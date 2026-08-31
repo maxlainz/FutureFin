@@ -70,8 +70,9 @@ pub fn net_return_percentages(
     let nominal_pct = (asset_yield - debt_cost) * hundred / net_worth;
 
     // `(1 + n/100)/(1 + i/100)` reescrito como `(100 + n)/(100 + i)`: una división menos y el
-    // mismo número. La inflación llega clampada a ≥ 0 desde la instalación, así que el
-    // denominador es ≥ 100; la guarda es defensiva (el JSONB no se revalida al leer).
+    // mismo número. La instalación valida la inflación en [−2, 50] (#146: los negativos son
+    // válidos desde 4.9.0), así que el denominador es ≥ 98; la guarda es defensiva (el valor
+    // almacenado no se revalida al leer).
     let inflation_factor = hundred + annual_inflation_percent;
     let real_pct = if inflation_factor <= Decimal::ZERO {
         nominal_pct

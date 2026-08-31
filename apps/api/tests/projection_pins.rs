@@ -168,19 +168,23 @@ async fn pin_escenario_b_inflacion() {
         .await
         .json();
 
-    // a mano: base = 1.500×12/0,04 = 450.000. target(120) = 450.000×1,025^10 = 576.018,10
-    // (1,025^10 = 1,2800845…). El gasto de la SIMULACIÓN va congelado (divergencia D1/#139,
-    // decidida: gastos indexados, ingresos planos — este pin SE MOVERÁ en la Ola 5).
+    // a mano: base = 1.500×12/0,04 = 450.000. target(120) = 450.000×1,025^10 = 576.038,04
+    // (1,025^10 = 1,280084544196…; la cifra 576.018,10 que llevaba este comentario transponía
+    // dígitos del producto — errata detectada en el spike de la Ola 5).
     let base = dec(&s["jubilacion_target_net_worth"]);
     assert!((base - 450_000.0).abs() < 0.01, "base: {base}");
     let ft120 = s["fire_target_series"].as_array().map(|a| a.len());
     assert!(ft120.unwrap_or(0) > 0, "fire_target_series vacío");
 
-    // capturado 4.6.0 (ahorro plano 1.000/mes al 7 %):
+    // INVERTIDO en la Ola 5 (#139; capturado en 4.6.0 como 285 / 211.361,91 / 1.094.275,23 con
+    // el gasto congelado). Con el gasto indexado al 2,5 % e ingresos planos, este hogar —que
+    // ahorra 1.000 €/mes sobre 1.500 de gasto, al 7 % nominal— DEJA DE ALCANZAR el FIRE dentro
+    // de 30 años: la señal de producto más dura de la ola, en primera línea del CHANGELOG.
+    // Números predichos por la réplica a 50 dígitos ANTES de ejecutar (spike §5.2.2).
     let jub = s["jubilacion_month_index"].clone();
     let nw120 = nw_at(&s, 120);
     let nw360 = nw_at(&s, 360);
-    assert_eq!(jub, 285, "jubilacion_month_index capturado: {jub}");
-    assert!((nw120 - 211_361.91).abs() < 0.01, "NW(120) capturado: {nw120}");
-    assert!((nw360 - 1_094_275.23).abs() < 0.01, "NW(360) capturado: {nw360}");
+    assert!(jub.is_null(), "sin cruce en 360 meses con el gasto indexado: {jub}");
+    assert!((nw120 - 181_037.91).abs() < 0.01, "NW(120) predicho: {nw120}");
+    assert!((nw360 - 777_970.12).abs() < 0.01, "NW(360) predicho: {nw360}");
 }

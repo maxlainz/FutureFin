@@ -405,3 +405,58 @@ async fn the_served_deflator_is_the_one_behind_milestones_real() {
         "el deflactado de la serie ({esperado}) y el de /deflate ({obtenido}) deben coincidir"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #146 (Ola 5): inflación NEGATIVA — deflactar hacia ARRIBA
+// ---------------------------------------------------------------------------
+
+/// Con inflación −2 % el deflactor es > 1 en meses futuros: los euros de un mundo deflacionario
+/// valen MÁS en euros de hoy, así que `net_worth_real` queda ESTRICTAMENTE por encima del
+/// nominal (hasta 4.8.0 el gate `<= ZERO` devolvía deflactor 1 y las dos series eran idénticas).
+/// Verificación puntual: real(m) == nominal(m) / 0,98^(m/12), y en m = 12 el cociente es
+/// exactamente 1/0,98. Además `milestones_real` deja de venir vacío (con inflación 0 sigue
+/// vacío — ese contrato no cambia) y la serie del objetivo DECRECE.
+#[tokio::test]
+async fn negative_inflation_deflates_upward_and_shrinks_the_target() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    set_inflation(&app, &owner, "-2").await;
+
+    let s = app
+        .get_with_cookie("/v1/projection/series?months=120&density=monthly", &owner.cookie)
+        .await
+        .json();
+    let pts = s["points"].as_array().unwrap();
+
+    for p in pts.iter().filter(|p| p["month_index"].as_i64().unwrap() > 0) {
+        let m = p["month_index"].as_i64().unwrap();
+        let nominal = num(&p["net_worth"]);
+        let real = num(&p["net_worth_real"]);
+        assert!(
+            real > nominal,
+            "mes {m}: con deflación lo real ({real}) debe superar lo nominal ({nominal})"
+        );
+        let esperado = nominal / 0.98f64.powf(m as f64 / 12.0);
+        assert!(
+            (real - esperado).abs() <= esperado.abs() * 1e-9 + 1e-6,
+            "mes {m}: real esperado {esperado}, obtenido {real}"
+        );
+    }
+
+    // El objetivo decrece: la serie paralela del target baja entre el primer y el último punto.
+    let ft = s["fire_target_series"].as_array().unwrap();
+    if ft.len() >= 2 {
+        assert!(
+            num(&ft[ft.len() - 1]) < num(&ft[0]),
+            "con inflación negativa el objetivo debe DECRECER a lo largo de la serie"
+        );
+    }
+
+    // Y los hitos en euros de hoy viajan (con inflación 0 siguen vacíos — contrato intacto).
+    assert!(
+        !s["milestones_real"].as_array().unwrap().is_empty()
+            || s["milestones"].as_array().unwrap().is_empty(),
+        "si hay hitos nominales, con deflación debe haber hitos reales: {s}"
+    );
+}

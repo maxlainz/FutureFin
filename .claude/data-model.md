@@ -14,7 +14,7 @@ Migrations in `apps/api/migrations/`. SQLx embeds and runs them on startup.
 - `api_tokens` (v3.0.0, `20260816120000_api_tokens.sql`; `scope` añadida en `20260828140100_api_tokens_scope.sql`, Fase 3/issue #84): `id (uuid PK)`, `user_id (FK users ON DELETE CASCADE)`, `label (1..64)`, `token_hash (text UNIQUE — SHA-256 hex del secreto; el secreto `ffp_…` jamás se persiste)`, `token_prefix (primeros 12 chars, para la UI)`, `scope (text NOT NULL DEFAULT 'read_write', CHECK ∈ {read_write, read_only})`, `created_at`, `expires_at (nullable)`, `last_used_at (nullable, throttle 60 s)`, `revoked_at (nullable — soft-revoke, la fila queda como auditoría)`. Credencial Bearer del servidor MCP (`/mcp`). **Excluida a propósito del `.ffbackup`**: son credenciales de la instalación, no datos financieros — un restore no debe resucitar secretos. Sin `installation_id`: el rol/installation se re-resuelven vivos en cada uso vía `require_installation_member`. `scope` se lee **vivo** en el mismo SELECT que autentica; `ADD COLUMN … NOT NULL DEFAULT` no reescribe la tabla (PG 11+, el default vive en el catálogo) así que los tokens ya emitidos siguen funcionando byte a byte. Detalle de las tres puertas de escritura (rol → scope → toggle) y del reparto de responsabilidades: [`auth-and-membership.md`](auth-and-membership.md) §API tokens.
 
 ### Installation (singleton)
-- `installation`: `id (uuid PK)`, `base_currency (char 3)`, `calendar_tz (text)`, `annual_inflation_assumption_percent (decimal NOT NULL DEFAULT 0; 0 = target FIRE plano, >0 = target móvil que crece con la inflación)`, `show_age_mode (text: 'dates'|'ages')`, `fire_settings (jsonb nullable)`, `mcp_write_enabled (bool NOT NULL DEFAULT TRUE, `20260818120000` — kill-switch vivo de las tools de escritura MCP; toggle owner-only en Ajustes → Integraciones; NO se exporta en el `.ffbackup`)`, `created_at`
+- `installation`: `id (uuid PK)`, `base_currency (char 3)`, `calendar_tz (text)`, `annual_inflation_assumption_percent (decimal NOT NULL, DEFAULT 2.5 desde 4.9.0/#146 — migración `20260901130000`, solo filas NUEVAS; rango [−2, 50] en la validación de escritura; indexa el GASTO del bucle Y el target FIRE — #139; negativo = deflación: ambos decrecen)`, `show_age_mode (text: 'dates'|'ages')`, `fire_settings (jsonb nullable)`, `mcp_write_enabled (bool NOT NULL DEFAULT TRUE, `20260818120000` — kill-switch vivo de las tools de escritura MCP; toggle owner-only en Ajustes → Integraciones; NO se exporta en el `.ffbackup`)`, `created_at`
   - `projection_target_age` fue **eliminada** (`20260516120000_drop_projection_target_age.sql`, v1.0.6): el cruce FIRE es el único trigger de jubilación.
   - Singleton: only one row ever exists. First user auto-creates it on register.
   
@@ -320,18 +320,21 @@ que el preview publicó)`, `created_at`, `expires_at (NOT NULL — TTL 10 min)`,
   ],
   "savings_source": "budget|transactions_avg|budget_income_real_expense",
   "income_avg_window_months": 3, "income_avg_window_mode": "data|calendar",
-  "expense_avg_window_months": 12, "expense_avg_window_mode": "data|calendar"
+  "expense_avg_window_months": 12, "expense_avg_window_mode": "data|calendar",
+  "horizon_lifespan_age": 90
 }
 ```
-Defaults (Spain): SWR 3.5%, 5-bracket capital gains schedule (IRPF). Last bracket must have `up_to: null`.
+Defaults (Spain): SWR 3.5%, 5-bracket capital gains schedule (IRPF), `horizon_lifespan_age: 90`
+(4.9.0/#149 — edad límite del horizonte, clamp de lectura y cota de escritura 85..=105; aditivo
+sin migración, un JSONB sin el campo → 90). Last bracket must have `up_to: null`.
 `fire_settings` is nullable; when null, defaults apply on read (handler calls `resolve_fire_settings`).
 
 **`savings_source`** (`SavingsSource` enum, default `budget`) — fuente del ahorro mensual de la simulación FIRE, **tres modos**:
 - `budget` (modo A, presupuesto — histórico): budget entries + cuota derivada de pasivos time-limited (el engine cobra el debt service y amortiza el principal).
-- `transactions_avg` (modo B): income y gasto del promedio ponderado real 12m de las transacciones, **crudo** (reforma 3.4.0: las cuotas de pasivo ya viven dentro de los movimientos; los pasivos no tocan la caja de la simulación y solo restan su principal pendiente al NW, constante en todo el horizonte — `monthly_payment` se anula en memoria antes de entrar al engine).
-- `budget_income_real_expense` (modo C): income del **presupuesto** + gasto **real** (mismo promedio crudo que B, mismo contrato de pasivos). Target FIRE `annual_expense` usa el gasto real, `current_income` usa el income del presupuesto.
+- `transactions_avg` (modo B): income y gasto del promedio ponderado real de las transacciones. Desde 4.8.0 (#142, opción 3) el gasto del ENGINE es `max(0, promedio − Σ cuotas declaradas activas)` y los pasivos amortizan con su `monthly_payment` real — la anulación en memoria de 3.4.0 quedó revertida (el panel de `/v1/summary` sigue mostrando el promedio crudo).
+- `budget_income_real_expense` (modo C): income del **presupuesto** + gasto **real** (mismo promedio y misma resta de cuotas que B). Target FIRE `annual_expense` usa el gasto real, `current_income` usa el income del presupuesto.
 
-El promedio 12m que alimenta el engine cuenta solo **meses reales** (≥1 transacción `recurring_rule_id IS NULL`); meses solo-recurrentes se excluyen por completo (ver §Transactions en `api-routes.md`). Aditivo, **sin migración** (`FireSettings` tiene `#[serde(default)]` a nivel struct, así que un JSONB sin el campo → `budget`; backups viejos siguen cargando). En B y C las **transacciones se vuelven input del engine** (gate `SavingsSource::uses_transactions()`; ver nota en §Transactions). Semántica completa en `futurefin-fire-domain-reference` y `futurefin-config-and-flags`.
+El promedio que alimenta el engine cuenta solo **meses reales y clasificados** (≥1 transacción `recurring_rule_id IS NULL` con `kind` no NULL — 4.8.0/#125); meses solo-recurrentes o sin clasificar se excluyen por completo (ver §Transactions en `api-routes.md`). Aditivo, **sin migración** (`FireSettings` tiene `#[serde(default)]` a nivel struct, así que un JSONB sin el campo → `budget`; backups viejos siguen cargando). En B y C las **transacciones se vuelven input del engine** (gate `SavingsSource::uses_transactions()`; ver nota en §Transactions). Semántica completa en `futurefin-fire-domain-reference` y `futurefin-config-and-flags`.
 
 **Deserialization is strict**: `fire_number_mode` only accepts `manual | annual_expense | current_income`; `savings_source` only `budget | transactions_avg | budget_income_real_expense` (unknown → 422, like `FireNumberMode`; el error lista las tres variantes válidas). The legacy alias `annual_expense_adjusted` is mapped to `annual_expense` for backwards-compat with old backups, but any other value returns 422 (was silently coerced to default before May 2026). The field `fire_number_expense_adjustment_pct` was removed — it had no consumer.
 

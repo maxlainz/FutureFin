@@ -673,6 +673,13 @@ pub struct ProjectionInput {
     /// Civil "today" de la instalación (inicio del mes simulado para el índice 1).
     pub ref_date: NaiveDate,
     pub horizon_months: u32,
+    /// Inflación anual asumida de la instalación, en % ([−2, 50] tras la validación de la API).
+    /// Desde la Ola 5 (#139) indexa el GASTO del bucle — regular y de jubilación — con
+    /// `inflation_factor_at_month_index` sobre el eje `(k−1)/12`; los ingresos quedan planos
+    /// (decisión del owner). Independiente de `FireTarget.annual_inflation_percent` en la firma
+    /// (el target puede no existir y el gasto se indexa igual); el handler rellena ambos del
+    /// MISMO supuesto efectivo, overrides de simulate incluidos.
+    pub annual_inflation_percent: Decimal,
     pub income_regular_monthly: Decimal,
     pub expense_regular_monthly: Decimal,
     pub assets: Vec<SimAsset>,
@@ -758,9 +765,9 @@ fn month_window(month_first: NaiveDate) -> (NaiveDate, NaiveDate) {
 /// frente a valores absurdos ya persistidos.
 ///
 /// `pub(crate)` porque `runway.rs` lo comparte: el runway debe usar EXACTAMENTE la misma
-/// conversión anual→mensual que la simulación, o divergiría del chart de proyección. Nota: para
-/// la inflación del gasto del runway el argumento nunca es negativo (la instalación valida
-/// 0..50), así que este cambio solo afecta al retorno esperado de los activos.
+/// conversión anual→mensual que la simulación, o divergiría del chart de proyección. Nota: desde
+/// 4.9.0 (#146) la inflación del gasto del runway también puede ser negativa ([−2, 50]) — el
+/// factor < 1 hace decrecer el gasto de verdad, mismo contrato que los retornos negativos.
 pub(crate) fn monthly_multiplier(annual_percent: Option<Decimal>) -> Decimal {
     let Some(p) = annual_percent else {
         return Decimal::ONE;
@@ -782,6 +789,26 @@ pub(crate) fn monthly_multiplier(annual_percent: Option<Decimal>) -> Decimal {
 /// Es la **única fuente de verdad**: tanto el motor (para decidir `fire_reached`) como el
 /// handler de la API (para construir `fire_target_series`) la consumen, evitando off-by-one
 /// entre la serie y el cruce.
+/// Factor de indexación al IPC en el índice de mes `m`: `(1 + annual_percent/100)^(m/12)`.
+///
+/// `m = 0` o `annual_percent == 0` ⇒ `ONE` **exacto**, sin pasar por `powd`. La guarda es
+/// **`is_zero()`, NO `<= ZERO`** (#146): una inflación negativa DEBE componer — con `i = −2 %`
+/// el factor a 10 años es `0,98^10 = 0,81707280688754689024` y en los múltiplos de 12 el
+/// exponente normaliza a entero y `powd` va por `checked_powu` (potencia exacta, sin `exp`/`ln`).
+/// Con `−100 < i < 0` la base `1 + i/100` es positiva y `powd` converge sin caso especial;
+/// la capa API rechaza `i < −2` (`inflation_out_of_range`).
+///
+/// Única implementación del factor: la consumen el objetivo FIRE (`fire_target_at_month_index`)
+/// y, desde #139, la indexación del gasto del bucle — la misma trampa de fórmula duplicada que
+/// v1.3.0 cerró para el target, cerrada aquí para el gasto antes de nacer.
+pub fn inflation_factor_at_month_index(annual_percent: Decimal, month_index: u32) -> Decimal {
+    if month_index == 0 || annual_percent.is_zero() {
+        return Decimal::ONE;
+    }
+    let years = Decimal::from(month_index) / Decimal::from(12u32);
+    (Decimal::ONE + annual_percent / Decimal::from(100u32)).powd(years)
+}
+
 pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> Option<Decimal> {
     let ft = ft?;
     if ft.base_amount <= Decimal::ZERO {
@@ -798,11 +825,11 @@ pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> 
         .or(ft.debt_payments_remaining.last())
         .copied()
         .unwrap_or(Decimal::ZERO);
-    if ft.annual_inflation_percent <= Decimal::ZERO || month_index == 0 {
-        return Some(ft.base_amount + debt_term);
-    }
-    let years = Decimal::from(month_index) / Decimal::from(12u32);
-    let factor = (Decimal::ONE + ft.annual_inflation_percent / Decimal::from(100u32)).powd(years);
+    // Desde la Ola 5 la base se multiplica por el factor único (`inflation_factor_at_month_index`),
+    // que con inflación NEGATIVA decrece (#146: hasta 4.8.0 la rama `<= ZERO` aplanaba el
+    // objetivo; la deflación sostenida ya no colapsa a plano). El término de deuda sigue fuera
+    // del factor: las cuotas son nominales por contrato.
+    let factor = inflation_factor_at_month_index(ft.annual_inflation_percent, month_index);
     Some(ft.base_amount * factor + debt_term)
 }
 
@@ -1431,11 +1458,22 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         } else {
             input.income_regular_monthly
         };
-        let expense = if in_retirement {
-            input.expense_retirement_monthly
-        } else {
-            input.expense_regular_monthly
-        };
+        // #139 (Ola 5): el GASTO se indexa al IPC de la instalación con el factor único
+        // (`inflation_factor_at_month_index`) sobre el MISMO eje que el trigger del target,
+        // `(k−1)/12` — el mes 1 cobra el gasto base tal cual (`f(1)=1`: lo que el usuario acaba
+        // de teclear no se mueve), y ambas ramas (regular y jubilación) escalan por el mismo
+        // factor, así que la discontinuidad del cruce es la de hoy × f(k*) — sin saltos nuevos.
+        // Los INGRESOS quedan planos a propósito (decisión del owner: «las subidas hay que
+        // pelearlas»); con inflación negativa el gasto DECRECE (#146). En B/C el escalar llega
+        // ya restado de cuotas declaradas (#142) y se indexa el residuo: la cuota es nominal
+        // por contrato y el motor la cobra aparte sin inflar.
+        let expense_factor = inflation_factor_at_month_index(input.annual_inflation_percent, k - 1);
+        let expense = expense_factor
+            * if in_retirement {
+                input.expense_retirement_monthly
+            } else {
+                input.expense_regular_monthly
+            };
 
         let retirement_withdrawal = if in_retirement {
             input.retirement_monthly_withdrawal
@@ -1588,6 +1626,7 @@ mod tests {
         ProjectionInput {
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: horizon,
+            annual_inflation_percent: Decimal::ZERO,
             income_regular_monthly: income,
             expense_regular_monthly: expense,
             assets,
@@ -1733,6 +1772,8 @@ mod tests {
         );
         inp.income_retirement_monthly = Decimal::ZERO;
         inp.expense_retirement_monthly = Decimal::from(2_000);
+        // Como lo cablea el handler: la MISMA inflación en el input (gasto, #139) y en el target.
+        inp.annual_inflation_percent = Decimal::from(2);
         inp.fire_target = Some(FireTarget {
             base_amount: Decimal::from(500_000),
             annual_inflation_percent: Decimal::from(2),
@@ -1757,7 +1798,13 @@ mod tests {
                 "mes {k}: jubilado = jubilado, nada de nómina reinsertada"
             );
         }
-        assert_eq!(out.net_worth[120].round_dp(2), "343865.59".parse::<Decimal>().unwrap());
+        // Pin movido en la Ola 5 (#139, gasto indexado; antes 343.865,59 con gasto congelado).
+        // Con rentabilidad e inflación IGUALES (2 % ambas) hay forma cerrada exacta:
+        // V_k = (V_{k−1} − 2.000·m^(k−1))·m  ⟹  V_k/m^k = V_{k−1}/m^(k−1) − 2.000
+        //   ⟹  V_120 = 1,02^10 · (500.000 − 2.000·120) = 1,21899441999475713024 × 260.000
+        //            = 316.938,549198… → 316.938,55 (exacto en Decimal, sin tolerancia:
+        // el exponente 120/12 = 10 normaliza a entero y powd va por checked_powu).
+        assert_eq!(out.net_worth[120].round_dp(2), "316938.55".parse::<Decimal>().unwrap());
     }
 
     #[test]
@@ -2603,6 +2650,11 @@ mod tests {
     /// sumidero, un pasivo de 100.000 € a 500 €/mes con `payment_end` lejano, planning ≠ 0 y
     /// target FIRE configurado. Vive fuera del test para que la reforma 4.2.0 pueda reutilizarlo
     /// añadiendo los campos nuevos a `None`/default sin tocar los valores esperados.
+    // Ola 5 (#139): el input de este pin se queda DELIBERADAMENTE con `annual_inflation_percent`
+    // a 0 (el default de `base_input`): su propósito es la estabilidad bit a bit de la MATEMÁTICA
+    // DE PASIVOS respecto de pre-4.2.0, y congelar el gasto aísla ese eje. La combinación
+    // «target inflado + gasto congelado» ya no es alcanzable desde el handler — aquí es un
+    // instrumento de aislamiento, no un contrato de producto.
     fn liability_pin_input() -> ProjectionInput {
         let assets = vec![
             mk_asset(0xA1, Decimal::from(50_000), true, Some(Decimal::from(7))),
@@ -3872,5 +3924,143 @@ mod tests {
             Decimal::from(15_600),
             "la equivalencia semanal es exacta sin descuento"
         );
+    }
+
+    /// INVERTIDO en la Ola 5 (#139) — el baseline congelado cruzaba en el mes **386** (número
+    /// del issue, reproducido exacto). Con el gasto indexado a la inflación e ingresos PLANOS
+    /// (la decisión firmada; el «335» que anunciaba el issue era la alternativa RECHAZADA de
+    /// indexarlo todo — corrección publicada en el issue el 2026-08-31), este hogar **no cruza
+    /// en 840 meses**: la aportación real decrece cada mes y la caja entra en déficit en el mes
+    /// **247** (forma cerrada: k−1 > 12·ln(1,5)/ln(1,02) = 245,70). Patrimonio final ≈
+    /// 1.549.432,92 (réplica a 50 dígitos), lejos del objetivo (~2,4 M€ inflado a 70 años).
+    #[test]
+    fn indexed_expense_postpones_the_crossing_beyond_the_horizon() {
+        let fondo = mk_asset(0xB1, Decimal::ZERO, true, Some(Decimal::from(6)));
+        let mut inp = base_input(
+            840,
+            Decimal::from(3_000),
+            Decimal::from(2_000),
+            vec![fondo],
+            vec![rule_remainder(0)],
+        );
+        inp.annual_inflation_percent = Decimal::from(2);
+        inp.fire_target = Some(FireTarget {
+            base_amount: Decimal::from(600_000),
+            annual_inflation_percent: Decimal::from(2),
+            debt_payments_remaining: Vec::new(),
+        });
+        let out = project_net_worth_series(&inp).unwrap();
+        let cruce = (0..=840u32).find(|&m| {
+            fire_target_at_month_index(inp.fire_target.as_ref(), m)
+                .is_some_and(|t| out.liquid_worth[m as usize] >= t)
+        });
+        assert_eq!(cruce, None, "con gasto indexado e ingresos planos no hay cruce en 70 años");
+
+        // Primer déficit de caja en el mes 247: la aportación del 246 aún entra, la del 247 no.
+        assert!(
+            out.contributed_capital[246] > out.contributed_capital[245],
+            "el mes 246 aún aporta"
+        );
+        assert_eq!(
+            out.contributed_capital[247], out.contributed_capital[246],
+            "desde el 247 la caja es deficitaria y no se aporta"
+        );
+        let final_ = out.net_worth[840].round_dp(2);
+        assert!(
+            (final_ - dec_s("1549432.92")).abs() < Decimal::ONE,
+            "patrimonio final ≈1.549.432,92, got {final_}"
+        );
+    }
+
+    /// INVERTIDO en la Ola 5 (#139) — el baseline congelado daba NW(K) = 1.000·K exacto.
+    /// Escenario mínimo del spike §2.2: ingreso 3.000, gasto 2.000, activo al 0 % (multiplicador
+    /// 1), inflación 3 %. Forma cerrada con q = 1,03^(1/12) (exponente (k−1)/12):
+    /// NW(K) = 3.000·K − 2.000·(1,03^(K/12) − 1)/(q − 1), verificada a 50 dígitos contra el
+    /// bucle: NW(12) = 11.671,7611861425; NW(24) = 22.613,6752078692;
+    /// NW(120) = 81.104,0063772995. Tolerancia en céntimos: los sumandos individuales pasan por
+    /// `powd` con exponentes fraccionarios (los pins existentes del engine hacen lo mismo).
+    #[test]
+    fn the_expense_is_indexed_to_installation_inflation() {
+        let hucha = mk_asset(0xB2, Decimal::ZERO, true, None);
+        let mut inp = base_input(
+            120,
+            Decimal::from(3_000),
+            Decimal::from(2_000),
+            vec![hucha],
+            vec![rule_remainder(0)],
+        );
+        inp.annual_inflation_percent = Decimal::from(3);
+        let out = project_net_worth_series(&inp).unwrap();
+        for (k, esperado) in [
+            (12usize, "11671.7611861425"),
+            (24, "22613.6752078692"),
+            (120, "81104.0063772995"),
+        ] {
+            let got = out.net_worth[k];
+            let want = dec_s(esperado);
+            assert!(
+                (got - want).abs() < dec_s("0.01"),
+                "NW({k}): esperado {want}, obtenido {got}"
+            );
+        }
+        // El mes 1 cobra el gasto BASE tal cual (f(1) = 1): lo que el usuario teclea no se mueve.
+        assert_eq!(out.net_worth[1], Decimal::from(1_000), "mes 1 sin inflar");
+    }
+
+    /// #139, efecto de segundo orden ahora pineado (antes «known, unpinned behavior»): el techo
+    /// de un cap `months_expense` CRECE con la inflación — «6 meses de gasto» son 6 meses del
+    /// gasto REAL del mes corriente. Activo arrancando exactamente en su techo del mes 1
+    /// (6 × 1.000 = 6.000): con inflación 0 la regla no vuelve a recibir nunca; con 3 % el techo
+    /// sube cada mes y la regla sigue rellenando el colchón.
+    #[test]
+    fn months_expense_ceiling_grows_with_inflation() {
+        let build = |inflacion: Decimal| {
+            let colchon = mk_asset(0xC1, Decimal::from(6_000), true, None);
+            let mut inp = base_input(
+                24,
+                Decimal::from(3_000),
+                Decimal::from(1_000),
+                vec![colchon],
+                vec![rule_fixed(0, Decimal::from(500), Some(AllocationCap::MonthsExpense(Decimal::from(6))))],
+            );
+            inp.annual_inflation_percent = inflacion;
+            project_net_worth_series(&inp).unwrap()
+        };
+        let plano = build(Decimal::ZERO);
+        let inflado = build(Decimal::from(3));
+        assert_eq!(
+            plano.per_asset_series[0][24],
+            Decimal::from(6_000),
+            "sin inflación el techo es fijo y el colchón no crece"
+        );
+        assert!(
+            inflado.per_asset_series[0][24] > Decimal::from(6_000),
+            "con inflación el techo sube y la regla sigue rellenando: {}",
+            inflado.per_asset_series[0][24]
+        );
+    }
+
+    /// #146 (Ola 5): una inflación NEGATIVA hace DECRECER el objetivo — hasta 4.8.0 la rama
+    /// `<= ZERO` lo aplanaba en silencio. Pins exactos (múltiplos de 12 ⇒ exponente entero ⇒
+    /// `checked_powu`, sin `exp`/`ln`): base 863.652,80 € a −2 % anual:
+    /// t(12) = 863.652,80 × 0,98 = 846.379,7440; t(120) = 863.652,80 × 0,98^10
+    /// = 705.667,2174722891568870686720 (0,98^10 = 0,81707280688754689024, 20 decimales exactos;
+    /// el producto cabe en los 28 dígitos de Decimal sin redondear).
+    #[test]
+    fn negative_inflation_shrinks_the_target_instead_of_flattening_it() {
+        let ft = FireTarget {
+            base_amount: dec("863652.80"),
+            annual_inflation_percent: Decimal::from(-2),
+            debt_payments_remaining: Vec::new(),
+        };
+        let t = |m: u32| fire_target_at_month_index(Some(&ft), m).unwrap();
+        assert_eq!(t(0), dec("863652.80"), "mes 0: la base tal cual");
+        assert_eq!(t(12), dec_s("846379.7440"), "un año a −2 %: ×0,98 exacto");
+        assert_eq!(
+            t(120),
+            dec_s("705667.2174722891568870686720"),
+            "diez años: ×0,98^10, exacto por checked_powu"
+        );
+        assert!(t(1) < t(0) && t(6) < t(1) && t(13) < t(12), "estrictamente decreciente");
     }
 }

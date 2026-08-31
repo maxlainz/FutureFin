@@ -2115,9 +2115,9 @@ export default function App() {
     if (pctTrim === null) return;
     const pctToSend = pctTrim === "" ? "0" : pctTrim;
     const n = Number(pctToSend);
-    if (!Number.isFinite(n) || n < 0 || n > 50) {
+    if (!Number.isFinite(n) || n < -2 || n > 50) {
       setInstallationError(
-        "Supuesto de inflación anual: número entre 0 y 50 (0 = sin inflación).",
+        "Supuesto de inflación anual: número entre -2 y 50 (0 = sin inflación; negativo = deflación).",
       );
       return;
     }

@@ -41,9 +41,9 @@ export const HELP_TEXTS = {
       "Meses que tus activos líquidos cubrirían tu gasto si dejaras de ingresar hoy. No es una " +
       "división simple: se vacían en el mismo orden que en la simulación —primero los de menor " +
       "rentabilidad esperada, mientras el resto sigue rindiendo la suya—, y el gasto con el que " +
-      "se compara crece cada año con la inflación que tengas configurada —aquí sí, aunque la " +
-      "simulación de tu patrimonio (la que ves en Proyección) mantenga ese mismo gasto congelado " +
-      "en euros de hoy—. Qué gasto se usa depende de la fuente del ahorro (Ajustes → Plan): con " +
+      "se compara crece cada año con la inflación que tengas configurada, la misma regla que " +
+      "aplica la Proyección a tu gasto. Qué gasto se usa depende de la fuente del ahorro " +
+      "(Ajustes → Plan): con " +
       "el presupuesto, el presupuestado; con los movimientos reales, tu gasto real promediado. " +
       "«Indefinida» exige dos cosas: que tu retirada anual quepa en el SWR y que tus líquidos " +
       "tengan rentabilidad esperada positiva — el dinero parado al 0 % siempre se agota, y aquí " +
@@ -185,14 +185,27 @@ export const HELP_TEXTS = {
       "convierte tu gasto anual en el objetivo FIRE: cuanto más baja la tasa, más grande el " +
       "objetivo.",
   },
+  "settings.horizon_age": {
+    title: "Edad límite del horizonte",
+    body:
+      "Hasta qué edad simula la proyección (85 a 105; de serie, 90). Subirla revela la cola de " +
+      "longevidad: en una pareja de 65, la probabilidad de que al menos uno pase de los 95 ronda " +
+      "el 25 %, y un plan que «llega justo» a los 90 puede no llegar a los 95. Dos avisos: el " +
+      "horizonte total está topado a 70 años vista (si eres joven, subir la edad puede no " +
+      "cambiar nada), y el margen al final se lee en la propia curva — lo que te queda en el " +
+      "último mes, en euros de hoy.",
+  },
   "settings.inflation": {
     title: "Inflación anual asumida",
     body:
-      "Cuánto encarece cada año lo que compras. La simulación de tu patrimonio trabaja en euros " +
-      "corrientes: tu ingreso, tu gasto y tus aportaciones NO suben con la inflación mes a mes " +
-      "—reflejan «lo que haces ahora», tal cual—. Dos cifras sí la usan: el objetivo FIRE, que " +
-      "crece porque mantener tu nivel de vida costará más, y la Autonomía del Resumen, cuyo " +
-      "gasto de comparación también se infla, aunque el patrimonio que proyectas no lo haga.",
+      "Cuánto encarece cada año lo que compras. La simulación trabaja en euros corrientes y " +
+      "reparte la inflación así: tu GASTO sube con ella mes a mes (el de ahora y el de " +
+      "jubilación — vivir igual costará más), tus INGRESOS quedan planos a propósito (las " +
+      "subidas de sueldo hay que pelearlas, no se regalan en la simulación), y el objetivo " +
+      "FIRE crece para conservar tu poder adquisitivo. La Autonomía del Resumen infla su gasto " +
+      "con la misma regla. Puedes ponerla en negativo (hasta −2 %) para estresar tu plan con " +
+      "deflación: entonces el gasto y el objetivo bajan. El gasto que declaras está siempre en " +
+      "euros de HOY; la simulación lo actualiza sola.",
   },
 
   // --- Movimientos ----------------------------------------------------------

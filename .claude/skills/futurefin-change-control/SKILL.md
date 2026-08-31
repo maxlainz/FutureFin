@@ -15,12 +15,19 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31 (Ola 4
-del programa de la auditoría, rama `feat/ola4-el-cruce`)**: **66** ficheros de test de integración
-(sin ficheros nuevos — la ola añade tests dentro de suites existentes), **51** migraciones (cero
-nuevas: todo el cambio es de motor/handler), `.ffbackup` sigue en **11**, catálogo MCP sigue en
-**68** tools (una descripción reescrita — `get_transactions_summary` —, cero altas), engine
-runway en **16** tests in-module. Antes, counts refreshed **2026-08-31 (Ola 3
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31 (Ola 5
+del programa de la auditoría, rama `feat/ola5-inflacion-horizonte`)**: **66** ficheros de test de
+integración (sin ficheros nuevos), **52** migraciones (la 52ª es `20260901130000_inflation_default_2_5`
+— SOLO cambia el DEFAULT de la columna, filas existentes intactas), `.ffbackup` sigue en **11**
+(el eje nuevo `horizon_lifespan_age` viaja dentro del JSONB de fire_settings, sin cambio de
+esquema), catálogo MCP sigue en **68** tools (dos regex de inflación a signed + un param nuevo en
+`update_fire_settings`), `ProjectionInput` gana `annual_inflation_percent` (breaking de input del
+engine, precedente v1.2.0), engine runway en **17** tests in-module. Antes, counts refreshed
+**2026-08-31 (Ola 4 del programa de la auditoría, rama `feat/ola4-el-cruce`)**: **66** ficheros
+de test de integración (sin ficheros nuevos — la ola añade tests dentro de suites existentes),
+**51** migraciones (cero nuevas: todo el cambio es de motor/handler), `.ffbackup` sigue en **11**,
+catálogo MCP sigue en **68** tools (una descripción reescrita — `get_transactions_summary` —,
+cero altas), engine runway en **16** tests in-module. Antes, counts refreshed **2026-08-31 (Ola 3
 del programa de la auditoría, rama `feat/ola3-la-deuda`)**: **66** ficheros de test de integración
 (`ls apps/api/tests/*.rs | wc -l` — nuevos `projection_pins.rs`, `projection_failure_states.rs`,
 `patch_null_clears.rs`, `asset_order_determinism.rs` de las Olas 1-2), **51** migraciones

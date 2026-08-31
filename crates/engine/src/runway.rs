@@ -52,7 +52,7 @@ pub enum RunwayOutcome {
 /// - **Tasas negativas componen**: herencia documentada de [`monthly_multiplier`] — `None` y 0
 ///   siguen siendo factor 1, pero una rentabilidad negativa (−100 < r < 0) decrece el saldo de
 ///   verdad y por tanto **acorta** el runway (≤ −100 se clampa a factor 0). La inflación del
-///   gasto nunca es negativa aquí (la instalación valida 0..50).
+///   gasto puede ser NEGATIVA desde 4.9.0 (#146, rango [−2, 50]): el gasto entonces DECRECE mes a mes y el runway se alarga.
 /// - **Umbral SWR (caso infinito)**: el runway es `Indefinite` ⟺ la retirada anual no supera el
 ///   SWR sobre el saldo inicial: `annual_expense_for_swr ≤ A·(swr_pct/100)`. Se compara sin
 ///   dividir — `annual_expense_for_swr·100 ≤ A·swr_pct` — para que la frontera sea **exacta** en
@@ -469,6 +469,22 @@ mod tests {
             con_gross,
             RunwayOutcome::Months(Decimal::from(MAX_RUNWAY_MONTHS)),
             "por encima del umbral y con retorno > gasto, el bucle agota el tope (suelo)"
+        );
+    }
+
+    /// #146 (Ola 5): con inflación NEGATIVA el gasto DECRECE mes a mes (`g *= m_inf`, factor
+    /// < 1) y el runway se ALARGA. 12.000 € sin rentabilidad, gasto 1.000 €/mes, i = −2 %:
+    /// el bucle corta en k = 13 con total_12 = 12.000 − 1.000·(1 − m^12)/(1 − m) ≈ 110,40 y
+    /// g_13 = 1.000·m^12 = 980 exacto (m^12 ≡ 0,98) → 12 + 110,40/980 ≈ **12,1126543321** meses
+    /// (forma cerrada verificada a 50 dígitos). Hasta 4.8.0 el handler clampaba la inflación a
+    /// ≥ 0 y publicaba 12,0 — el engine siempre supo componer hacia abajo.
+    #[test]
+    fn negative_inflation_lets_the_expense_shrink_and_extends_the_runway() {
+        let out = months(runway(&[(d(12_000), None)], d(1_000), d(-2), swr()));
+        assert!(out > d(12), "más que los 12 exactos de inflación 0, got {out}");
+        assert!(
+            out > d(12_112) / d(1_000) && out < d(12_113) / d(1_000),
+            "esperado ≈12,1127 meses, got {out}"
         );
     }
 }
