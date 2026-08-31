@@ -539,18 +539,27 @@ fn payment_interval_count(
     }
     match frequency {
         PaymentFrequency::Monthly => {
+            // #123: cada vencimiento se recalcula DESDE EL ANCLA (`start + n meses`), nunca
+            // encadenando el resultado del paso anterior. `checked_add_months` recorta al fin
+            // del mes de destino, y encadenarlo degradaba el día ancla para siempre al pasar
+            // por un mes corto: con ancla 31 el recibo real gira a fin de CADA mes (12 cuotas
+            // en un año), pero la cadena degradada contaba 13 — 1.000 € de deuda inventada por
+            // año en el escenario del issue. Anclado, `start + 7` desde el 31-08 vuelve a caer
+            // en el 31-03: el día de cargo no se degrada tras febrero, como en la realidad.
             let mut n = 0u32;
-            let mut d = start;
-            while d <= end {
+            loop {
+                let d = start.checked_add_months(Months::new(n)).ok_or_else(|| {
+                    ApiError::BadRequest("payment_schedule_overflow: payment schedule date overflow".into())
+                })?;
+                if d > end {
+                    break;
+                }
                 n += 1;
                 if n > 1200 {
                     return Err(ApiError::BadRequest(
                         "payment_schedule_too_long: too many monthly payment intervals".into(),
                     ));
                 }
-                d = d.checked_add_months(Months::new(1)).ok_or_else(|| {
-                    ApiError::BadRequest("payment_schedule_overflow: payment schedule date overflow".into())
-                })?;
             }
             Ok(n)
         }
@@ -1635,4 +1644,38 @@ pub fn liabilities_router() -> Router {
         .route("/", get(list_liabilities).post(create_liability))
         .route("/{id}", patch(patch_liability).delete(delete_liability))
         .route("/{id}/schedule", get(get_liability_schedule))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Escenario del issue #123, calculado a mano. Ancla 31-08-2026, fin 30-08-2027:
+    /// vencimientos reales 31-08-2026 … 31-07-2027 = **12** recibos (el 31-08-2027 cae tras el
+    /// fin). El conteo encadenado degradaba el ancla al pasar por febrero (…-28 para siempre)
+    /// y contaba 13 — 1.000 € de deuda derivada inventada por año con día ancla 29-31.
+    #[test]
+    fn monthly_interval_count_keeps_the_anchor_day() {
+        let start = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        let end = NaiveDate::from_ymd_opt(2027, 8, 30).unwrap();
+        assert_eq!(
+            payment_interval_count(PaymentFrequency::Monthly, start, end).unwrap(),
+            12
+        );
+
+        // Un día más de ventana y el 13.º recibo (31-08-2027) sí entra.
+        let end = NaiveDate::from_ymd_opt(2027, 8, 31).unwrap();
+        assert_eq!(
+            payment_interval_count(PaymentFrequency::Monthly, start, end).unwrap(),
+            13
+        );
+
+        // Ancla ≤ 28: sin degradación posible — mismo resultado que siempre.
+        let start = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let end = NaiveDate::from_ymd_opt(2026, 12, 15).unwrap();
+        assert_eq!(
+            payment_interval_count(PaymentFrequency::Monthly, start, end).unwrap(),
+            12
+        );
+    }
 }

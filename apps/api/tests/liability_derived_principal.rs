@@ -33,11 +33,12 @@ async fn server_today(app: &TestApp, owner: &LoggedInOwner) -> NaiveDate {
 /// que caiga en día 29/30/31 las dos formas NO coinciden (chrono clampa a fin de mes y la
 /// iterativa arrastra el clamp), y el test daría 200 o 201 pagos según el día en que se ejecute.
 fn end_date_for_n_monthly_payments(today: NaiveDate, n: u32) -> NaiveDate {
-    let mut d = today;
-    for _ in 1..n {
-        d = d.checked_add_months(Months::new(1)).expect("no overflow");
-    }
-    d
+    // Anclado (#123): `hoy + (n−1) meses` en un solo paso. La versión encadenada producía,
+    // con hoy en día 29-31, una fecha degradada que bajo el conteo anclado vale n−1 cuotas —
+    // este helper habría hecho flaky-por-calendario todos los tests de derivación.
+    today
+        .checked_add_months(Months::new(n - 1))
+        .expect("no overflow")
 }
 
 async fn categories(app: &TestApp, owner: &LoggedInOwner) -> (String, String) {
