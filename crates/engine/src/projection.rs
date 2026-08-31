@@ -782,6 +782,26 @@ pub(crate) fn monthly_multiplier(annual_percent: Option<Decimal>) -> Decimal {
 /// Es la **única fuente de verdad**: tanto el motor (para decidir `fire_reached`) como el
 /// handler de la API (para construir `fire_target_series`) la consumen, evitando off-by-one
 /// entre la serie y el cruce.
+/// Factor de indexación al IPC en el índice de mes `m`: `(1 + annual_percent/100)^(m/12)`.
+///
+/// `m = 0` o `annual_percent == 0` ⇒ `ONE` **exacto**, sin pasar por `powd`. La guarda es
+/// **`is_zero()`, NO `<= ZERO`** (#146): una inflación negativa DEBE componer — con `i = −2 %`
+/// el factor a 10 años es `0,98^10 = 0,81707280688754689024` y en los múltiplos de 12 el
+/// exponente normaliza a entero y `powd` va por `checked_powu` (potencia exacta, sin `exp`/`ln`).
+/// Con `−100 < i < 0` la base `1 + i/100` es positiva y `powd` converge sin caso especial;
+/// la capa API rechaza `i < −2` (`inflation_out_of_range`).
+///
+/// Única implementación del factor: la consumen el objetivo FIRE (`fire_target_at_month_index`)
+/// y, desde #139, la indexación del gasto del bucle — la misma trampa de fórmula duplicada que
+/// v1.3.0 cerró para el target, cerrada aquí para el gasto antes de nacer.
+pub fn inflation_factor_at_month_index(annual_percent: Decimal, month_index: u32) -> Decimal {
+    if month_index == 0 || annual_percent.is_zero() {
+        return Decimal::ONE;
+    }
+    let years = Decimal::from(month_index) / Decimal::from(12u32);
+    (Decimal::ONE + annual_percent / Decimal::from(100u32)).powd(years)
+}
+
 pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> Option<Decimal> {
     let ft = ft?;
     if ft.base_amount <= Decimal::ZERO {
@@ -798,11 +818,11 @@ pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> 
         .or(ft.debt_payments_remaining.last())
         .copied()
         .unwrap_or(Decimal::ZERO);
-    if ft.annual_inflation_percent <= Decimal::ZERO || month_index == 0 {
-        return Some(ft.base_amount + debt_term);
-    }
-    let years = Decimal::from(month_index) / Decimal::from(12u32);
-    let factor = (Decimal::ONE + ft.annual_inflation_percent / Decimal::from(100u32)).powd(years);
+    // Desde la Ola 5 la base se multiplica por el factor único (`inflation_factor_at_month_index`),
+    // que con inflación NEGATIVA decrece (#146: hasta 4.8.0 la rama `<= ZERO` aplanaba el
+    // objetivo; la deflación sostenida ya no colapsa a plano). El término de deuda sigue fuera
+    // del factor: las cuotas son nominales por contrato.
+    let factor = inflation_factor_at_month_index(ft.annual_inflation_percent, month_index);
     Some(ft.base_amount * factor + debt_term)
 }
 
