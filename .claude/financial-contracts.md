@@ -79,10 +79,14 @@ realidad** o entre superficies, no error de aritmética.
 - Crecimiento **después** de los flujos del mes (aportación cobra el mes completo);
   `values[i] = values[i].checked_mul(m)` — desbordar es error tipado `AssetValueOverflow`, nunca
   panic ni saturación silenciosa.
-- Drenaje en déficit: `surplus_cash` primero; luego TODOS los activos — líquidos primero, dentro
-  de cada grupo menor rentabilidad primero, desempate por índice de entrada (orden de entrada
-  total: `ORDER BY sort_index, name, id`). Lo no cubierto se acumula en `undrained_cumulative` y
-  RESTA del patrimonio: la curva puede ser negativa y no se aplana — correcto.
+- Drenaje en déficit: `surplus_cash` primero y SIN grossear (caja ya tributada como renta); lo
+  que falte se vende **BRUTO** (4.10.0/#140: `gross_up_monthly(neto, tramos, enabled, g)` — M1,
+  dentro del bucle, en todo drenaje) sobre TODOS los activos — líquidos primero, dentro de cada
+  grupo menor rentabilidad primero, desempate por índice de entrada (orden de entrada total:
+  `ORDER BY sort_index, name, id`); la base de coste de cada activo baja con lo vendido (#120).
+  Lo no cubierto se acumula en `undrained_cumulative` **NETO** (mide gasto que faltó, no ventas
+  que no ocurrieron) y RESTA del patrimonio: la curva puede ser negativa y no se aplana —
+  correcto.
 - `surplus_cash` rinde 0 % — realista para cuenta corriente española (~0,15 % TEDR), pero es
   invisible e ilimitado (§4: D10, decisión: regla remainder obligatoria).
 
@@ -98,17 +102,21 @@ realidad** o entre superficies, no error de aritmética.
   principal se congela — la parte «para siempre» es divergencia (§4: D17, decidida).
 
 ### 2.4 FIRE y fiscalidad
-- `target_base = gross_up(need_annual)/(swr/100)`; target del mes k = `base·(1+i/100)^(k/12) +
-  término_deuda(k)` (único helper `fire_target_at_month_index`; el término finito de deuda es de
-  4.8.0/#142 — el objetivo NO es monótono). Cruce desde 4.8.0/#143: **`líquido(k−1) ≥
+- target del mes k = `gross_up(need(k), tramos, g)/(swr/100) + término_deuda(k)` (4.10.0/#170:
+  evaluado POR MES sobre la necesidad real — en `annual_expense` la pensión plana se resta
+  DESPUÉS de inflar el gasto; en `manual`/`current_income` la cifra se indexa entera; helpers
+  `fire_target_at_month_index` + `fire_target_base_at_month_index`; NO monótono por partida
+  doble: término de deuda decreciente y, con pensión, base súper-inflada). Cruce desde 4.8.0/#143: **`líquido(k−1) ≥
   target(k−1)`** (Σ activos vendibles + surplus_cash, bruto), con latch absorbente (#141).
 - Gross-up: forma cerrada por tramos (escala **marginal**), tramos por defecto = escala del ahorro
   VIGENTE 2025-26 (19/21/23/27/30 @ 6k/50k/200k/300k — Ley 7/2024). Paridad Rust↔TS por
   `fire-parity.json` (recuenta los casos con `python3 -c "import json;print(len(json.load(open(
   'apps/api/tests/fixtures/fire-parity.json'))['cases']))"` — el «9» que aquí vivió congelado ya
   mordió una vez).
-- La base imponible que asume es el **reembolso íntegro**; la ley grava solo la plusvalía con FIFO
-  y diferimiento (LIRPF arts. 33/37/94) — §4: D4, decidido: fracción g por fases.
+- La base imponible es la fracción **`taxable_gain_ratio`** (g, [0,1], default 1 = reembolso
+  íntegro — 4.10.0/#140 fase 2); la ley exacta grava la plusvalía con FIFO y diferimiento (LIRPF
+  arts. 33/37/94) — derivar g de la cartera real (`contributed_capital`, ya por activo desde
+  #120) es backlog declarado del issue.
 - Fiscalidad de fondos: la rentabilidad publicada de un fondo YA es neta de TER/transacción
   (RD 1082/2012 art. 5; CNMV); los traspasos entre fondos están exentos (art. 94) — por eso «sin
   rebalanceo» es carencia funcional, no fiscal.
@@ -119,8 +127,8 @@ realidad** o entre superficies, no error de aritmética.
 - Tras el cruce: `income_retirement` (partidas `persists_after_retirement`) y `expense_retirement`
   (partidas `!ends_at_retirement`), **del presupuesto en los 3 modos**; desde 4.9.0 (#139) el
   gasto se INDEXA a la inflación de la instalación y los ingresos quedan planos (decisión del
-  owner); el superávit va a `surplus_cash`; la retirada NO tributa (asimetría con el target —
-  §4: D5, decidido en #140, se cierra en la Ola 6).
+  owner); el superávit va a `surplus_cash` (y CUENTA como aportado, #120); la retirada TRIBUTA
+  desde 4.10.0/#140 — todo drenaje vende bruto con la misma escala y la misma g que el objetivo.
 
 ### 2.6 Histórico
 - Interpolación entre snapshots: activos lineal en días civiles (o anclada a cash-flow); pasivos
@@ -222,15 +230,24 @@ deflación el objetivo DECRECE (t(120) = 705.667,217472 sobre 863.652,80 a −2 
 por encima de lo nominal (#146); la edad límite del horizonte es configurable
 (`fire_settings.horizon_lifespan_age`, 85..=105, default 90; basis `lifespan_age` +
 `horizon_lifespan_age` ecoada; margen al final = último punto + `final_net_worth_real`) (#149).
+**Resueltas en 4.10.0 (Ola 6 — «El impuesto que sí se paga»)**: la base de coste es POR ACTIVO y
+baja al vender (`b' = b·v_post/v_pre`; `contributed = Σ basis + surplus_cash` — el superávit
+jubilado cuenta y la serie DEJA DE SER MONÓTONA) (#120); la retirada simulada TRIBUTA — todo
+drenaje de activos vende bruto (`gross_up_monthly`, M1, dentro del bucle; la caja no se grossea;
+`undrained` pasa a NETO; el pin de #119 con tramos ES: mes 100/−520.000 → mes 80/−561.200) y la
+fracción de plusvalía gravable es configurable (`taxable_gain_ratio`, [0,1], default 1 — misma g
+en objetivo, drenaje y los DOS umbrales del runway, cuyo bucle finito también vende bruto desde
+esta ola: baseline 10 → 8,0 meses con tramos ES) (#140); el objetivo se evalúa MES A MES sobre la
+necesidad real — `gross_up(need(k))/SWR + término_deuda(k)`, con la pensión plana restada DESPUÉS
+de inflar (caso central: target(240) 509.467,68 → 676.078,21, el Δ son los 166.610,54 del issue) y
+el fiscal drag capturado también sin pensión (+7.140,43 € a 30 años: los tramos son nominales)
+(#170); la traza `InRetirement` resuelve los techos con el presupuesto de jubilación — dos
+escalares × dos ramas (#171).
 
 ### Con dirección decidida por el owner (2026-08-30) — pendientes de implementar
 
 | Divergencia | Coste (sintético) | Issue |
 |---|---|---|
-| Fiscalidad: retirada simulada grosseada + base plusvalía por fases (g, default 1,0) | 425 k€ de NW ficticio; objetivo −8/−13 % con g=0,5 | [#140](https://github.com/maxlainz/FutureFin/issues/140) |
-| Base de coste POR ACTIVO: baja al drenar + superávit jubilado cuenta (decidido: «arreglo completo») | 720 k€ sin contabilizar; habilita g derivado (backlog) | [#120](https://github.com/maxlainz/FutureFin/issues/120) |
-| Objetivo FIRE vs pensión plana bajo #139: la necesidad se resta ANTES de inflar (decisión del owner 2026-08-31: SE ARREGLA, con el gross-up ya en el engine — Ola 6) | 166.610,54 € cortos (pensión 1.000 €/mes, 2 %, 20 a) | [#170](https://github.com/maxlainz/FutureFin/issues/170) |
-| `first_month_allocation` publica el techo de cap con el gasto REGULAR en la traza `InRetirement` (Ola 6) | traza engañosa, serie intacta | [#171](https://github.com/maxlainz/FutureFin/issues/171) |
 | Importes del presupuesto declarados «netos» en la GUI | ~103 k€ de objetivo si se teclea la pensión bruta | [#147](https://github.com/maxlainz/FutureFin/issues/147) |
 | «Próximos» con flujos recurrentes con fecha (dirección del owner) | 355 k€ de alquiler perpetuo; 607 k€ de pensión anticipada | [#148](https://github.com/maxlainz/FutureFin/issues/148) |
 | Regla remainder obligatoria (default: primer activo) | 360 k€ muertos vs ~1,22 M€ invertidos (30 a) | [#150](https://github.com/maxlainz/FutureFin/issues/150) |

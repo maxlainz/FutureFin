@@ -66,25 +66,33 @@ ecoado al lado. (The docs/comments that still described the old model were fixed
 | **Sobrante / surplus** | Positive monthly net cash (`income − expense − debt_service + planning_adj`). Fed into the allocation cascade. Unrouted surplus accumulates as `surplus_cash` (counted in net worth). |
 | **Cascade** | The ordered list of `allocation_rules` that distributes the monthly surplus across assets. §6. |
 | **Debt service** | Sum of active liability monthly payments, each capped by remaining principal. |
-| **Contributed capital** | Cumulative cost basis: initial `purchase_price` of assets + every euro routed to assets or to `surplus_cash` before retirement. Never includes market growth. |
-| **Drawdown / drain** | In deficit months, cash is pulled from `surplus_cash` first, then from assets (liquid, lowest-return first). Retirement is modelled as income dropping, which creates the deficit. |
+| **Contributed capital** | `Σ basis por activo + surplus_cash` (4.10.0/#120): arranca en los `purchase_price`, sube con cada euro que la cascada asigna Y con el superávit (también el del jubilado), y **BAJA al vender** (`b' = b·v_post/v_pre`) — ya NO es monótono. Never includes market growth. |
+| **Drawdown / drain** | In deficit months, cash is pulled from `surplus_cash` first (sin grossear: la caja entró tributada), then from assets (liquid, lowest-return first) — vendiendo **BRUTO** desde 4.10.0/#140 (`gross_up_monthly` con la misma escala y `g` que el objetivo); `undrained` se acumula NETO. Retirement is modelled as income dropping, which creates the deficit. |
 | **Installation** | The single-household deployment singleton; `fire_settings` and inflation live on its one DB row. |
 | **Runway** | Months the **liquid** assets cover the total monthly expense, compounding their expected return and inflating the expense (§2c). A KPI of `/v1/summary`. It shares two inputs with the FIRE target since v2.3.0 — the same `swr_pct` and the same tax gross-up — because its *infinite* case is exactly a liquidity FIRE number: `Indefinite` ⟺ the grossed-up annual withdrawal ≤ SWR × liquid balance. The finite case remains its own simulation. |
 
 ## 2. The FIRE number: three modes
 
-Server: `compute_fire_target_nw` (projection.rs:137-164). Settings: `installation.fire_settings`
-JSONB, deserialized to `FireSettings` (installation.rs:61-73), defaults applied on read by
-`resolve_fire_settings` (installation.rs:116-121).
+Server: `compute_fire_need` (handler) construye el `FireNeed` por modo y el ENGINE evalúa el
+objetivo POR MES (`fire_target_base_at_month_index`, 4.10.0/#170). Settings:
+`installation.fire_settings` JSONB, defaults applied on read by `resolve_fire_settings`.
 
 ```
-need_annual =
-  manual         → fire_number_manual_amount                     (must be > 0, else no target)
-  annual_expense → (expense_retirement_monthly − income_retirement_monthly) × 12   (≤ 0 → no target)
-  current_income → (income_regular_monthly    − income_retirement_monthly) × 12    (≤ 0 → no target)
+need(k) =
+  manual         → fire_number_manual_amount · f(k)                        (hoy > 0, else no target)
+  annual_expense → max(0, expense_retirement_monthly·f(k) − income_retirement_monthly) × 12
+                                                   (la pensión PLANA se resta DESPUÉS de inflar;
+                                                    need(0) ≤ 0 → no target para TODA la serie)
+  current_income → (income_regular_monthly − income_retirement_monthly) × 12 · f(k)  (≤ 0 hoy → no target)
 
-target_base = gross_up(need_annual, tax_brackets, taxes_enabled) / (swr_pct / 100)
+target(k) = gross_up(need(k), tax_brackets, taxes_enabled, taxable_gain_ratio) / (swr_pct/100)
+            + debt_term(k)
 ```
+
+`f(k)` es el factor de inflación (`inflation_factor_at_month_index`). En `k = 0` todo degenera a
+la fórmula histórica — la vista previa y `fire-parity.json` no se mueven. El gross-up de la
+necesidad inflada NO es el gross-up inflado (fiscal drag: la escala es afín y los tramos
+nominales), por eso la evaluación por mes aplica a los TRES modos.
 
 Critical input nuances (source of the worst historical bug in this area):
 - `annual_expense` uses **`expense_retirement_monthly`** = sum of budget expense entries with
@@ -281,17 +289,24 @@ function is piecewise linear, so no iteration is needed. Walk brackets in order 
 below); in the bracket with rate `r`:
 
 ```
-gross_candidate = (net + K − r · prev_ceiling) / (1 − r)
-if gross_candidate ≤ bracket ceiling → that is the answer
+gross_candidate = (net + K − r · prev_ceiling) / (1 − r·g)
+if g · gross_candidate ≤ bracket ceiling → that is the answer
 else K += r × bracket_width; advance to next bracket
 ```
 
-The open last bracket guarantees termination. Degenerate `r ≥ 100%` returns `prev_ceiling`.
+`g` = `taxable_gain_ratio` (fracción [0,1] de cada euro bruto que es plusvalía gravable —
+4.10.0/#140 fase 2; `g = 1` colapsa BIT-idéntico a la forma histórica, `g = 0` ≡ sin impuestos).
+OJO: con `g` el test de validez cambia de FORMA, no solo el denominador — comparar `G ≤ techo`
+en vez de `g·G ≤ techo` es el bug silencioso de la fase (caso N-4 del fixture). The open last
+bracket guarantees termination. Degenerate effective `r·g ≥ 100%` returns `prev_ceiling`.
+
+**Location**: `crates/engine/src/tax.rs` desde la Ola 6 (#140) — el objetivo (por mes, #170), el
+drenaje bruto del bucle y los dos umbrales del runway consumen LA MISMA función.
 
 **History**: until v1.3.0 the server ran a 90-iteration binary search on `Decimal`. The closed
 form replaced it with **identical results ±0.01 €** — proven by the regression test
-`closed_form_matches_binary_search_across_es_brackets` (projection.rs:1583-1613), which keeps
-the old binary search alive as a reference implementation.
+`closed_form_matches_binary_search_across_es_brackets` (moved to `crates/engine/src/tax.rs` with
+the function), which keeps the old binary search alive as a reference implementation.
 
 **Client**: `apps/web/src/lib/fire.ts` uses the SAME closed form as the server since Ola 2/#118
 (`grossUpNetAnnualFire`, fire.ts:236-272; its own comment records that the old 90-iteration

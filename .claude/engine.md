@@ -21,7 +21,8 @@ Only `Decimal` arithmetic. Four modules:
 ## Public API
 
 ```rust
-// Main projection: returns net_worth and contributed_capital series (len = horizon_months + 1, index 0 = today)
+// Main projection: net_worth, liquid_worth and contributed_capital series (len = horizon_months + 1,
+// index 0 = today). contributed_capital = Σ basis por activo + surplus_cash (#120, puede decrecer).
 pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOutput, EngineError>
 
 // Returns nominal contributions routed to each asset in the FIRST simulated month only.
@@ -409,7 +410,7 @@ en `E` en los meses con sobrante, porque la cascada reparte menos.
 ## SimAsset fields
 - `expected_annual_return_percent`: **nominal** compound growth rate (7 = 7%/year). None = no compound growth.
 - `is_liquid`: liquid assets are drained first when cash is negative; sorted by growth rate (lowest first).
-- `purchase_price`: optional cost basis; included in `contributed_capital[0]`.
+- `purchase_price`: optional cost basis; seeds `basis[i]` (#120) and therefore `contributed_capital[0]`. La base baja proporcionalmente al valor drenado y la rentabilidad nunca la toca — el hueco `valor − base` es la plusvalía latente.
 
 ## AllocationRule fields
 ```rust
@@ -448,9 +449,14 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
 3. `retirement_withdrawal` = `retirement_monthly_withdrawal` if `in_retirement`, else 0.
 4. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
 5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)). Anything no rule absorbed flows into `surplus_cash` (counted in NW). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
-6. If `net_cash <= 0` (deficit): drain `surplus_cash` first, then drain assets — ALL of them,
-   liquids first, then illiquids, each group lowest-return first (tiebreak by input index); any
-   need still uncovered accumulates in `undrained_cumulative` and is subtracted from net worth.
+6. If `net_cash <= 0` (deficit): drain `surplus_cash` first **sin grossear** (la caja entró ya
+   tributada como renta); lo que falte se vende **BRUTO** (4.10.0/#140 fase 1:
+   `gross_up_monthly(neto, tramos, enabled, g)` — M1, dentro del bucle, en TODO drenaje, jubilado
+   o no), drenando ALL assets — liquids first, then illiquids, each group lowest-return first
+   (tiebreak by input index). La base de coste de cada activo BAJA con lo drenado
+   (`b' = b·v_post/v_pre`, #120) y `undrained_cumulative` acumula el descubierto **NETO** (mide
+   gasto que faltó, no ventas que no ocurrieron); se resta del net worth. El chequeo de
+   agotamiento (#119) compara el BRUTO necesario contra lo vendible.
    (Erratum fixed 2026-08: this line used to say only "liquid assets", but `drain_from_assets`
    has always continued into illiquid assets once the liquids run dry.)
 7. Apply compound growth (`× monthly_multiplier(rate)`) to each asset value — sin deflactar. `monthly_multiplier` = raíz 12ª del factor anual `1 + p/100`; `None` y `0` → factor 1; **las tasas negativas componen de verdad** (−50 % anual ⇒ ×0,5 en 12 meses); `p ≤ −100` se clampa a factor 0 (la capa API rechaza esos inputs con error tipado).
@@ -462,7 +468,7 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
 pub struct ProjectionOutput {
     pub net_worth: Vec<Decimal>,         // nominal, euros del momento, index 0..=horizon_months
     pub liquid_worth: Vec<Decimal>,      // 4.8.0 (#143): Σ activos is_liquid + surplus_cash (BRUTA) — la base del cruce
-    pub contributed_capital: Vec<Decimal>, // cumulative cost basis (nominal)
+    pub contributed_capital: Vec<Decimal>, // Σ basis por activo + surplus_cash (nominal) — desde 4.10.0/#120 PUEDE DECRECER: vender baja la base (b' = b·v_post/v_pre); «cumulative» murió con la Ola 6
     pub per_asset_series: Vec<Vec<Decimal>>, // value per asset per month (nominal)
     pub assets_depleted_month_index: Option<u32>, // 4.6.0 (#119): primer mes con déficit ≥ TODO lo drenable
     pub uncovered_deficit_total: Decimal,         // 4.6.0 (#119): undrained_cumulative final
@@ -630,10 +636,17 @@ Model (each rule exists for a reason — do not "simplify" one away):
   measure and **not** `Indefinite` (the UI renders it «+100 años»). Still no epsilon and no closed
   form: `ln`-based closed forms suffer cancellation exactly at the `A·j → g` boundary; the monthly
   loop avoids it and costs microseconds.
-- **Exact reduction to `A / g`** (the finite branch): with return and inflation 0 every multiplier
-  is 1 and the sequential drain removes exactly `g` from the total each month, so the final
-  fractional month reconstructs `A/g` with a single division — bit-exact **inside the engine**,
-  which is where the property lives.
+- **The finite loop sells GROSS (4.10.0, twin of #140)**: each month's need is
+  `gross_up_monthly(inflated expense, brackets, enabled, taxable_gain_ratio)` — until 4.9.x the
+  threshold demanded fiscal capital while the loop spent tax-free, the exact asymmetry of #140 in
+  another card. With ES brackets the canonical 12.000/1.000 scenario drops from 12 to **9,5758**
+  months (and back to 12 exact with `g = 0`). The gross-up runs INSIDE the loop on the
+  already-inflated expense (`gross_up` is affine — D-1).
+- **Exact reduction to `A / g`** (the finite branch, **taxes off**): with return and inflation 0
+  every multiplier is 1 and the sequential drain removes exactly `g` from the total each month,
+  so the final fractional month reconstructs `A/g` with a single division — bit-exact **inside
+  the engine**, which is where the property lives. Con impuestos el divisor es el BRUTO y la
+  división simple muere.
   Since 3.8.0 the HTTP surface publishes `runway_months` rounded to **1 decimal**
   (`handlers/summary.rs`, aligned with `sim_kpis` in `handlers/projection.rs`, which already did),
   so the baseline tests assert `(A/g).round_dp(1)`: still no tolerance, just the published
@@ -713,6 +726,6 @@ Worked example (engine-verified, `worked_example_matches_the_documented_figures`
 ## Performance notes (handler ↔ engine boundary)
 - `project_net_worth_series` is CPU-bound (840 months × N assets × `Decimal::powd`). The handler wraps it in `tokio::task::spawn_blocking` to avoid blocking the reactor.
 - `compound_outpaces_true_savings_month` is a **second projection pass** with `planning_adj = 0` and `liability.monthly_payment = 0` so the marker compares `market_growth` against a clean `income − expense` baseline. Eliminating the double pass would change the indicator's semantics; instead the handler runs both projections in parallel with `tokio::join!(spawn_blocking, spawn_blocking)`.
-- The gross-up of net-annual FIRE through tax brackets uses a **closed-form per-bracket solver** (no binary search). `gross = (net − r·prev_ceiling + K) / (1 − r)`, advancing one bracket at a time until the candidate fits. Old code used 90 iterations of binary search on `Decimal`. Desde v2.3.0 `gross_up_net_annual_fire` es `pub(crate)` (`apps/api/src/handlers/projection.rs`) y tiene **dos consumidores**: el target FIRE y el umbral SWR del runway en `summary.rs` (`annual_expense_gross`). Cualquier cambio en los tramos o en el solver mueve **ambos** números a la vez — es intencional: comparten definición fiscal por diseño.
+- The gross-up of net-annual FIRE through tax brackets uses a **closed-form per-bracket solver** (no binary search). `gross = (net − r·prev_ceiling + K) / (1 − r)`, advancing one bracket at a time until the candidate fits. Old code used 90 iterations of binary search on `Decimal`. Desde la Ola 6 (#140) vive en el ENGINE (`crates/engine/src/tax.rs`, `pub`, con el eje `taxable_gain_ratio` — la validez por tramo es `g·G ≤ techo`) y tiene **cuatro consumidores**: el target FIRE (evaluado POR MES desde #170), el drenaje bruto del bucle, y los dos umbrales SWR del runway (summary + simulate) — cuyo bucle finito también vende bruto desde esta ola. Cualquier cambio en los tramos o en el solver mueve TODOS a la vez — es intencional: una sola definición fiscal.
 - `build_installation_projection_input` returns a `BuiltProjection` struct that carries `input`, `monthly_net_regular`, `asset_id_name` (Vec<(Uuid, String)>) and `planning_rows`. The handler reuses those instead of issuing a second `SELECT id, name FROM assets` and a second `SELECT planning_flows` (deleted with Fase 2.3). Desde v2.2.0 también expone `effective_savings_source` + (desde 3.9.0) `savings_income_basis` / `savings_expense_basis` — que **sustituyen** al escalar `savings_source_months_with_data`: con ventanas configurables por lado no existe *un* número de meses — (fuente **tras** el fallback, serializadas en `ProjectionSeriesResponse`) y `debt_service_monthly` (cuotas de pasivos activos; **no** es input del engine, que amortiza los pasivos aparte), que consume `assets_projection_context` para los caps `months_expense`.
 - Initial queries in `get_projection_series` (installation row, user birth_date, household birth_date) run concurrently via `tokio::try_join!`.

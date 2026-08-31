@@ -110,7 +110,10 @@ pub struct FinancialHealthMetrics {
     /// drenándolos en el MISMO orden que la simulación real — menor rentabilidad esperada primero,
     /// cada saldo restante componiendo la suya (#128; hasta 4.7.x se usaba una media ponderada por
     /// valor, sistemáticamente más corta en carteras mixtas) — y con el gasto creciendo a la
-    /// inflación de la instalación (`futurefin_engine::liquid_runway_months`). `null` cuando no hay
+    /// inflación de la instalación (`futurefin_engine::liquid_runway_months`). Desde 4.10.0
+    /// (gemelo de #140) el bucle vende **BRUTO**: cubrir el gasto realiza plusvalía, con la
+    /// misma escala y la misma `taxable_gain_ratio` que el objetivo — la identidad
+    /// «líquidos / gasto» solo sobrevive con impuestos apagados. `null` cuando no hay
     /// base de gasto (`expense_total == 0`) **o** cuando el runway es indefinido (ver
     /// `runway_is_indefinite`). El valor `1200` es el tope del bucle del servidor y significa
     /// «al menos 100 años» (un **suelo**, no una medida exacta).
