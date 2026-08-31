@@ -202,6 +202,8 @@ SQLx embed migrations in `apps/api/migrations/`. Run automatically on startup vi
 
 **Una sola rama viva: `main`** — el trabajo sale de `main` en ramas cortas y vuelve por Pull Request con CI en verde; los releases son **tags** sobre `main`. `main` está protegida (PR obligatorio, sin force-push ni borrado): no se empuja directamente, y ese es el objetivo. Historia y porqué (la retirada de `dev` incluida): [`.claude/git-and-releases.md`](.claude/git-and-releases.md).
 
+**Sin atribuciones.** Ningún commit ni PR lleva firma de herramienta: ni trailers de coautoría de un asistente, ni URLs de sesión, ni pies «Generated with». CI lo bloquea (job `attribution-scan`); el porqué y el incidente que obligó a reescribir el historial completo (2026-08-31): [`.claude/git-and-releases.md`](.claude/git-and-releases.md) §Sin atribuciones.
+
 ### Desarrollar
 
 ```bash

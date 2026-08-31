@@ -60,6 +60,43 @@ jobs:
           fi
           echo "OK: solo los dos config.* esperados."
 
+  # Ninguna atribución de herramienta en los mensajes de commit: ni trailers de coautoría de
+  # un asistente, ni URLs de sesión, ni pies «Generated with». Existe porque el 2026-08-31
+  # hubo que reescribir el historial COMPLETO de main (300 de 332 commits llevaban trailer,
+  # 79 llevaban URL de sesión) porque ninguna puerta lo miraba. La coautoría de
+  # dependabot[bot] es autoría real de los bumps y NO se bloquea — de ahí que el patrón exija
+  # «claude» tras los dos puntos. Detalle e incidente: .claude/git-and-releases.md
+  # §Sin atribuciones.
+  attribution-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          # El rango del PR necesita la historia de la base; el repo es pequeño.
+          fetch-depth: 0
+      - name: Mensajes de commit sin atribución
+        # Los valores van por env y no interpolados en el script: un nombre de rama
+        # puede contener `$(…)` y ejecutarse como código (vector documentado de Actions).
+        env:
+          EVENTO: ${{ github.event_name }}
+          BASE: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENTO" = "pull_request" ]; then
+            # Los commits de la rama del PR (el checkout de un PR es su merge ref).
+            mensajes="$(git log --format=%B "origin/$BASE..HEAD")"
+          else
+            # Push a main (o dispatch): el commit en la punta — un squash arrastra
+            # los mensajes de la rama, así que esto caza lo que se colara al mergear.
+            mensajes="$(git log -1 --format=%B HEAD)"
+          fi
+          if printf '%s\n' "$mensajes" | grep -niE '^(co-authored-by:[[:space:]]*claude\b|claude-session:)|generated with \[claude code\]'; then
+            echo "::error::hay atribución en un mensaje de commit (líneas arriba). Reescribe el mensaje (amend/reword) antes de mergear — la norma vive en .claude/git-and-releases.md §Sin atribuciones."
+            exit 1
+          fi
+          echo "OK: mensajes sin atribución."
+
   rust:
     runs-on: ubuntu-latest
     steps:

@@ -82,6 +82,41 @@ Tags publicados: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere los secrets `DOCKER
 > incluye `type=raw,value=latest`, así que reconstruir una versión vieja **sobrescribe `:latest`**
 > con código antiguo.
 
+## Sin atribuciones — los commits y PRs no llevan firma de herramienta
+
+Ningún mensaje de commit ni cuerpo de PR lleva rastro del asistente que ayudó a escribirlo: ni
+trailer `Co-authored-by: Claude …`, ni línea `Claude-Session: <URL>`, ni pie «🤖 Generated with
+[Claude Code]». Decisión del owner (2026-08-31): el repo es público, ese rastro es ruido que no
+aporta nada al lector, y las URLs de sesión apuntan además a un recurso privado del owner.
+
+INCIDENTE (2026-08-31): nada lo vigilaba y el rastro cubrió el repositorio entero — 300 de los
+332 commits de `main` llevaban trailer de coautoría, 79 llevaban URL de sesión y 53 cuerpos de
+PR llevaban el pie. Hubo que **reescribir el historial completo** de `main` (solo mensajes: cada
+tree quedó bit-idéntico) y re-empujar todos los tags en sitio, con el ruleset «Proteger main»
+pausado y `publish-image.yml` deshabilitado durante el push — 60+ tags re-empujados con el
+workflow vivo habrían disparado 60+ builds pisándose `:latest`. Dos consecuencias permanentes:
+
+- **Los SHAs de `main` anteriores al 2026-08-31 ya no existen en el historial actual.** Un SHA
+  citado en un doc, un issue o una memoria de antes de esa fecha sigue resolviendo en la web de
+  GitHub (objeto colgante / refs internos de PR), pero no en un clon fresco.
+- La coautoría `Co-authored-by: dependabot[bot]` **se conservó a propósito**: es autoría real de
+  los bumps de dependencias, no rastro de asistente. Por eso el patrón del gate exige `claude`
+  tras los dos puntos — y por eso sirve de control positivo del grep de abajo.
+
+La puerta es el job **`attribution-scan`** de `ci.yml`: en cada PR barre los mensajes de los
+commits de la rama; en cada push a `main`, el commit empujado (un squash arrastra los mensajes
+de la rama, así que también caza lo que se colara al mergear). La configuración del CLI que dejó
+de generar los trailers es **local a la máquina** (`~/.claude/settings.json`, bloque
+`attribution`) y se pierde en una máquina nueva — el gate es lo único que no depende de nadie.
+
+Re-verificación (el primero debe dar **0**; el segundo es el control positivo de que el grep
+funciona — si ambos dan 0, lo roto es el comando, no la limpieza del historial):
+
+```bash
+git log origin/main -i --grep='co-authored-by: claude' --grep='claude-session' --oneline | wc -l   # 0
+git log origin/main -i --grep='co-authored-by: dependabot' --oneline | wc -l                       # >0
+```
+
 ## Dependencias — automatizado (rutina cloud)
 
 Los PRs de Dependabot los procesa una **rutina cloud** («Dependabot autónomo», trigger de
