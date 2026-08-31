@@ -1181,7 +1181,9 @@ pub struct CreatePlanningFlowParams {
     /// Importe > 0 como string decimal (el signo lo da el scope de la categoría).
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub expected_amount: String,
-    /// "YYYY-MM-DD" opcional. Sin fecha, el flujo se reparte en los próximos 90 días.
+    /// "YYYY-MM-DD" opcional. Sin fecha, el flujo se reparte en los 90 días que arrancan el día 1
+    /// del mes en curso. Una fecha ya pasada no se descarta: carga íntegra en el mes en curso
+    /// (la proyección la marca `overdue` en `events`).
     #[serde(default)]
     #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub due_date: Option<String>,
@@ -2723,7 +2725,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_allocation_resolution",
-        description = "La cascada de asignación RESUELTA para el mes en curso: cuánto se lleva cada regla, de qué caja sale y por qué alguna recibe 0. Responde a «¿por qué mi cartera recibe menos de lo que puse?». `base_cash` = `recurring_net` (ESTABLE) + `planning_component` (el tramo de los planning flows sin fecha, que se agota en 90 días): con `base_includes_transient` true, `base_cash` NO es un importe mensual, cambia cada día y por eso no cuadra con get_summary. Por regla, `amount_intent` vs `amount_resolved`: si difieren sin `skipped_reason`, la regla fue RECORTADA por el cap, no saltada.",
+        description = "La cascada de asignación RESUELTA para el mes en curso: cuánto se lleva cada regla, de qué caja sale y por qué alguna recibe 0. Responde a «¿por qué mi cartera recibe menos de lo que puse?». `base_cash` = `recurring_net` (ESTABLE) + `planning_component` (planning flows sin fecha: 90 días desde el día 1 del mes): con `base_includes_transient` true, `base_cash` NO es mensual estable (el tramo se agota en ~3 meses) y no cuadra con get_summary. Por regla, `amount_intent` vs `amount_resolved`: si difieren sin `skipped_reason`, la regla fue RECORTADA por el cap, no saltada.",
         annotations(title = "Cascada resuelta", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_allocation_resolution(

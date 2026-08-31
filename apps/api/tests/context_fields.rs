@@ -646,10 +646,13 @@ async fn projection_publishes_the_dated_planning_flows_that_move_the_curve() {
 
     let anchor = chrono::Utc::now().date_naive();
     let dentro = add_months_signed(anchor, 30); // Más allá del tramo mensual de `hybrid`.
+    // 45 días atrás cae SIEMPRE antes del día 1 del mes ancla (ningún mes tiene 45 días).
+    let vencido = anchor - chrono::Duration::days(45);
     let flujos = [
         (&cat_exp, "Reforma", "98000", Some(dentro)),
         (&cat_inc, "Herencia", "20000", Some(add_months_signed(anchor, 5))),
         (&cat_exp, "Sin fecha", "300", None),
+        (&cat_exp, "Atrasado", "3000", Some(vencido)),
     ];
     for (cat, title, amount, due) in flujos {
         let mut body = serde_json::json!({
@@ -667,12 +670,25 @@ async fn projection_publishes_the_dated_planning_flows_that_move_the_curve() {
     let proj = get(&app, &owner.cookie, "/v1/projection/series?density=hybrid").await;
     let events = proj["events"].as_array().expect("events array");
     assert_eq!(proj["events_truncated"], false, "{proj}");
-    // Solo los DOS con fecha: el sin-fecha se reparte sobre 90 días y no produce escalón, así que
-    // llamarlo «evento» sería señalar una rampa.
-    assert_eq!(events.len(), 2, "solo los flujos con fecha: {events:?}");
+    // Los TRES con fecha (el vencido incluido, #126): el sin-fecha se reparte sobre 90 días y no
+    // produce escalón, así que llamarlo «evento» sería señalar una rampa.
+    assert_eq!(events.len(), 3, "solo los flujos con fecha: {events:?}");
+
+    // #126: el vencido carga en el mes ancla con su fecha REAL y el flag que declara la
+    // discordancia mes-señalado ≠ fecha-mostrada. Los no vencidos llevan overdue: false — el
+    // campo distingue los dos casos, no decora.
+    let atrasado = events.iter().find(|e| e["title"] == "Atrasado").expect("Atrasado");
+    assert_eq!(atrasado["month_index"], 0, "{atrasado}");
+    assert_eq!(atrasado["overdue"], true, "{atrasado}");
+    assert_eq!(
+        atrasado["date_ymd"],
+        serde_json::json!(vencido.format("%Y-%m-%d").to_string()),
+        "{atrasado}"
+    );
 
     let reforma = events.iter().find(|e| e["title"] == "Reforma").expect("Reforma");
     assert_eq!(reforma["direction"], "outflow", "{reforma}");
+    assert_eq!(reforma["overdue"], false, "{reforma}");
     assert_eq!(dec(&reforma["amount"]), 98_000.0, "magnitud ≥ 0: {reforma}");
     assert_eq!(
         reforma["date_ymd"],

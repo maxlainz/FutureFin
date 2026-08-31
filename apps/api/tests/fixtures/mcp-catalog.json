@@ -656,8 +656,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 579,
-      "description_sha256_12": "175b3dfafd4b",
+      "description_len": 574,
+      "description_sha256_12": "1edcbf282da9",
       "name": "get_allocation_resolution",
       "properties": [
         "view"

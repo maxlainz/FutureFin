@@ -7,6 +7,7 @@
 mod common;
 
 use common::{LoggedInOwner, TestApp};
+use futurefin_engine::add_months_signed;
 use serde_json::{json, Value};
 
 async fn budget(app: &TestApp, cookie: &str, cat: &str, amount: &str) {
@@ -186,9 +187,18 @@ async fn resolution_flags_the_transient_planning_tranche() {
         dec(&b["recurring_net"]) + dec(&b["planning_component"]),
         "{b}"
     );
-    // El tramo es múltiplo exacto de 900/90 = 10 €/día.
+    // #126: la rampa está anclada al mes civil, así que el tramo del mes 0 es EXACTAMENTE
+    // días_del_mes_ancla × (900/90 = 10 €/día), se consulte el día del mes que se consulte —
+    // ése es el pin de reproducibilidad que el issue pedía (antes: solo «múltiplo de 10», y el
+    // valor variaba con los días que le quedaran al mes).
     let tranche = dec(&b["planning_component"]);
-    assert!((tranche / 10.0).fract().abs() < 1e-9, "tramo {tranche}: {b}");
+    let today = chrono::Utc::now().date_naive();
+    let month_first = {
+        use chrono::Datelike;
+        chrono::NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap()
+    };
+    let days_in_month = (add_months_signed(month_first, 1) - month_first).num_days() as f64;
+    assert_eq!(tranche, days_in_month * 10.0, "tramo {tranche}: {b}");
 
     // Y cuadra con lo que `/v1/assets` publica como aportación del mes 1.
     let assets = app.get_with_cookie("/v1/assets", &owner.cookie).await.json();

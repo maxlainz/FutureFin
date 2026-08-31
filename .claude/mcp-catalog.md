@@ -129,7 +129,8 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   ratios ya redondeados. Identidades pinneadas en
   `sim_kpis_match_summary_financial_health_in_all_three_modes`. Overrides: `one_off_expense`
   (`amount` + exactamente uno de `month_index`/`date`; mismo mapeo fecha→mes que un planning flow
-  real), `extra_monthly_expense` (gasto REAL: entra antes del target/caps vía `SimOverrides`
+  real EXCEPTO el pasado: la `date` anterior al mes ancla se rechaza — un what-if no modela deuda
+  vencida, mientras que un planning flow real vencido sí carga en el mes 0 desde #126), `extra_monthly_expense` (gasto REAL: entra antes del target/caps vía `SimOverrides`
   dentro de `build_installation_projection_input`), `extra_monthly_cash_adjustment` y
   `extra_monthly_savings` (NEUTROS: mecanismo planning-adjustment, no mueven target ni caps),
   `swr_pct` / `annual_inflation_percent` / `retirement_annual_expense` (re-validados con las

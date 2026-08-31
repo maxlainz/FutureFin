@@ -10,6 +10,7 @@ import { MetricCard } from "../components/MetricCard";
 import { Modal, ModalFormError } from "../components/Modal";
 import { PlanningDirectionChart } from "../components/charts/PlanningDirectionChart";
 import { PlusIcon, RowEditIcon, RowTrashIcon } from "../components/icons";
+import { formatDateDmy, todayYmdInTimeZone } from "../lib/dates";
 import {
   METRIC_DASH,
   formatCurrencyAmount,
@@ -101,6 +102,13 @@ export function UpcomingView({
   const currencyIso = installation?.installation.base_currency ?? "";
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const isMobile = useIsMobile();
+  // #126: un Próximo con fecha anterior al día 1 del mes en curso ya no desaparece de la
+  // proyección — carga íntegro en el mes actual, y esta marca es la única señal que el usuario
+  // tiene de que ese apunte ya está moviendo su curva. Comparación de strings ISO: es segura.
+  const calendarTz = installation?.installation.calendar_tz?.trim() || "UTC";
+  const anchorMonthFirstYmd = `${todayYmdInTimeZone(calendarTz).slice(0, 7)}-01`;
+  const rowIsOverdue = (row: PlanningFlowApiRow): boolean =>
+    Boolean(row.due_date && row.due_date < anchorMonthFirstYmd);
   const categoryById = budgetCategoryMap(
     planningIncomeCategories,
     planningExpenseCategories,
@@ -454,7 +462,8 @@ export function UpcomingView({
                         {isMobile ? (
                           <span className="cell-subline">
                             {PLANNING_DIRECTION_LABEL[row.direction]} · {categoryLabel}{" "}
-                            · {row.due_date ?? METRIC_DASH}
+                            · {row.due_date ? formatDateDmy(row.due_date) : METRIC_DASH}
+                            {rowIsOverdue(row) ? " · vencido, carga este mes" : null}
                           </span>
                         ) : null}
                       </td>
@@ -466,7 +475,23 @@ export function UpcomingView({
                           </span>
                         ) : null}
                       </td>
-                      {isMobile ? null : <td>{row.due_date ?? METRIC_DASH}</td>}
+                      {isMobile ? null : (
+                        <td>
+                          {row.due_date ? formatDateDmy(row.due_date) : METRIC_DASH}
+                          {rowIsOverdue(row) ? (
+                            <span
+                              className={
+                                row.direction === "outflow"
+                                  ? "chip upcoming-overdue-chip neg"
+                                  : "chip upcoming-overdue-chip"
+                              }
+                              title="La fecha ya pasó: el importe carga íntegro en el mes en curso de la proyección, no desaparece. Bórralo o cámbiale la fecha si ya se liquidó."
+                            >
+                              Vencido · se carga este mes
+                            </span>
+                          ) : null}
+                        </td>
+                      )}
                       {!isMobile && canEdit ? (
                         <td className="asset-actions-cell">
                           <div className="budget-row-actions">

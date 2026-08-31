@@ -1175,8 +1175,9 @@ pub struct AllocationResolutionResponse {
     pub view: &'static str,
     /// Mes al que corresponde la resolución (`YYYY-MM`).
     pub month: String,
-    /// La caja que la cascada reparte de verdad. **Incluye el tramo transitorio de planning**, así
-    /// que cambia día a día: es la explicación de por qué la aportación del mes 1 no cuadra con el
+    /// La caja que la cascada reparte de verdad. **Incluye el tramo transitorio de planning**
+    /// (desde #126 anclado al mes civil: constante dentro del mes, cambia al cambiar de mes hasta
+    /// agotarse la rampa): es la explicación de por qué la aportación del mes 1 no cuadra con el
     /// neto recurrente del summary.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
