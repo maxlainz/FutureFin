@@ -303,7 +303,7 @@ export function ProjectionNetWorthChart({
     // negativos (el deflactor los AMPLIFICA automáticamente, ×(1+inf)^(−k/12)). `deflationFactorAt`
     // devuelve 1 cuando el pct efectivo es 0. Alineado con `milestones_real` del backend.
     const effectivePct =
-      inflationAdjusted && installationInflationPct > 0
+      inflationAdjusted && installationInflationPct !== 0
         ? installationInflationPct
         : 0;
     const deflator = (monthIndex: number) =>
@@ -846,7 +846,7 @@ export function ProjectionNetWorthChart({
     const primary = weekly ?? daily;
     if (!primary) return null;
     const effectivePct =
-      inflationAdjusted && installationInflationPct > 0
+      inflationAdjusted && installationInflationPct !== 0
         ? installationInflationPct
         : 0;
     const visEnd = Math.min(0, visibleMonthEnd);

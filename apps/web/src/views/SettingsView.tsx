@@ -358,7 +358,7 @@ export function SettingsView({
   const projectionDraftValid =
     draftInflationPct != null &&
     Number.isFinite(draftInflationPct) &&
-    draftInflationPct >= 0 &&
+    draftInflationPct >= -2 &&
     draftInflationPct <= 50;
   useEffect(() => {
     if (!hasMembership || !isOwner) return;

@@ -472,7 +472,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Los tramos están mal ordenados. Revísalos de menor a mayor.",
   tax_brackets_not_increasing:
     "Los límites de los tramos deben ir siempre a más. Corrige el que se repite o baja.",
-  inflation_out_of_range: "La inflación anual debe estar entre 0 y 50 %.",
+  inflation_out_of_range: "La inflación anual debe estar entre -2 y 50 %.",
   apr_out_of_range:
     "El TIN anual debe estar entre 0 y 100 %. Si has escrito 350 queriendo decir 3,50, usa la coma decimal.",
   backup_asset_return_invalid:

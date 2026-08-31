@@ -106,11 +106,13 @@ export function formatProjectionChartHorizonLine(series: ProjectionSeriesApi): s
 
 /**
  * Deflactor multiplicativo del chart en el mes `monthIndex` (euros nominales → euros de hoy).
- * `annualPct ≤ 0` → 1 (sin ajuste). Keyed por `month_index` REAL, nunca por posición de array
- * (incidente v1.4.2). Ojo: `monthIndex` negativo (pasado) devuelve un factor > 1 — amplifica.
+ * `annualPct === 0` → 1 (sin ajuste); una inflación NEGATIVA da factor > 1 en meses futuros
+ * (#146: los euros de un mundo deflacionario valen MÁS en euros de hoy — espejo del gate
+ * `is_zero()` del backend). Keyed por `month_index` REAL, nunca por posición de array
+ * (incidente v1.4.2). Ojo: `monthIndex` negativo (pasado) invierte el efecto.
  */
 export function deflationFactorAt(monthIndex: number, annualPct: number): number {
-  return annualPct > 0
+  return annualPct !== 0
     ? 1 / Math.pow(1 + annualPct / 100, monthIndex / 12)
     : 1;
 }

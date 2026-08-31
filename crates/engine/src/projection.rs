@@ -3952,4 +3952,28 @@ mod tests {
         assert_eq!(out.net_worth[24], Decimal::from(24_000));
         assert_eq!(out.net_worth[120], Decimal::from(120_000));
     }
+
+    /// #146 (Ola 5): una inflación NEGATIVA hace DECRECER el objetivo — hasta 4.8.0 la rama
+    /// `<= ZERO` lo aplanaba en silencio. Pins exactos (múltiplos de 12 ⇒ exponente entero ⇒
+    /// `checked_powu`, sin `exp`/`ln`): base 863.652,80 € a −2 % anual:
+    /// t(12) = 863.652,80 × 0,98 = 846.379,7440; t(120) = 863.652,80 × 0,98^10
+    /// = 705.667,2174722891568870686720 (0,98^10 = 0,81707280688754689024, 20 decimales exactos;
+    /// el producto cabe en los 28 dígitos de Decimal sin redondear).
+    #[test]
+    fn negative_inflation_shrinks_the_target_instead_of_flattening_it() {
+        let ft = FireTarget {
+            base_amount: dec("863652.80"),
+            annual_inflation_percent: Decimal::from(-2),
+            debt_payments_remaining: Vec::new(),
+        };
+        let t = |m: u32| fire_target_at_month_index(Some(&ft), m).unwrap();
+        assert_eq!(t(0), dec("863652.80"), "mes 0: la base tal cual");
+        assert_eq!(t(12), dec_s("846379.7440"), "un año a −2 %: ×0,98 exacto");
+        assert_eq!(
+            t(120),
+            dec_s("705667.2174722891568870686720"),
+            "diez años: ×0,98^10, exacto por checked_powu"
+        );
+        assert!(t(1) < t(0) && t(6) < t(1) && t(13) < t(12), "estrictamente decreciente");
+    }
 }

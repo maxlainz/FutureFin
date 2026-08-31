@@ -449,7 +449,9 @@ fn installation_access_from_row(r: InstallationMemberRow) -> Result<Installation
             id: r.id,
             base_currency: r.base_currency,
             calendar_tz: r.calendar_tz,
-            annual_inflation_assumption_percent: r.annual_inflation_assumption_percent.max(Decimal::ZERO),
+            // Sin clamp desde 4.9.0 (#146): la validación de escritura acota [−2, 50] y ningún
+            // valor almacenado pudo nacer fuera (el validador histórico rechazaba TODO negativo).
+            annual_inflation_assumption_percent: r.annual_inflation_assumption_percent,
             show_age_mode: r.show_age_mode,
             fire_settings: resolve_fire_settings(r.fire_settings.map(|j| j.0)),
             mcp_write_enabled: r.mcp_write_enabled,
@@ -502,9 +504,12 @@ fn validate_show_age_mode(mode: &str) -> Result<(), ApiError> {
 }
 
 pub(crate) fn validate_annual_inflation_assumption(pct: Decimal) -> Result<(), ApiError> {
-    if pct.is_sign_negative() || pct > Decimal::from(50) {
+    // Rango [−2, 50] desde 4.9.0 (#146): España tuvo IPC anual medio negativo cinco veces este
+    // siglo (mínimo interanual −1,4 %, jul-2009) — el suelo 0 tenía una base histórica falsa y
+    // impedía estresar el propio plan con deflación. El −2 acota el peor escenario razonable.
+    if pct < Decimal::from(-2) || pct > Decimal::from(50) {
         return Err(ApiError::BadRequest(
-            "inflation_out_of_range: annual_inflation_assumption_percent must be between 0 and 50".into(),
+            "inflation_out_of_range: annual_inflation_assumption_percent must be between -2 and 50".into(),
         ));
     }
     Ok(())
@@ -1373,7 +1378,8 @@ pub(crate) async fn installation_calendar_inflation_fire(
     let (tz_str, inflation, fire_settings) = row.ok_or(ApiError::NotFound)?;
     Ok((
         naive_date_in_calendar_tz(&tz_str)?,
-        inflation.max(Decimal::ZERO),
+        // Sin clamp desde 4.9.0 (#146): rango garantizado por la validación de escritura.
+        inflation,
         resolve_fire_settings(fire_settings.map(|j| j.0)),
     ))
 }

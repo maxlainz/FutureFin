@@ -2825,6 +2825,9 @@ async fn every_decimal_uuid_and_date_param_carries_its_pattern() {
         ("update_asset", "expected_annual_return_percent"),
         ("update_asset_value", "expected_annual_return_percent"),
         ("simulate_projection", "expected_annual_return_percent"),
+        // #146 (4.9.0): la inflación admite negativos ([−2, 50] — deflación sostenida).
+        ("simulate_projection", "annual_inflation_percent"),
+        ("update_fire_settings", "annual_inflation_assumption_percent"),
     ];
 
     /// Recorre un schema entero y devuelve `(nombre_del_parámetro, subschema)` de cada

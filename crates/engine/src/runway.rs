@@ -471,4 +471,20 @@ mod tests {
             "por encima del umbral y con retorno > gasto, el bucle agota el tope (suelo)"
         );
     }
+
+    /// #146 (Ola 5): con inflación NEGATIVA el gasto DECRECE mes a mes (`g *= m_inf`, factor
+    /// < 1) y el runway se ALARGA. 12.000 € sin rentabilidad, gasto 1.000 €/mes, i = −2 %:
+    /// el bucle corta en k = 13 con total_12 = 12.000 − 1.000·(1 − m^12)/(1 − m) ≈ 110,40 y
+    /// g_13 = 1.000·m^12 = 980 exacto (m^12 ≡ 0,98) → 12 + 110,40/980 ≈ **12,1126543321** meses
+    /// (forma cerrada verificada a 50 dígitos). Hasta 4.8.0 el handler clampaba la inflación a
+    /// ≥ 0 y publicaba 12,0 — el engine siempre supo componer hacia abajo.
+    #[test]
+    fn negative_inflation_lets_the_expense_shrink_and_extends_the_runway() {
+        let out = months(runway(&[(d(12_000), None)], d(1_000), d(-2), swr()));
+        assert!(out > d(12), "más que los 12 exactos de inflación 0, got {out}");
+        assert!(
+            out > d(12_112) / d(1_000) && out < d(12_113) / d(1_000),
+            "esperado ≈12,1127 meses, got {out}"
+        );
+    }
 }

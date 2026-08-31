@@ -831,7 +831,9 @@ pub(crate) fn deflator_at_month_index(
     annual_inflation_percent: Decimal,
     month_index: u32,
 ) -> Decimal {
-    if annual_inflation_percent <= Decimal::ZERO {
+    // `is_zero()`, NO `<= ZERO` (#146): con inflación NEGATIVA el deflactor es > 1 — los euros
+    // futuros valen MÁS en euros de hoy, y `net_worth_real` queda por encima del nominal.
+    if annual_inflation_percent.is_zero() || month_index == 0 {
         return Decimal::ONE;
     }
     let infl_factor = Decimal::ONE + annual_inflation_percent / Decimal::from(100u32);
@@ -848,7 +850,7 @@ fn deflate_points_to_today(
     points: &[NwPoint],
     annual_inflation_percent: Decimal,
 ) -> Vec<NwPoint> {
-    if annual_inflation_percent <= Decimal::ZERO {
+    if annual_inflation_percent.is_zero() {
         return points.to_vec();
     }
     points
@@ -1418,7 +1420,9 @@ pub(crate) async fn build_installation_projection_input(
     let fire_target_absent_reason = fire_target_outcome.and_then(|r| r.err());
     let mut fire_target = fire_target_base.map(|base_amount| FireTarget {
         base_amount,
-        annual_inflation_percent: inflation_annual_percent.max(Decimal::ZERO),
+        // Sin clamp desde 4.9.0 (#146): el rango [−2, 50] lo garantiza la escritura, y una
+        // inflación negativa DEBE llegar al engine (objetivo decreciente, no plano).
+        annual_inflation_percent: inflation_annual_percent,
         // El término finito de deuda (#142) se rellena MÁS ABAJO, cuando los pasivos del engine
         // ya están construidos — necesita sus calendarios completos.
         debt_payments_remaining: Vec::new(),
@@ -1857,7 +1861,8 @@ pub(crate) async fn resolve_projection_context(
         tokio::try_join!(inst_q, session_birth_q, household_birth_q)?;
 
     let today = naive_date_in_calendar_tz(&inst_row.0)?;
-    let inflation_annual_percent = inst_row.1.max(Decimal::ZERO);
+    // Sin clamp desde 4.9.0 (#146): rango garantizado por la validación de escritura.
+    let inflation_annual_percent = inst_row.1;
     let show_age_mode = inst_row.2;
     let fire_settings = resolve_fire_settings(inst_row.3.map(|j| j.0));
 
@@ -2071,9 +2076,10 @@ pub async fn compute_projection_series_response(
 
     // Milestones en euros de hoy: mismos umbrales sobre el patrimonio deflactado. Con inflación 0 el
     // deflactor es 1 y serían idénticos a `milestones`, así que dejamos el vector vacío y la web
-    // reusa `milestones`. Se computa sobre `points_full` (resolución mensual) por la misma razón
+    // reusa `milestones`. Con inflación NEGATIVA (#146) sí se computan: el deflactor es > 1 y los
+    // hitos reales llegan ANTES que los nominales. Se computa sobre `points_full` (resolución mensual) por la misma razón
     // que `milestones`: no perder hitos que caen entre dos puntos anuales con densidad `hybrid`.
-    let milestones_real = if inflation_annual_percent > Decimal::ZERO {
+    let milestones_real = if !inflation_annual_percent.is_zero() {
         let points_full_real = deflate_points_to_today(&points_full, inflation_annual_percent);
         projection_unique_reached_milestones(
             &points_full_real,
@@ -3380,7 +3386,8 @@ pub(crate) async fn deflate_amount_core(
     .bind(iid)
     .fetch_one(pool)
     .await
-    .map(|v: Decimal| v.max(Decimal::ZERO))?;
+    // Sin clamp desde 4.9.0 (#146); el map solo fija el tipo del scalar.
+    .map(|v: Decimal| v)?;
     let anchor = proj_month_first(today);
 
     let k = match (month_index, date) {
