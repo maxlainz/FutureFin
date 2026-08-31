@@ -81,6 +81,7 @@ fn base_input(
         annual_inflation_percent: Decimal::ZERO,
         tax_brackets: Vec::new(),
         taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
         income_regular_monthly: income,
         expense_regular_monthly: expense,
         assets,
@@ -248,6 +249,7 @@ fn audit_dump_projection_series() {
         swr_pct: Decimal::from(100u32),
         tax_brackets: Vec::new(),
         taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
         annual_inflation_percent: d(25, 1),
         debt_payments_remaining: Vec::new(),
     });
@@ -269,6 +271,7 @@ fn audit_dump_projection_series() {
         swr_pct: Decimal::from(100u32),
         tax_brackets: Vec::new(),
         taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
         annual_inflation_percent: Decimal::ZERO,
         debt_payments_remaining: Vec::new(),
     });

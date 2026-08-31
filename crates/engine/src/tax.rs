@@ -64,12 +64,17 @@ pub fn gross_up_monthly(
     net_monthly: Decimal,
     brackets: &[TaxBracket],
     taxes_enabled: bool,
+    taxable_gain_ratio: Decimal,
 ) -> Decimal {
     if !taxes_enabled || net_monthly <= Decimal::ZERO {
         return net_monthly.max(Decimal::ZERO);
     }
-    gross_up_net_annual_fire(net_monthly * Decimal::from(12u32), brackets, taxes_enabled)
-        / Decimal::from(12u32)
+    gross_up_net_annual_fire(
+        net_monthly * Decimal::from(12u32),
+        brackets,
+        taxes_enabled,
+        taxable_gain_ratio,
+    ) / Decimal::from(12u32)
 }
 
 /// Inversa mensualizada: lo que NETEA una venta bruta mensual — `gross − tax(12·gross)/12`,
@@ -80,41 +85,61 @@ pub fn after_tax_monthly(
     gross_monthly: Decimal,
     brackets: &[TaxBracket],
     taxes_enabled: bool,
+    taxable_gain_ratio: Decimal,
 ) -> Decimal {
     if !taxes_enabled || gross_monthly <= Decimal::ZERO {
         return gross_monthly;
     }
     gross_monthly
-        - tax_on_gross_capital_annual(gross_monthly * Decimal::from(12u32), brackets)
-            / Decimal::from(12u32)
+        - tax_on_gross_capital_annual(
+            gross_monthly * Decimal::from(12u32) * taxable_gain_ratio,
+            brackets,
+        ) / Decimal::from(12u32)
 }
 
-/// Devuelve el `gross` tal que `gross − tax(gross) == net_annual`, sin búsqueda binaria.
+/// Devuelve el `gross` tal que `gross − tax(taxable_gain_ratio·gross) == net_annual`, sin
+/// búsqueda binaria. `taxable_gain_ratio` (g, fracción [0,1]) es la parte de cada euro bruto
+/// que es plusvalía gravable (#140 fase 2): `g = 1` = reembolso íntegro gravado (histórico),
+/// `g = 0` = nada tributa (≡ `taxes_enabled = false`).
 ///
 /// La función `tax(·)` es lineal por tramos: dentro del tramo i con tipo `r_i` y umbral
 /// inferior `prev_i`, `after(g) = g·(1 − r_i) + (r_i·prev_i − K_i)`, donde `K_i` es el impuesto
 /// acumulado de los tramos anteriores. Despejando `g = (net − r_i·prev_i + K_i) / (1 − r_i)` se
 /// obtiene un candidato; si cae dentro del tramo (≤ `ceiling_i`), es la solución; si no, se
 /// avanza al siguiente y se actualiza `K_i`.
-pub fn gross_up_net_annual_fire(net_annual: Decimal, brackets: &[TaxBracket], taxes_enabled: bool) -> Decimal {
+pub fn gross_up_net_annual_fire(
+    net_annual: Decimal,
+    brackets: &[TaxBracket],
+    taxes_enabled: bool,
+    taxable_gain_ratio: Decimal,
+) -> Decimal {
     if !taxes_enabled || net_annual <= Decimal::ZERO {
         return net_annual.max(Decimal::ZERO);
     }
     let hundred = Decimal::from(100u32);
+    let g = taxable_gain_ratio;
     let mut prev_ceiling = Decimal::ZERO;
     let mut k_cumulative = Decimal::ZERO;
     for b in brackets {
         let r = b.pct / hundred;
-        let denom = Decimal::ONE - r;
+        // Fase 2 (#140): la base imponible es `g·G` — se busca `G − tax(g·G) = net`, así que en
+        // el tramo de tipo r la ecuación es `net = G·(1 − r·g) − K + r·prev` y el TEST DE
+        // VALIDEZ cambia de forma con el denominador: hay que comparar `g·G ≤ techo`, no
+        // `G ≤ techo` — escribir solo el denominador y dejar el test viejo es el bug silencioso
+        // de esta fase (con net 250.000 y g 0,5 la base cae DOS tramos por debajo). Con
+        // `g = ONE` todo colapsa término a término a la forma histórica: `r·ONE` y `ONE·gross`
+        // son exactos en rust_decimal, así que la igualdad es de valor exacto, sin tolerancia.
+        let denom = Decimal::ONE - r * g;
         if denom <= Decimal::ZERO {
-            // Tipo del 100% (o superior): imposible recuperar `net` positivo; degeneración.
+            // Tipo efectivo ≥ 100 %: imposible netear. `prev_ceiling` TAL CUAL — no `prev/g`,
+            // que con g = ONE cambiaría la escala del Decimal (mismo valor, otro to_string).
             return prev_ceiling;
         }
         let gross = (net_annual + k_cumulative - r * prev_ceiling) / denom;
         match b.up_to {
             None => return gross,
             Some(ceiling) => {
-                if gross <= ceiling {
+                if g * gross <= ceiling {
                     return gross;
                 }
                 let width = ceiling - prev_ceiling;
@@ -185,7 +210,7 @@ mod tests {
         ];
         let tol = Decimal::new(1, 2); // 0.01 €
         for net in nets {
-            let g_closed = gross_up_net_annual_fire(net, &brackets, true);
+            let g_closed = gross_up_net_annual_fire(net, &brackets, true, Decimal::ONE);
             let g_binary = gross_up_binary_reference(net, &brackets);
             let diff = (g_closed - g_binary).abs();
             assert!(
@@ -204,12 +229,119 @@ mod tests {
     #[test]
     fn closed_form_handles_taxes_disabled_and_zero_net() {
         let brackets = es_brackets();
-        assert_eq!(gross_up_net_annual_fire(Decimal::from(50_000u32), &brackets, false), Decimal::from(50_000u32));
-        assert_eq!(gross_up_net_annual_fire(Decimal::ZERO, &brackets, true), Decimal::ZERO);
         assert_eq!(
-            gross_up_net_annual_fire(-Decimal::from(100u32), &brackets, true),
+            gross_up_net_annual_fire(Decimal::from(50_000u32), &brackets, false, Decimal::ONE),
+            Decimal::from(50_000u32)
+        );
+        assert_eq!(
+            gross_up_net_annual_fire(Decimal::ZERO, &brackets, true, Decimal::ONE),
+            Decimal::ZERO
+        );
+        assert_eq!(
+            gross_up_net_annual_fire(-Decimal::from(100u32), &brackets, true, Decimal::ONE),
             Decimal::ZERO,
             "net negativo se clipea a 0"
+        );
+    }
+
+    /// Referencia PRE-fase-2 (la forma cerrada sin `g`, copiada verbatim del estado 4.9.0):
+    /// existe solo para afirmar la bit-identidad de `g = 1` — sobre la FUNCIÓN, no sobre la
+    /// ola entera.
+    fn gross_up_pre_fase2(net_annual: Decimal, brackets: &[TaxBracket], taxes_enabled: bool) -> Decimal {
+        if !taxes_enabled || net_annual <= Decimal::ZERO {
+            return net_annual.max(Decimal::ZERO);
+        }
+        let hundred = Decimal::from(100u32);
+        let mut prev_ceiling = Decimal::ZERO;
+        let mut k_cumulative = Decimal::ZERO;
+        for b in brackets {
+            let r = b.pct / hundred;
+            let denom = Decimal::ONE - r;
+            if denom <= Decimal::ZERO {
+                return prev_ceiling;
+            }
+            let gross = (net_annual + k_cumulative - r * prev_ceiling) / denom;
+            match b.up_to {
+                None => return gross,
+                Some(ceiling) => {
+                    if gross <= ceiling {
+                        return gross;
+                    }
+                    let width = ceiling - prev_ceiling;
+                    k_cumulative += r * width;
+                    prev_ceiling = ceiling;
+                }
+            }
+        }
+        net_annual
+    }
+
+    /// #140 fase 2 — `g = 1` es BIT-idéntico a la forma sin `g`: `r·ONE` y `ONE·gross` son
+    /// exactos en rust_decimal y no hay redondeo intermedio, así que la igualdad es
+    /// `assert_eq!` de valor, sin tolerancia. Los netos 4.859/4.860/4.861 y
+    /// 39.619/39.620/39.621 ponen el bruto EXACTAMENTE en los bordes de tramo 6.000 y 50.000,
+    /// donde un `<=` mal puesto se ve.
+    #[test]
+    fn gross_up_with_g_one_is_bit_identical_to_the_ungrossed_form() {
+        let escalas: [Vec<TaxBracket>; 3] = [
+            es_brackets(),
+            vec![TaxBracket { up_to: None, pct: Decimal::from(80u32) }],
+            Vec::new(),
+        ];
+        let nets = [
+            0i64, 1, 4_859, 4_860, 4_861, 24_000, 25_650, 39_619, 39_620, 39_621, 114_000,
+            200_000, 250_000, 1_000_000,
+        ];
+        for brackets in &escalas {
+            for enabled in [true, false] {
+                for n in nets {
+                    let net = Decimal::from(n);
+                    assert_eq!(
+                        gross_up_net_annual_fire(net, brackets, enabled, Decimal::ONE),
+                        gross_up_pre_fase2(net, brackets, enabled),
+                        "net={n}, enabled={enabled}, tramos={}",
+                        brackets.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// `g = 0` ⇒ nada tributa: idéntico a `taxes_enabled = false` para todo net.
+    #[test]
+    fn g_zero_equals_taxes_disabled() {
+        let brackets = es_brackets();
+        for n in [1i64, 24_000, 250_000, 1_000_000] {
+            let net = Decimal::from(n);
+            assert_eq!(
+                gross_up_net_annual_fire(net, &brackets, true, Decimal::ZERO),
+                net,
+                "g=0 debe devolver el neto tal cual"
+            );
+            assert_eq!(
+                gross_up_net_annual_fire(net, &brackets, true, Decimal::ZERO),
+                gross_up_net_annual_fire(net, &brackets, false, Decimal::ONE),
+            );
+        }
+    }
+
+    /// La trampa del techo (#140 fase 2): el test de validez es `g·G ≤ techo`, NO `G ≤ techo`.
+    /// net 250.000 con g = 0,5: a g = 1 el bruto (331.257,14) caía en el tramo ABIERTO del
+    /// 30 %; con g = 0,5 la base gravable (140.610,17) cae en el 23 % — DOS tramos por debajo:
+    /// G = (250.000 + 10.380 − 0,23·50.000)/(1 − 0,115) = 248.880/0,885 = **281.220,3390**,
+    /// y la comprobación redonda `G − tax(0,5·G) = 250.000` exacta. (El K del tramo es 10.380
+    /// = 1.140 + 0,21·44.000 — un «11.640» que circuló en el spike era errata de nota, no de
+    /// cifra.) Escribir solo el denominador y dejar el test viejo daría el tramo del 27/30 %.
+    #[test]
+    fn the_validity_test_uses_the_taxable_base_not_the_gross() {
+        let brackets = es_brackets();
+        let half = Decimal::new(5, 1);
+        let g = gross_up_net_annual_fire(Decimal::from(250_000u32), &brackets, true, half);
+        assert_eq!(g.round_dp(4), "281220.3390".parse::<Decimal>().unwrap());
+        let neteado = g - tax_on_gross_capital_annual(half * g, &brackets);
+        assert!(
+            (neteado - Decimal::from(250_000u32)).abs() < Decimal::new(1, 6),
+            "G − tax(g·G) debe recuperar el neto: {neteado}"
         );
     }
 }

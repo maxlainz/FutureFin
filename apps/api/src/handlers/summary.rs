@@ -603,10 +603,13 @@ pub(crate) async fn summary_core(
     // fiscales que el target FIRE: infinito ⟺ gross_up(12·expense_tot) ≤ liquid·(swr/100) (ver
     // `runway.rs`). Por debajo del umbral y sin rentabilidad ni inflación se reduce EXACTO a
     // `liquid_assets / expense_tot`, que es el contrato histórico.
+    // #140 fase 2: el umbral del runway pasa g — la misma venta y el mismo impuesto que el
+    // objetivo; dejarlo a g=1 reabriría la asimetría en otra tarjeta.
     let annual_expense_gross = gross_up_net_annual_fire(
         expense_tot * Decimal::from(12u32),
         &fire.tax_brackets,
         fire.taxes_enabled,
+        fire.taxable_gain_ratio,
     );
     let (runway_months, runway_is_indefinite) = match liquid_runway_months(
         &liquid_rows,
@@ -614,6 +617,9 @@ pub(crate) async fn summary_core(
         inflation_pct,
         fire.swr_pct,
         annual_expense_gross,
+        &fire.tax_brackets,
+        fire.taxes_enabled,
+        fire.taxable_gain_ratio,
     ) {
         // 1 decimal, alineado con `sim_kpis` (`handlers/projection.rs`): el mismo número no puede
         // publicarse con dos precisiones según por qué puerta entres. El engine sigue exacto.

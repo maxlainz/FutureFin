@@ -661,6 +661,9 @@ pub struct FireTarget {
     /// hablan del mismo euro bruto.
     pub tax_brackets: Vec<crate::tax::TaxBracket>,
     pub taxes_enabled: bool,
+    /// Fracción de cada euro bruto que es plusvalía gravable (g, [0,1] — #140 fase 2).
+    /// `ONE` = histórico (reembolso íntegro gravado); `ZERO` ≡ sin impuestos.
+    pub taxable_gain_ratio: Decimal,
     pub annual_inflation_percent: Decimal,
     /// Término finito de deuda (#142): ver `debt_payments_remaining_series`.
     pub debt_payments_remaining: Vec<Decimal>,
@@ -715,6 +718,9 @@ pub struct ProjectionInput {
     pub tax_brackets: Vec<crate::tax::TaxBracket>,
     /// `false` ⇒ bruto = neto: la rama de déficit es bit-idéntica a 4.9.0.
     pub taxes_enabled: bool,
+    /// g de #140 fase 2 — la MISMA fracción que el objetivo (`FireTarget.taxable_gain_ratio`):
+    /// el drenaje y el target dimensionan la misma venta bruta.
+    pub taxable_gain_ratio: Decimal,
     pub income_regular_monthly: Decimal,
     pub expense_regular_monthly: Decimal,
     pub assets: Vec<SimAsset>,
@@ -864,7 +870,12 @@ pub fn fire_target_base_at_month_index(ft: &FireTarget, month_index: u32) -> Opt
     }
     let f = inflation_factor_at_month_index(ft.annual_inflation_percent, month_index);
     let net_annual = ft.need.annual_net_at(f);
-    let gross = crate::tax::gross_up_net_annual_fire(net_annual, &ft.tax_brackets, ft.taxes_enabled);
+    let gross = crate::tax::gross_up_net_annual_fire(
+        net_annual,
+        &ft.tax_brackets,
+        ft.taxes_enabled,
+        ft.taxable_gain_ratio,
+    );
     Some(gross / (ft.swr_pct / Decimal::from(100u32)))
 }
 
@@ -1584,6 +1595,7 @@ contrib_series.push(contributed_fn(&basis, surplus_cash));
                 need_assets_net,
                 &input.tax_brackets,
                 input.taxes_enabled,
+                input.taxable_gain_ratio,
             );
             // Mes de agotamiento (#119): el primer mes cuya VENTA BRUTA necesaria iguala o
             // supera todo lo vendible (la caja ya se restó arriba; el drenaje continúa sobre
@@ -1615,6 +1627,7 @@ contrib_series.push(contributed_fn(&basis, surplus_cash));
                         drawn_gross,
                         &input.tax_brackets,
                         input.taxes_enabled,
+                        input.taxable_gain_ratio,
                     );
                 // #120: la base baja en proporción al VALOR drenado — b' = b·v_post/v_pre,
                 // multiplicación antes de la división (drenar todo ⇒ b·0/v = 0 exacto).
@@ -1742,6 +1755,7 @@ mod tests {
             swr_pct: Decimal::from(100u32),
             tax_brackets: Vec::new(),
             taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
             annual_inflation_percent: inflation,
             debt_payments_remaining: Vec::new(),
         }
@@ -1760,6 +1774,7 @@ mod tests {
             annual_inflation_percent: Decimal::ZERO,
             tax_brackets: Vec::new(),
             taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
             income_regular_monthly: income,
             expense_regular_monthly: expense,
             assets,
@@ -4282,7 +4297,7 @@ mod tests {
     fn the_simulated_withdrawal_also_pays_taxes() {
         let brackets = crate::tax::es_brackets_for_tests();
         let objetivo =
-            crate::tax::gross_up_net_annual_fire(Decimal::from(24_000), &brackets, true)
+            crate::tax::gross_up_net_annual_fire(Decimal::from(24_000), &brackets, true, Decimal::ONE)
                 / dec_s("0.035");
         let build = |taxed: bool| {
             let fondo = mk_asset(0xF7, objetivo, true, Some(Decimal::from(5)));
@@ -4354,6 +4369,7 @@ mod tests {
             swr_pct: dec_s("3.5"),
             tax_brackets: if taxed { crate::tax::es_brackets_for_tests() } else { Vec::new() },
             taxes_enabled: taxed,
+            taxable_gain_ratio: Decimal::ONE,
             annual_inflation_percent: Decimal::from(2),
             debt_payments_remaining: Vec::new(),
         };
@@ -4390,6 +4406,7 @@ mod tests {
             swr_pct: dec_s("3.5"),
             tax_brackets: Vec::new(),
             taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
             annual_inflation_percent: Decimal::from(2),
             debt_payments_remaining: vec![Decimal::from(9_999)],
         };
@@ -4413,6 +4430,7 @@ mod tests {
             swr_pct: dec_s("3.5"),
             tax_brackets: Vec::new(),
             taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
             annual_inflation_percent: Decimal::from(-2),
             debt_payments_remaining: vec![Decimal::from(5_000)],
         };
@@ -4438,6 +4456,7 @@ mod tests {
             swr_pct: dec_s("3.5"),
             tax_brackets: crate::tax::es_brackets_for_tests(),
             taxes_enabled: true,
+            taxable_gain_ratio: Decimal::ONE,
             annual_inflation_percent: Decimal::from(2),
             debt_payments_remaining: Vec::new(),
         };

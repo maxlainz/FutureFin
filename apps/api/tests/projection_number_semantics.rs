@@ -282,6 +282,7 @@ async fn jubilacion_series_position_indexes_the_arrays_and_the_nominal_target_is
             swr_pct: "3.5".parse().unwrap(),
             tax_brackets: es_brackets(),
             taxes_enabled: true,
+            taxable_gain_ratio: rust_decimal::Decimal::ONE,
             annual_inflation_percent: rust_decimal::Decimal::from(3),
             debt_payments_remaining: Vec::new(),
         };

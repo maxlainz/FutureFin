@@ -1393,6 +1393,7 @@ pub(crate) async fn build_installation_projection_input(
             // La MISMA escala y el MISMO switch que el drenaje (#140).
             tax_brackets: fs.tax_brackets.clone(),
             taxes_enabled: fs.taxes_enabled,
+            taxable_gain_ratio: fs.taxable_gain_ratio,
             // Sin clamp desde 4.9.0 (#146): el rango [−2, 50] lo garantiza la escritura, y una
             // inflación negativa DEBE llegar al engine (objetivo decreciente, no plano).
             annual_inflation_percent: inflation_annual_percent,
@@ -1560,6 +1561,9 @@ pub(crate) async fn build_installation_projection_input(
         // el target se dimensionan con una sola fiscalidad. Sin fire_settings: sin impuesto.
         tax_brackets: fire_settings.map(|f| f.tax_brackets.clone()).unwrap_or_default(),
         taxes_enabled: fire_settings.map(|f| f.taxes_enabled).unwrap_or(false),
+        taxable_gain_ratio: fire_settings
+            .map(|f| f.taxable_gain_ratio)
+            .unwrap_or(Decimal::ONE),
         income_regular_monthly: inputs.income,
         expense_regular_monthly: inputs.expense,
         assets,
@@ -2592,10 +2596,13 @@ fn sim_kpis(
         .map(|a| (a.value.max(Decimal::ZERO), a.expected_annual_return_percent))
         .collect();
     let monthly_expense = input.expense_regular_monthly + debt_service_monthly;
+    // #140 fase 2: el umbral del runway pasa g — la misma venta y el mismo impuesto que el
+    // objetivo; dejarlo a g=1 reabriría la asimetría en otra tarjeta.
     let annual_expense_gross = gross_up_net_annual_fire(
         monthly_expense * Decimal::from(12u32),
         &fs.tax_brackets,
         fs.taxes_enabled,
+        fs.taxable_gain_ratio,
     );
     let (runway_months, runway_is_indefinite) = match futurefin_engine::liquid_runway_months(
         &liquid_rows,
@@ -2603,6 +2610,9 @@ fn sim_kpis(
         inflation_annual_percent,
         fs.swr_pct,
         annual_expense_gross,
+        &fs.tax_brackets,
+        fs.taxes_enabled,
+        fs.taxable_gain_ratio,
     ) {
         futurefin_engine::RunwayOutcome::Months(m) => (Some(m.round_dp(1)), false),
         futurefin_engine::RunwayOutcome::Indefinite => (None, true),
@@ -3812,6 +3822,7 @@ mod milestone_tests {
             annual_inflation_percent: Decimal::ZERO,
             tax_brackets: Vec::new(),
             taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
             income_regular_monthly: Decimal::from(3000),
             expense_regular_monthly: Decimal::from(2500),
             assets: vec![SimAsset {
@@ -3859,6 +3870,7 @@ mod milestone_tests {
             annual_inflation_percent: Decimal::ZERO,
             tax_brackets: Vec::new(),
             taxes_enabled: false,
+            taxable_gain_ratio: Decimal::ONE,
             income_regular_monthly: Decimal::from(1200),
             expense_regular_monthly: Decimal::from(1000),
             assets: vec![SimAsset {

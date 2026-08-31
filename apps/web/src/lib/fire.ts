@@ -41,6 +41,7 @@ export function defaultFireSettingsApi(): FireSettingsApi {
     income_avg_window_mode: "calendar",
     expense_avg_window_months: 12,
     expense_avg_window_mode: "calendar",
+    taxable_gain_ratio: "1",
     horizon_lifespan_age: 90,
   };
 }
@@ -113,7 +114,16 @@ export function normalizeInstallationFireSettings(
     // resetearía a 90 en silencio (el PATCH manda el objeto completo). Clamp 85..=105 como el
     // servidor (`resolve_fire_settings`).
     horizon_lifespan_age: clampHorizonLifespanAge(raw?.horizon_lifespan_age, 90),
+    // #140 fase 2: mismo round-trip obligatorio; clamp [0,1] espejo de resolve_fire_settings.
+    taxable_gain_ratio: clampTaxableGainRatio(raw?.taxable_gain_ratio, "1"),
   };
+}
+
+/** Cota de la fracción de plusvalía gravable ([0,1]), espejo de resolve_fire_settings. */
+export function clampTaxableGainRatio(v: unknown, fallback: string): string {
+  const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : NaN;
+  if (!Number.isFinite(n)) return fallback;
+  return String(Math.min(1, Math.max(0, n)));
 }
 
 /** Cota de la edad límite del horizonte (85..=105), espejo de `resolve_fire_settings`. */
@@ -237,6 +247,7 @@ export function grossUpNetAnnualFire(
   netAnnual: number,
   brackets: TaxBracketApi[],
   taxesEnabled: boolean,
+  taxableGainRatio: number = 1,
 ): number {
   // Forma cerrada por tramos, espejo EXACTO de gross_up_net_annual_fire del servidor
   // (crates/engine/src/tax.rs desde la Ola 6/#140) — Ola 2, #118. Hasta 4.6.0 aquí vivía una bisección
@@ -251,8 +262,10 @@ export function grossUpNetAnnualFire(
     const pct = parseDisplayDecimal(String(b.pct));
     if (pct === null || !Number.isFinite(pct)) continue; // borrador a medio teclear (solo cliente)
     const r = pct / 100;
-    const denom = 1 - r;
-    // Tramo ≥ 100 %: degeneración idéntica al servidor (devuelve el techo previo).
+    // #140 fase 2: la base imponible es g·G — el denominador cambia Y el test de validez
+    // cambia de forma (g·G ≤ techo, no G ≤ techo): espejo exacto del servidor.
+    const denom = 1 - r * taxableGainRatio;
+    // Tipo efectivo ≥ 100 %: degeneración idéntica al servidor (devuelve el techo previo).
     if (denom <= 0) return prevCeiling;
     const gross = (netAnnual + k - r * prevCeiling) / denom;
     const rawUp = b.up_to;
@@ -260,7 +273,7 @@ export function grossUpNetAnnualFire(
     if (isOpen) return gross;
     const ceiling = parseDisplayDecimal(String(rawUp));
     if (ceiling === null || !Number.isFinite(ceiling)) continue;
-    if (gross <= ceiling) return gross;
+    if (taxableGainRatio * gross <= ceiling) return gross;
     k += r * (ceiling - prevCeiling);
     prevCeiling = ceiling;
   }

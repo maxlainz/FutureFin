@@ -164,6 +164,14 @@ pub struct FireSettings {
     pub expense_avg_window_months: u32,
     /// Semántica de la ventana de gasto.
     pub expense_avg_window_mode: AvgWindowMode,
+    /// Fracción de cada euro bruto retirado que es plusvalía gravable (g, #140 fase 2 —
+    /// 4.10.0). `1` = reembolso íntegro gravado (histórico, default); `0` = nada tributa.
+    /// Rango [0, 1]; entra en el objetivo FIRE, en el drenaje simulado y en los dos umbrales
+    /// del runway A LA VEZ — una sola fiscalidad. Derivarla de la cartera real
+    /// (`contributed_capital`, ya por activo desde #120) es backlog explícito del issue.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub taxable_gain_ratio: Decimal,
     /// Edad límite del horizonte derivado (#149, 4.9.0): la proyección llega hasta los
     /// `horizon_lifespan_age` años del solicitante (antes era la constante 90). Rango [85, 105];
     /// default 90 ⇒ comportamiento idéntico al histórico. OJO: el horizonte sigue acotado a
@@ -215,6 +223,7 @@ pub(crate) fn default_fire_settings() -> FireSettings {
         income_avg_window_mode: AvgWindowMode::Calendar,
         expense_avg_window_months: 12,
         expense_avg_window_mode: AvgWindowMode::Calendar,
+        taxable_gain_ratio: Decimal::ONE,
         horizon_lifespan_age: 90,
     }
 }
@@ -274,6 +283,8 @@ pub(crate) fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSetting
     fs.horizon_lifespan_age = fs
         .horizon_lifespan_age
         .clamp(MIN_HORIZON_LIFESPAN_AGE, MAX_HORIZON_LIFESPAN_AGE);
+    // g fuera de [0,1] colado por restore/BD a mano: clamp en el consumo, como las ventanas.
+    fs.taxable_gain_ratio = fs.taxable_gain_ratio.clamp(Decimal::ZERO, Decimal::ONE);
     fs
 }
 
@@ -307,6 +318,11 @@ pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> 
                 "avg_window_out_of_range: {label} must be between {MIN_AVG_WINDOW_MONTHS} and {MAX_AVG_WINDOW_MONTHS} (months)"
             )));
         }
+    }
+    if fs.taxable_gain_ratio < Decimal::ZERO || fs.taxable_gain_ratio > Decimal::ONE {
+        return Err(ApiError::BadRequest(
+            "taxable_gain_ratio_out_of_range: taxable_gain_ratio must be between 0 and 1 (fraction)".into(),
+        ));
     }
     if !(MIN_HORIZON_LIFESPAN_AGE..=MAX_HORIZON_LIFESPAN_AGE).contains(&fs.horizon_lifespan_age) {
         return Err(ApiError::BadRequest(format!(
@@ -790,6 +806,8 @@ pub(crate) struct FireSettingsPatch {
     pub income_avg_window_mode: Option<AvgWindowMode>,
     pub expense_avg_window_months: Option<u32>,
     pub expense_avg_window_mode: Option<AvgWindowMode>,
+    /// #140 fase 2 (4.10.0): fracción de plusvalía gravable.
+    pub taxable_gain_ratio: Option<Decimal>,
     /// #149 (4.9.0): edad límite del horizonte derivado.
     pub horizon_lifespan_age: Option<u32>,
     /// Columna aparte de la instalación (no vive en el JSONB), pero es un eje FIRE más.
@@ -838,6 +856,9 @@ impl FireSettingsPatch {
         if let Some(v) = self.expense_avg_window_mode {
             after.expense_avg_window_mode = v;
         }
+        if let Some(v) = self.taxable_gain_ratio {
+            after.taxable_gain_ratio = v;
+        }
         if let Some(v) = self.horizon_lifespan_age {
             after.horizon_lifespan_age = v;
         }
@@ -855,6 +876,7 @@ impl FireSettingsPatch {
             && self.income_avg_window_mode.is_none()
             && self.expense_avg_window_months.is_none()
             && self.expense_avg_window_mode.is_none()
+            && self.taxable_gain_ratio.is_none()
             && self.horizon_lifespan_age.is_none()
             && self.annual_inflation_assumption_percent.is_none()
     }

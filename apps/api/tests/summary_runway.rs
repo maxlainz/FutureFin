@@ -192,7 +192,10 @@ async fn health(app: &TestApp, cookie: &str) -> Value {
 /// - gasto de presupuesto: **1.000/mes**
 /// - cuota derivada de un pasivo activo (mensual, 200): **200/mes**
 /// - `expense_total` = 1.000 + 200 = **1.200**
-/// - `runway_months` = 12.000 / 1.200 = **10**
+/// - `runway_months`: desde la Ola 6 (gemelo de #140) el bucle finito TRIBUTA — la venta
+/// bruta mensual con tramos ES (default) es gross_up(14.400)/12 = 1.506,3291, y
+/// 12.000/1.506,33 = 7,9664 → **8,0** publicado (hasta 4.9.x: 10, el bucle gastaba libre de
+/// impuestos mientras el umbral pedía capital fiscal).
 #[tokio::test]
 async fn runway_pre_change_baseline_liquid_over_expense() {
     let app = TestApp::spawn().await;
@@ -240,13 +243,9 @@ async fn runway_pre_change_baseline_liquid_over_expense() {
     // El total (1.200) y el runway no se mueven — la fusión reparte, no suma.
     assert_eq!(dec(&h["expense_regular_monthly_equivalent"]), d(1_200));
     assert_eq!(dec(&h["expense_total_monthly_equivalent"]), d(1_200));
-    // 12.000 / 1.200 = 10 meses exactos.
-    assert_eq!(dec(&h["runway_months"]), d(10));
-    assert_eq!(
-        dec(&h["runway_months"]),
-        dec(&h["liquid_assets_total"]) / dec(&h["expense_total_monthly_equivalent"]),
-        "runway = líquidos / gasto total"
-    );
+    // 12.000 / (gross_up(14.400)/12) = 7,9664 → 8,0 a 1 decimal (Ola 6: el bucle tributa; la
+    // identidad «líquidos / gasto» murió con él — el divisor es el BRUTO).
+    assert_eq!(dec(&h["runway_months"]), d(8));
 }
 
 /// Sin gasto (ni presupuesto ni cuotas) el runway no existe: `runway_months` se omite del JSON
@@ -305,11 +304,12 @@ async fn runway_with_return_exceeds_plain_division() {
     assert_eq!(dec(&h["liquid_assets_total"]), d(12_000));
     assert_eq!(dec(&h["expense_total_monthly_equivalent"]), d(1_200));
     let runway = dec(&h["runway_months"]);
+    // Ola 6: base grosseada 7,9664 sin retorno; el 5 % añade ≈0,12 meses → 8,0817 → 8,1.
     assert!(
-        runway > d(10),
-        "la rentabilidad debe alargar el runway por encima de la división simple (10), got {runway}"
+        runway > d(8),
+        "la rentabilidad debe alargar el runway por encima del bruto sin retorno (8,0), got {runway}"
     );
-    assert!(runway < d(11), "el extra por retorno ronda 0,2 meses, got {runway}");
+    assert!(runway < d(82) / d(10), "el extra por retorno ronda 0,12 meses, got {runway}");
     assert_eq!(h["runway_is_indefinite"], false);
 }
 
@@ -332,17 +332,18 @@ async fn runway_with_inflation_is_shorter_than_without() {
     let today = server_today(&app, &owner.cookie).await;
     active_liability(&app, &owner.cookie, &liab_cat, &expense_cat, "L1", "200", today).await;
 
-    // Antes del PATCH (inflación 0 por defecto) el runway es la división simple: 10 exactos.
+    // Antes del PATCH (inflación 0): bruto plano ⇒ 7,9664 → 8,0 (Ola 6: el bucle tributa).
     let sin_inflacion = health(&app, &owner.cookie).await;
-    assert_eq!(dec(&sin_inflacion["runway_months"]), d(10));
+    assert_eq!(dec(&sin_inflacion["runway_months"]), d(8));
 
     set_inflation(&app, &owner.cookie, "3").await;
 
     let h = health(&app, &owner.cookie).await;
     assert_eq!(dec(&h["expense_total_monthly_equivalent"]), d(1_200));
     let runway = dec(&h["runway_months"]);
-    assert!(runway < d(10), "la inflación debe acortar el runway, got {runway}");
-    assert!(runway > d(9), "el recorte ronda 0,11 meses, got {runway}");
+    // Predicho: 7,8982 → 7,9 publicado (el bruto del mes se calcula sobre el gasto YA inflado).
+    assert!(runway < d(8), "la inflación debe acortar el runway, got {runway}");
+    assert!(runway > d(78) / d(10), "el recorte ronda 0,07 meses, got {runway}");
     assert_eq!(h["runway_is_indefinite"], false);
 }
 
@@ -472,15 +473,16 @@ async fn runway_gross_up_raises_threshold() {
     liquid_asset_with_return(&app, &owner.cookie, &asset_cat, "Cartera", "270000", "2").await;
     budget(&app, &owner.cookie, &expense_cat, "700").await;
 
-    // Impuestos activados por defecto: la retirada bruta supera el 3,5 % → finito.
+    // Impuestos activados por defecto: la retirada bruta supera el 3,5 % → finito. Y desde la
+    // Ola 6 el BUCLE también tributa: la venta bruta mensual es gross_up(8.400)/12 = 873,42 y
+    // 270.000 al 2 % se agota en ≈431,92 meses (hasta 4.9.x, drenando el neto, eran 612,38).
     let con_impuestos = health(&app, &owner.cookie).await;
     assert_eq!(con_impuestos["runway_is_indefinite"], false);
     let runway = dec(&con_impuestos["runway_months"]);
     assert_eq!(
         runway,
-        Decimal::new(6_124, 1),
-        "finito por gross-up: 270.000 al 2 % pagando 700/mes se agota en ≈612,38 meses \
-         (publicado a 1 decimal), got {runway}"
+        Decimal::new(4_319, 1),
+        "finito por gross-up con drenaje bruto (predicho 431,9202 → 431,9), got {runway}"
     );
 
     set_fire_settings(&app, &owner.cookie, json!({ "taxes_enabled": false })).await;
@@ -539,7 +541,7 @@ async fn runway_swr_zero_never_indefinite() {
 /// - `expense_derived` = **0** (las cuotas no se re-suman como servicio de deuda)
 /// - `expense_total` = **1.500** (en modo A sería 8.000 + 800 = 8.800)
 /// - `net` = 3.000 − 1.500 = **1.500**
-/// - `runway` = 15.000 / 1.500 = **10** exactos
+/// - `runway` = 15.000 / (gross_up(18.000)/12) = 7,9530 → **8,0** (Ola 6: bruto)
 /// más las identidades `expense_total = expense_reg + expense_der` y `net = income − expense_total`.
 #[tokio::test]
 async fn mode_b_runway_uses_effective_expense_base() {
@@ -591,22 +593,21 @@ async fn mode_b_runway_uses_effective_expense_base() {
     );
     assert_eq!(net, income - expense_tot, "net = income − expense_total");
 
-    // Runway sobre la base efectiva: 15.000 / 1.500 = 10 (sin rentabilidad ni inflación).
+    // Runway sobre la base efectiva Y grosseada (Ola 6): la venta bruta mensual es
+    // gross_up(18.000)/12 = 22.632,9114/12 = 1.886,0759 → 15.000/1.886,08 = 7,9530 → 8,0
+    // publicado (hasta 4.9.x: 15.000/1.500 = 10, con la identidad de división simple que murió
+    // con el gemelo de #140 — el divisor es el BRUTO del gasto efectivo, no el neto).
     assert_eq!(dec(&h["liquid_assets_total"]), d(15_000));
-    assert_eq!(dec(&h["runway_months"]), d(10));
-    assert_eq!(
-        dec(&h["runway_months"]),
-        dec(&h["liquid_assets_total"]) / expense_tot,
-        "runway = líquidos / gasto total efectivo"
-    );
+    assert_eq!(dec(&h["runway_months"]), d(8));
     assert_eq!(h["runway_is_indefinite"], false);
 }
 
 /// Modo B **sin** meses reales en la ventana → fallback silencioso al presupuesto: la respuesta debe
 /// ser IDÉNTICA a la de modo A (runway y `expense_total` presupuestarios incluidos).
 ///
-/// PREDICCIÓN: `expense_total` = 1.000 + 200 = **1.200**, `runway` = 12.000 / 1.200 = **10**, y el
-/// bloque `financial_health` completo igual antes y después del PATCH (mismo JSON).
+/// PREDICCIÓN: `expense_total` = 1.000 + 200 = **1.200**, `runway` = 12.000 dividido por el
+/// BRUTO gross_up(14.400)/12 = 1.506,33 (Ola 6) ⇒ 7,9664 → **8,0**, y el bloque
+/// `financial_health` completo igual antes y después del PATCH (mismo JSON).
 #[tokio::test]
 async fn mode_b_zero_months_falls_back_to_budget_runway() {
     let app = TestApp::spawn().await;
@@ -635,7 +636,7 @@ async fn mode_b_zero_months_falls_back_to_budget_runway() {
 
     let modo_a = health(&app, &owner.cookie).await;
     assert_eq!(dec(&modo_a["expense_total_monthly_equivalent"]), d(1_200));
-    assert_eq!(dec(&modo_a["runway_months"]), d(10));
+    assert_eq!(dec(&modo_a["runway_months"]), d(8));
 
     set_mode_b(&app, &owner.cookie).await;
 
