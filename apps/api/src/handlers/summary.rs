@@ -193,7 +193,7 @@ pub struct FinancialHealthMetrics {
     /// 3,5556 %/año). Numerador: la suma de `current_value × expected_annual_return_percent` de
     /// TODOS los activos del scope menos la de `principal × apr_percent` de los pasivos **no
     /// vencidos** (mismo filtro que `total_liabilities`); denominador: `net_worth`. Un activo sin
-    /// rentabilidad configurada o un pasivo sin TAE cuentan como 0 % pero **siguen pesando** en el
+    /// rentabilidad configurada o un pasivo sin TIN cuentan como 0 % pero **siguen pesando** en el
     /// denominador. Se **omite** cuando `net_worth ≤ 0` (el cociente cambiaría de signo o
     /// divergiría). Lo calcula `futurefin_engine::net_return_percentages`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -469,7 +469,7 @@ pub(crate) async fn summary_core(
         r#"SELECT current_value, expected_annual_return_percent, is_liquid
            FROM assets WHERE {asset_scope}"#
     );
-    // Ídem con los pasivos: `(principal, TAE %)` con el filtro de vencidos de siempre — el mismo
+    // Ídem con los pasivos: `(principal, TIN %)` con el filtro de vencidos de siempre — el mismo
     // `WHERE` que servía la suma escalar, no uno nuevo. `total_liabilities` se suma en Rust.
     let liab_sql = format!(
         r#"SELECT principal, apr_percent FROM liabilities

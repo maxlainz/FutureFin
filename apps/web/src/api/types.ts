@@ -198,7 +198,7 @@ export type FinancialHealthMetrics = {
   savings_expected_monthly_equivalent?: string;
   /** Rendimiento anual **nominal** esperado del patrimonio neto, ya en PORCENTAJE (`"3.5556"` =
    *  3,5556 %/año), no en fracción como `savings_rate`. Suma de `valor × rentabilidad esperada`
-   *  de todos los activos menos `principal × TAE` de los pasivos vivos, sobre el patrimonio neto.
+   *  de todos los activos menos `principal × TIN` de los pasivos vivos, sobre el patrimonio neto.
    *  Ausente ⟺ el patrimonio neto no es positivo. */
   net_return_nominal_annual_pct?: string | null;
   /** El mismo rendimiento descontada la inflación configurada, dividiendo factores

@@ -901,7 +901,7 @@
       },
       "constraints_sha256_12": "1f46a8682c1e",
       "description_len": 445,
-      "description_sha256_12": "02bd0c4ee063",
+      "description_sha256_12": "75f1cff3eb6b",
       "name": "list_liabilities",
       "properties": [
         "view"
@@ -1424,7 +1424,7 @@
       },
       "constraints_sha256_12": "6e2bd16034b4",
       "description_len": 588,
-      "description_sha256_12": "0f21935e834a",
+      "description_sha256_12": "0bb3efebf423",
       "name": "update_liability",
       "properties": [
         "apr_percent",

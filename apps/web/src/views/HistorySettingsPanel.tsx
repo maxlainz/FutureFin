@@ -275,7 +275,7 @@ export function HistorySettingsPanel({
           const apr = it.aprPercent.trim();
           if (apr !== "") {
             const a = parseDisplayDecimal(apr);
-            if (a === null || a < 0) return { ok: false, error: "TAE inválida." };
+            if (a === null || a < 0) return { ok: false, error: "TIN inválido." };
             payload.apr_percent = toApiDecimalString(apr);
           }
           const pay = it.paymentAmount.trim();
@@ -692,7 +692,7 @@ export function HistorySettingsPanel({
                       {showTerms ? (
                         <>
                           <label className="field">
-                            <span>TAE %</span>
+                            <span>TIN %</span>
                             <input
                               value={it.aprPercent}
                               onChange={(e) =>

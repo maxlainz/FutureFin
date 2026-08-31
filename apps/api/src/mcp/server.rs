@@ -1400,7 +1400,7 @@ pub struct CreateLiabilityParams {
     #[serde(default)]
     #[schemars(extend("enum" = ["fixed_payments", "french", "interest_only", "revolving"]))]
     pub repayment_model: Option<String>,
-    /// TAE en % >= 0, string decimal.
+    /// TIN nominal anual en % >= 0, string decimal (el que construye el cuadro de amortización; no la TAE con comisiones).
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub apr_percent: Option<String>,
@@ -1468,7 +1468,7 @@ pub struct UpdateLiabilityParams {
     #[serde(default)]
     #[schemars(extend("enum" = ["fixed_payments", "french", "interest_only", "revolving"]))]
     pub repayment_model: Option<String>,
-    /// TAE en % >= 0, string decimal.
+    /// TIN nominal anual en % >= 0, string decimal (el que construye el cuadro de amortización; no la TAE con comisiones).
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub apr_percent: Option<String>,
@@ -2468,7 +2468,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_liabilities",
-        description = "Pasivos activos (deudas y préstamos): principal, TAE, cuota y frecuencia de pago, fecha fin del plan y `repayment_model`, que decide cómo los simula la proyección: `fixed_payments` la cuota va íntegra a principal sin intereses; `french` y `revolving` devengan interés al TIN sobre el saldo; `interest_only` el principal no baja. Los pasivos con plan ya vencido se filtran. La cuota de cada uno aparece además como partida de gasto en get_budget.",
+        description = "Pasivos activos (deudas y préstamos): principal, TIN, cuota y frecuencia de pago, fecha fin del plan y `repayment_model`, que decide cómo los simula la proyección: `fixed_payments` la cuota va íntegra a principal sin intereses; `french` y `revolving` devengan interés al TIN sobre el saldo; `interest_only` el principal no baja. Los pasivos con plan ya vencido se filtran. La cuota de cada uno aparece además como partida de gasto en get_budget.",
         annotations(title = "Pasivos", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_liabilities(
@@ -3969,7 +3969,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_liability",
-        description = "Edita un pasivo existente («el TIN de mi hipoteca ha bajado al 2,1 %»): label, `type_tag` (cadena vacía lo borra), categorías, TAE (clear_apr_percent la borra — obligatorio al volver a fixed_payments, que la rechaza), plan de pago, `repayment_model` (ver create_liability; al salir de revolving sus mínimos se anulan solos) y principal explícito o re-derivado del plan. Cambiar el modelo o la TAE con `derive_principal_from_plan` activo RE-DERIVA el principal. Prefiere esto a borrar y recrear: conserva los movimientos vinculados y la categoría de gasto de la cuota. Mueve la proyección.",
+        description = "Edita un pasivo existente («el TIN de mi hipoteca ha bajado al 2,1 %»): label, `type_tag` (cadena vacía lo borra), categorías, TIN (clear_apr_percent lo borra — obligatorio al volver a fixed_payments, que la rechaza), plan de pago, `repayment_model` (ver create_liability; al salir de revolving sus mínimos se anulan solos) y principal explícito o re-derivado del plan. Cambiar el modelo o el TIN con `derive_principal_from_plan` activo RE-DERIVA el principal. Prefiere esto a borrar y recrear: conserva los movimientos vinculados y la categoría de gasto de la cuota. Mueve la proyección.",
         annotations(title = "Editar pasivo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_liability(

@@ -221,7 +221,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   expense_end_set_and_clear:
     "No se puede poner y borrar la fecha de fin del gasto a la vez. Elige una de las dos cosas.",
   repayment_model_state_invalid:
-    "A esa deuda le faltan varios datos para el modelo elegido: revisa cuota, periodicidad y TAE.",
+    "A esa deuda le faltan varios datos para el modelo elegido: revisa cuota, periodicidad y TIN.",
   window_months_out_of_range:
     "La ventana pedida está fuera del rango permitido. Ajusta el número de meses.",
   due_date_out_of_range:
@@ -487,7 +487,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   snapshot_value_negative:
     "El valor de un elemento del snapshot no puede ser negativo.",
   snapshot_apr_percent_negative:
-    "La TAE de un elemento del snapshot no puede ser negativa.",
+    "El TIN de un elemento del snapshot no puede ser negativo.",
   snapshot_payment_amount_negative:
     "La cuota de un elemento del snapshot no puede ser negativa.",
   snapshot_payment_frequency_invalid:

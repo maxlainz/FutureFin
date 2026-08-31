@@ -100,18 +100,19 @@ export const HELP_TEXTS = {
       "frecuencia cuenta como 0 €.",
   },
   "liabilities.weighted_apr": {
-    title: "TAE media ponderada",
+    title: "TIN medio ponderado",
     body:
-      "Media de la TAE de tus pasivos, ponderada por el principal de cada uno. A diferencia del " +
-      "Rendimiento neto del Resumen, aquí un pasivo SIN TAE puesta queda fuera del cálculo " +
+      "Media del TIN de tus pasivos, ponderada por el principal de cada uno (el TIN nominal que " +
+      "usa el cuadro de amortización, no la TAE con comisiones de tu contrato). A diferencia " +
+      "del Rendimiento neto del Resumen, aquí un pasivo SIN TIN puesto queda fuera del cálculo " +
       "entero —no cuenta como 0 %—, así que la media puede moverse solo porque cambia qué " +
       "pasivos tienen tipo declarado, no porque cambien los tipos.",
   },
   "liabilities.approx_monthly_interest": {
     title: "Interés mensual aprox.",
     body:
-      "Estimación de orden de magnitud: para cada pasivo con TAE puesta, tu principal actual × " +
-      "TAE ÷ 12, como si todo ese principal devengara interés cada mes sin descontar " +
+      "Estimación de orden de magnitud: para cada pasivo con TIN puesto, tu principal actual × " +
+      "TIN ÷ 12, como si todo ese principal devengara interés cada mes sin descontar " +
       "amortización. Cuenta TODOS los pasivos con tipo, sea cual sea su modelo de amortización; " +
       "la proyección, en cambio, solo cobra interés de verdad a los que tienen un modelo que " +
       "devenga (francés o revolving) con un plan de pagos vivo — así que esta cifra puede ir " +

@@ -39,7 +39,7 @@ pub enum HistoryItemKind {
     Liability,
 }
 
-/// Términos del préstamo copiados en la observación de un pasivo. `apr_percent` es la TAE nominal
+/// Términos del préstamo copiados en la observación de un pasivo. `apr_percent` es el TIN nominal
 /// (5 = 5 %/año); `monthly_payment` es la cuota mensual (el llamante ya normaliza `weekly → ×52/12`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoanTerms {

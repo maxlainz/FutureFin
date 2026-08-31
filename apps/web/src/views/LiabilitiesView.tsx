@@ -230,7 +230,7 @@ export function LiabilitiesView({
             }
           />
           <MetricCard
-            label="TAE media ponderada" helpId="liabilities.weighted_apr"
+            label="TIN medio ponderado" helpId="liabilities.weighted_apr"
             value={
               liabilityMetricsReady && liabilitiesWeightedApr !== null
                 ? formatPercentDisplay(liabilitiesWeightedApr)
@@ -409,7 +409,7 @@ export function LiabilitiesView({
                 ) : null}
               </label>
               <label className="field">
-                <span>TAE % (opc.)</span>
+                <span>TIN % (opc.)</span>
                 <input
                   value={liabilityFormApr}
                   onChange={(e) => setLiabilityFormApr(e.target.value)}
@@ -587,7 +587,7 @@ export function LiabilitiesView({
                         <tr>
                           <th>Etiqueta</th>
                           <th className="num">Principal</th>
-                          {isMobile ? null : <th className="num">TAE %</th>}
+                          {isMobile ? null : <th className="num">TIN %</th>}
                           {isMobile ? null : <th className="num">Cuota</th>}
                           {isMobile ? null : <th>Frec.</th>}
                           {isMobile ? null : <th>Fin plan</th>}
@@ -659,7 +659,7 @@ export function LiabilitiesView({
                                 ) : null}
                                 {isMobile ? (
                                   <span className="cell-subline">
-                                    TAE {aprLabel} · Cuota{" "}
+                                    TIN {aprLabel} · Cuota{" "}
                                     {formatCurrencyOrDash(
                                       row.payment_amount,
                                       currencyIso,

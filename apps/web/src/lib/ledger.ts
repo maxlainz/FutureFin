@@ -177,7 +177,7 @@ export function liabilityPaymentMonthlyEquivalentNum(
   return 0;
 }
 
-/** TAE % media ponderada por principal (solo pasivos con TAE informada). */
+/** TIN % medio ponderado por principal (solo pasivos con TIN informado). */
 export function liabilitiesWeightedAprPercent(
   liabilities: LiabilityApiRow[],
 ): number | null {
@@ -197,7 +197,7 @@ export function liabilitiesWeightedAprPercent(
 }
 
 /**
- * Suma aproximada de interés mensual (saldo × TAE ÷ 12 por pasivo).
+ * Suma aproximada de interés mensual (saldo × TIN ÷ 12 por pasivo).
  * No modela amortización; sirve como orden de magnitud.
  */
 export function liabilitiesApproxMonthlyInterestSum(
