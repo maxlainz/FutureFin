@@ -140,9 +140,12 @@ locally FIRST — the feedback loop is minutes shorter and CI is not a debugger.
 | **Docs-only** | `CLAUDE.md`, `.claude/*.md`, `README.md`, CHANGELOG wording | No test gates. Gate = accuracy: verify every command/path/claim against the code before writing it (docs have drifted before — eight errata were found and fixed on 2026-07-02; prefer commands over frozen counts, e.g. `ls apps/api/migrations \| wc -l`). Record unfixable drift in futurefin-docs-and-writing §7. |
 | **Infra-release** | `Dockerfile`, `apps/api/docker-entrypoint.sh`, `docker-compose*.yml`, `.github/workflows/*`, **`addon/` y `repository.yaml`** (el paquete del add-on de Home Assistant: la misma imagen distribuida por un segundo canal — un `config.yaml` mal formado llega a la tienda de todos los suscriptores, y HA lee CUALQUIER `config.{yaml,yml,json}` del repo como add-on, de ahí la guarda del job `secrets-scan`), version bump, tag | CI green on `dev` — **including the `docker-stack` job, which since 3.0.0 is the only automated evidence of "no data loss"; never merge on a red or skipped one**; full local Docker-stack test (Section 4.2) before tagging, **plus the V2→V3 upgrade drill with real seeded data** (4.2, step B) — the published image now carries the database, so a bad entrypoint destroys installations that never ran your code path in CI; version bump + `Cargo.lock` sync + CHANGELOG; dev→main full-mirror merge; tag from `main`. Any edit to `docker-entrypoint.sh` also needs `shellcheck -S warning` clean (CI gates it). |
 
-CI (`.github/workflows/ci.yml`, runs on push/PR to `main`) covers **five** jobs
-(`sed -n '/^jobs:/,$p' .github/workflows/ci.yml | grep -E '^  [a-z_-]+:$'` — el grep a secas sobre todo el fichero da 8, porque `push:`/`pull_request:`/`workflow_dispatch:` cuelgan de `on:` con la misma indentación):
+CI (`.github/workflows/ci.yml`, runs on push/PR to `main`) covers **six** jobs
+(`sed -n '/^jobs:/,$p' .github/workflows/ci.yml | grep -E '^  [a-z_-]+:$'` — el grep a secas sobre todo el fichero da uno más de la cuenta, porque `push:`/`pull_request:`/`workflow_dispatch:` cuelgan de `on:` con la misma indentación):
 - `secrets-scan` — blocking and first: ningún dato personal en ficheros trackeados.
+- `attribution-scan` (2026-08-31) — ningún mensaje de commit lleva atribución de herramienta
+  (trailers de coautoría de un asistente, URLs de sesión); la coautoría de `dependabot[bot]` es
+  legítima y pasa. Porqué e incidente: `.claude/git-and-releases.md` §Sin atribuciones.
 - `rust` — `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked`.
 - `web` — `npm run typecheck:web` + `lint:web` + `npm test --workspace futurefin-web` + `build:web`.
 - `integration` — servicio `postgres:16.4-alpine` + `cargo test --workspace --locked`. **Es la
