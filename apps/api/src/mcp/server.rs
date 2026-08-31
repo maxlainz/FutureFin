@@ -4391,7 +4391,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_allocation_rule",
-        description = "Edita una regla de la cascada de asignación («aporta 200 € más al mes al fondo indexado»): amount (euros para fixed, % para percent), cap (kind+value o clear_cap) y enabled. Para añadir o quitar reglas están create_allocation_rule / delete_allocation_rule; el SUMIDERO (remainder sin tope) solo se pone desde la app. Mueve la proyección entera.",
+        description = "Edita una regla de la cascada («aporta 200 € más al mes al fondo indexado»): amount (euros para fixed, % para percent), cap (kind+value o clear_cap) y enabled. El SUMIDERO (remainder sin tope) es INDESTRUCTIBLE con activos vivos: deshabilitarlo, caparlo o degradarlo → 400 remainder_required (muévelo de activo con target_asset_id). Crear/quitar reglas: create/delete_allocation_rule. Mueve la proyección.",
         annotations(title = "Editar regla de asignación", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_allocation_rule(
@@ -4949,7 +4949,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "delete_asset",
-        description = "Borra un activo del hogar. El preview trae los efectos: movimientos y lotes vinculados quedan DESVINCULADOS (no se borran); las reglas de reparto que apuntan al activo SÍ caen con él, sin vuelta atrás — `allocation_rules_deleted` dice cuántas y `allocation_remainder_rules_deleted` cuántas eran el sumidero. Si esa última no es 0, dilo ANTES de confirmar: el sobrante pasará a caja al 0 % (resolution lo marca surplus_destination=cash). Mueve la proyección entera.",
+        description = "Borra un activo del hogar. El preview trae los efectos: movimientos y lotes vinculados quedan DESVINCULADOS (no se borran); las reglas de reparto que apuntan al activo caen con él — pero si es el destino del sumidero y quedan otros activos, el borrado se RECHAZA (remainder_required: mueve antes la regla resto a otro activo). El último activo del scope sí se borra. Mueve la proyección entera.",
         annotations(title = "Borrar activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn delete_asset(

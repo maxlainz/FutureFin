@@ -384,13 +384,14 @@ async fn mode_b_raw_avg_ignores_liability_links() {
     approx(delta, 4800.0);
 }
 
-/// Ajustado en 4.8.0 (#142, opción 3): el plan vuelve a estar VIVO en modo real — el motor
-/// cobra la cuota y amortiza. Para un préstamo SIN intereses la trayectoria de NW es idéntica a
-/// la «resta constante» de 3.4.0 (M sale de caja y M baja el principal: se cancelan), y en este
-/// escenario el promedio de gasto es 0, así que la resta de la cuota clampa a 0 y el delta no
-/// cambia — por eso este pin numérico SOBREVIVE tal cual. Lo que ya no es verdad es la prosa
-/// vieja («sin cargo de caja, sin amortización»); el escalón al vencer se pinea en el test de
-/// al lado.
+/// Reajustado en 4.12.1 (la muerte de `surplus_cash`): este escenario NO tiene activos, así
+/// que el neto positivo del mes (ingreso 2.000 − cuota 1.000 = 1.000) ya no se acumula en caja
+/// — queda VARADO y declarado (decisión 3 del owner: el modelo no simula dinero sin sitio). El
+/// patrimonio publicado es SOLO la deuda amortizándose: NW(k) = 1.000·k − 100.000 mientras el
+/// plan vive. El bucle se acota a k ≤ 50 porque el fin del plan (`today + 5 años`) hace el
+/// tramo posterior dependiente del reloj — la meseta se comprueba por su existencia, no por su
+/// mes exacto. Historia: en 4.8.0 (#142) el pin era 2.000·k − 100.000 porque el 1.000 sobrante
+/// contaba como caja dentro del NW.
 #[tokio::test]
 async fn mode_b_liability_static_nw_subtraction() {
     let app = TestApp::spawn().await;
@@ -420,20 +421,28 @@ async fn mode_b_liability_static_nw_subtraction() {
     let body = app.get_with_cookie("/v1/projection/series?months=240", &owner.cookie).await.json();
     approx(parse_dec(&body["monthly_delta_assumption"]), 2000.0);
 
-    // Serie sin activos: NW(k) = surplus_cash(k) − principal = 2000·k − 100000 en TODOS los
-    // puntos — lineal exacto, sin escalón en el mes ~100 (donde la amortización antigua habría
-    // saldado el principal) ni al vencer el plan.
+    // Serie sin activos (4.12.1): NW(k) = −principal(k) = 1.000·k − 100.000 mientras el plan
+    // vive — el 1.000/mes que antes era caja está varado y fuera del balance. Exacto y estable
+    // para k ≤ 50 (el plan de today+5 años vive al menos ~52 meses desde cualquier fecha).
     let points = body["points"].as_array().unwrap();
     assert!(points.len() > 200, "serie mensual esperada, {} puntos", points.len());
     for p in points {
         let k = p["month_index"].as_u64().unwrap() as f64;
+        if k > 50.0 {
+            break;
+        }
         let nw = p["net_worth"].as_f64().unwrap();
-        let expected = 2000.0 * k - 100_000.0;
+        let expected = 1000.0 * k - 100_000.0;
         assert!(
             (nw - expected).abs() < 0.5,
-            "mes {k}: net_worth {nw}, esperado {expected} (resta estática de principal)"
+            "mes {k}: net_worth {nw}, esperado {expected} (solo amortización; el resto, varado)"
         );
     }
+    // Y el varado se DECLARA — a 240 meses es ≥ 50×1.000 (la cifra exacta depende del reloj
+    // por el fin del plan; el arranque no).
+    let varado = parse_dec(&body["unallocated_savings_total"]);
+    assert!(varado >= 50_000.0, "unallocated_savings_total: {varado}");
+    assert_eq!(body["unallocated_savings_reason"], "no_assets", "{body}");
 }
 
 /// Target FIRE modo B (annual_expense) usa el promedio de gasto crudo como base:

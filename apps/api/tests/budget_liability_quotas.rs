@@ -234,15 +234,20 @@ async fn liability_quota_stays_out_of_the_engine_expense_base() {
         2000.0,
     );
 
-    // Y el engine sigue cobrándola exactamente UNA vez. Caja del mes = 3.000 − 1.000 − 200 = 1.800;
-    // el principal baja 200/mes. NW(k) = 1.800k − (100.000 − 200k) = 2.000k − 100.000.
+    // Y el engine sigue cobrándola exactamente UNA vez. Caja del mes = 3.000 − 1.000 − 200 =
+    // 1.800 — pero desde 4.12.1 este escenario SIN ACTIVOS no acumula ese sobrante (decisión 3:
+    // varado y declarado): el patrimonio publicado es solo el principal amortizándose,
+    // NW(k) = 200k − 100.000. La prueba de «la cuota se cobra UNA vez» sobrevive intacta: si se
+    // cobrara dos, la amortización sería 400/mes y NW(12) sería −95.200, no −97.600.
     approx(parse_dec(&proj["starting_net_worth"]), -100_000.0);
     let points = proj["points"].as_array().unwrap();
     let nw_12 = points[12]["net_worth"].as_f64().unwrap();
     assert!(
-        (nw_12 - (-76_000.0)).abs() < 1.0,
-        "NW(12) = 2.000·12 − 100.000 = −76.000 (cuota contada una vez); got {nw_12}"
+        (nw_12 - (-97_600.0)).abs() < 1.0,
+        "NW(12) = 200·12 − 100.000 = −97.600 (cuota contada una vez; sobrante varado); got {nw_12}"
     );
+    let varado = parse_dec(&proj["unallocated_savings_total"]);
+    assert!(varado > 0.0, "el 1.800/mes varado se declara: {varado}");
 }
 
 // ---------------------------------------------------------------------------

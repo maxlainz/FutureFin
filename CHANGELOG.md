@@ -4,6 +4,49 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.12.1] - 2026-08-31
+
+**Fin de `surplus_cash`** — la caja fantasma al 0 % se elimina del modelo entero (entrevista de
+decisiones con el owner, 2026-08-31: «es antinatural y no tiene espejo en la realidad — el dinero
+siempre vive en un activo»). Cierra #175 y #176. **Breaking §5** en tres campos (abajo). Números
+por triple fuente, pineados en el bucle real.
+
+### La cascada corre también jubilada (#175)
+
+- Nadie cambia de lógica al jubilarse: fijas, porcentajes, topes y sumidero siguen mandando tras
+  el cruce FIRE. **El ancla del issue, entregada exacta**: 500 €/mes de superávit de pensión al
+  5 % durante 30 años = **409.348,92 €** invertidos donde antes morían 180.000,00 € en caja —
+  los +229.348,92 € que #175 cifró. Lo reinvertido sube la base de coste (#120) y abarata las
+  ventas futuras (#178). Los techos de la fase (#171) pasan de explicativos a vinculantes.
+- **El cruce FIRE solo puede irse más tarde, nunca adelantarse** (teorema: la base líquida pierde
+  un término ≥ 0), y en producción es invariante — solo se movía en escenarios sin cascada, en la
+  dirección honesta (un euro sin invertir no debería decidir que ya vives de rentas).
+
+### El sumidero es indestructible (#176)
+
+- Con activos vivos: borrar el activo del sumidero quedando otros, deshabilitar la regla «resto»
+  o degradarla → 400 `remainder_required` (la salida legal: muévela de activo). El último activo
+  del scope sí se borra. Migración que **reactiva los sumideros deshabilitados** (legales hasta
+  hoy; sin ella el upgrade haría desaparecer dinero en esos scopes) + el mismo espejo al importar
+  backups.
+
+### El euro sin destino no se simula
+
+- Sin activos (o sin sumidero alcanzable — inalcanzable ya en producción), el ahorro NO compone,
+  no cuenta como aportado y no entra al patrimonio: se declara en voz alta en
+  `unallocated_savings_total` + `unallocated_savings_reason` (`no_assets` | `no_sink`), en la
+  serie, en `simulate` y en la resolución. Los euros no desaparecen sin decirlo — dejan de
+  fingirse invertidos.
+- Identidades nuevas del motor: `patrimonio = Σ activos − pasivos − descubierto`,
+  `aportado = Σ bases`, `líquido = Σ activos líquidos`. El escalón «caja primero» de los déficits
+  desaparece; su exención fiscal la hereda la extensión `basis_declared` de #178 — la base que la
+  cascada alimenta ES un dato observado, y sin esa pieza un descubierto de 3.000 € habría
+  tributado 784,81 € inventados. Consecuencia visible: el pin del escenario canónico A sube a
+  676.315,04 € (+23.044,82 — impuesto que se cobraba sobre euros que eran base).
+- **Breaking §5**: `leftover_to_surplus_cash` → `leftover_unallocated`; `surplus_destination` →
+  sustituido por `unallocated_savings_reason`; el `skipped_reason: in_retirement` muere (la
+  cascada ya no se salta). La SPA no consumía ninguno de los tres.
+
 ## [4.12.0] - 2026-08-31
 
 **La plusvalía que de verdad tributa, y el sobrante que ya no puede nacer muerto** (issues #178 y

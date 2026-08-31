@@ -322,8 +322,8 @@ pub struct ProjectionSeriesResponse {
     /// hay posición equivalente porque la cifra no se lee de la serie.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compound_outpaces_true_savings_month_index: Option<u32>,
-    /// Primer mes cuyo déficit de caja iguala o supera TODO lo drenable (`surplus_cash` + todos
-    /// los activos): la cartera se vacía ese mes y desde el siguiente el descubierto se acumula
+    /// Primer mes cuya venta bruta necesaria iguala o supera TODO lo drenable (todos los
+    /// activos): la cartera se vacía ese mes y desde el siguiente el descubierto se acumula
     /// restando del patrimonio. Número de MES (misma base que `points[].month_index`), nunca una
     /// posición de array. `null` explícito = no se agota dentro del horizonte — no «no
     /// calculado». (#119)
@@ -333,6 +333,17 @@ pub struct ProjectionSeriesResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub uncovered_deficit_total: Decimal,
+    /// Ahorro que ninguna regla de la cascada absorbió, acumulado (4.12.1): NO entra en
+    /// `net_worth`, NO compone y NO cuenta como aportado — el modelo se niega a simular un euro
+    /// sin destino declarado. `"0.0000"` = cero euros varados (caso normal: con activos vivos el
+    /// sumidero es indestructible, #176).
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub unallocated_savings_total: Decimal,
+    /// Por qué hay ahorro varado: `null` = no lo hay; `"no_assets"` = el scope no tiene activos
+    /// (crea tu primer activo); `"no_sink"` = hay activos sin sumidero habilitado (residual).
+    #[schema(value_type = Option<String>)]
+    pub unallocated_savings_reason: Option<&'static str>,
     /// Pasivos cuya cuota no cubre el devengo: la deuda CRECE mes a mes (amortización negativa).
     /// Vacío = ninguno. Deliberadamente más estrecho que el `payment_does_not_reduce_principal`
     /// del calendario: un `interest_only` congela el principal y NO aparece aquí — esa
@@ -818,6 +829,21 @@ fn expense_end_date_monthly_adjustments(
 /// #178: qué régimen fiscal gobierna el drenaje, derivado de los INPUTS (los mismos que ve el
 /// engine). Un activo «declara coste» ⟺ `purchase_price` presente (incluido 0 — «todo es
 /// ganancia» es una declaración, no una ausencia).
+/// 4.12.1: la razón del ahorro varado — solo hay dos causas posibles (demostrado: un sumidero
+/// habilitado no tiene tope y se lleva `remaining` entero, así que con él el leftover es 0).
+fn unallocated_reason_of(
+    assets: &[futurefin_engine::SimAsset],
+    total: Decimal,
+) -> Option<&'static str> {
+    if total <= Decimal::ZERO {
+        None
+    } else if assets.is_empty() {
+        Some("no_assets")
+    } else {
+        Some("no_sink")
+    }
+}
+
 fn drawdown_gain_basis_of(assets: &[futurefin_engine::SimAsset]) -> &'static str {
     let declared = assets.iter().filter(|a| a.purchase_price.is_some()).count();
     if declared == 0 {
@@ -2323,6 +2349,11 @@ pub async fn compute_projection_series_response(
         taxable_gain_ratio_today: taxable_gain_ratio_today_of(&projection_input.assets),
         assets_depleted_month_index: output.assets_depleted_month_index,
         uncovered_deficit_total: money_out(output.uncovered_deficit_total),
+        unallocated_savings_total: money_out(output.unallocated_savings_total),
+        unallocated_savings_reason: unallocated_reason_of(
+            &projection_input.assets,
+            output.unallocated_savings_total,
+        ),
         liabilities_negative_amortization,
         fire_target_absent_reason,
     })
@@ -2400,6 +2431,12 @@ pub(crate) struct SimKpis {
     /// respuesta a «si gasto X más, ¿cuándo me quedo sin nada?» — la pregunta que más justifica
     /// un what-if.
     pub assets_depleted_month_index: Option<u32>,
+    /// Espejo de `/v1/projection/series` (4.12.1): ahorro que ninguna regla absorbió — fuera
+    /// del balance, solo cuantificado. `"0.0000"` = caso normal.
+    #[serde(with = "rust_decimal::serde::str")]
+    pub unallocated_savings_total: Decimal,
+    /// `null` | `"no_assets"` | `"no_sink"` — mismo vocabulario que la serie.
+    pub unallocated_savings_reason: Option<&'static str>,
     /// Fecha civil del cruce (`YYYY-MM-DD`) = `anchor_date_ymd` + el índice, conservando el día
     /// del ancla con recorte a fin de mes. `null` ⟺ no hay cruce.
     /// Sin `skip_serializing_if`: su hermano `jubilacion_month_index` ya iba explícito y estos dos
@@ -2812,6 +2849,11 @@ fn sim_kpis(
     SimKpis {
         jubilacion_month_index,
         assets_depleted_month_index: output.assets_depleted_month_index,
+        unallocated_savings_total: money_out(output.unallocated_savings_total),
+        unallocated_savings_reason: unallocated_reason_of(
+            &input.assets,
+            output.unallocated_savings_total,
+        ),
         jubilacion_date_ymd,
         jubilacion_age,
         final_net_worth: money_out(final_net_worth),

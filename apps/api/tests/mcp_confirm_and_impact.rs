@@ -520,6 +520,19 @@ async fn el_token_del_preview_vale_exactamente_una_vez() {
     }
     let (a1, a2) = (ids[0].clone(), ids[1].clone());
 
+    // 4.12.1 (#176): "Fondo A" (primer activo) es el destino del sumidero sembrado, y borrarlo
+    // quedando "Fondo B" vivo ahora se RECHAZA — se mueve antes la regla a B (la salida legal
+    // que la propia guarda nombra), que es lo que este test no venía a probar.
+    let sink = app.sink_rule_id(&owner.cookie).await;
+    let moved = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{sink}"),
+            json!({"target_asset_id": a2}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(moved.status, http::StatusCode::OK, "{moved:?}");
+
     let preview = ok_json(&mcp_post(&app, &token, tool_call("delete_asset", json!({"id": a1}))).await);
     let ct = preview["confirm_token"].as_str().unwrap().to_string();
 

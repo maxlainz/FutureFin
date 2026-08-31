@@ -109,13 +109,15 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
     assert!((nw12 - (-80_006.71)).abs() < 0.01, "NW(12) capturado: {nw12}");
     assert!((nw180 - 316_313.32).abs() < 0.01, "NW(180) capturado: {nw180}");
     // Ola 6 (#140 fase 1): el drenaje de jubilación TRIBUTA — con gasto retirado 1.200 €/mes
-    // el bruto mensual es gross_up(14.400)/12 = 1.506,33 (+306,33 de impuesto), y los ~125
-    // meses de drenaje tras el cruce (235) dejan NW(360) en 653.270,22 (capturado; antes
-    // 703.274,35 — ≈−50 k€, coherente con 306 €/mes × 125 m + composición al 5 %). El cruce y
-    // NW(180) NO se mueven: antes del 235 este hogar no drena (caja positiva). El mecanismo
-    // exacto está pineado a mano en el engine (`the_simulated_withdrawal_also_pays_taxes`,
-    // `depletion_arrives_earlier_and_the_uncovered_deficit_is_net`).
-    assert!((nw360 - 653_270.22).abs() < 0.01, "NW(360) capturado: {nw360}");
+    // el bruto era gross_up(14.400)/12 = 1.506,33 con g=1, y NW(360) quedó en 653.270,22.
+    // 4.12.1 (extensión B de #178): la base que la cascada construyó durante 234 meses es un
+    // DATO observado, así que el drenaje deriva su g real (< 1, creciente) en vez del escalar 1
+    // — la exención fiscal del difunto «caja primero» heredada de verdad. NW(360) sube a
+    // 676.315,04 (capturado; +23.044,82 de impuesto que se cobraba sobre euros que eran base).
+    // El cruce (235), NW(12) y NW(180) NO se mueven: antes del 235 este hogar no drena. El
+    // mecanismo exacto está pineado a mano en el engine (`derived_g_rises_along_the_trajectory…`,
+    // `the_simulated_withdrawal_also_pays_taxes` — este último sin coste declarado, g=1).
+    assert!((nw360 - 676_315.04).abs() < 0.01, "NW(360) capturado: {nw360}");
 }
 
 /// Escenario B — «inflación 2,5 %» (lo moverán #146/#139/#149 en la Ola 5).

@@ -987,7 +987,9 @@ async fn allocation_rule_update_respects_sink_invariant() {
         "{body}"
     );
 
-    // enabled=false es un cambio legal y devuelve antes/después.
+    // INVERTIDO en 4.12.1 (#176): deshabilitar el ÚNICO sumidero era legal (el sobrante caía a
+    // surplus_cash); con la caja muerta lo dejaría sin destino, así que ahora es el MISMO 400
+    // que caparlo. La salida legal sigue siendo mover la regla de activo (target_asset_id).
     let envelope = mcp_post(
         &app,
         &token,
@@ -997,9 +999,11 @@ async fn allocation_rule_update_respects_sink_invariant() {
         ),
     )
     .await;
-    let out = tool_json(&envelope);
-    assert_eq!(out["before"]["enabled"], true);
-    assert_eq!(out["after"]["enabled"], false);
+    let body = tool_error(&envelope, "bad_request");
+    assert!(
+        body["message"].as_str().unwrap().contains("remainder_required"),
+        "{body}"
+    );
 }
 
 /// REGRESIÓN (auditoría MCP §5) — `cap_value` sin `cap_kind` ya no se evapora con un 200.
@@ -3201,10 +3205,10 @@ async fn mcp_only_errors_carry_a_stable_code() {
 /// `create_allocation_rule` **no puede crear el sumidero**, y sí una regla capada.
 ///
 /// La asimetría que justifica el `SinkPolicy::Forbidden`: crear el sumidero donde no había
-/// redirige TODO el sobrante de golpe y **no se deshace por el mismo canal** — borrar el único
-/// sumidero devuelve `remainder_required`, así que la única salida es un `update` que lo
-/// convierta en otra cosa. Un formulario que enseña la cascada entera hace evidente ese estado;
-/// una conversación, no.
+/// redirige TODO el sobrante de golpe y **no se deshace por el mismo canal** — desde 4.12.1
+/// (#176) el sumidero es INDESTRUCTIBLE con activos vivos: ni borrarlo, ni deshabilitarlo, ni
+/// degradarlo (la salida es moverlo de activo). Un formulario que enseña la cascada entera hace
+/// evidente ese estado; una conversación, no.
 #[tokio::test]
 async fn create_allocation_rule_refuses_the_sink_and_shares_the_core() {
     let app = TestApp::spawn().await;
