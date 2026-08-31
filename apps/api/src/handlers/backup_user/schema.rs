@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::handlers::installation::FireSettings;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 10;
+pub const CURRENT_SCHEMA_VERSION: u32 = 11;
 pub const SUPPORTED_FORMAT_VERSION: u8 = 1;
 pub const MAGIC: &[u8; 4] = b"FFBK";
 
@@ -183,6 +183,14 @@ pub struct BackupLiabilityV10 {
     pub payment_frequency: Option<String>,
     #[serde(default)]
     pub payment_end_date: Option<NaiveDate>,
+    /// Cuota mínima revolving (4.7.0, #144): % del saldo de apertura y suelo en €. Aditivos con
+    /// `default`, SIN bump de schema_version (mismo patrón que `expense_category_ref`): los
+    /// backups anteriores no llevan los campos → `None` → el import les aplica el MISMO backfill
+    /// bit-idéntico de la migración (pct = 0, suelo = cuota declarada) si son revolving.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub min_payment_pct: Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub min_payment_eur: Option<Decimal>,
     #[serde(default)]
     pub notes: Option<String>,
     pub sort_index: i32,
@@ -233,6 +241,36 @@ pub struct BackupSnapshot {
     pub items: Vec<BackupSnapshotItem>,
 }
 
+/// Forma CONGELADA del snapshot para los payloads v4..v10 (#129): igual que la actual pero su
+/// item no conoce `repayment_model`. El bump 10→11 existe en vez de un campo aditivo porque
+/// `parse_payload` rechaza versiones futuras: es el mecanismo que impide que un servidor 4.6.0
+/// lea a medias un backup 4.7.0 y pierda el modelo en silencio (un `#[serde(default)]` aditivo
+/// habría importado sin error… tirando el campo).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupSnapshotV10 {
+    pub kind: String,
+    pub snapshot_date: NaiveDate,
+    pub source: String,
+    pub items: Vec<BackupSnapshotItemV10>,
+}
+
+/// Item congelado de los payloads v4..v10. Ver [`BackupSnapshotV10`].
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupSnapshotItemV10 {
+    #[serde(default)]
+    pub ledger_index: Option<usize>,
+    pub item_key: Uuid,
+    pub label: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub value: Decimal,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub apr_percent: Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub payment_amount: Option<Decimal>,
+    #[serde(default)]
+    pub payment_frequency: Option<String>,
+}
+
 /// A single item inside an exported snapshot.
 ///
 /// ## Re-link mechanism (reconciled — supersedes any per-agent detail)
@@ -263,6 +301,10 @@ pub struct BackupSnapshotItem {
     pub payment_amount: Option<Decimal>,
     #[serde(default)]
     pub payment_frequency: Option<String>,
+    /// Modelo de amortización que tenía el pasivo al capturar la foto (#129, v11/4.7.0).
+    /// `None` = item de activo, o snapshot que no lo sabía (⇒ interpolación lineal al importar).
+    #[serde(default)]
+    pub repayment_model: Option<String>,
 }
 
 /// A CSV import batch exported inside a `.ffbackup` (schema_version ≥ 5).
@@ -490,7 +532,7 @@ pub struct BackupPayloadV4 {
     pub installation_snapshot_informative: InstallationSnapshotInformative,
     /// History snapshots (schema_version ≥ 4). Empty when migrating from an older backup.
     #[serde(default)]
-    pub snapshots: Vec<BackupSnapshot>,
+    pub snapshots: Vec<BackupSnapshotV10>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -507,7 +549,7 @@ pub struct BackupPayloadV5 {
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
     #[serde(default)]
-    pub snapshots: Vec<BackupSnapshot>,
+    pub snapshots: Vec<BackupSnapshotV10>,
     /// CSV import batches (schema_version ≥ 5). Empty when migrating from an older backup.
     #[serde(default)]
     pub transaction_imports: Vec<BackupTransactionImport>,
@@ -533,7 +575,7 @@ pub struct BackupPayloadV6 {
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
     #[serde(default)]
-    pub snapshots: Vec<BackupSnapshot>,
+    pub snapshots: Vec<BackupSnapshotV10>,
     #[serde(default)]
     pub transaction_imports: Vec<BackupTransactionImport>,
     #[serde(default)]
@@ -559,7 +601,7 @@ pub struct BackupPayloadV7 {
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
     #[serde(default)]
-    pub snapshots: Vec<BackupSnapshot>,
+    pub snapshots: Vec<BackupSnapshotV10>,
     #[serde(default)]
     pub transaction_imports: Vec<BackupTransactionImport>,
     #[serde(default)]
@@ -585,7 +627,7 @@ pub struct BackupPayloadV8 {
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
     #[serde(default)]
-    pub snapshots: Vec<BackupSnapshot>,
+    pub snapshots: Vec<BackupSnapshotV10>,
     #[serde(default)]
     pub transaction_imports: Vec<BackupTransactionImport>,
     #[serde(default)]
@@ -616,7 +658,7 @@ pub struct BackupPayloadV9 {
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
     #[serde(default)]
-    pub snapshots: Vec<BackupSnapshot>,
+    pub snapshots: Vec<BackupSnapshotV10>,
     #[serde(default)]
     pub transaction_imports: Vec<BackupTransactionImport>,
     #[serde(default)]
@@ -645,6 +687,35 @@ pub struct BackupPayloadV10 {
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
     #[serde(default)]
+    pub snapshots: Vec<BackupSnapshotV10>,
+    #[serde(default)]
+    pub transaction_imports: Vec<BackupTransactionImport>,
+    #[serde(default)]
+    pub transactions: Vec<BackupTransaction>,
+    #[serde(default)]
+    pub categorization_rules: Vec<BackupCategorizationRule>,
+    #[serde(default)]
+    pub recurring_transaction_rules: Vec<BackupRecurringRule>,
+    #[serde(default)]
+    pub transfer_match_rejections: Vec<BackupTransferMatchRejection>,
+}
+
+/// v11 (4.7.0, #129): `repayment_model` viaja en cada item de snapshot de pasivos. Copia
+/// literal de V10 con el snapshot nuevo — el resto de secciones son idénticas.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupPayloadV11 {
+    pub user: BackupUser,
+    pub categories_used: Vec<BackupCategory>,
+    pub assets: Vec<BackupAssetV3>,
+    #[serde(default)]
+    pub allocation_rules: Vec<BackupAllocationRule>,
+    pub liabilities: Vec<BackupLiabilityV10>,
+    pub budget_entries: Vec<BackupBudgetEntry>,
+    pub planning_flows: Vec<BackupPlanningFlow>,
+    #[serde(default)]
+    pub ui_preferences: UiPreferences,
+    pub installation_snapshot_informative: InstallationSnapshotInformative,
+    #[serde(default)]
     pub snapshots: Vec<BackupSnapshot>,
     #[serde(default)]
     pub transaction_imports: Vec<BackupTransactionImport>,
@@ -659,7 +730,7 @@ pub struct BackupPayloadV10 {
 }
 
 /// Alias for the current-version payload. Export and import code work against this type.
-pub type BackupPayload = BackupPayloadV10;
+pub type BackupPayload = BackupPayloadV11;
 
 #[derive(Debug)]
 pub enum AnyPayload {
@@ -673,6 +744,7 @@ pub enum AnyPayload {
     V8(BackupPayloadV8),
     V9(BackupPayloadV9),
     V10(BackupPayloadV10),
+    V11(BackupPayloadV11),
 }
 
 pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, String> {
@@ -726,6 +798,11 @@ pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, St
             let p: BackupPayloadV10 = serde_json::from_slice(bytes)
                 .map_err(|e| format!("backup_payload_malformed: payload v10 malformed: {e}"))?;
             Ok(AnyPayload::V10(p))
+        }
+        11 => {
+            let p: BackupPayloadV11 = serde_json::from_slice(bytes)
+                .map_err(|e| format!("backup_payload_malformed: payload v11 malformed: {e}"))?;
+            Ok(AnyPayload::V11(p))
         }
         v if v > CURRENT_SCHEMA_VERSION => Err(format!(
             "backup_schema_version_unsupported: schema_version {v} is newer than this server supports ({CURRENT_SCHEMA_VERSION}); update FutureFin to import this backup",
@@ -994,6 +1071,10 @@ fn payload_v9_to_v10(p: BackupPayloadV9) -> BackupPayloadV10 {
                 principal: l.principal,
                 principal_derived_from_plan: l.principal_derived_from_plan,
                 repayment_model: default_repayment_model(),
+                // Sin mínimos: los backups pre-4.7.0 no los conocen; el backfill (si el modelo
+                // resulta revolving) lo aplica el import, no la cadena de migración.
+                min_payment_pct: None,
+                min_payment_eur: None,
                 apr_percent: l.apr_percent,
                 payment_amount: l.payment_amount,
                 payment_frequency: l.payment_frequency,
@@ -1015,36 +1096,87 @@ fn payload_v9_to_v10(p: BackupPayloadV9) -> BackupPayloadV10 {
     }
 }
 
+/// v10 → v11 (#129): cada item de snapshot gana `repayment_model: None` — la foto no sabía el
+/// modelo, y `None` interpola por la CUERDA (la ley menos comprometida; el trade-off honesto
+/// está escrito en la migración `20260901120100`: los franceses genuinos pre-4.7.0 pierden la
+/// curva compuesta que se les aplicaba, el default mayoritario deja de heredar el bug de #129).
+fn payload_v10_to_v11(p: BackupPayloadV10) -> BackupPayloadV11 {
+    BackupPayloadV11 {
+        user: p.user,
+        categories_used: p.categories_used,
+        assets: p.assets,
+        allocation_rules: p.allocation_rules,
+        liabilities: p.liabilities,
+        budget_entries: p.budget_entries,
+        planning_flows: p.planning_flows,
+        ui_preferences: p.ui_preferences,
+        installation_snapshot_informative: p.installation_snapshot_informative,
+        snapshots: p
+            .snapshots
+            .into_iter()
+            .map(|snap| BackupSnapshot {
+                kind: snap.kind,
+                snapshot_date: snap.snapshot_date,
+                source: snap.source,
+                items: snap
+                    .items
+                    .into_iter()
+                    .map(|it| BackupSnapshotItem {
+                        ledger_index: it.ledger_index,
+                        item_key: it.item_key,
+                        label: it.label,
+                        value: it.value,
+                        apr_percent: it.apr_percent,
+                        payment_amount: it.payment_amount,
+                        payment_frequency: it.payment_frequency,
+                        repayment_model: None,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        transaction_imports: p.transaction_imports,
+        transactions: p.transactions,
+        categorization_rules: p.categorization_rules,
+        recurring_transaction_rules: p.recurring_transaction_rules,
+        transfer_match_rejections: p.transfer_match_rejections,
+    }
+}
+
 pub fn migrate_to_current(any: AnyPayload) -> BackupPayload {
-    // Cadena completa v1..v10: TODOS los backups antiguos siguen importando (regla de
+    // Cadena completa v1..v11: TODOS los backups antiguos siguen importando (regla de
     // change-control §5 — un backup es la única vía de recuperación de un usuario).
     match any {
-        AnyPayload::V1(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(
-            payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(
-                payload_v2_to_v3(payload_v1_to_v2(p)),
+        AnyPayload::V1(p) => payload_v10_to_v11(payload_v9_to_v10(payload_v8_to_v9(
+            payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(
+                payload_v3_to_v4(payload_v2_to_v3(payload_v1_to_v2(p))),
             )))),
         ))),
-        AnyPayload::V2(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(
-            payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(
-                payload_v2_to_v3(p),
+        AnyPayload::V2(p) => payload_v10_to_v11(payload_v9_to_v10(payload_v8_to_v9(
+            payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(
+                payload_v3_to_v4(payload_v2_to_v3(p)),
             )))),
         ))),
-        AnyPayload::V3(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(
-            payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(payload_v3_to_v4(p)))),
+        AnyPayload::V3(p) => payload_v10_to_v11(payload_v9_to_v10(payload_v8_to_v9(
+            payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(
+                payload_v3_to_v4(p),
+            )))),
         ))),
-        AnyPayload::V4(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(
-            payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(p))),
+        AnyPayload::V4(p) => payload_v10_to_v11(payload_v9_to_v10(payload_v8_to_v9(
+            payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(p)))),
         ))),
-        AnyPayload::V5(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(
-            payload_v6_to_v7(payload_v5_to_v6(p)),
+        AnyPayload::V5(p) => payload_v10_to_v11(payload_v9_to_v10(payload_v8_to_v9(
+            payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(p))),
         ))),
-        AnyPayload::V6(p) => {
-            payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(payload_v6_to_v7(p))))
+        AnyPayload::V6(p) => payload_v10_to_v11(payload_v9_to_v10(payload_v8_to_v9(
+            payload_v7_to_v8(payload_v6_to_v7(p)),
+        ))),
+        AnyPayload::V7(p) => {
+            payload_v10_to_v11(payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(p))))
         }
-        AnyPayload::V7(p) => payload_v9_to_v10(payload_v8_to_v9(payload_v7_to_v8(p))),
-        AnyPayload::V8(p) => payload_v9_to_v10(payload_v8_to_v9(p)),
-        AnyPayload::V9(p) => payload_v9_to_v10(p),
-        AnyPayload::V10(p) => p,
+        AnyPayload::V8(p) => payload_v10_to_v11(payload_v9_to_v10(payload_v8_to_v9(p))),
+        AnyPayload::V9(p) => payload_v10_to_v11(payload_v9_to_v10(p)),
+        AnyPayload::V10(p) => payload_v10_to_v11(p),
+        AnyPayload::V11(p) => p,
     }
 }
 

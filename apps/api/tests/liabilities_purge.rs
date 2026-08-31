@@ -1,18 +1,23 @@
-//! Fase 1.1 — La purga de pasivos vencidos debe salir de los GETs.
+//! Pasivos vencidos en las lecturas. Historia en dos actos:
 //!
-//! Contrato esperado tras el cambio:
-//! - `GET /v1/liabilities` filtra por `payment_end_date IS NULL OR >= today`, pero no borra filas.
-//! - `GET /v1/summary` no incluye principales de pasivos vencidos en `total_liabilities`
-//!   ni en los breakdowns de categoría/type_tag.
-//! - Las filas vencidas siguen existiendo en BD (no hay mutación en lecturas).
+//! - Fase 1.1 (v1.3.0): la purga salió de los GETs — leer nunca borra filas (D5).
+//! - Ola 3 (#145, 4.7.0): el filtro de visibilidad cambió. Un plan vencido con SALDO VIVO
+//!   sigue siendo deuda (el banco reclama, refinancia o lleva a impagado el residuo): aparece
+//!   en TODAS las lecturas, congelado y marcado `plan_expired_with_balance: true`. Solo el
+//!   vencido Y saldado (`principal = 0`) queda fuera. Tres tests de este fichero se
+//!   INVIRTIERON a propósito con ese cambio: hasta 4.6.0 pineaban «el vencido desaparece», que
+//!   era exactamente el salto de patrimonio de +saldo de un día para otro que la auditoría midió.
+//! - Sigue intacto: las filas persisten en BD (no hay mutación en lecturas).
 
 mod common;
 
 use chrono::{Duration, Utc};
 use common::TestApp;
 
+/// INVERTIDO en 4.7.0 (#145): antes esperaba `len() == 1` («solo el activo»). El vencido con
+/// saldo se queda, marcado; el vencido saldado (principal 0) sí desaparece.
 #[tokio::test]
-async fn expired_liability_is_hidden_from_listing_but_persists_in_db() {
+async fn expired_liability_with_balance_stays_listed_and_marked() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let cat_id = app.create_category(&owner, "liability", "Préstamo").await;
@@ -66,26 +71,51 @@ async fn expired_liability_is_hidden_from_listing_but_persists_in_db() {
         "active liability create failed: {active:?}"
     );
 
-    // Antes de listar: ambos existen en BD.
-    assert_eq!(app.count_rows("liabilities").await, 2);
+    // Tercer pasivo: vencido Y saldado — el único que la lectura esconde.
+    let settled = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            serde_json::json!({
+                "category_id": cat_id,
+                "expense_category_id": exp_cat,
+                "label": "Saldada",
+                "principal": "0",
+                "payment_amount": "100",
+                "payment_frequency": "monthly",
+                "payment_end_date": past,
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(settled.status, http::StatusCode::CREATED, "{settled:?}");
+
+    // Antes de listar: los tres existen en BD.
+    assert_eq!(app.count_rows("liabilities").await, 3);
 
     let list = app.get_with_cookie("/v1/liabilities", &owner.cookie).await;
     assert_eq!(list.status, http::StatusCode::OK);
     let body = list.json();
     let arr = body.as_array().expect("liabilities list is an array");
-    assert_eq!(arr.len(), 1, "solo el pasivo activo debe aparecer en la lista");
-    assert_eq!(arr[0]["label"], "Hipoteca");
+    assert_eq!(arr.len(), 2, "vencido con saldo + activo; el saldado no: {body}");
 
-    // ⚠️ Tras la Fase 1.1, las filas vencidas deben PERSISTIR. Hoy el handler las purga.
-    let remaining = app.count_rows("liabilities").await;
+    let tarjeta = arr.iter().find(|r| r["label"] == "Tarjeta cerrada").expect("vencido visible");
     assert_eq!(
-        remaining, 2,
-        "GET /v1/liabilities no debe borrar filas vencidas (hoy fallará: el handler purga)"
+        tarjeta["plan_expired_with_balance"], true,
+        "el vencido con saldo viaja marcado: {tarjeta}"
     );
+    let hipoteca = arr.iter().find(|r| r["label"] == "Hipoteca").expect("activo visible");
+    assert_eq!(hipoteca["plan_expired_with_balance"], false);
+    assert!(!arr.iter().any(|r| r["label"] == "Saldada"), "el saldado no aparece");
+
+    // Leer sigue sin borrar NADA (D5).
+    let remaining = app.count_rows("liabilities").await;
+    assert_eq!(remaining, 3, "GET /v1/liabilities no debe borrar filas");
 }
 
+/// INVERTIDO en 4.7.0 (#145): antes esperaba total 100 («solo el activo»). A mano:
+/// 9.999 (vencido con saldo) + 100 (activo) = **10.099,0** en total y en el breakdown.
 #[tokio::test]
-async fn summary_excludes_expired_liability_principal_and_breakdown() {
+async fn summary_includes_the_expired_balance_in_totals_and_breakdown() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("bob").await;
     let cat_id = app.create_category(&owner, "liability", "Préstamo").await;
@@ -134,8 +164,8 @@ async fn summary_excludes_expired_liability_principal_and_breakdown() {
         .parse()
         .expect("parse decimal");
     assert!(
-        (total - 100.0).abs() < 0.001,
-        "total_liabilities solo debe sumar el pasivo activo (esperado ≈ 100, recibido {total})"
+        (total - 10_099.0).abs() < 0.001,
+        "total_liabilities = 9.999 vencido-con-saldo + 100 activo (esperado 10.099, recibido {total})"
     );
 
     let breakdown = body["liabilities_by_category"]
@@ -149,8 +179,8 @@ async fn summary_excludes_expired_liability_principal_and_breakdown() {
         .parse()
         .expect("parse breakdown total");
     assert!(
-        (prestamo_total - 100.0).abs() < 0.001,
-        "breakdown por categoría no debe incluir el principal vencido (esperado ≈ 100, recibido {prestamo_total})"
+        (prestamo_total - 10_099.0).abs() < 0.001,
+        "el breakdown por categoría incluye el vencido con saldo (esperado 10.099, recibido {prestamo_total})"
     );
 
     assert_eq!(
@@ -160,12 +190,12 @@ async fn summary_excludes_expired_liability_principal_and_breakdown() {
     );
 }
 
-/// Reforma 3.4.0 (fix C-10): la proyección también filtra pasivos vencidos. Antes
-/// `build_installation_projection_input` cargaba TODOS los pasivos del scope y el engine restaba
-/// su principal del net worth en cada mes — `projection.starting_net_worth` divergía de
-/// `summary.net_worth` exactamente en el principal vencido (contra el contrato D5/I5).
+/// INVERTIDO en 4.7.0 (#145) — y el invariante de 3.4.0 (fix C-10) se CONSERVA: summary y
+/// proyección ven el mismo universo, solo que ahora ese universo incluye el vencido con saldo.
+/// A mano, sin activos: net worth = −(9.999 + 50.000) = **−59.999,0** en ambas superficies; el
+/// saldo vencido queda congelado (el engine no le devenga ni cobra cuota: plan inactivo).
 #[tokio::test]
-async fn projection_excludes_expired_liability_principal() {
+async fn projection_and_summary_agree_including_the_expired_balance() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("carol").await;
     let cat_id = app.create_category(&owner, "liability", "Préstamo").await;
@@ -226,16 +256,16 @@ async fn projection_excludes_expired_liability_principal() {
         .expect("parse starting_net_worth");
 
     assert!(
-        (summary_nw - (-50_000.0)).abs() < 0.001,
-        "summary.net_worth solo debe restar el principal activo, got {summary_nw}"
+        (summary_nw - (-59_999.0)).abs() < 0.001,
+        "summary.net_worth resta activo Y vencido-con-saldo (−50.000 − 9.999), got {summary_nw}"
     );
     assert!(
         (starting - summary_nw).abs() < 0.001,
         "projection.starting_net_worth ({starting}) debe coincidir con summary.net_worth ({summary_nw}) — el principal vencido no puede lastrar la serie"
     );
 
-    // Y en TODA la serie el vencido sigue sin aparecer: con presupuesto vacío el delta es 0 y el
-    // único movimiento del NW es la amortización del pasivo activo (modo A) — nunca los −9999.
+    // El vencido entra CONGELADO: sin plan activo no devenga ni cobra cuota, así que arrastra
+    // −9.999 constantes toda la serie — sin salto el día del despliegue ni después.
     let points = body["points"].as_array().expect("points");
     let first_nw = points[0]["net_worth"].as_f64().expect("net_worth f64");
     assert!(

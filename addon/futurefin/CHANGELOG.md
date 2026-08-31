@@ -5,6 +5,26 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.7.0
+
+- Las deudas ahora se simulan como los préstamos reales: el modelo por defecto pasa a ser el
+  **sistema francés** (interés + amortización en cada cuota). Si tenías una deuda con tipo de
+  interés y cuota mensual guardada con el modelo antiguo «cuota fija», se convierte
+  automáticamente y tu proyección empieza a contar los intereses que ese préstamo siempre tuvo:
+  verás la deuda durar más y el patrimonio proyectado bajar — es el número honesto, no un error.
+- Modelos nuevos de verdad: «solo intereses» cobra exactamente el interés del período (como una
+  carencia real), y las revolving usan su cuota mínima real (porcentaje del saldo con suelo en
+  euros).
+- Un préstamo cuyo plan de pagos terminó con capital pendiente ya no desaparece de tus números:
+  sigue visible, marcado «plan vencido con saldo», restando en tu patrimonio.
+- El campo del tipo de interés pasa a llamarse **TIN** (lo que siempre fue); las cifras no
+  cambian por esto.
+- El asistente de IA puede simular amortizaciones anticipadas con su comisión legal (2 % por
+  defecto) y con la opción de reducir cuota en vez de acortar plazo.
+- El histórico de patrimonio aguanta mejor las fotos incompletas (un elemento que falte en una
+  captura ya no hunde la gráfica) y recuerda el modelo de cada deuda al interpolar el pasado.
+- Copias de seguridad: formato v11 (las anteriores siguen importando, como siempre).
+
 ## 4.6.0
 
 - El asistente de IA (chat MCP) deja de recalcular por su cuenta cifras que el servidor ya sabía:

@@ -71,6 +71,10 @@ export function LiabilitiesView({
   setLiabilityFormDerivePrincipal,
   liabilityFormRepaymentModel,
   setLiabilityFormRepaymentModel,
+  liabilityFormMinPct,
+  setLiabilityFormMinPct,
+  liabilityFormMinEur,
+  setLiabilityFormMinEur,
   editingLiabilityId,
   liabilitySaving,
   submitLiabilityForm,
@@ -120,6 +124,12 @@ export function LiabilitiesView({
   setLiabilityFormRepaymentModel: Dispatch<
     SetStateAction<LiabilityRepaymentModelApi>
   >;
+  /** Cuota mínima revolving: % del saldo de apertura (solo aplica con modelo revolving). */
+  liabilityFormMinPct: string;
+  setLiabilityFormMinPct: Dispatch<SetStateAction<string>>;
+  /** Suelo en euros de la cuota mínima revolving. */
+  liabilityFormMinEur: string;
+  setLiabilityFormMinEur: Dispatch<SetStateAction<string>>;
   editingLiabilityId: string | null;
   liabilitySaving: boolean;
   submitLiabilityForm: (e: FormEvent) => void;
@@ -162,17 +172,21 @@ export function LiabilitiesView({
     : null;
   const liabilitiesMonthlyServiceSum = liabilityMetricsReady
     ? liabilities.reduce(
-        (acc, r) => acc + liabilityPaymentMonthlyEquivalentNum(r),
+        // El plan vencido con saldo (#145) sigue en la lista pero su cuota YA NO SE GIRA: el
+        // servicio mensual solo suma planes vivos — la misma base que el presupuesto.
+        (acc, r) =>
+          acc + (r.plan_expired_with_balance ? 0 : liabilityPaymentMonthlyEquivalentNum(r)),
         0,
       )
     : null;
 
+  const calendarTz = installation?.installation.calendar_tz ?? "UTC";
   const liabilitiesWeightedApr = liabilityMetricsReady
-    ? liabilitiesWeightedAprPercent(liabilities)
+    ? liabilitiesWeightedAprPercent(liabilities, calendarTz)
     : null;
 
   const liabilitiesApproxMonthlyInterest = liabilityMetricsReady
-    ? liabilitiesApproxMonthlyInterestSum(liabilities)
+    ? liabilitiesApproxMonthlyInterestSum(liabilities, calendarTz)
     : null;
 
   return (
@@ -220,7 +234,7 @@ export function LiabilitiesView({
             }
           />
           <MetricCard
-            label="TAE media ponderada" helpId="liabilities.weighted_apr"
+            label="TIN medio ponderado" helpId="liabilities.weighted_apr"
             value={
               liabilityMetricsReady && liabilitiesWeightedApr !== null
                 ? formatPercentDisplay(liabilitiesWeightedApr)
@@ -312,7 +326,7 @@ export function LiabilitiesView({
               <label className="field">
                 <span className="checkbox-label-with-hint">
                   Modelo
-                  <InlineHint title="Cuota fija: la cuota va íntegra a principal (histórico). Francés y Revolving devengan interés y exigen TAE > 0 y cuota mensual. Solo intereses mantiene el principal." />
+                  <InlineHint title="Francés: el préstamo español típico — cada cuota paga interés y amortiza el resto (una hipoteca de 200.000 € a 1.000 €/mes al 3 % tarda 278 meses y ~78.000 € de intereses, no 200 meses y 0 €). Sin intereses (0 %): la cuota va íntegra a principal; solo para deudas realmente gratuitas. Solo intereses (carencia): la cuota del mes es el interés del saldo; el principal no baja. Revolving: cuota mínima = % del saldo con suelo en €. Todos menos «Sin intereses» exigen TIN > 0 y cuota mensual." />
                 </span>
                 <select
                   value={liabilityFormRepaymentModel}
@@ -329,6 +343,33 @@ export function LiabilitiesView({
                   ))}
                 </select>
               </label>
+              {liabilityFormRepaymentModel === "revolving" ? (
+                <>
+                  <label className="field">
+                    <span className="checkbox-label-with-hint">
+                      Mínimo % saldo
+                      <InlineHint title="Cuota mínima revolving: porcentaje del saldo de cada mes, con el suelo en € como mínimo absoluto. Se exige al menos uno de los dos > 0." />
+                    </span>
+                    <input
+                      value={liabilityFormMinPct}
+                      onChange={(e) => setLiabilityFormMinPct(e.target.value)}
+                      inputMode="decimal"
+                      placeholder="p. ej. 3"
+                      autoComplete="off"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Mínimo suelo €</span>
+                    <input
+                      value={liabilityFormMinEur}
+                      onChange={(e) => setLiabilityFormMinEur(e.target.value)}
+                      inputMode="decimal"
+                      placeholder="p. ej. 30"
+                      autoComplete="off"
+                    />
+                  </label>
+                </>
+              ) : null}
               <label
                 className="field"
                 style={{
@@ -372,7 +413,7 @@ export function LiabilitiesView({
                 ) : null}
               </label>
               <label className="field">
-                <span>TAE % (opc.)</span>
+                <span>TIN % (opc.)</span>
                 <input
                   value={liabilityFormApr}
                   onChange={(e) => setLiabilityFormApr(e.target.value)}
@@ -550,7 +591,7 @@ export function LiabilitiesView({
                         <tr>
                           <th>Etiqueta</th>
                           <th className="num">Principal</th>
-                          {isMobile ? null : <th className="num">TAE %</th>}
+                          {isMobile ? null : <th className="num">TIN %</th>}
                           {isMobile ? null : <th className="num">Cuota</th>}
                           {isMobile ? null : <th>Frec.</th>}
                           {isMobile ? null : <th>Fin plan</th>}
@@ -611,6 +652,17 @@ export function LiabilitiesView({
                                     </span>
                                   </>
                                 ) : null}
+                                {row.plan_expired_with_balance ? (
+                                  <>
+                                    {" "}
+                                    <span
+                                      className="chip"
+                                      title="El plan de pagos terminó con capital pendiente: la deuda no se extingue por calendario. Sigue restando en tu patrimonio, congelada (sin devengo ni cuota). Alarga el plan o registra su refinanciación."
+                                    >
+                                      plan vencido con saldo
+                                    </span>
+                                  </>
+                                ) : null}
                                 {!row.expense_category_id ? (
                                   <span
                                     className="muted"
@@ -622,7 +674,7 @@ export function LiabilitiesView({
                                 ) : null}
                                 {isMobile ? (
                                   <span className="cell-subline">
-                                    TAE {aprLabel} · Cuota{" "}
+                                    TIN {aprLabel} · Cuota{" "}
                                     {formatCurrencyOrDash(
                                       row.payment_amount,
                                       currencyIso,

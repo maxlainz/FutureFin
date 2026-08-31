@@ -3663,7 +3663,7 @@ fieldset.retirement-config-stack {
    ========================================================================== */
 @media (max-width: 640px) { /* bp:mobile 640 */
   /* Línea secundaria muted bajo la 1ª celda: datos demotados de las columnas
-     que desaparecen en móvil (categoría/tipo/TAE/cuota…). */
+     que desaparecen en móvil (categoría/tipo/TIN/cuota…). */
   .cell-subline {
     display: block;
     margin-top: 0.2rem;

@@ -15,9 +15,17 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-30 (reparto
-de CLAUDE.md en subdocumentos)**: **62** ficheros de test de integración (`ls apps/api/tests/*.rs | wc -l`),
-**49** migraciones (`ls apps/api/migrations/*.sql | wc -l`), `.ffbackup` `CURRENT_SCHEMA_VERSION` = **10**,
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31 (Ola 3
+del programa de la auditoría, rama `feat/ola3-la-deuda`)**: **66** ficheros de test de integración
+(`ls apps/api/tests/*.rs | wc -l` — nuevos `projection_pins.rs`, `projection_failure_states.rs`,
+`patch_null_clears.rs`, `asset_order_determinism.rs` de las Olas 1-2), **51** migraciones
+(`ls apps/api/migrations/*.sql | wc -l`; las dos nuevas son el default `french` + mínimos revolving
+—DATA-CHANGING firmada— y `history_snapshot_items.repayment_model`), `.ffbackup`
+`CURRENT_SCHEMA_VERSION` = **11** (v11 lleva el modelo en cada item de snapshot; v1..v10 siguen
+importando por la cadena completa, con la normalización firmada de #144 aplicada a los pasivos),
+catálogo MCP en **68** tools (params nuevos, cero altas). Antes, counts refreshed **2026-08-30
+(reparto de CLAUDE.md en subdocumentos)**: **62** ficheros de test de integración,
+**49** migraciones, `.ffbackup` `CURRENT_SCHEMA_VERSION` = **10**,
 catálogo MCP en **68** tools, `apps/api/Cargo.toml` en `4.4.1` (tag publicado, add-on sincronizado).
 Antes, counts refreshed **2026-08-27 on branch
 `feat/home-assistant-addon`** (add-on de Home Assistant: subpath por request, SSO de cabeceras,
