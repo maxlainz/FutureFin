@@ -237,9 +237,11 @@ async fn the_window_never_moves_the_aggregates() {
     assert_bad_request_code(&malo, "schedule_window_out_of_range");
 }
 
-/// `fixed_payments` —el default de la columna— no devenga: interés 0 en todos los meses y el total
-/// a pagar es el principal, **con TIN o sin él**. Es la garantía de que el calendario de un pasivo
-/// histórico sigue contando la historia de siempre.
+/// `fixed_payments` no devenga: interés 0 en todos los meses y el total a pagar es el principal.
+/// Es la garantía de que el calendario de un pasivo histórico sigue contando la historia de
+/// siempre. (Ajustado en 4.7.0/#144: ya no se puede declarar un TIN «informativo» sobre este
+/// modelo — el alta lo rechaza y la columna dejó de ser el default, ahora es `french` —, así que
+/// el caso «con TIN o sin él» quedó irrepresentable y este test lo prueba sin TIN.)
 ///
 /// PREDICCIÓN: 1.200 € a 100 €/mes ⇒ extinción en el mes **12**, interés **0**, total **1.200 €**.
 #[tokio::test]
@@ -251,7 +253,6 @@ async fn fixed_payments_schedule_charges_no_interest() {
         &owner,
         json!({
             "principal": "1200",
-            "apr_percent": "9",
             "payment_amount": "100",
             "payment_frequency": "monthly",
         }),

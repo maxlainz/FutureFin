@@ -71,6 +71,8 @@ async fn capture_creates_both_kinds_with_copied_terms() {
             "category_id": liab_cat, "expense_category_id": liab_exp_cat,
             "label": "Hipoteca",
             "principal": "5000",
+            // Francés explícito desde #144: declarar TIN exige un modelo que devengue.
+            "repayment_model": "french",
             "apr_percent": "3.5",
             "payment_amount": "200",
             "payment_frequency": "monthly",
@@ -944,6 +946,7 @@ async fn prefill_live_when_no_snapshots() {
             "/v1/liabilities",
             serde_json::json!({
                 "category_id": liab_cat, "expense_category_id": liab_exp_cat, "label": "Hipoteca", "principal": "5000",
+                "repayment_model": "french",
                 "apr_percent": "3.5", "payment_amount": "200", "payment_frequency": "monthly",
                 "payment_end_date": future,
             }),

@@ -355,7 +355,8 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
         &token,
         tool_call(
             "create_liability",
-            json!({"label": "Hipoteca", "category_id": cat_liab, "expense_category_id": cat_exp, "principal": "120000", "apr_percent": "3.10"}),
+            // Francés explícito con plan (#144): declarar TIN exige un modelo que devengue.
+            json!({"label": "Hipoteca", "category_id": cat_liab, "expense_category_id": cat_exp, "principal": "120000", "repayment_model": "french", "apr_percent": "3.10", "payment_amount": "600", "payment_frequency": "monthly"}),
         ),
     )
     .await;
@@ -438,12 +439,12 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
     assert_eq!(apr, "2.10".parse::<rust_decimal::Decimal>().unwrap());
     let cuota: rust_decimal::Decimal = row["payment_amount"].as_str().unwrap().parse().unwrap();
     assert_eq!(cuota, "650".parse::<rust_decimal::Decimal>().unwrap());
-    // El modelo de amortización viaja en el listado desde 4.2.0, y el pasivo sigue en el
-    // histórico mientras nadie lo cambie.
-    assert_eq!(row["repayment_model"], "fixed_payments");
+    // El modelo de amortización viaja en el listado desde 4.2.0; desde #144 la fila nace
+    // francesa (el alta con TIN lo exige) y el update no la ha movido.
+    assert_eq!(row["repayment_model"], "french");
 
-    // 4.2.0 — «mi préstamo es francés»: el modelo se fija por MCP (la fila ya tiene TIN 2,10 y
-    // cuota mensual 650, así que el estado resultante es coherente) y se ve por HTTP.
+    // «Mi préstamo es francés»: fijar por MCP el modelo que ya tiene es un no-op válido (la
+    // fila tiene TIN 2,10 y cuota mensual 650, estado coherente) y se ve por HTTP.
     let envelope = mcp_post(
         &app,
         &token,
@@ -890,8 +891,11 @@ async fn liability_create_with_derived_principal() {
         &token,
         tool_call(
             "create_liability",
+            // Francés explícito desde #144 (declarar TIN exige un modelo que devengue); el
+            // principal derivado pasa a ser el valor actual al 5 %, que es lo que este test
+            // quiere: la derivación de verdad, no la Σ ingenua.
             json!({"label": "Coche", "category_id": cat, "expense_category_id": exp_cat,
-                   "derive_principal_from_plan": true,
+                   "derive_principal_from_plan": true, "repayment_model": "french",
                    "payment_amount": "300", "payment_frequency": "monthly",
                    "payment_end_date": "2028-12-01", "apr_percent": "5"}),
         ),

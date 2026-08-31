@@ -452,10 +452,13 @@ export default function App() {
   const [liabilityFormNotes, setLiabilityFormNotes] = useState("");
   const [liabilityFormDerivePrincipal, setLiabilityFormDerivePrincipal] =
     useState(false);
-  // Modelo de amortización (4.2.0). El default del formulario es el histórico: dar de alta un
-  // pasivo sin tocar este select produce exactamente el pasivo que producía antes.
+  // Modelo de amortización. Default `french` desde 4.7.0 (#144): el alta sin tocar el select
+  // produce el préstamo español típico — el default histórico (`fixed_payments`, sin intereses)
+  // simulaba un producto que no existe.
   const [liabilityFormRepaymentModel, setLiabilityFormRepaymentModel] =
-    useState<LiabilityRepaymentModelApi>("fixed_payments");
+    useState<LiabilityRepaymentModelApi>("french");
+  const [liabilityFormMinPct, setLiabilityFormMinPct] = useState("");
+  const [liabilityFormMinEur, setLiabilityFormMinEur] = useState("");
   const [editingLiabilityId, setEditingLiabilityId] = useState<string | null>(
     null,
   );
@@ -2523,7 +2526,9 @@ export default function App() {
     setLiabilityFormPaymentEnd("");
     setLiabilityFormNotes("");
     setLiabilityFormDerivePrincipal(false);
-    setLiabilityFormRepaymentModel("fixed_payments");
+    setLiabilityFormRepaymentModel("french");
+    setLiabilityFormMinPct("");
+    setLiabilityFormMinEur("");
   }
 
   async function submitLiabilityForm(ev: FormEvent) {
@@ -2577,6 +2582,18 @@ export default function App() {
       // «volver a NULL», así que mandar el valor del formulario en cada guardado es lo único que
       // permite deshacer un modelo eligiendo `fixed_payments`.
       base.repayment_model = liabilityFormRepaymentModel;
+      // Solo revolving lleva mínimos; en los demás modelos no se envían (el PATCH los anula
+      // solo al salir de revolving, y el POST los rechaza).
+      if (liabilityFormRepaymentModel === "revolving") {
+        const minPct = toApiDecimalString(liabilityFormMinPct);
+        if (minPct) {
+          base.min_payment_pct = minPct;
+        }
+        const minEur = toApiDecimalString(liabilityFormMinEur);
+        if (minEur) {
+          base.min_payment_eur = minEur;
+        }
+      }
       if (!liabilityFormDerivePrincipal) {
         base.principal = toApiDecimalString(liabilityFormPrincipal);
       }
@@ -2587,6 +2604,11 @@ export default function App() {
       const apr = toApiDecimalString(liabilityFormApr);
       if (apr) {
         base.apr_percent = apr;
+      } else if (editingLiabilityId) {
+        // Tri-estado del PATCH (#144): el formulario muestra el estado completo, así que un
+        // campo TIN vacío en edición es «sin TIN» y viaja como null explícito (omitirlo
+        // conservaría el guardado y volver a «Sin intereses» daría apr_forbidden_for_model).
+        base.apr_percent = null;
       }
       if (payAmt && payFreq) {
         base.payment_amount = payAmt;
@@ -2678,7 +2700,10 @@ export default function App() {
     setLiabilityFormDerivePrincipal(row.principal_derived_from_plan ?? false);
     // `?? "fixed_payments"` cubre una respuesta de un backend anterior a 4.2.0 (el campo es
     // obligatorio en el tipo, pero el tipo describe el servidor de hoy, no el que haya delante).
+    // En EDICIÓN el fallback sigue siendo el histórico: así se comportaba esa fila.
     setLiabilityFormRepaymentModel(row.repayment_model ?? "fixed_payments");
+    setLiabilityFormMinPct(formatEditableDecimalString(row.min_payment_pct ?? ""));
+    setLiabilityFormMinEur(formatEditableDecimalString(row.min_payment_eur ?? ""));
   }
 
   // Acciones del modal «¿Guardar snapshot?». Best-effort: si la captura falla la cerramos sin
@@ -3724,6 +3749,10 @@ export default function App() {
             setLiabilityFormDerivePrincipal={setLiabilityFormDerivePrincipal}
             liabilityFormRepaymentModel={liabilityFormRepaymentModel}
             setLiabilityFormRepaymentModel={setLiabilityFormRepaymentModel}
+            liabilityFormMinPct={liabilityFormMinPct}
+            setLiabilityFormMinPct={setLiabilityFormMinPct}
+            liabilityFormMinEur={liabilityFormMinEur}
+            setLiabilityFormMinEur={setLiabilityFormMinEur}
             editingLiabilityId={editingLiabilityId}
             liabilitySaving={liabilitySaving}
             submitLiabilityForm={(e) => void submitLiabilityForm(e)}

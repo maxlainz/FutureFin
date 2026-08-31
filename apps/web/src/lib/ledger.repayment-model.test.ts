@@ -164,7 +164,9 @@ describe("liabilityDerivedPrincipalPreview — puertas de la vista previa", () =
 describe("etiquetas de modelo", () => {
   it("hay etiqueta para los cuatro modelos del wire y el orden los cubre todos", () => {
     expect(REPAYMENT_MODEL_ORDER).toHaveLength(4);
-    expect(REPAYMENT_MODEL_ORDER[0]).toBe("fixed_payments");
+    // INVERTIDO en 4.7.0 (#144): el primero era `fixed_payments` (el default histórico);
+    // desde la Ola 3 el francés encabeza el select porque ES el default y el préstamo típico.
+    expect(REPAYMENT_MODEL_ORDER[0]).toBe("french");
     for (const m of REPAYMENT_MODEL_ORDER) {
       expect(REPAYMENT_MODEL_LABEL[m]).toBeTruthy();
     }

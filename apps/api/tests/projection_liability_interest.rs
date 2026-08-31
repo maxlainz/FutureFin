@@ -76,7 +76,9 @@ async fn net_worth_series(model: &str, apr: Option<&str>) -> Vec<f64> {
 /// serían idénticas y este test fallaría.
 #[tokio::test]
 async fn a_french_liability_projects_below_an_identical_fixed_payments_one() {
-    let fixed = net_worth_series("fixed_payments", Some("3")).await;
+    // El gemelo sin intereses ya no puede declarar TIN (#144, apr_forbidden_for_model) — y no
+    // le hace falta: el engine lo ignoraba, así que su serie es la misma que la de siempre.
+    let fixed = net_worth_series("fixed_payments", None).await;
     let french = net_worth_series("french", Some("3")).await;
 
     assert!(
@@ -94,19 +96,35 @@ async fn a_french_liability_projects_below_an_identical_fixed_payments_one() {
     );
 }
 
-/// Compatibilidad: en `fixed_payments` el TIN es informativo y el engine lo ignora. La serie de
-/// un pasivo con TIN configurado es la misma que la de uno sin él — que es exactamente lo que se
-/// prometió al migrar (`DEFAULT 'fixed_payments'`: nadie ve moverse un número al actualizar).
+/// INVERTIDO en 4.7.0 (#144). Hasta 4.6.0 este test pineaba «en `fixed_payments` el TIN es
+/// informativo y el engine lo ignora» — el estado que la auditoría llamó préstamo gratis
+/// silencioso: un número guardado que no movía nada. Desde la Ola 3 ese estado es
+/// **irrepresentable**: el alta lo rechaza (`apr_forbidden_for_model`) y la migración firmada
+/// convirtió o anuló las filas existentes. Lo que queda por pinear es la puerta.
 #[tokio::test]
-async fn fixed_payments_ignores_the_apr_so_existing_liabilities_do_not_move() {
-    let without_apr = net_worth_series("fixed_payments", None).await;
-    let with_apr = net_worth_series("fixed_payments", Some("3")).await;
+async fn fixed_payments_with_an_apr_is_now_unrepresentable() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let liab_cat = app.create_category(&owner, "liability", "Préstamos").await;
+    let exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
 
-    assert_eq!(without_apr.len(), with_apr.len());
-    for (k, (a, b)) in without_apr.iter().zip(with_apr.iter()).enumerate() {
-        assert!(
-            (a - b).abs() < 0.01,
-            "mes {k}: el TIN no puede mover la serie en fixed_payments ({a} vs {b})"
-        );
-    }
+    let r = app
+        .post_json_with_cookie(
+            "/v1/liabilities",
+            json!({
+                "category_id": liab_cat,
+                "expense_category_id": exp_cat,
+                "label": "Hipoteca",
+                "principal": "100000",
+                "repayment_model": "fixed_payments",
+                "apr_percent": "3",
+                "payment_amount": "500",
+                "payment_frequency": "monthly",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    let msg = r.json()["message"].as_str().unwrap_or_default().to_string();
+    assert!(msg.starts_with("apr_forbidden_for_model"), "{msg}");
 }

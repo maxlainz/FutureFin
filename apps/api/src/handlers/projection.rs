@@ -530,6 +530,9 @@ struct LiabEngineRow {
     /// Literal de la columna (`fixed_payments` | `french` | `interest_only` | `revolving`),
     /// acotado por el CHECK de la migración `20260825120000_liabilities_repayment_model`.
     repayment_model: String,
+    /// Cuota mínima revolving (Ola 3/#144): % del saldo y suelo en €. Solo `revolving`.
+    min_payment_pct: Option<Decimal>,
+    min_payment_eur: Option<Decimal>,
 }
 
 #[derive(Debug, FromRow)]
@@ -1274,7 +1277,7 @@ pub(crate) async fn build_installation_projection_input(
     let liab_today_ph = view.next_arg_index();
     let liab_sql = format!(
         r#"SELECT id, label, principal, payment_amount, payment_frequency, payment_end_date,
-                  apr_percent, repayment_model
+                  apr_percent, repayment_model, min_payment_pct, min_payment_eur
            FROM liabilities
            WHERE {liab_scope}
              AND (payment_end_date IS NULL OR payment_end_date >= ${liab_today_ph})"#
@@ -1531,6 +1534,8 @@ pub(crate) async fn build_installation_projection_input(
                 .map(LiabRepaymentModel::to_engine)
                 .unwrap_or(RepaymentModel::FixedPayments),
             apr_percent: r.apr_percent,
+            min_payment_pct: r.min_payment_pct,
+            min_payment_eur: r.min_payment_eur,
             // Ejes what-if de `simulate_projection`: el ensamblado REAL nunca los pone. Los
             // aplica el override post-build sobre el input clonado del escenario, igual que
             // `asset_return_overrides` — una proyección de verdad no simula amortizaciones que
@@ -3632,7 +3637,9 @@ mod milestone_tests {
                 payment_end: None,
                 repayment_model: RepaymentModel::FixedPayments,
                 apr_percent: None,
-                extra_principal_monthly: Decimal::ZERO,
+                min_payment_pct: None,
+            min_payment_eur: None,
+            extra_principal_monthly: Decimal::ZERO,
                 extra_principal_lump_sums: Vec::new(),
             }],
             planning_monthly_cash_adjustment: vec![Decimal::from(5_000); 24],

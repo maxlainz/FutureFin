@@ -27,19 +27,22 @@ export const PAYMENT_FREQ_LABEL: Record<"monthly" | "weekly", string> = {
 
 export type LiabilityPaymentFreq = "" | "monthly" | "weekly";
 
-/** Orden de los `<option>` del formulario: el histórico primero, luego por cercanía conceptual. */
+/**
+ * Orden de los `<option>` del formulario: el francés primero — es EL préstamo español y el
+ * default desde 4.7.0 (#144); el modelo sin intereses queda como lo que es, un caso especial.
+ */
 export const REPAYMENT_MODEL_ORDER: LiabilityRepaymentModelApi[] = [
-  "fixed_payments",
   "french",
+  "fixed_payments",
   "interest_only",
   "revolving",
 ];
 
 export const REPAYMENT_MODEL_LABEL: Record<LiabilityRepaymentModelApi, string> =
   {
-    fixed_payments: "Cuota fija",
-    french: "Francés",
-    interest_only: "Solo intereses",
+    fixed_payments: "Sin intereses (0 %)",
+    french: "Francés (préstamo típico)",
+    interest_only: "Solo intereses (carencia)",
     revolving: "Revolving",
   };
 

@@ -436,6 +436,10 @@ export type LiabilityApiRow = {
   payment_amount: string | null;
   payment_frequency: "monthly" | "weekly" | null;
   payment_end_date: string | null;
+  /** Cuota mínima revolving: % del saldo de apertura. `null` en los demás modelos (4.7.0). */
+  min_payment_pct: string | null;
+  /** Suelo en euros de la cuota mínima revolving. `null` en los demás modelos (4.7.0). */
+  min_payment_eur: string | null;
   notes: string | null;
   sort_index: number;
 };

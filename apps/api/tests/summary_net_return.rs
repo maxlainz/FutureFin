@@ -68,8 +68,12 @@ async fn liability(
     let l = app
         .post_json_with_cookie(
             "/v1/liabilities",
+            // Francés explícito desde #144: el default histórico (`fixed_payments`) rechaza el
+            // TIN que este helper necesita declarar. El net_return de hoy usa el TIN sin mirar
+            // el modelo, así que los esperados de estos tests no se mueven (eso cambia en #121).
             json!({ "category_id": cat, "expense_category_id": exp_cat, "label": label,
                     "principal": principal, "apr_percent": apr,
+                    "repayment_model": "french",
                     "payment_amount": "300", "payment_frequency": "monthly",
                     "payment_end_date": future }),
             cookie,

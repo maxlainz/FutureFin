@@ -1392,10 +1392,11 @@ pub struct CreateLiabilityParams {
     /// TIN, que es el capital pendiente de verdad.
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
-    /// Modelo de amortización: "fixed_payments" (default, la cuota va íntegra a principal y no
-    /// se devengan intereses), "french" (sistema francés, exige apr_percent > 0),
-    /// "interest_only" (la cuota es el interés, el principal no baja) o "revolving".
-    /// Todos menos fixed_payments exigen plan de pago mensual (weekly no se admite).
+    /// Modelo de amortización: "fixed_payments" (default si se omite: préstamo SIN intereses,
+    /// la cuota va íntegra a principal — rechaza apr_percent), "french" (sistema francés, el
+    /// préstamo español típico), "interest_only" (la cuota cubre solo el interés, el principal
+    /// no baja) o "revolving" (exige además min_payment_pct/min_payment_eur). Todos menos
+    /// fixed_payments exigen apr_percent > 0 y plan de pago mensual (weekly no se admite).
     #[serde(default)]
     #[schemars(extend("enum" = ["fixed_payments", "french", "interest_only", "revolving"]))]
     pub repayment_model: Option<String>,
@@ -1415,6 +1416,16 @@ pub struct CreateLiabilityParams {
     #[serde(default)]
     #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub payment_end_date: Option<String>,
+    /// Solo revolving: cuota mínima como % del saldo de apertura (0-100), string decimal. La
+    /// cuota del mes es max(pct·saldo, min_payment_eur), sin superar el saldo. Revolving exige
+    /// min_payment_pct > 0 o min_payment_eur > 0; los demás modelos rechazan ambos.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub min_payment_pct: Option<String>,
+    /// Solo revolving: suelo en euros de la cuota mínima, string decimal >= 0.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub min_payment_eur: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -1461,6 +1472,10 @@ pub struct UpdateLiabilityParams {
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub apr_percent: Option<String>,
+    /// true = BORRA el TIN (necesario para volver a fixed_payments, que lo rechaza).
+    /// Mutuamente exclusivo con apr_percent.
+    #[serde(default)]
+    pub clear_apr_percent: Option<bool>,
     /// Cuota como string decimal (> 0 si se pasa).
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
@@ -1473,6 +1488,17 @@ pub struct UpdateLiabilityParams {
     #[serde(default)]
     #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub payment_end_date: Option<String>,
+    /// Solo revolving: cuota mínima como % del saldo de apertura (0-100), string decimal.
+    /// Set-only mientras el pasivo siga siendo revolving (omitirlo conserva el actual). Al
+    /// pasar a revolving se exige min_payment_pct > 0 o min_payment_eur > 0; al salir de
+    /// revolving ambos mínimos se anulan solos.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub min_payment_pct: Option<String>,
+    /// Solo revolving: suelo en euros de la cuota mínima, string decimal >= 0. Set-only.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub min_payment_eur: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -3851,7 +3877,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_liability",
-        description = "Da de alta un pasivo (deuda/préstamo): label, `type_tag` libre (dimensión de get_summary.liabilities_by_type_tag), categoría scope liability, categoría de GASTO de la cuota, plan de pago, `repayment_model` (los cuatro en list_liabilities; `french` y `revolving` exigen apr_percent > 0 y cuota mensual) y el principal: explícito o derive_principal_from_plan=true. DERIVARLO es Σ cuotas en `fixed_payments` —sin descontar intereses, muy por encima del capital pendiente real— y el VALOR ACTUAL al TIN en `french`; si el usuario sabe su capital pendiente, pásalo. Mueve la proyección.",
+        description = "Da de alta un pasivo (deuda/préstamo): label, `type_tag` libre (dimensión de get_summary.liabilities_by_type_tag), categoría scope liability, categoría de GASTO de la cuota, plan de pago, `repayment_model` (los cuatro en list_liabilities; todos menos `fixed_payments` —sin intereses, rechaza apr_percent— exigen apr_percent > 0 y cuota mensual; `revolving` exige además min_payment_pct/min_payment_eur) y el principal: explícito o derive_principal_from_plan=true. DERIVARLO es valor actual de las cuotas al TIN (Σ sin TIN); si el usuario sabe su capital pendiente, pásalo. Mueve la proyección.",
         annotations(title = "Crear pasivo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_liability(
@@ -3900,6 +3926,16 @@ impl FutureFinMcp {
                     .as_deref()
                     .map(|d| parse_date_param("payment_end_date", d))
                     .transpose()?,
+                min_payment_pct: p
+                    .min_payment_pct
+                    .as_deref()
+                    .map(|v| parse_decimal_param("min_payment_pct", v))
+                    .transpose()?,
+                min_payment_eur: p
+                    .min_payment_eur
+                    .as_deref()
+                    .map(|v| parse_decimal_param("min_payment_eur", v))
+                    .transpose()?,
                 notes: p.notes.clone(),
                 sort_index: None,
             })
@@ -3933,7 +3969,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_liability",
-        description = "Edita un pasivo existente («el TIN de mi hipoteca ha bajado al 2,1 %», «mi préstamo es francés, no cuota fija»): label, `type_tag` (omitirlo conserva el actual, cadena vacía lo borra), categorías, TAE, plan de pago, `repayment_model` (ver create_liability o list_liabilities para los cuatro modelos) y principal explícito o re-derivado del plan. Cambiar el modelo o la TAE con `derive_principal_from_plan` activo RE-DERIVA el principal. Prefiere esto a borrar y recrear: conserva los movimientos vinculados y la categoría de gasto de la cuota. Mueve la proyección.",
+        description = "Edita un pasivo existente («el TIN de mi hipoteca ha bajado al 2,1 %»): label, `type_tag` (cadena vacía lo borra), categorías, TAE (clear_apr_percent la borra — obligatorio al volver a fixed_payments, que la rechaza), plan de pago, `repayment_model` (ver create_liability; al salir de revolving sus mínimos se anulan solos) y principal explícito o re-derivado del plan. Cambiar el modelo o la TAE con `derive_principal_from_plan` activo RE-DERIVA el principal. Prefiere esto a borrar y recrear: conserva los movimientos vinculados y la categoría de gasto de la cuota. Mueve la proyección.",
         annotations(title = "Editar pasivo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_liability(
@@ -3943,6 +3979,24 @@ impl FutureFinMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
         let run = || -> Result<(Uuid, crate::handlers::liabilities::PatchLiabilityBody), ApiError> {
+            if p.apr_percent.is_some() && p.clear_apr_percent.unwrap_or(false) {
+                return Err(ApiError::BadRequest(
+                    "apr_percent_set_and_clear: apr_percent and clear_apr_percent are mutually \
+                     exclusive"
+                        .into(),
+                ));
+            }
+            // El PATCH distingue omitir (sin cambio) de null (borrar): clear_apr_percent
+            // materializa ese null, igual que clear_purchase_price en update_asset.
+            let apr_percent = if p.clear_apr_percent.unwrap_or(false) {
+                Some(serde_json::Value::Null)
+            } else {
+                p.apr_percent
+                    .as_deref()
+                    .map(|v| parse_decimal_param("apr_percent", v))
+                    .transpose()?
+                    .map(|d| serde_json::Value::String(d.to_string()))
+            };
             Ok((
                 parse_uuid_param("liability_id", &p.liability_id)?,
                 crate::handlers::liabilities::PatchLiabilityBody {
@@ -3971,11 +4025,7 @@ impl FutureFinMcp {
                         .as_deref()
                         .map(|v| parse_decimal_param("principal", v))
                         .transpose()?,
-                    apr_percent: p
-                        .apr_percent
-                        .as_deref()
-                        .map(|v| parse_decimal_param("apr_percent", v))
-                        .transpose()?,
+                    apr_percent,
                     payment_amount: p
                         .payment_amount
                         .as_deref()
@@ -3990,6 +4040,16 @@ impl FutureFinMcp {
                         .payment_end_date
                         .as_deref()
                         .map(|d| parse_date_param("payment_end_date", d))
+                        .transpose()?,
+                    min_payment_pct: p
+                        .min_payment_pct
+                        .as_deref()
+                        .map(|v| parse_decimal_param("min_payment_pct", v))
+                        .transpose()?,
+                    min_payment_eur: p
+                        .min_payment_eur
+                        .as_deref()
+                        .map(|v| parse_decimal_param("min_payment_eur", v))
                         .transpose()?,
                     notes: p.notes.clone(),
                     sort_index: None,

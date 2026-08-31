@@ -372,15 +372,23 @@ export const ERROR_MESSAGES: Record<string, string> = {
   payment_end_date_required_for_derived_principal:
     "Para calcular el capital pendiente a partir del plan hace falta la fecha del último pago.",
   repayment_model_invalid:
-    "Ese modelo de deuda no existe. Elige cuota fija, francés, solo intereses o revolving.",
+    "Ese modelo de deuda no existe. Elige francés, sin intereses, solo intereses o revolving.",
   apr_required_for_model:
-    "Para una deuda francesa o revolving hace falta la TAE (mayor que cero).",
+    "Ese modelo de deuda devenga interés: hace falta el TIN (mayor que cero).",
+  apr_forbidden_for_model:
+    "Una deuda sin intereses no lleva TIN. Quítalo o elige francés, solo intereses o revolving.",
   payment_plan_required_for_model:
     "Ese modelo de deuda necesita plan de pagos: indica cuota y periodicidad.",
   derive_not_supported_for_model:
-    "El capital pendiente solo se puede calcular del plan en cuota fija o francés.",
+    "El capital pendiente solo se puede calcular del plan en las deudas sin intereses o francesas.",
   weekly_not_supported_for_model:
-    "La periodicidad semanal solo vale para deudas de cuota fija.",
+    "La periodicidad semanal solo vale para deudas sin intereses.",
+  revolving_minimum_required:
+    "Una revolving necesita su cuota mínima: porcentaje del saldo o suelo en euros, mayor que cero.",
+  revolving_minimum_forbidden_for_model:
+    "La cuota mínima (porcentaje del saldo y suelo) es solo de las revolving. Quítala en los demás modelos.",
+  apr_percent_set_and_clear:
+    "No se puede fijar el TIN y borrarlo a la vez. Manda solo uno de los dos.",
 
   // ── Presupuesto y próximos ────────────────────────────────────────────────────────────
   budget_entry_category_scope_unsupported:

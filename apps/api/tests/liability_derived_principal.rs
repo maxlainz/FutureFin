@@ -108,7 +108,9 @@ async fn fixed_payments_derives_the_plain_sum_of_the_payments() {
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
     assert_eq!(principal_of(&r), expected, "un TIN 0 no descuenta en fixed_payments");
 
-    // Y con un TIN > 0 configurado tampoco: en este modelo el TIN es informativo.
+    // INVERTIDO en 4.7.0 (#144): un TIN > 0 en el modelo sin intereses ya no es «informativo»
+    // — es un alta inválida. El caso «fixed_payments ignora el TIN al derivar» murió con él:
+    // la derivación es una sola rama (valor actual al TIN) y en este modelo el TIN no existe.
     let r = post_liability(
         &app,
         &owner,
@@ -117,8 +119,9 @@ async fn fixed_payments_derives_the_plain_sum_of_the_payments() {
         json!({ "payment_end_date": end.to_string(), "apr_percent": "3" }),
     )
     .await;
-    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
-    assert_eq!(principal_of(&r), expected, "fixed_payments ignora el TIN al derivar");
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    let msg = r.json()["message"].as_str().unwrap_or_default().to_string();
+    assert!(msg.starts_with("apr_forbidden_for_model"), "{msg}");
 }
 
 /// `french` descuenta: `P = M · (1 − (1 + i)^−n) / i` con `i = 3/1200 = 0,0025` y `n = 200`.
@@ -218,7 +221,8 @@ async fn patching_the_model_rederives_the_principal() {
     let patched = app
         .patch_json_with_cookie(
             &format!("/v1/liabilities/{id}"),
-            json!({ "repayment_model": "fixed_payments" }),
+            // Volver al modelo histórico exige soltar el TIN en el mismo PATCH (#144).
+            json!({ "repayment_model": "fixed_payments", "apr_percent": null }),
             &owner.cookie,
         )
         .await;

@@ -523,12 +523,46 @@ async fn insert_payload(
             None => None,
         };
         let new_id = Uuid::new_v4();
+        // Normalización #144 (4.7.0, DATA-CHANGING firmada por el owner en la migración
+        // `20260901120000_…_french_default.sql` — el MISMO predicado, tercer sitio): la
+        // migración solo alcanza las filas que existían ese día, así que cada restore de un
+        // backup ≤ v10 volvería a fabricar el defecto auditado (fixed_payments con TIN que
+        // simula un préstamo gratis, e ineditable bajo `apr_forbidden_for_model`). Un backup
+        // restaura el SIGNIFICADO de lo que había, no un literal que hoy miente:
+        // - fixed_payments + TIN > 0 + cuota mensual → `french` (era un francés simulado a 0 %);
+        // - fixed_payments + TIN inexpresable como francés → TIN fuera (el engine siempre lo ignoró);
+        // - revolving sin mínimos (backups sin los campos) → backfill bit-idéntico de la
+        //   migración: pct = 0, suelo = la cuota declarada ⇒ max(0·saldo, cuota) = cuota.
+        let mut eff_model = l.repayment_model.as_str();
+        let mut eff_apr = l.apr_percent;
+        if eff_model == "fixed_payments" && matches!(eff_apr, Some(a) if a > Decimal::ZERO) {
+            if l.payment_frequency.as_deref() == Some("monthly")
+                && matches!(l.payment_amount, Some(p) if p > Decimal::ZERO)
+            {
+                eff_model = "french";
+            } else {
+                eff_apr = None;
+            }
+        }
+        let (eff_min_pct, eff_min_eur) = if eff_model == "revolving" {
+            match (l.min_payment_pct, l.min_payment_eur) {
+                (None, None) => match l.payment_amount {
+                    Some(p) => (Some(Decimal::ZERO), Some(p)),
+                    None => (None, None),
+                },
+                carried => carried,
+            }
+        } else {
+            (None, None)
+        };
         sqlx::query(
             r#"INSERT INTO liabilities (
                    id, installation_id, owner_user_id, category_id, expense_category_id, label,
                    type_tag, principal, principal_derived_from_plan, apr_percent, payment_amount,
-                   payment_frequency, payment_end_date, notes, sort_index, repayment_model
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)"#,
+                   payment_frequency, payment_end_date, notes, sort_index, repayment_model,
+                   min_payment_pct, min_payment_eur
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                         $17, $18)"#,
         )
         .bind(new_id)
         .bind(iid)
@@ -539,18 +573,20 @@ async fn insert_payload(
         .bind(l.type_tag.as_deref())
         .bind(l.principal)
         .bind(l.principal_derived_from_plan)
-        .bind(l.apr_percent)
+        .bind(eff_apr)
         .bind(l.payment_amount)
         .bind(l.payment_frequency.as_deref())
         .bind(l.payment_end_date)
         .bind(l.notes.as_deref())
         .bind(l.sort_index)
-        // Este INSERT bypasea a propósito la validación del create (igual que con
-        // `expense_category_id`): un backup restaura lo que había, no lo que hoy sería válido.
-        // Consecuencia buscada: un pasivo `french` sin TIN importa sin error y el engine lo trata
-        // como si no devengara (degeneración garantizada en `liability_month`). El único filtro
-        // es el CHECK de la columna — un literal inventado sí revienta el import, y debe.
-        .bind(&l.repayment_model)
+        // Más allá de la normalización de arriba, este INSERT sigue bypaseando a propósito la
+        // validación del create (igual que con `expense_category_id`): un backup restaura lo
+        // que había. Un pasivo `french` sin TIN importa sin error y el engine lo trata como si
+        // no devengara (degeneración garantizada en `liability_month`). El único filtro es el
+        // CHECK de la columna — un literal inventado sí revienta el import, y debe.
+        .bind(eff_model)
+        .bind(eff_min_pct)
+        .bind(eff_min_eur)
         .execute(&mut **tx)
         .await?;
         new_liability_ids.push(new_id);

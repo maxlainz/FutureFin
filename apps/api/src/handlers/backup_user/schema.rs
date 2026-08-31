@@ -183,6 +183,14 @@ pub struct BackupLiabilityV10 {
     pub payment_frequency: Option<String>,
     #[serde(default)]
     pub payment_end_date: Option<NaiveDate>,
+    /// Cuota mínima revolving (4.7.0, #144): % del saldo de apertura y suelo en €. Aditivos con
+    /// `default`, SIN bump de schema_version (mismo patrón que `expense_category_ref`): los
+    /// backups anteriores no llevan los campos → `None` → el import les aplica el MISMO backfill
+    /// bit-idéntico de la migración (pct = 0, suelo = cuota declarada) si son revolving.
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub min_payment_pct: Option<Decimal>,
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    pub min_payment_eur: Option<Decimal>,
     #[serde(default)]
     pub notes: Option<String>,
     pub sort_index: i32,
@@ -994,6 +1002,10 @@ fn payload_v9_to_v10(p: BackupPayloadV9) -> BackupPayloadV10 {
                 principal: l.principal,
                 principal_derived_from_plan: l.principal_derived_from_plan,
                 repayment_model: default_repayment_model(),
+                // Sin mínimos: los backups pre-4.7.0 no los conocen; el backfill (si el modelo
+                // resulta revolving) lo aplica el import, no la cadena de migración.
+                min_payment_pct: None,
+                min_payment_eur: None,
                 apr_percent: l.apr_percent,
                 payment_amount: l.payment_amount,
                 payment_frequency: l.payment_frequency,

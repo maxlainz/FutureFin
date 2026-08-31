@@ -52,6 +52,9 @@ async fn create_liability(
                 "expense_category_id": exp_cat,
                 "label": label,
                 "principal": principal,
+                // Francés explícito desde #144: TIN + fixed_payments ya no es un alta válida
+                // (apr_forbidden_for_model) y este helper quiere un pasivo con TIN.
+                "repayment_model": "french",
                 "apr_percent": "3.5",
                 "payment_amount": "500",
                 "payment_frequency": "monthly",
@@ -1016,11 +1019,14 @@ async fn import_rejects_a_manifest_with_out_of_range_kdf_parameters() {
 // v10 (4.2.0) — `repayment_model` en los pasivos
 // ---------------------------------------------------------------------------
 
-/// Un `.ffbackup` **v9** (pre-4.2.0) no lleva `repayment_model`. Sus pasivos tienen que entrar
-/// como `fixed_payments`, que es exactamente el modelo con el que se calcularon los números que
-/// el usuario vio cuando exportó: restaurar un backup viejo no puede mover una proyección.
+/// INVERTIDO en 4.7.0 (#144). Un `.ffbackup` **v9** (pre-4.2.0) no lleva `repayment_model` y
+/// hasta 4.6.0 sus pasivos entraban como `fixed_payments` («restaurar no mueve una proyección»).
+/// La migración firmada de #144 supersede esa promesa: un pasivo v9 con TIN y cuota mensual ERA
+/// un francés simulado sin intereses, y restaurarlo hoy le aplica el MISMO predicado que la
+/// migración aplicó a las filas vivas — entra como `french` con su TIN. La proyección se mueve
+/// hacia el número honesto, igual que se movió la de la instalación al actualizar a 4.7.0.
 #[tokio::test]
-async fn v9_backup_imports_its_liabilities_as_fixed_payments() {
+async fn v9_backup_liability_with_tin_imports_as_french_like_the_migration() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
 
@@ -1064,9 +1070,10 @@ async fn v9_backup_imports_its_liabilities_as_fixed_payments() {
     let rows = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
     assert_eq!(rows[0]["label"], "Hipoteca vieja");
     assert_eq!(
-        rows[0]["repayment_model"], "fixed_payments",
-        "un pasivo de un backup v9 tiene que quedar en el modelo histórico"
+        rows[0]["repayment_model"], "french",
+        "TIN 3 % + cuota mensual: el significado honesto del pasivo v9 es el francés"
     );
+    assert_eq!(rows[0]["apr_percent"].as_str(), Some("3.0000"), "el TIN se conserva");
 }
 
 /// Roundtrip v10: el modelo sobrevive al export → import. Sin esto, un usuario que restaura su
@@ -1103,7 +1110,9 @@ async fn v10_roundtrip_preserves_the_repayment_model() {
     let patched = app
         .patch_json_with_cookie(
             &format!("/v1/liabilities/{id}"),
-            serde_json::json!({ "repayment_model": "fixed_payments" }),
+            // `apr_percent: null` explícito: desde #144 el modelo histórico rechaza TIN
+            // (apr_forbidden_for_model), así que ensuciar el estado exige soltarlo a la vez.
+            serde_json::json!({ "repayment_model": "fixed_payments", "apr_percent": null }),
             &owner.cookie,
         )
         .await;
@@ -1172,6 +1181,93 @@ async fn v10_french_liability_without_apr_still_imports() {
         .get_with_cookie("/v1/projection/series?months=24", &owner.cookie)
         .await;
     assert_eq!(series.status, http::StatusCode::OK, "series: {series:?}");
+}
+
+/// La normalización #144 en el import (la MISMA regla firmada de la migración, tercer sitio):
+/// un `.ffbackup` ≤ v10 restaura el **significado** de sus pasivos, no literales que hoy
+/// mienten. Las tres ramas a la vez, distinguibles entre sí:
+/// - `fixed_payments` + TIN 3 % + cuota mensual → importa como `french` (TIN intacto);
+/// - `fixed_payments` + TIN 3 % **sin plan** (inexpresable como francés) → sigue
+///   `fixed_payments` pero el TIN se anula (el engine siempre lo ignoró);
+/// - `revolving` sin mínimos → backfill bit-idéntico de la migración: pct = 0, suelo = cuota.
+#[tokio::test]
+async fn v10_import_normalizes_liabilities_like_the_signed_migration() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let mk_liab = |label: &str, model: &str, apr: serde_json::Value, pay: serde_json::Value, freq: serde_json::Value, idx: i32| {
+        serde_json::json!({
+            "category_ref": { "scope": "liability", "name": "Préstamos" },
+            "expense_category_ref": null,
+            "label": label,
+            "principal": "10000.0000",
+            "principal_derived_from_plan": false,
+            "repayment_model": model,
+            "apr_percent": apr,
+            "payment_amount": pay,
+            "payment_frequency": freq,
+            "payment_end_date": null,
+            "sort_index": idx
+        })
+    };
+    let payload = serde_json::json!({
+        "user": { "username": "alice", "birth_date": null },
+        "categories_used": [{ "scope": "liability", "name": "Préstamos", "sort_index": 0 }],
+        "assets": [],
+        "allocation_rules": [],
+        "liabilities": [
+            mk_liab("Era francés", "fixed_payments", "3.0000".into(), "500.0000".into(), "monthly".into(), 0),
+            mk_liab("Residuo", "fixed_payments", "3.0000".into(), serde_json::Value::Null, serde_json::Value::Null, 1),
+            mk_liab("Tarjeta", "revolving", "18.0000".into(), "250.0000".into(), "monthly".into(), 2),
+        ],
+        "budget_entries": [],
+        "planning_flows": [],
+        "ui_preferences": {},
+        "installation_snapshot_informative": installation_snapshot_json(),
+        "snapshots": [],
+        "transaction_imports": [],
+        "transactions": [],
+        "categorization_rules": [],
+        "recurring_transaction_rules": [],
+        "transfer_match_rejections": []
+    });
+    let b64 = craft_ffbackup_b64(10, &payload, owner.user_id);
+
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "v10 import: {applied:?}");
+    assert_eq!(applied.json()["imported"]["liabilities"].as_u64(), Some(3));
+
+    let rows = app.get_with_cookie("/v1/liabilities", &owner.cookie).await.json();
+    let by_label = |l: &str| {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["label"] == l)
+            .unwrap_or_else(|| panic!("falta {l}"))
+            .clone()
+    };
+
+    let frances = by_label("Era francés");
+    assert_eq!(frances["repayment_model"], "french", "TIN + cuota mensual ⇒ french");
+    assert_eq!(frances["apr_percent"].as_str(), Some("3.0000"), "el TIN se conserva");
+
+    let residuo = by_label("Residuo");
+    assert_eq!(residuo["repayment_model"], "fixed_payments");
+    assert!(
+        residuo["apr_percent"].is_null(),
+        "el residuo inexpresable pierde el TIN: {residuo:?}"
+    );
+
+    let tarjeta = by_label("Tarjeta");
+    assert_eq!(tarjeta["repayment_model"], "revolving");
+    let pct: rust_decimal::Decimal = tarjeta["min_payment_pct"].as_str().unwrap().parse().unwrap();
+    assert_eq!(pct, rust_decimal::Decimal::ZERO, "backfill pct = 0");
+    let eur: rust_decimal::Decimal = tarjeta["min_payment_eur"].as_str().unwrap().parse().unwrap();
+    assert_eq!(
+        eur,
+        rust_decimal::Decimal::from(250),
+        "backfill suelo = cuota declarada"
+    );
 }
 
 /// **Un `.ffbackup` antiguo con reglas de categorización duplicadas sigue importándose.**

@@ -599,31 +599,35 @@ async fn fetch_liabilities(
     iid: Uuid,
     user_id: Uuid,
 ) -> Result<(Vec<BackupLiability>, HashMap<Uuid, usize>), ApiError> {
-    #[allow(clippy::type_complexity)]
-    let rows: Vec<(
-        Uuid,
-        String,
-        String,
-        Option<String>,
-        String,
-        Option<String>,
-        Decimal,
-        bool,
-        Option<Decimal>,
-        Option<Decimal>,
-        Option<String>,
-        Option<NaiveDate>,
-        Option<String>,
-        i32,
-        String,
-    )> = sqlx::query_as(
-        // `repayment_model` va AL FINAL a propósito: la tupla se indexa por posición (`r.0..r.N`)
-        // y meterlo en medio desplazaría en silencio todos los campos siguientes.
+    // Struct con nombres en vez de la tupla histórica: con los mínimos revolving (#144) la fila
+    // pasa de 15 a 17 columnas y sqlx solo implementa `FromRow` para tuplas de hasta 16 — y de
+    // paso muere la trampa de «`repayment_model` va AL FINAL a propósito» del indexado posicional.
+    #[derive(sqlx::FromRow)]
+    struct LiabilityExportRow {
+        id: Uuid,
+        scope: String,
+        cat_name: String,
+        expense_cat_name: Option<String>,
+        label: String,
+        type_tag: Option<String>,
+        principal: Decimal,
+        principal_derived_from_plan: bool,
+        apr_percent: Option<Decimal>,
+        payment_amount: Option<Decimal>,
+        payment_frequency: Option<String>,
+        payment_end_date: Option<NaiveDate>,
+        notes: Option<String>,
+        sort_index: i32,
+        repayment_model: String,
+        min_payment_pct: Option<Decimal>,
+        min_payment_eur: Option<Decimal>,
+    }
+    let rows: Vec<LiabilityExportRow> = sqlx::query_as(
         r#"SELECT l.id, c.scope, c.name AS cat_name, ec.name AS expense_cat_name, l.label,
                   l.type_tag, l.principal,
                   l.principal_derived_from_plan, l.apr_percent, l.payment_amount,
                   l.payment_frequency, l.payment_end_date, l.notes, l.sort_index,
-                  l.repayment_model
+                  l.repayment_model, l.min_payment_pct, l.min_payment_eur
            FROM liabilities l
            JOIN categories c ON c.id = l.category_id
            LEFT JOIN categories ec ON ec.id = l.expense_category_id
@@ -640,25 +644,27 @@ async fn fetch_liabilities(
         .into_iter()
         .enumerate()
         .map(|(i, r)| {
-            id_to_index.insert(r.0, i);
+            id_to_index.insert(r.id, i);
             BackupLiability {
-                category_ref: CategoryRef { scope: r.1, name: r.2 },
+                category_ref: CategoryRef { scope: r.scope, name: r.cat_name },
                 // La categoría de gasto siempre tiene scope 'expense' (validación de la API).
-                expense_category_ref: r.3.map(|name| CategoryRef {
+                expense_category_ref: r.expense_cat_name.map(|name| CategoryRef {
                     scope: "expense".into(),
                     name,
                 }),
-                label: r.4,
-                type_tag: r.5,
-                principal: r.6,
-                principal_derived_from_plan: r.7,
-                apr_percent: r.8,
-                payment_amount: r.9,
-                payment_frequency: r.10,
-                payment_end_date: r.11,
-                notes: r.12,
-                sort_index: r.13,
-                repayment_model: r.14,
+                label: r.label,
+                type_tag: r.type_tag,
+                principal: r.principal,
+                principal_derived_from_plan: r.principal_derived_from_plan,
+                apr_percent: r.apr_percent,
+                payment_amount: r.payment_amount,
+                payment_frequency: r.payment_frequency,
+                payment_end_date: r.payment_end_date,
+                notes: r.notes,
+                sort_index: r.sort_index,
+                repayment_model: r.repayment_model,
+                min_payment_pct: r.min_payment_pct,
+                min_payment_eur: r.min_payment_eur,
             }
         })
         .collect();

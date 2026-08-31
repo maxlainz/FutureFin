@@ -59,6 +59,8 @@ fn mk_liab(
         payment_end,
         repayment_model: model,
         apr_percent: apr,
+        min_payment_pct: None,
+        min_payment_eur: None,
         extra_principal_monthly: Decimal::ZERO,
         extra_principal_lump_sums: vec![],
     }

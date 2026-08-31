@@ -105,9 +105,11 @@ impl RepaymentModel {
         }
     }
 
-    /// ¿Devenga intereses este modelo, y por tanto exige un TIN configurado?
+    /// ¿Devenga intereses este modelo, y por tanto exige un TIN configurado? Desde la Ola 3
+    /// (#144) `interest_only` DERIVA la cuota del TIN (saldo × TIN/1200): sin TIN cobraría 0 €
+    /// en silencio — todos menos el préstamo sin intereses lo exigen.
     fn requires_apr(self) -> bool {
-        matches!(self, RepaymentModel::French | RepaymentModel::Revolving)
+        self != RepaymentModel::FixedPayments
     }
 }
 
@@ -149,6 +151,14 @@ pub struct LiabilityResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, format = "date")]
     pub payment_end_date: Option<NaiveDate>,
+    /// Cuota mínima revolving (% del saldo de apertura). `null` en los demás modelos.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub min_payment_pct: Option<Decimal>,
+    /// Suelo en euros de la cuota mínima revolving. `null` en los demás modelos.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub min_payment_eur: Option<Decimal>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     pub sort_index: i32,
@@ -188,6 +198,16 @@ pub struct CreateLiabilityBody {
     pub payment_frequency: Option<PaymentFrequency>,
     #[serde(default)]
     pub payment_end_date: Option<NaiveDate>,
+    /// Cuota mínima revolving: % del saldo de apertura (0-100). Solo con `revolving`.
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub min_payment_pct: Option<Decimal>,
+    /// Suelo en euros de la cuota mínima revolving. Solo con `revolving`.
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub min_payment_eur: Option<Decimal>,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
@@ -209,23 +229,36 @@ pub struct PatchLiabilityBody {
     #[serde(default)]
     pub derive_principal_from_plan: Option<bool>,
     /// Set-only (sin clear): `None` conserva el modelo actual. No hay «volver a NULL» porque la
-    /// columna es NOT NULL — para deshacer se manda `fixed_payments` explícito.
+    /// columna es NOT NULL — para deshacer se manda `fixed_payments` explícito (y desde #144,
+    /// con `apr_percent: null` en el mismo PATCH si la fila tenía TIN).
     #[serde(default)]
     pub repayment_model: Option<RepaymentModel>,
     #[serde(default)]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub principal: Option<Decimal>,
-    #[serde(default)]
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub apr_percent: Option<Decimal>,
+    /// Tri-estado desde #144 (mismo patrón que `purchase_price` en assets): ausente conserva,
+    /// `null` LIMPIA el TIN, string decimal lo cambia. El clear existe porque volver a
+    /// `fixed_payments` exige soltar el TIN en el mismo PATCH (`apr_forbidden_for_model`).
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
+    #[schema(value_type = Option<Object>, nullable = true)]
+    pub apr_percent: Option<serde_json::Value>,
     #[serde(default)]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub payment_amount: Option<Decimal>,
     pub payment_frequency: Option<PaymentFrequency>,
     pub payment_end_date: Option<NaiveDate>,
+    /// Cuota mínima revolving (% del saldo). Set-only; solo con `revolving`.
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub min_payment_pct: Option<Decimal>,
+    /// Suelo en euros de la cuota mínima revolving. Set-only; solo con `revolving`.
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub min_payment_eur: Option<Decimal>,
     pub notes: Option<String>,
     pub sort_index: Option<i32>,
 }
@@ -246,6 +279,8 @@ struct LiabilityRow {
     sort_index: i32,
     principal_derived_from_plan: bool,
     repayment_model: String,
+    min_payment_pct: Option<Decimal>,
+    min_payment_eur: Option<Decimal>,
 }
 
 fn normalize_label(raw: &str) -> Result<String, ApiError> {
@@ -387,11 +422,34 @@ fn validate_repayment_model_state(
     payment_amount: Option<Decimal>,
     payment_frequency: Option<PaymentFrequency>,
     derive: bool,
+    min_payment_pct: Option<Decimal>,
+    min_payment_eur: Option<Decimal>,
 ) -> Result<(), ApiError> {
+    // Desde la Ola 3 (#144) el modelo sin intereses TAMBIÉN valida: un TIN sobre él era un
+    // número inmóvil que el engine ignoraba — el préstamo gratis silencioso que la auditoría
+    // señaló. «Rechazar, no defaultear» (§2.6).
     if model == RepaymentModel::FixedPayments {
-        // El modelo histórico no impone NADA: un pasivo sin plan, con `weekly`, o con un TIN
-        // configurado (informativo, el engine lo ignora en este modelo) sigue siendo válido.
-        return Ok(());
+        let mut problems: Vec<(String, &'static str)> = Vec::new();
+        if matches!(apr, Some(a) if a > Decimal::ZERO) {
+            problems.push((
+                "apr_forbidden_for_model: repayment_model fixed_payments is an interest-free loan (0 %) — remove apr_percent or choose french/interest_only/revolving".to_string(),
+                "apr_percent must be absent",
+            ));
+        }
+        if min_payment_pct.is_some() || min_payment_eur.is_some() {
+            problems.push((
+                format!("revolving_minimum_forbidden_for_model: min_payment_pct/min_payment_eur only apply to repayment_model revolving (got {model})"),
+                "min_payment_pct/min_payment_eur must be absent",
+            ));
+        }
+        return match problems.len() {
+            0 => Ok(()),
+            1 => Err(ApiError::BadRequest(problems.remove(0).0)),
+            _ => Err(ApiError::BadRequest(format!(
+                "repayment_model_state_invalid: repayment_model {model} needs all of these fixed at once: {}",
+                problems.iter().map(|(_, sh)| *sh).collect::<Vec<_>>().join("; ")
+            ))),
+        };
     }
 
     // `.0` = mensaje completo del código específico (el que se devuelve si es el ÚNICO problema);
@@ -421,6 +479,23 @@ fn validate_repayment_model_state(
                 "weekly_not_supported_for_model: payment_frequency weekly is only supported with repayment_model fixed_payments (got {model})"
             ),
             "payment_frequency must not be weekly",
+        ));
+    }
+
+    if model == RepaymentModel::Revolving
+        && !(matches!(min_payment_pct, Some(p) if p > Decimal::ZERO)
+            || matches!(min_payment_eur, Some(e) if e > Decimal::ZERO))
+    {
+        problems.push((
+            "revolving_minimum_required: repayment_model revolving needs min_payment_pct > 0 or min_payment_eur > 0 — the minimum instalment is a percentage of the balance with a floor in euros, not a fixed quota".to_string(),
+            "min_payment_pct > 0 or min_payment_eur > 0 is required",
+        ));
+    }
+
+    if model != RepaymentModel::Revolving && (min_payment_pct.is_some() || min_payment_eur.is_some()) {
+        problems.push((
+            format!("revolving_minimum_forbidden_for_model: min_payment_pct/min_payment_eur only apply to repayment_model revolving (got {model})"),
+            "min_payment_pct/min_payment_eur must be absent",
         ));
     }
 
@@ -511,7 +586,6 @@ fn derive_principal_from_payment_plan(
     frequency: PaymentFrequency,
     payment_end_date: NaiveDate,
     today: NaiveDate,
-    model: RepaymentModel,
     apr_percent: Option<Decimal>,
 ) -> Result<Decimal, ApiError> {
     let n = payment_interval_count(frequency, today, payment_end_date)?;
@@ -520,15 +594,17 @@ fn derive_principal_from_payment_plan(
             "payment_schedule_empty: derived principal requires at least one payment interval".into(),
         ));
     }
-    match model {
-        RepaymentModel::French => Ok(futurefin_engine::present_value_of_payments(
-            payment_amount,
-            Decimal::from(n),
-            apr_percent,
-        )
-        .round_dp_with_strategy(4, rust_decimal::RoundingStrategy::MidpointAwayFromZero)),
-        _ => Ok(payment_amount * Decimal::from(n)),
-    }
+    // Rama única desde la Ola 3 (#144/#121): el principal derivado es SIEMPRE el valor actual
+    // de las cuotas pendientes al TIN. Con `fixed_payments` el TIN es imposible por validación
+    // (apr_forbidden_for_model) y la migración anuló el residuo, así que `apr_percent` llega
+    // None y el helper devuelve Σ cuotas — bit-idéntico al comportamiento anterior. El `model`
+    // ya no decide nada aquí; la firma ya no recibe el modelo.
+    Ok(futurefin_engine::present_value_of_payments(
+        payment_amount,
+        Decimal::from(n),
+        apr_percent,
+    )
+    .round_dp_with_strategy(4, rust_decimal::RoundingStrategy::MidpointAwayFromZero))
 }
 
 async fn assert_liability_category(
@@ -609,6 +685,8 @@ fn row_to_response(r: LiabilityRow) -> Result<LiabilityResponse, ApiError> {
         payment_amount: r.payment_amount,
         payment_frequency,
         payment_end_date: r.payment_end_date,
+        min_payment_pct: r.min_payment_pct,
+        min_payment_eur: r.min_payment_eur,
         notes: r.notes,
         sort_index: r.sort_index,
     })
@@ -653,7 +731,7 @@ pub(crate) async fn list_liabilities_core(
     let sql = format!(
         r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
-                  sort_index, principal_derived_from_plan, repayment_model
+                  sort_index, principal_derived_from_plan, repayment_model, min_payment_pct, min_payment_eur
            FROM liabilities
            WHERE {scope}
              AND (payment_end_date IS NULL OR payment_end_date >= ${today_ph})
@@ -746,6 +824,8 @@ pub(crate) async fn create_liability_core(
         body.payment_amount,
         body.payment_frequency,
         derive,
+        body.min_payment_pct,
+        body.min_payment_eur,
     )?;
 
     let (principal, principal_derived) = if derive {
@@ -768,7 +848,7 @@ pub(crate) async fn create_liability_core(
         let pf = PaymentFrequency::parse(fs)?;
         let today = installation_naive_today(&state.pool, iid).await?;
         (
-            derive_principal_from_payment_plan(amt, pf, end, today, model, body.apr_percent)?,
+            derive_principal_from_payment_plan(amt, pf, end, today, body.apr_percent)?,
             true,
         )
     } else {
@@ -795,12 +875,12 @@ pub(crate) async fn create_liability_core(
                installation_id, category_id, expense_category_id, label, type_tag, principal,
                apr_percent, payment_amount, payment_frequency,
                payment_end_date, notes, sort_index, principal_derived_from_plan,
-               owner_user_id, repayment_model
+               owner_user_id, repayment_model, min_payment_pct, min_payment_eur
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
            RETURNING id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
-                     sort_index, principal_derived_from_plan, repayment_model"#,
+                     sort_index, principal_derived_from_plan, repayment_model, min_payment_pct, min_payment_eur"#,
     )
     .bind(iid)
     .bind(body.category_id)
@@ -817,6 +897,8 @@ pub(crate) async fn create_liability_core(
     .bind(principal_derived)
     .bind(user_id)
     .bind(model.as_str())
+    .bind(body.min_payment_pct)
+    .bind(body.min_payment_eur)
     .fetch_one(&state.pool)
     .await?;
 
@@ -887,7 +969,7 @@ pub(crate) async fn patch_liability_core(
     let row: Option<LiabilityRow> = sqlx::query_as(
         r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
-                  sort_index, principal_derived_from_plan, repayment_model
+                  sort_index, principal_derived_from_plan, repayment_model, min_payment_pct, min_payment_eur
            FROM liabilities
            WHERE id = $1 AND installation_id = $2"#,
     )
@@ -926,13 +1008,26 @@ pub(crate) async fn patch_liability_core(
         .derive_principal_from_plan
         .unwrap_or(current.principal_derived_from_plan);
 
-    let new_apr = match body.apr_percent {
-        Some(apr) => {
+    let new_apr = match &body.apr_percent {
+        None => current.apr_percent,
+        Some(v) if v.is_null() => None,
+        Some(serde_json::Value::String(raw)) => {
+            let apr: Decimal = raw.trim().parse().map_err(|_| {
+                ApiError::BadRequest(
+                    "decimal_invalid: apr_percent must be a valid decimal string".into(),
+                )
+            })?;
             assert_non_negative(apr, "apr_percent")?;
             assert_apr_percent_range(apr)?;
             Some(apr)
         }
-        None => current.apr_percent,
+        // El wire de los importes es string decimal (§2.1); un número JSON aquí siempre fue 422
+        // vía serde y el tri-estado no lo relaja.
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "decimal_invalid: apr_percent must be a valid decimal string".into(),
+            ))
+        }
     };
 
     // Set-only. Se resuelve ANTES del bloque de derivación a propósito: cambiar el modelo (o el
@@ -957,12 +1052,26 @@ pub(crate) async fn patch_liability_core(
         .as_deref()
         .map(PaymentFrequency::parse)
         .transpose()?;
+    // Los mínimos son estado EXCLUSIVO de revolving: al salir del modelo caen solos (como el
+    // TIN residual en la migración de #144) — sin esto el merge set-only arrastraría los
+    // mínimos guardados, `revolving_minimum_forbidden_for_model` rechazaría el PATCH y la fila
+    // quedaría atrapada en revolving para siempre. Volver a revolving exige re-declararlos.
+    let (new_min_pct, new_min_eur) = if new_model == RepaymentModel::Revolving {
+        (
+            body.min_payment_pct.or(current.min_payment_pct),
+            body.min_payment_eur.or(current.min_payment_eur),
+        )
+    } else {
+        (body.min_payment_pct, body.min_payment_eur)
+    };
     validate_repayment_model_state(
         new_model,
         new_apr,
         new_pay_amt,
         new_pay_freq,
         derived_flag,
+        new_min_pct,
+        new_min_eur,
     )?;
 
     let new_pay_end = body.payment_end_date.or(current.payment_end_date);
@@ -998,7 +1107,7 @@ pub(crate) async fn patch_liability_core(
         })?;
         let pf = PaymentFrequency::parse(fs)?;
         let today = installation_naive_today(&state.pool, iid).await?;
-        derive_principal_from_payment_plan(amt, pf, end, today, new_model, new_apr)?
+        derive_principal_from_payment_plan(amt, pf, end, today, new_apr)?
     } else {
         match body.principal {
             Some(p) => {
@@ -1024,11 +1133,13 @@ pub(crate) async fn patch_liability_core(
                sort_index = $11,
                principal_derived_from_plan = $12,
                repayment_model = $13,
+               min_payment_pct = $16,
+               min_payment_eur = $17,
                updated_at = now()
            WHERE id = $14 AND installation_id = $15
            RETURNING id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
-                     sort_index, principal_derived_from_plan, repayment_model"#,
+                     sort_index, principal_derived_from_plan, repayment_model, min_payment_pct, min_payment_eur"#,
     )
     .bind(new_cat)
     .bind(new_expense_cat)
@@ -1045,6 +1156,8 @@ pub(crate) async fn patch_liability_core(
     .bind(new_model.as_str())
     .bind(id)
     .bind(iid)
+    .bind(new_min_pct)
+    .bind(new_min_eur)
     .fetch_one(&state.pool)
     .await?;
 
@@ -1305,7 +1418,7 @@ pub struct LiabilityScheduleResponse {
     pub model_note: String,
 }
 
-const SCHEDULE_MODEL_NOTE: &str = "Calendario proyectado con la MISMA recurrencia que el chart de proyección (interés sobre el saldo de apertura, cuota a fin de mes: P' = P·(1+i) − M, con i = apr_percent/1200), arrancando en el saldo de HOY y no en el principal original. Solo devenga con plan de pago activo y solo en repayment_model french o revolving: fixed_payments no cobra intereses y en interest_only la cuota ES el interés. Los importes son nominales (euros del momento), sin deflactar. No modela comisiones, seguros vinculados, revisiones de tipo variable ni carencias.";
+const SCHEDULE_MODEL_NOTE: &str = "Calendario proyectado con la MISMA recurrencia que el chart de proyección (interés sobre el saldo de apertura, cuota a fin de mes: P' = P·(1+i) − M, con i = apr_percent/1200), arrancando en el saldo de HOY y no en el principal original. Solo devenga con plan de pago activo y TIN > 0: fixed_payments no cobra intereses; en interest_only la cuota del mes ES el interes del periodo (saldo x TIN/1200, la declarada solo topa por arriba) y el principal no baja; en revolving la cuota es max(min_payment_pct x saldo, min_payment_eur), no la declarada. Los importes son nominales (euros del momento), sin deflactar. No modela comisiones, seguros vinculados, revisiones de tipo variable ni carencias.";
 
 pub(crate) fn payoff_absence_code(a: futurefin_engine::LiabilityPayoffAbsence) -> &'static str {
     match a {
@@ -1357,7 +1470,7 @@ pub(crate) async fn liability_schedule_core(
     let sql = format!(
         r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
-                  sort_index, principal_derived_from_plan, repayment_model
+                  sort_index, principal_derived_from_plan, repayment_model, min_payment_pct, min_payment_eur
            FROM liabilities
            WHERE {scope}
              AND id = ${id_ph}
@@ -1388,6 +1501,8 @@ pub(crate) async fn liability_schedule_core(
         payment_end: row.payment_end_date,
         repayment_model: model.to_engine(),
         apr_percent: row.apr_percent,
+        min_payment_pct: row.min_payment_pct,
+        min_payment_eur: row.min_payment_eur,
         extra_principal_monthly: Decimal::ZERO,
         extra_principal_lump_sums: Vec::new(),
     };

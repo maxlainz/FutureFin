@@ -115,6 +115,11 @@ pub struct ProjectionLiabilityInput {
     /// deliberada: el import de un `.ffbackup` puede colar un pasivo `french` sin TIN, y el
     /// engine jamás debe panicar ni devolver error por eso — devuelve la serie sin intereses.
     pub apr_percent: Option<Decimal>,
+    /// Cuota mínima revolving: porcentaje del saldo de APERTURA (3 = 3 %/mes). Solo lo usa
+    /// `Revolving`; `None` ⇒ 0. (Ola 3/#144.)
+    pub min_payment_pct: Option<Decimal>,
+    /// Suelo en euros de la cuota mínima revolving. Solo `Revolving`; `None` ⇒ 0.
+    pub min_payment_eur: Option<Decimal>,
     /// **Amortización extra mensual** por encima de la cuota (eje what-if, 4.4.0). `0` reproduce
     /// bit a bit el comportamiento anterior.
     ///
@@ -166,39 +171,72 @@ fn liability_active(liab: &ProjectionLiabilityInput, m_start: NaiveDate) -> bool
 ///
 /// - inactivo → `(0, P)`: ni caja, ni amortización, ni devengo.
 /// - `FixedPayments` → `cash = min(M, P)`, `P' = P − cash`. **Bit-idéntico** al modelo pre-4.2.0.
-/// - `French` / `Revolving` → `payoff = P·(1 + i)`, `cash = min(M, payoff)`, `P' = payoff − cash`.
-///   Con `i = 0` degenera exactamente en `FixedPayments`. El tope de la cuota es el **payoff**,
-///   no el principal: cancelar el préstamo cuesta el saldo *con* el interés del mes.
-/// - `InterestOnly` → `cash = min(M, P)` y `P' = P` (constante). El TIN es informativo aquí: la
-///   cuota que el usuario declara YA es el interés que paga; recalcularlo lo cobraría dos veces.
+///   Sin TIN por contrato desde la Ola 3 (la validación lo rechaza): es el préstamo al 0 %.
+/// - `French` → `payoff = P·(1 + i)`, `cash = min(M, payoff)`, `P' = payoff − cash`. El tope de
+///   la cuota es el **payoff**, no el principal: cancelar el préstamo cuesta el saldo *con* el
+///   interés del mes.
+/// - `InterestOnly` (Ola 3, #144) → `cash = min(M, P·i)`, `P' = P + P·i − cash`. La cuota del
+///   mes ES el interés del período; la declarada solo topa por arriba, y por debajo el déficit
+///   capitaliza (carencia real). Nunca amortiza: eso es `extra_principal_monthly`.
+/// - `Revolving` (Ola 3, #144) → misma recurrencia francesa pero la cuota NO es la declarada:
+///   `m = max(min_payment_pct·P/100, min_payment_eur)`, `cash = min(m, payoff)`. Con pct 0 y
+///   suelo = cuota declarada degenera bit-idéntico en la francesa (forma del backfill).
 ///
 /// **Saturación, nunca pánico**: si el `checked_mul`/`checked_add` del payoff desborda (TIN
 /// absurdo × horizonte largo), se devuelve el principal sin devengar más. La salida sigue siendo
 /// finita y la simulación termina.
 fn liability_month(
-    model: RepaymentModel,
+    liab: &ProjectionLiabilityInput,
     principal: Decimal,
     monthly_payment: Decimal,
-    apr_percent: Option<Decimal>,
     active: bool,
 ) -> (Decimal, Decimal) {
     if !active {
         return (Decimal::ZERO, principal);
     }
-    let i = match apr_percent {
+    let i = match liab.apr_percent {
         Some(apr) if apr > Decimal::ZERO => apr / Decimal::from(1200),
         _ => Decimal::ZERO,
     };
-    match model {
+    match liab.repayment_model {
         RepaymentModel::FixedPayments => {
             let cash = monthly_payment.min(principal).max(Decimal::ZERO);
             (cash, principal - cash)
         }
         RepaymentModel::InterestOnly => {
-            let cash = monthly_payment.min(principal).max(Decimal::ZERO);
-            (cash, principal)
+            // Carencia REAL (Ola 3/#144; contrato en .claude/financial-contracts.md §2.6): la cuota ES el interés del período
+            // (saldo × TIN/1200), no un pago libre. La cuota declarada es un TOPE por arriba:
+            //   M ≥ interés ⇒ cash = interés, principal plano;
+            //   M < interés ⇒ cash = M y el déficit CAPITALIZA (la deuda crece) — como un
+            //   producto español de verdad. Nunca amortiza: adelantar capital en carencia es
+            //   `extra_principal`, no la cuota. Hasta 4.6.0 aquí se aceptaba una cuota
+            //   arbitraria como «interés» (300 €/mes sobre una deuda de 300 €: 252.000 € de
+            //   interés fantasma en 70 años).
+            let interest = principal.checked_mul(i).unwrap_or(Decimal::ZERO);
+            let cash = monthly_payment.min(interest).max(Decimal::ZERO);
+            (cash, principal + interest - cash)
         }
-        RepaymentModel::French | RepaymentModel::Revolving => {
+        RepaymentModel::Revolving => {
+            // Revolving REAL (Ola 3/#144): cuota mínima = max(pct × saldo de APERTURA, suelo €).
+            // La cuota declarada (`monthly_payment`) NO entra en la caja: alimenta el
+            // presupuesto, y esa divergencia está declarada (SCHEDULE_MODEL_NOTE, helpTexts).
+            // Con pct = 0 y suelo = cuota declarada la recurrencia degenera EXACTAMENTE en la
+            // francesa (el backfill de la migración garantiza bit-identidad para lo existente).
+            let payoff = Decimal::ONE
+                .checked_add(i)
+                .and_then(|factor| principal.checked_mul(factor))
+                .unwrap_or(principal);
+            let pct_cuota = liab
+                .min_payment_pct
+                .unwrap_or(Decimal::ZERO)
+                .max(Decimal::ZERO)
+                / Decimal::from(100)
+                * principal;
+            let m = pct_cuota.max(liab.min_payment_eur.unwrap_or(Decimal::ZERO));
+            let cash = m.min(payoff).max(Decimal::ZERO);
+            (cash, payoff - cash)
+        }
+        RepaymentModel::French => {
             let payoff = Decimal::ONE
                 .checked_add(i)
                 .and_then(|factor| principal.checked_mul(factor))
@@ -417,13 +455,8 @@ pub fn liability_amortization_schedule(
                 break;
             }
 
-            let (payment, closing_after_payment) = liability_month(
-                liab.repayment_model,
-                principal,
-                liab.monthly_payment,
-                liab.apr_percent,
-                true,
-            );
+            let (payment, closing_after_payment) =
+                liability_month(liab, principal, liab.monthly_payment, true);
             let extra = liability_extra_principal(liab, k, closing_after_payment, true);
             let closing = closing_after_payment - extra;
 
@@ -976,10 +1009,9 @@ pub fn first_month_allocation(
         let active = liability_active(liab, m_start);
         let opening = principals.get(i).copied().unwrap_or(Decimal::ZERO);
         let (cash, closing) = liability_month(
-            liab.repayment_model,
+            liab,
             opening,
             liab.monthly_payment,
-            liab.apr_percent,
             active,
         );
         debt_service += cash + liability_extra_principal(liab, 1, closing, active);
@@ -1170,13 +1202,8 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
                 break;
             }
             let active = liability_active(liab, m_start);
-            let (cash, closing) = liability_month(
-                liab.repayment_model,
-                principals[i],
-                liab.monthly_payment,
-                liab.apr_percent,
-                active,
-            );
+            let (cash, closing) =
+                liability_month(liab, principals[i], liab.monthly_payment, active);
             // Amortización extra (what-if): sale de la caja del mes como servicio de deuda Y baja
             // el principal el mismo importe. Las dos cosas o ninguna — hacer solo la primera
             // drenaría caja sin reducir deuda, y solo la segunda imprimiría dinero.
@@ -1797,6 +1824,8 @@ mod tests {
             payment_end: Some(NaiveDate::from_ymd_opt(2040, 1, 1).unwrap()),
             repayment_model: RepaymentModel::FixedPayments,
             apr_percent: None,
+            min_payment_pct: None,
+            min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
         }];
@@ -2224,6 +2253,8 @@ mod tests {
             // (a cero: el pin describe un pasivo real, no un what-if).
             repayment_model: RepaymentModel::FixedPayments,
             apr_percent: None,
+            min_payment_pct: None,
+            min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
         }];
@@ -2348,6 +2379,8 @@ mod tests {
             payment_end: None,
             repayment_model: model,
             apr_percent: apr,
+            min_payment_pct: None,
+            min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
         }];
@@ -2467,11 +2500,17 @@ mod tests {
         assert_eq!(implicit_principal(&out, 2), dec("101005.0000"));
     }
 
-    /// Solo intereses: el principal no se mueve NUNCA y la caja que sale es la cuota entera —
-    /// que es justo lo que declara el usuario de un préstamo de este tipo. El TIN es informativo
-    /// aquí: la cuota YA es el interés, devengarlo otra vez lo cobraría dos veces.
+    /// INVERTIDO en la Ola 3 (#144). Hasta 4.6.0 este test pineaba «la caja es la cuota
+    /// declarada, entera» — sobre una deuda de 300 € con cuota 500 salían 300 €/mes, y con
+    /// cuota 300 €/mes durante 70 años salían 252.000 € de «interés» sobre 300 € de deuda.
+    /// La carencia real española cobra el interés del período: `cash = min(M, P·i)`.
+    ///
+    /// Números a mano (80.000 € al 6 % ⇒ i = 0,005; interés = 400,00 €/mes exacto):
+    /// - cuota declarada 400 = interés ⇒ caja 400, principal plano;
+    /// - cuota declarada 600 > interés ⇒ caja 400 igualmente (la cuota es tope, no suelo);
+    /// - deuda 300 € al 6 % ⇒ interés 1,50 €/mes; cuota declarada 500 ⇒ caja 1,50, no 300.
     #[test]
-    fn interest_only_principal_constant_and_cash_is_the_quota() {
+    fn interest_only_cash_is_the_period_interest_not_the_declared_quota() {
         let inp = one_liability_input(
             24,
             Decimal::from(80_000),
@@ -2484,17 +2523,30 @@ mod tests {
             assert_eq!(
                 implicit_principal(&out, k),
                 Decimal::from(80_000),
-                "el principal de un interest_only es constante (mes {k})"
+                "con cuota = interés el principal es constante (mes {k})"
             );
         }
         assert_eq!(
             first_month_allocation(&inp).unwrap().debt_service,
             Decimal::from(400),
-            "la caja del mes es la cuota íntegra"
+            "la caja del mes es el interés del período"
         );
 
-        // Con la cuota por encima del saldo, la caja se recorta al saldo (`min`): nadie paga
-        // 500 € por un préstamo del que solo debe 300.
+        // Cuota por ENCIMA del interés: la caja se recorta al interés (600 → 400,00). En
+        // carencia no se amortiza pagando de más — eso es `extra_principal_monthly`.
+        let generoso = one_liability_input(
+            1,
+            Decimal::from(80_000),
+            Decimal::from(600),
+            RepaymentModel::InterestOnly,
+            Some(Decimal::from(6)),
+        );
+        assert_eq!(
+            first_month_allocation(&generoso).unwrap().debt_service,
+            Decimal::from(400)
+        );
+
+        // La deuda pequeña que motivó la inversión: 300 € al 6 % ⇒ 1,50 €/mes, no 300.
         let pequeno = one_liability_input(
             1,
             Decimal::from(300),
@@ -2504,17 +2556,36 @@ mod tests {
         );
         assert_eq!(
             first_month_allocation(&pequeno).unwrap().debt_service,
-            Decimal::from(300)
+            dec("1.500"),
         );
     }
 
-    /// `Revolving` y `French` comparten recurrencia en 4.2.0 — **deliberadamente**. Este test
-    /// pinea esa equivalencia para que no se rompa por accidente: el día que revolving modele lo
-    /// suyo (disposiciones, cuota mínima como % del saldo) este test se cambia A PROPÓSITO, con
-    /// su entrada de CHANGELOG. Mientras tanto, dos etiquetas para la misma matemática es una
-    /// decisión de producto (el usuario nombra su deuda como es), no un descuido.
+    /// Cuota (tope) por DEBAJO del interés en carencia: el déficit capitaliza. 100.000 € al
+    /// 12 % ⇒ devengo 1.000 €/mes, tope declarado 400. A mano:
+    /// mes 1: caja 400, cierre 100.000 + 1.000 − 400 = 100.600;
+    /// mes 2: interés 1.006, caja 400, cierre 100.600 + 1.006 − 400 = 101.206.
     #[test]
-    fn revolving_matches_french_recurrence() {
+    fn interest_only_deficit_capitalizes_like_a_real_carencia() {
+        let inp = one_liability_input(
+            2,
+            Decimal::from(100_000),
+            Decimal::from(400),
+            RepaymentModel::InterestOnly,
+            Some(Decimal::from(12)),
+        );
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(implicit_principal(&out, 1), dec("100600.00"));
+        assert_eq!(implicit_principal(&out, 2), dec("101206.0000"));
+    }
+
+    /// INVERTIDO en la Ola 3 (#144). El test 4.2.0 `revolving_matches_french_recurrence` pineaba
+    /// «revolving = etiqueta de la recurrencia francesa» y su propio comentario anunciaba que
+    /// moriría a propósito el día que revolving modelara lo suyo. Ese día es este: la cuota
+    /// mínima real es `max(pct × saldo de apertura, suelo €)` — lo que queda de la equivalencia
+    /// es el caso degenerado `pct = 0, suelo = cuota declarada`, que es EXACTAMENTE el backfill
+    /// de la migración y por eso se pinea bit-idéntico.
+    #[test]
+    fn revolving_backfill_shape_degenerates_to_french_bit_identical() {
         let frances = one_liability_input(
             120,
             Decimal::from(12_000),
@@ -2522,18 +2593,60 @@ mod tests {
             RepaymentModel::French,
             Some(Decimal::from(18)),
         );
-        let revolving = one_liability_input(
+        let mut revolving = one_liability_input(
             120,
             Decimal::from(12_000),
             Decimal::from(250),
             RepaymentModel::Revolving,
             Some(Decimal::from(18)),
         );
+        revolving.liabilities[0].min_payment_pct = Some(Decimal::ZERO);
+        revolving.liabilities[0].min_payment_eur = Some(Decimal::from(250));
         let a = project_net_worth_series(&frances).unwrap();
         let b = project_net_worth_series(&revolving).unwrap();
         assert_eq!(a.net_worth, b.net_worth);
         assert_eq!(a.contributed_capital, b.contributed_capital);
         assert_eq!(a.per_asset_series, b.per_asset_series);
+    }
+
+    /// La cuota mínima revolving de verdad (#144): `max(pct × saldo de apertura, suelo €)`,
+    /// topada al payoff. A mano, TIN 18 % ⇒ i = 0,015, pct 3 %, suelo 30 €:
+    /// - saldo 3.000 ⇒ max(90, 30) = 90,00; cierre = 3.000·1,015 − 90 = 2.955,00;
+    /// - saldo 800 ⇒ max(24, 30) = 30,00 (manda el suelo); cierre = 800·1,015 − 30 = 782,00.
+    /// La cuota DECLARADA no pinta nada en la caja: se declara 999 y salen 90.
+    #[test]
+    fn revolving_minimum_is_pct_of_opening_balance_with_a_floor() {
+        let mut grande = one_liability_input(
+            1,
+            Decimal::from(3_000),
+            Decimal::from(999),
+            RepaymentModel::Revolving,
+            Some(Decimal::from(18)),
+        );
+        grande.liabilities[0].min_payment_pct = Some(Decimal::from(3));
+        grande.liabilities[0].min_payment_eur = Some(Decimal::from(30));
+        assert_eq!(
+            first_month_allocation(&grande).unwrap().debt_service,
+            dec("90.00")
+        );
+        let out = project_net_worth_series(&grande).unwrap();
+        assert_eq!(implicit_principal(&out, 1), dec("2955.000"));
+
+        let mut pequeno = one_liability_input(
+            1,
+            Decimal::from(800),
+            Decimal::from(999),
+            RepaymentModel::Revolving,
+            Some(Decimal::from(18)),
+        );
+        pequeno.liabilities[0].min_payment_pct = Some(Decimal::from(3));
+        pequeno.liabilities[0].min_payment_eur = Some(Decimal::from(30));
+        assert_eq!(
+            first_month_allocation(&pequeno).unwrap().debt_service,
+            dec("30")
+        );
+        let out = project_net_worth_series(&pequeno).unwrap();
+        assert_eq!(implicit_principal(&out, 1), dec("782.000"));
     }
 
     /// `payment_end` congela el pasivo en los CUATRO modelos: desde el mes siguiente no sale
@@ -2680,6 +2793,8 @@ mod tests {
             payment_end: None,
             repayment_model: model,
             apr_percent: apr,
+            min_payment_pct: None,
+            min_payment_eur: None,
             extra_principal_monthly: Decimal::ZERO,
             extra_principal_lump_sums: Vec::new(),
         }
