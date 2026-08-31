@@ -763,8 +763,8 @@ pub struct ProjectionOutput {
     /// Length == `assets.len()`; inner length == `horizon_months + 1` (months 0..=horizon).
     /// Nominal, igual que `net_worth`.
     pub per_asset_series: Vec<Vec<Decimal>>,
-    /// Primer mes (1-based, misma base que el bucle) cuyo déficit de caja iguala o supera TODO
-    /// lo drenable (`surplus_cash` + todos los activos): la cartera se vacía ese mes y desde el
+    /// Primer mes (1-based, misma base que el bucle) cuya venta bruta necesaria iguala o supera
+    /// TODO lo drenable (todos los activos): la cartera se vacía ese mes y desde el
     /// siguiente el descubierto se acumula. `None` = no se agota dentro del horizonte — no es
     /// «no calculado». La definición vive en el bucle (caso exacto con `>=`, no «primer mes con
     /// descubierto», que daría el mes siguiente al vaciado). Issue #119.
@@ -773,11 +773,19 @@ pub struct ProjectionOutput {
     /// cero euros descubiertos, no «no aplica». Ya se restaba del patrimonio publicado; ahora
     /// además se declara. Issue #119.
     pub uncovered_deficit_total: Decimal,
-    /// Patrimonio LÍQUIDO por mes (#143): Σ de los activos con `is_liquid` + la caja sin
-    /// repartir (`surplus_cash`) — exactamente el stock que el drenaje de jubilación puede
-    /// vender, SIN restar pasivos (por eso el término de deuda del objetivo son las cuotas
-    /// completas, ver `FireTarget::debt_payments_remaining`). Es la base que decide el cruce
-    /// FIRE desde 4.8.0; `net_worth` sigue siendo el total y no cambia.
+    /// Ahorro mensual que ninguna regla de la cascada absorbió, acumulado en euros nominales
+    /// (4.12.1, decisión del owner). NO entra en `net_worth`, NO compone y NO cuenta en
+    /// `contributed_capital`: el modelo se niega a simular un euro sin destino declarado. `0`
+    /// es cero euros, no «no aplica». En producción es inalcanzable con activos vivos
+    /// (sumidero indestructible #176 + retro-siembra 4.12.0); existe porque el motor es una
+    /// función pura y debe definir el estado.
+    pub unallocated_savings_total: Decimal,
+    /// Patrimonio LÍQUIDO por mes (#143): Σ de los activos con `is_liquid` — exactamente el
+    /// stock que el drenaje de jubilación puede vender, SIN restar pasivos (por eso el término
+    /// de deuda del objetivo son las cuotas completas, ver
+    /// `FireTarget::debt_payments_remaining`) y, desde 4.12.1, sin término de caja
+    /// (`surplus_cash` murió). Es la base que decide el cruce FIRE desde 4.8.0; `net_worth`
+    /// sigue siendo el total y no cambia.
     pub liquid_worth: Vec<Decimal>,
 }
 
@@ -1018,11 +1026,6 @@ pub enum AllocationSkipReason {
     /// `target_index` fuera de rango. Inalcanzable desde el handler, que valida antes; el bucle
     /// principal lo tolera en silencio y aquí se hace explícito.
     InvalidTarget,
-    /// El mes 1 cae en fase de jubilación: el bucle de simulación manda TODO el superávit a
-    /// `surplus_cash` y la cascada no se ejecuta en ningún mes de esa fase. Distinto de
-    /// [`Self::NoCash`] a propósito: aquí HAY caja (se publica en `base_cash`), lo que no hay
-    /// es asignación — decir «no_cash» sería mentir con un enum.
-    InRetirement,
 }
 
 /// Traza de UNA regla en la cascada de un mes. `amount_intent` es lo que la regla pidió y
@@ -1330,40 +1333,11 @@ pub fn first_month_allocation(
     let net_cash_month = recurring_net + planning_component;
 
     let mut rules_trace: Vec<RuleOutcome> = Vec::new();
-    // En jubilación con superávit el bucle de simulación NO ejecuta la cascada: todo el
-    // sobrante va a `surplus_cash` (rama `in_retirement` del bucle). Hasta la auditoría de
-    // 2026-08 esta función sí la ejecutaba, y `/v1/assets` y `/v1/allocation-rules/resolution`
-    // publicaban aportaciones regla a regla que la simulación no hace en ningún mes
-    // (H-cascada-1). Misma verdad que el bucle: ceros, sobrante íntegro, y cada regla
-    // marcada `InRetirement` — no `NoCash`, porque caja hay.
-    let (alloc, leftover) = if in_retirement && net_cash_month > Decimal::ZERO {
-        for (rule_index, rule) in input.allocation_rules.iter().enumerate() {
-            // Mismo criterio que la rama sin sobrante (#96): el techo del cap existe aunque la
-            // cascada no corra — se publica resuelto, no como null.
-            // #171 (Ola 6): los escalares de la FASE del mes, no los regulares — la traza de
-            // un jubilado publicaba techos calculados sobre una nómina y un gasto que ya no
-            // existen (months_expense(6) decía 15.000 donde el bucle usaría 12.000; un
-            // income_multiple(4) inflaba ×3). Mismos locales que ya eligió el propio mes 1.
-            let (ceiling, room) = rule_cap_ceiling_and_room(
-                rule,
-                &values,
-                expense + debt_service,
-                income,
-            );
-            rules_trace.push(RuleOutcome {
-                rule_index,
-                target_index: rule.target_index,
-                amount_intent: Decimal::ZERO,
-                amount_resolved: Decimal::ZERO,
-                cap_ceiling: ceiling,
-                cap_room: room,
-                skipped_reason: Some(AllocationSkipReason::InRetirement),
-            });
-        }
-        (vec![Decimal::ZERO; n], net_cash_month)
-    } else {
-        // #171: también aquí — esta rama es la del jubilado CON DÉFICIT (el estado normal de
-        // un jubilado), y `distribute_contributions` publica los techos aunque no reparta (#96).
+    // 4.12.1 (#175): la cascada corre TAMBIÉN jubilado — la rama que aquí publicaba ceros con
+    // `InRetirement` murió con `surplus_cash`. #171 sigue vivo en los escalares: los techos se
+    // resuelven con la FASE del mes (`expense + debt_service`, `income` ya elegidos arriba), y
+    // desde 4.12.1 esos techos GOBIERNAN euros de verdad, no solo la explicación.
+    let (alloc, leftover) = {
         distribute_contributions(
             net_cash_month,
             &input.allocation_rules,
@@ -1451,33 +1425,45 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
     // drenado (`b·(v−d)/v`): drenar todo un activo deja su base en 0 exacto. La rentabilidad
     // nunca la toca — el hueco valor−base ES la plusvalía latente.
     //
-    // `contributed_capital(k) = Σ basis_i(k) + surplus_cash(k)` — IDENTIDAD, no acumulador:
-    // la caja es base pura (entra ya tributada, no compone), así que el sobrante que la
-    // cascada no asigna y el superávit del jubilado cuentan solos, y el déficit que consume
-    // caja también RESTA solo. Consecuencia deliberada: la serie publicada DEJA DE SER
-    // MONÓTONA — «cumulative» murió con #120.
+    // `contributed_capital(k) = Σ basis_i(k)` — IDENTIDAD, no acumulador (desde 4.12.1 sin
+    // término de caja: `surplus_cash` murió — el dinero siempre vive en un activo). La serie
+    // publicada sigue SIN ser monótona («cumulative» murió con #120).
     let mut basis: Vec<Decimal> = input
         .assets
         .iter()
         .map(|a| a.purchase_price.filter(|p| *p > Decimal::ZERO).unwrap_or(Decimal::ZERO))
         .collect();
-    let contributed_fn = |basis: &[Decimal], surplus: Decimal| -> Decimal {
-        basis.iter().copied().sum::<Decimal>() + surplus
-    };
+    // #178 extensión (4.12.1): un activo cuya base ALIMENTA la simulación (la cascada le aportó)
+    // deriva su g aunque no declarara purchase_price — el euro aportado ES el dato: el motor
+    // observó su precio. Sin esto, el drenaje del sumidero sin coste declarado tributaría al
+    // escalar (default 1) euros que nunca fueron plusvalía — 784,81 € inventados en un
+    // descubierto de 3.000 € — y la exención del difunto escalón «caja primero» no se heredaría.
+    // Degrada bien: un fondo de 100.000 sin coste que recibe 500 queda en g = 0,995.
+    let mut basis_declared: Vec<bool> = input
+        .assets
+        .iter()
+        .map(|a| a.purchase_price.is_some())
+        .collect();
+    let contributed_fn =
+        |basis: &[Decimal]| -> Decimal { basis.iter().copied().sum::<Decimal>() };
     let mut undrained_cumulative = Decimal::ZERO;
     let mut assets_depleted_month_index: Option<u32> = None;
-    // Monthly savings not routed when remainder weights sum to zero.
-    let mut surplus_cash = Decimal::ZERO;
+    // 4.12.1 (decisión 3 del owner): el ahorro que ninguna regla absorbe NO entra al balance —
+    // no compone, no cuenta como aportado, no es riqueza líquida. Solo se CUANTIFICA aquí.
+    // En producción es inalcanzable con activos vivos (sumidero indestructible #176 +
+    // retro-siembra); existe porque el motor es una función pura y debe definir el estado.
+    let mut unallocated_savings_total = Decimal::ZERO;
 
-    let nw_fn = |vals: &[Decimal], pr: &[Decimal], und: Decimal, surplus: Decimal| -> Decimal {
+    let nw_fn = |vals: &[Decimal], pr: &[Decimal], und: Decimal| -> Decimal {
         let ta: Decimal = vals.iter().copied().sum();
         let tl: Decimal = pr.iter().copied().sum();
-        ta + surplus - tl - und
+        ta - tl - und
     };
-    // Base líquida del cruce (#143): lo vendible — activos `is_liquid` + caja sin repartir.
-    // Brutos a propósito (sin restar pasivos ni descubierto): el objetivo empareja ese hueco
-    // con su término de cuotas completas (`debt_payments_remaining`).
-    let liquid_fn = |vals: &[Decimal], surplus: Decimal| -> Decimal {
+    // Base líquida del cruce (#143): lo vendible — activos `is_liquid`. Brutos a propósito
+    // (sin restar pasivos ni descubierto): el objetivo empareja ese hueco con su término de
+    // cuotas completas (`debt_payments_remaining`). Desde 4.12.1 sin término de caja — teorema:
+    // el cruce solo pudo irse MÁS TARDE con este cambio, nunca adelantarse.
+    let liquid_fn = |vals: &[Decimal]| -> Decimal {
         input
             .assets
             .iter()
@@ -1485,18 +1471,12 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             .filter(|(a, _)| a.is_liquid)
             .map(|(_, v)| *v)
             .sum::<Decimal>()
-            + surplus
     };
     let mut liquid_series = Vec::with_capacity(input.horizon_months as usize + 1);
 
-    net_series.push(nw_fn(
-        &values,
-        &principals,
-        undrained_cumulative,
-        surplus_cash,
-    ));
-    liquid_series.push(liquid_fn(&values, surplus_cash));
-contrib_series.push(contributed_fn(&basis, surplus_cash));
+    net_series.push(nw_fn(&values, &principals, undrained_cumulative));
+    liquid_series.push(liquid_fn(&values));
+    contrib_series.push(contributed_fn(&basis));
     for (i, s) in per_asset_series.iter_mut().enumerate() {
         s.push(values[i]);
     }
@@ -1547,7 +1527,7 @@ contrib_series.push(contributed_fn(&basis, surplus_cash));
         // El cruce se decide contra el patrimonio LÍQUIDO al cierre del mes k-1 (#143): la
         // regla del SWR está calibrada sobre cartera vendible; una vivienda no produce
         // retirada. El total (`nw_fn`) sigue siendo lo que se publica y drena.
-        let liquid_prev = liquid_fn(&values, surplus_cash);
+        let liquid_prev = liquid_fn(&values);
         let fire_reached = fire_target_at_month_index(input.fire_target.as_ref(), k - 1)
             .map_or(false, |t| liquid_prev >= t);
         // Latch (#141): `retired` solo puede pasar a true; el objetivo deja de mirarse después.
@@ -1590,28 +1570,22 @@ contrib_series.push(contributed_fn(&basis, surplus_cash));
             - retirement_withdrawal;
 
         if net_cash_month <= Decimal::ZERO {
-            let need_net = -net_cash_month;
-            // La caja va PRIMERO y sin grossear (#140): `surplus_cash` entró ya tributada como
-            // renta del trabajo — venderla no realiza plusvalía. Grossear el déficit entero
-            // antes de tocarla inventaría un impuesto sobre euros que nunca fueron un fondo.
-            let from_surplus = surplus_cash.min(need_net);
-            surplus_cash -= from_surplus;
-            let need_assets_net = need_net - from_surplus;
-            // #178: la fracción de plusvalía gravable es POR ACTIVO cuando el activo declaró su
-            // coste (`purchase_price` presente, aunque sea 0): `g_i = 1 − b_i/v_i`, clampada a
-            // [0,1] (bajo el agua ⇒ 0; las minusvalías no compensan — divergencia declarada).
-            // Sin coste declarado, el activo usa el ESCALAR configurado — regla de
-            // compatibilidad: nadie ve moverse un número sin haber aportado el dato. `g_i` es
-            // invariante al drenaje del propio mes (b'/v_post = b/v_pre — teorema pineado en
-            // los tests), así que evaluarla aquí, antes de vender, no aproxima nada.
-            let gains: Vec<Decimal> = input
-                .assets
+            // 4.12.1: sin escalón de caja — el déficit entero se cubre vendiendo. La virtud
+            // fiscal del difunto escalón la hereda el drenaje natural: la cuenta al 0 % drena
+            // primero (drain_order) y su base alimentada por la cascada deriva g = 0 (b = v).
+            let need_assets_net = -net_cash_month;
+            // #178: la fracción de plusvalía gravable es POR ACTIVO cuando su base es un DATO —
+            // `purchase_price` declarado (aunque sea 0) O base alimentada por la propia cascada
+            // (`basis_declared`, extensión 4.12.1): `g_i = 1 − b_i/v_i`, clampada a [0,1] (bajo
+            // el agua ⇒ 0; las minusvalías no compensan — divergencia declarada). Sin dato, el
+            // ESCALAR configurado. `g_i` es invariante al drenaje del propio mes
+            // (b'/v_post = b/v_pre — teorema pineado), así que evaluarla aquí no aproxima nada.
+            let gains: Vec<Decimal> = values
                 .iter()
                 .enumerate()
-                .map(|(i, a)| {
-                    if a.purchase_price.is_some() && values[i] > Decimal::ZERO {
-                        (Decimal::ONE - basis[i] / values[i])
-                            .clamp(Decimal::ZERO, Decimal::ONE)
+                .map(|(i, v)| {
+                    if basis_declared[i] && *v > Decimal::ZERO {
+                        (Decimal::ONE - basis[i] / *v).clamp(Decimal::ZERO, Decimal::ONE)
                     } else {
                         input.taxable_gain_ratio
                     }
@@ -1747,10 +1721,9 @@ contrib_series.push(contributed_fn(&basis, surplus_cash));
                     }
                 }
             }
-        } else if in_retirement {
-            // In retirement any surplus stays as cash buffer; no new contributions are made.
-            surplus_cash += net_cash_month;
         } else {
+            // 4.12.1 (#175): la MISMA cascada, jubilado o no — nadie cambia de lógica al
+            // jubilarse. Los techos de la fase (#171) pasan de explicativos a vinculantes.
             // `None`: el bucle corre hasta 840 veces por request y nadie lee la traza aquí.
             let (alloc, leftover) = distribute_contributions(
                 net_cash_month,
@@ -1761,13 +1734,19 @@ contrib_series.push(contributed_fn(&basis, surplus_cash));
                 None,
             );
             for i in 0..values.len() {
-                values[i] += alloc[i];
-                basis[i] += alloc[i];
+                if alloc[i] > Decimal::ZERO {
+                    values[i] += alloc[i];
+                    // También jubilado (#120): lo reinvertido ES base de coste — sube b_i y
+                    // abarata las ventas futuras (#178). Y desde aquí la base de este activo
+                    // es un DATO observado: deriva su g aunque no declarara purchase_price.
+                    basis[i] += alloc[i];
+                    basis_declared[i] = true;
+                }
             }
             if leftover > Decimal::ZERO {
-                // Solo a la caja: la identidad `Σ basis + surplus_cash` ya lo cuenta como
-                // aportado — sumarlo también a una base sería contarlo dos veces.
-                surplus_cash += leftover;
+                // Decisión 3 (owner, 2026-08-31): el euro sin destino declarado NO se simula —
+                // fuera del balance, solo cuantificado. Inalcanzable en producción (#176).
+                unallocated_savings_total += leftover;
             }
         }
 
@@ -1786,15 +1765,10 @@ contrib_series.push(contributed_fn(&basis, surplus_cash));
             principals[i] = *closing;
         }
 
-        let nw = nw_fn(
-            &values,
-            &principals,
-            undrained_cumulative,
-            surplus_cash,
-        );
+        let nw = nw_fn(&values, &principals, undrained_cumulative);
         net_series.push(nw);
-        liquid_series.push(liquid_fn(&values, surplus_cash));
-    contrib_series.push(contributed_fn(&basis, surplus_cash));
+        liquid_series.push(liquid_fn(&values));
+        contrib_series.push(contributed_fn(&basis));
         for (i, s) in per_asset_series.iter_mut().enumerate() {
             s.push(values[i]);
         }
@@ -1806,6 +1780,7 @@ contrib_series.push(contributed_fn(&basis, surplus_cash));
         per_asset_series,
         assets_depleted_month_index,
         uncovered_deficit_total: undrained_cumulative,
+        unallocated_savings_total,
         liquid_worth: liquid_series,
     })
 }
@@ -2120,14 +2095,17 @@ mod tests {
         assert_eq!(err, EngineError::AssetValueOverflow);
     }
 
-    /// Regresión (auditoría 2026-08, H-cascada-1): en jubilación con superávit el bucle manda
-    /// todo el sobrante a `surplus_cash`, pero `first_month_allocation` ejecutaba la cascada y
-    /// publicaba aportaciones que la simulación no hace jamás. A mano: NW(0) = 200.000 ≥ target
-    /// 100.000 ⇒ jubilado; caja = 2.200 − 1.600 = 600 ⇒ per_asset = [0], leftover = 600, la
-    /// regla marcada `InRetirement` (no `NoCash`: caja hay). Y el bucle coincide:
-    /// NW(1) = 200.000 + 600 = 200.600 con el activo intacto en 200.000.
+    /// INVERTIDO en 4.12.1 (#175 — antes: `…_skips_cascade_in_retirement_like_the_loop`, la
+    /// regresión H-cascada-1 de la auditoría 2026-08, que pineaba «en jubilación la cascada no
+    /// corre y todo va a `surplus_cash`»). La decisión del owner la reescribe entera: la MISMA
+    /// cascada corre jubilado o no, y `surplus_cash` murió. A mano: NW(0) = 200.000 ≥ target
+    /// 100.000 ⇒ jubilado; caja = 2.200 − 1.600 = 600 ⇒ el sumidero se lleva los 600
+    /// (per_asset = [600], leftover = 0, sin skipped_reason). El bucle coincide:
+    /// NW(1) = 200.600 — el MISMO número que antes, por el mecanismo contrario (el euro vive en
+    /// el activo, no en una caja fantasma) — y la serie por activo lo enseña: 200.600, no
+    /// 200.000. Nunca borrar este test.
     #[test]
-    fn first_month_allocation_skips_cascade_in_retirement_like_the_loop() {
+    fn first_month_allocation_runs_the_cascade_in_retirement_like_the_loop() {
         let a = mk_asset(1, Decimal::from(200_000), true, None);
         let mut inp = base_input(
             2,
@@ -2141,18 +2119,16 @@ mod tests {
         inp.fire_target = Some(ft_flat(Decimal::from(100_000), Decimal::ZERO));
 
         let fma = first_month_allocation(&inp).unwrap();
-        assert_eq!(fma.per_asset, vec![Decimal::ZERO]);
-        assert_eq!(fma.leftover, Decimal::from(600));
+        assert_eq!(fma.per_asset, vec![Decimal::from(600)]);
+        assert_eq!(fma.leftover, Decimal::ZERO);
         assert_eq!(fma.base_cash, Decimal::from(600));
         assert_eq!(fma.rules.len(), 1);
-        assert_eq!(
-            fma.rules[0].skipped_reason,
-            Some(AllocationSkipReason::InRetirement)
-        );
+        assert_eq!(fma.rules[0].skipped_reason, None);
 
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.net_worth[1], Decimal::from(200_600));
-        assert_eq!(out.per_asset_series[0][1], Decimal::from(200_000));
+        assert_eq!(out.per_asset_series[0][1], Decimal::from(200_600));
+        assert_eq!(out.unallocated_savings_total, Decimal::ZERO);
     }
 
     /// Issue #96: el techo del cap se resuelve TAMBIÉN en un mes sin sobrante. A mano:
@@ -2211,15 +2187,20 @@ mod tests {
     }
 
     #[test]
-    fn no_rules_routes_surplus_to_cash() {
-        // Sin reglas: el sobrante queda como caja (surplus_cash) y entra al NW.
+    fn no_rules_strands_the_surplus_entirely() {
+        // INVERTIDO en 4.12.1 (antes: `no_rules_routes_surplus_to_cash`, que pineaba «el
+        // sobrante queda como surplus_cash y entra al NW»). Decisión 3 del owner: el euro sin
+        // regla que lo destine NO se simula — fuera del balance, solo CUANTIFICADO. En
+        // producción este estado es inalcanzable (siembra + sumidero indestructible #176);
+        // el motor, función pura, lo define así. Nunca borrar este test.
         let a = mk_asset(1, Decimal::ZERO, true, None);
         let inp = base_input(3, Decimal::from(3000), Decimal::from(1000), vec![a], vec![]);
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.net_worth[0], Decimal::ZERO);
-        assert_eq!(out.net_worth[1], Decimal::from(2000));
-        assert_eq!(out.net_worth[2], Decimal::from(4000));
-        assert_eq!(out.net_worth[3], Decimal::from(6000));
+        assert_eq!(out.net_worth[1], Decimal::ZERO);
+        assert_eq!(out.net_worth[2], Decimal::ZERO);
+        assert_eq!(out.net_worth[3], Decimal::ZERO);
+        assert_eq!(out.unallocated_savings_total, Decimal::from(6000));
     }
 
     #[test]
@@ -2383,9 +2364,10 @@ mod tests {
 
     #[test]
     fn multi_rules_same_asset_share_ceiling() {
-        // R1: fija 300 a A (cap 500). R2: remainder a A (cap 500).
-        // Sobrante 1000. R1 pone 300, A=300, room=200. R2 quiere todo (700) pero room=200 → 200.
-        // Quedan 500 sin asignar → surplus_cash. Sin regla remainder a otro, ese 500 va a cash.
+        // R1: fija 300 a A (cap 500). R2: remainder CON TOPE a A (cap 500) — un remainder con
+        // tope no es un sumidero. Sobrante 1000. R1 pone 300, A=300, room=200. R2 quiere todo
+        // (700) pero room=200 → 200. Quedan 500 sin regla que los destine: desde 4.12.1 NO
+        // entran al balance (decisión 3) — solo se cuantifican.
         let a = mk_asset(1, Decimal::ZERO, true, None);
         let inp = base_input(
             1,
@@ -2405,8 +2387,9 @@ mod tests {
         let nom = first_month_per_asset_contribution_nominals(&inp).unwrap();
         assert_eq!(nom[0], Decimal::from(500));
         let out = project_net_worth_series(&inp).unwrap();
-        // A llega a 500. Sobran 500 → surplus_cash. NW = 500 + 500 = 1000.
-        assert_eq!(out.net_worth[1], Decimal::from(1000));
+        // A llega a 500 y ahí termina el balance; los 500 varados se declaran aparte.
+        assert_eq!(out.net_worth[1], Decimal::from(500));
+        assert_eq!(out.unallocated_savings_total, Decimal::from(500));
     }
 
     #[test]
@@ -4250,6 +4233,9 @@ mod tests {
             Decimal::from(6_000),
             "sin inflación el techo es fijo y el colchón no crece"
         );
+        // 4.12.1 (decisión 3): cascada de solo-topes ya llena ⇒ CapFull todos los meses y los
+        // 2.000/mes × 24 quedan varados — cuantificados, fuera del balance.
+        assert_eq!(plano.unallocated_savings_total, Decimal::from(48_000));
         assert!(
             inflado.per_asset_series[0][24] > Decimal::from(6_000),
             "con inflación el techo sube y la regla sigue rellenando: {}",
@@ -4284,8 +4270,10 @@ mod tests {
     /// (superávit ⇒ rama `InRetirement`) o 1.000 (déficit ⇒ rama `else`, `NoCash`).
     /// months_expense(6): 6·(2.000+500) = 15.000 sin jubilar; 6·(1.500+500) = 12.000 jubilado
     /// (hoy publicaba 15.000 — la mentira). income_multiple(4): 4·3.000 = 12.000 sin jubilar;
-    /// 4·1.000 = 4.000 jubilado con déficit (hoy 12.000, factor 3). La serie NO cambia: en
-    /// jubilación el bucle no ejecuta la cascada — es un bug de explicación.
+    /// 4·1.000 = 4.000 jubilado con déficit (hoy 12.000, factor 3). Desde 4.12.1 (#175) la
+    /// cascada corre TAMBIÉN jubilada, así que estos techos ya GOBIERNAN euros de verdad — la
+    /// sustancia de #171 (los escalares de la fase) sobrevive intacta; lo que muere es que
+    /// fueran solo explicativos.
     #[test]
     fn the_retirement_trace_resolves_caps_with_the_months_budget() {
         let build = |retired: bool, income_ret: Decimal, cap: AllocationCap| {
@@ -4323,9 +4311,10 @@ mod tests {
         assert_eq!(a.rules[0].cap_ceiling, Some(Decimal::from(15_000)));
         assert_eq!(a.rules[0].cap_room, Some(Decimal::from(12_000)));
 
-        // B · jubilado con SUPERÁVIT (rama InRetirement): techo 12.000, hueco 9.000.
+        // B · jubilado con SUPERÁVIT: desde 4.12.1 la cascada CORRE (500 de superávit al
+        // sumidero, sin skipped_reason) y los techos de la fase lo gobiernan: 12.000 / 9.000.
         let b = build(true, Decimal::from(2_500), me6());
-        assert_eq!(b.rules[0].skipped_reason, Some(AllocationSkipReason::InRetirement));
+        assert_eq!(b.rules[0].skipped_reason, None);
         assert_eq!(b.rules[0].cap_ceiling, Some(Decimal::from(12_000)));
         assert_eq!(b.rules[0].cap_room, Some(Decimal::from(9_000)));
 
@@ -4368,14 +4357,17 @@ mod tests {
         assert_eq!(out.per_asset_series[1][1], Decimal::from(15_000));
     }
 
-    /// #120, bullet 2 — el superávit del jubilado cuenta como aportado. Es el escenario
-    /// H-capital-10 del propio issue: cartera 1.000.000 al 5 %, jubilado desde el mes 1,
-    /// pensión 2.000 / gasto 1.000, 24 meses, sin purchase_price. El sobrante va a
-    /// `surplus_cash` (la cascada no corre en jubilación) y la identidad
-    /// `contributed = Σ basis + surplus_cash` lo cuenta solo: 24 × 1.000 = **24.000**
-    /// (hasta 4.9.0: 0). El activo compone intocado: 1.000.000·1,05² = 1.102.500.
+    /// INVERTIDO en 4.12.1 (antes: `retirement_surplus_counts_as_contributed`, el escenario
+    /// H-capital-10 de #120, que pineaba «el sobrante jubilado va a surplus_cash y cuenta como
+    /// aportado»). Con `surplus_cash` muerto y SIN NINGUNA REGLA, el superávit de pensión no
+    /// tiene destino: no compone, no es aportado, no entra al NW — solo se cuantifica
+    /// (24 × 1.000 = 24.000, decisión 3 del owner; el titular es que los euros NO desaparecen
+    /// sin decirlo). El activo compone intocado: 1.000.000·1,05² = 1.102.500, y eso ES ahora
+    /// el NW entero. El caso CON regla (el de producción, donde el superávit sí compone —
+    /// 180.000 → 409.348,92 en el ancla del CHANGELOG) vive en
+    /// `retirement_surplus_runs_the_users_cascade`. Nunca borrar este test.
     #[test]
-    fn retirement_surplus_counts_as_contributed() {
+    fn retirement_surplus_without_rules_is_stranded_and_quantified() {
         let fondo = mk_asset(0xE3, Decimal::from(1_000_000), true, Some(Decimal::from(5)));
         let mut inp = base_input(24, Decimal::from(3_000), Decimal::from(1_000), vec![fondo], vec![]);
         inp.retirement_start_month = Some(1);
@@ -4383,13 +4375,40 @@ mod tests {
         inp.expense_retirement_monthly = Decimal::from(1_000);
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.contributed_capital[0], Decimal::ZERO);
-        assert_eq!(out.contributed_capital[24], Decimal::from(24_000));
+        assert_eq!(out.contributed_capital[24], Decimal::ZERO);
         assert_eq!(
             out.per_asset_series[0][24].round_dp(2),
             dec_s("1102500.00"),
             "1.000.000 × 1,05² — el activo compone intocado"
         );
-        assert_eq!(out.net_worth[24].round_dp(2), dec_s("1126500.00"));
+        assert_eq!(out.net_worth[24].round_dp(2), dec_s("1102500.00"));
+        assert_eq!(out.unallocated_savings_total, Decimal::from(24_000));
+    }
+
+    /// 4.12.1 (#175) — EL ancla del CHANGELOG, derivada del bucle real por triple fuente:
+    /// jubilado desde el mes 1, pensión 1.500 / gasto 1.000 (superávit 500 €/mes), inflación 0,
+    /// activo al 5 % CON la regla resto (el estado de producción: siembra + #176). La cascada
+    /// corre también jubilada y el superávit COMPONE como renta prepagable:
+    /// V(360) = 500·m·(m³⁶⁰−1)/(m−1) con m = 1,05^(1/12) ⇒ **409.348,92 €** — donde 4.12.0
+    /// acumulaba 180.000,00 € muertos en caja (Δ = +229.348,92, el coste exacto que #175
+    /// cifró). Y lo reinvertido ES base: contributed(360) = 180.000 exactos.
+    #[test]
+    fn retirement_surplus_runs_the_users_cascade() {
+        let fondo = mk_asset(0xE4, Decimal::ZERO, true, Some(Decimal::from(5)));
+        let mut inp = base_input(
+            360,
+            Decimal::from(3_000),
+            Decimal::from(1_000),
+            vec![fondo],
+            vec![rule_remainder(0)],
+        );
+        inp.retirement_start_month = Some(1);
+        inp.income_retirement_monthly = Decimal::from(1_500);
+        inp.expense_retirement_monthly = Decimal::from(1_000);
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(out.net_worth[360].round_dp(2), dec_s("409348.92"));
+        assert_eq!(out.contributed_capital[360], Decimal::from(180_000));
+        assert_eq!(out.unallocated_savings_total, Decimal::ZERO);
     }
 
     /// #140 fase 1 — el escenario de coste del issue, pineado con el número CORREGIDO en el
