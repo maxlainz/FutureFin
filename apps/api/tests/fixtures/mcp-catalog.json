@@ -1109,6 +1109,7 @@
         "$defs.FireSettingsOverrideParam.savings_source": "enum=[\"budget\",\"budget_income_real_expense\",\"transactions_avg\"] type=[\"null\",\"string\"]",
         "$defs.FireSettingsOverrideParam.tax_brackets": "type=[\"array\",\"null\"]",
         "$defs.FireSettingsOverrideParam.tax_brackets[]": "$ref=\"#/$defs/TaxBracketParam\"",
+        "$defs.FireSettingsOverrideParam.taxable_gain_ratio": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$defs.FireSettingsOverrideParam.taxes_enabled": "type=[\"boolean\",\"null\"]",
         "$defs.LiabilityOverrideParam": "additionalProperties=false required=[\"liability_id\"] type=\"object\"",
         "$defs.LiabilityOverrideParam.apr_percent": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
@@ -1128,7 +1129,7 @@
         "$defs.TaxBracketParam.pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
         "$defs.TaxBracketParam.up_to": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "f18bf1d4f746",
+      "constraints_sha256_12": "3bf65068c336",
       "description_len": 588,
       "description_sha256_12": "b22212f22fb4",
       "name": "simulate_projection",
@@ -1361,12 +1362,13 @@
         "$.swr_pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$.tax_brackets": "type=[\"array\",\"null\"]",
         "$.tax_brackets[]": "$ref=\"#/$defs/TaxBracketParam\"",
+        "$.taxable_gain_ratio": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$.taxes_enabled": "type=[\"boolean\",\"null\"]",
         "$defs.TaxBracketParam": "additionalProperties=false required=[\"pct\"] type=\"object\"",
         "$defs.TaxBracketParam.pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
         "$defs.TaxBracketParam.up_to": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "5e9b4d5df7ba",
+      "constraints_sha256_12": "adcd71dd9b6b",
       "description_len": 580,
       "description_sha256_12": "b5c35aa33f0d",
       "name": "update_fire_settings",
@@ -1383,6 +1385,7 @@
         "savings_source",
         "swr_pct",
         "tax_brackets",
+        "taxable_gain_ratio",
         "taxes_enabled"
       ],
       "required": []

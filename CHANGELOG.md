@@ -4,6 +4,72 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.10.0] - 2026-08-31
+
+**Ola 6 de la resolución — «El impuesto que sí se paga»** (issues #120, #140, #170, #171 — los
+dos últimos entraron por orden del owner: deuda mínima o inexistente). **DOS breaking de cifra en
+sentidos opuestos**: el patrimonio proyectado BAJA (la retirada tributa) y el objetivo SUBE en los
+años lejanos (la necesidad real se evalúa mes a mes). Un hogar que hoy se cree jubilable puede
+dejar de serlo por las dos puntas a la vez — eso es el realismo que faltaba, no un bug nuevo.
+Números a mano (spike Opus + réplica independiente en sesión + engine, tres derivaciones
+coincidentes al céntimo).
+
+### La retirada simulada también paga impuestos (#140 fase 1) — BREAKING
+
+- **Todo drenaje de activos vende BRUTO**: cubrir un déficit de 2.000 € netos cuesta
+  gross_up(24.000)/12 = 2.518,99 € de venta con los tramos ES — jubilado o no (gatear por fase
+  crearía un salto artificial del +25,95 % en el cruce). La caja (`surplus_cash`) nunca se
+  grossea: entró ya tributada como renta.
+- El escenario de coste del issue: patrimonio final a 30 años **2.095.261,95 → 1.670.368,13**
+  (−424.893,82; el «1.670.367» que circulaba era un artefacto de resta, corregido en el issue).
+  El pin de agotamiento con impuestos: la cartera de 200.000 € se vacía en el mes **80** (antes
+  100) y el descubierto acumulado es **NETO** (−561.200,00, con identidad comprobable
+  720.000 − 158.800 — el bruto habría cobrado impuesto sobre ventas que no ocurrieron).
+- `gross_up_net_annual_fire` y `TaxBracket` **viven ahora en el motor**
+  (`crates/engine/src/tax.rs`), con serde idéntica (el JSONB almacenado deserializa igual).
+
+### La fracción de plusvalía gravable es tuya (#140 fase 2)
+
+- `taxable_gain_ratio` (0–1, de serie 1 = reembolso íntegro, lo más prudente): en la realidad
+  española solo tributa la ganancia, y si tu cartera es mitad coste, un 0,5 es más realista.
+  **Una sola fiscalidad**: la misma g entra en el objetivo, en el drenaje simulado y en los dos
+  umbrales del runway; simulable sin persistir. Con g=0,5 el objetivo del escenario tipo baja
+  un 11,7 % (863.652,80 → **762.330,41** — el ≈762.314 del issue redondeaba un intermedio).
+  g=1 es bit-idéntico a la fase 1 (probado con assert_eq, sin tolerancia).
+
+### El objetivo se evalúa mes a mes sobre la necesidad real (#170) — BREAKING
+
+- `target(k) = gross_up(gasto·f(k) − pensión_plana)/SWR + término_deuda(k)`: la pensión se resta
+  DESPUÉS de inflar (hasta 4.9.0 se restaba antes, y el objetivo se quedaba corto en
+  `pensión·(f(k)−1)/SWR` — caso central: target a 20 años **509.467,68 → 676.078,21**, el Δ son
+  exactamente los 166.610,54 € cuantificados en el issue).
+- **El fiscal drag existe aunque no tengas pensión**: los tramos son nominales y retirar más
+  euros nominales dentro de 30 años cae en tramos más altos — +7.140,43 € de objetivo a 30 años
+  en el caso sin pensión. La evaluación por mes lo captura en los tres modos.
+- **El número del formulario no se mueve**: en el mes 0 la fórmula degenera exacta (fire-parity
+  intacto, 10 casos + 7 nuevos del eje g). Con deflación, la necesidad puede agotarse dentro del
+  horizonte y el objetivo queda en solo-deuda: te jubilas cuando tu pensión deflactada cubre el
+  gasto.
+
+### Lo aportado baja cuando vendes (#120)
+
+- La base de coste es **por activo** y baja proporcionalmente al valor drenado (vaciar un activo
+  deja su base en 0 exacto); el superávit del jubilado **cuenta como aportado** (+24.000 € en el
+  escenario del issue, antes 0). La serie «aportado» del chart **deja de ser monótona** — vender
+  baja lo aportado, como en la realidad.
+
+### Y de propina
+
+- **La Autonomía paga los mismos impuestos** (el gemelo del issue, destapado en el spike): el
+  bucle finito del runway vendía el gasto neto mientras su umbral pedía capital fiscal. Ahora
+  vende bruto con la misma escala y la misma g: la tarjeta baja de 10,0 a **8,0** meses en el
+  escenario canónico con los tramos ES (y la división simple «líquidos/gasto» solo sobrevive con
+  impuestos apagados).
+- La traza de asignación de un jubilado resuelve sus techos con el presupuesto de jubilación
+  (#171): un `income_multiple(4)` publicaba 12.000 € de techo sobre una nómina que ya no se
+  cobra donde el bucle usaría 4.000 €. Solo explicación — la curva no cambia.
+- Hardening: un activo con valor negativo (colable por restore) ya no «financia» drenajes.
+
 ## [4.9.0] - 2026-08-31
 
 **Ola 5 de la resolución — «La inflación y el horizonte»** (issues #139, #146, #149). La ola que

@@ -247,6 +247,7 @@
     "tax_brackets_not_increasing",
     "tax_brackets_open_not_last",
     "tax_brackets_ordering_invalid",
+    "taxable_gain_ratio_out_of_range",
     "terms_only_for_liabilities",
     "timezone_invalid",
     "title_empty",

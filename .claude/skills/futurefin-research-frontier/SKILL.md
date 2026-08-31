@@ -160,7 +160,9 @@ thousands of households with zero mocking. 22+ example tests already encode expe
    `1..=240` (keep runtime sane; 840 in a few `#[test]` spot checks only), 0–4 assets,
    0–4 rules with valid `target_index`, rates `0..=15`.
 3. Implement properties named `prop_cascade_conserves_pool`, `prop_caps_never_exceeded`,
-   `prop_series_lengths_align`, `prop_contributed_capital_monotone`,
+   `prop_series_lengths_align`, `prop_contributed_capital_bounded` (OJO: la monotonía que aquí
+   se proponía MURIÓ con #120/4.10.0 — vender baja la base a propósito; el invariante que sí
+   sobrevive es `contributed(k) ≤ Σ purchase_price + Σ aportaciones acumuladas`),
    `prop_zero_rate_accounting_identity`, `prop_replay_bit_identical`; run with
    `cargo test -p futurefin-engine` (CI already runs this target, `.github/workflows/ci.yml`).
 

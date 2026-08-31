@@ -784,6 +784,26 @@ export function SettingsView({
                       ))}
                     </select>
                   </label>
+                  <label className="field">
+                    <span className="label-with-help">
+                      Plusvalía gravable de la retirada
+                      <HelpPopover
+                        title={HELP_TEXTS["settings.taxable_gain"].title}
+                        body={HELP_TEXTS["settings.taxable_gain"].body}
+                      />
+                    </span>
+                    <input
+                      inputMode="decimal"
+                      value={String(fireTaxDraft.taxable_gain_ratio ?? "1")}
+                      onChange={(e) => {
+                        const raw = e.target.value.trim().replace(",", ".");
+                        setFireTaxDraft((prev) => ({
+                          ...prev,
+                          taxable_gain_ratio: raw,
+                        }));
+                      }}
+                    />
+                  </label>
               </div>
             ) : null}
             <p className="muted tight">

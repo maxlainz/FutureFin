@@ -91,6 +91,9 @@ pub fn liquid_runway_months(
     annual_inflation_percent: Decimal,
     swr_pct: Decimal,
     annual_expense_for_swr: Decimal,
+    tax_brackets: &[crate::tax::TaxBracket],
+    taxes_enabled: bool,
+    taxable_gain_ratio: Decimal,
 ) -> RunwayOutcome {
     if monthly_expense <= Decimal::ZERO {
         return RunwayOutcome::NoExpenseBase;
@@ -139,12 +142,19 @@ pub fn liquid_runway_months(
 
     let mut g = monthly_expense;
     for k in 1..=MAX_RUNWAY_MONTHS {
+        // El gemelo de #140 (Ola 6): cubrir el gasto vendiendo líquidos TRIBUTA — hasta 4.9.x
+        // el umbral pedía el gasto grosseado y el bucle lo gastaba libre de impuestos, la misma
+        // asimetría del drain en otra tarjeta. El gross-up va DENTRO del bucle, sobre el gasto
+        // YA inflado del mes (gross_up es afín: grossear fuera y dejar que la inflación escale
+        // el bruto divergiría — D-1). Con `taxes_enabled = false` es la identidad y la
+        // reducción exacta a A/g sigue intacta.
+        let need_gross = crate::tax::gross_up_monthly(g, tax_brackets, taxes_enabled, taxable_gain_ratio);
         let total: Decimal = vals.iter().sum();
-        if total < g {
+        if total < need_gross {
             // Mes final fraccionario: la parte del mes k que el saldo aún cubre.
-            return RunwayOutcome::Months(Decimal::from(k - 1) + total / g);
+            return RunwayOutcome::Months(Decimal::from(k - 1) + total / need_gross);
         }
-        let mut need = g;
+        let mut need = need_gross;
         for &idx in &order {
             if need <= Decimal::ZERO {
                 break;
@@ -187,7 +197,7 @@ mod tests {
         infl: Decimal,
         swr_pct: Decimal,
     ) -> RunwayOutcome {
-        liquid_runway_months(assets, g, infl, swr_pct, g * d(12))
+        liquid_runway_months(assets, g, infl, swr_pct, g * d(12), &[], false, Decimal::ONE)
     }
 
     fn months(o: RunwayOutcome) -> Decimal {
@@ -461,10 +471,10 @@ mod tests {
     #[test]
     fn grossed_expense_raises_threshold() {
         let assets = [(d(1_000_000), Some(d(7)))];
-        let sin_gross = liquid_runway_months(&assets, d(1_000), Decimal::ZERO, swr(), d(12_000));
+        let sin_gross = liquid_runway_months(&assets, d(1_000), Decimal::ZERO, swr(), d(12_000), &[], false, Decimal::ONE);
         assert_eq!(sin_gross, RunwayOutcome::Indefinite);
 
-        let con_gross = liquid_runway_months(&assets, d(1_000), Decimal::ZERO, swr(), d(36_000));
+        let con_gross = liquid_runway_months(&assets, d(1_000), Decimal::ZERO, swr(), d(36_000), &[], false, Decimal::ONE);
         assert_eq!(
             con_gross,
             RunwayOutcome::Months(Decimal::from(MAX_RUNWAY_MONTHS)),
@@ -486,5 +496,41 @@ mod tests {
             out > d(12_112) / d(1_000) && out < d(12_113) / d(1_000),
             "esperado ≈12,1127 meses, got {out}"
         );
+    }
+
+    /// El gemelo de #140 (Ola 6): el bucle finito TRIBUTA — vender líquidos para pagar el gasto
+    /// realiza plusvalía, igual que el drain de la simulación. 12.000 € sin rentabilidad, gasto
+    /// 1.000 €/mes, tramos ES, g = 1: la venta bruta mensual es gross_up(12.000)/12 =
+    /// 15.037,9747/12 = 1.253,1646 → runway = 12.000/1.253,16 ≈ **9,5758** meses (era 12 con el
+    /// bucle libre de impuestos — el umbral pedía capital fiscal y el drenaje lo gastaba
+    /// gratis). Con g = 0 vuelve a 12 exactos: la identidad con taxes-off.
+    #[test]
+    fn the_finite_loop_pays_the_same_taxes_as_the_threshold() {
+        let es = crate::tax::es_brackets_for_tests();
+        let taxed = months(liquid_runway_months(
+            &[(d(12_000), None)],
+            d(1_000),
+            Decimal::ZERO,
+            swr(),
+            d(12_000),
+            &es,
+            true,
+            Decimal::ONE,
+        ));
+        assert!(
+            taxed > d(9_575) / d(1_000) && taxed < d(9_576) / d(1_000),
+            "esperado ≈9,5758, got {taxed}"
+        );
+        let g_zero = liquid_runway_months(
+            &[(d(12_000), None)],
+            d(1_000),
+            Decimal::ZERO,
+            swr(),
+            d(12_000),
+            &es,
+            true,
+            Decimal::ZERO,
+        );
+        assert_eq!(g_zero, RunwayOutcome::Months(d(12)), "g = 0 ≡ sin impuestos: A/g exacto");
     }
 }

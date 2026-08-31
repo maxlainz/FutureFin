@@ -4,6 +4,7 @@ mod history;
 mod net_return;
 mod projection;
 mod runway;
+mod tax;
 
 pub use history::{
     add_months_signed, amortized_segment_value, anchored_cashflow_segment_value, evaluate_timeline,
@@ -12,18 +13,20 @@ pub use history::{
 };
 pub use net_return::{net_return_percentages, NetReturn};
 pub use projection::{
-    debt_payments_remaining_series, fire_target_at_month_index, first_month_allocation,
+    debt_payments_remaining_series, fire_target_at_month_index, fire_target_base_at_month_index,
+    first_month_allocation,
     first_month_per_asset_contribution_nominals, liability_amortization_schedule,
     liability_interest_accrues,
     present_value_of_payments, project_net_worth_series, resolve_cap_ceiling, AllocationCap,
     AllocationKind,
-    AllocationRule, AllocationSkipReason, EngineError, FireTarget, FirstMonthAllocation,
+    AllocationRule, AllocationSkipReason, EngineError, FireNeed, FireTarget, FirstMonthAllocation,
     EarlyRepaymentEffect, LiabilityPayoffAbsence, LiabilitySchedule, LiabilityScheduleMonth,
     ProjectionInput,
     ProjectionLiabilityInput, ProjectionOutput, RepaymentModel, RuleOutcome, SimAsset,
     MAX_LIABILITY_SCHEDULE_MONTHS,
 };
 pub use runway::{liquid_runway_months, RunwayOutcome, MAX_RUNWAY_MONTHS};
+pub use tax::{after_tax_monthly, gross_up_monthly, gross_up_net_annual_fire, tax_on_gross_capital_annual, TaxBracket};
 
 #[cfg(test)]
 mod no_f64_in_domain_code {

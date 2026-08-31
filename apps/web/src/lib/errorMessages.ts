@@ -475,6 +475,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   inflation_out_of_range: "La inflación anual debe estar entre -2 y 50 %.",
   horizon_lifespan_age_out_of_range:
     "La edad límite del horizonte debe estar entre 85 y 105 años.",
+  taxable_gain_ratio_out_of_range:
+    "La fracción de plusvalía gravable debe estar entre 0 y 1 (por ejemplo, 0,5).",
   apr_out_of_range:
     "El TIN anual debe estar entre 0 y 100 %. Si has escrito 350 queriendo decir 3,50, usa la coma decimal.",
   backup_asset_return_invalid:

@@ -185,6 +185,17 @@ export const HELP_TEXTS = {
       "convierte tu gasto anual en el objetivo FIRE: cuanto más baja la tasa, más grande el " +
       "objetivo.",
   },
+  "settings.taxable_gain": {
+    title: "Plusvalía gravable de la retirada",
+    body:
+      "Qué parte de cada euro que vendas en la jubilación es ganancia que tributa (de 0 a 1; de " +
+      "serie, 1 = todo el reembolso tributa, lo más prudente). En la realidad española solo " +
+      "tributa la plusvalía — lo que el fondo ganó desde que compraste —, así que si tu cartera " +
+      "es mitad coste y mitad ganancia, un 0,5 es más realista. Bajarla mueve DOS cosas a la " +
+      "vez: tu objetivo baja (necesitas vender menos bruto para el mismo neto) y la simulación " +
+      "te descuenta menos impuestos al vender. Se aplica igual en el objetivo, en la curva y en " +
+      "la Autonomía — una sola fiscalidad.",
+  },
   "settings.horizon_age": {
     title: "Edad límite del horizonte",
     body:

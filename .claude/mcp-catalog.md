@@ -181,7 +181,11 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   regla se salta entera sin error ni flag.
   **`fire_settings_overrides` (4.0.0, auditoría de simulate_projection §3)**: hasta 4.0.0 el ÚNICO campo de
   `FireSettings` simulable era `swr_pct`, así que preguntar «¿y si cumplo el presupuesto?» exigía
-  persistir el cambio con `update_fire_settings`. Ahora se pueden simular `savings_source`,
+  persistir el cambio con `update_fire_settings`. Desde 4.10.0 (#140 fase 2) el eje
+  `taxable_gain_ratio` (g, fracción [0,1], string decimal, default "1") existe en LAS DOS
+  superficies — override de `simulate_projection` Y `update_fire_settings` — y mueve dos cosas a
+  la vez: el objetivo baja Y la retirada bruta simulada baja (el cruce se adelanta por las dos
+  puntas; el texto de ayuda lo dice entero). Ahora se pueden simular `savings_source`,
   `fire_number_mode` + `fire_number_manual_amount`, `taxes_enabled`, `tax_brackets` y las cuatro
   ventanas del promedio. **Punto de aplicación: entre el clon de `fire_settings` y
   `validate_fire_settings`, NUNCA post-build** — `savings_source` y las ventanas las lee el

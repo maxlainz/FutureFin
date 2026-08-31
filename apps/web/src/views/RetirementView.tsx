@@ -206,7 +206,12 @@ export function RetirementView({
 
     let targetNoPen: number | null = null;
     if (needAnnual !== null && needAnnual > 0 && swrN !== null && swrN > 0) {
-      const grossNoPen = grossUpNetAnnualFire(needAnnual, brackets, taxOn);
+      const grossNoPen = grossUpNetAnnualFire(
+        needAnnual,
+        brackets,
+        taxOn,
+        Number(fireDraft.taxable_gain_ratio ?? "1"),
+      );
       targetNoPen = grossNoPen / (swrN / 100);
       // #142 (4.8.0): el objetivo lleva además el término finito de deuda (Σ cuotas restantes
       // + residuales). El cliente NO puede derivarlo (necesita el calendario completo de cada

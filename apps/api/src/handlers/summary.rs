@@ -5,9 +5,8 @@ use crate::handlers::installation::{
     installation_calendar_inflation_fire, require_installation_member, SavingsSource,
 };
 use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
-use crate::handlers::projection::{
-    gross_up_net_annual_fire, resolve_effective_savings_inputs, SavingsAvgBasis,
-};
+use crate::handlers::projection::{resolve_effective_savings_inputs, SavingsAvgBasis};
+use futurefin_engine::gross_up_net_annual_fire;
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::summary::transactions_avg;
 use crate::state::AppState;
@@ -111,7 +110,10 @@ pub struct FinancialHealthMetrics {
     /// drenándolos en el MISMO orden que la simulación real — menor rentabilidad esperada primero,
     /// cada saldo restante componiendo la suya (#128; hasta 4.7.x se usaba una media ponderada por
     /// valor, sistemáticamente más corta en carteras mixtas) — y con el gasto creciendo a la
-    /// inflación de la instalación (`futurefin_engine::liquid_runway_months`). `null` cuando no hay
+    /// inflación de la instalación (`futurefin_engine::liquid_runway_months`). Desde 4.10.0
+    /// (gemelo de #140) el bucle vende **BRUTO**: cubrir el gasto realiza plusvalía, con la
+    /// misma escala y la misma `taxable_gain_ratio` que el objetivo — la identidad
+    /// «líquidos / gasto» solo sobrevive con impuestos apagados. `null` cuando no hay
     /// base de gasto (`expense_total == 0`) **o** cuando el runway es indefinido (ver
     /// `runway_is_indefinite`). El valor `1200` es el tope del bucle del servidor y significa
     /// «al menos 100 años» (un **suelo**, no una medida exacta).
@@ -604,10 +606,13 @@ pub(crate) async fn summary_core(
     // fiscales que el target FIRE: infinito ⟺ gross_up(12·expense_tot) ≤ liquid·(swr/100) (ver
     // `runway.rs`). Por debajo del umbral y sin rentabilidad ni inflación se reduce EXACTO a
     // `liquid_assets / expense_tot`, que es el contrato histórico.
+    // #140 fase 2: el umbral del runway pasa g — la misma venta y el mismo impuesto que el
+    // objetivo; dejarlo a g=1 reabriría la asimetría en otra tarjeta.
     let annual_expense_gross = gross_up_net_annual_fire(
         expense_tot * Decimal::from(12u32),
         &fire.tax_brackets,
         fire.taxes_enabled,
+        fire.taxable_gain_ratio,
     );
     let (runway_months, runway_is_indefinite) = match liquid_runway_months(
         &liquid_rows,
@@ -615,6 +620,9 @@ pub(crate) async fn summary_core(
         inflation_pct,
         fire.swr_pct,
         annual_expense_gross,
+        &fire.tax_brackets,
+        fire.taxes_enabled,
+        fire.taxable_gain_ratio,
     ) {
         // 1 decimal, alineado con `sim_kpis` (`handlers/projection.rs`): el mismo número no puede
         // publicarse con dos precisiones según por qué puerta entres. El engine sigue exacto.

@@ -115,7 +115,14 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
     assert_eq!(jub, 235, "jubilacion_month_index capturado: {jub}");
     assert!((nw12 - (-80_006.71)).abs() < 0.01, "NW(12) capturado: {nw12}");
     assert!((nw180 - 316_313.32).abs() < 0.01, "NW(180) capturado: {nw180}");
-    assert!((nw360 - 703_274.35).abs() < 0.01, "NW(360) capturado: {nw360}");
+    // Ola 6 (#140 fase 1): el drenaje de jubilación TRIBUTA — con gasto retirado 1.200 €/mes
+    // el bruto mensual es gross_up(14.400)/12 = 1.506,33 (+306,33 de impuesto), y los ~125
+    // meses de drenaje tras el cruce (235) dejan NW(360) en 653.270,22 (capturado; antes
+    // 703.274,35 — ≈−50 k€, coherente con 306 €/mes × 125 m + composición al 5 %). El cruce y
+    // NW(180) NO se mueven: antes del 235 este hogar no drena (caja positiva). El mecanismo
+    // exacto está pineado a mano en el engine (`the_simulated_withdrawal_also_pays_taxes`,
+    // `depletion_arrives_earlier_and_the_uncovered_deficit_is_net`).
+    assert!((nw360 - 653_270.22).abs() < 0.01, "NW(360) capturado: {nw360}");
 }
 
 /// Escenario B — «inflación 2,5 %» (lo moverán #146/#139/#149 en la Ola 5).
