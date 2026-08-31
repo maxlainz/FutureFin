@@ -5,6 +5,17 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.9.0
+
+- **La inflación ahora encarece tu gasto mes a mes** (el de hoy y el de jubilación); tus ingresos
+  se quedan planos a propósito — las subidas de sueldo hay que peleárselas, la simulación no las
+  regala. Las curvas y la fecha de jubilación de cualquier plan con inflación configurada cambian:
+  el modelo era estructuralmente optimista y deja de serlo.
+- Puedes poner la inflación **en negativo** (hasta −2 %) para estresar tu plan con deflación, y
+  las instalaciones nuevas nacen asumiendo un 2,5 % (el objetivo del BCE) en vez de 0 %.
+- La proyección llega hasta la **edad que tú elijas** (85–105, de serie 90): subirla revela si tu
+  plan aguanta la cola de longevidad. El margen al final se lee en la propia curva.
+
 ## 4.8.0
 
 - El objetivo de jubilación ahora cuenta la deuda que te queda: a la cifra de siempre se le suman

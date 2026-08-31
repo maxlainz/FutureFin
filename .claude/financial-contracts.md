@@ -205,6 +205,18 @@ sin deflactar quedan declarados en la ayuda (#125); `net_recurring_monthly`/`net
 convergen al primer paso real del motor (`first_month_allocation`, que ya no atajea a ceros sin
 activos) (#127); «Autonomía: indefinida» exige rentabilidad esperada ponderada > 0 además del
 umbral SWR, y el caso finito drena secuencialmente como la simulación (#128).
+**Resueltas en 4.9.0 (Ola 5 — «La inflación y el horizonte»)**: el GASTO del bucle (regular y de
+jubilación) se indexa a la inflación de la instalación con el factor único sobre el eje `(k−1)/12`
+— los INGRESOS quedan planos por decisión del owner («las subidas hay que pelearlas»); la
+corrección del «coste medido» del issue está publicada en el propio #139 (su «mes 335» era la
+alternativa rechazada de indexarlo todo: con la decisión firmada el hogar del ejemplo no cruza en
+840 meses y entra en déficit el mes 247) (#139); la inflación admite negativos — rango [−2, 50],
+default 2,5 % SOLO en instalaciones nuevas, y caen las 11 capas de aplanado (5 clamps, la rama
+del engine, el deflactor, el gate de milestones_real, 2 regex MCP y los suelos de la SPA): con
+deflación el objetivo DECRECE (t(120) = 705.667,217472 sobre 863.652,80 a −2 %) y lo real queda
+por encima de lo nominal (#146); la edad límite del horizonte es configurable
+(`fire_settings.horizon_lifespan_age`, 85..=105, default 90; basis `lifespan_age` +
+`horizon_lifespan_age` ecoada; margen al final = último punto + `final_net_worth_real`) (#149).
 
 ### Con dirección decidida por el owner (2026-08-30) — pendientes de implementar
 
@@ -212,13 +224,10 @@ umbral SWR, y el caso finito drena secuencialmente como la simulación (#128).
 |---|---|---|
 | Deuda en el objetivo: la cuota cuenta los meses que quedan de préstamo, en los 3 modos; en B/C la deuda vuelve a amortizar | hasta 3,28 M€ (+236 %) / 522 k€ / 442 k€ según pata | [#142](https://github.com/maxlainz/FutureFin/issues/142) |
 | Jubilación absorbente (latch, sin re-empleo automático) | 152-266 k€ de patrimonio fantasma (hasta 77 % del NW) | [#141](https://github.com/maxlainz/FutureFin/issues/141) |
-| Gastos indexados al IPC; ingresos planos («las subidas se pelean») | 334 k€ de gasto de jubilación no cobrado a 30 a | [#139](https://github.com/maxlainz/FutureFin/issues/139) |
 | Fiscalidad: retirada simulada grosseada + base plusvalía por fases (g, default 1,0) | 425 k€ de NW ficticio; objetivo −8/−13 % con g=0,5 | [#140](https://github.com/maxlainz/FutureFin/issues/140) |
 | Solo el patrimonio líquido decide el cruce FIRE | falso «FIRE hoy» con déficit real de 383 k€ | [#143](https://github.com/maxlainz/FutureFin/issues/143) |
-| Inflación default 2,5 % + rango [−2, 50] | objetivo −64 % con el default 0 % actual | [#146](https://github.com/maxlainz/FutureFin/issues/146) |
 | Importes del presupuesto declarados «netos» en la GUI | ~103 k€ de objetivo si se teclea la pensión bruta | [#147](https://github.com/maxlainz/FutureFin/issues/147) |
 | «Próximos» con flujos recurrentes con fecha (dirección del owner) | 355 k€ de alquiler perpetuo; 607 k€ de pensión anticipada | [#148](https://github.com/maxlainz/FutureFin/issues/148) |
-| Horizonte: margen visible al final + edad límite configurable | 151-190 k€ de cola no financiada | [#149](https://github.com/maxlainz/FutureFin/issues/149) |
 | Regla remainder obligatoria (default: primer activo) | 360 k€ muertos vs ~1,22 M€ invertidos (30 a) | [#150](https://github.com/maxlainz/FutureFin/issues/150) |
 
 ### Pendientes de decisión de arreglo (issue por divergencia)
@@ -243,6 +252,7 @@ umbral SWR, y el caso finito drena secuencialmente como la simulación (#128).
 | Regla de millares en campos % («7.125» = 7125 %) (D33-%) | proyección rechazada con 400 tipado (tras 4.5.0) | Trampa documentada; el 400 tipado de 4.5.0 la hace ruidosa |
 | Descubierto/`undrained` al 0 % (parte de D9) | agujero subestimado ~220 k€ al 18-20 % TEDR | El agujero se publica (issue #119); su coste financiero no se modela |
 | Estacionalidad del presupuesto alisada a doceavas (D25) | 0 € al horizonte; sin señal de tesorería | Presupuesto mensual por diseño |
+| Objetivo FIRE vs pensión plana bajo #139: la necesidad se resta ANTES de inflar y el objetivo se queda corto en `I_ret·(g^y − 1)/SWR` | 166.610,54 € (pensión 1.000 €/mes, 2 %, 20 a) | Corregirlo rompería la forma cerrada del objetivo — rediseño, no parche; evidencia y decisión pendiente en [#170](https://github.com/maxlainz/FutureFin/issues/170) |
 
 ## 5. Convenciones españolas de referencia (fuentes)
 

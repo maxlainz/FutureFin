@@ -4,6 +4,65 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.9.0] - 2026-08-31
+
+**Ola 5 de la resolución — «La inflación y el horizonte»** (issues #139, #146, #149). La ola que
+hace que la inflación signifique lo que todo el mundo cree que significa. **BREAKING de cifras**:
+todos los planes con inflación configurada mueven su curva, su fecha de cruce y su patrimonio
+proyectado — ningún dato se pierde, pero lo que ves cambia. Todo número calculado a mano (réplica
+Decimal a 50 dígitos, validada contra 4 pins del repo al céntimo) ANTES de correr los tests.
+
+### El gasto sube con la vida; el sueldo hay que peleárselo (#139) — BREAKING
+
+- **El GASTO de la simulación (el de ahora y el de jubilación) se indexa mes a mes a la inflación
+  de la instalación**; los **INGRESOS quedan planos a propósito** (decisión del owner: las
+  subidas no se regalan en la simulación). El eje es el mismo del objetivo (`(k−1)/12`): el mes 1
+  cobra exactamente el gasto que tecleaste, y lo que declaras está siempre en euros de HOY.
+- **La señal de producto más dura del programa**: el hogar canónico que ahorra 1.000 €/mes sobre
+  1.500 € de gasto, al 7 % nominal y 2,5 % de inflación, **deja de alcanzar el FIRE dentro de
+  30 años** (el pin pasa de cruce en el mes 285 a `null`; NW(360): 1.094.275,23 → 777.970,12).
+  No es un bug nuevo — es el optimismo estructural del modelo congelado, retirado.
+- **Corrección publicada en el propio issue**: su «coste medido» anunciaba el cruce adelantándose
+  de 386 a 335 — ese 335 era la alternativa RECHAZADA (indexarlo todo). Con la decisión firmada,
+  el mismo hogar entra en déficit de caja en el mes 247 (forma cerrada
+  `k−1 > 12·ln(1,5)/ln(1,02) = 245,70`) y no cruza en 840 meses.
+- En B/C se indexa el gasto efectivo YA restado de cuotas (#142): la cuota es nominal por
+  contrato y no se infla. Los techos «N meses de gasto» de la cascada ahora CRECEN con la
+  inflación (son N meses del gasto real del mes — pineado por primera vez).
+- **Divergencia aceptada y contabilizada (issue #170)**: el objetivo resta la pensión ANTES de
+  inflar, así que con pensión declarada e inflación positiva se queda corto en
+  `pensión·(factor^años − 1)/SWR` — 166.610,54 € con 1.000 €/mes, 2 % y 20 años. Corregirlo
+  rompe la forma cerrada del objetivo: rediseño, no parche.
+
+### La inflación negativa existe (#146)
+
+- Rango [−2, 50] (España tuvo IPC medio negativo cinco veces este siglo; el suelo 0 impedía
+  estresar el propio plan). Caen las **11 capas de aplanado** que convertían un negativo en 0:
+  con −2 %, el objetivo DECRECE (863.652,80 → **705.667,217472** a 10 años, exacto en Decimal),
+  el deflactor es > 1 (lo real por ENCIMA de lo nominal, los hitos reales llegan antes) y la
+  Autonomía se alarga (12,0 → **12,1** meses en el escenario canónico).
+- **Las instalaciones NUEVAS nacen asumiendo 2,5 %** (objetivo del BCE) en vez de 0 % — el valor
+  más optimista del rango ya no es el silencioso por defecto. Las existentes conservan su valor.
+
+### El horizonte tiene la edad que tú digas (#149)
+
+- `fire_settings.horizon_lifespan_age` (85–105, de serie 90): la proyección llega hasta esa edad.
+  Con el tope de 70 años vista intacto, el eje solo muerde si tu edad ≥ edad_límite − 70.
+  Extenderlo revela la cola de longevidad que un plan «al límite» esconde.
+- **Breaking de un enum publicado**: `horizon_basis` pasa de `lifespan_90` (un 90 congelado en un
+  literal) a **`lifespan_age`**, con `horizon_lifespan_age` ecoado al lado en serie y simulate.
+- El «margen al final» no estrena señal: es el último punto de la serie (que viaja SIEMPRE, en
+  ambas densidades) — y la serie gana `final_net_worth_real` (euros de hoy, paridad con
+  simulate). «No llegó» ⟺ `assets_depleted_month_index != null` o `uncovered_deficit_total > 0`.
+
+### Notas de verificación
+
+- Los tests con inflación 0 no se movieron NI UN DÍGITO (gate de la ola: `f(1)=1` y la
+  degeneración exacta a factor 1). El arnés de integración normaliza las instalaciones de test a
+  inflación 0 — el default 2,5 lo pinea un test de flujo crudo aparte.
+- Pins nuevos con forma cerrada exacta: latch a 2 %/2 % `V₁₂₀ = 1,02¹⁰·(500.000 − 240.000) =
+  316.938,55` (antes 343.865,59); serie indexada NW(120) = 81.104,01 (antes 120.000,00).
+
 ## [4.8.0] - 2026-08-31
 
 **Ola 4 de la resolución — «El cruce, la base y la jubilación»** (issues #141, #142, #143, #124,
