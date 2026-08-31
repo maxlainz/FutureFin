@@ -4,6 +4,21 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.12.2] - 2026-08-31
+
+### La leyenda del chart de Jubilación deja de parecer un tercer objetivo
+
+- El pie del panel «Patrimonio vs. objetivo FIRE» mostraba el rango numérico del eje
+  (patrimonio hoy → patrimonio un año después del cruce). Esa segunda cifra, sin rótulo y
+  sentada bajo los dos objetivos de la tarjeta (euros de hoy + nominal al cruce), se leía como
+  un **tercer** objetivo — la misma familia del incidente que fundó el catálogo de métricas
+  (cifras correctas, mutuamente irreconciliables para quien las mira). Reporte del owner sobre
+  la vista móvil.
+- La leyenda ahora nombra solo la **ventana**: «de hoy a la jubilación» (con cruce futuro) o el
+  horizonte en años. El recorte del chart a cruce+12 no cambia — el año de padding sigue ahí,
+  la etiqueta simplemente no lo menciona. Cero cifras del motor se mueven; solo desaparece un
+  número ambiental sin dueño.
+
 ## [4.12.1] - 2026-08-31
 
 **Fin de `surplus_cash`** — la caja fantasma al 0 % se elimina del modelo entero (entrevista de

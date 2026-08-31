@@ -125,9 +125,9 @@ export function deflationFactorAt(monthIndex: number, annualPct: number): number
  *
  * Existe porque con `density=hybrid` el servidor DIEZMA la serie (meses 0..12, 24, 36…): la
  * posición 13 es el mes 24, y `points.length` (~82) no es el número de meses. Todo lo que
- * recorte una ventana por un MES —`clampToMonth` del MiniProjection, el pie «hoy → fin» de
- * Jubilación— tiene que traducir mes → posición por aquí, nunca con un `Math.min(mes, len-1)`,
- * que en hybrid no recortaba nada.
+ * recorte una ventana por un MES —`clampToMonth` del MiniProjection— tiene que traducir
+ * mes → posición por aquí, nunca con un `Math.min(mes, len-1)`, que en hybrid no recortaba
+ * nada.
  *
  * Devuelve `0` si el primer punto ya se pasa: siempre hay algo que pintar.
  */
