@@ -162,6 +162,11 @@ the add-on's `version:` as the image tag. Operational consequences:
   the Release is created**. So an add-on user can never be offered a version whose image does not
   exist. If that step fails, the image is out but the store stays one version behind until someone
   lands a normal PR raising `version:`. Check with `./scripts/audit-releases.sh --addon`.
+  The bot bumps ONLY `version:` — the store's changelog tab renders
+  `addon/futurefin/CHANGELOG.md`, whose `## X.Y.Z` section is written BY HAND in the same bump
+  PR (user-facing prose, not a technical copy; incident: the tab froze at 4.3.1 across four
+  releases because nothing required it). `./scripts/audit-releases.sh --version` (CI, job
+  `rust`) blocks a bump whose version lacks that section.
 
   **Who signs that commit (since 2026-08-30): the owner's GitHub App `futurefin-release-bot`**
   (id 4770261, sole permission `contents: write`, no webhook, installed only on this repo), the
