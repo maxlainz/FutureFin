@@ -1268,11 +1268,15 @@ pub fn first_month_allocation(
         for (rule_index, rule) in input.allocation_rules.iter().enumerate() {
             // Mismo criterio que la rama sin sobrante (#96): el techo del cap existe aunque la
             // cascada no corra — se publica resuelto, no como null.
+            // #171 (Ola 6): los escalares de la FASE del mes, no los regulares — la traza de
+            // un jubilado publicaba techos calculados sobre una nómina y un gasto que ya no
+            // existen (months_expense(6) decía 15.000 donde el bucle usaría 12.000; un
+            // income_multiple(4) inflaba ×3). Mismos locales que ya eligió el propio mes 1.
             let (ceiling, room) = rule_cap_ceiling_and_room(
                 rule,
                 &values,
-                input.expense_regular_monthly + debt_service,
-                input.income_regular_monthly,
+                expense + debt_service,
+                income,
             );
             rules_trace.push(RuleOutcome {
                 rule_index,
@@ -1286,12 +1290,14 @@ pub fn first_month_allocation(
         }
         (vec![Decimal::ZERO; n], net_cash_month)
     } else {
+        // #171: también aquí — esta rama es la del jubilado CON DÉFICIT (el estado normal de
+        // un jubilado), y `distribute_contributions` publica los techos aunque no reparta (#96).
         distribute_contributions(
             net_cash_month,
             &input.allocation_rules,
             &values,
-            input.expense_regular_monthly + debt_service,
-            input.income_regular_monthly,
+            expense + debt_service,
+            income,
             Some(&mut rules_trace),
         )
     };
@@ -4076,5 +4082,71 @@ mod tests {
             "diez años: ×0,98^10, exacto por checked_powu"
         );
         assert!(t(1) < t(0) && t(6) < t(1) && t(13) < t(12), "estrictamente decreciente");
+    }
+
+    /// #171 (Ola 6): la traza de `first_month_allocation` resuelve los techos con los escalares
+    /// de la FASE del mes — no con los regulares. Cuatro casos, dos ramas (patrón
+    /// context_fields): activo de 3.000, cuota de pasivo 500 (fixed, sin TIN, principal holgado),
+    /// gasto regular 2.000 / de jubilación 1.500, ingreso regular 3.000 / de jubilación 2.500
+    /// (superávit ⇒ rama `InRetirement`) o 1.000 (déficit ⇒ rama `else`, `NoCash`).
+    /// months_expense(6): 6·(2.000+500) = 15.000 sin jubilar; 6·(1.500+500) = 12.000 jubilado
+    /// (hoy publicaba 15.000 — la mentira). income_multiple(4): 4·3.000 = 12.000 sin jubilar;
+    /// 4·1.000 = 4.000 jubilado con déficit (hoy 12.000, factor 3). La serie NO cambia: en
+    /// jubilación el bucle no ejecuta la cascada — es un bug de explicación.
+    #[test]
+    fn the_retirement_trace_resolves_caps_with_the_months_budget() {
+        let build = |retired: bool, income_ret: Decimal, cap: AllocationCap| {
+            let fondo = mk_asset(0xD1, Decimal::from(3_000), true, None);
+            let mut inp = base_input(
+                12,
+                Decimal::from(3_000),
+                Decimal::from(2_000),
+                vec![fondo],
+                vec![AllocationRule {
+                    target_index: 0,
+                    kind: AllocationKind::Remainder,
+                    amount: None,
+                    cap: Some(cap),
+                }],
+            );
+            inp.liabilities = vec![liab(
+                Decimal::from(100_000),
+                Decimal::from(500),
+                RepaymentModel::FixedPayments,
+                None,
+            )];
+            inp.expense_retirement_monthly = Decimal::from(1_500);
+            inp.income_retirement_monthly = income_ret;
+            if retired {
+                inp.retirement_start_month = Some(1);
+            }
+            first_month_allocation(&inp).unwrap()
+        };
+        let me6 = || AllocationCap::MonthsExpense(Decimal::from(6));
+        let im4 = || AllocationCap::IncomeMultiple(Decimal::from(4));
+
+        // A · sin jubilar, months_expense(6): techo 15.000, hueco 12.000.
+        let a = build(false, Decimal::ZERO, me6());
+        assert_eq!(a.rules[0].cap_ceiling, Some(Decimal::from(15_000)));
+        assert_eq!(a.rules[0].cap_room, Some(Decimal::from(12_000)));
+
+        // B · jubilado con SUPERÁVIT (rama InRetirement): techo 12.000, hueco 9.000.
+        let b = build(true, Decimal::from(2_500), me6());
+        assert_eq!(b.rules[0].skipped_reason, Some(AllocationSkipReason::InRetirement));
+        assert_eq!(b.rules[0].cap_ceiling, Some(Decimal::from(12_000)));
+        assert_eq!(b.rules[0].cap_room, Some(Decimal::from(9_000)));
+
+        // B' · jubilado con DÉFICIT (rama else, NoCash): mismos techos de jubilación.
+        let b2 = build(true, Decimal::from(1_000), me6());
+        assert_eq!(b2.rules[0].skipped_reason, Some(AllocationSkipReason::NoCash));
+        assert_eq!(b2.rules[0].cap_ceiling, Some(Decimal::from(12_000)));
+        assert_eq!(b2.rules[0].cap_room, Some(Decimal::from(9_000)));
+
+        // C/D · income_multiple(4): 12.000 sin jubilar; 4.000 jubilado (déficit).
+        let c = build(false, Decimal::ZERO, im4());
+        assert_eq!(c.rules[0].cap_ceiling, Some(Decimal::from(12_000)));
+        let d = build(true, Decimal::from(1_000), im4());
+        assert_eq!(d.rules[0].cap_ceiling, Some(Decimal::from(4_000)));
+        assert_eq!(d.rules[0].cap_room, Some(Decimal::from(1_000)));
     }
 }
