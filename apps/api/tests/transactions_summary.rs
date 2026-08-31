@@ -66,7 +66,9 @@ async fn summary_numbers_windows_and_no_double_count() {
     let liab_cat = app.create_category(&owner, "liability", "Préstamo").await;
 
     let today = server_today(&app, &owner.cookie).await;
-    // Mes seleccionado = 2 meses antes de hoy (completo). Ventana avg_months=3 = sel-1,-2,-3.
+    // Mes seleccionado = 2 meses antes de hoy (completo). Ventana avg_months=3 ANCLADA A HOY
+    // (#125): {hoy−3, hoy−2, hoy−1} = {sel−1, sel, hoy−1} — el propio mes seleccionado entra en
+    // su promedio de comparación, y sel−3 (hoy−5) queda FUERA (decoy de exclusión).
     let (sy, sm) = shift_month(today.year(), today.month(), -2);
     let (y1, m1) = shift_month(sy, sm, -1);
     let (y3, m3) = shift_month(sy, sm, -3);
@@ -108,7 +110,7 @@ async fn summary_numbers_windows_and_no_double_count() {
     manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Super C", "-60", "expense", Some(&super_cat)).await;
     manual(&app, &owner.cookie, &date_in(y1, m1, 3), "Sueldo", "1000", "income", Some(&nomina_cat)).await;
     manual(&app, &owner.cookie, &date_in(y1, m1, 20), "Aporte", "-100", "savings", None).await;
-    // sel-3: Super -90.
+    // sel-3 (hoy−5, FUERA de la ventana anclada a hoy): Super -90 — no debe promediar.
     manual(&app, &owner.cookie, &date_in(y3, m3, 10), "Super D", "-90", "expense", Some(&super_cat)).await;
 
     let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_months=3");
@@ -119,24 +121,25 @@ async fn summary_numbers_windows_and_no_double_count() {
     assert_eq!(b["year"].as_i64().unwrap(), sy as i64);
     assert_eq!(b["month"].as_u64().unwrap(), sm as u64);
     assert_eq!(b["is_partial"], false, "mes 2 atrás → completo");
-    // Promedio PONDERADO: denominador = months_with_data (meses del tramo con datos), no window_months.
+    // Promedio PONDERADO: denominador = meses reales del tramo, no window_months.
     assert_eq!(b["avg_window"], "3");
-    assert_eq!(b["window_months"].as_u64().unwrap(), 3, "tramo [sel-3, sel)");
-    assert_eq!(b["months_with_data"].as_u64().unwrap(), 2, "sólo sel-1 y sel-3 tienen datos");
+    assert_eq!(b["window_months"].as_u64().unwrap(), 3, "tramo [hoy-3, hoy)");
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 2, "sólo sel-1 (hoy−3) y sel (hoy−2) tienen datos");
 
-    // Línea Super: actual 150, budget 300, avg (60+90)/2=75, deltas -150 / +75.
+    // Línea Super: actual 150, budget 300, avg (60+150)/2=105 — el 90 de sel−3 queda fuera y el
+    // propio sel entra (#125) —, deltas -150 / +45.
     let sup = line(&b["expense_categories"], "Super");
     approx(parse_dec(&sup["actual"]), 150.0);
     approx(parse_dec(&sup["budget"]), 300.0);
-    approx(parse_dec(&sup["avg"]), 75.0);
+    approx(parse_dec(&sup["avg"]), 105.0);
     approx(parse_dec(&sup["delta_vs_budget"]), -150.0);
-    approx(parse_dec(&sup["delta_vs_avg"]), 75.0);
+    approx(parse_dec(&sup["delta_vs_avg"]), 45.0);
 
-    // Sin categoría: actual 30, budget 0, avg 0.
+    // Sin categoría: actual 30, budget 0, avg 30/2 = 15 (el −30 de sel está en la ventana).
     let sc = line(&b["expense_categories"], "Sin categoría");
     approx(parse_dec(&sc["actual"]), 30.0);
     approx(parse_dec(&sc["budget"]), 0.0);
-    approx(parse_dec(&sc["avg"]), 0.0);
+    approx(parse_dec(&sc["avg"]), 15.0);
 
     // Vivienda: la cuota atribuida materializa la fila aunque no tenga movimientos ni partidas
     // (budget = 500 del plan; actual/avg 0 — aún sin recibos vinculados a esa categoría).
@@ -146,29 +149,30 @@ async fn summary_numbers_windows_and_no_double_count() {
     approx(parse_dec(&viv["avg"]), 0.0);
     approx(parse_dec(&viv["delta_vs_budget"]), -500.0);
 
-    // Ingreso Nómina: actual 2000, budget 2000, avg 1000/2=500 (denominador ponderado 2).
+    // Ingreso Nómina: actual 2000, budget 2000, avg (1000+2000)/2=1500 (denominador ponderado 2).
     let nom = line(&b["income_categories"], "Nómina");
     approx(parse_dec(&nom["actual"]), 2000.0);
     approx(parse_dec(&nom["budget"]), 2000.0);
-    approx(parse_dec(&nom["avg"]), 500.0);
+    approx(parse_dec(&nom["avg"]), 1500.0);
     approx(parse_dec(&nom["delta_vs_budget"]), 0.0);
 
     // Sin línea derivada SINTÉTICA de cuotas: la key sigue fuera del JSON (la cuota entra
     // atribuida a su categoría de gasto, no como fila aparte sin pareja).
     assert!(b.get("derived_debt_line").is_none(), "derived_debt_line eliminada");
 
-    // Savings block: actual 200, avg 100/2=50.
+    // Savings block: actual 200, avg (100+200)/2=150.
     approx(parse_dec(&b["savings"]["actual"]), 200.0);
-    approx(parse_dec(&b["savings"]["avg"]), 50.0);
+    approx(parse_dec(&b["savings"]["avg"]), 150.0);
 
     // Income block agregado.
     approx(parse_dec(&b["income"]["actual"]), 2000.0);
-    approx(parse_dec(&b["income"]["avg"]), 500.0);
+    approx(parse_dec(&b["income"]["avg"]), 1500.0);
 
-    // Totales. expense_actual = 150+30 = 180 (SIN la cuota del pasivo → sin doble conteo).
+    // Totales. expense_actual = 150+30 = 180 (SIN la cuota del pasivo → sin doble conteo);
+    // expense_avg = 105 (Super) + 15 (Sin categoría) = 120.
     let t = &b["totals"];
     approx(parse_dec(&t["expense_actual"]), 180.0);
-    approx(parse_dec(&t["expense_avg"]), 75.0);
+    approx(parse_dec(&t["expense_avg"]), 120.0);
     approx(parse_dec(&t["expense_budget"]), 800.0); // 300 Super + 500 cuota atribuida a Vivienda
     approx(parse_dec(&t["income_actual"]), 2000.0);
     approx(parse_dec(&t["income_budget"]), 2000.0);
@@ -226,8 +230,9 @@ async fn budget(app: &TestApp, cookie: &str, cat: &str, amount: &str) {
     assert_eq!(r.status, http::StatusCode::CREATED, "budget: {r:?}");
 }
 
-/// El denominador del promedio es `months_with_data` (meses del tramo con ≥1 transacción), NO
-/// `window_months`: un tramo de 6 meses con datos sólo en 2 divide entre 2.
+/// El denominador del promedio son los meses reales del tramo, NO `window_months`: un tramo de
+/// 6 meses (anclado a hoy, #125) con datos sólo en 3 divide entre 3. Con sel = hoy−2, la ventana
+/// {hoy−6..hoy−1} contiene sel−3 (hoy−5), sel−1 (hoy−3) y el propio sel (hoy−2).
 #[tokio::test]
 async fn summary_avg_window_weighted_denominator() {
     let app = TestApp::spawn().await;
@@ -249,13 +254,16 @@ async fn summary_avg_window_weighted_denominator() {
 
     assert_eq!(b["avg_window"], "6");
     assert_eq!(b["window_months"].as_u64().unwrap(), 6);
-    assert_eq!(b["months_with_data"].as_u64().unwrap(), 2, "sólo sel-1 y sel-3 con datos");
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 3, "sel-3, sel-1 y sel con datos");
     let sup = line(&b["expense_categories"], "Super");
     approx(parse_dec(&sup["actual"]), 100.0);
-    approx(parse_dec(&sup["avg"]), 60.0); // (40 + 80) / 2
+    approx(parse_dec(&sup["avg"]), 73.3333); // (100 + 40 + 80) / 3
 }
 
-/// YTD = enero..mes seleccionado (exclusive). El caso enero deja el tramo vacío → avg 0.
+/// YTD = enero del año EN CURSO..mes en curso (exclusive) — desde #125 la ventana se ancla en
+/// HOY, no en el mes seleccionado: los meses del año pasado ya no entran nunca, y seleccionar un
+/// mes antiguo no cambia el tramo (la comparativa es siempre «contra tu media de este año»).
+/// En enero el tramo es genuinamente vacío (aún no hay meses completos del año) → media `null`.
 #[tokio::test]
 async fn summary_avg_window_ytd() {
     let app = TestApp::spawn().await;
@@ -264,35 +272,53 @@ async fn summary_avg_window_ytd() {
     budget(&app, &owner.cookie, &super_cat, "200").await;
 
     let today = server_today(&app, &owner.cookie).await;
-    let year = today.year() - 1; // año natural completamente en el pasado.
+    // −100 en cada mes COMPLETO del año en curso, y un decoy −999 en junio del año pasado que
+    // jamás debe promediar.
+    for m in 1..today.month() {
+        manual(&app, &owner.cookie, &date_in(today.year(), m, 1), "Mes", "-100", "expense", Some(&super_cat)).await;
+    }
+    manual(&app, &owner.cookie, &date_in(today.year() - 1, 6, 10), "Decoy", "-999", "expense", Some(&super_cat)).await;
 
-    manual(&app, &owner.cookie, &date_in(year, 2, 10), "Feb", "-30", "expense", Some(&super_cat)).await;
-    manual(&app, &owner.cookie, &date_in(year, 4, 10), "Abr", "-50", "expense", Some(&super_cat)).await;
-    manual(&app, &owner.cookie, &date_in(year, 6, 10), "Jun", "-120", "expense", Some(&super_cat)).await;
+    // Selección por defecto (último mes completo) y un mes antiguo: MISMO tramo (ancla en hoy).
+    let b = app
+        .get_with_cookie("/v1/transactions/summary?avg_window=ytd", &owner.cookie)
+        .await
+        .json();
+    let year_old = today.year() - 1;
+    let b_old = app
+        .get_with_cookie(
+            &format!("/v1/transactions/summary?year={year_old}&month=6&avg_window=ytd"),
+            &owner.cookie,
+        )
+        .await
+        .json();
 
-    // Mes seleccionado junio: YTD = ene..may (window_months 5), datos en feb y abr → denom 2.
-    let url = format!("/v1/transactions/summary?year={year}&month=6&avg_window=ytd");
-    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
-    assert_eq!(b["avg_window"], "ytd");
-    assert_eq!(b["window_months"].as_u64().unwrap(), 5);
-    assert_eq!(b["months_with_data"].as_u64().unwrap(), 2);
-    let sup = line(&b["expense_categories"], "Super");
-    approx(parse_dec(&sup["actual"]), 120.0);
-    approx(parse_dec(&sup["avg"]), 40.0); // (30 + 50) / 2
-
-    // Mes seleccionado enero: tramo vacío → months_with_data 0, window_months 0 y la media NO
-    // existe. Desde la Fase 1 (issue #82) eso se dice con `null`, no con un "0.0000" que se leía
-    // como «de media no gastas nada» — y arrastraba un `delta_vs_avg` igual al gasto entero.
-    let url = format!("/v1/transactions/summary?year={year}&month=1&avg_window=ytd");
-    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
-    assert_eq!(b["window_months"].as_u64().unwrap(), 0);
-    assert_eq!(b["months_with_data"].as_u64().unwrap(), 0);
-    let sup = line(&b["expense_categories"], "Super");
-    assert_eq!(sup["avg"], Value::Null, "{sup}");
-    assert_eq!(sup["delta_vs_avg"], Value::Null, "{sup}");
+    let completos = u64::from(today.month() - 1);
+    for (label, body) in [("default", &b), ("mes antiguo", &b_old)] {
+        assert_eq!(body["avg_window"], "ytd", "{label}");
+        assert_eq!(
+            body["window_months"].as_u64().unwrap(),
+            completos,
+            "{label}: YTD = meses completos del año en curso"
+        );
+        let sup = line(&body["expense_categories"], "Super");
+        if completos == 0 {
+            // Enero: tramo vacío → la media NO existe y se dice con `null` (Fase 1, issue #82),
+            // no con un "0.0000" que se leería como «de media no gastas nada».
+            assert_eq!(body["months_with_data"].as_u64().unwrap(), 0, "{label}");
+            assert_eq!(sup["avg"], Value::Null, "{label}: {sup}");
+            assert_eq!(sup["delta_vs_avg"], Value::Null, "{label}: {sup}");
+        } else {
+            assert_eq!(body["months_with_data"].as_u64().unwrap(), completos, "{label}");
+            // −100 en cada mes completo → media 100 exacta; si el decoy del año pasado entrara,
+            // saldría inflada.
+            approx(parse_dec(&sup["avg"]), 100.0);
+        }
+    }
 }
 
-/// ALL = desde el mes del MIN(op_date) hasta el seleccionado (exclusive). Sin historial → vacío.
+/// ALL = desde el mes del MIN(op_date) hasta el mes EN CURSO (exclusive) — ancla en hoy, #125.
+/// Sin historial → vacío.
 #[tokio::test]
 async fn summary_avg_window_all() {
     let app = TestApp::spawn().await;
@@ -311,10 +337,11 @@ async fn summary_avg_window_all() {
     let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_window=all");
     let b = app.get_with_cookie(&url, &owner.cookie).await.json();
     assert_eq!(b["avg_window"], "all");
-    assert_eq!(b["window_months"].as_u64().unwrap(), 5, "MIN(op_date) en sel-5 → 5 meses");
-    assert_eq!(b["months_with_data"].as_u64().unwrap(), 2, "sel-2 y sel-5 con datos");
+    // Ancla en hoy (#125): tramo [MIN(op_date), hoy) = [hoy−7, hoy) → 7 meses, y el propio sel entra.
+    assert_eq!(b["window_months"].as_u64().unwrap(), 7, "MIN(op_date) en hoy-7 → 7 meses");
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 3, "sel, sel-2 y sel-5 con datos");
     let sup = line(&b["expense_categories"], "Super");
-    approx(parse_dec(&sup["avg"]), 50.0); // (40 + 60) / 2
+    approx(parse_dec(&sup["avg"]), 66.6667); // (100 + 40 + 60) / 3
 
     // Sin historial (app nueva) → tramo vacío.
     let app2 = TestApp::spawn().await;
@@ -534,7 +561,10 @@ async fn reconciled_excluded_from_month_totals() {
 }
 
 /// Un mes cuyo único contenido es un par conciliado NO cuenta en `months_with_data` (misma lógica
-/// que los meses pseudovacíos): denominador 1 (solo sel−2), avg de Super = 200/1 = 200.
+/// que los meses pseudovacíos). Ventana anclada a hoy (#125): {hoy−3, hoy−2, hoy−1} = {sel−1,
+/// sel, hoy−1} — sel−1 es el mes solo-conciliadas y el gasto real de sel−2 (hoy−4) queda FUERA.
+/// Denominador 1 (solo el propio sel), avg de Super = 100/1 = 100; si el mes conciliado contara,
+/// saldría 100/2 = 50.
 #[tokio::test]
 async fn reconciled_only_month_not_counted_in_months_with_data() {
     let app = TestApp::spawn().await;
@@ -549,13 +579,13 @@ async fn reconciled_only_month_not_counted_in_months_with_data() {
     // sel−1: SOLO un par conciliado.
     manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Salida", "-300", "expense", None).await;
     manual(&app, &owner.cookie, &date_in(y1, m1, 11), "Entrada", "300", "income", None).await;
-    // sel−2: gasto real.
+    // sel−2 (hoy−4, fuera de la ventana): gasto real que no debe promediar.
     manual(&app, &owner.cookie, &date_in(y2, m2, 8), "Super real", "-200", "expense", Some(&super_cat)).await;
 
     let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_window=3");
     let b = app.get_with_cookie(&url, &owner.cookie).await.json();
     assert_eq!(b["months_with_data"].as_u64(), Some(1), "el mes solo-conciliadas no cuenta: {b:?}");
-    approx(parse_dec(&line(&b["expense_categories"], "Super")["avg"]), 200.0);
+    approx(parse_dec(&line(&b["expense_categories"], "Super")["avg"]), 100.0);
 }
 
 /// La serie mensual por categoría excluye las conciliadas: Super real −100 + pata −40 conciliada
@@ -619,18 +649,19 @@ async fn recurring_only_month_excluded_from_avg_numerator_and_denominator() {
     let alq_cat = app.create_category(&owner, "expense", "Alquiler").await;
 
     let today = server_today(&app, &owner.cookie).await;
-    // Mes seleccionado = hoy − 1 (completo). Ventana avg_months=3 = sel-1, sel-2, sel-3.
+    // Mes seleccionado = hoy − 1 (completo). Ventana avg_months=3 anclada a hoy (#125):
+    // {hoy−3, hoy−2, hoy−1} = {sel−2, sel−1, sel} — el propio sel entra en el promedio.
     let (sy, sm) = shift_month(today.year(), today.month(), -1);
     let (y1, m1) = shift_month(sy, sm, -1);
     let (y2, m2) = shift_month(sy, sm, -2);
-    let (y3, m3) = shift_month(sy, sm, -3);
 
-    // sel-1 y sel-2: meses REALES (gasto manual en Comer Fuera).
-    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Bar", "-200", "expense", Some(&comer_cat)).await;
-    manual(&app, &owner.cookie, &date_in(y2, m2, 10), "Bar", "-220", "expense", Some(&comer_cat)).await;
-    // UNA regla de alquiler con origen en sel-3, que materializa 860 en sel-3, sel-2 y sel-1.
-    // sel-3 queda como mes SOLO-recurrente: es el que hasta ahora hundía todas las medias.
-    recurring(&app, &owner.cookie, &date_in(y3, m3, 1), "Alquiler", "-860", "expense", Some(&alq_cat)).await;
+    // sel y sel-1: meses REALES (gasto manual en Comer Fuera).
+    manual(&app, &owner.cookie, &date_in(sy, sm, 10), "Bar", "-200", "expense", Some(&comer_cat)).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "Bar", "-220", "expense", Some(&comer_cat)).await;
+    // UNA regla de alquiler con origen en sel-2, que materializa 860 en sel-2 (origen), sel-1 y
+    // sel (los dos meses activos ≥ origen). sel-2 queda como mes SOLO-recurrente — el mes de
+    // origen es el único que puede serlo desde 3.9.0, y es el que hasta ahora hundía las medias.
+    recurring(&app, &owner.cookie, &date_in(y2, m2, 1), "Alquiler", "-860", "expense", Some(&alq_cat)).await;
 
     let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_months=3");
     let resp = app.get_with_cookie(&url, &owner.cookie).await;
@@ -639,9 +670,9 @@ async fn recurring_only_month_excluded_from_avg_numerator_and_denominator() {
 
     // Las dos cifras se publican y son DISTINTAS: 3 meses tienen algo, solo 2 promedian.
     assert_eq!(b["months_with_data"].as_u64().unwrap(), 3, "los 3 meses tienen movimientos");
-    assert_eq!(b["avg_months"].as_u64().unwrap(), 2, "solo sel-1 y sel-2 son reales");
+    assert_eq!(b["avg_months"].as_u64().unwrap(), 2, "solo sel-1 y sel son reales");
 
-    // Comer Fuera: (200+220)/2 = 210. Con el denominador viejo habría salido 420/3 = 140.
+    // Comer Fuera: (220+200)/2 = 210. Con el denominador viejo habría salido 420/3 = 140.
     let comer = line(&b["expense_categories"], "Comer Fuera");
     approx(parse_dec(&comer["avg"]), 210.0);
 
@@ -653,11 +684,11 @@ async fn recurring_only_month_excluded_from_avg_numerator_and_denominator() {
     // Aditividad: Σ de las líneas == el total. Es lo que se perdería con un denominador por categoría.
     approx(parse_dec(&b["totals"]["expense_avg"]), 1070.0);
 
-    // Base del promedio: sel-2 → sel-1, contiguos.
+    // Base del promedio: sel-1 → sel, contiguos.
     let basis = &b["avg_basis"];
     assert_eq!(basis["months"].as_u64().unwrap(), 2);
-    assert_eq!(basis["first_month"], format!("{y2:04}-{m2:02}"));
-    assert_eq!(basis["last_month"], format!("{y1:04}-{m1:02}"));
+    assert_eq!(basis["first_month"], format!("{y1:04}-{m1:02}"));
+    assert_eq!(basis["last_month"], format!("{sy:04}-{sm:02}"));
     assert_eq!(basis["has_gaps"], false);
     assert!(b.get("avg_unavailable_reason").is_none(), "sí hay promedio");
 }
@@ -693,19 +724,19 @@ async fn avg_basis_reports_gaps_between_real_months() {
     let cat = app.create_category(&owner, "expense", "Super").await;
 
     let today = server_today(&app, &owner.cookie).await;
+    // Ventana anclada a hoy (#125): {hoy−3, hoy−2, hoy−1} con sel = hoy−1.
     let (sy, sm) = shift_month(today.year(), today.month(), -1);
-    let (y1, m1) = shift_month(sy, sm, -1);
-    let (y3, m3) = shift_month(sy, sm, -3);
+    let (y2, m2) = shift_month(sy, sm, -2);
 
-    // sel-1 y sel-3 reales; sel-2 completamente vacío.
-    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "A", "-100", "expense", Some(&cat)).await;
-    manual(&app, &owner.cookie, &date_in(y3, m3, 10), "B", "-200", "expense", Some(&cat)).await;
+    // sel (hoy−1) y sel-2 (hoy−3) reales; hoy−2 completamente vacío en medio.
+    manual(&app, &owner.cookie, &date_in(sy, sm, 10), "A", "-100", "expense", Some(&cat)).await;
+    manual(&app, &owner.cookie, &date_in(y2, m2, 10), "B", "-200", "expense", Some(&cat)).await;
 
     let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_months=3");
     let b = app.get_with_cookie(&url, &owner.cookie).await.json();
 
     assert_eq!(b["avg_months"].as_u64().unwrap(), 2);
-    assert_eq!(b["avg_basis"]["has_gaps"], true, "sel-1 y sel-3 no son consecutivos");
+    assert_eq!(b["avg_basis"]["has_gaps"], true, "sel y sel-2 no son consecutivos");
     approx(parse_dec(&line(&b["expense_categories"], "Super")["avg"]), 150.0);
 }
 
@@ -751,9 +782,10 @@ async fn window_without_real_months_reports_no_avg_and_why() {
 /// de tu media», que es falso: no hay datos. `is_partial` no servía para distinguirlo (dice si el
 /// mes civil ha terminado, no si tiene movimientos).
 ///
-/// Predicción: mes seleccionado = hoy−2 (vacío); movimientos en hoy−3 y hoy−4, dentro de la
-/// ventana de 3 meses `[sel−3, sel)` = {hoy−5, hoy−4, hoy−3}. Luego `avg_months = 2` y la media SÍ
-/// existe: lo que se anula es la comparación, no el promedio.
+/// Predicción: mes seleccionado = hoy−2 (vacío); movimientos en hoy−3 y hoy−4. La ventana de 3
+/// meses anclada a hoy (#125) es {hoy−3, hoy−2, hoy−1}, así que solo hoy−3 promedia:
+/// `avg_months = 1`, media = 200, y la media SÍ existe: lo que se anula es la comparación, no el
+/// promedio.
 #[tokio::test]
 async fn a_month_without_movements_is_a_gap_not_a_zero() {
     let app = TestApp::spawn().await;
@@ -787,7 +819,7 @@ async fn a_month_without_movements_is_a_gap_not_a_zero() {
 
     assert_eq!(body["actual_txn_count"], 0, "{body}");
     assert_eq!(body["has_actual_data"], false, "{body}");
-    assert_eq!(body["avg_months"], 2, "hay media, lo que falta es el mes: {body}");
+    assert_eq!(body["avg_months"], 1, "hay media (hoy−3), lo que falta es el mes: {body}");
 
     let l = line(&body["expense_categories"], "Super");
     approx(parse_dec(&l["actual"]), 0.0);
@@ -816,8 +848,10 @@ async fn a_month_without_movements_is_a_gap_not_a_zero() {
 /// `delta_vs_avg` igual al gasto entero: el campo de procedencia bien y el dato que un modelo va a
 /// resumir, mal. Filas y totales siguen ahora la misma regla.
 ///
-/// Predicción: todos los movimientos caen en el mes seleccionado, así que con `avg_window=all` el
-/// tramo `[window_start, selected)` es vacío → `avg_months = 0`.
+/// Predicción: todos los movimientos caen en el mes EN CURSO (que nunca entra en la ventana:
+/// está a medias), así que con `avg_window=all` el tramo `[window_start, hoy)` es vacío →
+/// `avg_months = 0`. (Hasta #125 este test usaba el último mes completo, que con el ancla en hoy
+/// ya sí promedia — el único mes garantizado fuera de la ventana es el corriente.)
 #[tokio::test]
 async fn an_empty_average_window_emits_null_not_zero() {
     let app = TestApp::spawn().await;
@@ -826,10 +860,10 @@ async fn an_empty_average_window_emits_null_not_zero() {
     let nomina_cat = app.create_category(&owner, "income", "Nómina").await;
 
     let today = server_today(&app, &owner.cookie).await;
-    let (sy, sm) = shift_month(today.year(), today.month(), -1);
-    manual(&app, &owner.cookie, &date_in(sy, sm, 3), "SUPER", "-120", "expense", Some(&super_cat)).await;
-    manual(&app, &owner.cookie, &date_in(sy, sm, 4), "NOMINA", "2000", "income", Some(&nomina_cat)).await;
-    manual(&app, &owner.cookie, &date_in(sy, sm, 5), "APORTACION", "-300", "savings", None).await;
+    let (sy, sm) = (today.year(), today.month());
+    manual(&app, &owner.cookie, &date_in(sy, sm, 1), "SUPER", "-120", "expense", Some(&super_cat)).await;
+    manual(&app, &owner.cookie, &date_in(sy, sm, 1), "NOMINA", "2000", "income", Some(&nomina_cat)).await;
+    manual(&app, &owner.cookie, &date_in(sy, sm, 1), "APORTACION", "-300", "savings", None).await;
 
     let body = app
         .get_with_cookie(
@@ -919,4 +953,116 @@ async fn category_series_names_the_scope_mismatch_and_marks_months_without_data(
         assert_eq!(m["has_data"], false, "{m}");
         approx(parse_dec(&m["total"]), 0.0);
     }
+}
+
+// ---------------------------------------------------------------------------
+// #125 (Ola 4): denominador clasificado + ventana anclada a hoy
+// ---------------------------------------------------------------------------
+
+/// El escenario del issue #125 (sub-bug 1), con la escala del ejemplo: hoy−1..hoy−3 con
+/// 2.000 €/mes clasificados; hoy−4..hoy−6 con movimientos reales pero `kind` NULL (solo pueden
+/// nacer de un import — la API manual exige kind, así que se des-clasifican por SQL, igual que
+/// quedaría un CSV a medio categorizar).
+///
+/// Predicción: media de gasto = 6.000/3 = **2.000 €/mes**. Hasta 4.7.x salía 6.000/6 = 1.000
+/// (los meses sin clasificar sumaban 0 € al numerador y 1 al denominador), la mitad del gasto
+/// real — y de ahí un objetivo FIRE 300.000 € más bajo en modo B. `months_with_data` sigue
+/// diciendo 6 (describe lo que hay); el denominador es `avg_months` = 3. El MISMO denominador
+/// gobierna el panel (modo B): `savings_expense_basis.avg_months == 3` y gasto efectivo 2.000.
+#[tokio::test]
+async fn an_unclassified_month_does_not_divide_the_average() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Gastos").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    for d in 1..=3i32 {
+        let (y, m) = shift_month(today.year(), today.month(), -d);
+        manual(&app, &owner.cookie, &date_in(y, m, 10), "Gasto", "-2000", "expense", Some(&cat)).await;
+    }
+    for d in 4..=6i32 {
+        let (y, m) = shift_month(today.year(), today.month(), -d);
+        manual(&app, &owner.cookie, &date_in(y, m, 10), &format!("SinClasificar{d}"), "-2000", "expense", None).await;
+    }
+    // Des-clasificar los tres últimos: quedan como los deja un import sin categorizar.
+    sqlx::query("UPDATE transactions SET kind = NULL WHERE concept LIKE 'SinClasificar%'")
+        .execute(&app.pool)
+        .await
+        .expect("unclassify");
+
+    let b = app
+        .get_with_cookie("/v1/transactions/summary?avg_window=6", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(b["months_with_data"].as_u64().unwrap(), 6, "los 6 meses tienen movimientos: {b}");
+    assert_eq!(b["avg_months"].as_u64().unwrap(), 3, "solo los 3 clasificados promedian: {b}");
+    approx(parse_dec(&b["totals"]["expense_avg"]), 2000.0);
+
+    // El lado del panel/proyección (modo B) divide con la MISMA regla.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({ "fire_settings": { "savings_source": "transactions_avg" } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "set mode B: {r:?}");
+    let s = app.get_with_cookie("/v1/summary", &owner.cookie).await.json();
+    let h = &s["financial_health"];
+    assert_eq!(h["savings_expense_basis"]["avg_months"].as_u64().unwrap(), 3, "{h}");
+    approx(parse_dec(&h["expense_regular_monthly_equivalent"]), 2000.0);
+}
+
+/// #125 (sub-bug 2): la ventana del promedio se ancla en HOY, no en el mes seleccionado — dos
+/// selecciones distintas comparan contra el MISMO tramo, y ese tramo es EXACTAMENTE el que
+/// promedia el panel (`transactions_avg`, la media que consume la proyección en modo B).
+/// Hasta 4.7.x las dos «medias de 6 meses» describían tramos desplazados un mes.
+#[tokio::test]
+async fn the_average_window_is_anchored_to_today_not_to_the_selection() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Gastos").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    for d in 1..=3i32 {
+        let (y, m) = shift_month(today.year(), today.month(), -d);
+        manual(&app, &owner.cookie, &date_in(y, m, 10), "Gasto", "-1000", "expense", Some(&cat)).await;
+    }
+    let (fy, fm) = shift_month(today.year(), today.month(), -3);
+    let (ly, lm) = shift_month(today.year(), today.month(), -1);
+
+    // Selección por defecto (hoy−1) y selección antigua (hoy−3): misma base, misma media.
+    let b_default = app
+        .get_with_cookie("/v1/transactions/summary?avg_window=6", &owner.cookie)
+        .await
+        .json();
+    let b_old = app
+        .get_with_cookie(
+            &format!("/v1/transactions/summary?year={fy}&month={fm}&avg_window=6"),
+            &owner.cookie,
+        )
+        .await
+        .json();
+    for (label, b) in [("default", &b_default), ("selección antigua", &b_old)] {
+        let basis = &b["avg_basis"];
+        assert_eq!(basis["months"].as_u64().unwrap(), 3, "{label}: {basis}");
+        assert_eq!(basis["first_month"], format!("{fy:04}-{fm:02}"), "{label}");
+        assert_eq!(basis["last_month"], format!("{ly:04}-{lm:02}"), "{label}");
+        approx(parse_dec(&b["totals"]["expense_avg"]), 1000.0);
+    }
+
+    // Y es el MISMO tramo que promedia el panel en modo B (paridad con `transactions_avg`).
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({ "fire_settings": { "savings_source": "transactions_avg" } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "set mode B: {r:?}");
+    let s = app.get_with_cookie("/v1/summary", &owner.cookie).await.json();
+    let eb = &s["financial_health"]["savings_expense_basis"];
+    assert_eq!(eb["avg_months"].as_u64().unwrap(), 3, "{eb}");
+    assert_eq!(eb["first_month"], format!("{fy:04}-{fm:02}"), "{eb}");
+    assert_eq!(eb["last_month"], format!("{ly:04}-{lm:02}"), "{eb}");
 }

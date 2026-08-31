@@ -374,15 +374,23 @@ async fn mode_b_raw_avg_ignores_liability_links() {
     manual(&app, &owner.cookie, &date_in(y1, m1, 12), "Resto", "-1550", "expense", None, None).await;
 
     set_mode_b(&app, &owner.cookie).await;
-    // Promedio crudo: delta = income_avg − expense_avg = 6000 − 2000 = 4000, con L1/L2/L3
-    // presentes e irrelevantes para la caja. (Con la resta híbrida antigua habría sido 4750.)
+    // INVERTIDO en 4.8.0 (#142, opción 3 firmada): la cuota DECLARADA de los planes vivos sale
+    // del promedio — gasto efectivo = 2.000 − (500 + 300) = 1.200 y delta = 6.000 − 1.200 =
+    // **4.800** (la cuota vuelve al motor como servicio de deuda real, con su vencimiento).
+    // Sigue siendo la cuota DECLARADA, no la vinculada (L1 gira 450 reales): estimación acotada
+    // y documentada. L3 (plan vencido) sigue SIN restarse — su cuota ya no se gira.
+    // (Hasta 4.7.0 el promedio iba crudo: delta 4.000 y deuda congelada para siempre.)
     let delta = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
-    approx(delta, 4000.0);
+    approx(delta, 4800.0);
 }
 
-/// Reforma 3.4.0: en modo real el pasivo es una **resta constante** de NW — sin cargo de caja,
-/// sin amortización y sin escalón al vencer el plan. NW(k) = k·delta − principal, todo el
-/// horizonte. (Antes, el engine cobraba 1000/mes de debt service y amortizaba el principal.)
+/// Ajustado en 4.8.0 (#142, opción 3): el plan vuelve a estar VIVO en modo real — el motor
+/// cobra la cuota y amortiza. Para un préstamo SIN intereses la trayectoria de NW es idéntica a
+/// la «resta constante» de 3.4.0 (M sale de caja y M baja el principal: se cancelan), y en este
+/// escenario el promedio de gasto es 0, así que la resta de la cuota clampa a 0 y el delta no
+/// cambia — por eso este pin numérico SOBREVIVE tal cual. Lo que ya no es verdad es la prosa
+/// vieja («sin cargo de caja, sin amortización»); el escalón al vencer se pinea en el test de
+/// al lado.
 #[tokio::test]
 async fn mode_b_liability_static_nw_subtraction() {
     let app = TestApp::spawn().await;
@@ -548,9 +556,14 @@ async fn mode_b_no_step_up_at_liability_end() {
     let early = terminal_nw("alice", 1).await;
     let late = terminal_nw("bob", 26).await;
 
+    // INVERTIDO en 4.8.0 (#142, opción 3): hasta 4.7.0 este test pineaba «sin step-up» — el
+    // plan se anulaba y la fecha de vencimiento era irrelevante, o sea, la cuota liberada
+    // NUNCA volvía al ahorro. Ahora el motor cobra la cuota mientras el plan vive y la libera
+    // al vencer: terminar 25 años antes deja cientos de miles más de patrimonio (la cuota de
+    // 1.000 €/mes componiendo al 10 %). El paréntesis firmado del owner, hecho contrato.
     assert!(
-        (early - late).abs() < 0.5,
-        "modo real: el vencimiento del plan no debe alterar la trayectoria (sin step-up); early={early}, late={late}"
+        early > late + 300_000.0,
+        "el plan que termina antes libera su cuota al ahorro; early={early}, late={late}"
     );
 }
 

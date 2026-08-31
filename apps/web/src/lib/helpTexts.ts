@@ -39,13 +39,15 @@ export const HELP_TEXTS = {
     title: "Autonomía",
     body:
       "Meses que tus activos líquidos cubrirían tu gasto si dejaras de ingresar hoy. No es una " +
-      "división simple: mientras se consumen, los líquidos siguen rindiendo su rentabilidad " +
-      "esperada, y el gasto con el que se compara crece cada año con la inflación que tengas " +
-      "configurada —aquí sí, aunque la simulación de tu patrimonio (la que ves en Proyección) " +
-      "mantenga ese mismo gasto congelado en euros de hoy—. Qué gasto se usa depende de la " +
-      "fuente del ahorro (Ajustes → Plan): con el presupuesto, el presupuestado; con los " +
-      "movimientos reales, tu gasto real promediado. «+100 años» es un suelo, no una medida " +
-      "exacta.",
+      "división simple: se vacían en el mismo orden que en la simulación —primero los de menor " +
+      "rentabilidad esperada, mientras el resto sigue rindiendo la suya—, y el gasto con el que " +
+      "se compara crece cada año con la inflación que tengas configurada —aquí sí, aunque la " +
+      "simulación de tu patrimonio (la que ves en Proyección) mantenga ese mismo gasto congelado " +
+      "en euros de hoy—. Qué gasto se usa depende de la fuente del ahorro (Ajustes → Plan): con " +
+      "el presupuesto, el presupuestado; con los movimientos reales, tu gasto real promediado. " +
+      "«Indefinida» exige dos cosas: que tu retirada anual quepa en el SWR y que tus líquidos " +
+      "tengan rentabilidad esperada positiva — el dinero parado al 0 % siempre se agota, y aquí " +
+      "se dice en meses. «+100 años» es un suelo, no una medida exacta.",
   },
   "summary.net_return": {
     title: "Rendimiento neto",
@@ -132,13 +134,15 @@ export const HELP_TEXTS = {
     title: "Patrimonio objetivo",
     body:
       "Lo que necesitas acumular para vivir de tu patrimonio: tu gasto anual en jubilación —de " +
-      "tus partidas de presupuesto marcadas para jubilación, sin la cuota de tus préstamos, así " +
-      "que no es el mismo total que ves en Presupuesto—, con los impuestos por delante si los " +
-      "tienes activados, dividido entre la tasa segura de retirada. Esas partidas van en NETO: " +
-      "lo que de verdad gastas o cobras cada mes (una pensión, por ejemplo), nunca la cifra " +
-      "bruta antes de impuestos — el cálculo ya lo asume así. La cifra grande está en euros de " +
-      "hoy; el paréntesis es ese mismo objetivo llevado al mes del cruce con la inflación " +
-      "configurada, lo que de verdad tendrás que haber reunido para entonces.",
+      "tus partidas de presupuesto marcadas para jubilación, con los impuestos por delante si " +
+      "los tienes activados— dividido entre la tasa segura de retirada, MÁS cada euro de cuota " +
+      "que te quede por pagar de tus préstamos (tus activos deben cubrir la renta perpetua y " +
+      "además terminar de pagar la deuda; por eso el objetivo baja según amortizas y deja de " +
+      "moverse cuando el préstamo muere). Esas partidas van en NETO: lo que de verdad gastas o " +
+      "cobras cada mes, nunca la cifra bruta — el cálculo ya lo asume así. Y solo cuenta tu " +
+      "patrimonio LÍQUIDO para cruzarlo: una vivienda no produce retirada mensual, aunque siga " +
+      "sumando en tu patrimonio total. La cifra grande está en euros de hoy; el paréntesis es " +
+      "ese mismo objetivo llevado al mes del cruce con la inflación configurada.",
   },
 
   // --- Ajustes · Proyección -------------------------------------------------
@@ -195,20 +199,23 @@ export const HELP_TEXTS = {
   "expenses.expense_avg": {
     title: "Gasto promedio",
     body:
-      "Media de tu gasto en la ventana elegida arriba. El denominador NO son los meses del " +
-      "calendario: son los meses con movimientos reales. Un mes vacío, o uno cuyo único " +
-      "contenido son movimientos recurrentes, queda fuera entero —ni suma ni divide—, así que " +
-      "no hunde la media mientras no tengas histórico. Dos cosas más: la ventana NO incluye el " +
-      "mes que estás mirando (con junio elegido y 3 meses, promedia marzo, abril y mayo), y las " +
+      "Media de tu gasto en tus últimos meses completos —la ventana elegida arriba, contada " +
+      "hacia atrás desde hoy: es la MISMA media que usa la proyección, aunque estés mirando un " +
+      "mes antiguo—. El denominador NO son los meses del calendario: son los meses con " +
+      "movimientos reales clasificados. Un mes vacío, uno cuyo único contenido son movimientos " +
+      "recurrentes, o uno donde todo está aún sin clasificar, queda fuera entero —ni suma ni " +
+      "divide—, así que no hunde la media. El mes en curso tampoco entra (está a medias), y las " +
       "transferencias conciliadas quedan fuera, porque mover dinero entre tus cuentas no es " +
-      "gasto. El paréntesis dice de qué meses sale.",
+      "gasto. Los importes se promedian tal cual, en euros de su fecha: un histórico de hace " +
+      "muchos años pesa igual que el reciente, sin ajustar por inflación. El paréntesis dice de " +
+      "qué meses sale.",
   },
   "expenses.income_avg": {
     title: "Ingreso promedio",
     body:
-      "Media de tus ingresos en la ventana elegida, con el mismo denominador que el gasto " +
-      "promedio: solo los meses con movimientos reales, sin contar el mes que estás mirando y " +
-      "sin las transferencias conciliadas.",
+      "Media de tus ingresos en tus últimos meses completos, con la misma ventana y el mismo " +
+      "denominador que el gasto promedio: solo los meses con movimientos reales clasificados, " +
+      "sin el mes en curso y sin las transferencias conciliadas.",
   },
   "expenses.savings_transferred": {
     title: "Traspasado a ahorro",

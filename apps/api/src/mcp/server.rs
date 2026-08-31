@@ -2332,7 +2332,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_transactions_summary",
-        description = "Comparativa de un mes: gasto e ingreso reales por categoría vs presupuesto vs promedio ponderado de meses anteriores. Sin year/month usa el último mes completo. El promedio divide entre `avg_months` = meses del tramo con al menos un movimiento REAL; un mes cuyo único contenido son instancias recurrentes queda fuera del numerador Y del denominador. `months_with_data` se devuelve aparte y NO es el denominador. Los importes son MAGNITUDES ≥ 0. `totals.net_actual` = income − expense SIN el ahorro: es el mismo número que `income_minus_expense` de get_history_cashflow, nunca su `cash_delta`.",
+        description = "Comparativa de un mes: real por categoría vs presupuesto vs promedio de los últimos meses completos (ancla HOY, la misma media que la proyección; el mes seleccionado entra si cae dentro). Sin year/month usa el último mes completo. Divide entre `avg_months` = meses con ≥1 movimiento REAL y CLASIFICADO; un mes solo-recurrente o sin clasificar no suma ni divide; euros nominales sin deflactar. `months_with_data` NO es el denominador. Importes MAGNITUDES ≥ 0. `totals.net_actual` = income − expense SIN el ahorro: igual a `income_minus_expense` de get_history_cashflow, nunca su `cash_delta`.",
         annotations(title = "Comparativa mensual", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_transactions_summary(

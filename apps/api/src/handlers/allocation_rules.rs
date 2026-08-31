@@ -1192,15 +1192,15 @@ pub struct AllocationResolutionResponse {
     #[schema(value_type = String)]
     pub planning_component: Decimal,
     /// Cuota mensual de los pasivos activos que la cascada descuenta. **`null` cuando la cifra no
-    /// aplica**: con la base de gasto salida del promedio real (modos B/C con datos de gasto) la
-    /// cuota ya es un movimiento dentro de ese promedio y publicarla aparte la contaría dos veces.
-    /// Hasta 4.3.1 ese caso viajaba como `"0"` — y un `0` numérico no puede significar «no aplica»:
-    /// se leía como «no pagas servicio de deuda» con un préstamo vivo.
+    /// aplica** — contrato 4.3.1→4.7.x. Desde 4.8.0 (#142, opción 3) la cuota viaja como número
+    /// en los TRES modos (en B/C el gasto efectivo ya la restó del promedio: publicarla es
+    /// contarla una vez, no dos) y un `0` significa solo «no hay pasivos con cuota activa».
+    /// La nullabilidad del campo se conserva por forma.
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub debt_service: Option<Decimal>,
-    /// `included_in_real_expense` ⟺ `debt_service` es `null`. `null` ⟺ la cuota viaja (y entonces
-    /// un `0` sí significa «no hay pasivos con cuota activa»).
+    /// Desde 4.8.0 siempre `null` (ver arriba); el literal `included_in_real_expense` se retiró
+    /// con el contrato que lo justificaba. Retirar el campo es un breaking §5 aparte.
     #[schema(value_type = Option<String>)]
     pub debt_service_absent_reason: Option<&'static str>,
     /// `true` cuando `planning_component != 0`: avisa de que `base_cash` lleva dentro un término

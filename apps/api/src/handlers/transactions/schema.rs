@@ -857,15 +857,17 @@ pub struct TransactionsSummaryResponse {
     pub has_actual_data: bool,
     /// Ventana efectiva del promedio: `"3"` | `"6"` | `"12"` (nº de meses) | `"ytd"` | `"all"`.
     pub avg_window: String,
-    /// Nº de meses civiles del tramo `[window_start, selected)` (Months(n)=n; Ytd=month−1;
-    /// All=amplitud; puede ser 0).
+    /// Nº de meses civiles del tramo `[window_start, mes en curso)` — desde #125 (Ola 4) la
+    /// ventana se ancla en HOY, no en el mes seleccionado: es el mismo tramo que promedia la
+    /// proyección (Months(n)=n; Ytd=mes en curso−1, 0 en enero; All=amplitud; puede ser 0).
     pub window_months: u32,
     /// Nº de meses del tramo con ≥1 transacción de cualquier kind/categoría, **recurrentes
     /// incluidos**. Describe lo que hay en el tramo. NO es el denominador — ese es `avg_months`.
     pub months_with_data: u32,
     /// **El denominador del promedio**: nº de meses del tramo con ≥1 movimiento REAL
-    /// (`recurring_rule_id IS NULL`). Los meses no reales quedan fuera del numerador y del
-    /// denominador. `0` ⟺ no hay promedio (todas las medias son 0).
+    /// (`recurring_rule_id IS NULL`) **y clasificado** (`kind` no NULL — #125: un mes solo de
+    /// importaciones sin clasificar no divide). Los meses no reales quedan fuera del numerador y
+    /// del denominador. `0` ⟺ no hay promedio (todas las medias son 0).
     pub avg_months: u32,
     /// Procedencia del promedio. `null` ⟺ `avg_months == 0`.
     #[serde(skip_serializing_if = "Option::is_none")]

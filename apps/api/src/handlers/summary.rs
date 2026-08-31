@@ -107,21 +107,25 @@ pub struct FinancialHealthMetrics {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub liquid_assets_total: Decimal,
-    /// **Unidad: meses.** Meses que los activos **líquidos** cubren el gasto total mensual, componiendo la rentabilidad
-    /// esperada de esos activos (media ponderada por valor) y con el gasto creciendo a la inflación
-    /// de la instalación (`futurefin_engine::liquid_runway_months`). `null` cuando no hay base de
-    /// gasto (`expense_total == 0`) **o** cuando el runway es indefinido (ver `runway_is_indefinite`).
-    /// El valor `1200` es el tope del bucle del servidor y significa «al menos 100 años» (un
-    /// **suelo**, no una medida exacta).
+    /// **Unidad: meses.** Meses que los activos **líquidos** cubren el gasto total mensual,
+    /// drenándolos en el MISMO orden que la simulación real — menor rentabilidad esperada primero,
+    /// cada saldo restante componiendo la suya (#128; hasta 4.7.x se usaba una media ponderada por
+    /// valor, sistemáticamente más corta en carteras mixtas) — y con el gasto creciendo a la
+    /// inflación de la instalación (`futurefin_engine::liquid_runway_months`). `null` cuando no hay
+    /// base de gasto (`expense_total == 0`) **o** cuando el runway es indefinido (ver
+    /// `runway_is_indefinite`). El valor `1200` es el tope del bucle del servidor y significa
+    /// «al menos 100 años» (un **suelo**, no una medida exacta).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub runway_months: Option<Decimal>,
     /// `true` cuando la retirada anual — `12 × expense_total_monthly_equivalent`, grosseada por los
     /// tramos fiscales de `fire_settings` igual que el target FIRE — no supera el SWR de la
-    /// instalación aplicado a `liquid_assets_total`; en ese caso `runway_months` es `null`. Con
-    /// gasto 0 el runway tampoco existe pero este campo es `false` (no hay base). Con
-    /// `swr_pct = 0` nunca es `true`.
+    /// instalación aplicado a `liquid_assets_total` **y** la cartera líquida tiene rentabilidad
+    /// esperada ponderada > 0 (#128: la regla del SWR se validó para carteras invertidas — el
+    /// dinero parado al 0 % nunca es «indefinido», por grande que sea el saldo); en ese caso
+    /// `runway_months` es `null`. Con gasto 0 el runway tampoco existe pero este campo es `false`
+    /// (no hay base). Con `swr_pct = 0` nunca es `true`.
     pub runway_is_indefinite: bool,
     /// Σ de `expected_amount` de **TODOS** los Próximos (`planning_flows`) del scope cuya
     /// categoría es de scope `income`. **Sin ventana temporal y sin anualizar**: entra igual un

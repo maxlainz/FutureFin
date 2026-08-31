@@ -288,6 +288,13 @@ export type ProjectionPointApi = {
   net_worth: number;
   /** f64. */
   contributed_capital: number;
+  /** f64, euros de HOY (4.6.0). Con inflación 0 vale lo mismo que net_worth. */
+  net_worth_real?: number;
+  /**
+   * f64 (4.8.0, #143): patrimonio LÍQUIDO nominal — Σ activos vendibles + caja, sin restar
+   * pasivos. Es la base que decide el cruce FIRE (comparar contra fire_target_series).
+   */
+  net_worth_liquid?: number;
 };
 
 export type ProjectionMilestoneApi = {
@@ -354,6 +361,12 @@ export type ProjectionSeriesApi = {
   jubilacion_age?: number | null;
   /** Objetivo FIRE base en euros de hoy. El target real de cada mes crece con la inflación. */
   jubilacion_target_net_worth?: string | null;
+  /**
+   * 4.8.0 (#142): término finito de deuda del objetivo a día de hoy (Σ cuotas restantes +
+   * residuales), Decimal-string. La vista previa del formulario debe SUMARLO a su base; `null`
+   * sin objetivo, `"0.0000"` sin deuda.
+   */
+  fire_target_debt_component?: string | null;
   /** Posición (índice de array, base 0) en `points` / `fire_target_series` / `asset_series[].values`
    *  correspondiente al mes de jubilación. `null` ⟺ no hay cruce. Convención: el punto servido
    *  inmediatamente ANTERIOR o igual al mes del cruce — existe porque `jubilacion_month_index` no

@@ -207,6 +207,17 @@ export function RetirementView({
     if (needAnnual !== null && needAnnual > 0 && swrN !== null && swrN > 0) {
       const grossNoPen = grossUpNetAnnualFire(needAnnual, brackets, taxOn);
       targetNoPen = grossNoPen / (swrN / 100);
+      // #142 (4.8.0): el objetivo lleva además el término finito de deuda (Σ cuotas restantes
+      // + residuales). El cliente NO puede derivarlo (necesita el calendario completo de cada
+      // plan): se SUMA el que publica el servidor. No depende de los ajustes del draft, así que
+      // la vista previa sigue siendo exacta al mover SWR/gasto/impuestos.
+      const debtComponent =
+        projectionSeries?.fire_target_debt_component != null
+          ? parseDisplayDecimal(projectionSeries.fire_target_debt_component)
+          : null;
+      if (debtComponent !== null && debtComponent > 0) {
+        targetNoPen += debtComponent;
+      }
     }
 
     return { needAnnual, swrN, targetNoPen };
@@ -215,6 +226,7 @@ export function RetirementView({
     fireExpenseM,
     fireIncomeM,
     retirementBudgetSnapshot?.totals.income_retirement_monthly_equivalent,
+    projectionSeries?.fire_target_debt_component,
   ]);
 
   // Ajustes REALMENTE guardados (prop reactiva de la instalación), normalizados igual que el
