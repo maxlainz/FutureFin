@@ -4,6 +4,57 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.12.0] - 2026-08-31
+
+**La plusvalía que de verdad tributa, y el sobrante que ya no puede nacer muerto** (issues #178 y
+la retro-siembra de #150, ambos ordenados por el owner el mismo día). Números a mano verificados
+por TRES fuentes (spike Opus + réplica Decimal-50 independiente en sesión + el motor, coincidentes
+al céntimo).
+
+### La retirada tributa sobre la ganancia REAL de cada activo (#178)
+
+- **Antes, toda venta tributaba como si el 100 % fuera plusvalía** (el escalar `taxable_gain_ratio`
+  con default 1): en una cartera 80 % coste eso es vender **5.279,82 €/año de más** (30.227,85 de
+  bruto donde bastan 24.948,02 — un 21,2 %) y pagar 6.227,85 € de impuesto donde tocan 948,02.
+  Ahora, **si un activo declara su precio de compra, su `g` se DERIVA de la base de coste viva**
+  (`g_i = 1 − base/valor`, la base que #120 ya llevaba por activo): invariante a la propia venta
+  (teorema pineado) y creciente sola con el tiempo — que es lo que hace de verdad.
+- **El ancla del issue** (500.000 € al 80 % de coste, 5 %, 24.000 € netos/año): agotamiento
+  **mes 403 → mes 561** (+158 meses: el default robaba **13,2 años** de jubilación). Y la perilla
+  estática que la ayuda antigua invitaba a poner (0,2 fijo) daba **mes 916** — 29,6 años de
+  OPTIMISMO, porque congela una fracción de coste que decae al ritmo del crecimiento. Esto no era
+  una mejora de precisión: era una **trampa publicada**, y la ayuda queda reescrita.
+- **Mezclas exactas, sin iterar**: con activos de `g` distinta, el bruto lo resuelve una forma
+  cerrada por tramos nueva (`gross_up_mixed_monthly`): la base agregada `Σ g_i·venta_i` atraviesa
+  los tramos progresivos y el paseo decide venta Y reparto a la vez (caso pineado: A al 20 % de
+  ganancia + B al 80 %, neto 1.000 €/mes → bruto exacto **1.039,50 €**, todo de A; ningún escalar
+  reproduce el 1.044,81 del caso con capacidad mordiendo). La familia «punto fijo iterado» queda
+  retirada por arqueología (converge a razón 0,11 — 9 iteraciones para el céntimo — y oscila en
+  las fronteras).
+- **Dos regímenes, una fiscalidad** (contrato financiero §2.4): el OBJETIVO y el umbral de
+  Autonomía son perpetuidades y conservan el escalar (default 1 — que a perpetuidad no es
+  prudencia sino el LÍMITE correcto: la fracción de coste decae a 0); el DRENAJE y el bucle
+  finito de Autonomía son trayectorias y derivan. Dirección del error residual: la segura (se
+  cruza sobrecapitalizado). La Autonomía end-to-end: 12.000 € al 0 % con gasto 1.000 pasan de
+  **9,6 → 11,5 meses** al declarar un coste de 9.600.
+- **Cero números se mueven sin aportar el dato**: sin ningún coste declarado, la vía rápida es el
+  camino LITERAL de 4.11.0 (bit a bit — todos los pins del programa intactos). La respuesta
+  declara qué rigió: `drawdown_gain_basis` (`cost_basis`|`declared_ratio`|`mixed`) y la `g₀`
+  informativa de hoy (`taxable_gain_ratio_today`). El espejo TS muerto `taxOnGrossCapitalAnnual`
+  (cero llamantes, sin fixture) se retira.
+
+### El sobrante ya no puede quedarse en caja al 0 % (#150, retro-siembra)
+
+- **Orden del owner (2026-08-31), que revierte el «sin retro-siembra» de 4.11.0**: la migración
+  siembra la regla «resto» en TODO scope con activos y sin sumidero — apuntando al activo
+  **líquido de menor rentabilidad esperada** (empate: el de mayor saldo; «el primer activo que se
+  creó» no es recuperable — la tabla no guarda fecha de alta). Y la MISMA regla corre al importar
+  un backup anterior a la siembra: restaurar un archivo viejo ya no refabrica el sobrante muerto.
+- Con esto, `surplus_cash` queda reducido a sus dos papeles legítimos: primera fuente en los
+  déficits (dinero ya tributado — venderlo no realiza plusvalía, ahora por teorema) y el
+  superávit del JUBILADO, que sigue en caja porque la cascada no corre tras el cruce — decisión
+  de modelo pendiente en #175.
+
 ## [4.11.0] - 2026-08-31
 
 **Ola 7 de la resolución — «Próximos con fecha y el sobrante que trabaja»** (issues #126, #148,
