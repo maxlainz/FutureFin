@@ -32,7 +32,6 @@ async fn projection_series_returns_stable_compound_marker_and_starting_nw() {
         )
         .await;
     assert_eq!(asset_resp.status, http::StatusCode::CREATED, "create asset: {asset_resp:?}");
-    let asset_id = asset_resp.json()["id"].as_str().unwrap().to_string();
 
     let income_resp = app
         .post_json_with_cookie(
@@ -52,14 +51,8 @@ async fn projection_series_returns_stable_compound_marker_and_starting_nw() {
         .await;
     assert_eq!(expense_resp.status, http::StatusCode::CREATED, "create expense entry: {expense_resp:?}");
 
-    let rule_resp = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            serde_json::json!({"target_asset_id": asset_id, "kind": "remainder"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(rule_resp.status, http::StatusCode::CREATED, "create allocation rule: {rule_resp:?}");
+    // #150: "MSCI World" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
 
     let series = app.get_with_cookie("/v1/projection/series?months=24", &owner.cookie).await;
     assert_eq!(series.status, http::StatusCode::OK, "GET series: {series:?}");

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::handlers::installation::FireSettings;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 11;
+pub const CURRENT_SCHEMA_VERSION: u32 = 12;
 pub const SUPPORTED_FORMAT_VERSION: u8 = 1;
 pub const MAGIC: &[u8; 4] = b"FFBK";
 
@@ -213,14 +213,38 @@ pub struct BackupBudgetEntry {
     pub sort_index: i32,
 }
 
+/// Forma CONGELADA para los payloads v1..v11 (#148): su flujo no conoce la ventana recurrente
+/// — todos los Próximos eran puntuales.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct BackupPlanningFlow {
+pub struct BackupPlanningFlowV11 {
     pub category_ref: CategoryRef,
     pub title: String,
     #[serde(with = "rust_decimal::serde::str")]
     pub expected_amount: Decimal,
     #[serde(default)]
     pub due_date: Option<NaiveDate>,
+    pub show_in_chart: bool,
+    #[serde(default)]
+    pub notes: Option<String>,
+    pub sort_index: i32,
+}
+
+/// v12 (4.11.0, #148): el flujo declara la base del importe (`one_off` = total en €;
+/// `per_month` = €/MES durante la ventana) y las dos fechas de ventana.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupPlanningFlow {
+    pub category_ref: CategoryRef,
+    pub title: String,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub expected_amount: Decimal,
+    /// `one_off` | `per_month`.
+    pub amount_basis: String,
+    #[serde(default)]
+    pub due_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub window_start_date: Option<NaiveDate>,
+    #[serde(default)]
+    pub window_end_date: Option<NaiveDate>,
     pub show_in_chart: bool,
     #[serde(default)]
     pub notes: Option<String>,
@@ -481,7 +505,7 @@ pub struct BackupPayloadV1 {
     pub assets: Vec<BackupAssetV1>,
     pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
-    pub planning_flows: Vec<BackupPlanningFlow>,
+    pub planning_flows: Vec<BackupPlanningFlowV11>,
     #[serde(default)]
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
@@ -494,7 +518,7 @@ pub struct BackupPayloadV2 {
     pub assets: Vec<BackupAssetV2>,
     pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
-    pub planning_flows: Vec<BackupPlanningFlow>,
+    pub planning_flows: Vec<BackupPlanningFlowV11>,
     #[serde(default)]
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
@@ -511,7 +535,7 @@ pub struct BackupPayloadV3 {
     pub allocation_rules: Vec<BackupAllocationRule>,
     pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
-    pub planning_flows: Vec<BackupPlanningFlow>,
+    pub planning_flows: Vec<BackupPlanningFlowV11>,
     #[serde(default)]
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
@@ -526,7 +550,7 @@ pub struct BackupPayloadV4 {
     pub allocation_rules: Vec<BackupAllocationRule>,
     pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
-    pub planning_flows: Vec<BackupPlanningFlow>,
+    pub planning_flows: Vec<BackupPlanningFlowV11>,
     #[serde(default)]
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
@@ -544,7 +568,7 @@ pub struct BackupPayloadV5 {
     pub allocation_rules: Vec<BackupAllocationRule>,
     pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
-    pub planning_flows: Vec<BackupPlanningFlow>,
+    pub planning_flows: Vec<BackupPlanningFlowV11>,
     #[serde(default)]
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
@@ -570,7 +594,7 @@ pub struct BackupPayloadV6 {
     pub allocation_rules: Vec<BackupAllocationRule>,
     pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
-    pub planning_flows: Vec<BackupPlanningFlow>,
+    pub planning_flows: Vec<BackupPlanningFlowV11>,
     #[serde(default)]
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
@@ -596,7 +620,7 @@ pub struct BackupPayloadV7 {
     pub allocation_rules: Vec<BackupAllocationRule>,
     pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
-    pub planning_flows: Vec<BackupPlanningFlow>,
+    pub planning_flows: Vec<BackupPlanningFlowV11>,
     #[serde(default)]
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
@@ -622,7 +646,7 @@ pub struct BackupPayloadV8 {
     pub allocation_rules: Vec<BackupAllocationRule>,
     pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
-    pub planning_flows: Vec<BackupPlanningFlow>,
+    pub planning_flows: Vec<BackupPlanningFlowV11>,
     #[serde(default)]
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
@@ -653,7 +677,7 @@ pub struct BackupPayloadV9 {
     pub allocation_rules: Vec<BackupAllocationRule>,
     pub liabilities: Vec<BackupLiabilityV9>,
     pub budget_entries: Vec<BackupBudgetEntry>,
-    pub planning_flows: Vec<BackupPlanningFlow>,
+    pub planning_flows: Vec<BackupPlanningFlowV11>,
     #[serde(default)]
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
@@ -682,7 +706,7 @@ pub struct BackupPayloadV10 {
     pub allocation_rules: Vec<BackupAllocationRule>,
     pub liabilities: Vec<BackupLiabilityV10>,
     pub budget_entries: Vec<BackupBudgetEntry>,
-    pub planning_flows: Vec<BackupPlanningFlow>,
+    pub planning_flows: Vec<BackupPlanningFlowV11>,
     #[serde(default)]
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
@@ -711,6 +735,35 @@ pub struct BackupPayloadV11 {
     pub allocation_rules: Vec<BackupAllocationRule>,
     pub liabilities: Vec<BackupLiabilityV10>,
     pub budget_entries: Vec<BackupBudgetEntry>,
+    pub planning_flows: Vec<BackupPlanningFlowV11>,
+    #[serde(default)]
+    pub ui_preferences: UiPreferences,
+    pub installation_snapshot_informative: InstallationSnapshotInformative,
+    #[serde(default)]
+    pub snapshots: Vec<BackupSnapshot>,
+    #[serde(default)]
+    pub transaction_imports: Vec<BackupTransactionImport>,
+    #[serde(default)]
+    pub transactions: Vec<BackupTransaction>,
+    #[serde(default)]
+    pub categorization_rules: Vec<BackupCategorizationRule>,
+    #[serde(default)]
+    pub recurring_transaction_rules: Vec<BackupRecurringRule>,
+    #[serde(default)]
+    pub transfer_match_rejections: Vec<BackupTransferMatchRejection>,
+}
+
+/// v12 (4.11.0, #148): los planning flows declaran base y ventana recurrente. Copia literal
+/// de V11 cambiando solo `planning_flows` — el resto de secciones son idénticas.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BackupPayloadV12 {
+    pub user: BackupUser,
+    pub categories_used: Vec<BackupCategory>,
+    pub assets: Vec<BackupAssetV3>,
+    #[serde(default)]
+    pub allocation_rules: Vec<BackupAllocationRule>,
+    pub liabilities: Vec<BackupLiabilityV10>,
+    pub budget_entries: Vec<BackupBudgetEntry>,
     pub planning_flows: Vec<BackupPlanningFlow>,
     #[serde(default)]
     pub ui_preferences: UiPreferences,
@@ -730,7 +783,7 @@ pub struct BackupPayloadV11 {
 }
 
 /// Alias for the current-version payload. Export and import code work against this type.
-pub type BackupPayload = BackupPayloadV11;
+pub type BackupPayload = BackupPayloadV12;
 
 #[derive(Debug)]
 pub enum AnyPayload {
@@ -745,6 +798,7 @@ pub enum AnyPayload {
     V9(BackupPayloadV9),
     V10(BackupPayloadV10),
     V11(BackupPayloadV11),
+    V12(BackupPayloadV12),
 }
 
 pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, String> {
@@ -803,6 +857,11 @@ pub fn parse_payload(schema_version: u32, bytes: &[u8]) -> Result<AnyPayload, St
             let p: BackupPayloadV11 = serde_json::from_slice(bytes)
                 .map_err(|e| format!("backup_payload_malformed: payload v11 malformed: {e}"))?;
             Ok(AnyPayload::V11(p))
+        }
+        12 => {
+            let p: BackupPayloadV12 = serde_json::from_slice(bytes)
+                .map_err(|e| format!("backup_payload_malformed: payload v12 malformed: {e}"))?;
+            Ok(AnyPayload::V12(p))
         }
         v if v > CURRENT_SCHEMA_VERSION => Err(format!(
             "backup_schema_version_unsupported: schema_version {v} is newer than this server supports ({CURRENT_SCHEMA_VERSION}); update FutureFin to import this backup",
@@ -1142,10 +1201,50 @@ fn payload_v10_to_v11(p: BackupPayloadV10) -> BackupPayloadV11 {
     }
 }
 
+/// v11 → v12 (#148): el flujo v11 no conocía la ventana recurrente — todos los Próximos eran
+/// puntuales, así que `amount_basis: "one_off"` y ventanas vacías reproducen exactamente lo que
+/// aquel servidor modelaba.
+fn payload_v11_to_v12(p: BackupPayloadV11) -> BackupPayloadV12 {
+    BackupPayloadV12 {
+        user: p.user,
+        categories_used: p.categories_used,
+        assets: p.assets,
+        allocation_rules: p.allocation_rules,
+        liabilities: p.liabilities,
+        budget_entries: p.budget_entries,
+        planning_flows: p
+            .planning_flows
+            .into_iter()
+            .map(|f| BackupPlanningFlow {
+                category_ref: f.category_ref,
+                title: f.title,
+                expected_amount: f.expected_amount,
+                amount_basis: "one_off".into(),
+                due_date: f.due_date,
+                window_start_date: None,
+                window_end_date: None,
+                show_in_chart: f.show_in_chart,
+                notes: f.notes,
+                sort_index: f.sort_index,
+            })
+            .collect(),
+        ui_preferences: p.ui_preferences,
+        installation_snapshot_informative: p.installation_snapshot_informative,
+        snapshots: p.snapshots,
+        transaction_imports: p.transaction_imports,
+        transactions: p.transactions,
+        categorization_rules: p.categorization_rules,
+        recurring_transaction_rules: p.recurring_transaction_rules,
+        transfer_match_rejections: p.transfer_match_rejections,
+    }
+}
+
 pub fn migrate_to_current(any: AnyPayload) -> BackupPayload {
-    // Cadena completa v1..v11: TODOS los backups antiguos siguen importando (regla de
-    // change-control §5 — un backup es la única vía de recuperación de un usuario).
-    match any {
+    // Cadena completa v1..v12: TODOS los backups antiguos siguen importando (regla de
+    // change-control §5 — un backup es la única vía de recuperación de un usuario). Los brazos
+    // v1..v10 producen V11 y el salto 11→12 es el mismo para todos.
+    let v11 = match any {
+        AnyPayload::V12(p) => return p,
         AnyPayload::V1(p) => payload_v10_to_v11(payload_v9_to_v10(payload_v8_to_v9(
             payload_v7_to_v8(payload_v6_to_v7(payload_v5_to_v6(payload_v4_to_v5(
                 payload_v3_to_v4(payload_v2_to_v3(payload_v1_to_v2(p))),
@@ -1177,7 +1276,8 @@ pub fn migrate_to_current(any: AnyPayload) -> BackupPayload {
         AnyPayload::V9(p) => payload_v10_to_v11(payload_v9_to_v10(p)),
         AnyPayload::V10(p) => payload_v10_to_v11(p),
         AnyPayload::V11(p) => p,
-    }
+    };
+    payload_v11_to_v12(v11)
 }
 
 #[cfg(test)]

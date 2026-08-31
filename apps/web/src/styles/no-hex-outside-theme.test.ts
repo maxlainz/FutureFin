@@ -149,8 +149,10 @@ const RGBA_ZERO_PATTERN = /rgba\(\s*0\s*,\s*0\s*,\s*0\s*,/g;
  * en vez de dejar pasar en silencio un `rgba(0,0,0,…)` distinto que caiga en las mismas líneas.
  */
 const RGBA_ZERO_EXCEPTIONS: ReadonlySet<string> = new Set([
-  "App.css:2356",
-  "App.css:2357",
+  // La sombra del tooltip del chart (excepción documentada junto al CSS). Ola 7 (#126/#148)
+  // insertó reglas más arriba en App.css y las líneas se desplazaron 2356/2357 → 2382/2383.
+  "App.css:2382",
+  "App.css:2383",
 ]);
 
 function rgbaZeroHits(): Hit[] {

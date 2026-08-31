@@ -129,7 +129,8 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   ratios ya redondeados. Identidades pinneadas en
   `sim_kpis_match_summary_financial_health_in_all_three_modes`. Overrides: `one_off_expense`
   (`amount` + exactamente uno de `month_index`/`date`; mismo mapeo fecha→mes que un planning flow
-  real), `extra_monthly_expense` (gasto REAL: entra antes del target/caps vía `SimOverrides`
+  real EXCEPTO el pasado: la `date` anterior al mes ancla se rechaza — un what-if no modela deuda
+  vencida, mientras que un planning flow real vencido sí carga en el mes 0 desde #126), `extra_monthly_expense` (gasto REAL: entra antes del target/caps vía `SimOverrides`
   dentro de `build_installation_projection_input`), `extra_monthly_cash_adjustment` y
   `extra_monthly_savings` (NEUTROS: mecanismo planning-adjustment, no mueven target ni caps),
   `swr_pct` / `annual_inflation_percent` / `retirement_annual_expense` (re-validados con las
@@ -466,6 +467,14 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     sobre un `remainder` con tope) devuelve el mismo 400 `sink_creation_not_allowed` — la guarda
     vive en la core (`allocation_rules.rs`, comentario junto a `is_sink`), así que la
     `description` de la tool («el SUMIDERO solo se pone desde la app») vuelve a ser verdad.
+    **Excepción ACOTADA desde 4.11.0 (#150, política S2)**: la SIEMBRA del sumidero al crear el
+    PRIMER activo de un scope virgen (cero activos y cero reglas del owner) ocurre en las dos
+    superficies — también cuando el alta llega por la tool `create_asset`. No contradice el
+    porqué de la prohibición: aquí no se «redirige» nada (el sobrante iba a caja muerta, no había
+    cascada que alterar), el destino es el activo que el mismo request acaba de crear, y **la
+    escritura implícita se declara** (`seeded_allocation_rule_id` en la respuesta de
+    `create_asset`, HTTP y tool). `create_allocation_rule`/`update_allocation_rule` siguen con
+    `Forbidden`: la excepción vive en `create_asset_core`, no en las tools de reglas.
   - **`confirm_transfer_match` cierra la omisión de `reconcile_pair` sin reabrirla.** El registro
     §3.1 la excluía como *LLM footgun* con un *revisit trigger* literal: «que exista una tool de
     sugerencias». Existe — y lo que se implementó **no es `reconcile_pair`**: acepta **solo un
@@ -572,7 +581,11 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   por una petición que no movió un número sería incoherente con el propio objetivo de la clave),
   `update_transaction` (owner-guard → `not_found`),
   `capture_snapshot` (upsert por día civil — sobrescribe), `create_planning_flow` /
-  `update_planning_flow` (tri-state `clear_due_date`),
+  `update_planning_flow` (tri-states `clear_due_date`, `clear_window_start` y `clear_window_end`;
+  desde 4.11.0/#148 ambas hablan `amount_basis` + ventana `window_start_date`/`window_end_date` —
+  con `per_month` el importe es **€/MES**, y cambiar de base exige dejar coherentes fecha y
+  ventana en la misma llamada: el core valida el estado RESULTANTE con los mismos códigos de wire
+  que HTTP),
   `create_category`, `create_categorization_rule` (solo imports futuros; conflict con `source`
   concreto duplicado). **Contrato de cache por tool**: COND (`invalidate_projection_if_savings_
   uses_transactions`, solo modos B/C) = transaction C/U + materialize; NONE = capture_snapshot

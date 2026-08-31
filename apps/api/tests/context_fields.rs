@@ -255,6 +255,34 @@ async fn upcoming_totals_publish_the_horizon_they_are_summing() {
     );
     // Y la ratio sigue siendo una fracción sobre esos mismos operandos sin ventana.
     assert!((dec(&fh["upcoming_coverage_ratio"]) - 1200.0 / 9300.0).abs() < 1e-6, "{fh}");
+
+    // #148: un recurrente de 800 €/MES NO entra en los totales en € — mezclaría magnitudes.
+    // Va aparte, en €/mes, y el count global sí lo cuenta.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/planning/flows",
+            serde_json::json!({
+                "category_id": cat_exp, "title": "Alquiler", "expected_amount": "800",
+                "amount_basis": "per_month", "window_start_date": "2026-09-01"
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "per_month: {r:?}");
+
+    let summary = get(&app, &owner.cookie, "/v1/summary").await;
+    let fh = &summary["financial_health"];
+    assert_eq!(
+        dec(&fh["upcoming_outflows_total"]),
+        9300.0,
+        "el €/mes no contamina el total en €: {fh}"
+    );
+    assert_eq!(dec(&fh["upcoming_recurring_monthly_outflow"]), 800.0, "{fh}");
+    assert_eq!(dec(&fh["upcoming_recurring_monthly_inflow"]), 0.0, "{fh}");
+    assert_eq!(fh["upcoming_recurring_count"], 1, "{fh}");
+    assert_eq!(fh["upcoming_flows_count"], 4, "el count global cuenta TODO: {fh}");
+    // La ratio conserva su base (solo puntuales) — su helpText lo declara.
+    assert!((dec(&fh["upcoming_coverage_ratio"]) - 1200.0 / 9300.0).abs() < 1e-6, "{fh}");
 }
 
 // ---------------------------------------------------------------------------
@@ -646,10 +674,13 @@ async fn projection_publishes_the_dated_planning_flows_that_move_the_curve() {
 
     let anchor = chrono::Utc::now().date_naive();
     let dentro = add_months_signed(anchor, 30); // Más allá del tramo mensual de `hybrid`.
+    // 45 días atrás cae SIEMPRE antes del día 1 del mes ancla (ningún mes tiene 45 días).
+    let vencido = anchor - chrono::Duration::days(45);
     let flujos = [
         (&cat_exp, "Reforma", "98000", Some(dentro)),
         (&cat_inc, "Herencia", "20000", Some(add_months_signed(anchor, 5))),
         (&cat_exp, "Sin fecha", "300", None),
+        (&cat_exp, "Atrasado", "3000", Some(vencido)),
     ];
     for (cat, title, amount, due) in flujos {
         let mut body = serde_json::json!({
@@ -667,12 +698,25 @@ async fn projection_publishes_the_dated_planning_flows_that_move_the_curve() {
     let proj = get(&app, &owner.cookie, "/v1/projection/series?density=hybrid").await;
     let events = proj["events"].as_array().expect("events array");
     assert_eq!(proj["events_truncated"], false, "{proj}");
-    // Solo los DOS con fecha: el sin-fecha se reparte sobre 90 días y no produce escalón, así que
-    // llamarlo «evento» sería señalar una rampa.
-    assert_eq!(events.len(), 2, "solo los flujos con fecha: {events:?}");
+    // Los TRES con fecha (el vencido incluido, #126): el sin-fecha se reparte sobre 90 días y no
+    // produce escalón, así que llamarlo «evento» sería señalar una rampa.
+    assert_eq!(events.len(), 3, "solo los flujos con fecha: {events:?}");
+
+    // #126: el vencido carga en el mes ancla con su fecha REAL y el flag que declara la
+    // discordancia mes-señalado ≠ fecha-mostrada. Los no vencidos llevan overdue: false — el
+    // campo distingue los dos casos, no decora.
+    let atrasado = events.iter().find(|e| e["title"] == "Atrasado").expect("Atrasado");
+    assert_eq!(atrasado["month_index"], 0, "{atrasado}");
+    assert_eq!(atrasado["overdue"], true, "{atrasado}");
+    assert_eq!(
+        atrasado["date_ymd"],
+        serde_json::json!(vencido.format("%Y-%m-%d").to_string()),
+        "{atrasado}"
+    );
 
     let reforma = events.iter().find(|e| e["title"] == "Reforma").expect("Reforma");
     assert_eq!(reforma["direction"], "outflow", "{reforma}");
+    assert_eq!(reforma["overdue"], false, "{reforma}");
     assert_eq!(dec(&reforma["amount"]), 98_000.0, "magnitud ≥ 0: {reforma}");
     assert_eq!(
         reforma["date_ymd"],

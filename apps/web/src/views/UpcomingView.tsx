@@ -2,6 +2,7 @@ import type { Dispatch, FormEvent, SetStateAction } from "react";
 import type {
   CategoryRow,
   InstallationAccess,
+  PlanningAmountBasisApi,
   PlanningFlowApiRow,
   PlanningFlowDirectionApi,
 } from "../api/types";
@@ -10,6 +11,7 @@ import { MetricCard } from "../components/MetricCard";
 import { Modal, ModalFormError } from "../components/Modal";
 import { PlanningDirectionChart } from "../components/charts/PlanningDirectionChart";
 import { PlusIcon, RowEditIcon, RowTrashIcon } from "../components/icons";
+import { formatDateDmy, todayYmdInTimeZone } from "../lib/dates";
 import {
   METRIC_DASH,
   formatCurrencyAmount,
@@ -49,6 +51,12 @@ export function UpcomingView({
   setPlanningFormAmount,
   planningFormDue,
   setPlanningFormDue,
+  planningFormBasis,
+  setPlanningFormBasis,
+  planningFormWindowStart,
+  setPlanningFormWindowStart,
+  planningFormWindowEnd,
+  setPlanningFormWindowEnd,
   planningFormNotes,
   setPlanningFormNotes,
   planningFormShowInChart,
@@ -83,6 +91,12 @@ export function UpcomingView({
   setPlanningFormAmount: Dispatch<SetStateAction<string>>;
   planningFormDue: string;
   setPlanningFormDue: Dispatch<SetStateAction<string>>;
+  planningFormBasis: PlanningAmountBasisApi;
+  setPlanningFormBasis: Dispatch<SetStateAction<PlanningAmountBasisApi>>;
+  planningFormWindowStart: string;
+  setPlanningFormWindowStart: Dispatch<SetStateAction<string>>;
+  planningFormWindowEnd: string;
+  setPlanningFormWindowEnd: Dispatch<SetStateAction<string>>;
   planningFormNotes: string;
   setPlanningFormNotes: Dispatch<SetStateAction<string>>;
   planningFormShowInChart: boolean;
@@ -101,6 +115,24 @@ export function UpcomingView({
   const currencyIso = installation?.installation.base_currency ?? "";
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const isMobile = useIsMobile();
+  // #126: un Próximo con fecha anterior al día 1 del mes en curso ya no desaparece de la
+  // proyección — carga íntegro en el mes actual, y esta marca es la única señal que el usuario
+  // tiene de que ese apunte ya está moviendo su curva. Comparación de strings ISO: es segura.
+  const calendarTz = installation?.installation.calendar_tz?.trim() || "UTC";
+  const anchorMonthFirstYmd = `${todayYmdInTimeZone(calendarTz).slice(0, 7)}-01`;
+  const rowIsOverdue = (row: PlanningFlowApiRow): boolean =>
+    Boolean(row.due_date && row.due_date < anchorMonthFirstYmd);
+  // #148: la celda de calendario de un recurrente es su periodo, no un vencimiento.
+  const rowPeriodLabel = (row: PlanningFlowApiRow): string => {
+    if (row.amount_basis === "per_month") {
+      const start = row.window_start_date
+        ? formatDateDmy(row.window_start_date)
+        : METRIC_DASH;
+      const end = row.window_end_date ? formatDateDmy(row.window_end_date) : "sin fin";
+      return `${start} – ${end}`;
+    }
+    return row.due_date ? formatDateDmy(row.due_date) : METRIC_DASH;
+  };
   const categoryById = budgetCategoryMap(
     planningIncomeCategories,
     planningExpenseCategories,
@@ -111,12 +143,19 @@ export function UpcomingView({
       ? planningIncomeCategories
       : planningExpenseCategories;
 
+  // #148: los totales en € suman SOLO puntuales — el expected_amount de un recurrente son
+  // €/MES y mezclarlo aquí sería un error de magnitud (el mismo que se arregló en /v1/summary).
   const planningInflowSum = planningFlows
-    .filter((f) => f.direction === "inflow")
+    .filter((f) => f.direction === "inflow" && f.amount_basis !== "per_month")
     .reduce((acc, f) => acc + (parseDisplayDecimal(f.expected_amount) ?? 0), 0);
   const planningOutflowSum = planningFlows
-    .filter((f) => f.direction === "outflow")
+    .filter((f) => f.direction === "outflow" && f.amount_basis !== "per_month")
     .reduce((acc, f) => acc + (parseDisplayDecimal(f.expected_amount) ?? 0), 0);
+  const recurringRows = planningFlows.filter((f) => f.amount_basis === "per_month");
+  const recurringMonthlyNet = recurringRows.reduce((acc, f) => {
+    const amt = parseDisplayDecimal(f.expected_amount) ?? 0;
+    return acc + (f.direction === "inflow" ? amt : -amt);
+  }, 0);
 
   const planningWorkspaceSub = installationBusy
     ? "Cargando…"
@@ -136,6 +175,9 @@ export function UpcomingView({
 
   const flowsNetTotal = !planningLoading
     ? planningFlows.reduce((acc, f) => {
+        if (f.amount_basis === "per_month") {
+          return acc; // €/mes: su neto va en la tarjeta «Recurrentes», no en este total en €.
+        }
         const amt = parseDisplayDecimal(f.expected_amount) ?? 0;
         return (
           acc +
@@ -165,6 +207,7 @@ export function UpcomingView({
         <div className="metric-grid workspace-kpi-strip planning-direction-strip">
           <MetricCard
             label="Entradas (suma)"
+            helpId="upcoming.inflows"
             value={
               !planningLoading
                 ? formatCurrencyNumber(planningInflowSum, currencyIso)
@@ -173,6 +216,7 @@ export function UpcomingView({
           />
           <MetricCard
             label="Salidas (suma)"
+            helpId="upcoming.outflows"
             value={
               !planningLoading
                 ? formatCurrencyNumber(planningOutflowSum, currencyIso)
@@ -181,12 +225,24 @@ export function UpcomingView({
           />
           <MetricCard
             label="Neto planificado"
+            helpId="upcoming.net"
             value={
               flowsNetTotal !== null
                 ? formatCurrencyNumber(flowsNetTotal, currencyIso)
                 : METRIC_DASH
             }
           />
+          {recurringRows.length > 0 ? (
+            <MetricCard
+              label="Recurrentes (neto /mes)"
+              helpId="upcoming.recurring_net"
+              value={
+                !planningLoading
+                  ? `${formatCurrencyNumber(recurringMonthlyNet, currencyIso)} /mes`
+                  : METRIC_DASH
+              }
+            />
+          ) : null}
         </div>
       ) : null}
 
@@ -247,6 +303,28 @@ export function UpcomingView({
                 Salida (gasto)
               </button>
             </div>
+            {/* #148: la base del importe. «Puntual» = total en €; «Recurrente» = €/mes durante
+                un periodo. Cambiar de pestaña no borra nada hasta guardar. */}
+            <div className="segmented" role="tablist" aria-label="Tipo de flujo">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={planningFormBasis === "one_off"}
+                className={planningFormBasis === "one_off" ? "active" : ""}
+                onClick={() => setPlanningFormBasis("one_off")}
+              >
+                Puntual
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={planningFormBasis === "per_month"}
+                className={planningFormBasis === "per_month" ? "active" : ""}
+                onClick={() => setPlanningFormBasis("per_month")}
+              >
+                Recurrente
+              </button>
+            </div>
             <div className="asset-form-grid">
               <label className="field">
                 <span>Categoría</span>
@@ -275,7 +353,11 @@ export function UpcomingView({
                 />
               </label>
               <label className="field">
-                <span>Importe esperado</span>
+                <span>
+                  {planningFormBasis === "per_month"
+                    ? "Importe mensual"
+                    : "Importe esperado"}
+                </span>
                 <input
                   value={planningFormAmount}
                   onChange={(e) => setPlanningFormAmount(e.target.value)}
@@ -284,31 +366,55 @@ export function UpcomingView({
                   autoComplete="off"
                 />
               </label>
-              <label className="field">
-                <span>Fecha prevista (opc.)</span>
-                <input
-                  type="date"
-                  value={planningFormDue}
-                  onChange={(e) => {
-                    setPlanningFormDue(e.target.value);
-                    if (e.target.value.trim() === "") {
-                      setPlanningFormShowInChart(false);
-                    }
-                  }}
-                />
-              </label>
-              {planningFormDue.trim() !== "" ? (
-                <label className="field checkbox-field">
-                  <input
-                    type="checkbox"
-                    checked={planningFormShowInChart}
-                    onChange={(e) =>
-                      setPlanningFormShowInChart(e.target.checked)
-                    }
-                  />
-                  <span>Mostrar en la gráfica</span>
-                </label>
-              ) : null}
+              {planningFormBasis === "per_month" ? (
+                <>
+                  <label className="field">
+                    <span>Desde</span>
+                    <input
+                      type="date"
+                      value={planningFormWindowStart}
+                      onChange={(e) => setPlanningFormWindowStart(e.target.value)}
+                      required
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Hasta (opc. — vacío = sin fin)</span>
+                    <input
+                      type="date"
+                      value={planningFormWindowEnd}
+                      onChange={(e) => setPlanningFormWindowEnd(e.target.value)}
+                    />
+                  </label>
+                </>
+              ) : (
+                <>
+                  <label className="field">
+                    <span>Fecha prevista (opc.)</span>
+                    <input
+                      type="date"
+                      value={planningFormDue}
+                      onChange={(e) => {
+                        setPlanningFormDue(e.target.value);
+                        if (e.target.value.trim() === "") {
+                          setPlanningFormShowInChart(false);
+                        }
+                      }}
+                    />
+                  </label>
+                  {planningFormDue.trim() !== "" ? (
+                    <label className="field checkbox-field">
+                      <input
+                        type="checkbox"
+                        checked={planningFormShowInChart}
+                        onChange={(e) =>
+                          setPlanningFormShowInChart(e.target.checked)
+                        }
+                      />
+                      <span>Mostrar en la gráfica</span>
+                    </label>
+                  ) : null}
+                </>
+              )}
             </div>
             <label className="field">
               <span>Notas (opc.)</span>
@@ -411,7 +517,7 @@ export function UpcomingView({
                   {isMobile ? null : <th>Categoría</th>}
                   <th>Título</th>
                   <th className="num">Importe</th>
-                  {isMobile ? null : <th>Fecha prevista</th>}
+                  {isMobile ? null : <th>Fecha / periodo</th>}
                   {!isMobile && canEdit ? (
                     <th className="asset-actions-cell">
                       <span className="sr-only">Acciones</span>
@@ -454,19 +560,44 @@ export function UpcomingView({
                         {isMobile ? (
                           <span className="cell-subline">
                             {PLANNING_DIRECTION_LABEL[row.direction]} · {categoryLabel}{" "}
-                            · {row.due_date ?? METRIC_DASH}
+                            · {rowPeriodLabel(row)}
+                            {row.amount_basis === "per_month" ? " · /mes" : null}
+                            {rowIsOverdue(row) ? " · vencido, carga este mes" : null}
                           </span>
                         ) : null}
                       </td>
                       <td className="num">
                         {formatCurrencyAmount(row.expected_amount, currencyIso)}
+                        {isMobile ? null : (
+                          // Slot SIEMPRE reservado (design-system: adornos en celdas numéricas
+                          // van en ancho fijo o la columna se desalinea).
+                          <span className="amount-unit-slot" aria-hidden={row.amount_basis !== "per_month"}>
+                            {row.amount_basis === "per_month" ? "/mes" : ""}
+                          </span>
+                        )}
                         {rowTappable ? (
                           <span className="row-chevron" aria-hidden>
                             ›
                           </span>
                         ) : null}
                       </td>
-                      {isMobile ? null : <td>{row.due_date ?? METRIC_DASH}</td>}
+                      {isMobile ? null : (
+                        <td>
+                          {rowPeriodLabel(row)}
+                          {rowIsOverdue(row) ? (
+                            <span
+                              className={
+                                row.direction === "outflow"
+                                  ? "chip upcoming-overdue-chip neg"
+                                  : "chip upcoming-overdue-chip"
+                              }
+                              title="La fecha ya pasó: el importe carga íntegro en el mes en curso de la proyección, no desaparece. Bórralo o cámbiale la fecha si ya se liquidó."
+                            >
+                              Vencido · se carga este mes
+                            </span>
+                          ) : null}
+                        </td>
+                      )}
                       {!isMobile && canEdit ? (
                         <td className="asset-actions-cell">
                           <div className="budget-row-actions">

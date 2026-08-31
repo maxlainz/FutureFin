@@ -4,6 +4,108 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.11.0] - 2026-08-31
+
+**Ola 7 de la resolución — «Próximos con fecha y el sobrante que trabaja»** (issues #126, #148,
+#150, #136 — la última ola del programa de la auditoría del modelo financiero). Tres fugas de
+caja dejan de existir: lo vencido ya no desaparece, la renta con contrato ya no se cobra para
+siempre, y el sobrante mensual ya no nace muerto en caja al 0 %. Números a mano (spike Opus +
+réplica independiente a 50 dígitos en sesión, coincidentes al céntimo).
+
+### Un Próximo vencido carga en el mes en curso, declarado (#126)
+
+- **Antes, una `due_date` anterior al día 1 del mes en curso se descartaba en silencio** — en el
+  vector de caja, en `events[]` y en el baseline de hitos, cada uno con su propia copia de la
+  regla. Ahora carga **íntegro en el mes 0**: el instrumento real arrastra la deuda vencida, no
+  la borra. Sin cota de antigüedad — la protección es la declaración, no un filtro que sería el
+  mismo bug con otro umbral. Coste que se recupera en el escenario del issue: 3.000 € de IRPF
+  vencido que la proyección ya no pierde, que a 20 años al 5 % son 3.000 × 1,05²⁰ =
+  **7.959,89 €** (el «≈8.000» del issue).
+- `events[]` gana el campo **`overdue`**: el vencido se emite en `month_index: 0` con su
+  `date_ymd` REAL (pasada) — el mes señalado y la fecha mostrada dejan de coincidir a propósito,
+  y el flag es lo que lo declara. La UI marca la fila: chip «Vencido · se carga este mes».
+- **La rampa de los Próximos sin fecha se ancla al mes civil** (90 días desde el día 1, antes
+  desde el día de la consulta): el reparto es idéntico se pregunte el día que se pregunte. Antes
+  el mes 0 recibía solo los días restantes — con 900 € sin fecha: −310 € el día 1, −10 € el 31,
+  un rango de **300 € (30 % de una aportación tipo de 1.000 €/mes)** que hacía irreproducible
+  `contribution_nominal_monthly`, `planning_component` y `net_cash_monthly`. El baseline de
+  hitos deriva ahora del MISMO mapeo (tres meses ancla) — muere la tercera regla fecha→mes.
+- El what-if de `simulate_projection` conserva su contrato («nunca anterior al mes ancla») con
+  un rechazo explícito — antes salía gratis del check de todo-ceros que este arreglo retira.
+
+### «Próximos» habla flujos recurrentes con ventana (#148) — `.ffbackup` 11 → 12
+
+- `planning_flows` gana **`amount_basis`** (`one_off` = importe TOTAL en €, el comportamiento de
+  siempre y el default; `per_month` = **€/MES** durante `[window_start_date, window_end_date]`,
+  fin vacío = sin fin). La lección de archivo aplicada en las dos direcciones: el importe no se
+  duplica — se declara su base —, y las fechas SÍ son campos nuevos (nada de reusar `due_date`,
+  que es tri-estado y arrastra `show_in_chart` y su cota). Un `per_month` carga **mes civil
+  completo** en cada mes que su ventana toca — coherente con presupuesto y servicio de deuda;
+  prorratear los meses frontera habría reintroducido la dependencia del día que #126 retira.
+- **El caso del issue**: un alquiler de 800 €/mes con contrato hasta el mes 36 no tenía dónde
+  declarar el fin y se cobraba los 480 meses del horizonte — **444 × 800 = 355.200,00 €** de
+  renta inexistente que dejan de sumarse a la proyección al modelarlo como recurrente con
+  ventana. **El objetivo FIRE sigue sin ver los Próximos** (decisión del owner, declarada en el
+  contrato financiero y en la ayuda de la pantalla).
+- **Unidades de portada**: los `upcoming_*_total` de `/v1/summary` sumaban el `expected_amount`
+  de TODOS los flujos — sumar €/mes dentro de un total en € es un error de magnitud, así que los
+  totales pasan a ser SOLO de puntuales y los recurrentes viajan aparte en
+  `upcoming_recurring_monthly_inflow`/`_outflow` (€/MES) + `upcoming_recurring_count`. Misma
+  separación en las tarjetas de la pestaña (con sus textos de ayuda nuevos).
+- **`.ffbackup` 11 → 12** (#148): la forma v11 queda congelada y la cadena completa v1..v12
+  sigue importando; un servidor 4.10.x rechaza ruidosamente un backup 4.11.0 en vez de tirar la
+  ventana en silencio. Roundtrip y compat pineados.
+- MCP: `create_planning_flow`/`update_planning_flow` ganan base y ventana (tri-estados
+  `clear_window_start`/`clear_window_end` con exclusión mutua); `list_planning_flows` deja de
+  decir «no son recurrentes»; los `summary` de las tools llevan la unidad en el texto
+  (`800 €/mes · 2026-09-01 → sin fin`). UI: alta «Puntual | Recurrente» en la pestaña, columna
+  «Fecha / periodo» (que además pasa a formatear DD/MM/AAAA) y sufijo «/mes» en slot fijo.
+
+### El sobrante mensual nace con destino (#150)
+
+- **El primer activo de un scope virgen siembra la regla «resto»** (cero activos Y cero reglas
+  del owner — las dos condiciones, para no retro-sembrar en instalaciones existentes, que era lo
+  descartado por el owner). La siembra usa la MISMA función que crea y valida cualquier regla —
+  invariante del sumidero incluida — y la respuesta la **declara**: `seeded_allocation_rule_id`
+  en el 201 (HTTP y tool MCP). El coste de no tenerla, en el escenario 1 del issue: 300 €/mes de
+  sobrante sin regla acumulaban 108.000,00 € muertos a 30 años; la MISMA cascada sobre un activo
+  al 2 % da **147.622,45 €** — 39.622,45 € de rentabilidad no simulada. *(El issue decía
+  147.378 €: es la renta pospagable — 147.379,05 exacta —; el motor aporta ANTES del
+  crecimiento, y la cifra prepagable correcta es la publicada.)*
+- `GET /v1/allocation-rules/resolution` publica **`surplus_destination`** (`asset` | `cash`), y
+  la SPA avisa en el panel de Asignación cuando el sobrante se queda en caja al 0 % (la vía de
+  las instalaciones anteriores, sin retro-siembra, y del borrado del activo del sumidero).
+- **Alcance declarado**: el escenario 2 del issue (jubilado con sobrante de pensión) **NO se
+  entrega** — en jubilación la cascada no corre y el superávit sigue en caja al 0 %; son
+  229.348,92 € a 30 años y quedan en el issue #175 (decisión de modelo). La guarda dura contra
+  borrar el activo del sumidero (hoy solo se declara en el preview) es #176.
+- La política MCP «el sumidero solo se pone desde la app» sigue vigente para las tools de
+  reglas; la siembra es su única excepción, acotada y declarada en el catálogo.
+
+### Las siete magnitudes duplicadas en TS, disposicionadas (#136)
+
+- La línea principal del chart en «euros de hoy» pasa a **consumir `net_worth_real` del
+  servidor** (publicado desde 4.6.0, hasta hoy sin lectores) y la tasa del deflactor sale de
+  `deflation_annual_inflation_percent` de la propia respuesta — re-obtenerla de la instalación
+  era un canal de divergencia silenciosa. El helper TS queda solo para lo que el servidor no
+  puede servir (histórico k < 0 y grid fino fraccionario), pineado por el fixture cruzado nuevo
+  `deflator-parity.json` (7 casos, ±1e-9).
+- **La línea «Capital aportado» SALE del modo «euros de hoy»**: su cifra correcta exige
+  deflactar cada aportación por su propio mes (500 €/mes, 30 años al 2 %: **135.606,13 €**) y no
+  es computable desde la serie diezmada — la aproximación de un solo factor que se dibujaba daba
+  **99.372,76 €, un 26,72 % de menos** —, y el servidor rechaza publicarla a propósito. En
+  nominal sigue igual.
+- El interés mensual aproximado de Pasivos gana su fixture cruzado
+  (`liability-interest-parity.json`, 5 casos sobre el predicado compartido de #121). Con esto,
+  TODO duplicado cliente↔servidor que queda está pineado por fixture: gross-up de la vista
+  previa (17 casos), principal derivado (6), deflactor (7) e interés (5). Dos de las siete
+  magnitudes ya habían muerto en la Ola 2; el registro completo, en el contrato financiero §4.
+
+**Fin del programa de la auditoría (olas 1–7, 4.5.0 → 4.11.0)**: los 40 issues del alcance están
+cerrados o disposicionados; el contrato financiero §4 no conserva ninguna fila «pendiente» del
+programa — solo las divergencias aceptadas, cada una con su razón, y dos issues nuevos (#175,
+#176) abiertos por el camino con su evidencia.
+
 ## [4.10.0] - 2026-08-31
 
 **Ola 6 de la resolución — «El impuesto que sí se paga»** (issues #120, #140, #170, #171 — los

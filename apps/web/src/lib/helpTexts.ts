@@ -258,6 +258,35 @@ export const HELP_TEXTS = {
       "el Resumen y sale de ingresos menos gastos. La ventana no incluye el mes que estás " +
       "mirando.",
   },
+
+  // --- Próximos ------------------------------------------------------------
+  "upcoming.inflows": {
+    title: "Entradas (suma)",
+    body:
+      "Suma de tus entradas previstas puntuales: importes totales en euros, sin ventana " +
+      "temporal — una del mes que viene y una a diez años suman igual. Las recurrentes no " +
+      "entran aquí: son euros al mes y tienen su propia tarjeta.",
+  },
+  "upcoming.outflows": {
+    title: "Salidas (suma)",
+    body:
+      "Suma de tus salidas previstas puntuales: importes totales en euros, sin ventana " +
+      "temporal. Las recurrentes no entran aquí: son euros al mes y tienen su propia tarjeta.",
+  },
+  "upcoming.net": {
+    title: "Neto planificado",
+    body:
+      "Entradas menos salidas puntuales, en euros totales. No incluye los flujos recurrentes: " +
+      "su neto es una cifra al mes y se muestra aparte para no mezclar magnitudes. Los Próximos " +
+      "mueven la caja de tu proyección, nunca tu objetivo de jubilación.",
+  },
+  "upcoming.recurring_net": {
+    title: "Recurrentes (neto /mes)",
+    body:
+      "Entradas menos salidas de tus flujos recurrentes, en euros AL MES mientras cada periodo " +
+      "esté vigente. Es un ritmo mensual, no un total: por eso no se suma con las tarjetas de " +
+      "al lado.",
+  },
 } as const satisfies Record<string, HelpText>;
 
 export type HelpTextId = keyof typeof HELP_TEXTS;

@@ -603,6 +603,32 @@
   white-space: nowrap;
 }
 
+/* Próximo vencido (#126): la fecha pasó y el importe carga íntegro en el mes en curso. El color
+   aquí SÍ significa (design-system: nada de color decorativo): --ff-neg solo cuando es una
+   salida — un cobro vencido no es una amenaza y se queda con el chip neutro. */
+.upcoming-overdue-chip {
+  margin-left: 0.4rem;
+  white-space: nowrap;
+}
+
+.upcoming-overdue-chip.neg {
+  color: var(--ff-neg);
+  border-color: color-mix(in oklch, var(--ff-neg) 45%, var(--ff-line-soft));
+  background: color-mix(in oklch, var(--ff-neg) 8%, var(--ff-pill));
+}
+
+/* Unidad «/mes» de un Próximo recurrente (#148): slot de ancho fijo SIEMPRE reservado en la
+   celda numérica — si solo lo llevaran las filas recurrentes, la columna se desalinearía
+   (design-system §Adornos en celdas numéricas). */
+.amount-unit-slot {
+  display: inline-block;
+  width: 2.6em;
+  text-align: left;
+  padding-left: 0.3em;
+  color: var(--ff-muted);
+  font-size: 0.85em;
+}
+
 .budget-row-actions {
   display: inline-flex;
   flex-wrap: nowrap;

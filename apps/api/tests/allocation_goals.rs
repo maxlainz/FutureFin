@@ -100,12 +100,17 @@ async fn goals_cross_the_projection_series_at_the_predicted_month() {
                 "cap_kind": "months_expense", "cap_value": "2" }),
     )
     .await;
-    let r_sumidero = rule(
-        &app,
-        &owner.cookie,
-        json!({ "target_asset_id": sumidero, "kind": "remainder" }),
-    )
-    .await;
+    // #150: "Emergencia" fue el primer activo del owner → ya sembró el sumidero (apuntando a
+    // ella). Lo retargeteamos al activo pensado como sumidero en vez de crear uno segundo.
+    let r_sumidero = app.sink_rule_id(&owner.cookie).await;
+    let retarget = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{r_sumidero}"),
+            json!({ "target_asset_id": sumidero }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(retarget.status, http::StatusCode::OK, "{retarget:?}");
 
     let resp = app
         .get_with_cookie("/v1/allocation-rules/goals", &owner.cookie)
@@ -192,12 +197,16 @@ async fn goal_ceilings_match_the_engine_resolution() {
                 "cap_kind": "income_multiple", "cap_value": "1.25" }),
     )
     .await;
-    rule(
-        &app,
-        &owner.cookie,
-        json!({ "target_asset_id": a_sink, "kind": "remainder" }),
-    )
-    .await;
+    // #150: "Meta €" fue el primer activo del owner → ya sembró el sumidero; lo retargeteamos.
+    let seeded = app.sink_rule_id(&owner.cookie).await;
+    let retarget = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{seeded}"),
+            json!({ "target_asset_id": a_sink }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(retarget.status, http::StatusCode::OK, "{retarget:?}");
 
     let goals = app
         .get_with_cookie("/v1/allocation-rules/goals", &owner.cookie)
@@ -248,12 +257,16 @@ async fn an_unreachable_ceiling_says_not_within_horizon() {
                 "cap_kind": "amount", "cap_value": "100000000" }),
     )
     .await;
-    rule(
-        &app,
-        &owner.cookie,
-        json!({ "target_asset_id": sink, "kind": "remainder" }),
-    )
-    .await;
+    // #150: "Casa" fue el primer activo del owner → ya sembró el sumidero; lo retargeteamos.
+    let seeded = app.sink_rule_id(&owner.cookie).await;
+    let retarget = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{seeded}"),
+            json!({ "target_asset_id": sink }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(retarget.status, http::StatusCode::OK, "{retarget:?}");
 
     let b = app
         .get_with_cookie("/v1/allocation-rules/goals", &owner.cookie)

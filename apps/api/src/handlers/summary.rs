@@ -129,32 +129,48 @@ pub struct FinancialHealthMetrics {
     /// `runway_months` es `null`. Con gasto 0 el runway tampoco existe pero este campo es `false`
     /// (no hay base). Con `swr_pct = 0` nunca es `true`.
     pub runway_is_indefinite: bool,
-    /// Σ de `expected_amount` de **TODOS** los Próximos (`planning_flows`) del scope cuya
-    /// categoría es de scope `income`. **Sin ventana temporal y sin anualizar**: entra igual un
-    /// cobro previsto para el mes que viene que uno con `due_date` a dieciséis años, y entran
+    /// Σ de `expected_amount` de los Próximos **PUNTUALES** (`amount_basis = one_off`) del scope
+    /// cuya categoría es de scope `income`. **Sin ventana temporal y sin anualizar**: entra igual
+    /// un cobro previsto para el mes que viene que uno con `due_date` a dieciséis años, y entran
     /// también los que **no tienen fecha**. No es un flujo mensual ni comparable con
-    /// `income_monthly_equivalent`. Para saber hasta dónde llega el horizonte que se está sumando,
-    /// mira `upcoming_last_due_date_ymd`; para cuántos conceptos, `upcoming_flows_count`.
+    /// `income_monthly_equivalent`. Los recurrentes (#148) van aparte en
+    /// `upcoming_recurring_monthly_inflow` — son €/MES y sumarlos aquí mezclaría magnitudes.
+    /// Para saber hasta dónde llega el horizonte que se está sumando, mira
+    /// `upcoming_last_due_date_ymd`; para cuántos conceptos, `upcoming_flows_count`.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub upcoming_inflows_total: Decimal,
     /// Lo mismo para las categorías de scope `expense`. Mismas advertencias: sin ventana, sin
-    /// anualizar, con los flujos sin fecha dentro.
+    /// anualizar, con los flujos sin fecha dentro, y solo puntuales.
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub upcoming_outflows_total: Decimal,
+    /// **Unidad: €/MES** (#148) — Σ de `expected_amount` de los Próximos recurrentes
+    /// (`amount_basis = per_month`) de scope `income`, **sin mirar sus ventanas**: un alquiler
+    /// que empieza en 2027 suma igual que uno vigente. Es una intensidad, no un total; jamás
+    /// se suma con `upcoming_inflows_total` (€).
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub upcoming_recurring_monthly_inflow: Decimal,
+    /// Lo mismo para scope `expense`. €/MES.
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub upcoming_recurring_monthly_outflow: Decimal,
+    /// Nº de Próximos recurrentes (los que suman en los dos campos €/mes anteriores).
+    pub upcoming_recurring_count: i64,
     /// **Unidad: ratio adimensional** (`1.5` = las entradas cubren 1,5 veces las salidas).
     /// `upcoming_inflows_total / upcoming_outflows_total` cuando el denominador es > 0; ausente si
     /// no hay salidas previstas. Es una **fracción** (1.5 = las entradas cubren 1,5 veces las
     /// salidas), no un porcentaje, y hereda la ausencia de ventana de sus dos operandos: puede
-    /// dividir un cobro a dieciséis años vista entre un pago del mes que viene. No lo compares con
-    /// `runway_months`, que sí es una medida temporal.
+    /// dividir un cobro a dieciséis años vista entre un pago del mes que viene. **Base solo
+    /// puntuales** (#148): los recurrentes no entran en ninguno de los dos operandos. No lo
+    /// compares con `runway_months`, que sí es una medida temporal.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub upcoming_coverage_ratio: Option<Decimal>,
-    /// Nº de Próximos (entradas + salidas) que suman en los dos totales anteriores. `0` ⟺ ambos
-    /// totales son 0 de verdad, y no «hay flujos pero se anulan».
+    /// Nº de Próximos (entradas + salidas) del scope, **puntuales Y recurrentes** — cuenta todo
+    /// lo que existe, no solo lo que suma en los totales en €. `0` ⟺ no hay ningún Próximo.
     pub upcoming_flows_count: i64,
     /// `due_date` **más lejana** entre los Próximos contados, `YYYY-MM-DD`. `null` cuando ninguno
     /// tiene fecha (o no hay ninguno). Es la ventana que los totales de arriba NO declaran: sin
@@ -223,18 +239,25 @@ pub struct FinancialHealthMetrics {
 #[derive(Debug, FromRow)]
 struct PlanningScopeAgg {
     scope: String,
+    /// `true` = el grupo son flujos `per_month` (#148): su `total` está en €/MES, no en €.
+    per_month: bool,
     total: Decimal,
-    /// Nº de flujos del scope (fechados y sin fechar).
+    /// Nº de flujos del grupo (fechados y sin fechar).
     flow_count: i64,
-    /// `due_date` máxima del scope; `NULL` si ninguno de sus flujos lleva fecha.
+    /// `due_date` máxima del grupo; `NULL` si ninguno de sus flujos lleva fecha (los
+    /// `per_month` no llevan nunca — CHECK de la tabla).
     last_due_date: Option<NaiveDate>,
 }
 
-/// Los tres agregados de Próximos que publica `financial_health`: totales por scope, cuántos
-/// flujos los componen y hasta dónde llegan en el calendario.
+/// Los agregados de Próximos que publica `financial_health`. Los totales `inflows`/`outflows`
+/// son SOLO de puntuales (€); los recurrentes van aparte en €/MES (#148) — sumarlos en el mismo
+/// campo sería un error de magnitud (€ + €/mes).
 struct UpcomingAgg {
     inflows: Decimal,
     outflows: Decimal,
+    recurring_monthly_inflow: Decimal,
+    recurring_monthly_outflow: Decimal,
+    recurring_count: i64,
     count: i64,
     last_due_date: Option<NaiveDate>,
 }
@@ -354,12 +377,13 @@ async fn planning_flow_totals_in_out(
 ) -> Result<UpcomingAgg, ApiError> {
     let scope_where = view.scope_where("p");
     let sql = format!(
-        r#"SELECT c.scope AS scope, COALESCE(SUM(p.expected_amount), 0::numeric) AS total,
+        r#"SELECT c.scope AS scope, (p.amount_basis = 'per_month') AS per_month,
+                  COALESCE(SUM(p.expected_amount), 0::numeric) AS total,
                   COUNT(*)::bigint AS flow_count, MAX(p.due_date) AS last_due_date
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE {scope_where}
-           GROUP BY c.scope"#
+           GROUP BY c.scope, (p.amount_basis = 'per_month')"#
     );
     let rows: Vec<PlanningScopeAgg> = view
         .bind_scope_as(sqlx::query_as(&sql), installation_id, session_user_id)
@@ -369,16 +393,25 @@ async fn planning_flow_totals_in_out(
     let mut agg = UpcomingAgg {
         inflows: Decimal::ZERO,
         outflows: Decimal::ZERO,
+        recurring_monthly_inflow: Decimal::ZERO,
+        recurring_monthly_outflow: Decimal::ZERO,
+        recurring_count: 0,
         count: 0,
         last_due_date: None,
     };
     for r in rows {
         // Solo `income` y `expense` suman: una categoría de otro scope no es un Próximo, y su
         // recuento tampoco debe describir cifras en las que no entra.
-        match r.scope.as_str() {
-            "income" => agg.inflows += r.total,
-            "expense" => agg.outflows += r.total,
+        match (r.scope.as_str(), r.per_month) {
+            ("income", false) => agg.inflows += r.total,
+            ("expense", false) => agg.outflows += r.total,
+            // #148: un `per_month` son €/MES — jamás dentro de un total en €.
+            ("income", true) => agg.recurring_monthly_inflow += r.total,
+            ("expense", true) => agg.recurring_monthly_outflow += r.total,
             _ => continue,
+        }
+        if r.per_month {
+            agg.recurring_count += r.flow_count;
         }
         agg.count += r.flow_count;
         agg.last_due_date = match (agg.last_due_date, r.last_due_date) {
@@ -669,6 +702,9 @@ pub(crate) async fn summary_core(
         runway_is_indefinite,
         upcoming_inflows_total,
         upcoming_outflows_total,
+        upcoming_recurring_monthly_inflow: upcoming.recurring_monthly_inflow,
+        upcoming_recurring_monthly_outflow: upcoming.recurring_monthly_outflow,
+        upcoming_recurring_count: upcoming.recurring_count,
         upcoming_coverage_ratio,
         upcoming_flows_count: upcoming.count,
         upcoming_last_due_date_ymd: upcoming

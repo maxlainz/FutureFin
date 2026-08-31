@@ -73,15 +73,8 @@ async fn seed(app: &TestApp, owner: &LoggedInOwner) {
         )
         .await;
     assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
-    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
-    let r = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({ "target_asset_id": asset_id, "kind": "remainder", "priority": 100 }),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::CREATED, "sumidero: {r:?}");
+    // #150: "MSCI World" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
 }
 
 // ---------------------------------------------------------------------------

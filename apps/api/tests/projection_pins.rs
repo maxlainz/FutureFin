@@ -52,15 +52,8 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
-    let asset_id = r.json()["id"].as_str().unwrap().to_string();
-    let r = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({"target_asset_id": asset_id, "kind": "remainder"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    // #150: "Indexado" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
     for (path, body) in [
         ("/v1/budget/entries", json!({"category_id": cat_i, "amount": "3000"})),
         ("/v1/budget/entries", json!({"category_id": cat_e, "amount": "1200", "ends_at_retirement": false})),
@@ -143,15 +136,8 @@ async fn pin_escenario_b_inflacion() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
-    let asset_id = r.json()["id"].as_str().unwrap().to_string();
-    let r = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({"target_asset_id": asset_id, "kind": "remainder"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    // #150: "Indexado" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
     for (path, body) in [
         ("/v1/budget/entries", json!({"category_id": cat_i, "amount": "2500"})),
         ("/v1/budget/entries", json!({"category_id": cat_e, "amount": "1500", "ends_at_retirement": false})),

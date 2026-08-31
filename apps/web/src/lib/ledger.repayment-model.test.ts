@@ -285,3 +285,64 @@ describe("liabilityDerivedPrincipalNum — la rama única de 4.7.0", () => {
     expect(liabilityDerivedPrincipalNum(500, 200, "fixed_payments", 3)).toBeNull();
   });
 });
+
+// #136-6: fixture cruzado con la base compartida del servidor (suite Rust
+// `liability_interest_parity.rs`: predicado `liability_interest_accrues` + principal×TIN/1200).
+// No hay campo de hogar que consumir — la duplicación es aceptada y este fixture es lo que
+// impide que los dos lados se separen en silencio.
+describe("paridad del interés mensual aproximado (#136-6)", () => {
+  const dirname2 = path.dirname(fileURLToPath(import.meta.url));
+  const interestFixturePath = path.resolve(
+    dirname2,
+    "../../../api/tests/fixtures/liability-interest-parity.json",
+  );
+  type InterestRow = {
+    repayment_model: LiabilityRepaymentModelApi;
+    principal: string;
+    apr_percent: string | null;
+    payment_amount: string | null;
+    payment_end_date: string | null;
+  };
+  type InterestCase = {
+    name: string;
+    rows: InterestRow[];
+    expected_monthly_interest: string;
+  };
+  const interestCases = (
+    JSON.parse(readFileSync(interestFixturePath, "utf-8")) as {
+      cases: InterestCase[];
+    }
+  ).cases;
+
+  const asApiRow = (r: InterestRow): LiabilityApiRow => ({
+    id: "x",
+    category_id: "c1",
+    label: "L",
+    type_tag: null,
+    repayment_model: r.repayment_model,
+    principal: r.principal,
+    apr_percent: r.apr_percent,
+    payment_amount: r.payment_amount,
+    payment_frequency: "monthly",
+    payment_end_date: r.payment_end_date,
+    plan_expired_with_balance: false,
+    min_payment_pct: null,
+    min_payment_eur: null,
+    notes: null,
+    sort_index: 0,
+  });
+
+  it("el fixture no está vacío", () => {
+    expect(interestCases.length).toBeGreaterThan(0);
+  });
+
+  for (const c of interestCases) {
+    it(c.name, () => {
+      const got = liabilitiesApproxMonthlyInterestSum(
+        c.rows.map(asApiRow),
+        "UTC",
+      );
+      expect(got).toBeCloseTo(Number(c.expected_monthly_interest), 2);
+    });
+  }
+});

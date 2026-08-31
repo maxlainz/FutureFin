@@ -134,8 +134,8 @@
         "$.purchase_price": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "5512eefd8b12",
-      "description_len": 210,
-      "description_sha256_12": "98bdda9164f9",
+      "description_len": 287,
+      "description_sha256_12": "6ca853356680",
       "name": "create_asset",
       "properties": [
         "category_id",
@@ -301,24 +301,30 @@
     {
       "constraints": {
         "$": "additionalProperties=false required=[\"category_id\",\"expected_amount\",\"title\"] type=\"object\"",
+        "$.amount_basis": "enum=[\"one_off\",\"per_month\"] type=[\"null\",\"string\"]",
         "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
         "$.due_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
         "$.expected_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
         "$.notes": "type=[\"null\",\"string\"]",
         "$.show_in_chart": "type=[\"boolean\",\"null\"]",
-        "$.title": "type=\"string\""
+        "$.title": "type=\"string\"",
+        "$.window_end_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.window_start_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "5e3bef85ba0a",
-      "description_len": 253,
-      "description_sha256_12": "9f2e8a06b1ff",
+      "constraints_sha256_12": "7b20ea3b5f65",
+      "description_len": 234,
+      "description_sha256_12": "99d3b655be07",
       "name": "create_planning_flow",
       "properties": [
+        "amount_basis",
         "category_id",
         "due_date",
         "expected_amount",
         "notes",
         "show_in_chart",
-        "title"
+        "title",
+        "window_end_date",
+        "window_start_date"
       ],
       "required": [
         "category_id",
@@ -440,8 +446,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "55f9daf6f16d",
-      "description_len": 557,
-      "description_sha256_12": "cdabef50c31a",
+      "description_len": 464,
+      "description_sha256_12": "09dc5e2300d5",
       "name": "delete_asset",
       "properties": [
         "confirm",
@@ -656,8 +662,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 579,
-      "description_sha256_12": "175b3dfafd4b",
+      "description_len": 452,
+      "description_sha256_12": "4e72db53e89e",
       "name": "get_allocation_resolution",
       "properties": [
         "view"
@@ -915,8 +921,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 158,
-      "description_sha256_12": "7cc8cbb6a044",
+      "description_len": 215,
+      "description_sha256_12": "a194194d980a",
       "name": "list_planning_flows",
       "properties": [
         "view"
@@ -1459,28 +1465,38 @@
     {
       "constraints": {
         "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
+        "$.amount_basis": "enum=[\"one_off\",\"per_month\"] type=[\"null\",\"string\"]",
         "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
         "$.clear_due_date": "type=[\"boolean\",\"null\"]",
+        "$.clear_window_end": "type=[\"boolean\",\"null\"]",
+        "$.clear_window_start": "type=[\"boolean\",\"null\"]",
         "$.due_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
         "$.expected_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
         "$.notes": "type=[\"null\",\"string\"]",
         "$.show_in_chart": "type=[\"boolean\",\"null\"]",
-        "$.title": "type=[\"null\",\"string\"]"
+        "$.title": "type=[\"null\",\"string\"]",
+        "$.window_end_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.window_start_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "53abad6fdf51",
-      "description_len": 148,
-      "description_sha256_12": "220d408d09a7",
+      "constraints_sha256_12": "eb7782b5802e",
+      "description_len": 238,
+      "description_sha256_12": "91082a895361",
       "name": "update_planning_flow",
       "properties": [
+        "amount_basis",
         "category_id",
         "clear_due_date",
+        "clear_window_end",
+        "clear_window_start",
         "due_date",
         "expected_amount",
         "id",
         "notes",
         "show_in_chart",
-        "title"
+        "title",
+        "window_end_date",
+        "window_start_date"
       ],
       "required": [
         "id"

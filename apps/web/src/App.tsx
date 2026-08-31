@@ -185,6 +185,7 @@ import type {
   LiabilityApiRow,
   LiabilityRepaymentModelApi,
   MemberApiRow,
+  PlanningAmountBasisApi,
   PlanningFlowApiRow,
   ProjectionSeriesApi,
   SummaryResponse,
@@ -510,6 +511,12 @@ export default function App() {
   const [planningFormTitle, setPlanningFormTitle] = useState("");
   const [planningFormAmount, setPlanningFormAmount] = useState("");
   const [planningFormDue, setPlanningFormDue] = useState("");
+  // #148: base del importe y ventana recurrente. Con "per_month" el importe es €/MES entre
+  // planningFormWindowStart y planningFormWindowEnd (vacío = sin fin) y la fecha puntual no aplica.
+  const [planningFormBasis, setPlanningFormBasis] =
+    useState<PlanningAmountBasisApi>("one_off");
+  const [planningFormWindowStart, setPlanningFormWindowStart] = useState("");
+  const [planningFormWindowEnd, setPlanningFormWindowEnd] = useState("");
   const [planningFormNotes, setPlanningFormNotes] = useState("");
   const [planningFormShowInChart, setPlanningFormShowInChart] = useState(false);
 
@@ -2884,6 +2891,9 @@ export default function App() {
     setPlanningFormTitle("");
     setPlanningFormAmount("");
     setPlanningFormDue("");
+    setPlanningFormBasis("one_off");
+    setPlanningFormWindowStart("");
+    setPlanningFormWindowEnd("");
     setPlanningFormNotes("");
     setPlanningFormShowInChart(false);
   }
@@ -2896,17 +2906,29 @@ export default function App() {
     if (!planningFormCategoryId || !amt || !tit) {
       return;
     }
+    const isPerMonth = planningFormBasis === "per_month";
+    const windowStartTrim = planningFormWindowStart.trim();
+    const windowEndTrim = planningFormWindowEnd.trim();
+    if (isPerMonth && windowStartTrim === "") {
+      setPlanningError("Un flujo recurrente necesita la fecha de inicio de su periodo.");
+      return;
+    }
     setPlanningSaving(true);
     setPlanningError(null);
     try {
-      const dueTrim = planningFormDue.trim();
-      const showInChart = dueTrim !== "" && planningFormShowInChart;
+      const dueTrim = isPerMonth ? "" : planningFormDue.trim();
+      const showInChart = !isPerMonth && dueTrim !== "" && planningFormShowInChart;
       if (editingPlanningFlowId) {
+        // El PATCH manda el estado COMPLETO de base+fecha+ventana: el servidor valida el
+        // resultado y nada se auto-borra — cambiar de pestaña limpia el lado que no aplica.
         const patchBody: Record<string, unknown> = {
           category_id: planningFormCategoryId,
           title: tit,
           expected_amount: amt,
+          amount_basis: planningFormBasis,
           due_date: dueTrim === "" ? null : dueTrim,
+          window_start_date: isPerMonth ? windowStartTrim : null,
+          window_end_date: isPerMonth && windowEndTrim !== "" ? windowEndTrim : null,
           notes: planningFormNotes.trim(),
           show_in_chart: showInChart,
         };
@@ -2928,7 +2950,13 @@ export default function App() {
           title: tit,
           expected_amount: amt,
         };
-        if (dueTrim) {
+        if (isPerMonth) {
+          base.amount_basis = "per_month";
+          base.window_start_date = windowStartTrim;
+          if (windowEndTrim) {
+            base.window_end_date = windowEndTrim;
+          }
+        } else if (dueTrim) {
           base.due_date = dueTrim;
         }
         const nt = planningFormNotes.trim();
@@ -3209,6 +3237,9 @@ export default function App() {
     setPlanningFormTitle(row.title);
     setPlanningFormAmount(formatEditableDecimalString(row.expected_amount));
     setPlanningFormDue(row.due_date ?? "");
+    setPlanningFormBasis(row.amount_basis ?? "one_off");
+    setPlanningFormWindowStart(row.window_start_date ?? "");
+    setPlanningFormWindowEnd(row.window_end_date ?? "");
     setPlanningFormNotes(row.notes ?? "");
     setPlanningFormShowInChart(row.show_in_chart);
   }
@@ -3896,6 +3927,12 @@ export default function App() {
             setPlanningFormAmount={setPlanningFormAmount}
             planningFormDue={planningFormDue}
             setPlanningFormDue={setPlanningFormDue}
+            planningFormBasis={planningFormBasis}
+            setPlanningFormBasis={setPlanningFormBasis}
+            planningFormWindowStart={planningFormWindowStart}
+            setPlanningFormWindowStart={setPlanningFormWindowStart}
+            planningFormWindowEnd={planningFormWindowEnd}
+            setPlanningFormWindowEnd={setPlanningFormWindowEnd}
             planningFormNotes={planningFormNotes}
             setPlanningFormNotes={setPlanningFormNotes}
             planningFormShowInChart={planningFormShowInChart}

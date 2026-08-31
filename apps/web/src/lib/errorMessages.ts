@@ -411,6 +411,28 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "La fecha prevista no es válida. Escribe una fecha o déjala vacía.",
   due_date_format: "La fecha prevista debe tener el formato AAAA-MM-DD.",
   date_required: "Falta la fecha, o no tiene un formato válido.",
+  // #148 — flujos recurrentes con ventana
+  amount_basis_invalid:
+    "El tipo del flujo debe ser puntual (one_off) o recurrente (per_month).",
+  window_requires_per_month:
+    "El periodo (desde/hasta) solo aplica a un flujo recurrente. Cámbialo a recurrente o quita las fechas.",
+  per_month_excludes_due_date:
+    "Un flujo recurrente usa un periodo, no una fecha de vencimiento. Quita la fecha prevista.",
+  window_start_required:
+    "Un flujo recurrente necesita la fecha de inicio de su periodo.",
+  window_end_before_start:
+    "El fin del periodo no puede ser anterior a su inicio.",
+  window_date_type:
+    "Las fechas del periodo no son válidas. Escribe una fecha o déjala vacía.",
+  window_date_format: "Las fechas del periodo deben tener el formato AAAA-MM-DD.",
+  window_date_out_of_range:
+    "Las fechas del periodo no pueden estar a más de 100 años vista.",
+  window_start_set_and_clear:
+    "No puedes fijar y borrar el inicio del periodo a la vez.",
+  window_end_set_and_clear:
+    "No puedes fijar y borrar el fin del periodo a la vez.",
+  backup_amount_basis_invalid:
+    "El backup trae un movimiento previsto con un tipo desconocido. El archivo puede estar dañado.",
 
   // ── Reparto del sobrante ──────────────────────────────────────────────────────────────
   rule_kind_invalid:

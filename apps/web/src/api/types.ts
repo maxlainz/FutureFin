@@ -186,8 +186,14 @@ export type FinancialHealthMetrics = {
    *  instalación aplicado a `liquid_assets_total`. En ese caso `runway_months` viene `null`.
    *  Con `swr_pct = 0` nunca es `true`. */
   runway_is_indefinite?: boolean;
+  /** Σ de los Próximos PUNTUALES (€, sin ventana ni anualizar) — los recurrentes van aparte. */
   upcoming_inflows_total: string;
   upcoming_outflows_total: string;
+  /** **€/MES** (#148): Σ de los Próximos recurrentes por scope, sin mirar sus ventanas.
+   *  Jamás se suma con los totales en €. Ausente en backends < 4.11.0. */
+  upcoming_recurring_monthly_inflow?: string;
+  upcoming_recurring_monthly_outflow?: string;
+  upcoming_recurring_count?: number;
   upcoming_coverage_ratio: string | null;
   /** Fuente EFECTIVA del ahorro tras el fallback del servidor (`budget` si el modo
    *  configurado usaba transacciones —`transactions_avg` o `budget_income_real_expense`—
@@ -274,13 +280,22 @@ export type BudgetSnapshotApi = {
 
 export type PlanningFlowDirectionApi = "inflow" | "outflow";
 
+/** Base del importe (#148): `one_off` = TOTAL en €; `per_month` = €/MES durante la ventana. */
+export type PlanningAmountBasisApi = "one_off" | "per_month";
+
 export type PlanningFlowApiRow = {
   id: string;
   category_id: string;
   direction: PlanningFlowDirectionApi;
   title: string;
   expected_amount: string;
+  /** SIEMPRE presente — la unidad del importe nunca se infiere de otro campo. */
+  amount_basis: PlanningAmountBasisApi;
   due_date: string | null;
+  /** Solo `per_month` (skip_serializing_if → ausente en puntuales). */
+  window_start_date?: string;
+  /** Ausente con `per_month` = ventana SIN FIN (misma convención que payment_end_date null). */
+  window_end_date?: string;
   notes: string | null;
   sort_index: number;
   show_in_chart: boolean;
@@ -352,6 +367,10 @@ export type ProjectionSeriesApi = {
   horizon_lifespan_age?: number;
   /** Patrimonio del último mes en euros de HOY (paridad con simulate) — 4.9.0, #149. */
   final_net_worth_real?: string;
+  /** Tasa anual (Decimal-string) con la que el servidor construyó `net_worth_real` y
+   *  `milestones_real` — la fuente del deflactor del chart (#136-4a): re-obtenerla de la
+   *  instalación era un canal de divergencia silenciosa. Ausente en backends < 4.6.0. */
+  deflation_annual_inflation_percent?: string;
   starting_net_worth: string;
   monthly_delta_assumption: string;
   model_note: string;

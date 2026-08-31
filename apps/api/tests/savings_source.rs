@@ -520,16 +520,8 @@ async fn mode_b_no_step_up_at_liability_end() {
             )
             .await;
         assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
-        let asset_id = asset.json()["id"].as_str().unwrap().to_string();
-
-        let rule = app
-            .post_json_with_cookie(
-                "/v1/allocation-rules",
-                json!({ "target_asset_id": asset_id, "kind": "remainder" }),
-                &owner.cookie,
-            )
-            .await;
-        assert_eq!(rule.status, http::StatusCode::CREATED, "{rule:?}");
+        // #150: "MSCI" es el primer (y único) activo del owner, así que crearlo ya sembró el
+        // sumidero apuntándole — no hace falta crear la regla a mano.
 
         let today = server_today(&app, &owner.cookie).await;
         let end = date_in(today.year() + end_year_offset, today.month(), 28);
@@ -593,15 +585,8 @@ async fn assets_contribution_follows_savings_source_mode() {
         )
         .await;
     assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
-    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
-    let rule = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({ "target_asset_id": asset_id, "kind": "remainder" }),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(rule.status, http::StatusCode::CREATED, "{rule:?}");
+    // #150: "MSCI" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
 
     // Transacciones en el último mes completo (modo B): income 4000, expense 1000 → surplus 3000.
     let today = server_today(&app, &owner.cookie).await;
@@ -1074,15 +1059,8 @@ async fn asset_contribution_separates_recurring_from_the_planning_tranche() {
         )
         .await;
     assert_eq!(asset.status, http::StatusCode::CREATED, "{asset:?}");
-    let asset_id = asset.json()["id"].as_str().unwrap().to_string();
-    let rule = app
-        .post_json_with_cookie(
-            "/v1/allocation-rules",
-            json!({ "target_asset_id": asset_id, "kind": "remainder" }),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(rule.status, http::StatusCode::CREATED, "{rule:?}");
+    // #150: "Indexado" es el primer (y único) activo del owner, así que crearlo ya sembró el
+    // sumidero apuntándole — no hace falta crear la regla a mano.
 
     // Sin planning flows los dos campos coinciden: no hay tramo transitorio que separar.
     let a = app.get_with_cookie("/v1/assets", &owner.cookie).await.json();

@@ -15,7 +15,17 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31 (Ola 6
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31 (Ola 7
+del programa de la auditoría — la última —, rama `feat/ola7-proximos-y-sobrante`)**: **68**
+ficheros de test de integración (`ls apps/api/tests/*.rs | wc -l`; los dos nuevos son
+`deflator_parity.rs` y `liability_interest_parity.rs`, fixtures cruzados de #136), **53**
+migraciones (la 53ª es `20260901140000_planning_flows_recurring_window` — aditiva, DEFAULT
+reproduce el comportamiento previo), `.ffbackup` en **12** (#148: la ventana recurrente de
+`planning_flows`; forma v11 congelada, cadena v1..v12 completa), catálogo MCP sigue en **68**
+tools (params nuevos en create/update_planning_flow; descripciones al presupuesto justo tras
+recortar cuatro), `create_asset` siembra el sumidero del scope virgen (#150,
+`seeded_allocation_rule_id`) y el engine NO cambia (el vector de Próximos se construye en el
+handler). Antes, counts refreshed **2026-08-31 (Ola 6
 del programa de la auditoría, rama `feat/ola6-el-impuesto`)**: **66** ficheros de test de
 integración (sin ficheros nuevos), **52** migraciones (cero nuevas), `.ffbackup` sigue en **11**
 (los dos ejes nuevos — `taxable_gain_ratio`, `horizon_lifespan_age` — viajan en el JSONB de
