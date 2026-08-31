@@ -120,6 +120,11 @@ realidad** o entre superficies, no error de aritmética.
 - Fiscalidad de fondos: la rentabilidad publicada de un fondo YA es neta de TER/transacción
   (RD 1082/2012 art. 5; CNMV); los traspasos entre fondos están exentos (art. 94) — por eso «sin
   rebalanceo» es carencia funcional, no fiscal.
+- **El objetivo FIRE no ve los «Próximos»** (`planning_flows`, puntuales ni recurrentes —
+  4.11.0/#148): alimentan la CAJA de la proyección, no la necesidad que el target capitaliza.
+  Decisión del owner en #148, explícita («no arreglarlo por coherencia»): un Próximo es un evento
+  de tesorería, no gasto estructural — el gasto que define la jubilación vive en el presupuesto
+  (o en el promedio real, según el modo).
 
 ### 2.5 Jubilación
 - Disparador único: cruce patrimonial LÍQUIDO (el trigger por edad está vetado —

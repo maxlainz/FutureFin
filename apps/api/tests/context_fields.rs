@@ -255,6 +255,34 @@ async fn upcoming_totals_publish_the_horizon_they_are_summing() {
     );
     // Y la ratio sigue siendo una fracción sobre esos mismos operandos sin ventana.
     assert!((dec(&fh["upcoming_coverage_ratio"]) - 1200.0 / 9300.0).abs() < 1e-6, "{fh}");
+
+    // #148: un recurrente de 800 €/MES NO entra en los totales en € — mezclaría magnitudes.
+    // Va aparte, en €/mes, y el count global sí lo cuenta.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/planning/flows",
+            serde_json::json!({
+                "category_id": cat_exp, "title": "Alquiler", "expected_amount": "800",
+                "amount_basis": "per_month", "window_start_date": "2026-09-01"
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "per_month: {r:?}");
+
+    let summary = get(&app, &owner.cookie, "/v1/summary").await;
+    let fh = &summary["financial_health"];
+    assert_eq!(
+        dec(&fh["upcoming_outflows_total"]),
+        9300.0,
+        "el €/mes no contamina el total en €: {fh}"
+    );
+    assert_eq!(dec(&fh["upcoming_recurring_monthly_outflow"]), 800.0, "{fh}");
+    assert_eq!(dec(&fh["upcoming_recurring_monthly_inflow"]), 0.0, "{fh}");
+    assert_eq!(fh["upcoming_recurring_count"], 1, "{fh}");
+    assert_eq!(fh["upcoming_flows_count"], 4, "el count global cuenta TODO: {fh}");
+    // La ratio conserva su base (solo puntuales) — su helpText lo declara.
+    assert!((dec(&fh["upcoming_coverage_ratio"]) - 1200.0 / 9300.0).abs() < 1e-6, "{fh}");
 }
 
 // ---------------------------------------------------------------------------

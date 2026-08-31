@@ -1070,6 +1070,31 @@ fn parse_date_param(name: &str, raw: &str) -> Result<chrono::NaiveDate, ApiError
     })
 }
 
+/// El one-liner de un Próximo para el `summary` de create/update_planning_flow. La unidad va en
+/// el texto (#148): un `per_month` se lee `800 €/mes · 2026-09-01 → sin fin`, nunca como total.
+fn planning_flow_summary(f: &crate::handlers::planning::PlanningFlowResponse) -> String {
+    use crate::handlers::planning::PlanningAmountBasis;
+    match f.amount_basis {
+        PlanningAmountBasis::PerMonth => format!(
+            "{} · {} €/mes ({}) · {} → {}",
+            f.title,
+            f.expected_amount,
+            f.direction,
+            f.window_start_date.map(|d| d.to_string()).unwrap_or_default(),
+            f.window_end_date
+                .map(|d| d.to_string())
+                .unwrap_or_else(|| "sin fin".into()),
+        ),
+        PlanningAmountBasis::OneOff => format!(
+            "{} · {} ({}){}",
+            f.title,
+            f.expected_amount,
+            f.direction,
+            f.due_date.map(|d| format!(" · {d}")).unwrap_or_default(),
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Params de las tools de escritura (issue #3). Importes SIEMPRE strings decimales; UUIDs y
 // fechas como strings (se parsean con error tipado). Las validaciones de dominio viven en las
@@ -1181,15 +1206,28 @@ pub struct CreatePlanningFlowParams {
     /// Importe > 0 como string decimal (el signo lo da el scope de la categoría).
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub expected_amount: String,
-    /// "YYYY-MM-DD" opcional. Sin fecha, el flujo se reparte en los 90 días que arrancan el día 1
-    /// del mes en curso. Una fecha ya pasada no se descarta: carga íntegra en el mes en curso
-    /// (la proyección la marca `overdue` en `events`).
+    /// "one_off" (default) | "per_month". Con per_month el importe ES POR MES (€/mes) durante la
+    /// ventana [window_start_date, window_end_date] y el flujo no lleva due_date.
+    #[serde(default)]
+    #[schemars(extend("enum" = ["one_off", "per_month"]))]
+    pub amount_basis: Option<String>,
+    /// "YYYY-MM-DD" opcional (solo one_off). Sin fecha, el flujo se reparte en los 90 días que
+    /// arrancan el día 1 del mes en curso. Una fecha ya pasada no se descarta: carga íntegra en
+    /// el mes en curso (la proyección la marca `overdue` en `events`).
     #[serde(default)]
     #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub due_date: Option<String>,
+    /// "YYYY-MM-DD". Requerida con per_month; prohibida con one_off.
+    #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
+    pub window_start_date: Option<String>,
+    /// "YYYY-MM-DD" inclusive. Ausente con per_month = ventana SIN FIN.
+    #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
+    pub window_end_date: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
-    /// Mostrar como marcador en el chart (requiere due_date).
+    /// Mostrar como marcador en el chart (requiere due_date; solo one_off).
     #[serde(default)]
     pub show_in_chart: Option<bool>,
 }
@@ -1217,6 +1255,27 @@ pub struct UpdatePlanningFlowParams {
     /// true = borrar la fecha (el flujo pasa a repartirse en 90 días y sale del chart).
     #[serde(default)]
     pub clear_due_date: Option<bool>,
+    /// "one_off" | "per_month". Se valida el estado RESULTANTE: para cambiar de base deja
+    /// coherentes fecha y ventana en la MISMA llamada (a per_month: clear_due_date=true +
+    /// window_start_date; a one_off: clear_window_start=true y clear_window_end=true si la
+    /// había). Nada se auto-borra en silencio.
+    #[serde(default)]
+    #[schemars(extend("enum" = ["one_off", "per_month"]))]
+    pub amount_basis: Option<String>,
+    /// "YYYY-MM-DD" (solo per_month). Incompatible con clear_window_start.
+    #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
+    pub window_start_date: Option<String>,
+    /// true = borrar el inicio de la ventana (solo tiene sentido volviendo a one_off).
+    #[serde(default)]
+    pub clear_window_start: Option<bool>,
+    /// "YYYY-MM-DD" inclusive. Incompatible con clear_window_end.
+    #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
+    pub window_end_date: Option<String>,
+    /// true = borrar el fin de la ventana (pasa a SIN FIN). Incompatible con window_end_date.
+    #[serde(default)]
+    pub clear_window_end: Option<bool>,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
@@ -2535,7 +2594,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_planning_flows",
-        description = "Próximos: entradas y salidas puntuales previstas (con fecha opcional), p.ej. pagas extra, IRPF, un viaje. No son recurrentes ni parte del presupuesto mensual.",
+        description = "Próximos: entradas y salidas previstas fuera del presupuesto. amount_basis da la unidad: one_off = TOTAL en € (fecha opcional); per_month = €/MES durante [window_start_date, window_end_date] (end ausente = sin fin).",
         annotations(title = "Próximos", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_planning_flows(
@@ -2725,7 +2784,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_allocation_resolution",
-        description = "La cascada de asignación RESUELTA para el mes en curso: cuánto se lleva cada regla, de qué caja sale y por qué alguna recibe 0. Responde a «¿por qué mi cartera recibe menos de lo que puse?». `base_cash` = `recurring_net` (ESTABLE) + `planning_component` (planning flows sin fecha: 90 días desde el día 1 del mes): con `base_includes_transient` true, `base_cash` NO es mensual estable (el tramo se agota en ~3 meses) y no cuadra con get_summary. Por regla, `amount_intent` vs `amount_resolved`: si difieren sin `skipped_reason`, la regla fue RECORTADA por el cap, no saltada.",
+        description = "La cascada de asignación RESUELTA del mes en curso: cuánto se lleva cada regla y por qué alguna recibe 0. `base_cash` = `recurring_net` (ESTABLE) + `planning_component` (planning flows sin fecha: 90 días desde el día 1 del mes): con `base_includes_transient`, `base_cash` NO es mensual estable y no cuadra con get_summary. Por regla, `amount_intent` vs `amount_resolved`: si difieren sin `skipped_reason`, la regla fue RECORTADA por el cap, no saltada.",
         annotations(title = "Cascada resuelta", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_allocation_resolution(
@@ -3324,7 +3383,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_planning_flow",
-        description = "Añade una entrada a «Próximos» («apunta que en octubre pago 800 € de IRPF»): título, categoría income o expense, importe > 0 y fecha opcional. Alimenta directamente la proyección — usa simulate_projection si quieres enseñar el impacto antes de escribir.",
+        description = "Añade un «Próximo»: puntual (TOTAL en €, fecha opcional) o recurrente con amount_basis=per_month (€/MES durante la ventana; sin fin si falta window_end_date). Alimenta la proyección; simulate_projection enseña el impacto sin escribir.",
         annotations(title = "Crear próximo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_planning_flow(
@@ -3338,10 +3397,21 @@ impl FutureFinMcp {
                 category_id: parse_uuid_param("category_id", &p.category_id)?,
                 title: p.title.clone(),
                 expected_amount: parse_decimal_param("expected_amount", &p.expected_amount)?,
+                amount_basis: p.amount_basis.clone(),
                 due_date: p
                     .due_date
                     .as_deref()
                     .map(|d| parse_date_param("due_date", d))
+                    .transpose()?,
+                window_start_date: p
+                    .window_start_date
+                    .as_deref()
+                    .map(|d| parse_date_param("window_start_date", d))
+                    .transpose()?,
+                window_end_date: p
+                    .window_end_date
+                    .as_deref()
+                    .map(|d| parse_date_param("window_end_date", d))
                     .transpose()?,
                 notes: p.notes.clone(),
                 sort_index: None,
@@ -3364,8 +3434,7 @@ impl FutureFinMcp {
             Ok((
                 serde_json::json!({
                     "id": f.id,
-                    "summary": format!("{} · {} ({}){}", f.title, f.expected_amount, f.direction,
-                        f.due_date.map(|d| format!(" · {d}")).unwrap_or_default()),
+                    "summary": planning_flow_summary(&f),
                     "impact": impact,
                 }),
                 vec![f.id],
@@ -3376,7 +3445,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_planning_flow",
-        description = "Edita una entrada de «Próximos»: cualquier campo es opcional; clear_due_date=true borra la fecha (y desmarca show_in_chart). Alimenta la proyección.",
+        description = "Edita un «Próximo»: todo opcional; clear_due_date borra la fecha (y desmarca show_in_chart); clear_window_start/clear_window_end borran la ventana. amount_basis exige fecha y ventana coherentes en la misma llamada. Alimenta la proyección.",
         annotations(title = "Editar próximo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_planning_flow(
@@ -3393,11 +3462,39 @@ impl FutureFinMcp {
                         .into(),
                 ));
             }
+            if p.window_start_date.is_some() && p.clear_window_start == Some(true) {
+                return Err(ApiError::BadRequest(
+                    "window_start_set_and_clear: window_start_date and clear_window_start are mutually exclusive"
+                        .into(),
+                ));
+            }
+            if p.window_end_date.is_some() && p.clear_window_end == Some(true) {
+                return Err(ApiError::BadRequest(
+                    "window_end_set_and_clear: window_end_date and clear_window_end are mutually exclusive"
+                        .into(),
+                ));
+            }
             // Tri-state del PATCH HTTP: omitido = sin cambio; null = borrar; string = fijar.
             let due_date = if p.clear_due_date == Some(true) {
                 Some(serde_json::Value::Null)
             } else if let Some(d) = &p.due_date {
                 parse_date_param("due_date", d)?;
+                Some(serde_json::Value::String(d.trim().to_string()))
+            } else {
+                None
+            };
+            let window_start_date = if p.clear_window_start == Some(true) {
+                Some(serde_json::Value::Null)
+            } else if let Some(d) = &p.window_start_date {
+                parse_date_param("window_start_date", d)?;
+                Some(serde_json::Value::String(d.trim().to_string()))
+            } else {
+                None
+            };
+            let window_end_date = if p.clear_window_end == Some(true) {
+                Some(serde_json::Value::Null)
+            } else if let Some(d) = &p.window_end_date {
+                parse_date_param("window_end_date", d)?;
                 Some(serde_json::Value::String(d.trim().to_string()))
             } else {
                 None
@@ -3413,6 +3510,9 @@ impl FutureFinMcp {
                         .map(|a| parse_decimal_param("expected_amount", a))
                         .transpose()?,
                     due_date,
+                    amount_basis: p.amount_basis.clone(),
+                    window_start_date,
+                    window_end_date,
                     notes: p.notes.clone(),
                     sort_index: None,
                     show_in_chart: p.show_in_chart,
@@ -3435,8 +3535,7 @@ impl FutureFinMcp {
             Ok((
                 serde_json::json!({
                     "id": f.id,
-                    "summary": format!("{} · {} ({}){}", f.title, f.expected_amount, f.direction,
-                        f.due_date.map(|d| format!(" · {d}")).unwrap_or_default()),
+                    "summary": planning_flow_summary(&f),
                     "impact": impact,
                 }),
                 vec![f.id],

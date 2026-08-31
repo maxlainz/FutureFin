@@ -3768,3 +3768,106 @@ async fn the_sink_cannot_be_forged_by_editing_a_capped_remainder() {
     });
     assert!(still_capped, "la regla debe conservar su tope tras el rechazo");
 }
+
+/// #148 — cuarteto de la ventana recurrente sobre create/update_planning_flow. La invalidación
+/// FULL y el toggle `mcp_write_enabled` de estas dos tools ya están cubiertos por los barridos
+/// genéricos de este fichero (líneas «create_planning_flow: FULL» y el sweep del toggle): aquí
+/// van el core compartido, el error de dominio con el mismo código de wire y los tri-estados
+/// nuevos.
+#[tokio::test]
+async fn planning_flow_recurring_window_via_mcp() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "income", "Alquileres").await;
+
+    // (1) Core compartido: la fila creada por MCP es indistinguible de la del POST HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_planning_flow",
+            json!({"title": "Alquiler", "category_id": cat, "expected_amount": "800",
+                   "amount_basis": "per_month", "window_start_date": "2026-09-01",
+                   "window_end_date": "2029-08-31"}),
+        ),
+    )
+    .await;
+    let flow = tool_json(&envelope);
+    assert!(flow["summary"].as_str().unwrap().contains("€/mes"), "{flow}");
+    let flow_id = flow["id"].as_str().unwrap().to_string();
+    let rows = app.get_with_cookie("/v1/planning/flows", &owner.cookie).await.json();
+    assert_eq!(rows[0]["amount_basis"], "per_month", "{rows}");
+    assert_eq!(rows[0]["window_start_date"], "2026-09-01", "{rows}");
+    assert_eq!(rows[0]["window_end_date"], "2029-08-31", "{rows}");
+
+    // (3) Error de dominio compartido: mismo código de wire por las dos superficies.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_planning_flow",
+            json!({"title": "Mal", "category_id": cat, "expected_amount": "10",
+                   "amount_basis": "per_month", "window_start_date": "2027-01-01",
+                   "window_end_date": "2026-01-01"}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "bad_request");
+    let http = app
+        .post_json_with_cookie(
+            "/v1/planning/flows",
+            json!({"category_id": cat, "title": "Mal", "expected_amount": "10",
+                   "amount_basis": "per_month", "window_start_date": "2027-01-01",
+                   "window_end_date": "2026-01-01"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(http.status, ::http::StatusCode::BAD_REQUEST, "{http:?}");
+    let msg = http.json()["message"].as_str().unwrap_or_default().to_string();
+    assert!(msg.starts_with("window_end_before_start"), "{msg}");
+
+    // clear_window_end: la ventana pasa a sin fin (tri-estado), y set+clear a la vez es 400.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_planning_flow", json!({"id": flow_id, "clear_window_end": true})),
+    )
+    .await;
+    let updated = tool_json(&envelope);
+    assert!(updated["summary"].as_str().unwrap().contains("sin fin"), "{updated}");
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_planning_flow",
+            json!({"id": flow_id, "window_end_date": "2030-01-01", "clear_window_end": true}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "bad_request");
+
+    // Vuelta a one_off: nada se auto-borra — sin limpiar la ventana el estado resultante es
+    // incoherente y se rechaza; con clear_window_start el cambio entra.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_planning_flow", json!({"id": flow_id, "amount_basis": "one_off"})),
+    )
+    .await;
+    tool_error(&envelope, "bad_request");
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_planning_flow",
+            json!({"id": flow_id, "amount_basis": "one_off", "clear_window_start": true}),
+        ),
+    )
+    .await;
+    let _ = tool_json(&envelope);
+    let rows = app.get_with_cookie("/v1/planning/flows", &owner.cookie).await.json();
+    assert_eq!(rows[0]["amount_basis"], "one_off", "{rows}");
+    assert!(rows[0].get("window_start_date").is_none(), "{rows}");
+    assert!(rows[0].get("window_end_date").is_none(), "{rows}");
+}

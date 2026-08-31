@@ -633,11 +633,20 @@ async fn insert_payload(
     let mut planning_flows = 0u32;
     for p in &payload.planning_flows {
         let cid = resolve_category(cat_map, &p.category_ref.scope, &p.category_ref.name)?;
+        // Validar ANTES de insertar (mismo criterio que los snapshots): un backup manipulado
+        // con un valor fuera del enum tropezaría con el CHECK de la tabla (SQLSTATE 23514, sin
+        // mapear → 500). Rechazo con 400 y el import entero hace rollback.
+        if p.amount_basis != "one_off" && p.amount_basis != "per_month" {
+            return Err(ApiError::BadRequest(
+                "backup_amount_basis_invalid: planning flow amount_basis must be one_off or per_month".into(),
+            ));
+        }
         sqlx::query(
             r#"INSERT INTO planning_flows (
                    id, installation_id, owner_user_id, category_id, title, expected_amount,
-                   due_date, show_in_chart, notes, sort_index
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
+                   amount_basis, due_date, window_start_date, window_end_date,
+                   show_in_chart, notes, sort_index
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
         )
         .bind(Uuid::new_v4())
         .bind(iid)
@@ -645,7 +654,10 @@ async fn insert_payload(
         .bind(cid)
         .bind(&p.title)
         .bind(p.expected_amount)
+        .bind(&p.amount_basis)
         .bind(p.due_date)
+        .bind(p.window_start_date)
+        .bind(p.window_end_date)
         .bind(p.show_in_chart)
         .bind(p.notes.as_deref())
         .bind(p.sort_index)

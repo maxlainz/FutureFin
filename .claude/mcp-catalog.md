@@ -573,7 +573,11 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   por una petición que no movió un número sería incoherente con el propio objetivo de la clave),
   `update_transaction` (owner-guard → `not_found`),
   `capture_snapshot` (upsert por día civil — sobrescribe), `create_planning_flow` /
-  `update_planning_flow` (tri-state `clear_due_date`),
+  `update_planning_flow` (tri-states `clear_due_date`, `clear_window_start` y `clear_window_end`;
+  desde 4.11.0/#148 ambas hablan `amount_basis` + ventana `window_start_date`/`window_end_date` —
+  con `per_month` el importe es **€/MES**, y cambiar de base exige dejar coherentes fecha y
+  ventana en la misma llamada: el core valida el estado RESULTANTE con los mismos códigos de wire
+  que HTTP),
   `create_category`, `create_categorization_rule` (solo imports futuros; conflict con `source`
   concreto duplicado). **Contrato de cache por tool**: COND (`invalidate_projection_if_savings_
   uses_transactions`, solo modos B/C) = transaction C/U + materialize; NONE = capture_snapshot
