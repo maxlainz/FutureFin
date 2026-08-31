@@ -120,13 +120,17 @@ pub(crate) const FIRE_ABSENT_SWR_NOT_POSITIVE: &str = "swr_not_positive";
 
 /// `Err(razón)` en vez de `None`: el valor ausente y su causa viajan juntos, así que ningún caller
 /// puede publicar el hueco sin poder explicarlo.
-fn compute_fire_target_nw(
+/// La NECESIDAD del objetivo por modo (#170) — devuelve los ingredientes, no el resultado: el
+/// engine evalúa `gross_up(need(k))/SWR` mes a mes. Las tres razones de ausencia se deciden
+/// AQUÍ, una vez, sobre el estado de HOY (la puerta k=0 del engine las respalda).
+fn compute_fire_need(
     fire: &FireSettings,
     income_monthly: Decimal,
     income_retirement_monthly: Decimal,
     expense_monthly: Decimal,
-) -> Result<Decimal, &'static str> {
-    let need_annual = match fire.fire_number_mode {
+) -> Result<futurefin_engine::FireNeed, &'static str> {
+    use futurefin_engine::FireNeed;
+    let need = match fire.fire_number_mode {
         FireNumberMode::Manual => {
             let amt = fire
                 .fire_number_manual_amount
@@ -134,29 +138,34 @@ fn compute_fire_target_nw(
             if amt <= Decimal::ZERO {
                 return Err(FIRE_ABSENT_MANUAL_AMOUNT_MISSING);
             }
-            amt
+            FireNeed::Indexed { annual_net_today: amt }
         }
         FireNumberMode::AnnualExpense => {
             let net = expense_monthly - income_retirement_monthly;
             if net <= Decimal::ZERO {
                 return Err(FIRE_ABSENT_NET_NEED_NOT_POSITIVE);
             }
-            net * Decimal::from(12u32)
+            // El gasto se indexa, la pensión queda plana (#139) — el engine evalúa
+            // `max(0, E·f(k) − I)·12` mes a mes, no un neto pre-restado inflado entero.
+            FireNeed::ExpenseMinusPension {
+                expense_monthly,
+                pension_monthly: income_retirement_monthly,
+            }
         }
         FireNumberMode::CurrentIncome => {
             let net = income_monthly - income_retirement_monthly;
             if net <= Decimal::ZERO {
                 return Err(FIRE_ABSENT_NET_NEED_NOT_POSITIVE);
             }
-            net * Decimal::from(12u32)
+            // Cifra en euros de HOY que se indexa entera: descomponerla con los ingresos
+            // planos de #139 dejaría el objetivo PLANO — cambio semántico que nadie pidió.
+            FireNeed::Indexed { annual_net_today: net * Decimal::from(12u32) }
         }
     };
-    let swr = fire.swr_pct;
-    if swr <= Decimal::ZERO {
+    if fire.swr_pct <= Decimal::ZERO {
         return Err(FIRE_ABSENT_SWR_NOT_POSITIVE);
     }
-    let gross = gross_up_net_annual_fire(need_annual, &fire.tax_brackets, fire.taxes_enabled);
-    Ok(gross / (swr / Decimal::from(100u32)))
+    Ok(need)
 }
 
 /// Serializa un Decimal como f64 (~15 dígitos de precisión, suficiente para
@@ -1021,7 +1030,8 @@ fn fire_crossover_month(
     ft: Option<&futurefin_engine::FireTarget>,
     liquid_worth: &[Decimal],
 ) -> Option<u32> {
-    let ft = ft.filter(|f| f.base_amount > Decimal::ZERO)?;
+    // La puerta (necesidad positiva HOY, SWR > 0) vive en el engine: base None ⇒ sin cruce.
+    let ft = ft.filter(|f| futurefin_engine::fire_target_base_at_month_index(f, 0).is_some())?;
     for (i, lw) in liquid_worth.iter().enumerate() {
         let target = fire_target_at_month_index(Some(ft), i as u32).unwrap_or(Decimal::ZERO);
         if target > Decimal::ZERO && *lw >= target {
@@ -1368,20 +1378,28 @@ pub(crate) async fn build_installation_projection_input(
             None if inputs.expense_from_avg => inputs.expense,
             None => expense_retirement,
         };
-        compute_fire_target_nw(fs, inputs.income, income_retirement, fire_expense)
+        compute_fire_need(fs, inputs.income, income_retirement, fire_expense)
     });
-    let fire_target_base = fire_target_outcome.as_ref().and_then(|r| r.as_ref().ok().copied());
     // `None` cuando no hay `fire_settings` (no hay configuración FIRE que explicar), `Some(razón)`
     // cuando la hay y aun así no sale target.
-    let fire_target_absent_reason = fire_target_outcome.and_then(|r| r.err());
-    let mut fire_target = fire_target_base.map(|base_amount| FireTarget {
-        base_amount,
-        // Sin clamp desde 4.9.0 (#146): el rango [−2, 50] lo garantiza la escritura, y una
-        // inflación negativa DEBE llegar al engine (objetivo decreciente, no plano).
-        annual_inflation_percent: inflation_annual_percent,
-        // El término finito de deuda (#142) se rellena MÁS ABAJO, cuando los pasivos del engine
-        // ya están construidos — necesita sus calendarios completos.
-        debt_payments_remaining: Vec::new(),
+    let fire_target_absent_reason = fire_target_outcome
+        .as_ref()
+        .and_then(|r| r.as_ref().err().copied());
+    let mut fire_target = fire_target_outcome.and_then(|r| r.ok()).map(|need| {
+        let fs = fire_settings.expect("need solo existe con fire_settings");
+        FireTarget {
+            need,
+            swr_pct: fs.swr_pct,
+            // La MISMA escala y el MISMO switch que el drenaje (#140).
+            tax_brackets: fs.tax_brackets.clone(),
+            taxes_enabled: fs.taxes_enabled,
+            // Sin clamp desde 4.9.0 (#146): el rango [−2, 50] lo garantiza la escritura, y una
+            // inflación negativa DEBE llegar al engine (objetivo decreciente, no plano).
+            annual_inflation_percent: inflation_annual_percent,
+            // El término finito de deuda (#142) se rellena MÁS ABAJO, cuando los pasivos del
+            // engine ya están construidos — necesita sus calendarios completos.
+            debt_payments_remaining: Vec::new(),
+        }
     });
 
     let assets_scope = view.scope_where("");
@@ -2059,7 +2077,7 @@ pub async fn compute_projection_series_response(
     let fire_target_ref = projection_input.fire_target.as_ref();
     // #142: el término de hoy (mes 0) para la vista previa del formulario.
     let fire_target_debt_component = fire_target_ref
-        .filter(|ft| ft.base_amount > Decimal::ZERO)
+        .filter(|ft| futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some())
         .map(|ft| {
             ft.debt_payments_remaining
                 .first()
@@ -2073,7 +2091,7 @@ pub async fn compute_projection_series_response(
         jubilacion_target_net_worth,
         jubilacion_target_net_worth_nominal,
     ) = match fire_target_ref {
-        Some(ft) if ft.base_amount > Decimal::ZERO => {
+        Some(ft) if futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some() => {
             let crossed_at = fire_crossover_month(Some(ft), &output.liquid_worth);
             // Se itera sobre `points`, NO sobre `kept_indices`: la serie es paralela a los
             // puntos y el consumidor la alinea por posición (no lleva `month_index` propio,
@@ -2102,7 +2120,13 @@ pub async fn compute_projection_series_response(
             (
                 series,
                 crossed_at,
-                Some(money_out(ft.base_amount).to_string()),
+                Some(
+                    money_out(
+                        futurefin_engine::fire_target_base_at_month_index(ft, 0)
+                            .unwrap_or(Decimal::ZERO),
+                    )
+                    .to_string(),
+                ),
                 nominal,
             )
         }
@@ -2655,7 +2679,11 @@ fn sim_kpis(
         jubilacion_age,
         final_net_worth: money_out(final_net_worth),
         final_net_worth_real: money_out(final_net_worth_real),
-        fire_target_base: input.fire_target.as_ref().map(|ft| money_out(ft.base_amount)),
+        fire_target_base: input
+            .fire_target
+            .as_ref()
+            .and_then(|ft| futurefin_engine::fire_target_base_at_month_index(ft, 0))
+            .map(money_out),
         runway_months,
         runway_is_indefinite,
         income_monthly: money_out(income_monthly),
