@@ -273,16 +273,18 @@ async fn savings_source_override_predicts_exactly_what_persisting_it_would_do() 
             simulado["baseline"]["debt_service_absent_reason"].is_null(),
             "modo A: la cuota es medible, no hay razón de ausencia"
         );
-        // En el modo real la cuota NO es 0: es inexistente como cifra aparte (ya está dentro del
-        // gasto real). Publicarla como `"0"` se leía como «no pagas servicio de deuda».
-        assert!(
-            simulado["scenario"]["debt_service_monthly"].is_null(),
-            "modo {modo}: la cuota ya vive dentro del gasto real, debe ser null: {}",
+        // INVERTIDO en 4.8.0 (#142, opción 3): la cuota SALE del promedio y vuelve como
+        // servicio de deuda REAL también en B/C — una sola cuenta, en los tres modos. El
+        // literal `included_in_real_expense` se retiró con su modo.
+        assert_eq!(
+            dec(&simulado["scenario"]["debt_service_monthly"]),
+            400.0,
+            "modo {modo}: la cuota es servicio de deuda real: {}",
             simulado["scenario"]
         );
-        assert_eq!(
-            simulado["scenario"]["debt_service_absent_reason"], "included_in_real_expense",
-            "modo {modo}: y la razón tiene que decir por qué"
+        assert!(
+            simulado["scenario"]["debt_service_absent_reason"].is_null(),
+            "modo {modo}: ya no hay razón de ausencia"
         );
     }
 }
@@ -1087,25 +1089,15 @@ async fn sim_kpis_match_summary_financial_health_in_all_three_modes() {
             "modo {mode}: sin ajuste, caja = recurrente"
         );
 
-        // El servicio de deuda solo es una cifra en modo A; en B/C la cuota ya es un movimiento
-        // real dentro del promedio, así que no existe como número aparte y viaja `null` + razón.
-        if mode == "budget" {
-            assert_eq!(
-                dec(&k["debt_service_monthly"]),
-                400.0,
-                "modo A: la cuota viaja en debt_service_monthly"
-            );
-            assert!(k["debt_service_absent_reason"].is_null(), "modo A: {k}");
-        } else {
-            assert!(
-                k["debt_service_monthly"].is_null(),
-                "modo {mode}: debt_service no aplica, debe ser null (no 0): {k}"
-            );
-            assert_eq!(
-                k["debt_service_absent_reason"], "included_in_real_expense",
-                "modo {mode}: la razón de ausencia"
-            );
-        }
+        // INVERTIDO en 4.8.0 (#142, opción 3): la cuota es servicio de deuda REAL en los TRES
+        // modos (en B/C el gasto efectivo ya la restó del promedio — contarla aquí es contarla
+        // UNA vez). El literal `included_in_real_expense` se retiró con su modo.
+        assert_eq!(
+            dec(&k["debt_service_monthly"]),
+            400.0,
+            "modo {mode}: la cuota viaja en debt_service_monthly"
+        );
+        assert!(k["debt_service_absent_reason"].is_null(), "modo {mode}: {k}");
 
         // Sin overrides, todos los deltas de salud son cero.
         let d = &sim["deltas"];

@@ -15,7 +15,12 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31 (Ola 3
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31 (Ola 4
+del programa de la auditoría, rama `feat/ola4-el-cruce`)**: **66** ficheros de test de integración
+(sin ficheros nuevos — la ola añade tests dentro de suites existentes), **51** migraciones (cero
+nuevas: todo el cambio es de motor/handler), `.ffbackup` sigue en **11**, catálogo MCP sigue en
+**68** tools (una descripción reescrita — `get_transactions_summary` —, cero altas), engine
+runway en **16** tests in-module. Antes, counts refreshed **2026-08-31 (Ola 3
 del programa de la auditoría, rama `feat/ola3-la-deuda`)**: **66** ficheros de test de integración
 (`ls apps/api/tests/*.rs | wc -l` — nuevos `projection_pins.rs`, `projection_failure_states.rs`,
 `patch_null_clears.rs`, `asset_order_determinism.rs` de las Olas 1-2), **51** migraciones

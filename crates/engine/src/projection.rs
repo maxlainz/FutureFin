@@ -485,6 +485,55 @@ pub struct LiabilitySchedule {
     pub horizon_months: u32,
 }
 
+/// Serie del término finito de deuda del objetivo FIRE (#142): para cada mes `m`,
+/// `Σ_pasivos ( Σ_{j>m} caja(j) + saldo_residual )` — la caja de cada mes es la del calendario
+/// completo (cuota + amortización extra + comisión), y el saldo residual es lo que quede vivo
+/// al terminar el plan (constante: esa deuda no se paga sola). El último elemento del vector es
+/// la cola residual; consumido por `fire_target_at_month_index` con fallback al último valor.
+///
+/// Invariantes pineadas por test: `serie[0] == Σ total_cash_out + Σ final_principal` y, para un
+/// francés que se extingue, `serie[m] == principal_vivo(m) + interés_restante(m)` — la identidad
+/// que hace equivalentes la base líquida + cuotas (#143) y la base NW + interés.
+///
+/// **No depende del horizonte de la proyección** (invariante protegido por test): se calcula
+/// sobre el calendario completo (`MAX_LIABILITY_SCHEDULE_MONTHS`), no sobre los meses servidos.
+pub fn debt_payments_remaining_series(
+    liabilities: &[ProjectionLiabilityInput],
+    ref_date: NaiveDate,
+) -> Vec<Decimal> {
+    let mut monthly: Vec<Decimal> = Vec::new();
+    let mut residual_tail = Decimal::ZERO;
+    for liab in liabilities {
+        let sch = liability_amortization_schedule(liab, ref_date, MAX_LIABILITY_SCHEDULE_MONTHS);
+        residual_tail += sch.final_principal;
+        for m in &sch.months {
+            let idx = m.month_index as usize;
+            if monthly.len() <= idx {
+                monthly.resize(idx + 1, Decimal::ZERO);
+            }
+            monthly[idx] += m.payment + m.extra_principal + m.early_repayment_fee;
+        }
+    }
+    if monthly.is_empty() {
+        return if residual_tail > Decimal::ZERO {
+            vec![residual_tail]
+        } else {
+            Vec::new()
+        };
+    }
+    // Sufijos ESTRICTOS: serie[m] = Σ_{j > m} monthly[j] + residual_tail — la caja del mes m ya
+    // está pagada al cierre de m (el cruce compara con el cierre de k−1, ver el bucle). Los
+    // meses del calendario son 1-based, así que serie[0] cubre el plan entero.
+    let len = monthly.len();
+    let mut out = vec![Decimal::ZERO; len];
+    let mut acc = residual_tail;
+    for m in (0..len).rev() {
+        out[m] = acc;
+        acc += monthly[m];
+    }
+    out
+}
+
 /// Calendario de amortización de un pasivo desde `ref_date`, mes a mes.
 ///
 /// Pura y determinista como el resto del crate. `horizon_months` se clampa a
@@ -604,6 +653,19 @@ pub fn liability_amortization_schedule(
 pub struct FireTarget {
     pub base_amount: Decimal,
     pub annual_inflation_percent: Decimal,
+    /// Término FINITO de deuda (#142, emparejado con la base LÍQUIDA del cruce de #143):
+    /// `debt_payments_remaining[m]` = Σ de cuotas que quedan por pagar DESPUÉS del mes `m`
+    /// (sobre el calendario completo de cada plan, cota `MAX_LIABILITY_SCHEDULE_MONTHS`) más el
+    /// saldo residual que quede vivo al terminar cada plan (constante — esa deuda no se paga
+    /// sola). En euros NOMINALES: las cuotas son fijas por contrato y NO se inflan. Fuera de
+    /// rango ⇒ el ÚLTIMO valor (la cola residual constante), no 0. Vacío = sin deuda (0).
+    ///
+    /// Por qué cuotas y no solo interés: la base del cruce (#143) son los activos LÍQUIDOS
+    /// BRUTOS, que no restan ningún principal — así que el objetivo debe cubrir la perpetuidad
+    /// del gasto MÁS cada euro de cuota pendiente. (Con la base NW de antes, el término
+    /// equivalente habría sido solo el interés restante: algebraicamente son el MISMO requisito
+    /// sobre activos, y el test de emparejamiento lo fija.)
+    pub debt_payments_remaining: Vec<Decimal>,
 }
 
 #[derive(Debug, Clone)]
@@ -663,6 +725,12 @@ pub struct ProjectionOutput {
     /// cero euros descubiertos, no «no aplica». Ya se restaba del patrimonio publicado; ahora
     /// además se declara. Issue #119.
     pub uncovered_deficit_total: Decimal,
+    /// Patrimonio LÍQUIDO por mes (#143): Σ de los activos con `is_liquid` + la caja sin
+    /// repartir (`surplus_cash`) — exactamente el stock que el drenaje de jubilación puede
+    /// vender, SIN restar pasivos (por eso el término de deuda del objetivo son las cuotas
+    /// completas, ver `FireTarget::debt_payments_remaining`). Es la base que decide el cruce
+    /// FIRE desde 4.8.0; `net_worth` sigue siendo el total y no cambia.
+    pub liquid_worth: Vec<Decimal>,
 }
 
 /// Primero-de-mes de una fecha (día 1 del mismo mes). Compartido con `history.rs`.
@@ -719,12 +787,23 @@ pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> 
     if ft.base_amount <= Decimal::ZERO {
         return None;
     }
+    // Término finito de deuda (#142): cuotas restantes tras `month_index` + cola residual.
+    // OJO: con él, el objetivo DEJA DE SER MONÓTONO (base creciente + término decreciente) —
+    // cualquier optimización que asuma monotonía (búsqueda binaria del cruce, salida temprana)
+    // quedaría rota en silencio. El escaneo lineal de `fire_crossover_month` sigue siendo
+    // correcto. Con inflación 0 el objetivo pasa de plano a estrictamente decreciente.
+    let debt_term = ft
+        .debt_payments_remaining
+        .get(month_index as usize)
+        .or(ft.debt_payments_remaining.last())
+        .copied()
+        .unwrap_or(Decimal::ZERO);
     if ft.annual_inflation_percent <= Decimal::ZERO || month_index == 0 {
-        return Some(ft.base_amount);
+        return Some(ft.base_amount + debt_term);
     }
     let years = Decimal::from(month_index) / Decimal::from(12u32);
     let factor = (Decimal::ONE + ft.annual_inflation_percent / Decimal::from(100u32)).powd(years);
-    Some(ft.base_amount * factor)
+    Some(ft.base_amount * factor + debt_term)
 }
 
 fn drain_from_assets(
@@ -1059,17 +1138,11 @@ pub fn first_month_allocation(
             return Err(EngineError::InvalidAllocationRuleTarget);
         }
     }
-    if n == 0 {
-        return Ok(FirstMonthAllocation {
-            per_asset: out,
-            base_cash: Decimal::ZERO,
-            recurring_net: Decimal::ZERO,
-            planning_component: Decimal::ZERO,
-            debt_service: Decimal::ZERO,
-            leftover: Decimal::ZERO,
-            rules: Vec::new(),
-        });
-    }
+    // Sin activos NO hay atajo a ceros (#127): la caja del mes 1 (ingreso − gasto − deuda) existe
+    // aunque no haya dónde asignarla, y los KPIs (`net_recurring_monthly`, `net_cash_monthly`)
+    // la leen de aquí. Con `n == 0` no puede haber reglas (la validación de arriba las rechaza
+    // todas) y `distribute_contributions` sobre cero activos devuelve el pool entero como
+    // sobrante, así que la ruta general ya es correcta.
 
     let values: Vec<Decimal> = input.assets.iter().map(|a| a.value).collect();
     let principals: Vec<Decimal> = input
@@ -1111,12 +1184,17 @@ pub fn first_month_allocation(
     // diciendo «aportas 2.000 €/mes» y explicando regla a regla una cascada que no se ejecuta
     // jamás. No es un caso patológico: es el estado final del público al que sirve la app.
     //
-    // El mes 0 no tiene sobrante acumulado ni caja pendiente, así que el patrimonio de partida
-    // es Σ activos − Σ principales, igual que el primer punto de `net_worth`.
-    let nw_month_zero: Decimal = values.iter().copied().sum::<Decimal>()
-        - principals.iter().copied().sum::<Decimal>();
+    // El mes 0 no tiene sobrante acumulado ni caja pendiente. El cruce se decide contra el
+    // patrimonio LÍQUIDO (#143), igual que en el bucle: Σ de los activos vendibles.
+    let liquid_month_zero: Decimal = input
+        .assets
+        .iter()
+        .zip(values.iter())
+        .filter(|(a, _)| a.is_liquid)
+        .map(|(_, v)| *v)
+        .sum();
     let fire_reached = fire_target_at_month_index(input.fire_target.as_ref(), 0)
-        .is_some_and(|t| nw_month_zero >= t);
+        .is_some_and(|t| liquid_month_zero >= t);
     let in_retirement = fire_reached || input.retirement_start_month.is_some_and(|s| 1 >= s);
     let income = if in_retirement {
         input.income_retirement_monthly
@@ -1230,6 +1308,13 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         .iter()
         .map(|l| l.monthly_payment)
         .collect();
+    // La jubilación es un estado ABSORBENTE (#141): una vez cruzado el objetivo (o alcanzado
+    // `retirement_start_month`), el hogar no «vuelve al trabajo» porque el patrimonio caiga un
+    // mes por debajo del target inflado — nadie recupera la nómina íntegra el mes siguiente a
+    // jubilarse. Hasta 4.7.0 la re-evaluación mensual reinsertaba sueldos completos en las
+    // caídas (hasta el 77 % del patrimonio final era fantasma en el escenario del issue).
+    // `jubilacion_month_index` (primer cruce) no cambia de contrato.
+    let mut retired = false;
 
     let start_month_first = month_first_calendar(input.ref_date);
 
@@ -1260,6 +1345,20 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         let tl: Decimal = pr.iter().copied().sum();
         ta + surplus - tl - und
     };
+    // Base líquida del cruce (#143): lo vendible — activos `is_liquid` + caja sin repartir.
+    // Brutos a propósito (sin restar pasivos ni descubierto): el objetivo empareja ese hueco
+    // con su término de cuotas completas (`debt_payments_remaining`).
+    let liquid_fn = |vals: &[Decimal], surplus: Decimal| -> Decimal {
+        input
+            .assets
+            .iter()
+            .zip(vals.iter())
+            .filter(|(a, _)| a.is_liquid)
+            .map(|(_, v)| *v)
+            .sum::<Decimal>()
+            + surplus
+    };
+    let mut liquid_series = Vec::with_capacity(input.horizon_months as usize + 1);
 
     net_series.push(nw_fn(
         &values,
@@ -1267,6 +1366,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         undrained_cumulative,
         surplus_cash,
     ));
+    liquid_series.push(liquid_fn(&values, surplus_cash));
     contrib_series.push(contributed_cumulative);
     for (i, s) in per_asset_series.iter_mut().enumerate() {
         s.push(values[i]);
@@ -1315,13 +1415,17 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
         let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
 
-        let nw_prev = nw_fn(&values, &principals, undrained_cumulative, surplus_cash);
-        // `nw_prev` es el patrimonio al cierre del mes k-1; lo comparamos contra el target
-        // correspondiente a ese mismo punto del eje temporal.
+        // El cruce se decide contra el patrimonio LÍQUIDO al cierre del mes k-1 (#143): la
+        // regla del SWR está calibrada sobre cartera vendible; una vivienda no produce
+        // retirada. El total (`nw_fn`) sigue siendo lo que se publica y drena.
+        let liquid_prev = liquid_fn(&values, surplus_cash);
         let fire_reached = fire_target_at_month_index(input.fire_target.as_ref(), k - 1)
-            .map_or(false, |t| nw_prev >= t);
-        let in_retirement =
-            fire_reached || input.retirement_start_month.map_or(false, |s| k >= s);
+            .map_or(false, |t| liquid_prev >= t);
+        // Latch (#141): `retired` solo puede pasar a true; el objetivo deja de mirarse después.
+        retired = retired
+            || fire_reached
+            || input.retirement_start_month.map_or(false, |s| k >= s);
+        let in_retirement = retired;
         let income = if in_retirement {
             input.income_retirement_monthly
         } else {
@@ -1415,6 +1519,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             surplus_cash,
         );
         net_series.push(nw);
+        liquid_series.push(liquid_fn(&values, surplus_cash));
         contrib_series.push(contributed_cumulative);
         for (i, s) in per_asset_series.iter_mut().enumerate() {
             s.push(values[i]);
@@ -1427,6 +1532,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         per_asset_series,
         assets_depleted_month_index,
         uncovered_deficit_total: undrained_cumulative,
+        liquid_worth: liquid_series,
     })
 }
 
@@ -1494,6 +1600,164 @@ mod tests {
             retirement_monthly_withdrawal: Decimal::ZERO,
             fire_target: None,
         }
+    }
+
+    /// #143 — solo el patrimonio LÍQUIDO decide el cruce. Cartera del issue: vivienda ilíquida
+    /// de 400.000 € (0 %) + fondo líquido de 480.000 € (5 %), objetivo 863.652,80 €. El total
+    /// (880.000) supera el objetivo — la app de 4.7.0 declaraba «FIRE hoy» con un déficit real
+    /// de 383.652,80 € de capital vendible. Con la base líquida, el hogar SIGUE trabajando:
+    /// la aportación del mes 1 entra (1.000 € = ingreso − gasto), cosa que jubilado no haría.
+    #[test]
+    fn the_crossing_uses_only_liquid_worth() {
+        let casa = mk_asset(0xA1, Decimal::from(400_000), false, None);
+        let fondo = mk_asset(0xA2, Decimal::from(480_000), true, Some(Decimal::from(5)));
+        let mut inp = base_input(
+            24,
+            Decimal::from(3_000),
+            Decimal::from(2_000),
+            vec![casa, fondo],
+            vec![rule_remainder(1)],
+        );
+        inp.fire_target = Some(FireTarget {
+            base_amount: dec("863652.80"),
+            annual_inflation_percent: Decimal::ZERO,
+            debt_payments_remaining: Vec::new(),
+        });
+        let out = project_net_worth_series(&inp).unwrap();
+        assert_eq!(
+            out.contributed_capital[1],
+            Decimal::from(1_000),
+            "880.000 totales no jubilan a nadie: el líquido (480.000) no llega"
+        );
+        // La serie líquida publicada arranca en el fondo, sin la casa.
+        assert_eq!(out.liquid_worth[0], Decimal::from(480_000));
+        assert!(out.net_worth[0] == Decimal::from(880_000));
+    }
+
+    /// #142 ⇄ #143, el invariante de EMPAREJAMIENTO (spike §4.3): con base líquida BRUTA el
+    /// término del objetivo son TODAS las cuotas restantes (+ residual), y eso es EXACTAMENTE
+    /// el mismo requisito sobre activos que «base NW + interés restante»:
+    /// `serie[m] == principal_vivo(m) + interés_restante_tras(m)` — identidad del calendario.
+    /// Números del caso E del spike (francés 100.000 € / TIN 3 % / cuota 500, 278 meses):
+    /// serie[0] = **138.802,7999147153** (Σ cuotas; residual 0), serie[139] = 69.302,799915
+    /// (= P(139) 58.508,940182 + interés restante 10.793,859733), serie[278] = 0.
+    #[test]
+    fn target_and_crossing_base_agree_on_the_liability_accounting() {
+        let l = liab(
+            Decimal::from(100_000),
+            Decimal::from(500),
+            RepaymentModel::French,
+            Some(Decimal::from(3)),
+        );
+        let serie = debt_payments_remaining_series(std::slice::from_ref(&l), ref_2026());
+        let sch = liability_amortization_schedule(&l, ref_2026(), MAX_LIABILITY_SCHEDULE_MONTHS);
+
+        assert_eq!(
+            serie[0].round_dp(10),
+            dec_s("138802.7999147153"),
+            "serie[0] = Σ cuotas del plan entero"
+        );
+        assert_eq!(serie[278], Decimal::ZERO, "extinguido: no queda nada que cubrir");
+        assert_eq!(
+            serie[139].round_dp(6),
+            dec_s("69302.799915"),
+            "k=139: P(139) + interés restante"
+        );
+
+        // La identidad, mes a mes (muestreada): cuotas restantes == principal vivo + interés
+        // restante. Si alguien cambia una de las dos contabilidades sin la otra, esto revienta.
+        for probe in [1usize, 50, 139, 200, 277] {
+            let principal_close = sch.months[probe - 1].closing_principal;
+            let interest_after: Decimal =
+                sch.months[probe..].iter().map(|m| m.interest_accrued).sum();
+            // Igualdad a 15 decimales: son las MISMAS cantidades sumadas en orden distinto, y
+            // Decimal (28 dígitos) acumula el redondeo del último dígito de forma distinta.
+            assert_eq!(
+                serie[probe].round_dp(15),
+                (principal_close + interest_after).round_dp(15),
+                "identidad rota en el mes {probe}"
+            );
+        }
+    }
+
+    /// La cola residual (#142): un plan que vence con saldo vivo deja ese saldo como término
+    /// CONSTANTE del objetivo para siempre (esa deuda no se paga sola), servido por el fallback
+    /// «último valor» de `fire_target_at_month_index`.
+    #[test]
+    fn the_residual_balance_is_a_constant_tail_of_the_target() {
+        let mut l = liab(
+            Decimal::from(30_000),
+            Decimal::from(500),
+            RepaymentModel::FixedPayments,
+            None,
+        );
+        // Plan de 10 meses: paga 5.000, quedan 25.000 congelados.
+        l.payment_end = Some(NaiveDate::from_ymd_opt(2026, 10, 15).unwrap());
+        let serie = debt_payments_remaining_series(std::slice::from_ref(&l), ref_2026());
+        let ft = FireTarget {
+            base_amount: Decimal::from(600_000),
+            annual_inflation_percent: Decimal::ZERO,
+            debt_payments_remaining: serie.clone(),
+        };
+        assert_eq!(
+            serie[0],
+            Decimal::from(30_000),
+            "10 cuotas de 500 + 25.000 residuales"
+        );
+        // Muy lejos del plan: el término es el residuo, no 0.
+        assert_eq!(
+            fire_target_at_month_index(Some(&ft), 500),
+            Some(Decimal::from(625_000)),
+            "la deuda congelada sigue exigiendo capital"
+        );
+    }
+
+    /// #141 — la jubilación es un estado ABSORBENTE. Escenario del issue: 500.000 € líquidos
+    /// al 2 %, nómina 4.000 € / gasto 2.000 € (igual en jubilación, sin ingreso de jubilación),
+    /// objetivo 500.000 € con inflación 2 %, 120 meses. El cruce ocurre ya en el mes 1
+    /// (nw(0) == target(0)) y el target inflado supera enseguida al patrimonio drenado: bajo la
+    /// re-evaluación mensual pre-4.8.0 el hogar «volvía al trabajo» en cada caída y el NW final
+    /// salía 609.497,21 € con ~120.000 € de aportado fantasma (el 77 % de sobreestimación del
+    /// issue). Con el latch, a mano (50 dígitos): V_k = (V_{k−1} − 2.000)·1,02^(1/12) ⇒
+    /// V_120 = **343.865,59 €**, y `contributed_capital` es 0 en TODA la serie — ni un euro de
+    /// nómina reinsertado.
+    #[test]
+    fn retirement_is_an_absorbing_state() {
+        let asset = mk_asset(0xF1, Decimal::from(500_000), true, Some(Decimal::from(2)));
+        let mut inp = base_input(
+            120,
+            Decimal::from(4_000),
+            Decimal::from(2_000),
+            vec![asset],
+            vec![rule_remainder(0)],
+        );
+        inp.income_retirement_monthly = Decimal::ZERO;
+        inp.expense_retirement_monthly = Decimal::from(2_000);
+        inp.fire_target = Some(FireTarget {
+            base_amount: Decimal::from(500_000),
+            annual_inflation_percent: Decimal::from(2),
+            debt_payments_remaining: Vec::new(),
+        });
+        let out = project_net_worth_series(&inp).unwrap();
+
+        // Sanidad del flap: la serie pasa casi todo el horizonte POR DEBAJO del target inflado
+        // — exactamente el estado que antes reactivaba la nómina mes a mes.
+        let dips = (1..=120u32)
+            .filter(|&k| {
+                let t = fire_target_at_month_index(inp.fire_target.as_ref(), k).unwrap();
+                out.net_worth[k as usize] < t
+            })
+            .count();
+        assert!(dips > 100, "el escenario debe vivir bajo el target inflado: dips={dips}");
+
+        for k in 0..=120usize {
+            assert_eq!(
+                out.contributed_capital[k],
+                Decimal::ZERO,
+                "mes {k}: jubilado = jubilado, nada de nómina reinsertada"
+            );
+        }
+        assert_eq!(out.net_worth[120].round_dp(2), "343865.59".parse::<Decimal>().unwrap());
     }
 
     #[test]
@@ -1584,6 +1848,7 @@ mod tests {
         inp.fire_target = Some(FireTarget {
             base_amount: Decimal::from(100_000),
             annual_inflation_percent: Decimal::ZERO,
+            debt_payments_remaining: Vec::new(),
         });
 
         let fma = first_month_allocation(&inp).unwrap();
@@ -2149,6 +2414,7 @@ mod tests {
         inp.fire_target = Some(FireTarget {
             base_amount: Decimal::from(50_000),
             annual_inflation_percent: Decimal::from(10),
+            debt_payments_remaining: Vec::new(),
         });
         let out = project_net_worth_series(&inp).unwrap();
         let cross_idx = out
@@ -2202,6 +2468,7 @@ mod tests {
         let ft = FireTarget {
             base_amount: Decimal::from(750_000),
             annual_inflation_percent: Decimal::from(3),
+            debt_payments_remaining: Vec::new(),
         };
         let t0 = fire_target_at_month_index(Some(&ft), 0).unwrap();
         assert_eq!(t0, Decimal::from(750_000));
@@ -2226,6 +2493,7 @@ mod tests {
         let ft = FireTarget {
             base_amount: Decimal::from(500_000),
             annual_inflation_percent: Decimal::ZERO,
+            debt_payments_remaining: Vec::new(),
         };
         assert_eq!(
             fire_target_at_month_index(Some(&ft), 0).unwrap(),
@@ -2246,6 +2514,7 @@ mod tests {
         let ft = FireTarget {
             base_amount: Decimal::from(100_000),
             annual_inflation_percent: Decimal::from(5),
+            debt_payments_remaining: Vec::new(),
         };
         let r = Decimal::ONE + Decimal::from(5) / Decimal::from(100u32);
 
@@ -2288,6 +2557,7 @@ mod tests {
         inp.fire_target = Some(FireTarget {
             base_amount: Decimal::from_str_exact("342857.142857").unwrap(),
             annual_inflation_percent: Decimal::ZERO,
+            debt_payments_remaining: Vec::new(),
         });
 
         let out = project_net_worth_series(&inp).expect("simulación");
@@ -2368,6 +2638,7 @@ mod tests {
         inp.fire_target = Some(FireTarget {
             base_amount: Decimal::from(1_500_000),
             annual_inflation_percent: Decimal::new(25, 1),
+            debt_payments_remaining: Vec::new(),
         });
         inp
     }
@@ -2907,6 +3178,10 @@ mod tests {
             early_repayment_fee_pct: None,
             early_repayment_effect: EarlyRepaymentEffect::default(),
         }
+    }
+
+    fn dec_s(v: &str) -> Decimal {
+        v.parse().unwrap()
     }
 
     fn ref_2026() -> NaiveDate {

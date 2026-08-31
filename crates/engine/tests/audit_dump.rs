@@ -243,6 +243,7 @@ fn audit_dump_projection_series() {
     p2.fire_target = Some(FireTarget {
         base_amount: Decimal::from(800_000),
         annual_inflation_percent: d(25, 1),
+        debt_payments_remaining: Vec::new(),
     });
     dump_projection("P2_fire_mes0", &p2);
 
@@ -260,6 +261,7 @@ fn audit_dump_projection_series() {
     p3.fire_target = Some(FireTarget {
         base_amount: Decimal::from(200_000),
         annual_inflation_percent: Decimal::ZERO,
+        debt_payments_remaining: Vec::new(),
     });
     dump_projection("P3_superavit_jubilacion", &p3);
 

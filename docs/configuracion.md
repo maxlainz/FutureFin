@@ -153,7 +153,7 @@ el objetivo FIRE y la fecha de jubilación que ves:
 | Opción | Qué alimenta la simulación |
 |---|---|
 | **Presupuesto** (por defecto) | Lo que planeas: los ingresos y gastos de tu pestaña Presupuesto. Tus movimientos importados no cambian la proyección. |
-| **Movimientos reales** | Lo que de verdad pasó: el promedio ponderado de tus movimientos, por meses con datos reales. Importar un CSV o corregir un movimiento **sí** mueve la proyección. Las cuotas de préstamos cuentan como un gasto más. |
+| **Movimientos reales** | Lo que de verdad pasó: el promedio de tus movimientos, contando solo los meses con datos reales **ya clasificados** (un mes de importaciones sin categorizar no diluye la media). Importar un CSV o corregir un movimiento **sí** mueve la proyección. Las cuotas de préstamos viven dentro de ese promedio, pero la simulación las descuenta y amortiza tus deudas aparte, como en los otros dos modos — amortizar sigue moviendo la curva. |
 | **Ingresos de presupuesto + gasto real** | Mezcla: el ingreso sale del presupuesto (útil si tu nómina no pasa por los movimientos) y el gasto de los movimientos reales. Solo acierta mientras mantengas el presupuesto de ingresos al día. |
 
 Con movimientos reales, cada lado tiene su **ventana de promedio configurable** (en meses, ahí

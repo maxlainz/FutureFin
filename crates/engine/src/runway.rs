@@ -18,7 +18,9 @@ pub enum RunwayOutcome {
     /// no una medida exacta.
     Months(Decimal),
     /// La retirada anual (el gasto anual grosseado, `annual_expense_for_swr`) no supera el SWR
-    /// aplicado al saldo líquido: `annual_expense_for_swr ≤ A·(swr_pct/100)`.
+    /// aplicado al saldo líquido — `annual_expense_for_swr ≤ A·(swr_pct/100)` — **y** la cartera
+    /// líquida tiene rentabilidad esperada ponderada > 0 (#128): la regla del SWR se validó para
+    /// carteras invertidas, nunca para dinero parado al 0 %.
     Indefinite,
     /// No hay base de gasto (`monthly_expense <= 0`): el runway no está definido.
     NoExpenseBase,
@@ -40,11 +42,13 @@ pub enum RunwayOutcome {
 /// - **Orden retirada-antes-de-crecimiento**: cada mes se paga el gasto y luego crece el saldo
 ///   restante — el mismo orden que el bucle de simulación de `projection.rs` (drenaje del cash
 ///   flow negativo antes de aplicar los multiplicadores), así que ambas curvas son coherentes.
-/// - **Multiplicador ponderado**: se usa una media de los multiplicadores mensuales ponderada por
-///   valor, `m = Σ vₐ·monthly_multiplier(rₐ) / Σ vₐ`. Equivale a un **drenaje prorrateado** (cada
-///   activo aporta al gasto en proporción a su peso), ligeramente **conservador** frente al drain
-///   real del engine, que vacía primero los líquidos de menor rentabilidad y por tanto conserva
-///   más tiempo los de rentabilidad alta.
+/// - **Drenaje secuencial (#128)**: cada mes el gasto se cubre vaciando los activos en el MISMO
+///   orden que `drain_from_assets` en la simulación real — menor rentabilidad esperada primero
+///   (`None` cuenta como 0), empate por índice — y después cada saldo restante crece con SU
+///   propio multiplicador. Hasta 4.7.x se usaba una media de multiplicadores ponderada por valor
+///   (drenaje prorrateado), sistemáticamente **más corta**: prorratear consume también los
+///   activos de rentabilidad alta desde el mes 1, mientras el drain real los conserva
+///   componiendo. En el caso de un solo activo ambos modelos coinciden exactamente.
 /// - **Tasas negativas componen**: herencia documentada de [`monthly_multiplier`] — `None` y 0
 ///   siguen siendo factor 1, pero una rentabilidad negativa (−100 < r < 0) decrece el saldo de
 ///   verdad y por tanto **acorta** el runway (≤ −100 se clampa a factor 0). La inflación del
@@ -54,11 +58,15 @@ pub enum RunwayOutcome {
 ///   dividir — `annual_expense_for_swr·100 ≤ A·swr_pct` — para que la frontera sea **exacta** en
 ///   `Decimal`. Con `swr_pct ≤ 0` el lado derecho es ≤ 0 y el izquierdo > 0, así que nunca se
 ///   cumple (no necesita guarda aparte). Es el «FIRE number» de liquidez: `A ≥ gasto_bruto/SWR`.
-/// - **El disparador es deliberadamente independiente de rentabilidad e inflación**: mira solo
-///   `A`, el gasto grosseado y el SWR — la definición de SWR ya asume una cartera cuyo retorno
-///   real sostiene esa retirada a largo plazo. Rentabilidad e inflación siguen gobernando el
-///   caso **finito** (el bucle de abajo). Consecuencia asumida: un saldo por debajo del umbral
-///   con rentabilidad altísima ya no es «infinito», y uno en el umbral con rentabilidad 0 sí.
+/// - **Puerta de rentabilidad (#128)**: el umbral SWR solo declara `Indefinite` si además la
+///   rentabilidad esperada ponderada de la cartera líquida es **estrictamente positiva**
+///   (`Σ vₐ·rₐ > 0`, con `None` = 0; sin dividir — `A > 0` hace equivalentes la suma y la
+///   media). La regla del 3,5/4 % (Trinity/Bengen) se validó para carteras invertidas con
+///   retorno esperado positivo, nunca para dinero parado: 300.000 € al 0 % con gasto de
+///   875 €/mes cumplen el umbral por igualdad exacta y aun así se agotan en 342,86 meses — con
+///   la puerta, ese caso cae al bucle finito y publica esa cifra. La inflación sigue SIN mirar
+///   el disparador (gobierna solo el caso finito): la definición de SWR ya la asume dentro del
+///   retorno real de la cartera.
 /// - **Orden de checks**: `NoExpenseBase` se decide **antes** que el umbral SWR — con gasto 0 la
 ///   desigualdad `0 ≤ A·swr` sería trivialmente cierta y marcaría infinito un runway indefinido.
 /// - **Tope de 100 años**: si el saldo aguanta `MAX_RUNWAY_MONTHS` meses sin haber cumplido el
@@ -67,12 +75,13 @@ pub enum RunwayOutcome {
 ///
 /// # Reducción exacta a `A / g`
 ///
-/// Cuando el umbral SWR no se cumple, con rentabilidad e inflación 0 se tiene `m = m_inf = 1`,
-/// luego `balance_k = A − k·g` y `g` constante. Sea `n = ⌊A/g⌋`: para todo `k ≤ n` se cumple
-/// `balance_{k−1} = A − (k−1)·g ≥ g`, así que el bucle no corta; en `k = n+1` se cumple
-/// `balance_n = A − n·g < g` y se devuelve `n + (A − n·g)/g = A/g`. La única división es la
-/// final, de modo que el resultado es la división simple exacta (regresión sin tolerancias en
-/// los tests).
+/// Cuando no se declara `Indefinite`, con rentabilidad e inflación 0 todos los multiplicadores
+/// son 1 y el drenaje secuencial resta exactamente `g` del total cada mes: `total_k = A − k·g`
+/// con `g` constante (da igual de qué activo salga cada euro). Sea `n = ⌊A/g⌋`: para todo
+/// `k ≤ n` se cumple `total_{k−1} = A − (k−1)·g ≥ g`, así que el bucle no corta; en `k = n+1`
+/// se cumple `total_n = A − n·g < g` y se devuelve `n + (A − n·g)/g = A/g`. La única división
+/// es la final, de modo que el resultado es la división simple exacta (regresión sin
+/// tolerancias en los tests).
 ///
 /// Casos límite: `monthly_expense <= 0` → [`RunwayOutcome::NoExpenseBase`]; saldo total ≤ 0 →
 /// `Months(0)`.
@@ -94,29 +103,62 @@ pub fn liquid_runway_months(
         return RunwayOutcome::Months(Decimal::ZERO);
     }
 
-    // Infinito ⟺ la retirada anual (grosseada) no supera el SWR. Comparación exacta sin dividir.
+    // Infinito ⟺ la retirada anual (grosseada) no supera el SWR **y** la cartera tiene
+    // rentabilidad esperada ponderada > 0 (#128). Comparaciones exactas sin dividir.
     // OJO: el `100` desporcentúa `swr_pct` — no confundir ni compartir con `MAX_RUNWAY_MONTHS`
-    // aunque 12·100 = 1200 coincidan numéricamente.
-    if annual_expense_for_swr * Decimal::from(100u32) <= balance_0 * swr_pct {
+    // aunque 12·100 = 1200 coincidan numéricamente. Y `Σ v·r > 0` equivale a la media ponderada
+    // `Σ v·r / A > 0` porque aquí `A > 0` (garantizado por la guarda de arriba).
+    let weighted_expected_return: Decimal = liquid_assets
+        .iter()
+        .map(|(v, r)| *v * r.unwrap_or(Decimal::ZERO))
+        .sum();
+    if annual_expense_for_swr * Decimal::from(100u32) <= balance_0 * swr_pct
+        && weighted_expected_return > Decimal::ZERO
+    {
         return RunwayOutcome::Indefinite;
     }
 
-    // Media ponderada por valor de los multiplicadores mensuales (drenaje prorrateado).
-    let weighted: Decimal = liquid_assets
+    // Drenaje secuencial (#128): menor rentabilidad primero, empate por índice — el mismo orden
+    // que `drain_from_assets` dentro del grupo líquido. Cada mes: pagar el gasto vaciando en ese
+    // orden, y DESPUÉS crecer cada saldo restante con su propio multiplicador (retirada antes de
+    // crecimiento, como el bucle de simulación).
+    let mut vals: Vec<Decimal> = liquid_assets.iter().map(|(v, _)| *v).collect();
+    let mults: Vec<Decimal> = liquid_assets
         .iter()
-        .map(|(v, r)| *v * monthly_multiplier(*r))
-        .sum();
-    let m = weighted / balance_0;
+        .map(|(_, r)| monthly_multiplier(*r))
+        .collect();
+    let mut order: Vec<usize> = (0..vals.len()).collect();
+    order.sort_by(|&i, &j| {
+        liquid_assets[i]
+            .1
+            .unwrap_or(Decimal::ZERO)
+            .cmp(&liquid_assets[j].1.unwrap_or(Decimal::ZERO))
+            .then_with(|| i.cmp(&j))
+    });
     let m_inf = monthly_multiplier(Some(annual_inflation_percent));
 
-    let mut balance = balance_0;
     let mut g = monthly_expense;
     for k in 1..=MAX_RUNWAY_MONTHS {
-        if balance < g {
+        let total: Decimal = vals.iter().sum();
+        if total < g {
             // Mes final fraccionario: la parte del mes k que el saldo aún cubre.
-            return RunwayOutcome::Months(Decimal::from(k - 1) + balance / g);
+            return RunwayOutcome::Months(Decimal::from(k - 1) + total / g);
         }
-        balance = (balance - g) * m;
+        let mut need = g;
+        for &idx in &order {
+            if need <= Decimal::ZERO {
+                break;
+            }
+            // Un valor individual negativo no «drena» (take clampado a ≥ 0): con el modelo
+            // antiguo los negativos solo restaban del saldo agregado, y eso sigue siendo su
+            // único efecto (entran en `total`, nunca en la cobertura del gasto).
+            let take = vals[idx].max(Decimal::ZERO).min(need);
+            vals[idx] -= take;
+            need -= take;
+        }
+        for (v, m) in vals.iter_mut().zip(mults.iter()) {
+            *v *= *m;
+        }
         g *= m_inf;
     }
     // El saldo sobrevive el tope sin haber cumplido el umbral SWR: NO es infinito, pero el
@@ -155,8 +197,9 @@ mod tests {
         }
     }
 
-    /// Réplica del bucle con un multiplicador ya calculado — solo para el test de ponderación.
-    /// Sin inflación: `g` es constante (el test de ponderación la fija a 0).
+    /// Réplica del modelo ANTIGUO (un único multiplicador sobre el saldo agregado, ≤ 4.7.x) —
+    /// solo para los tests que demuestran que el drenaje secuencial (#128) da MÁS meses.
+    /// Sin inflación: `g` es constante (los tests que la usan la fijan a 0).
     fn reference_loop(balance_0: Decimal, m: Decimal, g: Decimal) -> Decimal {
         let mut balance = balance_0;
         for k in 1..=MAX_RUNWAY_MONTHS {
@@ -219,39 +262,57 @@ mod tests {
         assert_eq!(out, RunwayOutcome::Indefinite);
     }
 
-    /// La media de multiplicadores se pondera por **valor**, no por número de activos:
-    /// 150.000 al 0% + 50.000 al 10% ⇒ m = (150.000·1 + 50.000·m₁₀) / 200.000.
-    /// El resultado debe coincidir con el bucle usando ese m, y diferir de la media simple
-    /// (1 + m₁₀)/2, que sobrepondera el activo pequeño.
+    /// INVERTIDO en la Ola 4 (#128): hasta 4.7.x este test fijaba el multiplicador único
+    /// ponderado por valor (`weighted_rate_uses_value_weights`); ahora fija el drenaje
+    /// secuencial, que conserva los activos de rentabilidad alta mientras vacía los de baja.
+    ///
+    /// 150.000 al 0 % + 50.000 al 10 %, gasto 2.000 €/mes, sin inflación. A mano: la fase 1
+    /// drena el activo al 0 % en 150.000/2.000 = 75 meses exactos, mientras el activo al 10 %
+    /// compone intocado hasta 50.000·1,1^(75/12) ≈ 90.758 €; la fase 2 lo drena componiendo,
+    /// ≈ 56 meses más → ≈ 130,96 meses. El modelo antiguo (prorrateo) daba ≈ 111,39: casi 20
+    /// meses menos, porque consumía el activo al 10 % desde el mes 1.
     #[test]
-    fn weighted_rate_uses_value_weights() {
+    fn sequential_drain_preserves_the_high_return_assets() {
         let v_lento = d(150_000);
         let v_rapido = d(50_000);
         let m10 = monthly_multiplier(Some(d(10)));
         let balance_0 = v_lento + v_rapido;
-        let m_ponderado = (v_lento * Decimal::ONE + v_rapido * m10) / balance_0;
 
-        let out = runway(
+        let secuencial = months(runway(
             &[(v_lento, None), (v_rapido, Some(d(10)))],
             d(2_000),
             Decimal::ZERO,
             swr(),
-        );
-        assert_eq!(
-            months(out),
-            reference_loop(balance_0, m_ponderado, d(2_000))
+        ));
+        assert!(
+            secuencial > d(13_095) / d(100) && secuencial < d(13_096) / d(100),
+            "esperado ≈130,958 meses, obtenido {secuencial}"
         );
 
-        let m_simple = (Decimal::ONE + m10) / d(2);
-        assert_ne!(
-            m_ponderado, m_simple,
-            "la media simple debe diferir de la ponderada por valor"
+        let m_ponderado = (v_lento * Decimal::ONE + v_rapido * m10) / balance_0;
+        let antiguo = reference_loop(balance_0, m_ponderado, d(2_000));
+        assert!(
+            antiguo > d(11_139) / d(100) && antiguo < d(11_140) / d(100),
+            "la réplica del modelo antiguo debe dar ≈111,39, obtenido {antiguo}"
         );
-        assert_ne!(
-            reference_loop(balance_0, m_ponderado, d(2_000)),
-            reference_loop(balance_0, m_simple, d(2_000)),
-            "y esa diferencia debe ser observable en los meses de runway"
+        assert!(
+            secuencial > antiguo,
+            "el drenaje secuencial nunca da menos meses que el prorrateo ({secuencial} vs {antiguo})"
         );
+    }
+
+    /// Con UN solo activo el drenaje secuencial y el multiplicador único coinciden exactamente:
+    /// no hay orden que elegir y el multiplicador ponderado es el del propio activo. Fija que
+    /// el cambio de modelo de #128 NO movió ninguna cifra de cartera mono-activo.
+    #[test]
+    fn single_asset_matches_the_old_single_multiplier_model() {
+        let out = months(runway(
+            &[(d(24_000), Some(d(6)))],
+            d(1_500),
+            Decimal::ZERO,
+            swr(),
+        ));
+        assert_eq!(out, reference_loop(d(24_000), monthly_multiplier(Some(d(6))), d(1_500)));
     }
 
     /// Desde el fix de `monthly_multiplier` las pérdidas componen: −5% anual decrece el saldo
@@ -301,14 +362,65 @@ mod tests {
         );
     }
 
-    /// Frontera EXACTA del umbral: 300.000 al 4 % = 12.000 €/año = 12 × 1.000 → `Indefinite`
-    /// por igualdad (la comparación sin división lo hace posible en `Decimal`). Nota: sin
-    /// rentabilidad el saldo se agotaría en 300 meses — el KPI mide tasa de retirada, no
-    /// supervivencia (decisión de diseño documentada en el docstring del módulo).
+    /// INVERTIDO en la Ola 4 (#128): hasta 4.7.x la igualdad exacta del umbral bastaba para
+    /// `Indefinite` aunque la cartera rindiera 0 % («el KPI mide tasa de retirada, no
+    /// supervivencia»). Ahora la puerta de rentabilidad exige retorno esperado ponderado > 0:
+    /// el MISMO escenario (300.000 sin rentabilidad, 4 % SWR, 1.000 €/mes = igualdad exacta
+    /// 1.200.000 = 1.200.000) cae al bucle finito y publica la verdad — se agota en
+    /// 300.000/1.000 = **300 meses** exactos (reducción A/g). Con cualquier retorno positivo,
+    /// la igualdad sigue bastando: la frontera exacta en `Decimal` no cambió.
     #[test]
-    fn swr_threshold_exact_equality_is_indefinite() {
-        let out = runway(&[(d(300_000), None)], d(1_000), Decimal::ZERO, d(4));
-        assert_eq!(out, RunwayOutcome::Indefinite);
+    fn swr_threshold_equality_needs_positive_expected_return() {
+        let sin_retorno = runway(&[(d(300_000), None)], d(1_000), Decimal::ZERO, d(4));
+        assert_eq!(sin_retorno, RunwayOutcome::Months(d(300)));
+
+        let cero_explicito = runway(
+            &[(d(300_000), Some(Decimal::ZERO))],
+            d(1_000),
+            Decimal::ZERO,
+            d(4),
+        );
+        assert_eq!(cero_explicito, RunwayOutcome::Months(d(300)));
+
+        let con_retorno = runway(&[(d(300_000), Some(d(2)))], d(1_000), Decimal::ZERO, d(4));
+        assert_eq!(con_retorno, RunwayOutcome::Indefinite);
+    }
+
+    /// El escenario del issue #128: 300.000 € en cuenta corriente al 0 %, gasto 875 €/mes,
+    /// SWR 3,5 %. El umbral se cumple por igualdad exacta (10.500·100 = 1.050.000 =
+    /// 300.000·3,5) pero la puerta de rentabilidad lo tumba: ese dinero se agota en
+    /// 300.000/875 = **342,857142… meses** (≈ 28,6 años), y eso es lo que se publica.
+    #[test]
+    fn parked_cash_at_zero_return_is_never_indefinite() {
+        let out = runway(&[(d(300_000), Some(Decimal::ZERO))], d(875), Decimal::ZERO, swr());
+        assert_eq!(out, RunwayOutcome::Months(d(300_000) / d(875)));
+    }
+
+    /// El caso mixto del issue #128: 10.000 al 0 % + 10.000 al 10 %, gasto 1.000 €/mes,
+    /// SWR 3,5 (umbral no cumplido: 12.000·100 > 20.000·3,5). A mano: 10 meses drenando el
+    /// activo al 0 % mientras el del 10 % compone hasta ≈ 10.827 €, luego ≈ 11,3 meses más
+    /// drenándolo → ≈ **21,27 meses**. El prorrateo antiguo daba ≈ 20,80: la tarjeta
+    /// «Autonomía» ahora coincide con lo que `drain_from_assets` simula de verdad.
+    #[test]
+    fn mixed_portfolio_matches_the_engines_sequential_drain() {
+        let secuencial = months(runway(
+            &[(d(10_000), Some(Decimal::ZERO)), (d(10_000), Some(d(10)))],
+            d(1_000),
+            Decimal::ZERO,
+            swr(),
+        ));
+        assert!(
+            secuencial > d(2_127) / d(100) && secuencial < d(2_128) / d(100),
+            "esperado ≈21,2746 meses, obtenido {secuencial}"
+        );
+
+        let m10 = monthly_multiplier(Some(d(10)));
+        let m_ponderado = (d(10_000) * Decimal::ONE + d(10_000) * m10) / d(20_000);
+        let antiguo = reference_loop(d(20_000), m_ponderado, d(1_000));
+        assert!(
+            secuencial > antiguo,
+            "y siempre por encima del prorrateo ({secuencial} vs {antiguo})"
+        );
     }
 
     /// Un euro por debajo del umbral (299.999 al 4 % < 12.000 €/año) → finito, y como no hay

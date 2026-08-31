@@ -812,8 +812,8 @@
         "$.year": "format=\"int32\" maximum=3000 minimum=1900 type=[\"integer\",\"null\"]"
       },
       "constraints_sha256_12": "35306683141e",
-      "description_len": 592,
-      "description_sha256_12": "1077a2e57f5b",
+      "description_len": 591,
+      "description_sha256_12": "541ab84f4468",
       "name": "get_transactions_summary",
       "properties": [
         "avg_window",

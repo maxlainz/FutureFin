@@ -1,6 +1,6 @@
 {
  "version": 1,
- "_doc": "Casos canónicos compartidos entre el backend (apps/api/tests/fire_parity.rs) y el frontend (apps/web/src/lib/fire.test.ts). Si añades o cambias un caso aquí, los tests de ambos lados deben seguir pasando. Si divergen → uno de los dos cálculos está mal alineado.",
+ "_doc": "Casos canónicos compartidos entre el backend (apps/api/tests/fire_parity.rs) y el frontend (apps/web/src/lib/fire.test.ts). Si añades o cambias un caso aquí, los tests de ambos lados deben seguir pasando. Si divergen → uno de los dos cálculos está mal alineado. ALCANCE (4.8.0, #142): esta paridad cubre la BASE del objetivo (gross-up / SWR) — la única matemática duplicada en TS. El término finito de deuda NO se duplica a propósito: vive solo en el servidor (FireTarget.debt_payments_remaining) y el cliente lo consume ya calculado vía fire_target_debt_component; los 10 casos siguen sin pasivos y sus esperados no se mueven.",
  "_formula": "target_nw = gross_up(annual_need_net, brackets, taxes_enabled) / (swr_pct / 100). annual_need_net depende del modo: manual = fire_number_manual_amount; annual_expense = max(0, expense_retirement_monthly - income_retirement_monthly) * 12; current_income = max(0, income_monthly - income_retirement_monthly) * 12.",
  "_default_brackets_es": [
   {

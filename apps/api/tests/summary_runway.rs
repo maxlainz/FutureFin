@@ -375,17 +375,19 @@ async fn runway_indefinite_when_withdrawal_within_swr() {
     assert_eq!(h["runway_is_indefinite"], true);
 }
 
-/// Frontera EXACTA del umbral SWR, con impuestos desactivados para que el gasto grosseado sea el
-/// neto y la igualdad sea alcanzable en `Decimal`: 240.000 € líquidos **sin rentabilidad** y gasto
-/// de 700 €/mes con SWR 3,5 %.
+/// INVERTIDO en la Ola 4 (#128) — hasta 4.7.x la igualdad exacta del umbral bastaba para
+/// «Infinito» aunque la cartera rindiera 0 %. Frontera EXACTA del umbral SWR, con impuestos
+/// desactivados para que el gasto grosseado sea el neto y la igualdad sea alcanzable en
+/// `Decimal`: 240.000 € líquidos **sin rentabilidad** y gasto de 700 €/mes con SWR 3,5 %.
 ///
-/// PREDICCIÓN: 240.000 × 3,5 % = 8.400 = 12 × 700 → exactamente en el umbral → **Infinito**
-/// (aunque sin rentabilidad el saldo se agotaría en ~28,5 años: el KPI mide tasa de retirada, no
-/// supervivencia — decisión de diseño de 2.3.0). Al añadir 1 € más de gasto (701/mes), la
-/// retirada anual pasa a 8.412 > 8.400 → finito, y sin rentabilidad ni inflación el runway es la
-/// división exacta 240.000/701.
+/// PREDICCIÓN: 240.000 × 3,5 % = 8.400 = 12 × 700 → umbral cumplido por igualdad, pero la
+/// puerta de rentabilidad (#128) lo tumba (retorno esperado ponderado = 0) → **finito**, y sin
+/// rentabilidad ni inflación el runway es la división exacta 240.000/700 = 342,857… → **342,9**
+/// publicado (1 decimal desde 3.8.0). Ese dinero se agotaba en ~28,6 años mientras la tarjeta
+/// decía «indefinida»: el escenario es el del issue con otra escala. Con 1 €/mes más de gasto
+/// (701) la igualdad ni siquiera se alcanza y el resultado es la misma división: 240.000/701.
 #[tokio::test]
-async fn runway_indefinite_at_exact_swr_threshold() {
+async fn runway_finite_at_exact_swr_threshold_without_return() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
 
@@ -399,14 +401,17 @@ async fn runway_indefinite_at_exact_swr_threshold() {
     let h = health(&app, &owner.cookie).await;
     assert_eq!(dec(&h["liquid_assets_total"]), d(240_000));
     assert_eq!(dec(&h["expense_total_monthly_equivalent"]), d(700));
-    assert!(
-        h["runway_months"].is_null(),
-        "en el umbral exacto el runway es indefinido, got {:?}",
-        h["runway_months"]
+    assert_eq!(
+        h["runway_is_indefinite"], false,
+        "umbral cumplido pero sin rentabilidad esperada > 0: la puerta de #128 lo hace finito"
     );
-    assert_eq!(h["runway_is_indefinite"], true);
+    assert_eq!(
+        dec(&h["runway_months"]),
+        (d(240_000) / d(700)).round_dp(1),
+        "sin rentabilidad ni inflación, división exacta A/g (342,9 publicado a 1 decimal)"
+    );
 
-    // 1 €/mes más de gasto rompe la igualdad: 12 × 701 = 8.412 > 8.400.
+    // 1 €/mes más de gasto rompe además la igualdad: 12 × 701 = 8.412 > 8.400.
     budget(&app, &owner.cookie, &expense_cat, "1").await;
 
     let h = health(&app, &owner.cookie).await;
@@ -420,16 +425,42 @@ async fn runway_indefinite_at_exact_swr_threshold() {
     );
 }
 
+/// La contraparte de la puerta (#128): el MISMO umbral exacto, pero con rentabilidad esperada
+/// positiva (2 %), sigue siendo **Infinito** — la frontera exacta en `Decimal` no cambió, solo
+/// se le añadió la condición de retorno > 0.
+#[tokio::test]
+async fn runway_exact_threshold_with_positive_return_is_indefinite() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let asset_cat = app.create_category(&owner, "asset", "Cuenta").await;
+    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
+
+    set_fire_settings(&app, &owner.cookie, json!({ "taxes_enabled": false })).await;
+    liquid_asset_with_return(&app, &owner.cookie, &asset_cat, "Cartera", "240000", "2").await;
+    budget(&app, &owner.cookie, &expense_cat, "700").await;
+
+    let h = health(&app, &owner.cookie).await;
+    assert!(
+        h["runway_months"].is_null(),
+        "umbral por igualdad + retorno 2 % > 0 → indefinido, got {:?}",
+        h["runway_months"]
+    );
+    assert_eq!(h["runway_is_indefinite"], true);
+}
+
 /// El umbral usa el gasto anual GROSSEADO con los mismos tramos fiscales que el target FIRE.
 ///
-/// Escenario: 270.000 € líquidos sin rentabilidad, gasto 700 €/mes, SWR 3,5 % — entre los dos
-/// umbrales.
+/// Escenario: 270.000 € líquidos **al 2 %** (desde la Ola 4 el activo necesita rentabilidad
+/// esperada > 0 para poder ser «indefinido» — la puerta de #128; antes iba sin rentabilidad),
+/// gasto 700 €/mes, SWR 3,5 % — entre los dos umbrales.
 ///
 /// PREDICCIÓN: umbral sin impuestos = 12 × 700 / 3,5 % = 240.000 €; con los tramos ES por defecto
 /// gross_up(8.400) = 8.280/0,79 ≈ 10.481 € → umbral ≈ 299.457 €. Con impuestos activados (default)
-/// 270.000 < 299.457 → **finito** (y exacto: 270.000/700, la rentabilidad es 0); al desactivar
-/// impuestos, 270.000 ≥ 240.000 → **Infinito**. Fija que el runway comparte el gross-up del
-/// target FIRE (si alguien lo desacopla, este test cae).
+/// 270.000 < 299.457 → **finito**: el bucle drena 270.000 al 2 % pagando 700/mes — el retorno
+/// mensual inicial (~450 €) no cubre el gasto, así que se agota en ≈ 612,38 meses → **612,4**
+/// publicado. Al desactivar impuestos, 270.000 ≥ 240.000 y el 2 % pasa la puerta → **Infinito**.
+/// Fija que el runway comparte el gross-up del target FIRE (si alguien lo desacopla, este test cae).
 #[tokio::test]
 async fn runway_gross_up_raises_threshold() {
     let app = TestApp::spawn().await;
@@ -438,16 +469,18 @@ async fn runway_gross_up_raises_threshold() {
     let asset_cat = app.create_category(&owner, "asset", "Cuenta").await;
     let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
 
-    liquid_asset(&app, &owner.cookie, &asset_cat, "Cuenta A", "270000").await;
+    liquid_asset_with_return(&app, &owner.cookie, &asset_cat, "Cartera", "270000", "2").await;
     budget(&app, &owner.cookie, &expense_cat, "700").await;
 
     // Impuestos activados por defecto: la retirada bruta supera el 3,5 % → finito.
     let con_impuestos = health(&app, &owner.cookie).await;
     assert_eq!(con_impuestos["runway_is_indefinite"], false);
+    let runway = dec(&con_impuestos["runway_months"]);
     assert_eq!(
-        dec(&con_impuestos["runway_months"]),
-        (d(270_000) / d(700)).round_dp(1),
-        "finito por gross-up: sin rentabilidad ni inflación, división exacta (publicada a 1 decimal)"
+        runway,
+        Decimal::new(6_124, 1),
+        "finito por gross-up: 270.000 al 2 % pagando 700/mes se agota en ≈612,38 meses \
+         (publicado a 1 decimal), got {runway}"
     );
 
     set_fire_settings(&app, &owner.cookie, json!({ "taxes_enabled": false })).await;
@@ -455,7 +488,7 @@ async fn runway_gross_up_raises_threshold() {
     let sin_impuestos = health(&app, &owner.cookie).await;
     assert!(
         sin_impuestos["runway_months"].is_null(),
-        "sin impuestos el umbral baja a 240.000 y 270.000 lo supera, got {:?}",
+        "sin impuestos el umbral baja a 240.000, 270.000 lo supera y el 2 % pasa la puerta, got {:?}",
         sin_impuestos["runway_months"]
     );
     assert_eq!(sin_impuestos["runway_is_indefinite"], true);
