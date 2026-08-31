@@ -5,6 +5,22 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.8.0
+
+- El objetivo de jubilación ahora cuenta la deuda que te queda: a la cifra de siempre se le suman
+  todas las cuotas pendientes de tus préstamos (y lo que quede sin amortizar al final del plan).
+  Amortizar deuda **baja tu objetivo**, como debe ser.
+- El cruce de jubilación se decide con tu patrimonio **líquido** (lo que puedes vender), no con el
+  total: tu vivienda ya no «paga» el objetivo. Y una vez jubilado, jubilado — el simulador ya no
+  entra y sale de la jubilación mes a mes.
+- La tarjeta «Autonomía» solo dice «indefinida» si tus líquidos tienen rentabilidad esperada
+  positiva: el dinero parado al 0 % siempre se agota, y ahora se dice en meses. El cálculo además
+  vacía primero las cuentas que menos rinden, igual que la simulación.
+- El gasto promedio de Movimientos ya no se diluye con meses sin clasificar, y usa la misma
+  ventana de meses que la proyección (anclada a hoy).
+- Varias cifras del panel («caja del mes», partidas vencidas) convergen con lo que el motor
+  simula de verdad.
+
 ## 4.7.0
 
 - Las deudas ahora se simulan como los préstamos reales: el modelo por defecto pasa a ser el
