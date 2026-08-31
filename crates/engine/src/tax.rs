@@ -55,6 +55,40 @@ pub fn tax_on_gross_capital_annual(gross: Decimal, brackets: &[TaxBracket]) -> D
     tax
 }
 
+/// Mensualización M1 del gross-up (#140 fase 1): `gross_up(12·need)/12`, reevaluada cada mes.
+/// Exacta cuando los 12 `need` del año coinciden (gasto plano); con `need` variable sobreestima
+/// solo en los años cuyos valores anualizados cruzan un techo de tramo — medido: 1,88 € de bruto
+/// en 30 años frente al acumulador anual óptimo, que costaría estado por año fiscal, sensibilidad
+/// al mes de `ref_date` y un diente de sierra intraanual del +2,5 %. No se compra.
+pub fn gross_up_monthly(
+    net_monthly: Decimal,
+    brackets: &[TaxBracket],
+    taxes_enabled: bool,
+) -> Decimal {
+    if !taxes_enabled || net_monthly <= Decimal::ZERO {
+        return net_monthly.max(Decimal::ZERO);
+    }
+    gross_up_net_annual_fire(net_monthly * Decimal::from(12u32), brackets, taxes_enabled)
+        / Decimal::from(12u32)
+}
+
+/// Inversa mensualizada: lo que NETEA una venta bruta mensual — `gross − tax(12·gross)/12`,
+/// misma anualización M1 que `gross_up_monthly` (par redondo: `after_tax(gross_up(n)) = n`).
+/// La necesita el `undrained` NETO: el descubierto se mide en euros que faltaron por GASTAR,
+/// no en ventas que nunca ocurrieron.
+pub fn after_tax_monthly(
+    gross_monthly: Decimal,
+    brackets: &[TaxBracket],
+    taxes_enabled: bool,
+) -> Decimal {
+    if !taxes_enabled || gross_monthly <= Decimal::ZERO {
+        return gross_monthly;
+    }
+    gross_monthly
+        - tax_on_gross_capital_annual(gross_monthly * Decimal::from(12u32), brackets)
+            / Decimal::from(12u32)
+}
+
 /// Devuelve el `gross` tal que `gross − tax(gross) == net_annual`, sin búsqueda binaria.
 ///
 /// La función `tax(·)` es lineal por tramos: dentro del tramo i con tipo `r_i` y umbral
@@ -91,6 +125,19 @@ pub fn gross_up_net_annual_fire(net_annual: Decimal, brackets: &[TaxBracket], ta
     }
     // Inalcanzable: `validate_tax_brackets` exige que el último tramo tenga `up_to = None`.
     net_annual
+}
+
+/// Escala ES por defecto, SOLO para tests del crate (la de producción vive en la API,
+/// `default_es_tax_brackets`): evita que cada mod de tests duplique la lista.
+#[cfg(test)]
+pub(crate) fn es_brackets_for_tests() -> Vec<TaxBracket> {
+    vec![
+        TaxBracket { up_to: Some(Decimal::from(6_000u32)), pct: Decimal::from(19u32) },
+        TaxBracket { up_to: Some(Decimal::from(50_000u32)), pct: Decimal::from(21u32) },
+        TaxBracket { up_to: Some(Decimal::from(200_000u32)), pct: Decimal::from(23u32) },
+        TaxBracket { up_to: Some(Decimal::from(300_000u32)), pct: Decimal::from(27u32) },
+        TaxBracket { up_to: None, pct: Decimal::from(30u32) },
+    ]
 }
 
 #[cfg(test)]

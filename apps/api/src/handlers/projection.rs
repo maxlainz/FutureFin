@@ -1538,6 +1538,10 @@ pub(crate) async fn build_installation_projection_input(
         // #139: el MISMO supuesto efectivo que el target (sin clamp desde #146) — indexa el
         // gasto del bucle aunque no haya objetivo FIRE configurado.
         annual_inflation_percent: inflation_annual_percent,
+        // #140 fase 1: la MISMA escala y el MISMO switch que el objetivo — el drenaje bruto y
+        // el target se dimensionan con una sola fiscalidad. Sin fire_settings: sin impuesto.
+        tax_brackets: fire_settings.map(|f| f.tax_brackets.clone()).unwrap_or_default(),
+        taxes_enabled: fire_settings.map(|f| f.taxes_enabled).unwrap_or(false),
         income_regular_monthly: inputs.income,
         expense_regular_monthly: inputs.expense,
         assets,
@@ -3778,6 +3782,8 @@ mod milestone_tests {
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: 24,
             annual_inflation_percent: Decimal::ZERO,
+            tax_brackets: Vec::new(),
+            taxes_enabled: false,
             income_regular_monthly: Decimal::from(3000),
             expense_regular_monthly: Decimal::from(2500),
             assets: vec![SimAsset {
@@ -3823,6 +3829,8 @@ mod milestone_tests {
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: 24,
             annual_inflation_percent: Decimal::ZERO,
+            tax_brackets: Vec::new(),
+            taxes_enabled: false,
             income_regular_monthly: Decimal::from(1200),
             expense_regular_monthly: Decimal::from(1000),
             assets: vec![SimAsset {

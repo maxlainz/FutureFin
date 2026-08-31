@@ -79,6 +79,8 @@ fn base_input(
         ref_date: ref_date(),
         horizon_months: horizon,
         annual_inflation_percent: Decimal::ZERO,
+        tax_brackets: Vec::new(),
+        taxes_enabled: false,
         income_regular_monthly: income,
         expense_regular_monthly: expense,
         assets,
