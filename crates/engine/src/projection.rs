@@ -833,11 +833,22 @@ pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> 
     Some(ft.base_amount * factor + debt_term)
 }
 
+/// Drena `need` de los activos (líquidos primero, menor rentabilidad primero, empate por
+/// índice) y devuelve el DESCUBIERTO. Con `taken: Some(slice)` acumula además `taken[i] += lo
+/// drenado del activo i` — el reparto que #120 necesita para bajar la base de coste por activo
+/// (mismo patrón económico que el `Option<&mut Vec<RuleOutcome>>` de `distribute_contributions`:
+/// el bucle caliente pasa el slice que ya tiene, sin asignar nada por mes).
+///
+/// Un valor individual NEGATIVO nunca «financia» el drenaje (take clampado a ≥ 0): la escritura
+/// valida `current_value ≥ 0` pero la BD no tiene CHECK, y sin el clamp un negativo colado por
+/// restore/edición directa SUBÍA el valor y la necesidad a la vez (min(v, need) < 0). El
+/// negativo sigue pesando en los totales del caller; simplemente no se vende.
 fn drain_from_assets(
     values: &mut [Decimal],
     liquid: &[bool],
     rates: &[Option<Decimal>],
     mut need: Decimal,
+    mut taken: Option<&mut [Decimal]>,
 ) -> Decimal {
     if need <= Decimal::ZERO {
         return Decimal::ZERO;
@@ -860,9 +871,12 @@ fn drain_from_assets(
         if need <= Decimal::ZERO {
             break;
         }
-        let take = values[idx].min(need);
+        let take = values[idx].max(Decimal::ZERO).min(need);
         values[idx] -= take;
         need -= take;
+        if let Some(t) = taken.as_deref_mut() {
+            t[idx] += take;
+        }
     }
     need
 }
@@ -1509,7 +1523,7 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             surplus_cash -= from_surplus;
             need -= from_surplus;
             if need > Decimal::ZERO {
-                let und = drain_from_assets(&mut values, &liquid, &rates, need);
+                let und = drain_from_assets(&mut values, &liquid, &rates, need, None);
                 undrained_cumulative += und;
             }
         } else if in_retirement {
