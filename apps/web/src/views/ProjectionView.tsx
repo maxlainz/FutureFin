@@ -161,7 +161,9 @@ export function ProjectionView({
     const raw = installation?.installation.annual_inflation_assumption_percent;
     if (raw == null) return 0;
     const n = parseDisplayDecimal(String(raw));
-    return n != null && n > 0 ? n : 0;
+    // Sin suelo a 0 desde 4.9.0 (#146): una inflación NEGATIVA es válida y el deflactor del
+    // chart debe amplificar (> 1) en vez de fingir «sin ajuste».
+    return n != null && Number.isFinite(n) ? n : 0;
   }, [installation?.installation.annual_inflation_assumption_percent]);
 
   // Con el toggle de inflación activo (y inflación > 0), los hitos se expresan en euros de hoy: el

@@ -206,6 +206,18 @@ impl TestApp {
         let user_id = Uuid::parse_str(reg.json()["id"].as_str().expect("register id is string"))
             .expect("register id is uuid");
 
+        // Desde 4.9.0 (#146) una instalación NUEVA nace asumiendo 2,5 % de inflación. El arnés
+        // la normaliza a 0 para que los cientos de pins escritos bajo el default histórico sigan
+        // documentando el comportamiento a inflación 0; un test que quiera inflación la PATCHea
+        // explícitamente, y el default real lo pinea
+        // `installation_patch.rs::new_installations_are_born_assuming_two_and_a_half_percent`
+        // con el flujo crudo (sin este helper). ANTES del login a propósito: el login dispara el
+        // warm-up de la cache de proyección y cachearía la serie con 2,5 %.
+        sqlx::query("UPDATE installation SET annual_inflation_assumption_percent = 0")
+            .execute(&self.pool)
+            .await
+            .expect("normalize test inflation");
+
         let login = self
             .post_json(
                 "/v1/auth/login",

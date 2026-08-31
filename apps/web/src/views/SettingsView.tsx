@@ -358,7 +358,7 @@ export function SettingsView({
   const projectionDraftValid =
     draftInflationPct != null &&
     Number.isFinite(draftInflationPct) &&
-    draftInflationPct >= 0 &&
+    draftInflationPct >= -2 &&
     draftInflationPct <= 50;
   useEffect(() => {
     if (!hasMembership || !isOwner) return;
@@ -758,6 +758,32 @@ export function SettingsView({
                       </label>
                     </div>
                   ))}
+                  <label className="field">
+                    <span className="label-with-help">
+                      Horizonte: edad límite
+                      <HelpPopover
+                        title={HELP_TEXTS["settings.horizon_age"].title}
+                        body={HELP_TEXTS["settings.horizon_age"].body}
+                      />
+                    </span>
+                    <select
+                      value={String(fireTaxDraft.horizon_lifespan_age ?? 90)}
+                      onChange={(e) => {
+                        const n = Number(e.target.value);
+                        if (!Number.isInteger(n)) return;
+                        setFireTaxDraft((p) => ({
+                          ...p,
+                          horizon_lifespan_age: n,
+                        }));
+                      }}
+                    >
+                      {[85, 90, 95, 100, 105].map((edad) => (
+                        <option key={edad} value={String(edad)}>
+                          {edad} años
+                        </option>
+                      ))}
+                    </select>
+                  </label>
               </div>
             ) : null}
             <p className="muted tight">

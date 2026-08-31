@@ -1079,7 +1079,7 @@
     {
       "constraints": {
         "$": "additionalProperties=false type=\"object\"",
-        "$.annual_inflation_percent": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.annual_inflation_percent": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$.asset_return_overrides": "type=[\"array\",\"null\"]",
         "$.asset_return_overrides[]": "$ref=\"#/$defs/AssetReturnOverrideParam\"",
         "$.extra_monthly_cash_adjustment": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
@@ -1128,7 +1128,7 @@
         "$defs.TaxBracketParam.pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
         "$defs.TaxBracketParam.up_to": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "f9f184b2d0ca",
+      "constraints_sha256_12": "f18bf1d4f746",
       "description_len": 588,
       "description_sha256_12": "b22212f22fb4",
       "name": "simulate_projection",
@@ -1348,12 +1348,13 @@
     {
       "constraints": {
         "$": "additionalProperties=false type=\"object\"",
-        "$.annual_inflation_assumption_percent": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.annual_inflation_assumption_percent": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$.confirm": "type=[\"boolean\",\"null\"]",
         "$.expense_avg_window_mode": "enum=[\"calendar\",\"data\"] type=[\"null\",\"string\"]",
         "$.expense_avg_window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]",
         "$.fire_number_manual_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$.fire_number_mode": "enum=[\"annual_expense\",\"current_income\",\"manual\"] type=[\"null\",\"string\"]",
+        "$.horizon_lifespan_age": "format=\"uint32\" minimum=0 type=[\"integer\",\"null\"]",
         "$.income_avg_window_mode": "enum=[\"calendar\",\"data\"] type=[\"null\",\"string\"]",
         "$.income_avg_window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]",
         "$.savings_source": "enum=[\"budget\",\"budget_income_real_expense\",\"transactions_avg\"] type=[\"null\",\"string\"]",
@@ -1365,7 +1366,7 @@
         "$defs.TaxBracketParam.pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
         "$defs.TaxBracketParam.up_to": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "4806c51fd66f",
+      "constraints_sha256_12": "5e9b4d5df7ba",
       "description_len": 580,
       "description_sha256_12": "b5c35aa33f0d",
       "name": "update_fire_settings",
@@ -1376,6 +1377,7 @@
         "expense_avg_window_months",
         "fire_number_manual_amount",
         "fire_number_mode",
+        "horizon_lifespan_age",
         "income_avg_window_mode",
         "income_avg_window_months",
         "savings_source",

@@ -78,6 +78,7 @@ fn base_input(
     ProjectionInput {
         ref_date: ref_date(),
         horizon_months: horizon,
+        annual_inflation_percent: Decimal::ZERO,
         income_regular_monthly: income,
         expense_regular_monthly: expense,
         assets,

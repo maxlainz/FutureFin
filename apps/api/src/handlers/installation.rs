@@ -168,6 +168,12 @@ pub struct FireSettings {
     pub expense_avg_window_months: u32,
     /// Semántica de la ventana de gasto.
     pub expense_avg_window_mode: AvgWindowMode,
+    /// Edad límite del horizonte derivado (#149, 4.9.0): la proyección llega hasta los
+    /// `horizon_lifespan_age` años del solicitante (antes era la constante 90). Rango [85, 105];
+    /// default 90 ⇒ comportamiento idéntico al histórico. OJO: el horizonte sigue acotado a
+    /// [5, 70] años, así que el eje solo muerde si `edad ≥ edad_límite − 70` (a 105, un
+    /// treintañero ya está contra el techo del sistema, 840 meses).
+    pub horizon_lifespan_age: u32,
 }
 
 impl FireSettings {
@@ -213,6 +219,7 @@ pub(crate) fn default_fire_settings() -> FireSettings {
         income_avg_window_mode: AvgWindowMode::Calendar,
         expense_avg_window_months: 12,
         expense_avg_window_mode: AvgWindowMode::Calendar,
+        horizon_lifespan_age: 90,
     }
 }
 
@@ -249,6 +256,12 @@ fn default_es_tax_brackets() -> Vec<TaxBracket> {
 /// por otra vía (restore, edición directa de la BD, un fichero de otra versión) produciría una
 /// ventana de 0 meses → promedio sin denominador → fallback silencioso al presupuesto con la UI
 /// diciendo que está en modo real. Clampar en el consumo lo hace imposible.
+/// Cotas de la edad límite del horizonte (#149). 85 para no cortar por debajo de la esperanza
+/// de vida al nacer; 105 porque más allá el tope [5,70] del horizonte ya decide para cualquier
+/// edad adulta.
+pub(crate) const MIN_HORIZON_LIFESPAN_AGE: u32 = 85;
+pub(crate) const MAX_HORIZON_LIFESPAN_AGE: u32 = 105;
+
 pub(crate) fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSettings {
     let mut fs = match stored {
         None => default_fire_settings(),
@@ -260,6 +273,11 @@ pub(crate) fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSetting
     fs.expense_avg_window_months = fs
         .expense_avg_window_months
         .clamp(MIN_AVG_WINDOW_MONTHS, MAX_AVG_WINDOW_MONTHS);
+    // #149: una edad fuera de rango llegada por vía no validada (restore, BD a mano) produciría
+    // horizontes absurdos o un 90 fantasma; el clamp en el consumo lo hace imposible.
+    fs.horizon_lifespan_age = fs
+        .horizon_lifespan_age
+        .clamp(MIN_HORIZON_LIFESPAN_AGE, MAX_HORIZON_LIFESPAN_AGE);
     fs
 }
 
@@ -293,6 +311,11 @@ pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> 
                 "avg_window_out_of_range: {label} must be between {MIN_AVG_WINDOW_MONTHS} and {MAX_AVG_WINDOW_MONTHS} (months)"
             )));
         }
+    }
+    if !(MIN_HORIZON_LIFESPAN_AGE..=MAX_HORIZON_LIFESPAN_AGE).contains(&fs.horizon_lifespan_age) {
+        return Err(ApiError::BadRequest(format!(
+            "horizon_lifespan_age_out_of_range: horizon_lifespan_age must be between {MIN_HORIZON_LIFESPAN_AGE} and {MAX_HORIZON_LIFESPAN_AGE} (years)"
+        )));
     }
     if fs.taxes_enabled {
         validate_tax_brackets(&fs.tax_brackets)?;
@@ -449,7 +472,9 @@ fn installation_access_from_row(r: InstallationMemberRow) -> Result<Installation
             id: r.id,
             base_currency: r.base_currency,
             calendar_tz: r.calendar_tz,
-            annual_inflation_assumption_percent: r.annual_inflation_assumption_percent.max(Decimal::ZERO),
+            // Sin clamp desde 4.9.0 (#146): la validación de escritura acota [−2, 50] y ningún
+            // valor almacenado pudo nacer fuera (el validador histórico rechazaba TODO negativo).
+            annual_inflation_assumption_percent: r.annual_inflation_assumption_percent,
             show_age_mode: r.show_age_mode,
             fire_settings: resolve_fire_settings(r.fire_settings.map(|j| j.0)),
             mcp_write_enabled: r.mcp_write_enabled,
@@ -502,9 +527,12 @@ fn validate_show_age_mode(mode: &str) -> Result<(), ApiError> {
 }
 
 pub(crate) fn validate_annual_inflation_assumption(pct: Decimal) -> Result<(), ApiError> {
-    if pct.is_sign_negative() || pct > Decimal::from(50) {
+    // Rango [−2, 50] desde 4.9.0 (#146): España tuvo IPC anual medio negativo cinco veces este
+    // siglo (mínimo interanual −1,4 %, jul-2009) — el suelo 0 tenía una base histórica falsa y
+    // impedía estresar el propio plan con deflación. El −2 acota el peor escenario razonable.
+    if pct < Decimal::from(-2) || pct > Decimal::from(50) {
         return Err(ApiError::BadRequest(
-            "inflation_out_of_range: annual_inflation_assumption_percent must be between 0 and 50".into(),
+            "inflation_out_of_range: annual_inflation_assumption_percent must be between -2 and 50".into(),
         ));
     }
     Ok(())
@@ -766,6 +794,8 @@ pub(crate) struct FireSettingsPatch {
     pub income_avg_window_mode: Option<AvgWindowMode>,
     pub expense_avg_window_months: Option<u32>,
     pub expense_avg_window_mode: Option<AvgWindowMode>,
+    /// #149 (4.9.0): edad límite del horizonte derivado.
+    pub horizon_lifespan_age: Option<u32>,
     /// Columna aparte de la instalación (no vive en el JSONB), pero es un eje FIRE más.
     pub annual_inflation_assumption_percent: Option<Decimal>,
 }
@@ -812,6 +842,9 @@ impl FireSettingsPatch {
         if let Some(v) = self.expense_avg_window_mode {
             after.expense_avg_window_mode = v;
         }
+        if let Some(v) = self.horizon_lifespan_age {
+            after.horizon_lifespan_age = v;
+        }
         after
     }
 
@@ -826,6 +859,7 @@ impl FireSettingsPatch {
             && self.income_avg_window_mode.is_none()
             && self.expense_avg_window_months.is_none()
             && self.expense_avg_window_mode.is_none()
+            && self.horizon_lifespan_age.is_none()
             && self.annual_inflation_assumption_percent.is_none()
     }
 }
@@ -1373,7 +1407,8 @@ pub(crate) async fn installation_calendar_inflation_fire(
     let (tz_str, inflation, fire_settings) = row.ok_or(ApiError::NotFound)?;
     Ok((
         naive_date_in_calendar_tz(&tz_str)?,
-        inflation.max(Decimal::ZERO),
+        // Sin clamp desde 4.9.0 (#146): rango garantizado por la validación de escritura.
+        inflation,
         resolve_fire_settings(fire_settings.map(|j| j.0)),
     ))
 }

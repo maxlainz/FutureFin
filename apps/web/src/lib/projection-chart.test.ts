@@ -22,8 +22,13 @@ describe("deflationFactorAt", () => {
     expect(deflationFactorAt(12, 0)).toBe(1);
     expect(deflationFactorAt(-24, 0)).toBe(1);
   });
-  it("inflación negativa → 1 (sin ajuste)", () => {
-    expect(deflationFactorAt(12, -2)).toBe(1);
+  // INVERTIDO en 4.9.0 (#146): hasta 4.8.0 una inflación negativa devolvía 1 («sin ajuste»);
+  // ahora compone — los euros de un mundo deflacionario valen MÁS en euros de hoy.
+  it("inflación negativa → factor > 1 en meses futuros (12m a −2% → 1/0.98)", () => {
+    expect(deflationFactorAt(12, -2)).toBeCloseTo(1 / 0.98, 10);
+  });
+  it("inflación negativa en el pasado → factor < 1 (espejo)", () => {
+    expect(deflationFactorAt(-12, -2)).toBeCloseTo(0.98, 10);
   });
 });
 

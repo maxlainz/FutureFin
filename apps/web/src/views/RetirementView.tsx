@@ -164,7 +164,8 @@ export function RetirementView({
     const raw = installation?.installation.annual_inflation_assumption_percent;
     if (raw == null) return 0;
     const n = parseDisplayDecimal(String(raw));
-    return n != null && n > 0 ? n : 0;
+    // Sin suelo a 0 desde 4.9.0 (#146): la preview del objetivo debe decrecer con deflación.
+    return n != null && Number.isFinite(n) ? n : 0;
   }, [installation?.installation.annual_inflation_assumption_percent]);
 
   // Fuente EFECTIVA del ahorro (tras el fallback del servidor). En los modos con promedio

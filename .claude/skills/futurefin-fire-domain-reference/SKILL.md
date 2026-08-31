@@ -47,9 +47,9 @@ Primary sources (ground truth, in this order):
 
 Historical note: `projection_target_age` was **removed** in v1.0.6 (migration
 `20260516120000_drop_projection_target_age.sql`); FIRE crossover is the sole retirement trigger.
-`horizon_basis` strings are `lifespan_90 | fallback_no_demographics | months_override`
-(projection.rs:621,626,992). (The docs/comments that still described the old model were fixed on
-2026-07-02.)
+`horizon_basis` strings are `lifespan_age | fallback_no_demographics | months_override` since
+4.9.0/#149 (`lifespan_90` hasta 4.8.0 — el 90 dejó de ser constante), con `horizon_lifespan_age`
+ecoado al lado. (The docs/comments that still described the old model were fixed on 2026-07-02.)
 
 ## 1. Glossary (terms used everywhere in this repo)
 
@@ -317,9 +317,12 @@ The single most important idea in the codebase. Philosophy: **"haciendo lo que h
   [`engine.md`](../../engine.md) §Simulation loop paso 7, que siempre lo tuvo bien. Deriva
   preexistente, no causada por la Fase 6; se arregla aquí porque un lector que la creyera
   concluiría que un activo con rentabilidad esperada negativa se queda plano.
-- **Only the FIRE target moves with inflation.** `FireTarget { base_amount,
-  annual_inflation_percent }` (projection.rs:83-87); the handler clamps inflation to ≥ 0
-  (projection.rs:662,983).
+- **Inflation moves the FIRE target AND the loop's expense — never incomes** (4.9.0, #139/#146).
+  `FireTarget { base_amount, annual_inflation_percent, debt_payments_remaining }` for the target;
+  `ProjectionInput.annual_inflation_percent` indexes the expense with the same
+  `inflation_factor_at_month_index` on the `(k−1)/12` axis. The old handler clamps to ≥ 0 are
+  GONE (#146: range [−2, 50]; negative inflation composes — target and expense DECREASE);
+  re-verify with `grep -n "inflation" apps/api/src/handlers/projection.rs | grep -c "max(Decimal::ZERO)"` (must print 0).
 
 The single formula — `fire_target_at_month_index` (projection.rs:171-182), public in the engine
 crate and consumed by BOTH the engine and the handler:
@@ -522,11 +525,15 @@ All anchors in this section are in the HANDLER file `apps/api/src/handlers/proje
     — never interpolated between two points of `fire_target_series`, which under `hybrid` may not
     even contain the crossing month as a served point.
   Pin: `apps/api/tests/projection_number_semantics.rs`.
-- **Horizon rule** — `projection_horizon_months` (projection.rs:598-627): 90-year lifespan.
-  `years = clamp(90 − completed_age, 5, 70)` using the session user's `birth_date`, falling back
-  to the primary household person's (projection.rs:965-989); no birth date anywhere →
-  **30 years**. `?months=N` overrides; fuera de 12–840 **rechaza** con 400 `months_out_of_range` (hasta 4.3.1 clampaba en silencio, así que `get_projection` y `simulate_projection` respondían distinto al mismo valor). `horizon_basis` reports `lifespan_90` |
-  `fallback_no_demographics` | `months_override`.
+- **Horizon rule** — `projection_horizon_months`: configurable lifespan since 4.9.0 (#149).
+  `years = clamp(horizon_lifespan_age − completed_age, 5, 70)` con
+  `fire_settings.horizon_lifespan_age` (85..=105, default 90), using the session user's
+  `birth_date`, falling back to the primary household person's; no birth date anywhere →
+  **30 years**. El clamp [5, 70] no se tocó ⇒ el eje solo muerde si `edad ≥ edad_límite − 70`.
+  `?months=N` overrides; fuera de 12–840 **rechaza** con 400 `months_out_of_range` (hasta 4.3.1
+  clampaba en silencio). `horizon_basis` reports `lifespan_age` | `fallback_no_demographics` |
+  `months_override`, con `horizon_lifespan_age` al lado; el margen al final es
+  `points[último].net_worth` + `final_net_worth_real` (euros de hoy, paridad con simulate).
 - Large arrays (`points[].net_worth`, **`points[].net_worth_real`** desde 4.4.0,
   `fire_target_series`, `asset_series[].values`) serialize as f64 for wire size; scalar KPIs (`jubilacion_target_net_worth`, milestones targets,
   `starting_net_worth`) stay Decimal-as-string. This f64 boundary is deliberate (v1.4.0,
@@ -601,7 +608,7 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
 - Closed-form gross-up: `grep -n "gross_up_net_annual_fire" apps/api/src/handlers/projection.rs`
 - Defaults (SWR 3.5, ES brackets): `grep -n -A8 "fn default_fire_settings" apps/api/src/handlers/installation.rs`
 - SWR bound 0–4: `grep -n "swr_pct must be between" apps/api/src/handlers/installation.rs`
-- Horizon constants (90/5/70/30, basis strings): `grep -n "LIFESPAN_AGE\|FALLBACK_YEARS\|lifespan_90" apps/api/src/handlers/projection.rs`
+- Horizon constants (5/70/30, basis strings, configurable age): `grep -n "MIN_HORIZON_LIFESPAN_AGE\|FALLBACK_YEARS\|lifespan_age" apps/api/src/handlers/{projection,installation}.rs`
 - Deflation by month_index (**el núcleo desde 4.4.0 es `deflator_at_month_index`, con tres consumidores**):
   `grep -n -A10 "fn deflator_at_month_index" apps/api/src/handlers/projection.rs` y
   `grep -n "net_worth_real\|deflation_annual_inflation_percent\|deflate_amount_core" apps/api/src/handlers/projection.rs`

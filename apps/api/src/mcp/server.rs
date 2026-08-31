@@ -836,6 +836,8 @@ impl FireSettingsOverrideParam {
             expense_avg_window_months: self.expense_avg_window_months,
             expense_avg_window_mode: parse_enum_param(&self.expense_avg_window_mode)
                 .map_err(|e| ApiError::BadRequest(format!("expense_avg_window_mode: {e}")))?,
+            // El what-if del horizonte ya existe como `months`; la edad límite no se overridea.
+            horizon_lifespan_age: None,
             annual_inflation_assumption_percent: None,
         })
     }
@@ -952,13 +954,13 @@ pub struct SimulateParams {
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub swr_pct: Option<String>,
-    /// Inflación anual asumida en % (0–50, string decimal).
+    /// Inflación anual asumida en % (−2 a 50, string decimal; negativa = deflación sostenida).
     #[serde(default)]
     /// Alias aceptado: `annual_inflation_assumption_percent`, que es como se llama en
     /// `get_settings` y en `update_fire_settings`. Sin él, el nombre que el modelo acababa de
     /// leer se descartaba en silencio y el escenario salía idéntico al baseline.
     #[serde(alias = "annual_inflation_assumption_percent")]
-    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub annual_inflation_percent: Option<String>,
     /// Gasto ANUAL de jubilación (> 0, string decimal): sustituye **siempre** el gasto
     /// post-jubilación, y la base del target FIRE **solo con
@@ -1807,12 +1809,12 @@ pub struct UpdateFireSettingsParams {
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub swr_pct: Option<String>,
-    /// Inflación anual asumida en % (0–50), string decimal.
+    /// Inflación anual asumida en % (−2 a 50, string decimal; negativa = deflación sostenida).
     #[serde(default)]
     /// Alias aceptado: `annual_inflation_percent`, que es como se llama en
     /// `simulate_projection`. Simular y guardar deben aceptar el mismo nombre.
     #[serde(alias = "annual_inflation_percent")]
-    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub annual_inflation_assumption_percent: Option<String>,
     /// "budget" (A: plan) | "transactions_avg" (B: ingreso y gasto reales) |
     /// "budget_income_real_expense" (C: ingreso del plan + gasto real).
@@ -1836,6 +1838,11 @@ pub struct UpdateFireSettingsParams {
     #[serde(default)]
     #[schemars(extend("enum" = ["data", "calendar"]))]
     pub expense_avg_window_mode: Option<String>,
+    /// Edad límite del horizonte derivado (85..=105, default 90): la proyección llega hasta esa
+    /// edad del solicitante. OJO: el horizonte sigue acotado a 70 años, así que el eje solo
+    /// tiene efecto si la edad actual ≥ edad_límite − 70.
+    #[serde(default)]
+    pub horizon_lifespan_age: Option<u32>,
     /// "manual" | "annual_expense" | "current_income".
     #[serde(default)]
     #[schemars(extend("enum" = ["manual", "annual_expense", "current_income"]))]
@@ -4636,6 +4643,7 @@ impl FutureFinMcp {
                 .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))?;
             patch.income_avg_window_months = p.income_avg_window_months;
             patch.expense_avg_window_months = p.expense_avg_window_months;
+            patch.horizon_lifespan_age = p.horizon_lifespan_age;
             patch.income_avg_window_mode =
                 parse_enum_param(&p.income_avg_window_mode)
                     .map_err(|e| ApiError::BadRequest(format!("income_avg_window_mode: {e}")))?;
