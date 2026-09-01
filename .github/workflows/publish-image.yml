@@ -664,7 +664,7 @@ jobs:
       - name: Token de la App para el bump del add-on
         if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag)
         id: addon_bump_token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.ADDON_BUMP_APP_ID }}
           private-key: ${{ secrets.ADDON_BUMP_APP_PRIVATE_KEY }}
