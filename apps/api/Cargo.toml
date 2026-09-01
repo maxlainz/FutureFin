@@ -10,7 +10,7 @@ authors = ["Max Lainz"]
 
 [dependencies]
 aes-gcm = "0.11"
-argon2 = "0.5"
+argon2 = "0.6"
 async-trait = "0.1"
 base64 = "0.22"
 csv = "1"
