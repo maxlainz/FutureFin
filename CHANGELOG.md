@@ -4,6 +4,20 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.12.3] - 2026-09-01
+
+### La imagen se reconstruye sobre una base Debian al día
+
+- La etapa que compila el binario (`apps/api/Dockerfile:26`) va pineada por digest a
+  `rust:bookworm`, y Dependabot lo refresca de `e70e2ee` a `82150a5`. **Misma versión de Rust
+  (1.98.0) y misma distro**: ambos digests salen de la misma revisión de `docker-rust`
+  (`7e8ce3f…:stable/bookworm`); lo que cambia es la base `buildpack-deps:bookworm`, reconstruida
+  cinco días más tarde con sus paquetes de sistema al día.
+- Para quien actualiza: **cero cambios de comportamiento**. No se mueve ni una cifra del motor, ni
+  el frontend, ni el PostgreSQL empotrado. El binario se sigue copiando a `debian:bookworm-slim`
+  (`Dockerfile:56`), que esta etapa ni toca — `rust:bookworm` es solo andamio de compilación. Es
+  higiene de la cadena de build, no una función nueva.
+
 ## [4.12.2] - 2026-08-31
 
 ### La leyenda del chart de Jubilación deja de parecer un tercer objetivo
