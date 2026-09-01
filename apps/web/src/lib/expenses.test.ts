@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type {
   CategoryRow,
+  ImportConfirmResponseApi,
   ImportPreviewRowApi,
   SummaryTotalsApi,
   TransactionApi,
@@ -34,6 +35,7 @@ import {
   sortTransactionGroups,
   sortTransactions,
   summarizeDecisions,
+  summarizeImportBatch,
   transactionMatchesQuery,
   trendArrow,
   type ImportRowDraft,
@@ -290,6 +292,47 @@ describe("summarizeDecisions", () => {
       toImport: 2,
       toSkip: 0,
       toDiscard: 1,
+    });
+  });
+});
+
+describe("summarizeImportBatch", () => {
+  const confirmRes = (
+    over: Partial<ImportConfirmResponseApi>,
+  ): ImportConfirmResponseApi => ({
+    import_id: "11111111-1111-1111-1111-111111111111",
+    imported: 0,
+    skipped_already_imported: 0,
+    discarded: 0,
+    rules_learned: 0,
+    reconciled_pairs: 0,
+    ...over,
+  });
+
+  it("suma campo a campo las respuestas de todos los confirms de la tanda", () => {
+    const batch = summarizeImportBatch([
+      confirmRes({ imported: 12, skipped_already_imported: 2, reconciled_pairs: 1 }),
+      confirmRes({ imported: 30, discarded: 4, rules_learned: 3 }),
+      confirmRes({ imported: 0, import_id: undefined, skipped_already_imported: 7 }),
+    ]);
+    expect(batch).toEqual({
+      files: 3,
+      imported: 42,
+      skipped_already_imported: 9,
+      discarded: 4,
+      rules_learned: 3,
+      reconciled_pairs: 1,
+    });
+  });
+
+  it("tanda vacía (cancelar sin confirmar nada) → todo a cero", () => {
+    expect(summarizeImportBatch([])).toEqual({
+      files: 0,
+      imported: 0,
+      skipped_already_imported: 0,
+      discarded: 0,
+      rules_learned: 0,
+      reconciled_pairs: 0,
     });
   });
 });

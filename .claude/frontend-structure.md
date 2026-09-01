@@ -67,6 +67,7 @@ src/
 │   ├── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH (incl. expenses → «Movimientos», slug canónico /movimientos + alias de lectura /gastos en tabFromPathname), SETTINGS_SUBTAB_* (incl. history → «Histórico»/historico), tabFromPathname, settingsSubTabPath
 │   ├── expenses.ts               # pure helpers de la pestaña «Movimientos»: month labels (monthLabelEs/monthShortLabelEs), defaultSelectedMonth,
 │   │                             #   categoriesForKind (savings→[]), ImportRowDraft + initialDraftForRow/buildConfirmDecisions/summarizeDecisions/rowMatchesFilter,
+│   │                             #   ImportBatchSummary + summarizeImportBatch (agregado de la tanda multi-archivo del wizard, 4.13.0),
 │   │                             #   deltaToneClass/formatDeltaCurrency (rojo/verde solo en deltas), significanceThreshold (1% del ingreso real)/trendArrow/significantDeltaTone
 │   │                             #   (umbral de significancia de las flechas ↑↓), AVG_WINDOWS + avgWindowLabel (pills 3m/6m/12m/YTD/Todo), capitalizeSource, y los helpers de la tabla de
 │   │                             #   movimientos: normalizeSearchText/transactionMatchesQuery (búsqueda sin acentos), compareTransactions/sortTransactions + naturalSortDir (TxnSortKey/
@@ -143,11 +144,16 @@ src/
 │   │                             #   añadir el barrido periódico del servidor (`FUTUREFIN_RECONCILE_SWEEP_HOURS`) + el pase post-import; `POST /v1/transactions/reconcile`
 │   │                             #   sigue existiendo en la API y como tool MCP, pero la SPA ya no lo llama.
 │   │                             #   Materializa recurrentes en silencio al montar (solo canEdit). `onCashflowMutated` avisa a App.
-│   ├── ImportWizardModal.tsx     # wizard import CSV en 2 pasos (useReducer). Paso 1 = archivo → select «Cuenta origen (activo)» (movido desde el footer; ahora también en el preview) →
-│   │                             #   formato en <details> plegado (autodetección por defecto). Paso 2 = banner con fuente capitalizada + chips de conteos, bulk bar con cluster único
-│   │                             #   «Asignar a visibles», footer «{X} se importarán · {Y} excluidas ({Z} duplicadas)», columna «Tipo». /import/confirm con decisions[] paralelo. Stateless (sha256).
+│   ├── ImportWizardModal.tsx     # wizard import CSV en 2 pasos (useReducer); desde 4.13.0 acepta VARIOS archivos y los procesa en COLA (estado files[]+fileIndex+confirmed[];
+│   │                             #   preview/confirm POR archivo). Paso 1 = archivo(s) → select «Cuenta origen (activo)» (movido desde el footer; ahora también en el preview; cuenta y
+│   │                             #   formato se aplican a toda la tanda) → formato en <details> plegado (autodetección POR archivo). Paso 2 = línea «Archivo i de N» (solo con tanda >1) +
+│   │                             #   banner con fuente capitalizada + chips de conteos, bulk bar con cluster único «Asignar a visibles», footer «{X} se importarán · {Y} excluidas
+│   │                             #   ({Z} duplicadas)», columna «Tipo». /import/confirm con decisions[] paralelo; «Confirmar y seguir»/«Omitir archivo» avanzan la cola (el preview fallido a
+│   │                             #   mitad ofrece Omitir/Reintentar); cancelar a mitad conserva lo ya confirmado (cola NO atómica a propósito: cada CSV = su fila de transaction_imports,
+│   │                             #   deshacible por separado). Stateless (sha256 por archivo).
 │   │                             #   3.5.0: las «posibles transferencias» ya NO se atenúan ni se desmarcan (entran incluidas; la exclusión del gasto la hace la conciliación) — solo dup/divisa;
-│   │                             #   el aviso post-confirm (con `reconciled_pairs`) lo pinta GastosView en su callback `onImported`
+│   │                             #   el aviso post-tanda (agregado `summarizeImportBatch`, con `reconciled_pairs`) lo pinta GastosView en su callback `onImported`, llamado UNA vez al
+│   │                             #   cerrar y solo si hubo ≥1 confirm
 │   ├── ManualCashEntryModal.tsx  # alta manual de efectivo: grid multifila (magnitud + kind fija el signo) + checkbox «Repetir cada mes» por fila (→ recurrence:{}) → POST /v1/transactions/batch
 │   ├── RecurringRulesModal.tsx   # modal «Recurrentes» (botón en la toolbar de Movimientos): lista GET /v1/transactions/recurring y permite «Detener» (DELETE) cada regla
 │   │                             #   (conserva las instancias ya materializadas). Patrón ManualCashEntryModal: fetch al abrir, toda la lógica de presentación aquí (nada en lib/)
