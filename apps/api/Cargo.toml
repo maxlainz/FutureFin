@@ -9,7 +9,7 @@ repository = "https://github.com/maxlainz/FutureFin"
 authors = ["Max Lainz"]
 
 [dependencies]
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 argon2 = "0.5"
 async-trait = "0.1"
 base64 = "0.22"
