@@ -5,6 +5,11 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.12.6
+
+- Mantenimiento interno: la interfaz se reconstruye con herramientas al día. Tus cifras no se
+  mueven; si notas algún detalle visual raro, repórtalo — el empaquetado cambió por dentro.
+
 ## 4.12.5
 
 - Mantenimiento interno: la herramienta que empaqueta la interfaz se queda en su versión de
