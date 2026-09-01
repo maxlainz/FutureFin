@@ -31,7 +31,8 @@ const KDF_P_COST: u32 = 1;
 ///
 /// El manifiesto viaja en claro y queda FUERA del AAD (que solo cubre `schema_version`,
 /// `user_id_original` y `exported_at`), así que sus `kdf.*` son entrada no autenticada: los
-/// elige quien fabrica el fichero. `Params::new` no ayuda — en argon2 0.5 `MAX_M_COST` es
+/// elige quien fabrica el fichero. `Params::new` no ayuda — en argon2 0.6 `MAX_M_COST` sigue
+/// siendo
 /// `u32::MAX` y el propio crate documenta que no lo comprueba —, y `hash_password_into`
 /// reserva `vec![Block; m_cost]`, 1 KiB por bloque. Sin techo, un `.ffbackup` de 200 bytes con
 /// `m_cost: 8000000` pide 8 GB y se lleva por delante el contenedor entero, PostgreSQL
