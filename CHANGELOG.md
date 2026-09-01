@@ -4,6 +4,70 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.12.5] - 2026-09-01
+
+### El bundle lo compila la misma Node LTS que lo verifica
+
+- Política Node 24 LTS (PR #188, decisión del owner — sustituye a los PRs de Dependabot #155 y
+  #165, que proponían Node 26 «Current»): la etapa de build del frontend sube a
+  `node:24.20-bookworm-slim` (la LTS más reciente, pineada por digest), `@types/node` pasa de
+  ^22 a ^24 (por primera vez alineado con el runtime real), y `dependabot.yml` ignora `>=25`
+  en ambos hasta que 26 sea LTS (2026-10-28), con el paso de retirada anotado in situ.
+- Para quien actualiza: **cero cambios de comportamiento** — Node solo compila el bundle; el
+  runtime de la imagen sigue siendo el binario Rust sobre `debian:bookworm-slim`.
+
+## [4.12.4] - 2026-09-01
+
+### El cliente WebSocket del login con Home Assistant, al día
+
+- `tokio-tungstenite` 0.26.2 → 0.30.0 (PR #158). Cuatro saltos 0.x verificados símbolo a símbolo
+  contra el código fuente de ambas versiones: la superficie usada por el único call site
+  (`apps/api/src/ha_idp/client.rs` — el diálogo «Entrar con Home Assistant») es idéntica en
+  firma y forma; el único cambio sustantivo del rango (`tungstenite::Error` pasa de 136 a 32
+  bytes por boxing interno) no aplica porque aquí el error solo se formatea, nunca se
+  desestructura. `rustls` no cambia de major.
+- Para quien actualiza: **cero cambios de comportamiento**. En el `Cargo.lock` se colapsa un
+  duplicado de `rand` (0.9.x desaparece) y aparece uno de `sha1` (0.11 junto al 0.10 de sqlx).
+
+## [4.12.3] - 2026-09-01
+
+### La imagen se reconstruye sobre una base Debian al día
+
+- La etapa que compila el binario (`apps/api/Dockerfile:26`) va pineada por digest a
+  `rust:bookworm`, y Dependabot lo refresca de `e70e2ee` a `82150a5`. **Misma versión de Rust
+  (1.98.0) y misma distro**: ambos digests salen de la misma revisión de `docker-rust`
+  (`7e8ce3f…:stable/bookworm`); lo que cambia es la base `buildpack-deps:bookworm`, reconstruida
+  cinco días más tarde con sus paquetes de sistema al día.
+- Para quien actualiza: **cero cambios de comportamiento**. No se mueve ni una cifra del motor, ni
+  el frontend, ni el PostgreSQL empotrado. El binario se sigue copiando a `debian:bookworm-slim`
+  (`Dockerfile:56`), que esta etapa ni toca — `rust:bookworm` es solo andamio de compilación. Es
+  higiene de la cadena de build, no una función nueva.
+
+### Un backup truncado se rechaza en vez de importarse a medias
+
+- `flate2` 1.1.9 → 1.1.10 (#174). Vive en la ruta del `.ffbackup` cifrado
+  (`handlers/backup_user/crypto.rs:13-15,107,115`), y trae dos endurecimientos del decodificador:
+  **«Reject incomplete deflate streams at EOF»** y **«Reject oversized gzip extra fields»**. Un
+  fichero truncado o manipulado que antes podía devolver salida parcial ahora falla limpio como
+  corrupto. El formato no cambia: gzip sigue siendo gzip, y ningún backup válido se ve afectado.
+- Bajo ese mismo bump de parche, `flate2` **cambia de backend de compresión** (entra `zlib-rs`
+  0.6.7, `miniz_oxide` sube 0.8.9 → 0.9.1) y retira `cloudflare-zlib`. El repo declara
+  `flate2 = "1.0"` sin features, así que hereda el default nuevo. Sin cambio de formato ni de
+  cifras — queda anotado porque un cambio de motor bajo un parche merece decirse.
+- `futures-util` 0.3.32 → 0.3.34: correcciones de *soundness* (`ReadLine` ante excepciones, el
+  `Send` de `IterPinRef`/`Iter`, stacked borrows en `compat01as03`, fuga en
+  `FuturesUnordered::IntoIter`) e identidad del waker clonado. `uuid` 1.24.1 → 1.26.0: solo
+  adiciones (`serde::bytes`, `ContextV7::with_additional_precision_bits`), ninguna en uso aquí.
+- **Cero cifras del motor se mueven.** Ninguno de los tres saltos cruza major, los tres son
+  dependencias directas y ninguno anuncia rotura.
+
+> **Por qué este grupo aparece aquí y no en un 4.12.4.** El tag `v4.12.3` no se creó sobre el
+> commit del bump (`815fb27`) sino sobre el siguiente, `443631a` — el merge de #174 —, porque el
+> `ci-gate` del run de publicación falló en `815fb27` (ver #192). La imagen publicada como 4.12.3
+> **contiene** por tanto el grupo `cargo-menores`, así que esta sección lo declara. Un 4.12.4 cuyo
+> diff real contra la imagen 4.12.3 fuera solo un bump de versión contradiría «una versión, una
+> imagen»: no habría nada nuevo que publicar.
+
 ## [4.12.2] - 2026-08-31
 
 ### La leyenda del chart de Jubilación deja de parecer un tercer objetivo

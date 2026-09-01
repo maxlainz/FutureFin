@@ -5,6 +5,23 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.12.5
+
+- Mantenimiento interno: la herramienta que empaqueta la interfaz se queda en su versión de
+  soporte largo, alineada con la que la verifica. Nada cambia en lo que ves ni en tus números.
+
+## 4.12.4
+
+- Mantenimiento interno: se actualiza la pieza que habla con Home Assistant al iniciar sesión
+  («Entrar con Home Assistant»). Nada cambia en lo que ves ni en tus números.
+
+## 4.12.3
+
+- Mantenimiento interno: la imagen se reconstruye sobre una base de sistema al día. Nada cambia
+  en lo que ves ni en tus números.
+- Si intentas restaurar una copia de seguridad que llegó truncada o dañada, ahora te lo dice en
+  vez de importarla a medias. Las copias buenas se restauran igual que siempre.
+
 ## 4.12.2
 
 - La gráfica de Jubilación ya no muestra una cifra que parecía un tercer objetivo: su leyenda

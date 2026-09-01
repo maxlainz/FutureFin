@@ -8,6 +8,7 @@
 //! capturada del código actual (patrón projection_marker.rs), con tolerancia estrecha.
 
 mod common;
+use chrono::{Datelike, Duration, Months, Utc};
 use common::TestApp;
 use serde_json::{json, Value};
 
@@ -54,6 +55,16 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
     // #150: "Indexado" es el primer (y único) activo del owner, así que crearlo ya sembró el
     // sumidero apuntándole — no hace falta crear la regla a mano.
+    //
+    // La fecha de fin del plan es relativa A PROPÓSITO (#184): el motor ancla en HOY
+    // (`installation_naive_today`, tz por defecto UTC — igual que este `Utc::now()`), así que
+    // una fecha absoluta encoge el plan un mes cada día 1 y mueve NW(360). Lo que este pin
+    // quiere clavar es la LONGITUD del plan: último día del mes (hoy + 179) → exactamente
+    // 180 cuotas vivas (meses 0..=179 de la rejilla), sea cual sea el día en que corra el test.
+    let m_start = Utc::now().date_naive().with_day(1).expect("día 1 siempre existe");
+    let payment_end = (m_start + Months::new(180) - Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
     for (path, body) in [
         ("/v1/budget/entries", json!({"category_id": cat_i, "amount": "3000"})),
         ("/v1/budget/entries", json!({"category_id": cat_e, "amount": "1200", "ends_at_retirement": false})),
@@ -61,7 +72,7 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
                                    "label": "Casa", "principal": "150000", "apr_percent": "3",
                                    "payment_amount": "800", "payment_frequency": "monthly",
                                    "repayment_model": "french",
-                                   "payment_end_date": "2041-08-31"})),
+                                   "payment_end_date": payment_end})),
     ] {
         let r = app.post_json_with_cookie(path, body, &owner.cookie).await;
         assert_eq!(r.status, http::StatusCode::CREATED, "{path}: {r:?}");
@@ -112,12 +123,18 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
     // el bruto era gross_up(14.400)/12 = 1.506,33 con g=1, y NW(360) quedó en 653.270,22.
     // 4.12.1 (extensión B de #178): la base que la cascada construyó durante 234 meses es un
     // DATO observado, así que el drenaje deriva su g real (< 1, creciente) en vez del escalar 1
-    // — la exención fiscal del difunto «caja primero» heredada de verdad. NW(360) sube a
-    // 676.315,04 (capturado; +23.044,82 de impuesto que se cobraba sobre euros que eran base).
-    // El cruce (235), NW(12) y NW(180) NO se mueven: antes del 235 este hogar no drena. El
-    // mecanismo exacto está pineado a mano en el engine (`derived_g_rises_along_the_trajectory…`,
+    // — la exención fiscal del difunto «caja primero» heredada de verdad. NW(360) subió a
+    // 676.315,04 (+23.044,82 de impuesto que se cobraba sobre euros que eran base).
+    // #184: aquel 676.315,04 se capturó con la fecha absoluta 2041-08-31 y ancla de agosto
+    // 2026 = 181 cuotas, una más de las 180 que el escenario declara. Con la longitud del plan
+    // ya estable en 180, la cuota 181 no se paga: esos 800 € componen al 5 % los ~180 meses
+    // restantes y el residual congelado queda más alto → NW(360) = 677.335,52 (Δ +1.020,48,
+    // predicho en #184 y confirmado en local antes de actualizar el pin).
+    // El cruce (235), NW(12) y NW(180) NO se mueven: antes del 235 este hogar no drena, y los
+    // meses 1..180 son idénticos con ambas longitudes. El mecanismo exacto está pineado a mano
+    // en el engine (`derived_g_rises_along_the_trajectory…`,
     // `the_simulated_withdrawal_also_pays_taxes` — este último sin coste declarado, g=1).
-    assert!((nw360 - 676_315.04).abs() < 0.01, "NW(360) capturado: {nw360}");
+    assert!((nw360 - 677_335.52).abs() < 0.01, "NW(360) capturado: {nw360}");
 }
 
 /// Escenario B — «inflación 2,5 %» (lo moverán #146/#139/#149 en la Ola 5).

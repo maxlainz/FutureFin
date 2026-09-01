@@ -14,7 +14,7 @@
 #     de un manifest de una sola plataforma — si no, el build arm64 falla.
 
 # --- Frontend (Vite) ---
-FROM node:24.15-bookworm-slim@sha256:24dc26ef1e3c3690f27ebc4136c9c186c3133b25563ae4d7f0692e4d1fe5db0e AS web
+FROM node:24.20-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS web
 WORKDIR /build
 COPY package.json package-lock.json ./
 COPY apps/web ./apps/web
@@ -23,7 +23,7 @@ RUN npm ci && npm run build:web \
     && test -n "$(ls -A apps/web/dist/assets)"
 
 # --- API (Rust): imagen `rust:bookworm` (stable); digest fija la snapshot exacta del toolchain ---
-FROM rust:bookworm@sha256:e70e2eec3d495fd5c8e0be74adda86507dfac7f51a724fbf9813ff59b2b247c7 AS rust-builder
+FROM rust:bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS rust-builder
 ENV PATH=/usr/local/cargo/bin:$PATH
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./

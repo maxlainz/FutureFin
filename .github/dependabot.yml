@@ -50,6 +50,12 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # Política Node 24 LTS (decisión del owner, 2026-09-01, cierra #165): los @types/node
+      # van alineados con el major del Node que construye la imagen (Dockerfile) y el de CI.
+      # Node 26 es «Current» hasta el 2026-10-28; cuando sea LTS y se adopte, retirar esto.
+      - dependency-name: "@types/node"
+        versions: [">=25"]
 
   # Acciones usadas por los workflows de .github/workflows/.
   - package-ecosystem: github-actions
@@ -93,3 +99,10 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      # Política Node 24 LTS (decisión del owner, 2026-09-01, cierra #155): la imagen se
+      # construye con la LTS activa, no con «Current» — CI (node-version: "24") debe ejercitar
+      # el mismo major que compila el bundle publicado. Node 26 es LTS el 2026-10-28: al
+      # adoptarlo, subir también node-version en ci.yml y retirar este ignore.
+      - dependency-name: "node"
+        versions: [">=25"]
