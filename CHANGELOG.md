@@ -4,6 +4,31 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.13.0] - 2026-09-01
+
+### Subida múltiple de CSV en el import de movimientos
+
+- **El wizard de «Importar CSV» acepta varios archivos a la vez** y los procesa en cola:
+  preview → revisión → confirmación POR archivo, con «Confirmar y seguir», «Omitir archivo»
+  (también cuando el preview de un archivo falla a mitad de tanda: Omitir/Reintentar) y la línea
+  de progreso «Archivo i de N». Ponerse al día tras meses sin importar obligaba a repetir el
+  ciclo completo — abrir el modal, elegir archivo, previsualizar, revisar, confirmar — una vez
+  por extracto; ahora es una sola tanda, y con la autodetección activa cada archivo detecta su
+  propio banco (una tanda MyInvestor + N26 funciona). La cuenta origen y el formato se eligen
+  una vez y aplican a toda la tanda.
+- **La cola NO es atómica a propósito**: cada CSV conserva su preview/confirm stateless
+  (`file_sha256` por archivo), su propia fila en `transaction_imports` y su deshacer individual;
+  cancelar a mitad conserva lo ya confirmado. El aviso final es el agregado de la tanda
+  («N archivos · X importados · …», `summarizeImportBatch` en `lib/expenses.ts`), y el callback
+  `onImported` pasa de la respuesta de un confirm al agregado `ImportBatchSummary`, disparado
+  UNA vez al cerrar el wizard y solo si hubo al menos un confirm.
+- **Sin cambios en la API HTTP**: N llamadas al mismo par `/import/preview`+`/import/confirm`
+  (límite de 16 MiB POR archivo, no por tanda); paridad MCP n/a — el import CSV sigue siendo la
+  omisión deliberada registrada en `futurefin-mcp-parity` §3. En modos B/C cada confirm invalida
+  la cache de proyección como cualquier mutación de transacciones; en modo A (default), ninguna.
+  Verificado E2E en claro y oscuro sobre split-dev: tanda mixta de dos bancos (28+33=61
+  importados en el agregado), omitir, cancelar a mitad y deshacer por archivo.
+
 ## [4.12.6] - 2026-09-01
 
 ### El toolchain del frontend, dos majors al día

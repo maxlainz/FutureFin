@@ -5,6 +5,12 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.13.0
+
+- Al importar movimientos ya puedes subir **varios CSV a la vez**: los revisas y confirmas uno
+  a uno, cada archivo se puede omitir o deshacer por separado, y al final ves el total de la
+  tanda. Si mezclas bancos (MyInvestor y N26), cada archivo se reconoce solo.
+
 ## 4.12.6
 
 - Mantenimiento interno: la interfaz se reconstruye con herramientas al día. Tus cifras no se
