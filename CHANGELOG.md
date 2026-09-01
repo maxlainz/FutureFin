@@ -4,6 +4,19 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.12.4] - 2026-09-01
+
+### El cliente WebSocket del login con Home Assistant, al día
+
+- `tokio-tungstenite` 0.26.2 → 0.30.0 (PR #158). Cuatro saltos 0.x verificados símbolo a símbolo
+  contra el código fuente de ambas versiones: la superficie usada por el único call site
+  (`apps/api/src/ha_idp/client.rs` — el diálogo «Entrar con Home Assistant») es idéntica en
+  firma y forma; el único cambio sustantivo del rango (`tungstenite::Error` pasa de 136 a 32
+  bytes por boxing interno) no aplica porque aquí el error solo se formatea, nunca se
+  desestructura. `rustls` no cambia de major.
+- Para quien actualiza: **cero cambios de comportamiento**. En el `Cargo.lock` se colapsa un
+  duplicado de `rand` (0.9.x desaparece) y aparece uno de `sha1` (0.11 junto al 0.10 de sqlx).
+
 ## [4.12.3] - 2026-09-01
 
 ### La imagen se reconstruye sobre una base Debian al día
