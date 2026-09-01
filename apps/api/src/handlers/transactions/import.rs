@@ -19,7 +19,8 @@ use crate::handlers::transactions::csv_presets::{
 use crate::handlers::transactions::rules::{load_rules, match_rule, learn_rule, LoadedRule};
 use crate::handlers::transactions::schema::{
     compute_fingerprint, derive_rule_pattern, normalize_kind, ImportConfirmBody,
-    ImportConfirmResponse, ImportPreviewBody, ImportPreviewResponse, PreviewRow,
+    ImportConfirmResponse, ImportPreviewBody, ImportPreviewResponse, PendingAssignment,
+    PreviewRow,
 };
 use crate::handlers::transactions::reconcile::auto_reconcile_after_mutation;
 use crate::handlers::transactions::{
@@ -81,6 +82,60 @@ fn suggest_kind_category(
         return ("savings".into(), None);
     }
     (default_kind_by_sign(amount), None)
+}
+
+/// Máximo de `pending_assignments` por preview: cota de sanidad muy por encima de cualquier
+/// sesión real del wizard (una asignación por concepto distinto ya clasificado).
+const PENDING_ASSIGNMENTS_MAX: usize = 200;
+
+/// Convierte los `pending_assignments` de la sesión del wizard en reglas EFÍMERAS con la
+/// misma forma que crearía `learn_rule` en el confirm (`substring` + patrón derivado + source
+/// del preset), para que `match_rule` las evalúe con la precedencia completa junto a las
+/// persistidas. `updated_at = now()` les da la frescura que tendría la regla recién aprendida
+/// (gana los empates de precedencia, igual que ganaría tras persistirse).
+///
+/// Mismo gate que el aprendizaje real: sin categoría y sin `kind=savings` no hay regla. Y el
+/// mismo guard que el confirm: un patrón derivado vacío (concepto vacío) no genera regla —
+/// un substring vacío matchearía TODOS los conceptos.
+async fn ephemeral_rules_from_pending(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    preset_id: &str,
+    pending: &[PendingAssignment],
+) -> Result<Vec<LoadedRule>, ApiError> {
+    if pending.len() > PENDING_ASSIGNMENTS_MAX {
+        return Err(ApiError::BadRequest(format!(
+            "pending_assignments_too_many: at most {PENDING_ASSIGNMENTS_MAX} entries"
+        )));
+    }
+    let now = chrono::Utc::now();
+    let mut validated_categories: HashSet<(String, Option<Uuid>)> = HashSet::new();
+    let mut out = Vec::new();
+    for pa in pending {
+        let kind = normalize_kind(&pa.kind)?;
+        if pa.category_id.is_none() && kind != "savings" {
+            continue;
+        }
+        // Valida kind↔scope de la categoría una sola vez por combinación (son repetitivas).
+        if validated_categories.insert((kind.clone(), pa.category_id)) {
+            assert_transaction_category(pool, iid, &kind, pa.category_id).await?;
+        }
+        let pattern = derive_rule_pattern(&pa.concept);
+        if pattern.is_empty() {
+            continue;
+        }
+        out.push(LoadedRule {
+            id: Uuid::nil(),
+            match_kind: "substring".into(),
+            pattern,
+            source: Some(preset_id.to_string()),
+            assign_kind: Some(kind),
+            assign_category_id: pa.category_id,
+            updated_at: now,
+            ephemeral: true,
+        });
+    }
+    Ok(out)
 }
 
 /// Conteo de filas ya en BD por huella (para el estado `already_imported`).
@@ -158,7 +213,11 @@ pub async fn import_preview(
 
     assert_asset_in_installation(&state.pool, iid, body.account_asset_id).await?;
 
-    let rules = load_rules(&state.pool, iid, user.id.0).await?;
+    let mut rules = load_rules(&state.pool, iid, user.id.0).await?;
+    rules.extend(
+        ephemeral_rules_from_pending(&state.pool, iid, preset.id(), &body.pending_assignments)
+            .await?,
+    );
     let cat_names = load_category_names(&state.pool, iid).await?;
     let base_currency = installation_base_currency(&state.pool, iid).await?;
     let transfer = transfer_flags(&rows);
@@ -215,7 +274,8 @@ pub async fn import_preview(
             suggested_category_name: category_name,
             suggested_transfer: transfer[i],
             currency_warning,
-            matched_rule_id: matched.map(|m| m.id),
+            // Una regla efímera no está persistida: su id sintético no debe publicarse.
+            matched_rule_id: matched.filter(|m| !m.ephemeral).map(|m| m.id),
         });
     }
 
@@ -392,11 +452,19 @@ pub async fn import_confirm(
         next_ord.insert(fp.clone(), ord + 1);
         imported += 1;
 
-        // Aprendizaje: solo cuando hay una decisión de categorización con contenido.
+        // Aprendizaje: solo cuando hay una decisión de categorización con contenido. Un
+        // patrón derivado vacío no se aprende: como substring matchearía TODOS los conceptos
+        // futuros del banco. Hoy es inalcanzable desde aquí (`clean_concept` convierte el
+        // concepto vacío en «(sin concepto)»), pero la creación manual lo rechaza
+        // (`rule_pattern_empty`) y esta puerta no debe ser la única sin el guard — el mismo
+        // que aplica `ephemeral_rules_from_pending` a los conceptos que manda el cliente.
         if body.learn_rules && (d.category_id.is_some() || kind == "savings") {
             let pattern = derive_rule_pattern(&r.concept);
-            learn_rule(&mut tx, iid, user.id.0, preset.id(), &pattern, &kind, d.category_id).await?;
-            learned_patterns.insert((d.category_id, pattern));
+            if !pattern.is_empty() {
+                learn_rule(&mut tx, iid, user.id.0, preset.id(), &pattern, &kind, d.category_id)
+                    .await?;
+                learned_patterns.insert((d.category_id, pattern));
+            }
         }
     }
 

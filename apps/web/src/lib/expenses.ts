@@ -10,6 +10,7 @@ import type {
   CategoryRow,
   ImportConfirmResponseApi,
   ImportDecisionApi,
+  ImportPendingAssignmentApi,
   ImportPreviewRowApi,
   SummaryTotalsApi,
   TransactionApi,
@@ -36,6 +37,45 @@ export const KIND_LABEL_ES: Record<TransactionKindApi, string> = {
   income: "Ingreso",
   savings: "Ahorro",
 };
+
+// ---------------------------------------------------------------------------
+// Devoluciones (gasto con importe positivo)
+// ---------------------------------------------------------------------------
+
+/**
+ * ¿El importe —string decimal firmado tal como lo sirve la API— es estrictamente POSITIVO?
+ *
+ * Es una comprobación de SIGNO, no aritmética: los importes son decimales exactos y no deben
+ * pasar por `Number`/`parseFloat` para decidir nada de negocio. Basta con que no lleve signo
+ * menos y con que tenga alguna cifra significativa distinta de cero (`"0.0000"` no es positivo).
+ * Acepta la coma decimal porque el mismo helper se usa sobre lo que el usuario teclea en el
+ * modal de edición, no solo sobre lo que devuelve la API.
+ *
+ * Ante cualquier forma que no reconozca (notación científica, letras, vacío) devuelve `false`:
+ * la señal visual de devolución es una afirmación, y afirmar de más aquí es peor que callar.
+ */
+export function isPositiveAmountString(raw: string | null | undefined): boolean {
+  const t = String(raw ?? "").trim();
+  if (t === "") return false;
+  // `−` (U+2212) aparece en cifras ya formateadas; tratarlo como signo evita un falso positivo.
+  const body = /^[+]/.test(t) ? t.slice(1) : t;
+  if (/^[-−]/.test(body)) return false;
+  if (!/^[0-9]*[.,]?[0-9]*$/.test(body)) return false;
+  return /[1-9]/.test(body);
+}
+
+/**
+ * ¿La fila es una DEVOLUCIÓN? Un movimiento de tipo `expense` con importe positivo no es un
+ * gasto: es dinero que vuelve (reembolso, copago de un Bizum, abono del banco) y el backend lo
+ * NETEA contra el gasto de su categoría — por eso se guarda como gasto y no como ingreso. Sin
+ * una señal propia se lee como un error de signo, que es justo lo contrario de lo que es.
+ */
+export function isRefundRow(
+  kind: TransactionKindApi,
+  amount: string | null | undefined,
+): boolean {
+  return kind === "expense" && isPositiveAmountString(amount);
+}
 
 /** `YYYY-MM` → `{y, m}` (m 1-based); null si no parsea. */
 export function parseMonth(month: string): { y: number; m: number } | null {
@@ -152,6 +192,133 @@ export function initialDraftForRow(row: ImportPreviewRowApi): ImportRowDraft {
     linkedLiabilityId: "",
     force: false,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Automatch en vivo del preview (4.14.0)
+// ---------------------------------------------------------------------------
+
+/**
+ * ¿Son el MISMO draft? Comparación campo a campo de los seis campos editables. La usa el reducer
+ * del wizard para no marcar una fila como «tocada» cuando el patch no cambió nada (p. ej.
+ * «Incluir visibles» sobre filas ya incluidas): si un no-op marcara la fila, el automatch dejaría
+ * de propagarse a filas que el usuario nunca miró.
+ */
+export function draftsEqual(a: ImportRowDraft, b: ImportRowDraft): boolean {
+  return (
+    a.include === b.include &&
+    a.kind === b.kind &&
+    a.categoryId === b.categoryId &&
+    a.linkedAssetId === b.linkedAssetId &&
+    a.linkedLiabilityId === b.linkedLiabilityId &&
+    a.force === b.force
+  );
+}
+
+/**
+ * Cota de `pending_assignments` por preview. El backend rechaza con 400
+ * (`pending_assignments_too_many`) por encima de este número, así que el cliente recorta ANTES
+ * de enviar, quedándose con las más recientes.
+ */
+export const PENDING_ASSIGNMENTS_CAP = 200;
+
+/**
+ * La asignación que un draft aporta al acumulador de la sesión, o `null` si no aporta ninguna.
+ *
+ * GATE: solo generan regla efímera las asignaciones con categoría o con `kind=savings` — el mismo
+ * gate que el aprendizaje persistente del confirm. Mandar un `expense` sin categoría no enseñaría
+ * nada al servidor y solo gastaría cupo de las 200.
+ */
+export function pendingAssignmentForDraft(
+  concept: string,
+  draft: ImportRowDraft,
+): ImportPendingAssignmentApi | null {
+  if (draft.kind === "savings") {
+    return { concept, kind: "savings", category_id: null };
+  }
+  if (!draft.categoryId) return null;
+  return { concept, kind: draft.kind, category_id: draft.categoryId };
+}
+
+/**
+ * Incorpora al acumulador las asignaciones de las filas que el usuario acaba de tocar.
+ *
+ * Clave = concepto (es de lo que el servidor deriva el patrón de la regla efímera), así que la
+ * ÚLTIMA ESCRITURA GANA. El orden del Map es el de RECENCIA —por eso se borra la clave antes de
+ * reinsertarla—: el recorte a `PENDING_ASSIGNMENTS_CAP` se queda con la cola, y esa cola debe ser
+ * lo último que el usuario decidió.
+ *
+ * Devuelve el MISMO Map si ninguna entrada pasó el gate: el wizard usa la identidad del objeto
+ * para saber si hay que relanzar el preview.
+ */
+export function mergePendingAssignments(
+  prev: Map<string, ImportPendingAssignmentApi>,
+  entries: { concept: string; draft: ImportRowDraft }[],
+): Map<string, ImportPendingAssignmentApi> {
+  let next: Map<string, ImportPendingAssignmentApi> | null = null;
+  for (const { concept, draft } of entries) {
+    if (!concept) continue;
+    const assignment = pendingAssignmentForDraft(concept, draft);
+    if (!assignment) continue;
+    if (!next) next = new Map(prev);
+    next.delete(concept);
+    next.set(concept, assignment);
+  }
+  return next ?? prev;
+}
+
+/** El acumulador como array para el body del preview: dedupe por concepto (lo da el Map) y a lo
+ *  sumo las `cap` más recientes (la cola del orden de inserción). */
+export function buildPendingAssignments(
+  assignments: Map<string, ImportPendingAssignmentApi>,
+  cap: number = PENDING_ASSIGNMENTS_CAP,
+): ImportPendingAssignmentApi[] {
+  const all = [...assignments.values()];
+  return all.length > cap ? all.slice(all.length - cap) : all;
+}
+
+/**
+ * Adopta en el draft la sugerencia recalculada por el servidor. Devuelve el MISMO draft si no
+ * cambia nada — así el caller cuenta exactamente cuántas filas se movieron y el `memo` de las
+ * filas que no se movieron se sostiene.
+ *
+ * Solo toca kind/categoría: `include`, `force` y los vínculos son decisiones del usuario o
+ * semántica del dedup, y el re-preview no tiene nada que decir sobre ellas.
+ */
+export function adoptSuggestion(
+  draft: ImportRowDraft,
+  row: ImportPreviewRowApi,
+): ImportRowDraft {
+  const kind = row.suggested_kind;
+  const categoryId = kind === "savings" ? "" : row.suggested_category_id ?? "";
+  if (draft.kind === kind && draft.categoryId === categoryId) return draft;
+  return { ...draft, kind, categoryId };
+}
+
+/**
+ * Funde el preview recalculado sobre los drafts actuales: las filas TOCADAS por el usuario no se
+ * pisan nunca; el resto adopta la sugerencia nueva. Devuelve también cuántas se movieron (el
+ * aviso «aplicada a N filas similares» sale de aquí).
+ *
+ * `null` cuando la respuesta no corresponde fila a fila con el preview vivo (otro número de filas
+ * o índices distintos): antes que adoptar categorías descolocadas, se ignora el re-preview.
+ */
+export function mergeRepreview(
+  drafts: ImportRowDraft[],
+  touched: boolean[],
+  rows: ImportPreviewRowApi[],
+  previousRows: ImportPreviewRowApi[],
+): { drafts: ImportRowDraft[]; changed: number } | null {
+  if (rows.length !== drafts.length || rows.length !== previousRows.length) return null;
+  if (rows.some((row, i) => row.index !== previousRows[i].index)) return null;
+  let changed = 0;
+  const next = drafts.map((d, i) => {
+    if (touched[i]) return d;
+    const adopted = adoptSuggestion(d, rows[i]);
+    if (adopted !== d) changed += 1;
+    return adopted;
+  });
+  return { drafts: changed > 0 ? next : drafts, changed };
 }
 
 /**

@@ -529,3 +529,222 @@ async fn unrecognized_source_400() {
     assert_eq!(p.status, http::StatusCode::BAD_REQUEST);
     assert!(p.json()["message"].as_str().unwrap().contains("csv_preset_unrecognized"));
 }
+
+// ---------------------------------------------------------------------------
+// pending_assignments: reglas efímeras del preview (automatch en vivo, 4.14.0)
+// ---------------------------------------------------------------------------
+
+/// CSV MyInvestor sintético con tres comercios (dos del mismo patrón derivado).
+fn cafe_csv_b64() -> String {
+    B64.encode(
+        "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+         10/06/2026;10/06/2026;CAFE EJEMPLO 111;-3;EUR\n\
+         11/06/2026;11/06/2026;CAFE EJEMPLO 222;-4;EUR\n\
+         12/06/2026;12/06/2026;OTRO COMERCIO;-5;EUR\n",
+    )
+}
+
+async fn preview_with_pending(
+    app: &TestApp,
+    cookie: &str,
+    file_b64: &str,
+    pending: Value,
+) -> ResponseParts {
+    app.post_json_with_cookie(
+        "/v1/transactions/import/preview",
+        json!({ "source": "myinvestor", "file_b64": file_b64, "pending_assignments": pending }),
+        cookie,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn pending_assignment_propagates_to_similar_rows() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "expense", "Cafés").await;
+
+    let b64 = cafe_csv_b64();
+    let p = preview_with_pending(
+        &app,
+        &owner.cookie,
+        &b64,
+        json!([{ "concept": "CAFE EJEMPLO 111", "kind": "expense", "category_id": cat }]),
+    )
+    .await;
+    assert_eq!(p.status, http::StatusCode::OK, "{p:?}");
+    let body = p.json();
+    let rows = body["rows"].as_array().unwrap();
+
+    // El patrón derivado «CAFE EJEMPLO» (sin el sufijo numérico) alcanza a AMBAS filas del
+    // mismo comercio — exactamente lo que la regla aprendida hará en imports futuros.
+    for needle in ["CAFE EJEMPLO 111", "CAFE EJEMPLO 222"] {
+        let r = row_by_concept(rows, needle);
+        assert_eq!(r["suggested_category_id"], json!(cat), "{needle}: {r}");
+        assert_eq!(r["suggested_kind"], "expense", "{needle}: {r}");
+        // La regla efímera no está persistida: no publica matched_rule_id.
+        assert!(r["matched_rule_id"].is_null(), "{needle} sin rule id: {r}");
+    }
+    let other = row_by_concept(rows, "OTRO COMERCIO");
+    assert!(other["suggested_category_id"].is_null(), "no propaga a otros: {other}");
+}
+
+#[tokio::test]
+async fn pending_assignment_wins_over_shorter_persisted_rule() {
+    // Misma precedencia que tendrá tras persistirse: substring más largo gana. Si divergiera,
+    // el preview enseñaría una propagación que el próximo import desharía.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat_a = app.create_category(&owner, "expense", "Genérica").await;
+    let cat_b = app.create_category(&owner, "expense", "Específica").await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions/rules",
+            json!({
+                "pattern": "CAFE",
+                "match_kind": "substring",
+                "source": "myinvestor",
+                "assign_kind": "expense",
+                "assign_category_id": cat_a,
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    let b64 = cafe_csv_b64();
+    // Sin pending: gana la persistida.
+    let p0 = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    let b0 = p0.json();
+    let r0 = row_by_concept(b0["rows"].as_array().unwrap(), "CAFE EJEMPLO 222");
+    assert_eq!(r0["suggested_category_id"], json!(cat_a), "{r0}");
+
+    // Con pending sobre un concepto del comercio: «CAFE EJEMPLO» (más largo) la desbanca.
+    let p1 = preview_with_pending(
+        &app,
+        &owner.cookie,
+        &b64,
+        json!([{ "concept": "CAFE EJEMPLO 111", "kind": "expense", "category_id": cat_b }]),
+    )
+    .await;
+    let b1 = p1.json();
+    let r1 = row_by_concept(b1["rows"].as_array().unwrap(), "CAFE EJEMPLO 222");
+    assert_eq!(r1["suggested_category_id"], json!(cat_b), "{r1}");
+}
+
+#[tokio::test]
+async fn pending_assignment_gate_mirrors_learn_rules() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // Sin categoría y sin savings → no genera regla efímera (mismo gate que el aprendizaje).
+    let b64 = cafe_csv_b64();
+    let p = preview_with_pending(
+        &app,
+        &owner.cookie,
+        &b64,
+        json!([{ "concept": "CAFE EJEMPLO 111", "kind": "income" }]),
+    )
+    .await;
+    assert_eq!(p.status, http::StatusCode::OK, "{p:?}");
+    let body = p.json();
+    let r = row_by_concept(body["rows"].as_array().unwrap(), "CAFE EJEMPLO 222");
+    assert_eq!(r["suggested_kind"], "expense", "default por signo intacto: {r}");
+    assert!(r["suggested_category_id"].is_null(), "{r}");
+
+    // savings sin categoría SÍ propaga (los savings no llevan categoría por diseño).
+    let hucha = B64.encode(
+        "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+         10/06/2026;10/06/2026;HUCHA MENSUAL 1;-30;EUR\n\
+         11/06/2026;11/06/2026;HUCHA MENSUAL 2;-30;EUR\n",
+    );
+    let p2 = preview_with_pending(
+        &app,
+        &owner.cookie,
+        &hucha,
+        json!([{ "concept": "HUCHA MENSUAL 1", "kind": "savings" }]),
+    )
+    .await;
+    let b2 = p2.json();
+    let r2 = row_by_concept(b2["rows"].as_array().unwrap(), "HUCHA MENSUAL 2");
+    assert_eq!(r2["suggested_kind"], "savings", "{r2}");
+}
+
+#[tokio::test]
+async fn pending_assignments_validation() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let b64 = cafe_csv_b64();
+
+    // Kind inválido → 422-style 400 estricto, nunca coerción silenciosa.
+    let p = preview_with_pending(
+        &app,
+        &owner.cookie,
+        &b64,
+        json!([{ "concept": "CAFE EJEMPLO 111", "kind": "foobar" }]),
+    )
+    .await;
+    assert_eq!(p.status, http::StatusCode::BAD_REQUEST, "{p:?}");
+    assert!(p.json()["message"].as_str().unwrap().contains("invalid_kind"));
+
+    // Cota de sanidad: 201 entradas → 400.
+    let many: Vec<Value> = (0..201)
+        .map(|i| json!({ "concept": format!("X {i}"), "kind": "savings" }))
+        .collect();
+    let p2 = preview_with_pending(&app, &owner.cookie, &b64, json!(many)).await;
+    assert_eq!(p2.status, http::StatusCode::BAD_REQUEST, "{p2:?}");
+    assert!(p2.json()["message"].as_str().unwrap().contains("pending_assignments_too_many"));
+}
+
+#[tokio::test]
+async fn empty_concept_never_learns_a_catch_all_rule() {
+    // Una fila SIN concepto (venta de participaciones, p.ej.) confirmada como savings con
+    // learn_rules activo NO puede envenenar los imports futuros: `clean_concept` la convierte
+    // en «(sin concepto)» (regla específica, legítima) y el guard del confirm — el mismo de
+    // las reglas efímeras del preview — descarta cualquier patrón derivado vacío, que como
+    // substring matchearía TODOS los conceptos del banco.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+               10/06/2026;10/06/2026;;100;EUR\n\
+               11/06/2026;11/06/2026;COMERCIO NORMAL;-5;EUR\n";
+    let b64 = B64.encode(csv);
+    let p = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+
+    let c = confirm(
+        &app,
+        &owner.cookie,
+        "myinvestor",
+        &b64,
+        &sha,
+        vec![
+            json!({ "kind": "savings", "category_id": null }),
+            json!({ "kind": "expense", "category_id": null }),
+        ],
+        true,
+    )
+    .await;
+    assert_eq!(c.status, http::StatusCode::OK, "{c:?}");
+
+    // Ninguna regla con patrón vacío…
+    let rules = app.get_with_cookie("/v1/transactions/rules", &owner.cookie).await.json();
+    for r in rules.as_array().unwrap() {
+        assert!(
+            !r["pattern"].as_str().unwrap_or("").is_empty(),
+            "regla con patrón vacío aprendida: {r}"
+        );
+    }
+
+    // …y un preview posterior con un concepto cualquiera no sale contaminado a savings.
+    let csv2 = B64.encode(
+        "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
+         12/06/2026;12/06/2026;CONCEPTO CUALQUIERA;-7;EUR\n",
+    );
+    let p2 = preview(&app, &owner.cookie, "myinvestor", &csv2).await;
+    let b2 = p2.json();
+    let row = &b2["rows"][0];
+    assert_eq!(row["suggested_kind"], "expense", "sin contaminación: {row}");
+}

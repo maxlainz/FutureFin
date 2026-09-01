@@ -67,12 +67,20 @@ pub struct ReconcileOutcome {
 }
 
 /// EL predicado de candidatura, en un único sitio: mismo owner, misma divisa, importes
-/// exactamente opuestos, ninguna pata conciliada, par no rechazado y `|Δop_date| ≤ window_days`.
+/// exactamente opuestos, ambas patas de clase `income`/`expense`, ninguna pata conciliada,
+/// par no rechazado y `|Δop_date| ≤ window_days`.
 ///
 /// Lo comparten el pase de escritura (`auto_reconcile_owner`) y la lectura de sugerencias
 /// (`suggest_transfer_matches_core`). Es la razón de que exista esta función: dos copias del
 /// predicado divergirían, y entonces la lista de sugerencias propondría pares que el pase no
 /// haría —o callaría los que sí— sin que nada fallara.
+///
+/// Las filas `savings` (y las sin clase) NO son candidatas: una pata savings de importe
+/// exactamente opuesto a un gasto real dentro de la ventana lo emparejaría y excluiría ese
+/// gasto de los agregados — con el patrón «el espacio de ahorro reembolsa una compra
+/// concreta» (importes idénticos por construcción) el choque es sistemático, y a diferencia
+/// de un par income/expense el neto por bucket NO se conserva. El emparejamiento manual
+/// (`reconcile_pair_core`) sigue siendo kind-agnóstico a propósito: ahí decide el usuario.
 fn candidates_from_where(window_days: i32) -> String {
     let w = window_days;
     format!(
@@ -83,12 +91,14 @@ fn candidates_from_where(window_days: i32) -> String {
      AND b.owner_user_id  = a.owner_user_id
      AND b.currency = a.currency
      AND b.amount = -a.amount
+     AND b.kind IN ('income','expense')
      AND b.transfer_counterpart_id IS NULL
      AND b.op_date >= a.op_date - {w}
      AND b.op_date <= a.op_date + {w}
     WHERE a.installation_id = $1
       AND a.owner_user_id = $2
       AND a.amount < 0
+      AND a.kind IN ('income','expense')
       AND a.transfer_counterpart_id IS NULL
       AND NOT EXISTS (
             SELECT 1 FROM transfer_match_rejections r

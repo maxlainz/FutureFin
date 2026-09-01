@@ -77,6 +77,7 @@ import {
   formatDeltaCurrency,
   groupTransactionsByCategory,
   isReconciled,
+  isRefundRow,
   kpiBudgetTrend,
   monthLabelEs,
   naturalSortDir,
@@ -721,6 +722,9 @@ export function GastosView({
     const cats = categoriesForKind(kind, incomeCategories, expenseCategories);
     const hasLink = !!(t.linked_asset_id || t.linked_liability_id);
     const reconciled = isReconciled(t);
+    // Gasto con importe positivo = devolución (netea contra el gasto de su categoría). El importe
+    // ya sale en verde por `num-pos`; sin el chip eso se lee como un signo mal importado.
+    const refund = isRefundRow(kind, t.amount);
     const reconciledTitle = reconciled
       ? `Conciliada con «${t.transfer_counterpart_concept ?? "—"}» (${
           t.transfer_counterpart_op_date
@@ -760,6 +764,17 @@ export function GastosView({
         <td>{isMobile ? formatDateDm(t.op_date) : formatDateDmy(t.op_date)}</td>
         <td className="exp-concept-cell">
           {t.concept}
+          {refund ? (
+            <>
+              {" "}
+              <span
+                className="ff-refund-tag"
+                title="Gasto con importe positivo: una devolución. Resta del gasto de su categoría."
+              >
+                Devolución
+              </span>
+            </>
+          ) : null}
           {isMobile ? (
             <span className="cell-subline">
               {categoryLabel} · {KIND_LABEL_ES[kind]}
@@ -1517,6 +1532,9 @@ function EditTransactionModal({
 
   const isManual = !target.import_id;
   const reconciled = isReconciled(target);
+  // Sobre lo TECLEADO, no sobre `target`: cambiar el tipo o el signo en el formulario debe hacer
+  // aparecer o desaparecer el aviso antes de guardar.
+  const refund = isRefundRow(kind, amount);
   const cats = categoriesForKind(kind, incomeCategories, expenseCategories);
 
   /** Rompe el par (`DELETE /reconcile`): ambas patas vuelven a contar en los totales y el pase
@@ -1620,6 +1638,14 @@ function EditTransactionModal({
             >
               {unreconciling ? "Desconciliando…" : "Desconciliar"}
             </button>
+          </div>
+        ) : null}
+        {refund ? (
+          <div className="banner info-banner tight-banner">
+            <span>
+              <span className="ff-refund-tag">Devolución</span> Gasto con importe
+              positivo: se resta del gasto de su categoría en lugar de sumar como ingreso.
+            </span>
           </div>
         ) : null}
         <div className="asset-form-grid">

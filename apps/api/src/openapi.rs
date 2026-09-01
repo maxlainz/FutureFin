@@ -352,6 +352,7 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::transactions::BatchCreateBody,
         crate::handlers::transactions::PatchTransactionBody,
         crate::handlers::transactions::ImportPreviewBody,
+        crate::handlers::transactions::PendingAssignment,
         crate::handlers::transactions::PreviewRow,
         crate::handlers::transactions::ImportPreviewResponse,
         crate::handlers::transactions::ImportDecision,

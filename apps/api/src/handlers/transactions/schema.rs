@@ -495,6 +495,27 @@ pub struct ImportPreviewBody {
     #[serde(default)]
     #[schema(value_type = Option<String>, format = "uuid")]
     pub account_asset_id: Option<Uuid>,
+    /// Asignaciones hechas por el usuario en la sesión del wizard (aún sin confirmar). El
+    /// servidor las convierte en reglas EFÍMERAS con el mismo motor que el aprendizaje real
+    /// (`derive_rule_pattern` + precedencia completa de `match_rule`) y recalcula las
+    /// sugerencias — así el preview enseña exactamente la propagación que el confirm con
+    /// `learn_rules` consolidará. Nada se persiste. Máximo 200 entradas.
+    #[serde(default)]
+    pub pending_assignments: Vec<PendingAssignment>,
+}
+
+/// Una asignación de la sesión del wizard: el concepto de la fila que el usuario clasificó y
+/// lo que le asignó. Solo generan regla efímera las que llevan categoría o `kind=savings`
+/// (mismo gate que el aprendizaje persistente del confirm); el resto se ignora en silencio.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct PendingAssignment {
+    /// Concepto de la fila tal como lo devolvió el preview.
+    pub concept: String,
+    /// `expense` | `income` | `savings`.
+    pub kind: String,
+    #[serde(default)]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub category_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]

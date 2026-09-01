@@ -179,6 +179,7 @@
     "payment_schedule_empty",
     "payment_schedule_overflow",
     "payment_schedule_too_long",
+    "pending_assignments_too_many",
     "per_month_excludes_due_date",
     "percent_out_of_range",
     "planning_flow_category_scope_unsupported",

@@ -4,6 +4,44 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.14.0] - 2026-09-01
+
+### La conciliación deja de comerse gastos reales, y el preview del import aprende en vivo
+
+- **La candidatura automática de la conciliación exige ambas patas `income`/`expense`**
+  (`candidates_from_where`, compartido por el pase, el barrido y las sugerencias — cambio de
+  comportamiento respecto a 4.13.x, donde `savings` participaba). El predicado emparejaba
+  cualquier par de importes exactamente opuestos a ≤5 días sin mirar la clase: una fila
+  `savings` positiva (la retirada de un espacio de ahorro que reembolsa una compra concreta,
+  importes idénticos por construcción) podía emparejarse con el cargo real de tarjeta y
+  **sacar un gasto real de todos los agregados** — y a diferencia de un par income/expense,
+  el neto por bucket no se conserva: gasto y ahorro quedaban mal a la vez, en silencio. La
+  conciliación **manual** (`POST /v1/transactions/{id}/reconcile`) sigue siendo kind-agnóstica
+  a propósito: cruzar una aportación con su entrada en la cuenta destino es decisión legítima
+  del usuario. Regresión: `transactions_reconcile.rs` (savings ni se empareja ni se sugiere;
+  el par gasto↔savings de un import queda intacto; la vía manual acepta savings).
+- **Automatch de categoría en vivo en el wizard de import**: `POST /v1/transactions/import/preview`
+  acepta `pending_assignments` (≤200) — las asignaciones que el usuario ya hizo en la sesión —
+  y las convierte en reglas **efímeras** con el mismo motor que el aprendizaje real
+  (`derive_rule_pattern` + precedencia completa de `match_rule`): categorizar «CAFE EJEMPLO 111»
+  arrastra al resto de filas del comercio en el acto, y lo que el preview enseña es exactamente
+  lo que el confirm con `learn_rules` consolidará — sin duplicar el matching en el frontend.
+  Nada se persiste en el preview; un match efímero no publica `matched_rule_id`; mismo gate que
+  el aprendizaje (categoría o `kind=savings`). El wizard re-previsualiza con debounce y solo
+  rellena filas que el usuario no ha tocado a mano. Paridad MCP: n/a — el import CSV sigue
+  siendo la omisión deliberada registrada en `futurefin-mcp-parity` §3; la descripción de
+  `reconcile_transfers` sí se actualiza (enumeraba los criterios del pase).
+- **Guard del patrón vacío en el aprendizaje**: un patrón derivado vacío jamás se aprende ni
+  genera regla efímera — como substring matchearía TODOS los conceptos del banco. Hoy era
+  inalcanzable desde el confirm (`clean_concept` convierte el concepto vacío en «(sin
+  concepto)»), pero `pending_assignments` viene del cliente y la creación manual ya lo
+  rechazaba (`rule_pattern_empty`); ninguna puerta queda sin el guard.
+- **Badge «Devolución»**: una fila de clase gasto con importe positivo (el modelo documentado de
+  reembolso-que-netea: un copago de Bizum que compensa un gasto adelantado, un abono de
+  comercio) se señala como tal en el listado de Gastos y en el preview del import, en vez de
+  parecer un gasto con el signo cambiado. Solo presentación: los agregados ya hacían lo
+  correcto (`expense_actual = -Σ`, el importe positivo resta del gasto).
+
 ## [4.13.0] - 2026-09-01
 
 ### Subida múltiple de CSV en el import de movimientos

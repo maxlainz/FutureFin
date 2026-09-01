@@ -9,25 +9,34 @@ import type {
   TransactionMonthApi,
 } from "../api/types";
 import {
+  PENDING_ASSIGNMENTS_CAP,
   adjacentMonthInList,
+  adoptSuggestion,
   avgBasisDetail,
   avgUnavailableDetail,
   avgWindowLabel,
   buildConfirmDecisions,
+  buildPendingAssignments,
   capitalizeSource,
   categoriesForKind,
   compareTransactions,
   defaultSelectedMonth,
   deltaToneClass,
+  draftsEqual,
   groupTransactionsByCategory,
   initialDraftForRow,
+  isPositiveAmountString,
   isReconciled,
+  isRefundRow,
   kpiBudgetTrend,
+  mergePendingAssignments,
+  mergeRepreview,
   monthLabelEs,
   monthShortLabelEs,
   naturalSortDir,
   normalizeSearchText,
   parseMonth,
+  pendingAssignmentForDraft,
   rowMatchesFilter,
   signOf,
   significanceThreshold,
@@ -980,3 +989,253 @@ function txn(
     ...overrides,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Devoluciones (gasto con importe positivo)
+// ---------------------------------------------------------------------------
+
+describe("isPositiveAmountString", () => {
+  it("reconoce positivos tal como los sirve la API", () => {
+    expect(isPositiveAmountString("12.5000")).toBe(true);
+    expect(isPositiveAmountString("0.0100")).toBe(true);
+    expect(isPositiveAmountString("+7")).toBe(true);
+    expect(isPositiveAmountString(" 3 ")).toBe(true);
+  });
+  it("acepta la coma decimal (lo que se teclea en el modal de edición)", () => {
+    expect(isPositiveAmountString("12,5")).toBe(true);
+    expect(isPositiveAmountString("-12,5")).toBe(false);
+  });
+  it("el cero NO es positivo, con los decimales que traiga", () => {
+    expect(isPositiveAmountString("0")).toBe(false);
+    expect(isPositiveAmountString("0.0000")).toBe(false);
+    expect(isPositiveAmountString("-0.0000")).toBe(false);
+  });
+  it("negativos: menos ASCII y menos tipográfico", () => {
+    expect(isPositiveAmountString("-1")).toBe(false);
+    expect(isPositiveAmountString("−1")).toBe(false);
+  });
+  it("ante lo que no entiende, calla (no afirma que sea devolución)", () => {
+    expect(isPositiveAmountString("")).toBe(false);
+    expect(isPositiveAmountString(null)).toBe(false);
+    expect(isPositiveAmountString(undefined)).toBe(false);
+    expect(isPositiveAmountString("1e3")).toBe(false);
+    expect(isPositiveAmountString("abc")).toBe(false);
+  });
+});
+
+describe("isRefundRow", () => {
+  it("solo el gasto positivo es devolución", () => {
+    expect(isRefundRow("expense", "12.0000")).toBe(true);
+    expect(isRefundRow("expense", "-12.0000")).toBe(false);
+    expect(isRefundRow("income", "12.0000")).toBe(false);
+    expect(isRefundRow("savings", "12.0000")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Automatch en vivo del preview
+// ---------------------------------------------------------------------------
+
+describe("draftsEqual", () => {
+  it("compara los seis campos editables", () => {
+    expect(draftsEqual(draft({}), draft({}))).toBe(true);
+    expect(draftsEqual(draft({}), draft({ include: false }))).toBe(false);
+    expect(draftsEqual(draft({}), draft({ categoryId: "c1" }))).toBe(false);
+    expect(draftsEqual(draft({}), draft({ kind: "income" }))).toBe(false);
+    expect(draftsEqual(draft({}), draft({ force: true }))).toBe(false);
+    expect(draftsEqual(draft({}), draft({ linkedAssetId: "a1" }))).toBe(false);
+    expect(draftsEqual(draft({}), draft({ linkedLiabilityId: "l1" }))).toBe(false);
+  });
+});
+
+describe("pendingAssignmentForDraft (gate)", () => {
+  it("con categoría, sí", () => {
+    expect(pendingAssignmentForDraft("CAFE 365", draft({ categoryId: "c1" }))).toEqual({
+      concept: "CAFE 365",
+      kind: "expense",
+      category_id: "c1",
+    });
+  });
+  it("savings sí, aunque no lleve categoría (no puede llevarla)", () => {
+    expect(pendingAssignmentForDraft("TRASPASO", draft({ kind: "savings" }))).toEqual({
+      concept: "TRASPASO",
+      kind: "savings",
+      category_id: null,
+    });
+  });
+  it("expense/income sin categoría NO enseñan nada al servidor", () => {
+    expect(pendingAssignmentForDraft("X", draft({ categoryId: "" }))).toBeNull();
+    expect(
+      pendingAssignmentForDraft("X", draft({ kind: "income", categoryId: "" })),
+    ).toBeNull();
+  });
+});
+
+describe("mergePendingAssignments", () => {
+  it("acumula solo lo que pasa el gate", () => {
+    const out = mergePendingAssignments(new Map(), [
+      { concept: "CAFE 365", draft: draft({ categoryId: "c1" }) },
+      { concept: "SIN CAT", draft: draft({}) },
+    ]);
+    expect([...out.keys()]).toEqual(["CAFE 365"]);
+  });
+
+  it("devuelve el MISMO Map si nada pasó el gate (identidad = no relanzar el preview)", () => {
+    const prev = new Map();
+    expect(mergePendingAssignments(prev, [{ concept: "X", draft: draft({}) }])).toBe(
+      prev,
+    );
+  });
+
+  it("no muta el Map anterior", () => {
+    const prev = new Map();
+    mergePendingAssignments(prev, [
+      { concept: "CAFE 365", draft: draft({ categoryId: "c1" }) },
+    ]);
+    expect(prev.size).toBe(0);
+  });
+
+  it("última escritura gana Y pasa al final (recencia)", () => {
+    let m = mergePendingAssignments(new Map(), [
+      { concept: "A", draft: draft({ categoryId: "c1" }) },
+      { concept: "B", draft: draft({ categoryId: "c2" }) },
+    ]);
+    m = mergePendingAssignments(m, [
+      { concept: "A", draft: draft({ categoryId: "c9" }) },
+    ]);
+    expect([...m.keys()]).toEqual(["B", "A"]);
+    expect(m.get("A")?.category_id).toBe("c9");
+  });
+
+  it("ignora conceptos vacíos (fila fuera de rango)", () => {
+    const prev = new Map();
+    expect(
+      mergePendingAssignments(prev, [
+        { concept: "", draft: draft({ categoryId: "c1" }) },
+      ]),
+    ).toBe(prev);
+  });
+});
+
+describe("buildPendingAssignments", () => {
+  it("cap: se queda con las MÁS RECIENTES (la cola del orden de inserción)", () => {
+    let m = new Map();
+    for (let i = 0; i < 5; i += 1) {
+      m = mergePendingAssignments(m, [
+        { concept: `C${i}`, draft: draft({ categoryId: "c1" }) },
+      ]);
+    }
+    expect(buildPendingAssignments(m, 2).map((a) => a.concept)).toEqual(["C3", "C4"]);
+  });
+  it("por debajo del cap devuelve todo, ya deduplicado por concepto", () => {
+    let m = mergePendingAssignments(new Map(), [
+      { concept: "A", draft: draft({ categoryId: "c1" }) },
+    ]);
+    m = mergePendingAssignments(m, [
+      { concept: "A", draft: draft({ categoryId: "c2" }) },
+    ]);
+    expect(buildPendingAssignments(m)).toEqual([
+      { concept: "A", kind: "expense", category_id: "c2" },
+    ]);
+  });
+  it("el cap por defecto es el que acepta el backend", () => {
+    expect(PENDING_ASSIGNMENTS_CAP).toBe(200);
+  });
+});
+
+describe("adoptSuggestion", () => {
+  it("adopta kind y categoría recalculados", () => {
+    const d = draft({});
+    const out = adoptSuggestion(
+      d,
+      previewRow({ index: 0, suggested_kind: "expense", suggested_category_id: "c1" }),
+    );
+    expect(out.categoryId).toBe("c1");
+    expect(out.include).toBe(d.include);
+  });
+  it("savings no arrastra categoría", () => {
+    const out = adoptSuggestion(
+      draft({ categoryId: "c1" }),
+      previewRow({ index: 0, suggested_kind: "savings", suggested_category_id: "c1" }),
+    );
+    expect(out.kind).toBe("savings");
+    expect(out.categoryId).toBe("");
+  });
+  it("misma referencia cuando no cambia nada", () => {
+    const d = draft({ categoryId: "c1" });
+    expect(
+      adoptSuggestion(
+        d,
+        previewRow({ index: 0, suggested_kind: "expense", suggested_category_id: "c1" }),
+      ),
+    ).toBe(d);
+  });
+});
+
+describe("mergeRepreview", () => {
+  const rows = [
+    previewRow({ index: 0, suggested_kind: "expense", suggested_category_id: "c9" }),
+    previewRow({ index: 1, suggested_kind: "expense", suggested_category_id: "c9" }),
+    previewRow({ index: 2, suggested_kind: "expense", suggested_category_id: "c9" }),
+  ];
+  const previous = [
+    previewRow({ index: 0 }),
+    previewRow({ index: 1 }),
+    previewRow({ index: 2 }),
+  ];
+
+  it("las filas TOCADAS no se pisan nunca; el resto adopta", () => {
+    const drafts = [
+      draft({ categoryId: "mia" }),
+      draft({ categoryId: "" }),
+      draft({ categoryId: "" }),
+    ];
+    const out = mergeRepreview(drafts, [true, false, false], rows, previous);
+    expect(out).not.toBeNull();
+    expect(out?.drafts[0].categoryId).toBe("mia");
+    expect(out?.drafts[0]).toBe(drafts[0]);
+    expect(out?.drafts[1].categoryId).toBe("c9");
+    expect(out?.drafts[2].categoryId).toBe("c9");
+    expect(out?.changed).toBe(2);
+  });
+
+  it("cuenta 0 y conserva el array cuando no se mueve ninguna fila", () => {
+    const drafts = [
+      draft({ categoryId: "c9" }),
+      draft({ categoryId: "c9" }),
+      draft({ categoryId: "c9" }),
+    ];
+    const out = mergeRepreview(drafts, [false, false, false], rows, previous);
+    expect(out?.changed).toBe(0);
+    expect(out?.drafts).toBe(drafts);
+  });
+
+  it("todas tocadas → no se mueve nada", () => {
+    const drafts = [draft({}), draft({}), draft({})];
+    const out = mergeRepreview(drafts, [true, true, true], rows, previous);
+    expect(out?.changed).toBe(0);
+    expect(out?.drafts).toBe(drafts);
+  });
+
+  it("null si el recuento de filas no cuadra", () => {
+    expect(
+      mergeRepreview([draft({})], [false], rows, previous),
+    ).toBeNull();
+  });
+
+  it("null si los índices de las filas no cuadran (nunca adoptar descolocado)", () => {
+    const shifted = [
+      previewRow({ index: 0 }),
+      previewRow({ index: 7 }),
+      previewRow({ index: 2 }),
+    ];
+    expect(
+      mergeRepreview(
+        [draft({}), draft({}), draft({})],
+        [false, false, false],
+        shifted,
+        previous,
+      ),
+    ).toBeNull();
+  });
+});
