@@ -5,6 +5,11 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.12.5
+
+- Mantenimiento interno: la herramienta que empaqueta la interfaz se queda en su versión de
+  soporte largo, alineada con la que la verifica. Nada cambia en lo que ves ni en tus números.
+
 ## 4.12.4
 
 - Mantenimiento interno: se actualiza la pieza que habla con Home Assistant al iniciar sesión

@@ -4,6 +4,18 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.12.5] - 2026-09-01
+
+### El bundle lo compila la misma Node LTS que lo verifica
+
+- Política Node 24 LTS (PR #188, decisión del owner — sustituye a los PRs de Dependabot #155 y
+  #165, que proponían Node 26 «Current»): la etapa de build del frontend sube a
+  `node:24.20-bookworm-slim` (la LTS más reciente, pineada por digest), `@types/node` pasa de
+  ^22 a ^24 (por primera vez alineado con el runtime real), y `dependabot.yml` ignora `>=25`
+  en ambos hasta que 26 sea LTS (2026-10-28), con el paso de retirada anotado in situ.
+- Para quien actualiza: **cero cambios de comportamiento** — Node solo compila el bundle; el
+  runtime de la imagen sigue siendo el binario Rust sobre `debian:bookworm-slim`.
+
 ## [4.12.4] - 2026-09-01
 
 ### El cliente WebSocket del login con Home Assistant, al día
