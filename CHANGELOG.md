@@ -18,6 +18,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   (`Dockerfile:56`), que esta etapa ni toca — `rust:bookworm` es solo andamio de compilación. Es
   higiene de la cadena de build, no una función nueva.
 
+### Nota post-publicación: esta imagen lleva también el grupo cargo-menores
+
+- El tag `v4.12.3` acabó en el commit del merge de #174 (el `ci-gate` del publish abortó en el
+  commit del release por el incidente de atribución #194, y el run siguiente heredó la versión
+  pendiente), así que la imagen incluye además tres bumps de dependencias del binario:
+  `flate2` 1.1.9 → 1.1.10 (cambia el backend de compresión a `zlib-rs` y endurece el
+  decodificador — rechaza streams deflate incompletos al EOF; vive en la ruta del `.ffbackup`,
+  gzip sigue siendo gzip), `futures-util` 0.3.32 → 0.3.34 y `uuid` 1.24.1 → 1.26.0 (issue #185).
+  No existe un 4.12.4 con ese contenido: ya está aquí.
+
 ## [4.12.2] - 2026-08-31
 
 ### La leyenda del chart de Jubilación deja de parecer un tercer objetivo

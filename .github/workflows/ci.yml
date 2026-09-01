@@ -95,7 +95,20 @@ jobs:
             echo "::error::hay atribución en un mensaje de commit (líneas arriba). Reescribe el mensaje (amend/reword) antes de mergear — la norma vive en .claude/git-and-releases.md §Sin atribuciones."
             exit 1
           fi
-          echo "OK: mensajes sin atribución."
+          # Identidades, no solo mensajes (incidente #194): un commit AUTORADO como
+          # «Claude <noreply@anthropic.com>» pasa el filtro de mensajes, y al squashearlo
+          # GitHub añade él mismo el «Co-authored-by:» del autor distinto — la atribución
+          # aparece DESPUÉS del gate del PR, ya en main. Cazarla aquí, en el autor.
+          if [ "$EVENTO" = "pull_request" ]; then
+            identidades="$(git log --format='%an <%ae>%n%cn <%ce>' "origin/$BASE..HEAD")"
+          else
+            identidades="$(git log -1 --format='%an <%ae>%n%cn <%ce>' HEAD)"
+          fi
+          if printf '%s\n' "$identidades" | grep -niE 'anthropic\.com|^claude '; then
+            echo "::error::hay un commit autorado o comiteado con identidad de asistente (líneas arriba). Reescribe con la identidad del owner (git commit --amend --reset-author tras configurar user.name/user.email) — incidente documentado en el issue #194."
+            exit 1
+          fi
+          echo "OK: mensajes e identidades sin atribución."
 
   rust:
     runs-on: ubuntu-latest

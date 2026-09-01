@@ -7,8 +7,9 @@ decisión — vive en el
 
 ## 4.12.3
 
-- Mantenimiento interno: la imagen se reconstruye sobre una base de sistema al día. Nada cambia
-  en lo que ves ni en tus números.
+- Mantenimiento interno: la imagen se reconstruye sobre una base de sistema al día y actualiza
+  tres dependencias internas del binario (compresión de copias de seguridad incluida). Nada
+  cambia en lo que ves ni en tus números.
 
 ## 4.12.2
 
