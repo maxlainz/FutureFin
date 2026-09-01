@@ -156,7 +156,7 @@ export function buildProjectionMonthTickIndices(
   const span = Math.max(1, mc - past);
   const cap = Math.max(4, Math.min(maxTicks, 22));
   const roughStep = Math.ceil(span / Math.max(1, cap - 1));
-  let step = roughStep;
+  let step: number;
   if (span > 36) {
     const yAligned = Math.max(12, Math.ceil(roughStep / 12) * 12);
     step = Math.min(12, yAligned);

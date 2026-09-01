@@ -476,7 +476,7 @@ export function compareTransactions(
   dir: TxnSortDir,
 ): number {
   const mul = dir === "asc" ? 1 : -1;
-  let primary = 0;
+  let primary: number;
   if (key === "date") {
     primary = a.op_date.localeCompare(b.op_date);
   } else if (key === "concept") {
