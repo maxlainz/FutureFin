@@ -11,6 +11,12 @@ decisión — vive en el
   a uno, cada archivo se puede omitir o deshacer por separado, y al final ves el total de la
   tanda. Si mezclas bancos (MyInvestor y N26), cada archivo se reconoce solo.
 
+## 4.12.7
+
+- Mantenimiento interno: se modernizan las piezas que cifran tus copias de seguridad y protegen
+  tu contraseña. Tus copias exportadas y tu contraseña siguen funcionando exactamente igual —
+  hay tests permanentes que lo garantizan con ficheros de la versión anterior.
+
 ## 4.12.6
 
 - Mantenimiento interno: la interfaz se reconstruye con herramientas al día. Tus cifras no se
