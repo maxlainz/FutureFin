@@ -1,17 +1,21 @@
 use crate::error::ApiError;
-use argon2::{
-    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
-use rand_core::OsRng;
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use std::sync::OnceLock;
 
+/// `Argon2::default()` fija los parámetros que este binario PERSISTE en `users.password_hash`:
+/// m=19456, t=2, p=1, salida 32 B. Se dejan en el default a propósito —no se fijan a mano— porque
+/// argon2 0.6 mantiene `DEFAULT_M_COST = 19 * 1024`, `DEFAULT_T_COST = 2`, `DEFAULT_P_COST = 1` y
+/// `DEFAULT_OUTPUT_LEN = 32`, idénticos a 0.5.3. El cinturón de vectores congelados
+/// (`tests/crypto_frozen_vectors.rs`) vigila justo eso: si un bump futuro moviera esos defaults,
+/// `el_registro_de_hoy_conserva_los_parametros_del_hash_dorado` se pone rojo y obliga a fijarlos
+/// explícitos aquí en vez de dejar que la postura de seguridad cambie en silencio.
 pub fn hash_password(password: &str) -> Result<String, ApiError> {
     validate_password_strength(password)?;
-    let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
+    // password-hash 0.6 retiró `SaltString` y genera la sal DENTRO de `hash_password`
+    // (16 bytes de `getrandom`, la misma longitud que producía `SaltString::generate(&mut OsRng)`).
     Ok(argon2
-        .hash_password(password.as_bytes(), &salt)
+        .hash_password(password.as_bytes())
         .map_err(|_| ApiError::BadRequest("password_hash_failed: could not hash password".into()))?
         .to_string())
 }
@@ -62,9 +66,8 @@ pub async fn verify_password_blocking(
 fn dummy_hash() -> &'static str {
     static DUMMY: OnceLock<String> = OnceLock::new();
     DUMMY.get_or_init(|| {
-        let salt = SaltString::generate(&mut OsRng);
         Argon2::default()
-            .hash_password(b"timing-equalizer, never a real credential", &salt)
+            .hash_password(b"timing-equalizer, never a real credential")
             .expect("hashing a constant with default params cannot fail")
             .to_string()
     })
