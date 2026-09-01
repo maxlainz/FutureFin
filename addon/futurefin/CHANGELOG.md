@@ -5,6 +5,12 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.12.7
+
+- Mantenimiento interno: se modernizan las piezas que cifran tus copias de seguridad y protegen
+  tu contraseña. Tus copias exportadas y tu contraseña siguen funcionando exactamente igual —
+  hay tests permanentes que lo garantizan con ficheros de la versión anterior.
+
 ## 4.12.6
 
 - Mantenimiento interno: la interfaz se reconstruye con herramientas al día. Tus cifras no se

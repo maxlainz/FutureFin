@@ -4,6 +4,23 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.12.7] - 2026-09-01
+
+### El stack criptográfico sube de major, con el pasado congelado como testigo
+
+- **aes-gcm 0.10.3 → 0.11.1** (PR #160) y **argon2 0.5.3 → 0.6.0** (PR #162, con migración de
+  código: password-hash 0.6 genera la sal internamente — 16 bytes, el mismo layout PHC — y los
+  imports pasan a los re-exports de la raíz; los parámetros del KDF siguen siendo
+  `m=19456, t=2, p=1, out=32`, verificados idénticos en los defaults de 0.6, no asumidos).
+- La evidencia que estos bumps esperaban (bloqueados por la rutina en #185): el **cinturón de
+  vectores congelados** (#190) — un `.ffbackup` dorado y un hash PHC generados con las versiones
+  viejas que el binario nuevo tiene que seguir entendiendo. En CI y en local con ambos bumps
+  juntos: el backup de la era 0.10/0.5 descifra (AAD y tag GCM intactos), el hash de registro
+  antiguo verifica por la ruta real de login, y el registro de hoy conserva sus parámetros.
+- Para quien actualiza: **tus copias de seguridad exportadas y tu contraseña siguen funcionando
+  exactamente igual** — eso es precisamente lo que el cinturón demuestra, con controles
+  negativos para que no pueda pasar por vacío.
+
 ## [4.12.6] - 2026-09-01
 
 ### El toolchain del frontend, dos majors al día
