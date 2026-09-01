@@ -61,7 +61,9 @@ Solo lo activan los valores exactos `1`, `true`, `TRUE`, `yes` o `YES`; cualquie
 ### Sesiones
 
 La sesión es una cookie **`ff_session`** con `HttpOnly`, `SameSite=Lax`, `Path=/` y sin `Domain`
-(solo la sirve el host que la puso). Su `Max-Age` es `SESSION_TTL_DAYS`, 30 días por defecto
+(solo la sirve el host que la puso). Bajo un ingress de confianza el `Path` no es `/` sino el
+prefijo del ingress (`session_cookie_path`, `auth.rs`) — el detalle y el porqué, en la sección
+del add-on de Home Assistant más abajo. Su `Max-Age` es `SESSION_TTL_DAYS`, 30 días por defecto
 (rango admitido 1-400).
 
 El valor es un UUID opaco: no lleva información dentro. La sesión de verdad vive en la tabla
