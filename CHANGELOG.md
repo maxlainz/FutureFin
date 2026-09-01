@@ -18,15 +18,30 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   (`Dockerfile:56`), que esta etapa ni toca — `rust:bookworm` es solo andamio de compilación. Es
   higiene de la cadena de build, no una función nueva.
 
-### Nota post-publicación: esta imagen lleva también el grupo cargo-menores
+### Un backup truncado se rechaza en vez de importarse a medias
 
-- El tag `v4.12.3` acabó en el commit del merge de #174 (el `ci-gate` del publish abortó en el
-  commit del release por el incidente de atribución #194, y el run siguiente heredó la versión
-  pendiente), así que la imagen incluye además tres bumps de dependencias del binario:
-  `flate2` 1.1.9 → 1.1.10 (cambia el backend de compresión a `zlib-rs` y endurece el
-  decodificador — rechaza streams deflate incompletos al EOF; vive en la ruta del `.ffbackup`,
-  gzip sigue siendo gzip), `futures-util` 0.3.32 → 0.3.34 y `uuid` 1.24.1 → 1.26.0 (issue #185).
-  No existe un 4.12.4 con ese contenido: ya está aquí.
+- `flate2` 1.1.9 → 1.1.10 (#174). Vive en la ruta del `.ffbackup` cifrado
+  (`handlers/backup_user/crypto.rs:13-15,107,115`), y trae dos endurecimientos del decodificador:
+  **«Reject incomplete deflate streams at EOF»** y **«Reject oversized gzip extra fields»**. Un
+  fichero truncado o manipulado que antes podía devolver salida parcial ahora falla limpio como
+  corrupto. El formato no cambia: gzip sigue siendo gzip, y ningún backup válido se ve afectado.
+- Bajo ese mismo bump de parche, `flate2` **cambia de backend de compresión** (entra `zlib-rs`
+  0.6.7, `miniz_oxide` sube 0.8.9 → 0.9.1) y retira `cloudflare-zlib`. El repo declara
+  `flate2 = "1.0"` sin features, así que hereda el default nuevo. Sin cambio de formato ni de
+  cifras — queda anotado porque un cambio de motor bajo un parche merece decirse.
+- `futures-util` 0.3.32 → 0.3.34: correcciones de *soundness* (`ReadLine` ante excepciones, el
+  `Send` de `IterPinRef`/`Iter`, stacked borrows en `compat01as03`, fuga en
+  `FuturesUnordered::IntoIter`) e identidad del waker clonado. `uuid` 1.24.1 → 1.26.0: solo
+  adiciones (`serde::bytes`, `ContextV7::with_additional_precision_bits`), ninguna en uso aquí.
+- **Cero cifras del motor se mueven.** Ninguno de los tres saltos cruza major, los tres son
+  dependencias directas y ninguno anuncia rotura.
+
+> **Por qué este grupo aparece aquí y no en un 4.12.4.** El tag `v4.12.3` no se creó sobre el
+> commit del bump (`815fb27`) sino sobre el siguiente, `443631a` — el merge de #174 —, porque el
+> `ci-gate` del run de publicación falló en `815fb27` (ver #192). La imagen publicada como 4.12.3
+> **contiene** por tanto el grupo `cargo-menores`, así que esta sección lo declara. Un 4.12.4 cuyo
+> diff real contra la imagen 4.12.3 fuera solo un bump de versión contradiría «una versión, una
+> imagen»: no habría nada nuevo que publicar.
 
 ## [4.12.2] - 2026-08-31
 
