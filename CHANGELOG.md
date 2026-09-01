@@ -4,6 +4,24 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.12.6] - 2026-09-01
+
+### El toolchain del frontend, dos majors al día
+
+- **vite 6.4.3 → 8.2.2** con su acompañante obligado **@vitejs/plugin-react 4.7 → 6.1.1**
+  (PR #163): la 4.x no declara peer de vite 8, así que npm dejaba DOS vite en el árbol (el del
+  plugin anidado en 6.4.3) y el plugin Babel emitía deprecaciones de esbuild; la 6.x es la línea
+  nativa de vite 8 (Oxc, sin Babel). Ningún breaking de vite 7/8 ni de plugin-react 5/6 toca
+  nuestra configuración (sin `rollupOptions`, sin Sass, sin HMR custom, proxy intacto).
+- **@eslint/js 9.39.4 → 10.0.1** (PR #164): `eslint:recommended` v10 activa
+  `no-useless-assignment` y cazó **dos asignaciones muertas reales** —
+  `apps/web/src/lib/expenses.ts:479` y `apps/web/src/lib/projection-chart.ts:159` inicializaban
+  variables que todas las ramas reasignan antes de leer. Pasan a `let x: number`.
+- Para quien actualiza: **las cifras no se mueven** (488 tests de Vitest y la suite completa en
+  verde), pero el bundle se reconstruye entero con otro bundler (Rolldown) y otro minificador
+  CSS (Lightning CSS) — el repaso visual claro/oscuro queda en la lista de superficies del
+  owner, según la pauta del programa de gates visuales.
+
 ## [4.12.5] - 2026-09-01
 
 ### El bundle lo compila la misma Node LTS que lo verifica
