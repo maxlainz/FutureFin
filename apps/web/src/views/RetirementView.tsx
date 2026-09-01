@@ -38,7 +38,6 @@ import { appUrl } from "../lib/basePath";
 import {
   complementaryProjectionTickLabel,
   formatYearsEsFromMonths,
-  lastPointIndexAtOrBeforeMonth,
   projectionXTickLabel,
   resolveProjectionAxisAgeMode,
 } from "../lib/projection-chart";
@@ -504,15 +503,7 @@ export function RetirementView({
       projectionSeries &&
       projectionSeries.points.length > 0 ? (
         (() => {
-          const pts = projectionSeries.points;
           const horizon = projectionSeries.horizon_years;
-          const lastIdx = pts.length - 1;
-          const firstNwLabel = pts[0]
-            ? formatCurrencyNumber(pts[0].net_worth, currencyIso)
-            : null;
-          const lastNwLabel = pts[lastIdx]
-            ? formatCurrencyNumber(pts[lastIdx].net_worth, currencyIso)
-            : null;
           const jubMi =
             typeof projectionSeries.jubilacion_month_index === "number"
               ? projectionSeries.jubilacion_month_index
@@ -538,17 +529,6 @@ export function RetirementView({
           // Si hay jubilación FUTURA, recortamos la serie a jub+12 (un año después del cruce). El
           // eje Y se zoom-ajusta entre NW(hoy) y NW(fin).
           const clampToMonth = jubMi != null && !alreadyRetired ? jubMi + 12 : null;
-          // `clampToMonth` es un MES y `lastIdx` una POSICIÓN del array: con `density=hybrid`
-          // (0..12, 24, 36…) no son lo mismo, así que el pie del panel enseñaba el patrimonio de
-          // un punto que no era el último visible del chart. Misma traducción mes → posición que
-          // hace MiniProjection con esta misma prop.
-          const lastVisibleIdx =
-            clampToMonth != null
-              ? lastPointIndexAtOrBeforeMonth(pts, clampToMonth)
-              : lastIdx;
-          const lastVisibleLabel = pts[lastVisibleIdx]
-            ? formatCurrencyNumber(pts[lastVisibleIdx].net_worth, currencyIso)
-            : lastNwLabel;
           return (
             <section className="panel">
               <div className="panel-head-row">
@@ -560,8 +540,12 @@ export function RetirementView({
                     fontVariantNumeric: "tabular-nums",
                   }}
                 >
-                  {firstNwLabel && lastVisibleLabel
-                    ? `${firstNwLabel} → ${lastVisibleLabel}${clampToMonth != null ? " · cruce + 1 a" : ` · ${horizon} a`}`
+                  {/* Solo la VENTANA, sin cifras a propósito: el rango numérico (patrimonio
+                      hoy → patrimonio al año del cruce) se leía como un tercer objetivo junto
+                      a los dos de la tarjeta. El chart recorta a cruce+12 igualmente; la
+                      etiqueta no menciona ese año de padding. */}
+                  {clampToMonth != null
+                    ? "de hoy a la jubilación"
                     : `${horizon} a`}
                 </span>
               </div>

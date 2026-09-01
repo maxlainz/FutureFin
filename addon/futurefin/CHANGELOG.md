@@ -5,6 +5,11 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.12.2
+
+- La gráfica de Jubilación ya no muestra una cifra que parecía un tercer objetivo: su leyenda
+  ahora dice solo el tramo que pinta («de hoy a la jubilación»). Ningún número de tu plan cambia.
+
 ## 4.12.1
 
 - **Tu dinero ya nunca se queda «en caja fantasma»**: al jubilarte, tus reglas de ahorro siguen
