@@ -112,7 +112,7 @@ async fn create_with_recurrence_single_creates_rule_and_instance() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let today = server_today(&app, &owner.cookie).await;
-    let op = date_in(today.year(), today.month(), 20);
+    let op = today.format("%Y-%m-%d").to_string();
 
     let r = app
         .post_json_with_cookie(
@@ -156,7 +156,7 @@ async fn create_with_recurrence_batch_item_creates_rule() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let today = server_today(&app, &owner.cookie).await;
-    let op = date_in(today.year(), today.month(), 5);
+    let op = today.format("%Y-%m-%d").to_string();
 
     let r = app
         .post_json_with_cookie(
@@ -193,7 +193,7 @@ async fn legacy_day_of_month_field_is_ignored() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let today = server_today(&app, &owner.cookie).await;
-    let op = date_in(today.year(), today.month(), 10);
+    let op = today.format("%Y-%m-%d").to_string();
 
     let r = app
         .post_json_with_cookie(

@@ -5,6 +5,11 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.12.3
+
+- Mantenimiento interno: la imagen se reconstruye sobre una base de sistema al día. Nada cambia
+  en lo que ves ni en tus números.
+
 ## 4.12.2
 
 - La gráfica de Jubilación ya no muestra una cifra que parecía un tercer objetivo: su leyenda
