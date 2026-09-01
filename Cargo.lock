@@ -805,7 +805,7 @@ checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
 name = "futurefin-api"
-version = "4.12.3"
+version = "4.12.4"
 dependencies = [
  "aes-gcm",
  "argon2",
