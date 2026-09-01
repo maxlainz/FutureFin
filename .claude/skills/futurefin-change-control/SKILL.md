@@ -358,6 +358,12 @@ Its merge policy: patch/minor-in-range → 5 green checks suffice; **major or 0.
 evidence bar** (release notes read from the PR body, every announced breaking change grepped in
 the repo with the output pasted as a PR comment, checks on the current SHA — no readable notes,
 no merge). Every image-affecting fix gets its own patch release («una versión, una imagen»).
+**Crypto crates carry an extra bar**: for `aes-gcm`, `argon2` or `flate2`, green checks are NOT
+evidence — a round-trip suite only proves the new version understands *itself*. The evidence is
+`apps/api/tests/crypto_frozen_vectors.rs`, which decrypts a `.ffbackup` and verifies a PHC hash
+frozen with the OLD versions, i.e. the two formats this binary persists outside its own process
+(a user's backup file on disk, `users.password_hash` in the database). Run it on the bump branch
+and paste the output; **never** regenerate its vectors to make it green.
 The routine's ephemeral lock branch `ops/routine-lock` and the `dependabot-mirror` issue are
 infrastructure — do not delete them by hand (`.claude/git-and-releases.md` § Dependencias explains both).
 
