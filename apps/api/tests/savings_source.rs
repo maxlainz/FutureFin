@@ -271,7 +271,7 @@ async fn mode_b_weighted_avg_excludes_savings_and_partial_month() {
     manual(&app, &owner.cookie, &date_in(y6, m6, 15), "Sueldo", "1200", "income", None, None).await;
     manual(&app, &owner.cookie, &date_in(y6, m6, 16), "Compra", "-300", "expense", None, None).await;
     // Ruido excluido: mes actual (parcial) y mes −13 (antes de la ventana).
-    manual(&app, &owner.cookie, &date_in(today.year(), today.month(), 5), "Hoy", "9999", "income", None, None).await;
+    manual(&app, &owner.cookie, &today.format("%Y-%m-%d").to_string(), "Hoy", "9999", "income", None, None).await;
     manual(&app, &owner.cookie, &date_in(y13, m13, 15), "Viejo", "8888", "income", None, None).await;
 
     // Modo A (default) = presupuesto.
@@ -311,7 +311,7 @@ async fn mode_b_zero_months_falls_back_to_budget() {
 
     // Única transacción en el mes en curso (parcial) → fuera de ventana → months_with_data = 0.
     let today = server_today(&app, &owner.cookie).await;
-    manual(&app, &owner.cookie, &date_in(today.year(), today.month(), 5), "Hoy", "9999", "income", None, None).await;
+    manual(&app, &owner.cookie, &today.format("%Y-%m-%d").to_string(), "Hoy", "9999", "income", None, None).await;
 
     set_mode_b(&app, &owner.cookie).await;
     let delta = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
@@ -748,7 +748,7 @@ async fn projection_series_reports_effective_savings_source() {
 
     // Modo B sin transacciones en la ventana (solo una en el mes en curso) → fallback a budget.
     let today = server_today(&app, &owner.cookie).await;
-    manual(&app, &owner.cookie, &date_in(today.year(), today.month(), 5), "Hoy", "9999", "income", None, None).await;
+    manual(&app, &owner.cookie, &today.format("%Y-%m-%d").to_string(), "Hoy", "9999", "income", None, None).await;
     set_mode_b(&app, &owner.cookie).await;
     assert_eq!(
         source(&app, &owner.cookie).await,
@@ -973,7 +973,7 @@ async fn mode_c_zero_months_falls_back_to_budget() {
 
     // Única transacción en el mes en curso (parcial) → fuera de ventana → months_with_data = 0.
     let today = server_today(&app, &owner.cookie).await;
-    manual(&app, &owner.cookie, &date_in(today.year(), today.month(), 5), "Hoy", "9999", "income", None, None).await;
+    manual(&app, &owner.cookie, &today.format("%Y-%m-%d").to_string(), "Hoy", "9999", "income", None, None).await;
 
     set_mode_c(&app, &owner.cookie).await;
     let delta = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
