@@ -120,7 +120,7 @@ De uno en uno, ascendente, ciclo completo (latido del candado antes de cada merg
 
 0. Re-comprueba que el PR sigue mergeable (main se mueve 2 commits por ciclo). Conflicto → `@dependabot rebase`, siguiente.
 1. Mergea ese PR (y solo ese) — Dependabot: `merge_method: "merge"` + `commit_title` = título del PR + ` (#N)`.
-2. `git fetch origin && git checkout -B chore/release-<version> origin/main` — SIEMPRE de `origin/main` recién traído, nunca de tu main local (está atrasado: tus merges van por API). El diff del release debe ser EXACTAMENTE 3 ficheros: `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md`. Si ves más, para y repórtalo.
+2. `git fetch origin && git checkout -B chore/release-<version> origin/main` — SIEMPRE de `origin/main` recién traído, nunca de tu main local (está atrasado: tus merges van por API). El diff del release debe ser EXACTAMENTE 4 ficheros: `Cargo.toml`, `Cargo.lock`, `CHANGELOG.md` y `addon/futurefin/CHANGELOG.md` (este último con su sección `## X.Y.Z` — `audit-releases.sh --version`, que CI corre, falla sin ella; deriva detectada en #185). Si ves más, para y repórtalo.
 3. Lee la versión DEL CHECKOUT (`grep -m1 '^version' apps/api/Cargo.toml`), súbele un patch, sincroniza con `cargo update -p futurefin-api` (sin --offline).
 4. Sección `## [X.Y.Z] - AAAA-MM-DD` en CHANGELOG bajo `[Unreleased]`, en español, qué cambia para el usuario en la primera línea, nombrando el paquete concreto.
 5. `./scripts/audit-releases.sh --version`, commit, push de la rama, PR. Guarda la línea `remote: GitHub found N vulnerabilities…` del push: contraste extra del espejo.
