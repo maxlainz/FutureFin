@@ -5,6 +5,12 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.12.4
+
+- Si intentas restaurar una copia de seguridad que llegó truncada o dañada, ahora te lo dice en
+  vez de importarla a medias. Las copias buenas se restauran igual que siempre y tus números no
+  cambian.
+
 ## 4.12.3
 
 - Mantenimiento interno: la imagen se reconstruye sobre una base de sistema al día. Nada cambia

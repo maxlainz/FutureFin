@@ -4,6 +4,26 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.12.4] - 2026-09-01
+
+### Un backup truncado se rechaza en vez de importarse a medias
+
+- `flate2` 1.1.9 → 1.1.10 (#174). Vive en la ruta del `.ffbackup` cifrado
+  (`handlers/backup_user/crypto.rs:13-15,107,115`), y trae dos endurecimientos del decodificador:
+  **«Reject incomplete deflate streams at EOF»** y **«Reject oversized gzip extra fields»**. Un
+  fichero truncado o manipulado que antes podía devolver salida parcial ahora falla limpio como
+  corrupto. El formato no cambia: gzip sigue siendo gzip, y ningún backup válido se ve afectado.
+- Bajo ese mismo bump de parche, `flate2` **cambia de backend de compresión** (entra `zlib-rs`
+  0.6.7, `miniz_oxide` sube 0.8.9 → 0.9.1) y retira `cloudflare-zlib`. El repo declara
+  `flate2 = "1.0"` sin features, así que hereda el default nuevo. Sin cambio de formato ni de
+  cifras — queda anotado porque un cambio de motor bajo un parche merece decirse.
+- `futures-util` 0.3.32 → 0.3.34: correcciones de *soundness* (`ReadLine` ante excepciones, el
+  `Send` de `IterPinRef`/`Iter`, stacked borrows en `compat01as03`, fuga en
+  `FuturesUnordered::IntoIter`) e identidad del waker clonado. `uuid` 1.24.1 → 1.26.0: solo
+  adiciones (`serde::bytes`, `ContextV7::with_additional_precision_bits`), ninguna en uso aquí.
+- **Cero cifras del motor se mueven.** Ninguno de los tres saltos cruza major, los tres son
+  dependencias directas y ninguno anuncia rotura.
+
 ## [4.12.3] - 2026-09-01
 
 ### La imagen se reconstruye sobre una base Debian al día
