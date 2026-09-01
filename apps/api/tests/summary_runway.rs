@@ -626,7 +626,7 @@ async fn mode_b_zero_months_falls_back_to_budget_runway() {
     manual(
         &app,
         &owner.cookie,
-        &date_in(today.year(), today.month(), 5),
+        &today.format("%Y-%m-%d").to_string(),
         "Hoy",
         "9999",
         "income",
