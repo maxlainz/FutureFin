@@ -18,15 +18,23 @@
  *
  * Stateless: el confirm reenvía `file_b64` + `file_sha256` del preview. Perf: filas memoizadas y
  * filtros que no dependen del scroll.
+ *
+ * AUTOMATCH EN VIVO: cada asignación del usuario (fila o «Aplicar a visibles») entra en un
+ * acumulador concepto→asignación de toda la SESIÓN y, tras un debounce, se repite el preview del
+ * archivo en curso mandándolo en `pending_assignments`. Es el SERVIDOR quien recalcula las
+ * sugerencias con su motor de reglas (patrón derivado + precedencia completa): aquí no se duplica
+ * ni una línea de matching. Al volver, las filas que el usuario tocó quedan intactas y el resto
+ * adopta lo recalculado — clasificar un «CAFE 365» reclasifica los otros catorce.
  */
 
-import { memo, useCallback, useEffect, useMemo, useReducer, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { apiPost } from "../api/client";
 import type {
   AssetApiRow,
   CategoryRow,
   ImportConfirmRequest,
   ImportConfirmResponseApi,
+  ImportPendingAssignmentApi,
   ImportPreviewRequest,
   ImportPreviewResponseApi,
   ImportPreviewRowApi,
@@ -44,9 +52,14 @@ import {
   KIND_LABEL_ES,
   TRANSACTION_KINDS,
   buildConfirmDecisions,
+  buildPendingAssignments,
   capitalizeSource,
   categoriesForKind,
+  draftsEqual,
   initialDraftForRow,
+  isRefundRow,
+  mergePendingAssignments,
+  mergeRepreview,
   rowMatchesFilter,
   summarizeDecisions,
   summarizeImportBatch,
@@ -54,6 +67,13 @@ import {
   type ImportRowDraft,
   type ImportRowFilter,
 } from "../lib/expenses";
+
+/**
+ * Espera tras la ÚLTIMA asignación del usuario antes de repetir el preview. Suficiente para que
+ * un «kind + categoría» seguidos (dos `onChange`) viajen en una sola petición, y corto como para
+ * que la propagación se lea como inmediata.
+ */
+const REPREVIEW_DEBOUNCE_MS = 400;
 
 const SOURCE_OPTIONS: { id: TransactionImportSourceApi; label: string }[] = [
   { id: "auto", label: "Autodetectar" },
@@ -83,11 +103,25 @@ type State = {
   /** Preview del archivo en curso; null en review = leyendo el siguiente (o su preview falló). */
   preview: ImportPreviewResponseApi | null;
   drafts: ImportRowDraft[];
+  /** Paralelo a `drafts`: filas que el usuario tocó a mano. Un re-preview NUNCA las pisa. */
+  touched: boolean[];
   filter: ImportRowFilter;
   loading: boolean;
   error: string | null;
   /** Respuestas de los confirms ya aplicados en esta tanda (para el agregado final). */
   confirmed: ImportConfirmResponseApi[];
+  /**
+   * Acumulador de asignaciones de la SESIÓN del wizard (concepto → asignación), no del archivo:
+   * sobrevive a los saltos de la cola multi-CSV, así que lo clasificado en el archivo 1
+   * pre-categoriza el 2 sin esperar al aprendizaje del confirm. Orden = recencia.
+   */
+  assignments: Map<string, ImportPendingAssignmentApi>;
+  /** Se incrementa SOLO cuando `assignments` cambia: es lo que dispara el re-preview. */
+  assignmentsVersion: number;
+  /** Re-preview en vuelo. Deliberadamente NO es `loading`: la tabla sigue viva y editable. */
+  repreviewing: boolean;
+  /** Filas no-tocadas que movió el último re-preview (aviso «aplicada a N filas similares»). */
+  automatchApplied: number | null;
 };
 
 const INITIAL: State = {
@@ -98,10 +132,15 @@ const INITIAL: State = {
   fileIndex: 0,
   preview: null,
   drafts: [],
+  touched: [],
   filter: "all",
   loading: false,
   error: null,
   confirmed: [],
+  assignments: new Map(),
+  assignmentsVersion: 0,
+  repreviewing: false,
+  automatchApplied: null,
 };
 
 type Action =
@@ -116,6 +155,9 @@ type Action =
   | { type: "SET_FILTER"; filter: ImportRowFilter }
   | { type: "PATCH_ONE"; index: number; patch: Partial<ImportRowDraft> }
   | { type: "PATCH_MANY"; indices: number[]; patch: Partial<ImportRowDraft> }
+  | { type: "REPREVIEW_START" }
+  | { type: "REPREVIEW_OK"; preview: ImportPreviewResponseApi; fileIndex: number }
+  | { type: "REPREVIEW_DONE" }
   | { type: "CONFIRM_START" }
   | { type: "CONFIRM_OK"; res: ImportConfirmResponseApi };
 
@@ -125,6 +167,30 @@ function applyPatch(d: ImportRowDraft, patch: Partial<ImportRowDraft>): ImportRo
   if (kindChanged && patch.categoryId === undefined) next.categoryId = "";
   if (next.kind === "savings") next.categoryId = "";
   return next;
+}
+
+/**
+ * Registra en el acumulador lo que el usuario acaba de asignar en `indices`. Solo bumpea
+ * `assignmentsVersion` —y por tanto solo relanza el preview— si el Map cambió de verdad: las
+ * asignaciones que no pasan el gate (un gasto que se queda sin categoría) no tienen nada que
+ * enseñarle al servidor.
+ */
+function recordAssignments(
+  state: State,
+  indices: number[],
+  drafts: ImportRowDraft[],
+): State {
+  const rows = state.preview?.rows ?? [];
+  const assignments = mergePendingAssignments(
+    state.assignments,
+    indices.map((i) => ({ concept: rows[i]?.concept ?? "", draft: drafts[i] })),
+  );
+  if (assignments === state.assignments) return state;
+  return {
+    ...state,
+    assignments,
+    assignmentsVersion: state.assignmentsVersion + 1,
+  };
 }
 
 function reducer(state: State, action: Action): State {
@@ -139,7 +205,8 @@ function reducer(state: State, action: Action): State {
       return { ...state, accountAssetId: action.accountAssetId };
     case "PREVIEW_START":
       // Limpia el preview del archivo anterior: en la cola, entre confirm y confirm, la tabla
-      // vieja no debe verse bajo el spinner del siguiente.
+      // vieja no debe verse bajo el spinner del siguiente. `assignments` NO se limpia: es de la
+      // sesión, no del archivo.
       return {
         ...state,
         loading: true,
@@ -147,7 +214,10 @@ function reducer(state: State, action: Action): State {
         fileIndex: action.fileIndex,
         preview: null,
         drafts: [],
+        touched: [],
         filter: "all",
+        repreviewing: false,
+        automatchApplied: null,
       };
     case "PREVIEW_OK":
       return {
@@ -157,32 +227,98 @@ function reducer(state: State, action: Action): State {
         step: "review",
         preview: action.preview,
         drafts: action.drafts,
+        touched: action.drafts.map(() => false),
         filter: "all",
       };
     case "FAIL":
-      return { ...state, loading: false, error: action.message };
+      return { ...state, loading: false, repreviewing: false, error: action.message };
     case "BACK_TO_SELECT":
-      return { ...state, step: "select", preview: null, drafts: [], error: null };
+      return {
+        ...state,
+        step: "select",
+        preview: null,
+        drafts: [],
+        touched: [],
+        error: null,
+        repreviewing: false,
+        automatchApplied: null,
+      };
     case "SET_FILTER":
       return { ...state, filter: action.filter };
-    case "PATCH_ONE":
-      return {
-        ...state,
-        drafts: state.drafts.map((d, i) =>
-          i === action.index ? applyPatch(d, action.patch) : d,
-        ),
-      };
+    case "PATCH_ONE": {
+      const prev = state.drafts[action.index];
+      if (!prev) return state;
+      const next = applyPatch(prev, action.patch);
+      // Un patch que no cambia nada no «toca» la fila: si lo hiciera, el automatch dejaría de
+      // propagarse a filas que el usuario jamás miró.
+      if (draftsEqual(prev, next)) return state;
+      const drafts = state.drafts.map((d, i) => (i === action.index ? next : d));
+      return recordAssignments(
+        {
+          ...state,
+          drafts,
+          touched: state.touched.map((t, i) => (i === action.index ? true : t)),
+          automatchApplied: null,
+        },
+        [action.index],
+        drafts,
+      );
+    }
     case "PATCH_MANY": {
       const set = new Set(action.indices);
+      const changed: number[] = [];
+      const drafts = state.drafts.map((d, i) => {
+        if (!set.has(i)) return d;
+        const next = applyPatch(d, action.patch);
+        if (draftsEqual(d, next)) return d;
+        changed.push(i);
+        return next;
+      });
+      if (changed.length === 0) return state;
+      const changedSet = new Set(changed);
+      return recordAssignments(
+        {
+          ...state,
+          drafts,
+          touched: state.touched.map((t, i) => t || changedSet.has(i)),
+          automatchApplied: null,
+        },
+        changed,
+        drafts,
+      );
+    }
+    case "REPREVIEW_START":
+      return { ...state, repreviewing: true };
+    case "REPREVIEW_DONE":
+      return { ...state, repreviewing: false };
+    case "REPREVIEW_OK": {
+      // La respuesta puede llegar cuando la cola ya avanzó de archivo: el `file_sha256` y el
+      // índice son la prueba de que este preview es el del archivo que hay en pantalla.
+      const prev = state.preview;
+      if (
+        !prev ||
+        action.fileIndex !== state.fileIndex ||
+        action.preview.file_sha256 !== prev.file_sha256
+      ) {
+        return { ...state, repreviewing: false };
+      }
+      const merged = mergeRepreview(
+        state.drafts,
+        state.touched,
+        action.preview.rows,
+        prev.rows,
+      );
+      if (!merged) return { ...state, repreviewing: false };
       return {
         ...state,
-        drafts: state.drafts.map((d, i) =>
-          set.has(i) ? applyPatch(d, action.patch) : d,
-        ),
+        repreviewing: false,
+        preview: action.preview,
+        drafts: merged.drafts,
+        automatchApplied: merged.changed,
       };
     }
     case "CONFIRM_START":
-      return { ...state, loading: true, error: null };
+      return { ...state, loading: true, error: null, repreviewing: false };
     case "CONFIRM_OK":
       // No toca `loading`: o el caller encadena el PREVIEW_START del siguiente archivo, o cierra.
       return { ...state, confirmed: [...state.confirmed, action.res] };
@@ -218,15 +354,93 @@ export function ImportWizardModal({
   const [bulkCategory, setBulkCategory] = useState<string>("");
   const isMobile = useIsMobile();
 
+  /**
+   * Espejo del estado para el re-preview diferido. El debounce corre 400 ms DESPUÉS del render
+   * que lo programó, así que leer de una clausura daría el estado de entonces; y meter el estado
+   * en las dependencias del efecto lo relanzaría con cada respuesta —el re-preview reemplaza
+   * `preview`— en un bucle infinito. Se declara ANTES del efecto del debounce para que React lo
+   * refresque primero en el mismo commit.
+   */
+  const latest = useRef(state);
+  useEffect(() => {
+    latest.current = state;
+  });
+
+  const repreviewTimer = useRef<number | null>(null);
+  /** Sello del re-preview en vuelo: una respuesta con sello viejo se descarta (el `fetch` no se
+   *  aborta, pero su resultado no llega nunca a la tabla). */
+  const repreviewSeq = useRef(0);
+
+  /** Cancela el re-preview pendiente Y el que esté en vuelo. */
+  const cancelRepreview = useCallback(() => {
+    if (repreviewTimer.current !== null) {
+      window.clearTimeout(repreviewTimer.current);
+      repreviewTimer.current = null;
+    }
+    repreviewSeq.current += 1;
+  }, []);
+
   // Reset cada vez que se (re)abre el modal.
   useEffect(() => {
     if (open) {
+      cancelRepreview();
       dispatch({ type: "RESET" });
       setExpandedLinks(new Set());
       setBulkKind("");
       setBulkCategory("");
     }
-  }, [open]);
+  }, [open, cancelRepreview]);
+
+  /**
+   * Repite el preview del archivo EN CURSO con las asignaciones de la sesión, para que el
+   * servidor —con su motor de reglas real, no una copia en TS— recalcule las sugerencias. Las
+   * filas que el usuario tocó no se tocan; las demás adoptan lo recalculado.
+   *
+   * Es una comodidad, no una operación del import: si falla, se traga el error (la tabla vigente
+   * sigue siendo válida y el banner del wizard está reservado para los fallos de preview/confirm).
+   */
+  const runRepreview = useCallback(async () => {
+    const s = latest.current;
+    const file = s.files[s.fileIndex];
+    if (s.step !== "review" || s.loading || !file || !s.preview) return;
+    const seq = ++repreviewSeq.current;
+    const fileIndex = s.fileIndex;
+    dispatch({ type: "REPREVIEW_START" });
+    try {
+      const body: ImportPreviewRequest = { source: s.source, file_b64: file.b64 };
+      if (s.accountAssetId) body.account_asset_id = s.accountAssetId;
+      const pending = buildPendingAssignments(s.assignments);
+      if (pending.length > 0) body.pending_assignments = pending;
+      const preview = await apiPost<ImportPreviewResponseApi>(
+        "/v1/transactions/import/preview",
+        body,
+      );
+      if (seq !== repreviewSeq.current) return;
+      if (!preview) {
+        dispatch({ type: "REPREVIEW_DONE" });
+        return;
+      }
+      dispatch({ type: "REPREVIEW_OK", preview, fileIndex });
+    } catch {
+      if (seq !== repreviewSeq.current) return;
+      dispatch({ type: "REPREVIEW_DONE" });
+    }
+  }, []);
+
+  // Debounce: cada asignación nueva reprograma el re-preview y anula el anterior.
+  useEffect(() => {
+    if (state.assignmentsVersion === 0) return;
+    if (repreviewTimer.current !== null) window.clearTimeout(repreviewTimer.current);
+    const id = window.setTimeout(() => {
+      repreviewTimer.current = null;
+      void runRepreview();
+    }, REPREVIEW_DEBOUNCE_MS);
+    repreviewTimer.current = id;
+    return () => {
+      window.clearTimeout(id);
+      if (repreviewTimer.current === id) repreviewTimer.current = null;
+    };
+  }, [state.assignmentsVersion, runRepreview]);
 
   const rows = useMemo(() => state.preview?.rows ?? [], [state.preview]);
 
@@ -247,6 +461,7 @@ export function ImportWizardModal({
 
   /** Cierra el modal; si hubo confirms, notifica antes el agregado de la tanda. */
   function finishAndClose(confirmed: ImportConfirmResponseApi[]) {
+    cancelRepreview();
     if (confirmed.length > 0) onImported(summarizeImportBatch(confirmed));
     onClose();
   }
@@ -259,6 +474,7 @@ export function ImportWizardModal({
       dispatch({ type: "FAIL", message: "Selecciona al menos un archivo CSV." });
       return;
     }
+    cancelRepreview();
     dispatch({ type: "PREVIEW_START", fileIndex });
     try {
       const body: ImportPreviewRequest = {
@@ -266,6 +482,10 @@ export function ImportWizardModal({
         file_b64: file.b64,
       };
       if (state.accountAssetId) body.account_asset_id = state.accountAssetId;
+      // También en el preview INICIAL de cada archivo: lo clasificado en los anteriores de la
+      // cola llega pre-categorizado sin esperar a que el confirm consolide las reglas.
+      const pending = buildPendingAssignments(state.assignments);
+      if (pending.length > 0) body.pending_assignments = pending;
       const preview = await apiPost<ImportPreviewResponseApi>(
         "/v1/transactions/import/preview",
         body,
@@ -294,6 +514,8 @@ export function ImportWizardModal({
 
   async function runConfirm() {
     if (!state.preview || !currentFile) return;
+    // Un re-preview a medio vuelo reescribiría los drafts DESPUÉS de leerlos para las decisiones.
+    cancelRepreview();
     dispatch({ type: "CONFIRM_START" });
     try {
       const body: ImportConfirmRequest = {
@@ -354,6 +576,19 @@ export function ImportWizardModal({
     if (Object.keys(patch).length === 0) return;
     dispatch({ type: "PATCH_MANY", indices: visibleIndices, patch });
   }
+
+  /**
+   * Aviso del automatch. Vive en un slot de altura reservada (`.import-automatch-note` siempre se
+   * renderiza, con un espacio duro cuando está vacío): la tabla no puede saltar cada vez que el
+   * servidor propaga una categoría.
+   */
+  const automatchNote = state.repreviewing
+    ? "Aplicando categorías…"
+    : state.automatchApplied && state.automatchApplied > 0
+      ? `Categoría aplicada a ${state.automatchApplied} ${
+          state.automatchApplied === 1 ? "fila similar" : "filas similares"
+        }.`
+      : "";
 
   const bulkCategoryOptions = useMemo(
     () => [
@@ -598,6 +833,10 @@ export function ImportWizardModal({
               </div>
             </div>
 
+            <p className="import-automatch-note" aria-live="polite">
+              {automatchNote === "" ? " " : automatchNote}
+            </p>
+
             {rows.length === 0 ? (
               <p className="muted bordered-top">Sin filas en el CSV.</p>
             ) : (
@@ -760,6 +999,9 @@ const PreviewRowMemo = memo(function PreviewRow({
   const muted = row.status === "already_imported" || row.currency_warning;
   const amountNum = Number(row.amount);
   const amountClass = amountNum < 0 ? "num-neg" : amountNum > 0 ? "num-pos" : "";
+  // Se mira el DRAFT, no la sugerencia del servidor: si el usuario mueve la fila a Ingreso, la
+  // señal de devolución desaparece en el acto.
+  const refund = isRefundRow(draft.kind, row.amount);
   const statusHints: string[] = [];
   if (row.status === "already_imported") statusHints.push("Duplicado");
   if (row.suggested_transfer) statusHints.push("Transferencia");
@@ -849,6 +1091,17 @@ const PreviewRowMemo = memo(function PreviewRow({
         {isMobile ? null : <td>{formatDateDmy(row.op_date)}</td>}
         <td className="import-concept-cell">
           {row.concept}
+          {refund ? (
+            <>
+              {" "}
+              <span
+                className="ff-refund-tag"
+                title="Gasto con importe positivo: una devolución. Resta del gasto de su categoría."
+              >
+                Devolución
+              </span>
+            </>
+          ) : null}
           {isMobile ? (
             <span className="cell-subline">
               {formatDateDm(row.op_date)} ·{" "}

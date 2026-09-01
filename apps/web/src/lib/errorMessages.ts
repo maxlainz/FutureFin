@@ -134,6 +134,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "El archivo trae movimientos en otra divisa. Solo se pueden importar los que estén en la divisa de tu hogar.",
   preview_confirm_mismatch:
     "El archivo ha cambiado desde la vista previa. Vuelve a empezar la importación.",
+  pending_assignments_too_many:
+    "Demasiadas asignaciones pendientes en esta sesión. Confirma el archivo y sigue con el resto.",
   transaction_currency_invalid: "Esa divisa no es válida.",
   transaction_kind_invalid:
     "El tipo de movimiento no es válido. Elige gasto, ingreso o ahorro.",

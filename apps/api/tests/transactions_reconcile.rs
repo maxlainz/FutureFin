@@ -209,14 +209,107 @@ async fn different_owner_never_matched() {
 }
 
 #[tokio::test]
-async fn savings_leg_participates_in_matching() {
+async fn savings_leg_is_not_auto_matched_nor_suggested() {
+    // Contrato desde 4.14.0: la candidatura automática (pase + sugerencias) solo considera
+    // patas income/expense. Una fila savings de importe exactamente opuesto a un movimiento
+    // real dentro de la ventana lo emparejaría y sacaría ese movimiento de los agregados —
+    // y a diferencia de un par income/expense, el neto por bucket NO se conserva. (Hasta
+    // 4.13.x savings participaba; la vía manual de abajo queda como escape.)
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
-    // Una aportación (savings −200) y su contrapartida +200 en el bróker: sin conciliar, el
-    // income quedaría inflado en 200 → savings PARTICIPA en el matching.
+    create_txn(&app, &owner.cookie, "2026-06-10", "Aportación", "-200", "savings").await;
+    let b = create_txn(&app, &owner.cookie, "2026-06-11", "Entrada opuesta", "200", "income").await;
+    assert!(b["transfer_counterpart_id"].is_null(), "savings no auto-empareja: {b:?}");
+
+    // Ni el pase explícito…
+    let r = app
+        .post_json_with_cookie("/v1/transactions/reconcile", json!({}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(r.json()["pairs_created"].as_i64().unwrap(), 0, "pase no empareja savings");
+
+    // …ni las sugerencias (mismo predicado compartido).
+    let s = app
+        .get_with_cookie("/v1/transactions/transfer-matches", &owner.cookie)
+        .await;
+    assert_eq!(s.status, http::StatusCode::OK, "{s:?}");
+    assert_eq!(s.json()["suggestion_count"].as_i64().unwrap(), 0, "sin sugerencias savings");
+}
+
+#[tokio::test]
+async fn manual_reconcile_accepts_a_savings_leg() {
+    // El emparejamiento manual sigue siendo kind-agnóstico a propósito: si el usuario trackea
+    // también la cuenta destino y quiere cruzar la aportación con su entrada, puede.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
     let a = create_txn(&app, &owner.cookie, "2026-06-10", "Aportación", "-200", "savings").await;
     let b = create_txn(&app, &owner.cookie, "2026-06-11", "Entrada bróker", "200", "income").await;
-    assert_eq!(b["transfer_counterpart_id"], a["id"], "savings participa");
+    assert!(b["transfer_counterpart_id"].is_null(), "precondición: sin auto-par");
+
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/{}/reconcile", id_of(&a)),
+            json!({ "counterpart_id": id_of(&b) }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "manual con savings: {r:?}");
+    assert_eq!(r.json()["transaction"]["transfer_counterpart_id"], b["id"]);
+}
+
+#[tokio::test]
+async fn savings_pull_from_import_does_not_eat_a_real_expense() {
+    // EL CASO REAL que motivó el cambio: un espacio de ahorro reembolsa una compra concreta
+    // (importes idénticos por construcción, mismo día). La retirada del espacio entra como
+    // savings positivo vía import (el import está exento de la regla de signo) y NO debe
+    // emparejarse con el gasto real de tarjeta.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let csv = "\"Booking Date\",\"Value Date\",\"Partner Name\",\"Partner Iban\",Type,\"Payment Reference\",\"Account Name\",\"Amount (EUR)\",\"Original Amount\",\"Original Currency\",\"Exchange Rate\"\n\
+        2026-06-10,2026-06-10,\"TIENDA EJEMPLO\",,Presentment,,\"Cuenta principal\",-49.9,49.9,EUR,1\n\
+        2026-06-10,2026-06-10,\"Cuenta de Ahorro\",,\"Credit Transfer\",\"TIENDA EJEMPLO\",\"Cuenta principal\",49.9,,,\n";
+    let b64 = B64.encode(csv);
+    let p = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/preview",
+            json!({ "source": "n26", "file_b64": b64 }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(p.status, http::StatusCode::OK, "{p:?}");
+    let pb = p.json();
+    let sha = pb["file_sha256"].as_str().unwrap().to_string();
+
+    // Decisiones del wizard: el cargo es gasto real; la retirada del espacio, savings.
+    let c = app
+        .post_json_with_cookie(
+            "/v1/transactions/import/confirm",
+            json!({
+                "source": "n26",
+                "file_b64": b64,
+                "file_sha256": sha,
+                "decisions": [
+                    { "kind": "expense", "category_id": null },
+                    { "kind": "savings", "category_id": null },
+                ],
+                "learn_rules": false,
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(c.status, http::StatusCode::OK, "{c:?}");
+
+    // Ninguna de las dos patas queda conciliada: el gasto sigue contando como gasto.
+    let list = app
+        .get_with_cookie("/v1/transactions?month=2026-06", &owner.cookie)
+        .await;
+    for t in list.json().as_array().unwrap() {
+        assert!(
+            t["transfer_counterpart_id"].is_null(),
+            "nada conciliado en el par gasto↔savings: {t:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

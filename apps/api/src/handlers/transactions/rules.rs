@@ -37,6 +37,9 @@ pub struct LoadedRule {
     pub assign_kind: Option<String>,
     pub assign_category_id: Option<Uuid>,
     pub updated_at: DateTime<Utc>,
+    /// `true` = regla construida en memoria desde los `pending_assignments` del preview
+    /// (no persistida: su `id` es sintético y NO debe publicarse como `matched_rule_id`).
+    pub ephemeral: bool,
 }
 
 /// Carga todas las reglas del usuario para el matching del preview.
@@ -74,6 +77,7 @@ pub async fn load_rules(
             assign_kind: r.assign_kind,
             assign_category_id: r.assign_category_id,
             updated_at: r.updated_at,
+            ephemeral: false,
         })
         .collect())
 }

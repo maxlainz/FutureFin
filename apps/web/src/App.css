@@ -2939,6 +2939,29 @@ fieldset.retirement-config-stack {
   margin-right: 0.15rem;
 }
 
+/* Chip «Devolución»: un gasto con importe POSITIVO no es un error de signo, es dinero que vuelve
+   y que el backend netea contra el gasto de su categoría. Compartido por la tabla de Movimientos,
+   su modal de edición y la tabla del preview del import.
+   El color aquí SÍ significa (design-system §No introduzcas color decorativo): es el acento
+   marcando UN ítem excepcional de la fila, no adorno — mismo recurso que .exp-cat-dot. El tinte
+   sale de color-mix sobre --ff-pill / --ff-line-soft, así que sigue al tema en claro y oscuro sin
+   token nuevo (mismo patrón que .upcoming-overdue-chip). La CIFRA no se toca: ya la colorea
+   num-pos, el único uso sancionado de --ff-pos. */
+.ff-refund-tag {
+  display: inline-block;
+  font-size: 0.66rem;
+  line-height: 1.5;
+  padding: 0 0.4rem;
+  border-radius: var(--ff-radius-pill);
+  background: color-mix(in oklch, var(--ff-accent) 12%, var(--ff-pill));
+  color: var(--ff-ink-soft);
+  border: 1px solid color-mix(in oklch, var(--ff-accent) 30%, var(--ff-line-soft));
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  vertical-align: 0.08em;
+}
+
 /* Fila de un traspaso conciliado: atenuada, porque no cuenta en ningún total (mismo recurso que
    .import-row--muted del wizard). */
 .exp-row-reconciled td {
@@ -3289,6 +3312,16 @@ fieldset.retirement-config-stack {
 
 .import-row--muted td {
   opacity: 0.6;
+}
+
+/* Aviso del automatch en vivo («Categoría aplicada a N filas similares»). SIEMPRE renderizado
+   —con un espacio duro cuando no hay nada que decir— y con altura mínima propia: la tabla del
+   preview no puede saltar cada vez que el servidor propaga una categoría. */
+.import-automatch-note {
+  margin: 0;
+  min-height: 1.1rem;
+  font-size: 0.72rem;
+  color: var(--ff-muted);
 }
 
 .import-links-row td {

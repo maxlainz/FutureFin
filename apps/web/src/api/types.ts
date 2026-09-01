@@ -716,11 +716,27 @@ export type PatchTransactionRequest = {
   clear_notes?: boolean;
 };
 
+/**
+ * Una asignación provisional de la sesión del wizard: el concepto de una fila que el usuario ya
+ * clasificó y lo que le asignó. El servidor la convierte en una regla EFÍMERA (mismo motor de
+ * patrones y misma precedencia que las reglas persistidas) y recalcula las sugerencias del
+ * preview; nada se persiste. Solo generan regla las que llevan `category_id` o `kind: "savings"`
+ * — el mismo gate que el aprendizaje del confirm. `category_id` viaja explícitamente a `null`
+ * cuando no aplica.
+ */
+export type ImportPendingAssignmentApi = {
+  concept: string;
+  kind: TransactionKindApi;
+  category_id: string | null;
+};
+
 /** Cuerpo de `POST /v1/transactions/import/preview`. */
 export type ImportPreviewRequest = {
   source: TransactionImportSourceApi;
   file_b64: string;
   account_asset_id?: string;
+  /** Máximo 200 entradas (el backend responde 400 `pending_assignments_too_many` por encima). */
+  pending_assignments?: ImportPendingAssignmentApi[];
 };
 
 /** Una fila del preview del import. `status` new/already_imported. */

@@ -77,7 +77,8 @@ pub use schema::{
     CreateTransactionRequest,
     ImportBatchResponse, ImportConfirmBody, ImportConfirmResponse, ImportDecision, ImportPreviewBody,
     ImportPreviewResponse, MaterializeResponse, MonthEntry, PatchRuleBody, PatchTransactionBody,
-    PreviewRow, RecurrenceSpec, ReconcilePairBody, ReconcilePairResponse, ReconcileRunResponse,
+    PendingAssignment, PreviewRow, RecurrenceSpec, ReconcilePairBody, ReconcilePairResponse,
+    ReconcileRunResponse,
     RecurringRuleResponse, RuleResponse, TransactionResponse, TransactionsSummaryResponse,
 };
 

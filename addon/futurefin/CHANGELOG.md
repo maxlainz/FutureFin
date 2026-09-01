@@ -5,6 +5,17 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.14.0
+
+- Al revisar un import, **asignar una categoría a un movimiento la aplica al momento al resto de
+  movimientos parecidos** del archivo («Cafetería 12» arrastra a todas sus repeticiones), y lo que
+  ves es exactamente lo que las reglas aprendidas harán en los próximos imports.
+- Un gasto con importe positivo (un Bizum que te devuelve algo que adelantaste, un abono de la
+  tienda) ahora se señala como **«Devolución»**: resta del gasto de su categoría, y ya no parece
+  un signo mal importado.
+- La conciliación automática de transferencias **ya no puede emparejar un movimiento de ahorro
+  con un gasto real** del mismo importe: cada uno sigue contando donde le toca.
+
 ## 4.13.0
 
 - Al importar movimientos ya puedes subir **varios CSV a la vez**: los revisas y confirmas uno

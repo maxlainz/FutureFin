@@ -3267,7 +3267,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "reconcile_transfers",
-        description = "«Concíliame las transferencias»: pase de auto-conciliación sobre los movimientos del usuario del token — empareja importes exactamente opuestos (misma divisa) a ≤5 días, aunque vengan de extractos distintos. Idempotente; nunca re-empareja pares desconciliados a mano. Para VER los pares antes de escribir nada, suggest_transfer_matches.",
+        description = "«Concíliame las transferencias»: pase de auto-conciliación sobre los movimientos del usuario del token — empareja importes exactamente opuestos (misma divisa, solo gasto/ingreso) a ≤5 días, aunque vengan de extractos distintos. Idempotente; nunca re-empareja pares desconciliados a mano. Para VER los pares antes de escribir nada, suggest_transfer_matches.",
         annotations(title = "Conciliar transferencias", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn reconcile_transfers(
