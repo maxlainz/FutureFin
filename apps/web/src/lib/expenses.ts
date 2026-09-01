@@ -8,6 +8,7 @@
 import type {
   AvgBasisApi,
   CategoryRow,
+  ImportConfirmResponseApi,
   ImportDecisionApi,
   ImportPreviewRowApi,
   SummaryTotalsApi,
@@ -227,6 +228,43 @@ export function rowMatchesFilter(
     default:
       return true;
   }
+}
+
+/**
+ * Agregado de una tanda de imports (subida múltiple, 4.13.0): suma las respuestas de los
+ * `POST /import/confirm` que llegaron a confirmarse en una misma sesión del wizard. `files` es el
+ * nº de archivos CONFIRMADOS — los omitidos o fallidos no cuentan (cada uno conserva además su
+ * propia fila en `transaction_imports`, deshacible por separado). El wizard notifica UNA vez con
+ * este agregado al terminar o cerrarse, no una vez por archivo.
+ */
+export type ImportBatchSummary = {
+  files: number;
+  imported: number;
+  skipped_already_imported: number;
+  discarded: number;
+  rules_learned: number;
+  reconciled_pairs: number;
+};
+
+export function summarizeImportBatch(
+  responses: ImportConfirmResponseApi[],
+): ImportBatchSummary {
+  const sum: ImportBatchSummary = {
+    files: responses.length,
+    imported: 0,
+    skipped_already_imported: 0,
+    discarded: 0,
+    rules_learned: 0,
+    reconciled_pairs: 0,
+  };
+  for (const r of responses) {
+    sum.imported += r.imported;
+    sum.skipped_already_imported += r.skipped_already_imported;
+    sum.discarded += r.discarded;
+    sum.rules_learned += r.rules_learned;
+    sum.reconciled_pairs += r.reconciled_pairs;
+  }
+  return sum;
 }
 
 /** Signo redondeado a euros: `pos` (>0), `neg` (<0), `zero`. */

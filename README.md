@@ -51,7 +51,7 @@ proyección las aplica cada mes.
 
 ### Lo que ha pasado de verdad
 
-Importa el CSV de tu banco (MyInvestor y N26 se reconocen solos), o apunta el efectivo a mano.
+Importa los CSV de tu banco, varios a la vez si quieres (MyInvestor y N26 se reconocen solos), o apunta el efectivo a mano.
 FutureFin detecta duplicados, aprende cómo categorizas y empareja las transferencias entre tus
 propias cuentas para que no cuenten como gasto. Después compara mes real, presupuesto y promedio.
 

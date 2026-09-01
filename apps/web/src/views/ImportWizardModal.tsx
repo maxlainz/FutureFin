@@ -1,12 +1,20 @@
 /**
- * Wizard de import de CSV bancarios (2 pasos, `useReducer`).
+ * Wizard de import de CSV bancarios (2 pasos, `useReducer`). Desde 4.13.0 acepta VARIOS archivos
+ * a la vez y los procesa en cola, uno tras otro.
  *
- * Paso 1 (select): fuente (Auto/MyInvestor/N26) + archivo `.csv` → `POST /import/preview`.
- * Paso 2 (review): banner-resumen, barra de acciones masivas (filtros + incluir/excluir + asignar
- * kind/categoría en masa), tabla preview (filas dup/divisa atenuadas y desmarcadas por defecto —
- * las posibles transferencias entran incluidas desde 3.5.0 y solo llevan su hint textual; selects
- * kind/categoría por fila, editor de vínculos plegable) y footer con resumen
- * dinámico + select de cuenta origen del batch → `POST /import/confirm` con `decisions[]` paralelo.
+ * Paso 1 (select): fuente (Auto/MyInvestor/N26) + archivo(s) `.csv`. Cuenta y formato se aplican
+ * a toda la tanda. → `POST /import/preview` del primer archivo.
+ * Paso 2 (review), POR ARCHIVO: banner-resumen, barra de acciones masivas (filtros +
+ * incluir/excluir + asignar kind/categoría en masa), tabla preview (filas dup/divisa atenuadas y
+ * desmarcadas por defecto — las posibles transferencias entran incluidas desde 3.5.0 y solo
+ * llevan su hint textual; selects kind/categoría por fila, editor de vínculos plegable) y footer
+ * con resumen dinámico → `POST /import/confirm` con `decisions[]` paralelo. Confirmar (u
+ * «Omitir archivo») avanza al preview del siguiente; el último cierra el modal.
+ *
+ * La cola NO es atómica a propósito: cada archivo es su propio preview/confirm y su propia fila
+ * de `transaction_imports` (deshacible por separado); cancelar a mitad conserva lo ya confirmado.
+ * `onImported` se dispara UNA vez al terminar/cerrar, con el agregado (`summarizeImportBatch`),
+ * y solo si hubo al menos un confirm.
  *
  * Stateless: el confirm reenvía `file_b64` + `file_sha256` del preview. Perf: filas memoizadas y
  * filtros que no dependen del scroll.
@@ -41,6 +49,8 @@ import {
   initialDraftForRow,
   rowMatchesFilter,
   summarizeDecisions,
+  summarizeImportBatch,
+  type ImportBatchSummary,
   type ImportRowDraft,
   type ImportRowFilter,
 } from "../lib/expenses";
@@ -59,45 +69,55 @@ const FILTER_OPTIONS: { id: ImportRowFilter; label: string }[] = [
   { id: "uncategorized", label: "Sin categoría" },
 ];
 
+/** Un archivo de la tanda, ya leído a base64 en el select. */
+type QueuedFile = { name: string; b64: string };
+
 type State = {
   step: "select" | "review";
   source: TransactionImportSourceApi;
   accountAssetId: string;
-  fileName: string;
-  fileB64: string | null;
+  /** Tanda completa elegida en el paso select (1..N archivos). */
+  files: QueuedFile[];
+  /** Índice del archivo en curso (su preview/review). */
+  fileIndex: number;
+  /** Preview del archivo en curso; null en review = leyendo el siguiente (o su preview falló). */
   preview: ImportPreviewResponseApi | null;
   drafts: ImportRowDraft[];
   filter: ImportRowFilter;
   loading: boolean;
   error: string | null;
+  /** Respuestas de los confirms ya aplicados en esta tanda (para el agregado final). */
+  confirmed: ImportConfirmResponseApi[];
 };
 
 const INITIAL: State = {
   step: "select",
   source: "auto",
   accountAssetId: "",
-  fileName: "",
-  fileB64: null,
+  files: [],
+  fileIndex: 0,
   preview: null,
   drafts: [],
   filter: "all",
   loading: false,
   error: null,
+  confirmed: [],
 };
 
 type Action =
   | { type: "RESET" }
   | { type: "SET_SOURCE"; source: TransactionImportSourceApi }
-  | { type: "SET_FILE"; name: string; b64: string | null }
+  | { type: "SET_FILES"; files: QueuedFile[] }
   | { type: "SET_ACCOUNT"; accountAssetId: string }
-  | { type: "PREVIEW_START" }
+  | { type: "PREVIEW_START"; fileIndex: number }
   | { type: "PREVIEW_OK"; preview: ImportPreviewResponseApi; drafts: ImportRowDraft[] }
   | { type: "FAIL"; message: string }
   | { type: "BACK_TO_SELECT" }
   | { type: "SET_FILTER"; filter: ImportRowFilter }
   | { type: "PATCH_ONE"; index: number; patch: Partial<ImportRowDraft> }
   | { type: "PATCH_MANY"; indices: number[]; patch: Partial<ImportRowDraft> }
-  | { type: "CONFIRM_START" };
+  | { type: "CONFIRM_START" }
+  | { type: "CONFIRM_OK"; res: ImportConfirmResponseApi };
 
 function applyPatch(d: ImportRowDraft, patch: Partial<ImportRowDraft>): ImportRowDraft {
   const next = { ...d, ...patch };
@@ -113,12 +133,22 @@ function reducer(state: State, action: Action): State {
       return INITIAL;
     case "SET_SOURCE":
       return { ...state, source: action.source };
-    case "SET_FILE":
-      return { ...state, fileName: action.name, fileB64: action.b64, error: null };
+    case "SET_FILES":
+      return { ...state, files: action.files, fileIndex: 0, error: null };
     case "SET_ACCOUNT":
       return { ...state, accountAssetId: action.accountAssetId };
     case "PREVIEW_START":
-      return { ...state, loading: true, error: null };
+      // Limpia el preview del archivo anterior: en la cola, entre confirm y confirm, la tabla
+      // vieja no debe verse bajo el spinner del siguiente.
+      return {
+        ...state,
+        loading: true,
+        error: null,
+        fileIndex: action.fileIndex,
+        preview: null,
+        drafts: [],
+        filter: "all",
+      };
     case "PREVIEW_OK":
       return {
         ...state,
@@ -153,6 +183,9 @@ function reducer(state: State, action: Action): State {
     }
     case "CONFIRM_START":
       return { ...state, loading: true, error: null };
+    case "CONFIRM_OK":
+      // No toca `loading`: o el caller encadena el PREVIEW_START del siguiente archivo, o cierra.
+      return { ...state, confirmed: [...state.confirmed, action.res] };
     default:
       return state;
   }
@@ -175,7 +208,8 @@ export function ImportWizardModal({
   assets: AssetApiRow[];
   liabilities: LiabilityApiRow[];
   currencyIso: string;
-  onImported: (res: ImportConfirmResponseApi) => void;
+  /** Agregado de la tanda (1..N archivos). Solo se llama si hubo al menos un confirm. */
+  onImported: (batch: ImportBatchSummary) => void;
 }) {
   const [state, dispatch] = useReducer(reducer, INITIAL);
   const [expandedLinks, setExpandedLinks] = useState<Set<number>>(new Set());
@@ -208,16 +242,28 @@ export function ImportWizardModal({
     [rows, state.drafts],
   );
 
-  async function runPreview() {
-    if (!state.fileB64) {
-      dispatch({ type: "FAIL", message: "Selecciona un archivo CSV." });
+  const currentFile = state.files[state.fileIndex] ?? null;
+  const hasNextFile = state.fileIndex + 1 < state.files.length;
+
+  /** Cierra el modal; si hubo confirms, notifica antes el agregado de la tanda. */
+  function finishAndClose(confirmed: ImportConfirmResponseApi[]) {
+    if (confirmed.length > 0) onImported(summarizeImportBatch(confirmed));
+    onClose();
+  }
+
+  const handleClose = () => finishAndClose(state.confirmed);
+
+  async function previewFileAt(fileIndex: number) {
+    const file = state.files[fileIndex];
+    if (!file) {
+      dispatch({ type: "FAIL", message: "Selecciona al menos un archivo CSV." });
       return;
     }
-    dispatch({ type: "PREVIEW_START" });
+    dispatch({ type: "PREVIEW_START", fileIndex });
     try {
       const body: ImportPreviewRequest = {
         source: state.source,
-        file_b64: state.fileB64,
+        file_b64: file.b64,
       };
       if (state.accountAssetId) body.account_asset_id = state.accountAssetId;
       const preview = await apiPost<ImportPreviewResponseApi>(
@@ -225,6 +271,8 @@ export function ImportWizardModal({
         body,
       );
       if (!preview) throw new Error("Respuesta vacía del servidor.");
+      // Los estados por-fila del componente son del archivo anterior.
+      setExpandedLinks(new Set());
       dispatch({
         type: "PREVIEW_OK",
         preview,
@@ -238,26 +286,37 @@ export function ImportWizardModal({
     }
   }
 
+  /** Salta el archivo en curso sin importarlo; el último cierra la tanda. */
+  function skipCurrentFile() {
+    if (hasNextFile) void previewFileAt(state.fileIndex + 1);
+    else finishAndClose(state.confirmed);
+  }
+
   async function runConfirm() {
-    if (!state.preview || !state.fileB64) return;
+    if (!state.preview || !currentFile) return;
     dispatch({ type: "CONFIRM_START" });
     try {
       const body: ImportConfirmRequest = {
         source: state.source,
-        file_b64: state.fileB64,
+        file_b64: currentFile.b64,
         file_sha256: state.preview.file_sha256,
         decisions: buildConfirmDecisions(state.preview.rows, state.drafts),
         learn_rules: true,
       };
       if (state.accountAssetId) body.account_asset_id = state.accountAssetId;
-      if (state.fileName) body.original_filename = state.fileName;
+      if (currentFile.name) body.original_filename = currentFile.name;
       const res = await apiPost<ImportConfirmResponseApi>(
         "/v1/transactions/import/confirm",
         body,
       );
       if (!res) throw new Error("Respuesta vacía del servidor.");
-      onImported(res);
-      onClose();
+      dispatch({ type: "CONFIRM_OK", res });
+      if (hasNextFile) {
+        void previewFileAt(state.fileIndex + 1);
+      } else {
+        // `state.confirmed` es el del render del click: añade el res de ESTE confirm a mano.
+        finishAndClose([...state.confirmed, res]);
+      }
     } catch (e) {
       dispatch({
         type: "FAIL",
@@ -311,7 +370,7 @@ export function ImportWizardModal({
   );
 
   return (
-    <Modal title="Importar CSV" open={open} onClose={onClose} wide>
+    <Modal title="Importar CSV" open={open} onClose={handleClose} wide>
       <div className="stack import-wizard">
         <ModalFormError message={state.error} />
 
@@ -320,31 +379,43 @@ export function ImportWizardModal({
             className="stack"
             onSubmit={(e) => {
               e.preventDefault();
-              void runPreview();
+              void previewFileAt(0);
             }}
           >
             <p className="muted tight">
-              Sube el CSV de tu banco. Detectamos el formato automáticamente; nada se
-              guarda hasta que confirmes.
+              Sube uno o varios CSV de tu banco. Detectamos el formato automáticamente;
+              nada se guarda hasta que confirmes. Si subes varios, los revisarás y
+              confirmarás uno a uno.
             </p>
             <label className="field">
-              <span>Archivo .csv</span>
+              <span>Archivos .csv</span>
               <input
                 type="file"
                 accept=".csv,text/csv"
+                multiple
                 disabled={state.loading}
                 onChange={(e) => {
-                  const f = e.target.files && e.target.files[0];
-                  if (!f) {
-                    dispatch({ type: "SET_FILE", name: "", b64: null });
+                  const list = e.target.files ? Array.from(e.target.files) : [];
+                  if (list.length === 0) {
+                    dispatch({ type: "SET_FILES", files: [] });
                     return;
                   }
-                  void readFileAsBase64(f).then((b64) =>
-                    dispatch({ type: "SET_FILE", name: f.name, b64 }),
-                  );
+                  void Promise.all(
+                    list.map(async (f) => ({
+                      name: f.name,
+                      b64: await readFileAsBase64(f),
+                    })),
+                  ).then((files) => dispatch({ type: "SET_FILES", files }));
                 }}
               />
             </label>
+            {state.files.length > 1 ? (
+              <ul className="muted-list">
+                {state.files.map((f, i) => (
+                  <li key={`${f.name}-${i}`}>{f.name}</li>
+                ))}
+              </ul>
+            ) : null}
             <label className="field">
               <span>Cuenta origen (activo)</span>
               <select
@@ -362,7 +433,8 @@ export function ImportWizardModal({
               </select>
             </label>
             <p className="muted tight">
-              ¿De qué cuenta es este CSV? Los movimientos se vincularán a ese activo.
+              ¿De qué cuenta es el CSV? Los movimientos se vincularán a ese activo. Si
+              subes varios archivos, la cuenta y el formato se aplican a todos.
             </p>
             <details className="import-source-override">
               <summary>
@@ -388,7 +460,7 @@ export function ImportWizardModal({
               <button
                 type="submit"
                 className="btn primary"
-                disabled={state.loading || !state.fileB64}
+                disabled={state.loading || state.files.length === 0}
               >
                 {state.loading ? "Leyendo…" : "Previsualizar"}
               </button>
@@ -396,7 +468,7 @@ export function ImportWizardModal({
                 type="button"
                 className="btn ghost"
                 disabled={state.loading}
-                onClick={onClose}
+                onClick={handleClose}
               >
                 Cancelar
               </button>
@@ -404,6 +476,12 @@ export function ImportWizardModal({
           </form>
         ) : state.preview ? (
           <div className="stack">
+            {state.files.length > 1 ? (
+              <p className="muted tight">
+                Archivo {state.fileIndex + 1} de {state.files.length}:{" "}
+                <strong>{currentFile?.name}</strong>
+              </p>
+            ) : null}
             <div className="banner info-banner tight-banner import-summary-banner">
               <strong>{capitalizeSource(state.preview.source)}</strong>
               <span className="import-chips">
@@ -586,28 +664,62 @@ export function ImportWizardModal({
                 >
                   {state.loading
                     ? "Importando…"
-                    : `Confirmar (${summary.toImport})`}
+                    : hasNextFile
+                      ? `Confirmar y seguir (${summary.toImport})`
+                      : `Confirmar (${summary.toImport})`}
                 </button>
+                {state.confirmed.length === 0 && state.fileIndex === 0 ? (
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    disabled={state.loading}
+                    onClick={() => dispatch({ type: "BACK_TO_SELECT" })}
+                  >
+                    {state.files.length > 1 ? "Cambiar archivos" : "Cambiar archivo"}
+                  </button>
+                ) : null}
+                {state.files.length > 1 ? (
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    disabled={state.loading}
+                    onClick={skipCurrentFile}
+                  >
+                    Omitir archivo
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="btn ghost"
                   disabled={state.loading}
-                  onClick={() => dispatch({ type: "BACK_TO_SELECT" })}
-                >
-                  Cambiar archivo
-                </button>
-                <button
-                  type="button"
-                  className="btn ghost"
-                  disabled={state.loading}
-                  onClick={onClose}
+                  onClick={handleClose}
                 >
                   Cancelar
                 </button>
               </div>
             </div>
           </div>
-        ) : null}
+        ) : state.loading ? (
+          <p className="muted">Leyendo {currentFile?.name ?? "el archivo"}…</p>
+        ) : (
+          // Preview del archivo en curso falló a mitad de tanda (el error ya está arriba):
+          // se puede omitir el archivo, reintentar su preview, o cerrar conservando lo confirmado.
+          <div className="asset-form-actions">
+            <button type="button" className="btn primary" onClick={skipCurrentFile}>
+              Omitir este archivo
+            </button>
+            <button
+              type="button"
+              className="btn ghost"
+              onClick={() => void previewFileAt(state.fileIndex)}
+            >
+              Reintentar
+            </button>
+            <button type="button" className="btn ghost" onClick={handleClose}>
+              Cancelar
+            </button>
+          </div>
+        )}
       </div>
     </Modal>
   );

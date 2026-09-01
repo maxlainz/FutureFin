@@ -1302,20 +1302,22 @@ export function GastosView({
             assets={assets}
             liabilities={liabilities}
             currencyIso={currencyIso}
-            onImported={(res) => {
-              // El aviso post-confirm vive aquí (el wizard se cierra al confirmar): añade los
-              // pares auto-conciliados solo cuando los hay.
+            onImported={(batch) => {
+              // El aviso post-tanda vive aquí (el wizard notifica UNA vez al cerrar, con el
+              // agregado de todos los archivos confirmados): añade los pares auto-conciliados
+              // solo cuando los hay.
               const parts = [
-                `${res.imported} importados`,
-                `${res.skipped_already_imported + res.discarded} excluidos`,
+                `${batch.imported} importados`,
+                `${batch.skipped_already_imported + batch.discarded} excluidos`,
               ];
-              if (res.reconciled_pairs > 0) {
+              if (batch.reconciled_pairs > 0) {
                 parts.push(
-                  `${res.reconciled_pairs} par${res.reconciled_pairs === 1 ? "" : "es"} conciliado${
-                    res.reconciled_pairs === 1 ? "" : "s"
+                  `${batch.reconciled_pairs} par${batch.reconciled_pairs === 1 ? "" : "es"} conciliado${
+                    batch.reconciled_pairs === 1 ? "" : "s"
                   } automáticamente`,
                 );
               }
+              if (batch.files > 1) parts.unshift(`${batch.files} archivos`);
               setNotice(parts.join(" · "));
               void handleMutated();
             }}
