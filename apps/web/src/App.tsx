@@ -4,7 +4,6 @@ import {
   startTransition,
   useCallback,
   useEffect,
-  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -46,7 +45,13 @@ import {
   HA_LOGIN_AVAILABLE,
   haLoginHref,
 } from "./lib/basePath";
-import { ledgerViewQs } from "./lib/ledger";
+import {
+  LEDGER_PERSON_SCOPE_STORAGE_KEY,
+  isScopeReadOnly,
+  ledgerViewAmp,
+  ledgerViewQs,
+  resolveLedgerPersonScope,
+} from "./lib/ledger";
 import { savingsSourceUsesTransactions } from "./lib/fire";
 import { readFileAsBase64 } from "./lib/files";
 import { chartPerf } from "./lib/perf";
@@ -83,10 +88,11 @@ import {
  */
 function projectionSeriesUrl(scope: LedgerPersonScope, density?: "hybrid"): string {
   const params = new URLSearchParams();
-  if (scope === "mine") params.set("view", "mine");
+  // Los dos ámbitos viajan explícitos (ver `ledgerViewQs`): con el default del API en `mine`
+  // (5.0.0), omitir el parámetro en Hogar devolvería la proyección de una sola persona.
+  params.set("view", scope === "mine" ? "mine" : "household");
   if (density) params.set("density", density);
-  const q = params.toString();
-  return q ? `/v1/projection/series?${q}` : "/v1/projection/series";
+  return `/v1/projection/series?${params.toString()}`;
 }
 
 async function fetchProjectionTwoPhase(
@@ -227,8 +233,6 @@ function useAppPathNavigation(): [
   return [pathname, navigate];
 }
 
-const LEDGER_PERSON_SCOPE_STORAGE_KEY = "futurefin-ledger-person-scope";
-
 type FfbackupImportCounts = {
   assets: number;
   liabilities: number;
@@ -299,7 +303,6 @@ function markSsoSignedOut(signedOut: boolean) {
 }
 
 export default function App() {
-  const ledgerScopeSelectId = useId();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
 
@@ -307,16 +310,17 @@ export default function App() {
   const [user, setUser] = useState<UserResponse | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
 
+  // Default `mine` (D9 de 5.0.0): sin valor guardado —o con uno desconocido— la app arranca en la
+  // vista del miembro que ha entrado. La elección del usuario se sigue persistiendo.
   const [ledgerPersonScope, setLedgerPersonScopeInner] =
     useState<LedgerPersonScope>(() => {
-      if (typeof window === "undefined") return "household";
+      if (typeof window === "undefined") return "mine";
       try {
-        return window.localStorage.getItem(LEDGER_PERSON_SCOPE_STORAGE_KEY) ===
-          "mine"
-          ? "mine"
-          : "household";
+        return resolveLedgerPersonScope(
+          window.localStorage.getItem(LEDGER_PERSON_SCOPE_STORAGE_KEY),
+        );
       } catch {
-        return "household";
+        return "mine";
       }
     });
 
@@ -347,6 +351,16 @@ export default function App() {
   const [installationBusy, setInstallationBusy] = useState(false);
   const [installationGate, setInstallationGate] =
     useState<InstallationGate>("loading");
+
+  /**
+   * Vista Hogar = agregado informativo de **solo lectura** (D9/D32). Se decide UNA vez aquí y
+   * viaja a las vistas por el `canEdit` que ya tenían: ninguna vista repite la regla, así que no
+   * puede quedarse una atrás. El servidor rechaza además toda escritura de una fila ajena con
+   * 403 `not_row_owner` (D21) — esto es la UX de esa regla, no la regla.
+   */
+  const scopeReadOnly = isScopeReadOnly(ledgerPersonScope);
+  const canEditLedger = installation?.role !== "viewer" && !scopeReadOnly;
+
   const [setupCurrency, setSetupCurrency] = useState<"EUR" | "USD" | "GBP">(
     "EUR",
   );
@@ -1143,9 +1157,7 @@ export default function App() {
       // serie como texto; el chart quiere la serie entera, así que lo pide explícitamente. Sin
       // esta línea el eje pasado se cortaría en 10 años sin ningún aviso.
       const data = await apiGet<HistorySeriesApi>(
-        `/v1/history/series?window_months=1200${
-          ledgerPersonScope === "mine" ? "&view=mine" : ""
-        }`,
+        `/v1/history/series?window_months=1200${ledgerViewAmp(ledgerPersonScope)}`,
       );
       setHistorySeries(data);
     } catch {
@@ -1164,7 +1176,7 @@ export default function App() {
     try {
       const qs = ledgerViewQs(ledgerPersonScope);
       const data = await apiGet<HistoryCashflowApi>(
-        `/v1/history/cashflow${qs}${qs ? "&" : "?"}window_months=24`,
+        `/v1/history/cashflow${qs}&window_months=24`,
       );
       setCashflowSeries(data);
     } catch {
@@ -1181,7 +1193,7 @@ export default function App() {
     try {
       const qs = ledgerViewQs(ledgerPersonScope);
       const data = await apiGet<HistoryCashflowApi>(
-        `/v1/history/cashflow${qs}${qs ? "&" : "?"}window_months=6&resolution=daily`,
+        `/v1/history/cashflow${qs}&window_months=6&resolution=daily`,
       );
       setCashflowDaily(data);
     } catch {
@@ -1224,8 +1236,7 @@ export default function App() {
         setProjectionError(null);
       }
       try {
-        const qs =
-          ledgerPersonScope === "mine" ? "?view=mine" : "";
+        const qs = ledgerViewQs(ledgerPersonScope);
         const budPromise = fetch(apiUrl(`/v1/budget${qs}`), defaultFetchInit);
         const projPromise = skipProjection
           ? Promise.resolve(null as Response | null)
@@ -1924,6 +1935,9 @@ export default function App() {
   const showOnboarding =
     installationGate === "member" &&
     installation?.role === "owner" &&
+    // El asistente crea activos y líneas de presupuesto: en la vista Hogar no se ofrece (el
+    // banner de ámbito ya explica dónde se edita).
+    !scopeReadOnly &&
     (onboardingForced ||
       (!onboardingSkipped && installation.installation.onboarding_completed === false));
 
@@ -3423,21 +3437,38 @@ export default function App() {
         showNav={installationGate === "member"}
         extras={
           installationGate === "member" && hasMembership ? (
-            <select
-              id={ledgerScopeSelectId}
-              className="ledger-view-select"
-              value={ledgerPersonScope}
-              onChange={(e) =>
-                setLedgerPersonScope(
-                  e.target.value === "mine" ? "mine" : "household",
-                )
-              }
-              aria-label="Ámbito de datos: hogar o solo tus registros"
-              title="Hogar: todos los datos. Tu usuario: solo filas donde eres titular."
+            /* Segmentado «Yo | Hogar» (D32). Sustituye al `<select>` de vista: con la vista
+               propia como default y el hogar en solo lectura, el ámbito deja de ser un filtro
+               escondido en un desplegable y pasa a leerse de un vistazo. */
+            <div
+              className="ff-theme-toggle ff-topbar-scope"
+              role="group"
+              aria-label="Ámbito de datos"
             >
-              <option value="household">Todo el hogar</option>
-              <option value="mine">{user.username}</option>
-            </select>
+              <button
+                type="button"
+                className={ledgerPersonScope === "mine" ? "is-active" : ""}
+                aria-pressed={ledgerPersonScope === "mine"}
+                title={`Solo tus datos (${user.username}).`}
+                onClick={() => {
+                  if (ledgerPersonScope !== "mine") setLedgerPersonScope("mine");
+                }}
+              >
+                Yo
+              </button>
+              <button
+                type="button"
+                className={ledgerPersonScope === "household" ? "is-active" : ""}
+                aria-pressed={ledgerPersonScope === "household"}
+                title="Todo el hogar, agregado y en solo lectura."
+                onClick={() => {
+                  if (ledgerPersonScope !== "household")
+                    setLedgerPersonScope("household");
+                }}
+              >
+                Hogar
+              </button>
+            </div>
           ) : null
         }
       />
@@ -3601,6 +3632,16 @@ export default function App() {
                 : "app-main"
             }
           >
+        {/* Aviso de ámbito (D9/D32): el Hogar es un agregado informativo. Va en TODAS las
+            pestañas —no solo en las del ledger— porque el ámbito es global: quien llega a
+            Jubilación o a Resumen desde el drawer no ha pasado por ninguna otra pantalla. */}
+        {scopeReadOnly ? (
+          <div className="banner info-banner app-scope-banner" role="status">
+            <strong>Vista agregada del hogar · solo lectura</strong>
+            <small>Los datos se editan desde tu vista (Yo).</small>
+          </div>
+        ) : null}
+
         <div
           className="app-global-errors"
           role="region"
@@ -3695,16 +3736,27 @@ export default function App() {
         <Suspense fallback={<p className="muted tight">Cargando…</p>}>
         {activeTab === "summary" ? (
           <SummaryView
-            onAddFirstAsset={() => {
-              resetAssetForm();
-              setAssetModalOpen(true);
-              navigate(TAB_PATH.assets);
-            }}
-            onAddFirstBudgetEntry={() => {
-              resetBudgetForm("income");
-              setBudgetModalOpen(true);
-              navigate(TAB_PATH.budget);
-            }}
+            // Los CTA de estado vacío abren un modal de alta: sin `canEditLedger` el modal no
+            // se monta (la vista destino lo gatea), así que el botón llevaría a una pantalla
+            // donde no pasa nada. Sin `onAction`, `EmptyState` se queda en texto.
+            onAddFirstAsset={
+              canEditLedger
+                ? () => {
+                    resetAssetForm();
+                    setAssetModalOpen(true);
+                    navigate(TAB_PATH.assets);
+                  }
+                : undefined
+            }
+            onAddFirstBudgetEntry={
+              canEditLedger
+                ? () => {
+                    resetBudgetForm("income");
+                    setBudgetModalOpen(true);
+                    navigate(TAB_PATH.budget);
+                  }
+                : undefined
+            }
             installation={installation}
             loading={installationBusy}
             hasMembership={hasMembership}
@@ -3719,7 +3771,7 @@ export default function App() {
             installationBusy={installationBusy}
             hasMembership={hasMembership}
             ledgerPersonScope={ledgerPersonScope}
-            canEdit={installation?.role !== "viewer"}
+            canEdit={canEditLedger}
             formError={assetsError}
             projectionSeries={projectionSeries}
             anchorDateYmd={projectionSeries?.anchor_date_ymd ?? null}
@@ -3774,7 +3826,7 @@ export default function App() {
             installationBusy={installationBusy}
             hasMembership={hasMembership}
             ledgerPersonScope={ledgerPersonScope}
-            canEdit={installation?.role !== "viewer"}
+            canEdit={canEditLedger}
             formError={liabilitiesError}
             liabilityModalOpen={liabilityModalOpen}
             closeLiabilityModal={() => {
@@ -3846,7 +3898,7 @@ export default function App() {
             installationBusy={installationBusy}
             hasMembership={hasMembership}
             ledgerPersonScope={ledgerPersonScope}
-            canEdit={installation?.role !== "viewer"}
+            canEdit={canEditLedger}
             formError={budgetError}
             budgetModalOpen={budgetModalOpen}
             closeBudgetModal={() => {
@@ -3925,7 +3977,7 @@ export default function App() {
             installation={installation}
             hasMembership={hasMembership}
             ledgerPersonScope={ledgerPersonScope}
-            canEdit={installation?.role !== "viewer"}
+            canEdit={canEditLedger}
             user={user}
             onCashflowMutated={() => void loadCashflowSeries()}
           />
@@ -3935,7 +3987,7 @@ export default function App() {
             installationBusy={installationBusy}
             hasMembership={hasMembership}
             ledgerPersonScope={ledgerPersonScope}
-            canEdit={installation?.role !== "viewer"}
+            canEdit={canEditLedger}
             formError={planningError}
             planningModalOpen={planningModalOpen}
             closePlanningModal={() => {
@@ -3994,7 +4046,8 @@ export default function App() {
             retirementError={retirementError}
             user={user}
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
-            canEditFire={installation?.role === "owner"}
+            canEditFire={installation?.role === "owner" && !scopeReadOnly}
+            scopeReadOnly={scopeReadOnly}
             onSaveFire={saveFireSettingsPatch}
             navigate={navigate}
           />
@@ -4076,7 +4129,8 @@ export default function App() {
             categoriesError={categoriesError}
             hasMembership={hasMembership}
             canEditCategories={installation?.role !== "viewer"}
-            canEditHistory={installation?.role !== "viewer"}
+            canEditHistory={canEditLedger}
+            scopeReadOnly={scopeReadOnly}
             currencyIso={installation?.installation.base_currency ?? ""}
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
             onHistoryMutated={() => {

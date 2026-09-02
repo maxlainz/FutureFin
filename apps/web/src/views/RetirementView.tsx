@@ -33,6 +33,10 @@ import {
   savingsSourceUsesTransactions,
 } from "../lib/fire";
 import { type LedgerPersonScope } from "../lib/ledger";
+import {
+  persistRetirementIntroDismissed,
+  readRetirementIntroDismissed,
+} from "../lib/retirement-intro";
 import { settingsSubTabPath } from "../lib/navigation";
 import { appUrl } from "../lib/basePath";
 import {
@@ -69,6 +73,7 @@ export function RetirementView({
   user,
   calendarTz,
   canEditFire,
+  scopeReadOnly,
   onSaveFire,
   navigate,
 }: {
@@ -86,11 +91,23 @@ export function RetirementView({
   user: UserResponse | null;
   calendarTz: string;
   canEditFire: boolean;
+  /** Vista Hogar (D9/D32): agregado de solo lectura — el plan se edita desde la vista «Yo». */
+  scopeReadOnly: boolean;
   onSaveFire: (fs: FireSettingsApi) => Promise<void>;
   navigate: (path: string, replace?: boolean) => void;
 }) {
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
+
+  /**
+   * Aviso de alta (D33), una sola vez por navegador. Vive en estado local además de en
+   * `localStorage` para que el descarte sea inmediato aunque el almacenamiento esté bloqueado.
+   */
+  const [introDismissed, setIntroDismissed] = useState<boolean>(() =>
+    readRetirementIntroDismissed(),
+  );
+  const birthDateMissing = !user?.birth_date?.trim();
+  const showIntroBanner = hasMembership && !scopeReadOnly && !introDismissed;
 
   const [fireDraft, setFireDraft] = useState<FireSettingsApi>(() =>
     defaultFireSettingsApi(),
@@ -390,6 +407,47 @@ export function RetirementView({
         </p>
       </div>
 
+      {showIntroBanner ? (
+        <div className="banner info-banner retirement-intro-banner" role="status">
+          <div className="retirement-intro-banner-text">
+            <strong>Elige tu estrategia de jubilación</strong>
+            {birthDateMissing ? (
+              <small>
+                Añade tu fecha de nacimiento en «Tu cuenta» para las estrategias
+                por edad.{" "}
+                <a
+                  href={appUrl(settingsSubTabPath("general"))}
+                  onClick={(e) => {
+                    if (
+                      e.button !== 0 ||
+                      e.metaKey ||
+                      e.altKey ||
+                      e.ctrlKey ||
+                      e.shiftKey
+                    )
+                      return;
+                    e.preventDefault();
+                    navigate(settingsSubTabPath("general"));
+                  }}
+                >
+                  Ir a Tu cuenta
+                </a>
+              </small>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            className="btn ghost"
+            onClick={() => {
+              setIntroDismissed(true);
+              persistRetirementIntroDismissed();
+            }}
+          >
+            Entendido
+          </button>
+        </div>
+      ) : null}
+
       {hasMembership && ledgerPersonScope === "mine" ? (
         <div className="banner info-banner tight-banner">
           <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
@@ -493,7 +551,7 @@ export function RetirementView({
         </>
       ) : null}
 
-      {!canEditFire ? (
+      {!canEditFire && !scopeReadOnly ? (
         <p className="muted tight">
           Solo el propietario puede editar esta configuración.
         </p>
@@ -622,135 +680,150 @@ export function RetirementView({
         </section>
       ) : null}
 
-      <section className="panel">
-        <h3 className="panel-title">Objetivo anual <span className="muted">(en dinero de hoy)</span></h3>
-        <div className="stack bordered-top retirement-config-stack">
-          <fieldset disabled={!canEditFire} className="stack retirement-config-stack">
-            <div className="retirement-mode-grid" role="radiogroup" aria-label="Modo objetivo anual">
-              <label
-                className={`retirement-mode-card ${
-                  fireDraft.fire_number_mode === "manual" ? "is-active" : ""
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="fire_mode"
-                  className="sr-only"
-                  checked={fireDraft.fire_number_mode === "manual"}
-                  onChange={() =>
-                    setFireDraft((p) => ({ ...p, fire_number_mode: "manual" }))
-                  }
-                />
-                <span className="retirement-mode-name">Manual</span>
-                <span className="retirement-mode-sub retirement-mode-amount">
-                  {retirementObjectiveManualAnnualDisplay}
-                </span>
-              </label>
-              <label
-                className={`retirement-mode-card ${
-                  fireDraft.fire_number_mode === "annual_expense" ? "is-active" : ""
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="fire_mode"
-                  className="sr-only"
-                  checked={fireDraft.fire_number_mode === "annual_expense"}
-                  onChange={() =>
-                    setFireDraft((p) => ({
-                      ...p,
-                      fire_number_mode: "annual_expense",
-                    }))
-                  }
-                />
-                <span className="retirement-mode-name">Gasto actual</span>
-                <span className="retirement-mode-sub retirement-mode-amount">
-                  {retirementObjectiveExpenseAnnualDisplay}
-                </span>
-              </label>
-              <label
-                className={`retirement-mode-card ${
-                  fireDraft.fire_number_mode === "current_income" ? "is-active" : ""
-                }`}
-              >
-                <input
-                  type="radio"
-                  name="fire_mode"
-                  className="sr-only"
-                  checked={fireDraft.fire_number_mode === "current_income"}
-                  onChange={() =>
-                    setFireDraft((p) => ({
-                      ...p,
-                      fire_number_mode: "current_income",
-                    }))
-                  }
-                />
-                <span className="retirement-mode-name">Ingresos actuales</span>
-                <span className="retirement-mode-sub retirement-mode-amount">
-                  {retirementObjectiveIncomeAnnualDisplay}
-                </span>
-              </label>
-            </div>
+      {/* D9/D32: en la vista Hogar los formularios del plan NO se enseñan deshabilitados, se
+          ocultan. Un formulario gris con los números de un agregado de N personas invita a
+          teclear en él y no dice de quién es lo que se ve. */}
+      {scopeReadOnly ? (
+        <section className="panel muted-panel">
+          <h3 className="panel-title">Tu plan de jubilación</h3>
+          <p className="muted tight">
+            Solo lectura. Cambia a la vista «Yo» para editar tu objetivo y tu
+            retirada.
+          </p>
+        </section>
+      ) : (
+        <>
+        <section className="panel">
+          <h3 className="panel-title">Objetivo anual <span className="muted">(en dinero de hoy)</span></h3>
+          <div className="stack bordered-top retirement-config-stack">
+            <fieldset disabled={!canEditFire} className="stack retirement-config-stack">
+              <div className="retirement-mode-grid" role="radiogroup" aria-label="Modo objetivo anual">
+                <label
+                  className={`retirement-mode-card ${
+                    fireDraft.fire_number_mode === "manual" ? "is-active" : ""
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="fire_mode"
+                    className="sr-only"
+                    checked={fireDraft.fire_number_mode === "manual"}
+                    onChange={() =>
+                      setFireDraft((p) => ({ ...p, fire_number_mode: "manual" }))
+                    }
+                  />
+                  <span className="retirement-mode-name">Manual</span>
+                  <span className="retirement-mode-sub retirement-mode-amount">
+                    {retirementObjectiveManualAnnualDisplay}
+                  </span>
+                </label>
+                <label
+                  className={`retirement-mode-card ${
+                    fireDraft.fire_number_mode === "annual_expense" ? "is-active" : ""
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="fire_mode"
+                    className="sr-only"
+                    checked={fireDraft.fire_number_mode === "annual_expense"}
+                    onChange={() =>
+                      setFireDraft((p) => ({
+                        ...p,
+                        fire_number_mode: "annual_expense",
+                      }))
+                    }
+                  />
+                  <span className="retirement-mode-name">Gasto actual</span>
+                  <span className="retirement-mode-sub retirement-mode-amount">
+                    {retirementObjectiveExpenseAnnualDisplay}
+                  </span>
+                </label>
+                <label
+                  className={`retirement-mode-card ${
+                    fireDraft.fire_number_mode === "current_income" ? "is-active" : ""
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="fire_mode"
+                    className="sr-only"
+                    checked={fireDraft.fire_number_mode === "current_income"}
+                    onChange={() =>
+                      setFireDraft((p) => ({
+                        ...p,
+                        fire_number_mode: "current_income",
+                      }))
+                    }
+                  />
+                  <span className="retirement-mode-name">Ingresos actuales</span>
+                  <span className="retirement-mode-sub retirement-mode-amount">
+                    {retirementObjectiveIncomeAnnualDisplay}
+                  </span>
+                </label>
+              </div>
 
-            {fireDraft.fire_number_mode === "manual" ? (
+              {fireDraft.fire_number_mode === "manual" ? (
+                <label className="field">
+                  <span>Gasto anual neto objetivo</span>
+                  <input
+                    inputMode="decimal"
+                    value={fireDraft.fire_number_manual_amount ?? ""}
+                    onChange={(e) =>
+                      setFireDraft((p) => ({
+                        ...p,
+                        fire_number_manual_amount:
+                          e.target.value.trim() === ""
+                            ? null
+                            : e.target.value.replace(",", "."),
+                      }))
+                    }
+                    onBlur={() => queueFireSave(0)}
+                  />
+                </label>
+              ) : null}
+            </fieldset>
+          </div>
+        </section>
+
+        <section className="panel">
+          <h3 className="panel-title">Retirada</h3>
+          <div className="stack bordered-top retirement-config-stack">
+            <fieldset disabled={!canEditFire} className="stack retirement-config-stack">
               <label className="field">
-                <span>Gasto anual neto objetivo</span>
+                <span className="label-with-help">
+                  Retirada anual (SWR)
+                  <HelpPopover
+                    title={HELP_TEXTS["settings.swr"].title}
+                    body={HELP_TEXTS["settings.swr"].body}
+                  />
+                </span>
                 <input
-                  inputMode="decimal"
-                  value={fireDraft.fire_number_manual_amount ?? ""}
-                  onChange={(e) =>
+                  type="range"
+                  min={0}
+                  max={40}
+                  step={1}
+                  value={Math.round(
+                    (parseDisplayDecimal(fireDraft.swr_pct) ?? 0) * 10,
+                  )}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
                     setFireDraft((p) => ({
                       ...p,
-                      fire_number_manual_amount:
-                        e.target.value.trim() === ""
-                          ? null
-                          : e.target.value.replace(",", "."),
-                    }))
-                  }
+                      swr_pct: String(v / 10),
+                    }));
+                  }}
                   onBlur={() => queueFireSave(0)}
                 />
+                <span className="muted tight">
+                  {formatPercentAmount(fireDraft.swr_pct)}
+                </span>
               </label>
-            ) : null}
-          </fieldset>
-        </div>
-      </section>
-
-      <section className="panel">
-        <h3 className="panel-title">Retirada</h3>
-        <div className="stack bordered-top retirement-config-stack">
-          <fieldset disabled={!canEditFire} className="stack retirement-config-stack">
-            <label className="field">
-              <span className="label-with-help">
-                Retirada anual (SWR)
-                <HelpPopover
-                  title={HELP_TEXTS["settings.swr"].title}
-                  body={HELP_TEXTS["settings.swr"].body}
-                />
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={40}
-                step={1}
-                value={Math.round(
-                  (parseDisplayDecimal(fireDraft.swr_pct) ?? 0) * 10,
-                )}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  setFireDraft((p) => ({
-                    ...p,
-                    swr_pct: String(v / 10),
-                  }));
-                }}
-                onBlur={() => queueFireSave(0)}
-              />
-              <span className="muted tight">
-                {formatPercentAmount(fireDraft.swr_pct)}
-              </span>
-            </label>
-          </fieldset>
-        </div>
-      </section>
+            </fieldset>
+          </div>
+        </section>
+        </>
+      )}
 
       {hasMembership &&
       !projectionBusy &&

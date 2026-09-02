@@ -339,6 +339,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Esa cantidad no se entiende como número. Escríbela solo con cifras y, si hace falta, un decimal.",
   return_percent_too_low:
     "La rentabilidad anual no puede ser del -100 % o menos.",
+  volatility_out_of_range:
+    "La volatilidad anual debe estar entre 0 y 100 %. Como referencia: renta variable global ~15-18 %, renta fija ~4-6 %, efectivo 0.",
   patch_empty: "No has cambiado nada. Modifica algún dato antes de guardar.",
   category_wrong_scope:
     "Esa categoría no sirve para este apartado. Elige una del tipo correcto.",
@@ -474,6 +476,48 @@ export const ERROR_MESSAGES: Record<string, string> = {
   ids_do_not_match_scope:
     "El nuevo orden no coincide con las reglas que hay ahora. Recarga la página e inténtalo otra vez.",
 
+  // ── Plan de jubilación por usuario (5.0.0) ────────────────────────────────────────────
+  strategy: "Esa estrategia de jubilación no existe.",
+  target_retirement_age_required:
+    "Esa estrategia necesita que digas a qué edad quieres jubilarte.",
+  retirement_age_out_of_range:
+    "La edad de jubilación tiene que estar entre los 18 años y tu edad límite del horizonte.",
+  pension_required_for_bridge:
+    "«Puente hasta la pensión» necesita que declares tu pensión: importe y edad a la que empieza.",
+  pension_age_out_of_range:
+    "La edad a la que empieza la pensión tiene que estar entre los 50 años y tu edad límite del horizonte.",
+  pension_amount_not_positive: "El importe de la pensión debe ser mayor que cero.",
+  pension_fraction_out_of_range:
+    "La parte de la pensión que se cobra en media jornada debe estar entre 0 y 1.",
+  partial_age_out_of_range:
+    "La edad a la que empieza la media jornada tiene que estar entre los 18 años y tu edad límite del horizonte.",
+  partial_not_before_retirement:
+    "La media jornada tiene que empezar antes de la jubilación total.",
+  partial_income_negative: "El ingreso de la media jornada no puede ser negativo.",
+  target_basis: "Esa base del objetivo de jubilación no es válida.",
+  bridge_discount_basis: "Esa forma de descontar el puente hasta la pensión no es válida.",
+  withdrawal_rule_kind: "Esa regla de retirada no existe.",
+  spend_mode: "Esa forma de relacionar la regla de retirada con tu gasto no es válida.",
+  expense_basis: "Esa base de gasto para la media jornada no es válida.",
+  withdrawal_pct_required: "A esa regla de retirada le falta alguno de sus porcentajes.",
+  withdrawal_pct_out_of_range:
+    "El porcentaje de la regla de retirada debe ser mayor que 0 y como mucho 20 %.",
+  withdrawal_band_out_of_range:
+    "La banda y el ajuste de la regla de bandas deben ser mayores que 0 y como mucho 50 %.",
+  hybrid_end_pct_not_below_start:
+    "En la regla híbrida, el porcentaje final tiene que ser menor que el inicial.",
+  cash_buffer_out_of_range: "El colchón de caja debe estar entre 0 y 60 meses.",
+  success_threshold_out_of_range:
+    "El umbral de éxito debe estar entre el 50 % y el 99 %.",
+  field_set_and_clear:
+    "Has pedido a la vez fijar y borrar el mismo campo. Elige una de las dos cosas.",
+
+  // ── Filas del hogar: quién puede editarlas ────────────────────────────────────────────
+  not_row_owner:
+    "Esto es de otra persona del hogar. Puedes verlo, pero solo quien lo creó puede cambiarlo.",
+  household_read_only:
+    "La vista del hogar es solo de lectura para esta acción. Cambia a «Yo» y vuelve a intentarlo.",
+
   // ── Ajustes del hogar y del plan ──────────────────────────────────────────────────────
   swr_out_of_range: "La tasa de retirada segura debe estar entre 0 y 4 %.",
   fire_number_mode: "Esa forma de fijar el número FIRE no es válida.",
@@ -515,6 +559,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "El TIN anual debe estar entre 0 y 100 %. Si has escrito 350 queriendo decir 3,50, usa la coma decimal.",
   backup_asset_return_invalid:
     "El backup trae un activo con una rentabilidad esperada imposible (≤ −100 %); corrígela en la instalación de origen y vuelve a exportar.",
+  backup_asset_volatility_invalid:
+    "El backup trae un activo con una volatilidad fuera de rango (debe estar entre 0 y 100 %); corrígela en la instalación de origen y vuelve a exportar.",
   inflation_not_a_number:
     "La inflación no se entiende como número. Escríbela solo con cifras y, si hace falta, un decimal.",
   currency_format_invalid: "El código de moneda debe tener tres letras.",

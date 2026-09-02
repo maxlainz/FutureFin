@@ -84,6 +84,29 @@ describe("catálogo de errores", () => {
   });
 });
 
+/**
+ * Vista Hogar de solo lectura (5.0.0, D9/D21/D32). Los dos códigos que nacen de esa regla se
+ * fijan aparte del barrido genérico: son 403/400, y sin frase propia el usuario leería el
+ * mensaje de clase HTTP («No tienes permiso…»), que no dice ni de quién es la fila ni qué hacer
+ * — que es exactamente lo que la SPA tiene que explicar cuando esconde un botón.
+ */
+describe("hogar de solo lectura", () => {
+  it("«fila de otro miembro» tiene frase propia, no la genérica de 403", () => {
+    const frase = ERROR_MESSAGES.not_row_owner;
+    expect(frase).toBeTruthy();
+    expect(frase).not.toBe(ERROR_MESSAGES.forbidden);
+    expect(messageForError("not_row_owner", 403)).toBe(frase);
+  });
+
+  it("«la vista del hogar no escribe» tiene frase propia y menciona la salida", () => {
+    const frase = ERROR_MESSAGES.household_read_only;
+    expect(frase).toBeTruthy();
+    expect(frase).not.toBe(ERROR_MESSAGES.bad_request);
+    expect(frase).toContain("Yo");
+    expect(messageForError("household_read_only", 400)).toBe(frase);
+  });
+});
+
 describe("messageForError", () => {
   it("prefiere el código estable al status", () => {
     expect(messageForError("username_taken", 500)).toBe(ERROR_MESSAGES.username_taken);

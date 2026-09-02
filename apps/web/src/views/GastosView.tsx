@@ -65,7 +65,11 @@ import {
 } from "../lib/format";
 import { formatDateDm, formatDateDmy, todayYmdInTimeZone } from "../lib/dates";
 import { HELP_TEXTS } from "../lib/helpTexts";
-import { ledgerViewQs, type LedgerPersonScope } from "../lib/ledger";
+import {
+  ledgerViewAmp,
+  ledgerViewQs,
+  type LedgerPersonScope,
+} from "../lib/ledger";
 import { useIsMobile } from "../lib/responsive";
 import {
   AVG_WINDOWS,
@@ -139,7 +143,7 @@ export function GastosView({
   const today = todayYmdInTimeZone(calendarTz);
   const isMobile = useIsMobile();
   const viewSuffix = ledgerViewQs(ledgerPersonScope);
-  const viewAmp = ledgerPersonScope === "mine" ? "&view=mine" : "";
+  const viewAmp = ledgerViewAmp(ledgerPersonScope);
 
   const [incomeCategories, setIncomeCategories] = useState<CategoryRow[]>([]);
   const [expenseCategories, setExpenseCategories] = useState<CategoryRow[]>([]);

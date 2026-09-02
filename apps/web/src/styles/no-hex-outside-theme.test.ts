@@ -152,10 +152,11 @@ const RGBA_ZERO_EXCEPTIONS: ReadonlySet<string> = new Set([
   // La sombra del tooltip del chart (excepción documentada junto al CSS). Ola 7 (#126/#148)
   // insertó reglas más arriba en App.css y las líneas se desplazaron 2356/2357 → 2382/2383;
   // 4.15.0 (`.category-default-tag`, la marca de la categoría por defecto) las movió a
-  // 2399/2400. Que haya que tocar esto en cada movimiento es el precio deliberado de cerrar la
-  // excepción por file+línea en vez de por patrón.
-  "App.css:2399",
-  "App.css:2400",
+  // 2399/2400, y 5.0.0 (segmentado «Yo | Hogar» del TopBar + los dos banners de ámbito y de
+  // alta) a 2425/2426. Que haya que tocar esto en cada movimiento es el precio deliberado de
+  // cerrar la excepción por file+línea en vez de por patrón.
+  "App.css:2425",
+  "App.css:2426",
 ]);
 
 function rgbaZeroHits(): Hit[] {

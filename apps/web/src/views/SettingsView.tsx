@@ -84,6 +84,7 @@ export function SettingsView({
   hasMembership,
   canEditCategories,
   canEditHistory,
+  scopeReadOnly,
   currencyIso,
   calendarTz,
   onHistoryMutated,
@@ -180,6 +181,8 @@ export function SettingsView({
   hasMembership: boolean;
   canEditCategories: boolean;
   canEditHistory: boolean;
+  /** Vista Hogar (D9/D32): agregado de solo lectura — el plan se edita desde la vista «Yo». */
+  scopeReadOnly: boolean;
   currencyIso: string;
   /** Zona horaria (IANA) de la instalación; el panel de histórico deriva «hoy» de ella. */
   calendarTz: string;
@@ -286,8 +289,19 @@ export function SettingsView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [installation?.installation.id]);
 
+  /**
+   * El sub-tab «Plan» edita supuestos que alimentan la proyección; en la vista Hogar (agregado
+   * de N miembros) no hay una sola persona a la que atribuir el cambio, así que el panel se
+   * enseña en solo lectura y remite a la vista «Yo». Gatea también los autoguardados: dejarlos
+   * vivos con el formulario oculto guardaría a espaldas del usuario.
+   */
+  const planEditable = isOwner && !scopeReadOnly;
+  const planReadOnlyNote = scopeReadOnly
+    ? "Solo lectura. Tu plan se edita desde la vista «Yo»."
+    : "Solo lectura.";
+
   useEffect(() => {
-    if (!hasMembership || !isOwner) return;
+    if (!hasMembership || !planEditable) return;
     if (skipFireTaxAutosaveRef.current) {
       skipFireTaxAutosaveRef.current = false;
       return;
@@ -318,7 +332,7 @@ export function SettingsView({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [fireTaxDraft, hasMembership, isOwner, onSaveFire]);
+  }, [fireTaxDraft, hasMembership, planEditable, onSaveFire]);
 
   // ── Autoguardado de zona horaria (4.0.6: en Ajustes todo guarda solo) ──
   // Solo se lanza el PATCH cuando el draft es una IANA VÁLIDA y difiere del servidor:
@@ -365,7 +379,7 @@ export function SettingsView({
     draftInflationPct >= -2 &&
     draftInflationPct <= 50;
   useEffect(() => {
-    if (!hasMembership || !isOwner) return;
+    if (!hasMembership || !planEditable) return;
     if (!projectionDraftValid) return;
     if (
       draftInflationPct === serverInflationPct &&
@@ -382,7 +396,7 @@ export function SettingsView({
     serverInflationPct,
     serverShowAgeMode,
     hasMembership,
-    isOwner,
+    planEditable,
     saveInstallationProjection,
   ]);
 
@@ -574,7 +588,7 @@ export function SettingsView({
       ) : null}
 
       {settingsSubTab === "plan" && hasMembership ? (
-        isOwner ? (
+        planEditable ? (
         <section className="panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
           <div className="stack bordered-top">
@@ -820,13 +834,13 @@ export function SettingsView({
         ) : (
         <section className="panel muted-panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
-          <p className="muted tight">Solo lectura.</p>
+          <p className="muted tight">{planReadOnlyNote}</p>
         </section>
         )
       ) : null}
 
       {settingsSubTab === "plan" && hasMembership ? (
-        isOwner ? (
+        planEditable ? (
           <section className="panel">
             <h3 className="panel-title">Fiscalidad (IRPF ahorro)</h3>
             <div className="stack bordered-top">
@@ -938,7 +952,7 @@ export function SettingsView({
         ) : (
           <section className="panel muted-panel">
             <h3 className="panel-title">Fiscalidad (IRPF ahorro)</h3>
-            <p className="muted tight">Solo lectura.</p>
+            <p className="muted tight">{planReadOnlyNote}</p>
           </section>
         )
       ) : null}
