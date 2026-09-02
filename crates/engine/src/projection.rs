@@ -7,6 +7,7 @@
 //! ([`AllocationRule`]) ejecutadas en orden ascendente. Cada regla consume parte del sobrante
 //! para un activo destino hasta su tope opcional; lo que queda pasa a la siguiente regla.
 
+use crate::phases::{EngineWarning, Phase, PhasePlan};
 use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
@@ -32,6 +33,17 @@ pub enum EngineError {
     AssetValueOverflow,
     #[error("history timeline dates must be strictly ascending")]
     InvalidHistoryTimeline,
+    /// 5.0.0 WP1b: el `PhasePlan` pide una regla de retirada que este motor todavía no ejecuta
+    /// (todo lo que no es `fixed_real`; WP2 escribe `withdrawal.rs`). Se RECHAZA en vez de
+    /// degradar a `fixed_real`: una regla aceptada y no simulada publicaría el patrimonio de un
+    /// plan que nadie configuró — creíble y equivocado.
+    #[error("withdrawal rule not implemented yet in this engine version")]
+    UnsupportedWithdrawalRule,
+    /// 5.0.0 WP1b: el `PhasePlan` declara una fase que este motor todavía no ejecuta (media
+    /// jornada o pensión con fecha; WP3). Mismo criterio que
+    /// [`EngineError::UnsupportedWithdrawalRule`].
+    #[error("phase plan uses a phase not implemented yet in this engine version")]
+    UnsupportedPhase,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -730,22 +742,13 @@ pub struct ProjectionInput {
     /// Signed cash from planning flows per simulated month (`len == horizon_months`): index `i`
     /// pairs with month `i+1` (calendar month `add_months(month_first_calendar(ref_date), i)`).
     pub planning_monthly_cash_adjustment: Vec<Decimal>,
-    /// Month index (1-based, same indexing as the simulation loop) at which the retirement
-    /// drawdown phase begins. `None` = no drawdown modelled in this projection.
-    pub retirement_start_month: Option<u32>,
-    /// Income from sources that persist after retirement (e.g. rental, pension).
-    /// Replaces `income_regular_monthly` from `retirement_start_month` onward.
-    /// Typically `0` when all income stops at retirement (the default).
-    pub income_retirement_monthly: Decimal,
-    /// Expenses from sources that continue after retirement (i.e. entries where
-    /// `ends_at_retirement = false`). Replaces `expense_regular_monthly` from
-    /// `retirement_start_month` onward. Equal to `expense_regular_monthly` when
-    /// no expense ends at retirement.
-    pub expense_retirement_monthly: Decimal,
-    /// Optional additional monthly draw from assets on top of the income/expense budget.
-    /// The handler typically passes `0` — income reduction via `income_retirement_monthly`
-    /// is the primary drain mechanism in the new model.
-    pub retirement_monthly_withdrawal: Decimal,
+    /// **Plan de fases** (5.0.0 WP1b, `phases.rs`): trigger de jubilación, ingreso y gasto de la
+    /// fase jubilada, retirada extra, y —declaradas pero aún no simuladas— fase parcial, pensión
+    /// con fecha y regla de retirada. Absorbe los cuatro campos sueltos de 4.15.0
+    /// (`retirement_start_month`, `income_retirement_monthly`, `expense_retirement_monthly`,
+    /// `retirement_monthly_withdrawal`), que el bucle y `first_month_allocation` interpretaban
+    /// cada uno por su cuenta. [`PhasePlan::classic`] reproduce 4.15.0 bit a bit.
+    pub phase_plan: PhasePlan,
     /// Target FIRE móvil. Cuando está presente, las aportaciones se detienen en el primer mes
     /// donde el patrimonio cruza el target inflado correspondiente al mes en curso.
     pub fire_target: Option<FireTarget>,
@@ -787,6 +790,45 @@ pub struct ProjectionOutput {
     /// (`surplus_cash` murió). Es la base que decide el cruce FIRE desde 4.8.0; `net_worth`
     /// sigue siendo el total y no cambia.
     pub liquid_worth: Vec<Decimal>,
+    // -----------------------------------------------------------------------------------------
+    // 5.0.0 WP1b — LECTURAS de fase (§B.8). Ninguna cambia la aritmética: todas se derivan de
+    // valores que el bucle ya tenía en la mano. El pin dorado de 4.15.0 (`pins-4.15.json`) sigue
+    // hasheando SOLO los campos de arriba, y estos se pinean aparte en `pins-5.0-outputs.json`.
+    // -----------------------------------------------------------------------------------------
+    /// Primer mes (1-based, misma base que `assets_depleted_month_index`) en el que el hogar está
+    /// jubilado — por cruce o por trigger forzado, lo que ocurra ANTES. `None` = no se jubila
+    /// dentro del horizonte; no es «no calculado». Es el mes efectivo que el handler publicará
+    /// como `jubilacion_month_index` (R8) cuando WP5 cambie esa derivación.
+    pub retirement_month_index: Option<u32>,
+    /// Primer mes con `líquido(k−1) ≥ objetivo(k−1)`. **Lectura pura**: se evalúa cada mes,
+    /// también DESPUÉS de que el latch cierre, y no interviene en ninguna decisión. Con una
+    /// jubilación forzada anterior al cruce, este índice es posterior a
+    /// `retirement_month_index`; sin `fire_target` es `None`.
+    pub liquid_crossing_month_index: Option<u32>,
+    /// Fases atravesadas, en orden y con el mes 1-based en que empieza cada una. En WP1b son dos
+    /// como mucho: `[(Accumulating, 0)]` y, si hay jubilación, `(Retired, retirement_month_index)`.
+    /// `Partial` entra en WP3.
+    pub phase_transitions: Vec<(Phase, u32)>,
+    /// Retirada NETA efectiva del mes: los euros que salieron de los activos para cubrir el
+    /// déficit (`need_assets_net` menos el descubierto neto de ese mes). `len == horizon+1`,
+    /// índice 0 = 0 (el mes 0 es el estado inicial, no un mes simulado). Con `fixed_real` ES el
+    /// drenaje de 4.15.0 — el que ya alimentaba `uncovered_deficit_total`.
+    pub withdrawal: Vec<Decimal>,
+    /// Recorte de la regla: `max(0, necesidad − permitido)` (B.1.5 / D22-D24). **Informativo**:
+    /// no resta patrimonio ni cuenta como fracaso, y NO es `uncovered_deficit_total` (que mide lo
+    /// que los activos no pudieron vender). Todo ceros en WP1b: `fixed_real` no tiene techo, así
+    /// que nunca recorta. Lo llena WP2.
+    pub withdrawal_shortfall: Vec<Decimal>,
+    /// Exceso de la regla sobre la necesidad en modo `rule_is_spend` (se vende y se gasta). Todo
+    /// ceros en WP1b por la misma razón. Lo llena WP2.
+    pub withdrawal_excess: Vec<Decimal>,
+    /// Primer mes con pensión con fecha. `None` en WP1b (la pensión con fecha llega en WP3; la
+    /// pensión plana de hoy viaja dentro de `income_retirement_monthly` y no tiene mes propio).
+    pub pension_start_month_index: Option<u32>,
+    /// Primer mes de media jornada. `None` en WP1b (WP3).
+    pub partial_retirement_month_index: Option<u32>,
+    /// Avisos del motor. Vacío en WP1b: el enum [`EngineWarning`] aún no tiene variantes.
+    pub warnings: Vec<EngineWarning>,
 }
 
 /// Primero-de-mes de una fecha (día 1 del mismo mes). Compartido con `history.rs`.
@@ -1244,6 +1286,9 @@ pub fn first_month_allocation(
     if input.horizon_months < 1 {
         return Err(EngineError::InvalidHorizon);
     }
+    // Mismas puertas que el bucle: esta función RESUELVE EL MES 1 igual que él, así que no puede
+    // aceptar un plan que él rechaza (publicaría una cascada de una simulación que no existe).
+    input.phase_plan.ensure_supported()?;
     if input.planning_monthly_cash_adjustment.len() != input.horizon_months as usize {
         return Err(EngineError::InvalidPlanningAdjustments);
     }
@@ -1311,19 +1356,25 @@ pub fn first_month_allocation(
         .sum();
     let fire_reached = fire_target_at_month_index(input.fire_target.as_ref(), 0)
         .is_some_and(|t| liquid_month_zero >= t);
-    let in_retirement = fire_reached || input.retirement_start_month.is_some_and(|s| 1 >= s);
+    //
+    // 5.0.0 WP1b: el estado de la fase sale del MISMO `PhasePlan` que consume el bucle — antes
+    // eran dos lecturas independientes de los mismos cuatro campos, y una de las dos ya se había
+    // quedado atrás una vez (la que ignoraba `fire_target`).
+    let plan = &input.phase_plan;
+    let in_retirement =
+        fire_reached || plan.retirement_trigger.forced_month().is_some_and(|s| 1 >= s);
     let income = if in_retirement {
-        input.income_retirement_monthly
+        plan.income_retirement_monthly
     } else {
         input.income_regular_monthly
     };
     let expense = if in_retirement {
-        input.expense_retirement_monthly
+        plan.expense_retirement_monthly
     } else {
         input.expense_regular_monthly
     };
     let retirement_withdrawal = if in_retirement {
-        input.retirement_monthly_withdrawal
+        plan.extra_monthly_withdrawal
     } else {
         Decimal::ZERO
     };
@@ -1371,6 +1422,9 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
     if input.horizon_months < 1 {
         return Err(EngineError::InvalidHorizon);
     }
+    // 5.0.0 WP1b: lo que este motor no sabe simular no se simula (ver `PhasePlan`).
+    input.phase_plan.ensure_supported()?;
+    let plan: &PhasePlan = &input.phase_plan;
     if input.planning_monthly_cash_adjustment.len() != input.horizon_months as usize {
         return Err(EngineError::InvalidPlanningAdjustments);
     }
@@ -1427,6 +1481,14 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
     // caídas (hasta el 77 % del patrimonio final era fantasma en el escenario del issue).
     // `jubilacion_month_index` (primer cruce) no cambia de contrato.
     let mut retired = false;
+    // 5.0.0 WP1b — lecturas de fase (§B.8). `retirement_month_index` es el mes EFECTIVO (lo que
+    // el latch decide); `liquid_crossing_month_index` es el cruce puro y NO gobierna nada.
+    let mut retirement_month_index: Option<u32> = None;
+    let mut liquid_crossing_month_index: Option<u32> = None;
+    // Retirada neta efectiva del mes (§B.8). El índice 0 es el estado inicial, no un mes
+    // simulado: cero por definición, como el resto de series.
+    let mut withdrawal_series: Vec<Decimal> = Vec::with_capacity(input.horizon_months as usize + 1);
+    withdrawal_series.push(Decimal::ZERO);
 
     let start_month_first = month_first_calendar(input.ref_date);
 
@@ -1549,13 +1611,31 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         let liquid_prev = liquid_fn(&values);
         let fire_reached = fire_target_at_month_index(input.fire_target.as_ref(), k - 1)
             .map_or(false, |t| liquid_prev >= t);
+        // Lectura pura (5.0.0 WP1b): el cruce se evalúa TODOS los meses —también después de que
+        // el latch cierre, porque la línea de arriba no depende de `retired`— así que anotar su
+        // primera vez no toca una sola decisión ni una sola cifra. Con las estrategias por edad
+        // (D17) esta será la única lectura del cruce, y el trigger será la edad.
+        if fire_reached && liquid_crossing_month_index.is_none() {
+            liquid_crossing_month_index = Some(k);
+        }
         // Latch (#141): `retired` solo puede pasar a true; el objetivo deja de mirarse después.
+        //
+        // 5.0.0 WP1b conserva la UNIÓN de 4.15.0 —cruce O mes forzado, es decir `min(cruce, s)`—
+        // en vez de hacer exclusivo el trigger. Motivos, por orden: (1) `P10_jubilacion_forzada`
+        // del pin dorado fuerza el mes 37 sin objetivo FIRE, y con un `fire_target` presente la
+        // exclusión movería el caso; (2) la regla «un solo trigger por simulación» (D17) es de
+        // ESTRATEGIA, no del motor, y quien la hace cumplir es el HANDLER en WP3: para una
+        // estrategia por edad pasará `fire_target: None`, con lo que el cruce no puede dispararse
+        // porque no hay contra qué cruzar. El motor se queda tonto y pineado a propósito.
         retired = retired
             || fire_reached
-            || input.retirement_start_month.map_or(false, |s| k >= s);
+            || plan.retirement_trigger.forced_month().map_or(false, |s| k >= s);
+        if retired && retirement_month_index.is_none() {
+            retirement_month_index = Some(k);
+        }
         let in_retirement = retired;
         let income = if in_retirement {
-            input.income_retirement_monthly
+            plan.income_retirement_monthly
         } else {
             input.income_regular_monthly
         };
@@ -1571,13 +1651,13 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         let expense_factor = inflation_factor_at_month_index(input.annual_inflation_percent, k - 1);
         let expense = expense_factor
             * if in_retirement {
-                input.expense_retirement_monthly
+                plan.expense_retirement_monthly
             } else {
                 input.expense_regular_monthly
             };
 
         let retirement_withdrawal = if in_retirement {
-            input.retirement_monthly_withdrawal
+            plan.extra_monthly_withdrawal
         } else {
             Decimal::ZERO
         };
@@ -1587,6 +1667,10 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             - debt_service
             + planning_adj
             - retirement_withdrawal;
+
+        // 5.0.0 WP1b (§B.8): retirada NETA del mes. Se rellena solo en la rama de déficit y NO
+        // participa en ninguna decisión — es una lectura de lo que ya ocurrió.
+        let mut withdrawal_month = Decimal::ZERO;
 
         if net_cash_month <= Decimal::ZERO {
             // 4.12.1: sin escalón de caja — el déficit entero se cubre vendiendo. La virtud
@@ -1689,13 +1773,17 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
                     // Con impuestos apagados after_tax es la identidad y esto es exactamente
                     // el `und` de siempre.
                     let drawn_gross = need_gross - und_gross;
-                    undrained_cumulative += need_assets_net
-                        - crate::tax::after_tax_monthly(
-                            drawn_gross,
-                            &input.tax_brackets,
-                            input.taxes_enabled,
-                            g_scalar,
-                        );
+                    // 5.0.0 WP1b: el neto que de verdad salió de los activos ES la retirada del
+                    // mes. Misma expresión que antes, con nombre: se calcula una vez y se usa dos
+                    // (serie y descubierto), sin reordenar ni una operación.
+                    let drawn_net = crate::tax::after_tax_monthly(
+                        drawn_gross,
+                        &input.tax_brackets,
+                        input.taxes_enabled,
+                        g_scalar,
+                    );
+                    withdrawal_month = drawn_net;
+                    undrained_cumulative += need_assets_net - drawn_net;
                     // #120: la base baja en proporción al VALOR drenado — b' = b·v_post/v_pre,
                     // multiplicación antes de la división (drenar todo ⇒ b·0/v = 0 exacto).
                     // Guarda v_pre > 0 obligatoria: Decimal / 0 PANICA (precedente task_panic).
@@ -1741,6 +1829,9 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
                 // El descubierto sale NETO por construcción del solver — sin segunda llamada:
                 // `after_tax_monthly` con una sola `g` sería incorrecta sobre un bruto mixto.
                 undrained_cumulative += dd.net_shortfall_monthly;
+                // 5.0.0 WP1b: lo retirado NETO = lo que hacía falta menos lo que no se pudo
+                // vender. El acumulador de arriba no se toca.
+                withdrawal_month = need_assets_net - dd.net_shortfall_monthly;
                 for (pos, &i) in order.iter().enumerate() {
                     let take = dd.per_segment_monthly[pos];
                     if take > Decimal::ZERO {
@@ -1801,12 +1892,23 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
         let nw = nw_fn(&values, &principals, undrained_cumulative);
         net_series.push(nw);
+        withdrawal_series.push(withdrawal_month);
         liquid_series.push(liquid_fn(&values));
         contrib_series.push(contributed_fn(&basis));
         for (i, s) in per_asset_series.iter_mut().enumerate() {
             s.push(values[i]);
         }
     }
+
+    // Fases atravesadas (§B.8). En WP1b el motor solo conoce dos: se arranca acumulando en el mes
+    // 0 y, si el latch llegó a cerrarse, se pasa a jubilado en el mes que ya se anotó. `Partial`
+    // entra en WP3 y se insertará ENTRE las dos.
+    let mut phase_transitions: Vec<(Phase, u32)> = Vec::with_capacity(2);
+    phase_transitions.push((Phase::Accumulating, 0));
+    if let Some(k) = retirement_month_index {
+        phase_transitions.push((Phase::Retired, k));
+    }
+    let zeros = || vec![Decimal::ZERO; input.horizon_months as usize + 1];
 
     Ok(ProjectionOutput {
         net_worth: net_series,
@@ -1816,12 +1918,26 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         uncovered_deficit_total: undrained_cumulative,
         unallocated_savings_total,
         liquid_worth: liquid_series,
+        retirement_month_index,
+        liquid_crossing_month_index,
+        phase_transitions,
+        withdrawal: withdrawal_series,
+        // `fixed_real` retira EXACTAMENTE la necesidad: no hay techo que recorte ni sobrante que
+        // gastar de más, así que las dos series son cero por construcción, no por no calcularse.
+        // Se publican ya (con su longitud definitiva) para que la forma de la salida no cambie
+        // cuando WP2 las llene.
+        withdrawal_shortfall: zeros(),
+        withdrawal_excess: zeros(),
+        pension_start_month_index: None,
+        partial_retirement_month_index: None,
+        warnings: Vec::new(),
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::phases::RetirementTrigger;
     use uuid::Uuid;
 
     fn mk_asset(id: u128, value: Decimal, liquid: bool, rate: Option<Decimal>) -> SimAsset {
@@ -1896,10 +2012,7 @@ mod tests {
             allocation_rules: rules,
             liabilities: vec![],
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; horizon as usize],
-            retirement_start_month: None,
-            income_retirement_monthly: Decimal::ZERO,
-            expense_retirement_monthly: expense,
-            retirement_monthly_withdrawal: Decimal::ZERO,
+            phase_plan: PhasePlan::classic(Decimal::ZERO, expense),
             fire_target: None,
         }
     }
@@ -2026,8 +2139,8 @@ mod tests {
             vec![asset],
             vec![rule_remainder(0)],
         );
-        inp.income_retirement_monthly = Decimal::ZERO;
-        inp.expense_retirement_monthly = Decimal::from(2_000);
+        inp.phase_plan.income_retirement_monthly = Decimal::ZERO;
+        inp.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
         // Como lo cablea el handler: la MISMA inflación en el input (gasto, #139) y en el target.
         inp.annual_inflation_percent = Decimal::from(2);
         inp.fire_target = Some(ft_flat(Decimal::from(500_000), Decimal::from(2)));
@@ -2148,8 +2261,8 @@ mod tests {
             vec![a],
             vec![rule_remainder(0)],
         );
-        inp.income_retirement_monthly = Decimal::from(2_200);
-        inp.expense_retirement_monthly = Decimal::from(1_600);
+        inp.phase_plan.income_retirement_monthly = Decimal::from(2_200);
+        inp.phase_plan.expense_retirement_monthly = Decimal::from(1_600);
         inp.fire_target = Some(ft_flat(Decimal::from(100_000), Decimal::ZERO));
 
         let fma = first_month_allocation(&inp).unwrap();
@@ -2664,14 +2777,37 @@ mod tests {
             }],
             vec![],
         );
-        inp.retirement_start_month = Some(3);
-        inp.retirement_monthly_withdrawal = Decimal::from(1_000);
+        inp.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(3);
+        inp.phase_plan.extra_monthly_withdrawal = Decimal::from(1_000);
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.net_worth[0], Decimal::from(12_000));
         assert_eq!(out.net_worth[1], Decimal::from(12_000));
         assert_eq!(out.net_worth[2], Decimal::from(12_000));
         assert_eq!(out.net_worth[3], Decimal::from(11_000));
         assert_eq!(out.net_worth[4], Decimal::from(10_000));
+        // 5.0.0 WP1b — ANCLA derivada a mano de la serie de retirada: el mes 0 no es un mes
+        // simulado, los meses 1–2 no están jubilados y los meses 3–4 retiran la retirada extra
+        // entera (no hay más déficit: ingreso y gasto son 0). Es la misma caída de 1.000 €/mes
+        // que el patrimonio de arriba enseña, vista desde la otra cara.
+        assert_eq!(
+            out.withdrawal,
+            vec![
+                Decimal::ZERO,
+                Decimal::ZERO,
+                Decimal::ZERO,
+                Decimal::from(1_000),
+                Decimal::from(1_000)
+            ]
+        );
+        assert_eq!(out.retirement_month_index, Some(3));
+        assert_eq!(
+            out.liquid_crossing_month_index, None,
+            "sin objetivo FIRE no hay cruce que leer: la jubilación es forzada"
+        );
+        assert_eq!(
+            out.phase_transitions,
+            vec![(Phase::Accumulating, 0), (Phase::Retired, 3)]
+        );
     }
 
     #[test]
@@ -2689,15 +2825,22 @@ mod tests {
             }],
             vec![rule_remainder(0)],
         );
-        inp.retirement_start_month = Some(3);
-        inp.income_retirement_monthly = Decimal::from(500);
-        inp.expense_retirement_monthly = Decimal::from(2_000);
+        inp.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(3);
+        inp.phase_plan.income_retirement_monthly = Decimal::from(500);
+        inp.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.net_worth[0], Decimal::from(10_000));
         assert_eq!(out.net_worth[1], Decimal::from(11_000));
         assert_eq!(out.net_worth[2], Decimal::from(12_000));
         assert_eq!(out.net_worth[3], Decimal::from(10_500));
         assert_eq!(out.net_worth[4], Decimal::from(9_000));
+        // 5.0.0 WP1b: meses 1–2 aportando 1.000 (sin retirada), meses 3–5 jubilado con déficit
+        // 500 − 2.000 = −1.500 €/mes. La retirada es EL déficit, no el gasto.
+        assert_eq!(out.withdrawal[1], Decimal::ZERO);
+        assert_eq!(out.withdrawal[2], Decimal::ZERO);
+        assert_eq!(out.withdrawal[3], Decimal::from(1_500));
+        assert_eq!(out.withdrawal[4], Decimal::from(1_500));
+        assert_eq!(out.retirement_month_index, Some(3));
         assert_eq!(out.net_worth[5], Decimal::from(7_500));
     }
 
@@ -2843,7 +2986,7 @@ mod tests {
             vec![mk_asset(1, Decimal::from(1_000_000), true, Some(Decimal::ZERO))],
             vec![rule_remainder(0)],
         );
-        inp.expense_retirement_monthly = Decimal::from(1000);
+        inp.phase_plan.expense_retirement_monthly = Decimal::from(1000);
         inp.fire_target = Some(ft_flat(Decimal::from_str_exact("342857.142857").unwrap(), Decimal::ZERO));
 
         let out = project_net_worth_series(&inp).expect("simulación");
@@ -4330,10 +4473,10 @@ mod tests {
                 RepaymentModel::FixedPayments,
                 None,
             )];
-            inp.expense_retirement_monthly = Decimal::from(1_500);
-            inp.income_retirement_monthly = income_ret;
+            inp.phase_plan.expense_retirement_monthly = Decimal::from(1_500);
+            inp.phase_plan.income_retirement_monthly = income_ret;
             if retired {
-                inp.retirement_start_month = Some(1);
+                inp.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(1);
             }
             first_month_allocation(&inp).unwrap()
         };
@@ -4404,9 +4547,9 @@ mod tests {
     fn retirement_surplus_without_rules_is_stranded_and_quantified() {
         let fondo = mk_asset(0xE3, Decimal::from(1_000_000), true, Some(Decimal::from(5)));
         let mut inp = base_input(24, Decimal::from(3_000), Decimal::from(1_000), vec![fondo], vec![]);
-        inp.retirement_start_month = Some(1);
-        inp.income_retirement_monthly = Decimal::from(2_000);
-        inp.expense_retirement_monthly = Decimal::from(1_000);
+        inp.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(1);
+        inp.phase_plan.income_retirement_monthly = Decimal::from(2_000);
+        inp.phase_plan.expense_retirement_monthly = Decimal::from(1_000);
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.contributed_capital[0], Decimal::ZERO);
         assert_eq!(out.contributed_capital[24], Decimal::ZERO);
@@ -4436,9 +4579,9 @@ mod tests {
             vec![fondo],
             vec![rule_remainder(0)],
         );
-        inp.retirement_start_month = Some(1);
-        inp.income_retirement_monthly = Decimal::from(1_500);
-        inp.expense_retirement_monthly = Decimal::from(1_000);
+        inp.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(1);
+        inp.phase_plan.income_retirement_monthly = Decimal::from(1_500);
+        inp.phase_plan.expense_retirement_monthly = Decimal::from(1_000);
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.net_worth[360].round_dp(2), dec_s("409348.92"));
         assert_eq!(out.contributed_capital[360], Decimal::from(180_000));
@@ -4467,9 +4610,9 @@ mod tests {
                 vec![fondo],
                 vec![],
             );
-            inp.retirement_start_month = Some(1);
-            inp.income_retirement_monthly = Decimal::ZERO;
-            inp.expense_retirement_monthly = Decimal::from(2_000);
+            inp.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(1);
+            inp.phase_plan.income_retirement_monthly = Decimal::ZERO;
+            inp.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
             inp.tax_brackets = brackets.clone();
             inp.taxes_enabled = taxed;
             project_net_worth_series(&inp).unwrap()

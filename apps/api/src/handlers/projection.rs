@@ -27,7 +27,7 @@ use chrono::{Datelike, Duration, Months, NaiveDate};
 use futurefin_engine::{
     fire_target_at_month_index, first_month_per_asset_contribution_nominals,
     project_net_worth_series, AllocationCap, AllocationKind, AllocationRule, EngineError,
-    FireTarget, ProjectionInput, ProjectionLiabilityInput, RepaymentModel, SimAsset,
+    FireTarget, PhasePlan, ProjectionInput, ProjectionLiabilityInput, RepaymentModel, SimAsset,
 };
 use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
@@ -1727,10 +1727,12 @@ pub(crate) async fn build_installation_projection_input(
         allocation_rules,
         liabilities,
         planning_monthly_cash_adjustment,
-        retirement_start_month: None,
-        income_retirement_monthly: income_retirement,
-        expense_retirement_monthly: expense_retirement,
-        retirement_monthly_withdrawal: Decimal::ZERO,
+        // 5.0.0 WP1b: los cuatro campos de jubilación de 4.15.0 viven ahora en el `PhasePlan`.
+        // `classic` ES lo que este handler pasaba —jubilación por CRUCE (nunca rellenó
+        // `retirement_start_month`), `fixed_real` con techo, sin fase parcial ni pensión con
+        // fecha, retirada extra 0—, así que ni un número se mueve.
+        // WP3: estrategia del perfil → PhasePlan (trigger por edad, pensión con fecha, parcial).
+        phase_plan: PhasePlan::classic(income_retirement, expense_retirement),
         fire_target,
     };
 
@@ -2948,7 +2950,7 @@ fn sim_kpis(
         // que `rust_decimal` produce en una división (auditoría MCP §7).
         expense_base_monthly: money_out(input.expense_regular_monthly),
         income_base_monthly: money_out(income_monthly),
-        expense_retirement_base_monthly: money_out(input.expense_retirement_monthly),
+        expense_retirement_base_monthly: money_out(input.phase_plan.expense_retirement_monthly),
     }
 }
 
@@ -4148,10 +4150,7 @@ mod milestone_tests {
                 early_repayment_effect: Default::default(),
             }],
             planning_monthly_cash_adjustment: vec![Decimal::from(5_000); 24],
-            retirement_start_month: None,
-            income_retirement_monthly: Decimal::ZERO,
-            expense_retirement_monthly: Decimal::from(2500),
-            retirement_monthly_withdrawal: Decimal::ZERO,
+            phase_plan: PhasePlan::classic(Decimal::ZERO, Decimal::from(2500)),
             fire_target: None,
         };
         let month = compound_outpaces_true_savings_month(&input, Decimal::from(500)).unwrap();
@@ -4184,10 +4183,7 @@ mod milestone_tests {
             }],
             liabilities: vec![],
             planning_monthly_cash_adjustment: vec![Decimal::ZERO; 24],
-            retirement_start_month: None,
-            income_retirement_monthly: Decimal::ZERO,
-            expense_retirement_monthly: Decimal::from(1000),
-            retirement_monthly_withdrawal: Decimal::ZERO,
+            phase_plan: PhasePlan::classic(Decimal::ZERO, Decimal::from(1000)),
             fire_target: None,
         };
         let month = compound_outpaces_true_savings_month(&input, Decimal::from(200)).unwrap();

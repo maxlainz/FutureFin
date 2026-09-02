@@ -177,11 +177,42 @@ pub struct ProjectionInput {
     pub allocation_rules: Vec<AllocationRule>,   // cascade, in priority order
     pub liabilities: Vec<ProjectionLiabilityInput>,   // see per-mode contract note below
     pub planning_monthly_cash_adjustment: Vec<Decimal>,
-    pub retirement_start_month: Option<u32>,
-    pub income_retirement_monthly: Decimal,
-    pub expense_retirement_monthly: Decimal,
-    pub retirement_monthly_withdrawal: Decimal,
+    pub phase_plan: PhasePlan,         // 5.0.0 WP1b — absorbe los 4 campos de jubilación de 4.15.0
     pub fire_target: Option<FireTarget>,
+}
+
+// 5.0.0 WP1b (`phases.rs`, re-exportado de `lib.rs`). Sustituye a `retirement_start_month`,
+// `income_retirement_monthly`, `expense_retirement_monthly` y `retirement_monthly_withdrawal`,
+// que el bucle y `first_month_allocation` interpretaban cada uno por su cuenta. Lo que este
+// motor todavía no sabe simular se RECHAZA con error tipado, nunca se ignora.
+pub struct PhasePlan {
+    pub retirement_trigger: RetirementTrigger, // LiquidCrossing | AtMonth(u32) (1-based, `k >= s`)
+    pub partial: Option<PartialPhase>,         // WP3 — hoy `Some(..)` ⇒ EngineError::UnsupportedPhase
+    pub pension: Option<PensionSchedule>,      // WP3 — idem (`start_index` es 0-based, la rejilla del target)
+    pub withdrawal: WithdrawalRule,            // WP2 — solo FixedReal implementada
+    pub spend_mode: SpendMode,                 // Ceiling | RuleIsSpend — coinciden bajo FixedReal
+    pub income_retirement_monthly: Decimal,    // ingreso que persiste tras jubilarse (plano)
+    pub expense_retirement_monthly: Decimal,   // gasto tras jubilarse (se indexa con f(k−1))
+    pub extra_monthly_withdrawal: Decimal,     // el antiguo `retirement_monthly_withdrawal`
+}
+pub enum RetirementTrigger { LiquidCrossing, AtMonth(u32) }
+pub enum SpendMode { Ceiling, RuleIsSpend }
+pub enum WithdrawalRule { FixedReal, PercentOfBalance { pct }, Hybrid { start_pct, end_pct },
+                          Guardrails { pct, band_pct, adjust_pct } }   // solo FixedReal en WP1b
+pub enum ExpenseBasis { Retirement, Regular }
+pub enum Phase { Accumulating, Partial, Retired }
+pub enum EngineWarning {}                      // vacío: la lista existe, las variantes llegan en WP3
+pub struct PartialPhase { pub start_month: u32, pub income_monthly: Decimal, pub expense_basis: ExpenseBasis }
+pub struct PensionSchedule { pub start_index: u32, pub monthly_today: Decimal, pub indexed: bool,
+                             pub fraction_while_partial: Decimal }
+
+impl PhasePlan {
+    // Lo que el handler construye HOY: bit-idéntico a 4.15.0 (cruce, fixed_real/ceiling, sin
+    // parcial ni pensión con fecha, retirada extra 0).
+    pub fn classic(income_retirement_monthly: Decimal, expense_retirement_monthly: Decimal) -> Self
+    // El antiguo `retirement_start_month = Some(k)`: `classic` + trigger forzado + retirada extra.
+    pub fn forced_at(start_month: u32, income_retirement_monthly: Decimal,
+                     expense_retirement_monthly: Decimal, extra_monthly_withdrawal: Decimal) -> Self
 }
 
 pub struct FireTarget {
@@ -456,8 +487,8 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
    and the principal drops after it. In a household whose marginal asset grows at `g`, that month
    ends `E·g` lower (opportunity cost). The engine tests that pin the neutrality use a
    zero-return asset on purpose, to isolate the axis.
-2. Determine `in_retirement` via the **absorbing latch** (4.8.0, #141): `retired = retired || fire_reached || k >= retirement_start_month` — una vez jubilado, SIEMPRE jubilado, aunque el patrimonio caiga después por debajo del objetivo (antes el estado parpadeaba mes a mes con gastos crecientes e ingresos planos, alternando ingreso regular y de jubilación). `fire_reached` compara **`liquid_prev`** — la riqueza LÍQUIDA del mes anterior (`liquid_worth[k−1]`, ver identidades arriba): Σ de los activos `is_liquid`, BRUTA, sin restar principal (#143; `surplus_cash` retirado de este término en 4.12.1/#175 — teorema: el cruce solo pudo irse MÁS TARDE con el cambio, nunca adelantarse, y en producción es invariante; emparejada con el término de deuda del target, ver `FireTarget`) — contra el target FIRE del mes `k`: `base × (1 + inflation/100)^((k-1)/12) + debt_term(k)`. Si se alcanza, usa `income_retirement_monthly` / `expense_retirement_monthly`; si no, las variantes regulares. **El gasto elegido se multiplica por `f(k−1) = inflation_factor_at_month_index(input.annual_inflation_percent, k−1)`** (4.9.0, #139) — el ingreso no.
-3. `retirement_withdrawal` = `retirement_monthly_withdrawal` if `in_retirement`, else 0.
+2. Determine `in_retirement` via the **absorbing latch** (4.8.0, #141): `retired = retired || fire_reached || k >= phase_plan.retirement_trigger.forced_month()` — una vez jubilado, SIEMPRE jubilado, aunque el patrimonio caiga después por debajo del objetivo (antes el estado parpadeaba mes a mes con gastos crecientes e ingresos planos, alternando ingreso regular y de jubilación). `fire_reached` compara **`liquid_prev`** — la riqueza LÍQUIDA del mes anterior (`liquid_worth[k−1]`, ver identidades arriba): Σ de los activos `is_liquid`, BRUTA, sin restar principal (#143; `surplus_cash` retirado de este término en 4.12.1/#175 — teorema: el cruce solo pudo irse MÁS TARDE con el cambio, nunca adelantarse, y en producción es invariante; emparejada con el término de deuda del target, ver `FireTarget`) — contra el target FIRE del mes `k`: `base × (1 + inflation/100)^((k-1)/12) + debt_term(k)`. Si se alcanza, usa `phase_plan.income_retirement_monthly` / `phase_plan.expense_retirement_monthly`; si no, las variantes regulares. **El gasto elegido se multiplica por `f(k−1) = inflation_factor_at_month_index(input.annual_inflation_percent, k−1)`** (4.9.0, #139) — el ingreso no. **5.0.0 WP1b**: la unión `cruce || mes forzado` (es decir, `min(cruce, s)`) se conserva TAL CUAL — la regla «un solo trigger por simulación» (D17) es de estrategia y la hará cumplir el handler en WP3 pasando `fire_target: None` en las estrategias por edad. El cruce se sigue evaluando cada mes aunque el latch ya esté cerrado, y su primera vez se publica como `liquid_crossing_month_index` (lectura pura: no gobierna nada).
+3. `retirement_withdrawal` = `phase_plan.extra_monthly_withdrawal` if `in_retirement`, else 0.
 4. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
 5. If `net_cash > 0` (surplus): **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)) — **también en jubilación** (4.12.1, #175): es la MISMA cascada del usuario, sin rama especial por estado; los techos de la fase #171 pasan de explicativos a vinculantes también aquí. `AllocationSkipReason::InRetirement` y el literal de wire `in_retirement` MURIERON con la rama que los producía. Lo que ninguna regla absorbe **NO entra en el NW**: se acumula en `unallocated_savings_total` (ver [Output](#output)) — inalcanzable en producción con activos vivos (sumidero indestructible, #176). Lo reinvertido en cada activo, jubilado o no, **sube su base de coste** (`basis[i] += alloc[i]`, `basis_declared[i] = true`) y abarata sus ventas futuras (#178, ver paso 6). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
 6. If `net_cash <= 0` (deficit): **el escalón «caja primero» murió con `surplus_cash`** (4.12.1,
@@ -498,8 +529,28 @@ pub struct ProjectionOutput {
     pub assets_depleted_month_index: Option<u32>, // 4.6.0 (#119): primer mes con déficit ≥ TODO lo drenable
     pub uncovered_deficit_total: Decimal,         // 4.6.0 (#119): undrained_cumulative final
     pub unallocated_savings_total: Decimal,       // 4.12.1 (#175): ahorro que ninguna regla absorbió, acumulado — NO entra en net_worth ni en contributed_capital; "0" con activos vivos (sumidero indestructible #176)
+    // --- 5.0.0 WP1b (§B.8): LECTURAS de fase. Ninguna cambia la aritmética; todas se derivan de
+    //     valores que el bucle ya tenía. `pins-4.15.json` NO las hashea (sigue probando que las de
+    //     arriba no se movieron); van en `pins-5.0-outputs.json`, fixture aparte y aditivo.
+    pub retirement_month_index: Option<u32>,        // primer mes jubilado (1-based) — efectivo: min(cruce, forzado)
+    pub liquid_crossing_month_index: Option<u32>,   // primer mes con líquido(k−1) ≥ target(k−1) — LECTURA, no gobierna
+    pub phase_transitions: Vec<(Phase, u32)>,       // [(Accumulating,0)] (+ (Retired,k)); Partial en WP3
+    pub withdrawal: Vec<Decimal>,                   // retirada NETA del mes (len horizon+1, [0] = 0)
+    pub withdrawal_shortfall: Vec<Decimal>,         // recorte de la regla — informativo (D22/D24), NO es uncovered_deficit_total; ceros en WP1b
+    pub withdrawal_excess: Vec<Decimal>,            // exceso de rule_is_spend — ceros en WP1b
+    pub pension_start_month_index: Option<u32>,     // None en WP1b (WP3)
+    pub partial_retirement_month_index: Option<u32>,// None en WP1b (WP3)
+    pub warnings: Vec<EngineWarning>,               // vacío en WP1b
 }
 ```
+
+Sobre las lecturas de 5.0.0: `withdrawal(k)` son los euros NETOS que salieron de los activos ese
+mes (`need_assets_net` menos el descubierto neto del mes), así que con `fixed_real` **es** el
+drenaje de 4.15.0 visto desde la otra cara — el que ya alimentaba `uncovered_deficit_total`. Las
+tres magnitudes son distintas y no se suman entre sí: `withdrawal_shortfall` es lo que la REGLA no
+deja retirar (cero mientras la regla sea `fixed_real`, que no tiene techo), `uncovered_deficit_total`
+es lo que los ACTIVOS no pudieron vender. El handler no publica todavía ninguna de estas lecturas:
+`jubilacion_month_index` sigue derivándose en `handlers/projection.rs` (R8 es WP5).
 
 Sobre los dos campos de 4.6.0 (#119): la definición del mes de agotamiento vive en el bucle — el
 caso exacto usa `>=` («la cartera se vacía este mes»), no «primer mes con descubierto», que daría
@@ -512,6 +563,12 @@ array de 841 Decimals no lo pinta nadie.
 - `EngineError::InvalidPlanningAdjustments` — planning vec length != horizon_months
 - `EngineError::InvalidAllocationRuleTarget` — `target_index` out of bounds of `assets[]`
 - `EngineError::InvalidHistoryTimeline` — `HistoryTimeline::dates` not strictly ascending
+- `EngineError::UnsupportedWithdrawalRule` — 5.0.0 WP1b: `phase_plan.withdrawal` no es `FixedReal` (WP2)
+- `EngineError::UnsupportedPhase` — 5.0.0 WP1b: `phase_plan.partial` o `phase_plan.pension` presentes (WP3)
+
+Las dos últimas las comprueban **`project_net_worth_series` y `first_month_allocation`** antes de
+mirar nada más: la segunda resuelve el mes 1 igual que el bucle, así que no puede aceptar un plan
+que el bucle rechaza.
 
 ## History interpolation (`history.rs`)
 
@@ -753,7 +810,7 @@ Worked example (engine-verified, `worked_example_matches_the_documented_figures`
 - Planning flows with `due_date`: placed in their calendar month. Flows without `due_date`: spread over 90 days from ref_date.
 - Horizon derivation (`projection_horizon_months`): se resuelve **una** fecha de nacimiento — `users.birth_date` del usuario de sesión, y si es NULL la primera fila de `persons` con `birth_date` por `is_primary DESC, sort_index ASC`. Horizonte = `clamp(edad_límite − edad, 5, 70)` años × 12, con `edad_límite = fire_settings.horizon_lifespan_age` (85..=105, default 90 — configurable desde 4.9.0/#149; el clamp [5, 70] no se tocó, así que el eje solo muerde si `edad ≥ edad_límite − 70`). Sin fecha de nacimiento: fallback **360 meses (30 años)**. `?months=N` (12–840) lo sobreescribe. `horizon_basis` reporta la razón: `lifespan_age` (hasta 4.8.0 `lifespan_90` — un número congelado en un literal publicado) | `fallback_no_demographics` | `months_override`, con `horizon_lifespan_age` ecoado al lado. El «margen al final» NO estrena campo: es `points[último].net_worth` (+ `final_net_worth_real` en euros de hoy, paridad con simulate); «no llegó» ⟺ `assets_depleted_month_index != null` o `uncovered_deficit_total > 0`. (No existe `projection_target_age` — eliminado en v1.0.6.)
 - Response includes UI-layer fields computed in the handler (not in engine): `milestones` (next 3 net-worth thresholds, **nominal**), `milestones_real` (same thresholds crossed over the **deflated** net worth = euros de hoy; empty when inflation is 0 — the web reuses `milestones`. The web picks the set from the "Inflation Adjusted" toggle), `compound_outpaces_true_savings_month_index`, `anchor_date_ymd`, `show_age_mode`, `use_age_on_x_axis`, `viewer_birth_date`. Both milestone sets are computed over the full monthly series (`points_full`), not the decimated `points`, so `reached_month_index` keeps precision under `density=hybrid`. `deflate_points_to_today` mirrors the chart's visual deflation (`ProjectionNetWorthChart.baseSeries`) but at monthly resolution.
-- **Retirement drawdown**: el handler pasa **siempre** `retirement_start_month: None` — la jubilación se dispara únicamente cuando `nw_prev` cruza el target FIRE (`fire_reached`, v1.0.6). A partir de ese mes el ingreso cae a `income_retirement_monthly` (suma de `budget_entries` con `persists_after_retirement = true`) y el gasto pasa a `expense_retirement_monthly` (excluye gastos con `ends_at_retirement`). `retirement_monthly_withdrawal` es siempre 0 — la caída de ingresos por sí sola drena la cartera. El target FIRE lo computa el **servidor** (`compute_fire_target_nw` → `jubilacion_target_net_worth` en el response): `neto = expense_retirement − income_retirement` (modo annual_expense) o `neto = income − income_retirement` (modo current_income); si `neto ≤ 0` **no hay target** (`None`, no `max(0,…)`); si no, `target = gross_up(neto × 12) / (SWR/100)`. El frontend duplica la fórmula solo para el preview en vivo del formulario (paridad garantizada por `apps/api/tests/fixtures/fire-parity.json`).
+- **Retirement drawdown**: el handler pasa **siempre** `PhasePlan::classic(...)` — es decir, trigger `LiquidCrossing`, sin mes forzado (5.0.0 WP1b; antes, `retirement_start_month: None`) — la jubilación se dispara únicamente cuando `nw_prev` cruza el target FIRE (`fire_reached`, v1.0.6). A partir de ese mes el ingreso cae a `income_retirement_monthly` (suma de `budget_entries` con `persists_after_retirement = true`) y el gasto pasa a `expense_retirement_monthly` (excluye gastos con `ends_at_retirement`). `extra_monthly_withdrawal` (el antiguo `retirement_monthly_withdrawal`) es siempre 0 — la caída de ingresos por sí sola drena la cartera. El target FIRE lo computa el **servidor** (`compute_fire_target_nw` → `jubilacion_target_net_worth` en el response): `neto = expense_retirement − income_retirement` (modo annual_expense) o `neto = income − income_retirement` (modo current_income); si `neto ≤ 0` **no hay target** (`None`, no `max(0,…)`); si no, `target = gross_up(neto × 12) / (SWR/100)`. El frontend duplica la fórmula solo para el preview en vivo del formulario (paridad garantizada por `apps/api/tests/fixtures/fire-parity.json`).
 
 ## Performance notes (handler ↔ engine boundary)
 - `project_net_worth_series` is CPU-bound (840 months × N assets × `Decimal::powd`). The handler wraps it in `tokio::task::spawn_blocking` to avoid blocking the reactor.

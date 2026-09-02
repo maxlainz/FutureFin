@@ -2,6 +2,7 @@
 
 mod history;
 mod net_return;
+mod phases;
 mod projection;
 mod runway;
 mod tax;
@@ -12,6 +13,10 @@ pub use history::{
     HistoryTimeline, LoanTerms,
 };
 pub use net_return::{net_return_percentages, NetReturn};
+pub use phases::{
+    EngineWarning, ExpenseBasis, PartialPhase, PensionSchedule, Phase, PhasePlan, RetirementTrigger,
+    SpendMode, WithdrawalRule,
+};
 pub use projection::{
     debt_payments_remaining_series, fire_target_at_month_index, fire_target_base_at_month_index,
     first_month_allocation,

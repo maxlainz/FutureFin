@@ -1,0 +1,98 @@
+{
+  "_doc": "Pin ADITIVO de las salidas nuevas del motor 5.0.0 (WP1b, seccion B.8 del plan de la issue #207): SHA-256 del texto canonico de retirement_month_index, liquid_crossing_month_index, pension_start_month_index, partial_retirement_month_index, phase_transitions y las tres series withdrawal / withdrawal_shortfall / withdrawal_excess mes a mes con el Decimal completo via Display, mas el recuento de warnings. Cubre los casos de PROYECCION de tests/common/cases.rs (los L* son calendarios de amortizacion y no tienen fases). Vive APARTE de pins-4.15.json a proposito: aquel demuestra que las salidas de 4.15.0 no se movieron y dejaria de poder demostrarlo si creciera con cada lectura nueva. GENERADO: no editar a mano. Regenerar SOLO si el cambio es intencionado: UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG (futurefin-change-control). En WP1b withdrawal_shortfall y withdrawal_excess son cero por construccion (fixed_real no tiene techo); WP2 los llena y este pin dira exactamente donde.",
+  "engine_version": "5.0.0",
+  "hash_algo": "sha256 over the canonical text described in golden_pins.rs",
+  "cases": {
+    "P1_deficit_cronico": {
+      "sha256": "cd6cf9782c9c3acd96ad570bb083329cac0b31423ca307766d78c4f8234de6ed",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "30000",
+      "phases": "accumulating@0"
+    },
+    "P2_fire_mes0": {
+      "sha256": "d605c5913cbfae026ada0b8f2a091ecd1b872e034d430616cbc94baf75bafbdd",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": 1,
+      "withdrawal_total": "48000",
+      "phases": "accumulating@0|retired@1"
+    },
+    "P3_superavit_jubilacion": {
+      "sha256": "d503198bec6b501f9d51190088829998a181734865ed58cdd2d930b53999a3af",
+      "retirement_month_index": 22,
+      "liquid_crossing_month_index": 22,
+      "withdrawal_total": "0",
+      "phases": "accumulating@0|retired@22"
+    },
+    "P4_ret_menos100": {
+      "sha256": "00c7d139b6ebe6028e536877cff5eccdb043fd80070693243209b6ddcf43422d",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "0",
+      "phases": "accumulating@0"
+    },
+    "P5_flat_nominal_30y": {
+      "sha256": "9d7f4c00daa1631505ff9bb3ac17744e641fc1bf7d177a9482346a17a35a667f",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "0",
+      "phases": "accumulating@0"
+    },
+    "P6_venc_saldo_vivo_proj": {
+      "sha256": "20ca98734ba7e5046ebe66c27977b79a8e747ad929f3481f4b5c208502d54c9f",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "0",
+      "phases": "accumulating@0"
+    },
+    "P13_cash8k_denormal_g": {
+      "sha256": "8a0506535261b28d1def11871bf651ea7cbc4041ebd46949d85329f294939fad",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "1897961.6517787380958402623068",
+      "phases": "accumulating@0"
+    },
+    "P7_jubilado_pension_impuestos": {
+      "sha256": "5976365c10d39b9c97d170c11282395f15132089b0928b9f8e49cdf744ed4a13",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": 1,
+      "withdrawal_total": "777684.29263120468941668899783",
+      "phases": "accumulating@0|retired@1"
+    },
+    "P8_drenaje_g_mixta": {
+      "sha256": "aa13136c4690ae18f0db0f4141226ec71b82d5c63f82190f72533d1c6944c19a",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "42759.056176843132995569259128",
+      "phases": "accumulating@0"
+    },
+    "P9_hogar_realista": {
+      "sha256": "ece489a9a4d555464c2530c75df39768dc0b5bafdcceac2023634a2e87d7ceba",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "2622169.3627191690891580998079",
+      "phases": "accumulating@0"
+    },
+    "P10_jubilacion_forzada": {
+      "sha256": "44ec6ec48a0e1911e3b264f103be52913f7c4ee2bc8ce923f8a83953d83974c8",
+      "retirement_month_index": 37,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "105407.39701715813061378924819",
+      "phases": "accumulating@0|retired@37"
+    },
+    "P11_deflacion_negativa": {
+      "sha256": "e279575d83d2a3265cf199fe5ac1acf279736d27a050fe54a73ad523f8a2a5ba",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": 1,
+      "withdrawal_total": "15901.262000256247482304287519",
+      "phases": "accumulating@0|retired@1"
+    },
+    "P12_topes_de_cascada": {
+      "sha256": "876813e073579eb47b4cfa3f5592be2c0c2bf7d897ae3adfaac39b5d351a37d4",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "0",
+      "phases": "accumulating@0"
+    }
+  }
+}

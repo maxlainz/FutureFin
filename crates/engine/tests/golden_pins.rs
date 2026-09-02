@@ -37,7 +37,7 @@ mod cases;
 use cases::{liability_cases, projection_cases_all, projection_cases_audit, ref_date};
 use futurefin_engine::{
     first_month_allocation, liability_amortization_schedule, project_net_worth_series,
-    AllocationSkipReason, FirstMonthAllocation, LiabilityPayoffAbsence, LiabilitySchedule,
+    AllocationSkipReason, FirstMonthAllocation, LiabilityPayoffAbsence, LiabilitySchedule, Phase,
     ProjectionInput, ProjectionOutput,
 };
 use rust_decimal::Decimal;
@@ -750,4 +750,400 @@ fn mixed_drawdown_must_not_panic_on_a_denormal_gain_ratio() {
         out.assets_depleted_month_index, None,
         "y la cartera no se agota en 3 meses"
     );
+}
+
+// =============================================================================================
+// Pin ADITIVO de las salidas nuevas de 5.0.0 (§B.8)
+// =============================================================================================
+//
+// **Fixture aparte a propósito.** `pins-4.15.json` existe para demostrar UNA cosa: que el
+// refactor no movió las salidas que 4.15.0 ya publicaba. Meter en su hash los campos nuevos lo
+// haría cambiar en cada WP que añada una lectura, y entonces dejaría de poder decir «esto es
+// idéntico a 4.15.0» — que es todo lo que se le pide. Por eso las lecturas de fase viven en
+// `pins-5.0-outputs.json`, con su propio hash y su propia variable de regeneración.
+//
+// Regenerar cuando el cambio es INTENCIONADO (y solo este fichero; `UPDATE_ENGINE_PINS` sigue
+// siendo el de 4.15.0 y no se toca):
+//
+// ```text
+// UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins
+// ```
+//
+// Cubre los casos de PROYECCIÓN (P*): los L* son calendarios de amortización y no tienen fases.
+
+fn phase_tag(p: Phase) -> &'static str {
+    match p {
+        Phase::Accumulating => "accumulating",
+        Phase::Partial => "partial",
+        Phase::Retired => "retired",
+    }
+}
+
+/// Texto canónico de las salidas de 5.0.0 de una proyección. Las tres series van mes a mes con el
+/// `Decimal` COMPLETO (`Display`), igual que las de 4.15.0: si `withdrawal_shortfall` dejase de
+/// ser cero, o cambiase de longitud, el hash se entera.
+fn render_projection_outputs_5_0(name: &str, o: &ProjectionOutput) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "case {name}");
+    let _ = writeln!(out, "kind projection_outputs_5_0");
+    let _ = writeln!(
+        out,
+        "retirement_month_index {}",
+        opt(o.retirement_month_index)
+    );
+    let _ = writeln!(
+        out,
+        "liquid_crossing_month_index {}",
+        opt(o.liquid_crossing_month_index)
+    );
+    let _ = writeln!(
+        out,
+        "pension_start_month_index {}",
+        opt(o.pension_start_month_index)
+    );
+    let _ = writeln!(
+        out,
+        "partial_retirement_month_index {}",
+        opt(o.partial_retirement_month_index)
+    );
+    for (i, (phase, k)) in o.phase_transitions.iter().enumerate() {
+        let _ = writeln!(out, "phase {i} {} {k}", phase_tag(*phase));
+    }
+    for (k, v) in o.withdrawal.iter().enumerate() {
+        let _ = writeln!(out, "wd {k} {v}");
+    }
+    for (k, v) in o.withdrawal_shortfall.iter().enumerate() {
+        let _ = writeln!(out, "wds {k} {v}");
+    }
+    for (k, v) in o.withdrawal_excess.iter().enumerate() {
+        let _ = writeln!(out, "wde {k} {v}");
+    }
+    let _ = writeln!(out, "warnings {}", o.warnings.len());
+    for w in &o.warnings {
+        let _ = writeln!(out, "warning {w:?}");
+    }
+    out
+}
+
+/// Lo que el fixture de 5.0.0 guarda de un caso: el hash y los titulares legibles de un diff.
+struct Pin50 {
+    name: String,
+    sha256: String,
+    retirement_month_index: Option<u32>,
+    liquid_crossing_month_index: Option<u32>,
+    /// Σ de la serie de retirada: un titular que se mueve si el drenaje cambia de importe aunque
+    /// no cambie de mes.
+    withdrawal_total: Decimal,
+    /// El texto de las fases, tal cual entra en el hash («accumulating@0|retired@37»).
+    phases: String,
+}
+
+fn live_pins_5_0() -> Vec<Pin50> {
+    projection_cases_all()
+        .into_iter()
+        .map(|c| {
+            let out = project_net_worth_series(&c.input)
+                .unwrap_or_else(|e| panic!("el caso {} no debe fallar: {e}", c.name));
+            let text = render_projection_outputs_5_0(c.name, &out);
+            Pin50 {
+                name: c.name.to_string(),
+                sha256: sha256_hex(&text),
+                retirement_month_index: out.retirement_month_index,
+                liquid_crossing_month_index: out.liquid_crossing_month_index,
+                withdrawal_total: out.withdrawal.iter().copied().sum(),
+                phases: out
+                    .phase_transitions
+                    .iter()
+                    .map(|(p, k)| format!("{}@{k}", phase_tag(*p)))
+                    .collect::<Vec<_>>()
+                    .join("|"),
+            }
+        })
+        .collect()
+}
+
+fn fixture_path_5_0() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pins-5.0-outputs.json")
+}
+
+const DOC_5_0: &str = "Pin ADITIVO de las salidas nuevas del motor 5.0.0 (WP1b, seccion B.8 del \
+plan de la issue #207): SHA-256 del texto canonico de retirement_month_index, \
+liquid_crossing_month_index, pension_start_month_index, partial_retirement_month_index, \
+phase_transitions y las tres series withdrawal / withdrawal_shortfall / withdrawal_excess mes a \
+mes con el Decimal completo via Display, mas el recuento de warnings. Cubre los casos de \
+PROYECCION de tests/common/cases.rs (los L* son calendarios de amortizacion y no tienen fases). \
+Vive APARTE de pins-4.15.json a proposito: aquel demuestra que las salidas de 4.15.0 no se \
+movieron y dejaria de poder demostrarlo si creciera con cada lectura nueva. GENERADO: no editar \
+a mano. Regenerar SOLO si el cambio es intencionado: UPDATE_ENGINE_PINS_5_0=1 cargo test -p \
+futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG \
+(futurefin-change-control). En WP1b withdrawal_shortfall y withdrawal_excess son cero por \
+construccion (fixed_real no tiene techo); WP2 los llena y este pin dira exactamente donde.";
+
+fn render_fixture_5_0(pins: &[Pin50]) -> String {
+    let mut s = String::new();
+    s.push_str("{\n");
+    let _ = writeln!(s, "  \"_doc\": \"{DOC_5_0}\",");
+    s.push_str("  \"engine_version\": \"5.0.0\",\n");
+    s.push_str(
+        "  \"hash_algo\": \"sha256 over the canonical text described in golden_pins.rs\",\n",
+    );
+    s.push_str("  \"cases\": {\n");
+    for (i, p) in pins.iter().enumerate() {
+        let comma = if i + 1 == pins.len() { "" } else { "," };
+        let _ = writeln!(s, "    \"{}\": {{", p.name);
+        let _ = writeln!(s, "      \"sha256\": \"{}\",", p.sha256);
+        let _ = writeln!(
+            s,
+            "      \"retirement_month_index\": {},",
+            json_u32(p.retirement_month_index)
+        );
+        let _ = writeln!(
+            s,
+            "      \"liquid_crossing_month_index\": {},",
+            json_u32(p.liquid_crossing_month_index)
+        );
+        let _ = writeln!(
+            s,
+            "      \"withdrawal_total\": {},",
+            json_dec(Some(p.withdrawal_total))
+        );
+        let _ = writeln!(s, "      \"phases\": \"{}\"", p.phases);
+        let _ = writeln!(s, "    }}{comma}");
+    }
+    s.push_str("  }\n");
+    s.push_str("}\n");
+    s
+}
+
+/// El pin de las salidas nuevas. Misma mecánica que [`golden_pins_match_4_15_0`], fichero aparte.
+#[test]
+fn golden_pins_5_0_outputs_match() {
+    let pins = live_pins_5_0();
+    let generated = render_fixture_5_0(&pins);
+
+    if std::env::var("UPDATE_ENGINE_PINS_5_0").is_ok() {
+        std::fs::write(fixture_path_5_0(), &generated).expect("escribir el fixture de pins 5.0");
+        eprintln!(
+            "pins-5.0-outputs.json regenerado con {} casos — REVISA EL DIFF y documenta el delta \
+             en el CHANGELOG antes de mergear.",
+            pins.len()
+        );
+        return;
+    }
+
+    let raw = std::fs::read_to_string(fixture_path_5_0()).unwrap_or_else(|e| {
+        panic!(
+            "no se puede leer {}: {e}. Si es la primera vez, genera el fixture con \
+             UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins",
+            fixture_path_5_0().display()
+        )
+    });
+    let stored: serde_json::Value =
+        serde_json::from_str(&raw).expect("el fixture de pins 5.0 debe ser JSON válido");
+
+    let stored_cases = stored["cases"]
+        .as_object()
+        .expect("el fixture debe tener un objeto `cases`");
+
+    let mut live_names: Vec<&str> = pins.iter().map(|p| p.name.as_str()).collect();
+    let mut stored_names: Vec<&str> = stored_cases.keys().map(|k| k.as_str()).collect();
+    live_names.sort_unstable();
+    stored_names.sort_unstable();
+    assert_eq!(
+        live_names, stored_names,
+        "la batería de casos y el fixture de 5.0.0 no cubren los mismos casos. Si has añadido o \
+         retirado un caso a propósito, regenera con UPDATE_ENGINE_PINS_5_0=1"
+    );
+
+    let mut report = String::new();
+    for p in &pins {
+        let stored_case = &stored_cases[&p.name];
+        if stored_case["sha256"].as_str() == Some(p.sha256.as_str()) {
+            continue;
+        }
+        let _ = writeln!(report, "  · caso {}", p.name);
+        let _ = writeln!(
+            report,
+            "      sha256                       {} → {}",
+            stored_case["sha256"].as_str().unwrap_or(""),
+            p.sha256
+        );
+        for (field, live) in [
+            ("retirement_month_index", json_u32(p.retirement_month_index)),
+            (
+                "liquid_crossing_month_index",
+                json_u32(p.liquid_crossing_month_index),
+            ),
+            ("withdrawal_total", json_dec(Some(p.withdrawal_total))),
+            ("phases", format!("\"{}\"", p.phases)),
+        ] {
+            let before = &stored_case[field];
+            let before_txt = match before {
+                serde_json::Value::String(s) => format!("\"{s}\""),
+                other => other.to_string(),
+            };
+            let marker = if before_txt == live { "  " } else { "≠ " };
+            let _ = writeln!(report, "      {marker}{field:<26} {before_txt} → {live}");
+        }
+    }
+
+    assert!(
+        report.is_empty(),
+        "las LECTURAS de fase de 5.0.0 cambiaron. Si el cambio es intencional, regenera con \
+         UPDATE_ENGINE_PINS_5_0=1 y documenta el delta en el CHANGELOG.\n\nCasos que se movieron \
+         (guardado → vivo):\n{report}"
+    );
+}
+
+/// Control negativo del pin nuevo, gemelo de [`the_hash_actually_notices_a_single_moved_decimal`]:
+/// un detector sin control negativo es un test que siempre pasa.
+#[test]
+fn the_5_0_hash_notices_a_moved_withdrawal_and_a_moved_phase() {
+    let case = projection_cases_all()
+        .into_iter()
+        .find(|c| c.name == "P10_jubilacion_forzada")
+        .expect("P10 debe existir en la batería");
+    let out = project_net_worth_series(&case.input).expect("P10 simula");
+    let baseline = sha256_hex(&render_projection_outputs_5_0(case.name, &out));
+
+    // 1) Un céntimo de céntimo en la serie de retirada.
+    let mut mutated = out.clone();
+    let k = mutated.withdrawal.len() / 2;
+    mutated.withdrawal[k] += Decimal::new(1, 10);
+    assert_ne!(
+        baseline,
+        sha256_hex(&render_projection_outputs_5_0(case.name, &mutated)),
+        "mover 1e-10 en withdrawal[{k}] no cambió el hash"
+    );
+
+    // 2) El mes de jubilación.
+    let mut mutated = out.clone();
+    mutated.retirement_month_index = mutated.retirement_month_index.map(|m| m + 1);
+    assert_ne!(
+        baseline,
+        sha256_hex(&render_projection_outputs_5_0(case.name, &mutated)),
+        "mover el mes de jubilación no cambió el hash"
+    );
+
+    // 3) Una fase de más (lo que WP3 insertará entre las dos de hoy).
+    let mut mutated = out.clone();
+    mutated.phase_transitions.insert(1, (Phase::Partial, 12));
+    assert_ne!(
+        baseline,
+        sha256_hex(&render_projection_outputs_5_0(case.name, &mutated)),
+        "insertar una fase no cambió el hash"
+    );
+
+    // 4) Un recorte donde hoy hay cero: la serie informativa está pineada, no solo declarada.
+    let mut mutated = out;
+    mutated.withdrawal_shortfall[k] += Decimal::new(1, 10);
+    assert_ne!(
+        baseline,
+        sha256_hex(&render_projection_outputs_5_0(case.name, &mutated)),
+        "mover el recorte no cambió el hash"
+    );
+}
+
+/// **Invariante de las lecturas de fase en WP1b** (§C del plan, versión reducida a dos fases).
+/// El pin dice «esto no se ha movido»; esto dice «esto significa lo que dice que significa» —
+/// y sin él, un `retirement_month_index` que se quedase pegado a `None` pasaría el pin
+/// perfectamente el día que alguien lo regenerase.
+#[test]
+fn the_phase_readings_agree_with_the_series_they_describe() {
+    for c in projection_cases_all() {
+        let out = project_net_worth_series(&c.input)
+            .unwrap_or_else(|e| panic!("el caso {} no debe fallar: {e}", c.name));
+        let name = c.name;
+
+        // 1) Las tres series de retirada tienen la longitud de la serie de patrimonio, y el mes 0
+        //    (estado inicial, no simulado) es cero en las tres.
+        for (label, serie) in [
+            ("withdrawal", &out.withdrawal),
+            ("withdrawal_shortfall", &out.withdrawal_shortfall),
+            ("withdrawal_excess", &out.withdrawal_excess),
+        ] {
+            assert_eq!(
+                serie.len(),
+                out.net_worth.len(),
+                "{name}: {label} no tiene la longitud de net_worth"
+            );
+            assert_eq!(serie[0], Decimal::ZERO, "{name}: {label}[0] debe ser 0");
+        }
+
+        // 2) WP1b: `fixed_real` no recorta ni gasta de más.
+        assert!(
+            out.withdrawal_shortfall.iter().all(|v| *v == Decimal::ZERO),
+            "{name}: fixed_real no puede recortar"
+        );
+        assert!(
+            out.withdrawal_excess.iter().all(|v| *v == Decimal::ZERO),
+            "{name}: fixed_real no puede gastar por encima de la necesidad"
+        );
+
+        // 3) Retirada ≥ 0 SIEMPRE, y solo puede haberla en un mes de déficit: si el patrimonio
+        //    líquido no bajó ese mes por otra vía, es que se vendió algo.
+        assert!(
+            out.withdrawal.iter().all(|v| *v >= Decimal::ZERO),
+            "{name}: una retirada negativa sería una aportación disfrazada"
+        );
+
+        // 4) El descubierto total nunca puede ser negativo, y si hubo descubierto tuvo que
+        //    haber retirada o agotamiento — las tres magnitudes de B.1.5 no se contradicen.
+        assert!(out.uncovered_deficit_total >= Decimal::ZERO, "{name}");
+
+        // 5) Fases: siempre se arranca acumulando en el mes 0; la segunda (si existe) es
+        //    `Retired` y su mes ES `retirement_month_index`.
+        assert_eq!(
+            out.phase_transitions.first().copied(),
+            Some((Phase::Accumulating, 0)),
+            "{name}: toda simulación arranca acumulando en el mes 0"
+        );
+        match out.retirement_month_index {
+            Some(k) => {
+                assert_eq!(
+                    out.phase_transitions.get(1).copied(),
+                    Some((Phase::Retired, k)),
+                    "{name}: la fase jubilada tiene que empezar en el mes efectivo"
+                );
+                assert!(
+                    k >= 1 && k <= c.input.horizon_months,
+                    "{name}: mes fuera del horizonte"
+                );
+            }
+            None => assert_eq!(
+                out.phase_transitions.len(),
+                1,
+                "{name}: sin jubilación no hay segunda fase"
+            ),
+        }
+
+        // 6) El cruce es una LECTURA: nunca puede ser anterior al mes efectivo de jubilación
+        //    (el latch se cierra en `min(cruce, forzado)`), y con jubilación por cruce ambos
+        //    coinciden. Es el invariante que WP5 necesita para publicar los dos índices.
+        if let Some(x) = out.liquid_crossing_month_index {
+            let eff = out
+                .retirement_month_index
+                .expect("si hubo cruce, hubo jubilación");
+            assert!(
+                eff <= x,
+                "{name}: la jubilación efectiva ({eff}) no puede ser posterior al cruce ({x})"
+            );
+            if c.input
+                .phase_plan
+                .retirement_trigger
+                .forced_month()
+                .is_none()
+            {
+                assert_eq!(
+                    eff, x,
+                    "{name}: sin trigger forzado, jubilación efectiva y cruce son el mismo mes"
+                );
+            }
+        }
+
+        // 7) WP1b no simula pensión con fecha ni media jornada, y no emite avisos.
+        assert_eq!(out.pension_start_month_index, None, "{name}");
+        assert_eq!(out.partial_retirement_month_index, None, "{name}");
+        assert!(out.warnings.is_empty(), "{name}");
+    }
 }

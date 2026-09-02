@@ -23,7 +23,8 @@
 use chrono::NaiveDate;
 use futurefin_engine::{
     debt_payments_remaining_series, AllocationCap, AllocationKind, AllocationRule, FireNeed,
-    FireTarget, ProjectionInput, ProjectionLiabilityInput, RepaymentModel, SimAsset, TaxBracket,
+    FireTarget, PhasePlan, ProjectionInput, ProjectionLiabilityInput, RepaymentModel,
+    RetirementTrigger, SimAsset, TaxBracket,
 };
 use rust_decimal::Decimal;
 use uuid::Uuid;
@@ -121,10 +122,10 @@ pub fn base_input(
         allocation_rules: rules,
         liabilities: vec![],
         planning_monthly_cash_adjustment: vec![Decimal::ZERO; horizon as usize],
-        retirement_start_month: None,
-        income_retirement_monthly: Decimal::ZERO,
-        expense_retirement_monthly: expense,
-        retirement_monthly_withdrawal: Decimal::ZERO,
+        // El plan de 4.15.0 tal cual: jubilación por cruce, `fixed_real`/`ceiling`, sin fase
+        // parcial ni pensión con fecha y sin retirada extra. Los casos que necesitan otra cosa
+        // (P10) lo mutan campo a campo, igual que antes mutaban los cuatro campos sueltos.
+        phase_plan: PhasePlan::classic(Decimal::ZERO, expense),
         fire_target: None,
     }
 }
@@ -248,8 +249,8 @@ pub fn p9_household(checking_account_value: Decimal) -> ProjectionInput {
     p9.tax_brackets = es_tax_brackets_2025_26();
     p9.taxes_enabled = true;
     p9.taxable_gain_ratio = Decimal::ONE;
-    p9.income_retirement_monthly = Decimal::from(900);
-    p9.expense_retirement_monthly = Decimal::from(2_300);
+    p9.phase_plan.income_retirement_monthly = Decimal::from(900);
+    p9.phase_plan.expense_retirement_monthly = Decimal::from(2_300);
     p9.liabilities = vec![
         // Hipoteca francesa: 180.000 € al TIN 2,9 %, cuota 900 €, sin fecha de fin declarada.
         mk_liab(
@@ -414,8 +415,8 @@ pub fn projection_cases_audit() -> Vec<ProjCase> {
         vec![mk_asset(1, Decimal::from(900_000), true, None)],
         vec![],
     );
-    p2.income_retirement_monthly = Decimal::ZERO;
-    p2.expense_retirement_monthly = Decimal::from(2_000);
+    p2.phase_plan.income_retirement_monthly = Decimal::ZERO;
+    p2.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
     p2.fire_target = Some(FireTarget {
         need: FireNeed::Indexed {
             annual_net_today: Decimal::from(800_000),
@@ -446,8 +447,8 @@ pub fn projection_cases_audit() -> Vec<ProjCase> {
         )],
         vec![],
     );
-    p3.income_retirement_monthly = Decimal::from(2_500);
-    p3.expense_retirement_monthly = Decimal::from(2_000);
+    p3.phase_plan.income_retirement_monthly = Decimal::from(2_500);
+    p3.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
     p3.fire_target = Some(FireTarget {
         need: FireNeed::Indexed {
             annual_net_today: Decimal::from(200_000),
@@ -575,8 +576,8 @@ pub fn projection_cases_extended() -> Vec<ProjCase> {
     p7.tax_brackets = es_tax_brackets_2025_26();
     p7.taxes_enabled = true;
     p7.taxable_gain_ratio = Decimal::ONE;
-    p7.income_retirement_monthly = Decimal::from(800);
-    p7.expense_retirement_monthly = Decimal::from(2_000);
+    p7.phase_plan.income_retirement_monthly = Decimal::from(800);
+    p7.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
     p7.fire_target = Some(FireTarget {
         need: FireNeed::ExpenseMinusPension {
             expense_monthly: Decimal::from(2_000),
@@ -664,8 +665,9 @@ pub fn projection_cases_extended() -> Vec<ProjCase> {
     });
 
     // -----------------------------------------------------------------------------------------
-    // P10: jubilación FORZADA por `retirement_start_month` (no por cruce de objetivo) con
-    //      `retirement_monthly_withdrawal > 0`. El motor lo soporta desde siempre y la API
+    // P10: jubilación FORZADA por el trigger `AtMonth` del `PhasePlan` (no por cruce de objetivo)
+    //      con `extra_monthly_withdrawal > 0` — los antiguos `retirement_start_month` /
+    //      `retirement_monthly_withdrawal`. El motor lo soporta desde siempre y la API
     //      **nunca** lo rellena — es decir, ningún test de integración lo cubre: si el refactor
     //      lo rompiese, no habría red fuera de este pin.
     //
@@ -685,8 +687,8 @@ pub fn projection_cases_extended() -> Vec<ProjCase> {
         )],
         vec![rule_remainder(0)],
     );
-    p10.retirement_start_month = Some(37);
-    p10.retirement_monthly_withdrawal = Decimal::from(400);
+    p10.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(37);
+    p10.phase_plan.extra_monthly_withdrawal = Decimal::from(400);
     out.push(ProjCase {
         name: "P10_jubilacion_forzada",
         input: p10,
@@ -717,8 +719,8 @@ pub fn projection_cases_extended() -> Vec<ProjCase> {
         vec![rule_remainder(0)],
     );
     p11.annual_inflation_percent = Decimal::from(-2);
-    p11.income_retirement_monthly = Decimal::from(1_500);
-    p11.expense_retirement_monthly = Decimal::from(1_800);
+    p11.phase_plan.income_retirement_monthly = Decimal::from(1_500);
+    p11.phase_plan.expense_retirement_monthly = Decimal::from(1_800);
     p11.fire_target = Some(FireTarget {
         need: FireNeed::ExpenseMinusPension {
             expense_monthly: Decimal::from(1_800),
