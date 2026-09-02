@@ -195,6 +195,20 @@ realidad** o entre superficies, no error de aritmética.
 - El contrato en prosa de cada métrica vive en `apps/web/src/lib/helpTexts.ts`
   (skill `futurefin-metric-definitions`).
 
+### 2.8 Devoluciones (4.15.0)
+
+| Magnitud | Representación | Convención |
+|---|---|---|
+| **Devolución** (copago por Bizum, abono de comercio, reembolso) | fila de clase `expense` con `amount > 0` | Netea **dentro de la categoría de lo que compensa** (`actual = −Σ` firmado por categoría): un cargo de −30 y su copago de +12 dejan 18 en la misma categoría. **No hay categoría «Devoluciones»** (decisión del owner, 2026-09-02: una categoría-cajón rompe la atribución). La UI la señala con el badge «Devolución» y la comparativa publica `totals.refunds_actual` / `refunds_avg` (Σ de esos positivos, ≥ 0) como línea **derivada** — hacerla visible no cambia ningún total. |
+| Devolución ↔ conciliación | nunca pata de transferencia | La candidatura automática exige signo natural en ambas patas (`expense` negativa ↔ `income` positiva, `candidates_from_where`): un +49,90 de reembolso no puede «comerse» un cargo real de −49,90. La manual (`POST /v1/transactions/{id}/reconcile`) sigue kind/sign-agnóstica. |
+| Solo el importador y el restore de backup pueden crear un `expense` positivo | `assert_amount_sign_matches_kind` exime a ambos | El alta manual sigue exigiendo signo por clase; reclasificar un ingreso a gasto (PATCH de solo `kind`) también produce una devolución legítima. |
+
+**`net_avg` ↔ «Ahorro mensual» del Resumen — homónimos con base distinta.** `totals.net_avg`
+(`GET /v1/transactions/summary`) es `income_avg − expense_avg` sobre meses **reales** y siempre
+movimientos; el «Ahorro mensual» del Resumen (`financial_health.net_monthly_equivalent`) sigue el modo
+`savings_source` y en modo A sale del presupuesto. La tarjeta «Ahorro» de Movimientos y su texto de ayuda
+lo declaran (regla de `futurefin-metric-definitions` §4: decir lo que la métrica NO es).
+
 ## 3. Lo que el modelo YA acierta — no lo «arregles»
 
 1. **Francés español exacto**: interés = saldo apertura × TIN/1200, base 30/360, cuota fin de mes,

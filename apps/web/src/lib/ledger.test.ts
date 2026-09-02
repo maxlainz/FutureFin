@@ -8,7 +8,7 @@ import type { BudgetEntryApiRow, CategoryRow } from "../api/types";
 import { sortBudgetEntriesMacStyle } from "./ledger";
 
 function cat(id: string, name: string): CategoryRow {
-  return { id, scope: "expense", name, sort_index: 0 };
+  return { id, scope: "expense", name, sort_index: 0, is_fallback: false };
 }
 
 function entry(

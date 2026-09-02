@@ -2257,12 +2257,46 @@ export default function App() {
     }
   }
 
+  /**
+   * Traslada la marca «por defecto» del ámbito a `row` (`PATCH {is_fallback: true}`). El servidor
+   * hace el swap atómico —desmarca la anterior y marca esta— porque solo puede haber UNA por
+   * ámbito; aquí basta con recargar la lista para ver el resultado.
+   */
+  async function makeCategoryFallback(row: CategoryRow) {
+    if (row.is_fallback) return;
+    setCategorySaving(true);
+    setCategoriesError(null);
+    try {
+      const res = await fetch(apiUrl(`/v1/categories/${encodeURIComponent(row.id)}`), {
+        ...defaultFetchInit,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ is_fallback: true }),
+      });
+      if (!res.ok) {
+        throw await apiErrorFromResponse(res);
+      }
+      await loadCategories();
+    } catch (e: unknown) {
+      setCategoriesError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCategorySaving(false);
+    }
+  }
+
   function openCategoryDeleteModal(row: CategoryRow) {
+    // La categoría por defecto no se borra (el servidor devuelve `category_is_fallback`); el
+    // botón ya está deshabilitado, esto es el cinturón por si se llega por otra vía.
+    if (row.is_fallback) return;
     setCategoryDeletePending(row);
     const siblings = categories.filter(
       (x) => x.scope === row.scope && x.id !== row.id,
     );
-    setCategoryRemapToId(siblings[0]?.id ?? "");
+    // Destino por defecto del remap: la categoría por defecto del ámbito, que es donde acaba
+    // todo lo que se queda sin clasificar. Si no la hay, la primera hermana como antes.
+    setCategoryRemapToId(
+      (siblings.find((x) => x.is_fallback) ?? siblings[0])?.id ?? "",
+    );
     setCategoriesError(null);
     setCategoryDeleteModalOpen(true);
   }
@@ -4073,6 +4107,7 @@ export default function App() {
             setNewCatName={setNewCatName}
             categorySaving={categorySaving}
             createCategory={(e) => void createCategory(e)}
+            makeCategoryFallback={(row: CategoryRow) => void makeCategoryFallback(row)}
             openCategoryDeleteModal={(row) => openCategoryDeleteModal(row)}
             categoryDeleteModalOpen={categoryDeleteModalOpen}
             categoryDeletePending={categoryDeletePending}

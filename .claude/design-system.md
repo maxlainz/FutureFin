@@ -72,9 +72,19 @@ Una gráfica de apoyo (`components/charts/CategoryComparisonBars.tsx` → export
 |---|---|---|---|
 | `--cf-income` | `oklch(0.58 0.10 165)` | `oklch(0.72 0.10 165)` | Serie **Ingresos** del cash-flow mensual (`MonthlyCashflowBars`) — verde sobrio |
 | `--cf-expense` | `oklch(0.58 0.13 25)` | `oklch(0.70 0.13 25)` | Serie **Gastos** del cash-flow — rojo sobrio |
-| `--cf-savings` | `= var(--ff-accent)` | `= var(--ff-accent)` | Serie **Ahorro** del cash-flow |
+| `--cf-savings` | `= var(--ff-accent)` | `= var(--ff-accent)` | Serie **Invertido** del cash-flow (la clase `savings`, rotulada «Inversión» desde 4.15.0) |
+| `--cf-savings-cash` | `color-mix(in oklch, var(--cf-savings) 40%, var(--ff-paper))` | ídem (resuelve por rama) | Sub-segmento **En cuenta** del ahorro (4.15.0): la parte de ingresos − gastos que no se invirtió. Derivado del token de inversión para que se lea como «el mismo ahorro, más claro» |
 
 > **Comparativa por categoría eliminada**: el chart `CategoryComparisonBars` (barras horizontales Budget vs Promedio) se retiró tras 2.0.0 — con él se fueron el token **`--exp-average`** y el bloque CSS `.cmp-*`. El valor Real ya vivía en la tabla y las KPIs, y la tendencia vs presupuesto pasó a la banda de KPIs (ver §KPIs). El único chart que queda en ese archivo es `MonthlyCashflowBars`.
+>
+> **Composición de la barra (4.15.0)**: hacia arriba Ingresos; hacia abajo Gastos + Ahorro(neto), con el ahorro
+> partido en «invertido» (`--cf-savings`) y «en cuenta» (`--cf-savings-cash`), de modo que la parte sólida
+> inferior mide exactamente lo que la superior cuando ingresos ≥ gastos. Los dos casos que rompen esa igualdad
+> llevan **trama** y nombre: «déficit» (gastos > ingresos, color de gasto) y «de reservas» (inversión > ahorro,
+> color de inversión). La trama es `.cf-bar--hatched` = `repeating-linear-gradient(45deg, var(--ff-paper) 0 2px,
+> transparent 2px 5px)` sobre el color de serie — cero hex y resuelve por tema sola. **No** se usa un
+> `<pattern>` SVG: el chart es `div`+CSS y convertirlo a SVG no compraría nada. La aritmética vive pura en
+> `lib/cashflow-bars.ts` (testeada), el componente solo pinta.
 >
 > **Excepción explícita a la regla "sin rojo/verde en el chrome"**: el cash-flow (`MonthlyCashflowBars`) introduce **verde/rojo** (`--cf-income`/`--cf-expense`) para ingresos vs gastos: son colores **funcionales de serie del gráfico**, no chrome decorativo, y por tanto quedan dentro de la única zona (charts) donde el design system acepta varios colores. Verifica claro **y** oscuro.
 

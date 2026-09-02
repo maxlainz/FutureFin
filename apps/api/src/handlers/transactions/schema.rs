@@ -538,6 +538,11 @@ pub struct PreviewRow {
     pub suggested_category_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggested_category_name: Option<String>,
+    /// De dónde sale `suggested_category_id`: `rule` (una regla de categorización casó) o
+    /// `fallback` (ninguna casó y el servidor puso la categoría por defecto del scope, 4.15.0).
+    /// Ausente cuando no hay categoría sugerida (`savings`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_category_source: Option<&'static str>,
     /// Heurística: probable transferencia interna (sugerida como descarte).
     pub suggested_transfer: bool,
     /// `true` si la divisa del movimiento no es EUR (no importable en fase 1).
@@ -844,6 +849,22 @@ pub struct SummaryTotals {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub net_actual: Decimal,
+    /// `income_avg − expense_avg` — el ahorro real promedio (la inversión NO entra, igual que en
+    /// `net_actual`). **`null` ⟺ `avg_months == 0`.** No es el «Ahorro mensual» del Resumen, que
+    /// sigue el modo `savings_source` y puede salir del presupuesto: esto son siempre movimientos.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub net_avg: Option<Decimal>,
+    /// Σ de los importes POSITIVOS de clase `expense` del mes seleccionado (devoluciones), ≥ 0.
+    /// Ya están descontadas dentro de `expense_actual` y de la categoría a la que pertenecen:
+    /// este campo solo las hace visibles. Nunca `null` (Σ∅ = 0 es una medición, no una ausencia).
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub refunds_actual: Decimal,
+    /// Lo mismo promediado sobre la ventana (mismo denominador que el resto). `null` ⟺ `avg_months == 0`.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub refunds_avg: Option<Decimal>,
 }
 
 /// De qué meses sale el promedio. `has_gaps` viaja con el rango a propósito: sin él, una UI

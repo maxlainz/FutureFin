@@ -4,6 +4,77 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.15.0] - 2026-09-02
+
+### Ahorro es ingresos − gastos, las devoluciones netean en su categoría y todo movimiento tiene categoría
+
+Tres incoherencias que destapó el primer import de nueve meses reales (4.14.0), todas del mismo tipo:
+cifras correctas que el usuario no podía interpretar.
+
+- **«Ahorro» → «Inversión» en la pestaña Movimientos, y un «Ahorro» nuevo que sí es ingresos − gastos.**
+  La clase `savings` (aportaciones a cartera menos reembolsos) se rotulaba «Ahorro», pero el resto del
+  modelo —el motor, el Resumen, los modos B/C— entiende ahorro como ingresos − gastos; las dos cifras
+  divergían por lo que se quedaba en cuenta y por las transferencias desde otras cuentas propias, y el
+  gráfico mensual apilaba Gastos + Inversión bajo Ingresos, así que las alturas nunca encajaban. Ahora la
+  clase se llama **Inversión** en toda la UI (identificadores y valores de API intactos: `savings`), las
+  cuatro tarjetas son **Gasto promedio · Ingreso promedio · Ahorro · Tasa de ahorro** (el Ahorro lleva la
+  sublínea «invertido X · en cuenta Y», o «de reservas Z» si invertiste más de lo que ahorraste), y el
+  gráfico dibuja Gastos + Ahorro bajo Ingresos con la inversión como sub-segmento: en un mes con 3.000 €
+  de ingresos, 2.200 € de gastos y 500 € invertidos, la barra inferior mide exactamente 3.000 € (2.200 +
+  800 de ahorro, de los que 500 invertidos y 300 en cuenta). Los dos casos raros van **rayados y con
+  nombre**: «déficit» cuando los gastos superan a los ingresos y «de reservas» cuando la inversión supera
+  al ahorro del mes. `GET /v1/transactions/summary` publica `totals.net_avg` (ingreso medio − gasto medio,
+  `null` sin meses reales) para que la tarjeta no calcule nada en el cliente. Las entradas del catálogo de
+  ayuda «Traspasado a ahorro» y «% traspasado» se retiran; entran «Ahorro», «Tasa de ahorro» y
+  «Devoluciones», cada una diciendo lo que **no** es (el «Ahorro mensual» del Resumen sigue el modo de
+  ahorro configurado y puede salir del presupuesto; estas cifras son siempre movimientos reales).
+- **Las devoluciones dejan de ser candidatas a transferencia y netean dentro de su categoría.** Un gasto
+  con importe positivo (un copago por Bizum, un abono de comercio) ya restaba bien del gasto, pero el
+  matcher de conciliación lo admitía como pata «entrante» de una transferencia: un +49,90 de reembolso
+  podía emparejarse con un cargo real de −49,90 y sacar **los dos** de todos los agregados justo cuando la
+  devolución debe netear. Desde ahora la candidatura automática (pase, barrido y sugerencias, predicado
+  compartido `candidates_from_where`) exige **signo natural en las dos patas**: salida `expense` negativa y
+  entrada `income` positiva; una devolución nunca es pata de transferencia, y un ingreso negativo tampoco es
+  pata de salida. La conciliación manual sigue siendo kind/sign-agnóstica a propósito. **No hay categoría
+  «Devoluciones»** (el owner la descartó como mala praxis): cada devolución vive en la categoría de lo que
+  compensa, y para que no se lean como error de signo la comparativa de Movimientos publica una línea
+  derivada «Devoluciones incluidas: −X €» encima de las categorías (`totals.refunds_actual`,
+  `totals.refunds_avg`), que **no cambia ningún total**. Corrección de la entrada de 4.14.0: el badge
+  «Devolución» dejó de ser «solo presentación» en el momento en que las devoluciones cambian la
+  candidatura del matcher.
+- **Un ingreso o gasto ya no puede quedarse sin categoría, y la base de datos lo garantiza.** Hasta ahora el
+  import sin regla, el alta manual, `clear_category` y las tools MCP dejaban `category_id` a `NULL`, y
+  «Sin categoría» crecía en silencio (en la instalación de referencia, alrededor de noventa filas tras el
+  primer import). Ahora cada instalación tiene **una categoría por defecto por ámbito** («Otros gastos» /
+  «Otros ingresos», marcadas con `is_fallback`, no borrables sin designar otra antes): el preview del
+  import la pre-rellena cuando ninguna regla casa (`suggested_category_source: "rule" | "fallback"`) y el
+  confirm **rechaza** filas de ingreso/gasto sin categoría (`category_required`); el alta manual, el lote,
+  la edición y las tools MCP asignan la de por defecto si falta. Aprender reglas nunca aprende la categoría
+  por defecto (cientos de reglas «X → Otros gastos» ganarían por precedencia a cualquier regla futura).
+  Las plantillas recurrentes siguen la misma regla: una plantilla de gasto sin categoría habría hecho
+  fallar en silencio la materialización nocturna contra la restricción nueva.
+- **Migración DATA-CHANGING (firmada por el owner)**: `20260902120000_categories_fallback_and_transaction_category_required`
+  marca o crea la categoría por defecto de cada instalación y ámbito, **rellena** con ella todas las
+  transacciones y plantillas recurrentes de ingreso/gasto sin categoría, y añade los `CHECK`
+  (`kind IS NULL OR kind = 'savings' OR category_id IS NOT NULL` en `transactions`; sin el brazo de `kind`
+  nulo en `recurring_transaction_rules`, donde `kind` es obligatorio). Una fila sin `kind` sigue siendo
+  «sin clasificar», no «gasto sin categoría», y queda fuera a propósito. **Irreversible sin restaurar el dump
+  automático pre-migración** que el entrypoint deja en el volumen: soltar la restricción no devuelve los
+  nulos. El backup de usuario (`.ffbackup`) no cambia de forma (`schema_version` sigue en 12); al restaurar
+  un fichero antiguo, las filas sin categoría caen en la de por defecto.
+- **Breaking (HTTP y MCP)**: (a) `clear_category` en un movimiento de ingreso/gasto (`PATCH /v1/transactions/{id}`,
+  `PATCH /v1/transactions/batch`, `update_transaction(s)`) ya no deja `category_id: null`: devuelve la
+  categoría por defecto del ámbito; (b) `POST /v1/transactions/import/confirm` rechaza con 400
+  `category_required` decisiones de ingreso/gasto sin `category_id`, antes aceptadas; (c) la candidatura
+  automática de conciliación se estrecha (patas con signo antinatural fuera). Aditivos: `net_avg`,
+  `refunds_actual`, `refunds_avg`, `CategoryResponse.is_fallback`, `PreviewRow.suggested_category_source`,
+  `PATCH /v1/categories/{id}` con `is_fallback: true` (swap atómico; `false` → `fallback_cannot_be_unset`),
+  400 `category_is_fallback` al borrar la de por defecto; (d) **reclasificar un movimiento a otra clase exige nombrar la categoría**: `PATCH {"kind": "income"}` sobre un gasto categorizado devuelve 400 `category_scope_mismatch` en vez de descartar la categoría en silencio (antes esas filas no tenían categoría y el cambio pasaba); (e) `apply_to_existing: "uncategorized"` de las reglas de categorización queda vacío para ingresos/gastos (ya no existen), útil solo para filas sin `kind`. Paridad MCP: cero tools nuevas (68); la regla
+  transversal de categoría vive en las `instructions` del servidor y las descripciones de
+  `reconcile_transfers`, `suggest_transfer_matches`, `list_categories`, `update_category`, `delete_category`,
+  `create_transaction` y `list_transactions` se ajustan dentro del presupuesto de contexto; el import CSV
+  sigue siendo la omisión deliberada registrada.
+
 ## [4.14.0] - 2026-09-01
 
 ### La conciliación deja de comerse gastos reales, y el preview del import aprende en vivo

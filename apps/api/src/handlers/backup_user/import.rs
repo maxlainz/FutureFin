@@ -432,6 +432,23 @@ fn resolve_category<'a>(
         })
 }
 
+/// Categoría por defecto de `scope` en la instalación, memoizada por scope. Va por la conexión de
+/// la transacción del restore a propósito: la categoría que se escribe tiene que ser la que ve esa
+/// transacción, no la que vería una conexión distinta del pool.
+async fn fallback_for(
+    cache: &mut HashMap<String, Uuid>,
+    tx: &mut Transaction<'_, Postgres>,
+    iid: Uuid,
+    scope: &str,
+) -> Result<Uuid, ApiError> {
+    if let Some(id) = cache.get(scope) {
+        return Ok(*id);
+    }
+    let id = crate::handlers::categories::fallback_category_id(&mut **tx, iid, scope).await?;
+    cache.insert(scope.to_string(), id);
+    Ok(id)
+}
+
 async fn insert_payload(
     tx: &mut Transaction<'_, Postgres>,
     iid: Uuid,
@@ -439,6 +456,13 @@ async fn insert_payload(
     payload: &BackupPayload,
     cat_map: &HashMap<(String, String), Uuid>,
 ) -> Result<ImportCounts, ApiError> {
+    // Categorías POR DEFECTO por scope (4.15.0), memoizadas: un backup anterior a la categoría
+    // obligatoria trae movimientos y plantillas de ingreso/gasto **sin** categoría, y los CHECK
+    // `transactions_category_required_check` / `recurring_rules_category_required_check` los
+    // rechazarían. Se resuelven con la conexión de ESTA transacción —la del restore— y como mucho
+    // dos veces, no una por fila.
+    let mut fallbacks: HashMap<String, Uuid> = HashMap::new();
+
     // Insert assets and remember each freshly-minted UUID at the same index as the backup,
     // so allocation_rules.target_asset_index can be resolved below.
     let mut new_asset_ids: Vec<Uuid> = Vec::with_capacity(payload.assets.len());
@@ -926,6 +950,10 @@ async fn insert_payload(
         }
         let category_id = match &r.category_ref {
             Some(cr) => Some(resolve_category(cat_map, &cr.scope, &cr.name)?),
+            // Plantilla de ingreso/gasto sin categoría (backup ≤ 4.14.x): cae en la por defecto.
+            None if r.kind != "savings" => {
+                Some(fallback_for(&mut fallbacks, tx, iid, &r.kind).await?)
+            }
             None => None,
         };
         let linked_asset_id = match r.linked_asset_index {
@@ -1001,7 +1029,13 @@ async fn insert_payload(
         };
         let category_id = match &t.category_ref {
             Some(cr) => Some(resolve_category(cat_map, &cr.scope, &cr.name)?),
-            None => None,
+            // Movimiento de ingreso/gasto sin categoría (backup ≤ 4.14.x): cae en la por defecto.
+            // Una fila SIN `kind` («sin clasificar») se queda como está: el CHECK la deja fuera a
+            // propósito, porque inventarle categoría sería inventarle la clase.
+            None => match t.kind.as_deref() {
+                Some(k) if k != "savings" => Some(fallback_for(&mut fallbacks, tx, iid, k).await?),
+                _ => None,
+            },
         };
         let linked_asset_id = match t.linked_asset_index {
             Some(i) => Some(*new_asset_ids.get(i).ok_or_else(|| {

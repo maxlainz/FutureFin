@@ -65,23 +65,86 @@ fn default_kind_by_sign(amount: Decimal) -> String {
     }
 }
 
-/// Sugerencia de `(kind, category_id)` para una fila del preview.
+/// Las dos categorías POR DEFECTO de la instalación (4.15.0), cargadas UNA vez por request.
+///
+/// `Option` y no `Uuid` a propósito: el preview es una lectura y no debe reventar por un estado
+/// que él no puede arreglar. La migración `20260902120000` garantiza que existen; si aun así
+/// faltara una, la fila se sugiere sin categoría y quien se lleva el 400 con nombre propio
+/// (`category_required`, y `fallback_category_missing` en las demás vías) es el confirm — que es
+/// donde el usuario puede hacer algo al respecto.
+#[derive(Debug, Default, Clone, Copy)]
+struct Fallbacks {
+    income: Option<Uuid>,
+    expense: Option<Uuid>,
+}
+
+impl Fallbacks {
+    fn for_kind(&self, kind: &str) -> Option<Uuid> {
+        match kind {
+            "income" => self.income,
+            "expense" => self.expense,
+            _ => None,
+        }
+    }
+
+    /// `true` si `category_id` es justo la categoría por defecto de `kind`. Es el gate del
+    /// aprendizaje de reglas: ver `learn_rules` en el confirm.
+    fn is_fallback_of(&self, kind: &str, category_id: Option<Uuid>) -> bool {
+        category_id.is_some() && category_id == self.for_kind(kind)
+    }
+}
+
+async fn load_fallbacks(pool: &sqlx::PgPool, iid: Uuid) -> Result<Fallbacks, ApiError> {
+    let rows: Vec<(String, Uuid)> = sqlx::query_as(
+        r#"SELECT scope, id FROM categories WHERE installation_id = $1 AND is_fallback"#,
+    )
+    .bind(iid)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Fallbacks::default();
+    for (scope, id) in rows {
+        match scope.as_str() {
+            "income" => out.income = Some(id),
+            "expense" => out.expense = Some(id),
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// Sugerencia de `(kind, category_id, procedencia)` para una fila del preview.
+///
+/// La procedencia (`"rule"` | `"fallback"`) viaja al wizard porque las dos categorías se pintan
+/// igual y significan cosas distintas: una la eligió el usuario alguna vez, la otra es el cajón.
+/// El wizard la usa para no propagar la por defecto por automatch y para no ofrecerla como regla.
 fn suggest_kind_category(
     matched: Option<&LoadedRule>,
     savings_hint: bool,
     amount: Decimal,
-) -> (String, Option<Uuid>) {
-    if let Some(r) = matched {
-        let kind = r
-            .assign_kind
-            .clone()
-            .unwrap_or_else(|| default_kind_by_sign(amount));
-        return (kind, r.assign_category_id);
+    fallbacks: &Fallbacks,
+) -> (String, Option<Uuid>, Option<&'static str>) {
+    let (kind, from_rule) = match matched {
+        Some(r) => (
+            r.assign_kind
+                .clone()
+                .unwrap_or_else(|| default_kind_by_sign(amount)),
+            r.assign_category_id,
+        ),
+        None if savings_hint => ("savings".to_string(), None),
+        None => (default_kind_by_sign(amount), None),
+    };
+    if kind == "savings" {
+        // La inversión no lleva categoría por diseño: ni regla ni cajón.
+        return (kind, None, None);
     }
-    if savings_hint {
-        return ("savings".into(), None);
+    match from_rule {
+        Some(c) => (kind, Some(c), Some("rule")),
+        None => {
+            let fb = fallbacks.for_kind(&kind);
+            let source = fb.is_some().then_some("fallback");
+            (kind, fb, source)
+        }
     }
-    (default_kind_by_sign(amount), None)
 }
 
 /// Máximo de `pending_assignments` por preview: cota de sanidad muy por encima de cualquier
@@ -94,14 +157,20 @@ const PENDING_ASSIGNMENTS_MAX: usize = 200;
 /// persistidas. `updated_at = now()` les da la frescura que tendría la regla recién aprendida
 /// (gana los empates de precedencia, igual que ganaría tras persistirse).
 ///
-/// Mismo gate que el aprendizaje real: sin categoría y sin `kind=savings` no hay regla. Y el
-/// mismo guard que el confirm: un patrón derivado vacío (concepto vacío) no genera regla —
+/// Mismo gate que el aprendizaje real: sin categoría y sin `kind=savings` no hay regla; **y
+/// tampoco la hay cuando la categoría es la POR DEFECTO del scope** (4.15.0). El porqué es el
+/// mismo en las dos puertas: desde que todo ingreso/gasto lleva categoría, «Otros gastos» es lo
+/// que el servidor pone cuando NO sabe, no una decisión del usuario. Aprenderla —o propagarla por
+/// automatch dentro de la misma sesión del wizard— convertiría cada import en cientos de reglas
+/// «X → Otros gastos» que después ganan la precedencia y tapan a las reglas de verdad.
+/// Y el mismo guard que el confirm: un patrón derivado vacío (concepto vacío) no genera regla —
 /// un substring vacío matchearía TODOS los conceptos.
 async fn ephemeral_rules_from_pending(
     pool: &sqlx::PgPool,
     iid: Uuid,
     preset_id: &str,
     pending: &[PendingAssignment],
+    fallbacks: &Fallbacks,
 ) -> Result<Vec<LoadedRule>, ApiError> {
     if pending.len() > PENDING_ASSIGNMENTS_MAX {
         return Err(ApiError::BadRequest(format!(
@@ -114,6 +183,9 @@ async fn ephemeral_rules_from_pending(
     for pa in pending {
         let kind = normalize_kind(&pa.kind)?;
         if pa.category_id.is_none() && kind != "savings" {
+            continue;
+        }
+        if fallbacks.is_fallback_of(&kind, pa.category_id) {
             continue;
         }
         // Valida kind↔scope de la categoría una sola vez por combinación (son repetitivas).
@@ -213,10 +285,17 @@ pub async fn import_preview(
 
     assert_asset_in_installation(&state.pool, iid, body.account_asset_id).await?;
 
+    let fallbacks = load_fallbacks(&state.pool, iid).await?;
     let mut rules = load_rules(&state.pool, iid, user.id.0).await?;
     rules.extend(
-        ephemeral_rules_from_pending(&state.pool, iid, preset.id(), &body.pending_assignments)
-            .await?,
+        ephemeral_rules_from_pending(
+            &state.pool,
+            iid,
+            preset.id(),
+            &body.pending_assignments,
+            &fallbacks,
+        )
+        .await?,
     );
     let cat_names = load_category_names(&state.pool, iid).await?;
     let base_currency = installation_base_currency(&state.pool, iid).await?;
@@ -248,7 +327,8 @@ pub async fn import_preview(
 
         let matched = match_rule(&rules, preset.id(), &r.concept);
         let savings_hint = is_savings_hint(&r.concept);
-        let (kind, category_id) = suggest_kind_category(matched, savings_hint, r.amount);
+        let (kind, category_id, category_source) =
+            suggest_kind_category(matched, savings_hint, r.amount, &fallbacks);
         if matched.is_some() {
             precat_count += 1;
         }
@@ -272,6 +352,7 @@ pub async fn import_preview(
             suggested_kind: kind,
             suggested_category_id: category_id,
             suggested_category_name: category_name,
+            suggested_category_source: category_source,
             suggested_transfer: transfer[i],
             currency_warning,
             // Una regla efímera no está persistida: su id sintético no debe publicarse.
@@ -303,7 +384,7 @@ pub async fn import_preview(
     request_body = ImportConfirmBody,
     responses(
         (status = 200, description = "Import aplicado", body = ImportConfirmResponse),
-        (status = 400, description = "sha/nº filas no coinciden con el preview, o validación de fila"),
+        (status = 400, description = "sha/nº filas no coinciden con el preview, o validación de fila (incluido `category_required`: una decisión income/expense sin `category_id`)"),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Viewer or not a member"),
         (status = 404, description = "Installation missing"),
@@ -343,6 +424,7 @@ pub async fn import_confirm(
     // Validación temprana del `account_asset_id` y `original_filename`.
     assert_asset_in_installation(&state.pool, iid, body.account_asset_id).await?;
     let base_currency = installation_base_currency(&state.pool, iid).await?;
+    let fallbacks = load_fallbacks(&state.pool, iid).await?;
     let original_filename = match &body.original_filename {
         Some(f) => {
             let t = f.trim();
@@ -416,6 +498,17 @@ pub async fn import_confirm(
             )));
         }
         let kind = normalize_kind(&d.kind)?;
+        // ESTRICTO a propósito, y es la única vía de escritura que no rellena la categoría por
+        // defecto en silencio: en el wizard la categoría de cada fila SE VE, y el preview ya la
+        // trae puesta (`suggested_category_source: "fallback"`). Un confirm sin categoría es una
+        // decisión que se perdió por el camino —una fila que el cliente construyó a mano, un
+        // preview de antes de 4.15.0—, no una elección; aceptarla y silenciarla con el cajón
+        // enterraría el error en la atribución de un mes entero.
+        if kind != "savings" && d.category_id.is_none() {
+            return Err(ApiError::BadRequest(format!(
+                "category_required: row {i} is '{kind}' and carries no category_id; every income and expense needs one (the preview already suggests the default category of its scope)"
+            )));
+        }
         assert_transaction_category(&state.pool, iid, &kind, d.category_id).await?;
         assert_asset_in_installation(&state.pool, iid, d.linked_asset_id).await?;
         assert_liability_in_installation(&state.pool, iid, d.linked_liability_id).await?;
@@ -458,7 +551,16 @@ pub async fn import_confirm(
         // concepto vacío en «(sin concepto)»), pero la creación manual lo rechaza
         // (`rule_pattern_empty`) y esta puerta no debe ser la única sin el guard — el mismo
         // que aplica `ephemeral_rules_from_pending` a los conceptos que manda el cliente.
-        if body.learn_rules && (d.category_id.is_some() || kind == "savings") {
+        // El gate del aprendizaje lleva desde 4.15.0 una condición más: **nunca se aprende la
+        // categoría POR DEFECTO**. Es la que el servidor pone cuando ninguna regla casó, así que
+        // aprenderla escribiría una regla «este concepto → Otros gastos» por cada concepto nuevo
+        // del extracto —cientos tras el primer import— y esas reglas ganarían después la
+        // precedencia sobre las que el usuario sí quiso. Mismo criterio que
+        // `ephemeral_rules_from_pending`.
+        if body.learn_rules
+            && (d.category_id.is_some() || kind == "savings")
+            && !fallbacks.is_fallback_of(&kind, d.category_id)
+        {
             let pattern = derive_rule_pattern(&r.concept);
             if !pattern.is_empty() {
                 learn_rule(&mut tx, iid, user.id.0, preset.id(), &pattern, &kind, d.category_id)

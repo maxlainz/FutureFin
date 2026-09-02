@@ -1111,13 +1111,16 @@ pub struct CreateTransactionParams {
     pub op_date: String,
     pub concept: String,
     /// Importe FIRMADO como string decimal: gasto negativo ("-23.50"), ingreso positivo,
-    /// aportación de ahorro negativa. Nunca 0.
+    /// aportación de inversión negativa. Nunca 0. Un gasto POSITIVO es una devolución: netea
+    /// dentro de su categoría, no se registra como ingreso.
     #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub amount: String,
-    /// "expense" | "income" | "savings" (savings SIN categoría).
+    /// "expense" (gasto) | "income" (ingreso) | "savings" (INVERSIÓN: traspaso a un producto de
+    /// inversión, SIN categoría).
     #[schemars(extend("enum" = ["expense", "income", "savings"]))]
     pub kind: String,
-    /// Categoría (UUID de list_categories; el scope debe casar con el kind).
+    /// Categoría (UUID de list_categories; el scope debe casar con el kind). Omitida en
+    /// income/expense, el servidor pone la de por defecto de ese scope (`is_fallback`).
     #[serde(default)]
     #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
@@ -2105,12 +2108,14 @@ pub struct BatchTransactionParam {
     #[schemars(regex(pattern = DATE_YMD_STRING))]
     pub op_date: String,
     pub concept: String,
-    /// Importe FIRMADO: gasto negativo, ingreso positivo, aportación de ahorro negativa.
+    /// Importe FIRMADO: gasto negativo, ingreso positivo, aportación de inversión negativa. Un
+    /// gasto POSITIVO es una devolución y netea dentro de su categoría.
     #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub amount: String,
-    /// "expense" | "income" | "savings" (savings SIN categoría).
+    /// "expense" (gasto) | "income" (ingreso) | "savings" (INVERSIÓN, SIN categoría).
     #[schemars(extend("enum" = ["expense", "income", "savings"]))]
     pub kind: String,
+    /// Categoría (scope = kind). Omitida en income/expense, la de por defecto del scope.
     #[serde(default)]
     #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
@@ -2246,6 +2251,12 @@ pub struct UpdateCategoryParams {
     /// Orden de presentación dentro de su scope.
     #[serde(default)]
     pub sort_index: Option<i32>,
+    /// `true` designa esta categoría como destino por defecto del scope (`income`/`expense`) y
+    /// DESMARCA la anterior: solo hay una por scope, y es la que reciben los movimientos que
+    /// llegan sin categoría. `false` se rechaza (`fallback_cannot_be_unset`): para moverla,
+    /// designa otra. En scope `asset`/`liability` es error (`fallback_scope_invalid`).
+    #[serde(default)]
+    pub is_fallback: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2449,7 +2460,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_transactions",
-        description = "Movimientos (gastos, ingresos, ahorro) con filtros por mes, tipo, categoría, `uncategorized` (solo los sin clasificar), importe, fechas y lote de import, orden fecha descendente. Paginado en SQL: devuelve total_count y truncated. Para sumarlos sin bajártelos, aggregate_transactions.",
+        description = "Movimientos (gastos, ingresos, inversión) con filtros por mes, tipo, categoría, `uncategorized` (solo los sin clasificar: sin `kind`), importe, fechas y lote de import, orden fecha descendente. Paginado en SQL: devuelve total_count y truncated. Para sumarlos sin bajártelos, aggregate_transactions.",
         annotations(title = "Movimientos", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_transactions(
@@ -2523,7 +2534,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_history",
-        description = "Serie histórica de patrimonio neto interpolada desde los snapshots. month_index 0 = mes actual, evaluado HOY (los negativos, en su día 1); los markers son los snapshots reales. `points[].net_worth` es null en TODA la serie cuando `liabilities_snapshotted` es false (el pasivo del scope no está fotografiado entero): no hay neto histórico, solo `assets_total`, y el VIVO está en get_summary. VENTANA: omitir `window_months` da los últimos 120 meses, NO todo el histórico (pide 1200 para eso); la respuesta ecoa `window_months`, `window_truncated` y `first_snapshot_date_ymd`.",
+        description = "Serie histórica de patrimonio neto interpolada desde los snapshots. month_index 0 = mes actual, evaluado HOY (los negativos, en su día 1); los markers son los snapshots reales. `points[].net_worth` es null en TODA la serie cuando `liabilities_snapshotted` es false (el pasivo del scope no está fotografiado entero): no hay neto histórico, solo `assets_total`, y el VIVO está en get_summary. VENTANA: omitir `window_months` da los últimos 120 meses, NO todo el histórico (pide 1200 para eso).",
         annotations(title = "Histórico de patrimonio", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_history(
@@ -2835,7 +2846,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_categories",
-        description = "Catálogo de categorías de la instalación: id, scope (asset|liability|income|expense), nombre y orden. Úsalo para resolver nombre→id antes de filtrar o crear movimientos.",
+        description = "Catálogo de categorías de la instalación: id, scope (asset|liability|income|expense), nombre, orden y `is_fallback` (la por defecto del scope). Úsalo para resolver nombre→id antes de filtrar o crear movimientos.",
         annotations(title = "Categorías", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_categories(
@@ -2884,7 +2895,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_history_cashflow",
-        description = "Flujo de caja mensual real por tipo, meses firmados hacia atrás. Importes CON SU SIGNO: expense ≤ 0, savings ≤ 0, income ≥ 0. Dos netos distintos: `cash_delta` = expense+income+savings INCLUYE los traspasos a ahorro (un mes excelente con una aportación grande sale negativo y no es pérdida); `income_minus_expense` los deja fuera y es el `totals.net_actual` de get_transactions_summary — para «¿fue buen mes?» usa ése. La curva fina es opt-in (include_curve) y se omite por encima de 36 meses aunque `months[]` llegue a 120; cuando falta, `fine_absent_reason` dice cuál de las cuatro causas fue.",
+        description = "Flujo de caja mensual real por tipo, meses firmados hacia atrás. Importes CON SU SIGNO: expense ≤ 0, savings ≤ 0, income ≥ 0. Dos netos distintos: `cash_delta` = expense+income+savings INCLUYE los traspasos a inversión (un mes excelente con una aportación grande sale negativo y no es pérdida); `income_minus_expense` los deja fuera y es el `totals.net_actual` de get_transactions_summary — para «¿fue buen mes?» usa ése. La curva fina es opt-in (include_curve) y se omite por encima de 36 meses aunque `months[]` llegue a 120; cuando falta, `fine_absent_reason` dice cuál de las cuatro causas fue.",
         annotations(title = "Cash-flow histórico", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_history_cashflow(
@@ -3042,7 +3053,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_transaction",
-        description = "Registra un movimiento manual («apunta 23,50 € de cena de ayer»): fecha, concepto, importe FIRMADO (gasto negativo, ingreso positivo, aportación de ahorro negativa), kind (expense|income|savings; savings SIN categoría), categoría opcional (el scope debe casar con el kind) y links opcionales a activo o pasivo. Con recurring=true crea además la plantilla mensual y rellena los meses cerrados intermedios. OJO: reenviar el mismo movimiento crea OTRO movimiento (los duplicados manuales son legítimos). Si no puedes descartar un reintento (timeout, red), manda `idempotency_key`.",
+        description = "Registra un movimiento manual («apunta 23,50 € de cena de ayer»): fecha, concepto, importe FIRMADO (gasto negativo, ingreso positivo, aportación de inversión negativa), kind (expense|income|savings; savings SIN categoría), categoría (scope = kind; si falta, la de por defecto) y links opcionales a activo o pasivo. Con recurring=true crea además la plantilla mensual y rellena los meses cerrados intermedios. OJO: reenviar el mismo movimiento crea OTRO movimiento (los duplicados manuales son legítimos). Si no puedes descartar un reintento (timeout, red), manda `idempotency_key`.",
         annotations(title = "Crear movimiento", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_transaction(
@@ -3267,7 +3278,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "reconcile_transfers",
-        description = "«Concíliame las transferencias»: pase de auto-conciliación sobre los movimientos del usuario del token — empareja importes exactamente opuestos (misma divisa, solo gasto/ingreso) a ≤5 días, aunque vengan de extractos distintos. Idempotente; nunca re-empareja pares desconciliados a mano. Para VER los pares antes de escribir nada, suggest_transfer_matches.",
+        description = "«Concíliame las transferencias»: pase de auto-conciliación sobre los movimientos del usuario del token — empareja importes exactamente opuestos (misma divisa; salida `expense` < 0 + entrada `income` > 0) a ≤5 días, aunque vengan de extractos distintos. Idempotente; nunca re-empareja pares desconciliados a mano. Para VER los pares antes de escribir nada, suggest_transfer_matches.",
         annotations(title = "Conciliar transferencias", read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn reconcile_transfers(
@@ -3311,7 +3322,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "unreconcile_transfer",
-        description = "Desconcilia un par de transferencia («no era un traspaso, es un gasto real»): rompe el enlace de ambas patas —vuelven a contar como gasto o ingreso— y persiste un rechazo. Pasa el UUID de cualquiera de las dos. PUERTA DE UN SOLO SENTIDO: el par rechazado deja de proponerse, así que ni el pase automático ni confirm_transfer_match lo deshacen desde el chat. El preview devuelve LAS DOS patas: enséñaselas antes de confirmar.",
+        description = "Desconcilia un par de transferencia («no era un traspaso, es un gasto real»): rompe el enlace de ambas patas —vuelven a contar como gasto o ingreso— y persiste un rechazo. PUERTA DE UN SOLO SENTIDO: el par rechazado deja de proponerse, así que ni el pase automático ni confirm_transfer_match lo deshacen desde el chat.",
         annotations(title = "Desconciliar transferencia", read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
     )]
     async fn unreconcile_transfer(
@@ -3585,7 +3596,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_categorization_rule",
-        description = "Crea una regla de categorización («a partir de ahora, todo lo de MERCADONA es supermercado»): pattern + match_kind (substring default | prefix | exact), source opcional (null = cualquier banco), assign_kind y categoría opcional (savings sin categoría). Solo afecta a imports FUTUROS — nunca recategoriza lo existente; para eso, apply_categorization_rule. Una regla duplicada devuelve 409 `rule_duplicate` nombrando la existente (`source` ausente y vacío cuentan IGUAL); si lo ves tras un timeout, la regla YA existe: es la confirmación, no un fallo.",
+        description = "Crea una regla de categorización («a partir de ahora, todo lo de MERCADONA es supermercado»): pattern + match_kind (substring default | prefix | exact), source opcional (null = cualquier banco), assign_kind y categoría opcional (savings sin categoría). Solo afecta a imports FUTUROS — nunca recategoriza lo existente; para eso, apply_categorization_rule. Duplicada → 409 `rule_duplicate` con la existente (`source` ausente y vacío cuentan IGUAL); tras un timeout eso es la confirmación, no un fallo.",
         annotations(title = "Crear regla de categorización", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_categorization_rule(
@@ -3708,7 +3719,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "apply_categorization_rule",
-        description = "Aplica una regla de categorización a los movimientos YA EXISTENTES (backfill): create_categorization_rule NO lo hace. `apply_to_existing`: solo los sin categoría (default) o también los ya categorizados. Usa la MISMA precedencia que el import: un movimiento donde gana OTRA regla no se toca y sale en `matched_by_other_rule`, y una regla de un banco concreto no toca movimientos de otro origen y eso sale en `skipped_by_source` — un matched 0 con `skipped_by_source` > 0 NO es «nada que hacer». OJO: con `would_change_kind` > 0 la proyección se mueve en los modos B y C.",
+        description = "Aplica una regla de categorización a los movimientos YA EXISTENTES (backfill): create_categorization_rule NO lo hace. `apply_to_existing`: solo los sin categoría (default) o también los ya categorizados. Usa la MISMA precedencia que el import: no toca ni el movimiento donde gana OTRA regla (`matched_by_other_rule`) ni el de otro banco (`skipped_by_source`) — un matched 0 con `skipped_by_source` > 0 NO es «nada que hacer». OJO: con `would_change_kind` > 0 la proyección se mueve en los modos B y C.",
         annotations(title = "Aplicar regla al histórico", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn apply_categorization_rule(
@@ -5531,7 +5542,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_category",
-        description = "Renombra o reordena una categoría del catálogo compartido del hogar. `scope` es INMUTABLE. Renombrar no recategoriza nada. Duplicado en el mismo scope → 409.",
+        description = "Renombra, reordena o pone por defecto (`is_fallback: true` desmarca la anterior del scope) una categoría del catálogo compartido del hogar. `scope` es INMUTABLE. Renombrar no recategoriza nada. Duplicado en el mismo scope → 409.",
         annotations(title = "Editar categoría", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_category(
@@ -5556,6 +5567,7 @@ impl FutureFinMcp {
                 crate::handlers::categories::PatchCategoryBody {
                     name: p.name.clone(),
                     sort_index: p.sort_index,
+                    is_fallback: p.is_fallback,
                 },
             )
             .await?;
@@ -5570,7 +5582,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "delete_category",
-        description = "Borra una categoría COMPARTIDA. Con referencias vivas el borrado EXIGE `remap_to` (otra del MISMO scope) o da `category_in_use`; el preview las cuenta. El remap arrastra la atribución de cuotas.",
+        description = "Borra una categoría COMPARTIDA; la por defecto de su scope no (`category_is_fallback`). Con referencias vivas el borrado EXIGE `remap_to` (otra del MISMO scope) o da `category_in_use`; el preview las cuenta. El remap arrastra la atribución de cuotas.",
         annotations(title = "Borrar categoría", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn delete_category(
@@ -5820,7 +5832,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "suggest_transfer_matches",
-        description = "Pares candidatos a transferencia entre cuentas propias, SIN escribir nada: el preview del pase de conciliación. Cada uno trae el `match_id` que confirma confirm_transfer_match.",
+        description = "Pares candidatos a transferencia entre cuentas propias (salida `expense` < 0 + entrada `income` > 0), SIN escribir nada: el preview del pase de conciliación. Cada uno trae el `match_id` que confirma confirm_transfer_match.",
         annotations(title = "Sugerir transferencias", read_only_hint = true, open_world_hint = false)
     )]
     async fn suggest_transfer_matches(
@@ -6062,7 +6074,11 @@ const PROMPTS: &[(&str, &str, &str, &str)] = &[
         "Encuentra lo sin clasificar, los duplicados y las transferencias sin conciliar, y propone reglas.",
         "Audita cómo están categorizados mis movimientos, en este orden:\n\n\
          1. `list_transactions` con `uncategorized: true` (y un `month` o `date_from` si quiero acotar) para \
-         ver qué falta por clasificar. Mira `total_count`, no la longitud de la página.\n\
+         ver qué falta por CLASIFICAR: desde 4.15.0 ese filtro solo devuelve filas sin `kind`, porque \
+         ingresos y gastos llevan siempre categoría. Mira `total_count`, no la longitud de la página.\n\
+         1b. `list_categories` para localizar la categoría POR DEFECTO de cada scope (`is_fallback`) y \
+         `list_transactions` filtrando por ella: ahí es donde cae hoy lo que antes se quedaba sin \
+         categoría, y sacarlo de ahí es el grueso de la auditoría.\n\
          2. `find_duplicate_transactions` para los candidatos a duplicado.\n\
          3. `suggest_transfer_matches` para los traspasos entre mis cuentas que siguen contando como gasto \
          o ingreso.\n\
@@ -6073,8 +6089,12 @@ const PROMPTS: &[(&str, &str, &str, &str)] = &[
          sitio son dos movimientos reales. El discriminante es `spans_multiple_imports` / \
          `distinct_import_count`: repartidos entre lotes distintos es el patrón del re-import; dentro del \
          mismo lote suelen ser legítimos. Enséñame el grupo y deja que yo decida.\n\
-         - **Los `savings` no llevan categoría por diseño** y no salen en `uncategorized`: que no aparezcan \
-         no significa que estén clasificados.\n\
+         - **Los `savings` (inversión) no llevan categoría por diseño** y no salen en `uncategorized`: que no \
+         aparezcan no significa que estén clasificados.\n\
+         - **«Sin categoría» ya no es un estado posible en ingresos y gastos**, así que un `uncategorized` \
+         vacío NO significa «todo bien clasificado»: significa que no queda nada sin `kind`. Y una \
+         DEVOLUCIÓN (gasto de importe positivo) va en la categoría de lo que compensa, nunca en una \
+         categoría «Devoluciones» ni como ingreso: netea dentro de la suya.\n\
          - **Conciliar no es borrar.** Un par conciliado sigue visible y deja de contar en todos los \
          agregados de flujo; en los modos de ahorro B y C eso mueve el promedio real y con él la \
          proyección. Y desconciliar es una puerta de un solo sentido: el par rechazado deja de proponerse.\n\
@@ -6172,7 +6192,19 @@ impl ServerHandler for FutureFinMcp {
                 los pasivos vivos, mientras que la proyección solo lo devenga en los de `repayment_model` \
                 french o revolving con plan activo, así que con deuda en fixed_payments el KPI es MÁS \
                 conservador que get_projection; (3) los `net_return_*` faltan a la vez, y solo, cuando el \
-                patrimonio neto no es positivo.\n\nCONCILIADAS. Un movimiento con `transfer_counterpart_id` es una pata de una \
+                patrimonio neto no es positivo.\n\nCATEGORÍAS. Todo movimiento `income`/`expense` TIENE categoría: es un invariante de la base \
+                de datos, no una convención. Si omites `category_id` al crearlo o editarlo, el servidor le \
+                pone la de POR DEFECTO de su scope — la que `list_categories` marca con `is_fallback` —, y \
+                por eso `clear_category` sobre un income/expense no lo deja vacío: lo DEVUELVE a la de por \
+                defecto. Solo los `savings` (inversión) van sin categoría, por diseño. Consecuencia para \
+                las lecturas: `uncategorized` devuelve ya solo las filas sin `kind` (importadas y aún sin \
+                clasificar), nunca «gastos sin categorizar»; si buscas lo mal clasificado, filtra por la \
+                categoría por defecto. Y esa categoría no se borra (`category_is_fallback`): para moverla, \
+                designa otra con update_category `is_fallback: true`, que desmarca la anterior.\n\nDEVOLUCIONES. Un `expense` de importe POSITIVO es una devolución (un abono, un copago \
+                reembolsado): ya está descontada DENTRO de su categoría —`totals.refunds_actual` y \
+                `refunds_avg` de get_transactions_summary solo la hacen visible, no suman nada—, no es un \
+                ingreso ni una categoría aparte, y no es candidata a pata de transferencia: el pase de \
+                conciliación solo empareja una salida `expense` negativa con una entrada `income` positiva.\n\nCONCILIADAS. Un movimiento con `transfer_counterpart_id` es una pata de una \
                 transferencia entre cuentas propias ya conciliada: sigue visible en los listados pero NO \
                 cuenta en NINGÚN agregado de flujo (get_summary, get_transactions_summary, \
                 aggregate_transactions, las series). Conciliar o desconciliar cambia ese conjunto, así que \

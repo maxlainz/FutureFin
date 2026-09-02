@@ -5,6 +5,20 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.15.0
+
+- En Movimientos, lo que antes se llamaba «Ahorro» pasa a llamarse **«Inversión»** (lo que mueves a
+  carteras y productos de inversión) y aparece un **«Ahorro»** de verdad: ingresos menos gastos, con el
+  desglose de cuánto invertiste y cuánto se quedó en cuenta. El gráfico mensual encaja por alturas y marca
+  con rayas los meses en déficit y los meses en que invertiste tirando de reservas.
+- Las **devoluciones** (un gasto con importe positivo: un copago, un abono) ya no se confunden con
+  transferencias entre tus cuentas y se muestran como una línea informativa encima de las categorías; siguen
+  restando dentro de la categoría de lo que compensan.
+- **Todo ingreso o gasto tiene categoría**: si ninguna regla acierta, cae en «Otros gastos» / «Otros
+  ingresos», que ahora son la categoría por defecto de cada tipo (puedes designar otra desde Ajustes, pero
+  no borrar la que esté marcada). Al actualizar, los movimientos que tenías sin categoría pasan a la de por
+  defecto (el add-on deja un backup automático antes de la migración).
+
 ## 4.14.0
 
 - Al revisar un import, **asignar una categoría a un movimiento la aplica al momento al resto de

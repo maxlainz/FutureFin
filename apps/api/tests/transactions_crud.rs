@@ -15,11 +15,30 @@ async fn create_manual(app: &TestApp, cookie: &str, body: Value) -> common::Resp
     app.post_json_with_cookie("/v1/transactions", body, cookie).await
 }
 
+/// Id de la categoría POR DEFECTO de un scope (4.15.0). Es la que el servidor pone cuando un alta
+/// o un `clear_category` no nombran ninguna, y la que el preview del import sugiere cuando ninguna
+/// regla casa — así que es también la que el confirm exige que la decisión traiga.
+async fn fallback_category(app: &TestApp, cookie: &str, scope: &str) -> String {
+    let cats = app
+        .get_with_cookie(&format!("/v1/categories?scope={scope}"), cookie)
+        .await
+        .json();
+    cats.as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["is_fallback"] == json!(true))
+        .unwrap_or_else(|| panic!("sin categoría por defecto en '{scope}'"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 /// Importa una única transacción de gasto y devuelve su id.
 async fn import_one_expense(app: &TestApp, cookie: &str) -> String {
     let csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
                15/06/2026;15/06/2026;TIENDA IMPORTADA;-9;EUR\n";
     let b64 = B64.encode(csv);
+    let cat = fallback_category(app, cookie, "expense").await;
     let p = app
         .post_json_with_cookie(
             "/v1/transactions/import/preview",
@@ -34,7 +53,7 @@ async fn import_one_expense(app: &TestApp, cookie: &str) -> String {
             "/v1/transactions/import/confirm",
             json!({
                 "source": "myinvestor", "file_b64": b64, "file_sha256": sha,
-                "decisions": [ { "kind": "expense" } ], "learn_rules": false,
+                "decisions": [ { "kind": "expense", "category_id": cat } ], "learn_rules": false,
             }),
             cookie,
         )
@@ -206,13 +225,14 @@ async fn patch_imported_fields_editable_fingerprint_anchored() {
         .await;
     let pj = p.json();
     assert_eq!(pj["already_imported_count"].as_u64(), Some(1), "dedup detecta la huella anclada");
-    let sha = pj["file_sha256"].as_str().unwrap();
+    let sha = pj["file_sha256"].as_str().unwrap().to_string();
+    let cat = fallback_category(&app, &owner.cookie, "expense").await;
     let c = app
         .post_json_with_cookie(
             "/v1/transactions/import/confirm",
             json!({
                 "source": "myinvestor", "file_b64": b64, "file_sha256": sha,
-                "decisions": [ { "kind": "expense" } ], "learn_rules": false,
+                "decisions": [ { "kind": "expense", "category_id": cat } ], "learn_rules": false,
             }),
             &owner.cookie,
         )
@@ -843,8 +863,12 @@ async fn apply_rule_uses_full_precedence_and_reports_losers() {
             .clone()
     };
     assert_eq!(by_concept("WWW.AMAZON* MN34OP56")["category_id"], json!(compras));
-    assert!(
-        by_concept("AMAZON PRIME VIDEO")["category_id"].is_null(),
+    // La fila de la regla perdedora NO debe tocarse. Desde 4.15.0 «no tocada» ya no es «sin
+    // categoría»: nació en la POR DEFECTO al darse de alta sin ninguna, y ahí sigue.
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
+    assert_eq!(
+        by_concept("AMAZON PRIME VIDEO")["category_id"],
+        json!(otros_gastos),
         "la fila de la regla perdedora NO debe tocarse"
     );
 }
@@ -892,6 +916,12 @@ async fn apply_rule_respects_source_and_reports_it() {
 }
 
 /// `uncategorized` respeta lo ya clasificado; `all` reasigna. Y el preview no escribe.
+///
+/// **4.15.0 vacía el scope `uncategorized` sin cambiar su SQL** (`t.category_id IS NULL`): ya
+/// ningún ingreso ni gasto puede quedarse sin categoría, así que el alta sin categoría de este
+/// test aterriza en la POR DEFECTO y el scope no la alcanza. No es un fallo del filtro: es que la
+/// pregunta que respondía —«¿qué me falta por categorizar?»— dejó de tener respuestas. Lo que el
+/// test sigue fijando es lo mismo de siempre: `uncategorized` NO pisa lo ya clasificado y `all` sí.
 #[tokio::test]
 async fn apply_rule_scopes_and_preview_does_not_write() {
     let app = TestApp::spawn().await;
@@ -899,7 +929,7 @@ async fn apply_rule_scopes_and_preview_does_not_write() {
     let cajon = app.create_category(&owner, "expense", "Other").await;
     let compras = app.create_category(&owner, "expense", "Compras").await;
 
-    // Una fila sin categoría y otra en la categoría cajón.
+    // Una fila sin categoría explícita (→ cae en la POR DEFECTO) y otra en la categoría cajón.
     let a = create_manual(
         &app,
         &owner.cookie,
@@ -935,7 +965,7 @@ async fn apply_rule_scopes_and_preview_does_not_write() {
         .await;
     assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
 
-    // `uncategorized`: solo la que no tenía categoría.
+    // `uncategorized`: cero filas — ninguna tiene `category_id IS NULL` desde 4.15.0.
     let r = app
         .post_json_with_cookie(
             &format!("/v1/transactions/rules/{rule_id}/apply"),
@@ -943,19 +973,26 @@ async fn apply_rule_scopes_and_preview_does_not_write() {
             &owner.cookie,
         )
         .await;
-    assert_eq!(r.json()["matched"], 1, "{:?}", r.json());
+    assert_eq!(r.json()["matched"], 0, "{:?}", r.json());
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
     let rows = app
         .get_with_cookie("/v1/transactions?concept_contains=amazon", &owner.cookie)
         .await
         .json();
-    let dos = rows
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|t| t["concept"] == "AMAZON DOS")
-        .unwrap()
-        .clone();
-    assert_eq!(dos["category_id"], json!(cajon), "«all» no se ha ejecutado todavía");
+    let row_by = |c: &str| -> Value {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["concept"] == c)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(row_by("AMAZON DOS")["category_id"], json!(cajon), "«all» no se ha ejecutado todavía");
+    assert_eq!(
+        row_by("AMAZON UNO")["category_id"],
+        json!(otros_gastos),
+        "y la que no eligió categoría sigue en la por defecto, intacta"
+    );
 
     // `all`: ahora sí reasigna la de la categoría cajón.
     let r = app
@@ -966,7 +1003,7 @@ async fn apply_rule_scopes_and_preview_does_not_write() {
         )
         .await;
     let out = r.json();
-    assert_eq!(out["matched"], 1, "{out}");
+    assert_eq!(out["matched"], 2, "{out}");
     assert_eq!(out["by_current_category"][0]["category_name"], "Other", "{out}");
     let rows = app
         .get_with_cookie("/v1/transactions?concept_contains=amazon", &owner.cookie)
@@ -1065,14 +1102,17 @@ async fn batch_patch_is_all_or_nothing_and_names_the_culprit() {
     let msg = r.json()["message"].as_str().unwrap().to_string();
     assert!(msg.contains(&ajeno_id), "el 404 debe nombrar el id culpable: {msg}");
 
-    // CERO filas tocadas.
+    // CERO filas tocadas: siguen en la categoría POR DEFECTO con la que nacieron (4.15.0), que es
+    // el estado previo al lote — antes esa comprobación era «siguen sin categoría».
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
     let rows = app
         .get_with_cookie("/v1/transactions?view=mine", &owner.cookie)
         .await
         .json();
     for t in rows.as_array().unwrap() {
-        assert!(
-            t["category_id"].is_null(),
+        assert_eq!(
+            t["category_id"],
+            json!(otros_gastos),
             "ninguna fila debía tocarse tras el 404: {t}"
         );
     }
@@ -1266,11 +1306,16 @@ async fn patch_validates_sign_when_it_writes_the_amount_but_not_on_reclassificat
     assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
     assert_eq!(r.json()["code"], "amount_sign_mismatch");
 
-    // Cambiar importe y kind a la vez, coherentes: aceptado.
+    // Cambiar importe y kind a la vez, coherentes: aceptado. Desde 4.15.0 el cambio de clase
+    // arrastra la categoría —la que tenía es de otro scope y no puede quedarse—, así que el PATCH
+    // la nombra: dejarla implícita sería `category_scope_mismatch`, y eso es deliberado (el
+    // servidor no descarta en silencio una categoría que el usuario eligió).
+    let otros_ingresos = fallback_category(&app, &owner.cookie, "income").await;
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
     let r = app
         .patch_json_with_cookie(
             &format!("/v1/transactions/{id}"),
-            json!({ "amount": "23.50", "kind": "income" }),
+            json!({ "amount": "23.50", "kind": "income", "category_id": otros_ingresos }),
             &owner.cookie,
         )
         .await;
@@ -1281,12 +1326,24 @@ async fn patch_validates_sign_when_it_writes_the_amount_but_not_on_reclassificat
     let r = app
         .patch_json_with_cookie(
             &format!("/v1/transactions/{id}"),
-            json!({ "kind": "expense" }),
+            json!({ "kind": "expense", "category_id": otros_gastos }),
             &owner.cookie,
         )
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "reclasificar debe seguir siendo libre: {r:?}");
     assert_eq!(r.json()["amount"], "23.5000", "el importe no se toca al reclasificar");
+
+    // Y la variante SIN categoría es un 400 que nombra el problema, no un 200 que se come la
+    // categoría vieja: cambiar de clase sin decir a qué categoría va no tiene respuesta correcta.
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{id}"),
+            json!({ "kind": "income" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "category_scope_mismatch", "{}", r.json());
 }
 
 /// El importador NO aplica el guard de signo: trae el del banco, y una regla aprendida puede
@@ -1308,13 +1365,14 @@ async fn csv_import_still_accepts_the_sign_the_bank_sent() {
         )
         .await;
     let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+    let cat = fallback_category(&app, &owner.cookie, "expense").await;
     // Importe positivo declarado como gasto: es un abono que netea contra el gasto del mes.
     let c = app
         .post_json_with_cookie(
             "/v1/transactions/import/confirm",
             json!({
                 "source": "myinvestor", "file_b64": b64, "file_sha256": sha,
-                "decisions": [ { "kind": "expense" } ], "learn_rules": false,
+                "decisions": [ { "kind": "expense", "category_id": cat } ], "learn_rules": false,
             }),
             &owner.cookie,
         )
@@ -1457,5 +1515,252 @@ async fn patch_rejects_setting_and_clearing_the_same_field() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    // 4.15.0: `clear_category` sobre un ingreso/gasto ya no deja el movimiento sin categoría —
+    // lo devuelve a la POR DEFECTO de su scope. Es un cambio de significado sin cambio de forma,
+    // y es el único posible: el estado que este `clear` producía dejó de ser representable.
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
+    assert_eq!(r.json()["category_id"], json!(otros_gastos), "{}", r.json());
+}
+
+/// El gemelo del anterior por el lado de la INVERSIÓN: ahí `clear_category` sigue significando
+/// «sin categoría», porque los `savings` no llevan ninguna por diseño.
+#[tokio::test]
+async fn clear_category_on_savings_still_means_no_category() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let id = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "Aporte", "amount": "-100", "kind": "savings" }),
+    )
+    .await
+    .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{id}"),
+            json!({ "clear_category": true }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
     assert_eq!(r.json()["category_id"], Value::Null, "{}", r.json());
+}
+
+// ---------------------------------------------------------------------------
+// 4.15.0 — la categoría por defecto en las vías de escritura
+// ---------------------------------------------------------------------------
+
+/// Un alta sin categoría ya no crea un gasto «sin categoría»: lo crea en la POR DEFECTO de su
+/// scope. El lote hace lo mismo, y cada fila cae en la de SU clase (la inversión, en ninguna).
+///
+/// Ese estado no es un detalle de presentación: mientras existió, el desglose por categoría de un
+/// mes cuadraba en el total y mentía en la atribución, con la diferencia escondida en un hueco sin
+/// nombre que nadie sumaba.
+#[tokio::test]
+async fn manual_create_without_category_lands_in_the_fallback() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
+    let otros_ingresos = fallback_category(&app, &owner.cookie, "income").await;
+
+    let r = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "SUELTO", "amount": "-12.50", "kind": "expense" }),
+    )
+    .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    assert_eq!(r.json()["category_id"], json!(otros_gastos), "{}", r.json());
+    assert_eq!(r.json()["category_name"], "Otros gastos", "{}", r.json());
+
+    let b = app
+        .post_json_with_cookie(
+            "/v1/transactions/batch",
+            json!({ "transactions": [
+                { "op_date": "2026-06-01", "concept": "A", "amount": "-5", "kind": "expense" },
+                { "op_date": "2026-06-02", "concept": "B", "amount": "1000", "kind": "income" },
+                { "op_date": "2026-06-03", "concept": "C", "amount": "-200", "kind": "savings" },
+            ] }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(b.status, http::StatusCode::CREATED, "batch: {b:?}");
+    let rows = b.json();
+    assert_eq!(rows[0]["category_id"], json!(otros_gastos), "{rows}");
+    assert_eq!(rows[1]["category_id"], json!(otros_ingresos), "{rows}");
+    assert_eq!(rows[2]["category_id"], Value::Null, "la inversión no lleva categoría: {rows}");
+}
+
+/// El lote resuelve la categoría **por fila**, con el kind efectivo de cada una (`body.kind` si
+/// viene, si no el de la fila). Un solo `clear_category` sobre un ingreso y un gasto tiene que
+/// dejarlos en cajones DISTINTOS; resolver una vez para todo el lote los metería en el mismo.
+#[tokio::test]
+async fn batch_patch_resolves_the_fallback_per_row_kind() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+    let nomina = app.create_category(&owner, "income", "Nómina").await;
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
+    let otros_ingresos = fallback_category(&app, &owner.cookie, "income").await;
+
+    let gasto = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "GASTO", "amount": "-20",
+                "kind": "expense", "category_id": compras }),
+    )
+    .await
+    .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let ingreso = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-11", "concept": "INGRESO", "amount": "900",
+                "kind": "income", "category_id": nomina }),
+    )
+    .await
+    .json()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/transactions/batch",
+            json!({ "ids": [gasto, ingreso], "clear_category": true }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(r.json()["updated"], 2, "{}", r.json());
+
+    let rows = app.get_with_cookie("/v1/transactions", &owner.cookie).await.json();
+    let cat_of = |c: &str| -> Value {
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["concept"] == c)
+            .unwrap()["category_id"]
+            .clone()
+    };
+    assert_eq!(cat_of("GASTO"), json!(otros_gastos), "{rows}");
+    assert_eq!(cat_of("INGRESO"), json!(otros_ingresos), "{rows}");
+}
+
+/// Una regla «solo kind» (sin `assign_category_id`) aplicada retroactivamente escribía `NULL` en
+/// `category_id`. Desde 4.15.0 eso es un 23514 del CHECK —un 500 con cara de bug del motor de
+/// reglas—, así que la regla resuelve la POR DEFECTO antes de su `UPDATE`.
+#[tokio::test]
+async fn apply_rule_with_kind_only_lands_rows_in_the_fallback() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let compras = app.create_category(&owner, "expense", "Compras").await;
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
+
+    let t = create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "KIOSCO DE LA ESQUINA", "amount": "-3",
+                "kind": "expense", "category_id": compras }),
+    )
+    .await;
+    assert_eq!(t.status, http::StatusCode::CREATED, "{t:?}");
+
+    let rule = create_rule(
+        &app,
+        &owner.cookie,
+        json!({ "match_kind": "substring", "pattern": "KIOSCO", "assign_kind": "expense" }),
+    )
+    .await;
+    assert_eq!(rule.status, http::StatusCode::CREATED, "{rule:?}");
+    let rule_id = rule.json()["id"].as_str().unwrap().to_string();
+
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/rules/{rule_id}/apply"),
+            json!({ "apply_to_existing": "all", "confirm": true }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(r.json()["matched"], 1, "{}", r.json());
+
+    let rows = app
+        .get_with_cookie("/v1/transactions?concept_contains=KIOSCO", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(rows[0]["category_id"], json!(otros_gastos), "{rows}");
+
+    // Y es idempotente: la segunda pasada ve la fila YA en el destino resuelto, no «pendiente».
+    let r2 = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/rules/{rule_id}/apply"),
+            json!({ "apply_to_existing": "all", "confirm": true }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r2.json()["matched"], 0, "{}", r2.json());
+    assert_eq!(r2.json()["already_correct"], 1, "{}", r2.json());
+}
+
+/// `?uncategorized=true` conserva su SQL (`category_id IS NULL`) y por eso cambia de conjunto: tras
+/// 4.15.0 solo alcanza a las filas SIN CLASE —las que llegan restaurando un backup antiguo— y, si
+/// se pide explícitamente, a la inversión. Documentarlo con un test evita que el próximo lector
+/// crea que el filtro se rompió.
+#[tokio::test]
+async fn uncategorized_filter_now_returns_only_unclassified_rows() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // Un gasto y una inversión por la vía normal.
+    create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-10", "concept": "GASTO", "amount": "-20", "kind": "expense" }),
+    )
+    .await;
+    create_manual(
+        &app,
+        &owner.cookie,
+        json!({ "op_date": "2026-06-11", "concept": "APORTE", "amount": "-100", "kind": "savings" }),
+    )
+    .await;
+    // Y una fila SIN CLASE, que solo puede nacer de un restore: por SQL, como nacería.
+    let iid = app.installation_id().await;
+    sqlx::query(
+        "INSERT INTO transactions (installation_id, owner_user_id, source, op_date, concept, \
+         amount, currency, kind, category_id, fingerprint, fingerprint_ordinal) \
+         VALUES ($1, $2, 'manual', DATE '2026-06-12', 'SIN CLASE', -7, 'EUR', NULL, NULL, 'fp-sc', 0)",
+    )
+    .bind(iid)
+    .bind(owner.user_id)
+    .execute(&app.pool)
+    .await
+    .expect("fila sin clase");
+
+    let rows = app
+        .get_with_cookie("/v1/transactions?uncategorized=true", &owner.cookie)
+        .await
+        .json();
+    let conceptos: Vec<String> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["concept"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(conceptos, vec!["SIN CLASE".to_string()], "{rows}");
+
+    // Pedir la inversión explícitamente sigue devolviéndola (la exclusión es un DEFAULT).
+    let sav = app
+        .get_with_cookie("/v1/transactions?uncategorized=true&kind=savings", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(sav.as_array().unwrap().len(), 1, "{sav}");
+    assert_eq!(sav[0]["concept"], "APORTE", "{sav}");
 }

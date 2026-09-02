@@ -133,6 +133,20 @@ fn past_ymd(days: i64) -> String {
         .to_string()
 }
 
+/// Id de la categoría POR DEFECTO de un scope (4.15.0). La necesitan los seeds que insertan
+/// movimientos por SQL crudo: desde el CHECK `transactions_category_required_check` un gasto sin
+/// categoría no se puede escribir ni saltándose la API.
+async fn fallback_category(app: &TestApp, scope: &str) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM categories WHERE installation_id = (SELECT id FROM installation LIMIT 1) \
+         AND scope = $1 AND is_fallback",
+    )
+    .bind(scope)
+    .fetch_one(&app.pool)
+    .await
+    .expect("categoría por defecto del scope")
+}
+
 async fn installation_id(app: &TestApp) -> Uuid {
     sqlx::query_scalar::<_, Uuid>("SELECT id FROM installation LIMIT 1")
         .fetch_one(&app.pool)
@@ -692,14 +706,16 @@ async fn backup_recurring_rules_round_trip() {
     // 3.9.0: solo los meses ACTIVOS materializan → sembramos un movimiento real en M-1 antes.
     let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
     let iid = app.installation_id().await;
+    let otros_gastos = fallback_category(&app, "expense").await;
     sqlx::query(
         "INSERT INTO transactions (installation_id, owner_user_id, source, op_date, concept, \
-         amount, currency, kind, fingerprint, fingerprint_ordinal) \
-         VALUES ($1, $2, 'manual', $3, 'Activador', -1, 'EUR', 'expense', 'fp-act', 0)",
+         amount, currency, kind, category_id, fingerprint, fingerprint_ordinal) \
+         VALUES ($1, $2, 'manual', $3, 'Activador', -1, 'EUR', 'expense', $4, 'fp-act', 0)",
     )
     .bind(iid)
     .bind(owner.user_id)
     .bind(NaiveDate::from_ymd_opt(m1y, m1m, 15).unwrap())
+    .bind(otros_gastos)
     .execute(&app.pool)
     .await
     .expect("activate M-1");
@@ -776,6 +792,90 @@ async fn backup_recurring_rules_round_trip() {
     assert_eq!(mat2.json()["materialized"].as_u64().unwrap(), 0, "sin duplicados tras import");
     assert_eq!(mat2.json()["pruned"].as_u64().unwrap(), 0, "nada que podar: M-1 sigue activo");
     assert_eq!(app.count_rows("transactions").await, 3);
+}
+
+/// Un backup escrito ANTES de la categoría obligatoria trae ingresos, gastos y plantillas
+/// recurrentes con `category_ref: null`. El restore no puede insertarlos tal cual —el CHECK de
+/// 4.15.0 los rechaza— ni puede fallar: son ficheros que ya existen en los discos de la gente.
+///
+/// Los aterriza en la categoría POR DEFECTO de su scope, dentro de la MISMA transacción del
+/// restore. Lo que este test fija es exactamente eso, y sus dos excepciones: la inversión sigue
+/// sin categoría (por diseño) y una fila SIN clase sigue sin categoría (inventarle una sería
+/// inventarle la clase).
+#[tokio::test]
+async fn a_legacy_backup_without_categories_restores_into_the_fallback() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let payload = serde_json::json!({
+        "user": { "username": "alice", "birth_date": null },
+        "categories_used": [],
+        "assets": [],
+        "allocation_rules": [],
+        "liabilities": [],
+        "budget_entries": [],
+        "planning_flows": [],
+        "ui_preferences": {},
+        "installation_snapshot_informative": installation_snapshot_json(),
+        "snapshots": [],
+        "transaction_imports": [],
+        "transactions": [
+            { "import_index": null, "source": "manual", "op_date": "2026-06-10",
+              "concept": "Gasto sin categoria", "amount": "-40.0000", "currency": "EUR",
+              "kind": "expense", "fingerprint_ordinal": 0 },
+            { "import_index": null, "source": "manual", "op_date": "2026-06-11",
+              "concept": "Ingreso sin categoria", "amount": "900.0000", "currency": "EUR",
+              "kind": "income", "fingerprint_ordinal": 0 },
+            { "import_index": null, "source": "manual", "op_date": "2026-06-12",
+              "concept": "Aporte", "amount": "-100.0000", "currency": "EUR",
+              "kind": "savings", "fingerprint_ordinal": 0 },
+            { "import_index": null, "source": "manual", "op_date": "2026-06-13",
+              "concept": "Sin clasificar", "amount": "-7.0000", "currency": "EUR",
+              "kind": null, "fingerprint_ordinal": 0 }
+        ],
+        "categorization_rules": [],
+        "recurring_transaction_rules": [
+            { "concept": "Cuota sin categoria", "amount": "-25.0000", "kind": "expense",
+              "category_ref": null, "linked_asset_index": null, "linked_liability_index": null,
+              "notes": null, "last_materialized_month": "2026-06-01" }
+        ]
+    });
+    let b64 = craft_ffbackup_b64(7, &payload, owner.user_id);
+
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "restore legacy: {applied:?}");
+    assert_eq!(applied.json()["imported"]["transactions"].as_u64(), Some(4));
+    assert_eq!(
+        applied.json()["imported"]["recurring_transaction_rules"].as_u64(),
+        Some(1)
+    );
+
+    let otros_gastos = fallback_category(&app, "expense").await;
+    let otros_ingresos = fallback_category(&app, "income").await;
+
+    let rows: Vec<(String, Option<Uuid>)> =
+        sqlx::query_as("SELECT concept, category_id FROM transactions ORDER BY op_date")
+            .fetch_all(&app.pool)
+            .await
+            .expect("movimientos restaurados");
+    let by_concept = |c: &str| -> Option<Uuid> {
+        rows.iter().find(|(k, _)| k == c).unwrap_or_else(|| panic!("falta {c}")).1
+    };
+    assert_eq!(by_concept("Gasto sin categoria"), Some(otros_gastos));
+    assert_eq!(by_concept("Ingreso sin categoria"), Some(otros_ingresos));
+    assert_eq!(by_concept("Aporte"), None, "la inversión no lleva categoría");
+    assert_eq!(
+        by_concept("Sin clasificar"),
+        None,
+        "sin clase no se le inventa categoría"
+    );
+
+    let rule_cat: Option<Uuid> =
+        sqlx::query_scalar("SELECT category_id FROM recurring_transaction_rules")
+            .fetch_one(&app.pool)
+            .await
+            .expect("plantilla restaurada");
+    assert_eq!(rule_cat, Some(otros_gastos), "la plantilla también cae en el cajón");
 }
 
 /// A viewer cannot import (403) — enforced before any file parsing.

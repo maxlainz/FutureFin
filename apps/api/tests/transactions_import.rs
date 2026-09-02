@@ -65,6 +65,23 @@ async fn confirm(
     .await
 }
 
+/// Id de la categoría POR DEFECTO de un scope (4.15.0): la que el preview sugiere cuando ninguna
+/// regla casa, y la que el confirm exige que la decisión traiga.
+async fn fallback_category(app: &TestApp, cookie: &str, scope: &str) -> String {
+    let cats = app
+        .get_with_cookie(&format!("/v1/categories?scope={scope}"), cookie)
+        .await
+        .json();
+    cats.as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["is_fallback"] == json!(true))
+        .unwrap_or_else(|| panic!("sin categoría por defecto en '{scope}'"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 fn row_by_concept<'a>(rows: &'a [Value], needle: &str) -> &'a Value {
     rows.iter()
         .find(|r| r["concept"].as_str().unwrap_or("").contains(needle))
@@ -176,9 +193,10 @@ async fn dedup_ordinals_and_force() {
 
     // Forzar la primera fila → nueva ocurrencia (ordinal siguiente).
     let sha2 = b2["file_sha256"].as_str().unwrap();
+    let cat = fallback_category(&app, &owner.cookie, "expense").await;
     let decisions2 = vec![
-        json!({ "force": true, "kind": "expense" }),
-        json!({ "discard": true, "kind": "expense" }),
+        json!({ "force": true, "kind": "expense", "category_id": cat }),
+        json!({ "discard": true, "kind": "expense", "category_id": cat }),
     ];
     let c2 = confirm(&app, &owner.cookie, "myinvestor", &b64, sha2, decisions2, false).await;
     let cb2 = c2.json();
@@ -585,8 +603,17 @@ async fn pending_assignment_propagates_to_similar_rows() {
         // La regla efímera no está persistida: no publica matched_rule_id.
         assert!(r["matched_rule_id"].is_null(), "{needle} sin rule id: {r}");
     }
+    // No propaga a otros comercios: esa fila no la toca ninguna regla y por eso sale con la
+    // categoría POR DEFECTO (4.15.0) y `suggested_category_source: "fallback"` — que es justo lo
+    // que la distingue de una sugerencia de verdad.
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
     let other = row_by_concept(rows, "OTRO COMERCIO");
-    assert!(other["suggested_category_id"].is_null(), "no propaga a otros: {other}");
+    assert_eq!(
+        other["suggested_category_id"],
+        json!(otros_gastos),
+        "no propaga a otros: {other}"
+    );
+    assert_eq!(other["suggested_category_source"], "fallback", "{other}");
 }
 
 #[tokio::test]
@@ -649,9 +676,15 @@ async fn pending_assignment_gate_mirrors_learn_rules() {
     .await;
     assert_eq!(p.status, http::StatusCode::OK, "{p:?}");
     let body = p.json();
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
     let r = row_by_concept(body["rows"].as_array().unwrap(), "CAFE EJEMPLO 222");
     assert_eq!(r["suggested_kind"], "expense", "default por signo intacto: {r}");
-    assert!(r["suggested_category_id"].is_null(), "{r}");
+    assert_eq!(
+        r["suggested_category_id"],
+        json!(otros_gastos),
+        "sin regla efímera, la fila cae en la por defecto: {r}"
+    );
+    assert_eq!(r["suggested_category_source"], "fallback", "{r}");
 
     // savings sin categoría SÍ propaga (los savings no llevan categoría por diseño).
     let hucha = B64.encode(
@@ -669,6 +702,29 @@ async fn pending_assignment_gate_mirrors_learn_rules() {
     let b2 = p2.json();
     let r2 = row_by_concept(b2["rows"].as_array().unwrap(), "HUCHA MENSUAL 2");
     assert_eq!(r2["suggested_kind"], "savings", "{r2}");
+    assert!(
+        r2["suggested_category_source"].is_null(),
+        "la inversión no tiene categoría que atribuir: {r2}"
+    );
+
+    // 4.15.0: una asignación pendiente CON la categoría por defecto tampoco genera regla efímera.
+    // Sin este gate, el propio wizard propagaría «Otros gastos» a todo el comercio dentro de la
+    // sesión, y el confirm lo aprendería después como regla — que es la puerta gemela.
+    let p3 = preview_with_pending(
+        &app,
+        &owner.cookie,
+        &b64,
+        json!([{ "concept": "CAFE EJEMPLO 111", "kind": "expense", "category_id": otros_gastos }]),
+    )
+    .await;
+    assert_eq!(p3.status, http::StatusCode::OK, "{p3:?}");
+    let b3 = p3.json();
+    let r3 = row_by_concept(b3["rows"].as_array().unwrap(), "CAFE EJEMPLO 222");
+    assert_eq!(
+        r3["suggested_category_source"], "fallback",
+        "la por defecto llega por el cajón, NO por una regla efímera propagada: {r3}"
+    );
+    assert!(r3["matched_rule_id"].is_null(), "{r3}");
 }
 
 #[tokio::test]
@@ -707,6 +763,7 @@ async fn empty_concept_never_learns_a_catch_all_rule() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
 
+    let comercio = app.create_category(&owner, "expense", "Comercio").await;
     let csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
                10/06/2026;10/06/2026;;100;EUR\n\
                11/06/2026;11/06/2026;COMERCIO NORMAL;-5;EUR\n";
@@ -722,7 +779,7 @@ async fn empty_concept_never_learns_a_catch_all_rule() {
         &sha,
         vec![
             json!({ "kind": "savings", "category_id": null }),
-            json!({ "kind": "expense", "category_id": null }),
+            json!({ "kind": "expense", "category_id": comercio }),
         ],
         true,
     )
@@ -747,4 +804,146 @@ async fn empty_concept_never_learns_a_catch_all_rule() {
     let b2 = p2.json();
     let row = &b2["rows"][0];
     assert_eq!(row["suggested_kind"], "expense", "sin contaminación: {row}");
+}
+
+// ---------------------------------------------------------------------------
+// 4.15.0 — la categoría por defecto en el wizard
+// ---------------------------------------------------------------------------
+
+/// El preview pre-rellena la categoría de toda fila de ingreso/gasto y **dice de dónde sale**.
+/// Las dos categorías se pintan igual en el wizard y significan cosas distintas: una la eligió el
+/// usuario alguna vez (`"rule"`), la otra es el cajón que el servidor pone porque no sabe
+/// (`"fallback"`). Sin el campo, el wizard no puede evitar propagar el cajón por automatch ni
+/// avisar de que no se aprenderá como regla.
+#[tokio::test]
+async fn preview_suggests_the_fallback_and_says_where_it_came_from() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cafes = app.create_category(&owner, "expense", "Cafés").await;
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
+
+    // Una regla que cubre SOLO uno de los dos conceptos del fichero.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions/rules",
+            json!({ "pattern": "CAFE EJEMPLO", "match_kind": "substring", "source": "myinvestor",
+                    "assign_kind": "expense", "assign_category_id": cafes }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    let p = preview(&app, &owner.cookie, "myinvestor", &cafe_csv_b64()).await;
+    let body = p.json();
+    let rows = body["rows"].as_array().unwrap();
+
+    let con_regla = row_by_concept(rows, "CAFE EJEMPLO 111");
+    assert_eq!(con_regla["suggested_category_id"], json!(cafes), "{con_regla}");
+    assert_eq!(con_regla["suggested_category_source"], "rule", "{con_regla}");
+
+    let sin_regla = row_by_concept(rows, "OTRO COMERCIO");
+    assert_eq!(sin_regla["suggested_category_id"], json!(otros_gastos), "{sin_regla}");
+    assert_eq!(sin_regla["suggested_category_source"], "fallback", "{sin_regla}");
+    assert_eq!(sin_regla["suggested_category_name"], "Otros gastos", "{sin_regla}");
+
+    // El contador de precategorizadas sigue contando REGLAS, no cajones: es lo que el wizard
+    // enseña como «ya clasificadas», y el cajón no clasifica nada.
+    assert_eq!(body["precategorized_count"].as_u64(), Some(2), "{body}");
+}
+
+/// El confirm es la ÚNICA vía de escritura que no rellena el cajón en silencio: rechaza una
+/// decisión de ingreso/gasto sin categoría con `category_required` y el índice de la fila.
+///
+/// Es estricto a propósito. En el wizard la categoría de cada fila se ve y el preview ya la trae
+/// puesta, así que una decisión sin categoría no es una elección: es una que se perdió por el
+/// camino. Aceptarla y taparla con el cajón enterraría el error en la atribución de un mes entero.
+#[tokio::test]
+async fn confirm_rejects_an_expense_decision_without_category() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let b64 = cafe_csv_b64();
+    let p = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+    let n = p.json()["rows"].as_array().unwrap().len();
+
+    // Todas con categoría menos la segunda.
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
+    let mut decisions: Vec<Value> = (0..n)
+        .map(|_| json!({ "kind": "expense", "category_id": otros_gastos }))
+        .collect();
+    decisions[1] = json!({ "kind": "expense" });
+
+    let c = confirm(&app, &owner.cookie, "myinvestor", &b64, &sha, decisions, false).await;
+    assert_eq!(c.status, http::StatusCode::BAD_REQUEST, "{c:?}");
+    let body = c.json();
+    assert_eq!(body["code"], "category_required", "{body}");
+    assert!(
+        body["message"].as_str().unwrap().contains("row 1"),
+        "el 400 debe nombrar la fila: {body}"
+    );
+    // Todo-o-nada: ni la fila 0 se ha escrito.
+    assert_eq!(app.count_rows("transactions").await, 0);
+
+    // La inversión sí puede ir sin categoría: no lleva ninguna por diseño.
+    let hucha = B64.encode(&myinvestor_csv("HUCHA", "-30"));
+    let p2 = preview(&app, &owner.cookie, "myinvestor", &hucha).await;
+    let sha2 = p2.json()["file_sha256"].as_str().unwrap().to_string();
+    let c2 = confirm(
+        &app,
+        &owner.cookie,
+        "myinvestor",
+        &hucha,
+        &sha2,
+        vec![json!({ "kind": "savings" })],
+        false,
+    )
+    .await;
+    assert_eq!(c2.status, http::StatusCode::OK, "{c2:?}");
+    assert_eq!(c2.json()["imported"].as_u64(), Some(1), "{}", c2.json());
+}
+
+/// `learn_rules` no aprende NUNCA la categoría por defecto. Aprenderla escribiría una regla
+/// «este concepto → Otros gastos» por cada concepto nuevo del extracto —cientos tras el primer
+/// import— y esas reglas ganarían después la precedencia sobre las que el usuario sí quiso.
+#[tokio::test]
+async fn learn_rules_never_learns_the_fallback_category() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cafes = app.create_category(&owner, "expense", "Cafés").await;
+    let otros_gastos = fallback_category(&app, &owner.cookie, "expense").await;
+
+    let b64 = cafe_csv_b64();
+    let p = preview(&app, &owner.cookie, "myinvestor", &b64).await;
+    let body = p.json();
+    let sha = body["file_sha256"].as_str().unwrap().to_string();
+    let rows = body["rows"].as_array().unwrap().clone();
+
+    // Una fila con categoría de verdad, el resto con el cajón.
+    let decisions: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            let elegida = r["concept"].as_str().unwrap().contains("CAFE EJEMPLO 111");
+            json!({ "kind": "expense",
+                    "category_id": if elegida { &cafes } else { &otros_gastos } })
+        })
+        .collect();
+
+    let c = confirm(&app, &owner.cookie, "myinvestor", &b64, &sha, decisions, true).await;
+    assert_eq!(c.status, http::StatusCode::OK, "{c:?}");
+    assert_eq!(c.json()["rules_learned"].as_u64(), Some(1), "solo la elegida: {}", c.json());
+
+    let reglas = app
+        .get_with_cookie("/v1/transactions/rules", &owner.cookie)
+        .await
+        .json();
+    let reglas = reglas.as_array().unwrap();
+    assert_eq!(reglas.len(), 1, "{reglas:?}");
+    assert_eq!(reglas[0]["assign_category_id"], json!(cafes), "{reglas:?}");
+    for r in reglas {
+        assert_ne!(
+            r["assign_category_id"],
+            json!(otros_gastos),
+            "ninguna regla puede asignar la categoría por defecto: {r}"
+        );
+    }
 }

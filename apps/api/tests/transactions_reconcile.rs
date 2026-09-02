@@ -3,7 +3,9 @@
 //! (par manual / desconciliar) y el pase automático post-commit de las mutaciones.
 //!
 //! Contrato bajo test: el pase empareja importes exactamente opuestos del MISMO owner y misma
-//! divisa a ≤5 días, greedy determinista (gana la Δfecha menor), punto fijo (re-ejecutar → 0),
+//! divisa a ≤5 días **con el signo natural de cada pata** (salida `expense` negativa ↔ entrada
+//! `income` positiva: ni savings, ni devoluciones, ni ingresos negativos), greedy determinista
+//! (gana la Δfecha menor), punto fijo (re-ejecutar → 0),
 //! los pares desconciliados a mano NO resucitan (rechazo persistido), borrar/editar una pata
 //! desconcilia la otra, y las patas conciliadas siguen visibles en el listado.
 
@@ -103,6 +105,9 @@ async fn cross_import_pair_is_reconciled() {
     // separado. El confirm del segundo debe cruzar TODA la BD del owner y conciliarlas.
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
+    // 4.15.0: el confirm exige categoría en toda decisión income/expense.
+    let cat_out = app.create_category(&owner, "expense", "Traspasos").await;
+    let cat_in = app.create_category(&owner, "income", "Traspasos").await;
 
     let mi_csv = "Fecha de operación;Fecha de valor;Concepto;Importe;Divisa\n\
                   15/06/2026;15/06/2026;Traspaso a N26;-600;EUR\n";
@@ -119,7 +124,8 @@ async fn cross_import_pair_is_reconciled() {
         .post_json_with_cookie(
             "/v1/transactions/import/confirm",
             json!({ "source": "myinvestor", "file_b64": mi_b64,
-                    "file_sha256": p1b["file_sha256"], "decisions": [{ "kind": "expense" }],
+                    "file_sha256": p1b["file_sha256"],
+                    "decisions": [{ "kind": "expense", "category_id": cat_out }],
                     "learn_rules": false }),
             &owner.cookie,
         )
@@ -142,7 +148,8 @@ async fn cross_import_pair_is_reconciled() {
         .post_json_with_cookie(
             "/v1/transactions/import/confirm",
             json!({ "source": "n26", "file_b64": n26_b64,
-                    "file_sha256": p2b["file_sha256"], "decisions": [{ "kind": "income" }],
+                    "file_sha256": p2b["file_sha256"],
+                    "decisions": [{ "kind": "income", "category_id": cat_in }],
                     "learn_rules": false }),
             &owner.cookie,
         )
@@ -265,6 +272,8 @@ async fn savings_pull_from_import_does_not_eat_a_real_expense() {
     // emparejarse con el gasto real de tarjeta.
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
+    // Desde 4.15.0 el confirm exige categoría en toda decisión income/expense.
+    let compras = app.create_category(&owner, "expense", "Compras online").await;
 
     let csv = "\"Booking Date\",\"Value Date\",\"Partner Name\",\"Partner Iban\",Type,\"Payment Reference\",\"Account Name\",\"Amount (EUR)\",\"Original Amount\",\"Original Currency\",\"Exchange Rate\"\n\
         2026-06-10,2026-06-10,\"TIENDA EJEMPLO\",,Presentment,,\"Cuenta principal\",-49.9,49.9,EUR,1\n\
@@ -290,7 +299,7 @@ async fn savings_pull_from_import_does_not_eat_a_real_expense() {
                 "file_b64": b64,
                 "file_sha256": sha,
                 "decisions": [
-                    { "kind": "expense", "category_id": null },
+                    { "kind": "expense", "category_id": compras },
                     { "kind": "savings", "category_id": null },
                 ],
                 "learn_rules": false,
@@ -310,6 +319,150 @@ async fn savings_pull_from_import_does_not_eat_a_real_expense() {
             "nada conciliado en el par gasto↔savings: {t:?}"
         );
     }
+}
+
+/// Crea una DEVOLUCIÓN: un `expense` de importe POSITIVO.
+///
+/// No hay vía directa —`assert_amount_sign_matches_kind` rechaza el alta de un gasto positivo—,
+/// así que se hace como en la vida real: el abono entra como `income` (es lo que deduce el
+/// importador del signo) y se RE-clasifica a `expense`. Un PATCH que no toca `amount` no valida
+/// el signo a propósito (`patch_transaction_core`): reclasificar dinero que ya existe es
+/// exactamente el caso que ese comentario protege.
+async fn create_refund(
+    app: &TestApp,
+    cookie: &str,
+    op_date: &str,
+    concept: &str,
+    amount: &str,
+    category_id: &str,
+) -> Value {
+    let row = create_txn(app, cookie, op_date, concept, amount, "income").await;
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{}", id_of(&row)),
+            json!({ "kind": "expense", "category_id": category_id }),
+            cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "reclasificar a devolución: {r:?}");
+    let out = r.json();
+    assert_eq!(out["kind"], "expense", "{out:?}");
+    out
+}
+
+#[tokio::test]
+async fn refund_is_not_auto_matched_nor_suggested() {
+    // Contrato desde 4.15.0: la pata de ENTRADA es `income` POSITIVO, no «cualquier income/expense
+    // positivo». Una devolución (gasto de importe positivo) cuadra por construcción con el cargo
+    // que compensa —mismo importe, mismos días, mismo comercio— y emparejarla sacaba a las DOS
+    // filas de todos los agregados de flujo justo cuando lo correcto es que se resten dentro de su
+    // categoría. Caso real: un abono de +49,90 se comía el cargo de −49,90.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let compras = app.create_category(&owner, "expense", "Compras online").await;
+
+    let refund =
+        create_refund(&app, &owner.cookie, "2026-06-11", "Abono TIENDA", "49.90", &compras).await;
+    assert!(refund["transfer_counterpart_id"].is_null(), "precondición: suelta");
+
+    // El cargo real llega después y dispara el pase post-commit.
+    let cargo =
+        create_txn(&app, &owner.cookie, "2026-06-10", "TIENDA EJEMPLO", "-49.90", "expense").await;
+    assert!(
+        cargo["transfer_counterpart_id"].is_null(),
+        "una devolución no es pata de entrada: {cargo:?}"
+    );
+
+    // Ni el pase explícito…
+    let r = app
+        .post_json_with_cookie("/v1/transactions/reconcile", json!({}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(
+        r.json()["pairs_created"].as_i64().unwrap(),
+        0,
+        "el pase no empareja devoluciones"
+    );
+
+    // …ni las sugerencias (mismo predicado compartido).
+    let s = app
+        .get_with_cookie("/v1/transactions/transfer-matches", &owner.cookie)
+        .await;
+    assert_eq!(s.status, http::StatusCode::OK, "{s:?}");
+    assert_eq!(
+        s.json()["suggestion_count"].as_i64().unwrap(),
+        0,
+        "sin sugerencias de devolución"
+    );
+
+    // Y el gasto sigue siendo gasto: la devolución netea dentro de su categoría, no lo tapa.
+    let cargo_now = fetch_txn(&app, &owner.cookie, "2026-06", &id_of(&cargo)).await;
+    assert!(cargo_now["transfer_counterpart_id"].is_null(), "{cargo_now:?}");
+}
+
+#[tokio::test]
+async fn negative_income_is_no_longer_an_outgoing_leg() {
+    // EFECTO COLATERAL DECLARADO de 4.15.0: al exigir `a.kind = 'expense'` en la pata de salida, un
+    // `income` NEGATIVO (la simétrica de la devolución: un ingreso devuelto) deja de ser candidato
+    // automático — hasta 4.14.x sí lo era. Se fija aquí para que quien lo eche de menos encuentre
+    // la decisión y no un hueco.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let nomina = app.create_category(&owner, "income", "Nómina").await;
+
+    // Mismo truco que la devolución con los signos al revés: nace expense negativo y se reclasifica.
+    let neg =
+        create_txn(&app, &owner.cookie, "2026-06-10", "Nómina devuelta", "-120", "expense").await;
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{}", id_of(&neg)),
+            json!({ "kind": "income", "category_id": nomina }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "reclasificar a income negativo: {r:?}");
+    assert_eq!(r.json()["kind"], "income");
+
+    // La contrapartida positiva dispara el pase: bajo el predicado viejo habrían emparejado.
+    let b = create_txn(&app, &owner.cookie, "2026-06-11", "Nómina", "120", "income").await;
+    assert!(
+        b["transfer_counterpart_id"].is_null(),
+        "un income negativo ya no es pata de salida: {b:?}"
+    );
+    let s = app
+        .get_with_cookie("/v1/transactions/transfer-matches", &owner.cookie)
+        .await;
+    assert_eq!(
+        s.json()["suggestion_count"].as_i64().unwrap(),
+        0,
+        "tampoco se sugiere: {s:?}"
+    );
+}
+
+#[tokio::test]
+async fn manual_reconcile_still_accepts_a_refund_leg() {
+    // La vía manual sigue siendo kind/sign-agnóstica a propósito: si el usuario decide que ese
+    // abono SÍ era el espejo de aquel cargo, puede cruzarlos. 4.15.0 retira el automatismo, no la
+    // capacidad.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let compras = app.create_category(&owner, "expense", "Compras online").await;
+
+    let refund =
+        create_refund(&app, &owner.cookie, "2026-06-11", "Abono TIENDA", "49.90", &compras).await;
+    let cargo =
+        create_txn(&app, &owner.cookie, "2026-06-10", "TIENDA EJEMPLO", "-49.90", "expense").await;
+    assert!(cargo["transfer_counterpart_id"].is_null(), "precondición: sin auto-par");
+
+    let r = app
+        .post_json_with_cookie(
+            &format!("/v1/transactions/{}/reconcile", id_of(&cargo)),
+            json!({ "counterpart_id": id_of(&refund) }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "manual con devolución: {r:?}");
+    assert_eq!(r.json()["transaction"]["transfer_counterpart_id"], refund["id"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +573,7 @@ async fn delete_import_unreconciles_surviving_counterparts() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     // Pata manual + pata importada conciliadas; deshacer el import debe soltar la manual.
+    let cat_in = app.create_category(&owner, "income", "Traspasos").await;
     let a = create_txn(&app, &owner.cookie, "2026-06-15", "Salida manual", "-600", "expense").await;
     let n26_csv = "\"Booking Date\",\"Value Date\",\"Partner Name\",\"Partner Iban\",Type,\"Payment Reference\",\"Account Name\",\"Amount (EUR)\",\"Original Amount\",\"Original Currency\",\"Exchange Rate\"\n\
                    2026-06-16,2026-06-16,\"MyInvestor\",,\"Credit Transfer\",\"Entrada traspaso\",\"Cuenta principal\",600.00,,,\n";
@@ -436,7 +590,7 @@ async fn delete_import_unreconciles_surviving_counterparts() {
         .post_json_with_cookie(
             "/v1/transactions/import/confirm",
             json!({ "source": "n26", "file_b64": b64, "file_sha256": pb["file_sha256"],
-                    "decisions": [{ "kind": "income" }], "learn_rules": false }),
+                    "decisions": [{ "kind": "income", "category_id": cat_in }], "learn_rules": false }),
             &owner.cookie,
         )
         .await;

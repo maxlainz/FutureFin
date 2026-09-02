@@ -110,6 +110,7 @@ export function SettingsView({
   setNewCatName,
   categorySaving,
   createCategory,
+  makeCategoryFallback,
   openCategoryDeleteModal,
   categoryDeleteModalOpen,
   categoryDeletePending,
@@ -211,6 +212,9 @@ export function SettingsView({
   setNewCatName: Dispatch<SetStateAction<string>>;
   categorySaving: boolean;
   createCategory: (e: FormEvent) => void;
+  /** Traslada la marca «por defecto» del ámbito a esta categoría (`PATCH {is_fallback:true}`).
+   *  Solo tiene sentido en ingreso/gasto: los otros dos ámbitos no tienen categoría por defecto. */
+  makeCategoryFallback: (row: CategoryRow) => void;
   openCategoryDeleteModal: (row: CategoryRow) => void;
   categoryDeleteModalOpen: boolean;
   categoryDeletePending: CategoryRow | null;
@@ -989,8 +993,28 @@ export function SettingsView({
                     {CATEGORY_SCOPE_LABEL[c.scope]}
                   </span>
                   <span className="category-name">{c.name}</span>
+                  {c.is_fallback ? (
+                    <span
+                      className="category-default-tag"
+                      title="Aquí van los ingresos y gastos que no clasifica ninguna regla"
+                    >
+                      Por defecto
+                    </span>
+                  ) : null}
                   {canEditCategories ? (
                     <div className="category-row-actions budget-row-actions">
+                      {!c.is_fallback &&
+                      (c.scope === "income" || c.scope === "expense") ? (
+                        <button
+                          type="button"
+                          className="btn ghost text"
+                          title="Hacer categoría por defecto de su ámbito"
+                          disabled={categorySaving}
+                          onClick={() => makeCategoryFallback(c)}
+                        >
+                          Por defecto
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         className="btn ghost icon-btn"
@@ -1004,7 +1028,14 @@ export function SettingsView({
                         type="button"
                         className="btn ghost danger icon-btn"
                         aria-label="Eliminar categoría"
-                        disabled={categorySaving}
+                        // La por defecto no se borra: es el destino de todo ingreso o gasto sin
+                        // clasificar. Para retirarla hay que marcar antes otra.
+                        disabled={categorySaving || c.is_fallback}
+                        title={
+                          c.is_fallback
+                            ? "Es la categoría por defecto de su ámbito: marca antes otra como predeterminada"
+                            : undefined
+                        }
                         onClick={() => openCategoryDeleteModal(c)}
                       >
                         <RowTrashIcon />
@@ -1271,6 +1302,12 @@ export function SettingsView({
                       <p className="muted tight">Sin categoría sustituta en el ámbito.</p>
                     );
                   }
+                  // La por defecto va primero en la lista y es la preseleccionada (eso lo hace
+                  // `openCategoryDeleteModal`): es el destino natural de lo que se queda huérfano.
+                  const ordered = [
+                    ...siblings.filter((x) => x.is_fallback),
+                    ...siblings.filter((x) => !x.is_fallback),
+                  ];
                   return (
                     <label className="field">
                       <span>Reasignar a</span>
@@ -1279,9 +1316,10 @@ export function SettingsView({
                         onChange={(e) => setCategoryRemapToId(e.target.value)}
                         aria-label="Categoría destino al reasignar"
                       >
-                        {siblings.map((s) => (
+                        {ordered.map((s) => (
                           <option key={s.id} value={s.id}>
                             {s.name}
+                            {s.is_fallback ? " · por defecto" : ""}
                           </option>
                         ))}
                       </select>

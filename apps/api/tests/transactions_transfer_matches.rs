@@ -227,3 +227,63 @@ async fn suggestion_window_is_validated_not_clamped() {
         assert_eq!(r.json()["code"], json!(code), "{qs}: {:?}", r.json());
     }
 }
+
+#[tokio::test]
+async fn refund_pairs_are_absent_from_suggestions() {
+    // La lectura de sugerencias comparte EL predicado con el pase (`candidates_from_where`), así
+    // que la exclusión de las devoluciones de 4.15.0 tiene que verse también aquí — y sin que la
+    // lista se quede muda para los pares legítimos. El contraste está dentro del mismo test a
+    // propósito: un `suggestion_count = 0` puede significar «bien excluido» o «el endpoint no ve
+    // nada», y solo el par bueno de al lado distingue las dos cosas.
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("refund_owner").await;
+    let compras = app.create_category(&owner, "expense", "Compras online").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -2);
+
+    // Devolución (+49,90 clasificada como expense) y su cargo espejo, a 12 días: fuera de la
+    // ventana del pase, o sea justo el terreno de las sugerencias.
+    let abono = manual(&app, &owner.cookie, &date_in(sy, sm, 3), "Abono TIENDA", "49.90", "income").await;
+    let abono_id = abono["id"].as_str().unwrap().to_string();
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{abono_id}"),
+            json!({ "kind": "expense", "category_id": compras }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, StatusCode::OK, "reclasificar a devolución: {r:?}");
+    let cargo = manual(&app, &owner.cookie, &date_in(sy, sm, 15), "TIENDA EJEMPLO", "-49.90", "expense").await;
+    let cargo_id = cargo["id"].as_str().unwrap().to_string();
+
+    let s = app
+        .get_with_cookie("/v1/transactions/transfer-matches", &owner.cookie)
+        .await;
+    assert_eq!(s.status, StatusCode::OK, "{s:?}");
+    assert_eq!(
+        s.json()["suggestion_count"].as_i64().unwrap(),
+        0,
+        "la devolución no se propone: {s:?}"
+    );
+
+    // …y un traspaso de verdad, en el mismo dataset y a la misma distancia, SÍ se propone.
+    let out_leg = manual(&app, &owner.cookie, &date_in(sy, sm, 4), "Traspaso salida", "-300", "expense").await;
+    let in_leg = manual(&app, &owner.cookie, &date_in(sy, sm, 16), "Traspaso entrada", "300", "income").await;
+    let s2 = app
+        .get_with_cookie("/v1/transactions/transfer-matches", &owner.cookie)
+        .await;
+    let b2 = s2.json();
+    assert_eq!(b2["suggestion_count"].as_i64().unwrap(), 1, "el par legítimo sí: {b2}");
+    let sug = &b2["suggestions"][0];
+    assert_eq!(sug["outgoing"]["id"], out_leg["id"], "{sug}");
+    assert_eq!(sug["incoming"]["id"], in_leg["id"], "{sug}");
+
+    // Nada se ha conciliado por el camino: el GET no muta (invariante 1 del módulo).
+    for id in [&abono_id, &cargo_id] {
+        assert!(
+            txn(&app, &owner.cookie, id).await["transfer_counterpart_id"].is_null(),
+            "el GET no concilia {id}"
+        );
+    }
+}

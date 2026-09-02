@@ -51,6 +51,9 @@ src/
 │   │                             #   niceYTicks, axis age/dates mode, deflationFactorAt (deflactor keyed por month_index; k<0 amplifica),
 │   │                             #   PROJECTION_FOCUS_STORAGE_KEY, ASSET_LINE_COLORS (CSS vars), complementaryProjectionTickLabel,
 │   │                             #   projectionHoverTitle, formatYearsEsFromMonths, formatProjectionChartHorizonLine
+│   ├── cashflow-bars.ts          # geometría PURA del cash-flow mensual (4.15.0): buildCashflowColumns → Ingresos /
+│   │                             #   Gastos / déficit / invertido / en cuenta / de reservas + scale; MonthlyCashflowBars solo pinta.
+│   │                             #   Invariantes de alturas en cashflow-bars.test.ts
 │   ├── chart-legend.ts           # modelo PURO de la leyenda de charts (ChartLegend): buildStructuralLegendItems,
 │   │                             #   legendOrderByPeakDesc (leyenda peak DESC conservando el colorIndex de pintado),
 │   │                             #   buildAssetLegendItems (sufijo «Nombre · owner» en duplicados de la vista hogar;

@@ -367,9 +367,17 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     `surplus_cash` movió las descripciones de `delete_asset` y `get_allocation_resolution` y el
     total subió +101 sobre los `23874` de la ronda anterior); era `52 21319 596` al cerrar la Fase 5.
     **La Fase 6 gastó casi todo el margen**: las 16 tools nuevas llevaron el crudo a **28.884**
-    (+4.884 sobre el tope) y el arreglo fue el que la propia guardia prescribe. Quedan **25
-    caracteres** — la próxima tool obliga a otra ronda de reequilibrio, así que presupuéstala al
-    planificarla, no al final.
+    (+4.884 sobre el tope) y el arreglo fue el que la propia guardia prescribe. **4.15.0 volvió a
+    medir antes de escribir**: el margen real era **5** caracteres (`68 23995 596`), no los 25/126
+    que circulaban congelados; el release necesitaba ~+250 (criterio de signo en `reconcile_transfers`
+    y `suggest_transfer_matches`, `is_fallback` en las tres tools de categorías, la categoría por
+    defecto en `create_transaction`) y los pagó recortando **prosa que duplicaba campos de respuesta**
+    en `unreconcile_transfer` (424→318), `apply_categorization_rule` (570→501),
+    `create_categorization_rule` (549→499) y `get_history` (574→491), y llevando la regla
+    transversal de categoría (obligatoria en income/expense; `clear_category` = volver a la por
+    defecto; `uncategorized` = solo filas sin `kind`) al `instructions` en vez de a 68 descripciones.
+    Estado tras 4.15.0: **`68 23949 598`** — quedan **51 caracteres**. La próxima tool sigue
+    obligando a otra ronda de reequilibrio; presupuéstala al planificarla, no al final.
   - **Hallazgo que reordena lo que queda**: medido DESPUÉS del recorte, el `inputSchema` del
     catálogo son ~55 KB, **~2,7× las descripciones** (medida puntual de la auditoría de la Fase 5, no
     una constante congelada: re-derívala con un `tools/list` contra un servidor vivo pesando

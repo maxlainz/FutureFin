@@ -48,8 +48,8 @@
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "9f91ff01dcca",
-      "description_len": 570,
-      "description_sha256_12": "261539f88af1",
+      "description_len": 501,
+      "description_sha256_12": "c27651c525f4",
       "name": "apply_categorization_rule",
       "properties": [
         "apply_to_existing",
@@ -218,8 +218,8 @@
         "$.source": "type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "b61a3238dcf7",
-      "description_len": 549,
-      "description_sha256_12": "94dfd50c0847",
+      "description_len": 499,
+      "description_sha256_12": "0e2f4e603cde",
       "name": "create_categorization_rule",
       "properties": [
         "assign_category_id",
@@ -376,8 +376,8 @@
         "$.recurring": "type=[\"boolean\",\"null\"]"
       },
       "constraints_sha256_12": "3f24273e519d",
-      "description_len": 577,
-      "description_sha256_12": "413b7a59cd20",
+      "description_len": 581,
+      "description_sha256_12": "88718990100f",
       "name": "create_transaction",
       "properties": [
         "amount",
@@ -502,8 +502,8 @@
         "$.remap_to": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "2952083f166c",
-      "description_len": 194,
-      "description_sha256_12": "d3f50e368936",
+      "description_len": 250,
+      "description_sha256_12": "796f67c2cd8d",
       "name": "delete_category",
       "properties": [
         "confirm",
@@ -714,8 +714,8 @@
         "$.window_months": "format=\"int64\" maximum=1200 minimum=1 type=[\"integer\",\"null\"]"
       },
       "constraints_sha256_12": "0baf22866d5b",
-      "description_len": 574,
-      "description_sha256_12": "8cf45a55142b",
+      "description_len": 491,
+      "description_sha256_12": "4a07da5c44ee",
       "name": "get_history",
       "properties": [
         "include_asset_series",
@@ -733,8 +733,8 @@
         "$.window_months": "format=\"int64\" maximum=120 minimum=1 type=[\"integer\",\"null\"]"
       },
       "constraints_sha256_12": "98f6a7bce371",
-      "description_len": 595,
-      "description_sha256_12": "4bf120b7840b",
+      "description_len": 598,
+      "description_sha256_12": "5b3fe0cd0a79",
       "name": "get_history_cashflow",
       "properties": [
         "include_curve",
@@ -863,8 +863,8 @@
         "$.scope": "enum=[\"asset\",\"expense\",\"income\",\"liability\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "c340cf7d8f32",
-      "description_len": 169,
-      "description_sha256_12": "bf0501bd9721",
+      "description_len": 211,
+      "description_sha256_12": "8dc042c7cfcb",
       "name": "list_categories",
       "properties": [
         "scope"
@@ -1032,8 +1032,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "459417462574",
-      "description_len": 283,
-      "description_sha256_12": "ba4574ab01ee",
+      "description_len": 298,
+      "description_sha256_12": "bca138c54ca9",
       "name": "list_transactions",
       "properties": [
         "category_id",
@@ -1074,8 +1074,8 @@
         "$.confirm": "type=[\"boolean\",\"null\"]"
       },
       "constraints_sha256_12": "506034ee05c5",
-      "description_len": 356,
-      "description_sha256_12": "8466da64c90e",
+      "description_len": 381,
+      "description_sha256_12": "7cb48737d128",
       "name": "reconcile_transfers",
       "properties": [
         "confirm"
@@ -1163,8 +1163,8 @@
         "$.window_days": "format=\"int32\" maximum=365 minimum=1 type=[\"integer\",\"null\"]"
       },
       "constraints_sha256_12": "887a68211a10",
-      "description_len": 176,
-      "description_sha256_12": "0b7e0e32853f",
+      "description_len": 222,
+      "description_sha256_12": "463b6e08f208",
       "name": "suggest_transfer_matches",
       "properties": [
         "limit",
@@ -1180,8 +1180,8 @@
         "$.transaction_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\""
       },
       "constraints_sha256_12": "dfdb27ed0266",
-      "description_len": 424,
-      "description_sha256_12": "a9dddca5cfb1",
+      "description_len": 318,
+      "description_sha256_12": "a6a00df799e3",
       "name": "unreconcile_transfer",
       "properties": [
         "confirm",
@@ -1336,15 +1336,17 @@
       "constraints": {
         "$": "additionalProperties=false required=[\"id\"] type=\"object\"",
         "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.is_fallback": "type=[\"boolean\",\"null\"]",
         "$.name": "type=[\"null\",\"string\"]",
         "$.sort_index": "format=\"int32\" type=[\"integer\",\"null\"]"
       },
-      "constraints_sha256_12": "b38bbc50c365",
-      "description_len": 157,
-      "description_sha256_12": "c21165602409",
+      "constraints_sha256_12": "841586d3fc63",
+      "description_len": 228,
+      "description_sha256_12": "8c49e806f5bc",
       "name": "update_category",
       "properties": [
         "id",
+        "is_fallback",
         "name",
         "sort_index"
       ],

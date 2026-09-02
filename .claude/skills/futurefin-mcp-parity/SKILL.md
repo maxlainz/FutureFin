@@ -384,7 +384,7 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
    ```bash
    python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"
    ```
-   (today: `68 23874 596` — **126 characters from the ceiling**; `52 21319 596` right after Fase 5;
+   (today: `68 23949 598` after 4.15.0 — **51 characters from the ceiling**; it was `68 23995 596` — **5 from the ceiling** — right before 4.15.0, not the 126 this line used to claim: **re-measure, never trust the frozen number**; `52 21319 596` right after Fase 5;
    before Fase 5: 37,214 total, one description at 3,821, 26 tools over 600 chars). **Read that
    margin before you start**: Fase 6's 16 tools took the raw total to 28,884 (+4,884 over budget)
    and bringing it back was real work, not a trim. The next tool has to buy its description out of
@@ -670,8 +670,27 @@ y solo necesitaba superficie.**
 `unreconcile_transfer`, `update_allocation_rule`). **Coste de contexto**: las descripciones llegaron
 a **28.884** caracteres (+4.884 sobre el tope de 24.000) y el arreglo fue el que la propia guardia
 prescribe —campos de procedencia y `instructions`, **nunca** subir la constante—. Estado final
-**23.874 / 24.000, máximo 596**: quedan **126 caracteres**, así que **la próxima tool obliga a otra
-ronda de reequilibrio**. Presupuéstalo al planificarla.
+**23.874 / 24.000, máximo 596**: quedaban **126 caracteres** al cerrar la Fase 6 — y **5** cuando
+arrancó 4.15.0 (`68 23995 596`: los releases intermedios fueron comiéndoselos sin que este número
+se moviera). 4.15.0 cerró en **`68 23949 598`** (51 de margen) recortando prosa que duplicaba
+campos de respuesta y llevando la regla de categoría obligatoria al `instructions`. **La próxima
+tool obliga a otra ronda de reequilibrio**: presupuéstalo al planificarla, midiendo, no leyendo.
+
+**4.15.0 — evaluación de paridad (Inversión/devoluciones/categoría obligatoria)**:
+
+| Superficie HTTP | Resultado |
+|---|---|
+| `categories`: `is_fallback` en toda respuesta | **Tool actualizada** — `list_categories` nombra el campo (la core ya lo lleva) |
+| `PATCH /v1/categories/{id}` acepta `is_fallback` (swap; `false` → `fallback_cannot_be_unset`; asset/liability → `fallback_scope_invalid`) | **Tool actualizada** — `update_category` gana el param + descripción; cuarteto en `mcp_write.rs` |
+| `DELETE /v1/categories/{id}` rechaza la por defecto (`category_is_fallback`) | **Tool actualizada** — `delete_category` (descripción); el preview hereda `target_is_fallback` de `category_delete_effects` sin código en `server.rs` |
+| `GET /v1/transactions/summary`: `totals.net_avg`, `refunds_actual`, `refunds_avg` | **Tool actualizada por core, descripción intacta** — `get_transactions_summary` es `to_tool_result(core(...))`; los campos viajan a coste 0 y se documentan una vez en `instructions` §DEVOLUCIONES |
+| Candidatura de conciliación exige signo natural | **2 tools actualizadas** — `reconcile_transfers`, `suggest_transfer_matches`; `confirm_transfer_match` hereda (un `match_id` solo nombra pares que el predicado nuevo propuso) |
+| Categoría obligatoria en toda escritura income/expense (`create_transaction`, `create_batch`, `update_transaction(s)`, `apply_categorization_rule`) | **4 tools en prosa mínima + `instructions` §CATEGORÍAS** (en vez de 68 descripciones) |
+| `POST /v1/transactions/import/{preview,confirm}` (`suggested_category_source`, `category_required`) | **n/a** — omisión deliberada vigente (§3.1) |
+| Migración `20260902120000_…` | **n/a** — sin superficie |
+| `GET /v1/transactions/aggregate` | **n/a razonado** — el eje ya existe (`kind=expense&min_amount=0.0001`) |
+
+Recuento: **68 tools, cero altas** (`grep -c '#\[tool(' apps/api/src/mcp/server.rs` = 68; fixture `tool_count` = 68).
 
 Re-verify before trusting:
 
@@ -737,7 +756,7 @@ Re-verify before trusting:
 - Context budget (Fase 5) still respected — the test fails only if the total goes UP, never down:
   `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_http tool_descriptions_stay_within_the_context_budget`,
   and the exact fixture snapshot: `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
-  (`68 23874 596` today, **126 from the ceiling**; `52 21319 596` at the close of Fase 5;
+  (`68 23949 598` today after 4.15.0, **51 from the ceiling** — it was 5 just before; `52 21319 596` at the close of Fase 5;
   `37214`/`3821`/26-over-600 before Fase 5 — none of these lives anywhere but this skill and the
   CHANGELOG, so don't freeze any of them into the guard's constant).
 - View echo on the 7 enveloped listings, and the content parity that replaces byte parity for them:

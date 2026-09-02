@@ -43,6 +43,54 @@ impl CategoryScope {
     }
 }
 
+/// Nombre con el que nace la categoría por defecto de gasto (`seed_default_categories`, y la
+/// migración `20260902120000` cuando adopta la sembrada de una instalación anterior). Es solo el
+/// nombre de arranque: la designación vive en `categories.is_fallback`, no en el texto, así que
+/// renombrarla desde Ajustes no la degrada.
+pub(crate) const FALLBACK_EXPENSE_NAME: &str = "Otros gastos";
+/// El gemelo de ingresos. Ver [`FALLBACK_EXPENSE_NAME`].
+pub(crate) const FALLBACK_INCOME_NAME: &str = "Otros ingresos";
+
+/// `true` si `(scope, name)` es el par con el que nace la categoría por defecto de ese scope.
+/// Lo usa el seed; el resto del código pregunta por `is_fallback`, nunca por el nombre.
+pub(crate) fn is_seeded_fallback(scope: &str, name: &str) -> bool {
+    matches!(
+        (scope, name),
+        ("expense", FALLBACK_EXPENSE_NAME) | ("income", FALLBACK_INCOME_NAME)
+    )
+}
+
+/// Id de la categoría POR DEFECTO de `scope` en esta instalación (4.15.0). **Solo lectura**: no
+/// crea nada. La existencia la garantizan la migración `20260902120000` (backfill + creación por
+/// instalación) y `seed_default_categories`; si aun así falta, es un 400 con nombre propio
+/// —`fallback_category_missing`— y no un 500 mudo desde el CHECK de la base.
+///
+/// Genérica sobre el ejecutor a propósito: la llaman handlers con el pool, el restore de backup
+/// con la conexión de SU transacción (la categoría resuelta tiene que ser la que ve esa
+/// transacción, no la que vería una conexión distinta) y el import con el pool.
+pub(crate) async fn fallback_category_id<'e, E>(
+    exec: E,
+    installation_id: Uuid,
+    scope: &str,
+) -> Result<Uuid, ApiError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let id: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM categories
+           WHERE installation_id = $1 AND scope = $2 AND is_fallback"#,
+    )
+    .bind(installation_id)
+    .bind(scope)
+    .fetch_optional(exec)
+    .await?;
+    id.ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "fallback_category_missing: this installation has no default category for scope '{scope}'; mark one with PATCH /v1/categories/{{id}} {{\"is_fallback\": true}}"
+        ))
+    })
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CategoryResponse {
     #[schema(value_type = String, format = "uuid")]
@@ -50,6 +98,12 @@ pub struct CategoryResponse {
     pub scope: CategoryScope,
     pub name: String,
     pub sort_index: i32,
+    /// `true` ⟺ es la categoría POR DEFECTO de su scope (4.15.0): a ella van los ingresos/gastos
+    /// que llegan sin categoría (import sin regla, alta manual, `clear_category`, restore de un
+    /// backup antiguo). Hay exactamente una por instalación y scope, y solo en `income`/`expense`
+    /// (índice único parcial + CHECK en la base). No se puede borrar (`category_is_fallback`) ni
+    /// desmarcar: se cambia designando otra con `PATCH {"is_fallback": true}`.
+    pub is_fallback: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -64,6 +118,11 @@ pub struct CreateCategoryBody {
 pub struct PatchCategoryBody {
     pub name: Option<String>,
     pub sort_index: Option<i32>,
+    /// `true` designa esta categoría como destino por defecto de su scope (income/expense): los
+    /// movimientos de esa clase sin categoría caen aquí. Desmarca la anterior en la misma
+    /// transacción. `false` se rechaza (`fallback_cannot_be_unset`): se cambia designando otra.
+    #[serde(default)]
+    pub is_fallback: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +165,10 @@ pub(crate) struct CategoryDeleteEffects {
     pub categorization_rules_degraded: i64,
     /// `true` ⟺ `references_total > 0`, es decir: el borrado exige nombrar `remap_to`.
     pub remap_required: bool,
+    /// `true` ⟺ la categoría es la POR DEFECTO de su scope (4.15.0) → el borrado es imposible
+    /// (`category_is_fallback`), con o sin `remap_to`. Viaja en el preview para que quien lo lee
+    /// no proponga un borrado que la confirmación va a rechazar.
+    pub target_is_fallback: bool,
 }
 
 pub(crate) async fn category_delete_effects(
@@ -120,13 +183,14 @@ pub(crate) async fn category_delete_effects(
     // antes de borrar). Los dos contadores no bloqueantes viajan aparte porque el remap SÍ mueve
     // la atribución de las cuotas, y quien confirma un borrado tiene que poder verlo.
     type Counts = (i64, i64, i64, i64, i64, i64, i64, i64);
-    let row: Option<(String, String)> =
-        sqlx::query_as(r#"SELECT scope, name FROM categories WHERE id = $1 AND installation_id = $2"#)
-            .bind(category_id)
-            .bind(installation_id)
-            .fetch_optional(pool)
-            .await?;
-    let Some((scope, name)) = row else {
+    let row: Option<(String, String, bool)> = sqlx::query_as(
+        r#"SELECT scope, name, is_fallback FROM categories WHERE id = $1 AND installation_id = $2"#,
+    )
+    .bind(category_id)
+    .bind(installation_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some((scope, name, target_is_fallback)) = row else {
         return Err(ApiError::NotFound);
     };
 
@@ -168,16 +232,18 @@ pub(crate) async fn category_delete_effects(
         liabilities_expense_attribution: c.6,
         categorization_rules_degraded: c.7,
         remap_required: references_total > 0,
+        target_is_fallback,
     })
 }
 
+/// `(scope, is_fallback)` de una categoría de la instalación, o `None` si no existe.
 async fn category_scope_row(
     pool: &sqlx::PgPool,
     installation_id: Uuid,
     category_id: Uuid,
-) -> Result<Option<String>, ApiError> {
-    let s: Option<String> = sqlx::query_scalar(
-        r#"SELECT scope FROM categories WHERE id = $1 AND installation_id = $2"#,
+) -> Result<Option<(String, bool)>, ApiError> {
+    let s: Option<(String, bool)> = sqlx::query_as(
+        r#"SELECT scope, is_fallback FROM categories WHERE id = $1 AND installation_id = $2"#,
     )
     .bind(category_id)
     .bind(installation_id)
@@ -192,6 +258,7 @@ struct CategoryRow {
     scope: String,
     name: String,
     sort_index: i32,
+    is_fallback: bool,
 }
 
 fn normalize_name(raw: &str) -> Result<String, ApiError> {
@@ -215,6 +282,7 @@ fn row_to_response(r: CategoryRow) -> Result<CategoryResponse, ApiError> {
         scope: CategoryScope::parse(&r.scope)?,
         name: r.name,
         sort_index: r.sort_index,
+        is_fallback: r.is_fallback,
     })
 }
 
@@ -258,7 +326,7 @@ pub(crate) async fn list_categories_core(
 
     let rows: Vec<CategoryRow> = if let Some(ref sc) = scope_filter {
         sqlx::query_as(
-            r#"SELECT id, scope, name, sort_index
+            r#"SELECT id, scope, name, sort_index, is_fallback
                FROM categories
                WHERE installation_id = $1 AND scope = $2
                ORDER BY sort_index ASC, name ASC"#,
@@ -269,7 +337,7 @@ pub(crate) async fn list_categories_core(
         .await?
     } else {
         sqlx::query_as(
-            r#"SELECT id, scope, name, sort_index
+            r#"SELECT id, scope, name, sort_index, is_fallback
                FROM categories
                WHERE installation_id = $1
                ORDER BY scope ASC, sort_index ASC, name ASC"#,
@@ -328,7 +396,7 @@ pub(crate) async fn create_category_core(
     let row: CategoryRow = sqlx::query_as(
         r#"INSERT INTO categories (installation_id, scope, name, sort_index)
            VALUES ($1, $2, $3, $4)
-           RETURNING id, scope, name, sort_index"#,
+           RETURNING id, scope, name, sort_index, is_fallback"#,
     )
     .bind(iid)
     .bind(body.scope.as_str())
@@ -350,7 +418,7 @@ pub(crate) async fn create_category_core(
     ),
     responses(
         (status = 200, description = "Updated", body = CategoryResponse),
-        (status = 400, description = "Validation error"),
+        (status = 400, description = "Validation error (`fallback_cannot_be_unset`, `fallback_scope_invalid`)"),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Viewer or not a member"),
         (status = 404, description = "Category missing"),
@@ -382,6 +450,12 @@ pub async fn patch_category(
 /// **Cache NONE** (contrato histórico del módulo: ningún handler de categorías invalida). Renombrar
 /// una categoría no mueve ni un número de la proyección; su `category_id` es lo que viaja al engine.
 /// 409 en duplicado `(instalación, scope, nombre)` vía el mapeo global de sqlx.
+///
+/// ## `is_fallback` (4.15.0)
+/// - `Some(true)` → **swap atómico**: desmarca la categoría por defecto anterior del MISMO scope y
+///   marca ésta, en una sola transacción y en ese orden (índice único parcial).
+/// - `Some(false)` → 400 `fallback_cannot_be_unset`. La designación se mueve, no se apaga.
+/// - `Some(true)` sobre un scope `asset`/`liability` → 400 `fallback_scope_invalid`.
 pub(crate) async fn patch_category_core(
     pool: &sqlx::PgPool,
     iid: Uuid,
@@ -392,16 +466,27 @@ pub(crate) async fn patch_category_core(
     // alguien decida si cuenta como «algo que actualizar» (mismo criterio que
     // `patch_allocation_rule_core`).
     {
-        let PatchCategoryBody { name, sort_index } = &body;
-        if name.is_none() && sort_index.is_none() {
+        let PatchCategoryBody { name, sort_index, is_fallback } = &body;
+        if name.is_none() && sort_index.is_none() && is_fallback.is_none() {
             return Err(ApiError::BadRequest(
-                "patch_empty: provide name and/or sort_index".into(),
+                "patch_empty: provide name, sort_index and/or is_fallback".into(),
             ));
         }
     }
 
+    // `is_fallback: false` NO existe como operación. Desmarcar dejaría a la instalación sin
+    // destino para los ingresos/gastos sin categoría —el estado que 4.15.0 vino a eliminar— y el
+    // siguiente import fallaría con `fallback_category_missing` sin que nadie relacionara las dos
+    // cosas. La designación se MUEVE marcando otra, nunca se apaga.
+    if body.is_fallback == Some(false) {
+        return Err(ApiError::BadRequest(
+            "fallback_cannot_be_unset: the default category is moved by designating another one with is_fallback true, never by unsetting this one".into(),
+        ));
+    }
+    let designate_fallback = body.is_fallback == Some(true);
+
     let row: Option<CategoryRow> = sqlx::query_as(
-        r#"SELECT id, scope, name, sort_index
+        r#"SELECT id, scope, name, sort_index, is_fallback
            FROM categories
            WHERE id = $1 AND installation_id = $2"#,
     )
@@ -414,24 +499,50 @@ pub(crate) async fn patch_category_core(
         return Err(ApiError::NotFound);
     };
 
+    if designate_fallback && !matches!(current.scope.as_str(), "income" | "expense") {
+        return Err(ApiError::BadRequest(
+            "fallback_scope_invalid: only income and expense categories can be the default one; assets and liabilities always carry an explicit category".into(),
+        ));
+    }
+
     let new_name = match &body.name {
         Some(s) => normalize_name(s)?,
         None => current.name.clone(),
     };
     let new_sort = body.sort_index.unwrap_or(current.sort_index);
 
+    // El swap va en UNA transacción y en ESTE orden —desmarcar la anterior, marcar la nueva—
+    // porque el índice único es PARCIAL sobre `(installation_id, scope) WHERE is_fallback`: dos
+    // marcadas a la vez violan la unicidad aunque sea por un instante dentro de la transacción.
+    // El orden inverso da un 23505 con cara de conflicto de nombre.
+    let mut tx = pool.begin().await?;
+    if designate_fallback {
+        sqlx::query(
+            r#"UPDATE categories SET is_fallback = false
+               WHERE installation_id = $1 AND scope = $2 AND is_fallback AND id <> $3"#,
+        )
+        .bind(iid)
+        .bind(&current.scope)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    // `is_fallback OR $3`: este UPDATE nunca desmarca (el `false` ya se rechazó arriba), así que
+    // un PATCH de nombre no puede degradar la categoría por defecto por omisión.
     let updated: CategoryRow = sqlx::query_as(
         r#"UPDATE categories
-           SET name = $1, sort_index = $2
-           WHERE id = $3 AND installation_id = $4
-           RETURNING id, scope, name, sort_index"#,
+           SET name = $1, sort_index = $2, is_fallback = is_fallback OR $3
+           WHERE id = $4 AND installation_id = $5
+           RETURNING id, scope, name, sort_index, is_fallback"#,
     )
     .bind(&new_name)
     .bind(new_sort)
+    .bind(designate_fallback)
     .bind(id)
     .bind(iid)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     row_to_response(updated)
 }
@@ -446,7 +557,7 @@ pub(crate) async fn patch_category_core(
     ),
     responses(
         (status = 204, description = "Deleted"),
-        (status = 400, description = "Invalid remap or category still in use without remap_to"),
+        (status = 400, description = "Invalid remap, category still in use without remap_to, or the default category of its scope (`category_is_fallback`)"),
         (status = 401, description = "No valid session"),
         (status = 403, description = "Viewer or not a member"),
         (status = 404, description = "Category missing"),
@@ -475,6 +586,8 @@ pub async fn delete_category(
 /// apunta a la categoría y obliga a **nombrar el destino** del remap antes de confirmar.
 ///
 /// Reglas del remap, todas comprobadas antes de tocar nada:
+/// - la categoría POR DEFECTO de su scope (4.15.0) no se borra nunca → 400 `category_is_fallback`,
+///   comprobado ANTES de contar referencias (una fallback vacía tampoco se puede borrar);
 /// - con referencias bloqueantes y sin `remap_to` → 400 `category_in_use`;
 /// - `remap_to` == la propia categoría → 400 `remap_to_same_category`;
 /// - `remap_to` inexistente en la instalación → 400 `remap_to_not_found`;
@@ -489,9 +602,19 @@ pub(crate) async fn delete_category_core(
     id: Uuid,
     remap_to: Option<Uuid>,
 ) -> Result<(), ApiError> {
-    let Some(scope_src) = category_scope_row(pool, iid, id).await? else {
+    let Some((scope_src, src_is_fallback)) = category_scope_row(pool, iid, id).await? else {
         return Err(ApiError::NotFound);
     };
+
+    // ANTES de contar referencias: da igual que esté vacía. Sin categoría por defecto, el primer
+    // ingreso o gasto sin categoría —un import sin regla, un `clear_category`— se queda sin
+    // destino y revienta contra el CHECK de la base. Para cambiarla se designa otra
+    // (`PATCH {"is_fallback": true}`), y entonces ésta ya se puede borrar.
+    if src_is_fallback {
+        return Err(ApiError::BadRequest(
+            "category_is_fallback: this is the default category of its scope and cannot be deleted; designate another one first with is_fallback true".into(),
+        ));
+    }
 
     let refs = category_delete_effects(pool, iid, id).await?.references_total;
 
@@ -516,7 +639,7 @@ pub(crate) async fn delete_category_core(
                 "remap_to_same_category: remap_to must differ from the category being deleted".into(),
             ));
         }
-        let Some(scope_tgt) = category_scope_row(pool, iid, target).await? else {
+        let Some((scope_tgt, _)) = category_scope_row(pool, iid, target).await? else {
             return Err(ApiError::BadRequest(
                 "remap_to_not_found: remap_to category was not found in this installation".into(),
             ));

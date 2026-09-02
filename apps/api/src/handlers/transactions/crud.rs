@@ -22,9 +22,9 @@ use crate::handlers::transactions::schema::{
     TransactionResponse, SOURCE_MANUAL,
 };
 use crate::handlers::transactions::{
-    assert_asset_in_installation, assert_liability_in_installation, assert_transaction_category,
-    invalidate_projection_if_savings_uses_transactions, next_fingerprint_ordinal, row_to_response,
-    TxnRow, TXN_SELECT,
+    assert_asset_in_installation, assert_liability_in_installation,
+    invalidate_projection_if_savings_uses_transactions, next_fingerprint_ordinal,
+    resolve_category_for_kind, row_to_response, TxnRow, TXN_SELECT,
 };
 use crate::state::AppState;
 use axum::extract::{Extension, Path, Query};
@@ -51,6 +51,13 @@ const MAX_PATCH_BATCH: usize = 200;
 // Prepared (validated) transaction ready to insert
 // ---------------------------------------------------------------------------
 
+/// Movimiento manual ya validado y **con la categoría resuelta** (4.15.0): en `income`/`expense`
+/// `category_id` es siempre `Some` —la pedida o la por defecto del scope— y en `savings` siempre
+/// `None`. Se resuelve AQUÍ, antes de la huella de idempotencia, y eso es deliberado: la huella
+/// hashea el cuerpo YA NORMALIZADO, así que dos reintentos idénticos resuelven a la misma
+/// categoría y siguen coincidiendo. Lo único que un cambio de la categoría por defecto entre dos
+/// reintentos produce es un 409 `idempotency_key_reused` — que es la respuesta correcta: el
+/// segundo intento describiría un movimiento distinto del que se guardó.
 pub(crate) struct PreparedTxn {
     pub(crate) op_date: NaiveDate,
     pub(crate) value_date: Option<NaiveDate>,
@@ -99,7 +106,9 @@ async fn validate_manual(
     // `{"month":"2099-12","is_complete":true}`, un mes a 73 años vista marcado como cerrado. El
     // guard es de escritura manual: el import y el restore no lo aplican.
     assert_op_date_not_in_future(pool, iid, body.op_date).await?;
-    assert_transaction_category(pool, iid, &kind, body.category_id).await?;
+    // Valida el par kind↔categoría Y rellena la por defecto si el alta no trae ninguna: desde
+    // 4.15.0 un ingreso/gasto sin categoría no es un estado, es un CHECK violado.
+    let category_id = resolve_category_for_kind(pool, iid, &kind, body.category_id).await?;
     assert_asset_in_installation(pool, iid, body.linked_asset_id).await?;
     assert_liability_in_installation(pool, iid, body.linked_liability_id).await?;
     let notes = normalize_notes(&body.notes)?;
@@ -110,7 +119,7 @@ async fn validate_manual(
         concept,
         amount,
         kind,
-        category_id: body.category_id,
+        category_id,
         linked_asset_id: body.linked_asset_id,
         linked_liability_id: body.linked_liability_id,
         notes,
@@ -578,7 +587,7 @@ fn parse_month(raw: &str) -> Result<(NaiveDate, NaiveDate), ApiError> {
         ("month" = Option<String>, Query, description = "`YYYY-MM`; filtra por `op_date` en ese mes."),
         ("kind" = Option<String>, Query, description = "`expense` | `income` | `savings`."),
         ("category_id" = Option<Uuid>, Query, description = "Filtra por categoría."),
-        ("uncategorized" = Option<bool>, Query, description = "`true` → solo los movimientos SIN categoría (`category_id IS NULL`). Excluyente con `category_id` (400 `category_filter_exclusive`). Los `savings` NO llevan categoría por diseño, así que quedan fuera salvo que se pida `kind=savings` explícitamente."),
+        ("uncategorized" = Option<bool>, Query, description = "`true` → solo los movimientos SIN categoría (`category_id IS NULL`). Excluyente con `category_id` (400 `category_filter_exclusive`). Los `savings` NO llevan categoría por diseño, así que quedan fuera salvo que se pida `kind=savings` explícitamente. Desde 4.15.0 ingresos y gastos SIEMPRE llevan categoría (la por defecto si no se elige otra), así que sin `kind` este filtro solo devuelve filas sin clasificar (`kind` ausente)."),
         ("import_id" = Option<Uuid>, Query, description = "Filtra por lote de import."),
         ("concept_contains" = Option<String>, Query, description = "Subcadena del concepto (1–200), insensible a mayúsculas y a tildes: `cafe` encuentra `CAFÉ`. Los comodines `%` y `_` se tratan como texto literal."),
         ("min_amount" = Option<String>, Query, description = "Cota inferior del importe CON SIGNO (los gastos son negativos)."),
@@ -717,6 +726,13 @@ impl PreparedFilters {
     /// `category_id` solo sabe hacer igualdad de UUID, así que hasta ahora **no había forma de
     /// pedir «sin categoría»**: había que paginar el ledger entero detectando la AUSENCIA de una
     /// clave. `uncategorized = true` es ese filtro (`category_id IS NULL`).
+    ///
+    /// **Desde 4.15.0 el conjunto que devuelve es OTRO, sin cambiar una línea de SQL.** El backfill
+    /// de `20260902120000` y `resolve_category_for_kind` hacen que ningún `income`/`expense` pueda
+    /// quedar con `category_id IS NULL`, así que este filtro ya solo alcanza a las filas **sin
+    /// clasificar** (`kind IS NULL`, que solo llegan por restore de un backup antiguo) y, si se
+    /// pide `kind=savings`, a las aportaciones. No es una amputación: es que la pregunta «¿qué me
+    /// falta por categorizar?» dejó de tener respuestas.
     ///
     /// Pero «sin categoría» tiene un falso positivo estructural: los movimientos `savings` **no
     /// llevan categoría por diseño** (`assert_transaction_category` los rechaza con
@@ -1013,6 +1029,17 @@ pub async fn patch_batch(
 /// dedup (`source · op_date · amount · concept`) ni en el emparejado de transferencias
 /// (`op_date`, `amount`), así que el lote no recomputa huellas, no rompe pares y no dispara el pase
 /// de auto-conciliación. Eso es lo que lo hace seguro, y por eso no admite `amount`/`op_date`.
+///
+/// ## Categoría por fila (4.15.0)
+/// La categoría final se resuelve **una vez por fila** con el kind efectivo de esa fila
+/// (`body.kind ?? fila.kind`) y se escribe con `UPDATE … FROM unnest(ids, cats)`. Resolverla una
+/// sola vez para todo el lote metería un ingreso y un gasto en el MISMO cajón. Un lote que solo
+/// cambia `kind` también puede acabar escribiendo la columna: pasar una fila de `savings` a
+/// `expense` la deja sin categoría, y eso ya no es representable.
+///
+/// Cambiar de clase a un scope distinto SIN nombrar categoría es `category_scope_mismatch`, no un
+/// éxito que descarta la categoría vieja en silencio — mismo criterio que el PATCH individual y
+/// que la guardia de `category_set_and_clear`: aquí no se tira una categoría sin decirlo.
 pub(crate) async fn patch_transactions_batch_core(
     state: &Arc<AppState>,
     iid: Uuid,
@@ -1076,9 +1103,10 @@ pub(crate) async fn patch_transactions_batch_core(
         concept: String,
         amount: Decimal,
         kind: Option<String>,
+        category_id: Option<Uuid>,
     }
     let rows: Vec<Row> = sqlx::query_as(
-        r#"SELECT id, op_date, concept, amount, kind FROM transactions
+        r#"SELECT id, op_date, concept, amount, kind, category_id FROM transactions
            WHERE id = ANY($1) AND installation_id = $2 AND owner_user_id = $3"#,
     )
     .bind(&ids)
@@ -1104,27 +1132,43 @@ pub(crate) async fn patch_transactions_batch_core(
         )));
     }
 
-    // El par (kind, categoría) resultante se valida UNA vez por fila afectada: la categoría podría
-    // no encajar con el kind que quede tras el merge.
+    // El par (kind, categoría) resultante se resuelve **POR FILA**, no una vez para el lote: `kind`
+    // es opcional, así que el lote puede mezclar filas de clases distintas y cada una tiene su
+    // propia categoría por defecto (4.15.0). El kind efectivo de una fila es `body.kind ?? r.kind`.
+    let writes_category = body.category_id.is_some() || clear_category;
     let effective_category = if clear_category {
         None
     } else {
         body.category_id
     };
-    if kind.is_some() || body.category_id.is_some() || clear_category {
+    // `(id del movimiento, categoría final)`, en el orden de `rows`.
+    let mut resolved: Vec<(Uuid, Option<Uuid>)> = Vec::with_capacity(rows.len());
+    // ¿Hay que escribir la columna? Sí si el lote la toca, y también si SOLO cambia el `kind` pero
+    // alguna fila pasa a una clase que exige categoría y no la tenía (savings → expense sobre una
+    // fila sin categoría chocaría contra `transactions_category_required_check`).
+    let mut writes_category_column = writes_category;
+    if kind.is_some() || writes_category {
         for r in &rows {
             let k = kind.clone().or_else(|| r.kind.clone());
-            match k {
-                Some(k) => {
-                    assert_transaction_category(&state.pool, iid, &k, effective_category).await?
-                }
-                None if effective_category.is_some() => {
+            let requested = if writes_category {
+                effective_category
+            } else {
+                r.category_id
+            };
+            let final_category = match k {
+                Some(k) => resolve_category_for_kind(&state.pool, iid, &k, requested).await?,
+                None if writes_category && effective_category.is_some() => {
                     return Err(ApiError::BadRequest(
                         "transaction_category_requires_kind: category requires a kind: set kind in the same batch".into(),
                     ))
                 }
-                None => {}
+                // Sin clase efectiva no hay nada que resolver: la fila se queda como está.
+                None => requested,
+            };
+            if final_category != r.category_id {
+                writes_category_column = true;
             }
+            resolved.push((r.id, final_category));
         }
     }
 
@@ -1134,29 +1178,46 @@ pub(crate) async fn patch_transactions_batch_core(
         sets.push(format!("kind = ${arg}"));
         arg += 1;
     }
-    if body.category_id.is_some() || clear_category {
-        sets.push(format!("category_id = ${arg}"));
-        arg += 1;
-    }
     if notes.is_some() || clear_notes {
         sets.push(format!("notes = ${arg}"));
         arg += 1;
     }
-    let sql = format!(
-        "UPDATE transactions SET {}, updated_at = now() WHERE id = ANY(${arg})",
-        sets.join(", ")
-    );
-    let mut q = sqlx::query(&sql);
-    if let Some(k) = &kind {
-        q = q.bind(k);
-    }
-    if body.category_id.is_some() || clear_category {
-        q = q.bind(effective_category);
-    }
-    if notes.is_some() || clear_notes {
-        q = q.bind(if clear_notes { None } else { notes.clone() });
-    }
-    let done = q.bind(&ids).execute(&mut *tx).await?;
+    let done = if writes_category_column {
+        // Una categoría por fila → `UPDATE … FROM unnest(ids, cats)`: un solo viaje, sin bucle de
+        // N updates y sin perder el todo-o-nada (seguimos dentro de la misma transacción).
+        let upd_ids: Vec<Uuid> = resolved.iter().map(|(id, _)| *id).collect();
+        let upd_cats: Vec<Option<Uuid>> = resolved.iter().map(|(_, c)| *c).collect();
+        sets.push("category_id = v.category_id".into());
+        let sql = format!(
+            "UPDATE transactions AS t SET {}, updated_at = now() \
+             FROM unnest(${}::uuid[], ${}::uuid[]) AS v(id, category_id) \
+             WHERE t.id = v.id",
+            sets.join(", "),
+            arg,
+            arg + 1
+        );
+        let mut q = sqlx::query(&sql);
+        if let Some(k) = &kind {
+            q = q.bind(k);
+        }
+        if notes.is_some() || clear_notes {
+            q = q.bind(if clear_notes { None } else { notes.clone() });
+        }
+        q.bind(&upd_ids).bind(&upd_cats).execute(&mut *tx).await?
+    } else {
+        let sql = format!(
+            "UPDATE transactions SET {}, updated_at = now() WHERE id = ANY(${arg})",
+            sets.join(", ")
+        );
+        let mut q = sqlx::query(&sql);
+        if let Some(k) = &kind {
+            q = q.bind(k);
+        }
+        if notes.is_some() || clear_notes {
+            q = q.bind(if clear_notes { None } else { notes.clone() });
+        }
+        q.bind(&ids).execute(&mut *tx).await?
+    };
     tx.commit().await?;
 
     // UNA sola invalidación para todo el lote (post-commit), no una por ítem.
@@ -1317,6 +1378,12 @@ pub async fn patch_transaction(
 /// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_transaction`. Merge campo a
 /// campo con flags `clear_*`, política de huella (manual recomputa / importada anclada) e
 /// invalidación COND post-commit dentro. Owner-guard → 404 (solo movimientos propios).
+///
+/// **`clear_category` cambia de significado en 4.15.0** sin cambiar de forma: en un ingreso o un
+/// gasto devuelve el movimiento a la categoría POR DEFECTO de su scope (en `savings` sigue siendo
+/// «ninguna»). Y reclasificar a un scope distinto sin nombrar categoría es
+/// `category_scope_mismatch`: la que tenía es del scope viejo y descartarla en silencio sería
+/// perder una elección del usuario sin decírselo.
 pub(crate) async fn patch_transaction_core(
     state: &Arc<AppState>,
     iid: Uuid,
@@ -1458,17 +1525,21 @@ pub(crate) async fn patch_transaction_core(
         assert_op_date_not_in_future(&state.pool, iid, new_op_date).await?;
     }
 
-    // Validaciones kind↔categoría y links.
-    match &new_kind {
-        Some(k) => assert_transaction_category(&state.pool, iid, k, new_category).await?,
+    // Validaciones kind↔categoría y links. `clear_category` sobre un ingreso/gasto ya no deja el
+    // movimiento sin categoría: lo devuelve a la POR DEFECTO de su scope (4.15.0). Es un cambio de
+    // significado sin cambio de forma, y es el único que tiene sentido — el estado que el `clear`
+    // producía dejó de ser representable.
+    let new_category = match &new_kind {
+        Some(k) => resolve_category_for_kind(&state.pool, iid, k, new_category).await?,
         None => {
             if new_category.is_some() {
                 return Err(ApiError::BadRequest(
                     "transaction_category_requires_kind: category requires a kind".into(),
                 ));
             }
+            None
         }
-    }
+    };
     assert_asset_in_installation(&state.pool, iid, new_linked_asset).await?;
     assert_liability_in_installation(&state.pool, iid, new_linked_liability).await?;
 

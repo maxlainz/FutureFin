@@ -193,10 +193,29 @@ async fn aggregate_matches_get_transactions_summary_month_by_month() {
         );
     }
     approx(parse_dec(&agg_cat(&agg_exp, Some(&super_cat))["total"]), 150.0, "Super");
-    approx(parse_dec(&agg_cat(&agg_exp, None)["total"]), 30.0, "sin categoría");
+    // 4.15.0: «Kiosko» (alta sin categoría) cae en la categoría POR DEFECTO del scope, así que el
+    // bucket «sin categoría» ya no existe para gastos — la fila vive bajo la fallback.
+    let cats = app
+        .get_with_cookie("/v1/categories?scope=expense", &owner.cookie)
+        .await
+        .json();
+    let fallback_id = cats
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["is_fallback"] == json!(true))
+        .expect("categoría por defecto de gasto")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        agg_exp["by_category"].as_array().unwrap().iter().all(|l| !l["category_id"].is_null()),
+        "sin bucket nulo de gasto desde 4.15.0: {agg_exp}"
+    );
+    approx(parse_dec(&agg_cat(&agg_exp, Some(&fallback_id))["total"]), 30.0, "categoría por defecto");
     // El reparto porcentual dentro del kind: 150/180 y 30/180.
     approx(parse_dec(&agg_cat(&agg_exp, Some(&super_cat))["share_pct"]), 83.3, "share Super");
-    approx(parse_dec(&agg_cat(&agg_exp, None)["share_pct"]), 16.7, "share sin categoría");
+    approx(parse_dec(&agg_cat(&agg_exp, Some(&fallback_id))["share_pct"]), 16.7, "share categoría por defecto");
     approx(parse_dec(&line(&s["expense_categories"], "Super")["actual"]), 150.0, "summary Super");
 
     // ---- Sin filtro de kind no hay magnitud, y se dice por qué -------------------------------
@@ -273,7 +292,22 @@ async fn uncategorized_filter_finds_the_gap_without_the_savings_false_positive()
         .iter()
         .map(|t| t["concept"].as_str().unwrap().to_string())
         .collect();
-    assert_eq!(conceptos, vec!["Kiosko".to_string()], "solo el gasto sin categoría: {rows}");
+    // 4.15.0: un gasto ya no puede quedarse sin categoría — «Kiosko» cae en la POR DEFECTO del
+    // scope en el alta, así que «¿qué me falta por categorizar?» responde vacío para income/expense.
+    // Lo que sigue pudiendo salir aquí son filas sin `kind` (importaciones sin clasificar).
+    assert!(conceptos.is_empty(), "ningún gasto queda sin categoría desde 4.15.0: {rows}");
+    let all = app
+        .get_with_cookie(&format!("/v1/transactions?month={ym}"), &owner.cookie)
+        .await
+        .json();
+    let kiosko = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["concept"] == "Kiosko")
+        .cloned()
+        .unwrap();
+    assert!(kiosko["category_id"].is_string(), "Kiosko cae en la categoría por defecto: {kiosko}");
 
     // Pedir `savings` explícitamente SÍ los devuelve: la exclusión es un default, no una
     // amputación — ningún conjunto queda inalcanzable.
@@ -310,7 +344,13 @@ async fn uncategorized_filter_finds_the_gap_without_the_savings_false_positive()
         )
         .await
         .json();
-    approx(parse_dec(&agg["total"]), 30.0, "agregado sin categoría");
+    // 4.15.0: sin gastos sin categoría, el agregado del eje es el conjunto vacío — y lo DICE
+    // (`total_absent_reason`), en vez de devolver un cero plausible.
+    assert_eq!(
+        agg["total_absent_reason"],
+        json!("no_transactions"),
+        "el eje uncategorized+expense queda vacío desde 4.15.0: {agg}"
+    );
     let r = app
         .get_with_cookie(
             &format!("/v1/transactions/aggregate?uncategorized=true&category_id={super_cat}"),

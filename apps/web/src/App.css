@@ -1545,9 +1545,26 @@
   word-break: break-word;
 }
 
+/* Marca de la categoría POR DEFECTO del ámbito (4.15.0). Mismo lenguaje que `.ff-refund-tag`:
+   píldora tenue con un toque de acento, sin color semántico (no es una cifra delta). */
+.category-default-tag {
+  font-size: 0.66rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.45rem;
+  border-radius: var(--ff-radius-pill);
+  background: color-mix(in oklch, var(--ff-accent) 12%, var(--ff-pill));
+  color: var(--ff-ink-soft);
+  border: 1px solid color-mix(in oklch, var(--ff-accent) 30%, var(--ff-line-soft));
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
 .category-row-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.35rem;
   margin-left: auto;
 }
@@ -3152,6 +3169,23 @@ fieldset.retirement-config-stack {
   background: var(--cf-savings);
 }
 
+.cf-swatch--savings-cash {
+  background: var(--cf-savings-cash);
+}
+
+/* Trama de los segmentos «no salió del ingreso de este mes» (déficit / de reservas). Cada regla
+   va DESPUÉS de los modificadores de color de su familia a propósito: `background: var(--cf-…)`
+   es shorthand y resetea `background-image`, así que la trama tiene que aplicarse encima, no
+   antes — con la misma especificidad, manda el orden de aparición. Es un gradiente y no un
+   `<pattern>` SVG porque este chart es div+CSS: no hay `<svg>` donde declarar el patrón. */
+.cf-swatch--hatched {
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--ff-paper) 0 2px,
+    transparent 2px 5px
+  );
+}
+
 .cf-track {
   display: flex;
   align-items: stretch;
@@ -3188,6 +3222,12 @@ fieldset.retirement-config-stack {
   border-radius: 2px;
 }
 
+/* La mitad de abajo es UNA barra partida en cinco tramos: redondear cada uno la convertiría en
+   un collar de cuentas en cuanto un mes tiene déficit o inversión desde reservas. */
+.cf-col-down .cf-bar {
+  border-radius: 0;
+}
+
 .cf-bar--income {
   background: var(--cf-income);
 }
@@ -3198,6 +3238,19 @@ fieldset.retirement-config-stack {
 
 .cf-bar--savings {
   background: var(--cf-savings);
+}
+
+.cf-bar--savings-cash {
+  background: var(--cf-savings-cash);
+}
+
+/* Ver la nota de `.cf-swatch--hatched`: tiene que ir tras TODOS los `.cf-bar--*` de color. */
+.cf-bar--hatched {
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--ff-paper) 0 2px,
+    transparent 2px 5px
+  );
 }
 
 .cf-xlabels {

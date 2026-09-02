@@ -104,11 +104,15 @@
   --proj-area-10: #475569;
 
   /* Cash-flow mensual (MonthlyCashflowBars): ingresos en verde, gastos en
-     rojo-terroso, ahorro = acento. El verde/rojo aquí son colores FUNCIONALES
-     del gráfico (única zona donde se aceptan varios colores), no chrome. */
+     rojo-terroso, inversión = acento. El verde/rojo aquí son colores FUNCIONALES
+     del gráfico (única zona donde se aceptan varios colores), no chrome.
+     `--cf-savings-cash` es el ahorro que se quedó EN CUENTA: mismo tono que la
+     inversión, rebajado sobre el papel, porque es el mismo ahorro con otro
+     destino — un color distinto sugeriría otra magnitud. */
   --cf-income: oklch(0.58 0.10 165);
   --cf-expense: oklch(0.58 0.13 25);
   --cf-savings: var(--ff-accent);
+  --cf-savings-cash: color-mix(in oklch, var(--cf-savings) 40%, var(--ff-paper));
 
   /* Overlay flotante (tooltips): oscuro SIEMPRE, en los dos temas. No se
      redefinen más abajo a propósito — esa ausencia ES la decisión. Existen como
@@ -184,6 +188,7 @@
   --cf-income: oklch(0.72 0.10 165);
   --cf-expense: oklch(0.70 0.13 25);
   --cf-savings: var(--ff-accent);
+  --cf-savings-cash: color-mix(in oklch, var(--cf-savings) 40%, var(--ff-paper));
 }
 
 /* Reset global de color + fondo, aplicado al body para que los modos
