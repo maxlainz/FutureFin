@@ -259,6 +259,35 @@ pub async fn import_user_backup_apply(
         .execute(&mut *tx)
         .await?;
 
+    // 5. Perfil de jubilación (schema 13). Tres casos, y el tercero es el que importa:
+    //    - el fichero trae perfil (v13) → se restaura tal cual, como el resto del ledger;
+    //    - el fichero NO trae perfil pero SÍ los cuatro ejes legados dentro de `fire_settings`
+    //      (v ≤ 12) → se SIEMBRA con ellos, pero **solo si el usuario no tiene ya perfil**:
+    //      importar un backup viejo no puede pisar la estrategia que esa persona configuró
+    //      después de actualizar;
+    //    - ninguna de las dos → no se toca nada (defaults).
+    let file_profile = payload.retirement_profile.as_ref();
+    let legacy_seed = payload
+        .installation_snapshot_informative
+        .fire_settings
+        .legacy_retirement_profile();
+    if let Some(p) = file_profile {
+        sqlx::query(r#"UPDATE users SET retirement_profile = $1 WHERE id = $2"#)
+            .bind(sqlx::types::Json(p))
+            .bind(user.id.0)
+            .execute(&mut *tx)
+            .await?;
+    } else if let Some(seed) = legacy_seed {
+        sqlx::query(
+            r#"UPDATE users SET retirement_profile = $1
+               WHERE id = $2 AND retirement_profile IS NULL"#,
+        )
+        .bind(sqlx::types::Json(&seed))
+        .bind(user.id.0)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     tx.commit().await?;
 
     // Pase de auto-conciliación post-commit (3.5.0): no-op para backups v8 (ya vienen en punto
@@ -478,14 +507,25 @@ async fn insert_payload(
                     a.name
                 ))
             })?;
+        // Misma puerta que la escritura para la volatilidad (5.0.0): el `CHECK` de columna solo
+        // exige `>= 0` para poder tragar ficheros viejos, así que la cota de API se comprueba
+        // aquí, nombrando el activo igual que el retorno.
+        crate::handlers::assets::assert_volatility_percent(a.annual_volatility_percent).map_err(
+            |_| {
+                ApiError::BadRequest(format!(
+                    "backup_asset_volatility_invalid: asset '{}' carries annual_volatility_percent outside [0, 100]",
+                    a.name
+                ))
+            },
+        )?;
         let cid = resolve_category(cat_map, &a.category_ref.scope, &a.category_ref.name)?;
         let new_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO assets (
                    id, installation_id, owner_user_id, category_id, name, current_value,
                    purchase_price, is_liquid, expected_annual_return_percent,
-                   notes, sort_index
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+                   annual_volatility_percent, notes, sort_index
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
         )
         .bind(new_id)
         .bind(iid)
@@ -496,6 +536,7 @@ async fn insert_payload(
         .bind(a.purchase_price)
         .bind(a.is_liquid)
         .bind(a.expected_annual_return_percent)
+        .bind(a.annual_volatility_percent)
         .bind(a.notes.as_deref())
         .bind(a.sort_index)
         .execute(&mut **tx)

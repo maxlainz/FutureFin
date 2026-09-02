@@ -141,16 +141,19 @@ pub struct AvgWindowSpec {
 // lado API sigan compilando sin tocar sus imports.
 pub use futurefin_engine::TaxBracket;
 
+/// Supuestos FIRE **compartidos por el hogar**: fiscalidad, fuente del ahorro y ventanas del
+/// promedio. Todo lo que es PERSONAL —modo del objetivo, importe manual, SWR y edad límite del
+/// horizonte— se mudó en 5.0.0 al perfil de jubilación de cada usuario
+/// (`handlers/retirement_profile.rs`, decisión D13): con proyecciones independientes por miembro
+/// esos cuatro ejes no podían seguir siendo del hogar. **Breaking**: `PATCH /v1/installation` ya
+/// no los acepta y `GET` ya no los devuelve; la migración `20260902200000_…` los copia al perfil
+/// de cada usuario antes de retirarlos del JSONB, así que el upgrade no mueve un número.
+///
+/// Las claves desconocidas se ignoran (no hay `deny_unknown_fields`): un JSONB guardado por
+/// 4.15.x con los cuatro ejes dentro deserializa sin error, y la migración lo limpia.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(default)]
 pub struct FireSettings {
-    pub fire_number_mode: FireNumberMode,
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub fire_number_manual_amount: Option<Decimal>,
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub swr_pct: Decimal,
     pub taxes_enabled: bool,
     pub tax_brackets: Vec<TaxBracket>,
     /// Fuente del ahorro de la simulación. Ausente en JSON → `budget` (cubierto por el
@@ -173,12 +176,6 @@ pub struct FireSettings {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub taxable_gain_ratio: Decimal,
-    /// Edad límite del horizonte derivado (#149, 4.9.0): la proyección llega hasta los
-    /// `horizon_lifespan_age` años del solicitante (antes era la constante 90). Rango [85, 105];
-    /// default 90 ⇒ comportamiento idéntico al histórico. OJO: el horizonte sigue acotado a
-    /// [5, 70] años, así que el eje solo muerde si `edad ≥ edad_límite − 70` (a 105, un
-    /// treintañero ya está contra el techo del sistema, 840 meses).
-    pub horizon_lifespan_age: u32,
 }
 
 impl FireSettings {
@@ -210,9 +207,6 @@ impl Default for FireSettings {
 
 pub(crate) fn default_fire_settings() -> FireSettings {
     FireSettings {
-        fire_number_mode: FireNumberMode::AnnualExpense,
-        fire_number_manual_amount: None,
-        swr_pct: Decimal::new(35, 1),
         taxes_enabled: true,
         tax_brackets: default_es_tax_brackets(),
         savings_source: SavingsSource::Budget,
@@ -225,7 +219,6 @@ pub(crate) fn default_fire_settings() -> FireSettings {
         expense_avg_window_months: 12,
         expense_avg_window_mode: AvgWindowMode::Calendar,
         taxable_gain_ratio: Decimal::ONE,
-        horizon_lifespan_age: 90,
     }
 }
 
@@ -254,6 +247,17 @@ fn default_es_tax_brackets() -> Vec<TaxBracket> {
     ]
 }
 
+/// Cotas de la edad límite del horizonte (#149). 85 para no cortar por debajo de la esperanza
+/// de vida al nacer; 105 porque más allá el tope [5,70] del horizonte ya decide para cualquier
+/// edad adulta.
+///
+/// Desde 5.0.0 el EJE vive en el perfil de jubilación de cada usuario
+/// (`retirement_profile::RetirementProfile::horizon_lifespan_age`, decisión D13). Las cotas se
+/// quedan aquí, donde nacieron y donde ya las importaba el resto del módulo, y el perfil las
+/// reusa: dos copias de un rango publicado se separan sin que ningún test lo note.
+pub(crate) const MIN_HORIZON_LIFESPAN_AGE: u32 = 85;
+pub(crate) const MAX_HORIZON_LIFESPAN_AGE: u32 = 105;
+
 /// Resuelve el `FireSettings` almacenado aplicando defaults **y clamps**.
 ///
 /// El clamp vive AQUÍ y no solo en `validate_fire_settings` a propósito: la validación corre
@@ -262,12 +266,6 @@ fn default_es_tax_brackets() -> Vec<TaxBracket> {
 /// por otra vía (restore, edición directa de la BD, un fichero de otra versión) produciría una
 /// ventana de 0 meses → promedio sin denominador → fallback silencioso al presupuesto con la UI
 /// diciendo que está en modo real. Clampar en el consumo lo hace imposible.
-/// Cotas de la edad límite del horizonte (#149). 85 para no cortar por debajo de la esperanza
-/// de vida al nacer; 105 porque más allá el tope [5,70] del horizonte ya decide para cualquier
-/// edad adulta.
-pub(crate) const MIN_HORIZON_LIFESPAN_AGE: u32 = 85;
-pub(crate) const MAX_HORIZON_LIFESPAN_AGE: u32 = 105;
-
 pub(crate) fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSettings {
     let mut fs = match stored {
         None => default_fire_settings(),
@@ -279,37 +277,12 @@ pub(crate) fn resolve_fire_settings(stored: Option<FireSettings>) -> FireSetting
     fs.expense_avg_window_months = fs
         .expense_avg_window_months
         .clamp(MIN_AVG_WINDOW_MONTHS, MAX_AVG_WINDOW_MONTHS);
-    // #149: una edad fuera de rango llegada por vía no validada (restore, BD a mano) produciría
-    // horizontes absurdos o un 90 fantasma; el clamp en el consumo lo hace imposible.
-    fs.horizon_lifespan_age = fs
-        .horizon_lifespan_age
-        .clamp(MIN_HORIZON_LIFESPAN_AGE, MAX_HORIZON_LIFESPAN_AGE);
     // g fuera de [0,1] colado por restore/BD a mano: clamp en el consumo, como las ventanas.
     fs.taxable_gain_ratio = fs.taxable_gain_ratio.clamp(Decimal::ZERO, Decimal::ONE);
     fs
 }
 
 pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> {
-    if fs.swr_pct < Decimal::ZERO || fs.swr_pct > Decimal::from(4u32) {
-        return Err(ApiError::BadRequest(
-            "swr_out_of_range: swr_pct must be between 0 and 4 (percent)".into(),
-        ));
-    }
-    match fs.fire_number_mode {
-        FireNumberMode::Manual => {
-            let Some(amt) = fs.fire_number_manual_amount else {
-                return Err(ApiError::BadRequest(
-                    "fire_manual_amount_required: fire_number_manual_amount is required when fire_number_mode is manual".into(),
-                ));
-            };
-            if amt <= Decimal::ZERO {
-                return Err(ApiError::BadRequest(
-                    "fire_manual_amount_not_positive: fire_number_manual_amount must be > 0".into(),
-                ));
-            }
-        }
-        FireNumberMode::AnnualExpense | FireNumberMode::CurrentIncome => {}
-    }
     for (label, months) in [
         ("income_avg_window_months", fs.income_avg_window_months),
         ("expense_avg_window_months", fs.expense_avg_window_months),
@@ -324,11 +297,6 @@ pub(crate) fn validate_fire_settings(fs: &FireSettings) -> Result<(), ApiError> 
         return Err(ApiError::BadRequest(
             "taxable_gain_ratio_out_of_range: taxable_gain_ratio must be between 0 and 1 (fraction)".into(),
         ));
-    }
-    if !(MIN_HORIZON_LIFESPAN_AGE..=MAX_HORIZON_LIFESPAN_AGE).contains(&fs.horizon_lifespan_age) {
-        return Err(ApiError::BadRequest(format!(
-            "horizon_lifespan_age_out_of_range: horizon_lifespan_age must be between {MIN_HORIZON_LIFESPAN_AGE} and {MAX_HORIZON_LIFESPAN_AGE} (years)"
-        )));
     }
     if fs.taxes_enabled {
         validate_tax_brackets(&fs.tax_brackets)?;
@@ -805,11 +773,8 @@ pub(crate) async fn installation_access_core(
 /// DTO existe para esquivar exactamente ese bug.
 #[derive(Debug, Default)]
 pub(crate) struct FireSettingsPatch {
-    pub swr_pct: Option<Decimal>,
     pub taxes_enabled: Option<bool>,
     pub tax_brackets: Option<Vec<TaxBracket>>,
-    pub fire_number_mode: Option<FireNumberMode>,
-    pub fire_number_manual_amount: Option<Decimal>,
     pub savings_source: Option<SavingsSource>,
     pub income_avg_window_months: Option<u32>,
     pub income_avg_window_mode: Option<AvgWindowMode>,
@@ -817,8 +782,6 @@ pub(crate) struct FireSettingsPatch {
     pub expense_avg_window_mode: Option<AvgWindowMode>,
     /// #140 fase 2 (4.10.0): fracción de plusvalía gravable.
     pub taxable_gain_ratio: Option<Decimal>,
-    /// #149 (4.9.0): edad límite del horizonte derivado.
-    pub horizon_lifespan_age: Option<u32>,
     /// Columna aparte de la instalación (no vive en el JSONB), pero es un eje FIRE más.
     pub annual_inflation_assumption_percent: Option<Decimal>,
 }
@@ -835,20 +798,11 @@ impl FireSettingsPatch {
     /// `installation`, no en el JSONB, y cada caller lo resuelve por su lado.
     pub(crate) fn apply_to(&self, base: &FireSettings) -> FireSettings {
         let mut after = base.clone();
-        if let Some(v) = self.swr_pct {
-            after.swr_pct = v;
-        }
         if let Some(v) = self.taxes_enabled {
             after.taxes_enabled = v;
         }
         if let Some(v) = self.tax_brackets.clone() {
             after.tax_brackets = v;
-        }
-        if let Some(v) = self.fire_number_mode {
-            after.fire_number_mode = v;
-        }
-        if let Some(v) = self.fire_number_manual_amount {
-            after.fire_number_manual_amount = Some(v);
         }
         if let Some(v) = self.savings_source {
             after.savings_source = v;
@@ -868,25 +822,18 @@ impl FireSettingsPatch {
         if let Some(v) = self.taxable_gain_ratio {
             after.taxable_gain_ratio = v;
         }
-        if let Some(v) = self.horizon_lifespan_age {
-            after.horizon_lifespan_age = v;
-        }
         after
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.swr_pct.is_none()
-            && self.taxes_enabled.is_none()
+        self.taxes_enabled.is_none()
             && self.tax_brackets.is_none()
-            && self.fire_number_mode.is_none()
-            && self.fire_number_manual_amount.is_none()
             && self.savings_source.is_none()
             && self.income_avg_window_months.is_none()
             && self.income_avg_window_mode.is_none()
             && self.expense_avg_window_months.is_none()
             && self.expense_avg_window_mode.is_none()
             && self.taxable_gain_ratio.is_none()
-            && self.horizon_lifespan_age.is_none()
             && self.annual_inflation_assumption_percent.is_none()
     }
 }

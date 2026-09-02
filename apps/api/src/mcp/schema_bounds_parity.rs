@@ -29,7 +29,12 @@
 //! del engine) no va aquí: esto pinea *duplicaciones*, no cotas.
 
 use crate::handlers::history::MAX_HISTORY_WINDOW_MONTHS;
+use crate::handlers::installation::{MAX_HORIZON_LIFESPAN_AGE, MIN_HORIZON_LIFESPAN_AGE};
 use crate::handlers::liabilities::{MAX_SCHEDULE_WINDOW_MONTHS, SCHEDULE_HORIZON_MONTHS};
+use crate::handlers::retirement_profile::{
+    MAX_CASH_BUFFER_MONTHS, MAX_SUCCESS_THRESHOLD_PCT, MIN_PENSION_AGE, MIN_PROFILE_AGE,
+    MIN_SUCCESS_THRESHOLD_PCT,
+};
 
 const CATALOG_JSON: &str =
     include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mcp-catalog.json"));
@@ -98,6 +103,69 @@ const PINNED_BOUNDS: &[PinnedBound] = &[
                       (4) la descripción `params(\"window_months\" …)` del `#[utoipa::path]` de \
                       `GET /v1/history/series`; \
                       (5) regenera el fixture (ver la fila de `$.months`)",
+    },
+    // ---- Perfil de jubilación por usuario (5.0.0, D13) --------------------------------------
+    // Cinco cotas duplicadas entre el schema y `handlers/retirement_profile.rs`. Las tres de EDAD
+    // topan en `MAX_HORIZON_LIFESPAN_AGE` y no en el `horizon_lifespan_age` de cada perfil, que es
+    // el techo REAL: el schema no puede expresar una cota que depende de otro campo del mismo
+    // objeto, así que publica el techo absoluto y `validate_retirement_profile` aprieta el resto
+    // (`retirement_age_out_of_range`, `pension_age_out_of_range`, `partial_age_out_of_range`).
+    PinnedBound {
+        tool: "update_retirement_profile",
+        pointer: "$.horizon_lifespan_age",
+        expected_min: Some(MIN_HORIZON_LIFESPAN_AGE as i64),
+        expected_max: MAX_HORIZON_LIFESPAN_AGE as i64,
+        runtime_const: "apps/api/src/handlers/installation.rs: MIN/MAX_HORIZON_LIFESPAN_AGE",
+        also_update: "(1) las dos consts; (2) el literal \
+                      `#[schemars(range(min = 85, max = 105))]` sobre \
+                      `UpdateRetirementProfileParams::horizon_lifespan_age`; (3) el mensaje \
+                      `horizon_lifespan_age_out_of_range` (lo compone `format!` con las consts, \
+                      así que no es una cuarta copia); (4) regenera el fixture (ver la fila de \
+                      `$.months`)",
+    },
+    PinnedBound {
+        tool: "update_retirement_profile",
+        pointer: "$.target_retirement_age",
+        expected_min: Some(MIN_PROFILE_AGE as i64),
+        expected_max: MAX_HORIZON_LIFESPAN_AGE as i64,
+        runtime_const: "apps/api/src/handlers/retirement_profile.rs: MIN_PROFILE_AGE \
+                        (techo: MAX_HORIZON_LIFESPAN_AGE)",
+        also_update: "(1) `MIN_PROFILE_AGE`; (2) el literal \
+                      `#[schemars(range(min = 18, max = 105))]` sobre \
+                      `UpdateRetirementProfileParams::target_retirement_age`; (3) regenera el \
+                      fixture (ver la fila de `$.months`)",
+    },
+    PinnedBound {
+        tool: "update_retirement_profile",
+        pointer: "$defs.PensionParam.starts_at_age",
+        expected_min: Some(MIN_PENSION_AGE as i64),
+        expected_max: MAX_HORIZON_LIFESPAN_AGE as i64,
+        runtime_const: "apps/api/src/handlers/retirement_profile.rs: MIN_PENSION_AGE \
+                        (techo: MAX_HORIZON_LIFESPAN_AGE)",
+        also_update: "(1) `MIN_PENSION_AGE`; (2) el literal \
+                      `#[schemars(range(min = 50, max = 105))]` sobre \
+                      `PensionParam::starts_at_age`; (3) regenera el fixture",
+    },
+    PinnedBound {
+        tool: "update_retirement_profile",
+        pointer: "$.cash_buffer_months",
+        expected_min: Some(0),
+        expected_max: MAX_CASH_BUFFER_MONTHS as i64,
+        runtime_const: "apps/api/src/handlers/retirement_profile.rs: MAX_CASH_BUFFER_MONTHS",
+        also_update: "(1) la const; (2) el literal `#[schemars(range(min = 0, max = 60))]` sobre \
+                      `UpdateRetirementProfileParams::cash_buffer_months`; (3) regenera el fixture",
+    },
+    PinnedBound {
+        tool: "update_retirement_profile",
+        pointer: "$.success_threshold_pct",
+        expected_min: Some(MIN_SUCCESS_THRESHOLD_PCT as i64),
+        expected_max: MAX_SUCCESS_THRESHOLD_PCT as i64,
+        runtime_const: "apps/api/src/handlers/retirement_profile.rs: \
+                        MIN/MAX_SUCCESS_THRESHOLD_PCT",
+        also_update: "(1) las dos consts; (2) el literal \
+                      `#[schemars(range(min = 50, max = 99))]` sobre \
+                      `UpdateRetirementProfileParams::success_threshold_pct`; (3) regenera el \
+                      fixture",
     },
 ];
 

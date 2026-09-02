@@ -5,11 +5,12 @@ Migrations in `apps/api/migrations/`. SQLx embeds and runs them on startup.
 ## Core tables (chronological migration order)
 
 ### Users & Sessions
-- `users`: `id (uuid PK)`, `username (unique)` (restricción `users_username_key`), `password_hash (text, NULLABLE)`, `birth_date (date nullable)`, `created_at`, `external_user_id (uuid nullable)`. Los dos últimos cambios llegan con `20260827120000_users_trusted_header_identity.sql` (SSO por cabeceras de un proxy de confianza), ambos **aditivos** para las cuentas que ya existían:
+- `users`: `id (uuid PK)`, `username (unique)` (restricción `users_username_key`), `password_hash (text, NULLABLE)`, `birth_date (date nullable)`, `created_at`, `external_user_id (uuid nullable)`, `retirement_profile (jsonb nullable — 5.0.0)`. `password_hash` nullable y `external_user_id` llegan con `20260827120000_users_trusted_header_identity.sql` (SSO por cabeceras de un proxy de confianza), ambos **aditivos** para las cuentas que ya existían:
   - **`password_hash` deja de ser `NOT NULL`**. `NULL` = cuenta SSO **sin contraseña**: la autenticación la hizo el proveedor antes de que la petición llegara. Inventarle una contraseña aleatoria sería peor (una credencial que nadie conoce y que el cambio de contraseña podría rotar), así que la ausencia se modela como ausencia. Los tres flujos de contraseña la rechazan con **401 `sso_account_no_password`**: `POST /v1/auth/login`, `POST /v1/auth/password` y `POST /v1/backup/user-export` (su clave se deriva de la contraseña de cuenta).
   - **`external_user_id`** guarda la identidad estable del proveedor (`X-Remote-User-Id`). Es la clave de resolución del SSO: cambiar el nombre para mostrar en Home Assistant no crea una cuenta nueva. `NULL` en las cuentas de usuario+contraseña.
   - **Índice `users_external_user_id_key`: UNIQUE PARCIAL**, `CREATE UNIQUE INDEX … ON users (external_user_id) WHERE external_user_id IS NOT NULL`. El `WHERE` deja explícito que las filas sin identidad externa no compiten (aunque en Postgres `NULL` ya sea distinto de `NULL`) y mantiene el índice pequeño. **Consecuencia para los handlers**: `username` ya **no es el único UNIQUE de la tabla**, así que un 23505 sobre `users` hay que discriminarlo por `db.constraint()` antes de traducirlo — `register` lo hace (solo `users_username_key` → `username_taken`) y `handlers/sso.rs` distingue las tres salidas (nombre cogido → siguiente candidato; identidad duplicada → devolver el usuario que ganó la carrera; otra cosa → error).
   - Los dos `COMMENT ON COLUMN` de la migración son la documentación in-situ; `\d+ users` en `psql` los muestra.
+  - **`retirement_profile` (5.0.0, `20260902200000_users_retirement_profile.sql`, D13)**: el PLAN DE JUBILACIÓN de esa persona. `NULL` = defaults (y una clave ausente dentro del JSONB también, `#[serde(default)]` a nivel struct), así que es aditivo: nadie ve moverse un número. Forma completa y cotas en [`api-routes.md`](api-routes.md) §Perfil de jubilación por usuario; handler `handlers/retirement_profile.rs`. La migración **copia** al perfil de cada usuario los cuatro ejes que hasta 4.15.x vivían en `installation.fire_settings` (`fire_number_mode`, `fire_number_manual_amount`, `swr_pct`, `horizon_lifespan_age`) y **los retira** del JSONB de la instalación. Es input del motor: toda escritura invalida la cache de proyección.
 - `sessions`: `id (uuid PK)`, `user_id (FK users)`, `expires_at`, `created_at`
 - `api_tokens` (v3.0.0, `20260816120000_api_tokens.sql`; `scope` añadida en `20260828140100_api_tokens_scope.sql`, Fase 3/issue #84): `id (uuid PK)`, `user_id (FK users ON DELETE CASCADE)`, `label (1..64)`, `token_hash (text UNIQUE — SHA-256 hex del secreto; el secreto `ffp_…` jamás se persiste)`, `token_prefix (primeros 12 chars, para la UI)`, `scope (text NOT NULL DEFAULT 'read_write', CHECK ∈ {read_write, read_only})`, `created_at`, `expires_at (nullable)`, `last_used_at (nullable, throttle 60 s)`, `revoked_at (nullable — soft-revoke, la fila queda como auditoría)`. Credencial Bearer del servidor MCP (`/mcp`). **Excluida a propósito del `.ffbackup`**: son credenciales de la instalación, no datos financieros — un restore no debe resucitar secretos. Sin `installation_id`: el rol/installation se re-resuelven vivos en cada uso vía `require_installation_member`. `scope` se lee **vivo** en el mismo SELECT que autentica; `ADD COLUMN … NOT NULL DEFAULT` no reescribe la tabla (PG 11+, el default vive en el catálogo) así que los tokens ya emitidos siguen funcionando byte a byte. Detalle de las tres puertas de escritura (rol → scope → toggle) y del reparto de responsabilidades: [`auth-and-membership.md`](auth-and-membership.md) §API tokens.
 
@@ -21,13 +22,30 @@ Migrations in `apps/api/migrations/`. SQLx embeds and runs them on startup.
 - `installation_memberships`: `installation_id (FK)`, `user_id (FK)`, `role (text: 'owner'|'member'|'viewer')`, `created_at`
 
 ### Ledger entities
-All financial tables have `installation_id (FK)` and `owner_user_id (uuid nullable FK users)`.
-- `owner_user_id = NULL` → household-level row (legacy or shared)
-- `owner_user_id = user.id` → attributed to specific user (`?view=mine` filter)
+All financial tables have `installation_id (FK)` and `owner_user_id (uuid **NOT NULL** FK users
+`ON DELETE RESTRICT`)`.
+
+**Desde 5.0.0 no existe la fila «compartida»** (`20260902200100_ledger_owner_not_null.sql`,
+DATA-CHANGING firmada por el owner, D14). Las cinco tablas que la tenían nullable —`assets`,
+`liabilities`, `budget_entries`, `planning_flows`, `allocation_rules`— pasaron sus filas
+`owner_user_id IS NULL` al **owner más antiguo de la instalación** y la columna quedó `NOT NULL`;
+el resto del ledger (transactions y satélites, history_snapshots…) ya lo era. Eran filas legadas de
+antes de 2026-02-16 o de imports de backups muy viejos: ningún camino vivo de la API escribía
+`NULL` desde entonces. La FK pasa de `ON DELETE SET NULL` a `ON DELETE RESTRICT` — con `NOT NULL`
+un `SET NULL` sería un error igualmente; RESTRICT lo dice de frente.
+
+- `owner_user_id = user.id` → la fila es de esa persona: entra en su `?view=mine`, en su histórico
+  y en SU proyección (D9), y **solo ella puede mutarla** (D21 — 403 `not_row_owner`, ver
+  [`api-routes.md`](api-routes.md) §Dueño de la fila).
+- En `allocation_rules` —la única tabla con un invariante entre filas (I1: un sumidero por scope, el
+  último)— la migración borró el sumidero compartido redundante y recolocó el resto detrás de las
+  reglas del owner conservando su orden relativo. Con la columna `NOT NULL`, el `SinkScope` del
+  módulo dejó de ser `Option<Uuid>` y sus cuatro consultas `owner_user_id IS NULL` se retiraron:
+  no podían casar nada.
 
 **categories**: `id`, `installation_id`, `scope ('asset'|'liability'|'income'|'expense')`, `name`, `sort_index`, `is_fallback (bool NOT NULL DEFAULT false — 4.15.0)`. **Categoría por defecto**: exactamente una por `(installation_id, scope)` para `income` y `expense` (índice único parcial `categories_fallback_per_scope_uniq … WHERE is_fallback`; CHECK `categories_fallback_scope_chk`: solo esos dos scopes). Es el destino de todo movimiento/plantilla de esa clase que llega sin categoría; **no se borra** (`category_is_fallback`) — se cambia designando otra con `PATCH {is_fallback: true}` (swap atómico; `false` se rechaza). La siembra de instalación (`seed_default_categories`) marca «Otros gastos»/«Otros ingresos»; la migración `20260902120000_categories_fallback_and_transaction_category_required` las adoptó por nombre o las creó en las instalaciones existentes.
 
-**assets**: `id`, `installation_id`, `owner_user_id`, `category_id`, `name`, `current_value (decimal)`, `purchase_price (decimal nullable)`, `is_liquid (bool)`, `expected_annual_return_percent (decimal nullable)`, `notes`, `sort_index`. **Contribuciones automáticas viven en `allocation_rules`, no en este registro.**
+**assets**: `id`, `installation_id`, `owner_user_id`, `category_id`, `name`, `current_value (decimal)`, `purchase_price (decimal nullable)`, `is_liquid (bool)`, `expected_annual_return_percent (decimal nullable)`, `annual_volatility_percent (numeric(8,4) nullable, CHECK >= 0 — 5.0.0, `20260902200200_assets_annual_volatility.sql`)`, `notes`, `sort_index`. **Contribuciones automáticas viven en `allocation_rules`, no en este registro.** `annual_volatility_percent` es la **desviación típica ANUAL** de los retornos en puntos porcentuales (`17` = 17 %/año); `NULL` o `0` = activo determinista. El camino Decimal del motor la **ignora siempre** (D12): solo la leerá el crate estocástico. Cota de API `[0, 100]` (`volatility_out_of_range`); el CHECK de columna queda laxo a propósito para poder importar backups viejos. **`history_snapshot_items` NO la captura**: no es un valor observado.
 
 **allocation_rules**: `id`, `installation_id`, `owner_user_id`, `target_asset_id (FK assets ON DELETE CASCADE)`, `priority (int)`, `kind ('fixed'|'percent'|'remainder')`, `amount (decimal nullable; NULL para 'remainder')`, `cap_kind ('amount'|'months_expense'|'income_multiple' nullable)`, `cap_value (decimal nullable)`, `enabled (bool)`, `notes`, `created_at`. Cascade rules: el engine evalúa las reglas en orden ascendente de `priority` sobre el sobrante mensual (income − expense − debt_service). Cada regla aporta a su `target_asset_id` hasta su `cap` opcional; lo que queda fluye a la siguiente. Constraints: `kind='remainder'` ⇒ `amount IS NULL`; `cap_kind`/`cap_value` ambos NULL o ambos NOT NULL. **Siembra del sumidero**: el primer activo de un scope virgen la crea en runtime (4.11.0/#150); la migración `20260901150000_allocation_rules_retro_seed_sink.sql` (4.12.0, DATA-CHANGING ordenada por el owner) retro-sembró todo scope con activos y sin `remainder` sin tope — destino: líquido de menor rentabilidad esperada, empate al de mayor saldo — y la MISMA regla corre al importar un backup pre-siembra (`backup_user/import.rs`, cross-referenciado con la migración).
 
@@ -305,11 +323,16 @@ que el preview publicó)`, `created_at`, `expires_at (NOT NULL — TTL 10 min)`,
 - Índice `mcp_confirm_tokens_expires_at_idx (expires_at)`.
 
 ## FIRE settings (JSONB in installation.fire_settings)
+
+**5.0.0 — lo que queda aquí es lo COMPARTIDO por el hogar.** Cuatro claves se mudaron al perfil de
+jubilación de cada usuario (`users.retirement_profile`, D13): `fire_number_mode`,
+`fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age`. La migración
+`20260902200000_users_retirement_profile.sql` las copia al perfil de cada persona y las borra de
+este JSONB; si alguna sobreviviera (un restore, una edición a mano), serde la ignora como cualquier
+clave desconocida.
+
 ```json
 {
-  "fire_number_mode": "annual_expense|current_income|manual",
-  "fire_number_manual_amount": "decimal string or null",
-  "swr_pct": "3.5",
   "taxes_enabled": true,
   "tax_brackets": [
     { "up_to": "6000",   "pct": "19" },
@@ -321,12 +344,12 @@ que el preview publicó)`, `created_at`, `expires_at (NOT NULL — TTL 10 min)`,
   "savings_source": "budget|transactions_avg|budget_income_real_expense",
   "income_avg_window_months": 3, "income_avg_window_mode": "data|calendar",
   "expense_avg_window_months": 12, "expense_avg_window_mode": "data|calendar",
-  "horizon_lifespan_age": 90
+  "taxable_gain_ratio": "1"
 }
 ```
-Defaults (Spain): SWR 3.5%, 5-bracket capital gains schedule (IRPF), `horizon_lifespan_age: 90`
-(4.9.0/#149 — edad límite del horizonte, clamp de lectura y cota de escritura 85..=105; aditivo
-sin migración, un JSONB sin el campo → 90). Last bracket must have `up_to: null`.
+Defaults (Spain): 5-bracket capital gains schedule (IRPF), `taxable_gain_ratio: 1`. Last bracket
+must have `up_to: null`. Los defaults de los cuatro ejes movidos (SWR 3,5 %, modo `annual_expense`,
+`horizon_lifespan_age: 90`) viven ahora en `default_retirement_profile()`.
 `fire_settings` is nullable; when null, defaults apply on read (handler calls `resolve_fire_settings`).
 
 **`savings_source`** (`SavingsSource` enum, default `budget`) — fuente del ahorro mensual de la simulación FIRE, **tres modos**:
@@ -336,21 +359,24 @@ sin migración, un JSONB sin el campo → 90). Last bracket must have `up_to: nu
 
 El promedio que alimenta el engine cuenta solo **meses reales y clasificados** (≥1 transacción `recurring_rule_id IS NULL` con `kind` no NULL — 4.8.0/#125); meses solo-recurrentes o sin clasificar se excluyen por completo (ver §Transactions en `api-routes.md`). Aditivo, **sin migración** (`FireSettings` tiene `#[serde(default)]` a nivel struct, así que un JSONB sin el campo → `budget`; backups viejos siguen cargando). En B y C las **transacciones se vuelven input del engine** (gate `SavingsSource::uses_transactions()`; ver nota en §Transactions). Semántica completa en `futurefin-fire-domain-reference` y `futurefin-config-and-flags`.
 
-**Deserialization is strict**: `fire_number_mode` only accepts `manual | annual_expense | current_income`; `savings_source` only `budget | transactions_avg | budget_income_real_expense` (unknown → 422, like `FireNumberMode`; el error lista las tres variantes válidas). The legacy alias `annual_expense_adjusted` is mapped to `annual_expense` for backwards-compat with old backups, but any other value returns 422 (was silently coerced to default before May 2026). The field `fire_number_expense_adjustment_pct` was removed — it had no consumer.
+**Deserialization is strict**: `fire_number_mode` (ahora en el perfil de jubilación) only accepts `manual | annual_expense | current_income`; `savings_source` only `budget | transactions_avg | budget_income_real_expense` (unknown → 422, like `FireNumberMode`; el error lista las tres variantes válidas). The legacy alias `annual_expense_adjusted` is mapped to `annual_expense` for backwards-compat with old backups, but any other value returns 422 (was silently coerced to default before May 2026). The field `fire_number_expense_adjustment_pct` was removed — it had no consumer.
 
 ## Key invariants
 - `Decimal` for all monetary/percentage columns — never `f64` in schema or Rust code
 - `calendar_tz` validated as IANA timezone via `chrono_tz`
 - `base_currency` validated as 3-letter code, MVP supports EUR/USD/GBP only
-- `swr_pct` bounded 0–4 (percent, not ratio)
+- `swr_pct` bounded 0–4 (percent, not ratio) — desde 5.0.0 vive en `users.retirement_profile`
+- **Toda fila del ledger tiene dueño** (`owner_user_id NOT NULL`) y solo su dueño la muta (D21)
 
 ## Per-user `.ffbackup`
 The `/v1/backup/user-export` endpoint serializes a single user's slice into a versioned, encrypted binary file (see [`backup_user/schema.rs`](../apps/api/src/handlers/backup_user/schema.rs) and [`backup_user/crypto.rs`](../apps/api/src/handlers/backup_user/crypto.rs)).
 
-- **Scope**: only rows with `owner_user_id = caller.id` are exported. Household rows (`owner_user_id IS NULL`) are excluded by design. Categories are denormalized to `(scope, name)` pairs for portability across installations.
+- **Scope**: only rows with `owner_user_id = caller.id` are exported. (Hasta 5.0.0 esto excluía además las filas «compartidas» `owner_user_id IS NULL`; esa clase ya no existe — ver §Ledger entities.) Desde el schema 13 el payload lleva también el **perfil de jubilación** del usuario (`retirement_profile`, `null` = nunca lo configuró) y la **volatilidad** de cada activo. Categories are denormalized to `(scope, name)` pairs for portability across installations.
 - **Crypto**: Argon2id KDF (m=19456, t=2, p=1) → AES-256-GCM with random 16-byte salt and 12-byte nonce per export. AAD binds `schema_version`, original `user_id`, and `exported_at` to prevent manifest swap.
 - **Framing**: `"FFBK"` magic + format_version (`u8`) + manifest_len (`u32` LE) + manifest JSON + ciphertext. The manifest stays in cleartext so future versions can refuse unsupported schemas without trying to decrypt.
 - **Forward compat**: each payload variant lives behind `BackupPayloadVN` + a `migrate_to_current` chain. Backups with `schema_version > CURRENT_SCHEMA_VERSION` are rejected with `409` and a clear error. La fuente de verdad es la constante `CURRENT_SCHEMA_VERSION` en `apps/api/src/handlers/backup_user/schema.rs` — compruébala con `grep -n 'CURRENT_SCHEMA_VERSION' apps/api/src/handlers/backup_user/schema.rs` antes de citar un número aquí (esta línea dijo `= 7` mucho después de que el código fuera por el 9).
+  - **`CURRENT_SCHEMA_VERSION = 13`** (5.0.0, #207): `BackupPayloadV13` = V12 con `assets` como `BackupAssetV13` (añade `annual_volatility_percent?`) y un `retirement_profile?` en la raíz. `payload_v12_to_v13` pone `None` en las dos cosas — un fichero v12 describe un mundo sin volatilidad declarada y sin perfil en el payload. **Los cuatro ejes FIRE que un fichero ≤ v12 llevaba DENTRO de `installation_snapshot_informative.fire_settings` no se convierten en la migración**: viajan intactos en `BackupFireSettings.legacy` y es el IMPORTADOR quien decide si sembrar con ellos el perfil — **solo si el usuario que importa tiene la columna `NULL`**, porque esa condición es estado de la base, no del fichero. `BackupFireSettings` implementa `Serialize`/`Deserialize` **a mano, por `serde_json::Value`, y NO con `#[serde(flatten)]`**: flatten bufferiza en el `Content` de serde y por ese camino `rust_decimal::serde::str_option` rechaza un `null` explícito — que es exactamente lo que los ficheros ≤ v12 escriben en `fire_number_manual_amount` y en el `up_to` del último tramo fiscal. Se descubrió porque rompió trece tests de la propia suite; sin ellos, **ningún backup anterior a 5.0.0 se habría podido leer**.
+  - **`CURRENT_SCHEMA_VERSION = 12`** (4.11.0, #148): `BackupPayloadV12` = V11 con los `planning_flows` como `BackupPlanningFlow` (base y ventana recurrente); `payload_v11_to_v12` los marca `one_off` sin ventana, que es lo que aquel servidor modelaba.
   - **`CURRENT_SCHEMA_VERSION = 11`** (4.7.0, #129): `BackupPayloadV11` = V10 con los snapshots como `BackupSnapshotV11` (alias actual `BackupSnapshot`), cuyo item añade `repayment_model?`. `payload_v10_to_v11` mapea cada item con `None` («la foto no lo sabía» ⇒ ley lineal al interpolar). El bump existe EN VEZ de un campo aditivo porque `parse_payload` rechaza versiones futuras: es lo que impide que un servidor 4.6.0 lea a medias un backup 4.7.0 y pierda el modelo en silencio. Además el import de CUALQUIER versión ≤ v10 aplica la normalización firmada de #144 a los pasivos (fixed+TIN+mensual → french; residuo pierde el TIN; revolving sin mínimos → backfill pct 0 / suelo = cuota), y `BackupLiabilityV10` ganó `min_payment_pct?`/`min_payment_eur?` como campos ADITIVOS sin bump (patrón `expense_category_ref`).
   - **`CURRENT_SCHEMA_VERSION = 10`** (4.2.0, verificado 2026-08-25): `BackupPayloadV10` = V9 con los pasivos como `BackupLiabilityV10`, que añade `repayment_model`. `payload_v9_to_v10` es una copia literal que rellena el campo con **`fixed_payments`** en cada pasivo. `BackupLiability` es un alias que apunta siempre a la variante actual.
   - **Un `.ffbackup` v10 NO importa en ≤ 4.1.0**: la versión anterior rechaza con `409` cualquier `schema_version` por encima de la suya. Es el contrato de siempre (falla ruidosamente en vez de tragarse un payload que no entiende), pero conviene decirlo al actualizar: exporta *antes* de subir si quieres un backup que la imagen vieja pueda leer.

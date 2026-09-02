@@ -43,14 +43,15 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `http::request::Parts` hasta el `RequestContext` de cada tool. Fallo → 401/403 JSON
   `{error, code, message}` (el `ErrorBody` del API, con su código estable); **solo el 401** añade
   `WWW-Authenticate` (ver la nota del challenge en la sección OAuth).
-- **Tools de lectura — 27**, más `simulate_projection`, que tiene bullet propio: **28 con
-  `read_only_hint = true`** de las 68 del catálogo. Diecinueve se enumeran aquí (las 10 iniciales en
+- **Tools de lectura — 28**, más `simulate_projection`, que tiene bullet propio: **29 con
+  `read_only_hint = true`** de las 70 del catálogo. Diecinueve se enumeran aquí (las 10 iniciales en
   este bullet, las 9 del issue #2 en el siguiente), la vigésima es `get_allocation_resolution` (bullet
   de la cascada, más abajo) y las **siete de la Fase 6** tienen bloque propio al final de la sección.
   **Los contadores no se cuentan a mano**: los congela
   `mcp_write.rs::every_write_tool_in_the_source_calls_require_mcp_write` (un `#[test]` sin BD que
-  trocea `server.rs`), y son los mismos de `futurefin-mcp-parity` §5 — **68 tools / 28 lectura /
-  40 escritura / 17 con preview-confirm / 8 con `confirm_token` / 18 con `impact`**. Verificación de
+  trocea `server.rs`), y son los mismos de `futurefin-mcp-parity` §5 — **70 tools / 29 lectura /
+  41 escritura / 18 con preview-confirm / 8 con `confirm_token` / 18 con `impact`** (5.0.0/WP4:
+  `get_retirement_profile` y `update_retirement_profile`). Verificación de
   un vistazo:
   `grep -c '#\[tool(' apps/api/src/mcp/server.rs` y
   `grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs`.
@@ -188,9 +189,12 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   4.12.0 (#178)**: el escalar gobierna el OBJETIVO, el umbral de Autonomía y los activos SIN
   `purchase_price`; un activo con coste declarado deriva su `g` de la base real mes a mes en el
   drenaje (también en el what-if), y `get_projection` declara qué rigió (`drawdown_gain_basis`)
-  con la `g₀` informativa (`taxable_gain_ratio_today`). Ahora se pueden simular `savings_source`,
-  `fire_number_mode` + `fire_number_manual_amount`, `taxes_enabled`, `tax_brackets` y las cuatro
-  ventanas del promedio. **Punto de aplicación: entre el clon de `fire_settings` y
+  con la `g₀` informativa (`taxable_gain_ratio_today`). Ahora se pueden simular `savings_source`, `taxes_enabled`,
+  `tax_brackets` y las cuatro ventanas del promedio. **5.0.0 (WP4)**: `fire_number_mode` y
+  `fire_number_manual_amount` SALEN de este override — son del perfil de jubilación por usuario
+  (D13) y `fire_settings` es lo compartido por el hogar; vuelven en WP5 como `profile_overrides`.
+  El eje `swr_pct` de primer nivel de `simulate_projection` **sigue vivo** y se aplica sobre un
+  CLON del perfil del solicitante (se simula, no se persiste). **Punto de aplicación: entre el clon de `fire_settings` y
   `validate_fire_settings`, NUNCA post-build** — `savings_source` y las ventanas las lee el
   ensamblado para decidir si lanza siquiera la query de `transactions_avg`, así que aplicadas
   después el override no haría nada, en silencio. Se aplican con
@@ -376,8 +380,15 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     `create_categorization_rule` (549→499) y `get_history` (574→491), y llevando la regla
     transversal de categoría (obligatoria en income/expense; `clear_category` = volver a la por
     defecto; `uncategorized` = solo filas sin `kind`) al `instructions` en vez de a 68 descripciones.
-    Estado tras 4.15.0: **`68 23949 598`** — quedan **51 caracteres**. La próxima tool sigue
-    obligando a otra ronda de reequilibrio; presupuéstala al planificarla, no al final.
+    Estado tras 4.15.0: **`68 23949 598`** — quedaban **51 caracteres**. **5.0.0/WP4** metió DOS
+    tools (`get_retirement_profile`, `update_retirement_profile`) y volvió a pagar con la receta de
+    la guardia, no subiendo la constante: se movió al `instructions` la prosa que ya vivía allí
+    duplicada (índices de mes en `get_projection`, homónimos entre tools en `get_summary` y
+    `get_budget`, la equivalencia `net_actual` ↔ `income_minus_expense` que `get_history_cashflow`
+    ya declara desde su lado, la regla de reintentos/`idempotency_key`) y se añadió el párrafo
+    **DOS PLANOS DE CONFIGURACIÓN** (hogar vs. persona, y el dueño de cada fila del ledger).
+    Estado: **`70 23757 588`** — quedan **243 caracteres**. Sigue siendo un margen de una tool
+    corta: presupuesta el reequilibrio al planificar la siguiente, no al final.
   - **Hallazgo que reordena lo que queda**: medido DESPUÉS del recorte, el `inputSchema` del
     catálogo son ~55 KB, **~2,7× las descripciones** (medida puntual de la auditoría de la Fase 5, no
     una constante congelada: re-derívala con un `tools/list` contra un servidor vivo pesando
@@ -757,6 +768,35 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   histórica), y `list_liabilities` publica `plan_expired_with_balance` + la regla de visibilidad
   nueva (#145: el vencido con saldo vivo se sirve marcado). Todo por las cores compartidas; el
   catálogo congelado (`mcp-catalog.json`) se regeneró conscientemente.
+- **5.0.0 / WP4 (issue #207) — 68 → 70 tools: el plan de jubilación es de cada persona.** Dos tools
+  nuevas, ambas sobre el usuario DEL TOKEN y sin parámetro de scope (no hay forma de pedir el de
+  otro):
+  - **`get_retirement_profile`** (lectura, `NoParams`): el perfil ya resuelto —defaults y clamps
+    aplicados— más `birth_date`, que es lo que convierte cada edad del perfil en un mes de la serie.
+  - **`update_retirement_profile`** (escritura, preview/confirm): merge campo a campo, `clear_*`
+    para los borrados (el tri-estado no es expresable en JSON Schema — doctrina de la Fase 2), y
+    `clear_x` + `x` a la vez es 400 `field_set_and_clear`, no un ganador implícito. **Auth por ROL
+    (`require_mcp_write`), NO owner-only**: es dato personal del usuario del token, y un `viewer`
+    que no pudiera fijar su edad de jubilación no podría ver su propia proyección. **Sin
+    `confirm_token`**, mismo criterio explícito que `update_fire_settings`: el preview devuelve el
+    before/after ÍNTEGRO, así que deshacerlo es volver a llamar con los valores de `before` (el
+    criterio completo vive en el doc de `two_phase`). Su `side_effects` dice `scope: "user"` —
+    frente al `scope: "installation", affects_every_member: true` de `update_fire_settings`.
+
+  Cambios en tools existentes: **`update_fire_settings` pierde `swr_pct`, `horizon_lifespan_age`,
+  `fire_number_mode` y `fire_number_manual_amount`** (tiene `deny_unknown_fields`, así que un
+  cliente que los mande recibe un error que nombra el campo, no un silencio); `get_settings` ya no
+  los publica; `create_asset`/`update_asset` ganan `annual_volatility_percent` y `list_assets` lo
+  devuelve (sale gratis: reusa `list_assets_core`). `update_asset_value` **no** lo gana a propósito
+  — es el subset de VALORACIÓN, y la volatilidad es un supuesto del activo, no su valor de hoy.
+
+  **D21 llega gratis a las escrituras** porque las tools reusan las cores: una mutación sobre la
+  fila de otro miembro devuelve 403 `not_row_owner` por MCP igual que por HTTP, y el preview de
+  `delete_asset`/`delete_liability` falla igual de pronto — enseñaba el contenido de la fila ajena
+  **y emitía el `confirm_token`** que la ejecuta. Regresión:
+  `mcp_write.rs::mcp_writes_cannot_touch_another_members_rows` y
+  `mcp_confirm_and_impact.rs::el_preview_de_un_borrado_ajeno_no_emite_token`.
+
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
   mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,

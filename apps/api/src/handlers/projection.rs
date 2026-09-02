@@ -10,6 +10,7 @@ use crate::handlers::installation::{
     resolve_fire_settings, FireNumberMode, FireSettings, SavingsSource,
 };
 use futurefin_engine::gross_up_net_annual_fire;
+use crate::handlers::retirement_profile::{resolve_retirement_profile, RetirementProfile};
 use crate::handlers::person_view::LedgerView;
 /// Alias local: `RepaymentModel` a secas es el del **engine** en este fichero (ver el `use` de
 /// `futurefin_engine`); este es el del lado API, que sabe hablar con la columna SQL.
@@ -125,15 +126,17 @@ pub(crate) const FIRE_ABSENT_SWR_NOT_POSITIVE: &str = "swr_not_positive";
 /// engine evalúa `gross_up(need(k))/SWR` mes a mes. Las tres razones de ausencia se deciden
 /// AQUÍ, una vez, sobre el estado de HOY (la puerta k=0 del engine las respalda).
 fn compute_fire_need(
-    fire: &FireSettings,
+    profile: &RetirementProfile,
     income_monthly: Decimal,
     income_retirement_monthly: Decimal,
     expense_monthly: Decimal,
 ) -> Result<futurefin_engine::FireNeed, &'static str> {
     use futurefin_engine::FireNeed;
-    let need = match fire.fire_number_mode {
+    // 5.0.0: el modo del objetivo, el importe manual y el SWR son del PERFIL del usuario, no del
+    // hogar (D13). El resto de la fiscalidad (`taxes_enabled`, tramos, g) sigue siendo compartida.
+    let need = match profile.fire_number_mode {
         FireNumberMode::Manual => {
-            let amt = fire
+            let amt = profile
                 .fire_number_manual_amount
                 .ok_or(FIRE_ABSENT_MANUAL_AMOUNT_MISSING)?;
             if amt <= Decimal::ZERO {
@@ -163,7 +166,7 @@ fn compute_fire_need(
             FireNeed::Indexed { annual_net_today: net * Decimal::from(12u32) }
         }
     };
-    if fire.swr_pct <= Decimal::ZERO {
+    if profile.swr_pct <= Decimal::ZERO {
         return Err(FIRE_ABSENT_SWR_NOT_POSITIVE);
     }
     Ok(need)
@@ -1385,6 +1388,10 @@ pub(crate) async fn build_installation_projection_input(
     horizon_months: u32,
     inflation_annual_percent: Decimal,
     fire_settings: Option<&FireSettings>,
+    // `retirement_profile`: perfil de jubilación del usuario de la SESIÓN (5.0.0, D13). De aquí
+    // salen el modo del objetivo, el importe manual y el SWR. No es `Option` porque siempre hay
+    // uno resuelto — `NULL` en la columna es el perfil por defecto, no la ausencia de perfil.
+    retirement_profile: &RetirementProfile,
     overrides: Option<&SimOverrides>,
 ) -> Result<BuiltProjection, ApiError> {
     let (income_reg, income_retirement, expense_reg, expense_retirement, expense_end_entries) =
@@ -1511,7 +1518,10 @@ pub(crate) async fn build_installation_projection_input(
     // Base del FIRE number: income = income efectivo (modo C → presupuesto; modo B → promedio real);
     // expense = gasto efectivo en modo B/C (el gasto ya no es el del presupuesto), o
     // `expense_retirement` en modo A (comportamiento histórico).
-    let fire_target_outcome = fire_settings.map(|fs| {
+    // El `map` sigue colgando de `fire_settings`: es la presencia de configuración FIRE del
+    // HOGAR lo que decide si hay objetivo que explicar. Los ingredientes personales (modo,
+    // importe manual, SWR) salen del perfil desde 5.0.0.
+    let fire_target_outcome = fire_settings.map(|_fs| {
         // El override explícito de gasto de jubilación ancla el target en TODOS los modos; sin
         // él, la base histórica (gasto efectivo en B/C, gasto de jubilación en A).
         let fire_expense = match ov.retirement_monthly_expense {
@@ -1519,7 +1529,12 @@ pub(crate) async fn build_installation_projection_input(
             None if inputs.expense_from_avg => inputs.expense,
             None => expense_retirement,
         };
-        compute_fire_need(fs, inputs.income, income_retirement, fire_expense)
+        compute_fire_need(
+            retirement_profile,
+            inputs.income,
+            income_retirement,
+            fire_expense,
+        )
     });
     // `None` cuando no hay `fire_settings` (no hay configuración FIRE que explicar), `Some(razón)`
     // cuando la hay y aun así no sale target.
@@ -1530,7 +1545,7 @@ pub(crate) async fn build_installation_projection_input(
         let fs = fire_settings.expect("need solo existe con fire_settings");
         FireTarget {
             need,
-            swr_pct: fs.swr_pct,
+            swr_pct: retirement_profile.swr_pct,
             // La MISMA escala y el MISMO switch que el drenaje (#140).
             tax_brackets: fs.tax_brackets.clone(),
             taxes_enabled: fs.taxes_enabled,
@@ -1768,6 +1783,10 @@ pub(crate) async fn assets_projection_context(
     today: NaiveDate,
 ) -> Result<AssetsProjectionContext, ApiError> {
     let fire_settings = load_fire_settings(pool, iid).await?;
+    // Los caps y el reparto del mes 1 no miran el objetivo, pero el ensamblado sí necesita un
+    // perfil: se pasa el del solicitante, que es de quien son las filas del scope `mine`.
+    let retirement_profile =
+        crate::handlers::retirement_profile::load_retirement_profile(pool, session_user_id).await?;
     let built = build_installation_projection_input(
         pool,
         iid,
@@ -1777,6 +1796,7 @@ pub(crate) async fn assets_projection_context(
         1,
         Decimal::ZERO,
         Some(&fire_settings),
+        &retirement_profile,
         None,
     )
     .await?;
@@ -1941,6 +1961,13 @@ pub(crate) struct ProjectionContext {
     pub inflation_annual_percent: Decimal,
     pub show_age_mode: String,
     pub fire_settings: FireSettings,
+    /// Perfil de jubilación del usuario de la SESIÓN, ya resuelto (5.0.0, D13). De aquí salen
+    /// el modo del objetivo, el importe manual, el SWR y la edad límite del horizonte — los
+    /// cuatro ejes que hasta 4.15.x vivían en `fire_settings`.
+    ///
+    /// Semántica de UN miembro por ahora: también en `?view=household` es el perfil del
+    /// solicitante, igual que la demografía. WP5 corre una simulación por miembro.
+    pub retirement_profile: RetirementProfile,
     /// DOB de demografía: la del usuario de la sesión, o la del primer miembro del hogar.
     pub birth_date: Option<NaiveDate>,
     pub months: u32,
@@ -1971,8 +1998,14 @@ pub(crate) async fn resolve_projection_context(
     )
     .bind(iid)
     .fetch_one(pool);
-    let session_birth_q = sqlx::query_scalar::<_, Option<NaiveDate>>(
-        r#"SELECT birth_date FROM users WHERE id = $1"#,
+    // La DOB y el perfil salen de la MISMA fila: pedirlos por separado añadía un viaje para
+    // leer dos columnas de la misma tabla por la misma clave.
+    type SessionUserRow = (
+        Option<NaiveDate>,
+        Option<sqlx::types::Json<RetirementProfile>>,
+    );
+    let session_user_q = sqlx::query_as::<_, SessionUserRow>(
+        r#"SELECT birth_date, retirement_profile FROM users WHERE id = $1"#,
     )
     .bind(user_id)
     .fetch_one(pool);
@@ -1985,8 +2018,10 @@ pub(crate) async fn resolve_projection_context(
     .bind(iid)
     .fetch_optional(pool);
 
-    let (inst_row, session_birth, household_member_birth) =
-        tokio::try_join!(inst_q, session_birth_q, household_birth_q)?;
+    let (inst_row, session_user_row, household_member_birth) =
+        tokio::try_join!(inst_q, session_user_q, household_birth_q)?;
+    let (session_birth, stored_profile) = session_user_row;
+    let retirement_profile = resolve_retirement_profile(stored_profile.map(|j| j.0));
 
     let today = naive_date_in_calendar_tz(&inst_row.0)?;
     // Sin clamp desde 4.9.0 (#146): rango garantizado por la validación de escritura.
@@ -2006,8 +2041,11 @@ pub(crate) async fn resolve_projection_context(
             (m, "months_override".into())
         }
         None => {
-            let (m, b) =
-                projection_horizon_months(today, &birth_dates, fire_settings.horizon_lifespan_age);
+            let (m, b) = projection_horizon_months(
+                today,
+                &birth_dates,
+                retirement_profile.horizon_lifespan_age,
+            );
             (m, b.into())
         }
     };
@@ -2017,6 +2055,7 @@ pub(crate) async fn resolve_projection_context(
         inflation_annual_percent,
         show_age_mode,
         fire_settings,
+        retirement_profile,
         birth_date,
         months,
         horizon_basis,
@@ -2036,6 +2075,7 @@ pub async fn compute_projection_series_response(
         inflation_annual_percent,
         show_age_mode,
         fire_settings,
+        retirement_profile,
         birth_date: resolved_birth_for_demographics,
         months,
         horizon_basis,
@@ -2052,6 +2092,7 @@ pub async fn compute_projection_series_response(
         months,
         inflation_annual_percent,
         Some(&fire_settings),
+        &retirement_profile,
         None,
     )
     .await?;
@@ -2308,7 +2349,7 @@ pub async fn compute_projection_series_response(
         months,
         horizon_years,
         horizon_basis,
-        horizon_lifespan_age: fire_settings.horizon_lifespan_age,
+        horizon_lifespan_age: retirement_profile.horizon_lifespan_age,
         final_net_worth_real: money_out(final_net_worth_real),
         starting_net_worth: money_out(starting_net_worth),
         // En modos B/C esto es `sum / meses reales`: sin `money_out` viajaba con ~25 decimales
@@ -2721,6 +2762,7 @@ fn sim_kpis(
     built: &BuiltProjection,
     inflation_annual_percent: Decimal,
     fs: &FireSettings,
+    profile: &RetirementProfile,
     today: NaiveDate,
     birth_date: Option<NaiveDate>,
     // `monthly_cash_adjustment`: ajuste de caja mensual constante de ESTE lado (0 en el baseline).
@@ -2772,7 +2814,7 @@ fn sim_kpis(
         &liquid_rows,
         monthly_expense,
         inflation_annual_percent,
-        fs.swr_pct,
+        profile.swr_pct,
         annual_expense_gross,
         &fs.tax_brackets,
         fs.taxes_enabled,
@@ -2898,9 +2940,9 @@ fn sim_kpis(
         savings_source: built.effective_savings_source,
         savings_income_basis: built.savings_income_basis.clone(),
         savings_expense_basis: built.savings_expense_basis.clone(),
-        fire_number_mode: fs.fire_number_mode,
+        fire_number_mode: profile.fire_number_mode,
         fire_target_absent_reason: built.fire_target_absent_reason,
-        swr_pct: fs.swr_pct,
+        swr_pct: profile.swr_pct,
         annual_inflation_percent: inflation_annual_percent,
         // `money_out` obligatorio: en modo B estas bases salen de `suma / n` y arrastran la escala
         // que `rust_decimal` produce en una división (auditoría MCP §7).
@@ -3077,12 +3119,17 @@ pub(crate) async fn simulate_projection_core(
     // es el EQUIVOCADO para esto: `savings_source` y las ventanas del promedio los lee el
     // ensamblado para decidir si lanza siquiera la query de `transactions_avg`. Aplicados
     // después, el override no haría absolutamente nada, en silencio.
-    let mut fs_patch = spec.fire_settings_overrides.unwrap_or_default();
-    if let Some(swr) = spec.swr_pct {
-        fs_patch.swr_pct = Some(swr);
-    }
+    let fs_patch = spec.fire_settings_overrides.unwrap_or_default();
     let fs_eff = fs_patch.apply_to(&ctx.fire_settings);
     crate::handlers::installation::validate_fire_settings(&fs_eff)?;
+    // El eje `swr_pct` del what-if sobrevive a la mudanza de 5.0.0: el SWR pasó a ser del perfil
+    // del usuario, así que el override se aplica sobre un CLON del perfil — se simula, no se
+    // persiste. El baseline usa el perfil real; el escenario, este clon.
+    let mut profile_eff = ctx.retirement_profile.clone();
+    if let Some(swr) = spec.swr_pct {
+        profile_eff.swr_pct = swr;
+    }
+    crate::handlers::retirement_profile::validate_retirement_profile(&profile_eff)?;
     let inflation_eff = spec
         .annual_inflation_percent
         .unwrap_or(ctx.inflation_annual_percent);
@@ -3103,6 +3150,7 @@ pub(crate) async fn simulate_projection_core(
         months,
         ctx.inflation_annual_percent,
         Some(&ctx.fire_settings),
+        &ctx.retirement_profile,
         None,
     )
     .await?;
@@ -3115,6 +3163,7 @@ pub(crate) async fn simulate_projection_core(
         months,
         inflation_eff,
         Some(&fs_eff),
+        &profile_eff,
         Some(&sim_ov),
     )
     .await?;
@@ -3362,6 +3411,7 @@ pub(crate) async fn simulate_projection_core(
         &baseline_built,
         ctx.inflation_annual_percent,
         &ctx.fire_settings,
+        &ctx.retirement_profile,
         ctx.today,
         ctx.birth_date,
         // El baseline es la instalación tal cual: por definición no lleva ajuste de caja.
@@ -3373,6 +3423,7 @@ pub(crate) async fn simulate_projection_core(
         &scenario_built,
         inflation_eff,
         &fs_eff,
+        &profile_eff,
         ctx.today,
         ctx.birth_date,
         // El MISMO `monthly_adj` que se sumó a `planning_monthly_cash_adjustment` arriba.
@@ -3472,7 +3523,7 @@ pub(crate) async fn simulate_projection_core(
     Ok(SimulateProjectionResponse {
         horizon_months: months,
         horizon_basis: ctx.horizon_basis.clone(),
-        horizon_lifespan_age: ctx.fire_settings.horizon_lifespan_age,
+        horizon_lifespan_age: ctx.retirement_profile.horizon_lifespan_age,
         view: view.as_str(),
         anchor_date_ymd: ctx.today.format("%Y-%m-%d").to_string(),
         show_age_mode: ctx.show_age_mode.clone(),

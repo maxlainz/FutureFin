@@ -75,10 +75,32 @@ contrario: la promesa existía, la implementación no.
 |------|------------|
 | `owner` | Full CRUD + approve/reject pending users + **gestionar membresías** (`PATCH`/`DELETE /v1/installation/members/{user_id}`) + backup export |
 | `member` | Full CRUD financial data |
-| `viewer` | Read-only (GET endpoints) |
+| `viewer` | Read-only (GET endpoints) + **su propio perfil de jubilación** (ver abajo) |
 
 `role_can_write(role)` → true for `owner` and `member`.
 `role_can_read(role)` → true for all three.
+
+### El rol no es lo único que decide una escritura (5.0.0)
+
+Desde 5.0.0 hay **dos ejes** sobre la tabla de arriba, y ninguno la sustituye:
+
+- **Dueño de la fila (D21)**. Toda mutación del ledger —`assets`, `liabilities`, `budget_entries`,
+  `planning_flows`, `allocation_rules`— exige además que `owner_user_id` sea el usuario de la
+  sesión: la fila de otro miembro devuelve **403 `not_row_owner`**, y **el rol `owner` tampoco la
+  salta**. Ser dueño de la instalación no es ser dueño de la fila; con proyecciones independientes
+  por miembro (D9) cada fila pertenece a la simulación de UNA persona. La LECTURA no cambia:
+  `?view=household` sigue enseñando el hogar entero. Detalle y códigos:
+  [`api-routes.md`](api-routes.md) §Dueño de la fila en las mutaciones.
+- **Dato personal: cualquier rol edita el SUYO.** `PATCH /v1/auth/me/retirement-profile` (y la tool
+  MCP `update_retirement_profile`) es la **única escritura del API que un `viewer` puede hacer**, y
+  no es una excepción arbitraria: el perfil de jubilación no es configuración del hogar sino de esa
+  persona, y sin poder fijar su edad de jubilación un viewer no podría ver su propia proyección —
+  que es exactamente lo que un viewer sí puede hacer. Nadie puede editar el de otro: no hay
+  parámetro para pedirlo, ni por HTTP ni por MCP.
+
+La configuración COMPARTIDA del hogar sigue siendo owner-only (`PATCH /v1/installation`,
+`update_fire_settings`, `update_installation_settings`) — desde 5.0.0 sin los cuatro ejes FIRE
+personales, que se mudaron al perfil.
 
 ## Cookie
 - Name: `ff_session`

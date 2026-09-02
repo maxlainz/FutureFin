@@ -535,7 +535,9 @@ pub(crate) async fn capture_snapshots_core(
             .await?;
 
         if kind == "asset" {
-            // Filas compartidas (owner_user_id IS NULL) excluidas por construcción.
+            // El snapshot es POR USUARIO: se filtra `owner_user_id = $3`, así que solo entran
+            // las filas del capturador. Desde 5.0.0 la columna es NOT NULL (D14) y toda fila
+            // tiene dueño, así que ya no hay «compartidas» que excluir.
             sqlx::query(
                 r#"INSERT INTO history_snapshot_items
                        (snapshot_id, source_item_id, label, value,
@@ -1343,27 +1345,31 @@ async fn fetch_history_scope(
         .fetch_all(pool)
         .await?;
 
-    // 3) Assets vivos del scope. Las filas compartidas (owner_user_id IS NULL) nunca
-    //    participan en el histórico → conjunto extra `owner_user_id IS NOT NULL`.
+    // 3) Assets vivos del scope. El filtro extra `owner_user_id IS NOT NULL` que había aquí
+    //    —«las filas compartidas nunca participan en el histórico»— se retiró en 5.0.0: la
+    //    migración `20260902200100_ledger_owner_not_null.sql` (D14) asignó las filas legadas al
+    //    owner más antiguo y dejó la columna `NOT NULL`, así que el predicado era una tautología
+    //    que se leía como una regla viva.
     let a_scope = view.scope_where("a");
     let assets_sql = format!(
         "SELECT a.id, a.name, a.current_value, a.owner_user_id
          FROM assets a
-         WHERE {a_scope} AND a.owner_user_id IS NOT NULL"
+         WHERE {a_scope}"
     );
     let live_assets: Vec<LiveAssetRow> = view
         .bind_scope_as(sqlx::query_as(&assets_sql), iid, session_user_id)
         .fetch_all(pool)
         .await?;
 
-    // 4) Pasivos del scope con plan vivo o saldo vivo (#145), mismo conjunto extra.
+    // 4) Pasivos del scope con plan vivo o saldo vivo (#145). Mismo caso que los activos: el
+    //    `owner_user_id IS NOT NULL` murió con la migración de D14.
     let l_scope = view.scope_where("l");
     let l_today_arg = view.next_arg_index();
     let liabs_sql = format!(
         "SELECT l.id, l.principal, l.apr_percent, l.payment_amount,
                 l.payment_frequency, l.repayment_model, l.owner_user_id
          FROM liabilities l
-         WHERE {l_scope} AND l.owner_user_id IS NOT NULL
+         WHERE {l_scope}
            AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${l_today_arg} OR l.principal > 0)"
     );
     let live_liabs: Vec<LiveLiabilityRow> = view

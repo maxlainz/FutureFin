@@ -658,8 +658,16 @@ async fn an_expired_budget_entry_stops_counting_everywhere_at_once() {
     let r = app
         .patch_json_with_cookie(
             "/v1/installation",
-            json!({ "fire_settings": { "fire_number_mode": "annual_expense", "swr_pct": "4",
-                     "taxes_enabled": false, "tax_brackets": [] } }),
+            json!({ "fire_settings": { "taxes_enabled": false, "tax_brackets": [] } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    // 5.0.0 (D13): modo del objetivo y SWR son del perfil del usuario, no del hogar.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "annual_expense", "swr_pct": "4"}),
             &owner.cookie,
         )
         .await;

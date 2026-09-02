@@ -495,6 +495,12 @@ pub(crate) async fn summary_core(
     // Una sola query para los escalares de instalación que necesita este handler: fecha civil,
     // inflación (base del runway) y los fire_settings (fuente del ahorro + SWR/tramos del runway).
     let (today, inflation_pct, fire) = installation_calendar_inflation_fire(pool, iid).await?;
+    // El SWR salió de `fire_settings` en 5.0.0 (D13): el umbral «runway indefinido» lo fija el
+    // perfil del SOLICITANTE, no el hogar. Semántica de un miembro por ahora — con `household`
+    // sigue siendo el del solicitante, igual que la demografía de la proyección; WP5 lo hará por
+    // miembro (con el MÍNIMO SWR del hogar para el umbral agregado).
+    let retirement_profile =
+        crate::handlers::retirement_profile::load_retirement_profile(pool, user_id).await?;
     let source = fire.savings_source;
 
     let asset_scope = view.scope_where("");
@@ -653,7 +659,7 @@ pub(crate) async fn summary_core(
         &liquid_rows,
         expense_tot,
         inflation_pct,
-        fire.swr_pct,
+        retirement_profile.swr_pct,
         annual_expense_gross,
         &fire.tax_brackets,
         fire.taxes_enabled,

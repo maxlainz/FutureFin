@@ -9,6 +9,37 @@ use sqlx::query::{Query, QueryAs, QueryScalar};
 use sqlx::{Postgres, Type};
 use uuid::Uuid;
 
+/// **D21 (5.0.0)** — toda mutación del ledger exige que la fila sea del usuario de la sesión.
+///
+/// `?view` NUNCA fue una frontera de autorización (D2) y sigue sin serlo: es un filtro de
+/// LECTURA. Lo que cambia en 5.0.0 es la ESCRITURA. Con proyecciones independientes por miembro
+/// (D9) cada fila del ledger pertenece a la simulación de UNA persona, así que editar la de otro
+/// miembro no es «colaborar»: es mover su plan sin que se entere. El rol `owner` **tampoco**
+/// salta la regla — ser dueño de la instalación no es ser dueño de la fila.
+///
+/// Es 403 y no 404 a propósito: la fila existe, el hogar la ve en su listado (`view=household`)
+/// y ocultarla al editar produciría un «no existe» que el usuario puede desmentir en la pantalla
+/// de al lado. El 404 se reserva para lo que de verdad no está.
+pub fn not_row_owner() -> ApiError {
+    ApiError::ForbiddenWith(
+        "not_row_owner: this row belongs to another household member; only its owner can change it"
+            .into(),
+    )
+}
+
+/// Puerta de D21: compara el dueño de la fila con el usuario de la sesión.
+///
+/// Punto ÚNICO — los cinco módulos del ledger la llaman en vez de escribir el `if`, que es lo
+/// que evita que uno de ellos se quede atrás en la próxima refactorización (el patrón del
+/// dual-branch drift que ya mordió dos veces en el MCP).
+pub fn require_row_owner(row_owner: Uuid, session_user_id: Uuid) -> Result<(), ApiError> {
+    if row_owner == session_user_id {
+        Ok(())
+    } else {
+        Err(not_row_owner())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LedgerViewQuery {
     #[serde(default)]

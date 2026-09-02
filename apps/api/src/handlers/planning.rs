@@ -2,7 +2,7 @@ use crate::error::ApiError;
 use crate::handlers::budget::assert_budget_category;
 use crate::handlers::installation::require_installation_member;
 use crate::handlers::membership::role_can_write;
-use crate::handlers::person_view::LedgerViewQuery;
+use crate::handlers::person_view::{require_row_owner, LedgerViewQuery};
 use crate::handlers::projection::refresh_projection_after_mutation;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
@@ -187,6 +187,8 @@ struct PlanningFlowJoinRow {
     notes: Option<String>,
     sort_index: i32,
     show_in_chart: bool,
+    /// `NOT NULL` desde la migración 5.0.0 (D14). Lo lee la puerta de D21 del PATCH.
+    owner_user_id: Uuid,
 }
 
 fn scope_to_direction(scope: &str) -> Result<PlanningFlowDirection, ApiError> {
@@ -385,7 +387,7 @@ pub(crate) async fn list_planning_flows_core(
         r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
                   p.expected_amount, p.amount_basis, p.due_date,
                   p.window_start_date, p.window_end_date, p.notes, p.sort_index,
-                  p.show_in_chart
+                  p.show_in_chart, p.owner_user_id
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE {scope}
@@ -515,7 +517,7 @@ pub(crate) async fn create_planning_flow_core(
         r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
                   p.expected_amount, p.amount_basis, p.due_date,
                   p.window_start_date, p.window_end_date, p.notes, p.sort_index,
-                  p.show_in_chart
+                  p.show_in_chart, p.owner_user_id
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE p.id = $1"#,
@@ -588,7 +590,7 @@ pub(crate) async fn patch_planning_flow_core(
         r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
                   p.expected_amount, p.amount_basis, p.due_date,
                   p.window_start_date, p.window_end_date, p.notes, p.sort_index,
-                  p.show_in_chart
+                  p.show_in_chart, p.owner_user_id
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE p.id = $1 AND p.installation_id = $2"#,
@@ -601,6 +603,7 @@ pub(crate) async fn patch_planning_flow_core(
     let Some(current) = row else {
         return Err(ApiError::NotFound);
     };
+    require_row_owner(current.owner_user_id, user_id)?;
 
     let new_cat = body.category_id.unwrap_or(current.category_id);
     if new_cat != current.category_id {
@@ -686,7 +689,7 @@ pub(crate) async fn patch_planning_flow_core(
                sort_index = $9,
                show_in_chart = $10,
                updated_at = now()
-           WHERE id = $11 AND installation_id = $12
+           WHERE id = $11 AND installation_id = $12 AND owner_user_id = $13
            RETURNING planning_flows.id,
                      planning_flows.category_id,
                      (
@@ -702,7 +705,8 @@ pub(crate) async fn patch_planning_flow_core(
                      planning_flows.window_end_date,
                      planning_flows.notes,
                      planning_flows.sort_index,
-                     planning_flows.show_in_chart"#,
+                     planning_flows.show_in_chart,
+                     planning_flows.owner_user_id"#,
     )
     .bind(new_cat)
     .bind(&new_title)
@@ -716,6 +720,7 @@ pub(crate) async fn patch_planning_flow_core(
     .bind(new_show_in_chart)
     .bind(id)
     .bind(iid)
+    .bind(user_id)
     .fetch_one(&state.pool)
     .await?;
 
@@ -759,12 +764,25 @@ pub(crate) async fn delete_planning_flow_core(
     user_id: Uuid,
     id: Uuid,
 ) -> Result<(), ApiError> {
-    let res =
-        sqlx::query(r#"DELETE FROM planning_flows WHERE id = $1 AND installation_id = $2"#)
-            .bind(id)
-            .bind(iid)
-            .execute(&state.pool)
-            .await?;
+    // D21: SELECT previo para distinguir «no existe» (404) de «es de otro miembro» (403).
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT owner_user_id FROM planning_flows WHERE id = $1 AND installation_id = $2"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .fetch_optional(&state.pool)
+    .await?;
+    require_row_owner(owner.ok_or(ApiError::NotFound)?, user_id)?;
+
+    let res = sqlx::query(
+        r#"DELETE FROM planning_flows
+           WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .bind(user_id)
+    .execute(&state.pool)
+    .await?;
 
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);

@@ -1464,17 +1464,19 @@ async fn update_fire_settings_merges_field_by_field_and_is_owner_only() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
 
+    // 5.0.0: `fire_settings` ya NO lleva swr_pct, fire_number_mode, fire_number_manual_amount ni
+    // horizon_lifespan_age — esos cuatro ejes son del perfil de jubilación de cada usuario (D13).
+    // Lo que queda aquí es lo COMPARTIDO por el hogar.
+    //
     // Tramos fiscales personalizados por HTTP (objeto completo, como hace la SPA).
     let r = app
         .patch_json_with_cookie(
             "/v1/installation",
             json!({"fire_settings": {
-                "fire_number_mode": "annual_expense",
-                "fire_number_manual_amount": null,
-                "swr_pct": "4",
                 "taxes_enabled": true,
                 "tax_brackets": [{"up_to": "10000", "pct": "10"}, {"up_to": null, "pct": "25"}],
-                "savings_source": "budget"
+                "savings_source": "budget",
+                "taxable_gain_ratio": "1"
             }}),
             &owner.cookie,
         )
@@ -1485,30 +1487,40 @@ async fn update_fire_settings_merges_field_by_field_and_is_owner_only() {
     let envelope = mcp_post(
         &app,
         &token,
-        tool_call("update_fire_settings", json!({"swr_pct": "3.0"})),
+        tool_call("update_fire_settings", json!({"taxable_gain_ratio": "0.5"})),
     )
     .await;
     let preview = tool_json(&envelope);
     assert_eq!(preview["preview"], true);
-    assert_eq!(preview["effects"]["entity"]["before"]["swr_pct"], "4");
-    assert_eq!(preview["effects"]["entity"]["after"]["swr_pct"], "3.0");
+    assert_eq!(preview["effects"]["entity"]["before"]["taxable_gain_ratio"], "1");
+    assert_eq!(preview["effects"]["entity"]["after"]["taxable_gain_ratio"], "0.5");
     assert_eq!(preview["effects"]["side_effects"]["scope"], "installation");
     let stored = app.get_with_cookie("/v1/installation", &owner.cookie).await;
-    assert_eq!(stored.json()["installation"]["fire_settings"]["swr_pct"], "4");
+    assert_eq!(
+        stored.json()["installation"]["fire_settings"]["taxable_gain_ratio"],
+        "1"
+    );
 
-    // Confirm: cambia SOLO swr — los tax_brackets personalizados sobreviven (el bug del
+    // Confirm: cambia SOLO g — los tax_brackets personalizados sobreviven (el bug del
     // #[serde(default)] que un PATCH parcial por HTTP sí dispararía).
     let envelope = mcp_post(
         &app,
         &token,
-        tool_call("update_fire_settings", json!({"swr_pct": "3.0", "confirm": true})),
+        tool_call(
+            "update_fire_settings",
+            json!({"taxable_gain_ratio": "0.5", "confirm": true}),
+        ),
     )
     .await;
     let applied = tool_json(&envelope);
     assert_eq!(applied["applied"], true);
     let stored = app.get_with_cookie("/v1/installation", &owner.cookie).await;
     let fs = stored.json()["installation"]["fire_settings"].clone();
-    assert_eq!(fs["swr_pct"], "3.0");
+    assert_eq!(fs["taxable_gain_ratio"], "0.5");
+    assert!(
+        fs.get("swr_pct").is_none(),
+        "5.0.0: el SWR ya no vive en fire_settings: {fs}"
+    );
     assert_eq!(
         fs["tax_brackets"].as_array().unwrap().len(),
         2,
@@ -1520,7 +1532,10 @@ async fn update_fire_settings_merges_field_by_field_and_is_owner_only() {
     let envelope = mcp_post(
         &app,
         &token,
-        tool_call("update_fire_settings", json!({"swr_pct": "5", "confirm": true})),
+        tool_call(
+            "update_fire_settings",
+            json!({"taxable_gain_ratio": "2", "confirm": true}),
+        ),
     )
     .await;
     tool_error(&envelope, "bad_request");
@@ -1531,7 +1546,10 @@ async fn update_fire_settings_merges_field_by_field_and_is_owner_only() {
     let envelope = mcp_post(
         &app,
         &member_token,
-        tool_call("update_fire_settings", json!({"swr_pct": "3.5", "confirm": true})),
+        tool_call(
+            "update_fire_settings",
+            json!({"taxable_gain_ratio": "0.7", "confirm": true}),
+        ),
     )
     .await;
     tool_error(&envelope, "forbidden");
@@ -2204,7 +2222,7 @@ fn classify(envelope: &serde_json::Value) -> Outcome {
 /// **Por qué existe esta tabla** (la trampa que haría falso el test sin ella). Dos medidas
 /// tomadas el 2026-08-28 sobre `src/mcp/server.rs`, y las dos apuntan al mismo sitio:
 ///
-///   * **Estructural**: en **35 de las 40** tools de escritura el parseo de parámetros corre
+///   * **Estructural**: en **36 de las 41** tools de escritura el parseo de parámetros corre
 ///     ANTES del gate — el patrón `let run = || { … parse … }; match run() { Err(e) =>
 ///     return to_tool_outcome(e) }`. Sólo cinco (`capture_snapshot`, `materialize_recurring`,
 ///     `reconcile_transfers` y, desde la Fase 6, `confirm_transfer_match` —su `match_id` es una
@@ -2212,12 +2230,13 @@ fn classify(envelope: &serde_json::Value) -> Outcome {
 ///     `Option<String>`—) llaman a `require_mcp_write` en la primera línea del bloque
 ///     asíncrono. (`unreconcile_transfer` pasó a parsear primero en la Fase 3: su preview
 ///     necesita el UUID para cargar las dos patas del par.)
-///   * **Observable**: **35 de las 40** declaran algún parámetro `required`, así que con
+///   * **Observable**: **35 de las 41** declaran algún parámetro `required`, así que con
 ///     `{}` mueren en la deserialización de rmcp y **nunca ejecutan el gate**. Con
 ///     argumentos vacíos sólo lo alcanzan `capture_snapshot`, `materialize_recurring`,
-///     `reconcile_transfers`, `update_fire_settings` y `update_installation_settings`.
+///     `reconcile_transfers`, `update_fire_settings`, `update_retirement_profile` y
+///     `update_installation_settings` (las tres últimas: todos sus parámetros son opcionales).
 ///
-/// Es decir: un test que barriera las 40 con `{}` y aceptara «cualquier error» daría verde
+/// Es decir: un test que barriera las 41 con `{}` y aceptara «cualquier error» daría verde
 /// aunque el gate no existiera en 35 de ellas. De ahí la tabla.
 ///
 /// Decisión (issue #81, punto 1): se implementan **las dos vías**, y la tabla es
@@ -2268,7 +2287,10 @@ fn write_probe(name: &str) -> Option<serde_json::Value> {
         "delete_recurring_rule" => json!({"id": ID}),
         "delete_snapshot" => json!({"id": ID}),
         "delete_import" => json!({"id": ID}),
-        "update_fire_settings" => json!({"swr_pct": "3.5"}),
+        "update_fire_settings" => json!({"taxes_enabled": true}),
+        // 5.0.0: el plan de jubilación es del usuario del token, así que el gate es por ROL
+        // (`require_mcp_write`), no owner-only.
+        "update_retirement_profile" => json!({"swr_pct": "3.5"}),
         // Fase 6 (issue #87).
         "create_batch" => json!({
             "transactions": [
@@ -2338,11 +2360,12 @@ async fn every_write_tool_rejects_a_viewer_and_the_disabled_toggle() {
     let writes = write_tool_names(&catalog);
     assert_eq!(
         writes.len(),
-        40,
-        "contador de futurefin-mcp-parity §5: 40 tools de escritura (31 hasta la Fase 5; la \
+        41,
+        "contador de futurefin-mcp-parity §5: 41 tools de escritura (31 hasta la Fase 5; la \
          Fase 6 añade create_batch, create_snapshot, update_snapshot, create_allocation_rule, \
          delete_allocation_rule, update_category, delete_category, confirm_transfer_match y \
-         update_installation_settings). Si has añadido o retirado una, actualiza el contador \
+         update_installation_settings; 5.0.0 añade update_retirement_profile). Si has añadido o \
+         retirado una, actualiza el contador \
          AQUÍ, en la skill mcp-parity, en .claude/mcp-catalog.md y en .claude/backend-structure.md a la vez: {writes:?}"
     );
 
@@ -2484,12 +2507,13 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     const SRC: &str = include_str!("../src/mcp/server.rs");
     let blocks = tool_blocks();
 
-    // Contadores de futurefin-mcp-parity §5 (68 / 28 / 40 / 40, a 2026-08-28, Fase 6).
+    // Contadores de futurefin-mcp-parity §5 (70 / 29 / 41 / 41, a 2026-09-02, WP4 de 5.0.0:
+    // `get_retirement_profile` y `update_retirement_profile`).
     let read_only = blocks.iter().filter(|b| b.read_only).count();
     let writes = blocks.iter().filter(|b| !b.read_only).count();
-    assert_eq!(blocks.len(), 68, "total de tools (§5 de futurefin-mcp-parity)");
-    assert_eq!(read_only, 28, "tools de lectura + simulate (§5)");
-    assert_eq!(writes, 40, "tools de escritura (§5)");
+    assert_eq!(blocks.len(), 70, "total de tools (§5 de futurefin-mcp-parity)");
+    assert_eq!(read_only, 29, "tools de lectura + simulate (§5)");
+    assert_eq!(writes, 41, "tools de escritura (§5)");
     assert_eq!(
         read_only + writes,
         blocks.len(),
@@ -2497,14 +2521,14 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     );
     assert_eq!(
         SRC.matches("require_mcp_write(&self.state.pool").count(),
-        40,
+        41,
         "el nº de llamadas al gate debe ser EXACTAMENTE el nº de escrituras: una escritura \
          sin gate es un fallo de seguridad (viewer escribiendo, o escritura con el \
          kill-switch apagado); una llamada de más es una lectura que ya no lo es"
     );
     assert_eq!(
         SRC.matches("p.confirm.unwrap_or(false)").count(),
-        17,
+        18,
         "tools con preview/confirm (§5). Toda destructiva nueva debería sumar aquí. Subió de 11 \
          a 14 en la Fase 3 (issue #84): `materialize_recurring`, `reconcile_transfers` y \
          `unreconcile_transfer` eran destructivas SIN preview — dos de ellas irreversibles —, así \
@@ -2533,7 +2557,7 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     // Y la auditoría: cada gate abre una fila, y `settled` es el ÚNICO sitio donde se cierra.
     assert_eq!(
         SRC.matches("settled(&self.state.pool, audit").count(),
-        40,
+        41,
         "toda escritura cierra su fila de auditoría con `settled`; sin él la fila se queda en \
          `attempted` y el log calla el desenlace de justo las llamadas que fallaron"
     );
@@ -2979,7 +3003,7 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
         ("delete_categorization_rule", json!({"id": rule_id})),
         ("delete_recurring_rule", json!({"id": recurring_id})),
         ("apply_categorization_rule", json!({"id": rule_id})),
-        ("update_fire_settings", json!({"swr_pct": "3.5"})),
+        ("update_fire_settings", json!({"taxes_enabled": true})),
         // Fase 3 (issue #84): las tres destructivas que NO tenían preview y ahora lo tienen.
         ("materialize_recurring", json!({})),
         ("reconcile_transfers", json!({})),
@@ -3982,4 +4006,167 @@ async fn expense_fallback_id(app: &TestApp, cookie: &str) -> String {
         .collect();
     assert_eq!(found.len(), 1, "una categoría por defecto de gasto, y solo una: {rows}");
     found.into_iter().next().unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// 5.0.0 — D21 por MCP y el perfil de jubilación por usuario (D13)
+// ---------------------------------------------------------------------------
+
+/// **D21 llega gratis al MCP porque las tools comparten las cores.** Este test es la evidencia:
+/// el token de un miembro no puede mover el activo de otro por `update_asset`, `update_asset_value`
+/// ni `delete_asset`, y el error es el MISMO `not_row_owner` del HTTP.
+///
+/// Sin él, la puerta se podría añadir solo al handler HTTP y el MCP quedaría abierto — que es
+/// exactamente la forma del dual-branch drift que ya mordió dos veces (Fase 2 y Fase 6).
+#[tokio::test]
+async fn mcp_writes_cannot_touch_another_members_rows() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let member = app.register_and_approve_member(&owner, "bob", "member").await;
+    let member_token = create_token_for(&app, &member.cookie).await;
+
+    // Un activo del OWNER.
+    let cat = app.create_category(&owner, "asset", "Indexados").await;
+    let created = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat, "name": "MSCI World", "current_value": "10000"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(created.status, http::StatusCode::CREATED, "{created:?}");
+    let asset_id = created.json()["id"].as_str().expect("asset id").to_string();
+
+    for call in [
+        tool_call("update_asset", json!({"asset_id": asset_id, "name": "secuestrado"})),
+        tool_call(
+            "update_asset_value",
+            json!({"asset_id": asset_id, "current_value": "1"}),
+        ),
+        tool_call("delete_asset", json!({"id": asset_id, "confirm": false})),
+    ] {
+        let envelope = mcp_post(&app, &member_token, call.clone()).await;
+        let body = tool_error(&envelope, "forbidden");
+        assert_eq!(
+            body["code"], "not_row_owner",
+            "{call} debía dar el código de fila ajena y dio: {body}"
+        );
+    }
+
+    // Y el activo sigue igual.
+    let listed = app.get_with_cookie("/v1/assets", &owner.cookie).await;
+    let rows = listed.json();
+    let row = rows
+        .as_array()
+        .expect("assets array")
+        .iter()
+        .find(|a| a["id"] == asset_id.as_str())
+        .expect("sigue ahí");
+    assert_eq!(row["name"], "MSCI World", "{row}");
+    assert_eq!(row["current_value"], "10000.0000", "{row}");
+}
+
+/// Las dos tools nuevas del perfil: preview/confirm, merge campo a campo y — lo que las separa de
+/// `update_fire_settings` — **auth por ROL, no owner-only**. El perfil es dato del usuario del
+/// token, así que un `viewer` edita el suyo y nadie el de otro (no hay parámetro para pedirlo).
+#[tokio::test]
+async fn retirement_profile_tools_are_personal_and_preview_before_writing() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    // Lectura: los defaults de 4.15.x.
+    let got = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
+    assert_eq!(got["profile"]["strategy"], "asap", "{got}");
+    assert_eq!(got["profile"]["swr_pct"], "3.5", "{got}");
+    assert_eq!(got["birth_date"], "1990-01-01", "{got}");
+
+    // Preview: valida y enseña before/after, sin persistir.
+    let preview = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_retirement_profile",
+                json!({"strategy": "retire_at_age", "target_retirement_age": 57, "swr_pct": "3.0"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert_eq!(preview["effects"]["entity"]["before"]["strategy"], "asap");
+    assert_eq!(preview["effects"]["entity"]["after"]["strategy"], "retire_at_age");
+    // El radio es UNA persona, no la instalación: es lo que lo distingue de update_fire_settings.
+    assert_eq!(preview["effects"]["side_effects"]["scope"], "user", "{preview}");
+    let still = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
+    assert_eq!(still["profile"]["strategy"], "asap", "el preview no persiste: {still}");
+
+    // Confirm: escribe, y el merge NO resetea lo que no nombra.
+    let applied = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_retirement_profile",
+                json!({"strategy": "retire_at_age", "target_retirement_age": 57, "swr_pct": "3.0", "confirm": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(applied["applied"], true, "{applied}");
+    let applied2 = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("update_retirement_profile", json!({"cash_buffer_months": 12, "confirm": true})),
+        )
+        .await,
+    );
+    let after = &applied2["outcome"]["after"];
+    assert_eq!(after["cash_buffer_months"], 12, "{applied2}");
+    assert_eq!(after["target_retirement_age"], 57, "el merge no resetea: {applied2}");
+    assert_eq!(after["swr_pct"], "3.0", "{applied2}");
+
+    // Las mismas cotas que el PATCH HTTP, con el mismo código.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_retirement_profile", json!({"swr_pct": "9", "confirm": true})),
+    )
+    .await;
+    tool_error(&envelope, "bad_request");
+
+    // `clear_*` y su valor a la vez es una intención contradictoria, no un ganador implícito.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_retirement_profile",
+            json!({"cash_buffer_months": 6, "clear_cash_buffer_months": true}),
+        ),
+    )
+    .await;
+    let body = tool_error(&envelope, "bad_request");
+    assert_eq!(body["code"], "field_set_and_clear", "{body}");
+
+    // Un VIEWER edita el SUYO: el gate es por rol (require_mcp_write), no owner-only… salvo que
+    // `viewer` no es rol de escritura, así que se comprueba con un `member`, que sí lo es, y que
+    // con `update_fire_settings` recibiría un 403.
+    let member = app.register_and_approve_member(&owner, "bob", "member").await;
+    let member_token = create_token_for(&app, &member.cookie).await;
+    let mine = tool_json(
+        &mcp_post(
+            &app,
+            &member_token,
+            tool_call(
+                "update_retirement_profile",
+                json!({"strategy": "coast", "target_retirement_age": 50, "confirm": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(mine["applied"], true, "un member configura SU jubilación: {mine}");
+    // Y no ha tocado la del owner.
+    let owners = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
+    assert_eq!(owners["profile"]["strategy"], "retire_at_age", "{owners}");
 }

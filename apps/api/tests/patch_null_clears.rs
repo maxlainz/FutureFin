@@ -215,10 +215,13 @@ async fn fire_settings_null_resets_to_defaults() {
         ["installation"]["fire_settings"]
         .clone();
 
+    // 5.0.0: el SWR salió de `fire_settings` (D13), así que el eje que aleja el objeto de sus
+    // defaults es otro — `taxable_gain_ratio`, que sigue siendo del hogar. Lo que se prueba no
+    // cambia: que `"fire_settings": null` BORRA el JSONB y la lectura vuelve a los defaults.
     let r = app
         .patch_json_with_cookie(
             "/v1/installation",
-            json!({"fire_settings": {"swr_pct": "3"}}),
+            json!({"fire_settings": {"taxable_gain_ratio": "0.4"}}),
             &owner.cookie,
         )
         .await;
@@ -226,7 +229,7 @@ async fn fire_settings_null_resets_to_defaults() {
     let fs = app.get_with_cookie("/v1/installation", &owner.cookie).await.json()
         ["installation"]["fire_settings"]
         .clone();
-    assert_eq!(fs["swr_pct"], "3", "{fs}");
+    assert_eq!(fs["taxable_gain_ratio"], "0.4", "{fs}");
     assert_ne!(fs, defaults, "el patch debe alejarlo de los defaults para que el reset pruebe algo");
 
     // null → borra el JSONB guardado; la lectura vuelve a los defaults (rama `Some(None)` viva)

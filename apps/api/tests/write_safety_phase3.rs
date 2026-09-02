@@ -368,7 +368,10 @@ async fn el_preview_del_borrado_de_pasivo_cuenta_la_cuota_del_presupuesto() {
     let gasto_antes = dec(&antes["totals"]["expense_regular_monthly_equivalent"]);
 
     let effects = futurefin_api::handlers::liabilities::liability_delete_effects(
-        &app.pool, iid, liab_uuid,
+        &app.pool,
+        iid,
+        owner.user_id,
+        liab_uuid,
     )
     .await
     .expect("efectos del borrado");
@@ -431,6 +434,7 @@ async fn un_pasivo_sin_plan_de_pago_no_promete_ninguna_partida() {
     let effects = futurefin_api::handlers::liabilities::liability_delete_effects(
         &app.pool,
         app.installation_id().await,
+        owner.user_id,
         id,
     )
     .await

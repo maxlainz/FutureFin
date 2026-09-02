@@ -6,7 +6,7 @@
 use crate::error::ApiError;
 use crate::handlers::installation::require_installation_member;
 use crate::handlers::membership::role_can_write;
-use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
+use crate::handlers::person_view::{require_row_owner, LedgerView, LedgerViewQuery};
 use crate::handlers::projection::refresh_projection_after_mutation;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
@@ -101,7 +101,8 @@ pub struct ReorderBody {
 #[derive(Debug, FromRow)]
 struct RuleRow {
     id: Uuid,
-    owner_user_id: Option<Uuid>,
+    /// `NOT NULL` desde la migración 5.0.0 (D14): es a la vez el scope de I1 y la puerta de D21.
+    owner_user_id: Uuid,
     target_asset_id: Uuid,
     priority: i32,
     kind: String,
@@ -123,7 +124,7 @@ fn row_to_response(r: RuleRow) -> AllocationRuleResponse {
         cap_value: r.cap_value,
         enabled: r.enabled,
         notes: r.notes,
-        owner_user_id: r.owner_user_id,
+        owner_user_id: Some(r.owner_user_id),
     }
 }
 
@@ -212,33 +213,17 @@ async fn assert_asset_in_scope(
     asset_id: Uuid,
     owner_filter: SinkScope,
 ) -> Result<(), ApiError> {
-    let ok: bool = match owner_filter {
-        None => {
-            sqlx::query_scalar(
-                r#"SELECT EXISTS (
-                    SELECT 1 FROM assets
-                    WHERE id = $1 AND installation_id = $2
-                )"#,
-            )
-            .bind(asset_id)
-            .bind(iid)
-            .fetch_one(&mut *conn)
-            .await?
-        }
-        Some(uid) => {
-            sqlx::query_scalar(
-                r#"SELECT EXISTS (
-                    SELECT 1 FROM assets
-                    WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3
-                )"#,
-            )
-            .bind(asset_id)
-            .bind(iid)
-            .bind(uid)
-            .fetch_one(&mut *conn)
-            .await?
-        }
-    };
+    let ok: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM assets
+            WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3
+        )"#,
+    )
+    .bind(asset_id)
+    .bind(iid)
+    .bind(owner_filter)
+    .fetch_one(&mut *conn)
+    .await?;
     if !ok {
         return Err(ApiError::BadRequest(
             "target_asset_not_found: target_asset_id must reference an asset in your scope".into(),
@@ -261,8 +246,9 @@ async fn assert_asset_in_scope(
 //      guardia de conteo pasaba y nadie movía la prioridad). La cascada quedaba con su sumidero en
 //      medio: todo lo que hubiera por debajo dejaba de recibir, en silencio.
 //   2. La guardia `sink_must_be_last` del `reorder` resolvía el scope desde la VISTA, y en
-//      `household` eso es `owner_user_id IS NULL` — que no casa ninguna fila creada por la API
-//      (el alta siempre escribe un owner). O sea: no llegaba a mirar nada.
+//      `household` eso era `owner_user_id IS NULL` — que no casa ninguna fila creada por la API
+//      (el alta siempre escribe un owner). O sea: no llegaba a mirar nada. Desde 5.0.0 el
+//      `reorder` solo opera en `view=mine` (D21) y ese scope compartido ya no existe.
 //
 // La forma de arreglarlo no es añadir una tercera guardia: es dejar de comprobar el cambio y pasar
 // a comprobar el **estado resultante**. `assert_sink_invariant` es una POST-condición sobre lo ya
@@ -289,7 +275,16 @@ fn is_sink(kind: &str, cap_kind: Option<&str>) -> bool {
 /// sumidero. Exigir «uno solo, el último» sobre la unión haría imposible que las dos lo tengan.
 /// `create`/`patch`/`delete` ya trabajaban por owner; el `reorder` era el único que lo derivaba de
 /// la vista, y por eso su guardia estaba muerta.
-type SinkScope = Option<Uuid>;
+///
+/// **5.0.0 (D14)**: era `Option<Uuid>`, y el brazo `None` significaba «el scope compartido»
+/// (`owner_user_id IS NULL`). Ese scope ya no existe: la migración
+/// `20260902200100_ledger_owner_not_null.sql` asignó las filas legadas al owner más antiguo y
+/// dejó la columna `NOT NULL`. Los brazos `None` de este módulo —cuatro consultas con
+/// `owner_user_id IS NULL`— eran, ya antes de la migración, código que **no casaba ninguna fila
+/// creada por la API** (el alta siempre escribió un owner); con la columna `NOT NULL` no pueden
+/// casar nada por construcción, así que se retiran en vez de quedarse como ruido que se lee
+/// como una rama viva.
+type SinkScope = Uuid;
 
 #[derive(Debug, FromRow)]
 struct SinkProbeRow {
@@ -317,27 +312,14 @@ async fn assert_sink_invariant(
     iid: Uuid,
     scope: SinkScope,
 ) -> Result<(), ApiError> {
-    let rows: Vec<SinkProbeRow> = match scope {
-        None => {
-            sqlx::query_as(
-                r#"SELECT id, priority, kind, cap_kind FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id IS NULL"#,
-            )
-            .bind(iid)
-            .fetch_all(&mut *conn)
-            .await?
-        }
-        Some(uid) => {
-            sqlx::query_as(
-                r#"SELECT id, priority, kind, cap_kind FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id = $2"#,
-            )
-            .bind(iid)
-            .bind(uid)
-            .fetch_all(&mut *conn)
-            .await?
-        }
-    };
+    let rows: Vec<SinkProbeRow> = sqlx::query_as(
+        r#"SELECT id, priority, kind, cap_kind FROM allocation_rules
+           WHERE installation_id = $1 AND owner_user_id = $2"#,
+    )
+    .bind(iid)
+    .bind(scope)
+    .fetch_all(&mut *conn)
+    .await?;
 
     let sinks: Vec<&SinkProbeRow> = rows
         .iter()
@@ -388,29 +370,15 @@ async fn count_uncapped_remainder_rules(
     iid: Uuid,
     owner_filter: SinkScope,
 ) -> Result<i64, ApiError> {
-    let n: i64 = match owner_filter {
-        None => {
-            sqlx::query_scalar(
-                r#"SELECT COUNT(*) FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id IS NULL
-                     AND kind = 'remainder' AND cap_kind IS NULL"#,
-            )
-            .bind(iid)
-            .fetch_one(&mut *conn)
-            .await?
-        }
-        Some(uid) => {
-            sqlx::query_scalar(
-                r#"SELECT COUNT(*) FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id = $2
-                     AND kind = 'remainder' AND cap_kind IS NULL"#,
-            )
-            .bind(iid)
-            .bind(uid)
-            .fetch_one(&mut *conn)
-            .await?
-        }
-    };
+    let n: i64 = sqlx::query_scalar(
+        r#"SELECT COUNT(*) FROM allocation_rules
+           WHERE installation_id = $1 AND owner_user_id = $2
+             AND kind = 'remainder' AND cap_kind IS NULL"#,
+    )
+    .bind(iid)
+    .bind(owner_filter)
+    .fetch_one(&mut *conn)
+    .await?;
     Ok(n)
 }
 
@@ -420,31 +388,16 @@ async fn find_uncapped_remainder(
     iid: Uuid,
     owner_filter: SinkScope,
 ) -> Result<Option<(Uuid, i32)>, ApiError> {
-    let row: Option<(Uuid, i32)> = match owner_filter {
-        None => {
-            sqlx::query_as(
-                r#"SELECT id, priority FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id IS NULL
-                     AND kind = 'remainder' AND cap_kind IS NULL
-                   ORDER BY priority DESC LIMIT 1"#,
-            )
-            .bind(iid)
-            .fetch_optional(&mut *conn)
-            .await?
-        }
-        Some(uid) => {
-            sqlx::query_as(
-                r#"SELECT id, priority FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id = $2
-                     AND kind = 'remainder' AND cap_kind IS NULL
-                   ORDER BY priority DESC LIMIT 1"#,
-            )
-            .bind(iid)
-            .bind(uid)
-            .fetch_optional(&mut *conn)
-            .await?
-        }
-    };
+    let row: Option<(Uuid, i32)> = sqlx::query_as(
+        r#"SELECT id, priority FROM allocation_rules
+           WHERE installation_id = $1 AND owner_user_id = $2
+             AND kind = 'remainder' AND cap_kind IS NULL
+           ORDER BY priority DESC LIMIT 1"#,
+    )
+    .bind(iid)
+    .bind(owner_filter)
+    .fetch_optional(&mut *conn)
+    .await?;
     Ok(row)
 }
 
@@ -454,27 +407,14 @@ async fn max_priority_in_scope(
     iid: Uuid,
     scope: SinkScope,
 ) -> Result<i32, ApiError> {
-    let n: i32 = match scope {
-        None => {
-            sqlx::query_scalar(
-                r#"SELECT COALESCE(MAX(priority), 0) FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id IS NULL"#,
-            )
-            .bind(iid)
-            .fetch_one(&mut *conn)
-            .await?
-        }
-        Some(uid) => {
-            sqlx::query_scalar(
-                r#"SELECT COALESCE(MAX(priority), 0) FROM allocation_rules
-                   WHERE installation_id = $1 AND owner_user_id = $2"#,
-            )
-            .bind(iid)
-            .bind(uid)
-            .fetch_one(&mut *conn)
-            .await?
-        }
-    };
+    let n: i32 = sqlx::query_scalar(
+        r#"SELECT COALESCE(MAX(priority), 0) FROM allocation_rules
+           WHERE installation_id = $1 AND owner_user_id = $2"#,
+    )
+    .bind(iid)
+    .bind(scope)
+    .fetch_one(&mut *conn)
+    .await?;
     Ok(n)
 }
 
@@ -597,7 +537,9 @@ pub(crate) async fn create_allocation_rule_core(
     let notes = normalize_notes(&body.notes)?;
     let enabled = body.enabled.unwrap_or(true);
 
-    let owner: SinkScope = Some(user_id);
+    // El alta atribuye SIEMPRE al usuario de la sesión (D21): no hay forma de crear una regla
+    // en la cascada de otro miembro.
+    let owner: SinkScope = user_id;
     let is_uncapped_remainder = is_sink(&kind, cap_kind.as_deref());
 
     if is_uncapped_remainder && sink_policy == SinkPolicy::Forbidden {
@@ -747,6 +689,9 @@ pub(crate) async fn patch_allocation_rule_core(
     let Some(current) = current else {
         return Err(ApiError::NotFound);
     };
+    // D21: la fila ya está cargada con su dueño, así que la puerta va aquí — antes de tocar
+    // nada y sin una query extra.
+    require_row_owner(current.owner_user_id, user_id)?;
 
     let new_kind = match &body.kind {
         Some(k) => normalize_kind(k)?,
@@ -861,7 +806,7 @@ pub(crate) async fn patch_allocation_rule_core(
                enabled = $6,
                notes = $7,
                priority = $8
-           WHERE id = $9 AND installation_id = $10
+           WHERE id = $9 AND installation_id = $10 AND owner_user_id = $11
            RETURNING id, owner_user_id, target_asset_id, priority, kind, amount,
                      cap_kind, cap_value, enabled, notes"#,
     )
@@ -875,6 +820,7 @@ pub(crate) async fn patch_allocation_rule_core(
     .bind(new_priority)
     .bind(id)
     .bind(iid)
+    .bind(user_id)
     .fetch_one(&mut *tx)
     .await?;
     commit_with_sink_invariant(tx, iid, &[current.owner_user_id]).await?;
@@ -945,7 +891,7 @@ pub(crate) async fn allocation_rule_delete_effects(
     user_id: Uuid,
     id: Uuid,
 ) -> Result<AllocationRuleDeleteEffects, ApiError> {
-    let current: Option<(String, Option<String>, Option<Uuid>, i32, Uuid)> = sqlx::query_as(
+    let current: Option<(String, Option<String>, Uuid, i32, Uuid)> = sqlx::query_as(
         r#"SELECT kind, cap_kind, owner_user_id, priority, target_asset_id
            FROM allocation_rules
            WHERE id = $1 AND installation_id = $2"#,
@@ -957,6 +903,9 @@ pub(crate) async fn allocation_rule_delete_effects(
     let Some((kind, cap_kind, owner, priority, target_asset_id)) = current else {
         return Err(ApiError::NotFound);
     };
+    // D21: el preview de un borrado ajeno ya cuenta cosas del plan de otro miembro. Falla igual
+    // que fallaría la confirmación, y antes de mirar nada más.
+    require_row_owner(owner, user_id)?;
     let sink = is_sink(&kind, cap_kind.as_deref());
 
     let blocked_reason = if sink {
@@ -998,7 +947,7 @@ pub(crate) async fn delete_allocation_rule_core(
     id: Uuid,
 ) -> Result<(), ApiError> {
     let mut tx = state.pool.begin().await?;
-    let current: Option<(String, Option<String>, Option<Uuid>)> = sqlx::query_as(
+    let current: Option<(String, Option<String>, Uuid)> = sqlx::query_as(
         r#"SELECT kind, cap_kind, owner_user_id FROM allocation_rules
            WHERE id = $1 AND installation_id = $2"#,
     )
@@ -1009,6 +958,9 @@ pub(crate) async fn delete_allocation_rule_core(
     let Some((kind, cap_kind, owner)) = current else {
         return Err(ApiError::NotFound);
     };
+    // D21 antes que la guardia del sumidero: decir «esta regla es el único sumidero» de una
+    // cascada ajena ya es contar algo del plan de otro.
+    require_row_owner(owner, user_id)?;
 
     // Borrar el sumidero dejaría el scope huérfano.
     if is_sink(&kind, cap_kind.as_deref()) {
@@ -1020,11 +972,15 @@ pub(crate) async fn delete_allocation_rule_core(
         }
     }
 
-    sqlx::query(r#"DELETE FROM allocation_rules WHERE id = $1 AND installation_id = $2"#)
-        .bind(id)
-        .bind(iid)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        r#"DELETE FROM allocation_rules
+           WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
     commit_with_sink_invariant(tx, iid, &[owner]).await?;
 
     refresh_projection_after_mutation(state, iid, user_id).await;
@@ -1066,11 +1022,22 @@ pub async fn reorder_allocation_rules(
         }
     }
 
-    // Load all current rules in this scope; the request must list exactly the same set.
+    // **D21 (5.0.0)**: reordenar es escribir, y una reordenación en `household` renumeraba de
+    // golpe las cascadas de TODOS los miembros — la única mutación del ledger que tocaba filas
+    // de otras personas por diseño. Con proyecciones independientes por miembro eso deja de
+    // tener sentido: la cascada es de quien la va a simular. `household` pasa a ser solo lectura
+    // aquí, con un 400 que dice qué pedir en su lugar (y no un 403: no es un permiso que falte,
+    // es una vista que no admite esta operación).
     let view = q.resolve()?;
+    if view == LedgerView::Household {
+        return Err(ApiError::BadRequest(
+            "household_read_only: reordering allocation rules is per-member; call it with ?view=mine".into(),
+        ));
+    }
+    // Load all current rules in this scope; the request must list exactly the same set.
     let scope = view.scope_where("");
     let current_sql = format!("SELECT id, owner_user_id FROM allocation_rules WHERE {scope}");
-    let current: Vec<(Uuid, Option<Uuid>)> = view
+    let current: Vec<(Uuid, Uuid)> = view
         .bind_scope_as(sqlx::query_as(&current_sql), iid, user.id.0)
         .fetch_all(&state.pool)
         .await?;
@@ -1081,12 +1048,10 @@ pub async fn reorder_allocation_rules(
         ));
     }
 
-    // Los scopes de I1 tocados por esta reordenación: **todos los owners presentes**, no uno
-    // derivado de la vista. En `household` la reordenación renumera filas de varias personas a la
-    // vez y cada una tiene su propio sumidero; la guardia anterior resolvía el scope a
-    // `owner_user_id IS NULL` y por tanto no comprobaba nada. La comprobación de que cada sumidero
-    // sigue siendo el último **de su owner** la hace `commit_with_sink_invariant`, con el mismo
-    // código `sink_must_be_last`.
+    // Los scopes de I1 tocados: con `view=mine` es siempre UNO —el del usuario de la sesión—,
+    // pero se derivan de las FILAS y no de la vista, que es lo que arregló la guardia muerta de
+    // 4.4.0. La comprobación de que el sumidero sigue siendo el último la hace
+    // `commit_with_sink_invariant`, con el mismo código `sink_must_be_last`.
     let touched_scopes: Vec<SinkScope> = current.iter().map(|(_, owner)| *owner).collect();
 
     let mut tx = state.pool.begin().await?;
@@ -1094,11 +1059,12 @@ pub async fn reorder_allocation_rules(
         let new_priority = (idx as i32) + 1;
         sqlx::query(
             r#"UPDATE allocation_rules SET priority = $1
-               WHERE id = $2 AND installation_id = $3"#,
+               WHERE id = $2 AND installation_id = $3 AND owner_user_id = $4"#,
         )
         .bind(new_priority)
         .bind(id)
         .bind(iid)
+        .bind(user.id.0)
         .execute(&mut *tx)
         .await?;
     }
@@ -1275,6 +1241,8 @@ pub(crate) async fn allocation_resolution_core(
 
     let today = crate::handlers::installation::installation_naive_today(pool, iid).await?;
     let fire_settings = load_fire_settings(pool, iid).await?;
+    let retirement_profile =
+        crate::handlers::retirement_profile::load_retirement_profile(pool, user_id).await?;
     let built = build_installation_projection_input(
         pool,
         iid,
@@ -1284,6 +1252,7 @@ pub(crate) async fn allocation_resolution_core(
         1,
         Decimal::ZERO,
         Some(&fire_settings),
+        &retirement_profile,
         None,
     )
     .await?;
@@ -1577,6 +1546,7 @@ pub(crate) async fn allocation_goals_core(
         ctx.months,
         ctx.inflation_annual_percent,
         Some(&ctx.fire_settings),
+        &ctx.retirement_profile,
         None,
     )
     .await?;

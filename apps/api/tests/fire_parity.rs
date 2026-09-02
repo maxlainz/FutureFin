@@ -1,7 +1,12 @@
 //! Fase 4.6 — Paridad cliente↔servidor sobre el cálculo FIRE.
 //!
 //! Carga los casos canónicos desde `tests/fixtures/fire-parity.json` y para cada uno:
-//!   1. configura una instalación con los `fire_settings` del caso,
+//!   1. configura una instalación con los `fire_settings` del caso — **repartidos en dos
+//!      superficies desde 5.0.0**: lo compartido por el hogar sigue en `PATCH /v1/installation`,
+//!      y los cuatro ejes personales (`fire_number_mode`, `fire_number_manual_amount`, `swr_pct`,
+//!      `horizon_lifespan_age`) van al perfil de jubilación del usuario (D13). El FIXTURE no
+//!      cambia: sigue describiendo UN cálculo FIRE, que es lo que comparte con el frontend; lo
+//!      que cambió es dónde vive cada mitad,
 //!   2. inserta un asset en estado inicial (mes 0),
 //!   3. inserta budget entries que reproducen los `monthly` del caso (income/expense),
 //!   4. llama `GET /v1/projection/series`,
@@ -61,11 +66,33 @@ async fn server_target_matches_canonical_fixtures() {
         let app = TestApp::spawn().await;
         let owner = app.register_and_login_owner("alice").await;
 
-        // PATCH installation con los FIRE settings del caso.
+        // Reparto del objeto del fixture entre sus dos dueños de 5.0.0. Se hace con una
+        // allowlist explícita y no descartando claves «que suenen a perfil»: si el fixture gana
+        // un eje nuevo, quien lo añada tiene que decidir de quién es.
+        const PROFILE_KEYS: [&str; 4] = [
+            "fire_number_mode",
+            "fire_number_manual_amount",
+            "swr_pct",
+            "horizon_lifespan_age",
+        ];
+        let obj = case
+            .fire_settings
+            .as_object()
+            .expect("fire_settings del fixture es un objeto");
+        let household: serde_json::Map<String, Value> = obj
+            .iter()
+            .filter(|(k, _)| !PROFILE_KEYS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let profile: serde_json::Map<String, Value> = obj
+            .iter()
+            .filter(|(k, _)| PROFILE_KEYS.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         let patch = app
             .patch_json_with_cookie(
                 "/v1/installation",
-                serde_json::json!({ "fire_settings": case.fire_settings }),
+                serde_json::json!({ "fire_settings": Value::Object(household) }),
                 &owner.cookie,
             )
             .await;
@@ -75,6 +102,21 @@ async fn server_target_matches_canonical_fixtures() {
             "[{}] patch fire_settings failed: {patch:?}",
             case.name
         );
+        if !profile.is_empty() {
+            let patch = app
+                .patch_json_with_cookie(
+                    "/v1/auth/me/retirement-profile",
+                    Value::Object(profile),
+                    &owner.cookie,
+                )
+                .await;
+            assert_eq!(
+                patch.status,
+                http::StatusCode::OK,
+                "[{}] patch retirement-profile failed: {patch:?}",
+                case.name
+            );
+        }
 
         // Seed: una categoría income, una expense, un asset para tener algo en proyección.
         let asset_cat = app.create_category(&owner, "asset", "Cash").await;

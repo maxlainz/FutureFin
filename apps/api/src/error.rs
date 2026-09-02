@@ -87,6 +87,14 @@ pub enum ApiError {
     UnauthorizedWith(String),
     #[error("forbidden")]
     Forbidden,
+    /// 403 que SÍ propaga mensaje al wire, con prefijo `snake_code:`. El `Forbidden` pelado dice
+    /// solo «forbidden» y su código es la clase HTTP, que basta cuando el motivo es el ROL (la
+    /// SPA ya sabe qué hacer con un 403 de owner-only). Existe este hermano para el 403 que
+    /// describe una regla de FILA — «esto es de otro miembro del hogar» (D21, 5.0.0) —, donde
+    /// el cliente necesita distinguirlo de un permiso insuficiente para enseñar la frase
+    /// correcta en vez de mandar al usuario a pedir que le suban el rol.
+    #[error("{0}")]
+    ForbiddenWith(String),
     #[error("resource conflict")]
     Conflict,
     /// 409 que SÍ propaga mensaje al wire, con prefijo `snake_code:`. El `Conflict` pelado nace
@@ -146,7 +154,7 @@ impl ApiError {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ApiError::Unauthorized | ApiError::UnauthorizedWith(_) => StatusCode::UNAUTHORIZED,
-            ApiError::Forbidden => StatusCode::FORBIDDEN,
+            ApiError::Forbidden | ApiError::ForbiddenWith(_) => StatusCode::FORBIDDEN,
             ApiError::NotFound | ApiError::NotFoundWith(_) => StatusCode::NOT_FOUND,
             ApiError::Conflict | ApiError::ConflictWith(_) => StatusCode::CONFLICT,
             ApiError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -161,6 +169,7 @@ impl ApiError {
             ApiError::Unauthorized => "authentication required".into(),
             ApiError::UnauthorizedWith(s) => s.clone(),
             ApiError::Forbidden => "forbidden".into(),
+            ApiError::ForbiddenWith(s) => s.clone(),
             ApiError::NotFound => "not found".into(),
             ApiError::NotFoundWith(s) => s.clone(),
             ApiError::Conflict => "resource conflict".into(),
@@ -178,7 +187,7 @@ impl ApiError {
             ApiError::BadRequest(_) => ErrorCode::BadRequest,
             ApiError::Unprocessable(_) => ErrorCode::Unprocessable,
             ApiError::Unauthorized | ApiError::UnauthorizedWith(_) => ErrorCode::Unauthorized,
-            ApiError::Forbidden => ErrorCode::Forbidden,
+            ApiError::Forbidden | ApiError::ForbiddenWith(_) => ErrorCode::Forbidden,
             ApiError::NotFound | ApiError::NotFoundWith(_) => ErrorCode::NotFound,
             ApiError::Conflict | ApiError::ConflictWith(_) => ErrorCode::Conflict,
             ApiError::Unavailable => ErrorCode::Unavailable,

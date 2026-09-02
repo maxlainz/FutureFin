@@ -334,8 +334,10 @@ async fn fire_settings_overrides_reuse_the_validation_of_the_real_patch() {
     let token = create_token(&app, &owner).await;
 
     for (overrides, needle) in [
-        // Modo manual sin importe: lo caza `validate_fire_settings`, no un `if` nuevo.
-        (json!({"fire_number_mode": "manual"}), "fire_manual_amount"),
+        // 5.0.0: `fire_number_mode` y `fire_number_manual_amount` salieron de este override —
+        // son del perfil de jubilación por usuario (D13) y volverán como `profile_overrides` en
+        // WP5. Los tres casos que quedan siguen probando lo mismo: la validación es la del PATCH
+        // real, no una segunda lista de cotas.
         (json!({"savings_source": "no_existe"}), "savings_source"),
         (json!({"income_avg_window_mode": "semanal"}), "income_avg_window_mode"),
         (json!({"expense_avg_window_months": 0}), "expense_avg_window_months"),

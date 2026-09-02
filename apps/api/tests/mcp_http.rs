@@ -193,6 +193,7 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "get_history_cashflow",
             "get_liability_schedule",
             "get_projection",
+            "get_retirement_profile",
             "get_settings",
             "get_summary",
             "get_transactions_summary",
@@ -224,6 +225,7 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "update_installation_settings",
             "update_liability",
             "update_planning_flow",
+            "update_retirement_profile",
             "update_snapshot",
             "update_transaction",
             "update_transactions",
@@ -472,7 +474,13 @@ async fn get_settings_returns_installation_and_role() {
     let settings = tool_text_json(&envelope);
     assert_eq!(settings["role"], "owner");
     assert!(settings["installation"]["base_currency"].is_string());
-    assert!(settings["installation"]["fire_settings"]["swr_pct"].is_string());
+    // 5.0.0: `fire_settings` es lo COMPARTIDO del hogar; el SWR y los otros tres ejes movidos
+    // viven en `get_retirement_profile` (D13).
+    assert!(settings["installation"]["fire_settings"]["taxable_gain_ratio"].is_string());
+    assert!(
+        settings["installation"]["fire_settings"]["swr_pct"].is_null(),
+        "el SWR ya no es del hogar: {settings}"
+    );
 }
 
 /// Shell mínimo de la SPA, para montar el `ServeDir` del binario publicado.
@@ -2383,7 +2391,10 @@ fn catalog_fixture_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-catalog.json")
 }
 
-/// Congela el **contrato de entrada** de las 52 tools, no sólo sus nombres.
+/// Congela el **contrato de entrada** de TODAS las tools, no sólo sus nombres.
+/// (Sin contar cuántas son: el número quedó obsoleto dos veces — `52` describía la Fase 5 y el
+/// catálogo lleva 70 desde 5.0.0. Cuéntalas con
+/// `jq '.tools | length' apps/api/tests/fixtures/mcp-catalog.json`.)
 ///
 /// `tools_list_returns_exactly_the_v1_catalog` (arriba) compara un `Vec<String>` de nombres y
 /// nada más: con él en verde se puede vaciar una descripción, invertir su sentido, quitar un
@@ -2535,7 +2546,7 @@ async fn tools_list_freezes_the_input_contract_of_every_tool() {
 
 /// **`#[ignore]` A PROPÓSITO — diana de la Fase 2 (issue #83).**
 ///
-/// Hoy falla, y eso es lo esperado. Medido al escribirlo (2026-08-28): **51 de las 52 tools**
+/// Hoy falla, y eso es lo esperado. Medido al escribirlo (2026-08-28): **51 de las 52 tools de entonces**
 /// aceptan propiedades desconocidas. `#[serde(deny_unknown_fields)]` aparece dos veces en
 /// `src/mcp/server.rs`, pero una de ellas es `FireSettingsOverrideParam`, un struct ANIDADO
 /// dentro de `SimulateParams` — no es el struct de params de ninguna tool. La única tool cuyo
@@ -2546,7 +2557,7 @@ async fn tools_list_freezes_the_input_contract_of_every_tool() {
 /// llamada devuelve 200 sin haber hecho lo que se le pidió.
 ///
 /// El test se escribió ignorado para que ese trabajo tuviera diana. **Cerrado en la Fase 2**
-/// (2026-08-28): las 52 tools publican `additionalProperties: false`, incluidas las cuatro que
+/// (2026-08-28, sobre las 52 de entonces): todas publican `additionalProperties: false`, incluidas las cuatro que
 /// no tenían struct de params (`get_settings`, `list_recurring_rules`, `materialize_recurring`,
 /// `reconcile_transfers`) — sin struct, rmcp emite un schema vacío que acepta cualquier campo,
 /// así que se les dio `NoParams`. El `#[ignore]` se retira aquí: a partir de ahora, añadir una
@@ -2576,7 +2587,7 @@ async fn every_input_schema_forbids_unknown_properties() {
 /// Fase 5 (issue #86) — **el catálogo cabe en el contexto**.
 ///
 /// Las descripciones de `tools/list` viajan ENTERAS en cada conversación, se use el MCP o no.
-/// Antes de esta fase sumaban 37.214 caracteres (~36 KB) en 52 tools, con cinco por encima de
+/// Antes de esta fase sumaban 37.214 caracteres (~36 KB) en las 52 tools de entonces, con cinco por encima de
 /// 1.200 y una de 3.821 — y la estrategia fallaba justo donde importa: en la auditoría en vivo
 /// la descripción de `get_summary` (2.278) llegó al cliente **truncada**, cortada en mitad de
 /// una advertencia sobre inconsistencia entre tools. Una advertencia que no llega no protege de
@@ -2592,7 +2603,7 @@ async fn every_input_schema_forbids_unknown_properties() {
 /// Si este test falla, NO subas la constante: mueve la prosa a uno de esos dos sitios.
 #[tokio::test]
 async fn tool_descriptions_stay_within_the_context_budget() {
-    /// Tope por descripción. 600 nace de la medida, no de la estética: con las 52 tools por
+    /// Tope por descripción. 600 nace de la medida, no de la estética: con todas las tools por
     /// debajo, el catálogo entero cabe holgadamente en `TOTAL_BUDGET`.
     const PER_TOOL_MAX: usize = 600;
     /// Tope del catálogo entero. Deja margen para tools nuevas sin volver a los ~36 KB.
@@ -2681,10 +2692,16 @@ async fn enumerated_params_publish_a_real_enum_in_the_json_schema() {
             "savings_source",
             &["budget", "transactions_avg", "budget_income_real_expense"],
         ),
+        // 5.0.0: `fire_number_mode` se mudó al perfil de jubilación por usuario (D13).
         (
-            "update_fire_settings",
+            "update_retirement_profile",
             "fire_number_mode",
             &["manual", "annual_expense", "current_income"],
+        ),
+        (
+            "update_retirement_profile",
+            "strategy",
+            &["asap", "retire_at_age", "coast", "partial", "pension_bridge"],
         ),
         ("update_fire_settings", "expense_avg_window_mode", &["data", "calendar"]),
         ("simulate_projection", "view", &["mine", "household"]),

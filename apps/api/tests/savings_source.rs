@@ -463,12 +463,20 @@ async fn mode_b_target_annual_expense_uses_expense_avg() {
         .patch_json_with_cookie(
             "/v1/installation",
             json!({ "fire_settings": {
-                "fire_number_mode": "annual_expense",
-                "swr_pct": "4",
                 "taxes_enabled": false,
                 "tax_brackets": [],
                 "savings_source": "transactions_avg"
             } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    // 5.0.0 (D13): el modo del objetivo y el SWR son del PERFIL del usuario; la fuente del
+    // ahorro y la fiscalidad siguen siendo del hogar. Mismos números, dos superficies.
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "annual_expense", "swr_pct": "4"}),
             &owner.cookie,
         )
         .await;
@@ -910,12 +918,20 @@ async fn mode_c_target_annual_expense_uses_expense_avg() {
         .patch_json_with_cookie(
             "/v1/installation",
             json!({ "fire_settings": {
-                "fire_number_mode": "annual_expense",
-                "swr_pct": "4",
                 "taxes_enabled": false,
                 "tax_brackets": [],
                 "savings_source": "budget_income_real_expense"
             } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    // 5.0.0 (D13): el modo del objetivo y el SWR son del PERFIL del usuario; la fuente del
+    // ahorro y la fiscalidad siguen siendo del hogar. Mismos números, dos superficies.
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "annual_expense", "swr_pct": "4"}),
             &owner.cookie,
         )
         .await;
@@ -945,12 +961,20 @@ async fn mode_c_target_current_income_uses_budget_income() {
         .patch_json_with_cookie(
             "/v1/installation",
             json!({ "fire_settings": {
-                "fire_number_mode": "current_income",
-                "swr_pct": "4",
                 "taxes_enabled": false,
                 "tax_brackets": [],
                 "savings_source": "budget_income_real_expense"
             } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    // 5.0.0 (D13): el modo del objetivo y el SWR son del PERFIL del usuario; la fuente del
+    // ahorro y la fiscalidad siguen siendo del hogar. Mismos números, dos superficies.
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "current_income", "swr_pct": "4"}),
             &owner.cookie,
         )
         .await;

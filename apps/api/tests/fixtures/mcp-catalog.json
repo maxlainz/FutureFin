@@ -1,6 +1,6 @@
 {
   "_doc": "Contrato de entrada de las tools MCP. GENERADO — no editar a mano: UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- tools_list_freezes_the_input_contract. `description_sha256_12` son los 6 primeros bytes del SHA-256 de la descripción publicada. `constraints` son las restricciones del inputSchema por posición ($ = raíz, $.x = propiedad, $.x[] = items, $defs.T.x = anidado), y `constraints_sha256_12` su hash: cubren additionalProperties, enum, pattern, type, required y las cotas numéricas y de longitud a cada nivel.",
-  "tool_count": 68,
+  "tool_count": 70,
   "tools": [
     {
       "constraints": {
@@ -125,6 +125,7 @@
     {
       "constraints": {
         "$": "additionalProperties=false required=[\"category_id\",\"current_value\",\"name\"] type=\"object\"",
+        "$.annual_volatility_percent": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
         "$.current_value": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
         "$.expected_annual_return_percent": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
@@ -133,11 +134,12 @@
         "$.notes": "type=[\"null\",\"string\"]",
         "$.purchase_price": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "5512eefd8b12",
+      "constraints_sha256_12": "fe0321f6080a",
       "description_len": 287,
       "description_sha256_12": "6ca853356680",
       "name": "create_asset",
       "properties": [
+        "annual_volatility_percent",
         "category_id",
         "current_value",
         "expected_annual_return_percent",
@@ -273,8 +275,8 @@
         "$.type_tag": "maxLength=120 minLength=1 type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "6f59f279529f",
-      "description_len": 593,
-      "description_sha256_12": "7d2af79cd8e4",
+      "description_len": 535,
+      "description_sha256_12": "01597734e1c0",
       "name": "create_liability",
       "properties": [
         "apr_percent",
@@ -376,8 +378,8 @@
         "$.recurring": "type=[\"boolean\",\"null\"]"
       },
       "constraints_sha256_12": "3f24273e519d",
-      "description_len": 581,
-      "description_sha256_12": "88718990100f",
+      "description_len": 467,
+      "description_sha256_12": "4989c99d7444",
       "name": "create_transaction",
       "properties": [
         "amount",
@@ -676,8 +678,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 540,
-      "description_sha256_12": "952e2855e652",
+      "description_len": 499,
+      "description_sha256_12": "1aacac95298d",
       "name": "get_budget",
       "properties": [
         "view"
@@ -733,8 +735,8 @@
         "$.window_months": "format=\"int64\" maximum=120 minimum=1 type=[\"integer\",\"null\"]"
       },
       "constraints_sha256_12": "98f6a7bce371",
-      "description_len": 598,
-      "description_sha256_12": "5b3fe0cd0a79",
+      "description_len": 507,
+      "description_sha256_12": "9732518fe8ef",
       "name": "get_history_cashflow",
       "properties": [
         "include_curve",
@@ -774,8 +776,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "5bbdcf2de7e5",
-      "description_len": 578,
-      "description_sha256_12": "67a83c312583",
+      "description_len": 495,
+      "description_sha256_12": "2d134bd1f42c",
       "name": "get_projection",
       "properties": [
         "include_asset_series",
@@ -789,8 +791,19 @@
         "$": "additionalProperties=false type=\"object\""
       },
       "constraints_sha256_12": "e3fc94c62797",
+      "description_len": 328,
+      "description_sha256_12": "ae7791a33dd4",
+      "name": "get_retirement_profile",
+      "properties": [],
+      "required": []
+    },
+    {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\""
+      },
+      "constraints_sha256_12": "e3fc94c62797",
       "description_len": 338,
-      "description_sha256_12": "184b61da3516",
+      "description_sha256_12": "b81841f44b6e",
       "name": "get_settings",
       "properties": [],
       "required": []
@@ -801,8 +814,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 596,
-      "description_sha256_12": "264064911c9b",
+      "description_len": 508,
+      "description_sha256_12": "bca2844770be",
       "name": "get_summary",
       "properties": [
         "view"
@@ -818,8 +831,8 @@
         "$.year": "format=\"int32\" maximum=3000 minimum=1900 type=[\"integer\",\"null\"]"
       },
       "constraints_sha256_12": "35306683141e",
-      "description_len": 591,
-      "description_sha256_12": "541ab84f4468",
+      "description_len": 471,
+      "description_sha256_12": "81729fd38d57",
       "name": "get_transactions_summary",
       "properties": [
         "avg_window",
@@ -849,8 +862,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 590,
-      "description_sha256_12": "048025fdbe5b",
+      "description_len": 535,
+      "description_sha256_12": "017f80ebed72",
       "name": "list_assets",
       "properties": [
         "view"
@@ -907,8 +920,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 535,
-      "description_sha256_12": "761490317cde",
+      "description_len": 509,
+      "description_sha256_12": "01a5a3144f79",
       "name": "list_liabilities",
       "properties": [
         "view"
@@ -1059,8 +1072,8 @@
         "$.confirm_token": "maxLength=200 minLength=1 type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "ffbe2eb3027d",
-      "description_len": 592,
-      "description_sha256_12": "3394bc3f8870",
+      "description_len": 549,
+      "description_sha256_12": "704bc77435bc",
       "name": "materialize_recurring",
       "properties": [
         "confirm",
@@ -1108,8 +1121,6 @@
         "$defs.FireSettingsOverrideParam": "additionalProperties=false type=\"object\"",
         "$defs.FireSettingsOverrideParam.expense_avg_window_mode": "enum=[\"calendar\",\"data\"] type=[\"null\",\"string\"]",
         "$defs.FireSettingsOverrideParam.expense_avg_window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]",
-        "$defs.FireSettingsOverrideParam.fire_number_manual_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
-        "$defs.FireSettingsOverrideParam.fire_number_mode": "enum=[\"annual_expense\",\"current_income\",\"manual\"] type=[\"null\",\"string\"]",
         "$defs.FireSettingsOverrideParam.income_avg_window_mode": "enum=[\"calendar\",\"data\"] type=[\"null\",\"string\"]",
         "$defs.FireSettingsOverrideParam.income_avg_window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]",
         "$defs.FireSettingsOverrideParam.savings_source": "enum=[\"budget\",\"budget_income_real_expense\",\"transactions_avg\"] type=[\"null\",\"string\"]",
@@ -1135,9 +1146,9 @@
         "$defs.TaxBracketParam.pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
         "$defs.TaxBracketParam.up_to": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "3bf65068c336",
-      "description_len": 588,
-      "description_sha256_12": "b22212f22fb4",
+      "constraints_sha256_12": "1d4841a5d02c",
+      "description_len": 574,
+      "description_sha256_12": "718ba63b4881",
       "name": "simulate_projection",
       "properties": [
         "annual_inflation_percent",
@@ -1221,6 +1232,7 @@
     {
       "constraints": {
         "$": "additionalProperties=false required=[\"asset_id\"] type=\"object\"",
+        "$.annual_volatility_percent": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$.asset_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
         "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
         "$.clear_purchase_price": "type=[\"boolean\",\"null\"]",
@@ -1231,11 +1243,12 @@
         "$.notes": "type=[\"null\",\"string\"]",
         "$.purchase_price": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "95950f1c68a5",
+      "constraints_sha256_12": "d6461a30982b",
       "description_len": 376,
       "description_sha256_12": "2e8a4cd402ee",
       "name": "update_asset",
       "properties": [
+        "annual_volatility_percent",
         "asset_id",
         "category_id",
         "clear_purchase_price",
@@ -1361,13 +1374,9 @@
         "$.confirm": "type=[\"boolean\",\"null\"]",
         "$.expense_avg_window_mode": "enum=[\"calendar\",\"data\"] type=[\"null\",\"string\"]",
         "$.expense_avg_window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]",
-        "$.fire_number_manual_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
-        "$.fire_number_mode": "enum=[\"annual_expense\",\"current_income\",\"manual\"] type=[\"null\",\"string\"]",
-        "$.horizon_lifespan_age": "format=\"uint32\" minimum=0 type=[\"integer\",\"null\"]",
         "$.income_avg_window_mode": "enum=[\"calendar\",\"data\"] type=[\"null\",\"string\"]",
         "$.income_avg_window_months": "format=\"uint32\" maximum=60 minimum=1 type=[\"integer\",\"null\"]",
         "$.savings_source": "enum=[\"budget\",\"budget_income_real_expense\",\"transactions_avg\"] type=[\"null\",\"string\"]",
-        "$.swr_pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
         "$.tax_brackets": "type=[\"array\",\"null\"]",
         "$.tax_brackets[]": "$ref=\"#/$defs/TaxBracketParam\"",
         "$.taxable_gain_ratio": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
@@ -1376,22 +1385,18 @@
         "$defs.TaxBracketParam.pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
         "$defs.TaxBracketParam.up_to": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "adcd71dd9b6b",
-      "description_len": 580,
-      "description_sha256_12": "b5c35aa33f0d",
+      "constraints_sha256_12": "0d45c134f372",
+      "description_len": 537,
+      "description_sha256_12": "c534599a7a05",
       "name": "update_fire_settings",
       "properties": [
         "annual_inflation_assumption_percent",
         "confirm",
         "expense_avg_window_mode",
         "expense_avg_window_months",
-        "fire_number_manual_amount",
-        "fire_number_mode",
-        "horizon_lifespan_age",
         "income_avg_window_mode",
         "income_avg_window_months",
         "savings_source",
-        "swr_pct",
         "tax_brackets",
         "taxable_gain_ratio",
         "taxes_enabled"
@@ -1439,8 +1444,8 @@
         "$.type_tag": "maxLength=120 type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "6e2bd16034b4",
-      "description_len": 588,
-      "description_sha256_12": "0bb3efebf423",
+      "description_len": 552,
+      "description_sha256_12": "4fd7864cc639",
       "name": "update_liability",
       "properties": [
         "apr_percent",
@@ -1503,6 +1508,82 @@
       "required": [
         "id"
       ]
+    },
+    {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.birth_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
+        "$.bridge_discount_basis": "enum=[\"expected_return\",\"none\",\"swr\"] type=[\"null\",\"string\"]",
+        "$.cash_buffer_months": "format=\"uint32\" maximum=60 minimum=0 type=[\"integer\",\"null\"]",
+        "$.clear_birth_date": "type=[\"boolean\",\"null\"]",
+        "$.clear_cash_buffer_months": "type=[\"boolean\",\"null\"]",
+        "$.clear_fire_number_manual_amount": "type=[\"boolean\",\"null\"]",
+        "$.clear_partial_retirement": "type=[\"boolean\",\"null\"]",
+        "$.clear_pension": "type=[\"boolean\",\"null\"]",
+        "$.clear_target_basis": "type=[\"boolean\",\"null\"]",
+        "$.clear_target_retirement_age": "type=[\"boolean\",\"null\"]",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.fire_number_manual_amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.fire_number_mode": "enum=[\"annual_expense\",\"current_income\",\"manual\"] type=[\"null\",\"string\"]",
+        "$.horizon_lifespan_age": "format=\"uint32\" maximum=105 minimum=85 type=[\"integer\",\"null\"]",
+        "$.partial_retirement|anyOf[0]": "$ref=\"#/$defs/PartialRetirementParam\"",
+        "$.partial_retirement|anyOf[1]": "type=\"null\"",
+        "$.pension|anyOf[0]": "$ref=\"#/$defs/PensionParam\"",
+        "$.pension|anyOf[1]": "type=\"null\"",
+        "$.strategy": "enum=[\"asap\",\"coast\",\"partial\",\"pension_bridge\",\"retire_at_age\"] type=[\"null\",\"string\"]",
+        "$.success_threshold_pct": "format=\"uint32\" maximum=99 minimum=50 type=[\"integer\",\"null\"]",
+        "$.swr_pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.target_basis": "enum=[\"bridge_to_pension\",\"perpetuity\"] type=[\"null\",\"string\"]",
+        "$.target_retirement_age": "format=\"uint32\" maximum=105 minimum=18 type=[\"integer\",\"null\"]",
+        "$.withdrawal_rule|anyOf[0]": "$ref=\"#/$defs/WithdrawalRuleParam\"",
+        "$.withdrawal_rule|anyOf[1]": "type=\"null\"",
+        "$defs.PartialRetirementParam": "additionalProperties=false required=[\"income_monthly_today\",\"starts_at_age\"] type=\"object\"",
+        "$defs.PartialRetirementParam.expense_basis": "enum=[\"regular\",\"retirement\"] type=[\"null\",\"string\"]",
+        "$defs.PartialRetirementParam.income_monthly_today": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
+        "$defs.PartialRetirementParam.starts_at_age": "format=\"uint32\" maximum=105 minimum=18 type=\"integer\"",
+        "$defs.PensionParam": "additionalProperties=false required=[\"monthly_amount_today\",\"starts_at_age\"] type=\"object\"",
+        "$defs.PensionParam.fraction_while_partial": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$defs.PensionParam.indexed": "type=[\"boolean\",\"null\"]",
+        "$defs.PensionParam.monthly_amount_today": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
+        "$defs.PensionParam.starts_at_age": "format=\"uint32\" maximum=105 minimum=50 type=\"integer\"",
+        "$defs.WithdrawalRuleParam": "additionalProperties=false required=[\"kind\"] type=\"object\"",
+        "$defs.WithdrawalRuleParam.adjust_pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$defs.WithdrawalRuleParam.band_pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$defs.WithdrawalRuleParam.end_pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$defs.WithdrawalRuleParam.kind": "enum=[\"fixed_real\",\"guardrails\",\"hybrid\",\"percent_of_balance\"] type=\"string\"",
+        "$defs.WithdrawalRuleParam.pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$defs.WithdrawalRuleParam.spend_mode": "enum=[\"ceiling\",\"rule_is_spend\"] type=[\"null\",\"string\"]",
+        "$defs.WithdrawalRuleParam.start_pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "7dc7ff1d2a13",
+      "description_len": 288,
+      "description_sha256_12": "ef2ce78290b6",
+      "name": "update_retirement_profile",
+      "properties": [
+        "birth_date",
+        "bridge_discount_basis",
+        "cash_buffer_months",
+        "clear_birth_date",
+        "clear_cash_buffer_months",
+        "clear_fire_number_manual_amount",
+        "clear_partial_retirement",
+        "clear_pension",
+        "clear_target_basis",
+        "clear_target_retirement_age",
+        "confirm",
+        "fire_number_manual_amount",
+        "fire_number_mode",
+        "horizon_lifespan_age",
+        "partial_retirement",
+        "pension",
+        "strategy",
+        "success_threshold_pct",
+        "swr_pct",
+        "target_basis",
+        "target_retirement_age",
+        "withdrawal_rule"
+      ],
+      "required": []
     },
     {
       "constraints": {

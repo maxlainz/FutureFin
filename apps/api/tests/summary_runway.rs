@@ -170,6 +170,19 @@ async fn set_fire_settings(app: &TestApp, cookie: &str, fs: Value) {
     assert_eq!(r.status, http::StatusCode::OK, "set fire_settings: {r:?}");
 }
 
+/// El SWR salió de `fire_settings` en 5.0.0 (D13): el umbral «runway indefinido» lo fija ahora el
+/// perfil de jubilación del SOLICITANTE, no el hogar. Mismo eje, mismo número, otra ruta.
+async fn set_swr(app: &TestApp, cookie: &str, swr: &str) {
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({ "swr_pct": swr }),
+            cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "set swr_pct: {r:?}");
+}
+
 async fn budget(app: &TestApp, cookie: &str, cat: &str, amount: &str) {
     let r = app
         .post_json_with_cookie(
@@ -511,7 +524,7 @@ async fn runway_swr_zero_never_indefinite() {
     let asset_cat = app.create_category(&owner, "asset", "Cuenta").await;
     let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
 
-    set_fire_settings(&app, &owner.cookie, json!({ "swr_pct": "0" })).await;
+    set_swr(&app, &owner.cookie, "0").await;
     liquid_asset_with_return(&app, &owner.cookie, &asset_cat, "Cartera", "1000000", "7").await;
     budget(&app, &owner.cookie, &expense_cat, "1000").await;
 

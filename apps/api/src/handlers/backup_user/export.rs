@@ -24,7 +24,7 @@ use super::schema::{
     BackupAllocationRule, BackupAsset, BackupBudgetEntry, BackupCategorizationRule, BackupCategory,
     BackupLiability, BackupPayload, BackupPlanningFlow, BackupRecurringRule, BackupSnapshot,
     BackupSnapshotItem, BackupTransaction, BackupTransactionImport, BackupTransferMatchRejection,
-    BackupUser, CategoryRef, InstallationSnapshotInformative, UiPreferences,
+    BackupFireSettings, BackupUser, CategoryRef, InstallationSnapshotInformative, UiPreferences,
     CURRENT_SCHEMA_VERSION,
 };
 
@@ -199,6 +199,11 @@ async fn build_payload(
     )
     .await?;
     let categorization_rules = fetch_categorization_rules(pool, iid, user_id).await?;
+    // El perfil se exporta **sin resolver**: `None` significa «este usuario nunca lo configuró»,
+    // y restaurar eso como `NULL` deja exactamente el mismo estado. Guardar el resuelto
+    // convertiría un default en una elección.
+    let retirement_profile =
+        crate::handlers::retirement_profile::stored_retirement_profile(pool, user_id).await?;
     let transfer_match_rejections =
         fetch_transfer_match_rejections(pool, iid, user_id, &txn_id_to_index).await?;
 
@@ -212,6 +217,7 @@ async fn build_payload(
         planning_flows,
         ui_preferences,
         installation_snapshot_informative: snapshot,
+        retirement_profile,
         snapshots,
         transaction_imports,
         transactions,
@@ -511,11 +517,12 @@ async fn fetch_assets(
         Option<Decimal>,
         bool,
         Option<Decimal>,
+        Option<Decimal>,
         Option<String>,
         i32,
     )> = sqlx::query_as(
         r#"SELECT a.id, c.scope, c.name AS cat_name, a.name, a.current_value, a.purchase_price,
-                  a.is_liquid, a.expected_annual_return_percent,
+                  a.is_liquid, a.expected_annual_return_percent, a.annual_volatility_percent,
                   a.notes, a.sort_index
            FROM assets a
            JOIN categories c ON c.id = a.category_id
@@ -540,8 +547,9 @@ async fn fetch_assets(
                 purchase_price: r.5,
                 is_liquid: r.6,
                 expected_annual_return_percent: r.7,
-                notes: r.8,
-                sort_index: r.9,
+                annual_volatility_percent: r.8,
+                notes: r.9,
+                sort_index: r.10,
             }
         })
         .collect();
@@ -901,6 +909,11 @@ async fn fetch_installation_snapshot(
         calendar_tz: row.1,
         annual_inflation_assumption_percent: Some(row.2),
         show_age_mode: row.3,
-        fire_settings: resolve_fire_settings(row.4.map(|j| j.0)),
+        // Los cuatro ejes legados salen a `None`: desde 5.0.0 viven en el perfil del usuario y
+        // el fichero no debe llevar dos copias de la misma cifra.
+        fire_settings: BackupFireSettings {
+            settings: resolve_fire_settings(row.4.map(|j| j.0)),
+            legacy: Default::default(),
+        },
     })
 }

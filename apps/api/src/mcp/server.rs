@@ -766,6 +766,10 @@ fn parse_tax_brackets(
 /// Ejes de `fire_settings` que `simulate_projection` puede cambiar **sin persistir**. Mismos
 /// nombres, mismos valores y mismas cotas que `update_fire_settings`: lo que se simula aquí es
 /// exactamente lo que pasaría al guardarlo allí.
+///
+/// 5.0.0: `fire_number_mode` y `fire_number_manual_amount` ya NO están aquí — son del perfil de
+/// jubilación de cada usuario (D13) y `fire_settings` es lo compartido por el hogar. El SWR sí
+/// sigue siendo simulable, por el eje `swr_pct` de primer nivel de la propia tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FireSettingsOverrideParam {
@@ -779,14 +783,6 @@ pub struct FireSettingsOverrideParam {
     #[serde(default)]
     #[schemars(extend("enum" = ["budget", "transactions_avg", "budget_income_real_expense"]))]
     pub savings_source: Option<String>,
-    /// "manual" | "annual_expense" | "current_income".
-    #[serde(default)]
-    #[schemars(extend("enum" = ["manual", "annual_expense", "current_income"]))]
-    pub fire_number_mode: Option<String>,
-    /// Objetivo manual > 0, string decimal (requerido si el modo efectivo acaba siendo "manual").
-    #[serde(default)]
-    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
-    pub fire_number_manual_amount: Option<String>,
     /// Simular con y sin impuestos sobre la plusvalía en el gross-up del objetivo.
     #[serde(default)]
     pub taxes_enabled: Option<bool>,
@@ -825,16 +821,8 @@ pub struct FireSettingsOverrideParam {
 impl FireSettingsOverrideParam {
     fn to_patch(&self) -> Result<crate::handlers::installation::FireSettingsPatch, ApiError> {
         Ok(crate::handlers::installation::FireSettingsPatch {
-            swr_pct: None,
             taxes_enabled: self.taxes_enabled,
             tax_brackets: parse_tax_brackets(&self.tax_brackets)?,
-            fire_number_mode: parse_enum_param(&self.fire_number_mode)
-                .map_err(|e| ApiError::BadRequest(format!("fire_number_mode: {e}")))?,
-            fire_number_manual_amount: self
-                .fire_number_manual_amount
-                .as_deref()
-                .map(|v| parse_decimal_param("fire_number_manual_amount", v))
-                .transpose()?,
             savings_source: parse_enum_param(&self.savings_source)
                 .map_err(|e| ApiError::BadRequest(format!("savings_source: {e}")))?,
             income_avg_window_months: self.income_avg_window_months,
@@ -848,8 +836,6 @@ impl FireSettingsOverrideParam {
                 .as_deref()
                 .map(|v| parse_decimal_param("taxable_gain_ratio", v))
                 .transpose()?,
-            // El what-if del horizonte ya existe como `months`; la edad límite no se overridea.
-            horizon_lifespan_age: None,
             annual_inflation_assumption_percent: None,
         })
     }
@@ -1427,6 +1413,12 @@ pub struct UpdateAssetParams {
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub expected_annual_return_percent: Option<String>,
+    /// Volatilidad anual de los retornos en % (0–100), string decimal: desviación típica ANUAL,
+    /// no un rango. Omitir o "0" = activo determinista (cuenta, depósito). El camino determinista
+    /// del motor la IGNORA: solo la lee el Monte Carlo.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub annual_volatility_percent: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -1452,6 +1444,12 @@ pub struct CreateAssetParams {
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub purchase_price: Option<String>,
+    /// Volatilidad anual de los retornos en % (0–100), string decimal: desviación típica ANUAL,
+    /// no un rango. Omitir o "0" = activo determinista (cuenta, depósito). El camino determinista
+    /// del motor la IGNORA: solo la lee el Monte Carlo.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub annual_volatility_percent: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -1881,10 +1879,6 @@ pub struct TaxBracketParam {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateFireSettingsParams {
-    /// SWR en % (0–4), string decimal.
-    #[serde(default)]
-    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
-    pub swr_pct: Option<String>,
     /// Inflación anual asumida en % (−2 a 50, string decimal; negativa = deflación sostenida).
     #[serde(default)]
     /// Alias aceptado: `annual_inflation_percent`, que es como se llama en
@@ -1921,19 +1915,6 @@ pub struct UpdateFireSettingsParams {
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub taxable_gain_ratio: Option<String>,
-    /// Edad límite del horizonte derivado (85..=105, default 90): la proyección llega hasta esa
-    /// edad del solicitante. OJO: el horizonte sigue acotado a 70 años, así que el eje solo
-    /// tiene efecto si la edad actual ≥ edad_límite − 70.
-    #[serde(default)]
-    pub horizon_lifespan_age: Option<u32>,
-    /// "manual" | "annual_expense" | "current_income".
-    #[serde(default)]
-    #[schemars(extend("enum" = ["manual", "annual_expense", "current_income"]))]
-    pub fire_number_mode: Option<String>,
-    /// Objetivo manual > 0, string decimal (requerido con mode=manual).
-    #[serde(default)]
-    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
-    pub fire_number_manual_amount: Option<String>,
     #[serde(default)]
     pub taxes_enabled: Option<bool>,
     /// Tramos fiscales COMPLETOS (sustituyen a los actuales; umbrales crecientes, solo el
@@ -1943,6 +1924,315 @@ pub struct UpdateFireSettingsParams {
     /// Sin confirm=true NO se persiste nada: devuelve el before/after validado (preview).
     #[serde(default)]
     pub confirm: Option<bool>,
+}
+
+
+// ---------------------------------------------------------------------------
+// Perfil de jubilación por usuario (5.0.0, D13)
+// ---------------------------------------------------------------------------
+
+/// Regla de retirada del perfil. Se sustituye ENTERA (no campo a campo): qué `pct` son
+/// obligatorios depende de `kind`, así que un merge parcial permitiría estados que nadie
+/// escribió («guardrails con el pct del percent_of_balance anterior»).
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WithdrawalRuleParam {
+    /// "fixed_real" (retira la necesidad declarada indexada, sin techo — la conducta de 4.15.x)
+    /// | "percent_of_balance" (pct % del líquido) | "hybrid" (start_pct hasta que el saldo
+    /// permite bajar a end_pct) | "guardrails" (Guyton-Klinger).
+    #[schemars(extend("enum" = ["fixed_real", "percent_of_balance", "hybrid", "guardrails"]))]
+    pub kind: String,
+    /// % anual BRUTO de impuestos (0 < pct <= 20), string decimal. Requerido por
+    /// percent_of_balance y guardrails.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub pct: Option<String>,
+    /// hybrid: % de partida (0 < pct <= 20).
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub start_pct: Option<String>,
+    /// hybrid: % al que se baja tras el latch. Estrictamente MENOR que start_pct.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub end_pct: Option<String>,
+    /// guardrails: banda alrededor de la tasa inicial que dispara el ajuste (0 < pct <= 50).
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub band_pct: Option<String>,
+    /// guardrails: cuánto se recorta/sube la retirada al tocar una banda (0 < pct <= 50).
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub adjust_pct: Option<String>,
+    /// "ceiling" (default: la regla es un TECHO, se retira min(necesidad, regla)) |
+    /// "rule_is_spend" (la regla ES el gasto: se retira lo que dice, haya necesidad o no).
+    #[serde(default)]
+    #[schemars(extend("enum" = ["ceiling", "rule_is_spend"]))]
+    pub spend_mode: Option<String>,
+}
+
+/// Pensión pública (u otra renta vitalicia) CON FECHA. No es una partida de presupuesto: su
+/// fecha de inicio cambia el OBJETIVO, no solo el flujo de caja.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PensionParam {
+    /// Importe MENSUAL en euros de HOY (> 0), string decimal.
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub monthly_amount_today: String,
+    /// Edad a la que empieza a cobrarse (50..=horizon_lifespan_age).
+    #[schemars(range(min = 50, max = 105))]
+    pub starts_at_age: u32,
+    /// true (default) = se indexa a la inflación de la instalación; false = importe plano.
+    #[serde(default)]
+    pub indexed: Option<bool>,
+    /// Fracción del importe que se cobra durante la fase de media jornada, 0..=1 (default "0").
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub fraction_while_partial: Option<String>,
+}
+
+/// Fase de media jornada. Termina en la jubilación total (no lleva edad de fin: chocaría con el
+/// trigger).
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PartialRetirementParam {
+    /// Edad a la que empieza (18..=horizon_lifespan_age, y menor que target_retirement_age).
+    #[schemars(range(min = 18, max = 105))]
+    pub starts_at_age: u32,
+    /// Ingreso MENSUAL en euros de HOY durante la fase (>= 0; "0" = año sabático).
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub income_monthly_today: String,
+    /// "retirement" (default: quien baja a media jornada ya vive como jubilado) | "regular".
+    #[serde(default)]
+    #[schemars(extend("enum" = ["retirement", "regular"]))]
+    pub expense_basis: Option<String>,
+}
+
+/// Cambios del perfil de jubilación del usuario DEL TOKEN. Merge campo a campo: lo omitido no se
+/// toca. Los `clear_*` materializan el `null` que el JSON Schema no puede expresar (doctrina
+/// Fase 2 del MCP).
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRetirementProfileParams {
+    /// "asap" (cruce de líquido, el de siempre) | "retire_at_age" (la edad manda, llegue o no el
+    /// capital) | "coast" | "partial" | "pension_bridge". retire_at_age y coast exigen
+    /// target_retirement_age; pension_bridge exige pension.
+    #[serde(default)]
+    #[schemars(extend("enum" = ["asap", "retire_at_age", "coast", "partial", "pension_bridge"]))]
+    pub strategy: Option<String>,
+    /// Edad de jubilación total (18..=horizon_lifespan_age).
+    #[serde(default)]
+    #[schemars(range(min = 18, max = 105))]
+    pub target_retirement_age: Option<u32>,
+    /// true = borrar la edad de jubilación.
+    #[serde(default)]
+    pub clear_target_retirement_age: Option<bool>,
+    /// "manual" | "annual_expense" | "current_income". Desde 5.0.0 es del PERFIL, no de la
+    /// instalación.
+    #[serde(default)]
+    #[schemars(extend("enum" = ["manual", "annual_expense", "current_income"]))]
+    pub fire_number_mode: Option<String>,
+    /// Objetivo manual > 0, string decimal (requerido con fire_number_mode=manual).
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub fire_number_manual_amount: Option<String>,
+    /// true = borrar el importe manual.
+    #[serde(default)]
+    pub clear_fire_number_manual_amount: Option<bool>,
+    /// SWR en % (0–4), string decimal. Desde 5.0.0 es del PERFIL.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub swr_pct: Option<String>,
+    /// Edad límite del horizonte (85..=105, default 90). El horizonte sigue acotado a 70 años.
+    #[serde(default)]
+    #[schemars(range(min = 85, max = 105))]
+    pub horizon_lifespan_age: Option<u32>,
+    /// "perpetuity" (ignora la pensión: conservador) | "bridge_to_pension" (capital para llegar
+    /// a la pensión + perpetuidad sobre lo que no cubra). Omitido se DERIVA: bridge si hay
+    /// pensión declarada, perpetuity si no.
+    #[serde(default)]
+    #[schemars(extend("enum" = ["perpetuity", "bridge_to_pension"]))]
+    pub target_basis: Option<String>,
+    /// true = volver a la base derivada.
+    #[serde(default)]
+    pub clear_target_basis: Option<bool>,
+    /// Tasa con la que se descuentan los flujos del puente: "expected_return" (default) | "swr" |
+    /// "none" (sin descuento, conservador).
+    #[serde(default)]
+    #[schemars(extend("enum" = ["expected_return", "swr", "none"]))]
+    pub bridge_discount_basis: Option<String>,
+    /// Regla de retirada COMPLETA (sustituye a la actual).
+    #[serde(default)]
+    pub withdrawal_rule: Option<WithdrawalRuleParam>,
+    /// Bloque de pensión COMPLETO (sustituye al actual).
+    #[serde(default)]
+    pub pension: Option<PensionParam>,
+    /// true = borrar la pensión declarada.
+    #[serde(default)]
+    pub clear_pension: Option<bool>,
+    /// Fase de media jornada COMPLETA (sustituye a la actual).
+    #[serde(default)]
+    pub partial_retirement: Option<PartialRetirementParam>,
+    /// true = borrar la fase de media jornada.
+    #[serde(default)]
+    pub clear_partial_retirement: Option<bool>,
+    /// Colchón de caja en meses de gasto (0–60). Solo actúa en Monte Carlo.
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 60))]
+    pub cash_buffer_months: Option<u32>,
+    /// true = borrar el colchón.
+    #[serde(default)]
+    pub clear_cash_buffer_months: Option<bool>,
+    /// Umbral de éxito de Monte Carlo en % (50–99, default 95).
+    #[serde(default)]
+    #[schemars(range(min = 50, max = 99))]
+    pub success_threshold_pct: Option<u32>,
+    /// Fecha de nacimiento "YYYY-MM-DD" del usuario del token: es lo que convierte cada edad del
+    /// perfil en un mes de la serie. Sin ella, las estrategias por edad no pueden resolverse.
+    #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
+    pub birth_date: Option<String>,
+    /// true = borrar la fecha de nacimiento.
+    #[serde(default)]
+    pub clear_birth_date: Option<bool>,
+    /// Sin confirm=true NO se persiste nada: devuelve el before/after validado (preview).
+    #[serde(default)]
+    pub confirm: Option<bool>,
+}
+
+impl UpdateRetirementProfileParams {
+    /// Wire → patchset de dominio. Los `clear_*` y su valor son mutuamente excluyentes: pedir las
+    /// dos cosas a la vez es una intención contradictoria, y elegir una por él sería adivinar.
+    fn to_patch(
+        &self,
+    ) -> Result<crate::handlers::retirement_profile::RetirementProfilePatch, ApiError> {
+        use crate::handlers::retirement_profile as rp;
+
+        fn tri<T>(value: Option<T>, clear: Option<bool>, field: &str) -> Result<Option<Option<T>>, ApiError> {
+            match (value, clear.unwrap_or(false)) {
+                (Some(_), true) => Err(ApiError::BadRequest(format!(
+                    "field_set_and_clear: {field} and clear_{field} are mutually exclusive"
+                ))),
+                (Some(v), false) => Ok(Some(Some(v))),
+                (None, true) => Ok(Some(None)),
+                (None, false) => Ok(None),
+            }
+        }
+
+        let withdrawal_rule = match &self.withdrawal_rule {
+            None => None,
+            Some(w) => Some(rp::WithdrawalRule {
+                kind: parse_enum_param(&Some(w.kind.clone()))
+                    .map_err(|e| ApiError::BadRequest(format!("withdrawal_rule_kind: {e}")))?
+                    .expect("kind es obligatorio en el schema"),
+                pct: w.pct.as_deref().map(|v| parse_decimal_param("withdrawal_rule.pct", v)).transpose()?,
+                start_pct: w.start_pct.as_deref().map(|v| parse_decimal_param("withdrawal_rule.start_pct", v)).transpose()?,
+                end_pct: w.end_pct.as_deref().map(|v| parse_decimal_param("withdrawal_rule.end_pct", v)).transpose()?,
+                band_pct: w.band_pct.as_deref().map(|v| parse_decimal_param("withdrawal_rule.band_pct", v)).transpose()?,
+                adjust_pct: w.adjust_pct.as_deref().map(|v| parse_decimal_param("withdrawal_rule.adjust_pct", v)).transpose()?,
+                spend_mode: parse_enum_param(&w.spend_mode)
+                    .map_err(|e| ApiError::BadRequest(format!("spend_mode: {e}")))?
+                    .unwrap_or_default(),
+            }),
+        };
+
+        let pension = match &self.pension {
+            None => None,
+            Some(p) => Some(rp::PensionPlan {
+                monthly_amount_today: parse_decimal_param(
+                    "pension.monthly_amount_today",
+                    &p.monthly_amount_today,
+                )?,
+                starts_at_age: p.starts_at_age,
+                indexed: p.indexed.unwrap_or(true),
+                fraction_while_partial: p
+                    .fraction_while_partial
+                    .as_deref()
+                    .map(|v| parse_decimal_param("pension.fraction_while_partial", v))
+                    .transpose()?
+                    .unwrap_or(rust_decimal::Decimal::ZERO),
+            }),
+        };
+
+        let partial_retirement = match &self.partial_retirement {
+            None => None,
+            Some(x) => Some(rp::PartialRetirement {
+                starts_at_age: x.starts_at_age,
+                income_monthly_today: parse_decimal_param(
+                    "partial_retirement.income_monthly_today",
+                    &x.income_monthly_today,
+                )?,
+                expense_basis: parse_enum_param(&x.expense_basis)
+                    .map_err(|e| ApiError::BadRequest(format!("expense_basis: {e}")))?
+                    .unwrap_or_default(),
+            }),
+        };
+
+        Ok(rp::RetirementProfilePatch {
+            strategy: parse_enum_param(&self.strategy)
+                .map_err(|e| ApiError::BadRequest(format!("strategy: {e}")))?,
+            target_retirement_age: tri(
+                self.target_retirement_age,
+                self.clear_target_retirement_age,
+                "target_retirement_age",
+            )?,
+            fire_number_mode: parse_enum_param(&self.fire_number_mode)
+                .map_err(|e| ApiError::BadRequest(format!("fire_number_mode: {e}")))?,
+            fire_number_manual_amount: tri(
+                self.fire_number_manual_amount
+                    .as_deref()
+                    .map(|v| parse_decimal_param("fire_number_manual_amount", v))
+                    .transpose()?,
+                self.clear_fire_number_manual_amount,
+                "fire_number_manual_amount",
+            )?,
+            swr_pct: self
+                .swr_pct
+                .as_deref()
+                .map(|v| parse_decimal_param("swr_pct", v))
+                .transpose()?,
+            horizon_lifespan_age: self.horizon_lifespan_age,
+            target_basis: tri(
+                parse_enum_param(&self.target_basis)
+                    .map_err(|e| ApiError::BadRequest(format!("target_basis: {e}")))?,
+                self.clear_target_basis,
+                "target_basis",
+            )?,
+            bridge_discount_basis: parse_enum_param(&self.bridge_discount_basis)
+                .map_err(|e| ApiError::BadRequest(format!("bridge_discount_basis: {e}")))?,
+            withdrawal_rule,
+            pension: tri(pension, self.clear_pension, "pension")?,
+            partial_retirement: tri(
+                partial_retirement,
+                self.clear_partial_retirement,
+                "partial_retirement",
+            )?,
+            cash_buffer_months: tri(
+                self.cash_buffer_months,
+                self.clear_cash_buffer_months,
+                "cash_buffer_months",
+            )?,
+            success_threshold_pct: self.success_threshold_pct,
+        })
+    }
+
+    /// Tri-estado de `birth_date`, aparte del patchset porque vive en su propia columna.
+    fn birth_patch(&self) -> Result<Option<Option<chrono::NaiveDate>>, ApiError> {
+        match (&self.birth_date, self.clear_birth_date.unwrap_or(false)) {
+            (Some(_), true) => Err(ApiError::BadRequest(
+                "field_set_and_clear: birth_date and clear_birth_date are mutually exclusive".into(),
+            )),
+            (Some(raw), false) => {
+                let d = chrono::NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d").map_err(|_| {
+                    ApiError::BadRequest(
+                        "birth_date_format: birth_date must be YYYY-MM-DD".into(),
+                    )
+                })?;
+                Ok(Some(Some(d)))
+            }
+            (None, true) => Ok(Some(None)),
+            (None, false) => Ok(None),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2357,7 +2647,7 @@ const LIST_IMPORTS_MAX_LIMIT: usize = 200;
 impl FutureFinMcp {
     #[tool(
         name = "get_summary",
-        description = "Estado financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingreso y gasto mensuales, tasa de ahorro, runway) y desgloses. TRAMPA: `financial_health` trae DOS ahorros. `net_monthly_equivalent` es el REAL del modo activo (`savings_source`) y el que usa el motor — úsalo para razonar y hacer cuentas; `savings_expected_monthly_equivalent` sale siempre del PRESUPUESTO y existe solo para el delta «real vs plan». Sus cuatro equivalentes mensuales tienen HOMÓNIMOS con otro valor en get_budget.totals. `net_return_*_annual_pct` es rentabilidad ESPERADA, no realizada.",
+        description = "Estado financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingreso y gasto mensuales, tasa de ahorro, runway) y desgloses. TRAMPA: `financial_health` trae DOS ahorros. `net_monthly_equivalent` es el REAL del modo activo (`savings_source`) y el que usa el motor — úsalo para razonar y hacer cuentas; `savings_expected_monthly_equivalent` sale siempre del PRESUPUESTO y existe solo para el delta «real vs plan». `net_return_*_annual_pct` es rentabilidad ESPERADA, no realizada.",
         annotations(title = "Resumen financiero", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_summary(
@@ -2375,7 +2665,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_projection",
-        description = "Proyección de patrimonio y jubilación (FIRE): serie futura (~82 puntos, mensual el primer año y anual después), objetivo FIRE por mes, jubilación estimada (`jubilacion_date_ymd`, `jubilacion_age`), hitos y supuestos. Cada punto trae `net_worth` (euros NOMINALES de ese mes) y `net_worth_real` (los mismos en euros de HOY, con `deflation_annual_inflation_percent`): di cuál citas, y lo mismo con `jubilacion_target_net_worth` (hoy) vs `..._nominal`. `jubilacion_month_index` es un MES; para indexar usa `jubilacion_series_position`. Los escalones los explica `events` (tope 100).",
+        description = "Proyección de patrimonio y jubilación (FIRE): serie futura (~82 puntos, mensual el primer año y anual después), objetivo FIRE por mes, jubilación estimada (`jubilacion_date_ymd`, `jubilacion_age`), hitos y supuestos. Cada punto trae `net_worth` (euros NOMINALES de ese mes) y `net_worth_real` (los mismos en euros de HOY, con `deflation_annual_inflation_percent`): di cuál citas, y lo mismo con `jubilacion_target_net_worth` (hoy) vs `..._nominal`. Los escalones los explica `events` (tope 100).",
         annotations(title = "Proyección FIRE", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_projection(
@@ -2410,7 +2700,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_budget",
-        description = "Presupuesto mensual: una sola lista de partidas de ingreso y gasto normalizadas a equivalente mensual. Cada partida trae `source`: `manual` (la escribe el usuario) o `liability` (cuota de un pasivo activo, solo lectura, atribuida a la categoría de gasto del pasivo — se edita con update_liability). Los totales de gasto ya incluyen las cuotas. OJO: `totals` es SIEMPRE el PLAN, y sus cuatro campos se llaman IGUAL que los de get_summary.financial_health, que en los modos B y C traen el gasto y el ingreso REALES. Mismo nombre, otro número.",
+        description = "Presupuesto mensual: una sola lista de partidas de ingreso y gasto normalizadas a equivalente mensual. Cada partida trae `source`: `manual` (la escribe el usuario) o `liability` (cuota de un pasivo activo, solo lectura, atribuida a la categoría de gasto del pasivo — se edita con update_liability). Los totales de gasto ya incluyen las cuotas. OJO: `totals` es SIEMPRE el PLAN, y sus cuatro campos son HOMÓNIMOS de los de get_summary.financial_health, que en los modos B y C traen las cifras REALES.",
         annotations(title = "Presupuesto", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_budget(
@@ -2430,7 +2720,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_transactions_summary",
-        description = "Comparativa de un mes: real por categoría vs presupuesto vs promedio de los últimos meses completos (ancla HOY, la misma media que la proyección; el mes seleccionado entra si cae dentro). Sin year/month usa el último mes completo. Divide entre `avg_months` = meses con ≥1 movimiento REAL y CLASIFICADO; un mes solo-recurrente o sin clasificar no suma ni divide; euros nominales sin deflactar. `months_with_data` NO es el denominador. Importes MAGNITUDES ≥ 0. `totals.net_actual` = income − expense SIN el ahorro: igual a `income_minus_expense` de get_history_cashflow, nunca su `cash_delta`.",
+        description = "Comparativa de un mes: real por categoría vs presupuesto vs promedio de los últimos meses completos (ancla HOY, la misma media que la proyección). Sin year/month usa el último mes completo. Divide entre `avg_months` = meses con ≥1 movimiento REAL y CLASIFICADO; un mes solo-recurrente o sin clasificar no suma ni divide; euros nominales sin deflactar. `months_with_data` NO es el denominador. Importes MAGNITUDES ≥ 0. `totals.net_actual` = income − expense SIN el ahorro.",
         annotations(title = "Comparativa mensual", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_transactions_summary(
@@ -2562,7 +2852,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_assets",
-        description = "Activos del hogar: valor actual, liquidez, rentabilidad esperada, plusvalía latente y lo que la cascada encamina a cada uno. `unrealized_pnl(_pct)` es valor − coste y NO es rentabilidad: no anualiza ni descuenta las aportaciones posteriores; null sin coste declarado. OJO a los tres campos de aportación: `contribution_recurring_monthly` es la ESTABLE y la que debes usar para razonar; `contribution_nominal_monthly` es la del PRIMER MES, baja cada día y salta el día 1; `contribution_target_amount` es el TOPE en euros, no una aportación. Desglose regla a regla: get_allocation_resolution.",
+        description = "Activos del hogar: valor actual, liquidez, rentabilidad esperada, plusvalía latente y lo que la cascada encamina a cada uno. `unrealized_pnl(_pct)` es valor − coste y NO es rentabilidad: no anualiza ni descuenta las aportaciones posteriores; null sin coste declarado. Tres campos de aportación: usa `contribution_recurring_monthly` (ESTABLE) para razonar; `contribution_nominal_monthly` es la del PRIMER MES y baja cada día; `contribution_target_amount` es un TOPE, no una aportación. Desglose regla a regla: get_allocation_resolution.",
         annotations(title = "Activos", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_assets(
@@ -2585,7 +2875,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_liabilities",
-        description = "Pasivos activos (deudas y préstamos): principal, TIN, cuota y frecuencia de pago, fecha fin del plan y `repayment_model`, que decide cómo los simula la proyección: `fixed_payments` la cuota va íntegra a principal sin intereses; `french` y `revolving` devengan interés al TIN sobre el saldo; `interest_only` el principal no baja. Un plan vencido con saldo vivo se sirve marcado `plan_expired_with_balance` (congelado, sin devengo); el vencido y saldado se filtra. La cuota de cada uno aparece además como partida de gasto en get_budget.",
+        description = "Pasivos activos (deudas y préstamos): principal, TIN, cuota y frecuencia de pago, fecha fin del plan y `repayment_model`, que decide cómo los simula la proyección: `fixed_payments` la cuota va íntegra a principal sin intereses; `french` y `revolving` devengan interés al TIN sobre el saldo; `interest_only` el principal no baja. Un plan vencido con saldo vivo llega marcado `plan_expired_with_balance` (congelado); el saldado se filtra. La cuota de cada uno aparece además como partida de gasto en get_budget.",
         annotations(title = "Pasivos", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_liabilities(
@@ -2631,7 +2921,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_settings",
-        description = "Ajustes de la instalación: divisa base, zona horaria, inflación anual asumida y configuración FIRE (modo del objetivo, SWR, tramos fiscales, fuente del ahorro y las ventanas del promedio real), más el rol del usuario del token y su identidad (`user`: id, username, birth_date — la fecha de nacimiento que fija el horizonte de proyección).",
+        description = "Ajustes COMPARTIDOS del hogar: divisa, zona horaria, inflación asumida y los supuestos FIRE comunes (impuestos y tramos, fuente del ahorro, ventanas del promedio), más el rol del usuario del token y su identidad (id, username, birth_date). El plan personal —estrategia, SWR, modo del objetivo, edad límite— está en get_retirement_profile.",
         annotations(title = "Ajustes", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_settings(
@@ -2660,7 +2950,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "simulate_projection",
-        description = "What-if de proyección/FIRE sin persistir NADA: baseline vs escenario, KPIs, deltas y `model_note` con los supuestos para leerlos. PREGUNTA QUÉ EJE quiere: «ahorrar 300 más» (`extra_monthly_savings`) y «gastar 300 menos» (`extra_monthly_expense: -300`) NO son la misma simulación y separan la jubilación años. Los ejes de caja no tocan ingreso ni gasto: mueven `net_cash_monthly`, nunca `net_recurring_monthly` (delta 0 EXACTO) ni `savings_rate`. `liability_overrides` contesta «¿me compensa amortizar antes?», y lo hace por `liability_total_interest_delta`, no con un salto de patrimonio.",
+        description = "What-if de proyección/FIRE sin persistir NADA: baseline vs escenario, KPIs, deltas y `model_note` con los supuestos para leerlos. PREGUNTA QUÉ EJE quiere: «ahorrar 300 más» (`extra_monthly_savings`) y «gastar 300 menos» (`extra_monthly_expense: -300`) NO son la misma simulación y separan la jubilación años. Los ejes de caja no tocan ingreso ni gasto: mueven `net_cash_monthly`, nunca `net_recurring_monthly` (delta 0 EXACTO) ni `savings_rate`. `liability_overrides` contesta «¿compensa amortizar antes?» por `liability_total_interest_delta`, no por un salto de patrimonio.",
         annotations(title = "Simular escenario", read_only_hint = true, open_world_hint = false)
     )]
     async fn simulate_projection(
@@ -2895,7 +3185,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_history_cashflow",
-        description = "Flujo de caja mensual real por tipo, meses firmados hacia atrás. Importes CON SU SIGNO: expense ≤ 0, savings ≤ 0, income ≥ 0. Dos netos distintos: `cash_delta` = expense+income+savings INCLUYE los traspasos a inversión (un mes excelente con una aportación grande sale negativo y no es pérdida); `income_minus_expense` los deja fuera y es el `totals.net_actual` de get_transactions_summary — para «¿fue buen mes?» usa ése. La curva fina es opt-in (include_curve) y se omite por encima de 36 meses aunque `months[]` llegue a 120; cuando falta, `fine_absent_reason` dice cuál de las cuatro causas fue.",
+        description = "Flujo de caja mensual real por tipo, meses firmados hacia atrás. Importes CON SU SIGNO: expense ≤ 0, savings ≤ 0, income ≥ 0. Dos netos distintos: `cash_delta` = expense+income+savings INCLUYE los traspasos a inversión (un mes excelente con una aportación grande sale negativo y no es pérdida); `income_minus_expense` los deja fuera y es el `totals.net_actual` de get_transactions_summary — para «¿fue buen mes?» usa ése. La curva fina es opt-in (include_curve); si falta, `fine_absent_reason` dice por qué.",
         annotations(title = "Cash-flow histórico", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_history_cashflow(
@@ -3053,7 +3343,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_transaction",
-        description = "Registra un movimiento manual («apunta 23,50 € de cena de ayer»): fecha, concepto, importe FIRMADO (gasto negativo, ingreso positivo, aportación de inversión negativa), kind (expense|income|savings; savings SIN categoría), categoría (scope = kind; si falta, la de por defecto) y links opcionales a activo o pasivo. Con recurring=true crea además la plantilla mensual y rellena los meses cerrados intermedios. OJO: reenviar el mismo movimiento crea OTRO movimiento (los duplicados manuales son legítimos). Si no puedes descartar un reintento (timeout, red), manda `idempotency_key`.",
+        description = "Registra un movimiento manual («apunta 23,50 € de cena de ayer»): fecha, concepto, importe FIRMADO (gasto negativo, ingreso positivo, aportación de inversión negativa), kind (expense|income|savings; savings SIN categoría), categoría (scope = kind) y links opcionales a activo o pasivo. Con recurring=true crea además la plantilla mensual y rellena los meses cerrados intermedios. OJO: reenviarlo crea OTRO movimiento; ante un reintento dudoso manda `idempotency_key`.",
         annotations(title = "Crear movimiento", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_transaction(
@@ -3220,7 +3510,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "materialize_recurring",
-        description = "«Ponme al día los recurrentes»: hace converger las instancias de las plantillas con los meses que tienen datos reales; nunca crea fechas futuras. TRES cosas antes de llamar: (1) el ámbito es LA INSTALACIÓN ENTERA, no solo el usuario del token; (2) además de crear, PODA las instancias de los meses que han dejado de tener movimientos reales (`pruned` dice cuántas): destruye datos; (3) converge al mismo estado siempre, pero ese estado depende de qué meses son reales AHORA. Su preview es el único SIN cifras: calcula y escribe en la misma transacción. Pregunta al usuario antes de confirmar.",
+        description = "«Ponme al día los recurrentes»: hace converger las instancias de las plantillas con los meses que tienen datos reales; nunca crea fechas futuras. TRES cosas antes de llamar: (1) el ámbito es LA INSTALACIÓN ENTERA, no solo el usuario del token; (2) además de crear, PODA las instancias de los meses que han dejado de tener movimientos reales (`pruned` dice cuántas): destruye datos; (3) converge al mismo estado siempre, pero ese estado depende de qué meses son reales AHORA. Su preview es el único SIN cifras. Pregunta al usuario antes de confirmar.",
         annotations(title = "Materializar recurrentes", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn materialize_recurring(
@@ -3871,6 +4161,9 @@ impl FutureFinMcp {
                         .as_deref()
                         .map(|v| parse_decimal_param("expected_annual_return_percent", v))
                         .transpose()?,
+                    // Subset de VALORACIÓN: la volatilidad es un supuesto del activo, no su
+                    // valor de hoy. Se cambia con `update_asset`.
+                    annual_volatility_percent: None,
                     notes: None,
                     sort_index: None,
                 },
@@ -3963,6 +4256,11 @@ impl FutureFinMcp {
                         .as_deref()
                         .map(|v| parse_decimal_param("expected_annual_return_percent", v))
                         .transpose()?,
+                    annual_volatility_percent: p
+                        .annual_volatility_percent
+                        .as_deref()
+                        .map(|v| parse_decimal_param("annual_volatility_percent", v))
+                        .transpose()?,
                     notes: p.notes.clone(),
                     sort_index: None,
                 },
@@ -4023,6 +4321,11 @@ impl FutureFinMcp {
                     .as_deref()
                     .map(|v| parse_decimal_param("expected_annual_return_percent", v))
                     .transpose()?,
+                annual_volatility_percent: p
+                    .annual_volatility_percent
+                    .as_deref()
+                    .map(|v| parse_decimal_param("annual_volatility_percent", v))
+                    .transpose()?,
                 notes: p.notes.clone(),
                 sort_index: None,
             })
@@ -4058,7 +4361,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_liability",
-        description = "Da de alta un pasivo (deuda/préstamo): label, `type_tag` libre (dimensión de get_summary.liabilities_by_type_tag), categoría scope liability, categoría de GASTO de la cuota, plan de pago, `repayment_model` (los cuatro en list_liabilities; todos menos `fixed_payments` —sin intereses, rechaza apr_percent— exigen apr_percent > 0 y cuota mensual; `revolving` exige además min_payment_pct/min_payment_eur) y el principal: explícito o derive_principal_from_plan=true. DERIVARLO es valor actual de las cuotas al TIN (Σ sin TIN); si el usuario sabe su capital pendiente, pásalo. Mueve la proyección.",
+        description = "Da de alta un pasivo (deuda/préstamo): label, `type_tag` libre (dimensión de get_summary.liabilities_by_type_tag), categoría scope liability, categoría de GASTO de la cuota, plan de pago, `repayment_model` (todos menos `fixed_payments` —sin intereses, rechaza apr_percent— exigen apr_percent > 0 y cuota mensual; `revolving`, además min_payment_pct/eur) y el principal: explícito o derive_principal_from_plan=true. DERIVARLO es el valor actual de las cuotas al TIN; si el usuario sabe su capital pendiente, pásalo. Mueve la proyección.",
         annotations(title = "Crear pasivo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_liability(
@@ -4150,7 +4453,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_liability",
-        description = "Edita un pasivo existente («el TIN de mi hipoteca ha bajado al 2,1 %»): label, `type_tag` (cadena vacía lo borra), categorías, TIN (clear_apr_percent lo borra — obligatorio al volver a fixed_payments, que la rechaza), plan de pago, `repayment_model` (ver create_liability; al salir de revolving sus mínimos se anulan solos) y principal explícito o re-derivado del plan. Cambiar el modelo o el TIN con `derive_principal_from_plan` activo RE-DERIVA el principal. Prefiere esto a borrar y recrear: conserva los movimientos vinculados y la categoría de gasto de la cuota. Mueve la proyección.",
+        description = "Edita un pasivo existente («el TIN de mi hipoteca ha bajado al 2,1 %»): label, `type_tag` (cadena vacía lo borra), categorías, TIN (clear_apr_percent lo borra — obligatorio al volver a fixed_payments, que la rechaza), plan de pago, `repayment_model` (ver create_liability; al salir de revolving sus mínimos se anulan solos) y principal explícito o re-derivado del plan. Cambiar el modelo o el TIN con `derive_principal_from_plan` activo RE-DERIVA el principal. Prefiere esto a borrar y recrear: conserva los movimientos vinculados. Mueve la proyección.",
         annotations(title = "Editar pasivo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_liability(
@@ -4742,7 +5045,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_fire_settings",
-        description = "Cambia la configuración FIRE de la instalación — SOLO el owner: SWR, inflación asumida, fuente del ahorro (A budget (plan) | B transactions_avg (ingreso y gasto reales) | C budget_income_real_expense (ingreso del plan + gasto real)), modo del objetivo, importe manual, impuestos y tramos, y las ventanas del promedio real (el modo B usa las de ingreso y gasto, el C solo las de gasto, el A ninguna). Merge campo a campo: los campos omitidos NUNCA se resetean. Es el mayor radio del catálogo, mueve la proyección entera — considera enseñar antes el impacto con simulate_projection.",
+        description = "Supuestos FIRE COMPARTIDOS del hogar — SOLO el owner: inflación asumida, impuestos y tramos, fuente del ahorro (A budget (plan) | B transactions_avg (ingreso y gasto reales) | C budget_income_real_expense (ingreso del plan + gasto real)) y las ventanas del promedio real (B usa ingreso y gasto, C solo gasto, A ninguna). El SWR, el modo del objetivo, el importe manual y la edad límite son PERSONALES desde 5.0.0: van en update_retirement_profile. Merge campo a campo, lo omitido no se resetea. Mueve la proyección de TODOS los miembros.",
         annotations(title = "Configurar FIRE", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_fire_settings(
@@ -4753,20 +5056,10 @@ impl FutureFinMcp {
         let id = identity(&ctx)?;
         let build = || -> Result<crate::handlers::installation::FireSettingsPatch, ApiError> {
             let mut patch = crate::handlers::installation::FireSettingsPatch::default();
-            patch.swr_pct = p
-                .swr_pct
-                .as_deref()
-                .map(|v| parse_decimal_param("swr_pct", v))
-                .transpose()?;
             patch.annual_inflation_assumption_percent = p
                 .annual_inflation_assumption_percent
                 .as_deref()
                 .map(|v| parse_decimal_param("annual_inflation_assumption_percent", v))
-                .transpose()?;
-            patch.fire_number_manual_amount = p
-                .fire_number_manual_amount
-                .as_deref()
-                .map(|v| parse_decimal_param("fire_number_manual_amount", v))
                 .transpose()?;
             patch.taxes_enabled = p.taxes_enabled;
             // Enums y tramos: por los helpers compartidos con `simulate_projection`. La lista de
@@ -4782,15 +5075,12 @@ impl FutureFinMcp {
                 .as_deref()
                 .map(|v| parse_decimal_param("taxable_gain_ratio", v))
                 .transpose()?;
-            patch.horizon_lifespan_age = p.horizon_lifespan_age;
             patch.income_avg_window_mode =
                 parse_enum_param(&p.income_avg_window_mode)
                     .map_err(|e| ApiError::BadRequest(format!("income_avg_window_mode: {e}")))?;
             patch.expense_avg_window_mode =
                 parse_enum_param(&p.expense_avg_window_mode)
                     .map_err(|e| ApiError::BadRequest(format!("expense_avg_window_mode: {e}")))?;
-            patch.fire_number_mode = parse_enum_param(&p.fire_number_mode)
-                .map_err(|e| ApiError::BadRequest(format!("fire_number_mode: {e}")))?;
             patch.tax_brackets = parse_tax_brackets(&p.tax_brackets)?;
             Ok(patch)
         };
@@ -4840,6 +5130,92 @@ impl FutureFinMcp {
                 });
                 Ok((
                     preview_payload("update_fire_settings", &effects, None),
+                    vec![],
+                ))
+            }
+        })
+        .await
+    }
+
+    #[tool(
+        name = "get_retirement_profile",
+        description = "Plan de jubilación del usuario del token —estrategia, edad objetivo, SWR, modo del objetivo FIRE, regla de retirada, pensión con fecha, media jornada, colchón, umbral— más su fecha de nacimiento: sin ella las estrategias por edad no se resuelven. Es PERSONAL y decide SU proyección; lo compartido del hogar está en get_settings.",
+        annotations(title = "Plan de jubilación", read_only_hint = true, open_world_hint = false)
+    )]
+    async fn get_retirement_profile(
+        &self,
+        Parameters(_): Parameters<NoParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        to_tool_result(
+            crate::handlers::retirement_profile::get_retirement_profile_core(
+                &self.state.pool,
+                id.user_id,
+            )
+            .await,
+        )
+    }
+
+    #[tool(
+        name = "update_retirement_profile",
+        description = "Cambia el plan de jubilación del usuario del token (y su fecha de nacimiento). Merge campo a campo: lo omitido NUNCA se resetea, los clear_* borran. Dato PERSONAL: cualquier rol edita el suyo, nadie el de otro. Mueve SU proyección entera — enseña antes el impacto con simulate_projection.",
+        annotations(title = "Configurar jubilación", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_retirement_profile(
+        &self,
+        Parameters(p): Parameters<UpdateRetirementProfileParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let built = (|| -> Result<_, ApiError> { Ok((p.to_patch()?, p.birth_patch()?)) })();
+        let (patch, birth) = match built {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        // `require_mcp_write` POR ROL, no owner-only: el perfil es del usuario del token. Un
+        // viewer que no pueda fijar su propia edad de jubilación no puede ver su propia
+        // proyección, que es exactamente lo que un viewer sí puede hacer.
+        let audit = match require_mcp_write(&self.state.pool, &id, "update_retirement_profile").await
+        {
+            Ok(a) => a,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let user_id = id.user_id;
+        settled(&self.state.pool, audit, async {
+            let apply = p.confirm.unwrap_or(false);
+            let impact_before = if apply {
+                impact_probe(&self.state, id.installation_id, id.user_id).await
+            } else {
+                None
+            };
+            let outcome = crate::handlers::retirement_profile::patch_retirement_profile_core(
+                &self.state,
+                id.user_id,
+                patch,
+                birth,
+                apply,
+            )
+            .await?;
+            if apply {
+                let impact =
+                    impact_since(&self.state, id.installation_id, id.user_id, impact_before).await;
+                // Sin confirm_token, mismo criterio que `update_fire_settings`: el preview
+                // devuelve el before/after ÍNTEGRO, así que deshacerlo es volver a llamar con los
+                // valores de `before` (ver el criterio completo en `two_phase`).
+                Ok((
+                    serde_json::json!({"applied": true, "outcome": outcome, "impact": impact}),
+                    vec![user_id],
+                ))
+            } else {
+                let effects = serde_json::json!({
+                    "entity": outcome,
+                    // A diferencia de `update_fire_settings`, el radio es UNA persona: el perfil
+                    // solo gobierna la proyección de su dueño.
+                    "side_effects": {"scope": "user", "affects_every_member": false},
+                });
+                Ok((
+                    preview_payload("update_retirement_profile", &effects, None),
                     vec![],
                 ))
             }
@@ -4992,7 +5368,8 @@ impl FutureFinMcp {
             // ligado el token, así que si entre el preview y el confirm el activo ganó una regla
             // de reparto la confirmación se rechaza en vez de borrar algo distinto de lo enseñado.
             let side_effects =
-                asset_delete_effects(&self.state.pool, id.installation_id, asset_id).await?;
+                asset_delete_effects(&self.state.pool, id.installation_id, id.user_id, asset_id)
+                    .await?;
             let effects = serde_json::json!({
                 "entity": {"id": asset.id, "name": asset.name, "current_value": asset.current_value.to_string()},
                 // `allocation_rules_deleted` y `allocation_remainder_rules_deleted` son
@@ -5062,7 +5439,7 @@ impl FutureFinMcp {
             // desvinculados y callaba los cientos de euros al mes que dejaban de estar
             // presupuestados — la misma omisión que `delete_asset` tuvo con las reglas de reparto.
             let side_effects =
-                liability_delete_effects(&self.state.pool, id.installation_id, liab_id)
+                liability_delete_effects(&self.state.pool, id.installation_id, id.user_id, liab_id)
                     .await?;
             let effects = serde_json::json!({
                 "entity": {"id": liab.id, "label": liab.label, "principal": liab.principal.to_string()},
@@ -6151,7 +6528,18 @@ impl ServerHandler for FutureFinMcp {
             .with_instructions(
                 "Finanzas del hogar FutureFin: lectura, simulación (simulate_projection, sin persistir) y \
                 escritura. Empieza por get_summary (estado actual) y get_settings (contexto: divisa, \
-                inflación, modo de ahorro, rol del token).\n\nUNIDADES. Los importes son strings decimales \
+                inflación, modo de ahorro, rol del token).\n\nDOS PLANOS DE CONFIGURACIÓN. Lo que \
+                el hogar comparte —divisa, calendario, inflación asumida, impuestos y tramos, fuente \
+                del ahorro y sus ventanas— vive en get_settings / update_fire_settings y lo edita \
+                SOLO el owner. El plan de JUBILACIÓN es de cada persona (get_retirement_profile / \
+                update_retirement_profile): estrategia, edad objetivo, SWR, modo del objetivo FIRE, \
+                edad límite del horizonte, regla de retirada, pensión con fecha, media jornada, \
+                colchón y umbral de éxito. Cualquier rol edita el SUYO y nadie el de otro. Y toda \
+                fila del ledger (activos, pasivos, presupuesto, próximos, reglas) tiene dueño: \
+                editar la de otro miembro es 403 `not_row_owner`, también para el owner.\n\nREINTENTOS. \
+                Si una escritura se corta (timeout, red) y no puedes descartar que llegara, no la \
+                repitas a ciegas: las tools que admiten `idempotency_key` la usan para \
+                deduplicar.\n\nUNIDADES. Los importes son strings decimales \
                 en la divisa base de la instalación (EUR salvo que get_settings diga otra); las series de \
                 charts (projection/history) usan números. REGLA DE ORO DE LAS CIFRAS: un campo que acaba en \
                 `_pct` o `_percent` es un PORCENTAJE (3.5 = 3,5 %); uno que acaba en `_rate` o `_ratio` es \

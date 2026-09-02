@@ -94,6 +94,9 @@ pub struct RecentChange {
     pub change: &'static str,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Dueño de la fila. Desde 5.0.0 las OCHO tablas del feed lo tienen `NOT NULL` (D14), así
+    /// que el campo viaja siempre; el `Option` se conserva por compatibilidad del contrato ya
+    /// publicado. Es además quien puede editarla (D21).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, format = "uuid")]
     pub owner_user_id: Option<Uuid>,

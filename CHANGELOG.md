@@ -4,6 +4,82 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### La jubilación deja de ser del hogar y pasa a ser de cada persona (5.0.0, WP4)
+
+Hasta 4.15.x la jubilación era **un ajuste de la instalación**: un solo SWR, un solo modo de objetivo
+y una sola edad límite para todo el mundo. Con proyecciones independientes por miembro (issue #207,
+decisión D9) eso deja de tener sentido — dos personas del mismo hogar pueden querer jubilarse a
+edades distintas, con reglas de retirada distintas y con pensiones que empiezan en años distintos.
+
+- **Perfil de jubilación por usuario** (`GET|PATCH /v1/auth/me/retirement-profile`, columna
+  `users.retirement_profile jsonb`). Además de los cuatro ejes que se mudan desde `fire_settings`,
+  el perfil declara la **estrategia** (`asap` · `retire_at_age` · `coast` · `partial` ·
+  `pension_bridge`), la edad objetivo, la base del objetivo y su descuento, la **regla de retirada**
+  (`fixed_real` · `percent_of_balance` · `hybrid` · `guardrails`, con modo `ceiling` o
+  `rule_is_spend`), la **pensión con fecha**, la fase de **media jornada**, el colchón de caja y el
+  umbral de éxito de Monte Carlo. **En 5.0.0-WP4 el motor todavía no los simula**: se guardan,
+  se validan y se publican; las fases y las reglas entran en los WP siguientes. Lo que YA cambia de
+  sitio son los cuatro ejes movidos, y por eso el upgrade es lo primero que se prueba
+  (`retirement_profile.rs::an_installation_upgraded_from_4_15_keeps_its_fire_target`).
+  El PATCH acepta también `birth_date` — misma columna que `PATCH /v1/auth/me` —, porque es lo que
+  convierte cada edad del perfil en un mes de la serie y pedirla en otra pantalla es garantizar que
+  la mitad de los perfiles por edad se queden sin ella.
+- **Cualquier rol edita el SUYO, y nadie el de otro.** Es la única escritura del API que un `viewer`
+  puede hacer, y no es una excepción arbitraria: sin poder fijar su edad de jubilación no podría ver
+  su propia proyección, que es exactamente lo que un viewer sí puede hacer.
+- **Volatilidad anual por activo** (`assets.annual_volatility_percent`, `[0, 100]`, `null` o `0` =
+  determinista). Es la desviación típica ANUAL de los retornos, no un rango ni un peor caso, y **el
+  camino determinista del motor la ignora**: declararla no mueve ni un euro de la proyección de hoy.
+  Existe ya para que quien la configure no tenga que volver cuando llegue el Monte Carlo.
+- **Toda mutación del ledger exige ser el dueño de la fila** (D21): activos, pasivos, presupuesto,
+  Próximos y reglas de asignación. Editar o borrar la fila de otro miembro devuelve **403
+  `not_row_owner`**, por HTTP y por MCP, y **el rol `owner` tampoco salta la regla** — ser dueño de
+  la instalación no es ser dueño de la fila. La LECTURA no cambia: `?view=household` sigue enseñando
+  el hogar entero (`view` nunca fue una frontera de autorización y sigue sin serlo). El preview de
+  `delete_asset` / `delete_liability` falla igual de pronto: enseñaba el contenido de la fila ajena
+  **y entregaba el `confirm_token` para ejecutarla**.
+- **MCP**: dos tools nuevas, `get_retirement_profile` y `update_retirement_profile` (preview/confirm,
+  merge campo a campo, `clear_*` para borrar). `update_fire_settings` pierde cuatro campos;
+  `create_asset` / `update_asset` / `list_assets` ganan `annual_volatility_percent`. El catálogo pasa
+  de 68 a **70 tools** (29 de lectura, 41 de escritura) sin subir el presupuesto de descripciones:
+  se rebalanceó moviendo prosa duplicada al `instructions` del servidor.
+
+### Breaking
+
+- **`installation.fire_settings` pierde cuatro claves**: `fire_number_mode`,
+  `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age`. `GET /v1/installation` ya no las
+  devuelve y `PATCH /v1/installation` ya no las acepta (se ignoran en silencio, como cualquier clave
+  desconocida del JSONB); viven en `GET|PATCH /v1/auth/me/retirement-profile`. La tool MCP
+  `update_fire_settings` las rechaza con `unknown field` (tiene `deny_unknown_fields`) y
+  `simulate_projection.fire_settings_overrides` pierde los dos del modo del objetivo — el eje
+  `swr_pct` de primer nivel de esa tool sigue funcionando y se aplica sobre un clon del perfil.
+  **La migración `20260902200000_users_retirement_profile.sql` copia los cuatro valores de la
+  instalación al perfil de cada usuario antes de retirarlos**, así que el upgrade no mueve un número:
+  cada miembro arranca en la estrategia `asap` —la conducta de 4.15.x— con exactamente lo que había.
+- **403 `not_row_owner` en toda mutación del ledger** (ver arriba). Un cliente que editara filas de
+  otro miembro deja de poder hacerlo. Y **`POST /v1/allocation-rules/reorder` deja de aceptar la
+  vista del hogar**: devuelve 400 `household_read_only` y hay que llamarlo con `?view=mine`. Era la
+  única mutación que tocaba filas ajenas por diseño — renumeraba de una vez las cascadas de todos
+  los miembros.
+- **Migración DATA-CHANGING (firmada por el owner, D14)**:
+  `20260902200100_ledger_owner_not_null.sql` asigna las filas `owner_user_id IS NULL` de las cinco
+  tablas del ledger al **owner más antiguo de la instalación** y deja la columna `NOT NULL` (la FK
+  pasa de `ON DELETE SET NULL` a `ON DELETE RESTRICT`). Son filas legadas de antes de 2026-02-16 o
+  de imports de backups muy viejos; ningún camino vivo de la API escribía `NULL` desde entonces.
+  **Consecuencia visible**: esas filas compartidas aparecen ahora en el `mine` de ese miembro,
+  entran en su histórico y solo él puede editarlas. En `allocation_rules` —la única tabla con un
+  invariante entre filas— un sumidero compartido redundante se borra y el resto se recoloca detrás
+  de las reglas del owner conservando su orden relativo.
+- **`.ffbackup` sube a `schema_version` 13**: el fichero incorpora el perfil de jubilación del
+  usuario y la volatilidad por activo. Los ficheros v1..v12 **siguen importando** (cadena completa,
+  regla §5 de change-control) y, al importar uno ≤ 12, los cuatro ejes que aquel `fire_settings`
+  llevaba dentro **siembran** el perfil — pero **solo si quien importa no tiene ya uno**: restaurar
+  un backup viejo no puede pisar la estrategia que esa persona configuró después de actualizar. Un
+  servidor 4.x **no** puede leer un fichero v13 (se niega con `backup_schema_version_unsupported`, no
+  lo importa a medias).
+
 ## [4.15.0] - 2026-09-02
 
 ### Ahorro es ingresos − gastos, las devoluciones netean en su categoría y todo movimiento tiene categoría

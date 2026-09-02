@@ -211,8 +211,13 @@ async fn a_new_rule_is_inserted_before_the_sink() {
 // El reorder en household: la guardia que no miraba nada
 // ---------------------------------------------------------------------------
 
+/// **5.0.0**: el `reorder` ya no acepta la vista household (D21 — renumeraba las cascadas de
+/// TODOS los miembros de una vez), así que la guardia se comprueba en `?view=mine`, que es donde
+/// vive ahora. La propiedad no cambia: un orden que deja el sumidero fuera del último puesto se
+/// rechaza con `sink_must_be_last` y **la transacción entera se revierte**. Lo que este test
+/// añade ahora es la puerta nueva: `household` se rechaza antes, con `household_read_only`.
 #[tokio::test]
-async fn reorder_in_household_view_still_refuses_to_unseat_the_sink() {
+async fn reorder_refuses_to_unseat_the_sink_and_is_per_member() {
     let app = TestApp::spawn().await;
     let (owner, _a1, a2) = setup(&app).await;
 
@@ -229,11 +234,21 @@ async fn reorder_in_household_view_still_refuses_to_unseat_the_sink() {
         .unwrap()
         .to_string();
 
-    // Orden ilegal: el sumidero delante. Sin `?view=mine`, o sea la vista household — la que hasta
-    // 4.4.0 no comprobaba nada.
-    let bad = app
+    // La vista household ya no reordena: se rechaza antes de mirar el orden.
+    let household = app
         .post_json_with_cookie(
             "/v1/allocation-rules/reorder",
+            serde_json::json!({"ids": [normal_id, sink_id]}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(household.status, http::StatusCode::BAD_REQUEST, "{household:?}");
+    assert_eq!(household.json()["code"], "household_read_only");
+
+    // Orden ilegal en `mine`: el sumidero delante.
+    let bad = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules/reorder?view=mine",
             serde_json::json!({"ids": [sink_id, normal_id]}),
             &owner.cookie,
         )
@@ -248,7 +263,7 @@ async fn reorder_in_household_view_still_refuses_to_unseat_the_sink() {
     // El orden legal sí pasa.
     let ok = app
         .post_json_with_cookie(
-            "/v1/allocation-rules/reorder",
+            "/v1/allocation-rules/reorder?view=mine",
             serde_json::json!({"ids": [normal_id, sink_id]}),
             &owner.cookie,
         )

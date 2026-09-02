@@ -1762,3 +1762,157 @@ async fn importing_a_pre_seed_backup_seeds_the_sink_with_the_owner_criteria() {
     let rules2 = app.get_with_cookie("/v1/allocation-rules", &owner.cookie).await.json();
     assert_eq!(rules2.as_array().unwrap().len(), 1, "{rules2:?}");
 }
+
+// ---------------------------------------------------------------------------
+// schema_version 13 (5.0.0) — perfil de jubilación + volatilidad por activo
+// ---------------------------------------------------------------------------
+
+/// Round-trip v13: lo que 5.0.0 añade al fichero **vuelve** tal cual.
+///
+/// Los dos campos nuevos son de naturaleza distinta y por eso se prueban juntos: la volatilidad
+/// es una columna del activo (viaja en `assets[]`) y el perfil de jubilación es una fila de
+/// `users` (viaja en la raíz del payload). Un restore que perdiera cualquiera de los dos dejaría
+/// la proyección de esa persona describiendo otro plan sin decirlo.
+#[tokio::test]
+async fn v13_roundtrips_the_retirement_profile_and_the_asset_volatility() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Indexados").await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({
+                "category_id": cat,
+                "name": "MSCI World",
+                "current_value": "10000",
+                "expected_annual_return_percent": "7",
+                "annual_volatility_percent": "17.5"
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({
+                "strategy": "pension_bridge",
+                "swr_pct": "3.1",
+                "pension": {"monthly_amount_today": "1100", "starts_at_age": 66},
+                "cash_buffer_months": 18
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    let file = export_ffbackup_b64(&app, &owner.cookie).await;
+
+    // El manifiesto declara la versión nueva.
+    let preview = import_preview(&app, &owner.cookie, &file).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(preview.json()["schema_version"], 13, "{preview:?}");
+
+    // Se borra todo y se restaura.
+    let applied = import_apply(&app, &owner.cookie, &file).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "{applied:?}");
+
+    let assets = app.get_with_cookie("/v1/assets", &owner.cookie).await;
+    let a = assets.json();
+    let row = a
+        .as_array()
+        .expect("assets array")
+        .iter()
+        .find(|x| x["name"] == "MSCI World")
+        .expect("el activo vuelve");
+    assert_eq!(row["annual_volatility_percent"], "17.5000", "{row}");
+
+    let profile = app
+        .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(profile["profile"]["strategy"], "pension_bridge", "{profile}");
+    assert_eq!(profile["profile"]["swr_pct"], "3.1", "{profile}");
+    assert_eq!(profile["profile"]["pension"]["starts_at_age"], 66, "{profile}");
+    assert_eq!(profile["profile"]["cash_buffer_months"], 18, "{profile}");
+}
+
+/// Importar un fichero **v12** (escrito por 4.15.x) SIEMBRA el perfil con los cuatro ejes que
+/// aquel `fire_settings` llevaba dentro — pero solo si quien importa no tiene perfil propio.
+///
+/// Las dos mitades importan. Sin la siembra, restaurar un backup de 4.15.x devolvería a esa
+/// persona al SWR por defecto y su objetivo de jubilación cambiaría de tamaño sin ningún aviso.
+/// Sin la condición, restaurar un backup viejo pisaría la estrategia que configuró DESPUÉS de
+/// actualizar — que es justo lo que un restore no debe hacer con un dato que el fichero no
+/// conoce.
+#[tokio::test]
+async fn importing_a_v12_file_seeds_the_profile_only_when_there_is_none() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // Un v12 mínimo: el `fire_settings` de entonces, con los cuatro ejes DENTRO.
+    let payload = serde_json::json!({
+        "user": {"username": "alice", "birth_date": "1990-01-01"},
+        "categories_used": [],
+        "assets": [],
+        "allocation_rules": [],
+        "liabilities": [],
+        "budget_entries": [],
+        "planning_flows": [],
+        "ui_preferences": {},
+        "installation_snapshot_informative": {
+            "base_currency": "EUR",
+            "calendar_tz": "UTC",
+            "show_age_mode": "dates",
+            "fire_settings": {
+                "fire_number_mode": "current_income",
+                "fire_number_manual_amount": null,
+                "swr_pct": "2.75",
+                "horizon_lifespan_age": 97,
+                "taxes_enabled": true,
+                "tax_brackets": [{"up_to": null, "pct": "19"}],
+                "savings_source": "budget"
+            }
+        }
+    });
+    let file = craft_ffbackup_b64(12, &payload, owner.user_id);
+
+    // 1) Usuario SIN perfil (columna NULL): se siembra con los cuatro ejes del fichero.
+    let applied = import_apply(&app, &owner.cookie, &file).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "{applied:?}");
+    let profile = app
+        .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(profile["profile"]["swr_pct"], "2.75", "{profile}");
+    assert_eq!(profile["profile"]["horizon_lifespan_age"], 97, "{profile}");
+    assert_eq!(
+        profile["profile"]["fire_number_mode"], "current_income",
+        "{profile}"
+    );
+    // La estrategia no viene del fichero: es la de 4.15.x, que es `asap`.
+    assert_eq!(profile["profile"]["strategy"], "asap", "{profile}");
+
+    // 2) El usuario configura SU plan después de actualizar…
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({"strategy": "retire_at_age", "target_retirement_age": 55, "swr_pct": "3.5"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    // …y volver a importar el MISMO fichero viejo NO se lo pisa.
+    let applied = import_apply(&app, &owner.cookie, &file).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "{applied:?}");
+    let profile = app
+        .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(profile["profile"]["strategy"], "retire_at_age", "{profile}");
+    assert_eq!(profile["profile"]["target_retirement_age"], 55, "{profile}");
+    assert_eq!(profile["profile"]["swr_pct"], "3.5", "{profile}");
+}

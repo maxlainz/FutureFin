@@ -159,6 +159,40 @@ cualquier cliente generado a partir de ella nacía sin enviar credencial ninguna
 | GET | `/v1/auth/ha/callback` | **4.3.1**. Vuelta del navegador desde HA (`?code=&state=` o `?error=`). Éxito → **302** a la app + cookie `ff_session`; fallo → **302** a `{prefijo}/?ha_error=<código>`. **Nunca** devuelve un cuerpo JSON de error. |
 | GET | `/v1/auth/me` | Current user info |
 | PATCH | `/v1/auth/me` | Update `birth_date` |
+| GET | `/v1/auth/me/retirement-profile` | **5.0.0**. Perfil de jubilación **del usuario de la sesión**, ya resuelto (defaults + clamps), más su `birth_date`: `{profile: {...}, birth_date}`. |
+| PATCH | `/v1/auth/me/retirement-profile` | **5.0.0**. Merge campo a campo, **tri-estado** (omitir = no cambiar; `null` = borrar). Acepta también `birth_date` (misma columna que `PATCH /v1/auth/me`). **Cualquier rol puede editar el SUYO**, `viewer` incluido. Invalida la proyección (el perfil es input del motor). |
+
+#### Perfil de jubilación por usuario (`/v1/auth/me/retirement-profile`) — **5.0.0**, D13
+
+Hasta 4.15.x la jubilación era un ajuste del HOGAR. Con proyecciones independientes por miembro
+(D9) pasa a ser de cada persona: columna `users.retirement_profile jsonb` (`NULL` = defaults),
+handler `handlers/retirement_profile.rs`, mismo patrón que `FireSettings` pieza por pieza
+(`#[serde(default)]` a nivel de struct, `default_*`, `resolve_*` con clamps en LECTURA,
+`validate_*` con códigos estables, patchset campo a campo con `apply_to`/`is_empty`).
+
+Forma (todas las claves opcionales en el wire):
+
+| Campo | Valores / cota | Nota |
+|---|---|---|
+| `strategy` | `asap` (default) · `retire_at_age` · `coast` · `partial` · `pension_bridge` | `retire_at_age`/`coast` exigen `target_retirement_age` (`target_retirement_age_required`); `pension_bridge` exige `pension` (`pension_required_for_bridge`) |
+| `target_retirement_age` | `[18, horizon_lifespan_age]` | `retirement_age_out_of_range` |
+| `fire_number_mode`, `fire_number_manual_amount`, `swr_pct`, `horizon_lifespan_age` | **MOVIDOS desde `fire_settings`** — mismos tipos, defaults y cotas | mismos códigos de error que tenían allí |
+| `target_basis` | `perpetuity` · `bridge_to_pension` | **Se DERIVA si no se fija**: `bridge_to_pension` con `pension` declarada, `perpetuity` sin ella; `pension_bridge` lo fuerza. La respuesta lo publica siempre resuelto |
+| `bridge_discount_basis` | `expected_return` (default) · `swr` · `none` | |
+| `withdrawal_rule` | `{kind, pct?, start_pct?, end_pct?, band_pct?, adjust_pct?, spend_mode}` | Se sustituye ENTERA. `percent_of_balance`→`pct`; `hybrid`→`start_pct` > `end_pct`; `guardrails`→`pct`+`band_pct`+`adjust_pct`. `pct` en `(0,20]`, banda/ajuste en `(0,50]` |
+| `pension` | `{monthly_amount_today > 0, starts_at_age ∈ [50, horizon], indexed=true, fraction_while_partial ∈ [0,1]}` | |
+| `partial_retirement` | `{starts_at_age ∈ [18, horizon], income_monthly_today ≥ 0, expense_basis}` | Debe empezar ANTES de `target_retirement_age` (`partial_not_before_retirement`) |
+| `cash_buffer_months` | `[0, 60]` | Solo actúa en Monte Carlo |
+| `success_threshold_pct` | `[50, 99]`, default 95 | |
+
+**El merge va sobre lo ALMACENADO, no sobre lo resuelto**, y no es un detalle de implementación:
+`target_basis` se deriva, así que mergear sobre el resuelto persistiría el `perpetuity` derivado de
+un perfil sin pensión como si el usuario lo hubiera elegido — y al declarar después su pensión el
+objetivo se quedaría en perpetuidad sin ningún aviso.
+
+**En WP4 el motor todavía no simula las fases ni las reglas**: se guardan, se validan y se publican.
+Lo que ya está vivo son los cuatro ejes movidos, que la proyección lee del perfil del solicitante
+(semántica de UN miembro; WP5 corre una simulación por miembro).
 
 - **Las cuentas SSO no tienen contraseña** (`users.password_hash` NULL desde `20260827120000_users_trusted_header_identity.sql`). `POST /v1/auth/login`, `POST /v1/auth/password` y `POST /v1/backup/user-export` las rechazan con **401 `sso_account_no_password`** — un 401 hablado a propósito: sin él, la persona se queda probando una contraseña que nunca existió. El login sigue pagando el Argon2id de descarte antes de responder, así que el reloj no delata nada.
 
@@ -409,7 +443,18 @@ sumideros que ya estaban apagados (con el mismo espejo en el import de backups).
 
 **Objetivo resuelto**: `fetch_asset_resolved_targets` dejó su propio `match cap_kind` y llama a `allocation_rules::resolve_cap_ceiling_eur`, la misma función que el techo del ETA de `/v1/allocation-rules/goals` — el objetivo de la pantalla de activos y el de la ETA son el mismo número por construcción.
 
-Each `AssetResponse` row carries `owner_user_id: Option<Uuid>` (`null`/absent = shared row). It is **display data only** (used by the frontend snapshot-prompt trigger to know which assets are "mine" in household view), never a security boundary — scoping still happens via `?view=mine`. Serialized as a uuid string, omitted when `None` (`skip_serializing_if`).
+**Volatilidad anual (5.0.0)** — `annual_volatility_percent` (Decimal-as-string, `[0, 100]`, error
+`volatility_out_of_range`) en `AssetResponse`, `POST` y `PATCH`. Es la **desviación típica ANUAL**
+de los retornos (`"17"` = 17 %/año), no un rango ni un peor caso. `null` o `0` = activo
+determinista. **El camino Decimal del motor la ignora siempre** (D12): declararla no mueve ni un
+euro de la proyección de hoy — solo la leerá el Monte Carlo. El `CHECK` de columna es más laxo
+(`>= 0`) a propósito, para poder importar backups viejos.
+
+Each `AssetResponse` row carries `owner_user_id` (serializado como uuid string). Desde **5.0.0** la
+columna es `NOT NULL` (D14), así que viaja siempre; el `Option` del tipo se conserva por
+compatibilidad del contrato publicado. Es dato de display (el trigger del modal de snapshot) **y**,
+desde D21, quien puede editar la fila: una mutación sobre un activo ajeno es 403 `not_row_owner`.
+La LECTURA sigue siendo del hogar — `?view` nunca fue una frontera de autorización.
 
 ### Allocation rules (`/v1/allocation-rules/`)
 Cascade rules that route the monthly surplus (`income − expense − debt_service`) into assets, in priority order. Accepts `?view=mine` to scope by `owner_user_id`.
@@ -940,6 +985,37 @@ distinguir «mine coincide con el hogar» de «el parámetro se ignoró», y en 
 ésa es exactamente la pregunta que decide si la cifra que estás citando es la del hogar o la tuya.
 Nada de esto es una frontera de autorización: sigue siendo un filtro, como dice el párrafo de
 arriba.
+
+## Dueño de la fila en las mutaciones (D21) — **5.0.0**
+
+`?view` es un filtro de LECTURA y sigue siéndolo (D2). Lo que cambia en 5.0.0 es la ESCRITURA: con
+proyecciones independientes por miembro (D9) cada fila del ledger pertenece a la simulación de UNA
+persona, así que editar la de otro no es «colaborar», es mover su plan sin que se entere.
+
+**Las cinco tablas** —`assets`, `liabilities`, `budget_entries`, `planning_flows`,
+`allocation_rules`— exigen en toda mutación (PATCH, DELETE, reorder) que
+`owner_user_id = usuario de la sesión`:
+
+- fila de otro miembro → **403 `not_row_owner`** (`ApiError::ForbiddenWith`, añadido para esto: el
+  `Forbidden` pelado no lleva código granular y el cliente no podría distinguirlo de un
+  permiso insuficiente);
+- fila inexistente → **404**, exactamente como antes;
+- **el rol `owner` NO salta la regla**: ser dueño de la instalación no es ser dueño de la fila;
+- **el alta atribuye siempre al usuario de la sesión**: no hay forma de crear a nombre de otro.
+
+Punto único: `person_view::require_row_owner` — los cinco módulos la llaman en vez de escribir el
+`if`. Se aplica también a los **previews** de `delete_asset` y `delete_liability`
+(`*_delete_effects`), que enseñan el contenido de la fila **y emiten el `confirm_token`** que la
+ejecuta; y a `allocation_rule_delete_effects`.
+
+**`POST /v1/allocation-rules/reorder` solo opera en `?view=mine`**: en `household` devuelve **400
+`household_read_only`**. Era la única mutación que tocaba filas ajenas por diseño (renumeraba de
+una vez las cascadas de todos los miembros). Es 400 y no 403 porque no falta un permiso: es una
+vista que no admite esta operación.
+
+Como el MCP reusa las mismas cores, las tools heredan la regla sin código propio (regresión:
+`mcp_write.rs::mcp_writes_cannot_touch_another_members_rows`). Tests HTTP:
+`apps/api/tests/ledger_ownership.rs`.
 
 ## Error mapping
 

@@ -114,11 +114,20 @@ async fn portfolio_depletion_month_is_published_and_exact() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    // 5.0.0 (D13): el modo del objetivo, el importe manual y el SWR son del PERFIL del usuario;
+    // los impuestos siguen siendo del hogar. Dos PATCHes, los mismos cuatro números.
     let r = app
         .patch_json_with_cookie(
             "/v1/installation",
-            json!({"fire_settings": {"fire_number_mode": "manual", "fire_number_manual_amount": "8000",
-                    "taxes_enabled": false, "swr_pct": "4"}}),
+            json!({"fire_settings": {"taxes_enabled": false}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "manual", "fire_number_manual_amount": "8000", "swr_pct": "4"}),
             &owner.cookie,
         )
         .await;
@@ -229,8 +238,8 @@ async fn fire_target_absent_reason_reaches_http_with_swr_zero() {
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
     let r = app
         .patch_json_with_cookie(
-            "/v1/installation",
-            json!({"fire_settings": {"swr_pct": "0"}}),
+            "/v1/auth/me/retirement-profile",
+            json!({"swr_pct": "0"}),
             &owner.cookie,
         )
         .await;
@@ -256,13 +265,14 @@ async fn fire_target_absent_reason_covers_the_other_two_causes() {
     let cat_i = app.create_category(&owner, "income", "Pension").await;
     let cat_e = app.create_category(&owner, "expense", "Vida").await;
 
-    // (a) `manual_amount_missing` NO tiene camino vivo por la API: validate_fire_settings
-    // rechaza «manual sin importe» EN LA ESCRITURA (fire_manual_amount_required) — el literal es
-    // la guardia defensiva del lado de cálculo. Se pinea el rechazo en la puerta:
+    // (a) `manual_amount_missing` NO tiene camino vivo por la API:
+    // `validate_retirement_profile` rechaza «manual sin importe» EN LA ESCRITURA
+    // (fire_manual_amount_required) — el literal es la guardia defensiva del lado de cálculo. Se
+    // pinea el rechazo en la puerta, que desde 5.0.0 es la del perfil.
     let r = app
         .patch_json_with_cookie(
-            "/v1/installation",
-            json!({"fire_settings": {"fire_number_mode": "manual"}}),
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "manual"}),
             &owner.cookie,
         )
         .await;
@@ -281,8 +291,8 @@ async fn fire_target_absent_reason_covers_the_other_two_causes() {
     }
     let r = app
         .patch_json_with_cookie(
-            "/v1/installation",
-            json!({"fire_settings": {"fire_number_mode": "annual_expense"}}),
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "annual_expense"}),
             &owner.cookie,
         )
         .await;
@@ -294,8 +304,15 @@ async fn fire_target_absent_reason_covers_the_other_two_causes() {
     let r = app
         .patch_json_with_cookie(
             "/v1/installation",
-            json!({"fire_settings": {"fire_number_mode": "manual", "fire_number_manual_amount": "500000",
-                    "taxes_enabled": false, "swr_pct": "3.5"}}),
+            json!({"fire_settings": {"taxes_enabled": false}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "manual", "fire_number_manual_amount": "500000", "swr_pct": "3.5"}),
             &owner.cookie,
         )
         .await;

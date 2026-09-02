@@ -158,7 +158,7 @@ pub(crate) fn validate_username(username: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn parse_me_birth_patch(v: &Value) -> Result<Option<NaiveDate>, ApiError> {
+pub(crate) fn parse_me_birth_patch(v: &Value) -> Result<Option<NaiveDate>, ApiError> {
     match v {
         Value::Null => Ok(None),
         Value::String(s) => NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
@@ -170,7 +170,7 @@ fn parse_me_birth_patch(v: &Value) -> Result<Option<NaiveDate>, ApiError> {
     }
 }
 
-fn validate_birth_date(d: NaiveDate) -> Result<(), ApiError> {
+pub(crate) fn validate_birth_date(d: NaiveDate) -> Result<(), ApiError> {
     let today = Utc::now().date_naive();
     if d > today {
         return Err(ApiError::BadRequest(

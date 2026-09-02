@@ -80,8 +80,17 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
     let r = app
         .patch_json_with_cookie(
             "/v1/installation",
-            json!({"fire_settings": {"fire_number_mode": "annual_expense", "taxes_enabled": true,
-                    "swr_pct": "3.5"}}),
+            json!({"fire_settings": {"taxes_enabled": true}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    // 5.0.0 (D13): modo del objetivo y SWR son del perfil del usuario. Se escriben explícitos
+    // aunque coincidan con los defaults: un pin no se apoya en un default.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "annual_expense", "swr_pct": "3.5"}),
             &owner.cookie,
         )
         .await;
@@ -168,8 +177,17 @@ async fn pin_escenario_b_inflacion() {
         .patch_json_with_cookie(
             "/v1/installation",
             json!({"annual_inflation_assumption_percent": "2.5",
-                   "fire_settings": {"fire_number_mode": "annual_expense", "taxes_enabled": false,
-                    "swr_pct": "4"}}),
+                   "fire_settings": {"taxes_enabled": false}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    // 5.0.0 (D13): el modo del objetivo y el SWR son del PERFIL del usuario, no del hogar. El
+    // pin no cambia de números — cambia de dónde se escriben los mismos dos ejes.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "annual_expense", "swr_pct": "4"}),
             &owner.cookie,
         )
         .await;

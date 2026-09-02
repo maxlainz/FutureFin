@@ -2,7 +2,7 @@ use crate::error::ApiError;
 use crate::handlers::budget::{budget_line_removed_with_liability, BudgetLineRemoved};
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::membership::role_can_write;
-use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
+use crate::handlers::person_view::{require_row_owner, LedgerView, LedgerViewQuery};
 use crate::handlers::projection::{
     liability_monthly_payment, refresh_projection_after_mutation,
 };
@@ -285,6 +285,8 @@ struct LiabilityRow {
     repayment_model: String,
     min_payment_pct: Option<Decimal>,
     min_payment_eur: Option<Decimal>,
+    /// `NOT NULL` desde la migración 5.0.0 (D14). Lo lee la puerta de D21 del PATCH.
+    owner_user_id: Uuid,
 }
 
 fn normalize_label(raw: &str) -> Result<String, ApiError> {
@@ -746,7 +748,8 @@ pub(crate) async fn list_liabilities_core(
     let sql = format!(
         r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
-                  sort_index, principal_derived_from_plan, repayment_model, min_payment_pct, min_payment_eur
+                  sort_index, principal_derived_from_plan, repayment_model, min_payment_pct,
+                  min_payment_eur, owner_user_id
            FROM liabilities
            WHERE {scope}
              AND (payment_end_date IS NULL OR payment_end_date >= ${today_ph} OR principal > 0)
@@ -895,7 +898,8 @@ pub(crate) async fn create_liability_core(
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
            RETURNING id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
-                     sort_index, principal_derived_from_plan, repayment_model, min_payment_pct, min_payment_eur"#,
+                     sort_index, principal_derived_from_plan, repayment_model, min_payment_pct,
+                     min_payment_eur, owner_user_id"#,
     )
     .bind(iid)
     .bind(body.category_id)
@@ -955,7 +959,9 @@ pub async fn patch_liability(
 
 /// Core sin HTTP: lo comparten el handler PATCH y la tool MCP `update_liability`. Merge campo a
 /// campo sobre la fila actual; si `derive_principal_from_plan` queda activo, el principal se
-/// rederiva del plan de pago. Invalidación FULL dentro. Sin owner-check (contrato del ledger).
+/// rederiva del plan de pago. Invalidación FULL dentro.
+///
+/// **D21 (5.0.0)**: 403 `not_row_owner` si el pasivo es de otro miembro; 404 si no existe.
 pub(crate) async fn patch_liability_core(
     state: &Arc<AppState>,
     iid: Uuid,
@@ -987,7 +993,8 @@ pub(crate) async fn patch_liability_core(
     let row: Option<LiabilityRow> = sqlx::query_as(
         r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
-                  sort_index, principal_derived_from_plan, repayment_model, min_payment_pct, min_payment_eur
+                  sort_index, principal_derived_from_plan, repayment_model, min_payment_pct,
+                  min_payment_eur, owner_user_id
            FROM liabilities
            WHERE id = $1 AND installation_id = $2"#,
     )
@@ -999,6 +1006,7 @@ pub(crate) async fn patch_liability_core(
     let Some(current) = row else {
         return Err(ApiError::NotFound);
     };
+    require_row_owner(current.owner_user_id, user_id)?;
 
     let new_cat = body.category_id.unwrap_or(current.category_id);
     if new_cat != current.category_id {
@@ -1167,10 +1175,11 @@ pub(crate) async fn patch_liability_core(
                min_payment_pct = $16,
                min_payment_eur = $17,
                updated_at = now()
-           WHERE id = $14 AND installation_id = $15
+           WHERE id = $14 AND installation_id = $15 AND owner_user_id = $18
            RETURNING id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                      payment_amount, payment_frequency, payment_end_date, notes,
-                     sort_index, principal_derived_from_plan, repayment_model, min_payment_pct, min_payment_eur"#,
+                     sort_index, principal_derived_from_plan, repayment_model, min_payment_pct,
+                     min_payment_eur, owner_user_id"#,
     )
     .bind(new_cat)
     .bind(new_expense_cat)
@@ -1189,6 +1198,7 @@ pub(crate) async fn patch_liability_core(
     .bind(iid)
     .bind(new_min_pct)
     .bind(new_min_eur)
+    .bind(user_id)
     .fetch_one(&state.pool)
     .await?;
 
@@ -1254,8 +1264,20 @@ pub struct LiabilityDeleteEffects {
 pub async fn liability_delete_effects(
     pool: &sqlx::PgPool,
     iid: Uuid,
+    session_user_id: Uuid,
     id: Uuid,
 ) -> Result<LiabilityDeleteEffects, ApiError> {
+    // D21 también aquí: este preview emite el `confirm_token` de `delete_liability`. Mismo
+    // criterio que `asset_delete_effects` — ver su doc.
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT owner_user_id FROM liabilities WHERE id = $1 AND installation_id = $2"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .fetch_optional(pool)
+    .await?;
+    require_row_owner(owner.ok_or(ApiError::NotFound)?, session_user_id)?;
+
     let transactions_unlinked: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)::bigint FROM transactions
            WHERE installation_id = $1 AND linked_liability_id = $2"#,
@@ -1278,12 +1300,25 @@ pub(crate) async fn delete_liability_core(
     user_id: Uuid,
     id: Uuid,
 ) -> Result<(), ApiError> {
-    let res =
-        sqlx::query(r#"DELETE FROM liabilities WHERE id = $1 AND installation_id = $2"#)
-            .bind(id)
-            .bind(iid)
-            .execute(&state.pool)
-            .await?;
+    // D21: sin SELECT previo no hay forma de distinguir «no existe» (404) de «es de otro
+    // miembro» (403). Una sola columna, por clave primaria.
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT owner_user_id FROM liabilities WHERE id = $1 AND installation_id = $2"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .fetch_optional(&state.pool)
+    .await?;
+    require_row_owner(owner.ok_or(ApiError::NotFound)?, user_id)?;
+
+    let res = sqlx::query(
+        r#"DELETE FROM liabilities WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .bind(user_id)
+    .execute(&state.pool)
+    .await?;
 
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);
@@ -1503,7 +1538,8 @@ pub(crate) async fn liability_schedule_core(
     let sql = format!(
         r#"SELECT id, category_id, expense_category_id, label, type_tag, principal, apr_percent,
                   payment_amount, payment_frequency, payment_end_date, notes,
-                  sort_index, principal_derived_from_plan, repayment_model, min_payment_pct, min_payment_eur
+                  sort_index, principal_derived_from_plan, repayment_model, min_payment_pct,
+                  min_payment_eur, owner_user_id
            FROM liabilities
            WHERE {scope}
              AND id = ${id_ph}
