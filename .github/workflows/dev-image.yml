@@ -1,0 +1,133 @@
+name: Dev image (canal :dev)
+
+# Canal de PRUEBA de una rama (5.0.0, D19): construye la imagen autocontenida desde la rama
+# indicada y la publica SOLO bajo la etiqueta `dev` (o `dev-<sufijo>`). Existe para probar una
+# versión grande en otras plataformas (compose, add-on de Home Assistant, MCP desde claude.ai)
+# ANTES de taguear nada.
+#
+# Lo que este workflow NO hace, a propósito — y por eso es un fichero aparte y no un input más
+# de publish-image.yml (cuyo dispatch lleva `create_tag`):
+#   - jamás mueve `:latest`, `:X`, `:X.Y` ni ninguna etiqueta semver (docker/metadata-action solo
+#     recibe la etiqueta `dev*` de abajo);
+#   - no crea tags de git, ni GitHub Release, ni bump del add-on (una versión existe si y solo
+#     si hay una imagen que la lleva: `dev` NO es una versión);
+#   - no exige CHANGELOG ni CI verde del commit: es una imagen de laboratorio. Quien la instala
+#     sobre datos reales hace antes su `.ffbackup` (docs/backups.md).
+# La etiqueta `dev` sobrevive a cleanup-ghcr.yml (solo poda versiones cuyos tags son todos
+# `sha-*`). Consumo: `FUTUREFIN_TAG=dev docker compose up -d`, o `image: …/futurefin:dev` en un
+# add-on local.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Rama o SHA a construir"
+        required: true
+        default: "release/5.0.0"
+      tag:
+        description: "Etiqueta de imagen: `dev` o `dev-<sufijo>` (nunca semver ni latest)"
+        required: true
+        default: "dev"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push-dev:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validar la etiqueta
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$INPUT_TAG" in
+            dev|dev-[A-Za-z0-9._-]*) ;;
+            *) echo "::error::etiqueta inválida: '$INPUT_TAG' (solo dev o dev-<sufijo>)"; exit 1 ;;
+          esac
+          echo "Etiqueta: ${INPUT_TAG}"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          persist-credentials: false
+      - name: Resolve commit
+        id: sha
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$(grep -m1 '^version' apps/api/Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - name: Resolve image list
+        id: images
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'maxlainz/futurefin' }}
+        run: |
+          set -euo pipefail
+          images="ghcr.io/${{ github.repository_owner }}/futurefin"
+          if [ -n "${DOCKERHUB_USERNAME}" ]; then
+            images="${images}"$'\n'"${DOCKERHUB_IMAGE}"
+            echo "dockerhub=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dockerhub=false" >> "$GITHUB_OUTPUT"
+            echo "Sin DOCKERHUB_USERNAME: publico solo en GHCR."
+          fi
+          {
+            echo "list<<EOF"
+            echo "$images"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.images.outputs.list }}
+          # Solo la etiqueta de laboratorio. Ni semver ni latest: ver la cabecera.
+          tags: |
+            type=raw,value=${{ github.event.inputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.title=FutureFin (dev)
+            org.opencontainers.image.description=Imagen de PRUEBA de FutureFin construida desde ${{ github.event.inputs.ref }} (${{ steps.sha.outputs.sha }}); no es una versión publicada.
+            org.opencontainers.image.revision=${{ steps.sha.outputs.sha }}
+            org.opencontainers.image.version=${{ steps.sha.outputs.version }}-dev
+            org.opencontainers.image.licenses=AGPL-3.0-only
+            org.opencontainers.image.vendor=maxlainz
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Login to Docker Hub
+        if: steps.images.outputs.dockerhub == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: La imagen responde por su etiqueta
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+          DOCKERHUB_ENABLED: ${{ steps.images.outputs.dockerhub }}
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE || 'maxlainz/futurefin' }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect "ghcr.io/${{ github.repository_owner }}/futurefin:${TAG}" > /dev/null
+          if [ "${DOCKERHUB_ENABLED}" = "true" ]; then
+            docker buildx imagetools inspect "${DOCKERHUB_IMAGE}:${TAG}" > /dev/null
+          fi
+          echo "OK: :${TAG} publicada desde ${{ steps.sha.outputs.sha }} (Cargo ${{ steps.sha.outputs.version }}). :latest intacto."
