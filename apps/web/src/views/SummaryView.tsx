@@ -1,6 +1,7 @@
 import type {
   InstallationAccess,
   ProjectionSeriesApi,
+  RetirementProfileApi,
   SummaryResponse,
 } from "../api/types";
 import { EmptyState } from "../components/EmptyState";
@@ -32,6 +33,7 @@ type LedgerPersonScope = "household" | "mine";
 
 export function SummaryView({
   installation,
+  retirementProfile,
   loading,
   hasMembership,
   ledgerPersonScope,
@@ -42,6 +44,8 @@ export function SummaryView({
   onAddFirstBudgetEntry,
 }: {
   installation: InstallationAccess | null;
+  /** Perfil de jubilación del usuario (5.0.0): de aquí sale el SWR de la tarjeta de Autonomía. */
+  retirementProfile: RetirementProfileApi | null;
   loading: boolean;
   hasMembership: boolean;
   ledgerPersonScope: LedgerPersonScope;
@@ -151,7 +155,7 @@ export function SummaryView({
   const showRunwayTile =
     showMetrics && fh && (runwayIsIndefinite || !isAbsentMetric(fh.runway_months));
   const runwayParenthetical = runwayIsIndefinite
-    ? runwaySwrParenthetical(installation?.installation.fire_settings)
+    ? runwaySwrParenthetical(retirementProfile)
     : undefined;
 
   // Rendimiento neto: la cifra grande es la REAL (descontada la inflación) y el paréntesis el

@@ -64,6 +64,8 @@ export function AssetsView({
   setAssetFormLiquid,
   assetFormExpectedReturn,
   setAssetFormExpectedReturn,
+  assetFormVolatility,
+  setAssetFormVolatility,
   assetFormNotes,
   setAssetFormNotes,
   editingAssetId,
@@ -101,6 +103,9 @@ export function AssetsView({
   setAssetFormLiquid: Dispatch<SetStateAction<boolean>>;
   assetFormExpectedReturn: string;
   setAssetFormExpectedReturn: Dispatch<SetStateAction<string>>;
+  /** Volatilidad anual % del activo (5.0.0, §A.2). Vacío = determinista. */
+  assetFormVolatility: string;
+  setAssetFormVolatility: Dispatch<SetStateAction<string>>;
   assetFormNotes: string;
   setAssetFormNotes: Dispatch<SetStateAction<string>>;
   editingAssetId: string | null;
@@ -342,6 +347,22 @@ export function AssetsView({
                   autoComplete="off"
                 />
               </label>
+              <label className="field">
+                <span className="label-with-help">
+                  Volatilidad anual % (opc.)
+                  <HelpPopover
+                    title={HELP_TEXTS["assets.volatility"].title}
+                    body={HELP_TEXTS["assets.volatility"].body}
+                  />
+                </span>
+                <input
+                  value={assetFormVolatility}
+                  onChange={(e) => setAssetFormVolatility(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="—"
+                  autoComplete="off"
+                />
+              </label>
             </div>
             <label className="field">
               <span>Notas (opc.)</span>
@@ -467,6 +488,13 @@ export function AssetsView({
                   a.expected_annual_return_percent != null &&
                   String(a.expected_annual_return_percent).trim() !== "",
               );
+              // La volatilidad solo ocupa columna cuando alguien del grupo la ha declarado; en
+              // móvil no entra ni en la sub-línea (el ancho ya se lo comen valor, compra y
+              // rentabilidad, y es el dato menos accionable de los cuatro).
+              const showVolatility = g.items.some((a) => {
+                const v = parseDisplayDecimal(String(a.annual_volatility_percent ?? ""));
+                return v != null && v > 0;
+              });
               const showContribution = g.items.some(
                 (a) => assetContributionMonthlyEstimateNum(a) > 0,
               );
@@ -506,6 +534,14 @@ export function AssetsView({
                               title="Nominal, ya neta de comisiones — no la rentabilidad real."
                             >
                               Rent. % a.a.
+                            </th>
+                          ) : null}
+                          {!isMobile && showVolatility ? (
+                            <th
+                              className="num"
+                              title="Desviación típica anual de los retornos. Solo alimenta las bandas de Monte Carlo; el camino determinista la ignora."
+                            >
+                              Volat. % a.a.
                             </th>
                           ) : null}
                           {!isMobile && showContribution ? (
@@ -639,6 +675,14 @@ export function AssetsView({
                                     ? formatPercentAmount(
                                         a.expected_annual_return_percent,
                                       )
+                                    : METRIC_DASH}
+                                </td>
+                              ) : null}
+                              {!isMobile && showVolatility ? (
+                                <td className="num muted">
+                                  {a.annual_volatility_percent != null &&
+                                  a.annual_volatility_percent !== ""
+                                    ? formatPercentAmount(a.annual_volatility_percent)
                                     : METRIC_DASH}
                                 </td>
                               ) : null}

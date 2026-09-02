@@ -16,7 +16,7 @@
 
 import { useState } from "react";
 import { apiPatch, apiPost } from "../api/client";
-import type { CategoryRow, FireSettingsApi, InstallationSnapshot } from "../api/types";
+import type { CategoryRow, InstallationSnapshot } from "../api/types";
 import { Modal, ModalFormError } from "../components/Modal";
 import { toApiDecimalString } from "../lib/format";
 
@@ -104,13 +104,14 @@ export function OnboardingWizard({
 
   const savePlan = () =>
     run(async () => {
-      const fire: FireSettingsApi = {
-        ...(installation.fire_settings as FireSettingsApi),
-        swr_pct: toApiDecimalString(swrPct),
-      };
+      // Dos destinos distintos desde 5.0.0 (D13): la inflación es del HOGAR, el SWR es
+      // PERSONAL y vive en el perfil de jubilación. Se manda un PATCH mínimo a cada uno; el
+      // del perfil solo nombra el SWR, así que no toca ningún otro eje.
       await apiPatch("/v1/installation", {
         annual_inflation_assumption_percent: toApiDecimalString(inflation),
-        fire_settings: fire,
+      });
+      await apiPatch("/v1/auth/me/retirement-profile", {
+        swr_pct: toApiDecimalString(swrPct),
       });
     }, 3);
 

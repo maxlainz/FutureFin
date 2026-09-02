@@ -35,10 +35,13 @@ export type TaxBracketApi = {
   pct: string;
 };
 
+/**
+ * Supuestos FIRE **del hogar**. En 5.0.0 perdió cuatro ejes —`fire_number_mode`,
+ * `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age`—, que pasaron a ser
+ * personales y viven en `RetirementProfileApi` (decisión D13): con proyecciones independientes
+ * por miembro no podían seguir siendo del hogar. Aquí quedan solo los supuestos compartidos.
+ */
 export type FireSettingsApi = {
-  fire_number_mode: FireNumberModeApi;
-  fire_number_manual_amount: string | null;
-  swr_pct: string;
   taxes_enabled: boolean;
   tax_brackets: TaxBracketApi[];
   /** Ausente en clientes/backups antiguos → tratar como `budget`. */
@@ -52,14 +55,138 @@ export type FireSettingsApi = {
   expense_avg_window_mode?: AvgWindowModeApi;
   /** Fracción de plusvalía gravable de la retirada (0..=1, string; default "1") — 4.10.0, #140. */
   taxable_gain_ratio?: string;
-  /** Edad límite del horizonte derivado (85..=105, default 90) — 4.9.0, #149. */
-  horizon_lifespan_age?: number;
 };
 
 /** Cómo se cuentan los meses de una ventana del promedio real.
  *  `calendar` = los meses con datos dentro de los últimos N civiles.
  *  `data` = los N meses CON DATOS más recientes, saltando los vacíos. */
 export type AvgWindowModeApi = "data" | "calendar";
+
+// ---------------------------------------------------------------------------
+// Perfil de jubilación POR USUARIO — `GET|PATCH /v1/auth/me/retirement-profile`
+// (5.0.0, issue #207, decisión D13). Espejo EXACTO de `RetirementProfile`
+// (`apps/api/src/handlers/retirement_profile.rs`): todo Decimal viaja como string y cada
+// enumerado es la misma lista de literales que acepta el servidor.
+// ---------------------------------------------------------------------------
+
+/** Las cinco estrategias (D15). Decide el trigger, la base del objetivo y qué lecturas existen. */
+export type RetirementStrategyApi =
+  | "asap"
+  | "retire_at_age"
+  | "coast"
+  | "partial"
+  | "pension_bridge";
+
+/** Sobre qué se dimensiona el objetivo. `pension_bridge` fuerza `bridge_to_pension`. */
+export type TargetBasisApi = "perpetuity" | "bridge_to_pension";
+
+/** Con qué tasa se descuentan los flujos del puente hasta la pensión (D7). */
+export type BridgeDiscountBasisApi = "expected_return" | "swr" | "none";
+
+/** Catálogo de reglas de retirada (D6). */
+export type WithdrawalRuleKindApi =
+  | "fixed_real"
+  | "percent_of_balance"
+  | "hybrid"
+  | "guardrails";
+
+/** Qué relación tiene la regla con el gasto declarado (D5). */
+export type SpendModeApi = "ceiling" | "rule_is_spend";
+
+/** Base de gasto de la fase de media jornada (D10). */
+export type PartialExpenseBasisApi = "retirement" | "regular";
+
+/**
+ * Regla de retirada + su modo de gasto. Los `pct` son BRUTOS de impuestos (como el SWR).
+ * En el PATCH viaja ENTERA, nunca campo a campo: qué `pct` son obligatorios depende de `kind`.
+ */
+export type WithdrawalRuleApi = {
+  kind: WithdrawalRuleKindApi;
+  /** `percent_of_balance` y `guardrails`: % anual del líquido. */
+  pct: string | null;
+  /** `hybrid`: % de partida. */
+  start_pct: string | null;
+  /** `hybrid`: % al que se baja tras el latch (estrictamente menor que `start_pct`). */
+  end_pct: string | null;
+  /** `guardrails`: banda alrededor de la tasa inicial que dispara el ajuste. */
+  band_pct: string | null;
+  /** `guardrails`: cuánto se recorta/sube la retirada al tocar una banda. */
+  adjust_pct: string | null;
+  spend_mode: SpendModeApi;
+};
+
+/** Pensión pública (u otra renta vitalicia) CON FECHA (D3/D8): su inicio cambia el objetivo. */
+export type PensionPlanApi = {
+  /** Importe MENSUAL en euros de HOY (> 0). */
+  monthly_amount_today: string;
+  starts_at_age: number;
+  /** `true` (default) = se indexa a la inflación del hogar; `false` = importe plano. */
+  indexed: boolean;
+  /** Fracción del importe que se cobra DURANTE la media jornada, en [0, 1]. Default `"0"`. */
+  fraction_while_partial: string;
+};
+
+/** Fase de media jornada (P7). Sin fin propio: termina en la jubilación total. */
+export type PartialRetirementApi = {
+  starts_at_age: number;
+  /** Ingreso MENSUAL en euros de HOY durante la fase (>= 0; `0` = año sabático). */
+  income_monthly_today: string;
+  expense_basis: PartialExpenseBasisApi;
+};
+
+/**
+ * Perfil de jubilación de UN usuario, tal y como lo devuelve el servidor: YA resuelto
+ * (defaults y clamps aplicados). `target_basis` se publica derivado (R6) y en la práctica
+ * nunca llega `null`; el tipo lo admite porque el campo ALMACENADO sí es opcional y ese es
+ * el valor que el PATCH puede volver a poner («derívalo tú»).
+ */
+export type RetirementProfileApi = {
+  strategy: RetirementStrategyApi;
+  /** OBLIGATORIA en `retire_at_age` y `coast`; opcional en `partial`; ignorada por el resto. */
+  target_retirement_age: number | null;
+  /** Los cuatro ejes que en 4.15.x vivían en `fire_settings` (mismos defaults y cotas). */
+  fire_number_mode: FireNumberModeApi;
+  fire_number_manual_amount: string | null;
+  swr_pct: string;
+  horizon_lifespan_age: number;
+  target_basis: TargetBasisApi | null;
+  bridge_discount_basis: BridgeDiscountBasisApi;
+  withdrawal_rule: WithdrawalRuleApi;
+  pension: PensionPlanApi | null;
+  partial_retirement: PartialRetirementApi | null;
+  /** Colchón de caja en meses de gasto (P4). Solo actúa en Monte Carlo. */
+  cash_buffer_months: number | null;
+  /** Umbral de éxito de Monte Carlo en % (D25, default 95). */
+  success_threshold_pct: number;
+};
+
+/** Respuesta de las dos rutas: el perfil resuelto + la fecha de nacimiento (misma pantalla). */
+export type RetirementProfileResponseApi = {
+  profile: RetirementProfileApi;
+  birth_date: string | null;
+};
+
+/**
+ * Cuerpo del PATCH. **Tri-estado**: una clave ausente NO cambia nada; `null` borra lo opcional.
+ * Nunca se manda el perfil entero — un PATCH «solo el SWR» borraría la pensión declarada.
+ */
+export type RetirementProfilePatchApi = {
+  strategy?: RetirementStrategyApi;
+  target_retirement_age?: number | null;
+  fire_number_mode?: FireNumberModeApi;
+  fire_number_manual_amount?: string | null;
+  swr_pct?: string;
+  horizon_lifespan_age?: number;
+  target_basis?: TargetBasisApi | null;
+  bridge_discount_basis?: BridgeDiscountBasisApi;
+  withdrawal_rule?: WithdrawalRuleApi;
+  pension?: PensionPlanApi | null;
+  partial_retirement?: PartialRetirementApi | null;
+  cash_buffer_months?: number | null;
+  success_threshold_pct?: number;
+  /** Misma columna que `PATCH /v1/auth/me`: `null` la borra, `"YYYY-MM-DD"` la fija. */
+  birth_date?: string | null;
+};
 
 export type InstallationSnapshot = {
   id: string;
@@ -129,6 +256,10 @@ export type AssetApiRow = {
    *  modal de snapshot en vista household. Ausente en clientes antiguos. */
   owner_user_id?: string;
   expected_annual_return_percent?: string | null;
+  /** Desviación típica anual de los retornos del activo, en % ([0, 100]) — 5.0.0, §A.2.
+   *  `null`/ausente o `0` = activo determinista. Solo alimenta las bandas de Monte Carlo; el
+   *  camino determinista la ignora. */
+  annual_volatility_percent?: string | null;
   /** Aporte del PRIMER MES resuelto por la cascada. Incluye el tramo de los planning flows sin
    *  fecha del mes en curso, así que baja cada día y salta el día 1. El servidor lo envía
    *  siempre; era opcional aquí por deriva del tipo. */

@@ -53,6 +53,10 @@ import {
   resolveLedgerPersonScope,
 } from "./lib/ledger";
 import { savingsSourceUsesTransactions } from "./lib/fire";
+import {
+  isEmptyRetirementProfilePatch,
+  normalizeRetirementProfile,
+} from "./lib/retirementProfile";
 import { readFileAsBase64 } from "./lib/files";
 import { chartPerf } from "./lib/perf";
 import { PROJECTION_FOCUS_STORAGE_KEY } from "./lib/projection-chart";
@@ -194,6 +198,9 @@ import type {
   PlanningAmountBasisApi,
   PlanningFlowApiRow,
   ProjectionSeriesApi,
+  RetirementProfileApi,
+  RetirementProfilePatchApi,
+  RetirementProfileResponseApi,
   SummaryResponse,
   UserResponse,
 } from "./api/types";
@@ -376,6 +383,21 @@ export default function App() {
   const [installationProjectionSaving, setInstallationProjectionSaving] =
     useState(false);
 
+  /**
+   * Perfil de jubilación del usuario de la sesión (5.0.0, D13). Vive AQUÍ y no en
+   * `RetirementView` porque es un input del motor: lo consume también el Resumen (el SWR de la
+   * tarjeta de Autonomía) y toda escritura obliga a recargar la serie de proyección. `null`
+   * mientras no ha llegado — nunca se sustituye por el default para pintar, o la vista
+   * enseñaría un plan que no es el del usuario.
+   */
+  const [retirementProfile, setRetirementProfile] =
+    useState<RetirementProfileApi | null>(null);
+  const [retirementProfileBusy, setRetirementProfileBusy] = useState(false);
+  const [retirementProfileError, setRetirementProfileError] = useState<
+    string | null
+  >(null);
+  const [retirementProfileSaving, setRetirementProfileSaving] = useState(false);
+
   const [pendingUsers, setPendingUsers] = useState<UserResponse[]>([]);
   const [pendingUsersBusy, setPendingUsersBusy] = useState(false);
   const [pendingUsersError, setPendingUsersError] = useState<string | null>(
@@ -436,6 +458,7 @@ export default function App() {
   const [assetFormPurchase, setAssetFormPurchase] = useState("");
   const [assetFormLiquid, setAssetFormLiquid] = useState(true);
   const [assetFormExpectedReturn, setAssetFormExpectedReturn] = useState("");
+  const [assetFormVolatility, setAssetFormVolatility] = useState("");
   const [assetFormNotes, setAssetFormNotes] = useState("");
   const [editingAssetId, setEditingAssetId] = useState<string | null>(null);
   const [assetSaving, setAssetSaving] = useState(false);
@@ -768,6 +791,27 @@ export default function App() {
       setInstallationGate("fetch_failed");
     } finally {
       setInstallationBusy(false);
+    }
+  }, []);
+
+  /**
+   * Perfil de jubilación del usuario (5.0.0). Se carga con la instalación, en el mismo momento:
+   * la ruta devuelve los DEFAULTS cuando no hay nada guardado, así que no hay estado «sin
+   * perfil» que gestionar — solo «todavía no ha llegado».
+   */
+  const loadRetirementProfile = useCallback(async () => {
+    setRetirementProfileBusy(true);
+    setRetirementProfileError(null);
+    try {
+      const body = await apiGet<RetirementProfileResponseApi>(
+        "/v1/auth/me/retirement-profile",
+      );
+      setRetirementProfile(normalizeRetirementProfile(body.profile));
+    } catch (e: unknown) {
+      setRetirementProfile(null);
+      setRetirementProfileError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRetirementProfileBusy(false);
     }
   }, []);
 
@@ -1572,6 +1616,9 @@ export default function App() {
   useEffect(() => {
     if (user) {
       void loadInstallation();
+      // El perfil no depende de la membresía: es dato del usuario del token y lo edita
+      // cualquier rol, `viewer` incluido (`patch_retirement_profile_core`).
+      void loadRetirementProfile();
     } else {
       setInstallation(null);
       setInstallationGate("loading");
@@ -1580,8 +1627,10 @@ export default function App() {
       setPendingUsersError(null);
       setSummary(null);
       setSummaryError(null);
+      setRetirementProfile(null);
+      setRetirementProfileError(null);
     }
-  }, [user, loadInstallation]);
+  }, [user, loadInstallation, loadRetirementProfile]);
 
   // Los drafts de zona horaria e inflación/modo edad se re-inicializan SOLO al cambiar de
   // instalación, no en cada refresh del objeto `installation`: desde que ambos formularios
@@ -2191,6 +2240,48 @@ export default function App() {
     }
   }
 
+  /**
+   * Guarda un PATCH **mínimo** del perfil de jubilación y devuelve el perfil resuelto que
+   * responde el servidor (lo necesita la vista para resincronizar `target_basis`, que el
+   * servidor DERIVA — ver `buildRetirementProfilePatch`).
+   *
+   * El perfil es un input del motor (SWR, modo del objetivo, edad límite y, desde WP5, la fase
+   * entera): tras guardarlo se recarga la serie de proyección igual que hace
+   * `saveFireSettingsPatch`, para que el chart de Jubilación / Resumen / Proyección no se quede
+   * enseñando el plan anterior hasta el siguiente cambio de pestaña.
+   *
+   * A diferencia de `fire_settings`, esto NO es owner-only: es el dato personal del usuario de
+   * la sesión, y el servidor lo acepta de cualquier rol.
+   */
+  async function saveRetirementProfilePatch(
+    patch: RetirementProfilePatchApi,
+  ): Promise<RetirementProfileApi | null> {
+    if (isEmptyRetirementProfilePatch(patch)) return retirementProfile;
+    setRetirementProfileError(null);
+    setRetirementProfileSaving(true);
+    try {
+      const res = await fetch(apiUrl("/v1/auth/me/retirement-profile"), {
+        ...defaultFetchInit,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        throw await apiErrorFromResponse(res);
+      }
+      const body = (await res.json()) as RetirementProfileResponseApi;
+      const saved = normalizeRetirementProfile(body.profile);
+      setRetirementProfile(saved);
+      void loadProjectionSeriesPage();
+      return saved;
+    } catch (e: unknown) {
+      setRetirementProfileError(e instanceof Error ? e.message : String(e));
+      throw e;
+    } finally {
+      setRetirementProfileSaving(false);
+    }
+  }
+
   const [mcpWriteSaving, setMcpWriteSaving] = useState(false);
   async function saveInstallationMcpWrite(enabled: boolean) {
     if (installation?.role !== "owner") return;
@@ -2432,6 +2523,7 @@ export default function App() {
     setAssetFormPurchase("");
     setAssetFormLiquid(true);
     setAssetFormExpectedReturn("");
+    setAssetFormVolatility("");
     setAssetFormNotes("");
   }
 
@@ -2463,6 +2555,19 @@ export default function App() {
       const er = toApiDecimalString(assetFormExpectedReturn);
       if (er) {
         base.expected_annual_return_percent = er;
+      }
+      // Volatilidad (5.0.0, §A.2): mismo trato que la rentabilidad esperada — solo viaja si el
+      // usuario la ha escrito.
+      //
+      // LIMITACIÓN CONOCIDA, del servidor y no de aquí: `PATCH /v1/assets/{id}` recibe estos
+      // dos ejes como opción SIMPLE (`assets.rs`, `new_vol`/`new_exp`), así que un `null`
+      // explícito es indistinguible de omitir la clave y el handler conserva el valor actual.
+      // Vaciar el campo NO devuelve el activo a determinista. Mandar `null` no lo arreglaría:
+      // solo fingiría que sí. Se deja igual que su hermano para que el día que el servidor
+      // gane el tri-estado (como ya lo tiene `purchase_price`) el arreglo sea uno solo.
+      const vol = toApiDecimalString(assetFormVolatility);
+      if (vol !== "") {
+        base.annual_volatility_percent = vol;
       }
 
       const ppTrim = toApiDecimalString(assetFormPurchase);
@@ -2564,6 +2669,9 @@ export default function App() {
     setAssetFormLiquid(a.is_liquid);
     setAssetFormExpectedReturn(
       formatEditableDecimalString(a.expected_annual_return_percent ?? ""),
+    );
+    setAssetFormVolatility(
+      formatEditableDecimalString(a.annual_volatility_percent ?? ""),
     );
     setAssetFormNotes(a.notes ?? "");
   }
@@ -3758,6 +3866,7 @@ export default function App() {
                 : undefined
             }
             installation={installation}
+            retirementProfile={retirementProfile}
             loading={installationBusy}
             hasMembership={hasMembership}
             ledgerPersonScope={ledgerPersonScope}
@@ -3800,6 +3909,8 @@ export default function App() {
             assetFormLiquid={assetFormLiquid}
             setAssetFormLiquid={setAssetFormLiquid}
             assetFormExpectedReturn={assetFormExpectedReturn}
+            assetFormVolatility={assetFormVolatility}
+            setAssetFormVolatility={setAssetFormVolatility}
             setAssetFormExpectedReturn={setAssetFormExpectedReturn}
             assetFormNotes={assetFormNotes}
             setAssetFormNotes={setAssetFormNotes}
@@ -4044,11 +4155,14 @@ export default function App() {
             summary={summary}
             retirementBusy={retirementBusy}
             retirementError={retirementError}
+            retirementProfile={retirementProfile}
+            retirementProfileBusy={retirementProfileBusy}
+            retirementProfileError={retirementProfileError}
+            retirementProfileSaving={retirementProfileSaving}
             user={user}
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
-            canEditFire={installation?.role === "owner" && !scopeReadOnly}
             scopeReadOnly={scopeReadOnly}
-            onSaveFire={saveFireSettingsPatch}
+            onSaveRetirementProfile={saveRetirementProfilePatch}
             navigate={navigate}
           />
         ) : activeTab === "projection" ? (
@@ -4144,6 +4258,7 @@ export default function App() {
             onToggleMcpWrite={(enabled) => void saveInstallationMcpWrite(enabled)}
             settingsSubTab={settingsSubTab}
             navigateSettingsSubTab={navigateSettingsSubTab}
+            navigate={navigate}
             visibleSettingsSubTabs={visibleSettingsSubTabs}
             pendingUsers={pendingUsers}
             pendingUsersBusy={pendingUsersBusy}

@@ -37,8 +37,10 @@ import {
 } from "../lib/fire";
 import {
   SETTINGS_SUBTAB_LABEL,
+  TAB_PATH,
   type SettingsSubTabId,
 } from "../lib/navigation";
+import { appUrl } from "../lib/basePath";
 
 const CATEGORY_SCOPES: CategoryScope[] = ["asset", "liability", "income", "expense"];
 
@@ -94,6 +96,7 @@ export function SettingsView({
   onToggleMcpWrite,
   settingsSubTab,
   navigateSettingsSubTab,
+  navigate,
   visibleSettingsSubTabs,
   pendingUsers,
   pendingUsersBusy,
@@ -194,6 +197,8 @@ export function SettingsView({
   onToggleMcpWrite: (enabled: boolean) => void;
   settingsSubTab: SettingsSubTabId;
   navigateSettingsSubTab: (id: SettingsSubTabId) => void;
+  /** Navegación de la app (la usa el puntero a Jubilación del panel «Plan»). */
+  navigate: (path: string, replace?: boolean) => void;
   visibleSettingsSubTabs: SettingsSubTabId[];
   pendingUsers: UserResponse[];
   pendingUsersBusy: boolean;
@@ -591,6 +596,24 @@ export function SettingsView({
         planEditable ? (
         <section className="panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
+          {/* 5.0.0 (D13/D26): estrategia, edad objetivo, SWR y edad límite del horizonte dejaron
+              de ser del hogar y son de cada persona. Aquí solo queda el puntero — un ajuste que
+              se editaba en dos sitios acaba divergiendo en uno de ellos. */}
+          <p className="muted">
+            Tu estrategia, tu edad objetivo y tu SWR se editan en{" "}
+            <a
+              href={appUrl(TAB_PATH.retirement)}
+              onClick={(e) => {
+                if (e.button !== 0 || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey)
+                  return;
+                e.preventDefault();
+                navigate(TAB_PATH.retirement);
+              }}
+            >
+              Jubilación
+            </a>
+            .
+          </p>
           <div className="stack bordered-top">
             <label className="field">
               <span className="label-with-help">
@@ -776,54 +799,35 @@ export function SettingsView({
                       </label>
                     </div>
                   ))}
-                  <label className="field">
-                    <span className="label-with-help">
-                      Horizonte: edad límite
-                      <HelpPopover
-                        title={HELP_TEXTS["settings.horizon_age"].title}
-                        body={HELP_TEXTS["settings.horizon_age"].body}
-                      />
-                    </span>
-                    <select
-                      value={String(fireTaxDraft.horizon_lifespan_age ?? 90)}
-                      onChange={(e) => {
-                        const n = Number(e.target.value);
-                        if (!Number.isInteger(n)) return;
-                        setFireTaxDraft((p) => ({
-                          ...p,
-                          horizon_lifespan_age: n,
-                        }));
-                      }}
-                    >
-                      {[85, 90, 95, 100, 105].map((edad) => (
-                        <option key={edad} value={String(edad)}>
-                          {edad} años
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="field">
-                    <span className="label-with-help">
-                      Plusvalía gravable de la retirada
-                      <HelpPopover
-                        title={HELP_TEXTS["settings.taxable_gain"].title}
-                        body={HELP_TEXTS["settings.taxable_gain"].body}
-                      />
-                    </span>
-                    <input
-                      inputMode="decimal"
-                      value={String(fireTaxDraft.taxable_gain_ratio ?? "1")}
-                      onChange={(e) => {
-                        const raw = e.target.value.trim().replace(",", ".");
-                        setFireTaxDraft((prev) => ({
-                          ...prev,
-                          taxable_gain_ratio: raw,
-                        }));
-                      }}
-                    />
-                  </label>
               </div>
             ) : null}
+
+            {/* La plusvalía gravable estaba ANIDADA dentro del bloque de las ventanas del
+                promedio, así que en el modo «Presupuesto» —el de serie— era invisible. Y no
+                depende del modo: gobierna el objetivo, el drenaje simulado y los dos umbrales
+                de Autonomía siempre. Un ajuste que la ayuda describe como vivo y la pantalla no
+                deja tocar es peor que no tenerlo. (El selector de edad límite compartía el
+                mismo anidamiento; se fue al perfil de jubilación en 5.0.0.) */}
+            <label className="field">
+              <span className="label-with-help">
+                Plusvalía gravable de la retirada
+                <HelpPopover
+                  title={HELP_TEXTS["settings.taxable_gain"].title}
+                  body={HELP_TEXTS["settings.taxable_gain"].body}
+                />
+              </span>
+              <input
+                inputMode="decimal"
+                value={String(fireTaxDraft.taxable_gain_ratio ?? "1")}
+                onChange={(e) => {
+                  const raw = e.target.value.trim().replace(",", ".");
+                  setFireTaxDraft((prev) => ({
+                    ...prev,
+                    taxable_gain_ratio: raw,
+                  }));
+                }}
+              />
+            </label>
             <p className="muted tight">
               {fireTaxSaving || installationProjectionSaving
                 ? "Guardando…"

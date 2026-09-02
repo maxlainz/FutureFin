@@ -2724,7 +2724,8 @@
   gap: 0.5rem;
 }
 
-.checkbox-field input[type="checkbox"] {
+.checkbox-field input[type="checkbox"],
+.checkbox-field input[type="radio"] {
   width: auto;
   margin: 0;
 }
@@ -2775,6 +2776,14 @@ fieldset.retirement-config-stack {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.5rem;
+}
+
+/* Cinco tarjetas de estrategia (D26): mismo lenguaje visual que las tres del modo del objetivo,
+   pero con `auto-fit` porque cinco no caben en la rejilla fija de 3. El `minmax(min(100%, …))`
+   es el patrón sancionado del design system: no-op en escritorio (el contenedor siempre supera
+   los 15rem) y en móvil colapsa solo, sin abrir un breakpoint nuevo. */
+.retirement-strategy-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
 }
 
 .retirement-mode-card {

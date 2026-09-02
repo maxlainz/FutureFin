@@ -8,11 +8,15 @@ import {
 } from "react";
 import type {
   BudgetSnapshotApi,
-  FireSettingsApi,
   InstallationAccess,
+  PensionPlanApi,
   ProjectionSeriesApi,
+  RetirementProfileApi,
+  RetirementProfilePatchApi,
+  RetirementStrategyApi,
   SummaryResponse,
   UserResponse,
+  WithdrawalRuleKindApi,
 } from "../api/types";
 import { HelpPopover } from "../components/HelpPopover";
 import { HELP_TEXTS } from "../lib/helpTexts";
@@ -27,11 +31,29 @@ import {
 } from "../lib/format";
 import {
   computeFireAnnualNeedNetEur,
-  defaultFireSettingsApi,
   grossUpNetAnnualFire,
   normalizeInstallationFireSettings,
   savingsSourceUsesTransactions,
 } from "../lib/fire";
+import {
+  BRIDGE_DISCOUNT_BASIS_LABEL,
+  HORIZON_LIFESPAN_AGE_OPTIONS,
+  MAX_CASH_BUFFER_MONTHS,
+  RETIREMENT_STRATEGIES,
+  RETIREMENT_STRATEGY_BLURB,
+  RETIREMENT_STRATEGY_LABEL,
+  WITHDRAWAL_RULE_KIND_LABEL,
+  buildRetirementProfilePatch,
+  defaultRetirementProfileApi,
+  effectiveTargetBasis,
+  isEmptyRetirementProfilePatch,
+  newPartialRetirementDraft,
+  newPensionPlanDraft,
+  normalizeRetirementProfile,
+  retirementProfileIssue,
+  strategyRequiresTargetAge,
+} from "../lib/retirementProfile";
+import { messageForError } from "../lib/errorMessages";
 import { type LedgerPersonScope } from "../lib/ledger";
 import {
   persistRetirementIntroDismissed,
@@ -59,6 +81,17 @@ const FIRE_TARGET_ABSENT_REASON_ES: Record<string, string> = {
   swr_not_positive: "SWR 0 %: no se calcula fecha de cruce.",
 };
 
+/** Un decimal tecleado por el usuario, listo para el wire: coma española → punto. */
+function typedDecimal(raw: string): string {
+  return raw.replace(",", ".");
+}
+
+/** Un decimal opcional: vacío = «no hay valor», que en el perfil es `null`, no `0`. */
+function typedDecimalOrNull(raw: string): string | null {
+  const t = raw.trim();
+  return t === "" ? null : typedDecimal(raw);
+}
+
 export function RetirementView({
   installation,
   installationBusy,
@@ -70,11 +103,14 @@ export function RetirementView({
   summary,
   retirementBusy,
   retirementError,
+  retirementProfile,
+  retirementProfileBusy,
+  retirementProfileError,
+  retirementProfileSaving,
   user,
   calendarTz,
-  canEditFire,
   scopeReadOnly,
-  onSaveFire,
+  onSaveRetirementProfile,
   navigate,
 }: {
   installation: InstallationAccess | null;
@@ -88,12 +124,19 @@ export function RetirementView({
   summary: SummaryResponse | null;
   retirementBusy: boolean;
   retirementError: string | null;
+  /** Perfil de jubilación del usuario de la sesión (5.0.0, D13). `null` = aún no ha llegado. */
+  retirementProfile: RetirementProfileApi | null;
+  retirementProfileBusy: boolean;
+  retirementProfileError: string | null;
+  retirementProfileSaving: boolean;
   user: UserResponse | null;
   calendarTz: string;
-  canEditFire: boolean;
   /** Vista Hogar (D9/D32): agregado de solo lectura — el plan se edita desde la vista «Yo». */
   scopeReadOnly: boolean;
-  onSaveFire: (fs: FireSettingsApi) => Promise<void>;
+  /** Guarda un PATCH mínimo y devuelve el perfil YA resuelto por el servidor. */
+  onSaveRetirementProfile: (
+    patch: RetirementProfilePatchApi,
+  ) => Promise<RetirementProfileApi | null>;
   navigate: (path: string, replace?: boolean) => void;
 }) {
   const currency = installation?.installation.base_currency ?? METRIC_DASH;
@@ -109,29 +152,148 @@ export function RetirementView({
   const birthDateMissing = !user?.birth_date?.trim();
   const showIntroBanner = hasMembership && !scopeReadOnly && !introDismissed;
 
-  const [fireDraft, setFireDraft] = useState<FireSettingsApi>(() =>
-    defaultFireSettingsApi(),
+  /**
+   * El plan de jubilación es dato PERSONAL: lo edita cualquier rol, `viewer` incluido (así lo
+   * acepta `patch_retirement_profile_core`). Lo único que lo bloquea es la vista Hogar, que es
+   * un agregado de N personas y no tiene un perfil al que atribuir el cambio.
+   */
+  const canEditProfile = hasMembership && !scopeReadOnly;
+
+  // ── Borrador del perfil y su autoguardado ─────────────────────────────────────────────────
+  const [profileDraft, setProfileDraft] = useState<RetirementProfileApi>(() =>
+    defaultRetirementProfileApi(),
   );
+  /**
+   * Lo que el servidor tiene AHORA MISMO, y por tanto la base contra la que se calcula el PATCH
+   * mínimo. Es un ref y no estado porque solo lo lee el guardado, nunca la pintada.
+   */
+  const syncedProfileRef = useRef<RetirementProfileApi>(defaultRetirementProfileApi());
   /** Aviso cuando el guardado automático se salta un cambio por datos inválidos. */
-  const [fireAutosaveIssue, setFireAutosaveIssue] = useState<string | null>(null);
-  const lastSavedFirePayloadRef = useRef<string>("");
-  const fireSaveTimerRef = useRef(0);
-  const fireSaveSeqRef = useRef(0);
+  const [profileIssue, setProfileIssue] = useState<string | null>(null);
+  const profileSaveTimerRef = useRef(0);
+  const profileSaveSeqRef = useRef(0);
+  const skipProfileAutosaveRef = useRef(true);
+  /** `null` mientras no se ha inicializado el borrador con lo que trajo el servidor. */
+  const profileInitializedRef = useRef<RetirementProfileApi | null>(null);
 
   useEffect(() => {
-    setFireDraft(
-      normalizeInstallationFireSettings(
-        installation?.installation.fire_settings,
-      ),
+    if (!retirementProfile) {
+      // Cierre de sesión o cambio de hogar: el siguiente perfil que llegue vuelve a inicializar.
+      profileInitializedRef.current = null;
+      return;
+    }
+    if (profileInitializedRef.current !== null) return;
+    profileInitializedRef.current = retirementProfile;
+    const p = normalizeRetirementProfile(retirementProfile);
+    setProfileDraft(p);
+    syncedProfileRef.current = p;
+    skipProfileAutosaveRef.current = true;
+  }, [retirementProfile]);
+
+  const savedProfile = useMemo(
+    () => normalizeRetirementProfile(retirementProfile),
+    [retirementProfile],
+  );
+  /** Hay cambios sin guardar (se usa para rotular la vista previa del objetivo). */
+  const profileDirty =
+    retirementProfile != null &&
+    !isEmptyRetirementProfilePatch(
+      buildRetirementProfilePatch(savedProfile, profileDraft),
     );
-    const serverFs = normalizeInstallationFireSettings(
-      installation?.installation.fire_settings,
-    );
-    lastSavedFirePayloadRef.current = JSON.stringify(serverFs);
-    // Re-inicializa el draft solo al cambiar de instalación; NO en cada cambio de
-    // fire_settings, que clobbearía ediciones en curso (este draft autosalva).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [installation?.installation.id]);
+
+  const runProfileSave = useCallback(() => {
+    if (!canEditProfile) return;
+    const patch = buildRetirementProfilePatch(syncedProfileRef.current, profileDraft);
+    if (isEmptyRetirementProfilePatch(patch)) {
+      setProfileIssue(null);
+      return;
+    }
+    // La guarda de validez habla con los MISMOS códigos que el servidor, así que la frase sale
+    // del catálogo único. Sin ella el pie del panel seguiría prometiendo «Guardado automático»
+    // mientras el PATCH se estrella contra un 400 y el cambio se pierde en silencio.
+    const issue = retirementProfileIssue(profileDraft);
+    if (issue) {
+      setProfileIssue(messageForError(issue, null));
+      return;
+    }
+    setProfileIssue(null);
+    const seq = ++profileSaveSeqRef.current;
+    void onSaveRetirementProfile(patch)
+      .then((saved) => {
+        if (seq !== profileSaveSeqRef.current || !saved) return;
+        syncedProfileRef.current = saved;
+        // `target_basis` lo DERIVA el servidor cuando no está fijado (R6). Resincronizarlo con
+        // lo que acaba de responder impide que el borrador —que enseña el valor derivado— lo
+        // mande como elección explícita en el siguiente PATCH y congele la derivación.
+        setProfileDraft((d) =>
+          d.target_basis === saved.target_basis
+            ? d
+            : { ...d, target_basis: saved.target_basis },
+        );
+      })
+      .catch(() => {
+        // El banner lo pinta App.tsx (`saveRetirementProfilePatch` rellena su error antes de
+        // relanzar). Aquí solo hay que NO marcar como guardado.
+      });
+  }, [profileDraft, canEditProfile, onSaveRetirementProfile]);
+
+  const queueProfileSave = useCallback(
+    (delayMs: number) => {
+      window.clearTimeout(profileSaveTimerRef.current);
+      profileSaveTimerRef.current = window.setTimeout(() => {
+        profileSaveTimerRef.current = 0;
+        runProfileSave();
+      }, delayMs);
+    },
+    [runProfileSave],
+  );
+
+  useEffect(() => {
+    if (!canEditProfile) return;
+    if (skipProfileAutosaveRef.current) {
+      skipProfileAutosaveRef.current = false;
+      return;
+    }
+    // Sin nada que guardar no se arma el temporizador. Este efecto se re-ejecuta en CADA
+    // re-render (el callback de guardado es una función nueva por render, como el resto de los
+    // `onSave*` de `App.tsx`), y sin esta salida temprana un flujo de re-renders ajenos —la
+    // serie de proyección llegando, por ejemplo— reiniciaría el debounce una y otra vez.
+    if (
+      isEmptyRetirementProfilePatch(
+        buildRetirementProfilePatch(syncedProfileRef.current, profileDraft),
+      )
+    ) {
+      return;
+    }
+    queueProfileSave(420);
+    return () => {
+      window.clearTimeout(profileSaveTimerRef.current);
+    };
+  }, [profileDraft, canEditProfile, queueProfileSave]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState !== "hidden") return;
+      window.clearTimeout(profileSaveTimerRef.current);
+      runProfileSave();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [runProfileSave]);
+
+  /** Atajo para editar un campo del borrador (todo el formulario autosalva). */
+  const patchDraft = useCallback(
+    (fn: (p: RetirementProfileApi) => RetirementProfileApi) => {
+      setProfileDraft((prev) => fn(prev));
+    },
+    [],
+  );
+
+  // ── Ejes del hogar que siguen alimentando la vista previa del objetivo ────────────────────
+  const houseFire = useMemo(
+    () => normalizeInstallationFireSettings(installation?.installation.fire_settings),
+    [installation?.installation.fire_settings],
+  );
 
   const axisAgeMode = projectionSeries
     ? resolveProjectionAxisAgeMode(projectionSeries, installation)
@@ -202,23 +364,27 @@ export function RetirementView({
     ? summary?.financial_health.income_monthly_equivalent
     : retirementBudgetSnapshot?.totals.income_monthly_equivalent;
 
-  // Vista previa LOCAL del objetivo con los ajustes del draft (sin guardar). `computeFireAnnualNeedNetEur`
+  // Vista previa LOCAL del objetivo con los ajustes del draft (sin guardar). El modo y el SWR
+  // salen del PERFIL (5.0.0); la fiscalidad sigue siendo del hogar. `computeFireAnnualNeedNetEur`
   // y `grossUpNetAnnualFire` siguen duplicados en cliente solo para esto: el cruce (mes, fecha,
-  // objetivo al cruce) ya no se recalcula aquí — lee siempre del servidor (§2.1/§2.2 del spike).
+  // objetivo al cruce) ya no se recalcula aquí — lee siempre del servidor.
   const firePreview = useMemo(() => {
     const expenseM = fireExpenseM;
     const incomeM = fireIncomeM;
     const incomeRetM =
       retirementBudgetSnapshot?.totals.income_retirement_monthly_equivalent;
     const needAnnual = computeFireAnnualNeedNetEur(
-      fireDraft,
+      {
+        fire_number_mode: profileDraft.fire_number_mode,
+        fire_number_manual_amount: profileDraft.fire_number_manual_amount,
+      },
       expenseM,
       incomeM,
       incomeRetM,
     );
-    const swrN = parseDisplayDecimal(fireDraft.swr_pct);
-    const brackets = fireDraft.tax_brackets;
-    const taxOn = fireDraft.taxes_enabled;
+    const swrN = parseDisplayDecimal(profileDraft.swr_pct);
+    const brackets = houseFire.tax_brackets;
+    const taxOn = houseFire.taxes_enabled;
 
     let targetNoPen: number | null = null;
     if (needAnnual !== null && needAnnual > 0 && swrN !== null && swrN > 0) {
@@ -226,7 +392,7 @@ export function RetirementView({
         needAnnual,
         brackets,
         taxOn,
-        Number(fireDraft.taxable_gain_ratio ?? "1"),
+        Number(houseFire.taxable_gain_ratio ?? "1"),
       );
       targetNoPen = grossNoPen / (swrN / 100);
       // #142 (4.8.0): el objetivo lleva además el término finito de deuda (Σ cuotas restantes
@@ -244,22 +410,15 @@ export function RetirementView({
 
     return { needAnnual, swrN, targetNoPen };
   }, [
-    fireDraft,
+    profileDraft.fire_number_mode,
+    profileDraft.fire_number_manual_amount,
+    profileDraft.swr_pct,
+    houseFire,
     fireExpenseM,
     fireIncomeM,
     retirementBudgetSnapshot?.totals.income_retirement_monthly_equivalent,
     projectionSeries?.fire_target_debt_component,
   ]);
-
-  // Ajustes REALMENTE guardados (prop reactiva de la instalación), normalizados igual que el
-  // draft — para poder comparar como iguales. Comparar contra `lastSavedFirePayloadRef` (un ref)
-  // no re-renderiza cuando el guardado automático completa, así que la tarjeta se quedaría
-  // mostrando la vista previa aunque el servidor ya hubiera recalculado (§2.3 del spike).
-  const savedFire = useMemo(
-    () => normalizeInstallationFireSettings(installation?.installation.fire_settings),
-    [installation?.installation.fire_settings],
-  );
-  const fireDraftDirty = JSON.stringify(fireDraft) !== JSON.stringify(savedFire);
 
   // Lecturas del servidor — SIEMPRE, nunca recalculadas en cliente: el cruce depende de la
   // simulación mensual completa y el cliente no puede rehacerla (ni debe fingirlo).
@@ -279,9 +438,9 @@ export function RetirementView({
   // «Patrimonio objetivo»: el servidor, salvo que el draft tenga cambios sin guardar — en ese
   // caso la vista previa local (con paréntesis «vista previa · sin guardar») para que la tarjeta
   // siga respondiendo al slider de SWR mientras llega el autosave + refetch.
-  const targetToday = fireDraftDirty ? firePreview.targetNoPen : serverTargetToday;
+  const targetToday = profileDirty ? firePreview.targetNoPen : serverTargetToday;
   const targetTodayReady =
-    retirementMetricsReady && (fireDraftDirty ? firePreviewReady : true);
+    retirementMetricsReady && (profileDirty ? firePreviewReady : true);
 
   const renderRetirementAmount = useCallback(
     (annual: number, monthly: number): ReactNode => (
@@ -297,11 +456,11 @@ export function RetirementView({
 
   const retirementObjectiveManualAnnualDisplay = useMemo<ReactNode>(() => {
     const m = parseDisplayDecimal(
-      String(fireDraft.fire_number_manual_amount ?? ""),
+      String(profileDraft.fire_number_manual_amount ?? ""),
     );
     if (!(m !== null && m > 0)) return METRIC_DASH;
     return renderRetirementAmount(m, m / 12);
-  }, [fireDraft.fire_number_manual_amount, renderRetirementAmount]);
+  }, [profileDraft.fire_number_manual_amount, renderRetirementAmount]);
 
   const retirementObjectiveExpenseAnnualDisplay = useMemo<ReactNode>(() => {
     const baseM = parseDisplayDecimal(String(fireExpenseM ?? ""));
@@ -315,83 +474,58 @@ export function RetirementView({
     return renderRetirementAmount(incM * 12, incM);
   }, [fireIncomeM, renderRetirementAmount]);
 
-  const skipFireAutosaveRef = useRef(true);
-
-  useEffect(() => {
-    skipFireAutosaveRef.current = true;
-  }, [installation?.installation.id]);
-
-  const runFireSave = useCallback(() => {
-    if (!hasMembership || !canEditFire) return;
-    // Estos dos `return` salían SIN guardar y **sin decir nada**, mientras el pie del panel
-    // seguía prometiendo «Guardado automático». El usuario movía el SWR fuera de rango, veía el
-    // mensaje de guardado y se iba con el cambio perdido. Ahora el aviso es visible.
-    const swrN = parseDisplayDecimal(fireDraft.swr_pct);
-    if (swrN === null || swrN < 0 || swrN > 4) {
-      setFireAutosaveIssue(
-        "La tasa de retirada segura debe estar entre 0 y 4 %. No se ha guardado.",
-      );
-      return;
-    }
-    if (
-      fireDraft.fire_number_mode === "manual" &&
-      (fireDraft.fire_number_manual_amount == null ||
-        String(fireDraft.fire_number_manual_amount).trim() === "")
-    ) {
-      setFireAutosaveIssue(
-        "Has elegido fijar el objetivo a mano pero falta la cifra. No se ha guardado.",
-      );
-      return;
-    }
-    setFireAutosaveIssue(null);
-    const payloadJson = JSON.stringify(fireDraft);
-    if (payloadJson === lastSavedFirePayloadRef.current) return;
-    const seq = ++fireSaveSeqRef.current;
-    void onSaveFire(fireDraft)
-      .then(() => {
-        if (seq !== fireSaveSeqRef.current) return;
-        lastSavedFirePayloadRef.current = payloadJson;
-      })
-      .catch(() => {});
-  }, [fireDraft, hasMembership, canEditFire, onSaveFire]);
-
-  const queueFireSave = useCallback(
-    (delayMs: number) => {
-      window.clearTimeout(fireSaveTimerRef.current);
-      fireSaveTimerRef.current = window.setTimeout(() => {
-        fireSaveTimerRef.current = 0;
-        runFireSave();
-      }, delayMs);
-    },
-    [runFireSave],
-  );
-
-  useEffect(() => {
-    if (!hasMembership || !canEditFire) return;
-    if (skipFireAutosaveRef.current) {
-      skipFireAutosaveRef.current = false;
-      return;
-    }
-    queueFireSave(420);
-    return () => {
-      window.clearTimeout(fireSaveTimerRef.current);
-    };
-  }, [fireDraft, hasMembership, canEditFire, queueFireSave]);
-
-  useEffect(() => {
-    const onVisibility = () => {
-      if (document.visibilityState !== "hidden") return;
-      window.clearTimeout(fireSaveTimerRef.current);
-      runFireSave();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    return () => document.removeEventListener("visibilitychange", onVisibility);
-  }, [runFireSave]);
-
   const lblOpts = {
     birthDateIso: axisBirth,
     anchorDateYmd: axisAnchor,
     calendarTz,
+  };
+
+  const strategy = profileDraft.strategy;
+  const basis = effectiveTargetBasis(profileDraft);
+  const rule = profileDraft.withdrawal_rule;
+  const pension = profileDraft.pension;
+  const partial = profileDraft.partial_retirement;
+  /** El pie de panel que dice si hay algo en vuelo. Mismo literal en los cinco paneles. */
+  const saveFooter = retirementProfileSaving ? "Guardando…" : "Guardado automático.";
+
+  /**
+   * Elegir estrategia SIEMBRA el bloque que esa estrategia necesita para poder rellenarse. La
+   * excepción es la edad objetivo: el servidor la exige y no hay ninguna edad que podamos
+   * inventar por el usuario, así que se deja vacía y el aviso lo dice.
+   */
+  const selectStrategy = useCallback(
+    (s: RetirementStrategyApi) => {
+      patchDraft((p) => {
+        const next: RetirementProfileApi = { ...p, strategy: s };
+        if (s === "partial" && next.partial_retirement == null) {
+          next.partial_retirement = newPartialRetirementDraft();
+        }
+        if (s === "pension_bridge" && next.pension == null) {
+          next.pension = newPensionPlanDraft();
+        }
+        return next;
+      });
+    },
+    [patchDraft],
+  );
+
+  const setPension = useCallback(
+    (fn: (p: PensionPlanApi) => PensionPlanApi) => {
+      patchDraft((p) => (p.pension ? { ...p, pension: fn(p.pension) } : p));
+    },
+    [patchDraft],
+  );
+
+  /** Campo numérico entero opcional: vacío borra, cualquier entero se acepta y lo juzga la guarda. */
+  const intFieldValue = (v: number | null) => (v == null ? "" : String(v));
+  const readIntField = (raw: string): number | null | undefined => {
+    const t = raw.trim();
+    if (t === "") return null;
+    const n = Number(t);
+    // `undefined` = «no es un entero, ignora la pulsación»: es el patrón de la casa para no
+    // dejar un número a medio teclear dentro del borrador que autosalva.
+    if (!Number.isInteger(n) || n < 0 || n > 200) return undefined;
+    return n;
   };
 
   return (
@@ -462,9 +596,13 @@ export function RetirementView({
         <div className="banner error-banner">{retirementError}</div>
       ) : null}
 
-      {fireAutosaveIssue ? (
+      {retirementProfileError ? (
+        <div className="banner error-banner">{retirementProfileError}</div>
+      ) : null}
+
+      {profileIssue ? (
         <div className="banner error-banner" role="alert">
-          {fireAutosaveIssue}
+          {profileIssue}
         </div>
       ) : null}
 
@@ -508,7 +646,7 @@ export function RetirementView({
               parenthetical={
                 !targetTodayReady
                   ? undefined
-                  : fireDraftDirty
+                  : profileDirty
                     ? "vista previa · sin guardar"
                     : targetAtCrossNominal !== null && targetAtCrossNominal > 0
                       ? `${formatCurrencyNumber(targetAtCrossNominal, currencyIso)} al cruce`
@@ -541,6 +679,19 @@ export function RetirementView({
                   : METRIC_DASH
               }
             />
+            {/* D31 — el margen es un TILE y nada más (ni área en el chart ni acción). La cifra
+                llega con los campos de Monte Carlo y los solves del servidor; hasta entonces la
+                tarjeta existe con un guion y la ayuda explica qué enseñará, en vez de aparecer
+                de la nada en la versión siguiente. Solo tiene sentido con una edad objetivo:
+                en «Cuanto antes» todo el ahorro va al objetivo por definición. */}
+            {strategy !== "asap" ? (
+              <MetricCard
+                label="Margen disponible"
+                helpId="retirement.disposable"
+                value={METRIC_DASH}
+                parenthetical="aún no se calcula"
+              />
+            ) : null}
           </div>
           {retirementMetricsReady && projectionSeries?.fire_target_absent_reason ? (
             <p className="muted tight">
@@ -551,26 +702,20 @@ export function RetirementView({
         </>
       ) : null}
 
-      {!canEditFire && !scopeReadOnly ? (
-        <p className="muted tight">
-          Solo el propietario puede editar esta configuración.
-        </p>
-      ) : null}
-
       {hasMembership &&
       projectionSeries &&
       projectionSeries.points.length > 0 ? (
         (() => {
           const horizon = projectionSeries.horizon_years;
-          const jubMi =
+          const jubMiChart =
             typeof projectionSeries.jubilacion_month_index === "number"
               ? projectionSeries.jubilacion_month_index
               : null;
           const jubLabel =
-            jubMi != null
+            jubMiChart != null
               ? // Meses del horizonte, no puntos del array: con `density=hybrid` `pts.length`
                 // (~82) no es el número de meses y la etiqueta relativa elegía «m» donde tocaba «a».
-                projectionXTickLabel(jubMi, projectionSeries.months, {
+                projectionXTickLabel(jubMiChart, projectionSeries.months, {
                   ageUiMode: axisAgeMode,
                   birthDateIso: axisBirth,
                   anchorDateYmd: axisAnchor,
@@ -583,10 +728,11 @@ export function RetirementView({
           // `jubMi === 0` es «ya jubilado» — el cruce es HOY, el mes 0. `0` es falsy en JS: un
           // `jubMi ? … : …` aquí reintroduce el bug al revés (#132). Con `alreadyRetired` no
           // recortamos a "cruce + 12": el usuario quiere ver el horizonte completo, no un año.
-          const alreadyRetired = jubMi === 0;
+          const alreadyRetired = jubMiChart === 0;
           // Si hay jubilación FUTURA, recortamos la serie a jub+12 (un año después del cruce). El
           // eje Y se zoom-ajusta entre NW(hoy) y NW(fin).
-          const clampToMonth = jubMi != null && !alreadyRetired ? jubMi + 12 : null;
+          const clampToMonth =
+            jubMiChart != null && !alreadyRetired ? jubMiChart + 12 : null;
           return (
             <section className="panel">
               <div className="panel-head-row">
@@ -641,7 +787,7 @@ export function RetirementView({
                         },
                       ] as const)
                     : []),
-                  ...(jubMi != null
+                  ...(jubMiChart != null
                     ? ([
                         {
                           key: "jub",
@@ -661,7 +807,7 @@ export function RetirementView({
                   Configura el objetivo FIRE más abajo para ver la línea de
                   target sobre el gráfico.
                 </p>
-              ) : jubMi == null ? (
+              ) : jubMiChart == null ? (
                 <p
                   className="muted tight"
                   style={{ marginTop: "0.6rem", fontSize: "0.78rem" }}
@@ -683,33 +829,311 @@ export function RetirementView({
       {/* D9/D32: en la vista Hogar los formularios del plan NO se enseñan deshabilitados, se
           ocultan. Un formulario gris con los números de un agregado de N personas invita a
           teclear en él y no dice de quién es lo que se ve. */}
-      {scopeReadOnly ? (
+      {!hasMembership ? null : scopeReadOnly ? (
         <section className="panel muted-panel">
           <h3 className="panel-title">Tu plan de jubilación</h3>
           <p className="muted tight">
-            Solo lectura. Cambia a la vista «Yo» para editar tu objetivo y tu
-            retirada.
+            Solo lectura. Cambia a la vista «Yo» para editar tu estrategia, tu
+            objetivo y tu retirada.
+          </p>
+        </section>
+      ) : retirementProfile == null ? (
+        <section className="panel muted-panel">
+          <h3 className="panel-title">Tu plan de jubilación</h3>
+          <p className="muted tight">
+            {retirementProfileBusy ? "Cargando…" : "Sin datos."}
           </p>
         </section>
       ) : (
         <>
-        <section className="panel">
-          <h3 className="panel-title">Objetivo anual <span className="muted">(en dinero de hoy)</span></h3>
-          <div className="stack bordered-top retirement-config-stack">
-            <fieldset disabled={!canEditFire} className="stack retirement-config-stack">
-              <div className="retirement-mode-grid" role="radiogroup" aria-label="Modo objetivo anual">
+          {/* ── 1. Estrategia (D26): cinco tarjetas + solo los campos de la elegida ────── */}
+          <section className="panel">
+            <div className="panel-head-row">
+              <h3 className="panel-title">Tu estrategia</h3>
+              <HelpPopover
+                title={HELP_TEXTS["retirement.strategy"].title}
+                body={HELP_TEXTS["retirement.strategy"].body}
+              />
+            </div>
+            <div className="stack bordered-top retirement-config-stack">
+              <div
+                className="retirement-mode-grid retirement-strategy-grid"
+                role="radiogroup"
+                aria-label="Estrategia de jubilación"
+              >
+                {RETIREMENT_STRATEGIES.map((s) => (
+                  <label
+                    key={s}
+                    className={`retirement-mode-card ${strategy === s ? "is-active" : ""}`}
+                  >
+                    <input
+                      type="radio"
+                      name="retirement_strategy"
+                      className="sr-only"
+                      checked={strategy === s}
+                      onChange={() => selectStrategy(s)}
+                    />
+                    <span className="retirement-mode-name">
+                      {RETIREMENT_STRATEGY_LABEL[s]}
+                    </span>
+                    <span className="retirement-mode-sub">
+                      {RETIREMENT_STRATEGY_BLURB[s]}
+                    </span>
+                  </label>
+                ))}
+              </div>
+
+              {/* Edad objetivo: obligatoria en las dos estrategias por edad, opcional en media
+                  jornada (donde marca el fin de la fase parcial). En «Cuanto antes» y en el
+                  puente NO se enseña: esas se disparan por cruce y una edad ahí no haría nada. */}
+              {strategyRequiresTargetAge(strategy) || strategy === "partial" ? (
+                <label className="field">
+                  <span className="label-with-help">
+                    {strategy === "partial"
+                      ? "Edad de jubilación total (opc.)"
+                      : "Edad de jubilación objetivo"}
+                    <HelpPopover
+                      title={HELP_TEXTS["retirement.target_age"].title}
+                      body={HELP_TEXTS["retirement.target_age"].body}
+                    />
+                  </span>
+                  <input
+                    inputMode="numeric"
+                    value={intFieldValue(profileDraft.target_retirement_age)}
+                    placeholder={strategy === "partial" ? "—" : "p. ej. 60"}
+                    onChange={(e) => {
+                      const v = readIntField(e.target.value);
+                      if (v === undefined) return;
+                      patchDraft((p) => ({ ...p, target_retirement_age: v }));
+                    }}
+                    onBlur={() => queueProfileSave(0)}
+                  />
+                  {strategyRequiresTargetAge(strategy) &&
+                  profileDraft.target_retirement_age == null ? (
+                    <small className="muted">
+                      {messageForError("target_retirement_age_required", null)} Sin
+                      guardar.
+                    </small>
+                  ) : birthDateMissing ? (
+                    <small className="muted">
+                      Sin tu fecha de nacimiento esta edad no se puede convertir en un mes:
+                      añádela en «Tu cuenta».
+                    </small>
+                  ) : null}
+                </label>
+              ) : null}
+
+              {/* Media jornada: la fase intermedia con su ingreso y su base de gasto. */}
+              {strategy === "partial" && partial ? (
+                <>
+                  <div className="field-row">
+                    <label className="field">
+                      <span className="label-with-help">
+                        Media jornada: edad de inicio
+                        <HelpPopover
+                          title={HELP_TEXTS["retirement.partial"].title}
+                          body={HELP_TEXTS["retirement.partial"].body}
+                        />
+                      </span>
+                      <input
+                        inputMode="numeric"
+                        value={String(partial.starts_at_age)}
+                        onChange={(e) => {
+                          const v = readIntField(e.target.value);
+                          if (v === undefined || v === null) return;
+                          patchDraft((p) =>
+                            p.partial_retirement
+                              ? {
+                                  ...p,
+                                  partial_retirement: {
+                                    ...p.partial_retirement,
+                                    starts_at_age: v,
+                                  },
+                                }
+                              : p,
+                          );
+                        }}
+                        onBlur={() => queueProfileSave(0)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Ingreso mensual en la fase</span>
+                      <input
+                        inputMode="decimal"
+                        placeholder="0"
+                        value={partial.income_monthly_today}
+                        onChange={(e) =>
+                          patchDraft((p) =>
+                            p.partial_retirement
+                              ? {
+                                  ...p,
+                                  partial_retirement: {
+                                    ...p.partial_retirement,
+                                    income_monthly_today: typedDecimal(e.target.value),
+                                  },
+                                }
+                              : p,
+                          )
+                        }
+                        onBlur={() => queueProfileSave(0)}
+                      />
+                    </label>
+                  </div>
+                  <label className="field">
+                    <span>Gasto durante la media jornada</span>
+                    <select
+                      value={partial.expense_basis}
+                      onChange={(e) =>
+                        patchDraft((p) =>
+                          p.partial_retirement
+                            ? {
+                                ...p,
+                                partial_retirement: {
+                                  ...p.partial_retirement,
+                                  expense_basis:
+                                    e.target.value === "regular"
+                                      ? "regular"
+                                      : "retirement",
+                                },
+                              }
+                            : p,
+                        )
+                      }
+                    >
+                      <option value="retirement">El de jubilación</option>
+                      <option value="regular">El regular de hoy</option>
+                    </select>
+                  </label>
+                </>
+              ) : null}
+              <p className="muted tight">{saveFooter}</p>
+            </div>
+          </section>
+
+          {/* ── 2. Pensión: opcional siempre, obligatoria en el puente ──────────────────── */}
+          <section className="panel">
+            <div className="panel-head-row">
+              <h3 className="panel-title">Pensión pública</h3>
+              <HelpPopover
+                title={HELP_TEXTS["retirement.pension"].title}
+                body={HELP_TEXTS["retirement.pension"].body}
+              />
+            </div>
+            <div className="stack bordered-top retirement-config-stack">
+              <label className="field checkbox-field">
+                <input
+                  type="checkbox"
+                  checked={pension != null}
+                  // El puente ES la pensión: quitarla dejaría la estrategia sin su dato y el
+                  // servidor rechazaría el PATCH. Se bloquea aquí en vez de dejar que el
+                  // usuario descubra el error después de haber borrado sus cifras.
+                  disabled={strategy === "pension_bridge" && pension != null}
+                  onChange={(e) =>
+                    patchDraft((p) => ({
+                      ...p,
+                      pension: e.target.checked ? newPensionPlanDraft() : null,
+                    }))
+                  }
+                />
+                <span>Cuento con una pensión</span>
+              </label>
+              {strategy === "pension_bridge" ? (
+                <small className="muted">
+                  «Puente hasta la pensión» la necesita: el objetivo se dimensiona con los años
+                  que van de tu jubilación a la primera paga.
+                </small>
+              ) : null}
+
+              {pension ? (
+                <>
+                  <div className="field-row">
+                    <label className="field">
+                      <span>Importe mensual (euros de hoy)</span>
+                      <input
+                        inputMode="decimal"
+                        placeholder="p. ej. 1200"
+                        value={pension.monthly_amount_today}
+                        onChange={(e) =>
+                          setPension((p) => ({
+                            ...p,
+                            monthly_amount_today: typedDecimal(e.target.value),
+                          }))
+                        }
+                        onBlur={() => queueProfileSave(0)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Edad a la que empieza</span>
+                      <input
+                        inputMode="numeric"
+                        value={String(pension.starts_at_age)}
+                        onChange={(e) => {
+                          const v = readIntField(e.target.value);
+                          if (v === undefined || v === null) return;
+                          setPension((p) => ({ ...p, starts_at_age: v }));
+                        }}
+                        onBlur={() => queueProfileSave(0)}
+                      />
+                    </label>
+                  </div>
+                  <label className="field checkbox-field">
+                    <input
+                      type="checkbox"
+                      checked={pension.indexed}
+                      onChange={(e) =>
+                        setPension((p) => ({ ...p, indexed: e.target.checked }))
+                      }
+                    />
+                    <span>Sube cada año con la inflación</span>
+                  </label>
+                  {/* Solo con media jornada declarada: fuera de esa fase la fracción no se
+                      aplica nunca, y un campo que no hace nada es peor que no estar. */}
+                  {partial ? (
+                    <label className="field">
+                      <span>Parte que cobras en media jornada (0 a 1)</span>
+                      <input
+                        inputMode="decimal"
+                        placeholder="0"
+                        value={pension.fraction_while_partial}
+                        onChange={(e) =>
+                          setPension((p) => ({
+                            ...p,
+                            fraction_while_partial: typedDecimal(e.target.value),
+                          }))
+                        }
+                        onBlur={() => queueProfileSave(0)}
+                      />
+                    </label>
+                  ) : null}
+                </>
+              ) : null}
+              <p className="muted tight">{saveFooter}</p>
+            </div>
+          </section>
+
+          {/* ── 3. Objetivo anual + base del objetivo ───────────────────────────────────── */}
+          <section className="panel">
+            <h3 className="panel-title">
+              Objetivo anual <span className="muted">(en dinero de hoy)</span>
+            </h3>
+            <div className="stack bordered-top retirement-config-stack">
+              <div
+                className="retirement-mode-grid"
+                role="radiogroup"
+                aria-label="Modo objetivo anual"
+              >
                 <label
                   className={`retirement-mode-card ${
-                    fireDraft.fire_number_mode === "manual" ? "is-active" : ""
+                    profileDraft.fire_number_mode === "manual" ? "is-active" : ""
                   }`}
                 >
                   <input
                     type="radio"
                     name="fire_mode"
                     className="sr-only"
-                    checked={fireDraft.fire_number_mode === "manual"}
+                    checked={profileDraft.fire_number_mode === "manual"}
                     onChange={() =>
-                      setFireDraft((p) => ({ ...p, fire_number_mode: "manual" }))
+                      patchDraft((p) => ({ ...p, fire_number_mode: "manual" }))
                     }
                   />
                   <span className="retirement-mode-name">Manual</span>
@@ -719,19 +1143,16 @@ export function RetirementView({
                 </label>
                 <label
                   className={`retirement-mode-card ${
-                    fireDraft.fire_number_mode === "annual_expense" ? "is-active" : ""
+                    profileDraft.fire_number_mode === "annual_expense" ? "is-active" : ""
                   }`}
                 >
                   <input
                     type="radio"
                     name="fire_mode"
                     className="sr-only"
-                    checked={fireDraft.fire_number_mode === "annual_expense"}
+                    checked={profileDraft.fire_number_mode === "annual_expense"}
                     onChange={() =>
-                      setFireDraft((p) => ({
-                        ...p,
-                        fire_number_mode: "annual_expense",
-                      }))
+                      patchDraft((p) => ({ ...p, fire_number_mode: "annual_expense" }))
                     }
                   />
                   <span className="retirement-mode-name">Gasto actual</span>
@@ -741,19 +1162,16 @@ export function RetirementView({
                 </label>
                 <label
                   className={`retirement-mode-card ${
-                    fireDraft.fire_number_mode === "current_income" ? "is-active" : ""
+                    profileDraft.fire_number_mode === "current_income" ? "is-active" : ""
                   }`}
                 >
                   <input
                     type="radio"
                     name="fire_mode"
                     className="sr-only"
-                    checked={fireDraft.fire_number_mode === "current_income"}
+                    checked={profileDraft.fire_number_mode === "current_income"}
                     onChange={() =>
-                      setFireDraft((p) => ({
-                        ...p,
-                        fire_number_mode: "current_income",
-                      }))
+                      patchDraft((p) => ({ ...p, fire_number_mode: "current_income" }))
                     }
                   />
                   <span className="retirement-mode-name">Ingresos actuales</span>
@@ -763,33 +1181,113 @@ export function RetirementView({
                 </label>
               </div>
 
-              {fireDraft.fire_number_mode === "manual" ? (
+              {profileDraft.fire_number_mode === "manual" ? (
                 <label className="field">
                   <span>Gasto anual neto objetivo</span>
                   <input
                     inputMode="decimal"
-                    value={fireDraft.fire_number_manual_amount ?? ""}
+                    value={profileDraft.fire_number_manual_amount ?? ""}
                     onChange={(e) =>
-                      setFireDraft((p) => ({
+                      patchDraft((p) => ({
                         ...p,
-                        fire_number_manual_amount:
-                          e.target.value.trim() === ""
-                            ? null
-                            : e.target.value.replace(",", "."),
+                        fire_number_manual_amount: typedDecimalOrNull(e.target.value),
                       }))
                     }
-                    onBlur={() => queueFireSave(0)}
+                    onBlur={() => queueProfileSave(0)}
                   />
                 </label>
               ) : null}
-            </fieldset>
-          </div>
-        </section>
 
-        <section className="panel">
-          <h3 className="panel-title">Retirada</h3>
-          <div className="stack bordered-top retirement-config-stack">
-            <fieldset disabled={!canEditFire} className="stack retirement-config-stack">
+              {/* Base del objetivo. En el puente NO se ofrece: esa estrategia ES el puente y el
+                  servidor la fuerza, así que un radio ahí enseñaría una opción sin efecto. */}
+              {strategy === "pension_bridge" ? (
+                <p className="muted tight">
+                  Base del objetivo: <strong>puente hasta la pensión</strong> · la fija la
+                  estrategia.
+                </p>
+              ) : (
+                <div className="field">
+                  <div
+                    className="retirement-radio-stack"
+                    role="radiogroup"
+                    aria-label="Base del objetivo"
+                  >
+                    {/* El rótulo va DENTRO del stack: `.field-label-text` le da `flex: 1 0 100%`
+                        para que ocupe su propia línea sobre las opciones cuando estas envuelven. */}
+                    <span className="label-with-help field-label-text">
+                      Base del objetivo
+                      <HelpPopover
+                        title={HELP_TEXTS["retirement.target_basis"].title}
+                        body={HELP_TEXTS["retirement.target_basis"].body}
+                      />
+                    </span>
+                    <label className="field checkbox-field">
+                      <input
+                        type="radio"
+                        name="target_basis"
+                        checked={basis === "perpetuity"}
+                        onChange={() =>
+                          patchDraft((p) => ({ ...p, target_basis: "perpetuity" }))
+                        }
+                      />
+                      <span>Renta perpetua (ignora la pensión)</span>
+                    </label>
+                    <label className="field checkbox-field">
+                      <input
+                        type="radio"
+                        name="target_basis"
+                        checked={basis === "bridge_to_pension"}
+                        onChange={() =>
+                          patchDraft((p) => ({ ...p, target_basis: "bridge_to_pension" }))
+                        }
+                      />
+                      <span>Puente hasta la pensión</span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {basis === "bridge_to_pension" ? (
+                <label className="field">
+                  <span className="label-with-help">
+                    Descuento del puente
+                    <HelpPopover
+                      title={HELP_TEXTS["retirement.bridge_discount"].title}
+                      body={HELP_TEXTS["retirement.bridge_discount"].body}
+                    />
+                  </span>
+                  <select
+                    value={profileDraft.bridge_discount_basis}
+                    onChange={(e) =>
+                      patchDraft((p) => ({
+                        ...p,
+                        bridge_discount_basis:
+                          e.target.value === "swr"
+                            ? "swr"
+                            : e.target.value === "none"
+                              ? "none"
+                              : "expected_return",
+                      }))
+                    }
+                  >
+                    {(
+                      ["expected_return", "swr", "none"] as const
+                    ).map((b) => (
+                      <option key={b} value={b}>
+                        {BRIDGE_DISCOUNT_BASIS_LABEL[b]}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              <p className="muted tight">{saveFooter}</p>
+            </div>
+          </section>
+
+          {/* ── 4. Retirada: cuánto sale del patrimonio y con qué relación con el gasto ─── */}
+          <section className="panel">
+            <h3 className="panel-title">Retirada</h3>
+            <div className="stack bordered-top retirement-config-stack">
               <label className="field">
                 <span className="label-with-help">
                   Retirada anual (SWR)
@@ -804,24 +1302,303 @@ export function RetirementView({
                   max={40}
                   step={1}
                   value={Math.round(
-                    (parseDisplayDecimal(fireDraft.swr_pct) ?? 0) * 10,
+                    (parseDisplayDecimal(profileDraft.swr_pct) ?? 0) * 10,
                   )}
                   onChange={(e) => {
                     const v = Number(e.target.value);
-                    setFireDraft((p) => ({
-                      ...p,
-                      swr_pct: String(v / 10),
-                    }));
+                    patchDraft((p) => ({ ...p, swr_pct: String(v / 10) }));
                   }}
-                  onBlur={() => queueFireSave(0)}
+                  onBlur={() => queueProfileSave(0)}
                 />
                 <span className="muted tight">
-                  {formatPercentAmount(fireDraft.swr_pct)}
+                  {formatPercentAmount(profileDraft.swr_pct)}
                 </span>
               </label>
-            </fieldset>
-          </div>
-        </section>
+
+              <label className="field">
+                <span className="label-with-help">
+                  Regla de retirada
+                  <HelpPopover
+                    title={HELP_TEXTS["retirement.withdrawal_rule"].title}
+                    body={HELP_TEXTS["retirement.withdrawal_rule"].body}
+                  />
+                </span>
+                <select
+                  value={rule.kind}
+                  onChange={(e) => {
+                    const kind = e.target.value as WithdrawalRuleKindApi;
+                    patchDraft((p) => ({
+                      ...p,
+                      withdrawal_rule: { ...p.withdrawal_rule, kind },
+                    }));
+                  }}
+                >
+                  {(
+                    [
+                      "fixed_real",
+                      "percent_of_balance",
+                      "hybrid",
+                      "guardrails",
+                    ] as const
+                  ).map((k) => (
+                    <option key={k} value={k}>
+                      {WITHDRAWAL_RULE_KIND_LABEL[k]}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {/* Cada regla pide SUS porcentajes y no los de otra: enseñar los cinco a la vez
+                  invitaría a rellenar campos que la regla elegida ni mira. */}
+              {rule.kind === "percent_of_balance" ? (
+                <label className="field">
+                  <span>Porcentaje anual del saldo</span>
+                  <input
+                    inputMode="decimal"
+                    placeholder="p. ej. 4"
+                    value={rule.pct ?? ""}
+                    onChange={(e) =>
+                      patchDraft((p) => ({
+                        ...p,
+                        withdrawal_rule: {
+                          ...p.withdrawal_rule,
+                          pct: typedDecimalOrNull(e.target.value),
+                        },
+                      }))
+                    }
+                    onBlur={() => queueProfileSave(0)}
+                  />
+                </label>
+              ) : null}
+
+              {rule.kind === "hybrid" ? (
+                <div className="field-row">
+                  <label className="field">
+                    <span>Porcentaje de partida</span>
+                    <input
+                      inputMode="decimal"
+                      placeholder="p. ej. 5"
+                      value={rule.start_pct ?? ""}
+                      onChange={(e) =>
+                        patchDraft((p) => ({
+                          ...p,
+                          withdrawal_rule: {
+                            ...p.withdrawal_rule,
+                            start_pct: typedDecimalOrNull(e.target.value),
+                          },
+                        }))
+                      }
+                      onBlur={() => queueProfileSave(0)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Porcentaje al que bajas</span>
+                    <input
+                      inputMode="decimal"
+                      placeholder="p. ej. 3,5"
+                      value={rule.end_pct ?? ""}
+                      onChange={(e) =>
+                        patchDraft((p) => ({
+                          ...p,
+                          withdrawal_rule: {
+                            ...p.withdrawal_rule,
+                            end_pct: typedDecimalOrNull(e.target.value),
+                          },
+                        }))
+                      }
+                      onBlur={() => queueProfileSave(0)}
+                    />
+                  </label>
+                </div>
+              ) : null}
+
+              {rule.kind === "guardrails" ? (
+                <>
+                  <label className="field">
+                    <span>Porcentaje de partida</span>
+                    <input
+                      inputMode="decimal"
+                      placeholder="p. ej. 5"
+                      value={rule.pct ?? ""}
+                      onChange={(e) =>
+                        patchDraft((p) => ({
+                          ...p,
+                          withdrawal_rule: {
+                            ...p.withdrawal_rule,
+                            pct: typedDecimalOrNull(e.target.value),
+                          },
+                        }))
+                      }
+                      onBlur={() => queueProfileSave(0)}
+                    />
+                  </label>
+                  <div className="field-row">
+                    <label className="field">
+                      <span>Banda que dispara el ajuste (%)</span>
+                      <input
+                        inputMode="decimal"
+                        placeholder="p. ej. 20"
+                        value={rule.band_pct ?? ""}
+                        onChange={(e) =>
+                          patchDraft((p) => ({
+                            ...p,
+                            withdrawal_rule: {
+                              ...p.withdrawal_rule,
+                              band_pct: typedDecimalOrNull(e.target.value),
+                            },
+                          }))
+                        }
+                        onBlur={() => queueProfileSave(0)}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Cuánto ajustas al tocarla (%)</span>
+                      <input
+                        inputMode="decimal"
+                        placeholder="p. ej. 10"
+                        value={rule.adjust_pct ?? ""}
+                        onChange={(e) =>
+                          patchDraft((p) => ({
+                            ...p,
+                            withdrawal_rule: {
+                              ...p.withdrawal_rule,
+                              adjust_pct: typedDecimalOrNull(e.target.value),
+                            },
+                          }))
+                        }
+                        onBlur={() => queueProfileSave(0)}
+                      />
+                    </label>
+                  </div>
+                </>
+              ) : null}
+
+              <div className="field">
+                <div
+                  className="retirement-radio-stack"
+                  role="radiogroup"
+                  aria-label="Cómo se aplica la regla"
+                >
+                  <span className="label-with-help field-label-text">
+                    Cómo se aplica la regla
+                    <HelpPopover
+                      title={HELP_TEXTS["retirement.spend_mode"].title}
+                      body={HELP_TEXTS["retirement.spend_mode"].body}
+                    />
+                  </span>
+                  <label className="field checkbox-field">
+                    <input
+                      type="radio"
+                      name="spend_mode"
+                      checked={rule.spend_mode === "ceiling"}
+                      onChange={() =>
+                        patchDraft((p) => ({
+                          ...p,
+                          withdrawal_rule: {
+                            ...p.withdrawal_rule,
+                            spend_mode: "ceiling",
+                          },
+                        }))
+                      }
+                    />
+                    <span>Techo: retiro como mucho la regla</span>
+                  </label>
+                  <label className="field checkbox-field">
+                    <input
+                      type="radio"
+                      name="spend_mode"
+                      checked={rule.spend_mode === "rule_is_spend"}
+                      onChange={() =>
+                        patchDraft((p) => ({
+                          ...p,
+                          withdrawal_rule: {
+                            ...p.withdrawal_rule,
+                            spend_mode: "rule_is_spend",
+                          },
+                        }))
+                      }
+                    />
+                    <span>La regla es mi gasto</span>
+                  </label>
+                </div>
+              </div>
+              <p className="muted tight">{saveFooter}</p>
+            </div>
+          </section>
+
+          {/* ── 5. Horizonte y riesgo ───────────────────────────────────────────────────── */}
+          <section className="panel">
+            <h3 className="panel-title">Horizonte y riesgo</h3>
+            <div className="stack bordered-top retirement-config-stack">
+              <label className="field">
+                <span className="label-with-help">
+                  Horizonte: edad límite
+                  <HelpPopover
+                    title={HELP_TEXTS["settings.horizon_age"].title}
+                    body={HELP_TEXTS["settings.horizon_age"].body}
+                  />
+                </span>
+                <select
+                  value={String(profileDraft.horizon_lifespan_age)}
+                  onChange={(e) => {
+                    const n = Number(e.target.value);
+                    if (!Number.isInteger(n)) return;
+                    patchDraft((p) => ({ ...p, horizon_lifespan_age: n }));
+                  }}
+                >
+                  {HORIZON_LIFESPAN_AGE_OPTIONS.map((edad) => (
+                    <option key={edad} value={String(edad)}>
+                      {edad} años
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="field-row">
+                <label className="field">
+                  <span className="label-with-help">
+                    Colchón de caja (meses)
+                    <HelpPopover
+                      title={HELP_TEXTS["retirement.cash_buffer"].title}
+                      body={HELP_TEXTS["retirement.cash_buffer"].body}
+                    />
+                  </span>
+                  <input
+                    inputMode="numeric"
+                    placeholder="—"
+                    value={intFieldValue(profileDraft.cash_buffer_months)}
+                    onChange={(e) => {
+                      const v = readIntField(e.target.value);
+                      if (v === undefined) return;
+                      if (v !== null && v > MAX_CASH_BUFFER_MONTHS) return;
+                      patchDraft((p) => ({ ...p, cash_buffer_months: v }));
+                    }}
+                    onBlur={() => queueProfileSave(0)}
+                  />
+                </label>
+                <label className="field">
+                  <span className="label-with-help">
+                    Umbral de éxito (%)
+                    <HelpPopover
+                      title={HELP_TEXTS["retirement.success_threshold"].title}
+                      body={HELP_TEXTS["retirement.success_threshold"].body}
+                    />
+                  </span>
+                  <input
+                    inputMode="numeric"
+                    value={String(profileDraft.success_threshold_pct)}
+                    onChange={(e) => {
+                      const v = readIntField(e.target.value);
+                      if (v === undefined || v === null) return;
+                      patchDraft((p) => ({ ...p, success_threshold_pct: v }));
+                    }}
+                    onBlur={() => queueProfileSave(0)}
+                  />
+                </label>
+              </div>
+              <p className="muted tight">{saveFooter}</p>
+            </div>
+          </section>
         </>
       )}
 
