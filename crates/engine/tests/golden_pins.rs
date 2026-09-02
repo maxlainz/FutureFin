@@ -1,6 +1,6 @@
 //! **PIN DORADO DEL MOTOR 4.15.0** — la red de bit-identidad del refactor 5.0.0.
 //!
-//! Qué hace: para cada caso de `tests/common/cases.rs` (L1–L6 y P1–P12) canonicaliza a TEXTO
+//! Qué hace: para cada caso de `tests/common/cases.rs` (L1–L6 y P1–P13) canonicaliza a TEXTO
 //! *todas* las salidas del motor —hasta el último dígito de cada `Decimal`, vía `Display`— y las
 //! resume en un SHA-256 guardado en `tests/fixtures/pins-4.15.json`. Si el refactor mueve un solo
 //! dígito de una serie, de una traza de cascada o de un calendario de amortización, el hash del
@@ -549,9 +549,10 @@ fn the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery() {
     );
     assert_eq!(
         audit.len(),
-        6,
-        "la batería que audit_dump vuelca son los 6 casos P1–P6; si de verdad hace falta uno más \
-         en el CSV, el oráculo externo tiene que enterarse"
+        7,
+        "la batería que audit_dump vuelca son los 6 casos P1–P6 más P13 (la regresión de la issue \
+         #208, añadida en WP1a de 5.0.0); si de verdad hace falta uno más en el CSV, el oráculo \
+         externo tiene que enterarse"
     );
 }
 
@@ -669,8 +670,8 @@ fn p7_and_p9_are_anchored_by_hand_derived_numbers() {
     );
 }
 
-/// **DIANA, no regresión: hoy PANICA y por eso va `#[ignore]`.** Bug vivo encontrado montando
-/// WP0 de 5.0.0 (pendiente de issue).
+/// **REGRESIÓN de la issue #208** (era DIANA `#[ignore]` en WP0: entonces PANICABA; el arreglo
+/// de WP1a la convierte en la red que impide que vuelva).
 ///
 /// `gross_up_mixed_monthly` calcula `(techo_del_tramo_fiscal − base) / g` para topar la venta de
 /// un tramo, y solo se protege con `if g > Decimal::ZERO`. Esa guarda no basta: con una `g`
@@ -688,9 +689,11 @@ fn p7_and_p9_are_anchored_by_hand_derived_numbers() {
 ///
 /// Cota medida: con `g = 1e-20` no desborda (200.000/1e-20 = 2e25); con `g = 1e-27`, sí.
 ///
-/// **Cuando el motor deje de panicar, quita el `#[ignore]`**: este test pasa a ser la regresión.
+/// **Arreglo (WP1a):** `checked_div` en los dos topes del solver mixto — un cociente que no cabe
+/// en `Decimal` significa «este tope no ata», y el techo real lo sigue poniendo la capacidad del
+/// activo (`capacity_monthly`). El caso `P13_cash8k_denormal_g` del pin dorado cubre el mismo
+/// mecanismo dentro de una proyección completa de 840 meses.
 #[test]
-#[ignore = "bug vivo del motor: gross_up_mixed_monthly desborda con una gain ratio denormal"]
 fn mixed_drawdown_must_not_panic_on_a_denormal_gain_ratio() {
     let mut input = cases::base_input(
         3,
@@ -717,4 +720,34 @@ fn mixed_drawdown_must_not_panic_on_a_denormal_gain_ratio() {
     let out = project_net_worth_series(&input)
         .expect("una gain ratio denormal no debe hacer fallar la simulación");
     assert_eq!(out.net_worth.len(), 4);
+
+    // Y no basta con «no panica»: el drenaje TIENE que ocurrir. Un `checked_div` que devolviese
+    // `None` y abortase el tramo dejaría la venta en cero y el test seguiría verde en su
+    // ausencia de pánico mientras el hogar se queda sin cubrir su gasto.
+    assert_eq!(
+        out.per_asset_series[0][1],
+        Decimal::ZERO,
+        "el activo denormal (1 €) se vende entero el primer mes"
+    );
+    for k in 1..=3usize {
+        assert!(
+            out.per_asset_series[1][k] < out.per_asset_series[1][k - 1],
+            "el activo grande tiene que ADELGAZAR cada mes (mes {k}: {} → {})",
+            out.per_asset_series[1][k - 1],
+            out.per_asset_series[1][k]
+        );
+        assert!(
+            out.net_worth[k] < out.net_worth[k - 1],
+            "el patrimonio tiene que bajar cada mes (mes {k})"
+        );
+    }
+    assert_eq!(
+        out.uncovered_deficit_total,
+        Decimal::ZERO,
+        "con 10.001 € vendibles y 1.000 €/mes de déficit no puede quedar descubierto"
+    );
+    assert_eq!(
+        out.assets_depleted_month_index, None,
+        "y la cartera no se agota en 3 meses"
+    );
 }

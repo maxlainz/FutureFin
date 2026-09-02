@@ -1,8 +1,9 @@
 //! Batería ÚNICA de casos del motor. **Una sola definición, dos consumidores:**
 //!
-//! - `audit_dump.rs` — vuelca en CSV las series de los casos L1–L6 y P1–P6 para que un oráculo
-//!   EXTERNO las compare mes a mes. Su salida es un contrato: no debe cambiar.
-//! - `golden_pins.rs` — canonicaliza y hashea TODOS los casos (L1–L6 y P1–P12) contra el pin de
+//! - `audit_dump.rs` — vuelca en CSV las series de los casos L1–L6, P1–P6 y P13 para que un
+//!   oráculo EXTERNO las compare mes a mes. Su salida es un contrato: no crece sin declararlo
+//!   (P13 entró en WP1a de 5.0.0 con el arreglo de la issue #208).
+//! - `golden_pins.rs` — canonicaliza y hashea TODOS los casos (L1–L6 y P1–P13) contra el pin de
 //!   4.15.0, la red de seguridad de bit-identidad del refactor 5.0.0.
 //!
 //! El módulo vivía dentro de `audit_dump.rs` hasta WP0 de 5.0.0. Se extrajo porque dos baterías
@@ -188,6 +189,108 @@ pub fn es_tax_brackets_2025_26() -> Vec<TaxBracket> {
 // Casos
 // ---------------------------------------------------------------------------------------------
 
+/// **El hogar de P9**, con el saldo de la cuenta corriente (activo 0) como ÚNICO eje.
+///
+/// 840 meses, 5 activos, cascada de 3 reglas con tope, 2 pasivos (uno francés con TIN y otro sin
+/// interés que vence), planning flows con signo en dos tramos, objetivo FIRE con pensión,
+/// impuestos ES, inflación 2,5 % y término finito de deuda.
+///
+/// Dos instancias, y el eje NO es decorativo:
+/// - `20_000` ⇒ `P9_hogar_realista`, el caso grande y el que mide `timing.rs`.
+/// - `8_000` ⇒ `P13_cash8k_denormal_g`, la **regresión de la issue #208**: con 8.000 € el −15.000
+///   del mes 24 deja la cuenta al borde, y como la cuenta va al 0 % y la cascada la alimenta, su
+///   base de coste queda pegada al valor (cada euro aportado sube las dos), el drenaje conserva
+///   `b/v` y un 0 % no vuelve a abrir hueco: la plusvalía relativa `g = 1 − b/v` se queda
+///   DENORMAL (≈1e-27). Hasta 4.15.0 el solver mixto calculaba `(techo_del_tramo − base) / g` con
+///   `/` y esta proyección PANICABA en el mes 138 con «Division overflowed» — un 400 `task_panic`
+///   opaco en producción. Desde WP1a de 5.0.0 el tope va por `checked_div` y los 840 meses corren.
+///   Con 12.000 y 15.000 panicaba igual; con 20.000 (P9) no, y por eso el bug sobrevivió a WP0.
+///
+/// Los dos casos comparten TODO lo demás — un segundo hogar escrito a mano habría divergido al
+/// primer retoque, y entonces P13 dejaría de ser «P9 con menos caja».
+pub fn p9_household(checking_account_value: Decimal) -> ProjectionInput {
+    let mut p9 = base_input(
+        840,
+        Decimal::from(4_200),
+        Decimal::from(2_600),
+        vec![
+            // 0 — cuenta corriente, 0 %: destino del `remainder` (sumidero). ES EL EJE del par
+            //     P9/P13 (ver el doc de arriba): al 0 % su base de coste no se despega nunca del
+            //     valor, así que es el activo que fabrica la `g` denormal de #208.
+            mk_asset(1, checking_account_value, true, None),
+            // 1 — fondo de bonos 3 %: destino de la regla fija con tope Amount(20.000).
+            mk_asset(2, Decimal::from(12_000), true, Some(Decimal::from(3))),
+            // 2 — fondo de RV 6,5 % CON base de coste declarada (30.000 sobre 40.000 ⇒ g = 0,25).
+            mk_asset_with_basis(
+                3,
+                Decimal::from(40_000),
+                true,
+                Some(d(65, 1)),
+                Decimal::from(30_000),
+            ),
+            // 3 — vivienda 1 %, ILÍQUIDA: pesa en `net_worth` pero no en `liquid_worth`, así que
+            //     el cruce FIRE (#143) no la cuenta y el drenaje solo la toca al final.
+            mk_asset(4, Decimal::from(250_000), false, Some(Decimal::ONE)),
+            // 4 — cripto 12 %: la cola de rentabilidad alta, última en el orden de drenaje.
+            mk_asset(5, Decimal::from(5_000), true, Some(Decimal::from(12))),
+        ],
+        vec![
+            rule_fixed(
+                1,
+                Decimal::from(300),
+                Some(AllocationCap::Amount(Decimal::from(20_000))),
+            ),
+            rule_percent(2, Decimal::from(60), None),
+            rule_remainder(0),
+        ],
+    );
+    p9.annual_inflation_percent = d(25, 1);
+    p9.tax_brackets = es_tax_brackets_2025_26();
+    p9.taxes_enabled = true;
+    p9.taxable_gain_ratio = Decimal::ONE;
+    p9.income_retirement_monthly = Decimal::from(900);
+    p9.expense_retirement_monthly = Decimal::from(2_300);
+    p9.liabilities = vec![
+        // Hipoteca francesa: 180.000 € al TIN 2,9 %, cuota 900 €, sin fecha de fin declarada.
+        mk_liab(
+            Decimal::from(180_000),
+            Decimal::from(900),
+            Some(d(29, 1)),
+            RepaymentModel::French,
+            None,
+        ),
+        // Préstamo al consumo sin interés que VENCE a los 30 meses.
+        mk_liab(
+            Decimal::from(6_000),
+            Decimal::from(200),
+            None,
+            RepaymentModel::FixedPayments,
+            Some(30),
+        ),
+    ];
+    // Planning flows: el índice `i` del vector es el mes `i+1` del bucle.
+    //   · −15.000 € en el mes 24 (una entrada de coche) ⇒ índice 23.
+    //   · +800 €/mes del mes 36 al 72 inclusive (un alquiler temporal) ⇒ índices 35..=71.
+    p9.planning_monthly_cash_adjustment[23] = Decimal::from(-15_000);
+    for i in 35..=71 {
+        p9.planning_monthly_cash_adjustment[i] = Decimal::from(800);
+    }
+    p9.fire_target = Some(FireTarget {
+        need: FireNeed::ExpenseMinusPension {
+            expense_monthly: Decimal::from(2_300),
+            pension_monthly: Decimal::from(900),
+        },
+        swr_pct: d(35, 1),
+        tax_brackets: es_tax_brackets_2025_26(),
+        taxes_enabled: true,
+        taxable_gain_ratio: Decimal::ONE,
+        annual_inflation_percent: d(25, 1),
+        // Término finito de deuda (#142) calculado con la MISMA función que el handler.
+        debt_payments_remaining: debt_payments_remaining_series(&p9.liabilities, ref_date()),
+    });
+    p9
+}
+
 /// Un calendario de amortización a volcar/hashear, con el horizonte con el que se pide.
 pub struct LiabCase {
     pub name: &'static str,
@@ -282,7 +385,11 @@ pub fn liability_cases() -> Vec<LiabCase> {
     ]
 }
 
-/// Batería de proyecciones que `audit_dump` vuelca (casos P1–P6). **Este orden ES el CSV.**
+/// Batería de proyecciones que `audit_dump` vuelca (casos P1–P6 y P13). **Este orden ES el CSV.**
+///
+/// P13 se sumó en WP1a de 5.0.0 con el arreglo de la issue #208: el CSV creció en un caso y el
+/// oráculo externo tiene que enterarse (la cota la vigila
+/// `golden_pins.rs::the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery`).
 pub fn projection_cases_audit() -> Vec<ProjCase> {
     let mut out = Vec::new();
 
@@ -413,6 +520,21 @@ pub fn projection_cases_audit() -> Vec<ProjCase> {
         input: p6,
     });
 
+    // -----------------------------------------------------------------------------------------
+    // P13: el hogar de P9 con 8.000 € en la cuenta corriente en vez de 20.000 — la **regresión
+    //      de la issue #208** (pánico «Division overflowed» en `gross_up_mixed_monthly`).
+    //
+    // Está en la batería de AUDITORÍA, no en la extendida, a propósito: la `g` denormal nace del
+    // par (cuenta al 0 % alimentada por la cascada) × (venta fuerte) y atraviesa el gross-up
+    // mixto por tramos progresivos — justo la aritmética que un oráculo externo debe poder
+    // reproducir mes a mes. Un pin interno solo diría «no panica»; el CSV dice «y estos son los
+    // números». El mecanismo completo, en el doc de [`p9_household`].
+    // -----------------------------------------------------------------------------------------
+    out.push(ProjCase {
+        name: "P13_cash8k_denormal_g",
+        input: p9_household(Decimal::from(8_000)),
+    });
+
     out
 }
 
@@ -535,98 +657,7 @@ pub fn projection_cases_extended() -> Vec<ProjCase> {
     //     `per_asset = [80, 300, 120, 0, 0]`, `leftover = 0`.
     // Todo ello se afirma en `golden_pins.rs::p7_and_p9_are_anchored_by_hand_derived_numbers`.
     // -----------------------------------------------------------------------------------------
-    let mut p9 = base_input(
-        840,
-        Decimal::from(4_200),
-        Decimal::from(2_600),
-        vec![
-            // 0 — cuenta corriente, 0 %: destino del `remainder` (sumidero).
-            //
-            // **20.000 € y no 8.000 € por un BUG VIVO del motor**, no por gusto: con 8.000 € esta
-            // proyección PANICA en el mes 138 con «Division overflowed» dentro de
-            // `gross_up_mixed_monthly`. Mecanismo (verificado y reducido a un reproductor mínimo
-            // en `golden_pins.rs::mixed_drawdown_must_not_panic_on_a_denormal_gain_ratio`): una
-            // cuenta al 0 % que la cascada alimenta tiene base de coste `b` pegada a su valor `v`
-            // (cada euro aportado sube las dos), el drenaje conserva el cociente `b/v` y un 0 % no
-            // vuelve a abrir hueco nunca — así que tras un drenaje fuerte (aquí el −15.000 € del
-            // mes 24) la plusvalía relativa `g = 1 − b/v` queda DENORMAL (≈1e-27) y el solver
-            // mixto calcula `(techo_del_tramo − base) / g`, que desborda `Decimal` (~7,9e28).
-            // Con 20.000 € el −15.000 no deja la cuenta al borde y el caso corre los 840 meses.
-            // Está reportado para abrir issue: el motor es una función pura y NO debe panicar
-            // con un input que la API acepta (el pool blocking lo publica como un 400
-            // `task_panic` ininteligible, el mismo precedente que forzó `checked_mul` en el
-            // crecimiento de activos).
-            mk_asset(1, Decimal::from(20_000), true, None),
-            // 1 — fondo de bonos 3 %: destino de la regla fija con tope Amount(20.000).
-            mk_asset(2, Decimal::from(12_000), true, Some(Decimal::from(3))),
-            // 2 — fondo de RV 6,5 % CON base de coste declarada (30.000 sobre 40.000 ⇒ g = 0,25).
-            mk_asset_with_basis(
-                3,
-                Decimal::from(40_000),
-                true,
-                Some(d(65, 1)),
-                Decimal::from(30_000),
-            ),
-            // 3 — vivienda 1 %, ILÍQUIDA: pesa en `net_worth` pero no en `liquid_worth`, así que
-            //     el cruce FIRE (#143) no la cuenta y el drenaje solo la toca al final.
-            mk_asset(4, Decimal::from(250_000), false, Some(Decimal::ONE)),
-            // 4 — cripto 12 %: la cola de rentabilidad alta, última en el orden de drenaje.
-            mk_asset(5, Decimal::from(5_000), true, Some(Decimal::from(12))),
-        ],
-        vec![
-            rule_fixed(
-                1,
-                Decimal::from(300),
-                Some(AllocationCap::Amount(Decimal::from(20_000))),
-            ),
-            rule_percent(2, Decimal::from(60), None),
-            rule_remainder(0),
-        ],
-    );
-    p9.annual_inflation_percent = d(25, 1);
-    p9.tax_brackets = es_tax_brackets_2025_26();
-    p9.taxes_enabled = true;
-    p9.taxable_gain_ratio = Decimal::ONE;
-    p9.income_retirement_monthly = Decimal::from(900);
-    p9.expense_retirement_monthly = Decimal::from(2_300);
-    p9.liabilities = vec![
-        // Hipoteca francesa: 180.000 € al TIN 2,9 %, cuota 900 €, sin fecha de fin declarada.
-        mk_liab(
-            Decimal::from(180_000),
-            Decimal::from(900),
-            Some(d(29, 1)),
-            RepaymentModel::French,
-            None,
-        ),
-        // Préstamo al consumo sin interés que VENCE a los 30 meses.
-        mk_liab(
-            Decimal::from(6_000),
-            Decimal::from(200),
-            None,
-            RepaymentModel::FixedPayments,
-            Some(30),
-        ),
-    ];
-    // Planning flows: el índice `i` del vector es el mes `i+1` del bucle.
-    //   · −15.000 € en el mes 24 (una entrada de coche) ⇒ índice 23.
-    //   · +800 €/mes del mes 36 al 72 inclusive (un alquiler temporal) ⇒ índices 35..=71.
-    p9.planning_monthly_cash_adjustment[23] = Decimal::from(-15_000);
-    for i in 35..=71 {
-        p9.planning_monthly_cash_adjustment[i] = Decimal::from(800);
-    }
-    p9.fire_target = Some(FireTarget {
-        need: FireNeed::ExpenseMinusPension {
-            expense_monthly: Decimal::from(2_300),
-            pension_monthly: Decimal::from(900),
-        },
-        swr_pct: d(35, 1),
-        tax_brackets: es_tax_brackets_2025_26(),
-        taxes_enabled: true,
-        taxable_gain_ratio: Decimal::ONE,
-        annual_inflation_percent: d(25, 1),
-        // Término finito de deuda (#142) calculado con la MISMA función que el handler.
-        debt_payments_remaining: debt_payments_remaining_series(&p9.liabilities, ref_date()),
-    });
+    let p9 = p9_household(Decimal::from(20_000));
     out.push(ProjCase {
         name: "P9_hogar_realista",
         input: p9,

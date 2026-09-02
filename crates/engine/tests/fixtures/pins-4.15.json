@@ -117,6 +117,14 @@
       "contributed_last": "0",
       "assets_depleted_month_index": null
     },
+    "P13_cash8k_denormal_g": {
+      "sha256": "8e4ade4235338152cac6e5509ae38b4d78f94df2f405ce4c9139e5f2d70c3fa6",
+      "horizon_months": 840,
+      "net_worth_last": "-724207.71094043099331783750114",
+      "liquid_worth_last": "0",
+      "contributed_last": "0",
+      "assets_depleted_month_index": 763
+    },
     "P7_jubilado_pension_impuestos": {
       "sha256": "b74575c29316860728990e15c150713139dfca2ec46c26a66d357d3c244408b9",
       "horizon_months": 360,

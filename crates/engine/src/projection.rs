@@ -1388,6 +1388,25 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         .iter()
         .map(|a| a.expected_annual_return_percent)
         .collect();
+    // Factor de crecimiento mensual POR ACTIVO, calculado UNA vez (WP1a de 5.0.0). Es
+    // loop-invariante por construcción: `rates` se deriva de `input.assets` y nadie la muta en
+    // toda la función (el bucle solo la LEE, para `drain_order` y `drain_from_assets`). Hasta
+    // 4.15.0 el paso de crecimiento llamaba a `monthly_multiplier` —y con ella a `powd`— una vez
+    // por activo Y POR MES: hasta 840 raíces doceavas idénticas por activo en cada request.
+    // MISMA llamada, MISMO argumento, mismo `Decimal` resultante: el pin dorado
+    // (`tests/golden_pins.rs`) lo comprueba bit a bit. Medido en `tests/timing.rs` (release, P9 a
+    // 840 meses, media de 100 pasadas): **31,5 ms → 12,3 ms por proyección**, −61 %.
+    //
+    // Lo que NO se precalcula, y por qué: `inflation_factor_at_month_index(…, k−1)` y
+    // `fire_target_at_month_index(…, k−1)` se evalúan una vez por mes DENTRO del bucle y así se
+    // quedan. Un vector por `k` haría EXACTAMENTE las mismas llamadas (las dos se evalúan
+    // incondicionalmente cada mes, no dependen del estado), así que no ahorra una sola `powd`:
+    // medido, 12,4 ms contra 12,3 ms — ruido — a cambio de dos vectores de 840 `Decimal`. La
+    // regla que sí ahorraba (`monthly_multiplier`) ahorraba porque su argumento no depende de
+    // `k`; estas dos sí dependen. Y jamás por producto acumulado: `powd` enruta los exponentes
+    // enteros por `checked_powu` (potencia exacta), pineado en
+    // `negative_inflation_shrinks_the_target_instead_of_flattening_it`.
+    let growth_multipliers: Vec<Decimal> = rates.iter().map(|r| monthly_multiplier(*r)).collect();
 
     let mut principals: Vec<Decimal> = input
         .liabilities
@@ -1580,12 +1599,25 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             // el agua ⇒ 0; las minusvalías no compensan — divergencia declarada). Sin dato, el
             // ESCALAR configurado. `g_i` es invariante al drenaje del propio mes
             // (b'/v_post = b/v_pre — teorema pineado), así que evaluarla aquí no aproxima nada.
+            //
+            // `checked_div`, no `/` (issue #208, misma familia que el tope del solver mixto):
+            // `*v > ZERO` no basta como guarda. El crecimiento NO toca `basis` (solo la cascada
+            // y el drenaje lo hacen), así que una rentabilidad muy negativa deja el valor pegado
+            // al mínimo representable (1e-28) con la base entera, y `b/v` se sale del rango de
+            // `Decimal` — `/` panicaba. El fallback es el que el `clamp` ya dictaba: `b/v`
+            // enorme ⇒ `1 − b/v` muy negativo ⇒ `g = 0` (activo todo coste). Ningún caso que
+            // hoy no desborda cambia de valor.
             let gains: Vec<Decimal> = values
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
                     if basis_declared[i] && *v > Decimal::ZERO {
-                        (Decimal::ONE - basis[i] / *v).clamp(Decimal::ZERO, Decimal::ONE)
+                        match basis[i].checked_div(*v) {
+                            Some(ratio) => {
+                                (Decimal::ONE - ratio).clamp(Decimal::ZERO, Decimal::ONE)
+                            }
+                            None => Decimal::ZERO,
+                        }
                     } else {
                         input.taxable_gain_ratio
                     }
@@ -1751,7 +1783,9 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         }
 
         for i in 0..values.len() {
-            let m = monthly_multiplier(rates[i]);
+            // Precalculado antes del bucle (`growth_multipliers`): mismo valor exacto que
+            // `monthly_multiplier(rates[i])`, sin repetir la raíz doceava 840 veces.
+            let m = growth_multipliers[i];
             // `checked_mul`, no `*`: con una tasa desorbitada y horizonte largo el producto
             // desborda Decimal y `*` PANICA — el pool blocking lo convertía en un 400
             // `task_panic` permanente e ininteligible (auditoría 2026-08). Error tipado.
@@ -4563,6 +4597,45 @@ mod tests {
         inp_g1.taxes_enabled = true;
         let out_g1 = project_net_worth_series(&inp_g1).unwrap();
         assert_eq!(out_g1.assets_depleted_month_index, Some(403));
+    }
+
+    /// #208, **misma familia que el pánico del solver mixto pero en el bucle**: un activo con
+    /// coste declarado y rentabilidad muy negativa acaba con el VALOR pegado al mínimo
+    /// representable de `Decimal` (1e-28) mientras su BASE sigue entera — el crecimiento no
+    /// toca `basis` (solo la cascada y el drenaje lo hacen), así que el cociente `b/v` no está
+    /// acotado por nada. En el primer mes de déficit el motor evalúa `g_i = 1 − b_i/v_i` y
+    /// `100 / 1e-28 = 1e30` DESBORDA el rango de `Decimal` (~7,9e28): `/` panicaba, y el pool
+    /// blocking lo publicaba como un 400 `task_panic` opaco. Divisor derivado por el propio
+    /// motor y guardado solo por `> 0`: exactamente la forma que `checked_div` cierra.
+    ///
+    /// El resultado con el arreglo es el que el `clamp` ya decía: `b/v` enorme ⇒ `1 − b/v`
+    /// muy negativo ⇒ `g = 0` (activo todo coste, no tributa al venderlo). Ningún caso que hoy
+    /// no desborda cambia de valor.
+    #[test]
+    fn a_denormal_asset_value_does_not_overflow_the_derived_gain_ratio() {
+        // ILÍQUIDO a propósito: nadie lo vende mientras la hucha líquida cubra el déficit, así
+        // que su valor decae ~175 meses sin que el drenaje toque su base.
+        let mut ruina = mk_asset(0x208, Decimal::from(100), false, Some(Decimal::from(-99)));
+        ruina.purchase_price = Some(Decimal::from(100));
+        let hucha = mk_asset(0x209, Decimal::from(10_000_000), true, None);
+        let inp = base_input(
+            240,
+            Decimal::ZERO,
+            Decimal::from(100),
+            vec![ruina, hucha],
+            vec![],
+        );
+        let out = project_net_worth_series(&inp)
+            .expect("un valor denormal no debe hacer panicar el motor");
+        assert_eq!(out.net_worth.len(), 241);
+        // Queda pegado al mínimo representable — positivo, no cero: por eso la guarda
+        // `*v > ZERO` no basta y hace falta `checked_div`.
+        let v_final = out.per_asset_series[0][240];
+        assert!(
+            v_final > Decimal::ZERO,
+            "el activo no llega a cero: {v_final}"
+        );
+        assert!(v_final < Decimal::new(1, 20), "y es denormal: {v_final}");
     }
 
     /// #170 — el objetivo sigue la necesidad REAL cuando la pensión queda plana. Caso central

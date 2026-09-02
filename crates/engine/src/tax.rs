@@ -176,11 +176,33 @@ pub fn gross_up_mixed_monthly(
                 break;
             }
             // Candidato que completa el neto en este trozo…
-            let mut x = (n_annual - net_acc) / den;
+            //
+            // **`checked_div`, no `/` (issue #208).** Los dos topes de abajo dividen por un
+            // número que el motor MISMO fabrica y que solo está guardado por «> 0»; con un
+            // divisor positivo pero DENORMAL el cociente exacto se sale del rango de `Decimal`
+            // (~7,9e28) y `/` **panica** («Division overflowed») — en producción, un 400
+            // `task_panic` opaco y permanente para ese hogar, el mismo precedente que forzó
+            // `checked_mul` en el crecimiento de activos. Un cociente que desborda significa
+            // «este tope no ata»: el techo real lo pone `cap`, que se aplica siempre. Por eso
+            // el fallback es EXACTO y ningún input que hoy no desborda cambia de valor
+            // (`min(⊤, cap) = cap`, y `x.min(top)` se salta cuando `top` no es representable).
+            let mut x = match (n_annual - net_acc).checked_div(den) {
+                Some(v) => v,
+                // `den` denormal (tipo efectivo a un pelo del 100 %): el candidato es
+                // ilimitado y manda la capacidad.
+                None => cap,
+            };
             // …topado por el techo del tramo fiscal (la base llena el tramo)…
             if g > Decimal::ZERO {
                 if let Some(ceiling) = brackets[m].up_to {
-                    x = x.min((ceiling - base) / g);
+                    // `g` denormal: la venta que haría falta para llenar el tramo fiscal no es
+                    // representable ⇒ este tramo no se llena nunca con este activo y el tope no
+                    // recorta. Lo fabrica el propio motor: una cuenta al 0 % alimentada por la
+                    // cascada tiene `b` pegada a `v`, el drenaje conserva `b/v` y tras una
+                    // venta fuerte queda `g = 1 − b/v ≈ 1e-27` (caso P13 del pin dorado).
+                    if let Some(top) = (ceiling - base).checked_div(g) {
+                        x = x.min(top);
+                    }
                 }
             }
             // …y por la capacidad del activo.
@@ -571,6 +593,88 @@ mod tests {
         let dd = gross_up_mixed_monthly(Decimal::from(1000u32), &[seg(100, "1")], &br, true);
         assert_eq!(dd.gross_monthly, Decimal::from(100u32));
         assert_eq!(dd.net_shortfall_monthly.round_dp(10), Decimal::from(919u32).round_dp(10));
+    }
+
+    /// **Frontera exacta del desbordamiento de la issue #208.** El tope de tramo del solver
+    /// mixto es `(techo − base) / g` y solo estaba guardado por `g > 0`. Con el techo de
+    /// 200.000 € de la escala ES y `g = 1e-27` el cociente vale `2e32` y NO cabe en un `Decimal`
+    /// (~7,9e28): `/` panicaba con «Division overflowed» y el pool blocking lo publicaba como un
+    /// 400 `task_panic`. Con `g = 1e-20` el mismo cociente es `2e25` y siempre cupo — las dos
+    /// mitades van juntas a propósito: la primera es el caso que ANTES panicaba, la segunda el
+    /// control que prueba que el arreglo no movió nada donde no desbordaba.
+    ///
+    /// La `g` denormal no es de laboratorio: la fabrica el propio motor (cuenta al 0 % alimentada
+    /// por la cascada + venta fuerte ⇒ `g = 1 − b/v ≈ 1e-27`). El caso `P13_cash8k_denormal_g`
+    /// del pin dorado lo reproduce dentro de una proyección completa de 840 meses.
+    #[test]
+    fn a_denormal_gain_ratio_does_not_overflow_the_bracket_ceiling() {
+        // Un tramo cerrado en 200.000 € (el techo del issue) y el abierto obligatorio.
+        let br = vec![
+            TaxBracket {
+                up_to: Some(Decimal::from(200_000u32)),
+                pct: Decimal::from(19u32),
+            },
+            TaxBracket {
+                up_to: None,
+                pct: Decimal::from(30u32),
+            },
+        ];
+        let run = |net_monthly: u32, cap_monthly: u32, g: Decimal| {
+            gross_up_mixed_monthly(
+                Decimal::from(net_monthly),
+                &[MixedSegment {
+                    capacity_monthly: Decimal::from(cap_monthly),
+                    gain_ratio: g,
+                }],
+                &br,
+                true,
+            )
+        };
+
+        // (a) 1e-27 — ANTES: pánico. AHORA: el tope no ata (no es representable) y manda la
+        //     capacidad, que sobra: se vende lo justo para netear 1.000 €, y con una plusvalía
+        //     gravable de 1e-27 el impuesto es aritméticamente despreciable.
+        let denormal = run(1_000, 10_000, Decimal::new(1, 27));
+        assert_eq!(denormal.net_shortfall_monthly, Decimal::ZERO);
+        assert!(
+            denormal.gross_monthly >= Decimal::from(1_000u32)
+                && denormal.gross_monthly < Decimal::from(1_001u32),
+            "con g≈0 el bruto es el neto: {}",
+            denormal.gross_monthly
+        );
+        assert_eq!(
+            denormal.per_segment_monthly[0], denormal.gross_monthly,
+            "un único tramo se lleva toda la venta"
+        );
+
+        // (b) 1e-20 — el cociente cabía ya en 4.15.0 y el arreglo NO lo toca: mismo camino
+        //     (`checked_div` devuelve `Some`), mismo valor.
+        let normal = run(1_000, 10_000, Decimal::new(1, 20));
+        assert_eq!(normal.net_shortfall_monthly, Decimal::ZERO);
+        assert!(
+            normal.gross_monthly >= Decimal::from(1_000u32)
+                && normal.gross_monthly < Decimal::from(1_001u32),
+            "el control tampoco se mueve: {}",
+            normal.gross_monthly
+        );
+
+        // (c) Control del tope que SÍ ata: con `g = 1` y 25.000 €/mes netos la base cruza el
+        //     techo de 200.000 €, así que `x.min((techo − base)/g)` recorta de verdad y el
+        //     paseo salta al tramo del 30 %. A mano: los primeros 200.000 € brutos netean
+        //     200.000·0,81 = 162.000; faltan 138.000 netos que salen a 0,70 ⇒
+        //     138.000/0,7 = 197.142,857142857142857142857143; total 397.142,857142857142857142857143
+        //     anuales ⇒ 33.095,238095238095238095238095 €/mes. Es la rama que el arreglo NO
+        //     puede haber tocado, y el número lo demuestra.
+        let gravada = run(25_000, 100_000, Decimal::ONE);
+        assert_eq!(
+            gravada.net_shortfall_monthly,
+            Decimal::ZERO,
+            "100.000 €/mes de capacidad cubren de sobra la venta"
+        );
+        assert_eq!(
+            gravada.gross_monthly.round_dp(12),
+            Decimal::new(33_095_238_095_238_095, 12)
+        );
     }
 
     /// `taxes_enabled = false`: llenado secuencial puro, identidad — la misma regla que el
