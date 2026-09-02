@@ -1718,11 +1718,15 @@ async fn delete_import_previews_txn_count_and_cascades() {
         )
         .await;
     let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+    // 4.15.0: el confirm exige categoría en toda decisión income/expense.
+    let cat = app.create_category(&owner, "expense", "Compras").await;
     let c = app
         .post_json_with_cookie(
             "/v1/transactions/import/confirm",
             json!({"source": "myinvestor", "file_b64": b64, "file_sha256": sha,
-                   "decisions": [{"kind": "expense"}, {"kind": "expense"}], "learn_rules": false}),
+                   "decisions": [{"kind": "expense", "category_id": cat},
+                                 {"kind": "expense", "category_id": cat}],
+                   "learn_rules": false}),
             &owner.cookie,
         )
         .await;
@@ -2895,11 +2899,14 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
         )
         .await;
     let sha = p.json()["file_sha256"].as_str().unwrap().to_string();
+    // 4.15.0: el confirm exige categoría en toda decisión income/expense.
+    let import_cat = app.create_category(&owner, "expense", "Compras").await;
     let c = app
         .post_json_with_cookie(
             "/v1/transactions/import/confirm",
             json!({"source": "myinvestor", "file_b64": b64, "file_sha256": sha,
-                   "decisions": [{"kind": "expense"}], "learn_rules": false}),
+                   "decisions": [{"kind": "expense", "category_id": import_cat}],
+                   "learn_rules": false}),
             &owner.cookie,
         )
         .await;
@@ -3861,4 +3868,118 @@ async fn planning_flow_recurring_window_via_mcp() {
     assert_eq!(rows[0]["amount_basis"], "one_off", "{rows}");
     assert!(rows[0].get("window_start_date").is_none(), "{rows}");
     assert!(rows[0].get("window_end_date").is_none(), "{rows}");
+}
+
+/// `update_category` con `is_fallback` (4.15.0): el cuarteto de una tool de escritura sobre el
+/// eje nuevo — core compartida, indistinguible vía HTTP, contrato de cache NONE y el error de
+/// dominio con el MISMO `code` que el wire HTTP. El gate del rol/toggle lo cubre la batería
+/// genérica (`write_tool_names`), que ya incluye `update_category`.
+///
+/// Por qué merece test propio y no una línea en el de renombrar: `is_fallback: true` no edita un
+/// campo, hace un SWAP — desmarca la categoría por defecto anterior del scope y marca ésta. Si el
+/// swap se rompiera a medias, el índice único parcial dejaría la instalación con CERO categorías
+/// por defecto en ese scope, y entonces todo movimiento income/expense sin categoría empezaría a
+/// fallar con `fallback_category_missing` en las dos superficies a la vez.
+#[tokio::test]
+async fn update_category_designates_the_scope_fallback_and_shares_the_core() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    // Modo B: las transacciones son inputs del motor, así que una invalidación indebida se vería.
+    set_mode(&app, &owner.cookie, "transactions_avg").await;
+
+    let compras = app.create_category(&owner, "expense", "Compras online").await;
+    let fondos = app.create_category(&owner, "asset", "Fondos").await;
+
+    let fallback_before = expense_fallback_id(&app, &owner.cookie).await;
+    assert_ne!(fallback_before, compras, "precondición: la semilla trae otra por defecto");
+
+    let iid = app.installation_id().await;
+    let key = app.household_key(iid, owner.user_id);
+    app.warm_household(&owner.cookie, &key).await;
+
+    // 1. La tool designa la nueva por defecto.
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("update_category", json!({"id": compras, "is_fallback": true})),
+        )
+        .await,
+    );
+    assert_eq!(out["id"], compras.as_str(), "{out}");
+
+    // 2. Indistinguible vía HTTP, y el SWAP es exactamente eso: una y solo una por scope.
+    let rows = app.get_with_cookie("/v1/categories", &owner.cookie).await.json();
+    let expense_fallbacks: Vec<&serde_json::Value> = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["scope"] == "expense" && c["is_fallback"] == json!(true))
+        .collect();
+    assert_eq!(expense_fallbacks.len(), 1, "una por scope, ni cero ni dos: {rows}");
+    assert_eq!(expense_fallbacks[0]["id"], compras.as_str(), "{rows}");
+    let previous = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == json!(fallback_before))
+        .expect("la anterior sigue existiendo, solo desmarcada");
+    assert_eq!(previous["is_fallback"], json!(false), "{previous}");
+
+    // 3. Cache: NONE. Designar la categoría por defecto no mueve ni una transacción ni un importe,
+    //    así que la proyección no puede cambiar — ni siquiera en modo B.
+    assert!(
+        app.cache_contains(&key).await,
+        "designar la categoría por defecto NUNCA invalida la cache de proyección"
+    );
+
+    // 4. Errores de dominio, con el MISMO `code` por las dos superficies (misma core).
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_category", json!({"id": compras, "is_fallback": false})),
+    )
+    .await;
+    assert_eq!(
+        tool_error(&envelope, "bad_request")["code"],
+        "fallback_cannot_be_unset",
+        "desmarcar dejaría el scope sin destino por defecto: hay que designar OTRA"
+    );
+    let http = app
+        .patch_json_with_cookie(
+            &format!("/v1/categories/{compras}"),
+            json!({"is_fallback": false}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(http.status, http::StatusCode::BAD_REQUEST, "{http:?}");
+    assert_eq!(http.json()["code"], "fallback_cannot_be_unset", "{http:?}");
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_category", json!({"id": fondos, "is_fallback": true})),
+    )
+    .await;
+    assert_eq!(
+        tool_error(&envelope, "bad_request")["code"],
+        "fallback_scope_invalid",
+        "solo income/expense tienen categoría por defecto"
+    );
+}
+
+/// Id de la categoría por defecto de gasto de la instalación. Falla alto si no hay exactamente
+/// una: el invariante de 4.15.0 es que siempre haya una y solo una por scope.
+async fn expense_fallback_id(app: &TestApp, cookie: &str) -> String {
+    let rows = app.get_with_cookie("/v1/categories", cookie).await.json();
+    let found: Vec<String> = rows
+        .as_array()
+        .expect("categories list")
+        .iter()
+        .filter(|c| c["scope"] == "expense" && c["is_fallback"] == json!(true))
+        .map(|c| c["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(found.len(), 1, "una categoría por defecto de gasto, y solo una: {rows}");
+    found.into_iter().next().unwrap()
 }

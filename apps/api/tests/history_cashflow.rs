@@ -125,7 +125,15 @@ async fn import_one_row_myinvestor(
     let pv = preview.json();
     let sha = pv["file_sha256"].as_str().unwrap().to_string();
     let n = pv["rows"].as_array().unwrap().len();
-    let decisions: Vec<Value> = (0..n).map(|_| json!({ "kind": "expense" })).collect();
+    // 4.15.0: el confirm exige categoría en toda decisión income/expense; el preview ya sugiere
+    // la POR DEFECTO del scope, que es la que toma el wizard sin intervención.
+    let exp_cat = pv["rows"][0]["suggested_category_id"]
+        .as_str()
+        .expect("el preview sugiere la categoría por defecto para un gasto sin regla")
+        .to_string();
+    let decisions: Vec<Value> = (0..n)
+        .map(|_| json!({ "kind": "expense", "category_id": exp_cat }))
+        .collect();
     let confirm = app
         .post_json_with_cookie(
             "/v1/transactions/import/confirm",

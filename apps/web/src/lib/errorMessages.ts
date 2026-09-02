@@ -138,12 +138,12 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Demasiadas asignaciones pendientes en esta sesión. Confirma el archivo y sigue con el resto.",
   transaction_currency_invalid: "Esa divisa no es válida.",
   transaction_kind_invalid:
-    "El tipo de movimiento no es válido. Elige gasto, ingreso o ahorro.",
+    "El tipo de movimiento no es válido. Elige gasto, ingreso o inversión.",
   transaction_concept_empty: "El concepto no puede quedar vacío.",
   transaction_concept_too_long: "El concepto es demasiado largo. Acórtalo.",
   transaction_notes_too_long: "Las notas son demasiado largas. Recórtalas.",
   transaction_category_requires_kind:
-    "Para poner categoría hay que indicar también si es gasto, ingreso o ahorro.",
+    "Para poner categoría hay que indicar también si es gasto, ingreso o inversión.",
   transactions_not_found:
     "Alguno de los movimientos ya no existe, así que no se ha cambiado nada. Recarga la lista e inténtalo otra vez.",
   amount_zero: "El importe no puede ser cero.",
@@ -243,7 +243,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   amount_out_of_range:
     "El importe es demasiado grande: caben hasta 14 dígitos enteros y 4 decimales.",
   amount_sign_mismatch:
-    "El signo del importe no cuadra con el tipo: los ingresos van en positivo, y los gastos y los traspasos a ahorro en negativo.",
+    "El signo del importe no cuadra con el tipo: los ingresos van en positivo, y los gastos y los traspasos a inversión en negativo.",
   op_date_in_future:
     "No puedes apuntar un movimiento con fecha futura. Si es algo que aún no ha pasado, va en «Próximos».",
   batch_empty: "No has seleccionado ningún movimiento. Elige al menos uno.",
@@ -291,9 +291,9 @@ export const ERROR_MESSAGES: Record<string, string> = {
   rule_pattern_empty: "El patrón de la regla no puede quedar vacío.",
   rule_pattern_too_long: "El patrón de la regla es demasiado largo. Acórtalo.",
   rule_assign_kind_invalid:
-    "El tipo que asigna la regla no es válido. Elige gasto, ingreso o ahorro.",
+    "El tipo que asigna la regla no es válido. Elige gasto, ingreso o inversión.",
   rule_assign_kind_required:
-    "La regla necesita saber qué asignar. Elige gasto, ingreso o ahorro.",
+    "La regla necesita saber qué asignar. Elige gasto, ingreso o inversión.",
   rule_assign_category_requires_kind:
     "Para que la regla asigne una categoría hay que indicar también el tipo.",
   rule_patch_empty:
@@ -307,7 +307,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   apply_to_existing_invalid:
     "Elige a qué aplicar la regla: a nada, solo a lo que no tenga categoría, o a todo.",
   recurring_rule_kind_invalid:
-    "El tipo del movimiento recurrente no es válido. Elige gasto, ingreso o ahorro.",
+    "El tipo del movimiento recurrente no es válido. Elige gasto, ingreso o inversión.",
   recurring_rule_concept_empty:
     "El concepto del movimiento recurrente no puede quedar vacío.",
   recurring_rule_concept_too_long:
@@ -317,7 +317,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   recurrence_too_old:
     "La fecha de inicio del recurrente es demasiado antigua. Acércala.",
   savings_no_category:
-    "Los movimientos de ahorro no llevan categoría. Quítala para poder guardar.",
+    "Los movimientos de inversión no llevan categoría. Quítala para poder guardar.",
 
   // ── Activos, pasivos y categorías ─────────────────────────────────────────────────────
   name_empty: "Escribe un nombre para poder guardar.",
@@ -352,6 +352,16 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Esa categoría no existe en esta instalación. Elige una de la lista.",
   category_in_use:
     "Esa categoría está en uso. Elige a qué categoría traspasar sus datos antes de borrarla.",
+  category_required:
+    "Los ingresos y los gastos necesitan categoría. Elige una en cada fila antes de continuar.",
+  category_is_fallback:
+    "Esa es la categoría por defecto de su ámbito y no se puede borrar. Marca antes otra como predeterminada.",
+  fallback_cannot_be_unset:
+    "La categoría por defecto no se puede quitar, solo trasladar: marca otra como predeterminada y esta dejará de serlo.",
+  fallback_scope_invalid:
+    "Solo las categorías de ingreso y de gasto pueden ser la predeterminada.",
+  fallback_category_missing:
+    "Tu hogar no tiene categoría por defecto para ese ámbito. Crea una en Ajustes → Categorías y márcala como predeterminada.",
   remap_to_same_category:
     "No puedes traspasar los datos a la misma categoría que estás borrando.",
   remap_to_not_found:

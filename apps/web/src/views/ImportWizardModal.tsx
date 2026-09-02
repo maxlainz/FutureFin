@@ -16,6 +16,12 @@
  * `onImported` se dispara UNA vez al terminar/cerrar, con el agregado (`summarizeImportBatch`),
  * y solo si hubo al menos un confirm.
  *
+ * CATEGORÍA OBLIGATORIA (4.15.0): el preview llega con la categoría por defecto ya puesta en las
+ * filas de ingreso/gasto que ninguna regla clasificó, y el select ya no ofrece «Sin categoría».
+ * Confirmar queda bloqueado si alguna fila incluida se quedara sin ella — el guarda de verdad es
+ * el servidor (`category_required`), esto es el cinturón. Una categoría marcada como «por
+ * defecto» NO se propaga por automatch ni se aprende como regla (`categorySource`).
+ *
  * Stateless: el confirm reenvía `file_b64` + `file_sha256` del preview. Perf: filas memoizadas y
  * filtros que no dependen del scroll.
  *
@@ -86,7 +92,9 @@ const FILTER_OPTIONS: { id: ImportRowFilter; label: string }[] = [
   { id: "new", label: "Nuevas" },
   { id: "duplicates", label: "Duplicados" },
   { id: "transfers", label: "Transferencias" },
-  { id: "uncategorized", label: "Sin categoría" },
+  // «Sin clasificar», no «Sin categoría» (4.15.0): desde que el preview pre-rellena la categoría
+  // por defecto, el filtro solo puede pescar filas que nadie ha llegado a clasificar.
+  { id: "uncategorized", label: "Sin clasificar" },
 ];
 
 /** Un archivo de la tanda, ya leído a base64 en el select. */
@@ -166,6 +174,13 @@ function applyPatch(d: ImportRowDraft, patch: Partial<ImportRowDraft>): ImportRo
   const kindChanged = patch.kind !== undefined && patch.kind !== d.kind;
   if (kindChanged && patch.categoryId === undefined) next.categoryId = "";
   if (next.kind === "savings") next.categoryId = "";
+  // Toda categoría que venga de un patch la ha elegido la persona: deja de ser sugerencia y
+  // vuelve a alimentar el automatch aunque resulte ser la de por defecto (elegirla a mano SÍ es
+  // una decisión). Y sin categoría no hay procedencia que declarar.
+  if (patch.categoryId !== undefined && patch.categoryId !== "") {
+    next.categorySource = "user";
+  }
+  if (next.categoryId === "") next.categorySource = null;
   return next;
 }
 
@@ -888,17 +903,36 @@ export function ImportWizardModal({
 
             <div className="import-footer">
               <div className="import-footer-summary muted">
-                {summary.toImport} se importarán ·{" "}
-                {summary.toSkip + summary.toDiscard} excluidas
-                {summary.toSkip > 0
-                  ? ` (${summary.toSkip} duplicadas ya guardadas)`
-                  : ""}
+                <div>
+                  {summary.toImport} se importarán ·{" "}
+                  {summary.toSkip + summary.toDiscard} excluidas
+                  {summary.toSkip > 0
+                    ? ` (${summary.toSkip} duplicadas ya guardadas)`
+                    : ""}
+                  {summary.missingCategory > 0 ? (
+                    <>
+                      {" · "}
+                      <strong>
+                        {summary.missingCategory}{" "}
+                        {summary.missingCategory === 1 ? "fila" : "filas"} sin categoría
+                      </strong>
+                    </>
+                  ) : null}
+                </div>
+                <div>Otros gastos/ingresos no se aprende como regla.</div>
               </div>
               <div className="asset-form-actions">
                 <button
                   type="button"
                   className="btn primary"
-                  disabled={state.loading || summary.toImport === 0}
+                  // El cinturón, no la guarda: el servidor rechaza el confirm con una fila de
+                  // ingreso/gasto sin categoría (`category_required`). Bloquear aquí evita el
+                  // viaje y señala en el footer cuántas faltan.
+                  disabled={
+                    state.loading ||
+                    summary.toImport === 0 ||
+                    summary.missingCategory > 0
+                  }
                   onClick={() => void runConfirm()}
                 >
                   {state.loading
@@ -1034,9 +1068,17 @@ const PreviewRowMemo = memo(function PreviewRow({
       disabled={draft.kind === "savings"}
       onChange={(e) => onPatch(index, { categoryId: e.target.value })}
     >
-      <option value="">
-        {draft.kind === "savings" ? "—" : "Sin categoría"}
-      </option>
+      {/* Sin opción «Sin categoría» en ingreso/gasto (4.15.0): el servidor rechaza el confirm
+          de una fila así, y el preview ya llega con la categoría por defecto puesta. El hueco
+          solo aparece —deshabilitado— si de verdad no hay ninguna, para que el select no mienta
+          preseleccionando la primera de la lista. */}
+      {draft.kind === "savings" ? (
+        <option value="">—</option>
+      ) : draft.categoryId === "" ? (
+        <option value="" disabled>
+          Elige categoría
+        </option>
+      ) : null}
       {cats.map((c) => (
         <option key={c.id} value={c.id}>
           {c.name}

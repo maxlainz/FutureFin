@@ -1,6 +1,6 @@
 [package]
 name = "futurefin-api"
-version = "4.14.0"
+version = "4.15.0"
 edition = "2021"
 description = "FutureFin HTTP API (self-hosted)"
 publish = false

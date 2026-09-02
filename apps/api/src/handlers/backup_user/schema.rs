@@ -8,6 +8,12 @@ use uuid::Uuid;
 
 use crate::handlers::installation::FireSettings;
 
+// 4.15.0 NO sube la versión: la FORMA exportada no cambia. `category_ref` sigue siendo
+// `Option<CategoryRef>` en movimientos y plantillas recurrentes —un fichero v12 escrito por
+// 4.14.x se lee igual— y lo único que cambia es qué hace el RESTORE con el `None` de un
+// ingreso/gasto: lo aterriza en la categoría por defecto del scope (`categories.is_fallback`),
+// dentro de su misma transacción. Un `None` exportado por 4.15.0 solo puede venir de `savings` o
+// de una fila sin clasificar, así que el round-trip sigue siendo exacto.
 pub const CURRENT_SCHEMA_VERSION: u32 = 12;
 pub const SUPPORTED_FORMAT_VERSION: u8 = 1;
 pub const MAGIC: &[u8; 4] = b"FFBK";

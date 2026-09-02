@@ -2,9 +2,10 @@
  * Alta manual de efectivo: grid multifila (`DraftItem[]`, patrón de HistorySettingsPanel) →
  * `POST /v1/transactions/batch`.
  *
- * El usuario teclea una MAGNITUD; el signo lo fija el kind (ingreso → +, gasto/ahorro → −, que es
- * la convención firmada del backend: negativo = cargo). savings no admite categoría; el vínculo
- * opcional es contextual (savings → activo destino, gasto → pasivo).
+ * El usuario teclea una MAGNITUD; el signo lo fija el kind (ingreso → +, gasto/inversión → −, que
+ * es la convención firmada del backend: negativo = cargo). savings no admite categoría —el resto
+ * la lleva SIEMPRE, preseleccionada a la por defecto—; el vínculo opcional es contextual
+ * (savings → activo destino, gasto → pasivo).
  */
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
@@ -59,6 +60,19 @@ export function ManualCashEntryModal({
   onSaved: (count: number) => void;
 }) {
   const keySeq = useRef(0);
+  /**
+   * Categoría POR DEFECTO del kind (4.15.0): la que recibe todo ingreso/gasto sin clasificar.
+   * `""` para savings (no admite categoría) y también si el hogar todavía no tiene ninguna
+   * marcada — ahí el `<select>` enseña su placeholder y el servidor resuelve por su cuenta.
+   */
+  const fallbackFor = useCallback(
+    (kind: TransactionKindApi): string =>
+      categoriesForKind(kind, incomeCategories, expenseCategories).find(
+        (c) => c.is_fallback,
+      )?.id ?? "",
+    [incomeCategories, expenseCategories],
+  );
+
   const blankRow = useCallback(
     (): CashDraft => {
       keySeq.current += 1;
@@ -68,13 +82,15 @@ export function ManualCashEntryModal({
         concept: "",
         amount: "",
         kind: "expense",
-        categoryId: "",
+        // La fila nace clasificada: en ingreso/gasto «sin categoría» dejó de ser un estado
+        // guardable, así que arrancar en blanco solo produciría un error al enviar.
+        categoryId: fallbackFor("expense"),
         linkedAssetId: "",
         linkedLiabilityId: "",
         repeatMonthly: false,
       };
     },
-    [defaultDate],
+    [defaultDate, fallbackFor],
   );
 
   const [rows, setRows] = useState<CashDraft[]>([]);
@@ -90,21 +106,26 @@ export function ManualCashEntryModal({
     }
   }, [open, blankRow]);
 
-  const updateRow = useCallback((key: string, patch: Partial<CashDraft>) => {
-    setRows((prev) =>
-      prev.map((r) => {
-        if (r.key !== key) return r;
-        const next = { ...r, ...patch };
-        if (patch.kind !== undefined && patch.kind !== r.kind) {
-          next.categoryId = "";
-          next.linkedAssetId = "";
-          next.linkedLiabilityId = "";
-        }
-        if (next.kind === "savings") next.categoryId = "";
-        return next;
-      }),
-    );
-  }, []);
+  const updateRow = useCallback(
+    (key: string, patch: Partial<CashDraft>) => {
+      setRows((prev) =>
+        prev.map((r) => {
+          if (r.key !== key) return r;
+          const next = { ...r, ...patch };
+          if (patch.kind !== undefined && patch.kind !== r.kind) {
+            // Cambiar de ámbito invalida la categoría anterior: cae en la por defecto del
+            // nuevo (vacía en savings, que no admite ninguna).
+            next.categoryId = fallbackFor(next.kind);
+            next.linkedAssetId = "";
+            next.linkedLiabilityId = "";
+          }
+          if (next.kind === "savings") next.categoryId = "";
+          return next;
+        }),
+      );
+    },
+    [fallbackFor],
+  );
 
   const addRow = useCallback(() => setRows((p) => [...p, blankRow()]), [blankRow]);
   const removeRow = useCallback(
@@ -175,7 +196,7 @@ export function ManualCashEntryModal({
         <ModalFormError message={error} />
         <p className="muted tight">
           Escribe el importe en positivo; el signo lo pone el tipo (ingreso suma,
-          gasto y ahorro restan).
+          gasto e inversión restan).
         </p>
 
         <div className="snapshot-items">
@@ -244,9 +265,15 @@ export function ManualCashEntryModal({
                         updateRow(r.key, { categoryId: e.target.value })
                       }
                     >
-                      <option value="">
-                        {r.kind === "savings" ? "—" : "Sin categoría"}
-                      </option>
+                      {/* Sin opción «Sin categoría» en ingreso/gasto (4.15.0). El hueco solo
+                          aparece —deshabilitado— si no hay categorías de ese ámbito. */}
+                      {r.kind === "savings" ? (
+                        <option value="">—</option>
+                      ) : r.categoryId === "" ? (
+                        <option value="" disabled>
+                          Elige categoría
+                        </option>
+                      ) : null}
                       {cats.map((c) => (
                         <option key={c.id} value={c.id}>
                           {c.name}

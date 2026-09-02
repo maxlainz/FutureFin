@@ -243,22 +243,35 @@ export const HELP_TEXTS = {
       "denominador que el gasto promedio: solo los meses con movimientos reales clasificados, " +
       "sin el mes en curso y sin las transferencias conciliadas.",
   },
-  "expenses.savings_transferred": {
-    title: "Traspasado a ahorro",
+  "expenses.savings": {
+    title: "Ahorro",
     body:
-      "Dinero que moviste a cuentas o productos de ahorro, según los movimientos marcados como " +
-      "ahorro. NO es ingresos menos gastos: es solo lo que apartaste de forma explícita, así que " +
-      "no tiene por qué coincidir con el ahorro del Resumen. Promediado sobre los mismos meses " +
-      "reales que el gasto y el ingreso, y con la misma ventana, que no incluye el mes que " +
-      "estás mirando.",
+      "Lo que te quedó: tus ingresos menos tus gastos en los últimos meses completos, con la " +
+      "misma ventana y el mismo denominador que las tarjetas de al lado — solo los meses con " +
+      "movimientos reales clasificados, sin el mes en curso y sin las transferencias " +
+      "conciliadas. El desglose dice qué hiciste con ese ahorro: cuánto se fue a inversión " +
+      "(los movimientos marcados como inversión) y cuánto se quedó en cuenta; si invertiste más " +
+      "de lo que ahorraste, la diferencia salió de reservas anteriores y así lo dice. Ojo: no es " +
+      "el «Ahorro mensual» del Resumen, que sigue la fuente del ahorro que tengas configurada y " +
+      "puede salir de tu presupuesto en vez de tus movimientos.",
   },
-  "expenses.transferred_rate": {
-    title: "Porcentaje traspasado",
+  "expenses.savings_rate": {
+    title: "Tasa de ahorro",
     body:
-      "Qué parte de tus ingresos moviste a ahorro de forma explícita, sobre los mismos meses " +
-      "reales que promedian las tarjetas de al lado. Ojo: no es tu tasa de ahorro — esa vive en " +
-      "el Resumen y sale de ingresos menos gastos. La ventana no incluye el mes que estás " +
-      "mirando.",
+      "Qué parte de tus ingresos te queda después de gastar, sobre los mismos meses reales que " +
+      "promedian las tarjetas de al lado. Puede ser negativa: si gastaste más de lo que " +
+      "ingresaste, no hay tasa positiva que enseñar. No es la tasa de ahorro del Resumen — " +
+      "aquella se calcula con el ingreso y el gasto de la fuente del ahorro configurada, no con " +
+      "tus movimientos reales, y las dos pueden diferir en varios puntos.",
+  },
+  "expenses.refunds": {
+    title: "Devoluciones",
+    body:
+      "Los gastos que llegaron con importe positivo: un reembolso, un abono del banco, la parte " +
+      "que te devolvió alguien de una compra. Ya están descontadas DENTRO de la categoría de lo " +
+      "que compensan, así que la cifra que ves aquí no hay que sumarla ni restarla otra vez. No " +
+      "son una categoría aparte y no son un ingreso: si contaran como ingreso, tu ahorro y tu " +
+      "tasa de ahorro saldrían inflados.",
   },
 
   // --- Próximos ------------------------------------------------------------

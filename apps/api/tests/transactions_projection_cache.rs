@@ -18,6 +18,24 @@ use common::TestApp;
 use serde_json::json;
 use uuid::Uuid;
 
+
+/// Categoría POR DEFECTO de un scope (4.15.0): el confirm del import exige categoría en toda
+/// decisión income/expense; la por defecto es la que el preview sugiere sin regla.
+async fn fallback_category(app: &TestApp, cookie: &str, scope: &str) -> String {
+    let cats = app
+        .get_with_cookie(&format!("/v1/categories?scope={scope}"), cookie)
+        .await
+        .json();
+    cats.as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["is_fallback"] == json!(true))
+        .unwrap_or_else(|| panic!("sin categoría por defecto en '{scope}'"))["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
 fn shift_month(year: i32, month: u32, delta: i32) -> (i32, u32) {
     let zero = (year as i64) * 12 + (month as i64 - 1) + delta as i64;
     ((zero.div_euclid(12)) as i32, (zero.rem_euclid(12) + 1) as u32)
@@ -101,12 +119,13 @@ async fn mode_a_mutations_do_not_touch_projection_cache() {
     .await;
 
     // 3. Import CSV (preview + confirm).
+    let exp_cat = fallback_category(&app, &owner.cookie, "expense").await;
     let (b64, sha) = preview_csv(&app, &owner.cookie, "IMPORTADA", "-9", 15).await;
     let conf = app
         .post_json_with_cookie(
             "/v1/transactions/import/confirm",
             json!({ "source": "myinvestor", "file_b64": b64, "file_sha256": sha,
-                    "decisions": [ { "kind": "expense" } ], "learn_rules": false }),
+                    "decisions": [ { "kind": "expense", "category_id": exp_cat } ], "learn_rules": false }),
             &owner.cookie,
         )
         .await;
@@ -201,12 +220,13 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
 
     // 4. import confirm
     app.warm_household(&owner.cookie, &key).await;
+    let exp_cat = fallback_category(&app, &owner.cookie, "expense").await;
     let (b64, sha) = preview_csv(&app, &owner.cookie, "IMPORTADA", "-9", 15).await;
     let conf = app
         .post_json_with_cookie(
             "/v1/transactions/import/confirm",
             json!({ "source": "myinvestor", "file_b64": b64, "file_sha256": sha,
-                    "decisions": [ { "kind": "expense" } ], "learn_rules": false }),
+                    "decisions": [ { "kind": "expense", "category_id": exp_cat } ], "learn_rules": false }),
             &owner.cookie,
         )
         .await;
@@ -250,14 +270,17 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
         .expect("clear rule instances");
     let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
     let iid = app.installation_id().await;
+    // 4.15.0: un gasto no puede quedarse sin categoría ni siquiera por SQL crudo (CHECK).
+    let exp_cat = fallback_category(&app, &owner.cookie, "expense").await;
     sqlx::query(
         "INSERT INTO transactions (installation_id, owner_user_id, source, op_date, concept, \
-         amount, currency, kind, fingerprint, fingerprint_ordinal) \
-         VALUES ($1, $2, 'manual', $3, 'Activador', -1, 'EUR', 'expense', 'fp-activador', 0)",
+         amount, currency, kind, category_id, fingerprint, fingerprint_ordinal) \
+         VALUES ($1, $2, 'manual', $3, 'Activador', -1, 'EUR', 'expense', $4::uuid, 'fp-activador', 0)",
     )
     .bind(iid)
     .bind(owner.user_id)
     .bind(NaiveDate::from_ymd_opt(m1y, m1m, 15).unwrap())
+    .bind(exp_cat)
     .execute(&app.pool)
     .await
     .expect("activate month");

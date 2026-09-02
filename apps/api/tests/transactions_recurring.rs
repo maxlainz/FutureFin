@@ -53,19 +53,35 @@ async fn keep_only_origin_instance(app: &TestApp, rule_id: &str, oy: i32, om: u3
 async fn activate_month_raw(app: &TestApp, owner_id: Uuid, y: i32, m: u32) {
     let iid = app.installation_id().await;
     let op = NaiveDate::from_ymd_opt(y, m, 15).unwrap();
+    // Con categoría: desde 4.15.0 el CHECK `transactions_category_required_check` no admite un
+    // gasto sin ella ni por SQL directo, que es justo lo que este helper hace.
+    let cat = fallback_category(app, "expense").await;
     sqlx::query(
         "INSERT INTO transactions (installation_id, owner_user_id, source, op_date, concept, \
-         amount, currency, kind, fingerprint, fingerprint_ordinal) \
-         VALUES ($1, $2, 'manual', $3, $4, -1, 'EUR', 'expense', $5, 0)",
+         amount, currency, kind, category_id, fingerprint, fingerprint_ordinal) \
+         VALUES ($1, $2, 'manual', $3, $4, -1, 'EUR', 'expense', $5, $6, 0)",
     )
     .bind(iid)
     .bind(owner_id)
     .bind(op)
     .bind(format!("Activador {y}-{m:02}"))
+    .bind(cat)
     .bind(format!("fp-activator-{y}-{m:02}"))
     .execute(&app.pool)
     .await
     .expect("insert activator movement");
+}
+
+/// Id de la categoría POR DEFECTO de un scope (4.15.0).
+async fn fallback_category(app: &TestApp, scope: &str) -> Uuid {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM categories WHERE installation_id = (SELECT id FROM installation LIMIT 1) \
+         AND scope = $1 AND is_fallback",
+    )
+    .bind(scope)
+    .fetch_one(&app.pool)
+    .await
+    .expect("categoría por defecto del scope")
 }
 
 /// Nº de días del mes civil `(year, month)`.
@@ -905,4 +921,71 @@ async fn category_used_by_recurring_rule_requires_remap() {
         .find(|x| x["id"] == json!(rule_id))
         .expect("la regla sigue existiendo");
     assert_eq!(rule["category_id"], json!(cat_b), "regla remapeada a B");
+}
+
+// ---------------------------------------------------------------------------
+// 4.15.0 — la plantilla también lleva categoría
+// ---------------------------------------------------------------------------
+
+/// Una plantilla recurrente creada sin categoría cae en la POR DEFECTO de su clase —igual que la
+/// backfillea la migración `20260902120000` para las que ya existían— y **cada instancia que
+/// materializa la hereda**.
+///
+/// Es la mitad que faltaba: `materialize_rule` inserta `rule.category_id` tal cual, así que una
+/// plantilla con `NULL` habría reventado contra `transactions_category_required_check` una vez al
+/// mes, en un pase de convergencia post-commit que corre en best-effort y se traga los errores en
+/// un `tracing::warn!` — el peor sitio posible para descubrirlo.
+#[tokio::test]
+async fn materializing_a_legacy_rule_after_the_backfill_keeps_the_fallback() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let otros_gastos = fallback_category(&app, "expense").await;
+    let today = server_today(&app, &owner.cookie).await;
+    let (py, pm) = shift_month(today.year(), today.month(), -1);
+
+    // La plantilla nace SIN categoría en la petición → el servidor la resuelve al cajón.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": date_in(py, pm, 5), "concept": "Cuota gimnasio",
+                    "amount": "-40", "kind": "expense", "recurrence": {} }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "create: {r:?}");
+    assert_eq!(
+        r.json()["category_id"],
+        json!(otros_gastos.to_string()),
+        "el movimiento de origen ya nace en el cajón: {}",
+        r.json()
+    );
+
+    let rule_cat: Option<Uuid> =
+        sqlx::query_scalar("SELECT category_id FROM recurring_transaction_rules")
+            .fetch_one(&app.pool)
+            .await
+            .expect("plantilla");
+    assert_eq!(rule_cat, Some(otros_gastos), "la plantilla también");
+
+    // El mes de origen ya está activo (lo activa su propia instancia), así que materializar no
+    // añade nada nuevo ahí; se activa el mes siguiente para que sí haya trabajo.
+    activate_month_raw(&app, owner.user_id, today.year(), today.month()).await;
+    let (ny, nm) = shift_month(py, pm, 1);
+    if (ny, nm) != (today.year(), today.month()) {
+        activate_month_raw(&app, owner.user_id, ny, nm).await;
+    }
+    let mat = materialize(&app, &owner.cookie).await;
+    assert_eq!(mat.status, http::StatusCode::OK, "materialize: {mat:?}");
+
+    // Toda instancia de la plantilla lleva la categoría de la plantilla; ninguna queda a NULL.
+    let cats: Vec<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT category_id FROM transactions WHERE recurring_rule_id IS NOT NULL",
+    )
+    .fetch_all(&app.pool)
+    .await
+    .expect("instancias");
+    assert!(!cats.is_empty(), "debe haber al menos la instancia de origen");
+    for c in cats {
+        assert_eq!(c, Some(otros_gastos), "instancia sin la categoría de la plantilla");
+    }
 }

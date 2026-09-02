@@ -48,6 +48,23 @@ async fn manual(app: &TestApp, cookie: &str, date: &str, concept: &str, amount: 
     assert_eq!(r.status, http::StatusCode::CREATED, "manual {concept}: {r:?}");
 }
 
+/// Nombre de la categoría POR DEFECTO de un scope. Desde 4.15.0 todo movimiento income/expense
+/// que llega sin categoría aterriza en ella, así que la antigua fila «Sin categoría» de la
+/// comparativa ya no existe: lo que antes se agrupaba bajo `category_id = NULL` sale ahora bajo
+/// este nombre. Se resuelve por el flag y no por el literal para que renombrar la semilla no
+/// rompa los tests.
+async fn fallback_name(app: &TestApp, cookie: &str, scope: &str) -> String {
+    let rows = app.get_with_cookie("/v1/categories", cookie).await.json();
+    rows.as_array()
+        .expect("categories list")
+        .iter()
+        .find(|c| c["scope"] == scope && c["is_fallback"] == json!(true))
+        .unwrap_or_else(|| panic!("no hay categoría por defecto de {scope}: {rows}"))["name"]
+        .as_str()
+        .expect("category name")
+        .to_string()
+}
+
 fn line<'a>(arr: &'a Value, name: &str) -> &'a Value {
     arr.as_array()
         .unwrap()
@@ -100,7 +117,8 @@ async fn summary_numbers_windows_and_no_double_count() {
     assert_eq!(r.status, http::StatusCode::CREATED, "liability: {r:?}");
 
     // --- Transacciones ---
-    // Mes seleccionado: Super -100 y -50 (=150), Sin categoría -30, income +2000, savings -200.
+    // Mes seleccionado: Super -100 y -50 (=150), sin categoría -30 (→ la de por defecto, 4.15.0),
+    // income +2000, savings -200.
     manual(&app, &owner.cookie, &date_in(sy, sm, 5), "Super A", "-100", "expense", Some(&super_cat)).await;
     manual(&app, &owner.cookie, &date_in(sy, sm, 12), "Super B", "-50", "expense", Some(&super_cat)).await;
     manual(&app, &owner.cookie, &date_in(sy, sm, 8), "Kiosko", "-30", "expense", None).await;
@@ -135,8 +153,10 @@ async fn summary_numbers_windows_and_no_double_count() {
     approx(parse_dec(&sup["delta_vs_budget"]), -150.0);
     approx(parse_dec(&sup["delta_vs_avg"]), 45.0);
 
-    // Sin categoría: actual 30, budget 0, avg 30/2 = 15 (el −30 de sel está en la ventana).
-    let sc = line(&b["expense_categories"], "Sin categoría");
+    // Categoría por defecto (donde cae el «Kiosko» sin categoría desde 4.15.0): actual 30,
+    // budget 0, avg 30/2 = 15 (el −30 de sel está en la ventana).
+    let default_expense = fallback_name(&app, &owner.cookie, "expense").await;
+    let sc = line(&b["expense_categories"], &default_expense);
     approx(parse_dec(&sc["actual"]), 30.0);
     approx(parse_dec(&sc["budget"]), 0.0);
     approx(parse_dec(&sc["avg"]), 15.0);
@@ -169,7 +189,7 @@ async fn summary_numbers_windows_and_no_double_count() {
     approx(parse_dec(&b["income"]["avg"]), 1500.0);
 
     // Totales. expense_actual = 150+30 = 180 (SIN la cuota del pasivo → sin doble conteo);
-    // expense_avg = 105 (Super) + 15 (Sin categoría) = 120.
+    // expense_avg = 105 (Super) + 15 (la de por defecto) = 120.
     let t = &b["totals"];
     approx(parse_dec(&t["expense_actual"]), 180.0);
     approx(parse_dec(&t["expense_avg"]), 120.0);
@@ -885,9 +905,11 @@ async fn an_empty_average_window_emits_null_not_zero() {
     assert!(l["delta_vs_budget"].is_string(), "{l}");
 
     // Totales y bloques, con la misma regla que las filas (nada de sumar nadas).
-    for key in ["expense_avg", "income_avg", "savings_avg"] {
+    for key in ["expense_avg", "income_avg", "savings_avg", "net_avg", "refunds_avg"] {
         assert_eq!(body["totals"][key], Value::Null, "totals.{key}: {body}");
     }
+    // `refunds_actual` NO se anula: Σ∅ = 0 es una medición, no una ausencia.
+    approx(parse_dec(&body["totals"]["refunds_actual"]), 0.0);
     assert_eq!(body["savings"]["avg"], Value::Null, "{body}");
     assert_eq!(body["income"]["avg"], Value::Null, "{body}");
     // Los `actual` NO se anulan: son mediciones, no comparaciones.
@@ -1065,4 +1087,106 @@ async fn the_average_window_is_anchored_to_today_not_to_the_selection() {
     assert_eq!(eb["avg_months"].as_u64().unwrap(), 3, "{eb}");
     assert_eq!(eb["first_month"], format!("{fy:04}-{fm:02}"), "{eb}");
     assert_eq!(eb["last_month"], format!("{ly:04}-{lm:02}"), "{eb}");
+}
+
+/// `totals.net_avg` (ahorro real promedio) y las devoluciones visibles (`refunds_actual/_avg`),
+/// 4.15.0.
+///
+/// Números PREDICHOS antes de ejecutar. Mes seleccionado = hoy−2 (completo); ventana `avg_months=3`
+/// anclada a HOY (#125) = {hoy−3, hoy−2, hoy−1}, de los que solo hoy−3 (= sel−1) y hoy−2 (= sel)
+/// tienen datos → `avg_months = 2`.
+///
+/// | Mes   | Gasto            | Devolución | Ingreso |
+/// |-------|------------------|-----------|---------|
+/// | sel   | −200             | +50       | +1000   |
+/// | sel−1 | −100             | —         | +600    |
+///
+/// - `expense_actual` = −Σ(expense) = −(−200 + 50) = **150** — la devolución YA está descontada,
+///   dentro de su propia categoría; no es una línea aparte ni un ingreso.
+/// - `refunds_actual` = **50**, y no suma nada al total: solo hace visible esa resta.
+/// - `expense_avg` = (150 + 100)/2 = **125**; `income_avg` = (1000 + 600)/2 = **800**;
+///   `refunds_avg` = (50 + 0)/2 = **25**; `net_avg` = 800 − 125 = **675**.
+#[tokio::test]
+async fn totals_expose_net_avg_and_refunds() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let compras = app.create_category(&owner, "expense", "Compras online").await;
+    let nomina = app.create_category(&owner, "income", "Nómina").await;
+
+    let today = server_today(&app, &owner.cookie).await;
+    let (sy, sm) = shift_month(today.year(), today.month(), -2);
+    let (y1, m1) = shift_month(sy, sm, -1);
+
+    manual(&app, &owner.cookie, &date_in(sy, sm, 5), "TIENDA", "-200", "expense", Some(&compras)).await;
+    manual(&app, &owner.cookie, &date_in(sy, sm, 1), "Sueldo", "1000", "income", Some(&nomina)).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 10), "TIENDA", "-100", "expense", Some(&compras)).await;
+    manual(&app, &owner.cookie, &date_in(y1, m1, 3), "Sueldo", "600", "income", Some(&nomina)).await;
+
+    // La devolución: entra como income positivo (lo que deduce el importador del signo) y se
+    // RE-clasifica a expense sin tocar el importe — un PATCH que no fija `amount` no valida el
+    // signo, y es justo el caso que ese comentario de `patch_transaction_core` protege. Alta
+    // directa de un gasto positivo no hay: la regla de signo la rechaza.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": date_in(sy, sm, 20), "concept": "Abono TIENDA",
+                    "amount": "50", "kind": "income", "category_id": nomina }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "abono: {r:?}");
+    let refund_id = r.json()["id"].as_str().unwrap().to_string();
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/{refund_id}"),
+            json!({ "kind": "expense", "category_id": compras }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "reclasificar a devolución: {r:?}");
+
+    let url = format!("/v1/transactions/summary?year={sy}&month={sm}&avg_months=3");
+    let b = app.get_with_cookie(&url, &owner.cookie).await.json();
+    assert_eq!(b["avg_months"].as_u64().unwrap(), 2, "sel y sel−1 son los meses reales: {b}");
+
+    let t = &b["totals"];
+    // La devolución vive DENTRO de su categoría, no en una fila propia.
+    let l = line(&b["expense_categories"], "Compras online");
+    approx(parse_dec(&l["actual"]), 150.0);
+    assert_eq!(
+        b["expense_categories"].as_array().unwrap().len(),
+        1,
+        "una devolución no materializa categoría nueva: {b}"
+    );
+
+    approx(parse_dec(&t["expense_actual"]), 150.0);
+    approx(parse_dec(&t["income_actual"]), 1000.0);
+    approx(parse_dec(&t["net_actual"]), 850.0);
+    approx(parse_dec(&t["refunds_actual"]), 50.0);
+    assert!(parse_dec(&t["refunds_actual"]) > 0.0, "hay devolución: {t}");
+
+    approx(parse_dec(&t["expense_avg"]), 125.0);
+    approx(parse_dec(&t["income_avg"]), 800.0);
+    approx(parse_dec(&t["refunds_avg"]), 25.0);
+    approx(parse_dec(&t["net_avg"]), 675.0);
+    // La identidad, no solo el número: `net_avg` se construye de los dos promedios que el usuario
+    // ve al lado, con su misma ventana y su mismo denominador.
+    approx(
+        parse_dec(&t["net_avg"]),
+        parse_dec(&t["income_avg"]) - parse_dec(&t["expense_avg"]),
+    );
+
+    // Sin base para promediar, los CUATRO promedios son null y las mediciones siguen siendo 0.
+    // Un miembro sin movimientos con `view=mine` es la forma barata de tener `avg_months = 0` sin
+    // depender del calendario.
+    let bob = app.register_and_approve_member(&owner, "bob", "member").await;
+    let b2 = app
+        .get_with_cookie(&format!("{url}&view=mine"), &bob.cookie)
+        .await
+        .json();
+    assert_eq!(b2["avg_months"].as_u64().unwrap(), 0, "bob no tiene datos: {b2}");
+    for key in ["expense_avg", "income_avg", "savings_avg", "net_avg", "refunds_avg"] {
+        assert_eq!(b2["totals"][key], Value::Null, "totals.{key}: {b2}");
+    }
+    approx(parse_dec(&b2["totals"]["refunds_actual"]), 0.0);
 }

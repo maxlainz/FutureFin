@@ -1,4 +1,5 @@
 use crate::error::ApiError;
+use crate::handlers::categories;
 use crate::handlers::membership::MembershipRole;
 use crate::handlers::projection::refresh_projection_after_mutation;
 use crate::handlers::session::require_session_user;
@@ -653,10 +654,15 @@ pub(crate) async fn bootstrap_installation_as_owner_if_empty(
 /// Son un punto de partida, no un dogma: se renombran y se borran desde Ajustes como cualquier
 /// otra. Por eso la lista es corta — cubre lo que casi todo el mundo tiene y deja fuera lo que
 /// depende de cada uno.
+///
+/// Dos de ellas nacen marcadas como **categoría por defecto** de su scope (4.15.0,
+/// `categories.is_fallback`): «Otros ingresos» y «Otros gastos». Son el destino de todo
+/// ingreso/gasto que llegue sin categoría, y por eso el catálogo sembrado ya no es opcional:
+/// sin ellas el primer import sin regla no tendría dónde caer.
 const DEFAULT_CATEGORIES: &[(&str, &[&str])] = &[
     ("asset", &["Cuenta corriente", "Ahorro", "Inversión", "Inmuebles"]),
     ("liability", &["Hipoteca", "Préstamo", "Tarjeta de crédito"]),
-    ("income", &["Nómina", "Otros ingresos"]),
+    ("income", &["Nómina", categories::FALLBACK_INCOME_NAME]),
     (
         "expense",
         &[
@@ -666,7 +672,7 @@ const DEFAULT_CATEGORIES: &[(&str, &[&str])] = &[
             "Transporte",
             "Ocio",
             "Salud",
-            "Otros gastos",
+            categories::FALLBACK_EXPENSE_NAME,
         ],
     ),
 ];
@@ -684,14 +690,17 @@ pub(crate) async fn seed_default_categories(
     for (scope, names) in DEFAULT_CATEGORIES {
         for (i, name) in names.iter().enumerate() {
             sqlx::query(
-                r#"INSERT INTO categories (installation_id, scope, name, sort_index)
-                   VALUES ($1, $2, $3, $4)
+                r#"INSERT INTO categories (installation_id, scope, name, sort_index, is_fallback)
+                   VALUES ($1, $2, $3, $4, $5)
                    ON CONFLICT (installation_id, scope, name) DO NOTHING"#,
             )
             .bind(installation_id)
             .bind(scope)
             .bind(name)
             .bind(i as i32)
+            // La marca viaja EN EL SEED, no en un UPDATE posterior: una instalación nace con su
+            // categoría por defecto o no nace (todo esto va en la transacción que crea el hogar).
+            .bind(categories::is_seeded_fallback(scope, name))
             .execute(&mut **tx)
             .await?;
         }

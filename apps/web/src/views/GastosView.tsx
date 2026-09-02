@@ -37,6 +37,7 @@ import type {
   TransactionsSummaryApi,
   UserResponse,
 } from "../api/types";
+import { HelpPopover } from "../components/HelpPopover";
 import { MetricCard } from "../components/MetricCard";
 import { Modal, ModalFormError } from "../components/Modal";
 import {
@@ -55,6 +56,7 @@ import {
 import { MonthlyCashflowBars } from "../components/charts/CategoryComparisonBars";
 import {
   formatCurrencyAmount,
+  formatCurrencyNumber,
   formatCurrencyOrDash,
   formatPercentDisplay,
   METRIC_DASH,
@@ -62,6 +64,7 @@ import {
   toApiDecimalString,
 } from "../lib/format";
 import { formatDateDm, formatDateDmy, todayYmdInTimeZone } from "../lib/dates";
+import { HELP_TEXTS } from "../lib/helpTexts";
 import { ledgerViewQs, type LedgerPersonScope } from "../lib/ledger";
 import { useIsMobile } from "../lib/responsive";
 import {
@@ -76,12 +79,15 @@ import {
   defaultSelectedMonth,
   formatDeltaCurrency,
   groupTransactionsByCategory,
+  isPositiveAmountString,
   isReconciled,
   isRefundRow,
   kpiBudgetTrend,
   monthLabelEs,
   naturalSortDir,
   parseMonth,
+  savingsBreakdown,
+  savingsRateFromTotals,
   significanceThreshold,
   significantDeltaTone,
   sortTransactionGroups,
@@ -462,16 +468,18 @@ export function GastosView({
   // Sin summary todavía no hay cifras que rotular, así que ahí sí vale la pedida.
   const avgLabel = avgWindowLabel(summary?.avg_window ?? avgWindow);
 
-  const savingsRateAvg = useMemo(() => {
-    // income_avg/savings_avg son null exactamente cuando avg_months == 0: sin promedio no hay
-    // tasa que calcular, y calcularla igualmente (con un 0 de relleno) pintaría un «0 %» donde
-    // no hay dato.
-    if (!totals || totals.income_avg === null || totals.savings_avg === null) return null;
-    const inc = parseDisplayDecimal(totals.income_avg) ?? 0;
-    const sav = parseDisplayDecimal(totals.savings_avg) ?? 0;
-    if (inc <= 0) return null;
-    return (sav / inc) * 100;
-  }, [totals]);
+  // Ahorro = ingresos − gastos (4.15.0), con su desglose invertido / en cuenta. Los dos helpers
+  // devuelven null cuando falta la base (`avg_months == 0` deja los promedios en null): sin
+  // promedio no hay cifra, y rellenar con ceros pintaría un «0 €» donde no hay dato.
+  const savings = useMemo(() => savingsBreakdown(totals), [totals]);
+  const savingsRate = useMemo(() => savingsRateFromTotals(totals), [totals]);
+  /** «invertido X · en cuenta Y», o «invertido X · de reservas Z» cuando lo invertido se pasó
+   *  del ahorro del periodo (la diferencia salió de reservas anteriores, no del mes). */
+  const savingsParenthetical = savings
+    ? savings.enCuenta < 0
+      ? `invertido ${formatCurrencyNumber(savings.invertido, currencyIso)} · de reservas ${formatCurrencyNumber(-savings.enCuenta, currencyIso)}`
+      : `invertido ${formatCurrencyNumber(savings.invertido, currencyIso)} · en cuenta ${formatCurrencyNumber(savings.enCuenta, currencyIso)}`
+    : undefined;
 
   const noCategories =
     incomeCategories.length === 0 && expenseCategories.length === 0;
@@ -572,6 +580,35 @@ export function GastosView({
         </span>
         <span className="metric-trend-label">vs presupuesto</span>
       </span>
+    );
+  }
+
+  /**
+   * Línea derivada «Devoluciones incluidas» sobre la tabla de gastos. Los gastos con importe
+   * positivo (reembolsos, abonos, copagos) ya están NETEADOS dentro de la categoría de lo que
+   * compensan, así que la tabla nunca los enseña por separado: sin esta línea, un mes con una
+   * devolución grande enseña una categoría más barata de lo que se gastó y nada lo explica.
+   *
+   * Oculta cuando no hay ninguna (un cero aquí no informa de nada, y el servidor manda un cero
+   * de verdad, no un null).
+   */
+  function renderRefundsNote(t: TransactionsSummaryApi["totals"]) {
+    if (!isPositiveAmountString(t.refunds_actual)) return null;
+    const actual = parseDisplayDecimal(t.refunds_actual) ?? 0;
+    // La media solo cuando hay una que enseñar: un «media −0 €» no informa de nada y además
+    // pinta un menos delante de un cero.
+    const avgRaw = t.refunds_avg != null ? parseDisplayDecimal(t.refunds_avg) : null;
+    const avg = avgRaw !== null && avgRaw > 0 ? avgRaw : null;
+    return (
+      <p className="muted tight">
+        Devoluciones incluidas: {formatCurrencyNumber(-actual, currencyIso)}
+        {avg !== null ? ` (media ${formatCurrencyNumber(-avg, currencyIso)})` : ""} · ya
+        descontadas dentro de cada categoría{" "}
+        <HelpPopover
+          title={HELP_TEXTS["expenses.refunds"].title}
+          body={HELP_TEXTS["expenses.refunds"].body}
+        />
+      </p>
     );
   }
 
@@ -978,22 +1015,23 @@ export function GastosView({
               }
             />
             <MetricCard
-              label={`Traspasado a ahorro (${avgLabel})`}
-              helpId="expenses.savings_transferred"
+              label={`Ahorro (${avgLabel})`}
+              helpId="expenses.savings"
               detail={avgBasisText}
               value={
-                totals ? formatCurrencyOrDash(totals.savings_avg, currencyIso) : METRIC_DASH
+                totals ? formatCurrencyOrDash(totals.net_avg, currencyIso) : METRIC_DASH
               }
+              parenthetical={savingsParenthetical}
               tone="accent-2"
             />
             <MetricCard
-              label={`% traspasado (${avgLabel})`}
-              helpId="expenses.transferred_rate"
+              label={`Tasa de ahorro (${avgLabel})`}
+              helpId="expenses.savings_rate"
               detail={avgBasisText}
               value={
-                savingsRateAvg !== null
-                  ? formatPercentDisplay(savingsRateAvg)
-                  : METRIC_DASH
+                // Sin color aunque salga negativa: es un VALOR, no una desviación contra un
+                // plan — el rojo/verde de esta app está reservado a las cifras delta.
+                savingsRate !== null ? formatPercentDisplay(savingsRate) : METRIC_DASH
               }
               tone="accent"
             />
@@ -1149,6 +1187,7 @@ export function GastosView({
                     <div className="exp-comparison-grid">
                       <div className="exp-comparison-col">
                         <h4 className="subsection-title">Gastos</h4>
+                        {renderRefundsNote(summary.totals)}
                         {renderComparisonTable(
                           summary.expense_categories,
                           "expense",
@@ -1510,21 +1549,37 @@ function EditTransactionModal({
   const [unreconciling, setUnreconciling] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  /**
+   * Categoría POR DEFECTO del kind (4.15.0): la que recibe todo ingreso/gasto sin clasificar.
+   * `""` para savings (no admite categoría) y también si el hogar no tiene ninguna marcada —
+   * ahí el `<select>` enseña su placeholder y el servidor resuelve con su propia por defecto.
+   */
+  const fallbackFor = useCallback(
+    (k: TransactionKindApi): string =>
+      categoriesForKind(k, incomeCategories, expenseCategories).find(
+        (c) => c.is_fallback,
+      )?.id ?? "",
+    [incomeCategories, expenseCategories],
+  );
+
   useEffect(() => {
     if (!target) return;
     setOpDate(target.op_date);
     setValueDate(target.value_date ?? "");
     setConcept(target.concept);
     setAmount(target.amount);
-    setKind(target.kind ?? "expense");
-    setCategoryId(target.category_id ?? "");
+    const nextKind = target.kind ?? "expense";
+    setKind(nextKind);
+    // Una fila heredada sin categoría se abre YA con la por defecto: desde 4.15.0 «sin
+    // categoría» no es un estado que se pueda guardar en un ingreso o un gasto.
+    setCategoryId(target.category_id ?? fallbackFor(nextKind));
     setLinkedAssetId(target.linked_asset_id ?? "");
     setLinkedLiabilityId(target.linked_liability_id ?? "");
     setNotes(target.notes ?? "");
     setFormError(null);
     setSaving(false);
     setUnreconciling(false);
-  }, [target]);
+  }, [target, fallbackFor]);
 
   if (!target) {
     return <Modal title="Editar movimiento" open={false} onClose={onClose} children={null} />;
@@ -1557,8 +1612,14 @@ function EditTransactionModal({
 
   function changeKind(newKind: TransactionKindApi) {
     setKind(newKind);
-    if (newKind === "savings" || (categoryId && !categoryFitsKind(categoryId, newKind))) {
+    if (newKind === "savings") {
       setCategoryId("");
+      return;
+    }
+    // Cambiar de ámbito invalida la categoría anterior; en vez de dejar el hueco (que ya no es
+    // un estado guardable) cae en la por defecto del ámbito nuevo.
+    if (!categoryId || !categoryFitsKind(categoryId, newKind)) {
+      setCategoryId(fallbackFor(newKind));
     }
   }
 
@@ -1585,8 +1646,11 @@ function EditTransactionModal({
     patch.op_date = opDate;
     patch.concept = concept.trim();
     patch.amount = toApiDecimalString(amount);
-    if (kind === "savings" || !categoryId) patch.clear_category = true;
-    else patch.category_id = categoryId;
+    // `clear_category` solo en savings: es el único kind que puede quedarse sin categoría. En
+    // ingreso/gasto la categoría es obligatoria, así que o se manda la elegida o no se toca el
+    // campo (y el servidor conserva la que ya tenía).
+    if (kind === "savings") patch.clear_category = true;
+    else if (categoryId) patch.category_id = categoryId;
     if (valueDate.trim()) patch.value_date = valueDate;
     else patch.clear_value_date = true;
     if (linkedAssetId) patch.linked_asset_id = linkedAssetId;
@@ -1706,7 +1770,17 @@ function EditTransactionModal({
               disabled={kind === "savings"}
               onChange={(e) => setCategoryId(e.target.value)}
             >
-              <option value="">{kind === "savings" ? "—" : "Sin categoría"}</option>
+              {/* Sin opción «Sin categoría» en ingreso/gasto: dejar de clasificar dejó de ser
+                  una opción en 4.15.0. El hueco solo aparece —deshabilitado— si el hogar no
+                  tiene categorías de ese ámbito, para que el select no mienta preseleccionando
+                  la primera de la lista. */}
+              {kind === "savings" ? (
+                <option value="">—</option>
+              ) : categoryId === "" ? (
+                <option value="" disabled>
+                  Elige categoría
+                </option>
+              ) : null}
               {cats.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}

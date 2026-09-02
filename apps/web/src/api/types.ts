@@ -111,6 +111,11 @@ export type CategoryRow = {
   scope: CategoryScope;
   name: string;
   sort_index: number;
+  /** Categoría POR DEFECTO de su ámbito (4.15.0): la que recibe todo ingreso/gasto que llegue sin
+   *  categoría, por cualquier vía. Hay EXACTAMENTE UNA por instalación y ámbito, y solo en
+   *  `income`/`expense` (nunca en `asset`/`liability`). No se puede borrar ni desmarcar: se
+   *  traslada marcando otra. */
+  is_fallback: boolean;
 };
 
 export type AssetApiRow = {
@@ -754,6 +759,12 @@ export type ImportPreviewRowApi = {
   suggested_transfer: boolean;
   currency_warning: boolean;
   matched_rule_id?: string;
+  /** De dónde sale `suggested_category_id` (4.15.0): `"rule"` = la casó una regla de
+   *  categorización; `"fallback"` = no la casó ninguna y el servidor puso la categoría por
+   *  defecto del ámbito. Ausente cuando no hay categoría sugerida (p. ej. `kind = savings`).
+   *  La distinción importa: una categoría por defecto NO debe propagarse como si fuera una
+   *  clasificación decidida (ni al automatch del preview, ni al aprendizaje de reglas). */
+  suggested_category_source?: "rule" | "fallback";
 };
 
 /** Respuesta de `POST /v1/transactions/import/preview`. */
@@ -864,6 +875,19 @@ export type SummaryTotalsApi = {
   /** `null` ⟺ `avg_months == 0`. */
   savings_avg: string | null;
   net_actual: string;
+  /** Ahorro promedio = `income_avg − expense_avg`, sobre los MISMOS meses reales y la misma
+   *  ventana que sus dos sumandos. `null` ⟺ `avg_months == 0`. Puede ser negativo (gastaste más
+   *  de lo que ingresaste). NO es el «Ahorro mensual» del Resumen, que sigue el modo de ahorro
+   *  configurado. */
+  net_avg: string | null;
+  /** Devoluciones del mes seleccionado: suma de los importes POSITIVOS de los movimientos de
+   *  gasto (reembolsos, abonos, copagos). Magnitud ≥ 0, NUNCA null — un mes sin devoluciones
+   *  emite un cero de verdad. Ya está descontada dentro de `expense_actual` y de la categoría de
+   *  cada fila: es una cifra derivada para explicarlo, no un sumando aparte. */
+  refunds_actual: string;
+  /** La misma magnitud, promediada sobre los meses reales de la ventana. `null` ⟺
+   *  `avg_months == 0`. */
+  refunds_avg: string | null;
 };
 
 /** De qué meses sale el promedio de la comparativa mensual. */

@@ -32,11 +32,24 @@ export const TRANSACTION_KINDS: TransactionKindApi[] = [
   "savings",
 ];
 
+/**
+ * Rótulo en español de cada `kind`. `savings` se llama **«Inversión»** desde 4.15.0: la clase
+ * mide dinero movido a productos de inversión, no «ingresos − gastos», y compartir la palabra
+ * «ahorro» con el Resumen y con el motor hacía irreconciliables dos cifras que ambas se
+ * presentaban como el ahorro del hogar. El valor de API (`savings`) no cambia.
+ */
 export const KIND_LABEL_ES: Record<TransactionKindApi, string> = {
   expense: "Gasto",
   income: "Ingreso",
-  savings: "Ahorro",
+  savings: "Inversión",
 };
+
+/**
+ * Rótulo del grupo único que reúne los movimientos `savings` en la tabla agrupada. Es el MISMO
+ * concepto que `KIND_LABEL_ES.savings` y se exporta aparte solo para que el pin del test y la
+ * vista citen una constante en vez de repetir la cadena en dos sitios.
+ */
+export const SAVINGS_GROUP_LABEL = "Inversión";
 
 // ---------------------------------------------------------------------------
 // Devoluciones (gasto con importe positivo)
@@ -165,6 +178,16 @@ export type ImportRowDraft = {
   kind: TransactionKindApi;
   /** "" = sin categoría. Ignorado si kind=savings. */
   categoryId: string;
+  /**
+   * Procedencia de `categoryId` (4.15.0): `"rule"` la puso una regla del servidor, `"fallback"`
+   * es la categoría POR DEFECTO del ámbito (nadie clasificó nada), `"user"` la eligió la persona
+   * y `null` no hay categoría (o el kind es savings).
+   *
+   * No es decorativo: un `"fallback"` NO alimenta el automatch del preview ni el aprendizaje de
+   * reglas — si lo hiciera, un import sin reglas acabaría enseñando cientos de reglas
+   * «X → Otros gastos» que luego impedirían clasificar de verdad.
+   */
+  categorySource: "rule" | "fallback" | "user" | null;
   /** "" = sin vínculo. */
   linkedAssetId: string;
   /** "" = sin vínculo. */
@@ -183,11 +206,13 @@ export type ImportRowDraft = {
  */
 export function initialDraftForRow(row: ImportPreviewRowApi): ImportRowDraft {
   const include = row.status === "new" && !row.currency_warning;
+  const categoryId =
+    row.suggested_kind === "savings" ? "" : row.suggested_category_id ?? "";
   return {
     include,
     kind: row.suggested_kind,
-    categoryId:
-      row.suggested_kind === "savings" ? "" : row.suggested_category_id ?? "",
+    categoryId,
+    categorySource: categoryId === "" ? null : row.suggested_category_source ?? null,
     linkedAssetId: "",
     linkedLiabilityId: "",
     force: false,
@@ -199,10 +224,14 @@ export function initialDraftForRow(row: ImportPreviewRowApi): ImportRowDraft {
 // ---------------------------------------------------------------------------
 
 /**
- * ¿Son el MISMO draft? Comparación campo a campo de los seis campos editables. La usa el reducer
+ * ¿Son el MISMO draft? Comparación campo a campo de los seis campos EDITABLES. La usa el reducer
  * del wizard para no marcar una fila como «tocada» cuando el patch no cambió nada (p. ej.
  * «Incluir visibles» sobre filas ya incluidas): si un no-op marcara la fila, el automatch dejaría
  * de propagarse a filas que el usuario nunca miró.
+ *
+ * `categorySource` queda FUERA de la comparación a propósito: es procedencia, no decisión.
+ * Incluirlo convertiría «volver a elegir la misma categoría» en un cambio real, que es
+ * exactamente el no-op que esta función existe para descartar.
  */
 export function draftsEqual(a: ImportRowDraft, b: ImportRowDraft): boolean {
   return (
@@ -228,6 +257,12 @@ export const PENDING_ASSIGNMENTS_CAP = 200;
  * GATE: solo generan regla efímera las asignaciones con categoría o con `kind=savings` — el mismo
  * gate que el aprendizaje persistente del confirm. Mandar un `expense` sin categoría no enseñaría
  * nada al servidor y solo gastaría cupo de las 200.
+ *
+ * SEGUNDO GATE (4.15.0): una categoría que llegó como la POR DEFECTO del ámbito
+ * (`categorySource === "fallback"`) tampoco aporta nada. Desde que el preview pre-rellena
+ * «Otros gastos»/«Otros ingresos», TODAS las filas sin regla traen categoría; sin este gate el
+ * automatch propagaría esa categoría por defecto a las filas vecinas como si alguien la hubiera
+ * decidido, y el aprendizaje del confirm la convertiría en reglas.
  */
 export function pendingAssignmentForDraft(
   concept: string,
@@ -237,6 +272,7 @@ export function pendingAssignmentForDraft(
     return { concept, kind: "savings", category_id: null };
   }
   if (!draft.categoryId) return null;
+  if (draft.categorySource === "fallback") return null;
   return { concept, kind: draft.kind, category_id: draft.categoryId };
 }
 
@@ -291,8 +327,17 @@ export function adoptSuggestion(
 ): ImportRowDraft {
   const kind = row.suggested_kind;
   const categoryId = kind === "savings" ? "" : row.suggested_category_id ?? "";
-  if (draft.kind === kind && draft.categoryId === categoryId) return draft;
-  return { ...draft, kind, categoryId };
+  const categorySource =
+    categoryId === "" ? null : row.suggested_category_source ?? null;
+  if (draft.kind === kind && draft.categoryId === categoryId) {
+    // Misma asignación: solo se refresca la PROCEDENCIA (una regla recién aprendida puede
+    // convertir en «rule» lo que llegó como «fallback»). El caller lo distingue de un movimiento
+    // real por los campos, no por la identidad del objeto.
+    return draft.categorySource === categorySource
+      ? draft
+      : { ...draft, categorySource };
+  }
+  return { ...draft, kind, categoryId, categorySource };
 }
 
 /**
@@ -312,13 +357,19 @@ export function mergeRepreview(
   if (rows.length !== drafts.length || rows.length !== previousRows.length) return null;
   if (rows.some((row, i) => row.index !== previousRows[i].index)) return null;
   let changed = 0;
+  let replaced = false;
   const next = drafts.map((d, i) => {
     if (touched[i]) return d;
     const adopted = adoptSuggestion(d, rows[i]);
-    if (adopted !== d) changed += 1;
+    if (adopted === d) return d;
+    replaced = true;
+    // `changed` es lo que el aviso enseña («aplicada a N filas similares»): solo cuenta si la
+    // fila cambió de tipo o de categoría. Un refresco de la PROCEDENCIA no mueve nada en
+    // pantalla y contarlo inflaría el número.
+    if (adopted.kind !== d.kind || adopted.categoryId !== d.categoryId) changed += 1;
     return adopted;
   });
-  return { drafts: changed > 0 ? next : drafts, changed };
+  return { drafts: replaced ? next : drafts, changed };
 }
 
 /**
@@ -350,21 +401,36 @@ export function buildConfirmDecisions(
 export function summarizeDecisions(
   rows: ImportPreviewRowApi[],
   drafts: ImportRowDraft[],
-): { toImport: number; toSkip: number; toDiscard: number } {
+): {
+  toImport: number;
+  toSkip: number;
+  toDiscard: number;
+  missingCategory: number;
+} {
   let toImport = 0;
   let toSkip = 0;
   let toDiscard = 0;
+  let missingCategory = 0;
   rows.forEach((row, i) => {
     const d = drafts[i];
     if (!d.include) {
       toDiscard += 1;
-    } else if (row.status === "already_imported" && !d.force) {
-      toSkip += 1;
-    } else {
-      toImport += 1;
+      return;
     }
+    if (row.status === "already_imported" && !d.force) {
+      toSkip += 1;
+      return;
+    }
+    toImport += 1;
+    // Cinturón del wizard (4.15.0): el servidor RECHAZA el confirm con una decisión de
+    // ingreso/gasto sin categoría (`category_required`). El predicado es EXACTAMENTE el suyo —
+    // solo las filas que de verdad se van a crear, ni las descartadas ni los duplicados que se
+    // omiten—, para no bloquear el botón por una fila que el servidor habría aceptado. Con el
+    // preview pre-rellenando la categoría por defecto esto se queda en 0 salvo que alguien
+    // cambie el tipo de una fila a mano.
+    if (d.kind !== "savings" && !d.categoryId) missingCategory += 1;
   });
-  return { toImport, toSkip, toDiscard };
+  return { toImport, toSkip, toDiscard, missingCategory };
 }
 
 /** Filtros de la barra de acciones masivas del wizard. */
@@ -375,7 +441,8 @@ export type ImportRowFilter =
   | "transfers"
   | "uncategorized";
 
-/** ¿La fila `i` pasa el filtro? (uncategorized = expense/income sin categoría, savings nunca). */
+/** ¿La fila `i` pasa el filtro? (`uncategorized`, rotulado «Sin clasificar» desde 4.15.0 =
+ *  expense/income sin categoría; savings nunca, no la admite). */
 export function rowMatchesFilter(
   row: ImportPreviewRowApi,
   draft: ImportRowDraft,
@@ -473,6 +540,61 @@ export function significanceThreshold(totals: SummaryTotalsApi): number {
   const incBudget = parseDisplayDecimal(totals.income_budget) ?? 0;
   if (incBudget > 0) return incBudget * 0.01;
   return 0;
+}
+
+/**
+ * Desglose de la tarjeta «Ahorro» de Movimientos (4.15.0).
+ *
+ * `ahorro` es `net_avg` (ingreso promedio − gasto promedio, misma ventana y mismo denominador de
+ * meses reales que las tarjetas vecinas). De ese ahorro, `invertido` es la parte que salió hacia
+ * productos de inversión (`savings_avg`, la clase `savings`) y `enCuenta` el resto, que se quedó
+ * en cuenta.
+ *
+ * `enCuenta` PUEDE SER NEGATIVO, y esa es información, no un error: significa que se invirtió más
+ * de lo que se ahorró, o sea que la diferencia salió de reservas anteriores. La vista lo rotula
+ * «de reservas» en vez de enseñar un «en cuenta» negativo.
+ *
+ * `null` cuando falta la base (`avg_months == 0` deja los promedios en null): sin promedio no hay
+ * desglose, y rellenar con ceros pintaría un reparto que nadie ha medido.
+ */
+export type SavingsBreakdown = {
+  ahorro: number;
+  invertido: number;
+  enCuenta: number;
+};
+
+export function savingsBreakdown(
+  totals: SummaryTotalsApi | null | undefined,
+): SavingsBreakdown | null {
+  if (!totals) return null;
+  if (totals.net_avg == null || totals.savings_avg == null) return null;
+  const ahorro = parseDisplayDecimal(totals.net_avg);
+  const invertido = parseDisplayDecimal(totals.savings_avg);
+  if (ahorro === null || invertido === null) return null;
+  return { ahorro, invertido, enCuenta: ahorro - invertido };
+}
+
+/**
+ * Tasa de ahorro de Movimientos (4.15.0): qué parte del ingreso promedio queda tras el gasto
+ * promedio, en PORCENTAJE (`net_avg / income_avg · 100`).
+ *
+ * `null` en dos casos que no son cero: sin promedio (`avg_months == 0`, los dos campos llegan
+ * null) y con ingreso promedio ≤ 0 (dividir entre cero, o entre un ingreso negativo, produce una
+ * cifra que no significa nada). Puede salir NEGATIVA cuando se gastó más de lo que se ingresó, y
+ * eso es un valor legítimo — la vista no lo colorea.
+ *
+ * NO es la tasa de ahorro del Resumen: aquella sigue el modo de ahorro configurado.
+ */
+export function savingsRateFromTotals(
+  totals: SummaryTotalsApi | null | undefined,
+): number | null {
+  if (!totals) return null;
+  if (totals.net_avg == null || totals.income_avg == null) return null;
+  const net = parseDisplayDecimal(totals.net_avg);
+  const income = parseDisplayDecimal(totals.income_avg);
+  if (net === null || income === null) return null;
+  if (income <= 0) return null;
+  return (net / income) * 100;
 }
 
 /**
@@ -724,7 +846,7 @@ export type TransactionGroup = {
 
 /**
  * Agrupa los movimientos por categoría. Grupo = categoría; `kind=savings` → un único grupo
- * «Ahorro / Inversión»; `category_id` nulo (y no savings) → «Sin categoría» POR KIND (un ingreso sin
+ * «Inversión»; `category_id` nulo (y no savings) → «Sin categoría» POR KIND (un ingreso sin
  * categoría va con los ingresos, un gasto con los gastos). El nombre visible sale de
  * `categoryNameById` (categoría viva), con fallback al `category_name` cacheado en la fila. NO
  * ordena: devuelve los grupos en orden de primera aparición (ordénalos con `sortTransactionGroups`).
@@ -745,7 +867,7 @@ export function groupTransactionsByCategory(
     let label: string;
     if (kind === "savings") {
       key = "savings";
-      label = "Ahorro / Inversión";
+      label = SAVINGS_GROUP_LABEL;
     } else if (r.category_id) {
       key = r.category_id;
       label = categoryNameById.get(r.category_id) ?? r.category_name ?? "Sin categoría";
@@ -764,7 +886,7 @@ export function groupTransactionsByCategory(
   return [...groups.values()];
 }
 
-/** Prioridad de sección de un kind en la tabla agrupada: ingresos, luego ahorro, abajo gastos. */
+/** Prioridad de sección de un kind en la tabla agrupada: ingresos, luego inversión, abajo gastos. */
 const KIND_GROUP_PRIORITY: Record<TransactionKindApi, number> = {
   income: 0,
   savings: 1,
@@ -773,7 +895,7 @@ const KIND_GROUP_PRIORITY: Record<TransactionKindApi, number> = {
 
 /**
  * Ordena los grupos en un orden FIJO, ajeno a la clave/dirección activa de la tabla (esa solo
- * ordena las filas DENTRO de cada grupo): (1) secciones por kind — ingresos → ahorro → gastos —,
+ * ordena las filas DENTRO de cada grupo): (1) secciones por kind — ingresos → inversión → gastos —,
  * (2) dentro de cada sección, de mayor a menor cantidad (`|subtotal|` descendente). Desempate
  * estable: alfabético por `label` y luego `key`.
  */

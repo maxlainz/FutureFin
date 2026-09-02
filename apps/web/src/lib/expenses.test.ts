@@ -9,7 +9,9 @@ import type {
   TransactionMonthApi,
 } from "../api/types";
 import {
+  KIND_LABEL_ES,
   PENDING_ASSIGNMENTS_CAP,
+  SAVINGS_GROUP_LABEL,
   adjacentMonthInList,
   adoptSuggestion,
   avgBasisDetail,
@@ -38,6 +40,8 @@ import {
   parseMonth,
   pendingAssignmentForDraft,
   rowMatchesFilter,
+  savingsBreakdown,
+  savingsRateFromTotals,
   signOf,
   significanceThreshold,
   significantDeltaTone,
@@ -50,8 +54,13 @@ import {
   type ImportRowDraft,
 } from "./expenses";
 
-function cat(id: string, scope: CategoryRow["scope"], name: string): CategoryRow {
-  return { id, scope, name, sort_index: 0 };
+function cat(
+  id: string,
+  scope: CategoryRow["scope"],
+  name: string,
+  isFallback = false,
+): CategoryRow {
+  return { id, scope, name, sort_index: 0, is_fallback: isFallback };
 }
 
 function previewRow(
@@ -183,6 +192,39 @@ describe("initialDraftForRow", () => {
       ).include,
     ).toBe(false);
   });
+  it("la procedencia de la categoría viaja desde el preview (4.15.0)", () => {
+    expect(
+      initialDraftForRow(
+        previewRow({
+          index: 0,
+          suggested_category_id: "c1",
+          suggested_category_source: "rule",
+        }),
+      ).categorySource,
+    ).toBe("rule");
+    expect(
+      initialDraftForRow(
+        previewRow({
+          index: 1,
+          suggested_category_id: "otros-gastos",
+          suggested_category_source: "fallback",
+        }),
+      ).categorySource,
+    ).toBe("fallback");
+  });
+  it("sin categoría sugerida no hay procedencia que declarar", () => {
+    expect(initialDraftForRow(previewRow({ index: 2 })).categorySource).toBeNull();
+    expect(
+      initialDraftForRow(
+        previewRow({
+          index: 3,
+          suggested_kind: "savings",
+          suggested_category_id: "c9",
+          suggested_category_source: "rule",
+        }),
+      ).categorySource,
+    ).toBeNull();
+  });
   it("currency warning is excluded", () => {
     expect(
       initialDraftForRow(previewRow({ index: 3, currency_warning: true }))
@@ -212,6 +254,7 @@ describe("buildConfirmDecisions", () => {
         include: true,
         kind: "expense",
         categoryId: "c1",
+        categorySource: "user",
         linkedAssetId: "",
         linkedLiabilityId: "l1",
         force: false,
@@ -220,6 +263,7 @@ describe("buildConfirmDecisions", () => {
         include: true,
         kind: "expense",
         categoryId: "",
+        categorySource: null,
         linkedAssetId: "",
         linkedLiabilityId: "",
         force: true,
@@ -241,6 +285,7 @@ describe("buildConfirmDecisions", () => {
         include: false,
         kind: "expense",
         categoryId: "c1",
+        categorySource: "user",
         linkedAssetId: "",
         linkedLiabilityId: "",
         force: false,
@@ -259,6 +304,7 @@ describe("buildConfirmDecisions", () => {
         include: true,
         kind: "savings",
         categoryId: "c1",
+        categorySource: null,
         linkedAssetId: "a1",
         linkedLiabilityId: "",
         force: false,
@@ -289,6 +335,9 @@ describe("summarizeDecisions", () => {
       toImport: 2,
       toSkip: 1,
       toDiscard: 1,
+      // Solo las DOS que se van a crear: el duplicado omitido y la excluida no llegan a existir,
+      // así que el servidor tampoco las valida.
+      missingCategory: 2,
     });
   });
   it("con los drafts POR DEFECTO, una transferencia sugerida cuenta como importada", () => {
@@ -301,7 +350,46 @@ describe("summarizeDecisions", () => {
       toImport: 2,
       toSkip: 0,
       toDiscard: 1,
+      // Las tres filas del helper llegan sin categoría sugerida; solo las dos INCLUIDAS cuentan.
+      missingCategory: 2,
     });
+  });
+
+  it("missingCategory usa el MISMO predicado que el servidor: solo lo que se va a crear", () => {
+    const rows = [
+      previewRow({ index: 0 }),
+      previewRow({ index: 1 }),
+      previewRow({ index: 2 }),
+      previewRow({ index: 3 }),
+      previewRow({ index: 4, status: "already_imported" }),
+    ];
+    const drafts: ImportRowDraft[] = [
+      draft({ include: true, kind: "expense", categoryId: "c1" }), // clasificada
+      draft({ include: true, kind: "income", categoryId: "" }), // ← cuenta
+      draft({ include: false, kind: "expense", categoryId: "" }), // excluida: no crea nada
+      draft({ include: true, kind: "savings", categoryId: "" }), // savings no la admite
+      draft({ include: true, kind: "expense", categoryId: "" }), // duplicado omitido: tampoco
+    ];
+    expect(summarizeDecisions(rows, drafts).missingCategory).toBe(1);
+  });
+
+  it("con el preview pre-rellenando la categoría por defecto, missingCategory es 0", () => {
+    const rows = [
+      previewRow({
+        index: 0,
+        suggested_category_id: "otros-gastos",
+        suggested_category_source: "fallback",
+      }),
+      previewRow({
+        index: 1,
+        suggested_kind: "income",
+        suggested_category_id: "otros-ingresos",
+        suggested_category_source: "fallback",
+      }),
+    ];
+    expect(
+      summarizeDecisions(rows, rows.map(initialDraftForRow)).missingCategory,
+    ).toBe(0);
   });
 });
 
@@ -778,7 +866,7 @@ describe("groupTransactionsByCategory", () => {
     expect(byKey["c1"].label).toBe("Alimentación");
     expect(byKey["c1"].rows).toHaveLength(2);
     expect(byKey["c1"].subtotal).toBeCloseTo(-50);
-    expect(byKey["savings"].label).toBe("Ahorro / Inversión");
+    expect(byKey["savings"].label).toBe(SAVINGS_GROUP_LABEL);
     expect(byKey["savings"].subtotal).toBeCloseTo(300);
     expect(byKey["uncategorized-expense"].label).toBe("Sin categoría");
     expect(byKey["uncategorized-expense"].subtotal).toBeCloseTo(-25);
@@ -958,6 +1046,9 @@ function totals(overrides: Partial<SummaryTotalsApi>): SummaryTotalsApi {
     savings_actual: "0",
     savings_avg: "0",
     net_actual: "0",
+    net_avg: "0",
+    refunds_actual: "0",
+    refunds_avg: "0",
     ...overrides,
   };
 }
@@ -967,6 +1058,7 @@ function draft(overrides: Partial<ImportRowDraft>): ImportRowDraft {
     include: true,
     kind: "expense",
     categoryId: "",
+    categorySource: null,
     linkedAssetId: "",
     linkedLiabilityId: "",
     force: false,
@@ -1069,6 +1161,47 @@ describe("pendingAssignmentForDraft (gate)", () => {
       pendingAssignmentForDraft("X", draft({ kind: "income", categoryId: "" })),
     ).toBeNull();
   });
+  it("la categoría POR DEFECTO tampoco: nadie la decidió, no debe propagarse (4.15.0)", () => {
+    expect(
+      pendingAssignmentForDraft(
+        "COMPRA RARA",
+        draft({ categoryId: "otros-gastos", categorySource: "fallback" }),
+      ),
+    ).toBeNull();
+  });
+  it("la MISMA categoría elegida a mano sí se propaga: elegirla es una decisión", () => {
+    expect(
+      pendingAssignmentForDraft(
+        "COMPRA RARA",
+        draft({ categoryId: "otros-gastos", categorySource: "user" }),
+      ),
+    ).toEqual({
+      concept: "COMPRA RARA",
+      kind: "expense",
+      category_id: "otros-gastos",
+    });
+  });
+  it("una categoría que puso una REGLA sigue propagándose", () => {
+    expect(
+      pendingAssignmentForDraft("CAFE 365", draft({ categoryId: "c1", categorySource: "rule" })),
+    ).not.toBeNull();
+  });
+});
+
+describe("draftsEqual (procedencia fuera de la comparación)", () => {
+  it("dos drafts que solo difieren en categorySource son el MISMO draft", () => {
+    expect(
+      draftsEqual(
+        draft({ categoryId: "c1", categorySource: "fallback" }),
+        draft({ categoryId: "c1", categorySource: "user" }),
+      ),
+    ).toBe(true);
+  });
+  it("pero un cambio real de categoría sí se ve", () => {
+    expect(
+      draftsEqual(draft({ categoryId: "c1" }), draft({ categoryId: "c2" })),
+    ).toBe(false);
+  });
 });
 
 describe("mergePendingAssignments", () => {
@@ -1170,6 +1303,32 @@ describe("adoptSuggestion", () => {
       ),
     ).toBe(d);
   });
+  it("adopta también la procedencia (4.15.0)", () => {
+    const out = adoptSuggestion(
+      draft({}),
+      previewRow({
+        index: 0,
+        suggested_category_id: "otros-gastos",
+        suggested_category_source: "fallback",
+      }),
+    );
+    expect(out.categoryId).toBe("otros-gastos");
+    expect(out.categorySource).toBe("fallback");
+  });
+  it("misma categoría con procedencia nueva: se refresca sin tocar la asignación", () => {
+    const d = draft({ categoryId: "c1", categorySource: "fallback" });
+    const out = adoptSuggestion(
+      d,
+      previewRow({
+        index: 0,
+        suggested_category_id: "c1",
+        suggested_category_source: "rule",
+      }),
+    );
+    expect(out).not.toBe(d);
+    expect(out.categoryId).toBe("c1");
+    expect(out.categorySource).toBe("rule");
+  });
 });
 
 describe("mergeRepreview", () => {
@@ -1210,6 +1369,36 @@ describe("mergeRepreview", () => {
     expect(out?.drafts).toBe(drafts);
   });
 
+  it("un refresco de PROCEDENCIA no cuenta como fila movida (el aviso no se infla)", () => {
+    const soloProcedencia = [
+      previewRow({
+        index: 0,
+        suggested_category_id: "c9",
+        suggested_category_source: "rule",
+      }),
+      previewRow({
+        index: 1,
+        suggested_category_id: "c9",
+        suggested_category_source: "rule",
+      }),
+      previewRow({
+        index: 2,
+        suggested_category_id: "c9",
+        suggested_category_source: "rule",
+      }),
+    ];
+    const drafts = [
+      draft({ categoryId: "c9", categorySource: "fallback" }),
+      draft({ categoryId: "c9", categorySource: "fallback" }),
+      draft({ categoryId: "c9", categorySource: "fallback" }),
+    ];
+    const out = mergeRepreview(drafts, [false, false, false], soloProcedencia, previous);
+    expect(out?.changed).toBe(0);
+    // …pero el array SÍ se reemplaza: la procedencia nueva tiene que llegar al draft.
+    expect(out?.drafts).not.toBe(drafts);
+    expect(out?.drafts.every((d) => d.categorySource === "rule")).toBe(true);
+  });
+
   it("todas tocadas → no se mueve nada", () => {
     const drafts = [draft({}), draft({}), draft({})];
     const out = mergeRepreview(drafts, [true, true, true], rows, previous);
@@ -1237,5 +1426,88 @@ describe("mergeRepreview", () => {
         previous,
       ),
     ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ahorro de Movimientos (4.15.0): ingresos − gastos, y su desglose
+// ---------------------------------------------------------------------------
+
+describe("savingsBreakdown", () => {
+  it("mes normal: lo que no se invirtió se quedó en cuenta", () => {
+    expect(
+      savingsBreakdown(totals({ net_avg: "1000", savings_avg: "800" })),
+    ).toEqual({ ahorro: 1000, invertido: 800, enCuenta: 200 });
+  });
+
+  it("invertir más de lo ahorrado deja «en cuenta» NEGATIVO: salió de reservas", () => {
+    const out = savingsBreakdown(totals({ net_avg: "200", savings_avg: "500" }));
+    expect(out).toEqual({ ahorro: 200, invertido: 500, enCuenta: -300 });
+  });
+
+  it("ahorro negativo (se gastó más de lo que entró) es un valor, no un error", () => {
+    expect(savingsBreakdown(totals({ net_avg: "-450", savings_avg: "0" }))).toEqual({
+      ahorro: -450,
+      invertido: 0,
+      enCuenta: -450,
+    });
+  });
+
+  it("sin promedio no hay desglose: null, nunca ceros de relleno", () => {
+    expect(savingsBreakdown(totals({ net_avg: null, savings_avg: null }))).toBeNull();
+    expect(savingsBreakdown(totals({ net_avg: "1000", savings_avg: null }))).toBeNull();
+    expect(savingsBreakdown(totals({ net_avg: null, savings_avg: "800" }))).toBeNull();
+    expect(savingsBreakdown(null)).toBeNull();
+  });
+
+  it("un cero de verdad SÍ se desglosa (cero ≠ ausencia)", () => {
+    expect(savingsBreakdown(totals({ net_avg: "0", savings_avg: "0" }))).toEqual({
+      ahorro: 0,
+      invertido: 0,
+      enCuenta: 0,
+    });
+  });
+});
+
+describe("savingsRateFromTotals", () => {
+  it("es el ahorro sobre el ingreso, en porcentaje", () => {
+    expect(
+      savingsRateFromTotals(totals({ net_avg: "500", income_avg: "2000" })),
+    ).toBeCloseTo(25);
+  });
+
+  it("puede ser negativa: gastar más de lo que entra no es «0 %»", () => {
+    expect(
+      savingsRateFromTotals(totals({ net_avg: "-200", income_avg: "1000" })),
+    ).toBeCloseTo(-20);
+  });
+
+  it("ingreso 0 o negativo → null: no hay denominador que signifique nada", () => {
+    expect(
+      savingsRateFromTotals(totals({ net_avg: "500", income_avg: "0" })),
+    ).toBeNull();
+    expect(
+      savingsRateFromTotals(totals({ net_avg: "500", income_avg: "-10" })),
+    ).toBeNull();
+  });
+
+  it("sin promedio, null (y no un 0 % inventado)", () => {
+    expect(
+      savingsRateFromTotals(totals({ net_avg: null, income_avg: null })),
+    ).toBeNull();
+    expect(
+      savingsRateFromTotals(totals({ net_avg: "500", income_avg: null })),
+    ).toBeNull();
+    expect(savingsRateFromTotals(undefined)).toBeNull();
+  });
+});
+
+describe("rótulo de la clase savings (4.15.0)", () => {
+  it("se llama «Inversión», no «Ahorro»: el ahorro es ingresos − gastos", () => {
+    expect(KIND_LABEL_ES.savings).toBe("Inversión");
+    expect(SAVINGS_GROUP_LABEL).toBe("Inversión");
+  });
+  it("la tabla agrupada y el selector de tipo dicen lo mismo", () => {
+    expect(SAVINGS_GROUP_LABEL).toBe(KIND_LABEL_ES.savings);
   });
 });

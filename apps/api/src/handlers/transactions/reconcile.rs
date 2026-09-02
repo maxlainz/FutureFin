@@ -67,20 +67,34 @@ pub struct ReconcileOutcome {
 }
 
 /// EL predicado de candidatura, en un único sitio: mismo owner, misma divisa, importes
-/// exactamente opuestos, ambas patas de clase `income`/`expense`, ninguna pata conciliada,
-/// par no rechazado y `|Δop_date| ≤ window_days`.
+/// exactamente opuestos, **pata de salida `expense` negativa + pata de entrada `income`
+/// positiva**, ninguna pata conciliada, par no rechazado y `|Δop_date| ≤ window_days`.
 ///
 /// Lo comparten el pase de escritura (`auto_reconcile_owner`) y la lectura de sugerencias
 /// (`suggest_transfer_matches_core`). Es la razón de que exista esta función: dos copias del
 /// predicado divergirían, y entonces la lista de sugerencias propondría pares que el pase no
 /// haría —o callaría los que sí— sin que nada fallara.
 ///
-/// Las filas `savings` (y las sin clase) NO son candidatas: una pata savings de importe
-/// exactamente opuesto a un gasto real dentro de la ventana lo emparejaría y excluiría ese
-/// gasto de los agregados — con el patrón «el espacio de ahorro reembolsa una compra
+/// Las filas `savings` (y las sin clase) NO son candidatas (4.14.0): una pata savings de
+/// importe exactamente opuesto a un gasto real dentro de la ventana lo emparejaría y excluiría
+/// ese gasto de los agregados — con el patrón «el espacio de ahorro reembolsa una compra
 /// concreta» (importes idénticos por construcción) el choque es sistemático, y a diferencia
-/// de un par income/expense el neto por bucket NO se conserva. El emparejamiento manual
-/// (`reconcile_pair_core`) sigue siendo kind-agnóstico a propósito: ahí decide el usuario.
+/// de un par income/expense el neto por bucket NO se conserva.
+///
+/// Tampoco lo son las DEVOLUCIONES (4.15.0), y por la misma forma de fallo: un `expense` de
+/// importe POSITIVO es un abono que ya netea dentro de su categoría, y hasta 4.14.x calificaba
+/// como pata `b` de entrada. Emparejarlo con el gasto que compensa sacaba a las DOS filas de
+/// todos los agregados de flujo justo cuando lo correcto es que se resten dentro de la
+/// categoría: el gasto desaparecía en vez de quedar neteado, y el reembolso dejaba de verse.
+/// Caso real medido: un abono de +49,90 se comía el cargo de −49,90 del mismo comercio.
+/// EFECTO COLATERAL DECLARADO: al exigir `a.kind = 'expense'`, un `income` NEGATIVO deja de
+/// ser pata de salida — es la simétrica de la devolución (un ingreso devuelto) y sale del
+/// automatismo por la misma razón, no por descuido.
+///
+/// El emparejamiento manual (`reconcile_pair_core`) sigue siendo kind/sign-agnóstico a
+/// propósito: ahí decide el usuario. La resolución de los pares YA conciliados tampoco pasa por
+/// aquí, así que un par creado a mano (o antes de 4.15.0) se sigue viendo y se sigue pudiendo
+/// desconciliar.
 fn candidates_from_where(window_days: i32) -> String {
     let w = window_days;
     format!(
@@ -91,14 +105,15 @@ fn candidates_from_where(window_days: i32) -> String {
      AND b.owner_user_id  = a.owner_user_id
      AND b.currency = a.currency
      AND b.amount = -a.amount
-     AND b.kind IN ('income','expense')
+     AND b.kind = 'income'
+     AND b.amount > 0
      AND b.transfer_counterpart_id IS NULL
      AND b.op_date >= a.op_date - {w}
      AND b.op_date <= a.op_date + {w}
     WHERE a.installation_id = $1
       AND a.owner_user_id = $2
       AND a.amount < 0
-      AND a.kind IN ('income','expense')
+      AND a.kind = 'expense'
       AND a.transfer_counterpart_id IS NULL
       AND NOT EXISTS (
             SELECT 1 FROM transfer_match_rejections r

@@ -15,7 +15,14 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-08-31
+How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-09-02 (4.15.0,
+rama `feat/4.15.0-inversion-devoluciones-categoria`)**: **56** migraciones (la 56ª,
+`20260902120000_categories_fallback_and_transaction_category_required`, es DATA-CHANGING firmada:
+rellena los ingresos/gastos sin categoría con la categoría por defecto de su scope y añade los CHECK), **70**
+ficheros de test de integración (nuevo `categories_fallback.rs`), catálogo MCP en 68 tools con el
+presupuesto **remedido a 23.949/24.000** (era 23.995 al empezar — 5 de margen, no 126: mide siempre), y
+tres breaking §5 en el wire (`clear_category` en income/expense devuelve la categoría por defecto,
+`import/confirm` rechaza sin categoría, la conciliación exige signo natural). Antes, counts refreshed **2026-08-31
 (4.12.1, rama `feat/175-176-fin-del-surplus-cash` — fin de `surplus_cash`, #175/#176 tras la
 entrevista de decisiones del owner)**: **55** migraciones (la 55ª,
 `20260901160000_allocation_rules_reenable_disabled_sinks`, es DATA-CHANGING: reactiva sumideros

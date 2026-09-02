@@ -264,3 +264,49 @@ async fn category_mutations_do_not_touch_the_projection_cache() {
         "DELETE /v1/categories no debe invalidar la proyección"
     );
 }
+
+/// La categoría POR DEFECTO (4.15.0) no se puede borrar, pero **sí es un destino válido de
+/// `remap_to`** — de hecho es el que la UI ofrecerá por defecto al borrar. Un veto que se
+/// extendiera al destino dejaría el borrado sin salida natural.
+#[tokio::test]
+async fn the_default_category_is_a_valid_remap_destination() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let comida = cat(&app, &owner, "expense", "Comida").await;
+    let fb: String = sqlx::query_scalar(
+        "SELECT id::text FROM categories \
+         WHERE installation_id = (SELECT id FROM installation LIMIT 1) \
+           AND scope = 'expense' AND is_fallback",
+    )
+    .fetch_one(&app.pool)
+    .await
+    .expect("categoría por defecto de gasto");
+
+    let e = app
+        .post_json_with_cookie(
+            "/v1/budget/entries",
+            json!({"category_id": comida, "amount": "300"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(e.status, http::StatusCode::CREATED, "{e:?}");
+
+    let r = app
+        .delete_with_cookie(
+            &format!("/v1/categories/{comida}?remap_to={fb}"),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::NO_CONTENT, "{r:?}");
+
+    let moved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM budget_entries WHERE category_id = $1::uuid")
+        .bind(Uuid::parse_str(&fb).unwrap())
+        .fetch_one(&app.pool)
+        .await
+        .expect("count");
+    assert_eq!(moved, 1, "la partida se movió al cajón");
+    assert!(
+        !list_categories(&app, &owner).await.iter().any(|c| c["id"] == json!(comida)),
+        "la categoría borrada ya no está"
+    );
+}

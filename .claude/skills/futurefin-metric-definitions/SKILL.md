@@ -88,7 +88,21 @@ Si retiras una métrica, **retira su texto**; no lo dejes «por si vuelve». El 
 | Resumen · salud financiera | `summary.savings`, `summary.liquid_assets`, `summary.runway`, `summary.net_worth`, `summary.net_return` **(nueva)** |
 | Jubilación | `retirement.target` **(nueva en 4.0.0)** |
 | Ajustes → Plan | `settings.savings_source`, `settings.income_window`, `settings.expense_window`, `settings.window_mode`, `settings.swr`, `settings.inflation` |
-| Movimientos | `expenses.expense_avg`, `expenses.income_avg`, `expenses.savings_transferred`, `expenses.transferred_rate` |
+| Movimientos | `expenses.expense_avg`, `expenses.income_avg`, `expenses.savings` **(4.15.0)**, `expenses.savings_rate` **(4.15.0)**, `expenses.refunds` **(4.15.0)** — `expenses.savings_transferred` y `expenses.transferred_rate` se **retiraron** en 4.15.0 |
+
+**4.15.0 — el «Ahorro» de Movimientos cambia de base, y es el caso de libro del §3.** Hasta 4.14.x la
+tarjeta rotulada «Ahorro»/«Traspasado a ahorro» era `−Σ(kind = savings)` — lo movido a productos de
+inversión —, mientras el motor, el Resumen y los modos B/C entienden ahorro como ingresos − gastos.
+Dos métricas distintas compartían palabra. Resolución: la clase `savings` se rotula **«Inversión»** en
+toda la UI, la tarjeta **«Ahorro»** (`expenses.savings`) pasa a ser `totals.net_avg` = `income_avg −
+expense_avg` (misma ventana y denominador que sus vecinas) con el desglose «invertido · en cuenta», y
+**«Tasa de ahorro»** (`expenses.savings_rate`) es `net_avg / income_avg`. Las dos entradas nuevas dicen
+lo que NO son: el «Ahorro mensual» del Resumen (`summary.savings`) sigue el modo `savings_source` y en
+modo A sale del presupuesto — homónimos con base distinta, declarados en los dos textos. Entra además
+`expenses.refunds` («Devoluciones»: gastos con importe positivo, ya descontados dentro de su categoría —
+ni categoría aparte ni ingreso; `totals.refunds_actual/_avg`). Retiradas `expenses.savings_transferred`
+y `expenses.transferred_rate` (sus consumidores desaparecen con las tarjetas; el test de cobertura lo
+exige en las dos direcciones).
 
 **`retirement.target` — «Patrimonio objetivo»** (4.0.0). La métrica más cara de la app no tenía
 texto. Lo que dice, y por qué cada trozo: el objetivo es el gasto anual en jubilación **grosseado

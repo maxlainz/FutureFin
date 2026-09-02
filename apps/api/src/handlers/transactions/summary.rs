@@ -2,11 +2,17 @@
 //!
 //! ## Convención de signos (magnitudes ≥ 0 para comparar con el presupuesto)
 //! Las transacciones se guardan firmadas (negativo = cargo). Aquí presentamos **magnitudes**:
-//! - Gasto de una categoría = `−Σ(amount)` de sus transacciones `expense` (un reembolso positivo
-//!   reduce el neto). El presupuesto es un importe mensual positivo → `delta = actual − budget`.
+//! - Gasto de una categoría = `−Σ(amount)` de sus transacciones `expense`. Una DEVOLUCIÓN es un
+//!   `expense` de importe POSITIVO (un abono del comercio, un copago reembolsado): netea DENTRO de
+//!   su categoría y por eso reduce el neto — nunca es un ingreso ni una categoría aparte. Lo que
+//!   suman esas devoluciones se publica aparte en `totals.refunds_actual`/`refunds_avg`, que no
+//!   añaden nada al total: solo hacen visible una resta que ya está hecha. El presupuesto es un
+//!   importe mensual positivo → `delta = actual − budget`.
 //! - Ingreso = `+Σ(amount)` (`income`, positivos).
-//! - Ahorro/Inversión = `−Σ(amount)` (`savings`; una aportación −200 cuenta como +200 ahorrado);
-//!   excluido del consumo → tiene su propio bloque, nunca entra en `expense`.
+//! - Inversión (`savings`) = `−Σ(amount)` (una aportación −200 cuenta como +200 invertido);
+//!   excluida del consumo → tiene su propio bloque, nunca entra en `expense`. En la UI la clase
+//!   `savings` se rotula «Inversión» desde 4.15.0; el «Ahorro» de esta pantalla es
+//!   `totals.net_avg` = `income_avg − expense_avg`, otra magnitud (homónimos declarados).
 //!
 //! ## Promedio ponderado (`avg`)
 //! El tramo del promedio es el rango medio-abierto `[window_start, first_of_month(today))` de
@@ -137,6 +143,13 @@ struct BucketRow {
     /// `WHERE`). Σ por mes `> 0` ⟺ ese mes tiene datos. No se puede reutilizar `real_txns` para
     /// esto: un mes solo-recurrente no promedia, pero sus movimientos SÍ suman en `actual`.
     txns: i32,
+    /// Solo la parte POSITIVA de `total` (`SUM(amount) FILTER (WHERE amount > 0)`, 0 si no hay
+    /// ninguna). Sobre los buckets `expense` es la DEVOLUCIÓN del bucket. Viaja en la misma
+    /// query que `total` a propósito: es un sumando del mismo agregado, no un dato nuevo — una
+    /// segunda query podría barrer otro conjunto de filas y hacer que `refunds_actual` dejara de
+    /// ser parte de `expense_actual`. Hereda del `WHERE` la exclusión de las conciliadas
+    /// (`transfer_counterpart_id IS NULL`) y el scope de la vista, igual que todo lo demás.
+    positive_total: Decimal,
 }
 
 /// Suma raw firmada de `(ym, kind, category)`.
@@ -536,7 +549,8 @@ pub(crate) async fn transactions_summary_core(
         "SELECT to_char(t.op_date, 'YYYY-MM') AS ym, t.kind AS kind,
                 t.category_id AS category_id, SUM(t.amount) AS total,
                 COUNT(*) FILTER (WHERE t.recurring_rule_id IS NULL AND t.kind IS NOT NULL)::int AS real_txns,
-                COUNT(*)::int AS txns
+                COUNT(*)::int AS txns,
+                COALESCE(SUM(t.amount) FILTER (WHERE t.amount > 0), 0) AS positive_total
          FROM transactions t
          WHERE {scope} AND t.op_date >= ${arg} AND t.op_date < ${end}
            AND t.transfer_counterpart_id IS NULL
@@ -555,11 +569,18 @@ pub(crate) async fn transactions_summary_core(
     // Movimientos de CUALQUIER tipo del mes seleccionado: el contador que distingue «mes a cero»
     // de «mes sin datos».
     let mut selected_txns: i64 = 0;
+    // Devoluciones por mes: Σ de los importes POSITIVOS de los buckets `expense`. Se acumula aquí
+    // y no en `buckets` porque no es una magnitud independiente — ya está DENTRO de `total`, y
+    // meterla en el mapa de buckets la haría sumar dos veces en cualquier `bucket_all`.
+    let mut refunds_by_ym: HashMap<String, Decimal> = HashMap::new();
     for r in raw {
         let kind = r.kind.unwrap_or_default();
         *real_txns_by_ym.entry(r.ym.clone()).or_insert(0) += r.real_txns;
         if r.ym == selected_ym {
             selected_txns += r.txns as i64;
+        }
+        if kind == "expense" {
+            *refunds_by_ym.entry(r.ym.clone()).or_insert(Decimal::ZERO) += r.positive_total;
         }
         *buckets.entry((r.ym, kind, r.category_id)).or_insert(Decimal::ZERO) += r.total;
     }
@@ -795,6 +816,30 @@ pub(crate) async fn transactions_summary_core(
     let income_budget_total: Decimal =
         money_out(income_categories.iter().map(|l| l.budget).sum());
     let net_actual = money_out(income_actual - expense_actual);
+    // Ahorro promedio = ingreso promedio − gasto promedio. Se construye de los DOS `Option` ya
+    // calculados y nunca de sus componentes: así comparte por construcción ventana, denominador y
+    // regla de mes real con las dos cifras que el usuario ve al lado, y `null ⟺ avg_months == 0`
+    // sale gratis en vez de ser una condición que alguien tenga que recordar replicar.
+    let net_avg: Option<Decimal> = income_avg
+        .zip(expense_avg)
+        .map(|(i, e)| money_out(i - e));
+
+    // ---- Devoluciones (gasto de importe positivo) --------------------------------------------
+    // Magnitud ≥ 0 YA descontada dentro de `expense_actual` y de la línea de su categoría: este
+    // campo no añade nada al total, solo hace visible una resta que ya está hecha. Nunca `null`
+    // (Σ∅ = 0 es una medición, no una ausencia); su media sí, con la regla de siempre.
+    let refunds_actual = money_out(
+        refunds_by_ym
+            .get(&selected_ym)
+            .copied()
+            .unwrap_or(Decimal::ZERO),
+    );
+    let refunds_win: Decimal = refunds_by_ym
+        .iter()
+        .filter(|(y, _)| in_avg_window(y.as_str()))
+        .map(|(_, v)| *v)
+        .sum();
+    let refunds_avg = has_avg.then(|| money_out(refunds_win / avg_denom));
 
     Ok(TransactionsSummaryResponse {
         year,
@@ -829,6 +874,9 @@ pub(crate) async fn transactions_summary_core(
             savings_actual,
             savings_avg,
             net_actual,
+            net_avg,
+            refunds_actual,
+            refunds_avg,
         },
     })
 }

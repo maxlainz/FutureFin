@@ -161,10 +161,17 @@ pub fn row_to_response(r: TxnRow) -> TransactionResponse {
 // Validadores que tocan la BD (compartidos por crud/import/rules)
 // ---------------------------------------------------------------------------
 
-/// Valida el par `(kind, category_id)`:
+/// Valida el par `(kind, category_id)` **sin resolver nada**:
 /// - `savings` → `category_id` debe ser `None` (`savings_no_category`).
 /// - `expense`/`income` con categoría → la categoría debe existir en la instalación y su scope
-///   debe coincidir con el kind (`category_scope_mismatch`); sin categoría → OK ("Sin categoría").
+///   debe coincidir con el kind (`category_scope_mismatch`); **sin categoría → OK**.
+///
+/// Ese último «OK» ya NO es un estado persistible desde 4.15.0 (el CHECK
+/// `transactions_category_required_check` lo prohíbe): este validador sobrevive para los caminos
+/// que solo miran una intención — el preview del import, las reglas efímeras del wizard y la
+/// validación de una regla de categorización, que puede no asignar categoría. **Toda escritura
+/// de movimientos pasa por [`resolve_category_for_kind`]**, que valida esto y además rellena la
+/// categoría por defecto cuando falta.
 pub async fn assert_transaction_category(
     pool: &sqlx::PgPool,
     iid: Uuid,
@@ -201,6 +208,36 @@ pub async fn assert_transaction_category(
         )));
     }
     Ok(())
+}
+
+/// Categoría DEFINITIVA de un movimiento a partir de su kind y de la categoría pedida (4.15.0).
+///
+/// Punto único de las escrituras: alta manual, lote, PATCH individual, PATCH en lote, aplicación
+/// retroactiva de una regla y restore de backup. Devuelve:
+/// - `savings` → `None` (y 400 `savings_no_category` si venía una categoría);
+/// - `income`/`expense` con categoría → esa misma, ya validada por scope;
+/// - `income`/`expense` **sin categoría** → la categoría POR DEFECTO del scope
+///   (`categories.is_fallback`), o 400 `fallback_category_missing` si la instalación no tiene.
+///
+/// Es lo que convierte «sin categoría» de estado persistible a estado **irrepresentable**: la base
+/// lo prohíbe con un CHECK y esta función es la que hace que ninguna escritura legítima choque
+/// contra él. `kind` viene ya normalizado (`normalize_kind`).
+pub(crate) async fn resolve_category_for_kind(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+    kind: &str,
+    category_id: Option<Uuid>,
+) -> Result<Option<Uuid>, ApiError> {
+    assert_transaction_category(pool, iid, kind, category_id).await?;
+    if kind == "savings" {
+        return Ok(None);
+    }
+    match category_id {
+        Some(id) => Ok(Some(id)),
+        None => Ok(Some(
+            crate::handlers::categories::fallback_category_id(pool, iid, kind).await?,
+        )),
+    }
 }
 
 /// El asset (si se da) debe existir en la instalación.

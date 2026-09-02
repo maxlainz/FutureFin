@@ -614,16 +614,21 @@ pub(crate) async fn apply_categorization_rule_core(
     // asignaría (`suggest_kind_category` cae al default por signo cuando gana una regla sin
     // `assign_kind`). Eso es lo que cuenta `shadowed_transactions` y lo que dice `note`.
     let assign_kind = target.assign_kind.clone();
-    match &assign_kind {
-        // La categoría pudo cambiar de scope desde que se creó la regla: revalidar una vez, no por fila.
-        Some(k) => super::assert_transaction_category(pool, iid, k, target.assign_category_id).await?,
+    // Categoría que la regla va a ESCRIBIR. La regla pudo crearse sin categoría («solo kind») o su
+    // categoría pudo cambiar de scope desde entonces: se revalida una vez, no por fila, y desde
+    // 4.15.0 se **resuelve** — una regla «solo kind» ya no puede dejar la fila con `category_id`
+    // NULL, que ahora es un 23514 del CHECK en vez de un movimiento sin categorizar.
+    let resolved_category: Option<Uuid> = match &assign_kind {
+        Some(k) => super::resolve_category_for_kind(pool, iid, k, target.assign_category_id).await?,
         None if !dry_run => {
             return Err(ApiError::BadRequest(
                 "rule_not_applicable: rule has no assign_kind to apply".into(),
             ))
         }
-        None => {}
-    }
+        // Sin `assign_kind` la regla no asigna nada y (por el invariante de `patch_rule_core`)
+        // tampoco lleva categoría: no hay nada que resolver.
+        None => None,
+    };
 
     let rules = load_rules(pool, iid, user_id).await?;
 
@@ -713,9 +718,7 @@ pub(crate) async fn apply_categorization_rule_core(
             }
             continue;
         };
-        if r.kind.as_deref() == Some(assign_kind)
-            && r.category_id == target.assign_category_id
-        {
+        if r.kind.as_deref() == Some(assign_kind) && r.category_id == resolved_category {
             out.already_correct += 1;
             continue;
         }
@@ -769,7 +772,7 @@ pub(crate) async fn apply_categorization_rule_core(
            WHERE id = ANY($3)"#,
     )
     .bind(assign_kind.as_deref())
-    .bind(target.assign_category_id)
+    .bind(resolved_category)
     .bind(&to_update)
     .execute(pool)
     .await?;
