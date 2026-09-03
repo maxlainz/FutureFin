@@ -177,7 +177,7 @@ Vocabulary used below (defined once):
 - **Settled design**: mutations call `refresh_projection_after_mutation` which only **deletes**
   entries (8 handler files call it — assets, liabilities, budget, planning, allocation_rules,
   installation, auth, projection); next GET recomputes once. Warm-up
-  (`warm_up_household_projection`) runs ONLY after login (`handlers/auth.rs`), where concurrency
+  (`warm_up_mine_projection` desde 5.0.0 — hasta 4.15 `warm_up_household_projection`) runs ONLY after login (`handlers/auth.rs`), where concurrency
   is per-user and harmless. **Guard**: `apps/api/tests/projection_cache.rs` +
   `scripts/smoke-projection-cache.sh`. Do not "optimize" by re-adding post-mutation warm-up.
 
