@@ -146,7 +146,8 @@ async fn series_empty_without_snapshots() {
     .await;
 
     // Predicción: 200, view household, points/asset_series/markers = [] (0 snapshots en scope).
-    let (body, anchor_date, anchor_mf) = get_series(&app, &owner.cookie, "").await;
+    // `household` explícito desde 5.0.0 (R2).
+    let (body, anchor_date, anchor_mf) = get_series(&app, &owner.cookie, "?view=household").await;
     assert_eq!(body["view"], "household");
     assert_eq!(body["points"].as_array().unwrap().len(), 0);
     assert_eq!(body["asset_series"].as_array().unwrap().len(), 0);
@@ -411,7 +412,7 @@ async fn series_household_sums_users_and_mine_filters() {
     //   k=-1 → assets 1000+600 = 1600 (suma server-side de las series por usuario).
     //   k=0  → 0 (ningún usuario tiene assets vivos; items solo-izquierda → 0).
     //   liabilities_total = 0 en TODA la rejilla (kind sin snapshots).
-    let (hh, _, _) = get_series(&app, &owner.cookie, "").await;
+    let (hh, _, _) = get_series(&app, &owner.cookie, "?view=household").await;
     assert_eq!(hh["view"], "household");
     assert_eq!(hh["points"].as_array().unwrap().len(), 2);
     assert_close(f64_of(&point_at(&hh, -1)["assets_total"]), 1600.0, "household k=-1");
@@ -767,7 +768,7 @@ async fn household_net_worth_needs_every_member_to_have_snapshotted_liabilities(
 
     // Household: assets 1600, liabilities 300 (solo las de Alice) → `any` habría publicado
     // net_worth = 1300, que no es el neto del hogar ni el de nadie.
-    let (hh, _, _) = get_series(&app, &alice.cookie, "").await;
+    let (hh, _, _) = get_series(&app, &alice.cookie, "?view=household").await;
     assert_close(f64_of(&point_at(&hh, -1)["assets_total"]), 1600.0, "household assets k=-1");
     assert_close(f64_of(&point_at(&hh, -1)["liabilities_total"]), 300.0, "household liabs k=-1");
     assert_all_nw_null(&hh, "hogar con un miembro sin pasivo fotografiado");
@@ -798,7 +799,7 @@ async fn household_net_worth_needs_every_member_to_have_snapshotted_liabilities(
         .await;
     assert_eq!(cap.status, http::StatusCode::OK, "{cap:?}");
 
-    let (hh2, _, _) = get_series(&app, &alice.cookie, "").await;
+    let (hh2, _, _) = get_series(&app, &alice.cookie, "?view=household").await;
     assert_eq!(hh2["liabilities_snapshotted"], serde_json::json!(true), "{hh2}");
     assert_close(
         nw_of(point_at(&hh2, -1)).expect("net_worth del hogar ya completo"),

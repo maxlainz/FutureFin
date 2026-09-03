@@ -340,9 +340,9 @@ async fn writing_the_profile_invalidates_the_projection_cache() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let r = app
         .patch_json_with_cookie(PROFILE, serde_json::json!({"swr_pct": "3.0"}), &owner.cookie)
         .await;

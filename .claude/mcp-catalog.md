@@ -71,6 +71,21 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `list_assets`, `list_liabilities`, `list_planning_flows`, `get_settings` (incluye bloque
   `user {id, username, birth_date}` del usuario del token — el endpoint HTTP NO lo lleva). Todas
   menos `get_settings` aceptan `view: "household"|"mine"` (misma semántica que `?view=`).
+
+  > **El default de `view` es `"mine"` desde 5.0.0** (R2, breaking): omitirlo devuelve los datos del
+  > usuario del token, y el hogar entero hay que pedirlo con `view: "household"`. Hasta 4.15.x era
+  > al revés. El bloque **SCOPE** del `instructions` lo dice con esas palabras, y las descripciones
+  > de los parámetros `view` de las tools también (`ViewParams`, `ProjectionParams`,
+  > `LiabilityScheduleParams`, `RecentChangesParams`, `FindDuplicateTransactionsParams`).
+  >
+  > Dos tools se salen del patrón:
+  > - **`get_projection`**: con `view: "household"` la respuesta es un **AGREGADO** —la SUMA de una
+  >   simulación por miembro, cada una con su estrategia— así que **no trae `jubilacion_*` ni
+  >   `fire_target_series`** (viajan con `absent_reason: "household_aggregate"`) y el hito de cada
+  >   persona va en `members[]`. Está en la descripción de la tool y en el `instructions`.
+  > - **`simulate_projection`**: `view: "household"` es **error `household_not_simulable`**. Un
+  >   what-if mueve UN plan y el hogar tiene N; su schema declara el rechazo en la descripción del
+  >   parámetro para que el modelo no lo intente. Test: `mcp_simulate.rs::household_view_is_refused_with_a_typed_error`.
 - **Tools de lectura añadidas en el issue #2 (9)**: `list_allocation_rules` (la cascada como
   reglas, no solo su resultado resuelto), `list_categories` (catálogo id/scope/nombre, filtro
   `scope`, prerrequisito para escribir), `get_category_monthly_series` (serie mensual cero-rellena
@@ -401,7 +416,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     la posición que la respuesta publica al lado, `jubilacion_series_position`, y si no hay ninguna
     es que la cifra no se lee de la serie); el **eco de `view`** dentro de SCOPE (toda respuesta
     cuyo contenido dependa del scope ecoa la vista aplicada: si dice `household`, la cifra es del
-    hogar aunque hayas pedido `mine`); y **FORMA DE LOS LISTADOS** (ver el bullet siguiente).
+    hogar aunque hayas pedido `mine`); y **FORMA DE LOS LISTADOS** (ver el bullet siguiente). En
+    5.0.0 el bloque SCOPE se reescribió para declarar el nuevo default (`mine`), el agregado del
+    hogar de `get_projection` y el rechazo de `simulate_projection`.
 
 - **Paridad de los listados: el sobre lo pone la tool, y por eso 7 salen del bucle byte a byte.**
   Bloque `NOTA-VIEW-ENVELOPE` en `mcp/server.rs`. Las respuestas de **objeto** ecoan `view` desde su

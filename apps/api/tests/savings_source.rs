@@ -506,7 +506,13 @@ async fn mode_b_household_vs_mine_scoping() {
     set_mode_b(&app, &owner.cookie).await;
 
     // household: income 3000, expense 1200 → delta 1800.
-    let hh = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    // `household` explícito desde 5.0.0 (R2): sin él, el GET devuelve la vista `mine`.
+    let hh = projection_delta(
+        &app,
+        &owner.cookie,
+        "/v1/projection/series?view=household&months=240",
+    )
+    .await;
     approx(hh, 1800.0);
     // mine (owner): income 2000, expense 800 → delta 1200.
     let mine = projection_delta(&app, &owner.cookie, "/v1/projection/series?view=mine&months=240").await;

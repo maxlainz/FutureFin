@@ -519,19 +519,21 @@ async fn backup_import_invalidates_projection_cache() {
     create_asset(&app, &owner.cookie, &cat, "A", "10000").await;
 
     let iid = installation_id(&app).await;
+    // La vista por defecto es `mine` desde 5.0.0 (R2): es la entrada que puebla un GET sin
+    // parámetros y la que el import tiene que invalidar.
     let key = ProjectionCacheKey {
         installation_id: iid,
-        view: LedgerView::Household,
+        view: LedgerView::Mine,
         owner_user_id: Some(owner.user_id),
         density: Density::Monthly,
     };
 
-    // Warm the household cache.
+    // Warm the default-view cache.
     let r = app.get_with_cookie("/v1/projection/series", &owner.cookie).await;
     assert_eq!(r.status, http::StatusCode::OK);
     {
         let cache = app.state.projection_cache.read().await;
-        assert!(cache.contains_key(&key), "household projection should be cached after a GET");
+        assert!(cache.contains_key(&key), "default-view projection should be cached after a GET");
     }
 
     let backup = export_ffbackup_b64(&app, &owner.cookie).await;

@@ -355,7 +355,7 @@ fn row_to_response(r: PlanningFlowJoinRow) -> Result<PlanningFlowResponse, ApiEr
     path = "/v1/planning/flows",
     tag = "planning",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = flows attributed to the signed-in user; omit = household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
     ),
     responses(
         (status = 200, description = "Planning flows", body = Vec<PlanningFlowResponse>),

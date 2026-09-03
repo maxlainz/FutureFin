@@ -610,20 +610,21 @@ async fn snapshot_mutations_do_not_touch_projection_cache() {
     )
     .await;
 
-    // Calentar la cache household (monthly) con un GET.
+    // Calentar la cache de la vista POR DEFECTO (monthly) con un GET. Desde 5.0.0 esa vista es
+    // `mine` (R2), que es además la que la SPA pide: es la entrada cuya supervivencia importa.
     let warm = app.get_with_cookie("/v1/projection/series", &owner.cookie).await;
     assert_eq!(warm.status, http::StatusCode::OK);
 
     let iid = installation_id(&app).await;
     let key = ProjectionCacheKey {
         installation_id: iid,
-        view: LedgerView::Household,
+        view: LedgerView::Mine,
         owner_user_id: Some(owner.user_id),
         density: Density::Monthly,
     };
     {
         let cache = app.state.projection_cache.read().await;
-        assert!(cache.contains_key(&key), "la entrada household debe estar caliente antes de las mutaciones");
+        assert!(cache.contains_key(&key), "la entrada por defecto debe estar caliente antes de las mutaciones");
     }
 
     // Mutaciones de snapshots: capture + backfill + delete.

@@ -126,6 +126,67 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
     let nw180 = nw_at(&s, 180);
     let nw360 = nw_at(&s, 360);
     assert_eq!(jub, 235, "jubilacion_month_index capturado: {jub}");
+    // R8 (5.0.0) — **el pin de que la mudanza no movió el número.** `jubilacion_month_index`
+    // dejó de derivarse del cruce que calcula el handler y pasa a ser el mes EFECTIVO que
+    // decide el motor (`ProjectionOutput::retirement_month_index`, traducido a la rejilla
+    // publicada). En la estrategia por defecto —`asap`, jubilación por cruce— las tres cifras
+    // son la MISMA por construcción: el cruce ES el trigger. Este assert es lo que se rompería
+    // si alguien publicara el mes del bucle a pelo (sería 236) o si el cruce-lectura y el
+    // trigger dejaran de coincidir en `asap`.
+    assert_eq!(
+        s["retirement_month_index"], 235,
+        "retirement_month_index debe ser el mismo mes efectivo: {}",
+        s["retirement_month_index"]
+    );
+    assert_eq!(
+        s["liquid_crossing_month_index"], 235,
+        "con `asap` el cruce ES el trigger: {}",
+        s["liquid_crossing_month_index"]
+    );
+    assert_eq!(s["strategy"], "asap", "estrategia por defecto: {}", s["strategy"]);
+    assert_eq!(
+        s["retirement_trigger"], "liquid_crossing",
+        "trigger por defecto: {}",
+        s["retirement_trigger"]
+    );
+    assert!(
+        s["jubilacion_absent_reason"].is_null() && s["liquid_crossing_absent_reason"].is_null(),
+        "hay objetivo y hay cruce: ninguna razón de ausencia: {s}"
+    );
+    // Las fases: acumulando desde el mes 0, jubilado desde el mes del cruce. Sobre la serie, no
+    // sobre el enum (§C: el invariante es de comportamiento).
+    let fases = s["phase_transitions"].as_array().expect("phase_transitions");
+    assert_eq!(fases.len(), 2, "acumulación + jubilación: {fases:?}");
+    assert_eq!(fases[0]["phase"], "accumulating");
+    assert_eq!(fases[0]["month_index"], 0);
+    assert_eq!(fases[1]["phase"], "retired");
+    assert_eq!(fases[1]["month_index"], 235, "la fase empieza en el mes publicado");
+    // Las tres series de retirada existen en cada punto y, con `fixed_real`, recorte y exceso
+    // son cero SIEMPRE (la regla no tiene techo): si alguna vez dejan de serlo sin que cambie
+    // la regla, es que el motor está recortando por su cuenta.
+    let pts = s["points"].as_array().expect("points");
+    for p in pts {
+        assert!(p["withdrawal"].is_number(), "falta withdrawal: {p}");
+        assert_eq!(p["withdrawal_shortfall"], 0.0, "fixed_real no recorta: {p}");
+        assert_eq!(p["withdrawal_excess"], 0.0, "ceiling no gasta de más: {p}");
+    }
+    // Y la retirada es 0 antes de jubilarse y > 0 después (el déficit de 1.200 €/mes que el
+    // patrimonio ya pinea desde la otra cara).
+    let w = |m: u64| -> f64 {
+        pts.iter()
+            .find(|p| p["month_index"] == m)
+            .unwrap_or_else(|| panic!("sin punto {m}"))["withdrawal"]
+            .as_f64()
+            .unwrap()
+    };
+    assert_eq!(w(180), 0.0, "en el mes 180 aún no está jubilado");
+    assert!(w(300) > 0.0, "jubilado desde el 235: el mes 300 retira");
+    // El hogar de un solo miembro NO publica `members[]` en `mine`: la respuesta entera es suya.
+    assert!(
+        s["members"].as_array().is_some_and(|m| m.is_empty()),
+        "members[] solo se llena en household: {}",
+        s["members"]
+    );
     assert!((nw12 - (-80_006.71)).abs() < 0.01, "NW(12) capturado: {nw12}");
     assert!((nw180 - 316_313.32).abs() < 0.01, "NW(180) capturado: {nw180}");
     // Ola 6 (#140 fase 1): el drenaje de jubilación TRIBUTA — con gasto retirado 1.200 €/mes

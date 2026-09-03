@@ -398,14 +398,27 @@ async fn view_mine_filters_to_token_user() {
         created.json()["token"].as_str().unwrap().to_string()
     };
 
-    // household (default) ve ambos; mine solo el del dueño del token (mario). Desde la Fase 5 la
-    // tool envuelve el array en `{view, assets}` — y el eco de `view` es justo lo que hacía falta
-    // aquí: con un solo activo por usuario los dos arrays podían coincidir sin que nada dijera
-    // qué scope se aplicó.
-    let envelope = mcp_post(&app, &token, tool_call_body("list_assets", serde_json::json!({}))).await;
+    // `household` EXPLÍCITO (desde 5.0.0 ya no es el default, R2) ve ambos; `mine` solo el del
+    // dueño del token (mario). Desde la Fase 5 la tool envuelve el array en `{view, assets}` — y
+    // el eco de `view` es justo lo que hacía falta aquí: con un solo activo por usuario los dos
+    // arrays podían coincidir sin que nada dijera qué scope se aplicó.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("list_assets", serde_json::json!({"view": "household"})),
+    )
+    .await;
     let all = tool_text_json(&envelope);
     assert_eq!(all["view"], "household", "{all}");
     assert_eq!(all["assets"].as_array().unwrap().len(), 2, "{all}");
+
+    // Y omitir el parámetro es `mine`: el default cambió, y con él la población sobre la que
+    // responde un agente que no pide scope.
+    let omitido = tool_text_json(
+        &mcp_post(&app, &token, tool_call_body("list_assets", serde_json::json!({}))).await,
+    );
+    assert_eq!(omitido["view"], "mine", "5.0.0: sin `view` la tool filtra a lo del token: {omitido}");
+    assert_eq!(omitido["assets"].as_array().unwrap().len(), 1, "{omitido}");
 
     let envelope = mcp_post(
         &app,
@@ -2068,7 +2081,11 @@ async fn list_transaction_imports_paginates_and_echoes_the_view() {
         &mcp_post(
             &app,
             &token,
-            tool_call_body("list_transaction_imports", serde_json::json!({"limit": 2})),
+            tool_call_body(
+                "list_transaction_imports",
+                // `household` explícito desde 5.0.0 (R2): las 3 importaciones son de dos personas.
+                serde_json::json!({"limit": 2, "view": "household"}),
+            ),
         )
         .await,
     );

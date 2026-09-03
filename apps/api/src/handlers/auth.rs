@@ -3,7 +3,7 @@ use crate::error::ApiError;
 use crate::handlers::installation::{
     bootstrap_installation_as_owner_if_empty, require_installation_member,
 };
-use crate::handlers::projection::warm_up_household_projection;
+use crate::handlers::projection::warm_up_mine_projection;
 use crate::handlers::session::require_session_user;
 use crate::prefix::PeerIp;
 use crate::state::AppState;
@@ -215,7 +215,7 @@ pub(crate) async fn establish_session(
     if let Ok((iid, _)) = require_installation_member(&state.pool, user_id).await {
         let state_clone = state.clone();
         tokio::spawn(async move {
-            warm_up_household_projection(state_clone, iid, user_id).await;
+            warm_up_mine_projection(state_clone, iid, user_id).await;
         });
     }
 

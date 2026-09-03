@@ -10,7 +10,11 @@ use crate::handlers::installation::{
     resolve_fire_settings, FireNumberMode, FireSettings, SavingsSource,
 };
 use futurefin_engine::gross_up_net_annual_fire;
-use crate::handlers::retirement_profile::{resolve_retirement_profile, RetirementProfile};
+use crate::handlers::retirement_profile::{
+    resolve_retirement_profile, RetirementProfile, RetirementStrategy,
+    SpendMode as ProfileSpendMode, WithdrawalRule as ProfileWithdrawalRule,
+    WithdrawalRuleKind as ProfileWithdrawalRuleKind,
+};
 use crate::handlers::person_view::LedgerView;
 /// Alias local: `RepaymentModel` a secas es el del **engine** en este fichero (ver el `use` de
 /// `futurefin_engine`); este es el del lado API, que sabe hablar con la columna SQL.
@@ -27,7 +31,8 @@ use chrono::{Datelike, Duration, Months, NaiveDate};
 use futurefin_engine::{
     fire_target_at_month_index, first_month_per_asset_contribution_nominals,
     project_net_worth_series, AllocationCap, AllocationKind, AllocationRule, EngineError,
-    FireTarget, PhasePlan, ProjectionInput, ProjectionLiabilityInput, RepaymentModel, SimAsset,
+    FireTarget, Phase, PhasePlan, ProjectionInput, ProjectionLiabilityInput, RepaymentModel,
+    SimAsset, SpendMode as EngineSpendMode, WithdrawalRule as EngineWithdrawalRule,
 };
 use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
@@ -227,6 +232,80 @@ pub struct ProjectionPoint {
     #[serde(serialize_with = "serialize_decimal_as_f64")]
     #[schema(value_type = f64)]
     pub net_worth_liquid: Decimal,
+    /// **Retirada NETA del mes** (5.0.0, §B.8): los euros que de verdad salieron de los activos
+    /// para cubrir el déficit de caja, en euros NOMINALES del mes. `0` en los meses de
+    /// acumulación y en el mes 0 (que es el estado de hoy, no un mes simulado).
+    ///
+    /// No es el gasto: el gasto se cubre primero con el ingreso de la fase. Y no es la venta
+    /// BRUTA: el impuesto de la plusvalía realizada se paga vendiendo de más, y ese exceso vive
+    /// dentro del patrimonio, no aquí.
+    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[schema(value_type = f64)]
+    pub withdrawal: Decimal,
+    /// **Recorte de la regla de retirada**: `max(0, necesidad − permitido)` (D22/D24). Es
+    /// INFORMATIVO — no resta patrimonio, no cuenta como fracaso y **no es**
+    /// `uncovered_deficit_total`, que mide lo que los activos no pudieron vender. Todo ceros
+    /// mientras la regla sea `fixed_real` (no tiene techo): lo llena WP2.
+    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[schema(value_type = f64)]
+    pub withdrawal_shortfall: Decimal,
+    /// **Exceso de la regla sobre la necesidad** en modo `rule_is_spend` (se vende y se gasta).
+    /// Todo ceros con `fixed_real` / `ceiling`, por la misma razón. Lo llena WP2.
+    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[schema(value_type = f64)]
+    pub withdrawal_excess: Decimal,
+}
+
+/// Una transición de fase de la simulación: en qué mes de la rejilla empieza cada fase.
+///
+/// Es la fuente del «carril de fases» del chart (D29). Va como lista y no como tres índices
+/// sueltos porque el orden ES el dato: las fases son monótonas (acumulación → media jornada →
+/// jubilado) y una fase que no ocurre simplemente no aparece.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PhaseTransition {
+    /// `accumulating` | `partial` | `retired`.
+    pub phase: &'static str,
+    /// Mes de la REJILLA (misma base que `points[].month_index`) en que empieza la fase.
+    pub month_index: u32,
+}
+
+/// Lecturas de UN miembro dentro del agregado del hogar (D9 / §D).
+///
+/// **No lleva series**: el hogar publica UNA curva (la suma) y esto explica de quién es cada
+/// marcador. Servir N series completas multiplicaría el payload por el número de miembros para
+/// responder a una pregunta —«¿cuándo se jubila cada uno?»— que se contesta con seis enteros.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct HouseholdMemberProjection {
+    #[schema(value_type = String, format = "uuid")]
+    pub user_id: Uuid,
+    pub username: String,
+    /// Estrategia de jubilación de ESTE miembro (`asap` | `retire_at_age` | `coast` | `partial`
+    /// | `pension_bridge`). Cada uno corre la suya: el hogar no tiene una.
+    pub strategy: String,
+    /// Mes EFECTIVO de jubilación de este miembro, en la rejilla común del hogar. `null` = no se
+    /// jubila dentro del horizonte.
+    pub jubilacion_month_index: Option<u32>,
+    /// Años cumplidos de ESTE miembro en ese mes (con SU fecha de nacimiento, no la del
+    /// solicitante). `null` si no se jubila o si no tiene fecha declarada.
+    pub jubilacion_age: Option<u32>,
+    /// Cruce del líquido con su objetivo — LECTURA, aunque su estrategia se dispare por edad.
+    pub liquid_crossing_month_index: Option<u32>,
+    /// El mes efectivo otra vez, con el nombre del motor. Igual a `jubilacion_month_index` (R8);
+    /// viaja porque es el nombre que usa el resto del contrato de fases.
+    pub retirement_month_index: Option<u32>,
+    /// Mes «coast» (dejar de aportar y llegar igual). **Siempre `null` hoy**: lo calcula la
+    /// bisección de `solve.rs` (§B.7), que no está en esta ola. Se publica ya para que el
+    /// consumidor no cambie de forma cuando llegue.
+    pub coast_fire_month_index: Option<u32>,
+    /// Mes de inicio de la media jornada. `null` hasta WP3.
+    pub partial_retirement_month_index: Option<u32>,
+    /// Mes de inicio de la pensión con fecha. `null` hasta WP3.
+    pub pension_start_month_index: Option<u32>,
+    /// Mes en que la cartera de ESTE miembro se vacía. El agregado publica el MÍNIMO; aquí se ve
+    /// de quién es.
+    pub assets_depleted_month_index: Option<u32>,
+    /// Avisos de este miembro (p. ej. `birth_date_missing`).
+    pub warnings: Vec<String>,
 }
 
 /// Punto **interno** para los cálculos que recorren la serie mensual completa (milestones,
@@ -464,6 +543,78 @@ pub struct ProjectionSeriesResponse {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub taxable_gain_ratio_today: Option<Decimal>,
+
+    // -----------------------------------------------------------------------------------------
+    // 5.0.0 — estrategia, fases y agregado del hogar (§B.8, §C, §D del plan de #207)
+    // -----------------------------------------------------------------------------------------
+    /// Estrategia de jubilación con la que se simuló: `asap` | `retire_at_age` | `coast` |
+    /// `partial` | `pension_bridge`. **`null` en `view=household`**: el agregado suma N
+    /// simulaciones y cada miembro corre la suya — la de cada uno viaja en `members[]`.
+    ///
+    /// Se ecoa por el mismo motivo que `view`: dos respuestas con las mismas cifras y distinta
+    /// estrategia se leen igual, y la estrategia decide QUÉ significa `jubilacion_month_index`
+    /// (un cruce alcanzado o una edad impuesta).
+    pub strategy: Option<String>,
+    /// Qué DISPARÓ la jubilación: `liquid_crossing` (el patrimonio alcanzó el objetivo) o
+    /// `target_age` (la edad manda, llegue o no el capital — D17). `null` en `household`.
+    ///
+    /// Con `target_age` el objetivo FIRE **sigue publicándose** (`fire_target_series`,
+    /// `jubilacion_target_net_worth`) pero ya no decide nada: es la línea de referencia contra la
+    /// que leer `liquid_crossing_month_index`. Sin este campo, un consumidor no puede distinguir
+    /// «se jubila porque llegó» de «se jubila porque cumplió años y no llegó».
+    #[schema(value_type = Option<String>)]
+    pub retirement_trigger: Option<&'static str>,
+    /// Mes EFECTIVO de jubilación del motor (§B.8), en la rejilla de `points[].month_index`. Es
+    /// **el mismo valor** que `jubilacion_month_index` (R8): viaja con los dos nombres porque
+    /// `jubilacion_*` es el contrato publicado desde 1.x y `retirement_month_index` es el nombre
+    /// del motor y del resto de las lecturas de fase. `null` en `household`.
+    pub retirement_month_index: Option<u32>,
+    /// **Posición** (índice de array) del mes de jubilación dentro de `points`. Gemelo exacto de
+    /// `jubilacion_series_position` y con su misma convención (el último punto servido cuyo
+    /// `month_index` no pasa del mes de jubilación); existe para que quien lea los campos con
+    /// nombre de motor no tenga que saltar a los `jubilacion_*` para poder indexar.
+    pub retirement_series_position: Option<u32>,
+    /// **Cruce del líquido con el objetivo FIRE** — LECTURA PURA desde 5.0.0. Con `asap` coincide
+    /// con `retirement_month_index` (es lo que dispara); con una estrategia por edad es el mes en
+    /// que el capital habría bastado, que puede ser posterior (te jubilas antes de llegar) o
+    /// anterior (podrías haberte jubilado antes).
+    ///
+    /// `null` + `liquid_crossing_absent_reason` cuando no hay objetivo contra el que cruzar o la
+    /// vista es agregada; `null` **sin** razón = hay objetivo y no se cruza dentro del horizonte.
+    pub liquid_crossing_month_index: Option<u32>,
+    /// `household_aggregate` | `no_fire_target`. `null` ⟺ el cruce es una pregunta con sentido en
+    /// esta respuesta (se haya alcanzado o no).
+    #[schema(value_type = Option<String>)]
+    pub liquid_crossing_absent_reason: Option<&'static str>,
+    /// Por qué los `jubilacion_*` y `retirement_*` están vacíos POR CONSTRUCCIÓN:
+    /// `household_aggregate` (la vista suma N planes y no tiene uno) | `no_retirement_trigger`
+    /// (ni objetivo FIRE válido ni edad objetivo: esta simulación no se jubila nunca).
+    /// `null` ⟺ hay un trigger; entonces un `jubilacion_month_index` nulo significa «no se
+    /// alcanza dentro del horizonte», que es un resultado, no un hueco.
+    #[schema(value_type = Option<String>)]
+    pub jubilacion_absent_reason: Option<&'static str>,
+    /// Por qué falta el marcador «tu dinero trabaja más que tú»: `household_aggregate` (el
+    /// marcador es una propiedad del ahorro de UNA persona; sumar N cascadas no produce uno).
+    /// `null` ⟺ la pregunta tiene sentido aquí.
+    #[schema(value_type = Option<String>)]
+    pub compound_outpaces_true_savings_absent_reason: Option<&'static str>,
+    /// Fases atravesadas y el mes de la rejilla en que empieza cada una. Siempre arranca con
+    /// `accumulating` en el mes 0. Vacío en `household`.
+    pub phase_transitions: Vec<PhaseTransition>,
+    /// Primer mes con pensión pública con fecha. `null` hasta WP3 (la pensión sin fecha de hoy
+    /// viaja dentro del ingreso de jubilación y no tiene mes propio).
+    pub pension_start_month_index: Option<u32>,
+    /// Primer mes de media jornada. `null` hasta WP3.
+    pub partial_retirement_month_index: Option<u32>,
+    /// Avisos de esta simulación. Literales cerrados: `birth_date_missing` /
+    /// `target_retirement_age_missing` = una estrategia por edad degradó a `asap` porque le
+    /// faltaba el dato (nunca un 500 en una lectura). Vacío = nada que advertir. En `household`
+    /// va vacío y los avisos viajan por miembro en `members[]`.
+    pub warnings: Vec<String>,
+    /// **Un elemento por miembro del hogar, y solo en `view=household`** (D9): el agregado es la
+    /// SUMA de N simulaciones independientes, así que esto es lo que dice de quién es cada
+    /// marcador. Vacío en `view=mine` — ahí la respuesta entera es de una sola persona.
+    pub members: Vec<HouseholdMemberProjection>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -536,7 +687,7 @@ struct LiabEngineRow {
     min_payment_eur: Option<Decimal>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, Clone, FromRow)]
 pub(crate) struct PlanningFlowProjRow {
     pub scope: String,
     pub expected_amount: Decimal,
@@ -1160,8 +1311,116 @@ pub(crate) fn projection_horizon_months(
     (clamped_years * 12, "lifespan_age")
 }
 
+/// **Mes de la rejilla en que el usuario cumple `age`** (5.0.0, D2/D17): el menor `m` tal que en
+/// la fecha civil de `points[m]` los años cumplidos ya son `age`. `0` si ya los tiene hoy.
+///
+/// Se define sobre la MISMA aritmética que publica la lectura civil de la jubilación
+/// (`proj_add_months` + [`age_completed_years`], la de `addMonthsCivil` de la web), no sobre una
+/// resta de años × 12. Eso compra un invariante comprobable: con una estrategia por edad, la
+/// respuesta cumple `jubilacion_age == target_retirement_age` exactamente — sin él, un nacimiento
+/// a final de mes podía publicar «te jubilas a los 54» habiendo pedido 55.
+///
+/// La estimación inicial (diferencia de edades × 12) está siempre a ≤ 12 meses del resultado, así
+/// que los dos bucles de corrección son O(1) — nunca un escaneo del horizonte.
+pub(crate) fn months_until_target_age(today: NaiveDate, birth: NaiveDate, age: u32) -> u32 {
+    let target = age as i32;
+    let hoy = age_completed_years(today, birth);
+    if hoy >= target {
+        return 0;
+    }
+    let mut m = ((target - hoy).max(0) as u32).saturating_mul(12);
+    while m > 0 && age_completed_years(proj_add_months(today, m - 1), birth) >= target {
+        m -= 1;
+    }
+    while age_completed_years(proj_add_months(today, m), birth) < target {
+        m += 1;
+    }
+    m
+}
+
+/// Regla de retirada del PERFIL → regla del MOTOR. Traducción total y sin brazo comodín: si
+/// mañana el catálogo del perfil gana una variante, esto deja de compilar — que es exactamente
+/// lo que debe pasar, en vez de mapearla en silencio a `fixed_real` y simular otra cosa.
+///
+/// Los `pct` ausentes se traducen a `0`: la validación del perfil ya los exige con cada `kind`
+/// (`validate_retirement_profile`), así que un `None` aquí describe una fila escrita fuera de la
+/// API. Un `0` hace que el motor no retire nada y sea evidente en la serie; inventar un default
+/// «razonable» publicaría un plan que nadie configuró. En cualquier caso, hoy todas estas
+/// variantes salen por `engine_feature_unavailable` antes de simular nada (WP2).
+fn withdrawal_rule_to_engine(rule: &ProfileWithdrawalRule) -> EngineWithdrawalRule {
+    let z = Decimal::ZERO;
+    match rule.kind {
+        ProfileWithdrawalRuleKind::FixedReal => EngineWithdrawalRule::FixedReal,
+        ProfileWithdrawalRuleKind::PercentOfBalance => EngineWithdrawalRule::PercentOfBalance {
+            pct: rule.pct.unwrap_or(z),
+        },
+        ProfileWithdrawalRuleKind::Hybrid => EngineWithdrawalRule::Hybrid {
+            start_pct: rule.start_pct.unwrap_or(z),
+            end_pct: rule.end_pct.unwrap_or(z),
+        },
+        ProfileWithdrawalRuleKind::Guardrails => EngineWithdrawalRule::Guardrails {
+            pct: rule.pct.unwrap_or(z),
+            band_pct: rule.band_pct.unwrap_or(z),
+            adjust_pct: rule.adjust_pct.unwrap_or(z),
+        },
+    }
+}
+
+/// Literal público de una estrategia del perfil. Se deriva del `Serialize` del enum para que no
+/// haya dos listas de strings que puedan divergir.
+fn strategy_label(s: RetirementStrategy) -> String {
+    serde_json::to_value(s)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        // Inalcanzable: el enum serializa siempre a una cadena. El fallback existe para no
+        // meter un `unwrap` en un camino de lectura.
+        .unwrap_or_else(|| "asap".to_string())
+}
+
+/// **Mes del BUCLE (1-based) → mes de la REJILLA publicada (0-based).**
+///
+/// El motor cuenta meses simulados: su mes `k` cubre el mes civil `ancla + (k−1)` y su cierre es
+/// la casilla `k` de las series. Las salidas de fase (`retirement_month_index`,
+/// `liquid_crossing_month_index`, `phase_transitions`) hablan en meses del BUCLE; todo lo que la
+/// API publica —`points[].month_index`, `jubilacion_month_index`, `jubilacion_date_ymd`— habla en
+/// la REJILLA, donde el 0 es hoy y el mes `m` nombra la frontera en la que el hecho ya es cierto.
+///
+/// El primer mes VIVIDO como jubilado es el `k` del motor, y su mes civil es `ancla + (k−1)` —
+/// exactamente la fecha que `jubilacion_civil` publica para la casilla `k − 1`. Por eso la
+/// conversión es `k − 1` y no una elección de estilo: con `k` a pelo, `jubilacion_date_ymd` se
+/// iría un mes al futuro y los pins de 4.15.x se moverían sin que nada del modelo cambiara.
+///
+/// (`assets_depleted_month_index` se publica en meses del BUCLE desde #119 y NO se toca aquí:
+/// mover un contrato ya publicado no es parte de esta ola. Divergencia declarada.)
+fn engine_month_to_grid(k: Option<u32>) -> Option<u32> {
+    k.map(|k| k.saturating_sub(1))
+}
+
+/// Eco cerrado del trigger de jubilación del `PhasePlan`. Dos literales, sin brazo comodín.
+pub(crate) const RETIREMENT_TRIGGER_CROSSING: &str = "liquid_crossing";
+pub(crate) const RETIREMENT_TRIGGER_AGE: &str = "target_age";
+
+/// La estrategia degradó a `asap` porque el usuario no tiene fecha de nacimiento: sin ella no hay
+/// edad que convertir en mes, y un 500 por un campo opcional del perfil sería el peor cambio
+/// posible (§A del plan de #207).
+pub(crate) const WARN_BIRTH_DATE_MISSING: &str = "birth_date_missing";
+/// Ídem sin `target_retirement_age`. La validación del PATCH lo exige en `retire_at_age`/`coast`,
+/// así que solo es alcanzable con un perfil escrito antes de esa validación o a mano en la BD;
+/// se degrada igualmente en vez de reventar una LECTURA.
+pub(crate) const WARN_TARGET_AGE_MISSING: &str = "target_retirement_age_missing";
+
 pub(crate) fn map_engine_err(e: EngineError) -> ApiError {
-    ApiError::BadRequest(format!("engine_rejected_input: {e}"))
+    match e {
+        // 5.0.0: el `PhasePlan` pidió algo que este motor todavía no ejecuta (una regla de
+        // retirada ≠ `fixed_real`, o una fase de WP3). No es un input INVÁLIDO —el perfil que lo
+        // produjo es legítimo y está validado—, es una capacidad que aún no existe, así que
+        // merece su propio código: `engine_rejected_input` mandaría al usuario a corregir unos
+        // datos que están bien.
+        EngineError::UnsupportedWithdrawalRule | EngineError::UnsupportedPhase => {
+            ApiError::BadRequest(format!("engine_feature_unavailable: {e}"))
+        }
+        _ => ApiError::BadRequest(format!("engine_rejected_input: {e}")),
+    }
 }
 
 /// Primer mes cuyo patrimonio cruza el target FIRE (inflado mes a mes). Se evalúa sobre TODOS
@@ -1360,6 +1619,27 @@ pub(crate) struct BuiltProjection {
     /// sobrevive porque las superficies que lo publican conservan su forma; el literal
     /// `included_in_real_expense` se retiró con el contrato de 3.4.0 que lo justificaba.
     pub debt_service_absent_reason: Option<&'static str>,
+    /// **El objetivo FIRE como LECTURA** (5.0.0, D17). Es el mismo `FireTarget` que hasta 4.15.x
+    /// viajaba dentro de `input.fire_target`, pero publicado aparte porque desde 5.0.0 los dos
+    /// papeles se separan:
+    ///
+    /// - `input.fire_target` es el **trigger**: si está, el motor se jubila al cruzarlo.
+    /// - `fire_target_reading` es lo que se DIBUJA y se lee (`fire_target_series`,
+    ///   `jubilacion_target_net_worth*`, `liquid_crossing_month_index`).
+    ///
+    /// En las estrategias por cruce (`asap` y, hasta WP3, `partial`/`pension_bridge`) son el
+    /// mismo objeto. En las estrategias por EDAD el motor recibe `fire_target: None` —un solo
+    /// trigger por simulación (D17)— y esto sigue siendo `Some(..)`: la línea discontinua del
+    /// chart no desaparece porque la edad haya tomado el mando, solo deja de decidir.
+    pub fire_target_reading: Option<FireTarget>,
+    /// Qué dispara la jubilación en ESTE ensamblado: `liquid_crossing` | `target_age`. Eco
+    /// cerrado del `PhasePlan::retirement_trigger`, para que la respuesta no obligue a deducirlo
+    /// de la combinación (`strategy`, `fire_target_absent_reason`).
+    pub retirement_trigger: &'static str,
+    /// Avisos del ENSAMBLADO (no del motor): hoy solo `birth_date_missing` /
+    /// `target_retirement_age_missing`, los dos casos en que una estrategia por edad degrada a
+    /// `asap` en vez de reventar (§A del plan: «nunca un 500»).
+    pub warnings: Vec<String>,
 }
 
 /// Overrides what-if de `simulate_projection` que deben aplicarse DENTRO del ensamblado, en el
@@ -1392,6 +1672,10 @@ pub(crate) async fn build_installation_projection_input(
     // salen el modo del objetivo, el importe manual y el SWR. No es `Option` porque siempre hay
     // uno resuelto — `NULL` en la columna es el perfil por defecto, no la ausencia de perfil.
     retirement_profile: &RetirementProfile,
+    // `birth_date`: la del usuario CUYO perfil se está simulando (`session_user_id`), no la
+    // «demografía resuelta» de la respuesta. Es lo que convierte `target_retirement_age` en un
+    // mes del bucle; sin ella una estrategia por edad degrada a `asap` con aviso.
+    birth_date: Option<NaiveDate>,
     overrides: Option<&SimOverrides>,
 ) -> Result<BuiltProjection, ApiError> {
     let (income_reg, income_retirement, expense_reg, expense_retirement, expense_end_entries) =
@@ -1708,6 +1992,71 @@ pub(crate) async fn build_installation_projection_input(
             futurefin_engine::debt_payments_remaining_series(&liabilities, today);
     }
 
+    // -----------------------------------------------------------------------------------------
+    // Estrategia del perfil → `PhasePlan` (5.0.0 WP5, §C del plan de #207)
+    // -----------------------------------------------------------------------------------------
+    // Solo se traduce lo que el motor SABE ejecutar hoy. `partial` y `pension_bridge` se
+    // comportan como `asap` a propósito: sus bloques (`pension`, `partial_retirement`) NO se
+    // pasan al plan porque WP1b los rechaza con `UnsupportedPhase`, y aceptar la estrategia para
+    // simular otra cosa publicaría el patrimonio de un plan que nadie configuró. Lo que sí se
+    // pasa desde ya son la regla de retirada y su modo: con `fixed_real` (el default) son
+    // bit-idénticos a 4.15.x, y cualquier otra regla sale por `engine_feature_unavailable`
+    // hasta que WP2 escriba `withdrawal.rs`.
+    // WP3: partial/pension_bridge — trigger parcial, pensión con fecha y objetivo puente.
+    let mut warnings: Vec<String> = Vec::new();
+    let forced_retirement_month: Option<u32> = if retirement_profile.strategy.requires_target_age()
+    {
+        match (birth_date, retirement_profile.target_retirement_age) {
+            (Some(b), Some(age)) => {
+                // `+ 1`: `months_until_target_age` devuelve el mes de la REJILLA publicada
+                // (0 = hoy) y `RetirementTrigger::AtMonth` habla en meses del BUCLE (1-based).
+                // El primer mes jubilado del bucle es el que cierra sobre esa casilla de la
+                // rejilla, así que la respuesta publica exactamente `m` como
+                // `jubilacion_month_index` (ver `engine_month_to_grid`).
+                Some(months_until_target_age(today, b, age).saturating_add(1))
+            }
+            (None, _) => {
+                warnings.push(WARN_BIRTH_DATE_MISSING.to_string());
+                None
+            }
+            (Some(_), None) => {
+                warnings.push(WARN_TARGET_AGE_MISSING.to_string());
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut phase_plan = match forced_retirement_month {
+        Some(r) => PhasePlan::forced_at(
+            r,
+            income_retirement,
+            expense_retirement,
+            // La retirada extra sigue siendo 0: el mecanismo de drenaje es la caída de ingresos,
+            // no un importe suelto (el campo existe por el pin `P10_jubilacion_forzada`).
+            Decimal::ZERO,
+        ),
+        None => PhasePlan::classic(income_retirement, expense_retirement),
+    };
+    phase_plan.withdrawal = withdrawal_rule_to_engine(&retirement_profile.withdrawal_rule);
+    phase_plan.spend_mode = match retirement_profile.withdrawal_rule.spend_mode {
+        ProfileSpendMode::Ceiling => EngineSpendMode::Ceiling,
+        ProfileSpendMode::RuleIsSpend => EngineSpendMode::RuleIsSpend,
+    };
+    let retirement_trigger = if forced_retirement_month.is_some() {
+        RETIREMENT_TRIGGER_AGE
+    } else {
+        RETIREMENT_TRIGGER_CROSSING
+    };
+    // El objetivo que ENTRA al motor y el que se LEE se separan aquí, y en un solo sitio.
+    let fire_target_reading = fire_target.clone();
+    let engine_fire_target = if forced_retirement_month.is_some() {
+        None
+    } else {
+        fire_target
+    };
+
     let input = ProjectionInput {
         ref_date: today,
         horizon_months,
@@ -1727,13 +2076,12 @@ pub(crate) async fn build_installation_projection_input(
         allocation_rules,
         liabilities,
         planning_monthly_cash_adjustment,
-        // 5.0.0 WP1b: los cuatro campos de jubilación de 4.15.0 viven ahora en el `PhasePlan`.
-        // `classic` ES lo que este handler pasaba —jubilación por CRUCE (nunca rellenó
-        // `retirement_start_month`), `fixed_real` con techo, sin fase parcial ni pensión con
-        // fecha, retirada extra 0—, así que ni un número se mueve.
-        // WP3: estrategia del perfil → PhasePlan (trigger por edad, pensión con fecha, parcial).
-        phase_plan: PhasePlan::classic(income_retirement, expense_retirement),
-        fire_target,
+        phase_plan,
+        // D17 — **un solo trigger por simulación**: con una estrategia por edad el motor NO
+        // recibe objetivo, así que el cruce no puede dispararlo. El objetivo sigue existiendo
+        // como LECTURA en `fire_target_reading` (línea del chart, `jubilacion_target_net_worth`,
+        // `liquid_crossing_month_index`), calculada por el handler con `fire_crossover_month`.
+        fire_target: engine_fire_target,
     };
 
     Ok(BuiltProjection {
@@ -1749,6 +2097,9 @@ pub(crate) async fn build_installation_projection_input(
         fire_target_absent_reason,
         debt_service_monthly,
         debt_service_absent_reason,
+        fire_target_reading,
+        retirement_trigger,
+        warnings,
     })
 }
 
@@ -1789,6 +2140,14 @@ pub(crate) async fn assets_projection_context(
     // perfil: se pasa el del solicitante, que es de quien son las filas del scope `mine`.
     let retirement_profile =
         crate::handlers::retirement_profile::load_retirement_profile(pool, session_user_id).await?;
+    // La DOB entra porque el plan de fases la necesita para las estrategias por edad: sin ella,
+    // el mes 1 de un `retire_at_age` ya cumplido se repartiría como si el usuario siguiera
+    // trabajando, y la aportación que muestra Activos no sería la que simula el chart.
+    let birth_date: Option<NaiveDate> =
+        sqlx::query_scalar(r#"SELECT birth_date FROM users WHERE id = $1"#)
+            .bind(session_user_id)
+            .fetch_one(pool)
+            .await?;
     let built = build_installation_projection_input(
         pool,
         iid,
@@ -1799,6 +2158,7 @@ pub(crate) async fn assets_projection_context(
         Decimal::ZERO,
         Some(&fire_settings),
         &retirement_profile,
+        birth_date,
         None,
     )
     .await?;
@@ -1845,7 +2205,7 @@ pub(crate) async fn assets_projection_context(
     path = "/v1/projection/series",
     tag = "projection",
     params(
-        ("view" = Option<String>, Query, description = "`mine` | `household`; ausente = household. Cualquier otro valor → 400 `invalid_view`"),
+        ("view" = Option<String>, Query, description = "`mine` (default desde 5.0.0: `view` omitido o vacío) = una simulación con el perfil, la fecha de nacimiento y las filas del solicitante. `household` = AGREGADO de una simulación por miembro (suma de series; `jubilacion_*` y `fire_target_series` vacíos, detalle por persona en `members[]`). Cualquier otro valor → 400 `invalid_view`."),
         ("months" = Option<u32>, Query, description = "Horizonte en meses (12–840; fuera de rango → 400 `months_out_of_range`); omitir = horizonte derivado (`lifespan_age` | `fallback_no_demographics`), ver `horizon_basis` + `horizon_lifespan_age` en la respuesta"),
         ("density" = Option<String>, Query, description = "`monthly` (default) | `hybrid` (mensual el primer año, anual después). Cualquier otro valor → 400 `invalid_density`"),
     ),
@@ -1972,6 +2332,11 @@ pub(crate) struct ProjectionContext {
     pub retirement_profile: RetirementProfile,
     /// DOB de demografía: la del usuario de la sesión, o la del primer miembro del hogar.
     pub birth_date: Option<NaiveDate>,
+    /// DOB **del usuario de la sesión**, sin el fallback demográfico de arriba. Es la única que
+    /// puede convertir `target_retirement_age` en un mes: heredar la fecha de otra persona para
+    /// decidir CUÁNDO se jubila el solicitante sería inventarle una edad. Sin ella, las
+    /// estrategias por edad degradan a `asap` con `warnings: ["birth_date_missing"]`.
+    pub session_birth_date: Option<NaiveDate>,
     pub months: u32,
     pub horizon_basis: String,
 }
@@ -2059,59 +2424,100 @@ pub(crate) async fn resolve_projection_context(
         fire_settings,
         retirement_profile,
         birth_date,
+        session_birth_date: session_birth,
         months,
         horizon_basis,
     })
 }
 
-pub async fn compute_projection_series_response(
-    state: &AppState,
+/// Razones de ausencia ESTRUCTURAL de 5.0.0 — las que no dependen de los datos sino de la forma
+/// de la pregunta. Literales cerrados, compartidos por la serie y por el MCP.
+pub(crate) const ABSENT_HOUSEHOLD_AGGREGATE: &str = "household_aggregate";
+pub(crate) const ABSENT_NO_FIRE_TARGET: &str = "no_fire_target";
+pub(crate) const ABSENT_NO_RETIREMENT_TRIGGER: &str = "no_retirement_trigger";
+
+/// Una simulación COMPLETA de un miembro: el ensamblado, la salida del motor y las dos lecturas
+/// derivadas que hay que calcular junto a ella (amortización negativa y marcador de interés
+/// compuesto). Es la unidad que `view=mine` produce una vez y `view=household` produce N veces.
+struct MemberRun {
     user_id: Uuid,
+    username: String,
+    profile: RetirementProfile,
+    birth_date: Option<NaiveDate>,
+    built: BuiltProjection,
+    output: futurefin_engine::ProjectionOutput,
+    negative_amortization: Vec<LiabilityNegativeAmortization>,
+    compound_month: Option<u32>,
+}
+
+/// Fila de miembro del hogar tal y como sale de la BD (id, nombre, DOB y perfil sin resolver).
+#[derive(Debug, FromRow)]
+struct HouseholdMemberRow {
+    user_id: Uuid,
+    username: String,
+    birth_date: Option<NaiveDate>,
+    retirement_profile: Option<sqlx::types::Json<RetirementProfile>>,
+}
+
+/// Miembros de la instalación, cada uno con su fecha de nacimiento y su perfil de jubilación.
+///
+/// **Solo los que tienen fila en `installation_memberships`** (D9): un usuario registrado y
+/// pendiente de aprobación no es del hogar, y sumar su patrimonio al agregado sería enseñar
+/// dinero de alguien a quien todavía no se ha dado acceso. El orden es estable (owner primero,
+/// luego por nombre) para que dos peticiones idénticas devuelvan `members[]` y `asset_series` en
+/// el mismo orden.
+async fn household_members(
+    pool: &sqlx::PgPool,
     iid: Uuid,
-    view: LedgerView,
-    months_override: Option<u32>,
-    density: Density,
-) -> Result<ProjectionSeriesResponse, ApiError> {
-    let ProjectionContext {
-        today,
-        inflation_annual_percent,
-        show_age_mode,
-        fire_settings,
-        retirement_profile,
-        birth_date: resolved_birth_for_demographics,
-        months,
-        horizon_basis,
-    } = resolve_projection_context(&state.pool, iid, user_id, months_override).await?;
+) -> Result<Vec<HouseholdMemberRow>, ApiError> {
+    let rows: Vec<HouseholdMemberRow> = sqlx::query_as(
+        r#"SELECT m.user_id, u.username, u.birth_date, u.retirement_profile
+           FROM installation_memberships m
+           JOIN users u ON u.id = m.user_id
+           WHERE m.installation_id = $1
+           ORDER BY
+               CASE m.role WHEN 'owner' THEN 0 WHEN 'member' THEN 1 ELSE 2 END,
+               u.username, m.user_id"#,
+    )
+    .bind(iid)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
 
-    let horizon_years = months / 12;
-
+/// Simula a UN miembro con SUS filas (`LedgerView::Mine` atado a su id), SU perfil y SU fecha de
+/// nacimiento.
+///
+/// `member_id` es deliberadamente independiente del usuario de la sesión: en `view=household` el
+/// solicitante corre N simulaciones que no son la suya. Ese es todo el cambio de fondo de D9 —
+/// el resto es aritmética de sumas.
+#[allow(clippy::too_many_arguments)]
+async fn run_member_projection(
+    state: &AppState,
+    iid: Uuid,
+    member_id: Uuid,
+    username: String,
+    profile: RetirementProfile,
+    birth_date: Option<NaiveDate>,
+    today: NaiveDate,
+    months: u32,
+    inflation_annual_percent: Decimal,
+    fire_settings: &FireSettings,
+) -> Result<MemberRun, ApiError> {
     let built = build_installation_projection_input(
         &state.pool,
         iid,
-        user_id,
-        view,
+        member_id,
+        LedgerView::Mine,
         today,
         months,
         inflation_annual_percent,
-        Some(&fire_settings),
-        &retirement_profile,
+        Some(fire_settings),
+        &profile,
+        birth_date,
         None,
     )
     .await?;
-    let BuiltProjection {
-        input: projection_input,
-        monthly_net_regular: monthly_delta_assumption,
-        allocation_rule_ids: _,
-        asset_id_name,
-        liability_id_label,
-        planning_rows,
-        effective_savings_source,
-        savings_income_basis,
-        savings_expense_basis,
-        fire_target_absent_reason,
-        debt_service_monthly: _,
-        debt_service_absent_reason: _,
-    } = built;
 
     // Las dos simulaciones (principal + marker «compound supera ahorro») son CPU-bound y se
     // ejecutan en el pool blocking de Tokio. `tokio::join!` arranca ambas en paralelo, así que
@@ -2122,9 +2528,13 @@ pub async fn compute_projection_series_response(
     // blocking de Tokio, y N proyecciones concurrentes —trivial de provocar con `?months=`, que
     // salta la cache por diseño— dejaban sin CPU al reactor hasta tumbar `/v1/ready`. El permiso
     // envuelve SOLO la simulación: un HIT de cache no pasa por aquí y no espera a nadie.
-    let main_input = projection_input.clone();
-    let marker_input = projection_input.clone();
-    let assumption = monthly_delta_assumption;
+    //
+    // 5.0.0: en `household` esto se repite POR MIEMBRO, en serie. La concurrencia máxima sigue
+    // siendo 2 permisos —la misma que en 4.15.x—; lo que crece es el tiempo total, y por eso el
+    // agregado se cachea igual que cualquier otra entrada.
+    let main_input = built.input.clone();
+    let marker_input = built.input.clone();
+    let assumption = built.monthly_net_regular;
     let (main_join, marker_join) = tokio::join!(
         crate::heavy::run_projection_sim("projection", move || {
             let output = project_net_worth_series(&main_input)?;
@@ -2154,7 +2564,8 @@ pub async fn compute_projection_series_response(
         }),
     );
     let (output, negative_amortization_flags) = main_join?.map_err(map_engine_err)?;
-    let liabilities_negative_amortization: Vec<LiabilityNegativeAmortization> = liability_id_label
+    let negative_amortization: Vec<LiabilityNegativeAmortization> = built
+        .liability_id_label
         .iter()
         .zip(negative_amortization_flags.iter())
         .filter_map(|((id, label), flag)| {
@@ -2167,39 +2578,215 @@ pub async fn compute_projection_series_response(
             })
         })
         .collect();
-    let compound_outpaces_true_savings_month_index = marker_join?.map_err(map_engine_err)?;
+    let compound_month = marker_join?.map_err(map_engine_err)?;
 
-    let starting_net_worth = output
-        .net_worth
+    Ok(MemberRun {
+        user_id: member_id,
+        username,
+        profile,
+        birth_date,
+        built,
+        output,
+        negative_amortization,
+        compound_month,
+    })
+}
+
+/// Suma posición a posición dos series del mismo largo. Los miembros comparten horizonte (§D:
+/// `household_max_lifespan`), así que las longitudes coinciden por construcción; el `zip` deja
+/// fuera cualquier cola sobrante en vez de indexar a ciegas.
+fn add_series_into(acc: &mut Vec<Decimal>, add: &[Decimal]) {
+    if acc.is_empty() {
+        acc.extend_from_slice(add);
+        return;
+    }
+    for (a, b) in acc.iter_mut().zip(add.iter()) {
+        *a += *b;
+    }
+}
+
+/// Serie de una salida del motor, con `0` donde el índice no existe (el mes 0 de las series de
+/// retirada, que el motor sí rellena, o una cola más corta de la que se espera).
+fn series_at(serie: &[Decimal], i: usize) -> Decimal {
+    serie.get(i).copied().unwrap_or(Decimal::ZERO)
+}
+
+pub async fn compute_projection_series_response(
+    state: &AppState,
+    user_id: Uuid,
+    iid: Uuid,
+    view: LedgerView,
+    months_override: Option<u32>,
+    density: Density,
+) -> Result<ProjectionSeriesResponse, ApiError> {
+    let ProjectionContext {
+        today,
+        inflation_annual_percent,
+        show_age_mode,
+        fire_settings,
+        retirement_profile,
+        birth_date: resolved_birth_for_demographics,
+        session_birth_date,
+        months: ctx_months,
+        horizon_basis: ctx_horizon_basis,
+    } = resolve_projection_context(&state.pool, iid, user_id, months_override).await?;
+
+    // -----------------------------------------------------------------------------------------
+    // Qué se simula, y cuántas veces (D9)
+    // -----------------------------------------------------------------------------------------
+    // `mine`: UNA simulación, la del solicitante. `household`: UNA POR MIEMBRO, cada una con su
+    // perfil, su fecha de nacimiento y sus filas — porque desde 5.0.0 la jubilación es una
+    // estrategia por persona y no hay forma de correr dos estrategias en un solo bucle.
+    let aggregated = matches!(view, LedgerView::Household);
+    let member_rows: Vec<HouseholdMemberRow> = if aggregated {
+        household_members(&state.pool, iid).await?
+    } else {
+        Vec::new()
+    };
+
+    // Horizonte COMÚN del hogar: el mayor de los horizontes individuales
+    // (`horizon_basis: "household_max_lifespan"`). Cortar por el más corto jubilaría de golpe al
+    // resto; alargar el propio de cada uno les haría vivir más de lo que declararon. Con
+    // `?months=` explícito manda el llamante, como siempre.
+    let (months, horizon_basis) = if months_override.is_some() || !aggregated {
+        (ctx_months, ctx_horizon_basis)
+    } else {
+        let longest = member_rows
+            .iter()
+            .map(|m| {
+                let p = resolve_retirement_profile(
+                    m.retirement_profile.as_ref().map(|j| j.0.clone()),
+                );
+                projection_horizon_months(today, &[m.birth_date], p.horizon_lifespan_age).0
+            })
+            .max()
+            .unwrap_or(ctx_months);
+        (longest, "household_max_lifespan".to_string())
+    };
+    let horizon_years = months / 12;
+
+    let runs: Vec<MemberRun> = if aggregated {
+        let mut acc = Vec::with_capacity(member_rows.len());
+        for m in member_rows {
+            let profile =
+                resolve_retirement_profile(m.retirement_profile.map(|j| j.0));
+            acc.push(
+                run_member_projection(
+                    state,
+                    iid,
+                    m.user_id,
+                    m.username,
+                    profile,
+                    m.birth_date,
+                    today,
+                    months,
+                    inflation_annual_percent,
+                    &fire_settings,
+                )
+                .await?,
+            );
+        }
+        acc
+    } else {
+        vec![
+            run_member_projection(
+                state,
+                iid,
+                user_id,
+                String::new(),
+                retirement_profile.clone(),
+                session_birth_date,
+                today,
+                months,
+                inflation_annual_percent,
+                &fire_settings,
+            )
+            .await?,
+        ]
+    };
+
+    // -----------------------------------------------------------------------------------------
+    // Agregación (§D del plan, campo a campo). Con un solo run es la identidad.
+    // -----------------------------------------------------------------------------------------
+    let series_len = runs
         .first()
-        .copied()
-        .unwrap_or(Decimal::ZERO);
+        .map(|r| r.output.net_worth.len())
+        .unwrap_or((months + 1) as usize);
+    let mut agg_net_worth: Vec<Decimal> = Vec::new();
+    let mut agg_contributed: Vec<Decimal> = Vec::new();
+    let mut agg_liquid: Vec<Decimal> = Vec::new();
+    let mut agg_withdrawal: Vec<Decimal> = Vec::new();
+    let mut agg_shortfall: Vec<Decimal> = Vec::new();
+    let mut agg_excess: Vec<Decimal> = Vec::new();
+    let mut uncovered_deficit_total = Decimal::ZERO;
+    let mut unallocated_savings_total = Decimal::ZERO;
+    let mut monthly_delta_assumption = Decimal::ZERO;
+    let mut assets_depleted_month_index: Option<u32> = None;
+    let mut asset_series_ids: Vec<(Uuid, String)> = Vec::new();
+    let mut all_assets: Vec<futurefin_engine::SimAsset> = Vec::new();
+    let mut all_planning_rows: Vec<PlanningFlowProjRow> = Vec::new();
+    let mut liabilities_negative_amortization: Vec<LiabilityNegativeAmortization> = Vec::new();
+
+    for r in &runs {
+        add_series_into(&mut agg_net_worth, &r.output.net_worth);
+        add_series_into(&mut agg_contributed, &r.output.contributed_capital);
+        add_series_into(&mut agg_liquid, &r.output.liquid_worth);
+        add_series_into(&mut agg_withdrawal, &r.output.withdrawal);
+        add_series_into(&mut agg_shortfall, &r.output.withdrawal_shortfall);
+        add_series_into(&mut agg_excess, &r.output.withdrawal_excess);
+        uncovered_deficit_total += r.output.uncovered_deficit_total;
+        unallocated_savings_total += r.output.unallocated_savings_total;
+        monthly_delta_assumption += r.built.monthly_net_regular;
+        // MÍNIMO, no suma: el hogar se queda sin cartera cuando el PRIMERO de sus miembros se
+        // queda sin la suya — el detalle de quién y cuándo vive en `members[]`.
+        if let Some(k) = r.output.assets_depleted_month_index {
+            assets_depleted_month_index =
+                Some(assets_depleted_month_index.map_or(k, |acc: u32| acc.min(k)));
+        }
+        asset_series_ids.extend(r.built.asset_id_name.iter().cloned());
+        all_assets.extend(r.built.input.assets.iter().cloned());
+        all_planning_rows.extend(r.built.planning_rows.iter().cloned());
+        liabilities_negative_amortization.extend(r.negative_amortization.iter().cloned());
+    }
+    if agg_net_worth.is_empty() {
+        // Hogar sin ningún miembro simulable: serie plana de ceros en vez de un array vacío que
+        // el chart leería como «no hay datos» y un agente como «patrimonio desconocido».
+        agg_net_worth = vec![Decimal::ZERO; series_len];
+        agg_contributed = vec![Decimal::ZERO; series_len];
+        agg_liquid = vec![Decimal::ZERO; series_len];
+        agg_withdrawal = vec![Decimal::ZERO; series_len];
+        agg_shortfall = vec![Decimal::ZERO; series_len];
+        agg_excess = vec![Decimal::ZERO; series_len];
+    }
+
+    let starting_net_worth = agg_net_worth.first().copied().unwrap_or(Decimal::ZERO);
 
     // Indices a serializar según la densidad solicitada. Para `Hybrid`
     // (mes 0..12 mensual + anual desde 24) el JSON pesa ~5× menos.
-    let kept_indices = density_month_indices(density, output.net_worth.len() as u32);
+    let kept_indices = density_month_indices(density, agg_net_worth.len() as u32);
 
     let points: Vec<ProjectionPoint> = kept_indices
         .iter()
         .filter_map(|&i| {
             let idx = i as usize;
-            let nw = output.net_worth.get(idx)?;
-            let cc = output.contributed_capital.get(idx)?;
+            let nw = agg_net_worth.get(idx)?;
             Some(ProjectionPoint {
                 month_index: i,
                 net_worth: *nw,
-                contributed_capital: *cc,
-                net_worth_liquid: output
-                    .liquid_worth
-                    .get(idx)
-                    .copied()
-                    .unwrap_or(Decimal::ZERO),
+                contributed_capital: series_at(&agg_contributed, idx),
+                net_worth_liquid: series_at(&agg_liquid, idx),
                 // Deflactado por el `month_index` del punto, JAMÁS por su posición en el array:
                 // con `density=hybrid` los puntos no son equidistantes y la versión ingenua
                 // deflacta 70 años como si fueran 30 — el bug del chart de la v1.4.2, que aquí
                 // no puede reproducirse porque el helper solo acepta un número de mes.
-                net_worth_real: *nw
-                    * deflator_at_month_index(inflation_annual_percent, i),
+                //
+                // En el agregado se deflacta DESPUÉS de sumar (§D): la inflación es de la
+                // instalación, así que deflactar cada miembro y sumar da lo mismo — pero
+                // hacerlo una vez deja una sola división por punto y una sola cifra que auditar.
+                net_worth_real: *nw * deflator_at_month_index(inflation_annual_percent, i),
+                withdrawal: series_at(&agg_withdrawal, idx),
+                withdrawal_shortfall: series_at(&agg_shortfall, idx),
+                withdrawal_excess: series_at(&agg_excess, idx),
             })
         })
         .collect();
@@ -2207,8 +2794,7 @@ pub async fn compute_projection_series_response(
     // Milestones se computan sobre TODOS los meses (no sobre los serializados),
     // si no, con `density=hybrid` se perderían milestones que caen entre dos
     // puntos anuales.
-    let points_full: Vec<NwPoint> = output
-        .net_worth
+    let points_full: Vec<NwPoint> = agg_net_worth
         .iter()
         .enumerate()
         .map(|(i, nw)| NwPoint {
@@ -2217,27 +2803,33 @@ pub async fn compute_projection_series_response(
         })
         .collect();
 
-    // `asset_id_name` y `planning_rows` se reusan de `build_installation_projection_input` —
-    // antes el handler hacía 2 SELECTs adicionales redundantes contra `assets` y `planning_flows`.
-    let asset_series: Vec<AssetSeries> = asset_id_name
-        .iter()
-        .zip(output.per_asset_series.iter())
-        .map(|((id, name), series)| AssetSeries {
-            asset_id: *id,
-            asset_name: name.clone(),
-            values: kept_indices
-                .iter()
-                .filter_map(|&i| series.get(i as usize))
-                .map(|v| v.to_f64().unwrap_or(0.0))
-                .collect(),
-        })
-        .collect();
+    // `asset_id_name` y `planning_rows` se reusan del ensamblado de cada miembro — antes el
+    // handler hacía 2 SELECTs adicionales redundantes contra `assets` y `planning_flows`. En
+    // `household` las series por activo se CONCATENAN: ya vienen identificadas por `asset_id`,
+    // así que sumarlas sería destruir la única desagregación que el chart necesita.
+    let mut asset_series: Vec<AssetSeries> = Vec::with_capacity(asset_series_ids.len());
+    for r in &runs {
+        for ((id, name), serie) in r.built.asset_id_name.iter().zip(r.output.per_asset_series.iter())
+        {
+            asset_series.push(AssetSeries {
+                asset_id: *id,
+                asset_name: name.clone(),
+                values: kept_indices
+                    .iter()
+                    .filter_map(|&i| serie.get(i as usize))
+                    .map(|v| v.to_f64().unwrap_or(0.0))
+                    .collect(),
+            });
+        }
+    }
 
     let milestone_baseline_adjustment =
-        planning_upcoming_net_for_milestone_baseline(today, &planning_rows);
+        planning_upcoming_net_for_milestone_baseline(today, &all_planning_rows);
     // Eventos: mismo `planning_rows` ya cargado, misma regla fecha→mes que los ajustes de caja.
-    // Ninguna query nueva.
-    let (events, events_truncated) = projection_events_from_flows(today, months, &planning_rows);
+    // Ninguna query nueva. En `household` la lista es la UNIÓN de los Próximos de los miembros y
+    // el tope de 100 se aplica al conjunto — un tope por miembro dejaría respuestas de tamaño
+    // proporcional al hogar.
+    let (events, events_truncated) = projection_events_from_flows(today, months, &all_planning_rows);
     let milestones = projection_unique_reached_milestones(
         &points_full,
         today,
@@ -2264,10 +2856,17 @@ pub async fn compute_projection_series_response(
         Vec::new()
     };
 
-    let fire_target_ref = projection_input.fire_target.as_ref();
+    // -----------------------------------------------------------------------------------------
+    // Lecturas de jubilación: del run del solicitante en `mine`, ninguna en `household`
+    // -----------------------------------------------------------------------------------------
+    let solo = (!aggregated).then(|| &runs[0]);
+
+    let fire_target_ref = solo
+        .and_then(|r| r.built.fire_target_reading.as_ref())
+        .filter(|ft| futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some());
+
     // #142: el término de hoy (mes 0) para la vista previa del formulario.
     let fire_target_debt_component = fire_target_ref
-        .filter(|ft| futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some())
         .map(|ft| {
             ft.debt_payments_remaining
                 .first()
@@ -2275,55 +2874,64 @@ pub async fn compute_projection_series_response(
                 .unwrap_or(Decimal::ZERO)
         })
         .map(crate::money::money_out);
-    let (
-        fire_target_series,
-        jubilacion_month_index,
-        jubilacion_target_net_worth,
-        jubilacion_target_net_worth_nominal,
-    ) = match fire_target_ref {
-        Some(ft) if futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some() => {
-            let crossed_at = fire_crossover_month(Some(ft), &output.liquid_worth);
-            // Se itera sobre `points`, NO sobre `kept_indices`: la serie es paralela a los
-            // puntos y el consumidor la alinea por posición (no lleva `month_index` propio,
-            // auditoría MCP §8), así que el paralelismo tiene que ser estructural. Antes `points`
-            // usaba `filter_map` (descarta índices fuera de rango) y esta serie un `map` que
-            // no descartaba nada: coincidían solo porque `density_month_indices` nunca emite
-            // un índice > months-1. Un cambio ahí las habría desalineado en silencio.
-            let series: Vec<f64> = points
-                .iter()
-                .map(|p| {
-                    fire_target_at_month_index(Some(ft), p.month_index)
-                        .unwrap_or(Decimal::ZERO)
-                        .to_f64()
-                        .unwrap_or(0.0)
-                })
-                .collect();
-            debug_assert_eq!(series.len(), points.len(), "fire_target_series ∥ points");
-            // Target del mes del cruce en euros NOMINALES, calculado EXACTO con el helper del
-            // motor sobre `crossed_at`. Ni se interpola entre dos puntos de la serie ni se lee
-            // de `fire_target_series[pos]`: con `density=hybrid` el mes del cruce puede no ser
-            // un punto servido, y `base_amount` sin redondear es el mismo que usó el motor para
-            // decidir el cruce.
-            let nominal = crossed_at
-                .and_then(|k| fire_target_at_month_index(Some(ft), k))
-                .map(|v| money_out(v).to_string());
-            (
-                series,
-                crossed_at,
-                Some(
-                    money_out(
-                        futurefin_engine::fire_target_base_at_month_index(ft, 0)
-                            .unwrap_or(Decimal::ZERO),
-                    )
-                    .to_string(),
-                ),
-                nominal,
-            )
-        }
-        _ => (Vec::new(), None, None, None),
-    };
-    // Posición del mes del cruce dentro de los arrays paralelos: el ÚLTIMO punto servido cuyo
-    // `month_index` no pasa del mes del cruce (convención documentada en el campo). `rposition`
+
+    // R8 — `jubilacion_month_index` ES el mes EFECTIVO de jubilación que decidió el motor, no el
+    // cruce derivado por el handler. Con `asap` los dos coinciden exactamente (el cruce ES el
+    // trigger) y ni un pin de 4.15.x se mueve; con una estrategia por edad, esto dice cuándo te
+    // jubilas de verdad y `liquid_crossing_month_index` cuándo habrías llegado.
+    let jubilacion_month_index =
+        solo.and_then(|r| engine_month_to_grid(r.output.retirement_month_index));
+    // El cruce sigue calculándose AQUÍ y no leyéndose del motor: en las estrategias por edad el
+    // motor no recibe objetivo (D17) y su propia lectura sería `null`. `fire_crossover_month`
+    // escanea la serie líquida contra el objetivo-lectura, que es justo lo que se dibuja.
+    let liquid_crossing_month_index = solo
+        .and_then(|r| fire_crossover_month(fire_target_ref, &r.output.liquid_worth));
+
+    let (fire_target_series, jubilacion_target_net_worth, jubilacion_target_net_worth_nominal) =
+        match fire_target_ref {
+            Some(ft) => {
+                // Se itera sobre `points`, NO sobre `kept_indices`: la serie es paralela a los
+                // puntos y el consumidor la alinea por posición (no lleva `month_index` propio,
+                // auditoría MCP §8), así que el paralelismo tiene que ser estructural. Antes `points`
+                // usaba `filter_map` (descarta índices fuera de rango) y esta serie un `map` que
+                // no descartaba nada: coincidían solo porque `density_month_indices` nunca emite
+                // un índice > months-1. Un cambio ahí las habría desalineado en silencio.
+                let series: Vec<f64> = points
+                    .iter()
+                    .map(|p| {
+                        fire_target_at_month_index(Some(ft), p.month_index)
+                            .unwrap_or(Decimal::ZERO)
+                            .to_f64()
+                            .unwrap_or(0.0)
+                    })
+                    .collect();
+                debug_assert_eq!(series.len(), points.len(), "fire_target_series ∥ points");
+                // Target del mes de la jubilación EFECTIVA en euros NOMINALES, calculado EXACTO
+                // con el helper del motor. Ni se interpola entre dos puntos de la serie ni se lee
+                // de `fire_target_series[pos]`: con `density=hybrid` el mes puede no ser un punto
+                // servido. Con una estrategia por edad esta cifra sigue siendo una LECTURA —
+                // «esto es lo que habrías necesitado el mes en que te jubilas» —, y compararla
+                // con el líquido de ese mes es exactamente lo que revela una infra-financiación.
+                let nominal = jubilacion_month_index
+                    .and_then(|k| fire_target_at_month_index(Some(ft), k))
+                    .map(|v| money_out(v).to_string());
+                (
+                    series,
+                    Some(
+                        money_out(
+                            futurefin_engine::fire_target_base_at_month_index(ft, 0)
+                                .unwrap_or(Decimal::ZERO),
+                        )
+                        .to_string(),
+                    ),
+                    nominal,
+                )
+            }
+            None => (Vec::new(), None, None),
+        };
+
+    // Posición del mes de jubilación dentro de los arrays paralelos: el ÚLTIMO punto servido cuyo
+    // `month_index` no pasa del mes de jubilación (convención documentada en el campo). `rposition`
     // sobre `points`, no aritmética sobre `kept_indices`: la posición es una propiedad del array
     // que se serializa, así que se deriva de él.
     let jubilacion_series_position = jubilacion_month_index.and_then(|k| {
@@ -2340,10 +2948,106 @@ pub async fn compute_projection_series_response(
         jubilacion_month_index,
     );
 
+    let phase_transitions: Vec<PhaseTransition> = solo
+        .map(|r| {
+            r.output
+                .phase_transitions
+                .iter()
+                .map(|(phase, k)| PhaseTransition {
+                    phase: match phase {
+                        Phase::Accumulating => "accumulating",
+                        Phase::Partial => "partial",
+                        Phase::Retired => "retired",
+                    },
+                    month_index: engine_month_to_grid(Some(*k)).unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Avisos del ensamblado + los del motor. El enum `EngineWarning` está VACÍO en esta ola (no
+    // hay ni un aviso que el bucle sepa emitir todavía), así que el `match` sin brazos es la
+    // forma honesta de escribirlo: cuando WP2/WP3 le añadan variantes, esto dejará de compilar
+    // hasta que alguien decida su literal público.
+    let warnings: Vec<String> = solo
+        .map(|r| {
+            let mut w = r.built.warnings.clone();
+            w.extend(r.output.warnings.iter().map(|x| match *x {}));
+            w
+        })
+        .unwrap_or_default();
+
+    let has_retirement_trigger = solo.is_some_and(|r| {
+        r.built.retirement_trigger == RETIREMENT_TRIGGER_AGE || fire_target_ref.is_some()
+    });
+
     let final_nominal = points_full.last().map(|p| p.net_worth).unwrap_or(Decimal::ZERO);
-    let final_month_index = points_full.last().map(|p| p.month_index).unwrap_or(0).max(0) as u32;
+    let final_month_index = points_full.last().map(|p| p.month_index).unwrap_or(0);
     let final_net_worth_real =
         final_nominal * deflator_at_month_index(inflation_annual_percent, final_month_index);
+
+    let members: Vec<HouseholdMemberProjection> = if aggregated {
+        runs.iter()
+            .map(|r| {
+                let effective = engine_month_to_grid(r.output.retirement_month_index);
+                let (_, age) = jubilacion_civil(today, r.birth_date, effective);
+                HouseholdMemberProjection {
+                    user_id: r.user_id,
+                    username: r.username.clone(),
+                    strategy: strategy_label(r.profile.strategy),
+                    jubilacion_month_index: effective,
+                    jubilacion_age: age,
+                    liquid_crossing_month_index: fire_crossover_month(
+                        r.built
+                            .fire_target_reading
+                            .as_ref()
+                            .filter(|ft| {
+                                futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some()
+                            }),
+                        &r.output.liquid_worth,
+                    ),
+                    retirement_month_index: effective,
+                    // §B.7 (`solve.rs`) no entra en esta ola: el campo viaja como `null`
+                    // EXPLÍCITO para que el consumidor no cambie de forma cuando llegue.
+                    coast_fire_month_index: None,
+                    partial_retirement_month_index: engine_month_to_grid(
+                        r.output.partial_retirement_month_index,
+                    ),
+                    pension_start_month_index: engine_month_to_grid(
+                        r.output.pension_start_month_index,
+                    ),
+                    assets_depleted_month_index: r.output.assets_depleted_month_index,
+                    warnings: {
+                        let mut w = r.built.warnings.clone();
+                        w.extend(r.output.warnings.iter().map(|x| match *x {}));
+                        w
+                    },
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // El eco de contexto del ahorro es el del SOLICITANTE también en `household`: la fuente y las
+    // ventanas son de la instalación, pero el fallback («no hay meses reales») se decide sobre
+    // las filas de cada scope, así que no existe UN basis del hogar. Se publica el suyo — el
+    // mismo criterio que la demografía (`viewer_birth_date`, horizonte), que también es del
+    // solicitante en las dos vistas.
+    let context_run = if aggregated {
+        runs.iter().find(|r| r.user_id == user_id).or_else(|| runs.first())
+    } else {
+        runs.first()
+    };
+    let effective_savings_source = context_run
+        .map(|r| r.built.effective_savings_source)
+        .unwrap_or_default();
+    let savings_income_basis = context_run
+        .map(|r| r.built.savings_income_basis.clone())
+        .unwrap_or_else(SavingsAvgBasis::budget);
+    let savings_expense_basis = context_run
+        .map(|r| r.built.savings_expense_basis.clone())
+        .unwrap_or_else(SavingsAvgBasis::budget);
 
     Ok(ProjectionSeriesResponse {
         view: view.as_str(),
@@ -2358,7 +3062,7 @@ pub async fn compute_projection_series_response(
         // mientras `simulate_projection` publicaba la misma cifra con cuatro.
         monthly_delta_assumption: money_out(monthly_delta_assumption),
         model_note:
-            "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, ajustes por Próximos, crecimiento compuesto por activo en términos nominales. El GASTO (regular y de jubilación) se indexa mes a mes a la inflación de la instalación; los INGRESOS quedan planos a propósito (las subidas se pelean, no se regalan), y el target FIRE se evalúa mes a mes ajustado por inflación para preservar el poder adquisitivo del usuario."
+            "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, ajustes por Próximos, crecimiento compuesto por activo en términos nominales. El GASTO (regular y de jubilación) se indexa mes a mes a la inflación de la instalación; los INGRESOS quedan planos a propósito (las subidas se pelean, no se regalan), y el target FIRE se evalúa mes a mes ajustado por inflación para preservar el poder adquisitivo del usuario. La jubilación la dispara la ESTRATEGIA del perfil: por cruce del líquido con el objetivo (`asap`) o por edad (`retire_at_age`/`coast`), y entonces el cruce pasa a ser una lectura. Con `view=household` la curva es la SUMA de una simulación independiente por miembro, cada una con su estrategia: por eso el hogar no publica jubilación propia."
                 .into(),
         anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
         show_age_mode: show_age_mode.clone(),
@@ -2368,7 +3072,9 @@ pub async fn compute_projection_series_response(
             .map(|d| d.format("%Y-%m-%d").to_string()),
         milestones,
         milestones_real,
-        compound_outpaces_true_savings_month_index,
+        compound_outpaces_true_savings_month_index: solo.and_then(|r| r.compound_month),
+        compound_outpaces_true_savings_absent_reason: aggregated
+            .then_some(ABSENT_HOUSEHOLD_AGGREGATE),
         jubilacion_month_index,
         jubilacion_date_ymd,
         jubilacion_age,
@@ -2388,17 +3094,44 @@ pub async fn compute_projection_series_response(
         savings_income_basis,
         savings_expense_basis,
         deflation_annual_inflation_percent: money_out(inflation_annual_percent),
-        drawdown_gain_basis: drawdown_gain_basis_of(&projection_input.assets),
-        taxable_gain_ratio_today: taxable_gain_ratio_today_of(&projection_input.assets),
-        assets_depleted_month_index: output.assets_depleted_month_index,
-        uncovered_deficit_total: money_out(output.uncovered_deficit_total),
-        unallocated_savings_total: money_out(output.unallocated_savings_total),
-        unallocated_savings_reason: unallocated_reason_of(
-            &projection_input.assets,
-            output.unallocated_savings_total,
-        ),
+        drawdown_gain_basis: drawdown_gain_basis_of(&all_assets),
+        taxable_gain_ratio_today: taxable_gain_ratio_today_of(&all_assets),
+        assets_depleted_month_index,
+        uncovered_deficit_total: money_out(uncovered_deficit_total),
+        unallocated_savings_total: money_out(unallocated_savings_total),
+        unallocated_savings_reason: unallocated_reason_of(&all_assets, unallocated_savings_total),
         liabilities_negative_amortization,
-        fire_target_absent_reason,
+        fire_target_absent_reason: if aggregated {
+            Some(ABSENT_HOUSEHOLD_AGGREGATE)
+        } else {
+            solo.and_then(|r| r.built.fire_target_absent_reason)
+        },
+        strategy: solo.map(|r| strategy_label(r.profile.strategy)),
+        retirement_trigger: solo.map(|r| r.built.retirement_trigger),
+        retirement_month_index: jubilacion_month_index,
+        retirement_series_position: jubilacion_series_position,
+        liquid_crossing_month_index,
+        liquid_crossing_absent_reason: if aggregated {
+            Some(ABSENT_HOUSEHOLD_AGGREGATE)
+        } else if fire_target_ref.is_none() {
+            Some(ABSENT_NO_FIRE_TARGET)
+        } else {
+            None
+        },
+        jubilacion_absent_reason: if aggregated {
+            Some(ABSENT_HOUSEHOLD_AGGREGATE)
+        } else if has_retirement_trigger {
+            None
+        } else {
+            Some(ABSENT_NO_RETIREMENT_TRIGGER)
+        },
+        phase_transitions,
+        pension_start_month_index: solo
+            .and_then(|r| engine_month_to_grid(r.output.pension_start_month_index)),
+        partial_retirement_month_index: solo
+            .and_then(|r| engine_month_to_grid(r.output.partial_retirement_month_index)),
+        warnings,
+        members,
     })
 }
 
@@ -2639,6 +3372,19 @@ pub(crate) struct SimKpis {
     /// Base de gasto **post-jubilación** tras overrides. En modo A es la que ancla el target FIRE.
     #[serde(with = "rust_decimal::serde::str")]
     pub expense_retirement_base_monthly: Decimal,
+    /// Estrategia de jubilación con la que se simuló ESTE lado (5.0.0): `asap` | `retire_at_age`
+    /// | `coast` | `partial` | `pension_bridge`. Va por lado porque el escenario puede llevar un
+    /// perfil clonado y modificado, y sin el eco un `jubilacion_months_delta` de 0 no distingue
+    /// «el eje no movió nada» de «la fecha la fija la edad, no el capital».
+    pub strategy: String,
+    /// Qué disparó la jubilación de este lado: `liquid_crossing` | `target_age` (D17). Con
+    /// `target_age`, `jubilacion_month_index` es una edad cumplida y `fire_target_base` una
+    /// referencia, no una meta alcanzada.
+    pub retirement_trigger: &'static str,
+    /// Mes en que el líquido alcanza el objetivo — LECTURA. Con `asap` coincide con
+    /// `jubilacion_month_index`; con una estrategia por edad puede ser posterior (no llegas) o
+    /// anterior (podrías haberte ido antes). `null` = no hay objetivo o no se cruza.
+    pub liquid_crossing_month_index: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2774,7 +3520,17 @@ fn sim_kpis(
     monthly_cash_adjustment: Decimal,
 ) -> SimKpis {
     let debt_service_monthly = built.debt_service_monthly;
-    let jubilacion_month_index = fire_crossover_month(input.fire_target.as_ref(), &output.liquid_worth);
+    // 5.0.0 (R8): el mes publicado es el EFECTIVO del motor, traducido a la rejilla — con `asap`
+    // es exactamente el cruce de 4.15.x y ningún delta se mueve. El objetivo que se LEE sale de
+    // `built.fire_target_reading` y no de `input.fire_target`: con una estrategia por edad el
+    // input no lleva objetivo (D17) y el KPI se quedaría sin base que citar.
+    let reading_target = built
+        .fire_target_reading
+        .as_ref()
+        .filter(|ft| futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some());
+    let jubilacion_month_index = engine_month_to_grid(output.retirement_month_index);
+    let liquid_crossing_month_index =
+        fire_crossover_month(reading_target, &output.liquid_worth);
     let (jubilacion_date_ymd, jubilacion_age) =
         jubilacion_civil(today, birth_date, jubilacion_month_index);
     let final_net_worth = output.net_worth.last().copied().unwrap_or(Decimal::ZERO);
@@ -2902,9 +3658,7 @@ fn sim_kpis(
         jubilacion_age,
         final_net_worth: money_out(final_net_worth),
         final_net_worth_real: money_out(final_net_worth_real),
-        fire_target_base: input
-            .fire_target
-            .as_ref()
+        fire_target_base: reading_target
             .and_then(|ft| futurefin_engine::fire_target_base_at_month_index(ft, 0))
             .map(money_out),
         runway_months,
@@ -2951,6 +3705,9 @@ fn sim_kpis(
         expense_base_monthly: money_out(input.expense_regular_monthly),
         income_base_monthly: money_out(income_monthly),
         expense_retirement_base_monthly: money_out(input.phase_plan.expense_retirement_monthly),
+        strategy: strategy_label(profile.strategy),
+        retirement_trigger: built.retirement_trigger,
+        liquid_crossing_month_index,
     }
 }
 
@@ -2987,6 +3744,18 @@ pub(crate) async fn simulate_projection_core(
     view: LedgerView,
     spec: SimulationSpec,
 ) -> Result<SimulateProjectionResponse, ApiError> {
+    // ---- D9: el hogar NO se simula ----------------------------------------------------------
+    // `view=household` dejó de ser «las mismas cuentas con más filas»: desde 5.0.0 es el AGREGADO
+    // de N simulaciones, una por miembro y con la estrategia de cada uno. Un what-if sobre eso no
+    // tiene una respuesta única —¿el `swr_pct` de quién?, ¿el gasto extra de quién?— y devolver
+    // «algo» sería publicar un escenario que no describe el plan de nadie. Se rechaza en el CORE,
+    // no en la capa MCP, para que HTTP y MCP no puedan discrepar si mañana hay ruta.
+    if matches!(view, LedgerView::Household) {
+        return Err(ApiError::BadRequest(
+            "household_not_simulable: simulate_projection runs one member's plan; view=household is an aggregate of N independent simulations (one strategy per member) and has no single scenario to move — call it with view=mine (the default)".into(),
+        ));
+    }
+
     // ---- Cotas de dominio (mismas que sus ejes de settings reales) --------------------------
     // Mismo helper que el `?months=` de la proyección real: un solo literal, un solo código.
     // Redundante con `resolve_projection_context` (más abajo) a propósito — aquí fija la
@@ -3153,6 +3922,7 @@ pub(crate) async fn simulate_projection_core(
         ctx.inflation_annual_percent,
         Some(&ctx.fire_settings),
         &ctx.retirement_profile,
+        ctx.session_birth_date,
         None,
     )
     .await?;
@@ -3166,6 +3936,7 @@ pub(crate) async fn simulate_projection_core(
         inflation_eff,
         Some(&fs_eff),
         &profile_eff,
+        ctx.session_birth_date,
         Some(&sim_ov),
     )
     .await?;
@@ -3722,21 +4493,26 @@ pub fn projection_router() -> Router {
         .route("/deflate", get(get_projection_deflate))
 }
 
-/// Recompute de la proyección `view=household` (ambas densidades) y guardado
-/// en cache. Pensado para `tokio::spawn` tras login. Si falla, no propaga el
-/// error: solo deja el cache vacío para que el próximo GET haga el compute
-/// sincronamente.
-pub async fn warm_up_household_projection(
+/// Recompute de la proyección **`view=mine`** del usuario que acaba de entrar (ambas densidades)
+/// y guardado en cache. Pensado para `tokio::spawn` tras login. Si falla, no propaga el error:
+/// solo deja el cache vacío para que el próximo GET haga el compute sincronamente.
+///
+/// **5.0.0 (R2): calienta `mine`, no `household`.** El warm-up solo sirve para algo si precalcula
+/// lo que el siguiente GET va a pedir, y desde 5.0.0 la vista por defecto —de la SPA y del
+/// parámetro ausente— es `mine`. Calentar `household` dejaría en la cache una entrada que nadie
+/// consulta mientras el primer GET real paga el compute entero; y en 5.0.0 `household` cuesta N
+/// simulaciones, no una, así que además sería el warm-up más caro para la vista menos usada.
+pub async fn warm_up_mine_projection(
     state: Arc<AppState>,
     installation_id: Uuid,
     user_id: Uuid,
 ) {
     for density in [Density::Hybrid, Density::Monthly] {
-        tracing::info!(installation_id = %installation_id, density = ?density, "warm-up household projection start");
+        tracing::info!(installation_id = %installation_id, density = ?density, "warm-up mine projection start");
         let t0 = std::time::Instant::now();
         let key = ProjectionCacheKey {
             installation_id,
-            view: LedgerView::Household,
+            view: LedgerView::Mine,
             owner_user_id: Some(user_id),
             density,
         };
@@ -3744,7 +4520,7 @@ pub async fn warm_up_household_projection(
             &state,
             user_id,
             installation_id,
-            LedgerView::Household,
+            LedgerView::Mine,
             None,
             density,
         )

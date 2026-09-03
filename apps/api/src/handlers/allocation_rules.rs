@@ -439,7 +439,7 @@ pub(crate) enum SinkPolicy {
     path = "/v1/allocation-rules",
     tag = "allocation-rules",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = rows attributed to the signed-in user; omit = full household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
     ),
     responses(
         (status = 200, description = "Rules ordered by priority ascending", body = [AllocationRuleResponse]),
@@ -993,7 +993,7 @@ pub(crate) async fn delete_allocation_rule_core(
     tag = "allocation-rules",
     request_body = ReorderBody,
     params(
-        ("view" = Option<String>, Query, description = "`mine` = scope by user; omit = household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
     ),
     responses(
         (status = 200, description = "Reordered", body = [AllocationRuleResponse]),
@@ -1204,7 +1204,7 @@ pub struct AllocationResolutionResponse {
     get,
     path = "/v1/allocation-rules/resolution",
     tag = "allocation-rules",
-    params(("view" = Option<String>, Query, description = "`mine` | household.")),
+    params(("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`.")),
     responses(
         (status = 200, description = "Cascada resuelta del mes en curso", body = AllocationResolutionResponse),
         (status = 401, description = "No valid session"),
@@ -1243,6 +1243,13 @@ pub(crate) async fn allocation_resolution_core(
     let fire_settings = load_fire_settings(pool, iid).await?;
     let retirement_profile =
         crate::handlers::retirement_profile::load_retirement_profile(pool, user_id).await?;
+    // La DOB del solicitante: sin ella una estrategia por edad no se puede convertir en mes del
+    // bucle, y el reparto del mes 1 se resolvería como si el usuario siguiera trabajando.
+    let birth_date: Option<chrono::NaiveDate> =
+        sqlx::query_scalar(r#"SELECT birth_date FROM users WHERE id = $1"#)
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
     let built = build_installation_projection_input(
         pool,
         iid,
@@ -1253,6 +1260,7 @@ pub(crate) async fn allocation_resolution_core(
         Decimal::ZERO,
         Some(&fire_settings),
         &retirement_profile,
+        birth_date,
         None,
     )
     .await?;
@@ -1490,7 +1498,7 @@ pub struct AllocationGoalsResponse {
     get,
     path = "/v1/allocation-rules/goals",
     tag = "allocation-rules",
-    params(("view" = Option<String>, Query, description = "`mine` | household.")),
+    params(("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`.")),
     responses(
         (status = 200, description = "Objetivos (topes) de la cascada con su fecha estimada", body = AllocationGoalsResponse),
         (status = 401, description = "No valid session"),
@@ -1547,6 +1555,7 @@ pub(crate) async fn allocation_goals_core(
         ctx.inflation_annual_percent,
         Some(&ctx.fire_settings),
         &ctx.retirement_profile,
+        ctx.session_birth_date,
         None,
     )
     .await?;

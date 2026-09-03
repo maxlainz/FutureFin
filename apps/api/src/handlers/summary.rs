@@ -465,7 +465,7 @@ pub struct SummaryResponse {
     path = "/v1/summary",
     tag = "summary",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = sums for rows attributed to the signed-in user; omit = household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
     ),
     responses(
         (status = 200, description = "Installation aggregates + financial_health (monthly equivalents según `fire_settings.savings_source`, runway de líquidos con retorno e inflación, rendimiento neto anual esperado del patrimonio —nominal y real—, sumas de Próximos). Los pasivos con `payment_end_date` pasada se **filtran** de las lecturas; nunca se borran (reads never mutate).", body = SummaryResponse),
@@ -485,6 +485,35 @@ pub async fn get_summary(
     Ok(Json(out))
 }
 
+/// **SWR mínimo del hogar** (5.0.0, §D): el menor `swr_pct` entre los perfiles de los miembros
+/// con fila en `installation_memberships`. `None` = el hogar no tiene miembros con perfil legible
+/// (inalcanzable con una instalación sana: el solicitante siempre es uno).
+///
+/// Se resuelve por el MISMO camino que cualquier otro perfil (`resolve_retirement_profile`), así
+/// que los defaults y los clamps son idénticos a los que ve el usuario en su formulario: leer el
+/// JSONB crudo aquí abriría una segunda interpretación del mismo dato.
+async fn household_min_swr_pct(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+) -> Result<Option<Decimal>, ApiError> {
+    let rows: Vec<Option<sqlx::types::Json<crate::handlers::retirement_profile::RetirementProfile>>> =
+        sqlx::query_scalar(
+            r#"SELECT u.retirement_profile
+               FROM installation_memberships m
+               JOIN users u ON u.id = m.user_id
+               WHERE m.installation_id = $1"#,
+        )
+        .bind(iid)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|j| {
+            crate::handlers::retirement_profile::resolve_retirement_profile(j.map(|x| x.0)).swr_pct
+        })
+        .min())
+}
+
 /// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_summary`.
 pub(crate) async fn summary_core(
     pool: &sqlx::PgPool,
@@ -496,11 +525,23 @@ pub(crate) async fn summary_core(
     // inflación (base del runway) y los fire_settings (fuente del ahorro + SWR/tramos del runway).
     let (today, inflation_pct, fire) = installation_calendar_inflation_fire(pool, iid).await?;
     // El SWR salió de `fire_settings` en 5.0.0 (D13): el umbral «runway indefinido» lo fija el
-    // perfil del SOLICITANTE, no el hogar. Semántica de un miembro por ahora — con `household`
-    // sigue siendo el del solicitante, igual que la demografía de la proyección; WP5 lo hará por
-    // miembro (con el MÍNIMO SWR del hogar para el umbral agregado).
+    // perfil del usuario. En `mine` es el del solicitante y ya está.
+    //
+    // En `household` (WP5, §D) es el **MÍNIMO** de los perfiles de los miembros, y el mínimo no
+    // es una preferencia estética: el runway agregado se sirve sobre las filas de TODO el hogar,
+    // y «indefinido» significa «esta cartera aguanta para siempre». Basta con que UN miembro
+    // considere insostenible esa tasa de retirada para que el hogar no pueda declararse
+    // indefinido — usar el máximo (o el del solicitante) permitiría que el más optimista del
+    // hogar firmara por todos, que es exactamente el número plausible y falso que aquí no se
+    // publica. Con un solo miembro coincide con el suyo, así que nada se mueve.
     let retirement_profile =
         crate::handlers::retirement_profile::load_retirement_profile(pool, user_id).await?;
+    let swr_for_runway = match view {
+        LedgerView::Mine => retirement_profile.swr_pct,
+        LedgerView::Household => {
+            household_min_swr_pct(pool, iid).await?.unwrap_or(retirement_profile.swr_pct)
+        }
+    };
     let source = fire.savings_source;
 
     let asset_scope = view.scope_where("");
@@ -659,7 +700,7 @@ pub(crate) async fn summary_core(
         &liquid_rows,
         expense_tot,
         inflation_pct,
-        retirement_profile.swr_pct,
+        swr_for_runway,
         annual_expense_gross,
         &fire.tax_brackets,
         fire.taxes_enabled,

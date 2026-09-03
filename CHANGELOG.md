@@ -46,8 +46,59 @@ edades distintas, con reglas de retirada distintas y con pensiones que empiezan 
   de 68 a **70 tools** (29 de lectura, 41 de escritura) sin subir el presupuesto de descripciones:
   se rebalanceó moviendo prosa duplicada al `instructions` del servidor.
 
+### La estrategia decide la jubilación, y el hogar pasa a ser una suma (5.0.0, WP5)
+
+El perfil de WP4 ya no es solo configuración: **la estrategia gobierna la simulación**.
+
+- **`retire_at_age` y `coast` se jubilan por EDAD** (D17). El motor recibe el mes en que el usuario
+  cumple `target_retirement_age` como trigger forzado y **ningún objetivo FIRE**: un solo trigger por
+  simulación, o la edad no mandaría de verdad. El objetivo se sigue calculando y dibujando
+  (`fire_target_series`, `jubilacion_target_net_worth`), pero pasa a ser una **lectura**: el nuevo
+  `liquid_crossing_month_index` dice cuándo el capital habría bastado, que puede ser después (te vas
+  sin llegar) o antes. El mes se deriva con la misma aritmética civil que publica `jubilacion_age`,
+  así que la respuesta cumple `jubilacion_age == target_retirement_age` exactamente. **Sin fecha de
+  nacimiento la estrategia degrada a `asap`** con `warnings: ["birth_date_missing"]` — nunca un 500
+  en una lectura. `partial` y `pension_bridge` se comportan de momento como `asap`; sus fases llegan
+  en el paquete siguiente y el motor las rechaza con 400 `engine_feature_unavailable` en vez de
+  simular otra cosa (mismo código para una regla de retirada distinta de `fixed_real`).
+- **`GET /v1/projection/series` publica las lecturas de fase**: `strategy`, `retirement_trigger`,
+  `retirement_month_index` + `retirement_series_position`, `liquid_crossing_month_index`,
+  `phase_transitions[]`, `pension_start_month_index`, `partial_retirement_month_index`, `warnings[]`
+  y, por punto, `withdrawal` / `withdrawal_shortfall` / `withdrawal_excess` (flujos del mes, no
+  acumulados; los dos últimos son cero mientras la regla sea `fixed_real`, que no tiene techo). Los
+  huecos estructurales llevan su razón: `jubilacion_absent_reason`,
+  `liquid_crossing_absent_reason`, `compound_outpaces_true_savings_absent_reason`.
+  `simulate_projection` ecoa `strategy`, `retirement_trigger` y `liquid_crossing_month_index` por
+  lado.
+
 ### Breaking
 
+- **El default de `?view` pasa de `household` a `mine`** (R2), en HTTP y en MCP. Omitir el parámetro
+  —o mandarlo vacío— devuelve ahora **los datos del usuario que pregunta**; el hogar entero hay que
+  pedirlo con `?view=household` / `view: "household"`. Afecta a las ocho respuestas que ecoan `view`
+  y a todas las tools con scope. El porqué: con la jubilación convertida en estrategia por persona,
+  servir el hogar por omisión mezclaba filas de dos personas bajo el perfil de una sola. El eco de
+  `view` que existe desde 4.4.0 es exactamente lo que permite a un cliente darse cuenta. Un cliente
+  que quiera la conducta de 4.15.x añade `?view=household` y no cambia nada más.
+- **`GET /v1/projection/series?view=household` deja de ser una simulación y pasa a ser un
+  AGREGADO** (D9): el servidor corre **una simulación por miembro** —con su perfil, su fecha de
+  nacimiento y sus filas— al horizonte común `max(horizontes)`
+  (`horizon_basis: "household_max_lifespan"`) y suma las series. En consecuencia el hogar **ya no
+  publica jubilación propia**: `jubilacion_*`, `retirement_*`, `strategy`, `phase_transitions` y
+  `fire_target_series` viajan vacíos con `absent_reason: "household_aggregate"`, y el hito de cada
+  persona va en el nuevo `members[]`. `assets_depleted_month_index` pasa a ser el **mínimo** del
+  hogar. **Un hogar de dos miembros cambia de números por diseño**: antes se simulaba una sola
+  cartera conjunta con una sola estrategia; ahora son N planes independientes que se suman. Una
+  instalación de un solo miembro no se mueve.
+- **`simulate_projection` rechaza `view: "household"`** con 400 `household_not_simulable`. Un
+  what-if mueve UN plan y el hogar tiene N.
+- **`jubilacion_month_index` es ahora el mes EFECTIVO de jubilación** (R8), no el cruce derivado por
+  el handler: con `asap` las dos definiciones coinciden exactamente y ningún pin se movió (escenario
+  A de `projection_pins.rs`: mes 235 antes y después), pero con una estrategia por edad la cifra
+  cambia de significado — es la edad, y el cruce viaja aparte.
+- **`GET /v1/summary?view=household` usa el SWR MÍNIMO del hogar** para el umbral «runway
+  indefinido». Basta con que un miembro considere insostenible esa tasa de retirada para que el
+  hogar no pueda declararse indefinido; con el máximo, el más optimista firmaría por todos.
 - **`installation.fire_settings` pierde cuatro claves**: `fire_number_mode`,
   `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age`. `GET /v1/installation` ya no las
   devuelve y `PATCH /v1/installation` ya no las acepta (se ignoran en silencio, como cualquier clave

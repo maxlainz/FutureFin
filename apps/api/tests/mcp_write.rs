@@ -265,12 +265,12 @@ async fn cache_contract_cond_none_and_full_via_mcp() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
     let cat = app.create_category(&owner, "expense", "Comida").await;
     let cat_inc = app.create_category(&owner, "income", "Nómina").await;
 
     // --- Modo A (budget): create_transaction vía MCP NO invalida (COND inactiva) -------------
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -311,7 +311,7 @@ async fn cache_contract_cond_none_and_full_via_mcp() {
 
     // --- Modo B: create_transaction vía MCP SÍ invalida (COND activa) -------------------------
     set_mode(&app, &owner.cookie, "transactions_avg").await;
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -331,7 +331,7 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
 
     let cat_asset = app.create_category(&owner, "asset", "Fondos").await;
     let cat_asset2 = app.create_category(&owner, "asset", "Cash").await;
@@ -364,7 +364,7 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
 
     // --- update_asset: body completo (rename + recategorizar + iliquidez + borrar el precio
     // de compra) y contrato FULL — misma core `patch_asset_core` que el PATCH HTTP. ------------
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -411,7 +411,7 @@ async fn update_asset_and_update_liability_share_cores_and_invalidate_full() {
 
     // --- update_liability: la asimetría que empujaba a borrar y recrear. Edita TAE y plan de
     // pago sobre la MISMA fila (misma core `patch_liability_core` que el PATCH) + FULL. --------
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -790,10 +790,10 @@ async fn asset_tools_create_update_and_reject_absurd_returns() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
     let cat = app.create_category(&owner, "asset", "Fondos").await;
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -809,7 +809,7 @@ async fn asset_tools_create_update_and_reject_absurd_returns() {
     app.assert_invalidated(&key, "create_asset").await;
 
     // update_asset_value: valor anterior/nuevo + FULL.
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -912,10 +912,10 @@ async fn budget_tools_move_projection_and_validate() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
     let cat = app.create_category(&owner, "expense", "Ocio").await;
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -1114,7 +1114,9 @@ async fn planning_flow_summary_uses_the_wire_form_of_the_direction() {
 
     // Y coincide con lo que devuelve la lectura para la misma fila.
     // Fase 5: los listados van envueltos con el eco de la vista aplicada.
-    let flows = tool_json(&mcp_post(&app, &token, tool_call("list_planning_flows", json!({}))).await);
+    let flows = tool_json(
+        &mcp_post(&app, &token, tool_call("list_planning_flows", json!({"view": "household"}))).await,
+    );
     assert_eq!(flows["view"], "household", "{flows}");
     assert_eq!(flows["planning_flows"][0]["direction"], "outflow", "{flows}");
 }
@@ -1158,8 +1160,8 @@ async fn update_categorization_rule_shares_core_and_rejects_ambiguous_tristate()
     .await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
-    app.warm_household(&owner.cookie, &key).await;
+    let key = app.default_view_key(iid, owner.user_id);
+    app.warm_default_view(&owner.cookie, &key).await;
 
     // 1. Escritura por la tool + tri-estado: `clear_source` la hace agnóstica del banco.
     let out = tool_json(
@@ -1313,8 +1315,8 @@ async fn delete_categorization_rule_previews_then_deletes() {
         .to_string();
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
-    app.warm_household(&owner.cookie, &key).await;
+    let key = app.default_view_key(iid, owner.user_id);
+    app.warm_default_view(&owner.cookie, &key).await;
 
     // 1. Sin confirm: preview, no borra, y la huella cuadra con lo sembrado.
     let preview = tool_json(
@@ -1556,8 +1558,8 @@ async fn update_fire_settings_merges_field_by_field_and_is_owner_only() {
 
     // Cambiar savings_source por MCP invalida la proyección (FULL).
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
-    app.warm_household(&owner.cookie, &key).await;
+    let key = app.default_view_key(iid, owner.user_id);
+    app.warm_default_view(&owner.cookie, &key).await;
     let envelope = mcp_post(
         &app,
         &token,
@@ -1821,8 +1823,8 @@ async fn reconcile_tools_share_core_and_respect_write_gates() {
     // Desconciliar por MCP (modo B para verificar la invalidación COND).
     set_mode(&app, &owner.cookie, "transactions_avg").await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
-    app.warm_household(&owner.cookie, &key).await;
+    let key = app.default_view_key(iid, owner.user_id);
+    app.warm_default_view(&owner.cookie, &key).await;
     let envelope = preview_then_confirm(
         &app,
         &token,
@@ -1924,10 +1926,10 @@ async fn apply_categorization_rule_previews_then_executes_and_respects_gates() {
         .fetch_one(&app.pool)
         .await
         .unwrap();
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
 
     // 1. PREVIEW: no escribe y no invalida.
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let preview = tool_json(
         &mcp_post(
             &app,
@@ -2083,8 +2085,8 @@ async fn update_transactions_batch_shares_core_and_respects_gates() {
         .fetch_one(&app.pool)
         .await
         .unwrap();
-    let key = app.household_key(iid, owner.user_id);
-    app.warm_household(&owner.cookie, &key).await;
+    let key = app.default_view_key(iid, owner.user_id);
+    app.warm_default_view(&owner.cookie, &key).await;
 
     // 1. Escritura por la tool.
     let out = tool_json(
@@ -3246,7 +3248,7 @@ async fn create_allocation_rule_refuses_the_sink_and_shares_the_core() {
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
     let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
     let asset = app
         .post_json_with_cookie(
@@ -3277,7 +3279,7 @@ async fn create_allocation_rule_refuses_the_sink_and_shares_the_core() {
     }
 
     // Un `remainder` CON tope sí: deja de ser el sumidero.
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let out = tool_json(
         &mcp_post(
             &app,
@@ -3555,9 +3557,9 @@ async fn snapshot_tools_backfill_the_past_without_touching_the_projection_cache(
     let owner = app.register_and_login_owner("alice").await;
     let token = create_token(&app, &owner).await;
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let snap = tool_json(
         &mcp_post(
             &app,
@@ -3919,8 +3921,8 @@ async fn update_category_designates_the_scope_fallback_and_shares_the_core() {
     assert_ne!(fallback_before, compras, "precondición: la semilla trae otra por defecto");
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
-    app.warm_household(&owner.cookie, &key).await;
+    let key = app.default_view_key(iid, owner.user_id);
+    app.warm_default_view(&owner.cookie, &key).await;
 
     // 1. La tool designa la nueva por defecto.
     let out = tool_json(

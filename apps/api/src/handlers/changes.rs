@@ -168,7 +168,7 @@ fn parse_since(raw: Option<&str>) -> Result<DateTime<Utc>, ApiError> {
     path = "/v1/changes",
     tag = "changes",
     params(
-        ("view" = Option<String>, Query, description = "`mine` | household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
         ("since" = String, Query, description = "Obligatorio. RFC 3339 o YYYY-MM-DD."),
         ("limit" = Option<i64>, Query, description = "1..=500; por defecto 100."),
     ),

@@ -714,7 +714,7 @@ fn row_to_response(r: LiabilityRow, today: NaiveDate) -> Result<LiabilityRespons
     path = "/v1/liabilities",
     tag = "liabilities",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = rows attributed to the signed-in user; omit or other value = full household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
     ),
     responses(
         (status = 200, description = "Liabilities visibles: plan de pago vivo o saldo vivo (#145); el vencido con saldo viaja marcado plan_expired_with_balance. Nunca borra nada.", body = [LiabilityResponse]),

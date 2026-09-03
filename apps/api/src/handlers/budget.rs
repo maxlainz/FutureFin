@@ -631,7 +631,7 @@ pub(crate) async fn ledger_regular_monthly_income_and_expense(
     path = "/v1/budget",
     tag = "budget",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = partidas atribuidas al usuario de la sesión (las cuotas de pasivo se filtran igual); omitido = hogar."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
     ),
     responses(
         (status = 200, description = "Presupuesto: partidas persistidas y cuotas de pasivos activos en una sola lista (`entries`, discriminadas por `source`), con los totales normalizados a equivalente mensual.", body = BudgetSnapshotResponse),

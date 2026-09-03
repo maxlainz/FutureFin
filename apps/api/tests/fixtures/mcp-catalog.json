@@ -776,8 +776,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "5bbdcf2de7e5",
-      "description_len": 495,
-      "description_sha256_12": "2d134bd1f42c",
+      "description_len": 575,
+      "description_sha256_12": "ecb42eb0fd8c",
       "name": "get_projection",
       "properties": [
         "include_asset_series",

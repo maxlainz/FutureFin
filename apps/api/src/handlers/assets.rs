@@ -398,7 +398,7 @@ async fn fetch_asset_resolved_targets(
     path = "/v1/assets",
     tag = "assets",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = rows attributed to the signed-in user; omit or other value = full household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
     ),
     responses(
         (status = 200, description = "Assets for the installation", body = [AssetResponse]),

@@ -412,8 +412,8 @@ pub struct NoParams {}
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ViewParams {
-    /// Scope: "mine" = solo lo del usuario del token; omitido = hogar completo. La respuesta
-    /// ecoa la vista efectivamente aplicada en su campo `view`.
+    /// Scope: "mine" (DEFAULT desde 5.0.0) = solo lo del usuario del token; "household" = hogar
+    /// entero, hay que pedirlo. La respuesta ecoa la vista aplicada en su campo `view`.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -422,8 +422,9 @@ pub struct ViewParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProjectionParams {
-    /// Scope: "mine" = solo lo del usuario del token; omitido = hogar completo. La respuesta
-    /// ecoa la vista efectivamente aplicada en su campo `view`.
+    /// Scope: "mine" (DEFAULT desde 5.0.0) = la simulación del usuario del token, con SU
+    /// estrategia. "household" = la SUMA de una simulación por miembro: sin `jubilacion_*` ni
+    /// `fire_target_series` (razón `household_aggregate`), con el hito de cada uno en `members[]`.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -443,8 +444,8 @@ pub struct ProjectionParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryParams {
-    /// Scope: "mine" = solo lo del usuario del token; omitido = hogar completo. La respuesta
-    /// ecoa la vista efectivamente aplicada en su campo `view`.
+    /// Scope: "mine" (DEFAULT desde 5.0.0) = solo lo del usuario del token; "household" = hogar
+    /// entero, hay que pedirlo. La respuesta ecoa la vista aplicada en su campo `view`.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -463,8 +464,8 @@ pub struct HistoryParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TransactionsSummaryParams {
-    /// Scope: "mine" = solo lo del usuario del token; omitido = hogar completo. La respuesta
-    /// ecoa la vista efectivamente aplicada en su campo `view`.
+    /// Scope: "mine" (DEFAULT desde 5.0.0) = solo lo del usuario del token; "household" = hogar
+    /// entero, hay que pedirlo. La respuesta ecoa la vista aplicada en su campo `view`.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -528,8 +529,8 @@ impl TxnFilterScalars {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListTransactionsParams {
-    /// Scope: "mine" = solo lo del usuario del token; omitido = hogar completo. La respuesta
-    /// ecoa la vista efectivamente aplicada en su campo `view`.
+    /// Scope: "mine" (DEFAULT desde 5.0.0) = solo lo del usuario del token; "household" = hogar
+    /// entero, hay que pedirlo. La respuesta ecoa la vista aplicada en su campo `view`.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -599,8 +600,8 @@ pub struct CategoriesParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CategorySeriesParams {
-    /// Scope: "mine" = solo lo del usuario del token; omitido = hogar completo. La respuesta
-    /// ecoa la vista efectivamente aplicada en su campo `view`.
+    /// Scope: "mine" (DEFAULT desde 5.0.0) = solo lo del usuario del token; "household" = hogar
+    /// entero, hay que pedirlo. La respuesta ecoa la vista aplicada en su campo `view`.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -621,8 +622,8 @@ pub struct CategorySeriesParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CashflowParams {
-    /// Scope: "mine" = solo lo del usuario del token; omitido = hogar completo. La respuesta
-    /// ecoa la vista efectivamente aplicada en su campo `view`.
+    /// Scope: "mine" (DEFAULT desde 5.0.0) = solo lo del usuario del token; "household" = hogar
+    /// entero, hay que pedirlo. La respuesta ecoa la vista aplicada en su campo `view`.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -897,8 +898,9 @@ pub struct LiabilityOverrideParam {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SimulateParams {
-    /// Scope: "mine" = solo lo del usuario del token; omitido = hogar completo. La respuesta
-    /// ecoa la vista efectivamente aplicada en su campo `view`.
+    /// Scope. SOLO "mine" (el default): "household" es 400 `household_not_simulable` — el hogar
+    /// es la suma de N simulaciones, una por miembro y con la estrategia de cada uno, y un
+    /// what-if sobre eso no tiene un plan único que mover.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -1724,8 +1726,8 @@ pub struct DeleteCategorizationRuleParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListImportsParams {
-    /// Scope: "mine" = solo lo del usuario del token; omitido = hogar completo. La respuesta
-    /// ecoa la vista efectivamente aplicada en su campo `view`.
+    /// Scope: "mine" (DEFAULT desde 5.0.0) = solo lo del usuario del token; "household" = hogar
+    /// entero, hay que pedirlo. La respuesta ecoa la vista aplicada en su campo `view`.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -2238,8 +2240,8 @@ impl UpdateRetirementProfileParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AggregateTransactionsParams {
-    /// Scope: "mine" = solo lo del usuario del token; omitido = hogar completo. La respuesta
-    /// ecoa la vista efectivamente aplicada en su campo `view`.
+    /// Scope: "mine" (DEFAULT desde 5.0.0) = solo lo del usuario del token; "household" = hogar
+    /// entero, hay que pedirlo. La respuesta ecoa la vista aplicada en su campo `view`.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -2289,8 +2291,8 @@ pub struct AggregateTransactionsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FindDuplicateTransactionsParams {
-    /// Scope: "mine" = solo lo del usuario del token; omitido = hogar completo. Los grupos nunca
-    /// mezclan personas (la huella incluye el owner), pero el scope decide qué filas se miran.
+    /// Scope: "mine" (default) | "household". Los grupos nunca mezclan personas (la huella
+    /// incluye el owner), pero el scope decide qué filas se miran.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -2341,7 +2343,7 @@ pub struct LiabilityScheduleParams {
     /// UUID del pasivo (de list_liabilities).
     #[schemars(regex(pattern = UUID_STRING))]
     pub liability_id: String,
-    /// Scope: "mine" | omitido = hogar completo.
+    /// Scope: "mine" (default) | "household".
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -2375,7 +2377,7 @@ pub struct DeflateAmountParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecentChangesParams {
-    /// Scope: "mine" | omitido = hogar completo. La respuesta ecoa la vista aplicada.
+    /// Scope: "mine" (default) | "household". La respuesta ecoa la vista aplicada.
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
@@ -2665,7 +2667,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_projection",
-        description = "Proyección de patrimonio y jubilación (FIRE): serie futura (~82 puntos, mensual el primer año y anual después), objetivo FIRE por mes, jubilación estimada (`jubilacion_date_ymd`, `jubilacion_age`), hitos y supuestos. Cada punto trae `net_worth` (euros NOMINALES de ese mes) y `net_worth_real` (los mismos en euros de HOY, con `deflation_annual_inflation_percent`): di cuál citas, y lo mismo con `jubilacion_target_net_worth` (hoy) vs `..._nominal`. Los escalones los explica `events` (tope 100).",
+        description = "Proyección de patrimonio y jubilación (FIRE): serie futura (~82 puntos, mensual el primer año y anual después), objetivo FIRE por mes, jubilación estimada (`jubilacion_date_ymd`, `jubilacion_age`), hitos y supuestos. Cada punto trae `net_worth` (euros NOMINALES de ese mes) y `net_worth_real` (los mismos en euros de HOY, con `deflation_annual_inflation_percent`): di cuál citas, y lo mismo con `jubilacion_target_net_worth` (hoy) vs `..._nominal`. Los escalones los explica `events` (tope 100). Con `view: \"household\"` la serie es la SUMA por miembro (hitos en `members[]`).",
         annotations(title = "Proyección FIRE", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_projection(
@@ -6554,12 +6556,18 @@ impl ServerHandler for FutureFinMcp {
                 de MES en la rejilla de la serie, NUNCA una posición de array: con la densidad `hybrid` que \
                 sirve get_projection la mayoría de los meses no tiene punto propio. Para indexar usa la \
                 posición que la respuesta publica al lado (`jubilacion_series_position`), y si no hay \
-                ninguna es que esa cifra no se lee de la serie.\n\nSCOPE. `view: \"mine\"` filtra a los datos \
-                del usuario del token; omitido o `\"household\"` devuelve el hogar entero; cualquier otro \
-                valor es error `invalid_view`. Las tools que no aceptan el parámetro son siempre del usuario \
-                del token. Toda respuesta cuyo contenido dependa del scope ECOA la vista aplicada en su \
-                campo `view`: si dice `household`, la cifra es del hogar aunque hayas pedido `mine` y el \
-                hogar tenga un solo miembro.\n\nFORMA DE LOS LISTADOS. Casi todos los `list_*` devuelven un \
+                ninguna es que esa cifra no se lee de la serie.\n\nSCOPE. **El default es `view: \"mine\"`** \
+                (desde 5.0.0): omitir el parámetro devuelve los datos del usuario del token, y el hogar \
+                entero hay que pedirlo con `view: \"household\"`; cualquier otro valor es error \
+                `invalid_view`. Las tools que no aceptan el parámetro son siempre del usuario del token. \
+                Toda respuesta cuyo contenido dependa del scope ECOA la vista aplicada en su campo `view`: \
+                si dice `household`, la cifra es del hogar aunque hayas pedido `mine` y el hogar tenga un \
+                solo miembro. En `get_projection` el hogar NO es «las mismas cuentas con más filas»: es la \
+                SUMA de una simulación por miembro, cada una con SU estrategia de jubilación, así que la \
+                respuesta agregada no trae `jubilacion_*` ni `fire_target_series` (van con \
+                `absent_reason: \"household_aggregate\"`) y el hito de cada persona viaja en `members[]`. \
+                Por lo mismo `simulate_projection` RECHAZA el hogar con `household_not_simulable`: un \
+                what-if necesita un plan, y el hogar tiene N.\n\nFORMA DE LOS LISTADOS. Casi todos los `list_*` devuelven un \
                 OBJETO, no un array suelto: los elementos van bajo la clave de su entidad — `assets`, \
                 `liabilities`, `planning_flows`, `allocation_rules`, `months`, `transactions`, `imports`, \
                 `snapshots`, `rules`, `goals`, `changes`, `suggestions`, `groups` — más el eco de `view` \

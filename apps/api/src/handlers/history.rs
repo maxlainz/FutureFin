@@ -1630,7 +1630,7 @@ const DEFAULT_HISTORY_WINDOW_MONTHS: i64 = 120;
     path = "/v1/history/series",
     tag = "history",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = solo mis snapshots; omitido u otro valor → `household` (todos los usuarios de la instalación)."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
         ("window_months" = Option<i64>, Query, description = "Limita la serie a los últimos N meses (1..=1200; fuera de rango → 400 `window_months_out_of_range`). Omitido = 120 (10 años); usa 1200 para todo el histórico. La respuesta ecoa `window_months` y marca `window_truncated`."),
         ("include_asset_series" = Option<bool>, Query, description = "`false` omite `asset_series`. Default `true`."),
     ),
@@ -2027,7 +2027,7 @@ const MAX_FINE_CURVE_WINDOW_MONTHS: i32 = 36;
     path = "/v1/history/cashflow",
     tag = "history",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = solo mis transacciones/snapshots; omitido u otro valor → `household`."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
         ("window_months" = Option<i64>, Query, description = "Meses de ventana (default 24, rango 1..=120; fuera de rango → 400 `window_months_out_of_range`). Por encima de 36 el agregado mensual llega igual, pero la curva fina se omite con `fine_absent_reason = window_too_large_for_curve`."),
         ("resolution" = Option<String>, Query, description = "`weekly` (default) | `daily`. `daily` requiere `window_months <= 6`."),
     ),

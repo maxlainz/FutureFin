@@ -356,6 +356,75 @@ async fn the_new_jubilacion_fields_are_explicit_null_when_there_is_no_crossing()
     );
 }
 
+/// 5.0.0 (§B.8) — **las tres series de retirada son FLUJOS del mes, no acumulados**, y los dos
+/// nombres del mes efectivo apuntan al mismo punto de la serie.
+///
+/// Publicar `withdrawal` como acumulado sería el mismo fallo de familia que este fichero
+/// documenta: una cifra sintácticamente válida que significa otra cosa. Se distingue con una
+/// prueba directa —la suma de los flujos hasta el mes k es MAYOR que el flujo de k, y el flujo no
+/// es monótono— sin depender de ningún número concreto del modelo.
+#[tokio::test]
+async fn the_withdrawal_series_are_monthly_flows_and_the_positions_index_the_arrays() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_crossing_household(&app, &owner).await;
+
+    let r = app
+        .get_with_cookie("/v1/projection/series?months=600", &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let s = r.json();
+
+    let k = s["jubilacion_month_index"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("este escenario debe cruzar: {s}"));
+    assert_eq!(
+        s["retirement_month_index"], s["jubilacion_month_index"],
+        "R8: los dos nombres son el mismo mes: {s}"
+    );
+    assert_eq!(
+        s["retirement_series_position"], s["jubilacion_series_position"],
+        "y las dos posiciones, la misma: {s}"
+    );
+
+    let pts = s["points"].as_array().expect("points");
+    // La posición INDEXA el array (esa es toda su razón de ser) y apunta al último punto servido
+    // que no pasa del mes publicado.
+    let pos = s["retirement_series_position"].as_u64().expect("posición") as usize;
+    assert!(pos < pts.len(), "la posición debe caer dentro de points: {pos} / {}", pts.len());
+    assert!(
+        pts[pos]["month_index"].as_u64().unwrap() <= k,
+        "convención «el punto anterior o igual»: {}",
+        pts[pos]
+    );
+
+    // El flujo del mes: 0 mientras se acumula, positivo una vez jubilado.
+    let w_at = |m: u64| -> f64 {
+        pts.iter()
+            .find(|p| p["month_index"] == m)
+            .unwrap_or_else(|| panic!("sin punto {m}"))["withdrawal"]
+            .as_f64()
+            .unwrap()
+    };
+    assert_eq!(w_at(0), 0.0, "el mes 0 no es un mes simulado: {s}");
+    assert_eq!(w_at(k.saturating_sub(1)), 0.0, "el mes anterior aún no drena");
+    let despues = w_at(k + 12);
+    assert!(despues > 0.0, "jubilado: el mes {} retira: {despues}", k + 12);
+
+    // Y NO es un acumulado: la suma de los flujos posteriores al cruce supera con creces
+    // cualquier flujo individual, y el flujo individual no crece sin parar de mes en mes.
+    let suma: f64 = pts
+        .iter()
+        .filter(|p| p["month_index"].as_u64().unwrap() > k)
+        .map(|p| p["withdrawal"].as_f64().unwrap())
+        .sum();
+    assert!(
+        suma > despues * 2.0,
+        "si `withdrawal` fuese acumulado, un solo punto ya valdría casi la suma entera: \
+         suma {suma}, punto {despues}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 2. `final_net_worth_real_delta` con deflactores incomparables
 // ---------------------------------------------------------------------------

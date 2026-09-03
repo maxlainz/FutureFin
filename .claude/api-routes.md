@@ -606,7 +606,21 @@ son 100.000 € de caja pero **78.618,1542 €** de deuda hoy. Además, en PATCH
 nuevos (el modelo se resuelve antes del bloque de derivación, a propósito).
 
 ### Summary (`/v1/summary/`)
-Aggregated net worth, financial health metrics, category breakdowns. Accepts `?view=mine`. `total_liabilities` and breakdowns use the 4.7.0 visibility predicate (plan vivo o saldo vivo — see Liabilities note above); el `net_return` solo resta el TIN de lo que DEVENGA (#121).
+Aggregated net worth, financial health metrics, category breakdowns. Accepts `?view=` (**default
+`mine` desde 5.0.0**, R2).
+
+**El SWR del umbral «runway indefinido» es del PERFIL, y en `household` es el MÍNIMO del hogar
+(5.0.0, D13/§D).** El SWR salió de `installation.fire_settings` en 5.0.0 y vive en
+`users.retirement_profile`: en `view=mine` se usa el del solicitante y punto. En `view=household`
+el runway se sirve sobre las filas de TODO el hogar, así que `household_min_swr_pct` (`summary.rs`)
+toma el **menor** `swr_pct` entre los perfiles de los miembros con fila en
+`installation_memberships`. El mínimo no es una preferencia estética: «indefinido» significa «esta
+cartera aguanta para siempre», y basta con que UN miembro considere insostenible esa tasa de
+retirada para que el hogar no pueda declararlo — con el máximo (o con el del solicitante) el más
+optimista del hogar firmaría por todos. Con un solo miembro coincide con el suyo y nada se mueve.
+Los perfiles se resuelven por el MISMO camino que cualquier otro (`resolve_retirement_profile`), no
+leyendo el JSONB crudo: una segunda interpretación del mismo dato es como divergen los defaults.
+ `total_liabilities` and breakdowns use the 4.7.0 visibility predicate (plan vivo o saldo vivo — see Liabilities note above); el `net_return` solo resta el TIN de lo que DEVENGA (#121).
 
 **Campos de contexto (4.4.0, Fase 5, issue #86)** — ninguno cambia una cifra; todos declaran de dónde sale:
 - **`view`** (raíz, `"household" | "mine"`) — eco de la vista aplicada (`LedgerView::as_str`). Reenviarlo como `?view=` reproduce la misma respuesta. Existe porque en una instalación de un solo usuario `?view=mine` y omitirlo devolvían payloads **byte a byte idénticos**.
@@ -683,9 +697,45 @@ códigos se emiten como literales completos en cada sitio** porque `error_codes_
 fuente y uno compuesto con `format!` sería invisible para el catálogo.
 
 ### Projection (`/v1/projection/`)
-Net-worth series via `futurefin-engine`. Accepts `?view=mine` and `?months=N`. `N` fuera de
-**12–840** es **400 `months_out_of_range`** (desde 4.4.0; antes se clampaba en silencio y la
-respuesta afirmaba `horizon_basis: "months_override"` como si hubiera hecho caso al valor pedido).
+Net-worth series via `futurefin-engine`. Accepts `?view=` (**default `mine` desde 5.0.0**, R2) y
+`?months=N`. `N` fuera de **12–840** es **400 `months_out_of_range`** (desde 4.4.0; antes se
+clampaba en silencio y la respuesta afirmaba `horizon_basis: "months_override"` como si hubiera
+hecho caso al valor pedido).
+
+**`view=household` es un AGREGADO de N simulaciones, no una simulación con más filas (5.0.0, D9 /
+§D del plan de #207).** El handler corre **una simulación por miembro** de
+`installation_memberships` —cada una con SU perfil de jubilación, SU fecha de nacimiento y SUS
+filas (`LedgerView::Mine` atado a ese miembro)— al horizonte común `max(horizontes individuales)`
+(`horizon_basis: "household_max_lifespan"`), y suma. Regla por campo:
+
+| Campo | Agregación |
+|---|---|
+| `points[].net_worth` / `net_worth_liquid` / `contributed_capital` / `withdrawal*` | **Σ** por mes |
+| `points[].net_worth_real` | Σ y **DESPUÉS** deflactado (la inflación es de la instalación: sale lo mismo, con una sola división por punto) |
+| `asset_series[]` | **concatenadas** (ya vienen identificadas por `asset_id`; sumarlas destruiría la única desagregación que el chart necesita) |
+| `events[]`, `liabilities_negative_amortization[]` | concatenados, con el tope GLOBAL de 100 eventos |
+| `uncovered_deficit_total`, `unallocated_savings_total`, `starting_net_worth`, `monthly_delta_assumption` | **Σ** |
+| `assets_depleted_month_index` | **MÍNIMO** (el hogar se queda sin cartera cuando el PRIMERO se queda sin la suya); el detalle por persona en `members[]` |
+| `fire_target_series` | `[]` + `fire_target_absent_reason: "household_aggregate"` |
+| `jubilacion_*`, `retirement_*`, `strategy`, `retirement_trigger`, `phase_transitions`, `pension_start_month_index`, `partial_retirement_month_index`, `fire_target_debt_component` | `null` / `[]` + `jubilacion_absent_reason: "household_aggregate"` |
+| `liquid_crossing_month_index` | `null` + `liquid_crossing_absent_reason: "household_aggregate"` |
+| `compound_outpaces_true_savings_month_index` | `null` + `compound_outpaces_true_savings_absent_reason: "household_aggregate"` |
+| `savings_source`, `savings_*_basis`, `viewer_birth_date`, `show_age_mode`, `horizon_lifespan_age` | del **SOLICITANTE** (el fallback del promedio se decide por scope: no existe UN basis del hogar) |
+| `members[]` | una fila por miembro (ver abajo) |
+
+`members[]` = `{user_id, username, strategy, jubilacion_month_index, jubilacion_age,
+liquid_crossing_month_index, retirement_month_index, coast_fire_month_index (siempre `null` hasta
+`solve.rs`), partial_retirement_month_index, pension_start_month_index,
+assets_depleted_month_index, warnings[]}`. **Sin series por miembro**: el hogar publica UNA curva y
+esto explica de quién es cada marcador; N series completas multiplicarían el payload por el número
+de miembros para contestar algo que se responde con seis enteros. Un usuario **pendiente de
+aprobación NO es del hogar** (la frontera es `installation_memberships`, la misma que decide el
+acceso) y un miembro sin datos aporta una serie plana de ceros y su fila, no un hueco. Vacío en
+`view=mine`. Tests: `apps/api/tests/projection_household_aggregate.rs`.
+
+`simulate_projection` **rechaza** `view=household` con **400 `household_not_simulable`**: un
+what-if mueve UN plan y el hogar tiene N. El rechazo vive en `simulate_projection_core`, no en la
+capa MCP, para que HTTP y MCP no puedan discrepar el día que haya ruta.
 
 Response (`ProjectionSeriesResponse`) includes:
 - `view` (4.4.0) — eco de la vista aplicada, `"household" | "mine"`. Aquí importa además porque el horizonte y la demografía (`viewer_birth_date`, `jubilacion_age`) son SIEMPRE del solicitante, también en `household`: sin este campo, dos respuestas con el mismo horizonte y distinto scope de patrimonio se leen igual.
@@ -702,6 +752,20 @@ Response (`ProjectionSeriesResponse`) includes:
 - `compound_outpaces_true_savings_month_index` — primer **MES** (misma base que `points[].month_index`, **no** una posición de array) en que el rendimiento del patrimonio supera el ahorro mensual base — sin Próximos ni plan de amortización, que son puntuales o decrecientes y harían depender el cruce de un pago suelto. `null` = no cruza dentro del horizonte, **no** «no calculado». No tiene `*_series_position` porque la cifra no se lee de la serie.
 - `events[]` + `events_truncated` (4.4.0, Fase 5) — los **saltos** de la curva: un elemento `{month_index, date_ymd, title, amount, direction, overdue}` por cada Próximo **con `due_date`** — el VENCIDO incluido (4.11.0, #126): carga íntegro en el mes 0 con `overdue: true` y su `date_ymd` REAL (pasada), así que el mes señalado y la fecha mostrada dejan de coincidir a propósito y el flag es lo que lo declara —, `amount` como magnitud ≥ 0 y el signo en `direction` (`inflow` scope income | `outflow` scope expense), orden mes ASC + importe DESC, tope `PROJECTION_EVENTS_MAX = 100` (`events_truncated` marca el recorte, que se lleva los meses más lejanos). **Sin query nueva**: sale de los `planning_rows` ya cargados y **comparte la regla de mapeo fecha→mes** con `planning_monthly_cash_adjustments_from_flows`, así que el mes que señala es exactamente aquel en el que la curva salta. **No entran** los Próximos sin fecha (se reparten sobre 90 días naturales desde el día 1 del mes ancla — #126: producen una rampa idéntica todos los días del mes, no un escalón), ni los pasivos, ni las partidas de presupuesto con fecha de fin (cambian la PENDIENTE, no producen un escalón). Existe porque con `density=hybrid` —la que sirve la tool MCP— entre dos puntos consecutivos caben doce meses y una caída de decenas de miles de euros no tenía en la respuesta **nada** que la explicara. **Se descartó exponer `density` como parámetro de la tool**: `monthly` multiplica el payload por ~5 (841 puntos) y sigue sin decir POR QUÉ cayó, solo dónde; un evento son ~90 bytes y contesta la pregunta entera.
 - `fire_target_series: f64[]`, `asset_series[].values: f64[]` — arrays grandes paralelos a `points` (también `f64`).
+- **Estrategia y fases (5.0.0, §B.8/§C)** — la jubilación deja de ser «un cruce» y pasa a ser lo que decide la ESTRATEGIA del perfil del usuario (`users.retirement_profile.strategy`):
+  - `strategy` (`asap` | `retire_at_age` | `coast` | `partial` | `pension_bridge`; `null` en `household`) y `retirement_trigger` (`liquid_crossing` | `target_age`). Se ecoan por el mismo motivo que `view`: dos respuestas con las mismas cifras y distinta estrategia se leen igual, y la estrategia decide **qué significa** `jubilacion_month_index` — un objetivo alcanzado o una edad impuesta.
+  - **`jubilacion_month_index` := el mes EFECTIVO de jubilación del motor** (R8): `ProjectionOutput::retirement_month_index`, traducido de mes del BUCLE (1-based) a la REJILLA publicada (0-based) con `engine_month_to_grid` (`k − 1`; el primer mes vivido como jubilado es el `k` del motor y su mes civil es `ancla + (k−1)`, que es exactamente la fecha que `jubilacion_civil` publica para la casilla `k−1`). Hasta 4.15.x lo derivaba `fire_crossover_month` en el handler. Con `asap` las dos definiciones coinciden **exactamente** y ni un pin se movió (`projection_pins.rs`, escenario A: mes 235 antes y después).
+  - `retirement_month_index` / `retirement_series_position` — el MISMO valor que `jubilacion_month_index` / `jubilacion_series_position`, con el nombre del motor. Viajan los dos porque `jubilacion_*` es el contrato publicado desde 1.x y `retirement_*` es el nombre del resto de las lecturas de fase.
+  - `liquid_crossing_month_index` — el cruce `líquido(k) ≥ objetivo(k)`, ahora **LECTURA PURA**. Con `asap` coincide con el mes efectivo; con una estrategia por edad puede caer después (te jubilas sin llegar) o antes (podrías haberte ido antes). Lo calcula el handler con `fire_crossover_month` sobre `built.fire_target_reading`, **no** el motor: en las estrategias por edad el motor no recibe objetivo (D17) y su propia lectura sería `null`. `liquid_crossing_absent_reason` ∈ {`household_aggregate`, `no_fire_target`}; `null` + valor `null` = hay objetivo y no se cruza dentro del horizonte.
+  - `jubilacion_absent_reason` ∈ {`household_aggregate`, `no_retirement_trigger`} — por qué los `jubilacion_*`/`retirement_*` están vacíos **por construcción**. `null` ⟺ hay trigger, y entonces un índice nulo significa «no se alcanza dentro del horizonte», que es un resultado y no un hueco.
+  - `phase_transitions[]` = `{phase: accumulating|partial|retired, month_index}` en la rejilla publicada — la fuente del carril de fases del chart (D29). El orden ES el dato: las fases son monótonas y la que no ocurre no aparece.
+  - `pension_start_month_index`, `partial_retirement_month_index` — `null` hasta WP3 (la pensión sin fecha de hoy viaja dentro del ingreso de jubilación y no tiene mes propio).
+  - `warnings[]` — literales cerrados: `birth_date_missing` / `target_retirement_age_missing` = una estrategia por edad **degradó a `asap`** porque le faltaba el dato. **Nunca un 500 en una lectura**; en `household` va vacío y los avisos viajan por miembro.
+  - **D17, un solo trigger por simulación**: con `retire_at_age`/`coast` el handler pasa `PhasePlan::forced_at(R)` y **`fire_target: None`** al motor, donde `R` = `months_until_target_age(hoy, DOB, edad) + 1` (mes del bucle). El objetivo se sigue calculando y publicando (`fire_target_series`, `jubilacion_target_net_worth*`) desde `BuiltProjection::fire_target_reading`: la línea discontinua no desaparece porque la edad tome el mando, solo deja de decidir. `months_until_target_age` se define sobre `age_completed_years` + `proj_add_months` (la aritmética que ya publica `jubilacion_age`), lo que compra un invariante comprobable: **`jubilacion_age == target_retirement_age` exactamente**. Tests: `apps/api/tests/projection_age_strategy.rs`.
+  - **`partial` y `pension_bridge` se comportan hoy como `asap`** (marcador `// WP3` en `build_installation_projection_input`): sus bloques `pension`/`partial_retirement` NO se pasan al plan porque el motor los rechaza (`UnsupportedPhase`), y aceptar la estrategia para simular otra cosa publicaría el patrimonio de un plan que nadie configuró.
+  - La **regla de retirada** y su `spend_mode` sí se pasan ya desde el perfil (`withdrawal_rule_to_engine`, traducción total sin brazo comodín). Con `fixed_real` (el default) es bit-idéntico a 4.15.x; cualquier otra sale por **400 `engine_feature_unavailable`** (`map_engine_err` mapea ahí `EngineError::UnsupportedWithdrawalRule` y `UnsupportedPhase`: no es un input inválido, es una capacidad que aún no existe, y `engine_rejected_input` mandaría al usuario a corregir unos datos que están bien).
+- `points[].withdrawal` / `withdrawal_shortfall` / `withdrawal_excess` (5.0.0, §B.8) — **flujos del MES**, no acumulados, serializados como `f64` como el resto de la serie y decimados por densidad igual que `net_worth`. `withdrawal` = los euros que salieron de los activos para cubrir el déficit (NETOS: el impuesto de la plusvalía se paga vendiendo de más, y ese exceso vive dentro del patrimonio); `withdrawal_shortfall` = `max(0, necesidad − permitido)` — **informativo**, no resta patrimonio, no cuenta como fracaso (D22/D24) y **no es** `uncovered_deficit_total`, que mide lo que los activos no pudieron vender; `withdrawal_excess` = el sobrante de la regla en modo `rule_is_spend`. Los dos últimos son **todo ceros** mientras la regla sea `fixed_real` (no tiene techo): los llena WP2. Pin: `projection_number_semantics.rs::the_withdrawal_series_are_monthly_flows_and_the_positions_index_the_arrays`.
+- `members[]` (5.0.0, D9) — vacío en `mine`, una fila por miembro en `household`. Ver el bloque de agregación de arriba.
 - `points[].net_worth_liquid` (4.8.0, #143) — la riqueza **líquida** de cada punto (Σ activos `is_liquid`, BRUTA, sin restar principal — `surplus_cash` retirado del término en 4.12.1/#175), escalar por punto serializado como `f64` como sus vecinos. Es **la serie contra la que se decide el cruce FIRE** — `net_worth` (total) se sigue publicando y pintando, pero cruzar con él contaba la vivienda como si pudiera pagar la compra del mes. Emparejada con el término de deuda del objetivo (#142): quien no resta el principal en la base debe cubrir TODAS las cuotas pendientes en el objetivo (algebraicamente equivalente al par «NW neto vs base + interés restante»).
 - `fire_target_debt_component` (4.8.0, #142; Decimal-string, opcional) — el término de deuda del objetivo **en el mes 0**: Σ de todos los pagos de cuota pendientes (cuota + extra + comisión) + cola residual. `fire_target_series[p]` ya lo lleva dentro (la serie es base inflada + término decreciente); este escalar existe para que la vista Jubilación sume al objetivo del formulario el componente que la forma cerrada del cliente no modela. Con deuda viva **el objetivo deja de ser monótono** (base creciente + término decreciente; con inflación 0, estrictamente decreciente).
 - `net_recurring_monthly` / `net_cash_monthly` (semántica 4.8.0, #127) — convergen al **primer paso real del motor** (`first_month_allocation`): el servicio de deuda es el que se paga de verdad el mes 1 (`min(cuota, payoff)` + extra + comisión, no la cuota nominal) y `net_cash_monthly` incluye el tramo de Próximos del mes 1. Hasta 4.7.x se recalculaban aparte con la cuota nominal y las dos superficies publicaban dos «cajas del mes» distintas (300 € de brecha en el escenario del issue). Sin activos ya no hay atajo a ceros (el engine calcula la caja igual). Fallback a la fórmula nominal solo si el engine devuelve error.
@@ -714,7 +778,7 @@ Response (`ProjectionSeriesResponse`) includes:
 
 **`GET /v1/projection/deflate` (4.4.0, Fase 6)** — convierte un importe entre euros nominales de un mes futuro y euros de hoy, **en las dos direcciones a la vez** (`deflator`, `amount_in_today_euros`, `amount_in_month_euros`). Query: `amount` (con signo) y **exactamente uno** de `month_index` (0..840) o `date` — la guardia es literalmente `month_index.is_some() == date.is_some()`, así que **mandar los dos Y no mandar ninguno** dan el mismo `deflate_timing_ambiguous`; una fecha pasada `deflate_date_in_past`, un mes fuera de rango `deflate_month_out_of_range` (por cualquiera de las dos vías, también desde una `date` lejana). **No acepta `?view=`**: la inflación asumida es de la **instalación**, no de una persona, así que un scope aquí sería un parámetro que no significa nada. No simula: reusa el mismo `deflator_at_month_index` que produce `net_worth_real` y `milestones_real` (un solo deflactor para las tres superficies, pineado en `projection_deflation.rs::the_served_deflator_is_the_one_behind_milestones_real`). Core `deflate_amount_core`.
 
-**Cache server-side**: `AppState` mantiene un cache in-memory por `(installation_id, view, owner_user_id, density)` (`ProjectionCacheKey`, `state.rs`) con sliding TTL de 60 min. **`owner_user_id` es SIEMPRE `Some(_)`, también en `household` (4.0.0)**: hasta entonces solo viajaba en `mine`, y la respuesta de `household` lleva demografía del **solicitante** (`viewer_birth_date`, el horizonte derivado de su edad, `jubilacion_age`, el eje de edades), así que el primer miembro que pedía la proyección dejaba la suya cacheada para todo el hogar — un miembro recibía la fecha de nacimiento de otro y, con el orden inverso, un horizonte de 360 meses en vez de 648: si su cruce FIRE caía en el mes 400, la app le decía «no llegas a jubilarte». Regresión: `apps/api/tests/projection_cache.rs`. Hits sub-ms; el GET sin cache hace el cómputo full (~500 ms). Invalidación automática: cualquier mutación en assets/liabilities/budget/planning/allocation/installation/user.birth_date llama `state.invalidate_projection_by_installation(iid)`; las mutaciones de **transactions** invalidan **solo en los modos que usan transacciones** (`fire_settings.savings_source ∈ {transactions_avg, budget_income_real_expense}`, i.e. `SavingsSource::uses_transactions()`; ver sección Transactions). Logout llama `state.invalidate_projection_by_user(user_id)` (solo `view=mine`). Warm-up: `tokio::spawn` tras `POST /v1/auth/login` recomputa `view=household` para que el primer GET sea hit. Sin warm-up tras mutación (evita race condition de warm-ups concurrentes).
+**Cache server-side**: `AppState` mantiene un cache in-memory por `(installation_id, view, owner_user_id, density)` (`ProjectionCacheKey`, `state.rs`) con sliding TTL de 60 min. **`owner_user_id` es SIEMPRE `Some(_)`, también en `household` (4.0.0)**: hasta entonces solo viajaba en `mine`, y la respuesta de `household` lleva demografía del **solicitante** (`viewer_birth_date`, el horizonte derivado de su edad, `jubilacion_age`, el eje de edades), así que el primer miembro que pedía la proyección dejaba la suya cacheada para todo el hogar — un miembro recibía la fecha de nacimiento de otro y, con el orden inverso, un horizonte de 360 meses en vez de 648: si su cruce FIRE caía en el mes 400, la app le decía «no llegas a jubilarte». Regresión: `apps/api/tests/projection_cache.rs`. Hits sub-ms; el GET sin cache hace el cómputo full (~500 ms). Invalidación automática: cualquier mutación en assets/liabilities/budget/planning/allocation/installation/user.birth_date llama `state.invalidate_projection_by_installation(iid)`; las mutaciones de **transactions** invalidan **solo en los modos que usan transacciones** (`fire_settings.savings_source ∈ {transactions_avg, budget_income_real_expense}`, i.e. `SavingsSource::uses_transactions()`; ver sección Transactions). Logout llama `state.invalidate_projection_by_user(user_id)` (solo `view=mine`). Warm-up: `tokio::spawn` tras `POST /v1/auth/login` recomputa **`view=mine`** del usuario que entra (`warm_up_mine_projection`, renombrado en 5.0.0) para que el primer GET sea hit — desde R2 esa es la vista por defecto y la que pide la SPA; calentar `household` dejaría en la cache una entrada que nadie consulta y que además cuesta N simulaciones. Sin warm-up tras mutación (evita race condition de warm-ups concurrentes).
 
 **Compresión**: todos los endpoints pasan por `tower_http::compression::CompressionLayer::new().gzip(true)`. `/v1/projection/series` baja de ~260 KB a ~30 KB con `Content-Encoding: gzip`.
 
@@ -948,7 +1012,17 @@ if !role_can_write(role.as_str()) { return Err(ApiError::Forbidden); }
 
 For any endpoint that accepts `?view=mine`, **do not** write two `match view { Household => sqlx::query_as("…installation_id = $1…"), Mine => sqlx::query_as("…installation_id = $1 AND owner_user_id = $2…") }` branches. Use the helpers in `handlers/person_view.rs`:
 
-**Desde 4.0.0 `resolve()` es falible.** Valores aceptados: `mine`, `household`, ausente o vacío. Cualquier otro → `400 invalid_view`. Antes el brazo comodín devolvía **household** (el hogar entero) en silencio, así que un cliente que escribiera `"MINE"` recibía datos de otros miembros creyendo haber pedido los suyos (auditoría MCP §4). No era un fallo de autorización — D2 sigue vigente: cualquier miembro puede pedir `household` a la cara — pero sí una respuesta sobre otra población que la pedida. **No reimplementes el parseo**: `projection.rs` tenía su propia copia del `match` y por eso se le escapó el arreglo; ahora delega como todos. Misma clase, arreglados a la vez: `resolution` de `/v1/history/cashflow` (`invalid_resolution`) y `density` de `/v1/projection/series` (`invalid_density`). Regresión: `apps/api/tests/query_param_validation.rs`.
+**El default es `mine` desde 5.0.0 (R2, breaking).** `resolve()` (`handlers/person_view.rs`) mapea
+ausente o vacío → **`Mine`**; `household` hay que pedirlo EXPLÍCITAMENTE; cualquier otro valor →
+`400 invalid_view`. El porqué: con la jubilación convertida en estrategia POR USUARIO (D9/D13), la
+simulación por defecto tiene que ser la del solicitante —su perfil, su fecha de nacimiento, sus
+filas—; servir el hogar entero por omisión mezclaba filas de dos personas bajo el perfil de una
+sola. Pin del default para las ocho superficies a la vez:
+`apps/api/tests/context_fields.rs::every_view_aware_response_echoes_the_view_it_applied`, que
+además exige que **omitirlo sea idéntico a pedir `view=mine`** (si algún día divergen, es que un
+handler se quedó con su propio default).
+
+**Desde 4.0.0 `resolve()` es falible.** Antes el brazo comodín devolvía **household** (el hogar entero) en silencio, así que un cliente que escribiera `"MINE"` recibía datos de otros miembros creyendo haber pedido los suyos (auditoría MCP §4). No era un fallo de autorización — D2 sigue vigente: cualquier miembro puede pedir `household` a la cara — pero sí una respuesta sobre otra población que la pedida. **No reimplementes el parseo**: `projection.rs` tenía su propia copia del `match` y por eso se le escapó el arreglo; ahora delega como todos. Misma clase, arreglados a la vez: `resolution` de `/v1/history/cashflow` (`invalid_resolution`) y `density` de `/v1/projection/series` (`invalid_density`). Regresión: `apps/api/tests/query_param_validation.rs`.
 
 ```rust
 let view = q.resolve()?; // Query<LedgerViewQuery> — falible desde 4.0.0

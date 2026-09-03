@@ -1286,3 +1286,57 @@ async fn retirement_fields_are_explicit_null_and_fire_series_is_parallel_to_poin
         }
     }
 }
+
+/// 5.0.0 (§D) — **`view: "household"` es 400 `household_not_simulable`.**
+///
+/// El hogar dejó de ser «las mismas cuentas con más filas»: es la SUMA de N simulaciones, una por
+/// miembro y con la estrategia de cada uno. Un what-if sobre eso no tiene un plan único que mover
+/// —¿el SWR de quién?, ¿el gasto extra de quién?—, así que devolver «algo» sería publicar un
+/// escenario que no describe el plan de nadie. Se rechaza en el CORE (no en la capa MCP) para que
+/// HTTP y MCP no puedan discrepar el día que haya ruta.
+#[tokio::test]
+async fn household_view_is_refused_with_a_typed_error() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    let resp = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "simulate_projection",
+            json!({"view": "household", "extra_monthly_savings": "100"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "el hogar no se simula: {resp}"
+    );
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("household_not_simulable"),
+        "el error debe nombrar su código para que el agente pueda reaccionar: {text}"
+    );
+
+    // Y el default (`mine` desde R2) sigue simulando: lo que se rechaza es el hogar, no la tool.
+    let ok = mcp_post(
+        &app,
+        &token,
+        tool_call("simulate_projection", json!({"extra_monthly_savings": "100"})),
+    )
+    .await;
+    let body = tool_json(&ok);
+    assert_eq!(body["view"], "mine", "el default es mine: {body}");
+    assert_eq!(body["baseline"]["strategy"], "asap", "eco de estrategia: {body}");
+    assert_eq!(
+        body["scenario"]["retirement_trigger"], "liquid_crossing",
+        "eco del trigger: {body}"
+    );
+    // R8 en el what-if: con `asap` el mes efectivo ES el cruce, así que los dos campos coinciden.
+    assert_eq!(
+        body["baseline"]["jubilacion_month_index"], body["baseline"]["liquid_crossing_month_index"],
+        "con asap el cruce es el trigger: {body}"
+    );
+}

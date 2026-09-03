@@ -109,10 +109,14 @@ async fn every_view_aware_response_echoes_the_view_it_applied() {
     for ep in endpoints {
         let sep = if ep.contains('?') { '&' } else { '?' };
 
-        let household = get(&app, &owner.cookie, ep).await;
+        // **5.0.0 (R2): el default es `mine`.** Este bucle es el sitio donde ese cambio se pinea
+        // para las OCHO superficies a la vez — omitir `view` y recibir el hogar entero era la
+        // conducta hasta 4.15.x, y con la jubilación por usuario (D9/D13) devolvía las filas de
+        // dos personas bajo el perfil de una sola.
+        let omitido = get(&app, &owner.cookie, ep).await;
         assert_eq!(
-            household["view"], "household",
-            "{ep} sin ?view debe declarar household: {household}"
+            omitido["view"], "mine",
+            "{ep} sin ?view debe declarar mine desde 5.0.0: {omitido}"
         );
 
         let explicit = get(&app, &owner.cookie, &format!("{ep}{sep}view=household")).await;
@@ -121,15 +125,33 @@ async fn every_view_aware_response_echoes_the_view_it_applied() {
         let mine = get(&app, &owner.cookie, &format!("{ep}{sep}view=mine")).await;
         assert_eq!(mine["view"], "mine", "{ep}?view=mine: {mine}");
 
+        // Omitirlo y pedirlo explícitamente tienen que dar EXACTAMENTE lo mismo: si algún día
+        // divergen, es que un handler se quedó con su propio default.
+        assert_eq!(
+            omitido, mine,
+            "{ep}: omitir `view` debe ser idéntico a pedir `view=mine`"
+        );
+
         // La prueba de que el campo sirve para algo: con un solo usuario el resto del payload es
         // idéntico, y aun así las dos respuestas se distinguen.
+        //
+        // `/v1/projection/series` es la excepción DECLARADA desde 5.0.0 (§D): su `household` ya
+        // no es «las mismas cuentas con más filas» sino el AGREGADO de una simulación por
+        // miembro, así que cambia de forma —`members[]`, `jubilacion_*` nulos con
+        // `household_aggregate`— aunque el hogar tenga una sola persona. Eso se comprueba abajo,
+        // en `projection_household_aggregate.rs`.
+        if ep == "/v1/projection/series" {
+            assert_eq!(explicit["fire_target_absent_reason"], "household_aggregate", "{explicit}");
+            assert!(mine["members"].as_array().is_some_and(|m| m.is_empty()), "{mine}");
+            continue;
+        }
         let mut sin_view = mine.clone();
-        sin_view["view"] = household["view"].clone();
+        sin_view["view"] = explicit["view"].clone();
         assert_eq!(
-            sin_view, household,
+            sin_view, explicit,
             "{ep}: con un solo usuario mine y household solo deberían diferir en `view`"
         );
-        assert_ne!(mine["view"], household["view"], "{ep}");
+        assert_ne!(mine["view"], explicit["view"], "{ep}");
     }
 }
 

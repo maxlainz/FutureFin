@@ -73,7 +73,9 @@ async fn changes_lists_creations_and_edits_and_declares_what_it_cannot_see() {
         "las dos tablas invisibles se nombran: {b}"
     );
     assert_eq!(b["tables_covered"].as_array().unwrap().len(), 8, "{b}");
-    assert_eq!(b["view"], "household", "{b}");
+    // 5.0.0 (R2): sin `?view` la respuesta es `mine`. Este test tiene un solo usuario, así que
+    // el contenido no cambia — lo que cambia es lo que la respuesta DECLARA haber aplicado.
+    assert_eq!(b["view"], "mine", "{b}");
     assert!(b["since"].as_str().unwrap().starts_with("1970-01-01"), "{b}");
 
     let ents = entities(&b);

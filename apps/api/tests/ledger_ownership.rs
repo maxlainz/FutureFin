@@ -173,8 +173,12 @@ async fn the_installation_owner_does_not_bypass_the_rule() {
         assert_eq!(r.json()["code"], "not_row_owner", "{path}: {r:?}");
     }
 
-    // La LECTURA del hogar sigue siendo del hogar: D21 no toca `?view`.
-    let listed = app.get_with_cookie("/v1/assets", &owner.cookie).await;
+    // La LECTURA del hogar sigue siendo del hogar: D21 no toca `?view`. **El hogar se pide
+    // EXPLÍCITAMENTE desde 5.0.0** (R2): el default es `mine`, donde el activo ajeno no sale —
+    // y no salir por scope no es lo mismo que no poder verlo, que es lo que este test separa.
+    let listed = app
+        .get_with_cookie("/v1/assets?view=household", &owner.cookie)
+        .await;
     assert_eq!(listed.status, http::StatusCode::OK, "{listed:?}");
     assert!(
         listed
@@ -258,7 +262,8 @@ async fn reordering_allocation_rules_is_per_member_only() {
     let owner = app.register_and_login_owner("alice").await;
     let [_asset, _liab, _entry, _flow, rule] = seed_ledger(&app, &owner, "alice").await;
 
-    // Sin `?view` (= household) → 400 con el código que dice qué pedir en su lugar.
+    // Sin `?view` el default es `mine` desde 5.0.0 (R2), así que el reorder de las reglas
+    // PROPIAS funciona: es la operación que la SPA hace todo el rato.
     let r = app
         .post_json_with_cookie(
             "/v1/allocation-rules/reorder",
@@ -266,10 +271,9 @@ async fn reordering_allocation_rules_is_per_member_only() {
             &owner.cookie,
         )
         .await;
-    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
-    assert_eq!(r.json()["code"], "household_read_only", "{r:?}");
+    assert_eq!(r.status, http::StatusCode::OK, "el default `mine` sí reordena: {r:?}");
 
-    // Explícito tampoco.
+    // El hogar, explícito, sigue prohibido.
     let r = app
         .post_json_with_cookie(
             "/v1/allocation-rules/reorder?view=household",

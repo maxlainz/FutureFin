@@ -234,10 +234,11 @@ async fn reorder_refuses_to_unseat_the_sink_and_is_per_member() {
         .unwrap()
         .to_string();
 
-    // La vista household ya no reordena: se rechaza antes de mirar el orden.
+    // La vista household ya no reordena: se rechaza antes de mirar el orden. Va EXPLÍCITA
+    // desde 5.0.0 (R2) — omitir `?view` ahora es `mine`, que sí reordena.
     let household = app
         .post_json_with_cookie(
-            "/v1/allocation-rules/reorder",
+            "/v1/allocation-rules/reorder?view=household",
             serde_json::json!({"ids": [normal_id, sink_id]}),
             &owner.cookie,
         )
@@ -280,10 +281,10 @@ async fn creating_and_deleting_a_rule_invalidates_the_projection_cache() {
     let app = TestApp::spawn().await;
     let (owner, a1, a2) = setup(&app).await;
     let iid: Uuid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
     app.settle_login_warmup(iid).await;
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     // #150: "Fondo" (a1) ya tiene el sumidero sembrado (remainder sin tope) desde `setup()`; un
     // segundo remainder chocaría con `uncapped_remainder_exists`. Usamos un `fixed` — lo que este
     // bloque prueba es que CREAR invalida la caché, no de qué kind es la regla.
@@ -304,7 +305,7 @@ async fn creating_and_deleting_a_rule_invalidates_the_projection_cache() {
     .await;
     let extra_id = extra.json()["id"].as_str().unwrap().to_string();
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let del = app
         .delete_with_cookie(&format!("/v1/allocation-rules/{extra_id}"), &owner.cookie)
         .await;
