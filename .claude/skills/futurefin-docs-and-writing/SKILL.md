@@ -61,7 +61,7 @@ current drift is a duplicated or orphaned fact).
 | `CHANGELOG.md` | User-facing AND forensic history per release (Keep a Changelog 1.1.0 + SemVer). The project's memory of *why* | Users + future sessions |
 | `README.md` | Self-hoster quick start (Docker), update/rollback, env-var table (prod subset), image tag scheme | Self-hosters |
 | `SECURITY.md` | Supported versions, private disclosure channel, and the **honest** security posture of a self-hosted install: no TLS, no login rate limiting, open registration, open DCR, `?view=mine` is not an authorization boundary, what `.ffbackup` encryption does and does not protect. Every claim must be verified in code — the file says so itself. **The out-of-scope list is a contract**: adding a behavior there means "reporting this gets a link, not a fix" | Self-hosters + security reporters |
-| `docs/*.md` (`instalacion`, `actualizar`, `configuracion`, `backups`, `desarrollo`, `mcp`) | The user-facing manual the public README links to. Same accuracy bar as `.claude/*.md`; different audience (people, not sessions) | Self-hosters |
+| `docs/*.md` — cuéntalos con `ls docs/*.md` (**9** el 2026-09-03: `README`, `instalacion`, `home-assistant`, `actualizar`, **`jubilacion`** (5.0.0), `configuracion`, `backups`, `mcp`, `desarrollo`) | The user-facing manual the public README links to. Same accuracy bar as `.claude/*.md`; different audience (people, not sessions). `docs/README.md` es su índice y **cada página nueva entra en su tabla y en sus Atajos**, o no existe para quien la busca. `docs/jubilacion.md` es la única página del manual que documenta una FUNCIONALIDAD y no una operación: es donde va la prosa de producto que el README solo resume | Self-hosters |
 | `.claude/skills/*/SKILL.md` | Encoded judgment + runbooks per topic (this library) | AI sessions |
 
 `CLAUDE.md` deliberately *summarizes* what the `.claude/*.md` docs detail. When you update a
@@ -88,6 +88,7 @@ Run through this at the end of every change. "Doc" columns are cumulative (updat
 | Dev/build/deploy command | `docs/desarrollo.md` (dev + imagen local) / `docs/instalacion.md`+`docs/actualizar.md` (producción); `CLAUDE.md` solo si cambia un puntero de su §Commands |
 | Git workflow, release steps, dependency-routine policy | `.claude/git-and-releases.md` (+ el resumen de CLAUDE.md §Git workflow si cambia la esencia) |
 | Container behavior: `Dockerfile`, `apps/api/docker-entrypoint.sh`, any `docker-compose*.yml` (embedded PG, automatic backups, shutdown, upgrade paths) | `.claude/env-and-config.md` (entrypoint vars + compose matrix) **and** `README.md` (self-hoster steps: quick start, "Actualizar", "Actualizar desde 2.x") **and** `docs/desarrollo.md`/`docs/instalacion.md` if a command changed **and** `CHANGELOG.md` |
+| Una capacidad NUEVA que el usuario ve en pantalla (no un ajuste, no un endpoint) | La página del manual que la cubre en `docs/` — y si no hay ninguna, una **página nueva** más su fila en `docs/README.md` (tabla + Atajos) y en la tabla de Documentación del `README.md`. Precedente: `docs/jubilacion.md` (5.0.0). Un README que anuncia una capacidad sin sitio donde explicarla convierte cada duda en un issue |
 | Anything a user or self-hoster can observe | `CHANGELOG.md` entry (under `## [Unreleased]` until release) |
 | Docker quick start, backup story, supported tags | `README.md` |
 | Any fact stated in a `.claude/skills/*/SKILL.md` | that skill, same PR (see §6) |
@@ -256,6 +257,12 @@ rule; v1.2.0 is the precedent).
 
 ## 7. STANDING ERRATA — known doc drift
 
+> **Estado a 2026-09-03**: la tabla tiene **17** filas abiertas — cuéntalas con
+> `grep -c '^| [0-9]\+ |' .claude/skills/futurefin-docs-and-writing/SKILL.md`, que incluye las
+> cabeceras numeradas de las dos tablas. **Todas son del lado del CÓDIGO o de skills fuera del
+> alcance del pase que las encontró**; ninguna es una afirmación falsa en un `.claude/*.md` de
+> referencia ni en el manual `docs/`.
+
 **No known drift as of 2026-07-02.** The eight errata found during the skill-library authoring
 (stale "no CI yet" + "33 migrations" in tests.md; `projection_target_age` remnants in
 data-model.md, engine.md and api-routes.md; the stale `mac_*` `horizon_basis` doc comment in
@@ -356,11 +363,10 @@ norma de abajo — una errata registrada es deuda, no un archivo.
 |---|---|---|---|
 | 3 | `apps/web/src/lib/errorMessages.ts`, `idempotency_key_batch_unsupported` | «La clave de idempotencia solo vale para dar de alta un movimiento suelto, **no para un lote**» | **Dejó de ser cierto con la Fase 6**: el lote SÍ acepta clave, en la **raíz** del body. Lo que se rechaza es la clave **por ítem**. El mensaje inglés del servidor ya se corrigió («put idempotency_key at the root of the batch body»); la traducción de la SPA no. Verificado 2026-08-28 |
 | 4 | `apps/web/src/lib/errorMessages.ts`, `idempotency_key_invalid` | «entre 1 y 200 caracteres» | Hay **dos** cotas desde la Fase 6: **200** en el alta individual y **180** en el lote (`MAX_BATCH_KEY_CHARS`, el margen es para el sufijo derivado `#b{i}`). Verificado 2026-08-28 |
-| 5 | `apps/api/tests/query_param_validation.rs`, `VIEW_ROUTES` | La tabla enumera las rutas que aceptan `?view=` | **Le faltan dos de la Fase 6**: `/v1/changes` y `/v1/allocation-rules/goals` aceptan `view` y no están en la tabla (el diff solo añadió `aggregate` y `duplicates`). Es un hueco de cobertura del test que existe precisamente para cazar el enum que cae al default en silencio. Verificado 2026-08-28 |
-| 7 | `apps/api/tests/mcp_http.rs`, doc-comments de siete tests («las 52 tools», «51 de las 52») — **no `server.rs`, que no tiene ninguna** | 7 menciones a un catálogo de 52 | Son **68** desde la Fase 6. Las siete están en `apps/api/tests/mcp_http.rs` (líneas ~2219, 2399, 2471, 2551, 2562, 2592, 2608) y describen mediciones **fechadas** de fases anteriores, así que varias son históricamente correctas — pero al menos dos (`tools_list_freezes_…` y el tope por descripción) hablan del estado **actual**. Verificado 2026-08-28 |
+| 5 | `apps/api/tests/query_param_validation.rs:22-39`, `VIEW_ROUTES` | La tabla enumera las rutas que aceptan `?view=` | **Le faltan TRES**: `/v1/changes` y `/v1/allocation-rules/goals` (Fase 6) y, desde 5.0.0, **`/v1/projection/bands`**. La lista tiene 16 entradas y el parámetro se declara en 21 sitios (`grep -rn '("view" = Option<String>, Query' apps/api/src/handlers/ \| wc -l`). Es un hueco de cobertura del test que existe precisamente para cazar el enum que cae al default en silencio — y con el default invertido a `mine` en 5.0.0 el fallo que dejaría pasar cambió de forma, no desapareció. Re-verificado 2026-09-03 |
 
 | 9 | `apps/api/src/handlers/projection.rs`, comentario junto a los ejes de `liability_overrides` | Dice que esos ejes no mueven el objetivo FIRE «ni las bases de los caps» | La segunda mitad es falsa: `debt_service` incluye ahora la amortización extra y el techo de un cap `months_expense` es `N × (expense + debt_service)`, así que **sí se mueve** en un what-if que amortiza. Efecto de segundo orden, alcanzable solo desde `simulate_projection` y **sin test que lo cubra**; documentado como tal en `.claude/engine.md` §AllocationRule y en `futurefin-fire-domain-reference` §5. Verificado 2026-08-28 |
-| 10 | `apps/api/src/handlers/projection.rs`, doc-comment de `deflator_at_month_index` | «Un único helper con **dos** callers» | Son **cuatro**: `deflate_points_to_today` (→ `milestones_real`), `points[].net_worth_real`, `final_net_worth_real` de `simulate_projection` (+ su delta) y `deflate_amount_core`. La afirmación de unicidad sigue siendo cierta y es la que importa; lo que caducó es el recuento. Verificado 2026-08-28 |
+| 10 | `apps/api/src/handlers/projection.rs:1281`, doc-comment de `deflator_at_month_index` | «Un único helper con **dos** callers» | Siguen sin ser dos: `grep -c "deflator_at_month_index" apps/api/src/handlers/projection.rs` → **9** el 2026-09-03 (eran cuatro callers al detectarlo en agosto). La afirmación de **unicidad** sigue siendo cierta y es la que importa; lo que caducó —dos veces ya— es el recuento. Re-verificado 2026-09-03 |
 | 11 | `apps/api/tests/mcp_http.rs`, doc-comment de `tool_descriptions_stay_within_the_context_budget` | «con **cinco** por encima de 1.200» (medición pre-Fase 5) | Son **seis** en el fixture de aquel commit. Medición histórica congelada en prosa, del tipo que §3.1 desaconseja: es reproducible (`git show 51b7675:apps/api/tests/fixtures/mcp-catalog.json`) y aun así se escribió a mano. Verificado 2026-08-28 |
 
 
@@ -371,14 +377,10 @@ comprobación**:
 
 | # | Doc & location | It says | Reality (verified 2026-08-29) |
 |---|---|---|---|
-| 12 | `apps/api/src/mcp/server.rs`, doc-comment de `DeleteWithTokenParams` (≈L1720/L1724) | Prescribe contar las tools de dos fases con `grep -c 'confirm_token.as_deref' apps/api/src/mcp/server.rs` y dice que da **8** | Ese comando da **10**: el propio comentario contiene la cadena dos veces —una de ellas es la línea que prescribe el grep—, así que **el patrón se cuenta a sí mismo**. Contador auto-referencial. Comandos que sí dan 8: `grep -c '= two_phase('` o `grep -c 'p\.confirm_token\.as_deref()'`. Ironía documentada: ese mismo comentario advierte de que «enumerarla a mano en prosa ya se quedó corta una vez». `futurefin-mcp-parity` §5 ya usa el comando bueno |
-| 13 | `apps/api/src/confirm_token.rs` (≈L35) | «`grep -c 'confirm_token.as_deref()' apps/api/src/mcp/server.rs` da las **7**» | El **comando** es correcto (con paréntesis no se autocuenta: da **8**); el **número** es de antes de la Fase 6. Cambiar solo el 7 por un 8 basta |
-| 14 | `apps/api/src/confirm_token.rs` (≈L32) | «no se exige en las **14** tools con preview» | **17** (`grep -c 'p.confirm.unwrap_or(false)'`) |
-| 15 | `apps/api/src/confirm_token.rs` (≈L40) | «`apps/api/src/mcp/` no contiene SQL salvo el `SELECT` del kill-switch en `auth.rs`» | `grep -c 'sqlx::query' apps/api/src/mcp/auth.rs` → **4** desde la Fase 3: el SELECT del toggle **más** el INSERT, el UPDATE y la poda de `mcp_write_audit`. El invariante que sigue siendo absoluto es el de `server.rs` (**0**), y así lo formula ya `futurefin-mcp-parity` §4 paso 1 |
-| 16 | `apps/api/src/mcp/auth.rs` (≈L233) | «este gate es el único punto por el que pasan las **31** escrituras» | **40** (`grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs`) |
-| 17 | `apps/api/src/mcp/server.rs` (≈L3566) | «Forma común de los **14** previews» | **17** |
-| 18 | `apps/api/src/mcp/server.rs` (≈L401, doc de `NoParams`) | «para que su `inputSchema` publique `additionalProperties: false` como el de las otras **48**» | Son **67** las otras (68 tools). El 48 es de un catálogo de 49; ni siquiera casa con el 52 de la Fase 2 |
-| 19 | `apps/api/tests/mcp_write.rs` (≈L2524) | Comentario: «Las **7** que además exigen el token» | Su propio `assert_eq!(…, 8)` dos líneas más abajo. **El comentario contradice al assert que acompaña**, que es la peor variante: el test está bien y el humano que lo lea se lleva el número malo |
+| 12 | `apps/api/src/mcp/server.rs:2117-2121`, doc-comment de `DeleteWithTokenParams` | Dice «hoy **8**» y prescribe `grep -c 'two_phase(' apps/api/src/mcp/server.rs`, **explicando** que contar por `confirm_token.as_deref` fallaría porque el comentario se cuenta a sí mismo | El número (8) es correcto; **el comando nuevo tiene exactamente el mismo defecto que el que sustituyó**: da **10**, porque la línea que lo prescribe contiene el literal `two_phase(`. Es la tercera vuelta del mismo error en el mismo comentario. El único que sobrevive es `grep -c 'p\.confirm_token\.as_deref()'` → **8**, que es el que usa `futurefin-mcp-parity` §5. **Regla que este caso deja escrita**: un comentario nunca debe contener el patrón literal que recomienda contar — escríbelo con backticks partidos, o cuenta por otra cosa. Re-verificado 2026-09-03 |
+| 16 | `apps/api/src/mcp/auth.rs:233` | «el único punto por el que pasan TODAS las escrituras (hoy **40**)» | **41** desde 5.0.0 (`grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs`). El «31» que esta fila denunciaba en agosto ya se corrigió; el número volvió a caducar con la primera tool de escritura nueva. **El comentario ya publica el comando al lado**, que es la mitad buena: lo que sobra es el número. Re-verificado 2026-09-03 |
+| 18 | `apps/api/src/mcp/server.rs:410` (doc de `NoParams`) | «para que su `inputSchema` publique `additionalProperties: false` como el de las otras **48**» | Son **70** las otras (71 tools). El 48 es de un catálogo de 49; no casaba ni con el 52 de la Fase 2 ni con el 68 de la 6. Re-verificado 2026-09-03 |
+| 19 | `apps/api/tests/mcp_write.rs:2545` | Comentario: «Las **7** que además exigen el token» | Su propio `assert_eq!(…, 8)` **cuatro líneas más abajo**. **El comentario contradice al assert que acompaña**, que es la peor variante: el test está bien y el humano que lo lea se lleva el número malo. Sigue igual. Re-verificado 2026-09-03 |
 
 Dos observaciones de esta pasada que **no** son erratas de un número sino asimetrías de diseño,
 anotadas por si el owner quiere issue:
@@ -412,7 +414,62 @@ wire descrito como `{error, message}` en dos doc-comments de `mcp/server.rs`) se
 construía un error sin `code`. Una errata registrada aquí es deuda, no un archivo: cuando el arreglo
 cabe en el mismo cambio, se arregla y la fila se borra.
 
+**Barrido 2026-09-03 para 5.0.0 (issue #207, rama `release/5.0.0`) — cinco filas RETIRADAS porque
+el código las arregló, y siete nuevas.** El pase que las encontró era documentación-only (`apps/` y
+`crates/` fuera de alcance), así que las nuevas se registran en vez de arreglarse.
+
+**Retiradas** (comprobadas una a una antes de borrarlas, según la norma de abajo):
+
+- **Antigua fila 7** («las 52 tools» ×7 en `mcp_http.rs`): quedan **tres** menciones y las tres son
+  ahora **mediciones fechadas** («las 52 tools **de entonces**», «(2026-08-28, sobre las 52 de
+  entonces)»). Una medición histórica con su fecha no es una errata: es la forma correcta de
+  congelar un número.
+- **Antiguas filas 13 y 14** (`confirm_token.rs`, «las 7» y «las 14 tools con preview»): **los dos
+  números se han ido del fichero**. El doc dice ahora «no se exige en todas las tools con preview» y
+  remite al grep. Es el arreglo que esta tabla prescribe: quitar el número, dejar el comando.
+- **Antigua fila 15** (`confirm_token.rs`, «`mcp/` no contiene SQL salvo el SELECT del kill-switch»):
+  corregida — hoy dice «`server.rs` no contiene SQL — `auth.rs` sí (el kill-switch y la auditoría de
+  escrituras)», que es el invariante real.
+- **Antigua fila 17** (`server.rs`, «Forma común de los 14 previews»): corregida a «Forma común de
+  TODOS los previews (el contador vive en §5 de la skill de paridad: NO lo dupliques aquí)». Es el
+  patrón que esta tabla quiere para todo contador: no lo repitas donde no puedes mantenerlo.
+
+**Nuevas** (todas del lado del CÓDIGO o de skills fuera del alcance de este pase):
+
+| # | Doc & location | It says | Reality (verified 2026-09-03) |
+|---|---|---|---|
+| 20 | `apps/api/src/mcp/server.rs:125-127`, doc-comment de `resolve_view` | «`"mine"` → Mine, `"household"` u **omitido** → Household» | **Falso desde 5.0.0**: `LedgerViewQuery::resolve` (`person_view.rs:75-83`) devuelve **Mine** para `None`, `""` y `"mine"`. La segunda mitad de la frase («cualquier otra cosa → `invalid_view`») sigue siendo cierta. Es la deriva más cara de las siete: **toda tool con scope hereda ese default**, así que el comentario le está diciendo al siguiente que lea el fichero justo lo contrario de lo que hace el servidor. Comprobación: `grep -n 'fn resolve' -A 9 apps/api/src/handlers/person_view.rs` |
+| 21 | `apps/api/src/mcp/server.rs:237`, doc-comment de `two_phase` | «no se exige en las **17** tools con preview» | **18** (`grep -c 'p\.confirm\.unwrap_or(false)' apps/api/src/mcp/server.rs`). El párrafo que enumera el criterio sigue siendo correcto; solo caducó el número |
+| 22 | `apps/api/src/mcp/server.rs:5541`, comentario de `update_fire_settings` | «Es **la única** tool destructiva del catálogo enteramente reversible desde su propio preview» | **Son dos** desde 5.0.0: `update_retirement_profile` aplica el mismo criterio y lo dice en su propio comentario (`server.rs:5628-5630`). Un «la única» es un contador disfrazado de adjetivo, y caduca igual |
+| 23 | `.claude/tests.md:150`, `.claude/financial-contracts.md:610`, `futurefin-validation-and-qa` §suites (fila del crate estocástico), `futurefin-research-frontier` (§Claims + §item 6), `futurefin-projection-realism-campaign` y `futurefin-fire-domain-reference` §4b — **seis documentos** | Que la suite de `crates/engine-stochastic` está **en ROJO** porque falla `mc_cash_buffer_changes_the_band_under_sequence_risk` | **Ese test ya no existe** (`grep -rn 'mc_cash_buffer_changes_the_band_under_sequence_risk' crates/` → **0**): el commit `8fe3bbf` convirtió la predicción falsada en dos hallazgos asertados, `mc_cash_buffer_is_installed_only_when_it_can_mean_something` y `mc_cash_buffer_costs_return_without_buying_safety_in_this_model`. **La suite está VERDE**: `cargo test -p futurefin-engine-stochastic` → 27 tests, 0 fallos (medido el 2026-09-03 sobre el árbol de trabajo, con el pase de correcciones del motor en curso; vuelve a medirlo antes de citarlo — el comando es la prueba, no esta frase). Importa más que un número: `futurefin-research-frontier` **bloquea una afirmación pública** sobre esa base, así que la deriva impide reclamar algo que ya es cierto. Los seis ficheros están fuera del alcance de este pase (WP8b) |
+| 27 | `.claude/skills/futurefin-failure-archaeology/SKILL.md:180` | Cita `warm_up_household_projection` como la función viva del warm-up post-login | **Ese símbolo ya no existe** (`grep -rn warm_up_household_projection apps crates` → 0): desde 5.0.0 es `warm_up_mine_projection` y calienta `view=mine`. La skill está fuera del alcance de este pase; el relato histórico sigue siendo correcto, solo caducó el nombre |
+| 25 | `apps/api/src/handlers/projection.rs`, comentario del clamp de `uncovered_deficit_total` | Cita `MonthSale::account` **en `projection.rs`** | Ese símbolo vive en `crates/engine/src/sim_core.rs`. Errata heredada de WP8a, que la dejó anotada al no poder tocar `apps/` |
+| 26 | `apps/api/tests/query_param_validation.rs` | — | Ver la fila **5**, ampliada: le falta ahora también `/v1/projection/bands` |
+
+**Comprobado y NO registrado**: la paridad de traducciones de los **49** códigos de error nuevos
+(`diff <(git show main:apps/api/tests/fixtures/error-codes.json) apps/api/tests/fixtures/error-codes.json | grep -c '^>'`
+→ 49). El guard bidireccional está **verde**
+(`npm test --workspace futurefin-web -- src/lib/errorMessages.test.ts` → 12 tests, 0 fallos), así
+que no hay hueco que anotar. Se deja escrito porque **un hueco descartado también es un resultado**:
+sin esto, la siguiente pasada volvería a mirarlo.
+
+**Lo que estas siete vuelven a enseñar, y que ya es un patrón y no una casualidad**: tres son un
+contador o un «la única» (21, 22 y la ampliación de la 5); una es un símbolo citado en el fichero
+equivocado (25); **dos son nombres de símbolo que dejaron de existir** — el test
+`mc_cash_buffer_changes_the_band_under_sequence_risk` repetido en **seis** documentos (23) y
+`warm_up_household_projection` (27) —; y una —la peor— es un **default descrito en prosa** (20). Esa última es la más peligrosa
+porque **no parece un número**: es una frase que describe una conducta, nadie la re-verifica, y su
+caducidad no la caza ningún `grep -c`. Amplía la norma de §3.1: los contadores caducan, los «la
+única» caducan, **y las frases que describen un default también** — escribe al lado el comando que
+lo prueba (`grep -n 'fn resolve' -A 9 …`), igual que harías con un número.
+
 ## Provenance and maintenance
+
+**Ampliada 2026-09-03 para 5.0.0** (issue #207, rama `release/5.0.0`): §1 (la fila de `docs/*.md`
+pasa a contarse con un comando y gana `jubilacion.md`), §2 (fila nueva: una capacidad que el usuario
+ve necesita página en el manual, no solo CHANGELOG) y §7 (barrido de 5.0.0 — cinco filas retiradas
+porque el código las arregló, seis nuevas, y un hueco descartado con su comando). El manual creció
+con `docs/jubilacion.md`, la primera página que documenta una funcionalidad y no una operación.
 
 Verified 2026-07-02 against v1.4.3 by reading: `CLAUDE.md`, all 9 `.claude/*.md`, `CHANGELOG.md`,
 `README.md`, `.github/workflows/ci.yml`, `apps/api/src/routes/mod.rs`,
@@ -422,10 +479,12 @@ v3.0.0** (§1 env-and-config row, §2 container row, §7 sweep) against `README.
 Re-verify with:
 
 - Current version: `grep -n '^version' apps/api/Cargo.toml` (and top entry of `CHANGELOG.md`).
-  **4.0.0 on 2026-08-22, with its `## [4.0.0] - 2026-08-22` CHANGELOG section already written**
-  (release ritual §5; gates in futurefin-change-control §4)
-- Migration count: `ls apps/api/migrations | wc -l` (**42 on 2026-08-22**; 36 on 2026-08-17)
-- Doc inventory: `ls .claude/*.md | wc -l` (**9**) and `ls .claude/skills | wc -l` (**18**)
+  **4.15.0 el 2026-09-03 en la rama `release/5.0.0`, con el bump a 5.0.0 todavía sin hacer**: la
+  release consolida el `## [Unreleased]` y sube la versión en el mismo PR (ritual §5; puertas en
+  futurefin-change-control §4). Antes: **4.0.0 on 2026-08-22**
+- Migration count: `ls apps/api/migrations | wc -l` (**59 on 2026-09-03**; 42 on 2026-08-22; 36 on 2026-08-17)
+- Doc inventory: `ls .claude/*.md | wc -l` (**12** on 2026-09-03; era 9), `ls .claude/skills | wc -l`
+  (**18**) y `ls docs/*.md | wc -l` (**9**, con `jubilacion.md` desde 5.0.0)
 - Compose matrix matches the §1 env-and-config row: `ls docker-compose*.yml` (yml / local / dev —
   **no `split-dev`**) and `awk '/^services:/{f=1;next} /^volumes:/{f=0} f && /^  [a-z]/' docker-compose.yml` (one service)
 - §7 sweep reproducible: `grep -rn 'split-dev\|futurefin-database\|POSTGRES_PASSWORD' --include='*.md' .`

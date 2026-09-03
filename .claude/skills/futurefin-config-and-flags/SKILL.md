@@ -216,6 +216,19 @@ sends `X-Ingress-Path` on every request, which outranks it (§1.1).
 | `POSTGRES_USER` / `POSTGRES_DB` | `futurefin` / `futurefin` | prod + dev | Passed through to the container (§1.2) and, in `docker-compose.dev.yml`, to the dev Postgres and its `pg_isready` healthcheck. |
 | `POSTGRES_PASSWORD` | dev compose defaults it to `futurefin`; prod compose does not pass it at all | dev (prod: optional) | **Changed in 3.0.0**: the old `${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}` guard is gone — production no longer needs it. It still matters in split-dev, where it must match the password inside your `DATABASE_URL`. |
 
+**Inputs del workflow `dev-image.yml` (5.0.0, D19)** — no son variables de entorno, son entradas de
+un `workflow_dispatch`, pero son un eje de configuración del canal `:dev` y por eso viven aquí:
+
+| Input | Requerido | Default | Validación |
+|---|---|---|---|
+| `ref` | sí | `release/5.0.0` | Rama o SHA que se construye (`actions/checkout` con ese `ref`) |
+| `tag` | sí | `dev` | **Solo `dev` o `dev-<sufijo>`**: el primer paso del job rechaza cualquier otra cosa (`case "$INPUT_TAG" in dev\|dev-[A-Za-z0-9._-]*)`) con un `::error::`. Jamás semver, jamás `latest` |
+
+Se consume con `FUTUREFIN_TAG=dev` (§1.3, misma variable de siempre) o con
+`image: …/futurefin:dev` en un add-on local. Runbook completo —qué publica, qué no toca nunca, y
+por qué es un fichero aparte y no un input más de `publish-image.yml`— en
+`futurefin-run-and-operate`.
+
 ### Dev-only (Vite, tests, scripts)
 
 | Variable | Default | Consumed where | Notes |
@@ -225,6 +238,21 @@ sends `X-Ingress-Path` on every request, which outranks it (§1.1).
 | `TEST_DATABASE_URL` | `postgres://futurefin:futurefin_test@127.0.0.1:5433/futurefin_test` | `apps/api/tests/common/mod.rs` | Postgres for integration tests (each test creates its own schema). **Desde 4.0.0 CI la define** (job `integration`, servicio `postgres:16.4-alpine` en `127.0.0.1:5432`; en local el puerto documentado sigue siendo 5433 para no chocar con el Postgres de desarrollo). Antes no existía en ningún job y la suite de integración no corría en CI — ver `.claude/skills/futurefin-validation-and-qa/SKILL.md` §3. |
 | `BASE`, `SMOKE_USER`, `SMOKE_PASS` | `http://127.0.0.1:8080`, auto-registers throwaway user | `scripts/smoke-projection-cache.sh` | Owned by futurefin-diagnostics-and-tooling. |
 | `ENV_FILE`, `BACKUP_DIR`, `KEEP_BACKUPS` | `.env.prod`, `./backups`, `30` | `scripts/backup-postgres.sh` | Owned by futurefin-run-and-operate. |
+
+**5.0.0 no añade NI UNA variable de entorno.** No es una omisión de este catálogo: es un hecho
+comprobable, y conviene comprobarlo porque una release de este tamaño invita a suponer lo contrario.
+
+```bash
+git diff main..HEAD -- .env.example apps/api/docker-entrypoint.sh addon/futurefin/ | wc -c   # 0
+git diff main..HEAD | grep -cE '^\+.*(std::env::var|FUTUREFIN_[A-Z_]+)'                     # 3
+```
+
+El segundo da tres líneas y ninguna es una variable de runtime nueva: un doc-comment que menciona el
+ya existente `FUTUREFIN_TAG`, y los dos interruptores **de test** `UPDATE_ENGINE_PINS` /
+`UPDATE_ENGINE_PINS_5_0` que regeneran los fixtures del golden (misma familia que
+`UPDATE_MCP_CATALOG` y `UPDATE_ERROR_CODES`; no los lee el binario). Todo lo que 5.0.0 configura vive
+en la fila `installation` (§5), en el perfil por usuario (§5.1), en la fila del activo (§5.2) o en
+un query param (§4).
 
 `.env.example` at the repo root is the canonical template: since 3.0.0 **every line in it is
 commented out** — production runs with an empty `.env` or none at all. It documents the optional
@@ -282,16 +310,42 @@ The postgres image digest now appears in exactly two places: `docker-compose.dev
 
 ## 4. API query-parameter flags and body limits
 
-### `?view=household|mine` — ledger scope (all ledger endpoints)
+### `?view=mine|household` — ledger scope (all ledger endpoints)
 
-Defined in `apps/api/src/handlers/person_view.rs` (`LedgerViewQuery::resolve`). The value is
-trimmed; exactly `mine` → `LedgerView::Mine` (adds `AND owner_user_id = <session user>`); **any
-other value, including typos, silently means `household`** (full installation). Accepted by
-assets, liabilities, summary, budget, planning, allocation-rules and projection handlers.
-Non-negotiable semantics: this is a client-side display filter, **not** an authorization
-boundary — every member sees household data. Handlers must build the WHERE via
-`LedgerView::scope_where(alias)` + `bind_scope_as/scalar` (placeholder indices start at
-`next_arg_index()`: 2 for household, 3 for mine); never hand-write the two branches.
+Defined in `apps/api/src/handlers/person_view.rs` (`LedgerViewQuery::resolve`, `:75-83`). The value
+is trimmed; **`mine` es el DEFAULT desde 5.0.0** (breaking, R2 del plan de #207): ausente, vacío o
+`mine` → `LedgerView::Mine` (añade `AND owner_user_id = <usuario de sesión>`); `household` →
+instalación entera; **cualquier otro valor es 400 `invalid_view`** — no cae al default en silencio.
+
+> **Dos afirmaciones de esta sección eran falsas y se corrigen aquí**: (a) el default era
+> `household` hasta 4.15.x y hoy es `mine`; (b) «cualquier otro valor significa `household` en
+> silencio» dejó de ser cierto en 4.0.0 — un literal desconocido devuelve 400. El guard está en
+> `person_view.rs::resolve_accepts_only_mine_household_and_absence` (`:201-219`), cuyo primer
+> `assert_eq!` dice literalmente «5.0.0: el default es mine».
+
+Rutas que lo aceptan hoy — **cuéntalas, no las memorices**. La declaración OpenAPI del parámetro
+es literal y por eso se puede contar:
+
+```bash
+grep -rn '("view" = Option<String>, Query' apps/api/src/handlers/ | wc -l   # 21 el 2026-09-03
+grep -rc '("view" = Option<String>, Query' apps/api/src/handlers/*.rs apps/api/src/handlers/*/*.rs | grep -v ':0'
+```
+
+El segundo da el reparto por fichero: `allocation_rules` ×4, `transactions/crud` ×3,
+`history` ×2, `transactions/summary` ×2, y uno cada uno en `assets`, `budget`, `changes`,
+`liabilities`, `planning`, `projection`, **`projection_bands`**, `summary`,
+`transactions/aggregate` y `transactions/duplicates`.
+
+Semántica no negociable, y **sigue sin cambiar**: `view` es un filtro de presentación, **no** una
+frontera de autorización — cualquier miembro puede leer los datos del hogar pidiendo
+`?view=household`. Lo que 5.0.0 sí añade es una frontera **de escritura**, que es otra cosa: toda
+mutación del ledger exige ser el dueño de la fila (403 `not_row_owner`, `person_view.rs:23-41`) y
+`POST /v1/allocation-rules/reorder` rechaza la vista del hogar con 400 `household_read_only`
+(`allocation_rules.rs:1034`). Ver `futurefin-architecture-contract` D2/D21.
+
+Los handlers construyen el WHERE con `LedgerView::scope_where(alias)` + `bind_scope_as/scalar`
+(los índices de placeholder empiezan en `next_arg_index()`: 2 para household, 3 para mine); jamás
+se escriben las dos ramas a mano.
 
 ### `GET /v1/projection/series?months=&density=&view=` (`apps/api/src/handlers/projection.rs`)
 
@@ -299,14 +353,40 @@ boundary — every member sees household data. Handlers must build the WHERE via
 |---|---|---|---|
 | `months` | u32, **must be 12–840 or the request is rejected** — since 4.4.0 out-of-range is **400 `months_out_of_range`**, NOT a silent clamp (`validate_months_override`, `handlers/projection.rs`) | omitted | Horizon override. Omitted → horizon derived from demographics: years until age 90 from ONE resolved birth date (session user's `users.birth_date`, else the first `persons` row by `is_primary DESC, sort_index ASC` — NOT the oldest member), clamped 5–70 years; no birth date at all → 30 years. `horizon_basis` in the response reports which path: `lifespan_90`, `fallback_no_demographics`, or `months_override`. (Implementation: `projection_horizon_months()`, `handlers/projection.rs` ~599–627.) |
 | `density` | `monthly` \| `hybrid` (trimmed; anything else → `monthly`) | `monthly` | Serialization-only decimation: `monthly` ≈ one point per month (~841 at max horizon); `hybrid` = months 0..12 monthly + 24, 36, … annually (~82 points, ~5× smaller JSON). The engine always computes the **full** series; milestones/crossover indices are computed pre-decimation, so a `reached_month_index` may not exist as a point in a hybrid response — match by `month_index`, never by array position (the v1.4.2 chart bug). |
-| `view` | as above | `household` | Also selects the cache partition. |
+| `view` | as above | **`mine`** (5.0.0; era `household`) | Also selects the cache partition. En `household` la respuesta deja de ser una simulación y pasa a ser el **agregado** de N simulaciones por miembro (`absent_reason: household_aggregate` en `jubilacion_*`, `strategy`, `fire_target_series`; el hito de cada persona va en `members[]`). |
 
 Cache-key implications (`apps/api/src/state.rs`): the in-memory projection cache is keyed by
 `(installation_id, view, owner_user_id [Some only for mine], density)` with a 60-min sliding TTL.
 **Any `?months=` override bypasses the cache entirely** (computed fresh, never stored). Adding a
 new query param that changes response content requires either joining `ProjectionCacheKey` or
 bypassing the cache — otherwise users get stale cross-contaminated responses. Every mutating
-handler invalidates the whole installation's entries (`refresh_projection_after_mutation`).
+handler invalidates the whole installation's entries (`refresh_projection_after_mutation`), y desde
+5.0.0 eso incluye el `PATCH /v1/auth/me/retirement-profile`: el perfil **es una entrada del motor**.
+La entrada de cache guarda además los **solves** del plan (ahorro necesario, coast, margen), así que
+un HIT no los recalcula. Detalle y puntos débiles: `futurefin-architecture-contract` D7.
+
+### `GET /v1/projection/bands?paths=&seed=&view=` (5.0.0, `apps/api/src/handlers/projection_bands.rs`)
+
+Las bandas de Monte Carlo. **No hereda los parámetros de la serie**: ni `density` ni `months`.
+
+| Param | Values | Default | Semantics |
+|---|---|---|---|
+| `paths` | u32, **1–2000**; fuera de rango → 400 `paths_out_of_range` (rechaza, **no clampa**) | `500` (`DEFAULT_PATHS`) | Caminos sorteados. La tool MCP topa en **1.000** (`MCP_MAX_PATHS`), no en 2.000: el contexto de un modelo es más caro que el ancho de banda de un navegador |
+| `seed` | cadena de dígitos decimales de un `u64`; vacío o solo espacios = omitido; cualquier otra cosa → 400 `invalid_seed` | `seed_for(installation_id, user_id)` — **estable por usuario** (D23) | El mercado sorteado. **Viaja de vuelta como CADENA**, no como número JSON: es un `u64` y `JSON.parse` lo redondea por encima de 2⁵³ |
+| `view` | `mine` \| `household` | `mine` | **`household` → 400 `household_bands_unavailable`**: los percentiles no suman entre miembros y, con el shock común, los dos ni siquiera son independientes. La comprobación vive en la core (`projection_bands_cached`), no en el handler, así que la tool MCP y `/v1/summary` heredan la misma conducta |
+| `density` | — | — | **No existe** (arqueología §2.18, veto 22). Siempre `hybrid`, cableado. El struct no lleva `deny_unknown_fields`, así que `?density=monthly` se **ignora en silencio**, no da 400 |
+| `months` | — | — | Tampoco existe: `horizon_basis` nunca puede ser `months_override` aquí |
+
+Cotas y umbral, todos constantes del mismo fichero — re-derívalos con
+`grep -nE 'const (DEFAULT_BANDS_PATHS|HTTP_MAX_PATHS|MCP_MAX_PATHS|VERDICT_AMBER_MARGIN_PP|BANDS_PERCENTILES)' apps/api/src/handlers/projection_bands.rs`:
+percentiles fijos `[10, 50, 90]`, ámbar a **10 puntos porcentuales** por debajo del umbral del
+perfil. **Cache propia**, por `(instalación, usuario, paths, semilla)`, con el TTL de la proyección
+y invalidada por **las mismas** mutaciones que la serie.
+
+**Opt-in por TAMAÑO, no por omisión** (los dos son axes de respuesta, no de configuración):
+`include_liquid_bands` en la tool `get_projection_bands` (la respuesta completa pesa 16,4 KB y la
+mitad son esas tres series) e `include_member_series` en `get_projection` (~5,9 KB por miembro). Por
+HTTP viajan siempre; solo la superficie MCP los pide.
 
 ### `GET /v1/history/*` — snapshot query params (`apps/api/src/handlers/history.rs`, v1.5.0)
 
@@ -415,13 +495,36 @@ NOT warm it; warm-up happens only after login, see futurefin-architecture-contra
 | `fire_settings` | PATCH only | JSONB, shape below | column nullable; `NULL` → defaults applied on read (`resolve_fire_settings`) | FIRE target computation config. |
 | `mcp_write_enabled` | PATCH only | bool | `TRUE` (column `NOT NULL DEFAULT TRUE`, migración `20260818120000`) | Kill-switch **vivo** de las tools de escritura del servidor MCP (issue #3): `require_mcp_write` lo lee de la DB en cada llamada de escritura → apagarlo corta la escritura en el siguiente request sin reiniciar (`FUTUREFIN_MCP_ENABLED` sigue siendo el kill-switch de `/mcp` entero, en el entorno; este es un **DB setting**, no una env var — deliberado: tiene toggle en la GUI, Ajustes → Integraciones). Las lecturas MCP no lo consultan. |
 
-### `fire_settings` JSONB shape (as of 2026-07-09; `savings_source` added; `taxable_gain_ratio` added 4.10.0/#140 — fracción [0,1] de plusvalía gravable, string decimal, default "1", clamp de lectura + cota de escritura, misma g en objetivo/drenaje/runway, simulable vía `fire_settings_overrides`; `horizon_lifespan_age` added 4.9.0/#149 — edad límite del horizonte, u32, clamp de lectura y cota de escritura **85..=105**, default 90; el horizonte sigue topado a [5, 70] años así que el eje solo muerde si `edad ≥ edad_límite − 70`; expuesto en Ajustes → Plan, en `update_fire_settings` (MCP) y ecoado como `horizon_lifespan_age` en las respuestas de proyección junto a `horizon_basis: "lifespan_age"`)
+### `fire_settings` JSONB shape — **recortado en 5.0.0**
+
+**Pierde cuatro claves**, que se mudan al perfil de jubilación **por usuario** (§5.1, decisión D13):
+`fire_number_mode`, `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age`. `GET /v1/installation`
+ya no las devuelve, `PATCH /v1/installation` las ignora (como cualquier clave desconocida del JSONB —
+`FireSettings` no lleva `deny_unknown_fields`, a propósito, para que un JSONB de 4.15.x siga
+deserializando) y la tool MCP `update_fire_settings` las **rechaza** con `unknown field`. La migración
+`20260902200000_users_retirement_profile.sql` **copia los cuatro valores al perfil de cada usuario
+antes de retirarlos** (`:15-24` copia, `:26-33` el `fire_settings - 'clave' - …`), así que el upgrade
+no mueve un número.
+
+Prueba de que se fueron, con su salida de hoy:
+
+```bash
+grep -n "fire_number_mode\|fire_number_manual_amount\|swr_pct\|horizon_lifespan_age" \
+  apps/api/src/handlers/installation.rs
+# → 2 líneas, las dos DOC-COMMENTS (:255 apunta al perfil, :1362 explica el runway).
+#   Cero campos del struct, cero parseo, cero validación.
+```
+
+Las constantes `MIN_HORIZON_LIFESPAN_AGE` / `MAX_HORIZON_LIFESPAN_AGE` (85 / 105) **se quedan** en
+`installation.rs:258-259` y el perfil las importa: la cota es la misma, solo cambia quién la lleva.
+
+Lo que `fire_settings` conserva (ocho claves; el resto de las notas históricas siguen valiendo:
+`savings_source` desde 2026-07-09, `taxable_gain_ratio` desde 4.10.0/#140 — fracción [0,1] de
+plusvalía gravable, string decimal, default `"1"`, clamp de lectura + cota de escritura, misma g en
+objetivo/drenaje/runway, simulable vía `fire_settings_overrides`):
 
 ```json
 {
-  "fire_number_mode": "annual_expense",          // "manual" | "annual_expense" | "current_income"
-  "fire_number_manual_amount": null,             // decimal string; REQUIRED and > 0 when mode = "manual"
-  "swr_pct": "3.5",                              // decimal string, 0–4 (PERCENT, not ratio)
   "taxes_enabled": true,
   "tax_brackets": [                              // capital-gains schedule used for gross-up
     { "up_to": "6000",   "pct": "19" },
@@ -430,13 +533,19 @@ NOT warm it; warm-up happens only after login, see futurefin-architecture-contra
     { "up_to": "300000", "pct": "27" },
     { "up_to": null,     "pct": "30" }           // last bracket MUST be open-ended (up_to null)
   ],
-  "savings_source": "budget"                     // "budget" (default) | "transactions_avg" | "budget_income_real_expense"
+  "taxable_gain_ratio": "1",                     // decimal string, [0, 1] — FRACCIÓN, no porcentaje
+  "savings_source": "budget",                    // "budget" (default) | "transactions_avg" | "budget_income_real_expense"
+  "income_avg_window_months": 3,                 // u32, 1–60
+  "income_avg_window_mode": "calendar",          // "data" | "calendar"
+  "expense_avg_window_months": 12,               // u32, 1–60
+  "expense_avg_window_mode": "calendar"          // "data" | "calendar"
 }
 ```
 
 Validation (`validate_fire_settings` / `validate_tax_brackets`, all 400 on failure):
-- `swr_pct` ∈ [0, 4].
-- mode `manual` ⇒ `fire_number_manual_amount` present and > 0.
+- `taxable_gain_ratio` ∈ [0, 1] (400 `taxable_gain_ratio_out_of_range`); ventanas ∈ [1, 60]
+  (400 `avg_window_out_of_range`).
+- **`swr_pct` y el modo del objetivo ya no se validan aquí** — sus cotas viven en §5.1.
 - When `taxes_enabled`: `tax_brackets` non-empty; each `pct` ∈ [0, 99]; only the **last** bracket
   may (and must) have `up_to: null`; non-last `up_to` values must be > 0 and strictly increasing.
 - Brackets are **not validated when `taxes_enabled` is false** — stale brackets can sit dormant.
@@ -466,8 +575,125 @@ Deserialization details that matter:
   wholesale (no deep merge — send the full object).
 
 Note: `installation.projection_target_age` no longer exists — dropped by migration
-`20260516120000_drop_projection_target_age.sql` (v1.0.6). The FIRE crossover is the sole
-retirement trigger; do not reintroduce an age setting.
+`20260516120000_drop_projection_target_age.sql` (v1.0.6). **Lo que esta nota decía después —«el
+cruce FIRE es el único disparador de jubilación; no reintroduzcas un ajuste de edad»— dejó de ser
+cierto en 5.0.0** y se corrige aquí: la edad de jubilación volvió, pero **por USUARIO y no por
+instalación**, que es exactamente la forma que el veto de 1.0.6 no prohibía. Es una readmisión
+declarada (D17 + `futurefin-failure-archaeology` §2.2): `target_retirement_age` vive en el perfil
+personal (§5.1), es el trigger **exclusivo** de `retire_at_age` y `coast`, y **hay un solo trigger
+por simulación** — cuando manda la edad, el cruce del objetivo se publica aparte como una lectura
+(`liquid_crossing_month_index`). Un ajuste de edad **de instalación** sigue prohibido: era eso, y no
+la edad en sí, lo que 1.0.6 retiró.
+
+### 5.1 Perfil de jubilación **por usuario** (`users.retirement_profile` JSONB, 5.0.0)
+
+El segundo plano de configuración que 5.0.0 introduce: **el hogar guarda los supuestos compartidos
+(inflación, impuestos, fuente del ahorro y sus ventanas, divisa, zona horaria); la persona guarda su
+plan de jubilación**. Rutas `GET | PATCH /v1/auth/me/retirement-profile`
+(`apps/api/src/handlers/retirement_profile.rs:929-934`; `/v1/me` no existe — `me` cuelga de
+`/v1/auth`). Tools MCP `get_retirement_profile` / `update_retirement_profile`.
+
+Tres diferencias de gobierno frente a §5, y las tres importan:
+
+1. **Cualquier rol edita el SUYO** —`viewer` incluido (`retirement_profile.rs:977-979`)— y nadie el
+   de otro. Es la única escritura del API que un `viewer` puede hacer: sin fijar su edad de
+   jubilación no podría ver su propia proyección, que es justo lo que un viewer sí puede hacer.
+   `PATCH /v1/installation`, en cambio, sigue siendo **owner-only**.
+2. **Es una entrada del motor**: un PATCH aplicado invalida la cache de proyección
+   (`retirement_profile.rs:1044-1046`).
+3. **El merge se hace sobre el perfil ALMACENADO, no sobre el resuelto** (`:1010`), y la validación
+   corre sobre el resultado **sin clamps** (`:1017-1019`): fuera de rango se rechaza, no se reescribe
+   en silencio. La lectura sí clampa (`resolve_retirement_profile`, `:452-495`), que es la misma
+   asimetría de `fire_settings`.
+
+Columna: `users.retirement_profile jsonb NULL`, sin CHECK y sin default
+(`apps/api/migrations/20260902200000_users_retirement_profile.sql:13`). `NULL` = todos los defaults.
+El struct lleva `#[serde(default)]` a nivel de struct y **no** `deny_unknown_fields`: una clave
+ausente es su default, nunca un error de deserialización.
+
+| Clave JSON | Tipo | Default (lectura) | Cota de escritura | Código 400 | Tri-estado en el PATCH |
+|---|---|---|---|---|---|
+| `strategy` | enum | `asap` | `asap` \| `retire_at_age` \| `coast` \| `partial` \| `pension_bridge` | serde (HTTP) / `strategy` (MCP) | No |
+| `target_retirement_age` | `u32?` | — | `[18, horizon_lifespan_age]`, ambas inclusive | `retirement_age_out_of_range` | **Sí** (`null` borra) |
+| `fire_number_mode` | enum | `annual_expense` | `manual` \| `annual_expense` \| `current_income` (+ alias legado `annual_expense_adjusted`) | serde / `fire_number_mode` | No |
+| `fire_number_manual_amount` | decimal string | — | requerido y **> 0** si el modo es `manual` | `fire_manual_amount_required` · `fire_manual_amount_not_positive` | **Sí** |
+| `swr_pct` | decimal string | `3.5` | `[0, 4]` — **PORCENTAJE** | `swr_out_of_range` | No |
+| `horizon_lifespan_age` | `u32` | `90` | `[85, 105]` | `horizon_lifespan_age_out_of_range` | No |
+| `target_basis` | enum | **derivado**, ver abajo | `perpetuity` \| `bridge_to_pension` | serde / `target_basis` | **Sí** (`null` = volver a derivarlo) |
+| `bridge_discount_basis` | enum | `expected_return` | `expected_return` \| `swr` \| `none` | serde / `bridge_discount_basis` | No |
+| `withdrawal_rule` | objeto | ver abajo | ver abajo | ver abajo | No — se sustituye **entero**, nunca campo a campo |
+| `pension` | objeto? | ausente | ver abajo | ver abajo | **Sí** |
+| `partial_retirement` | objeto? | ausente | ver abajo | ver abajo | **Sí** |
+| `cash_buffer_months` | `u32?` | ausente | `[0, 60]` | `cash_buffer_out_of_range` | **Sí** |
+| `success_threshold_pct` | `u32` | `95` | `[50, 99]` | `success_threshold_out_of_range` | No |
+| `birth_date` (no es del perfil) | `YYYY-MM-DD` | — | misma columna `users.birth_date` y **el mismo parser** que `PATCH /v1/auth/me` | los de `auth::validate_birth_date` | **Sí** |
+
+`withdrawal_rule` (objeto anidado, `retirement_profile.rs:293-332`): `kind` (`fixed_real` default \|
+`percent_of_balance` \| `hybrid` \| `guardrails`), `spend_mode` (`ceiling` default \| `rule_is_spend`),
+y los porcentajes **brutos de impuestos** `pct` / `start_pct` / `end_pct` en `(0, 20]` y `band_pct` /
+`adjust_pct` en `(0, 50]` — el mínimo es **exclusivo**, el máximo inclusivo. Qué exige cada `kind`:
+`percent_of_balance` → `pct`; `hybrid` → `start_pct` + `end_pct` con `end < start`
+(`hybrid_end_pct_not_below_start`); `guardrails` → `pct` + `band_pct` + `adjust_pct`; `fixed_real` →
+nada. Faltar cualquiera de ellos es `withdrawal_pct_required`; salirse, `withdrawal_pct_out_of_range`
+o `withdrawal_band_out_of_range`.
+
+`pension` (`:336-352`): `monthly_amount_today` (**requerido**, > 0, `pension_amount_not_positive`),
+`starts_at_age` (**requerido**, `[50, horizon]`, `pension_age_out_of_range`), `indexed` (default
+`true`) y `fraction_while_partial` (`[0, 1]`, default `0`, `pension_fraction_out_of_range`).
+
+`partial_retirement` (`:360-369`): `starts_at_age` (**requerido**, `[18, horizon]` y **estrictamente
+menor** que `target_retirement_age` si la hay → `partial_not_before_retirement`),
+`income_monthly_today` (**requerido**, `≥ 0`; 0 = año sabático) y `expense_basis` (`retirement`
+default \| `regular`). **No existe `ends_at_age` a propósito** (`:358-359`): la fase termina en la
+jubilación total, y una segunda fecha chocaría con el trigger.
+
+**Qué exige cada estrategia** (si falta, 400 y la simulación no arranca): `retire_at_age` y `coast` →
+`target_retirement_age` (`target_retirement_age_required`); `pension_bridge` → `pension`
+(`pension_required_for_bridge`); `partial` → `partial_retirement` (`partial_retirement_required`);
+`asap` → nada.
+
+**`target_basis` se DERIVA cuando no se elige** (`:487-492`): `pension_bridge` la fuerza a
+`bridge_to_pension`; una elección explícita gana; si no hay elección, `bridge_to_pension` cuando hay
+pensión declarada y `perpetuity` cuando no. Por eso la respuesta publica **dos** campos: el resuelto
+(`profile.target_basis`, nunca `null`) y el **almacenado** (`target_basis_stored`, `null` = «no
+elegida»). Un formulario que leyera solo el resuelto y reescribiera el perfil entero **congelaría la
+derivación** como si fuera una elección — el agujero que WP5-2a cerró.
+
+Las cotas **no se copian a mano**: se re-derivan.
+
+```bash
+grep -nE 'const (MIN|MAX)_[A-Z_]+' apps/api/src/handlers/retirement_profile.rs \
+                                   apps/api/src/handlers/installation.rs
+```
+
+Salida el 2026-09-03 (12 líneas): `MIN_PROFILE_AGE 18` · `MIN_PENSION_AGE 50` ·
+`MAX_WITHDRAWAL_PCT 20` · `MAX_GUARDRAIL_PCT 50` · `MAX_CASH_BUFFER_MONTHS 60` ·
+`MIN/MAX_SUCCESS_THRESHOLD_PCT 50/99` · `MAX_SWR_PCT 4` (todas en `retirement_profile.rs:59-78`), más
+`MIN/MAX_HORIZON_LIFESPAN_AGE 85/105` y `MIN/MAX_AVG_WINDOW_MONTHS 1/60` de `installation.rs`.
+
+**En MCP el tri-estado se escribe distinto**: un schema de tool no puede expresar «omitir vs `null`»,
+así que viaja como `campo` + `clear_campo: bool`, y mandar los dos es 400 `field_set_and_clear`
+(`mcp/server.rs:2396`). Mismo patrón en `update_asset` (§5.2).
+
+**Duplicado deliberado en el cliente**: `apps/web/src/lib/retirementProfile.ts:48-66` repite las
+mismas cotas para validar antes de enviar, y `retirementProfile.test.ts` recorre la tabla. Si mueves
+una cota en Rust, mueve las dos — es el mismo contrato duplicado que `fire.ts` ↔ el motor, con el
+mismo riesgo de deriva silenciosa.
+
+### 5.2 Ejes por FILA del ledger: la volatilidad del activo (5.0.0)
+
+`assets.annual_volatility_percent` no es un ajuste de instalación ni un query param: es una columna
+del activo, hermana de `expected_annual_return_percent`.
+
+| Aspecto | Hecho |
+|---|---|
+| Columna | `NUMERIC(8,4) NULL CHECK (>= 0)` (`20260902200200_assets_annual_volatility.sql:8-10`). El CHECK de la BD es **más laxo que el API a propósito**, para que un backup viejo importe |
+| Cota de API | `[0, 100]` puntos porcentuales, **ambas inclusive** → 400 `volatility_out_of_range` (`assets.rs:536-544`) |
+| Semántica | Desviación típica **ANUAL** del retorno. `null` o `0` = activo determinista. **El camino Decimal del motor la IGNORA siempre** (D12): declararla no mueve ni un euro de la proyección de hoy; solo la lee el Monte Carlo |
+| PATCH | **Tri-estado** (omitir no toca · `null` BORRA · valor sustituye), y desde 5.0.0 `expected_annual_return_percent` también lo es (`assets.rs:167-177`, merge en `:777-788`). Hasta 4.15.x `null` y clave ausente eran el mismo caso: no había forma de volver a «no declarada» sin borrar y recrear el activo con su histórico dentro |
+| MCP | `create_asset` gana `annual_volatility_percent`; `update_asset` gana ese más `clear_annual_volatility_percent` y `clear_expected_annual_return_percent` (**con el sufijo `_percent`**, no sin él) |
+| Backup | Fuera de `[0, 100]` en un `.ffbackup` → 400 `backup_asset_volatility_invalid` |
+| No se captura en el histórico | `history_snapshot_items` no la guarda: no es un valor observado |
 
 ## 6. How to add a new configuration axis
 
@@ -552,6 +778,15 @@ external-database mode (`exec_api_external`, `automigrate_*`, `FUTUREFIN_DB_MODE
 `apps/api/src/ha_idp/`, `apps/api/docker-entrypoint.sh` and `addon/futurefin/config.yaml`. The same
 pass corrected the `sso` row: the entrypoint exports `FUTUREFIN_TRUSTED_PROXY_IPS` **always** in
 add-on mode, not only when the toggle is on.
+**Ampliado el 2026-09-03 para 5.0.0 (issue #207, rama `release/5.0.0`)**: §4 (`?view` con default
+`mine` y 400 en literal desconocido — dos afirmaciones que estaban al revés; el endpoint nuevo
+`/v1/projection/bands` con sus cotas y su cache; los dos `include_*` opt-in por tamaño), §5
+(`fire_settings` pierde cuatro claves), **§5.1 nueva** (el perfil de jubilación por usuario, catálogo
+campo a campo), **§5.2 nueva** (`assets.annual_volatility_percent`), §1.3 (los dos inputs de
+`dev-image.yml`) y la constancia explícita de que **la release no añade ninguna variable de entorno**.
+Se corrige además la nota final de §5, que decía «el cruce FIRE es el único disparador de jubilación;
+no reintroduzcas un ajuste de edad» — cierto para un ajuste de INSTALACIÓN, falso desde 5.0.0 para
+uno por usuario.
 **§1.1's `FUTUREFIN_MCP_ENABLED`/`FUTUREFIN_PUBLIC_URL`/`CORS_ORIGINS` rows and §4's body-limit
 table re-verified 2026-08-28 for v4.4.0** (branch `feat/mcp-fase-4-transporte`, issue #85): the
 kill-switch stopped unmounting routes, the public-URL variable gained subpath support, the CORS
@@ -608,7 +843,21 @@ auditing for drift (all confirmed working on 2026-08-28):
 - **History `window_months` defaults/caps (Fase 5, issue #86, 4.4.0)**: `grep -n "DEFAULT_HISTORY_WINDOW_MONTHS\|MAX_HISTORY_WINDOW_MONTHS\|DEFAULT_CASHFLOW_WINDOW_MONTHS\|MAX_CASHFLOW_WINDOW_MONTHS\|MAX_FINE_CURVE_WINDOW_MONTHS" apps/api/src/handlers/history.rs` and the shared validator `grep -n "fn validate_window_months" -A 12 apps/api/src/handlers/mod.rs` (both endpoints reject out-of-range, neither clamps)
 - **MCP list-tool pagination limits (Fase 5, issue #86, 4.4.0 for the two new ones)**: `grep -n "_DEFAULT_LIMIT\|_MAX_LIMIT" apps/api/src/mcp/server.rs`
 - `?density` / hybrid indices: `grep -n "resolve_density\|density_month_indices" -A 10 apps/api/src/handlers/projection.rs`
-- `?view` resolution: `grep -n "fn resolve" -A 5 apps/api/src/handlers/person_view.rs`
+- `?view` resolution — **el default es `mine` desde 5.0.0**, y el grep debe enseñar la rama
+  `None | Some("") | Some("mine")`: `grep -n "fn resolve" -A 9 apps/api/src/handlers/person_view.rs`
+- **Perfil de jubilación (§5.1)**: cotas `grep -nE 'const (MIN|MAX)_[A-Z_]+' apps/api/src/handlers/retirement_profile.rs apps/api/src/handlers/installation.rs`
+  (12 líneas); derivación de `target_basis` `grep -n 'fn resolve_retirement_profile' -A 45 apps/api/src/handlers/retirement_profile.rs`;
+  ruta `grep -n 'me/retirement-profile' apps/api/src/handlers/retirement_profile.rs`; que
+  `fire_settings` ya no lleva los cuatro ejes
+  `grep -c "fire_number_mode\|fire_number_manual_amount\|swr_pct\|horizon_lifespan_age" apps/api/src/handlers/installation.rs`
+  (**2**, las dos doc-comments); espejo en el cliente `grep -nE 'const (MIN|MAX)_[A-Z_]+' apps/web/src/lib/retirementProfile.ts`
+- **Bandas (§4)**: `grep -nE 'const (DEFAULT_BANDS_PATHS|HTTP_MAX_PATHS|MCP_MAX_PATHS|VERDICT_AMBER_MARGIN_PP|BANDS_PERCENTILES)' apps/api/src/handlers/projection_bands.rs`
+  y `grep -n 'household_bands_unavailable\|fn parse_seed\|fn resolve_paths' apps/api/src/handlers/projection_bands.rs`
+- **Volatilidad del activo (§5.2)**: `grep -n 'annual_volatility_percent' apps/api/migrations/20260902200200_assets_annual_volatility.sql`
+  y `grep -n 'fn assert_volatility_percent' -A 10 apps/api/src/handlers/assets.rs`
+- **Canal `:dev` (§1.3)**: `grep -n 'inputs:' -A 12 .github/workflows/dev-image.yml` (los dos inputs
+  y sus defaults) y `grep -n 'dev|dev-' .github/workflows/dev-image.yml` (la validación de la etiqueta)
+- **5.0.0 no añade env vars**: `git diff main..HEAD -- .env.example apps/api/docker-entrypoint.sh addon/futurefin/ | wc -c` → **0**
 - Installation validation bounds: `grep -n "normalize_currency\|validate_show_age_mode\|validate_annual_inflation\|normalize_calendar_tz\|swr_pct\|from(99u32)" apps/api/src/handlers/installation.rs`
 - fire_settings defaults + legacy alias: `grep -n "default_fire_settings\|annual_expense_adjusted" -A 8 apps/api/src/handlers/installation.rs`
 - `savings_source` enum + reader + conditional cache gating: `grep -n "enum SavingsSource\|savings_source\|projection_savings_source" apps/api/src/handlers/installation.rs apps/api/src/handlers/transactions/mod.rs`

@@ -326,8 +326,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   rmcp): `title` legible, `open_world_hint = false` (el servidor solo toca su propia DB) y
   `read_only_hint = true` en las lecturas. Sin ellas un cliente conforme al spec asume el peor
   caso (escritura destructiva). Test: `tools_list_exposes_annotations_on_every_tool`. Recuentos
-  reproducibles: `grep -c 'read_only_hint = true'` → **28**, `grep -c 'destructive_hint = true'`
-  → **27** (`apps/api/src/mcp/server.rs`, 4.4.0 tras la Fase 6; eran 21 y 22 en 4.0.0).
+  reproducibles: `grep -c 'read_only_hint = true'` → **30**, `grep -c 'destructive_hint = true'`
+  → **28** (`apps/api/src/mcp/server.rs`, medido el 2026-09-03 con 5.0.0; eran 28 y 27 tras la
+  Fase 6 de 4.4.0, y 21 y 22 en 4.0.0).
   **Dos reclasificaciones a `destructive_hint = true` en 4.0.0** — `destructive_hint` es lo que un
   cliente MCP conforme usa para decidir si pide permiso al humano, así que declararlo mal no es un
   matiz de documentación:
@@ -447,9 +448,13 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     declarar el tri-estado de sus tres decimales, y las DOS descripciones de activos dejan de
     mentir con «Sin owner-check: cualquier member edita cualquier activo del hogar» —una frase que
     D21 volvió falsa en WP4 y que nadie había recontado—, lo que devuelve `update_asset_value` de
-    404 a 382. Estado: **`70 23834 575`** — quedan **166 caracteres**, y la tool más larga baja de
-    598 a 575. Sigue siendo un margen de una tool corta: presupuesta el reequilibrio al planificar
-    la siguiente (WP6 trae `get_projection_bands`), no al final.
+    404 a 382. Estado tras WP5-2: **`70 23834 575`** — quedaban **166 caracteres**. **WP6b metió
+    `get_projection_bands`** (490 caracteres) y volvió a pagar dentro, moviendo ~550 al
+    `instructions`: estado **HOY `71 23793 545`**, con **207** de margen y la tool más larga
+    (`simulate_projection`) en 545. La terna sale de un comando y no de la memoria —
+    `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`.
+    Sigue siendo un margen de una tool corta: presupuesta el reequilibrio al planificar la
+    siguiente, no al final.
   - **Hallazgo que reordena lo que queda**: medido DESPUÉS del recorte, el `inputSchema` del
     catálogo son ~55 KB, **~2,7× las descripciones** (medida puntual de la auditoría de la Fase 5, no
     una constante congelada: re-derívala con un `tools/list` contra un servidor vivo pesando
@@ -703,7 +708,8 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   escrituras COND (transacciones) NO llevan `impact`: es la escritura más frecuente del catálogo y
   solo mueve el motor a través de un promedio 12m, no vale la pena la lectura doble en el camino
   caliente. Recuento reproducible, nunca la lista de arriba a ojo:
-  `grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs` → **18** (eran quince hasta la
+  `grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs` → **19** el 2026-09-03 (18 tras la
+  Fase 6 de 4.4.0; eran quince hasta la
   Fase 6; hasta el barrido de la Fase 7 la enumeración de esta misma frase se había quedado en
   las quince mientras el párrafo ya decía 18 — copiar la lista daba tres nombres de menos). Las dos tools de snapshot **tampoco** lo llevan, y ahí la ausencia es contrato: publican
   `"affects_projection": false` en su lugar, porque los snapshots no son input del engine (D12) y un
@@ -792,8 +798,12 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   #4 del registro de paridad: desde 3.8.0 se podía crear una regla y aplicarla a cientos de
   movimientos pero no corregirla, y las reglas contradictorias se acumulaban (auditoría MCP §10). Las dos
   guardias del PATCH viven en la **core** (`rule_patch_empty`, `rule_patch_conflict`): el `clear_*`
-  ya no gana en silencio sobre el campo puesto. Catálogo total tras el tren 4.4.0 completo: **68 tools** (28 con `read_only_hint = true` + 40 de
-  escritura; recuento reproducible: `grep -c '#\[tool(' apps/api/src/mcp/server.rs`), congelado
+  ya no gana en silencio sobre el campo puesto. Catálogo total tras el tren 4.4.0 completo: **68 tools de entonces** (28 con
+  `read_only_hint = true` + 40 de escritura) — cifra **histórica**, no un recuento vivo: hoy son
+  **71 (30 + 41)**. El comando que lo recuenta
+  (`grep -c '#\[tool(' apps/api/src/mcp/server.rs`) vive en §catálogo, junto a su valor actual —
+  aquí solo estorbaría, porque una medición fechada con un comando vivo al lado se lee como si el
+  comando devolviera ese número. Congelado
   en `tools_list_returns_exactly_the_v1_catalog`. Eran **52** hasta la Fase 5 incluida. **La Fase 3 (issue #84) no toca el catálogo**
   (sigue en 52/21/31) — reescribe el andamiaje de las escrituras (auditoría, scope, dos fases,
   `impact`), no añade ni retira ninguna tool. Regresión: `apps/api/tests/mcp_write.rs` (tramos

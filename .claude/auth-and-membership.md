@@ -334,8 +334,11 @@ idéntico:
 5. Carrera con otra petición sobre la MISMA identidad externa (`users_external_user_id_key`): no es
    un error — se devuelve el usuario que ganó, que es lo que quien llama pedía.
 
-Tras el 200, `sso_login` hace el **mismo warm-up en background** de la proyección del hogar que
-`login` (D7: no se espera al recompute); usuario pending ⇒ no hay nada que calentar y se salta. El
+Tras el 200, `sso_login` hace el **mismo warm-up en background** que `login` — y desde 5.0.0 lo que
+calienta es la proyección **del propio usuario** (`warm_up_mine_projection`, `view=mine`, las dos
+densidades), no la del hogar: con el default de `?view` invertido, el hogar sería una entrada que
+nadie consulta, y además cuesta N simulaciones en vez de una (D7: no se espera al recompute);
+usuario pending ⇒ no hay nada que calentar y se salta. El
 camino HA-IdP lo hereda: `ha_callback` termina en el mismo `establish_session`.
 
 **Un matiz del camino HA-IdP**: el 409 `sso_username_unavailable` del punto 3 no puede salir como

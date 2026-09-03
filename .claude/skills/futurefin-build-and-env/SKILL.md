@@ -182,6 +182,9 @@ the only automated evidence of "no data loss" — do not weaken it. If your loca
 | Build API | `cd apps/api && cargo build` (CI: `cargo build -p futurefin-api --locked`) | No |
 | Engine unit tests | `cargo test -p futurefin-engine` | No — pure Decimal math, no I/O |
 | One engine test | `cargo test -p futurefin-engine -- <name>` | No |
+| **Stochastic engine** (5.0.0: Monte Carlo, `f64`) | `cargo test -p futurefin-engine-stochastic` | No — pure math, no I/O |
+| The **degeneration gate** alone (Decimal ↔ f64 son la misma simulación) | `cargo test -p futurefin-engine-stochastic --test degeneration` | No |
+| The **golden pins** of the engine | `cargo test -p futurefin-engine --test golden_pins` | No |
 | Full workspace tests (incl. `apps/api/tests/` integration) | see below | Yes — ff-test-db |
 | Frontend typecheck | `npm run typecheck:web` | No |
 | Frontend lint | `npm run lint:web` | No |
@@ -205,13 +208,22 @@ migrations there, and runs against the real router. Schemas are leaked on purpos
 
 What CI runs (**re-verified 2026-08-29; `.github/workflows/ci.yml` has FIVE jobs**, recount with
 `sed -n '/^jobs:/,$p' .github/workflows/ci.yml | grep -E '^  [a-z_-]+:$'`): `secrets-scan` (blocking, first); `rust` =
-`cargo build -p futurefin-api --locked` + `cargo test -p futurefin-engine --locked`; `web` = Node
+`cargo build -p futurefin-api --locked` + `cargo test -p futurefin-engine --locked` + —desde 5.0.0—
+`cargo test -p futurefin-engine-stochastic --locked`; `web` = Node
 24, `npm install` + `typecheck:web` + `lint:web` + `npm test --workspace futurefin-web` +
 `build:web`; **`integration` = a `postgres:16.4-alpine` service + `cargo test --workspace
 --locked`**; `docker-stack` = the shellcheck + image-sanity + container suite described in §4.
 **This paragraph said "three jobs" and "CI still does NOT run the Postgres integration tests"
 until the Fase-7 sweep — both false since 4.0.0.** Running `cargo test --workspace` locally is
 still the fast loop, but it is no longer the only place those tests run.
+
+**5.0.0 — el workspace tiene un crate más** (`crates/engine-stochastic`, el Monte Carlo en `f64`):
+`grep -n 'members' -A 1 Cargo.toml` lo enumera y `grep -n 'futurefin-engine' .github/workflows/ci.yml
+scripts/test-all.sh` debe imprimir **≥ 4 líneas**. Corre sin base de datos y `./scripts/test-all.sh`
+lo ejecuta **fuera** del bloque de integración, para que lo vea también un `SKIP_DB=1`: la puerta de
+degeneración (`degeneration.rs`, todos los casos de la batería, ≤ 1 € por mes) es lo único que
+garantiza que el camino de coma flotante y el exacto son la misma simulación, y saltársela por no
+tener Postgres levantado sería saltarse el gate que la arqueología exigió para readmitir el `f64`.
 
 ## 6. How migrations run in dev
 
@@ -382,7 +394,7 @@ self-contained image). Re-verify before trusting volatile facts — every comman
 2026-08-16:
 
 - Version: `grep '^version' apps/api/Cargo.toml` (3.0.0)
-- Migration count/list: `ls apps/api/migrations | wc -l` (**49** on 2026-08-30; 34 on 2026-08-16)
+- Migration count/list: `ls apps/api/migrations | wc -l` (**59** on 2026-09-03, rama `release/5.0.0`; 49 on 2026-08-30; 34 on 2026-08-16)
 - Compose files present — must be exactly three, and **no** `split-dev`: `ls docker-compose*.yml`
 - Dev DB definition (project name, service, port, volume): `cat docker-compose.dev.yml`
 - Production stack is one service, two volumes, `/v1/ready` healthcheck: `cat docker-compose.yml`
@@ -395,6 +407,8 @@ self-contained image). Re-verify before trusting volatile facts — every comman
 - API port default + env loading + connect timeout: `grep -n 'fn port\|fn load_env\|FUTUREFIN_DB_CONNECT_TIMEOUT_SECS' -A 5 apps/api/src/main.rs`
 - Migration runner (no auto-repair) + connect retry: `grep -n 'migrate!\|connect_with_retry' apps/api/src/db.rs`
 - CI jobs actually run: `grep -n 'name:\|run:' .github/workflows/ci.yml`
+- Workspace crates (5.0.0 añadió el cuarto): `sed -n '/^members/p' Cargo.toml` → `apps/api`,
+  `crates/domain`, `crates/engine`, `crates/engine-stochastic`
 - Test DB recipe: TL;DR block at top of `.claude/tests.md`
 - **`apps/web/vite.config.ts` still declares no `base` — and since 2026-08-27 that is deliberate,
   not an omission** (`grep -n 'base' apps/web/vite.config.ts` → nothing). A Vite `base` is baked at

@@ -255,6 +255,53 @@ nothing (the workflow's own comment block narrates the incident). In practice it
 today, because `publish-image.yml` never emits `sha-*` tags. Release tags are never deleted, so
 pinned deployments stay pullable.
 
+### 2.1b El canal `:dev` — una imagen de laboratorio, NUNCA una versión (5.0.0, D19)
+
+`.github/workflows/dev-image.yml` es un **segundo** workflow, a propósito. Existe para probar una
+release grande en otras plataformas —compose, add-on de Home Assistant, MCP desde claude.ai— **antes
+de taguear nada**.
+
+**Cómo se lanza**: Actions → «Dev image (canal :dev)» → *Run workflow*, con dos entradas:
+
+| Input | Requerido | Default | Qué acepta |
+|---|---|---|---|
+| `ref` | sí | `release/5.0.0` | La rama o el SHA que se construye |
+| `tag` | sí | `dev` | **Solo `dev` o `dev-<sufijo>`**; el primer paso del job valida el literal y aborta con `::error::` si no encaja. Nunca semver, nunca `latest` |
+
+**Qué publica**: `ghcr.io/<owner>/futurefin:<tag>` y Docker Hub `maxlainz/futurefin:<tag>`,
+multi-arch como el workflow de release.
+
+**Qué NO toca, nunca** — y por esto es un fichero aparte y no un input más de `publish-image.yml`
+(cuyo `workflow_dispatch` lleva `create_tag`):
+
+- no mueve `:latest`, `:X`, `:X.Y` ni ninguna etiqueta semver (`docker/metadata-action` solo recibe
+  la etiqueta `dev*`);
+- **no crea tag de git, ni GitHub Release, ni bump del add-on**. La norma de la casa —«una versión
+  existe si y solo si hay una imagen publicada que la lleva»— no se rompe porque **`dev` no es una
+  versión**;
+- no exige CHANGELOG ni CI verde del commit. Es una imagen de laboratorio, y se dice así.
+
+La etiqueta `dev` **sobrevive a `cleanup-ghcr.yml`**, que solo poda versiones cuyos tags son todos
+`sha-*`.
+
+**Cómo se consume**:
+
+```bash
+# Compose: en el .env de una instalación de PRUEBAS
+FUTUREFIN_TAG=dev
+docker compose pull && docker compose up -d
+
+# Add-on local de Home Assistant: en la copia local de addon/futurefin/config.yaml
+#   image: maxlainz/futurefin
+#   version: "dev"
+```
+
+**Regla de oro del canal**: `:dev` se prueba **sobre datos de laboratorio**. Si vas a apuntarlo a una
+instalación con datos reales, haz antes el `.ffbackup` de cada usuario (§5.4) **y** comprueba que el
+backup automático pre-migración se escribió (§5.1) — una imagen de rama puede traer migraciones que
+la versión publicada todavía no tiene, y **volver atrás desde una base ya migrada topa con la
+negativa de downgrade de §2.3**. Esa es la razón por la que el aviso está aquí y no en el workflow.
+
 ### 2.2 Pinning advice
 
 `FUTUREFIN_TAG=latest` (the default) means every `docker compose pull` may jump versions,
@@ -299,6 +346,63 @@ no `.env` and no `docker compose pull`. Read the result in the add-on's **Log** 
 as §3.2. Downgrading the add-on is only possible for versions the store still offers, and hits the
 same refusal banner above if the database moved past it: restore the pre-migration dump or go back
 up.
+
+### 2.3b Actualizar a 5.0.0 — lo que un operador tiene que saber antes de darle a *Update*
+
+5.0.0 es una **major**: cambia el esquema, cambia el formato del backup y cambia números en un hogar
+de más de una persona. El manual para el usuario final está en
+[`docs/actualizar.md`](../../../docs/actualizar.md) §«Actualizar a la 5.0.0»; esto es la versión de
+operador.
+
+**Antes de actualizar**: `.ffbackup` de **cada** usuario (§5.4) y, si te lo puedes permitir,
+`scripts/backup-postgres.sh` (§5.2). No es ritual: hay una migración que reescribe filas.
+
+**Tres migraciones nuevas** (`20260902200000` · `20260902200100` · `20260902200200`), todas después
+del dump automático pre-migración (§5.1). La segunda es **DATA-CHANGING firmada**:
+
+- **`users_retirement_profile`** — columna `users.retirement_profile jsonb` y **copia** de cuatro
+  ajustes que hasta 4.15.x eran del hogar (modo del objetivo, importe manual, SWR y edad límite) al
+  perfil de **cada** usuario. Es una copia previa a la retirada, así que **el upgrade no mueve un
+  número**: cada miembro arranca con la estrategia «Cuanto antes» —la conducta de 4.15.x— y con
+  exactamente lo que había.
+- **`ledger_owner_not_null`** — las filas del ledger sin dueño (`owner_user_id IS NULL`) pasan al
+  **owner más antiguo** de la instalación y la columna queda `NOT NULL`. Son filas legadas de antes
+  de 2026-02-16 o de imports de backups muy viejos. **Qué verá un hogar de dos personas**: esas
+  filas compartidas aparecen ahora en el «Yo» de ese miembro, entran en su histórico y **solo él
+  puede editarlas** — los demás reciben 403 al intentarlo. En `allocation_rules` un sumidero
+  compartido redundante se borra y el resto se recoloca detrás de las reglas del owner conservando
+  su orden relativo.
+- **`assets_annual_volatility`** — columna nueva, `NULL` = activo determinista. No cambia ningún
+  número existente.
+
+**Lo que cambia sin migración, y que genera tickets si no se avisa**:
+
+- **La vista por defecto pasa a ser «Yo»**, no «Hogar» (en la app y en el API: `?view` omitido =
+  `mine`). Quien mire el Resumen justo después de actualizar verá **sus** cifras, no las del hogar;
+  el hogar sigue a un clic. Un cliente de API que dependiera del default añade `?view=household`.
+- **El «Hogar» pasa a ser una vista agregada de solo lectura**: suma de una simulación por persona,
+  sin plan propio. **En un hogar de dos o más miembros los números del gráfico cambian por diseño**
+  —antes era una cartera conjunta con una sola estrategia—; una instalación de un solo miembro no se
+  mueve. Los botones de crear y editar desaparecen en esa vista, y el API devuelve 403 si alguien lo
+  intenta igualmente.
+- **El `.ffbackup` sube a 13.** Los ficheros v1..v12 **siguen importando**; al importar uno ≤ 12 se
+  siembra el perfil de jubilación desde su `fire_settings`, pero **solo si quien importa no tiene ya
+  uno**. **Un servidor 4.x no puede leer un fichero v13**: se niega en limpio con
+  `backup_schema_version_unsupported`. Si vas a poder necesitar volver atrás, guarda también un
+  `.ffbackup` hecho **con la 4.15.x** antes de actualizar.
+- **Rollback**: volver a una imagen 4.x con la base ya migrada topa con la negativa de downgrade de
+  §2.3 (`FutureFin NO ARRANCA: esta base de datos viene de una versión MÁS NUEVA`). La salida es
+  restaurar el `pre-migration-*.sql.gz` que el propio arranque escribió (§5.1), no forzar nada.
+
+**Verificación después**: los milestones de §3.2 más
+
+```bash
+curl -sf http://127.0.0.1:8080/v1/health     # la versión debe decir 5.0.0
+docker compose logs futurefin | grep -E "pre-migration backup written|migrations applied|ERROR"
+```
+
+y, dentro de la app, que cada miembro ve su plan en **Jubilación** con la estrategia «Cuanto antes»
+y las mismas cifras que antes de actualizar.
 
 ### 2.4 Upgrading from a 2.x two-container stack
 
@@ -1066,6 +1170,19 @@ against v4.0.0** (which removed the external-database mode: `exec_api_external`,
 `apps/api/src/{main.rs,db.rs,state.rs,routes/mod.rs}`, `apps/api/src/handlers/health.rs`,
 `apps/api/src/handlers/backup_user/{crypto.rs,schema.rs}`,
 `.github/workflows/{publish-image.yml,cleanup-ghcr.yml}`, `CHANGELOG.md`.
+
+**§2.1b (canal `:dev`) y §2.3b (actualizar a 5.0.0) escritas 2026-09-03** (issue #207, rama
+`release/5.0.0`), leídas de `.github/workflows/dev-image.yml`,
+`apps/api/migrations/2026090220*.sql`, `apps/api/src/handlers/backup_user/schema.rs`
+(`CURRENT_SCHEMA_VERSION = 13`), `apps/api/src/handlers/person_view.rs` (el default `mine` y
+`not_row_owner`) y la §Breaking de `CHANGELOG.md`. Re-verificación:
+`grep -n 'inputs:' -A 12 .github/workflows/dev-image.yml` (los dos inputs y sus defaults);
+`grep -n 'dev|dev-' .github/workflows/dev-image.yml` (la validación de la etiqueta);
+`grep -n 'sha-' .github/workflows/cleanup-ghcr.yml` (por qué `:dev` sobrevive a la poda);
+`ls apps/api/migrations | tail -3` (las tres de 5.0.0);
+`grep -n 'CURRENT_SCHEMA_VERSION' apps/api/src/handlers/backup_user/schema.rs` (**13**).
+La contrapartida para el usuario final vive en `docs/actualizar.md` §«Actualizar a la 5.0.0» — si
+una de las dos cambia, cambian las dos.
 
 **§2.1 gained the «Entrar con Home Assistant» block on 2026-08-27 for v4.3.1** (branch
 `feat/ha-idp-login`), read from `addon/futurefin/config.yaml`, `apps/api/docker-entrypoint.sh`,

@@ -10,7 +10,7 @@ description: >
   update a tool. Triggers: "add an MCP tool", "añadir una tool", "does this endpoint need a
   tool?", "the MCP is out of date", "el MCP se ha quedado atrás", "tools/list", "frozen catalog",
   "tools_list_returns_exactly_the_v1_catalog", "update the tool catalog", "new handler — MCP?",
-  "extract a *_core", "preview/confirm", "tool annotations", "68 tools". Do NOT use it for WHY
+  "extract a *_core", "preview/confirm", "tool annotations", "71 tools". Do NOT use it for WHY
   tools share core fns / live-role auth (futurefin-architecture-contract D14/D15), the catalog's
   per-tool semantics (.claude/api-routes.md §MCP), MCP env vars and the write toggle
   (futurefin-config-and-flags), how to run the MCP test suites (futurefin-validation-and-qa /
@@ -145,7 +145,7 @@ the blocking reason changes (noted per row).
 | `POST /v1/transactions/batch` (create) | **defer** | `create_transaction` loops fine; batch adds all-or-nothing tx semantics + shared fingerprint ordinals that complicate preview. **Sigue vigente en 3.8.0**: lo que se hizo tool-able fue el PATCH, no el POST | Real demand for >10-item batches from chat |
 | `POST /v1/transactions/rules` con `apply_to_existing` (el eje de backfill del body HTTP) | **omit** | En el momento del preview la regla todavía no existe, así que no hay nada que simular; y un `create_*` capaz de reescribir cientos de filas haría mentir a sus propias annotations, que es lo que el cliente MCP usa para decidir si pide permiso al humano. Desde el chat: `create_categorization_rule` → `apply_categorization_rule`, con un único gate de confirmación (3.8.0) | Que el SPA necesite el round-trip único también desde MCP, cosa que hoy no pasa |
 | `POST /v1/allocation-rules/reorder` | **omit** | Requires echoing the exact full id set; one missing id = 400; near-zero conversational value | UX rethink of the cascade |
-| `PATCH /v1/auth/me` (`birth_date`) | **defer** | Engine input but set-once identity data; marginal | Bundled into a future profile tool |
+| `PATCH /v1/auth/me` (`birth_date`) | **CERRADA 2026-09-03 (5.0.0)** — el eje ya está cubierto | El *revisit trigger* de esta fila era literalmente «bundled into a future profile tool». Esa tool existe: `update_retirement_profile` acepta `birth_date` + `clear_birth_date` (`mcp/server.rs:2376`, `:2379`), escribe **la misma columna** `users.birth_date` con **el mismo parser** que el endpoint (`retirement_profile.rs:1092` llama a `handlers::auth::parse_me_birth_patch`) y `get_retirement_profile` la devuelve. Y no es un extra: sin fecha de nacimiento las estrategias por edad degradan a `asap`, así que pedirla en otra pantalla era garantizar perfiles a medias | **Matiz honesto**: `PATCH /v1/auth/me` **sigue existiendo** (`routes/mod.rs:63`). Lo que se cubre es su eje `birth_date`; si algún día gana otro campo, esa parte vuelve a esta tabla |
 | `GET /v1/auth/me` | **covered de facto** por `get_settings` (2026-08-30) | Devuelve `{id, username, birth_date}` — exactamente el bloque `user` que `get_settings` obtiene de la misma `settings_user_core` (§3.3). Una tool dedicada duplicaría un subconjunto sin añadir capacidad | Que `GET /v1/auth/me` gane campos que `get_settings.user` no exponga |
 | `GET /v1/history/snapshots/prefill` | **defer** | Only meaningful as companion of snapshot backfill | Gap #3 below is implemented |
 | Full-body `PATCH /v1/installation` tool | **restricted** | `mcp_write_enabled` self-reference (§2.1); FIRE subset already covered by `update_fire_settings` (owner-only) | Only ever as explicit field-allowlist tool, never `PatchInstallationBody` passthrough |
@@ -224,6 +224,26 @@ sea cómoda. **Dos de las cuatro son ya la misma forma** («la core existe, el P
 el objeto entero, el chat necesita campo a campo»), así que esa vía está agotada como novedad: la
 quinta que la invoque no está argumentando nada, solo está aplicando un precedente — legítimo, pero
 dilo así.
+
+### 3.5 Evaluación del tren 5.0.0 (issue #207) — 68 → 71 tools
+
+La evaluación de §1 corrida sobre toda la superficie HTTP que la release movió. **Ninguna fila queda
+sin clasificar**; las tres tools nuevas y los cinco cambios de contrato están abajo.
+
+| Superficie HTTP nueva o cambiada (5.0.0) | Resultado de paridad |
+|---|---|
+| `GET \| PATCH /v1/auth/me/retirement-profile` | **Dos tools nuevas**: `get_retirement_profile` (read-only, sin `require_mcp_write`, `identity()` a secas) y `update_retirement_profile` (preview/confirm). Comparten `get_retirement_profile_core` / `patch_retirement_profile_core` con el HTTP — cero SQL en `server.rs`, como manda §4 paso 1. **Own-user por construcción**: `NoParams` y `user_id` de la identidad, así que leer el plan de otro no es expresable en el esquema |
+| Auth de `update_retirement_profile` | **Por ROL, no owner-only** — y es deliberado: `require_mcp_write` aplica sus tres puertas (rol vivo → scope del token → `mcp_write_enabled`) y ninguna mira al dueño. El comentario que lo sostiene (`server.rs:5599-5601`): *un `viewer` que no puede fijar su propia edad de jubilación no puede ver su propia proyección, que es exactamente lo que un viewer sí puede hacer*. Contraste con `update_fire_settings`, que **sí** es owner-only y lo comprueba **en la core** (D14/#99) porque toca el hogar entero |
+| `confirm_token` de `update_retirement_profile` | **NO lo lleva, y el criterio es el de `two_phase`** (`server.rs:224-247` §«Dónde se usa y dónde no»): el token se exige solo donde *la confirmación destruye algo que la conversación no puede reconstruir* — cascadas sin cota y puertas de una sola dirección. Aquí el preview devuelve el before/after **íntegro** del perfil, así que deshacerlo es volver a llamar con los valores de `before`. Es el mismo argumento de `update_fire_settings`, y **son ya dos**: la frase de `server.rs:5539-5541` que llamaba a aquella «la única tool destructiva enteramente reversible desde su propio preview» quedó obsoleta el día que esta llegó |
+| `GET /v1/projection/bands?paths&seed` | **Tool nueva** `get_projection_bands` (read-only). Tres decisiones de superficie, todas medidas: **(a) mine-only** — `view=household` devuelve 400 `household_bands_unavailable` desde la **core**, no desde el handler, así que la tool hereda la conducta sin repetir la comprobación; **(b) sin `density`** (arqueología §2.18, veto 22): fuerza `hybrid` igual que `get_projection`; **(c) `paths` topa en 1.000 por MCP frente a 2.000 por HTTP** — el contexto de un modelo es más caro que el ancho de banda de un navegador |
+| `include_liquid_bands` (nuevo, `get_projection_bands`) | **Opt-in por TAMAÑO, no omisión.** No es una capacidad recortada: es la mitad exacta del payload. La respuesta completa mide **~16 KB** a densidad `hybrid` y las tres series del líquido son la mitad de los puntos (`server.rs:3032-3037`, `mcp_http.rs:357-362`). Sin el flag **la clave no existe** (no viaja `null`), pinneado en `mcp_http.rs:402-405`. Presupuesto: `projection_bands.rs::the_hybrid_payload_stays_within_the_context_budget` ≤ **32 000 bytes**, cuyo mensaje de fallo prescribe la salida correcta («quita las bandas del líquido antes de subir la cota») |
+| `include_member_series` (nuevo, `get_projection`) | **Misma categoría: opt-in por tamaño.** Medido el 2026-09-03 (`projection_household_aggregate.rs:449-452`): `mine/hybrid` **21 009 B**, `household/hybrid` **34 161 B**, de los cuales `members[].series` son **11 748 B** (~5,9 KB por miembro, lineal con el hogar). **Por HTTP viajan siempre**; solo la tool las oculta, igual que `asset_series`. Dos presupuestos distintos y a propósito: **32 KB** la tool (`mcp_http.rs:470`) y **68 KB** el HTTP (`projection_household_aggregate.rs:465`, deliberadamente ~2× lo medido) |
+| `simulate_projection`: `profile_overrides`, `income_growth_real_pct_annual`, `income_steps`, `income_pause`, `solve`, `monte_carlo` | **Tool actualizada** (§3.3 sigue: **no hay ruta HTTP** — `grep -rn 'simulate' apps/api/src/routes/mod.rs` sigue vacío y `simulate_projection_core` tiene un único caller). `profile_overrides` **delega** sus cotas en los params de la tool de escritura (`to_patch()`), así que una cota no puede divergir entre guardar y simular. **Cinco de los seis ejes llevan anti-no-op** (`profile_overrides_empty`/`_no_op`, `income_growth_no_op`, `income_step_delta_zero`, `solve_no_op`); **`monte_carlo` no lo lleva, y está declarado**: no mueve el escenario, lo **describe** — `{"monte_carlo": {"paths": 500}}` con el resto vacío es la pregunta legítima «¿qué probabilidad de éxito tiene mi plan tal cual está?» |
+| `update_fire_settings` pierde 4 campos | **Tool actualizada, y la pérdida es la paridad**: `fire_number_mode`, `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age` se mudaron al perfil por usuario, así que dejarlos en una tool de ajustes del HOGAR habría sido servir una escritura que ya no existe. Comprobación acotada al struct, para que no la enmascare otra aparición del fichero:<br>`awk '/^pub struct UpdateFireSettingsParams \{/,/^\}/' apps/api/src/mcp/server.rs \| grep -cE 'fire_number_mode\|fire_number_manual_amount\|swr_pct\|horizon_lifespan_age'` → **0**.<br>El eje what-if no se pierde: vuelve por `profile_overrides` |
+| `assets`: volatilidad + tri-estado | **Dos tools actualizadas.** `create_asset` gana `annual_volatility_percent`; `update_asset` gana ese más `clear_annual_volatility_percent` y `clear_expected_annual_return_percent` (**con el sufijo `_percent`**: el nombre corto no existe). Un schema de tool no sabe expresar «omitir vs `null`», así que el tri-estado del PATCH viaja como `clear_*` — y hasta 4.15.x la tool **tenía la capacidad de romper un estado que no tenía la capacidad de reparar** (`mcp_write.rs:4175-4180`) |
+| D21 (403 `not_row_owner`) | **Heredado, sin trabajo de tool**: la comprobación vive en las cores, así que las dos superficies fallan igual — incluidos los previews de borrado, que antes enseñaban la fila ajena **y entregaban el `confirm_token`**. Lo que sí hubo que arreglar a mano fueron **dos descripciones que mentían**: las de activos decían «Sin owner-check: cualquier member edita cualquier activo del hogar», frase que D21 volvió falsa y que nadie había recontado |
+| Default de `?view` → `mine` | **Heredado por las tools con scope** (`resolve_view` llama a `LedgerViewQuery::resolve`), pero **NO es gratis**: cambia la respuesta de toda tool que omita `view`. Deriva detectada y **no arreglable desde documentación**: el doc-comment de `resolve_view` (`mcp/server.rs:125-127`) sigue diciendo «`"household"` u **omitido** → Household». Registrada en la tabla de erratas de `futurefin-docs-and-writing` §7 |
+| `GET /v1/summary` gana `plan` | **Heredado**: `get_summary` comparte `summary_core`, así que el objeto `plan` (con su `absent_reason: household_aggregate`) llega solo |
 
 ### 3.4 View echo — object responses vs `list_*` envelopes (Fase 5, issue #86)
 
@@ -413,15 +433,15 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
 
 ## 5. Keeping it honest — verification and drift audit
 
-Reproducible counters (run from repo root; **expected values dated 2026-08-28, Fases 0–6 del tren
-4.4.0**):
+Reproducible counters (run from repo root; **valores medidos el 2026-09-03, rama `release/5.0.0`;
+entre paréntesis los de 2026-08-28, Fases 0–6 del tren 4.4.0**):
 
 ```bash
-grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 68 — total tools
-grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 28 — reads + simulate
-grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 40 — writes
-grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 40 — MUST equal writes
-grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 17 — preview/confirm (Fase 6: +3)
+grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 71 (68) — total tools
+grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 30 (28) — reads + simulate
+grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 41 (40) — writes
+grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 41 (40) — MUST equal writes
+grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 18 (17) — preview/confirm
 grep -c '= two_phase(' apps/api/src/mcp/server.rs                    # 8 — las que exigen token de dos fases
 #   (OJO 1: `grep -c 'confirm_token'` a secas da 47 — cuenta también el campo del schema y su prosa.
 #    OJO 2: el comando de esta línea fue `grep -c 'confirm_token.as_deref'` hasta la Fase 7, y hoy
@@ -432,16 +452,40 @@ grep -c '= two_phase(' apps/api/src/mcp/server.rs                    # 8 — las
 #    dos menciones en prosa son `[`two_phase`]`, con backticks). Alternativa igual de buena:
 #    `grep -c 'p\.confirm_token\.as_deref()'` → 8. **`server.rs` sigue prescribiendo el grep viejo**
 #    y no se puede arreglar desde documentación — reportado como deriva código↔contrato.)
-grep -c 'settled(&self.state.pool' apps/api/src/mcp/server.rs       # 40 — == escrituras: toda escritura cierra su fila de auditoría
-#   (el patrón lleva `&self.state.pool` a propósito: `grep -c 'settled('` da 41, contando la definición)
-grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs       # 18 — escrituras que publican el bloque `impact`
-#   (`grep -c 'impact_since('` da 19: cuenta también la definición)
+grep -c 'settled(&self.state.pool' apps/api/src/mcp/server.rs       # 41 (40) — == escrituras: toda escritura cierra su fila de auditoría
+#   (el patrón lleva `&self.state.pool` a propósito: `grep -c 'settled('` da 42, contando la definición)
+grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs       # 19 (18) — escrituras que publican el bloque `impact`
+#   (`grep -c 'impact_since('` da 20: cuenta también la definición)
 grep -c 'sqlx::query' apps/api/src/mcp/server.rs                   # 0 — EL invariante real
 grep -c 'sqlx::query' apps/api/src/mcp/auth.rs                     # 4 — gate + auditoría (4.4.0)
 ```
 
-Los ocho números son **68/28/40/40/17/8/40/18** a 2026-08-28 (Fases 0–6 del tren 4.4.0), recontados
-enteros ese día. Antes de la Fase 6: 52/21/31/31/14/7/31/15.
+Los ocho números son **71/30/41/41/18/8/41/19** a **2026-09-03** (5.0.0, issue #207), recontados
+enteros ese día. A 2026-08-28 (Fases 0–6 del tren 4.4.0): 68/28/40/40/17/8/40/18. Antes de la Fase 6:
+52/21/31/31/14/7/31/15. **`= two_phase(` es el único que no se movió** — las tres tools nuevas no
+acuñan token (§3.5), y eso es una decisión, no un olvido.
+
+**Presupuesto de descripciones — el fixture lo mide sin arrancar nada.** `mcp-catalog.json` guarda un
+`description_len` por tool además del hash, así que la terna sale de un comando y no de una memoria:
+
+```bash
+python3 -c "
+import json
+d = json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))
+L = [t['description_len'] for t in d['tools']]
+print(len(L), sum(L), max(L))"
+# 71 23793 545   ← 2026-09-03. Tope del test: TOTAL_BUDGET 24 000, PER_TOOL_MAX 600.
+```
+
+Historia del margen, que es lo que dice si cabe la siguiente tool: `52 21319 596` al cerrar la
+Fase 5 → `68 23975 596` en 4.12.1 → `68 23949 598` tras 4.15.0 (**51 caracteres de margen**, medidos
+antes de escribir, no los 25/126 que circulaban congelados) → **`70 23757 588`** tras WP4 (dos tools
+nuevas pagadas moviendo prosa duplicada al `instructions`, 243 de margen) → `70 23834 575` tras
+WP5-2 → **`71 23793 545`** hoy, con `get_projection_bands` dentro: **207 caracteres de margen**. Los
+~550 que hicieron sitio salieron de siete descripciones hacia el `instructions` —donde el cliente los
+lee una vez por sesión y no una vez por tool—, que es exactamente la salida que el mensaje de fallo
+del test prescribe. **La constante no se ha tocado nunca**, y ese es el punto: cuando no cabe, se
+mueve prosa; no se sube el techo.
 
 Invariant cross-checks: writes == `require_mcp_write` count (a write tool skipping the gate is
 a security bug); reads + writes == total; the frozen-catalog vec length == total. The doc-side
@@ -462,6 +506,16 @@ or — the finding — an unclassified gap, which means the parity contract was 
 it now and check what else that PR missed.
 
 ## Provenance and maintenance
+
+**Refrescada 2026-09-03 para el tren 5.0.0 (issue #207, rama `release/5.0.0`)**: §5 (los ocho
+contadores recontados —**71/30/41/41/18/8/41/19**— y el presupuesto de descripciones convertido en un
+comando sobre `description_len` del fixture, `71 23793 545`), **§3.5 nueva** (la evaluación de
+paridad del tren entero: tres tools nuevas, seis ejes de `simulate_projection`, los dos `include_*`
+opt-in por tamaño, `update_fire_settings` recortada y D21 heredado) y el cierre de la fila diferida
+`PATCH /v1/auth/me` de §3.1. Fuentes: `apps/api/src/mcp/server.rs`,
+`apps/api/src/handlers/{retirement_profile,projection,projection_bands,assets}.rs`,
+`apps/api/tests/{mcp_http,mcp_write,mcp_simulate,projection_bands,projection_household_aggregate}.rs`
+y `apps/api/tests/fixtures/mcp-catalog.json`.
 
 Written 2026-08-19 (post-3.5.0 train, branch `dev`), sourced from: full tool inventory and
 `git show 82a43cb` (the add-a-tool pattern), a route-by-route HTTP↔MCP coverage matrix over

@@ -133,6 +133,25 @@ branches bound placeholders in different orders; the helpers exist to kill that 
 returned, silently); treating `mine` as a privacy/security boundary is a design error — it is not
 enforced server-side beyond filtering.
 
+**5.0.0 — el default se invierte y `household` cambia de naturaleza (R2 + D9 del plan de #207).**
+Tres cambios, y ninguno toca la frase de arriba:
+
+- **`?view` omitido o vacío es ahora `mine`**, no `household` (`person_view.rs:75-83`; el guard
+  `resolve_accepts_only_mine_household_and_absence` lo dice literalmente). El porqué: con la
+  jubilación convertida en estrategia **por persona**, servir el hogar por omisión mezclaba filas de
+  dos personas bajo el perfil de una sola. Breaking declarado; un cliente de 4.15.x recupera su
+  conducta añadiendo `?view=household`.
+- **`household` deja de ser una simulación y pasa a ser un AGREGADO informativo**: el servidor corre
+  **una simulación por miembro** —con su perfil, su fecha de nacimiento y sus filas— al horizonte
+  común `max(horizontes)` y suma las series. En consecuencia el hogar **no publica jubilación
+  propia**: `jubilacion_*`, `strategy`, `phase_transitions` y `fire_target_series` viajan vacíos con
+  `absent_reason: "household_aggregate"`, y el hito de cada persona va en `members[]`. «El ahorro
+  necesario del hogar» no es una cifra que exista, y por eso se publica `null` con razón en vez de
+  una suma que nadie podría interpretar.
+- **`view` sigue sin ser una frontera de autorización — la de ESCRITURA es otra cosa y es nueva**:
+  ver D23. Un literal desconocido, además, es 400 `invalid_view` desde 4.0.0, no un `household`
+  silencioso; esta sección lo afirmaba mal hasta 5.0.0.
+
 ### D3. Sessions in the DB, not JWT
 `ff_session` cookie = a UUID (HttpOnly, SameSite=Lax, Secure per `COOKIE_SECURE`); the row lives
 in `sessions` with `expires_at`; `require_session_user` (`handlers/session.rs`) joins
@@ -143,7 +162,7 @@ row; owner can nuke sessions), zero signing-key management, and on a single-node
 round-trip is cheap. **Breaks if violated**: switching to stateless JWT makes logout and
 pending-user demotion non-immediate and adds key rotation surface for no benefit at this scale.
 
-### D4. Money is `Decimal` end-to-end — with ONE deliberate `f64` exception
+### D4. Money is `Decimal` end-to-end — with TWO deliberate `f64` exceptions (publication, and the stochastic crate)
 Domain/schema/engine: `rust_decimal::Decimal`, never `f64` (see `crates/domain/src/lib.rs` header).
 API serializes amounts as decimal **strings** (`rust_decimal::serde::str`); the frontend does
 arithmetic via `parseDisplayDecimal`-style helpers, never `parseFloat` on money.
@@ -168,6 +187,49 @@ años." Scalars/KPIs (`starting_net_worth`, `jubilacion_target_net_worth`, miles
 stay Decimal-as-string. **Breaks if violated**: `f64` upstream (engine, DB, KPI fields) causes
 silent cent drift that compounds over 840 months; conversely, re-stringifying the big arrays
 regresses wire size and client parse cost for zero precision benefit at display resolution.
+
+**Segunda excepción sancionada (5.0.0): el crate `crates/engine-stochastic`.** El título de esta
+decisión decía «ONE deliberate `f64` exception» y ya no es cierto: **son dos, y la segunda tiene
+naturaleza distinta**. La primera es de **publicación** (el número se calcula exacto y se sirve en
+`f64`); la segunda es de **cómputo** — el Monte Carlo evalúa el bucle del motor en coma flotante,
+porque a ~12 ms por proyección `Decimal` de 840 meses, 500 caminos serían seis segundos por
+petición. Lo que la hace admisible son cuatro condiciones, y las cuatro son verificables:
+
+1. **De ahí no sale un euro.** Las salidas del crate son magnitudes **estadísticas** —probabilidad
+   de éxito, percentiles de una banda, probabilidad de agotamiento por edad—, donde un error
+   relativo de 1e-15 no cambia ninguna decisión. El patrimonio, el objetivo, la aportación necesaria
+   y cualquier cifra en euros siguen saliendo del camino `Decimal`. Está escrito en el crate
+   (`crates/engine-stochastic/src/lib.rs:14-20`) **y en el cable**: la última frase de
+   `BANDS_MODEL_NOTE` (`handlers/projection_bands.rs:341`) se lo dice a quien consume la respuesta.
+2. **El freezer de `crates/engine` NO se tocó, y no se le añadió ninguna excepción.** El test es
+   `crates_engine_src_has_no_f64_outside_comments` (`crates/engine/src/lib.rs:153`) y su mensaje de
+   fallo sigue diciendo «JAMÁS en `crates/`». **Matiz honesto que hay que decir en voz alta**: ese
+   test escanea `crates/engine/src` y nada más, así que «no hay `f64` en `crates/`» dejó de ser
+   cierto — el segundo sitio es un crate hermano que el freezer no ve. Lo que mantiene honesto al
+   segundo sitio no es el freezer: es la puerta de degeneración.
+3. **No hay un segundo modelo.** El crate no tiene bucle propio: instancia el bucle **genérico** de
+   `futurefin-engine` (trait `MoneyOps`, WP5.5) con otro tipo numérico. Si alguien cambia el modelo,
+   cambia en un solo sitio. El `F64Money` es un newtype por la orphan rule **y** para que no se
+   pueda mezclar un número estocástico con un `Decimal`; todas sus políticas (saturación al
+   convertir a `Decimal`, `checked_*` que devuelven `None` ⟺ no finito, `total_cmp`, igualdad de
+   `g` por tolerancia `1e-12`) están declaradas en una tabla en `lib.rs:83-95`.
+4. **La puerta de degeneración** (`crates/engine-stochastic/tests/degeneration.rs`,
+   `every_case_degenerates_from_decimal_to_floating_point`): para **todos** los casos de la batería
+   del motor —reutilizada por `#[path]`, una sola definición y dos crates que la corren— compara
+   `net_worth` y `liquid_worth` **mes a mes en todo el horizonte** y las decisiones **discretas**
+   (`retirement_month_index`, `liquid_crossing_month_index`, `assets_depleted_month_index`,
+   `phase_transitions`). **La cota de contrato es 1 € por mes** (`EUR_TOLERANCE`); por encima de
+   2⁵³ € —donde el propio espaciado de un `f64` ya supera el euro— la cota es **relativa 1e-12**, y
+   el caso se marca en la tabla que el test imprime. Ninguna cota se relaja «porque falla», y el
+   número de casos es un **suelo** asertado (`cases.len() >= 23`), no una constante. Medido hoy:
+   **máximo 1,5e-7 €** en 840 meses (caso P9) y los cuatro índices coincidiendo **exactamente**.
+
+Tests que hay que saber deletrear —hay **dos** con nombre parecido y greparlos mal da vacío—:
+`mc_zero_volatility_degenerates` (`degeneration.rs:295`, inyecta multiplicadores deterministas por
+el hook y exige igualdad **bit a bit**) y `mc_zero_volatility_degenerates_to_deterministic`
+(`monte_carlo.rs:225`, con el RNG en medio y σ=0). El de reproducibilidad es
+`mc_same_seed_bit_identical` (`monte_carlo.rs:142`), que además fija que el camino 7 es el camino 7
+tanto suelto como dentro de 64 o de 500.
 
 ### D5. Reads never mutate
 Liabilities whose `payment_end_date < today` are **filtered** out of GET `/v1/liabilities`,
@@ -215,15 +277,45 @@ owner sign-off (the v1.1.0 `allocation_rules` drop was explicitly signed off and
   over a small `HashMap` under an uncontended lock (microseconds) and makes the cache state final
   by the time the mutation responds. As a side effect it removed every timing-dependent sleep from
   the integration tests.
-- **Warm-up**: post-**login** only (`warm_up_household_projection`, both densities, household
-  view, spawned; failures logged, never propagated).
+- **Warm-up**: post-**login** only, y **desde 5.0.0 calienta `mine`, no `household`**
+  (`warm_up_mine_projection`, `handlers/projection.rs:5881`, las dos densidades; errores logueados,
+  nunca propagados). Dos razones y las dos importan: con el default invertido (D2) `household` sería
+  una entrada que nadie consulta, y en 5.0.0 el hogar cuesta **N simulaciones, no una** — habría sido
+  el warm-up más caro para la vista menos usada.
 - **Deliberately NO warm-up after mutation**: two consecutive mutations M1, M2 could spawn two
   concurrent warm-ups and M1's (computed on pre-M2 data) may finish after M2's, leaving the cache
   stale. The comment on `refresh_projection_after_mutation` documents this rejection. The first
   GET after a mutation eats one on-demand compute (~500 ms), then it's cached again.
 - `?months=` override **bypasses the cache entirely** (computed, not stored).
+- **5.0.0 — la entrada guarda también los SOLVES del plan.** No hay una cache de solves: los solves
+  son campos de la propia `ProjectionSeriesResponse`, así que se guardan y se sirven con ella
+  (`required_contribution_monthly`, su techo de búsqueda, `underfunded`, `required_capital_path`,
+  `disposable_*`, `coast_fire_month_index`, `coast_number`, `coast_path`). Importa porque **cada
+  solve es una bisección sobre el motor entero**: hasta 26 proyecciones completas, ~0,4 s a 600
+  meses. El primer GET tras una invalidación las paga; un HIT no paga nada. Medido en release sobre
+  un hogar con cuatro activos, hipoteca francesa y dos Próximos: **5 ms** (`asap`, sin solve),
+  **19 ms** (`coast`), **41 ms** (`retire_at_age`), **100 ms** (`partial` con pensión y edad); los
+  hits, 1–3 ms. Regresión: `projection_cache.rs::the_strategy_solves_are_computed_once_and_served_from_the_cache`.
+- **5.0.0 — una SEGUNDA cache: `bands_cache`.** Clave `{installation_id, user_id, paths, seed}`
+  (`state.rs:56-62`), entrada `Arc<ProjectionBandsResponse>`, **mismo `PROJECTION_CACHE_TTL` de 60
+  min, también deslizante**. **No lleva `view` a propósito**: las bandas solo existen en `mine`, y un
+  campo de un solo valor sugeriría que puede haber una entrada `household`. Es un mapa aparte y no
+  otra `Density` porque tiene dos ejes que la serie no tiene y cuesta un orden de magnitud más (500
+  simulaciones `f64` frente a una `Decimal`): mezclarlas habría hecho que cambiar de semilla tirara
+  la serie determinista por el suelo.
+- **Las dos caches se invalidan JUNTAS, en las mismas dos funciones.**
+  `invalidate_projection_by_installation` hace `retain` sobre los dos mapas
+  (`state.rs:258-276`), y `invalidate_projection_by_user` (logout) tira las entradas `mine` de ese
+  usuario **y** sus bandas (`state.rs:280-299`). El porqué está escrito en el código y es el fallo de
+  cache peor de todos: **un fan chart calculado sobre activos que ya no existen, al lado de una línea
+  determinista ya actualizada, son dos cifras que se contradicen en la misma pantalla**. El warm-up
+  **no** calienta bandas.
+- **5.0.0 — el perfil de jubilación invalida** (D25): `patch_retirement_profile_core` llama a
+  `refresh_projection_after_mutation` en la rama `apply` (`retirement_profile.rs:1032-1047`). Un
+  preview de la tool (`apply = false`) no escribe y no invalida.
 **Breaks if violated**: adding post-mutation warm-up without a versioned/compare-and-swap scheme
-reintroduces the stale-cache race; caching `months_override` responses explodes the key space.
+reintroduces the stale-cache race; caching `months_override` responses explodes the key space;
+**y separar la invalidación de las dos caches devuelve la contradicción en pantalla de arriba**.
 
 ### D8. FIRE math is duplicated client/server — held together by the parity fixture
 Server source of truth: `handlers/projection.rs` (`compute_fire_target_nw`,
@@ -271,6 +363,26 @@ first month net worth ≥ the inflation-adjusted target (`fire_reached` in
   returned 200 with `horizon_basis: "months_override"` on an out-of-range value — the response
   claimed "I did what you asked" while silently substituting a different horizon
   (`validate_months_override`, `handlers/projection.rs`).
+**5.0.0 — dos correcciones a esta decisión, y una tercera cosa que NO cambió.**
+
+- «**The FIRE crossover is the sole retirement trigger**» dejó de ser cierto: ver D24. Un solo
+  trigger por simulación sigue siendo la regla, pero puede ser la edad.
+- La regla del horizonte ya no dice «90» a secas: la edad límite es `horizon_lifespan_age` del
+  **perfil por usuario** (default 90, cota 85–105), y en `view=household` el horizonte es el
+  **máximo** de los de los miembros (`horizon_basis: "household_max_lifespan"`).
+- **`persons` NO se dejó de leer, y conviene decirlo exactamente.** El plan preveía retirar el
+  fallback; lo que el código hace hoy (`resolve_projection_context`,
+  `handlers/projection.rs:2705-2789`) es conservarlo **solo para la demografía**: sigue consultando
+  `persons` ordenado `is_primary DESC, sort_index ASC` (`:2737-2744`), y `ctx.birth_date =
+  session_birth.or(household_member_birth)` (`:2757`) alimenta **dos cosas y solo dos**: el
+  horizonte derivado y el `viewer_birth_date` publicado. El contexto lleva **una segunda fecha**,
+  `session_birth_date`, **sin fallback** (`:2691-2697`), y es la única que puede convertir
+  `target_retirement_age` en un mes — heredar la fecha de otra persona para decidir cuándo se jubila
+  quien pregunta sería inventarle una edad. Sin ella, las estrategias por edad degradan a `asap` con
+  `warnings: ["birth_date_missing"]`, nunca un 500. En `view=household` no se toca `persons` en
+  absoluto: cada fecha sale de `users` vía `household_members`. La tabla sigue viva y sin migración
+  de retirada.
+
 (The old target-age model lingered in `.claude/data-model.md`, `.claude/engine.md` and the
 `horizon_basis` doc comment in `projection.rs` until 2026-07-02 — all fixed since. The clamp→reject
 change (4.4.0) itself lingered as a stale "clamped 12–840" claim in this file,
@@ -833,6 +945,109 @@ Pinned by `apps/api/tests/context_fields.rs` (11 endpoint-level contract tests, 
 family above) and `apps/api/tests/mcp_http.rs::list_tools_echo_the_applied_view_and_keep_content_parity`
 / `list_snapshots_paginates_and_declares_item_suppression`.
 
+### D23. Toda mutación del ledger exige ser el DUEÑO de la fila (5.0.0, plan #207 D21)
+
+`?view` filtra lecturas y nunca fue una frontera de autorización (D2). Hasta 4.15.x eso significaba
+que **tampoco la escritura tenía frontera fina**: cualquier miembro podía editar o borrar la fila de
+cualquier otro. Desde 5.0.0, **toda mutación de las cinco tablas del ledger** —`assets`,
+`liabilities`, `budget_entries`, `planning_flows`, `allocation_rules`— comprueba
+`owner_user_id == usuario de sesión` y devuelve **403 `not_row_owner`**, por HTTP y por MCP.
+
+- **Una sola puerta, no un `if` por handler**: `require_row_owner` / `not_row_owner`
+  (`handlers/person_view.rs:23-41`). Los cinco módulos la importan y la llaman en el PATCH y en el
+  DELETE; las sentencias `DELETE` además rebindan el dueño (`AND owner_user_id = $3`) como cinturón
+  y tirantes.
+- **El rol `owner` NO salta la regla.** Ser dueño de la instalación no es ser dueño de la fila, y hay
+  un test dedicado a ello (`ledger_ownership.rs::the_installation_owner_does_not_bypass_the_rule`).
+- **403 y no 404, a propósito**: la fila existe y `?view=household` la enseña en la pantalla de al
+  lado; un 404 lo contradiría. Un id que de verdad no existe sigue siendo 404, y hay test
+  (`an_unknown_id_is_still_a_404`) precisamente para que D23 no convierta lo uno en lo otro.
+- **Aplica también a los PREVIEWS de borrado**, y esa es la parte que no es obvia. El preview de
+  `delete_asset` / `delete_liability` / `delete_allocation_rule` no solo enseñaba el contenido de la
+  fila ajena: **acuñaba y entregaba el `confirm_token` para ejecutarla**. Que la confirmación fuese a
+  fallar después no lo arregla. La comprobación va **antes** que la guarda del sumidero, para que
+  tampoco se filtre nada de la cascada de otro.
+- **`POST /v1/allocation-rules/reorder` es el caso aparte**: era la única mutación que tocaba filas
+  ajenas **por diseño** (renumeraba las cascadas de todos los miembros de una vez). Con vista de
+  hogar devuelve **400 `household_read_only`** — no es un permiso que falte, es una vista que no
+  admite esa operación —, y hay que llamarlo con `?view=mine`. **No confundir los dos códigos**:
+  `household_read_only` es un **400** de exactamente un endpoint; el rechazo genérico de mutación es
+  siempre **403 `not_row_owner`**.
+
+**El hallazgo que la forjó**: la revisión adversarial del plan (M6) señaló que D9 declaraba el hogar
+«solo lectura» **en la UI y en ningún sitio más**. Esconder los botones no es una regla: un cliente
+MCP, un `curl` o la propia SPA con un bug seguían pudiendo escribir la fila de otro. Una promesa de
+producto que solo vive en el frontend no es una promesa.
+**Breaks if violated**: un handler nuevo que se olvide la puerta reabre la escritura cruzada en
+silencio — la clase de fallo que D2 ya documenta para las lecturas, pero ahora con pérdida de datos.
+Regresión: `apps/api/tests/ledger_ownership.rs` (5 tests) + `mcp_write.rs` / `mcp_confirm_and_impact.rs`.
+
+### D24. Un solo trigger de jubilación por simulación; bajo estrategias por edad el CRUCE es una lectura (5.0.0, plan #207 D17)
+
+La jubilación dejó de tener un único disparador universal. Las estrategias `retire_at_age` y `coast`
+—y el fin de la fase de `partial` cuando lleva edad— se jubilan **por edad**, aunque el capital no
+llegue (con aviso rojo). Las demás siguen jubilándose **por cruce**. La regla dura es:
+**una simulación tiene exactamente un trigger**, o la edad no mandaría de verdad.
+
+- **La invariante la hace cumplir el HANDLER, no el motor**, y eso está declarado
+  (`crates/engine/src/phases.rs:26-35`). El motor conserva a propósito la **unión** de 4.15.0
+  (`retired || cruce || k ≥ s`) porque es lo que el pin dorado tiene fotografiado; quien decide es
+  `build_installation_projection_input` (`handlers/projection.rs:2397-2408`), poniendo
+  `phase_plan.crossing_is_reading_only = forced_retirement_month.is_some()`.
+- **El cruce no desaparece: se degrada a LECTURA.** El bucle siempre anota
+  `liquid_crossing_month_index` (`sim_core.rs:1417-1418`) y solo deja que **jubile** cuando el flag
+  está apagado (`:1423-1426`). La respuesta publica `retirement_trigger` (`liquid_crossing` |
+  `target_age`), el mes efectivo en `jubilacion_month_index` y el cruce aparte, con su
+  `liquid_crossing_absent_reason`.
+- **Por qué no basta con pasar `fire_target: None`**, que es lo que el handler hacía hasta WP5-2a:
+  sin objetivo dentro, el handler tenía que recalcular el cruce por su cuenta — y con base
+  `bridge_to_pension` esa segunda lectura **no es el objetivo que el motor evalúa**. Con
+  `pension_bridge` eran dos cruces distintos para la misma línea del chart. El objetivo entra
+  siempre (lo necesitan el chart, el rojo de infra-financiación y los solves) y lo que se apaga es su
+  poder de disparar.
+- **Readmisión declarada.** El trigger por edad estaba **vetado** desde 1.0.6
+  (`futurefin-failure-archaeology` §2.2, migración `20260516120000_drop_projection_target_age.sql`).
+  Lo que aquel veto retiró fue un ajuste **de instalación**; lo que vuelve es un eje **por usuario**,
+  exclusivo de dos estrategias, con un solo trigger por simulación y el cruce publicado al lado.
+  Sin fecha de nacimiento, las estrategias por edad **degradan a `asap`** con
+  `warnings: ["birth_date_missing"]` — nunca un 500 en una lectura.
+**Breaks if violated**: dos triggers activos a la vez producen un `jubilacion_month_index` que no
+coincide con el primer mes sin nómina de la serie — el chart, el KPI y la tarjeta del Resumen
+diciendo tres cosas distintas del mismo hecho. La invariante testeable no es sobre el enum sino
+sobre la serie: **el mes en que el ingreso cambia a jubilación == `jubilacion_month_index` == el
+marcador del chart == el primer mes de `Retired`**.
+
+### D25. El perfil de jubilación es una ENTRADA DEL MOTOR, por usuario (5.0.0, plan #207 D13)
+
+`users.retirement_profile` (JSONB) no es preferencia de UI: **gobierna cómo corre la simulación** —
+trigger, objetivo y su base, fases, regla de retirada, horizonte. De ahí se derivan tres obligaciones
+que no tiene ningún otro ajuste personal:
+
+1. **Un PATCH aplicado invalida la cache de proyección** (D7), instalación entera, y con ella las
+   bandas. `birth_date` viaja en el mismo PATCH y también invalida: mueve el eje de edad **y** el
+   horizonte.
+2. **Cualquier rol edita el SUYO —`viewer` incluido— y nadie el de otro.** Es la única escritura del
+   API que un `viewer` puede hacer, y no es una excepción arbitraria: sin poder fijar su edad de
+   jubilación no podría ver su propia proyección, que es exactamente lo que un `viewer` sí puede
+   hacer. Contrasta con `PATCH /v1/installation`, que sigue siendo owner-only porque toca el hogar.
+   Por MCP la puerta es `require_mcp_write` **por rol**, no owner-only.
+3. **El merge se hace sobre el perfil ALMACENADO, no sobre el resuelto**, y la respuesta publica los
+   dos (`profile.target_basis` resuelto + `target_basis_stored`, `null` = «no elegida»). Sin esa
+   separación, un formulario que leyera el perfil y lo reescribiera entero **congelaría la
+   derivación como si fuera una elección**: al declarar la pensión después, el objetivo se quedaba en
+   la perpetuidad conservadora que nadie pidió. La lectura clampa; la escritura **rechaza** fuera de
+   rango, no reescribe en silencio.
+
+El reparto que esto establece, y que hay que respetar al añadir un eje nuevo: **la instalación guarda
+los supuestos COMPARTIDOS** (inflación, impuestos, fuente del ahorro y sus ventanas, divisa, zona
+horaria); **la persona guarda su plan**. Los cuatro ejes que cambiaron de lado en 5.0.0
+—`fire_number_mode`, `fire_number_manual_amount`, `swr_pct`, `horizon_lifespan_age`— lo hicieron
+porque dos personas del mismo hogar pueden querer jubilarse a edades distintas con reglas distintas.
+Catálogo campo a campo: `futurefin-config-and-flags` §5.1.
+**Breaks if violated**: un eje del plan guardado en `installation` vuelve a imponer el plan de una
+persona a todas; un eje compartido guardado en el perfil se desincroniza entre miembros y produce
+agregados de hogar que no suman.
+
 ## 3. Invariants table
 
 | # | Invariant | Enforced where | How to check |
@@ -855,6 +1070,9 @@ family above) and `apps/api/tests/mcp_http.rs::list_tools_echo_the_applied_view_
 | I16 | An HA-IdP login and an ingress header-SSO with the same HA user resolve to the **same** `users` row (`external_user_id`, one `resolve_or_provision`); and the HA refresh token is revoked before any DB write (D19) | `handlers/ha_sso.rs::ha_callback` step order; `handlers/sso.rs::resolve_or_provision` (single provisioning path) | `apps/api/tests/ha_idp_login.rs::header_sso_and_ha_login_resolve_to_the_same_user`; call-order assertion `[Exchange, Identity, Revoke]` in the same suite |
 | I17 | **`/mcp` never carries `Access-Control-Allow-Credentials`**, and the API surface always does — one `CORS_ORIGINS` list, two layers (D21). Adding an origin for a browser MCP client must never grant cookie access to `/v1` | `routes/mod.rs` (`api_cors_layer`, applied **before** `merge(mcp)`) + `mcp::mcp_cors_layer` (applied with `route_layer`, never `layer`) | `apps/api/tests/mcp_http.rs::mcp_preflight_is_complete_and_grants_no_cookie_access` (asserts both halves: absent on `/mcp`, `true` on `/v1/backup/user-export`, same origin); `oauth_flow.rs::get_oauth_authorize_is_not_handled_by_the_api` guards the `layer`/`route_layer` half — a **401** there means the MCP auth escaped onto the fallback |
 | I18 | A response never lets suppressed/capped/derived content be indistinguishable from "there is nothing here": every window, cap, suppression, scope or basis is echoed as a named field, never inferred from array length or absence (D22) | Field-level, no single choke point: `handlers/history.rs` (`window_truncated`, `fine_absent_reason`, `item_count`/`items_included`), `handlers/projection.rs` (`events_truncated`), `handlers/person_view.rs` (`LedgerView::as_str` echoed view), `mcp/server.rs` (pagination envelopes) | `apps/api/tests/context_fields.rs` (one test per field family); `grep -rn "window_truncated\|fine_absent_reason\|items_included\|events_truncated" apps/api/src/handlers/` (**con `-r`**: sin él grep falla con «Is a directory» y el invariante queda sin comprobar) |
+| I19 | **Toda mutación del ledger comprueba el dueño de la fila** (D23): PATCH, DELETE y los previews de borrado de las cinco tablas devuelven **403 `not_row_owner`** si la fila es de otro miembro; el rol `owner` no salta la regla | Una sola puerta: `handlers/person_view.rs::require_row_owner`, llamada desde `assets.rs`, `liabilities.rs`, `budget.rs`, `planning.rs`, `allocation_rules.rs` | `grep -rn 'require_row_owner' apps/api/src/handlers/ \| wc -l` (**19** el 2026-09-03 — definición, `use`s y llamadas; el reparto por fichero sale de `grep -rc`, y las cinco tablas tienen que aparecer); `apps/api/tests/ledger_ownership.rs` |
+| I20 | **Un solo trigger de jubilación por simulación** (D24): con estrategia por edad el cruce se anota pero no jubila. Invariante de COMPORTAMIENTO, no de enum: el mes en que el ingreso pasa a jubilación == `jubilacion_month_index` == el marcador del chart == el primer mes de `Retired` | `handlers/projection.rs` pone `phase_plan.crossing_is_reading_only`; el bucle lo respeta en `crates/engine/src/sim_core.rs` | `grep -n 'crossing_is_reading_only' crates/engine/src/*.rs apps/api/src/handlers/projection.rs`; `apps/api/tests/projection_age_strategy.rs`, `projection_strategies.rs`, `crates/engine-stochastic/tests/monte_carlo.rs::mc_readings_follow_the_retirement_trigger` |
+| I21 | **Las dos caches de proyección se invalidan juntas** (D7): serie y bandas mueren en la misma función, por instalación y por usuario | `state.rs::invalidate_projection_by_installation` / `..._by_user` hacen `retain` sobre los **dos** mapas | `grep -n 'bands_cache' apps/api/src/state.rs`; `apps/api/tests/projection_bands.rs::the_bands_cache_serves_hits_and_dies_with_the_projection` y `::logout_drops_the_bands_of_that_user` |
 
 ## 4. Known weak points (stated plainly, as of 2026-07-02)
 
@@ -892,6 +1110,19 @@ family above) and `apps/api/tests/mcp_http.rs::list_tools_echo_the_applied_view_
   fixed on 2026-07-02, but the mechanism that produced them remains: docs are hand-maintained).
   When docs and code disagree, the code is ground truth; record unfixable drift in the
   standing-errata table of futurefin-docs-and-writing §7.
+- **W9 — la cache de bandas no tiene tope de tamaño ni de semillas** (D7, 5.0.0). Dicho sin
+  adornos: **no hay cota de entradas ni política de expulsión**. Lo único que borra es (a) la
+  caducidad perezosa **de la clave que se está consultando** y (b) las dos invalidaciones en bloque.
+  Una entrada cuya clave no se vuelve a pedir no la retira el TTL: sobrevive hasta que alguien mute
+  algo o cierre sesión. Y **el eje `seed` es un `u64` que elige el cliente** (`?seed=`, y también el
+  parámetro de la tool MCP), así que el número de entradas distintas por (instalación, usuario)
+  **no está acotado**: un bucle sobre semillas llena el mapa. Lo que sí está acotado es `paths`
+  (1–2000 HTTP, 1–1000 MCP, **rechazado** no clampado), el pico de memoria **por petición**
+  (≈25,7 MB en el extremo de 2.000 caminos) y la concurrencia, por el semáforo de simulaciones.
+  Contraste: la cache de la **serie** sí está acotada por construcción —instalaciones × 2 vistas ×
+  miembros × 2 densidades— porque `?months=` no se guarda. Si esto llega a molestar, la salida no es
+  bajar el TTL: es una cota de entradas por usuario con expulsión LRU, o dejar de cachear las
+  semillas explícitas y cachear solo la estable.
 - **W7 — Errors in projection math are silent** (owner-identified hardest problem): wrong
   economic modeling produces plausible-looking numbers. Stochastic returns, sequence-of-returns
   risk, tax-aware withdrawal and variable SWR are all candidate directions and currently
@@ -1060,6 +1291,22 @@ included) still said `?months=` was *clamped* to 12–840 — it has been a **re
   `list_recurring_rules` stay bare arrays); `grep -n "type_tag" apps/api/src/handlers/summary.rs`
   (the `Option<String>` change, `null` replacing the `"(sin etiqueta)"` literal);
   `cargo test -p futurefin-api --test context_fields` (the 11-test contract suite).
+
+- **D2/D4/D7/D11 amended and D23–D25 + I19–I21 + W9 written 2026-09-03 for 5.0.0** (issue #207,
+  rama `release/5.0.0`), leyendo `apps/api/src/handlers/{person_view,projection,projection_bands,retirement_profile,allocation_rules}.rs`,
+  `apps/api/src/state.rs`, `crates/engine/src/{phases,sim_core,lib}.rs`,
+  `crates/engine-stochastic/{Cargo.toml,src/lib.rs,src/mc.rs,tests/degeneration.rs,tests/monte_carlo.rs}`
+  y las suites `ledger_ownership.rs`, `projection_cache.rs`, `projection_bands.rs`,
+  `projection_household_aggregate.rs`. Re-verificación en una línea cada uno:
+  `grep -n 'fn resolve' -A 9 apps/api/src/handlers/person_view.rs` (D2: el default `mine`);
+  `grep -n 'fn crates_engine_src_has_no_f64_outside_comments' crates/engine/src/lib.rs` (D4: el
+  freezer sigue ahí, intacto) y `grep -nE 'const (EUR_TOLERANCE|REL_TOLERANCE)' crates/engine-stochastic/tests/degeneration.rs`
+  (la cota es **1 €**, no la cifra medida);
+  `grep -n 'pub struct BandsCacheKey' -A 8 apps/api/src/state.rs` (D7: la segunda cache y sus cuatro
+  campos, sin `view`);
+  `grep -n 'fn require_row_owner' -A 8 apps/api/src/handlers/person_view.rs` (D23);
+  `grep -n 'crossing_is_reading_only' crates/engine/src/phases.rs` (D24);
+  `grep -n 'refresh_projection_after_mutation' apps/api/src/handlers/retirement_profile.rs` (D25).
 
 Update this skill whenever: a decision above is overturned (record the new incident), a new
 cross-cutting mechanism appears (cache backend, auth scheme, second crate consumer of the

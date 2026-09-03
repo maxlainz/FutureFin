@@ -57,11 +57,17 @@ de pulsar:
 - Antes de aplicar nada, la app enseña un **preview** con los recuentos de lo que va a entrar.
   Léelo. Es la última oportunidad de darte cuenta de que ese no era el archivo.
 
-**Compatibilidad entre versiones**: cada archivo lleva un `schema_version` (hoy el **12**,
-septiembre de 2026 — la constante `CURRENT_SCHEMA_VERSION` del servidor manda). Todos los formatos
-antiguos, del 1 al 11, se siguen importando: se migran en memoria al llegar. Al revés no: un
-archivo de una versión **más nueva** que el servidor se rechaza limpiamente con un "actualiza
-FutureFin para importar este backup" — rechazo claro, nunca datos a medias.
+**Compatibilidad entre versiones**: cada archivo lleva un `schema_version` (hoy el **13**, desde la
+5.0.0 — la constante `CURRENT_SCHEMA_VERSION` del servidor manda). Todos los formatos antiguos, del
+1 al 12, se siguen importando: se migran en memoria al llegar. Al revés no: un archivo de una
+versión **más nueva** que el servidor se rechaza limpiamente con un "actualiza FutureFin para
+importar este backup" — rechazo claro, nunca datos a medias.
+
+La v13 incorpora **tu plan de jubilación** y la **volatilidad de cada activo**
+([Tu plan de jubilación](jubilacion.md)). Al importar un archivo de la 4.x, los ajustes de
+jubilación que aquel llevaba dentro **siembran** tu plan nuevo — pero solo si todavía no tienes uno,
+para que restaurar un backup viejo no te pise la estrategia que hayas configurado después de
+actualizar.
 
 La API por debajo, si prefieres automatizarlo (todos con cookie de sesión):
 
