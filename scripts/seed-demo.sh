@@ -88,10 +88,6 @@ api PATCH /v1/installation '{
   "annual_inflation_assumption_percent": "2.5",
   "onboarding_completed": true,
   "fire_settings": {
-    "fire_number_mode": "annual_expense",
-    "fire_number_manual_amount": null,
-    "fire_number_expense_adjustment_pct": null,
-    "swr_pct": "3.5",
     "taxes_enabled": true,
     "tax_brackets": [
       {"up_to": "6000", "pct": "19"},
@@ -118,11 +114,23 @@ CAT_TRANSPORTE="$(pick_id "$CATS" 'Transporte')"
 CAT_OCIO="$(pick_id "$CATS" 'Ocio')"
 
 # ── Activos ───────────────────────────────────────────────────────────────────
+
+# 5.0.0: el plan de jubilación es de cada persona, no del hogar (perfil por usuario). Modo del
+# objetivo, SWR y edad límite viven aquí; la pensión con fecha alimenta el objetivo puente y las
+# bandas de Monte Carlo la leen. Cifras inventadas, como todo lo demás.
+say "perfil de jubilación: estrategia, SWR y pensión con fecha"
+api PATCH /v1/auth/me/retirement-profile '{
+  "strategy": "asap",
+  "fire_number_mode": "annual_expense",
+  "swr_pct": "3.5",
+  "horizon_lifespan_age": 90,
+  "pension": {"monthly_amount_today": "1200", "starts_at_age": 67, "indexed": true}
+}' >/dev/null
 say "activos"
 A_CUENTA="$(api POST /v1/assets "{\"category_id\":\"$CAT_CUENTA\",\"name\":\"Cuenta corriente\",\"current_value\":\"4200\",\"is_liquid\":true,\"expected_annual_return_percent\":\"0\"}" | json_id)"
 api POST /v1/assets "{\"category_id\":\"$CAT_AHORRO\",\"name\":\"Cuenta remunerada\",\"current_value\":\"11500\",\"is_liquid\":true,\"expected_annual_return_percent\":\"2.25\"}" >/dev/null
-api POST /v1/assets "{\"category_id\":\"$CAT_INVERSION\",\"name\":\"Fondo indexado global\",\"current_value\":\"38600\",\"purchase_price\":\"31000\",\"is_liquid\":true,\"expected_annual_return_percent\":\"7\"}" >/dev/null
-api POST /v1/assets "{\"category_id\":\"$CAT_INVERSION\",\"name\":\"Plan de pensiones\",\"current_value\":\"9800\",\"purchase_price\":\"9000\",\"is_liquid\":false,\"expected_annual_return_percent\":\"5.5\"}" >/dev/null
+api POST /v1/assets "{\"category_id\":\"$CAT_INVERSION\",\"name\":\"Fondo indexado global\",\"current_value\":\"38600\",\"purchase_price\":\"31000\",\"is_liquid\":true,\"expected_annual_return_percent\":\"7\",\"annual_volatility_percent\":\"17\"}" >/dev/null
+api POST /v1/assets "{\"category_id\":\"$CAT_INVERSION\",\"name\":\"Plan de pensiones\",\"current_value\":\"9800\",\"purchase_price\":\"9000\",\"is_liquid\":false,\"expected_annual_return_percent\":\"5.5\",\"annual_volatility_percent\":\"10\"}" >/dev/null
 api POST /v1/assets "{\"category_id\":\"$CAT_INMUEBLE\",\"name\":\"Vivienda habitual\",\"current_value\":\"210000\",\"purchase_price\":\"185000\",\"is_liquid\":false,\"expected_annual_return_percent\":\"2\"}" >/dev/null
 
 # ── Pasivos ───────────────────────────────────────────────────────────────────
