@@ -519,3 +519,152 @@ async fn household_aggregate_is_cached_and_any_member_mutation_invalidates_it() 
     let snw1 = r1.json()["starting_net_worth"].as_str().unwrap().to_string();
     assert!(snw1.starts_with("18000"), "la mutación de bob debe verse: {snw1}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// 5.0.0 WP5-2b — los SOLVES viajan dentro de la entrada cacheada (M4)
+// ---------------------------------------------------------------------------------------------
+
+/// Hogar con estrategia por edad: lo que hace falta para que la respuesta lleve solves.
+async fn seed_retire_at_age(app: &TestApp, owner: &common::LoggedInOwner) {
+    let inc = app.create_category(owner, "income", "Nómina").await;
+    let exp = app.create_category(owner, "expense", "Vida").await;
+    let ast = app.create_category(owner, "asset", "Fondos").await;
+    for (cat, amount) in [(&inc, "2400"), (&exp, "1000")] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/budget/entries",
+                serde_json::json!({"category_id": cat, "amount": amount,
+                                   "ends_at_retirement": false}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({"category_id": ast, "name": "Indexado", "current_value": "20000",
+                               "is_liquid": true, "expected_annual_return_percent": "5"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({"strategy": "retire_at_age", "target_retirement_age": 60,
+                               "swr_pct": "4"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+}
+
+/// **Los solves se calculan UNA vez, con la serie, y se sirven desde la cache** (M4). Cada uno es
+/// una bisección sobre el motor entero —hasta 26 proyecciones—, así que recalcularlos en cada GET
+/// haría de la lectura más cara de la app la más cara por un orden de magnitud.
+///
+/// Se prueba con el mismo centinela que el resto del fichero, y no con un cronómetro: se
+/// envenena la entrada cacheada con un `required_contribution_monthly` imposible y se comprueba
+/// que el siguiente GET lo devuelve. Si el read path volviera a biseccionar, el centinela
+/// desaparecería.
+#[tokio::test]
+async fn the_strategy_solves_are_computed_once_and_served_from_the_cache() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_retire_at_age(&app, &owner).await;
+
+    let first = app
+        .get_with_cookie("/v1/projection/series?months=600", &owner.cookie)
+        .await;
+    assert_eq!(first.status, http::StatusCode::OK, "{first:?}");
+    let body = first.json();
+    assert!(
+        !body["required_contribution_monthly"].is_null(),
+        "una estrategia por edad publica su solve: {body}"
+    );
+    assert!(
+        !body["required_capital_path"].as_array().expect("serie").is_empty(),
+        "{body}"
+    );
+
+    // `?months=` salta la cache por diseño, así que el centinela se pone sobre la entrada del
+    // camino cacheado (sin `months`).
+    let warm = app
+        .get_with_cookie("/v1/projection/series", &owner.cookie)
+        .await;
+    assert_eq!(warm.status, http::StatusCode::OK, "{warm:?}");
+
+    let iid = installation_id_of(&app, &owner.cookie).await;
+    let uid = user_id_of(&app, &owner.cookie).await;
+    let key = ProjectionCacheKey {
+        installation_id: iid,
+        view: LedgerView::Mine,
+        owner_user_id: Some(uid),
+        density: Density::Monthly,
+    };
+    {
+        let mut cache = app.state.projection_cache.write().await;
+        let entry = cache.get_mut(&key).expect("entrada cacheada tras el GET");
+        let mut poisoned = (*entry.response).clone();
+        poisoned.required_contribution_monthly = Some(rust_decimal::Decimal::from(424_242));
+        entry.response = std::sync::Arc::new(poisoned);
+    }
+    let cached = app
+        .get_with_cookie("/v1/projection/series", &owner.cookie)
+        .await;
+    assert_eq!(
+        cached.json()["required_contribution_monthly"], "424242",
+        "el solve sale de la cache, no de una bisección nueva: {}",
+        cached.json()
+    );
+}
+
+/// **Un PATCH del perfil invalida la cache**, y por tanto los solves. El perfil es input del
+/// motor (estrategia, edad, SWR, pensión…): servir la serie anterior sería enseñar el plan viejo
+/// con la estrategia nueva escrita al lado.
+#[tokio::test]
+async fn a_retirement_profile_patch_invalidates_the_cached_projection_and_its_solves() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_retire_at_age(&app, &owner).await;
+
+    let before = app
+        .get_with_cookie("/v1/projection/series", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(before["strategy"], "retire_at_age", "{before}");
+    let c_before = before["required_contribution_monthly"].clone();
+    assert!(!c_before.is_null(), "{before}");
+
+    let iid = installation_id_of(&app, &owner.cookie).await;
+    let uid = user_id_of(&app, &owner.cookie).await;
+    let key = ProjectionCacheKey {
+        installation_id: iid,
+        view: LedgerView::Mine,
+        owner_user_id: Some(uid),
+        density: Density::Monthly,
+    };
+    assert!(app.cache_contains(&key).await, "el GET dejó entrada");
+
+    // Cambiar SOLO la estrategia: ninguna fila del ledger se mueve.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({"strategy": "coast"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    app.assert_invalidated(&key, "PATCH del perfil de jubilación").await;
+
+    let after = app
+        .get_with_cookie("/v1/projection/series", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(after["strategy"], "coast", "{after}");
+    // `coast` no publica aportación necesaria: publica el mes coast. Si la cache no se hubiera
+    // invalidado, seguiríamos viendo el solve de `retire_at_age`.
+    assert!(after["required_contribution_monthly"].is_null(), "{after}");
+    assert!(!after["coast_fire_month_index"].is_null(), "{after}");
+}

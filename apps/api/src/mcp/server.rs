@@ -51,7 +51,8 @@ use crate::handlers::planning::{
     patch_planning_flow_core,
 };
 use crate::handlers::projection::{
-    deflate_amount_core, projection_series_cached, simulate_projection_core, IncomeStepSpec,
+    deflate_amount_core, projection_series_cached, simulate_projection_core, IncomePauseSpec,
+    IncomeStepSpec,
     LiabilityOverrideSpec, SimulationSpec,
 };
 use crate::handlers::summary::summary_core;
@@ -307,7 +308,7 @@ struct ImpactProbe {
 /// de jubilación se pide con `get_projection` cuando el usuario la necesita: una llamada, cuando
 /// hace falta, en vez de dos por cada movimiento apuntado.
 async fn impact_probe(state: &Arc<AppState>, iid: Uuid, user_id: Uuid) -> Option<ImpactProbe> {
-    match summary_core(&state.pool, iid, user_id, LedgerView::Household).await {
+    match summary_core(state, iid, user_id, LedgerView::Household).await {
         Ok(s) => Some(ImpactProbe {
             net_worth: s.net_worth,
             savings_expected_monthly: s.financial_health.savings_expected_monthly_equivalent,
@@ -1028,6 +1029,176 @@ pub struct SimulateParams {
     /// llamada devuelve `liability_overrides_unavailable_in_real_expense_mode`.
     #[serde(default)]
     pub liability_overrides: Option<Vec<LiabilityOverrideParam>>,
+    /// **Tu PLAN de jubilación como escenario** (5.0.0): estrategia, edad objetivo, modo y
+    /// objetivo manual del número FIRE, base del objetivo, regla de retirada, pensión con fecha,
+    /// media jornada… Mismos campos, mismos valores y mismas cotas que `update_retirement_profile`
+    /// — lo que simulas aquí es exactamente lo que pasaría al guardarlo, y **no se persiste nada**.
+    /// «¿Y si me jubilo a los 55?» es `{"strategy": "retire_at_age", "target_retirement_age": 55}`.
+    /// Un patch vacío, o uno que deje el perfil como está, es un 400: no habría nada que contar.
+    #[serde(default)]
+    pub profile_overrides: Option<ProfileOverrideParam>,
+    /// **Pausa de ingresos** («¿y si me cojo una excedencia de 12 meses?»): multiplica el ingreso
+    /// GANADO durante la ventana y devuelve el retraso de la jubilación en `income_pause`. La
+    /// pensión con fecha NO se pausa.
+    #[serde(default)]
+    pub income_pause: Option<IncomePauseParam>,
+    /// Inversas caras, opt-in: hoy solo «¿cuánto más puedo gastar sin mover la fecha?».
+    #[serde(default)]
+    pub solve: Option<SolveParam>,
+}
+
+/// Pausa de ingresos del what-if (P8.c, 5.0.0).
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IncomePauseParam {
+    /// Primer mes de la pausa (1..=horizonte). **1 = el mes civil del ancla**, el mismo eje que
+    /// `one_off_expense.month_index`; NO es la rejilla 0-based de `points[].month_index`.
+    /// Exactamente uno de `from_month_index` o `from_date`.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 840))]
+    pub from_month_index: Option<u32>,
+    /// Fecha "YYYY-MM-DD" del primer mes de la pausa. Exactamente uno de los dos.
+    #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
+    pub from_date: Option<String>,
+    /// Duración en meses (>= 1). Ventana semiabierta: cubre `from`, `from+1`, …, `from+months-1`.
+    #[schemars(range(min = 1, max = 840))]
+    pub months: u32,
+    /// Multiplicador del ingreso durante la ventana, string decimal en [0, 1): "0" = sin cobrar,
+    /// "0.5" = media paga. "1" es un 400 (sería el baseline).
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub income_fraction: String,
+}
+
+/// Inversas caras de `simulate_projection`: cada una cuesta una bisección sobre el motor entero
+/// (hasta 26 proyecciones), así que se piden explícitamente en vez de venir siempre.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SolveParam {
+    /// true = calcula `max_extra_monthly_expense_keeping_date`: el mayor gasto mensual extra
+    /// constante (euros de hoy) que deja la fecha de jubilación donde está (±1 mes). Sube solo el
+    /// gasto REGULAR, no el de jubilación ni el objetivo. `false` es un 400.
+    #[serde(default)]
+    pub extra_monthly_expense_keeping_date: Option<bool>,
+}
+
+/// **El perfil de jubilación como eje what-if.** Mismos campos que
+/// [`UpdateRetirementProfileParams`] salvo los dos que no tienen sentido simulando: `confirm` (no
+/// se persiste nada) y `birth_date` (vive en su propia columna y es identidad, no plan).
+///
+/// La duplicación es de FORMA, no de semántica: `to_patch` delega en el de la tool de escritura,
+/// así que las cotas, los `clear_*` y los mensajes de error son literalmente los mismos. Un
+/// `#[serde(flatten)]` habría evitado repetir los campos, pero es incompatible con
+/// `deny_unknown_fields` — y perder el rechazo de campos desconocidos en una tool que el modelo
+/// rellena a ciegas cuesta más que estas treinta líneas.
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileOverrideParam {
+    /// "asap" | "retire_at_age" | "coast" | "partial" | "pension_bridge". retire_at_age y coast
+    /// exigen target_retirement_age; pension_bridge exige pension; partial exige partial_retirement.
+    #[serde(default)]
+    #[schemars(extend("enum" = ["asap", "retire_at_age", "coast", "partial", "pension_bridge"]))]
+    pub strategy: Option<String>,
+    /// Edad de jubilación total (18..=horizon_lifespan_age).
+    #[serde(default)]
+    #[schemars(range(min = 18, max = 105))]
+    pub target_retirement_age: Option<u32>,
+    /// true = simular SIN edad de jubilación.
+    #[serde(default)]
+    pub clear_target_retirement_age: Option<bool>,
+    /// "manual" | "annual_expense" | "current_income".
+    #[serde(default)]
+    #[schemars(extend("enum" = ["manual", "annual_expense", "current_income"]))]
+    pub fire_number_mode: Option<String>,
+    /// Necesidad ANUAL neta en euros de hoy (> 0, string decimal). NO es el capital objetivo:
+    /// el objetivo es esta cifra grosseada de impuestos y dividida por el SWR.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub fire_number_manual_amount: Option<String>,
+    /// true = simular sin importe manual.
+    #[serde(default)]
+    pub clear_fire_number_manual_amount: Option<bool>,
+    /// SWR en % (0–4), string decimal. Es el MISMO eje que `swr_pct` de primer nivel: pasar los
+    /// dos a la vez es un 400.
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub swr_pct: Option<String>,
+    /// Edad límite del horizonte (85..=105).
+    #[serde(default)]
+    #[schemars(range(min = 85, max = 105))]
+    pub horizon_lifespan_age: Option<u32>,
+    /// "perpetuity" (ignora la pensión: conservador) | "bridge_to_pension".
+    #[serde(default)]
+    #[schemars(extend("enum" = ["perpetuity", "bridge_to_pension"]))]
+    pub target_basis: Option<String>,
+    /// true = volver a la base derivada.
+    #[serde(default)]
+    pub clear_target_basis: Option<bool>,
+    /// "expected_return" (default) | "swr" | "none".
+    #[serde(default)]
+    #[schemars(extend("enum" = ["expected_return", "swr", "none"]))]
+    pub bridge_discount_basis: Option<String>,
+    /// Regla de retirada COMPLETA (sustituye a la actual).
+    #[serde(default)]
+    pub withdrawal_rule: Option<WithdrawalRuleParam>,
+    /// Bloque de pensión COMPLETO (sustituye al actual).
+    #[serde(default)]
+    pub pension: Option<PensionParam>,
+    /// true = simular sin pensión declarada.
+    #[serde(default)]
+    pub clear_pension: Option<bool>,
+    /// Fase de media jornada COMPLETA (sustituye a la actual).
+    #[serde(default)]
+    pub partial_retirement: Option<PartialRetirementParam>,
+    /// true = simular sin media jornada.
+    #[serde(default)]
+    pub clear_partial_retirement: Option<bool>,
+    /// Colchón de caja en meses de gasto (0–60). Solo actúa en Monte Carlo.
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 60))]
+    pub cash_buffer_months: Option<u32>,
+    /// true = simular sin colchón.
+    #[serde(default)]
+    pub clear_cash_buffer_months: Option<bool>,
+    /// Umbral de éxito de Monte Carlo en % (50–99).
+    #[serde(default)]
+    #[schemars(range(min = 50, max = 99))]
+    pub success_threshold_pct: Option<u32>,
+}
+
+impl ProfileOverrideParam {
+    /// Wire → patchset de dominio, **delegando** en el de `update_retirement_profile`: una sola
+    /// interpretación de los `clear_*`, una sola lista de cotas y un solo juego de códigos de
+    /// error para simular y para guardar.
+    fn to_patch(
+        &self,
+    ) -> Result<crate::handlers::retirement_profile::RetirementProfilePatch, ApiError> {
+        UpdateRetirementProfileParams {
+            strategy: self.strategy.clone(),
+            target_retirement_age: self.target_retirement_age,
+            clear_target_retirement_age: self.clear_target_retirement_age,
+            fire_number_mode: self.fire_number_mode.clone(),
+            fire_number_manual_amount: self.fire_number_manual_amount.clone(),
+            clear_fire_number_manual_amount: self.clear_fire_number_manual_amount,
+            swr_pct: self.swr_pct.clone(),
+            horizon_lifespan_age: self.horizon_lifespan_age,
+            target_basis: self.target_basis.clone(),
+            clear_target_basis: self.clear_target_basis,
+            bridge_discount_basis: self.bridge_discount_basis.clone(),
+            withdrawal_rule: self.withdrawal_rule.clone(),
+            pension: self.pension.clone(),
+            clear_pension: self.clear_pension,
+            partial_retirement: self.partial_retirement.clone(),
+            clear_partial_retirement: self.clear_partial_retirement,
+            cash_buffer_months: self.cash_buffer_months,
+            clear_cash_buffer_months: self.clear_cash_buffer_months,
+            success_threshold_pct: self.success_threshold_pct,
+            birth_date: None,
+            clear_birth_date: None,
+            confirm: None,
+        }
+        .to_patch()
+    }
 }
 
 /// Parsea un string decimal de un parámetro de tool con error tipado.
@@ -1988,7 +2159,7 @@ pub struct UpdateFireSettingsParams {
 /// Regla de retirada del perfil. Se sustituye ENTERA (no campo a campo): qué `pct` son
 /// obligatorios depende de `kind`, así que un merge parcial permitiría estados que nadie
 /// escribió («guardrails con el pct del percent_of_balance anterior»).
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WithdrawalRuleParam {
     /// "fixed_real" (retira la necesidad declarada indexada, sin techo — la conducta de 4.15.x)
@@ -2026,7 +2197,7 @@ pub struct WithdrawalRuleParam {
 
 /// Pensión pública (u otra renta vitalicia) CON FECHA. No es una partida de presupuesto: su
 /// fecha de inicio cambia el OBJETIVO, no solo el flujo de caja.
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PensionParam {
     /// Importe MENSUAL en euros de HOY (> 0), string decimal.
@@ -2046,7 +2217,7 @@ pub struct PensionParam {
 
 /// Fase de media jornada. Termina en la jubilación total (no lleva edad de fin: chocaría con el
 /// trigger).
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PartialRetirementParam {
     /// Edad a la que empieza (18..=horizon_lifespan_age, y menor que target_retirement_age).
@@ -2085,7 +2256,9 @@ pub struct UpdateRetirementProfileParams {
     #[serde(default)]
     #[schemars(extend("enum" = ["manual", "annual_expense", "current_income"]))]
     pub fire_number_mode: Option<String>,
-    /// Objetivo manual > 0, string decimal (requerido con fire_number_mode=manual).
+    /// Necesidad ANUAL neta en euros de hoy (> 0, string decimal), requerida con
+    /// fire_number_mode=manual. NO es el capital objetivo: el objetivo es esta cifra
+    /// grosseada de impuestos y dividida por el SWR, igual que `12·gasto` en annual_expense.
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub fire_number_manual_amount: Option<String>,
@@ -2714,7 +2887,7 @@ impl FutureFinMcp {
             Ok(v) => v,
             Err(e) => return to_tool_outcome(e),
         };
-        to_tool_result(summary_core(&self.state.pool, id.installation_id, id.user_id, view).await)
+        to_tool_result(summary_core(&self.state, id.installation_id, id.user_id, view).await)
     }
 
     #[tool(
@@ -3018,7 +3191,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "simulate_projection",
-        description = "What-if de proyección/FIRE sin persistir NADA: baseline vs escenario, KPIs, deltas y `model_note` con los supuestos para leerlos. PREGUNTA QUÉ EJE quiere: «ahorrar 300 más» (`extra_monthly_savings`) y «gastar 300 menos» (`extra_monthly_expense: -300`) NO son la misma simulación y separan la jubilación años. Los ejes de caja no tocan ingreso ni gasto: mueven `net_cash_monthly`, nunca `net_recurring_monthly` (delta 0 EXACTO) ni `savings_rate`. `liability_overrides` contesta «¿compensa amortizar antes?» por `liability_total_interest_delta`, no por un salto de patrimonio.",
+        description = "What-if de proyección/FIRE sin persistir NADA: baseline vs escenario, KPIs, deltas y `model_note` para leerlos. `profile_overrides` simula TU PLAN: «¿y si me jubilo a los 55?» = strategy retire_at_age + target_retirement_age. PREGUNTA QUÉ EJE quiere: «ahorrar 300 más» (`extra_monthly_savings`) y «gastar 300 menos» (`extra_monthly_expense: -300`) NO son la misma simulación y separan la jubilación años. Los ejes de caja no tocan ingreso ni gasto: mueven `net_cash_monthly`, nunca `net_recurring_monthly` (delta 0 EXACTO). `liability_overrides`: «¿compensa amortizar?» por el delta de interés.",
         annotations(title = "Simular escenario", read_only_hint = true, open_world_hint = false)
     )]
     async fn simulate_projection(
@@ -3161,6 +3334,32 @@ impl FutureFinMcp {
                     });
                 }
             }
+            spec.profile_overrides = p
+                .profile_overrides
+                .as_ref()
+                .map(|o| o.to_patch())
+                .transpose()?;
+            if let Some(pause) = &p.income_pause {
+                spec.income_pause = Some(IncomePauseSpec {
+                    from_month_index: pause.from_month_index,
+                    from_date: pause
+                        .from_date
+                        .as_deref()
+                        .map(|raw| parse_date_param("income_pause.from_date", raw))
+                        .transpose()?,
+                    months: pause.months,
+                    income_fraction: parse_decimal_param(
+                        "income_pause.income_fraction",
+                        &pause.income_fraction,
+                    )?,
+                });
+            }
+            // `Some(false)` viaja tal cual: el core lo rechaza con `solve_no_op`. Colapsarlo aquí
+            // a `None` haría que pedir un solve y declinarlo se leyera como no haberlo pedido.
+            spec.solve_extra_monthly_expense_keeping_date = p
+                .solve
+                .as_ref()
+                .map(|s| s.extra_monthly_expense_keeping_date.unwrap_or(false));
             Ok(spec)
         };
         let spec = match build_spec() {

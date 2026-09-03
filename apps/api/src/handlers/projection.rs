@@ -11,9 +11,9 @@ use crate::handlers::installation::{
 };
 use futurefin_engine::gross_up_net_annual_fire;
 use crate::handlers::retirement_profile::{
-    resolve_retirement_profile, RetirementProfile, RetirementStrategy,
-    SpendMode as ProfileSpendMode, WithdrawalRule as ProfileWithdrawalRule,
-    WithdrawalRuleKind as ProfileWithdrawalRuleKind,
+    resolve_retirement_profile, BridgeDiscountBasis, PartialExpenseBasis, RetirementProfile,
+    RetirementStrategy, SpendMode as ProfileSpendMode, TargetBasis as ProfileTargetBasis,
+    WithdrawalRule as ProfileWithdrawalRule, WithdrawalRuleKind as ProfileWithdrawalRuleKind,
 };
 use crate::handlers::person_view::LedgerView;
 /// Alias local: `RepaymentModel` a secas es el del **engine** en este fichero (ver el `use` de
@@ -29,10 +29,12 @@ use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
 use chrono::{Datelike, Duration, Months, NaiveDate};
 use futurefin_engine::{
-    fire_target_at_month_index, first_month_per_asset_contribution_nominals,
-    project_net_worth_series, AllocationCap, AllocationKind, AllocationRule, EngineError,
-    FireTarget, Phase, PhasePlan, ProjectionInput, ProjectionLiabilityInput, RepaymentModel,
-    SimAsset, SpendMode as EngineSpendMode, WithdrawalRule as EngineWithdrawalRule,
+    fire_target_at_month_index_with_plan, first_month_per_asset_contribution_nominals, project_net_worth_series, AllocationCap,
+    AllocationKind, AllocationRule, CoastSolve, EngineError, ExpenseBasis as EngineExpenseBasis,
+    FireTarget, PartialPhase, PensionSchedule, Phase, PhasePlan, ProjectionInput,
+    ProjectionLiabilityInput, RepaymentModel, SimAsset, SolveResult,
+    SpendMode as EngineSpendMode, TargetBasis as EngineTargetBasis,
+    WithdrawalRule as EngineWithdrawalRule,
 };
 use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
@@ -293,10 +295,26 @@ pub struct HouseholdMemberProjection {
     /// El mes efectivo otra vez, con el nombre del motor. Igual a `jubilacion_month_index` (R8);
     /// viaja porque es el nombre que usa el resto del contrato de fases.
     pub retirement_month_index: Option<u32>,
-    /// Mes «coast» (dejar de aportar y llegar igual). **Siempre `null` hoy**: lo calcula la
-    /// bisección de `solve.rs` (§B.7), que no está en esta ola. Se publica ya para que el
-    /// consumidor no cambie de forma cuando llegue.
+    /// Mes «coast» de ESTE miembro (dejar de aportar y llegar igual), en la rejilla común.
+    /// `null` con cualquier estrategia que no sea `coast`, y también con `coast` cuando el plan
+    /// no llega ni aportando siempre (entonces viaja `coast_not_reachable` en `warnings`).
     pub coast_fire_month_index: Option<u32>,
+    /// `true` ⟺ **ni invirtiendo cada euro de sobrante** llega al objetivo en su edad (D17, el
+    /// rojo). `null` = la pregunta no aplica a su estrategia (`asap`, `pension_bridge`, o una
+    /// estrategia por edad degradada por falta de fecha de nacimiento): **nunca `false` para
+    /// decir «no aplica»** — un `false` ahí se lee como «va bien».
+    pub underfunded: Option<bool>,
+    /// Aportación mensual mínima que le hace llegar a su edad objetivo, en euros. `null` con las
+    /// estrategias por cruce. Con `underfunded: true` es su TECHO de búsqueda: «todo lo que
+    /// tienes, y aun así no llega».
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub required_contribution_monthly: Option<Decimal>,
+    /// Margen mensual de ESTE miembro (ver el campo homónimo de la respuesta para la base exacta
+    /// de cada estrategia). `null` cuando su estrategia no publica margen.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub disposable_monthly: Option<Decimal>,
     /// Mes de inicio de la media jornada. `null` hasta WP3.
     pub partial_retirement_month_index: Option<u32>,
     /// Mes de inicio de la pensión con fecha. `null` hasta WP3.
@@ -494,10 +512,15 @@ pub struct ProjectionSeriesResponse {
     /// Años cumplidos en `jubilacion_date_ymd`. `null` si no hay cruce o no hay fecha de
     /// nacimiento resuelta (independiente de `show_age_mode`).
     pub jubilacion_age: Option<u32>,
-    /// Objetivo FIRE base **en euros de HOY** (gross-up de impuestos aplicado). Sirve como
-    /// referencia y como anclaje del target móvil — el target en cada mes es este valor ×
-    /// `(1 + inflación%)^(meses/12)`, así que el objetivo nominal el mes de la jubilación es
-    /// bastante mayor que esta cifra. `null` cuando no hay configuración FIRE válida.
+    /// Objetivo FIRE base **en euros de HOY** (gross-up de impuestos aplicado), **sin el término
+    /// de deuda** (que viaja aparte en `fire_target_debt_component`). Sirve como referencia y como
+    /// anclaje del target móvil. `null` cuando no hay configuración FIRE válida.
+    ///
+    /// **5.0.0 WP5-2b: es la base del objetivo del PLAN**, `T(0) − deuda(0)`, no la de la
+    /// perpetuidad. Sin pensión con fecha las dos expresiones son la misma cifra por construcción
+    /// (`fire_target_at_month_index` = base + deuda) y ningún hogar de 4.15.x ve moverse este
+    /// número; con base PUENTE, la de antes contradecía `fire_target_series[0]`, que es la línea
+    /// que el chart pinta.
     pub jubilacion_target_net_worth: Option<String>,
     /// Término FINITO de deuda del objetivo A DÍA DE HOY (4.8.0, #142): Σ de cuotas que quedan
     /// por pagar de todos los planes + saldos residuales, en euros nominales. El objetivo de
@@ -533,9 +556,10 @@ pub struct ProjectionSeriesResponse {
     ///
     /// Es el número que faltaba: `jubilacion_target_net_worth` está en euros de HOY, y el objetivo
     /// crece con la inflación, así que a décadas vista los dos difieren por más de 2×. Se evalúa
-    /// **exacto** con la misma `fire_target_at_month_index` del motor sobre el mes del cruce
-    /// (`base × (1 + inflación%)^(mes/12)`) — no se interpola entre puntos de la serie ni se lee de
-    /// `fire_target_series`, que con `density=hybrid` puede no tener el mes del cruce.
+    /// **exacto** con el evaluador CONSCIENTE DEL PLAN del motor (`PlanFireTarget`, el mismo que
+    /// produce `fire_target_series` y contra el que el bucle decide el cruce) sobre el mes de la
+    /// jubilación — no se interpola entre puntos de la serie ni se lee de `fire_target_series`,
+    /// que con `density=hybrid` puede no tener ese mes.
     pub jubilacion_target_net_worth_nominal: Option<String>,
     /// Serie mensual del target FIRE ajustado por inflación, paralela a `points`. Cada valor =
     /// `target_base × (1 + inflación%)^(month_index/12)`. Vacío cuando no hay FIRE configurado.
@@ -658,6 +682,128 @@ pub struct ProjectionSeriesResponse {
     /// SUMA de N simulaciones independientes, así que esto es lo que dice de quién es cada
     /// marcador. Vacío en `view=mine` — ahí la respuesta entera es de una sola persona.
     pub members: Vec<HouseholdMemberProjection>,
+
+    // -----------------------------------------------------------------------------------------
+    // 5.0.0 WP5-2b — pensión con fecha, puente, media jornada y SOLVES (§B.3, §B.7 de #207).
+    //
+    // Todo este bloque es `null`/vacío en `view=household`: el agregado suma N planes y ninguno
+    // de estos números tiene una versión «del hogar» (¿el margen de quién?, ¿el capital
+    // necesario para la edad de quién?). Lo que sí viaja por miembro está en `members[]`.
+    // -----------------------------------------------------------------------------------------
+    /// **Tasa ANUAL (%) con la que el puente descontó sus flujos** (D7), ya resuelta desde
+    /// `bridge_discount_basis`: rentabilidad esperada ponderada por valor de los activos LÍQUIDOS
+    /// de hoy (`None` en la tasa de un activo cuenta como 0 %), el propio `swr_pct`, o `0` sin
+    /// descuento. `null` ⟺ el objetivo no es puente — ahí no hay tasa que aplicar, y un `0` se
+    /// leería como «puente sin descontar» en vez de «no hay puente».
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub bridge_discount_annual_pct: Option<Decimal>,
+    /// **Tasa de retirada efectiva del puente**, en % ANUAL: `100 · 12·need_full_m(R−1)/L(R−1)`
+    /// en el mes efectivo de jubilación. Responde a lo que la perpetuidad esconde — mientras la
+    /// pensión no llega hay que sacar de la cartera el gasto ENTERO, y eso puede estar muy por
+    /// encima del SWR, legítimamente, porque dura pocos años.
+    ///
+    /// **Es un PORCENTAJE** (`6.5` = 6,5 %), no una fracción. `null` sin pensión con fecha, sin
+    /// base puente, sin objetivo, sin jubilación dentro del horizonte o con líquido no positivo
+    /// en ese mes: en ninguno de esos casos hay una tasa que medir.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub bridge_effective_withdrawal_pct: Option<Decimal>,
+    /// **Qué fracción del gasto cubre la pensión el mes en que empieza**: `P_m(P)/(E·f(P))`.
+    /// **Es una FRACCIÓN** (`0.6` = 60 %), no un porcentaje — la regla de oro de los sufijos.
+    /// Hace explícitos los dos escenarios de D15 sin asumir ninguno: `≥ 1` = la pensión cubre el
+    /// gasto entero y el término perpetuo del objetivo es 0 exacto. `null` sin pensión con fecha,
+    /// sin objetivo o con gasto no positivo en ese mes.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub pension_coverage_ratio: Option<Decimal>,
+    /// **Capital que sostendría a perpetuidad el HUECO de la media jornada**:
+    /// `gross_up(12·gap_m(X))/SWR`, con `gap_m(X) = max(0, gasto_base·f(X) − ingreso_parcial −
+    /// pensión·fracción)`. Informativo: no dispara nada y no es el objetivo de la simulación.
+    /// `"0.0000"` = la media jornada se paga sola; `null` = no hay fase parcial o no hay objetivo.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub partial_gap_target: Option<Decimal>,
+    /// `true` ⟺ hubo fase parcial y el patrimonio LÍQUIDO no bajó ni un mes durante ella.
+    /// `false` = hubo y menguó (y viaja `partial_phase_capital_shrinking` en `warnings`).
+    /// **`null` = no hubo fase parcial**: publicar `false` ahí diría «tu media jornada se come el
+    /// capital» de un hogar que no ha declarado ninguna.
+    pub partial_phase_capital_growing: Option<bool>,
+    /// **Aportación mensual mínima para llegar al objetivo en la edad objetivo** (§B.7), en euros
+    /// nominales. Es un TECHO sobre lo que la cascada invierte cada mes, no un importe que se
+    /// aporte pase lo que pase: en un mes con menos sobrante, se aporta el sobrante (R5).
+    ///
+    /// `null` con las estrategias por cruce (`asap`, `pension_bridge`) y con una estrategia por
+    /// edad degradada por falta de fecha de nacimiento — ahí no hay `R` contra el que resolver.
+    /// Con `underfunded: true` esta cifra ES `required_contribution_search_ceiling`.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub required_contribution_monthly: Option<Decimal>,
+    /// **Techo de la búsqueda** del solve: el máximo sobrante mensual del horizonte, con el
+    /// sobrante del mes 1 como suelo. Por encima de él, poner techo a la cascada ES no ponerlo.
+    /// Se publica para que `required_contribution_monthly` tenga denominador — «cuánto de mi
+    /// margen se lleva el plan» — sin obligar a deducirlo. `null` cuando no hay solve.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub required_contribution_search_ceiling: Option<Decimal>,
+    /// **El rojo de D17**: `true` ⟺ ni invirtiendo cada euro de sobrante se alcanza el objetivo
+    /// en la edad elegida. No es un error — la simulación existe, se jubila igual y se publica
+    /// entera; lo que dice es que se jubila POR DEBAJO del objetivo. Viaja además como
+    /// `retire_at_age_underfunded` en `warnings`.
+    ///
+    /// **`null` = la pregunta no aplica** (estrategia por cruce, o por edad sin fecha de
+    /// nacimiento). Nunca `false` para decir «no aplica»: ahí un `false` se lee como «va bien».
+    pub underfunded: Option<bool>,
+    /// **Serie del capital NECESARIO**, paralela a `points[]` (f64, misma decimación): el
+    /// patrimonio líquido de la simulación que aporta exactamente `required_contribution_monthly`
+    /// cada mes. Es una serie SIMULADA de verdad —una ejecución más del motor—, no el objetivo
+    /// descontado a una tasa escalar: ese número sería plausible y ninguna simulación lo produce
+    /// (hallazgo M8). Vacía cuando no hay solve.
+    pub required_capital_path: Vec<f64>,
+    /// **Margen mensual disponible** (D16/D31), en euros. La base depende de la estrategia y por
+    /// eso va declarada aquí:
+    ///
+    /// - `retire_at_age` / `partial` con edad: `techo_de_búsqueda − aportación_necesaria`,
+    ///   clampado a ≥ 0 — lo que sobra del máximo sobrante mensual una vez cubierto el plan.
+    /// - `coast`: el sobrante del mes 1 (R5) **desde el mes coast**, y `"0.0000"` antes. Este
+    ///   campo es el valor de HOY, así que solo es distinto de cero cuando el mes coast ya llegó.
+    ///
+    /// `null` = la estrategia no publica margen (`asap`, `pension_bridge`) o no hubo solve.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub disposable_monthly: Option<Decimal>,
+    /// **Serie del capital SOBRANTE**, paralela a `points[]` (f64): `líquido(k) −
+    /// capital_necesario(k)` con `retire_at_age`/`partial`, y `líquido(k) − coast_path(k)` desde
+    /// el mes coast (0 antes) con `coast`. Es el colchón por encima de lo que el plan exige.
+    /// Vacía cuando no hay solve.
+    pub disposable_capital: Vec<f64>,
+    /// El último valor de `disposable_capital` **en el mes efectivo de jubilación**, en euros
+    /// NOMINALES de ese mes. `null` sin solve o sin jubilación dentro del horizonte.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub disposable_capital_at_retirement: Option<Decimal>,
+    /// El mismo capital sobrante del mes de jubilación llevado a **euros de HOY**, con el mismo
+    /// deflactor que `points[].net_worth_real` (`deflation_annual_inflation_percent`). Es la
+    /// mitad legible del tile «Margen disponible»: el nominal de dentro de 25 años impresiona y
+    /// no dice nada. `null` en los mismos casos que su gemelo nominal.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub disposable_capital_today: Option<Decimal>,
+    /// **Mes «coast»** (§B.7): el primero a partir del cual se puede dejar de aportar y aun así
+    /// alcanzar el objetivo en la edad elegida. Número de MES de la rejilla, como el resto.
+    /// `null` con cualquier estrategia que no sea `coast`; con `coast`, `null` significa que el
+    /// plan no llega ni aportando siempre — y entonces viaja `coast_not_reachable` en `warnings`.
+    pub coast_fire_month_index: Option<u32>,
+    /// **El número coast**: el patrimonio LÍQUIDO con el que se ENTRA en el mes coast (el cierre
+    /// del mes anterior), en euros nominales. Desde ahí, sin un euro más invertido, la cartera
+    /// sola llega al objetivo. Es el valor de la serie simulada, no un descuento cerrado.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub coast_number: Option<Decimal>,
+    /// **Serie «si dejas de aportar en el mes coast»**, paralela a `points[]` (f64) — la línea
+    /// discontinua de D29. Cuando el coast no es alcanzable, es la serie de la ejecución que
+    /// aporta TODOS los meses: la mejor que el plan da. Vacía sin estrategia `coast`.
+    pub coast_path: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -1474,6 +1620,42 @@ pub(crate) const WARN_BIRTH_DATE_MISSING: &str = "birth_date_missing";
 /// así que solo es alcanzable con un perfil escrito antes de esa validación o a mano en la BD;
 /// se degrada igualmente en vez de reventar una LECTURA.
 pub(crate) const WARN_TARGET_AGE_MISSING: &str = "target_retirement_age_missing";
+/// El puente se pidió con descuento por **rentabilidad esperada** y el scope no tiene ni un euro
+/// de activo LÍQUIDO del que sacarla, así que la tasa cae a 0 (puente sin descuento: la suma
+/// llana de sus flujos, la lectura conservadora). Se avisa porque un objetivo puente sin
+/// descontar es sensiblemente MAYOR que el mismo puente descontado, y la diferencia no se
+/// explicaría por ningún campo de la respuesta. Solo viaja cuando la tasa se iba a usar de
+/// verdad (base puente + pensión con fecha resuelta).
+pub(crate) const WARN_BRIDGE_DISCOUNT_NO_LIQUID_ASSETS: &str = "bridge_discount_no_liquid_assets";
+
+/// **Rentabilidad esperada anual (%) de la cartera LÍQUIDA de hoy, ponderada por valor** (D7).
+///
+/// `Σ vᵢ·rᵢ / Σ vᵢ` sobre los activos con `is_liquid`, con `rᵢ = 0` para los que no declaran
+/// rentabilidad (misma convención que `net_return_percentages`: «None cuenta como 0 %» sin salir
+/// del denominador — un activo sin tasa declarada es una cuenta corriente, no un hueco).
+///
+/// `None` ⟺ **no hay base sobre la que ponderar**: ni un activo líquido, o su valor total no es
+/// positivo. Nunca un `0` inventado: el llamante decide qué hacer con la ausencia y, si la tasa
+/// iba a usarse, la declara con [`WARN_BRIDGE_DISCOUNT_NO_LIQUID_ASSETS`].
+///
+/// **No se reutiliza `net_return_percentages`** (`crates/engine/src/net_return.rs`) a propósito:
+/// aquella pondera sobre el PATRIMONIO NETO y resta el coste de la deuda, así que con
+/// apalancamiento devuelve una tasa amplificada — correcta para «cuánto renta tu patrimonio», y
+/// equivocada como tasa de descuento de un puente que se paga vendiendo cartera. Aquí la
+/// pregunta es «a qué tasa crece el dinero que voy a ir gastando», y ese dinero es el líquido.
+fn liquid_expected_return_pct(assets: &[SimAsset]) -> Option<Decimal> {
+    let mut total = Decimal::ZERO;
+    let mut weighted = Decimal::ZERO;
+    for a in assets.iter().filter(|a| a.is_liquid) {
+        let v = a.value.max(Decimal::ZERO);
+        total += v;
+        weighted += v * a.expected_annual_return_percent.unwrap_or(Decimal::ZERO);
+    }
+    if total <= Decimal::ZERO {
+        return None;
+    }
+    weighted.checked_div(total)
+}
 
 pub(crate) fn map_engine_err(e: EngineError) -> ApiError {
     match e {
@@ -1489,26 +1671,13 @@ pub(crate) fn map_engine_err(e: EngineError) -> ApiError {
     }
 }
 
-/// Primer mes cuyo patrimonio cruza el target FIRE (inflado mes a mes). Se evalúa sobre TODOS
-/// los meses de la serie — nunca sobre puntos decimados — para no perder precisión. Compartido
-/// por `compute_projection_series_response` y `simulate_projection_core`.
-/// Primer mes cuyo patrimonio LÍQUIDO (#143) alcanza el objetivo. Escaneo LINEAL a propósito:
-/// con el término finito de deuda (#142) el objetivo ya NO es monótono, así que una búsqueda
-/// binaria o una salida temprana serían incorrectas en silencio.
-fn fire_crossover_month(
-    ft: Option<&futurefin_engine::FireTarget>,
-    liquid_worth: &[Decimal],
-) -> Option<u32> {
-    // La puerta (necesidad positiva HOY, SWR > 0) vive en el engine: base None ⇒ sin cruce.
-    let ft = ft.filter(|f| futurefin_engine::fire_target_base_at_month_index(f, 0).is_some())?;
-    for (i, lw) in liquid_worth.iter().enumerate() {
-        let target = fire_target_at_month_index(Some(ft), i as u32).unwrap_or(Decimal::ZERO);
-        if target > Decimal::ZERO && *lw >= target {
-            return Some(i as u32);
-        }
-    }
-    None
-}
+// `fire_crossover_month` MURIÓ en WP5-2b (5.0.0). Escaneaba la serie líquida contra
+// `fire_target_at_month_index` porque a las estrategias por edad se les pasaba `fire_target:
+// None` para que el cruce no las jubilara, y sin objetivo en el input el motor no podía anotar su
+// propia lectura. Con `crossing_is_reading_only` el objetivo entra siempre y el cruce lo publica
+// el motor (`ProjectionOutput::liquid_crossing_month_index`), evaluado sobre el objetivo
+// CONSCIENTE DEL PLAN. La diferencia no era de estilo: con `bridge_to_pension` el handler cruzaba
+// contra la perpetuidad y el motor contra el puente — dos cruces distintos para la misma línea.
 
 // ---------------------------------------------------------------------------
 // Resolución compartida de los inputs de ahorro (proyección ↔ /v1/summary)
@@ -1702,10 +1871,20 @@ pub(crate) struct BuiltProjection {
     /// cerrado del `PhasePlan::retirement_trigger`, para que la respuesta no obligue a deducirlo
     /// de la combinación (`strategy`, `fire_target_absent_reason`).
     pub retirement_trigger: &'static str,
-    /// Avisos del ENSAMBLADO (no del motor): hoy solo `birth_date_missing` /
-    /// `target_retirement_age_missing`, los dos casos en que una estrategia por edad degrada a
-    /// `asap` en vez de reventar (§A del plan: «nunca un 500»).
+    /// Avisos del ENSAMBLADO (no del motor): `birth_date_missing`,
+    /// `target_retirement_age_missing` (una estrategia por edad degrada a `asap` en vez de
+    /// reventar — §A del plan: «nunca un 500») y `bridge_discount_no_liquid_assets`.
     pub warnings: Vec<String>,
+    /// **Mes del BUCLE (1-based) en que manda la edad**, `None` con trigger por cruce. Es la `R`
+    /// de §B.7: el `target_month` que los solves necesitan, y el único sitio donde se resolvió
+    /// (`edad → mes` con la fecha de nacimiento de ESTE miembro). Recalcularlo fuera obligaría a
+    /// arrastrar la DOB y a duplicar la aritmética civil.
+    pub forced_retirement_month: Option<u32>,
+    /// **Tasa ANUAL (%) con la que el puente descontó sus flujos** — la que de verdad entró al
+    /// `PhasePlan`, ya resuelta desde `bridge_discount_basis` (rentabilidad esperada ponderada
+    /// del líquido, el propio SWR, o 0). `None` ⟺ el objetivo no es puente: ahí no hay tasa que
+    /// publicar, y un `0` se leería como «puente sin descuento» en vez de «no hay puente».
+    pub bridge_discount_annual_pct: Option<Decimal>,
 }
 
 /// Overrides what-if de `simulate_projection` que deben aplicarse DENTRO del ensamblado, en el
@@ -2059,19 +2238,32 @@ pub(crate) async fn build_installation_projection_input(
     }
 
     // -----------------------------------------------------------------------------------------
-    // Estrategia del perfil → `PhasePlan` (5.0.0 WP5, §C del plan de #207)
+    // Estrategia del perfil → `PhasePlan` (5.0.0 WP5-2b, §C del plan de #207)
     // -----------------------------------------------------------------------------------------
-    // Solo se traduce lo que el motor SABE ejecutar hoy. `partial` y `pension_bridge` se
-    // comportan como `asap` a propósito: sus bloques (`pension`, `partial_retirement`) NO se
-    // pasan al plan porque WP1b los rechaza con `UnsupportedPhase`, y aceptar la estrategia para
-    // simular otra cosa publicaría el patrimonio de un plan que nadie configuró. Lo que sí se
-    // pasa desde ya son la regla de retirada y su modo: con `fixed_real` (el default) son
-    // bit-idénticos a 4.15.x, y cualquier otra regla sale por `engine_feature_unavailable`
-    // hasta que WP2 escriba `withdrawal.rs`.
-    // WP3: partial/pension_bridge — trigger parcial, pensión con fecha y objetivo puente.
+    // El perfil ENTERO se traduce aquí: trigger, fase parcial, pensión con fecha, base del
+    // objetivo, tasa de descuento del puente y regla de retirada. Es el único punto del API donde
+    // una decisión del usuario se convierte en un mes del bucle — y por eso todas las edades se
+    // convierten con `months_until_target_age`, la misma aritmética civil que publica
+    // `jubilacion_age`: derivarlas con una resta de años × 12 haría que la respuesta dijera «te
+    // jubilas a los 54» habiendo pedido 55.
+    //
+    // **Sin fecha de nacimiento se degradan las PARTES dependientes de la edad**, nunca la
+    // lectura entera: el trigger vuelve al cruce, la pensión y la media jornada no entran al
+    // plan, y viaja un `birth_date_missing`. Un 500 por un campo opcional del perfil sería el
+    // peor cambio posible en una LECTURA (§A del plan).
     let mut warnings: Vec<String> = Vec::new();
-    let forced_retirement_month: Option<u32> = if retirement_profile.strategy.requires_target_age()
-    {
+    fn push_warning(warnings: &mut Vec<String>, w: &str) {
+        if !warnings.iter().any(|x| x == w) {
+            warnings.push(w.to_string());
+        }
+    }
+
+    // `R`: mes del BUCLE (1-based) en que el miembro cumple `target_retirement_age`. Lo piden las
+    // dos estrategias por edad y, opcionalmente, `partial` (fin de la media jornada).
+    let wants_age_trigger = retirement_profile.strategy.requires_target_age()
+        || (matches!(retirement_profile.strategy, RetirementStrategy::Partial)
+            && retirement_profile.target_retirement_age.is_some());
+    let forced_retirement_month: Option<u32> = if wants_age_trigger {
         match (birth_date, retirement_profile.target_retirement_age) {
             (Some(b), Some(age)) => {
                 // `+ 1`: `months_until_target_age` devuelve el mes de la REJILLA publicada
@@ -2082,16 +2274,79 @@ pub(crate) async fn build_installation_projection_input(
                 Some(months_until_target_age(today, b, age).saturating_add(1))
             }
             (None, _) => {
-                warnings.push(WARN_BIRTH_DATE_MISSING.to_string());
+                push_warning(&mut warnings, WARN_BIRTH_DATE_MISSING);
                 None
             }
             (Some(_), None) => {
-                warnings.push(WARN_TARGET_AGE_MISSING.to_string());
+                push_warning(&mut warnings, WARN_TARGET_AGE_MISSING);
                 None
             }
         }
     } else {
         None
+    };
+
+    // Pensión CON FECHA (D3/D8). `start_index` es **0-based**, la rejilla del objetivo, no la
+    // 1-based del bucle: la asimetría la declara §B.3 y `PensionSchedule` la documenta.
+    let pension: Option<PensionSchedule> = match retirement_profile.pension.as_ref() {
+        None => None,
+        Some(p) => match birth_date {
+            Some(b) => Some(PensionSchedule {
+                start_index: months_until_target_age(today, b, p.starts_at_age),
+                monthly_today: p.monthly_amount_today,
+                indexed: p.indexed,
+                fraction_while_partial: p.fraction_while_partial,
+            }),
+            None => {
+                push_warning(&mut warnings, WARN_BIRTH_DATE_MISSING);
+                None
+            }
+        },
+    };
+
+    // Media jornada (P7/D10). `start_month` es del BUCLE (1-based), como el trigger.
+    let partial: Option<PartialPhase> = match retirement_profile.partial_retirement.as_ref() {
+        None => None,
+        Some(x) => match birth_date {
+            Some(b) => Some(PartialPhase {
+                start_month: months_until_target_age(today, b, x.starts_at_age).saturating_add(1),
+                income_monthly: x.income_monthly_today,
+                expense_basis: match x.expense_basis {
+                    PartialExpenseBasis::Retirement => EngineExpenseBasis::Retirement,
+                    PartialExpenseBasis::Regular => EngineExpenseBasis::Regular,
+                },
+            }),
+            None => {
+                push_warning(&mut warnings, WARN_BIRTH_DATE_MISSING);
+                None
+            }
+        },
+    };
+
+    // Base del objetivo. `resolve_retirement_profile` ya la derivó (R6), así que aquí nunca es
+    // `None`; el `unwrap_or_default` es la degradación de un perfil escrito fuera de la API.
+    let target_basis = match retirement_profile.target_basis.unwrap_or_default() {
+        ProfileTargetBasis::Perpetuity => EngineTargetBasis::Perpetuity,
+        ProfileTargetBasis::BridgeToPension => EngineTargetBasis::BridgeToPension,
+    };
+    // El puente solo DESCUENTA cuando de verdad hay puente que descontar: base puente + pensión
+    // con fecha resuelta. Sin las dos cosas la tasa no se lee, y publicarla sería invitar a
+    // leerla (el mismo criterio que `debt_service_absent_reason`).
+    let bridge_active = target_basis == EngineTargetBasis::BridgeToPension && pension.is_some();
+    let bridge_discount_annual_pct = match retirement_profile.bridge_discount_basis {
+        BridgeDiscountBasis::None => Decimal::ZERO,
+        BridgeDiscountBasis::Swr => retirement_profile.swr_pct,
+        BridgeDiscountBasis::ExpectedReturn => {
+            match liquid_expected_return_pct(&assets) {
+                Some(r) => r,
+                None => {
+                    if bridge_active {
+                        push_warning(&mut warnings, WARN_BRIDGE_DISCOUNT_NO_LIQUID_ASSETS);
+                    }
+                    Decimal::ZERO
+                }
+            }
+        }
     };
 
     let mut phase_plan = match forced_retirement_month {
@@ -2110,18 +2365,27 @@ pub(crate) async fn build_installation_projection_input(
         ProfileSpendMode::Ceiling => EngineSpendMode::Ceiling,
         ProfileSpendMode::RuleIsSpend => EngineSpendMode::RuleIsSpend,
     };
+    phase_plan.partial = partial;
+    phase_plan.pension = pension;
+    phase_plan.target_basis = target_basis;
+    phase_plan.bridge_discount_annual_pct = bridge_discount_annual_pct;
+    // **D17 — un solo trigger por simulación.** Con una estrategia por edad el objetivo SIGUE
+    // entrando al motor (lo necesita el chart, el infra-financiado y los solves), pero el cruce
+    // deja de jubilar: solo se anota como `liquid_crossing_month_index`. Hasta WP5-2a el handler
+    // conseguía lo mismo pasando `fire_target: None` y recalculando el cruce por su cuenta con
+    // `fire_target_at_month_index` — una segunda lectura del objetivo que, con base puente, NO
+    // es el objetivo que el motor evalúa. Ese atajo muere aquí.
+    phase_plan.crossing_is_reading_only = forced_retirement_month.is_some();
     let retirement_trigger = if forced_retirement_month.is_some() {
         RETIREMENT_TRIGGER_AGE
     } else {
         RETIREMENT_TRIGGER_CROSSING
     };
-    // El objetivo que ENTRA al motor y el que se LEE se separan aquí, y en un solo sitio.
+    // El objetivo que ENTRA al motor y el que se LEE son ya el MISMO objeto: `fire_target_reading`
+    // sobrevive porque las lecturas (base de hoy, nominal del mes de jubilación, razón de
+    // ausencia) lo consultan fuera del `ProjectionInput`, no porque difieran.
     let fire_target_reading = fire_target.clone();
-    let engine_fire_target = if forced_retirement_month.is_some() {
-        None
-    } else {
-        fire_target
-    };
+    let engine_fire_target = fire_target;
 
     let input = ProjectionInput {
         ref_date: today,
@@ -2166,6 +2430,8 @@ pub(crate) async fn build_installation_projection_input(
         fire_target_reading,
         retirement_trigger,
         warnings,
+        forced_retirement_month,
+        bridge_discount_annual_pct: bridge_active.then_some(bridge_discount_annual_pct),
     })
 }
 
@@ -2505,6 +2771,26 @@ pub(crate) const ABSENT_NO_RETIREMENT_TRIGGER: &str = "no_retirement_trigger";
 /// Una simulación COMPLETA de un miembro: el ensamblado, la salida del motor y las dos lecturas
 /// derivadas que hay que calcular junto a ella (amortización negativa y marcador de interés
 /// compuesto). Es la unidad que `view=mine` produce una vez y `view=household` produce N veces.
+/// **Los solves de §B.7 de UNA simulación**, calculados junto a la serie y guardados con ella en
+/// la entrada de cache (M4): el primer GET tras una invalidación los paga, los HITs no pagan nada.
+///
+/// Cada solve es una bisección **sobre el motor entero** (`crates/engine/src/solve.rs`), o sea
+/// hasta 26 proyecciones completas — el orden de magnitud es ~0,4 s a 600 meses. Por eso se
+/// calculan **solo cuando la estrategia los necesita** y nunca en el camino de `simulate`, que es
+/// cache-neutral por diseño (allí se piden con `solve: {…}`, explícitamente).
+struct StrategySolves {
+    /// `retire_at_age` y `partial` con edad de fin: la aportación mensual mínima que llega a
+    /// `T(R−1)`, su techo de búsqueda, el rojo de D17 y la serie de capital necesario.
+    required: Option<SolveResult>,
+    /// `coast`: el mes a partir del cual se puede dejar de aportar, su número y su serie.
+    coast: Option<CoastSolve>,
+    /// **Sobrante del mes 1 (R5)**, clampado a ≥ 0: `recurring_net` del primer paso real del
+    /// motor (`first_month_allocation`), es decir ingreso − gasto − servicio de deuda REALMENTE
+    /// pagado. Es el mismo número que `solve.rs` usa como SUELO de su techo de búsqueda, y el
+    /// que `coast` publica como margen disponible.
+    monthly_headroom: Decimal,
+}
+
 struct MemberRun {
     user_id: Uuid,
     username: String,
@@ -2518,6 +2804,7 @@ struct MemberRun {
     output: futurefin_engine::ProjectionOutput,
     negative_amortization: Vec<LiabilityNegativeAmortization>,
     compound_month: Option<u32>,
+    solves: StrategySolves,
 }
 
 /// Fila de miembro del hogar tal y como sale de la BD (id, nombre, DOB y perfil sin resolver).
@@ -2651,6 +2938,19 @@ async fn run_member_projection(
         .collect();
     let compound_month = marker_join?.map_err(map_engine_err)?;
 
+    // §B.7 — los solves de la estrategia, en el MISMO permiso de CPU y DESPUÉS de la serie (no en
+    // paralelo con ella: son hasta 26 proyecciones y competirían con el reactor por los dos
+    // permisos del semáforo). Solo corren cuando la estrategia los necesita, así que `asap` y
+    // `pension_bridge` —las dos por cruce— no pagan un céntimo.
+    let solve_input = built.input.clone();
+    let solve_month = built.forced_retirement_month;
+    let strategy = profile.strategy;
+    let solves = crate::heavy::run_projection_sim("strategy solves", move || {
+        compute_strategy_solves(&solve_input, solve_month, strategy)
+    })
+    .await?
+    .map_err(map_engine_err)?;
+
     Ok(MemberRun {
         user_id: member_id,
         username,
@@ -2661,6 +2961,7 @@ async fn run_member_projection(
         output,
         negative_amortization,
         compound_month,
+        solves,
     })
 }
 
@@ -2681,6 +2982,138 @@ fn add_series_into(acc: &mut Vec<Decimal>, add: &[Decimal]) {
 /// retirada, que el motor sí rellena, o una cola más corta de la que se espera).
 fn series_at(serie: &[Decimal], i: usize) -> Decimal {
     serie.get(i).copied().unwrap_or(Decimal::ZERO)
+}
+
+/// **Margen mensual disponible de un miembro** (D16/D31), con la base que corresponde a SU
+/// estrategia. Vive en una función y no repetido en dos sitios porque el agregado del hogar
+/// publica exactamente el mismo número por miembro que la vista `mine` publica para uno solo.
+///
+/// - Solve de aportación (`retire_at_age`, `partial` con edad): `techo − aportación`, clampado a
+///   ≥ 0. El techo es el máximo sobrante mensual del horizonte, que es contra lo que el solve
+///   buscó; restar el sobrante del mes 1 daría un margen negativo en cuanto la caja crezca.
+/// - `coast`: el sobrante del mes 1 (R5) **si el mes coast ya llegó**, y 0 si no. Antes del mes
+///   coast no hay margen: cada euro que se deje de aportar retrasa la fecha.
+/// - Resto: `None` — la estrategia no tiene margen que publicar.
+fn member_disposable_monthly(r: &MemberRun) -> Option<Decimal> {
+    disposable_monthly_of(&r.solves)
+}
+
+/// **Los solves de §B.7 que la estrategia necesita**, y ninguno más.
+///
+/// Función libre (y no un método de `MemberRun`) porque tiene DOS llamantes con inputs distintos:
+/// la proyección real, que la corre por miembro y guarda el resultado en la cache, y
+/// `simulate_projection`, que la corre sobre el baseline y sobre el escenario para poder publicar
+/// los deltas del plan. Si cada uno decidiera por su cuenta qué solve toca, `retire_at_age`
+/// podría publicar un `required_contribution_monthly` en la serie y `null` en el what-if.
+///
+/// **Coste**: cada solve es una bisección sobre el motor entero — hasta 26 proyecciones
+/// completas. Por eso las dos estrategias por cruce (`asap`, `pension_bridge`) no pagan nada, y
+/// por eso el llamante corre esto DENTRO del semáforo de CPU.
+fn compute_strategy_solves(
+    input: &ProjectionInput,
+    forced_retirement_month: Option<u32>,
+    strategy: RetirementStrategy,
+) -> Result<StrategySolves, EngineError> {
+    let monthly_headroom = futurefin_engine::first_month_allocation(input)?
+        .recurring_net
+        .max(Decimal::ZERO);
+    let mut out = StrategySolves {
+        required: None,
+        coast: None,
+        monthly_headroom,
+    };
+    let Some(r) = forced_retirement_month else {
+        return Ok(out);
+    };
+    match strategy {
+        // `partial` con edad de fin comparte solve con `retire_at_age`: la pregunta es la misma
+        // («¿cuánto tengo que aportar para llegar a R?») y el criterio también.
+        RetirementStrategy::RetireAtAge | RetirementStrategy::Partial => {
+            out.required = futurefin_engine::required_contribution_monthly(input, r)?;
+        }
+        RetirementStrategy::Coast => {
+            out.coast = futurefin_engine::coast_fire_month_index(input, r)?;
+        }
+        // `asap` y `pension_bridge` se disparan por cruce: no hay `R` que resolver.
+        RetirementStrategy::Asap | RetirementStrategy::PensionBridge => {}
+    }
+    Ok(out)
+}
+
+/// **Margen mensual disponible** a partir de los solves, con la base que corresponde a cada
+/// estrategia (la misma cuenta para la serie y para el what-if — ver `member_disposable_monthly`).
+fn disposable_monthly_of(solves: &StrategySolves) -> Option<Decimal> {
+    if let Some(sol) = solves.required.as_ref() {
+        return Some(money_out(
+            (sol.search_ceiling - sol.contribution).max(Decimal::ZERO),
+        ));
+    }
+    let coast = solves.coast.as_ref()?;
+    // `coast_month_index` es un mes del BUCLE (1-based) y «hoy» es el mes 1: antes del mes coast
+    // no hay margen —cada euro que se deje de aportar retrasa la fecha— y con `None` (coast no
+    // alcanzable) tampoco lo hay nunca.
+    let reached_today = coast.coast_month_index.is_some_and(|k| k <= 1);
+    Some(money_out(if reached_today {
+        solves.monthly_headroom
+    } else {
+        Decimal::ZERO
+    }))
+}
+
+/// **Los avisos de UN miembro**, en un solo sitio: los del ensamblado (`birth_date_missing`,
+/// `bridge_discount_no_liquid_assets`), los del bucle (`retire_at_age_underfunded`,
+/// `partial_phase_capital_shrinking`) y los del SOLVE (`coast_not_reachable`, que solo la
+/// bisección puede saber).
+///
+/// **Deduplicado**: `retire_at_age_underfunded` lo emiten el bucle (se jubila por debajo del
+/// objetivo) y el solve (ni aportándolo todo llega) por caminos distintos, y publicarlo dos veces
+/// haría que un consumidor que cuenta avisos midiera gravedad donde solo hay repetición.
+///
+/// El literal público de cada aviso del motor lo pone `EngineWarning::code()` en el propio crate,
+/// no un `match` aquí: un mapeo duplicado se queda atrás en cuanto el enum crece, y un aviso con
+/// dos nombres es un aviso que nadie puede buscar.
+fn merge_warnings(
+    assembly: &[String],
+    output: &futurefin_engine::ProjectionOutput,
+    solves: &StrategySolves,
+) -> Vec<String> {
+    let mut out = assembly.to_vec();
+    let engine = output
+        .warnings
+        .iter()
+        .copied()
+        .chain(
+            solves
+                .required
+                .iter()
+                .flat_map(|s| s.warnings.iter().copied()),
+        )
+        .chain(solves.coast.iter().flat_map(|c| c.warnings.iter().copied()));
+    for w in engine {
+        let code = w.code().to_string();
+        if !out.contains(&code) {
+            out.push(code);
+        }
+    }
+    out
+}
+
+fn member_warnings(r: &MemberRun) -> Vec<String> {
+    merge_warnings(&r.built.warnings, &r.output, &r.solves)
+}
+
+/// Decima una serie `Decimal` del motor a los mismos puntos que `points[]` y la serializa como
+/// f64 (excepción chart-only D4). Se itera sobre `points` —no sobre `kept_indices`— por la misma
+/// razón que `fire_target_series`: el paralelismo con los puntos tiene que ser estructural.
+fn decimate_to_points(points: &[ProjectionPoint], serie: &[Decimal]) -> Vec<f64> {
+    points
+        .iter()
+        .map(|p| {
+            series_at(serie, p.month_index as usize)
+                .to_f64()
+                .unwrap_or(0.0)
+        })
+        .collect()
 }
 
 pub async fn compute_projection_series_response(
@@ -2962,15 +3395,28 @@ pub async fn compute_projection_series_response(
     // jubilas de verdad y `liquid_crossing_month_index` cuándo habrías llegado.
     let jubilacion_month_index =
         solo.and_then(|r| engine_month_to_grid(r.output.retirement_month_index));
-    // El cruce sigue calculándose AQUÍ y no leyéndose del motor: en las estrategias por edad el
-    // motor no recibe objetivo (D17) y su propia lectura sería `null`. `fire_crossover_month`
-    // escanea la serie líquida contra el objetivo-lectura, que es justo lo que se dibuja.
-    let liquid_crossing_month_index = solo
-        .and_then(|r| fire_crossover_month(fire_target_ref, &r.output.liquid_worth));
+    // **El cruce lo lee el MOTOR desde WP5-2b.** Hasta WP5-2a lo recalculaba el handler
+    // (`fire_crossover_month`) porque a las estrategias por edad se les pasaba `fire_target:
+    // None` para que el cruce no las jubilara; con `crossing_is_reading_only` el objetivo entra
+    // igual y el motor anota el cruce sin decidir nada. La diferencia no es de estilo: el motor
+    // evalúa el objetivo CONSCIENTE DEL PLAN (puente incluido) y el handler evaluaba la
+    // perpetuidad de 4.15.x — con `pension_bridge` eran dos cruces distintos para la misma línea.
+    let liquid_crossing_month_index =
+        solo.and_then(|r| engine_month_to_grid(r.output.liquid_crossing_month_index));
+    // El `PhasePlan` del solicitante: es lo que hace que la línea del chart sea el objetivo del
+    // PLAN (puente con pensión con fecha) y no la perpetuidad de 4.15.x.
+    let solo_plan = solo.map(|r| &r.built.input.phase_plan);
 
     let (fire_target_series, jubilacion_target_net_worth, jubilacion_target_net_worth_nominal) =
-        match fire_target_ref {
-            Some(ft) => {
+        match (fire_target_ref, solo_plan) {
+            (Some(ft), Some(plan)) => {
+                // **El evaluador se construye UNA vez.** `fire_target_at_month_index_with_plan`
+                // es la forma de conveniencia y rehace la tabla del puente —`O(P)` gross-ups—
+                // en CADA llamada; con densidad mensual son ~841 llamadas y `P = 364`, o sea
+                // 300.000 gross-ups por respuesta. Medido antes de arreglarlo: **1.943 ms** de
+                // MISS en un hogar con pensión con fecha, contra 5 ms sin ella. `PlanFireTarget`
+                // existe exactamente para esto: `O(P)` al construirlo, `O(1)` por consulta.
+                let plan_target = futurefin_engine::PlanFireTarget::new(Some(ft), plan);
                 // Se itera sobre `points`, NO sobre `kept_indices`: la serie es paralela a los
                 // puntos y el consumidor la alinea por posición (no lleva `month_index` propio,
                 // auditoría MCP §8), así que el paralelismo tiene que ser estructural. Antes `points`
@@ -2980,7 +3426,8 @@ pub async fn compute_projection_series_response(
                 let series: Vec<f64> = points
                     .iter()
                     .map(|p| {
-                        fire_target_at_month_index(Some(ft), p.month_index)
+                        plan_target
+                            .at(p.month_index)
                             .unwrap_or(Decimal::ZERO)
                             .to_f64()
                             .unwrap_or(0.0)
@@ -2994,21 +3441,26 @@ pub async fn compute_projection_series_response(
                 // «esto es lo que habrías necesitado el mes en que te jubilas» —, y compararla
                 // con el líquido de ese mes es exactamente lo que revela una infra-financiación.
                 let nominal = jubilacion_month_index
-                    .and_then(|k| fire_target_at_month_index(Some(ft), k))
+                    .and_then(|k| plan_target.at(k))
                     .map(|v| money_out(v).to_string());
-                (
-                    series,
-                    Some(
-                        money_out(
-                            futurefin_engine::fire_target_base_at_month_index(ft, 0)
-                                .unwrap_or(Decimal::ZERO),
-                        )
-                        .to_string(),
-                    ),
-                    nominal,
-                )
+                // La BASE de hoy es el objetivo del PLAN en el mes 0 **menos su término de
+                // deuda** — no `fire_target_base_at_month_index`, que solo conoce la perpetuidad.
+                // Sin pensión con fecha las dos expresiones son la misma cifra por construcción
+                // (`fire_target_at_month_index` = base + deuda), así que ningún hogar de 4.15.x
+                // ve moverse este número; con base PUENTE, la de arriba es la única que cuadra
+                // con `fire_target_series[0]`, que es la línea que el chart pinta.
+                let debt_today = ft
+                    .debt_payments_remaining
+                    .first()
+                    .copied()
+                    .unwrap_or(Decimal::ZERO);
+                let base_today = plan_target
+                    .at(0)
+                    .map(|t| (t - debt_today).max(Decimal::ZERO))
+                    .unwrap_or(Decimal::ZERO);
+                (series, Some(money_out(base_today).to_string()), nominal)
             }
-            None => (Vec::new(), None, None),
+            _ => (Vec::new(), None, None),
         };
 
     // Posición del mes de jubilación dentro de los arrays paralelos: el ÚLTIMO punto servido cuyo
@@ -3050,13 +3502,7 @@ pub async fn compute_projection_series_response(
     // `EngineWarning::code()` (en el propio crate), no un `match` aquí: un mapeo duplicado en el
     // handler se queda atrás en cuanto el enum crece, y un aviso con dos nombres es un aviso que
     // nadie puede buscar.
-    let warnings: Vec<String> = solo
-        .map(|r| {
-            let mut w = r.built.warnings.clone();
-            w.extend(r.output.warnings.iter().map(|x| x.code().to_string()));
-            w
-        })
-        .unwrap_or_default();
+    let warnings: Vec<String> = solo.map(member_warnings).unwrap_or_default();
 
     let has_retirement_trigger = solo.is_some_and(|r| {
         r.built.retirement_trigger == RETIREMENT_TRIGGER_AGE || fire_target_ref.is_some()
@@ -3078,19 +3524,23 @@ pub async fn compute_projection_series_response(
                     strategy: strategy_label(r.profile.strategy),
                     jubilacion_month_index: effective,
                     jubilacion_age: age,
-                    liquid_crossing_month_index: fire_crossover_month(
-                        r.built
-                            .fire_target_reading
-                            .as_ref()
-                            .filter(|ft| {
-                                futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some()
-                            }),
-                        &r.output.liquid_worth,
+                    // Su propio cruce, leído del motor (que evaluó SU objetivo con SU plan).
+                    liquid_crossing_month_index: engine_month_to_grid(
+                        r.output.liquid_crossing_month_index,
                     ),
                     retirement_month_index: effective,
-                    // §B.7 (`solve.rs`) no entra en esta ola: el campo viaja como `null`
-                    // EXPLÍCITO para que el consumidor no cambie de forma cuando llegue.
-                    coast_fire_month_index: None,
+                    coast_fire_month_index: r
+                        .solves
+                        .coast
+                        .as_ref()
+                        .and_then(|c| engine_month_to_grid(c.coast_month_index)),
+                    underfunded: r.solves.required.as_ref().map(|s| s.underfunded),
+                    required_contribution_monthly: r
+                        .solves
+                        .required
+                        .as_ref()
+                        .map(|s| money_out(s.contribution)),
+                    disposable_monthly: member_disposable_monthly(r),
                     partial_retirement_month_index: engine_month_to_grid(
                         r.output.partial_retirement_month_index,
                     ),
@@ -3100,11 +3550,7 @@ pub async fn compute_projection_series_response(
                     assets_depleted_month_index: engine_month_to_grid(
                         r.output.assets_depleted_month_index,
                     ),
-                    warnings: {
-                        let mut w = r.built.warnings.clone();
-                        w.extend(r.output.warnings.iter().map(|x| x.code().to_string()));
-                        w
-                    },
+                    warnings: member_warnings(r),
                     horizon_months: r.own_horizon_months,
                     // MISMOS `kept_indices` que `points[]`: la decimación es una decisión del
                     // servidor por respuesta, no por serie, y dos densidades distintas en el
@@ -3134,6 +3580,69 @@ pub async fn compute_projection_series_response(
     // las filas de cada scope, así que no existe UN basis del hogar. Se publica el suyo — el
     // mismo criterio que la demografía (`viewer_birth_date`, horizonte), que también es del
     // solicitante en las dos vistas.
+    // -----------------------------------------------------------------------------------------
+    // Solves y lecturas de estrategia (§B.3, §B.7). Todo vacío en `household`: el agregado suma N
+    // planes y ninguna de estas cifras tiene versión «del hogar».
+    // -----------------------------------------------------------------------------------------
+    let required = solo.and_then(|r| r.solves.required.as_ref());
+    let coast = solo.and_then(|r| r.solves.coast.as_ref());
+    let liquid_full: &[Decimal] = solo.map(|r| r.output.liquid_worth.as_slice()).unwrap_or(&[]);
+
+    let required_capital_path = required
+        .map(|s| decimate_to_points(&points, &s.required_capital_path))
+        .unwrap_or_default();
+    let coast_path = coast
+        .map(|c| decimate_to_points(&points, &c.coast_path))
+        .unwrap_or_default();
+
+    // `disposable_capital` mensual completo (se decima después, como el resto de series). **No se
+    // clampa a ≥ 0**: con la cascada dirigiendo el sobrante a un activo NO líquido, aportar más
+    // no sube el líquido y la diferencia puede quedar por debajo de cero — esconderlo con un
+    // `max(0, ·)` publicaría un colchón que no existe.
+    let disposable_capital_full: Vec<Decimal> = if let Some(sol) = required {
+        liquid_full
+            .iter()
+            .enumerate()
+            .map(|(i, l)| *l - series_at(&sol.required_capital_path, i))
+            .collect()
+    } else if let Some(c) = coast {
+        // Antes del mes coast el margen es CERO por definición: hasta ahí hay que aportar. Desde
+        // él, lo que el líquido real supera a la trayectoria «si dejas de aportar».
+        let from = coast
+            .and_then(|c| c.coast_month_index)
+            .map(|k| k.saturating_sub(1) as usize)
+            .unwrap_or(usize::MAX);
+        liquid_full
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                if i >= from {
+                    *l - series_at(&c.coast_path, i)
+                } else {
+                    Decimal::ZERO
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let disposable_capital = if disposable_capital_full.is_empty() {
+        Vec::new()
+    } else {
+        decimate_to_points(&points, &disposable_capital_full)
+    };
+    // El margen en el mes EFECTIVO de jubilación: el nominal de ese mes y su lectura en euros de
+    // hoy (mismo deflactor que `points[].net_worth_real`).
+    let disposable_capital_at_retirement = (!disposable_capital_full.is_empty())
+        .then_some(jubilacion_month_index)
+        .flatten()
+        .and_then(|k| disposable_capital_full.get(k as usize).copied())
+        .map(money_out);
+    let disposable_capital_today = disposable_capital_at_retirement.and_then(|v| {
+        jubilacion_month_index
+            .map(|k| money_out(v * deflator_at_month_index(inflation_annual_percent, k)))
+    });
+
     let context_run = if aggregated {
         runs.iter().find(|r| r.user_id == user_id).or_else(|| runs.first())
     } else {
@@ -3195,7 +3704,13 @@ pub async fn compute_projection_series_response(
         drawdown_gain_basis: drawdown_gain_basis_of(&all_assets),
         taxable_gain_ratio_today: taxable_gain_ratio_today_of(&all_assets),
         assets_depleted_month_index,
-        uncovered_deficit_total: money_out(uncovered_deficit_total),
+        // **Clamp a ≥ 0 en la PUBLICACIÓN, no en el motor.** El descubierto se acumula como
+        // residuo de ventas brutas y puede salir con una cola de redondeo negativa del orden de
+        // −5e-25 (declarado en `MonthSale::account`, `crates/engine/src/projection.rs`): eso no
+        // es «−0,0000000000000000000000005 € descubiertos», es cero. Se corrige aquí porque el
+        // motor debe seguir publicando su aritmética tal cual —el golden la hashea— y quien
+        // redondea para un humano es la capa que serializa.
+        uncovered_deficit_total: money_out(uncovered_deficit_total.max(Decimal::ZERO)),
         unallocated_savings_total: money_out(unallocated_savings_total),
         unallocated_savings_reason: unallocated_reason_of(&all_assets, unallocated_savings_total),
         liabilities_negative_amortization,
@@ -3230,6 +3745,35 @@ pub async fn compute_projection_series_response(
             .and_then(|r| engine_month_to_grid(r.output.partial_retirement_month_index)),
         warnings,
         members,
+        bridge_discount_annual_pct: solo
+            .and_then(|r| r.built.bridge_discount_annual_pct)
+            .map(money_out),
+        bridge_effective_withdrawal_pct: solo
+            .and_then(|r| r.output.bridge_effective_withdrawal_pct)
+            .map(money_out),
+        pension_coverage_ratio: solo
+            .and_then(|r| r.output.pension_coverage_ratio)
+            .map(money_out),
+        partial_gap_target: solo.and_then(|r| r.output.partial_gap_target).map(money_out),
+        // `null` (no `false`) sin fase parcial: el motor publica un `bool` porque es una función
+        // pura y debe definir el estado, pero «no hubo media jornada» y «hubo y menguó» no pueden
+        // compartir valor en el wire.
+        partial_phase_capital_growing: solo.and_then(|r| {
+            r.output
+                .partial_retirement_month_index
+                .map(|_| r.output.partial_phase_capital_growing)
+        }),
+        required_contribution_monthly: required.map(|s| money_out(s.contribution)),
+        required_contribution_search_ceiling: required.map(|s| money_out(s.search_ceiling)),
+        underfunded: required.map(|s| s.underfunded),
+        required_capital_path,
+        disposable_monthly: solo.and_then(member_disposable_monthly),
+        disposable_capital,
+        disposable_capital_at_retirement,
+        disposable_capital_today,
+        coast_fire_month_index: coast.and_then(|c| engine_month_to_grid(c.coast_month_index)),
+        coast_number: coast.and_then(|c| c.coast_number).map(money_out),
+        coast_path,
     })
 }
 
@@ -3276,7 +3820,36 @@ pub(crate) struct SimulationSpec {
     /// NO se recortan en la jubilación: el usuario ha nombrado el mes, así que quitárselo sería
     /// simular otra cosa.
     pub income_steps: Vec<IncomeStepSpec>,
+    /// **P5 y compañía — el PERFIL de jubilación entero como eje what-if** (5.0.0, §E/D30, solo
+    /// MCP). Se aplica con el MISMO `RetirementProfilePatch::apply_to` que el PATCH real sobre un
+    /// CLON del perfil RESUELTO del usuario, se valida con `validate_retirement_profile` y se
+    /// vuelve a resolver: lo que se simula aquí es exactamente lo que pasaría al guardarlo.
+    ///
+    /// Por aquí vuelven `fire_number_mode` y `fire_number_manual_amount`, que WP4 quitó de
+    /// `fire_settings_overrides` al mudarlos al perfil (D13) y que se quedaron sin eje what-if
+    /// durante una ola.
+    pub profile_overrides: Option<crate::handlers::retirement_profile::RetirementProfilePatch>,
+    /// **P8.c — pausa de ingresos** («¿y si me cojo una excedencia de 12 meses?»). Mueve el
+    /// escenario Y publica su retraso en `income_pause` de la respuesta.
+    pub income_pause: Option<IncomePauseSpec>,
+    /// **P8.b — «¿cuánto más puedo gastar sin mover la fecha?»**. Opt-in porque cuesta una
+    /// bisección entera sobre el motor (hasta 26 proyecciones). `Some(false)` es un 400: pedir
+    /// el bloque `solve` sin pedir ningún solve no puede devolver nada.
+    pub solve_extra_monthly_expense_keeping_date: Option<bool>,
     pub include_series: bool,
+}
+
+/// Pausa de ingresos del what-if (P8.c). El mes es **1-based del ancla**, el mismo eje que
+/// `one_off_expense.month_index` e `income_steps[].month_index`.
+#[derive(Debug, Clone)]
+pub(crate) struct IncomePauseSpec {
+    pub from_month_index: Option<u32>,
+    pub from_date: Option<NaiveDate>,
+    /// Duración en meses (≥ 1). Ventana SEMIABIERTA: `from ≤ k < from + months`.
+    pub months: u32,
+    /// Multiplicador del ingreso GANADO durante la ventana, en `[0, 1)`. `0` = sin ingreso;
+    /// `1` sería el baseline y se rechaza.
+    pub income_fraction: Decimal,
 }
 
 /// Un escalón de ingreso del what-if: «desde el mes X, +/− N €/mes».
@@ -3523,6 +4096,55 @@ pub(crate) struct SimKpis {
     /// que este número, los meses entre ambos llevan un sueldo que un jubilado no cobraría — la
     /// ventana es exactamente esa diferencia, y aquí está para poder medirla.
     pub income_growth_stops_at_month_index: Option<u32>,
+
+    // ---- 5.0.0 WP5-2b — el PLAN de este lado (§B.3, §B.7) -----------------------------------
+    // Van por lado porque `profile_overrides` puede cambiar la estrategia entera, y entonces las
+    // dos columnas no describen el mismo plan. Los `null` NO son ceros: significan «esta
+    // estrategia no responde a esa pregunta».
+    /// Aportación mensual mínima para llegar al objetivo en la edad elegida. `null` con las
+    /// estrategias por cruce (`asap`, `pension_bridge`), que no tienen edad contra la que
+    /// resolver.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub required_contribution_monthly: Option<Decimal>,
+    /// Techo de la búsqueda del solve: el máximo sobrante mensual del horizonte. Es el
+    /// denominador de «cuánto de mi margen se lleva el plan».
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub required_contribution_search_ceiling: Option<Decimal>,
+    /// `true` ⟺ ni invirtiendo cada euro de sobrante se llega (D17, el rojo). **`null` = la
+    /// pregunta no aplica**, nunca `false` para decir «no aplica».
+    pub underfunded: Option<bool>,
+    /// Margen mensual disponible (D16/D31), con la base de cada estrategia — la misma que
+    /// declara `disposable_monthly` en `GET /v1/projection/series`.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub disposable_monthly: Option<Decimal>,
+    /// Mes a partir del cual se puede dejar de aportar y llegar igual (`coast`), en la rejilla.
+    pub coast_fire_month_index: Option<u32>,
+    /// El «número coast»: el líquido con el que se ENTRA en ese mes.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub coast_number: Option<Decimal>,
+    /// Capital que sostendría a perpetuidad el hueco de la media jornada. Informativo.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub partial_gap_target: Option<Decimal>,
+    /// `true` ⟺ hubo media jornada y el líquido no bajó ni un mes durante ella. `null` = no hubo.
+    pub partial_phase_capital_growing: Option<bool>,
+    /// Primer mes de media jornada, en la rejilla. `null` = no hay fase parcial.
+    pub partial_retirement_month_index: Option<u32>,
+    /// Primer mes con pensión CON FECHA, en la rejilla. `null` = no hay pensión con calendario.
+    pub pension_start_month_index: Option<u32>,
+    /// Qué FRACCIÓN del gasto cubre la pensión el mes en que empieza (`0.6` = 60 %).
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub pension_coverage_ratio: Option<Decimal>,
+    /// Tasa de retirada efectiva del puente, en % ANUAL (`6.5` = 6,5 %).
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub bridge_effective_withdrawal_pct: Option<Decimal>,
+    /// Tasa ANUAL (%) con la que el puente descontó sus flujos. `null` sin base puente.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub bridge_discount_annual_pct: Option<Decimal>,
+    /// Avisos de ESTE lado (mismos literales que `GET /v1/projection/series`), deduplicados:
+    /// `birth_date_missing`, `target_retirement_age_missing`,
+    /// `bridge_discount_no_liquid_assets`, `retire_at_age_underfunded`, `coast_not_reachable`,
+    /// `partial_phase_capital_shrinking`. Vacío = nada que advertir.
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3589,6 +4211,46 @@ pub(crate) struct SimDeltas {
     /// `scenario − baseline` en meses hasta quedar libre de deuda. Negativo = te libras antes.
     /// `null` si alguno de los dos lados no llega a saldar dentro del horizonte.
     pub liability_debt_free_months_delta: Option<i64>,
+
+    // ---- 5.0.0 WP5-2b — deltas del PLAN. `null` ⟺ alguno de los dos lados no publica la cifra
+    // (la misma regla que `jubilacion_months_delta`): restar contra un «no aplica» inventaría un
+    // número. Los `bool` (`underfunded`, `partial_phase_capital_growing`) NO tienen delta: se
+    // leen comparando las dos columnas, y un «delta booleano» sería un tercer valor que
+    // interpretar.
+    /// `scenario − baseline` del ahorro mensual necesario. **Negativo = necesitas ahorrar
+    /// menos**, que es la respuesta que el eje suele buscar.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub required_contribution_monthly_delta: Option<Decimal>,
+    /// `scenario − baseline` del margen mensual. Positivo = te sobra más cada mes.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub disposable_monthly_delta: Option<Decimal>,
+    /// `scenario − baseline` del mes coast. Negativo = puedes dejar de aportar antes.
+    pub coast_fire_months_delta: Option<i64>,
+    /// `scenario − baseline` del capital que sostiene el hueco de la media jornada.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub partial_gap_target_delta: Option<Decimal>,
+    /// `scenario − baseline` de la cobertura de la pensión, en FRACCIÓN.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub pension_coverage_ratio_delta: Option<Decimal>,
+    /// `scenario − baseline` de la tasa de retirada del puente, en PUNTOS PORCENTUALES.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub bridge_effective_withdrawal_pct_delta: Option<Decimal>,
+}
+
+/// **Lo que la pausa de ingresos le cuesta a la fecha de jubilación** (P8.c). Los dos meses viajan
+/// al lado del delta a propósito: «la pausa te saca del horizonte» es una respuesta legítima, y
+/// publicarla como un retraso enorme sería inventarse una cifra.
+#[derive(Debug, Serialize)]
+pub(crate) struct IncomePauseKpis {
+    /// Mes de jubilación del escenario **sin** la pausa, en la rejilla. `null` = no se jubila
+    /// dentro del horizonte.
+    pub baseline_month_index: Option<u32>,
+    /// Mes de jubilación del escenario **con** la pausa, en la rejilla. Coincide con
+    /// `scenario.jubilacion_month_index`, que es el lado que la lleva aplicada.
+    pub paused_month_index: Option<u32>,
+    /// `paused − baseline` en meses. **`null` cuando alguno de los dos no se jubila dentro del
+    /// horizonte.**
+    pub retirement_delay_months: Option<i64>,
 }
 
 /// Series decimadas (hybrid) opt-in — números f64 como el resto de series de chart.
@@ -3627,6 +4289,21 @@ pub(crate) struct SimulateProjectionResponse {
     pub deltas: SimDeltas,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series: Option<SimSeries>,
+    /// Presente ⟺ se pidió el eje `income_pause` (P8.c). Ausente = no se preguntó.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub income_pause: Option<IncomePauseKpis>,
+    /// **P8.b — el mayor gasto mensual extra CONSTANTE, en euros de hoy, que deja la fecha de
+    /// jubilación donde está** (±1 mes). Presente ⟺ se pidió `solve.extra_monthly_expense_keeping_date`.
+    ///
+    /// Sube solo el gasto REGULAR (el de la fase de acumulación), no el de jubilación ni la
+    /// necesidad que el objetivo capitaliza: la pregunta es «¿cuánto margen tengo AHORA?», no
+    /// «¿cuánto puedo subir mi nivel de vida para siempre?». Cuando ni gastándose el sobrante
+    /// entero se mueve la fecha —lo normal con un trigger por EDAD, que no depende del gasto—,
+    /// la respuesta es el máximo sobrante mensual: un SUELO honesto («al menos esto»), no un
+    /// infinito inventado. `null` ⟺ el escenario base no se jubila dentro del horizonte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub max_extra_monthly_expense_keeping_date: Option<Decimal>,
 }
 
 fn require_non_negative(name: &str, v: Option<Decimal>) -> Result<Decimal, ApiError> {
@@ -3659,6 +4336,10 @@ fn sim_kpis(
     // Primer mes de la rejilla SIN el crecimiento de ingreso (P11). Igual que el anterior: lo
     // sabe el llamante, que es quien construyó el vector, y aquí solo se ecoa.
     income_growth_stops_at_month_index: Option<u32>,
+    // Los solves de §B.7 de ESTE lado, ya calculados por el llamante (que es quien puede meterlos
+    // en el semáforo de CPU): `sim_kpis` es una función de ensamblado, no un sitio donde lanzar
+    // 26 proyecciones.
+    solves: &StrategySolves,
 ) -> SimKpis {
     let debt_service_monthly = built.debt_service_monthly;
     // 5.0.0 (R8): el mes publicado es el EFECTIVO del motor, traducido a la rejilla — con `asap`
@@ -3670,8 +4351,9 @@ fn sim_kpis(
         .as_ref()
         .filter(|ft| futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some());
     let jubilacion_month_index = engine_month_to_grid(output.retirement_month_index);
-    let liquid_crossing_month_index =
-        fire_crossover_month(reading_target, &output.liquid_worth);
+    // El cruce lo lee el MOTOR (WP5-2b): evalúa el objetivo consciente del plan —puente
+    // incluido—, que es el mismo contra el que se mide todo lo demás de este lado.
+    let liquid_crossing_month_index = engine_month_to_grid(output.liquid_crossing_month_index);
     let (jubilacion_date_ymd, jubilacion_age) =
         jubilacion_civil(today, birth_date, jubilacion_month_index);
     let final_net_worth = output.net_worth.last().copied().unwrap_or(Decimal::ZERO);
@@ -3800,9 +4482,20 @@ fn sim_kpis(
         jubilacion_age,
         final_net_worth: money_out(final_net_worth),
         final_net_worth_real: money_out(final_net_worth_real),
+        // La base del objetivo del PLAN en el mes 0: `T(0) − deuda(0)`. Sin pensión con fecha es
+        // exactamente `fire_target_base_at_month_index(ft, 0)` por construcción; con base PUENTE
+        // es la única lectura que cuadra con la línea que el chart pinta.
         fire_target_base: reading_target
-            .and_then(|ft| futurefin_engine::fire_target_base_at_month_index(ft, 0))
-            .map(money_out),
+            .filter(|ft| futurefin_engine::fire_target_base_at_month_index(ft, 0).is_some())
+            .and_then(|ft| {
+                let debt0 = ft
+                    .debt_payments_remaining
+                    .first()
+                    .copied()
+                    .unwrap_or(Decimal::ZERO);
+                fire_target_at_month_index_with_plan(Some(ft), &input.phase_plan, 0)
+                    .map(|t| money_out((t - debt0).max(Decimal::ZERO)))
+            }),
         runway_months,
         runway_is_indefinite,
         income_monthly: money_out(income_monthly),
@@ -3851,6 +4544,30 @@ fn sim_kpis(
         retirement_trigger: built.retirement_trigger,
         liquid_crossing_month_index,
         income_growth_stops_at_month_index,
+        required_contribution_monthly: solves.required.as_ref().map(|s| money_out(s.contribution)),
+        required_contribution_search_ceiling: solves
+            .required
+            .as_ref()
+            .map(|s| money_out(s.search_ceiling)),
+        underfunded: solves.required.as_ref().map(|s| s.underfunded),
+        disposable_monthly: disposable_monthly_of(solves),
+        coast_fire_month_index: solves
+            .coast
+            .as_ref()
+            .and_then(|c| engine_month_to_grid(c.coast_month_index)),
+        coast_number: solves.coast.as_ref().and_then(|c| c.coast_number).map(money_out),
+        partial_gap_target: output.partial_gap_target.map(money_out),
+        partial_phase_capital_growing: output
+            .partial_retirement_month_index
+            .map(|_| output.partial_phase_capital_growing),
+        partial_retirement_month_index: engine_month_to_grid(
+            output.partial_retirement_month_index,
+        ),
+        pension_start_month_index: engine_month_to_grid(output.pension_start_month_index),
+        pension_coverage_ratio: output.pension_coverage_ratio.map(money_out),
+        bridge_effective_withdrawal_pct: output.bridge_effective_withdrawal_pct.map(money_out),
+        bridge_discount_annual_pct: built.bridge_discount_annual_pct.map(money_out),
+        warnings: merge_warnings(&built.warnings, output, solves),
     }
 }
 
@@ -3862,7 +4579,7 @@ fn sim_kpis(
 /// porque el plan mejore, sino porque el motor capitaliza en NOMINAL y solo el objetivo FIRE crece
 /// con la inflación — bajarla sube la rentabilidad real de todos los activos y congela el objetivo
 /// a la vez, gratis, en el mismo movimiento. Lo mismo, en pequeño, con `swr_pct`.
-const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario − baseline. QUIÉN DECIDE QUÉ: la ESTRATEGIA del perfil elige el disparador de la jubilación (`retirement_trigger`: cruce del líquido con el objetivo, o la EDAD en `retire_at_age`/`coast` — llegue o no el capital; entonces el cruce es solo lectura, `liquid_crossing_month_index`) y la base del objetivo (`perpetuity` o `bridge_to_pension`). El SWR solo DIMENSIONA el objetivo (gasto anual grosseado / SWR), no gobierna lo que se retira: subirlo baja el objetivo por división, no por ahorrar más. Ya jubilado manda `withdrawal_rule`; por defecto `fixed_real` = la necesidad declarada, indexada y SIN techo. Con una regla con techo, `withdrawal_shortfall` es lo que la regla no dejó sacar (informativo: no resta patrimonio ni es un fracaso) y `withdrawal_excess` lo que se retira de más en `rule_is_spend`; `uncovered_deficit_total` es lo que los activos no pudieron vender, que es otra cosa. `view=household` no se simula (400 `household_not_simulable`): el agregado del hogar es informativo y no es el plan de nadie. El motor capitaliza en euros NOMINALES; la inflación indexa el GASTO mes a mes (regular y de jubilación, eje (k−1)/12: el mes 1 cobra el gasto declarado tal cual) y el objetivo, y deja los INGRESOS planos a propósito. Bajar `annual_inflation_percent` abarata TODO el gasto futuro, sube la rentabilidad real de los activos Y frena el objetivo a la vez: puede adelantar la jubilación años sin que nada del plan haya mejorado — léelo como un cambio de supuesto, no como una mejora. Admite negativos hasta −2 (deflación sostenida: gasto y objetivo DECRECEN). Los ejes de CAJA (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`, `income_growth_real_pct_annual`, `income_steps`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, y `net_recurring_monthly` y `savings_rate` salen con delta 0 EXACTO por diseño. `income_growth_real_pct_annual` añade `ingreso · ((1+g)^((k−1)/12) − 1)` al mes k y solo mientras el escenario NO está jubilado; el corte se calcula con una PRIMERA pasada del escenario sin el eje, así que es aproximado: si el sueldo extra adelanta la jubilación, los meses entre `scenario.jubilacion_month_index` y `scenario.income_growth_stops_at_month_index` llevan una nómina que un jubilado no cobraría — esa diferencia es la ventana, y los dos números viajan para poder medirla. Los `income_steps` NO se recortan en la jubilación: el mes lo nombra el llamante. `final_net_worth` está en euros nominales del último mes del horizonte; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null. `liability_overrides` amortiza deuda: el importe sale de la caja del mes Y baja el principal a la vez, así que el efecto instantáneo sobre el patrimonio es CERO salvo por la compensación por reembolso anticipado (default 2 % del extra, techo legal a tipo fijo de la Ley 5/2019 art. 23; `early_repayment_fee_pct: \"0\"` la quita): esa comisión sale de la caja y NO amortiza. No se modela la caída al 1,5 % tras el año 10, ni los topes de tipo variable (0,25 %/0,15 %), ni el límite de la pérdida financiera del prestamista: si tu préstamo es variable o veterano, pasa el % que te aplique. `early_repayment_effect: \"reduce_payment\"` baja la cuota en vez de acortar el plazo — con una amortización PUNTUAL el mes de extinción se conserva EXACTAMENTE; con amortización extra RECURRENTE puede adelantarse algo (nunca atrasarse). Lo que se gana está en `liability_total_interest_delta` (negativo = interés que ya no se devenga; compara contra `liability_early_repayment_fee_total_delta`, el coste) y en que la cuota liberada vuelve sola a la cascada, no en un salto de patrimonio el día que amortizas. Si el pasivo no devenga intereses (`fixed_payments`, o sin TIN), amortizar antes no mejora nada y el escenario lo dirá con deltas a cero.";
+const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario − baseline. QUIÉN DECIDE QUÉ: la ESTRATEGIA del perfil elige el disparador de la jubilación (`retirement_trigger`: cruce del líquido con el objetivo, o la EDAD en `retire_at_age`/`coast` — llegue o no el capital; entonces el cruce es solo lectura, `liquid_crossing_month_index`) y la base del objetivo (`perpetuity` o `bridge_to_pension`). El SWR solo DIMENSIONA el objetivo (gasto anual grosseado / SWR), no gobierna lo que se retira: subirlo baja el objetivo por división, no por ahorrar más. Ya jubilado manda `withdrawal_rule`; por defecto `fixed_real` = la necesidad declarada, indexada y SIN techo. Con una regla con techo, `withdrawal_shortfall` es lo que la regla no dejó sacar (informativo: no resta patrimonio ni es un fracaso) y `withdrawal_excess` lo que se retira de más en `rule_is_spend`; `uncovered_deficit_total` es lo que los activos no pudieron vender, que es otra cosa. EL PLAN ES UN EJE: `profile_overrides` cambia estrategia, edad objetivo, modo y objetivo manual del número FIRE, base del objetivo, regla de retirada, pensión con fecha y media jornada sobre un CLON del perfil (mismas cotas que guardarlo; nada se persiste), y por eso las lecturas del plan viajan POR LADO: `required_contribution_monthly` (el ahorro mínimo que llega a la edad), su techo de búsqueda, `underfunded` (ni ahorrándolo todo llegas — el rojo de D17), `disposable_monthly`, `coast_fire_month_index` y `coast_number`, `partial_gap_target`, `pension_coverage_ratio` (FRACCIÓN) y `bridge_effective_withdrawal_pct` (PORCENTAJE anual). Un `null` ahí NO es un cero: significa que esa estrategia no responde a esa pregunta, y por eso su delta también sale `null` en vez de restar contra un hueco. `income_pause` multiplica el ingreso GANADO durante su ventana —la pensión con fecha NO se pausa— y publica en `income_pause` los dos meses de jubilación y su diferencia; con «no se jubila dentro del horizonte» en cualquiera de los dos lados, `retirement_delay_months` es `null` en vez de un retraso inventado. `solve: {extra_monthly_expense_keeping_date: true}` responde «¿cuánto más puedo gastar sin mover la fecha?» subiendo solo el gasto REGULAR (no el de jubilación ni el objetivo), y con un trigger por EDAD —que no depende del gasto— devuelve el máximo sobrante mensual como SUELO honesto, no como infinito. `view=household` no se simula (400 `household_not_simulable`): el agregado del hogar es informativo y no es el plan de nadie. El motor capitaliza en euros NOMINALES; la inflación indexa el GASTO mes a mes (regular y de jubilación, eje (k−1)/12: el mes 1 cobra el gasto declarado tal cual) y el objetivo, y deja los INGRESOS planos a propósito. Bajar `annual_inflation_percent` abarata TODO el gasto futuro, sube la rentabilidad real de los activos Y frena el objetivo a la vez: puede adelantar la jubilación años sin que nada del plan haya mejorado — léelo como un cambio de supuesto, no como una mejora. Admite negativos hasta −2 (deflación sostenida: gasto y objetivo DECRECEN). Los ejes de CAJA (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`, `income_growth_real_pct_annual`, `income_steps`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, y `net_recurring_monthly` y `savings_rate` salen con delta 0 EXACTO por diseño. `income_growth_real_pct_annual` añade `ingreso · ((1+g)^((k−1)/12) − 1)` al mes k y solo mientras el escenario NO está jubilado; el corte se calcula con una PRIMERA pasada del escenario sin el eje, así que es aproximado: si el sueldo extra adelanta la jubilación, los meses entre `scenario.jubilacion_month_index` y `scenario.income_growth_stops_at_month_index` llevan una nómina que un jubilado no cobraría — esa diferencia es la ventana, y los dos números viajan para poder medirla. Los `income_steps` NO se recortan en la jubilación: el mes lo nombra el llamante. `final_net_worth` está en euros nominales del último mes del horizonte; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null. `liability_overrides` amortiza deuda: el importe sale de la caja del mes Y baja el principal a la vez, así que el efecto instantáneo sobre el patrimonio es CERO salvo por la compensación por reembolso anticipado (default 2 % del extra, techo legal a tipo fijo de la Ley 5/2019 art. 23; `early_repayment_fee_pct: \"0\"` la quita): esa comisión sale de la caja y NO amortiza. No se modela la caída al 1,5 % tras el año 10, ni los topes de tipo variable (0,25 %/0,15 %), ni el límite de la pérdida financiera del prestamista: si tu préstamo es variable o veterano, pasa el % que te aplique. `early_repayment_effect: \"reduce_payment\"` baja la cuota en vez de acortar el plazo — con una amortización PUNTUAL el mes de extinción se conserva EXACTAMENTE; con amortización extra RECURRENTE puede adelantarse algo (nunca atrasarse). Lo que se gana está en `liability_total_interest_delta` (negativo = interés que ya no se devenga; compara contra `liability_early_repayment_fee_total_delta`, el coste) y en que la cuota liberada vuelve sola a la cascada, no en un salto de patrimonio el día que amortizas. Si el pasivo no devenga intereses (`fixed_payments`, o sin TIN), amortizar antes no mejora nada y el escenario lo dirá con deltas a cero.";
 
 /// Nota de modelo de `GET /v1/projection/series` (P6, 5.0.0).
 ///
@@ -3872,7 +4589,7 @@ const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces l
 /// la regla de retirada gobierna lo que sale de la cartera— y confundirlas produce lecturas
 /// plausibles y falsas. Es constante y no un `format!` para que sea la MISMA cadena en cada
 /// respuesta (un `model_note` que cambia entre llamadas es ruido en la cache y en el diff).
-const PROJECTION_MODEL_NOTE: &str = "Motor mensual en euros NOMINALES: presupuesto regular sin las cuotas derivadas de pasivos, servicio de deuda por mes, ajustes por Próximos y crecimiento compuesto por activo. El GASTO (regular y de jubilación) se indexa a la inflación de la instalación con el eje (k−1)/12 —el mes 1 cobra el gasto declarado tal cual— y los INGRESOS quedan planos a propósito. Quien decide la jubilación es la ESTRATEGIA del perfil, y decide DOS cosas: el disparador (`retirement_trigger`: el cruce del líquido con el objetivo, o la EDAD en `retire_at_age`/`coast`, llegue o no el capital — entonces el cruce pasa a ser lectura en `liquid_crossing_month_index`) y la base del objetivo (`perpetuity`, o `bridge_to_pension` = capital para llegar a la pensión más la perpetuidad sobre lo que la pensión no cubra). El SWR solo DIMENSIONA ese objetivo (gasto anual grosseado / SWR); no gobierna lo que se retira. Ya jubilado manda `withdrawal_rule`: por defecto `fixed_real`, es decir la necesidad declarada, indexada y SIN techo. Con una regla con techo, `withdrawal_shortfall` es lo que la regla no dejó sacar (informativo: no resta patrimonio ni cuenta como fracaso) y `withdrawal_excess` lo que se retira de más en modo `rule_is_spend`; `uncovered_deficit_total` es otra cosa distinta — lo que los activos no pudieron vender. Con `view=household` la curva es la SUMA de una simulación independiente por miembro, cada una con su estrategia: una lectura INFORMATIVA del conjunto, no el plan de nadie, y por eso el hogar no publica jubilación propia (el hito de cada uno va en `members[]`).";
+const PROJECTION_MODEL_NOTE: &str = "Motor mensual en euros NOMINALES: presupuesto regular sin las cuotas derivadas de pasivos, servicio de deuda por mes, ajustes por Próximos y crecimiento compuesto por activo. El GASTO (regular y de jubilación) se indexa a la inflación de la instalación con el eje (k−1)/12 —el mes 1 cobra el gasto declarado tal cual— y los INGRESOS quedan planos a propósito. Quien decide la jubilación es la ESTRATEGIA del perfil, y decide DOS cosas: el disparador (`retirement_trigger`: el cruce del líquido con el objetivo, o la EDAD en `retire_at_age`/`coast`, llegue o no el capital — entonces el cruce pasa a ser lectura en `liquid_crossing_month_index`) y la base del objetivo (`perpetuity`, o `bridge_to_pension` = capital para llegar a la pensión más la perpetuidad sobre lo que la pensión no cubra). El SWR solo DIMENSIONA ese objetivo (gasto anual grosseado / SWR); no gobierna lo que se retira. Ya jubilado manda `withdrawal_rule`: por defecto `fixed_real`, es decir la necesidad declarada, indexada y SIN techo. Con una regla con techo, `withdrawal_shortfall` es lo que la regla no dejó sacar (informativo: no resta patrimonio ni cuenta como fracaso) y `withdrawal_excess` lo que se retira de más en modo `rule_is_spend`; `uncovered_deficit_total` es otra cosa distinta — lo que los activos no pudieron vender. Con una estrategia por EDAD el objetivo entra igual al motor pero no dispara nada, y el plan publica además lo que cuesta llegar: `required_contribution_monthly` (el ahorro mínimo), `required_capital_path` (la serie líquida SIMULADA de esa aportación, no un descuento escalar), `disposable_monthly`/`disposable_capital` (el margen por encima de lo necesario) y `underfunded` cuando ni ahorrándolo todo se llega. Con `coast`, `coast_fire_month_index` y `coast_path` dicen desde cuándo se puede dejar de aportar. Con pensión CON FECHA, `pension_coverage_ratio` es una FRACCIÓN y `bridge_effective_withdrawal_pct` un PORCENTAJE anual. Con `view=household` la curva es la SUMA de una simulación independiente por miembro, cada una con su estrategia: una lectura INFORMATIVA del conjunto, no el plan de nadie, y por eso el hogar no publica jubilación propia (el hito de cada uno va en `members[]`).";
 
 /// Cotas del eje P11 `income_growth_real_pct_annual` (% REAL anual, 5.0.0).
 ///
@@ -4058,6 +4775,25 @@ pub(crate) async fn simulate_projection_core(
         }
     }
 
+    // ---- P8.c: pausa de ingresos. Forma y anti-no-op ---------------------------------------
+    if let Some(pause) = &spec.income_pause {
+        if pause.from_month_index.is_some() == pause.from_date.is_some() {
+            return Err(ApiError::BadRequest(
+                "income_pause_timing_ambiguous: income_pause requires exactly one of from_month_index or from_date".into(),
+            ));
+        }
+        if pause.months == 0 {
+            return Err(ApiError::BadRequest(
+                "income_pause_months_zero: income_pause.months must be >= 1 — a zero-month pause is exactly the baseline".into(),
+            ));
+        }
+        if pause.income_fraction < Decimal::ZERO || pause.income_fraction >= Decimal::ONE {
+            return Err(ApiError::BadRequest(
+                "income_pause_fraction_out_of_range: income_pause.income_fraction must be in [0, 1) — 0 is an unpaid leave and 1 is the baseline with nothing to say".into(),
+            ));
+        }
+    }
+
     match (
         spec.one_off_amount,
         spec.one_off_month_index,
@@ -4097,11 +4833,44 @@ pub(crate) async fn simulate_projection_core(
     // El eje `swr_pct` del what-if sobrevive a la mudanza de 5.0.0: el SWR pasó a ser del perfil
     // del usuario, así que el override se aplica sobre un CLON del perfil — se simula, no se
     // persiste. El baseline usa el perfil real; el escenario, este clon.
-    let mut profile_eff = ctx.retirement_profile.clone();
+    // **P5 y el resto del perfil como eje what-if** (§E). El patchset se aplica con el MISMO
+    // `apply_to` del PATCH real sobre un CLON del perfil RESUELTO del solicitante, se valida con
+    // las cotas de escritura y se vuelve a resolver (clamps + derivación de `target_basis`): lo
+    // que se simula es exactamente lo que pasaría al guardarlo. No se persiste nada.
+    let mut profile_eff = match spec.profile_overrides.as_ref() {
+        None => ctx.retirement_profile.clone(),
+        Some(patch) => {
+            // Un patchset vacío es una llamada que no puede mover nada: 400, no un escenario
+            // idéntico al baseline sin explicación (la misma puerta que `liability_override_empty`).
+            if patch.is_empty() {
+                return Err(ApiError::BadRequest(
+                    "profile_overrides_empty: profile_overrides must set at least one field — an empty patch is exactly the baseline".into(),
+                ));
+            }
+            patch.apply_to(&ctx.retirement_profile)
+        }
+    };
+    // El eje suelto `swr_pct` convive con el del perfil porque es el que lleva publicado desde
+    // 1.x. Pedir los dos a la vez es una intención contradictoria y elegir uno sería adivinar.
     if let Some(swr) = spec.swr_pct {
+        if spec
+            .profile_overrides
+            .as_ref()
+            .is_some_and(|p| p.swr_pct.is_some())
+        {
+            return Err(ApiError::BadRequest(
+                "swr_pct_set_twice: pass swr_pct either at the top level or inside profile_overrides, not both".into(),
+            ));
+        }
         profile_eff.swr_pct = swr;
     }
     crate::handlers::retirement_profile::validate_retirement_profile(&profile_eff)?;
+    let profile_eff = resolve_retirement_profile(Some(profile_eff));
+    if spec.profile_overrides.is_some() && profile_eff == ctx.retirement_profile {
+        return Err(ApiError::BadRequest(
+            "profile_overrides_no_op: profile_overrides resolves to the profile you already have, so the scenario would come back identical with nothing to say why".into(),
+        ));
+    }
     let inflation_eff = spec
         .annual_inflation_percent
         .unwrap_or(ctx.inflation_annual_percent);
@@ -4444,6 +5213,74 @@ pub(crate) async fn simulate_projection_core(
         }
     }
 
+    // ---- P8.c: la pausa de ingresos, y lo que le cuesta a la fecha --------------------------
+    //
+    // El eje hace DOS cosas, y las dos son necesarias: aplica la pausa al escenario (para que las
+    // KPIs y la serie que se publican sean las del hogar en excedencia) y publica el RETRASO
+    // medido contra el mismo escenario sin la pausa. Medirlo contra el baseline de la instalación
+    // mezclaría el efecto de la pausa con el de todos los demás overrides de la llamada.
+    let mut income_pause_kpis: Option<IncomePauseKpis> = None;
+    if let Some(pause) = &spec.income_pause {
+        let anchor = proj_month_first(ctx.today);
+        let from = match (pause.from_month_index, pause.from_date) {
+            (Some(k), None) => k,
+            (None, Some(d)) => {
+                let diff = month_diff(anchor, proj_month_first(d));
+                if diff < 0 {
+                    return Err(ApiError::BadRequest(
+                        "income_pause_date_out_of_horizon: income_pause.from_date is outside the projection horizon".into(),
+                    ));
+                }
+                (diff as u32).saturating_add(1)
+            }
+            _ => unreachable!("validated above"),
+        };
+        if !(1..=months).contains(&from) {
+            return Err(ApiError::BadRequest(format!(
+                "income_pause_month_out_of_range: income_pause.from_month_index must be between 1 and {months}"
+            )));
+        }
+        let engine_pause = futurefin_engine::IncomePause {
+            from_month: from,
+            months: pause.months,
+            income_fraction: pause.income_fraction,
+        };
+        let probe = scenario_input.clone();
+        let delay = crate::heavy::run_projection_sim("income pause delay", move || {
+            futurefin_engine::retirement_delay_months(&probe, engine_pause)
+        })
+        .await?
+        .map_err(map_engine_err)?;
+        income_pause_kpis = Some(IncomePauseKpis {
+            // Los dos meses van a la rejilla; el delta NO se recalcula desde ellos porque el
+            // desplazamiento de −1 se cancela en la resta y el motor ya lo publica.
+            baseline_month_index: engine_month_to_grid(delay.baseline_month_index),
+            paused_month_index: engine_month_to_grid(delay.paused_month_index),
+            retirement_delay_months: delay.delay_months,
+        });
+        scenario_input.phase_plan.income_pause = Some(engine_pause);
+    }
+
+    // ---- P8.b: «¿cuánto más puedo gastar sin mover la fecha?» -------------------------------
+    let max_extra_monthly_expense_keeping_date = match spec.solve_extra_monthly_expense_keeping_date
+    {
+        None => None,
+        Some(false) => {
+            return Err(ApiError::BadRequest(
+                "solve_no_op: solve.extra_monthly_expense_keeping_date must be true to ask for it — passing false requests a solve and then declines it".into(),
+            ))
+        }
+        Some(true) => {
+            let probe = scenario_input.clone();
+            crate::heavy::run_projection_sim("max extra expense solve", move || {
+                futurefin_engine::max_extra_monthly_expense_keeping_date(&probe)
+            })
+            .await?
+            .map_err(map_engine_err)?
+            .map(money_out)
+        }
+    };
+
     // ---- Doble simulación en el pool blocking (CPU-bound; patrón del marker) -----------------
     // Bajo el MISMO techo que la proyección real (`heavy::run_projection_sim`). Es el llamante
     // que más lo necesita: `simulate_projection` es cache-neutral por diseño, así que cada
@@ -4461,6 +5298,31 @@ pub(crate) async fn simulate_projection_core(
     let baseline_out = baseline_join?.map_err(map_engine_err)?;
     let scenario_out = scenario_join?.map_err(map_engine_err)?;
 
+    // ---- Solves del PLAN, uno por lado (§B.7) ------------------------------------------------
+    // Van DESPUÉS de las dos series y en paralelo entre sí, bajo el mismo semáforo. Solo cuestan
+    // algo con una estrategia por edad; `asap` y `pension_bridge` devuelven un `StrategySolves`
+    // vacío tras una sola llamada a `first_month_allocation`.
+    let baseline_solve_input = baseline_built.input.clone();
+    let baseline_solve_month = baseline_built.forced_retirement_month;
+    let baseline_strategy = ctx.retirement_profile.strategy;
+    let scenario_solve_input = scenario_input.clone();
+    let scenario_solve_month = scenario_built.forced_retirement_month;
+    let scenario_strategy = profile_eff.strategy;
+    let (baseline_solve_join, scenario_solve_join) = tokio::join!(
+        crate::heavy::run_projection_sim("strategy solves", move || compute_strategy_solves(
+            &baseline_solve_input,
+            baseline_solve_month,
+            baseline_strategy
+        )),
+        crate::heavy::run_projection_sim("strategy solves", move || compute_strategy_solves(
+            &scenario_solve_input,
+            scenario_solve_month,
+            scenario_strategy
+        )),
+    );
+    let baseline_solves = baseline_solve_join?.map_err(map_engine_err)?;
+    let scenario_solves = scenario_solve_join?.map_err(map_engine_err)?;
+
     let baseline = sim_kpis(
         &baseline_built.input,
         &baseline_out,
@@ -4474,6 +5336,7 @@ pub(crate) async fn simulate_projection_core(
         Decimal::ZERO,
         // …ni crecimiento de ingreso: el eje es del escenario.
         None,
+        &baseline_solves,
     );
     let scenario = sim_kpis(
         &scenario_input,
@@ -4487,6 +5350,7 @@ pub(crate) async fn simulate_projection_core(
         // El MISMO `monthly_adj` que se sumó a `planning_monthly_cash_adjustment` arriba.
         monthly_adj,
         income_growth_stops_at,
+        &scenario_solves,
     );
 
     // Deflactores comparables ⟺ las dos inflaciones EFECTIVAS coinciden. Se lee del eco de cada
@@ -4560,6 +5424,33 @@ pub(crate) async fn simulate_projection_core(
             (Some(b), Some(s)) => Some(s as i64 - b as i64),
             _ => None,
         },
+        required_contribution_monthly_delta: pair_delta(
+            baseline.required_contribution_monthly,
+            scenario.required_contribution_monthly,
+        ),
+        disposable_monthly_delta: pair_delta(
+            baseline.disposable_monthly,
+            scenario.disposable_monthly,
+        ),
+        coast_fire_months_delta: match (
+            baseline.coast_fire_month_index,
+            scenario.coast_fire_month_index,
+        ) {
+            (Some(b), Some(s)) => Some(s as i64 - b as i64),
+            _ => None,
+        },
+        partial_gap_target_delta: pair_delta(
+            baseline.partial_gap_target,
+            scenario.partial_gap_target,
+        ),
+        pension_coverage_ratio_delta: pair_delta(
+            baseline.pension_coverage_ratio,
+            scenario.pension_coverage_ratio,
+        ),
+        bridge_effective_withdrawal_pct_delta: pair_delta(
+            baseline.bridge_effective_withdrawal_pct,
+            scenario.bridge_effective_withdrawal_pct,
+        ),
     };
 
     let series = if spec.include_series {
@@ -4592,7 +5483,19 @@ pub(crate) async fn simulate_projection_core(
         scenario,
         deltas,
         series,
+        income_pause: income_pause_kpis,
+        max_extra_monthly_expense_keeping_date,
     })
+}
+
+/// `escenario − baseline` de dos cifras que pueden no existir. **`None` en cuanto falta una de
+/// las dos**: restar contra un «esta estrategia no responde a esa pregunta» inventaría un número
+/// con el signo de la existencia, no del cambio. Es la misma regla de `jubilacion_months_delta`.
+fn pair_delta(baseline: Option<Decimal>, scenario: Option<Decimal>) -> Option<Decimal> {
+    match (baseline, scenario) {
+        (Some(b), Some(s)) => Some(money_out(s - b)),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------

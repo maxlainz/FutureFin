@@ -458,6 +458,134 @@ pub struct SummaryResponse {
     /// `POST`/`PATCH /v1/liabilities` (`type_tag`), no por categoría: el desglose por categoría es
     /// `liabilities_by_category`, y los dos suman lo mismo.
     pub liabilities_by_type_tag: Vec<TypeTagBreakdownLine>,
+    /// **El PLAN de jubilación de quien pregunta** (5.0.0, D27): estrategia, disparador, mes
+    /// efectivo, ahorro necesario, margen y el rojo de D17. Es lo que alimenta la tarjeta «Tu
+    /// plan» del Resumen sin obligar a la SPA a pedir además la serie de proyección entera.
+    ///
+    /// **Todo `null` con `absent_reason: household_aggregate` en `view=household`**: el hogar es
+    /// la suma de N planes independientes (uno por miembro, con su estrategia y su edad) y no
+    /// tiene uno propio — «el ahorro necesario del hogar» no es una cifra que exista.
+    pub plan: SummaryPlan,
+}
+
+/// El plan de jubilación resumido. Sale **del mismo objeto que pinta el chart**: se lee de la
+/// entrada de cache de proyección del usuario y, si no hay ninguna, se calcula por el camino
+/// cacheado (`projection_series_cached`) — que además la deja caliente, así que el GET de la
+/// serie que viene detrás es un HIT. Nunca hay una segunda fórmula: si estas cifras y las de
+/// `/v1/projection/series` pudieran divergir, no valdrían para nada.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SummaryPlan {
+    /// `asap` | `retire_at_age` | `coast` | `partial` | `pension_bridge`.
+    pub strategy: Option<String>,
+    /// Qué DISPARA la jubilación: `liquid_crossing` (el capital alcanzó el objetivo) o
+    /// `target_age` (la edad manda, llegue o no el capital — D17).
+    pub retirement_trigger: Option<String>,
+    /// Mes EFECTIVO de jubilación, en la rejilla de `points[].month_index` de
+    /// `/v1/projection/series` (0 = hoy). `null` con `absent_reason`, y también —con
+    /// `absent_reason` nulo— cuando el plan no se jubila dentro del horizonte: eso es un
+    /// resultado, no un hueco.
+    pub jubilacion_month_index: Option<u32>,
+    /// **Ahorro mensual necesario** para llegar al objetivo en la edad elegida, en euros. Es
+    /// exactamente `required_contribution_monthly` de `/v1/projection/series` — el mismo número
+    /// del mismo solve, con el nombre que se lee en un Resumen. `null` con las estrategias por
+    /// cruce: ahí no hay edad contra la que resolver nada.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub required_savings_monthly: Option<Decimal>,
+    /// **Margen mensual disponible** (D16/D31), con la base que corresponde a cada estrategia
+    /// —declarada en el campo homónimo de `/v1/projection/series`, que es de donde sale—.
+    /// `null` cuando la estrategia no publica margen.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub disposable_monthly: Option<Decimal>,
+    /// **El rojo de D17**: `true` ⟺ ni invirtiendo cada euro de sobrante se llega al objetivo en
+    /// la edad elegida. `null` = la pregunta no aplica a esta estrategia — nunca `false` para
+    /// decir «no aplica».
+    pub underfunded: Option<bool>,
+    /// Por qué el plan viene vacío: `household_aggregate` (la vista suma N planes y no tiene uno)
+    /// | `projection_unavailable` (la simulación no se pudo calcular; el Resumen es una lectura y
+    /// no se cae por eso). `null` ⟺ el plan de arriba es el del usuario.
+    #[schema(value_type = Option<String>)]
+    pub absent_reason: Option<&'static str>,
+}
+
+impl SummaryPlan {
+    /// El plan ausente, con su razón. Los seis campos van a `null` a la vez: publicar uno suelto
+    /// sería peor que no publicar ninguno.
+    fn absent(reason: &'static str) -> Self {
+        SummaryPlan {
+            strategy: None,
+            retirement_trigger: None,
+            jubilacion_month_index: None,
+            required_savings_monthly: None,
+            disposable_monthly: None,
+            underfunded: None,
+            absent_reason: Some(reason),
+        }
+    }
+}
+
+/// El agregado del hogar no tiene plan: es la suma de N simulaciones independientes.
+pub(crate) const PLAN_ABSENT_HOUSEHOLD: &str = "household_aggregate";
+/// La proyección no se pudo calcular. El Resumen es una LECTURA y no se cae por ello — pero lo
+/// dice, en vez de servir seis `null` indistinguibles de «no tienes plan».
+pub(crate) const PLAN_ABSENT_PROJECTION_UNAVAILABLE: &str = "projection_unavailable";
+
+/// Lee el plan de jubilación del usuario **del objeto que sirve el chart**.
+///
+/// Orden deliberado: primero las dos densidades de la cache (estas seis cifras no dependen de la
+/// densidad — son escalares del plan, no puntos de la serie), y solo si no hay ninguna se calcula
+/// por `projection_series_cached` con `hybrid`, que es la densidad que la SPA pide primero.
+///
+/// **Coste**: un MISS aquí paga una proyección entera más los solves de la estrategia (§B.7:
+/// hasta 26 proyecciones). No es coste nuevo del Resumen, es el MISMO que iba a pagar el GET de
+/// la serie un instante después — y como se inserta en la cache, ese GET pasa a ser un HIT. Tras
+/// un login o una mutación con warm-up, esto es siempre un HIT.
+async fn summary_plan(state: &AppState, iid: Uuid, user_id: Uuid) -> SummaryPlan {
+    use crate::state::{Density, ProjectionCacheKey};
+    for density in [crate::state::Density::Hybrid, Density::Monthly] {
+        let key = ProjectionCacheKey {
+            installation_id: iid,
+            view: LedgerView::Mine,
+            owner_user_id: Some(user_id),
+            density,
+        };
+        if let Some(cached) = state.projection_cache_get(&key).await {
+            return plan_from_series(&cached);
+        }
+    }
+    match crate::handlers::projection::projection_series_cached(
+        state,
+        user_id,
+        iid,
+        LedgerView::Mine,
+        None,
+        Density::Hybrid,
+    )
+    .await
+    {
+        Ok(series) => plan_from_series(&series),
+        Err(e) => {
+            tracing::warn!(error = %e, "no se pudo resolver el plan de jubilación para /v1/summary");
+            SummaryPlan::absent(PLAN_ABSENT_PROJECTION_UNAVAILABLE)
+        }
+    }
+}
+
+/// Proyección → plan. Copia de campos, sin una sola cuenta: cualquier aritmética aquí sería la
+/// segunda implementación de algo que la proyección ya resolvió.
+fn plan_from_series(
+    s: &crate::handlers::projection::ProjectionSeriesResponse,
+) -> SummaryPlan {
+    SummaryPlan {
+        strategy: s.strategy.clone(),
+        retirement_trigger: s.retirement_trigger.map(str::to_string),
+        jubilacion_month_index: s.jubilacion_month_index,
+        required_savings_monthly: s.required_contribution_monthly,
+        disposable_monthly: s.disposable_monthly,
+        underfunded: s.underfunded,
+        absent_reason: None,
+    }
 }
 
 #[utoipa::path(
@@ -481,7 +609,7 @@ pub async fn get_summary(
 ) -> Result<Json<SummaryResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = summary_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
+    let out = summary_core(&state, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
 }
 
@@ -516,11 +644,14 @@ async fn household_min_swr_pct(
 
 /// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_summary`.
 pub(crate) async fn summary_core(
-    pool: &sqlx::PgPool,
+    state: &AppState,
     iid: Uuid,
     user_id: Uuid,
     view: LedgerView,
 ) -> Result<SummaryResponse, ApiError> {
+    // Un solo alias para no reescribir las ~20 queries de abajo: lo que cambió en 5.0.0 es que
+    // esta core necesita además el ESTADO (la cache de proyección), no solo el pool.
+    let pool = &state.pool;
     // Una sola query para los escalares de instalación que necesita este handler: fecha civil,
     // inflación (base del runway) y los fire_settings (fuente del ahorro + SWR/tramos del runway).
     let (today, inflation_pct, fire) = installation_calendar_inflation_fire(pool, iid).await?;
@@ -790,6 +921,10 @@ pub(crate) async fn summary_core(
         assets_by_category,
         liabilities_by_category,
         liabilities_by_type_tag,
+        plan: match view {
+            LedgerView::Mine => summary_plan(state, iid, user_id).await,
+            LedgerView::Household => SummaryPlan::absent(PLAN_ABSENT_HOUSEHOLD),
+        },
     })
 }
 

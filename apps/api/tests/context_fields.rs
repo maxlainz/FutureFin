@@ -145,7 +145,33 @@ async fn every_view_aware_response_echoes_the_view_it_applied() {
             assert!(mine["members"].as_array().is_some_and(|m| m.is_empty()), "{mine}");
             continue;
         }
+        // `/v1/summary` es la SEGUNDA excepción declarada (5.0.0 WP5-2b, D27): su bloque `plan`
+        // —estrategia, disparador, ahorro necesario, margen y el rojo de D17— es el plan de UNA
+        // persona, y el agregado del hogar no tiene uno. Sale entero a `null` con
+        // `absent_reason: household_aggregate`, igual que los `jubilacion_*` de la serie. El
+        // resto del payload sí sigue siendo idéntico con un solo usuario, y eso es lo que se
+        // comprueba: la excepción está ACOTADA a `plan`.
         let mut sin_view = mine.clone();
+        if ep == "/v1/summary" {
+            let plan_household = &explicit["plan"];
+            assert_eq!(plan_household["absent_reason"], "household_aggregate", "{explicit}");
+            for k in [
+                "strategy",
+                "retirement_trigger",
+                "jubilacion_month_index",
+                "required_savings_monthly",
+                "disposable_monthly",
+                "underfunded",
+            ] {
+                assert!(
+                    plan_household[k].is_null(),
+                    "en household el plan va entero a null, y {k} no lo está: {explicit}"
+                );
+            }
+            assert!(mine["plan"]["absent_reason"].is_null(), "{mine}");
+            assert_eq!(mine["plan"]["strategy"], "asap", "{mine}");
+            sin_view["plan"] = explicit["plan"].clone();
+        }
         sin_view["view"] = explicit["view"].clone();
         assert_eq!(
             sin_view, explicit,

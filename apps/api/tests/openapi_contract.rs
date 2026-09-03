@@ -218,3 +218,71 @@ fn the_retirement_profile_patch_advertises_the_target_basis_enum() {
     got.sort_unstable();
     assert_eq!(got, vec!["bridge_to_pension", "perpetuity"], "{variants:?}");
 }
+
+/// **El bloque `plan` del Resumen y los solves de la proyección están DECLARADOS** (5.0.0
+/// WP5-2b). Un campo que la API sirve y el documento no describe es un cliente generado que no
+/// lo tiene, y aquí la mitad son cifras de dinero: `null` y `0` significan cosas distintas y el
+/// contrato tiene que poder decirlo.
+#[test]
+fn the_plan_and_the_strategy_solves_are_declared_in_the_document() {
+    let doc = doc();
+
+    // `/v1/summary` → `plan`, con su razón de ausencia.
+    let plan_ref = doc["components"]["schemas"]["SummaryResponse"]["properties"]["plan"].to_string();
+    assert!(
+        plan_ref.contains("SummaryPlan"),
+        "SummaryResponse.plan debe referirse al componente SummaryPlan: {plan_ref}"
+    );
+    let plan = &doc["components"]["schemas"]["SummaryPlan"]["properties"];
+    for k in [
+        "strategy",
+        "retirement_trigger",
+        "jubilacion_month_index",
+        "required_savings_monthly",
+        "disposable_monthly",
+        "underfunded",
+        "absent_reason",
+    ] {
+        assert!(!plan[k].is_null(), "SummaryPlan.{k} no está declarado: {plan}");
+    }
+
+    // `/v1/projection/series` → los solves y las lecturas de pensión/puente/media jornada.
+    let serie = &doc["components"]["schemas"]["ProjectionSeriesResponse"]["properties"];
+    for k in [
+        "bridge_discount_annual_pct",
+        "bridge_effective_withdrawal_pct",
+        "pension_coverage_ratio",
+        "partial_gap_target",
+        "partial_phase_capital_growing",
+        "required_contribution_monthly",
+        "required_contribution_search_ceiling",
+        "underfunded",
+        "required_capital_path",
+        "disposable_monthly",
+        "disposable_capital",
+        "disposable_capital_at_retirement",
+        "disposable_capital_today",
+        "coast_fire_month_index",
+        "coast_number",
+        "coast_path",
+    ] {
+        assert!(
+            !serie[k].is_null(),
+            "ProjectionSeriesResponse.{k} no está declarado"
+        );
+    }
+
+    // Y por miembro del hogar, las cuatro que explican de quién es cada marcador.
+    let miembro = &doc["components"]["schemas"]["HouseholdMemberProjection"]["properties"];
+    for k in [
+        "coast_fire_month_index",
+        "underfunded",
+        "required_contribution_monthly",
+        "disposable_monthly",
+    ] {
+        assert!(
+            !miembro[k].is_null(),
+            "HouseholdMemberProjection.{k} no está declarado"
+        );
+    }
+}

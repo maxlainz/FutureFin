@@ -121,8 +121,92 @@ llevaba tiempo sin cumplir y que solo se ven cuando alguien intenta usarlas.
   informativo y **no es** `uncovered_deficit_total`; y el agregado del hogar es una lectura
   informativa, no el plan de nadie.
 
+### El plan entero llega al motor, y con él lo que cuesta cumplirlo (5.0.0, WP5-2b)
+
+WP5 dejó la estrategia decidiendo el disparador. Esto conecta **el resto del perfil** —pensión con
+fecha, media jornada, base del objetivo y su descuento— y añade lo que ninguna versión anterior
+sabía contestar: **cuánto hay que ahorrar para llegar**, y **cuánto sobra**.
+
+- **La pensión con fecha cambia el OBJETIVO, no solo la caja.** Con `pension` declarada y base
+  `bridge_to_pension` (el default cuando hay pensión, R6), el objetivo deja de ser «capital para
+  vivir de él para siempre» y pasa a ser «capital para llegar hasta la pensión, más la perpetuidad
+  sobre lo que la pensión no cubra». Con el ejemplo sintético del issue —gasto 2.000 €/mes, SWR
+  4 %, sin impuestos, pensión de 1.200 €/mes a los 67, cartera líquida al 5 %— el objetivo de hoy
+  baja de **600.000 €** (perpetuidad, que ignora la pensión) a **≈435.300 €**: 380.700 € de puente
+  descontado más 54.600 € de la perpetuidad sobre los 800 €/mes que la pensión no cubre. Se publica
+  además `pension_coverage_ratio` (FRACCIÓN: `0.6` = la pensión cubre el 60 % del gasto) y
+  `bridge_effective_withdrawal_pct` (PORCENTAJE anual), que es lo que la perpetuidad esconde:
+  mientras la pensión no llega hay que sacar el gasto ENTERO de la cartera, y eso puede estar por
+  encima del SWR — legítimamente, porque dura pocos años.
+- **La tasa a la que se descuenta el puente es tuya y se publica.** `bridge_discount_basis` elige
+  entre la rentabilidad esperada ponderada de tus activos LÍQUIDOS (default), tu propio SWR, o
+  ninguna; la tasa efectiva viaja en `bridge_discount_annual_pct`. Con el ejemplo de arriba, sin
+  descontar el mismo puente costaría **968.000 €** — por eso, si no hay ni un euro líquido del que
+  sacar la tasa, cae a 0 y lo dice (`bridge_discount_no_liquid_assets`) en vez de encarecer el
+  objetivo en silencio.
+- **La media jornada se simula, y su hueco tiene precio.** `partial_gap_target` =
+  `gross_up(12·hueco)/SWR` con `hueco = gasto − ingreso de media jornada − pensión·fracción`. Con
+  el ejemplo del issue (gasto 2.000, media jornada de 1.100, SWR 4 %, sin impuestos) son exactamente
+  **270.000 €**. Al lado, `partial_phase_capital_growing` dice si el patrimonio aguantó la fase:
+  `true` creció, `false` menguó (con aviso), y **`null` = no hubo media jornada** — publicar `false`
+  ahí diría «tu media jornada se come el capital» de un hogar que no ha declarado ninguna.
+- **«¿Cuánto tengo que ahorrar para jubilarme a los 60?»** — `required_contribution_monthly`, la
+  aportación mensual mínima que alcanza el objetivo en la edad elegida, **biseccionada sobre el
+  motor entero**: cada evaluación es una proyección de verdad, con su cascada, sus topes, su
+  servicio de deuda y su fiscalidad. Se publica con su techo de búsqueda
+  (`required_contribution_search_ceiling`, el máximo sobrante mensual) y con
+  `required_capital_path`, la serie líquida SIMULADA de esa aportación — no el objetivo descontado
+  a una tasa escalar, que es un número plausible que ninguna simulación produce.
+- **El rojo de D17**: `underfunded: true` cuando ni invirtiendo cada euro de sobrante se llega. No
+  es un error — la simulación existe, se jubila igual y se publica entera; lo que dice es que se
+  jubila POR DEBAJO del objetivo. Entonces `required_contribution_monthly` ES el techo de búsqueda:
+  «todo lo que tienes, y aun así no llega».
+- **El margen disponible** (D16/D31): `disposable_monthly` y la serie `disposable_capital`, más sus
+  dos escalares en el mes de jubilación (`disposable_capital_at_retirement` nominal y
+  `disposable_capital_today` en euros de hoy). Es lo que sobra por encima de lo que el plan exige.
+- **Coast FIRE**: `coast_fire_month_index` (el primer mes a partir del cual se puede dejar de
+  aportar y llegar igual), `coast_number` (el patrimonio líquido con el que se ENTRA en ese mes) y
+  `coast_path` (la serie discontinua «si dejas de aportar aquí»). Si el plan no llega ni aportando
+  siempre, el mes es `null` y viaja `coast_not_reachable`.
+- **Los solves se calculan UNA vez, con la serie, y se guardan en la misma entrada de cache.** Un
+  cache hit no paga nada. Medido en release sobre un hogar rico (4 activos, hipoteca francesa al
+  3 %, dos Próximos, horizonte 840 meses): el primer GET pasa de 5 ms (`asap`, sin solve) a 19 ms
+  (`coast`), 41 ms (`retire_at_age`) y 100 ms (`partial` con pensión y edad); los hits, 1–3 ms.
+- **La tarjeta «Tu plan» en `/v1/summary`** (D27): `plan.{strategy, retirement_trigger,
+  jubilacion_month_index, required_savings_monthly, disposable_monthly, underfunded}`. Sale del
+  **mismo objeto que pinta el chart** —la entrada de cache de la proyección, o un cálculo por el
+  mismo camino cacheado que la deja caliente—, así que las dos superficies no pueden divergir. En
+  `?view=household` va entero a `null` con `absent_reason: "household_aggregate"`: el hogar es la
+  suma de N planes y «el ahorro necesario del hogar» no es una cifra que exista.
+- **`simulate_projection` gana el plan como eje** (solo MCP, D30): `profile_overrides` acepta
+  **cualquier campo del perfil** con las mismas cotas que guardarlo («¿y si me jubilo a los 55?» =
+  `{"strategy": "retire_at_age", "target_retirement_age": 55}`) sin persistir nada, y con él
+  **vuelven `fire_number_mode` y `fire_number_manual_amount`**, que se quedaron sin eje what-if
+  cuando WP4 los mudó al perfil. Además `income_pause` («¿y si me cojo una excedencia de un año?»
+  → los dos meses de jubilación y su diferencia, con la pensión con fecha SIN pausar) y
+  `solve: {extra_monthly_expense_keeping_date: true}` («¿cuánto más puedo gastar sin mover la
+  fecha?»). Los KPIs del plan viajan por LADO con sus deltas; un `null` ahí no es un cero, es «esa
+  estrategia no responde a esa pregunta», y por eso su delta también es `null`.
+- **El puente costaba 1,9 segundos y ahora cuesta 13 ms.** La serie del objetivo consultaba el
+  evaluador del plan una vez por punto, y esa forma de conveniencia **rehace la tabla del puente
+  entera** en cada llamada: con densidad mensual y una pensión a 30 años eran ~300.000 gross-ups
+  por respuesta. Se construye una sola vez.
+- **`uncovered_deficit_total` se clampa a ≥ 0 al publicarlo.** El motor lo acumula como residuo de
+  ventas brutas y podía salir con una cola de redondeo de orden −5·10⁻²⁵. Eso no es un descubierto
+  negativo, es cero. El motor no cambia (su aritmética la congela el golden); redondea quien
+  serializa.
+
 ### Breaking
 
+- **`liquid_crossing_month_index` lo publica ahora el MOTOR, y con el objetivo del PLAN.** Hasta
+  WP5-2a lo recalculaba el handler contra la perpetuidad de 4.15.x, porque a las estrategias por
+  edad se les pasaba el motor sin objetivo. Con el objetivo dentro y el cruce marcado como lectura,
+  la cifra la da el bucle evaluando el objetivo consciente del plan — **con `pension_bridge` eran
+  dos cruces distintos para la misma línea del chart**. Sin pensión con fecha el número no se mueve.
+- **`jubilacion_target_net_worth` (y `fire_target_base` de `simulate_projection`) pasan a ser la
+  base del objetivo del PLAN**, no la de la perpetuidad. Sin pensión con fecha son la misma cifra
+  por construcción; con base puente, la de antes contradecía el primer punto de
+  `fire_target_series`, que es la línea que el chart pinta.
 - **`assets_depleted_month_index` pasa a la rejilla 0-based** (issue #210), en
   `GET /v1/projection/series` (raíz y `members[]`) y en los dos lados de `simulate_projection`. Se
   publicaba en la convención 1-based del bucle del motor desde 4.6.0 y era el **único** índice de

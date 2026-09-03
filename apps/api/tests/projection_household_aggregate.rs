@@ -220,9 +220,59 @@ async fn household_series_is_the_sum_of_each_members_mine_series() {
             m["retirement_month_index"] == m["jubilacion_month_index"],
             "R8: los dos nombres son el mismo mes: {m}"
         );
-        assert!(m["coast_fire_month_index"].is_null(), "solve.rs no está en esta ola: {m}");
         assert!(m["user_id"].is_string(), "{m}");
         assert!(m["warnings"].as_array().is_some(), "{m}");
+    }
+
+    // 5. **Los solves de §B.7, por miembro** (WP5-2b). `bob` corre `retire_at_age`, así que su
+    // fila trae lo que le cuesta llegar; `alice` corre `asap` (por cruce) y las suyas van a
+    // `null` — que no es cero: es «esa estrategia no responde a esa pregunta».
+    for k in [
+        "underfunded",
+        "required_contribution_monthly",
+        "disposable_monthly",
+    ] {
+        assert!(ma[k].is_null(), "alice se jubila por cruce: {k} en {ma}");
+        assert!(!mb[k].is_null(), "bob se jubila por edad: {k} en {mb}");
+    }
+    // Ninguno de los dos hace `coast`, así que su mes coast no existe.
+    assert!(ma["coast_fire_month_index"].is_null(), "{ma}");
+    assert!(mb["coast_fire_month_index"].is_null(), "{mb}");
+    // Y la cifra del agregado es la MISMA que su vista `mine` publica: `members[]` explica la
+    // suma, no la reinterpreta.
+    assert_eq!(
+        mb["required_contribution_monthly"], mine_b["required_contribution_monthly"],
+        "{mb} vs {mine_b}"
+    );
+    assert_eq!(
+        mb["disposable_monthly"], mine_b["disposable_monthly"],
+        "{mb} vs {mine_b}"
+    );
+    assert_eq!(mb["underfunded"], mine_b["underfunded"], "{mb} vs {mine_b}");
+
+    // 6. El agregado NO publica plan propio: los solves son de una persona.
+    for k in [
+        "required_contribution_monthly",
+        "required_contribution_search_ceiling",
+        "underfunded",
+        "disposable_monthly",
+        "coast_fire_month_index",
+        "coast_number",
+        "partial_gap_target",
+        "partial_phase_capital_growing",
+        "pension_coverage_ratio",
+        "bridge_effective_withdrawal_pct",
+        "bridge_discount_annual_pct",
+        "disposable_capital_at_retirement",
+        "disposable_capital_today",
+    ] {
+        assert!(hh[k].is_null(), "el hogar no tiene plan propio: {k} en {hh}");
+    }
+    for k in ["required_capital_path", "disposable_capital", "coast_path"] {
+        assert!(
+            hh[k].as_array().expect("array").is_empty(),
+            "las series del plan son de una persona: {k} en {hh}"
+        );
     }
 }
 

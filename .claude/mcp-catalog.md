@@ -871,6 +871,75 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     desplazado un mes: compararlo con `jubilacion_month_index` daba un mes de más. El delta
     `assets_depleted_months_delta` no se mueve (los dos lados se desplazan igual).
 
+- **5.0.0 / WP5-2b (issue #207) — cero tools nuevas, un contrato que crece: `simulate_projection`.**
+  Evaluación de paridad: **tool actualizada**; ninguna omisión nueva y la fila «tool sin endpoint»
+  del registro **no cambia** — `simulate_projection` sigue sin ruta HTTP (D30: el what-if inverso
+  vive solo en MCP, y en la SPA el usuario explora GUARDANDO su configuración).
+  - **`profile_overrides` — el PLAN entero como eje (P5).** Mismos campos, mismos valores, mismas
+    cotas y los mismos `clear_*` que `update_retirement_profile` (`ProfileOverrideParam::to_patch`
+    **delega** en el de la tool de escritura: una sola interpretación del tri-estado y un solo juego
+    de códigos de error). Se aplica con el `RetirementProfilePatch::apply_to` real sobre un CLON del
+    perfil RESUELTO, se valida y se vuelve a resolver — lo que se simula es exactamente lo que
+    pasaría al guardarlo, y **no persiste nada** (por eso la tool sigue sin `require_mcp_write`).
+    Excluye dos campos a propósito: `confirm` (no hay nada que confirmar) y `birth_date` (es
+    identidad y vive en su propia columna, no en el plan).
+    **Por aquí vuelven `fire_number_mode` y `fire_number_manual_amount`**, que WP4 sacó de
+    `fire_settings_overrides` al mudarlos al perfil (D13) y que se quedaron una ola sin eje what-if.
+    Anti-no-op: patch vacío ⇒ `profile_overrides_empty`; patch que resuelve al perfil que ya tienes
+    ⇒ `profile_overrides_no_op`; `swr_pct` a la vez arriba y dentro ⇒ `swr_pct_set_twice` (el eje
+    suelto sobrevive porque lleva publicado desde 1.x, pero elegir uno por el llamante sería
+    adivinar).
+  - **`income_pause` (P8.c)** — `{from_month_index | from_date, months, income_fraction}`. Multiplica
+    el ingreso GANADO durante una ventana SEMIABIERTA; **la pensión con fecha NO se pausa** (una
+    excedencia interrumpe el trabajo, no la pensión pública). Hace DOS cosas: aplica la pausa al
+    escenario —las KPIs y la serie que se publican son las del hogar en excedencia— y publica el
+    retraso en el bloque `income_pause` de la respuesta (`baseline_month_index`,
+    `paused_month_index`, `retirement_delay_months`), medido contra **el mismo escenario sin la
+    pausa**, no contra el baseline de la instalación: mezclarlo con los demás overrides haría el
+    número ilegible. Con «no se jubila dentro del horizonte» en cualquiera de los dos lados el
+    retraso es `null`, nunca un número enorme inventado. Cotas: `months ≥ 1`
+    (`income_pause_months_zero`), `income_fraction ∈ [0, 1)` (`income_pause_fraction_out_of_range`
+    — `1` sería el baseline), exactamente uno de los dos anclajes
+    (`income_pause_timing_ambiguous`), mes dentro del horizonte
+    (`income_pause_month_out_of_range`). El eje de mes es el de `one_off_expense`: **1 = el mes
+    civil del ancla**.
+  - **`solve: {extra_monthly_expense_keeping_date: true}` (P8.b)** — devuelve
+    `max_extra_monthly_expense_keeping_date`: el mayor gasto mensual extra constante (euros de hoy)
+    que deja la fecha de jubilación donde está (±1 mes). **Opt-in** porque cuesta una bisección
+    entera sobre el motor (hasta 26 proyecciones), y `false` es un 400 `solve_no_op` — pedir el
+    bloque y declinarlo no puede devolver nada. Sube solo el gasto REGULAR: la pregunta es «¿cuánto
+    margen tengo AHORA?», no «¿cuánto puedo subir mi nivel de vida para siempre?». Con un trigger
+    por EDAD —que no depende del gasto— la respuesta es el máximo sobrante mensual, un **SUELO**
+    honesto («al menos esto»), no un infinito.
+  - **Los KPIs del PLAN viajan por LADO y con sus deltas.** `SimKpis` gana
+    `required_contribution_monthly`, `required_contribution_search_ceiling`, `underfunded`,
+    `disposable_monthly`, `coast_fire_month_index`, `coast_number`, `partial_gap_target`,
+    `partial_phase_capital_growing`, `partial_retirement_month_index`, `pension_start_month_index`,
+    `pension_coverage_ratio` (**FRACCIÓN**), `bridge_effective_withdrawal_pct` (**PORCENTAJE**
+    anual), `bridge_discount_annual_pct` y `warnings[]`. Van por lado porque `profile_overrides`
+    puede cambiar la estrategia entera, y entonces las dos columnas no describen el mismo plan.
+    `SimDeltas` gana los cinco numéricos correspondientes; **los `bool` NO tienen delta** (se leen
+    comparando las dos columnas, y un «delta booleano» sería un tercer valor que interpretar), y
+    cualquier delta contra un lado que no publica la cifra es **`null`**, no una resta contra un
+    hueco — la misma regla de `jubilacion_months_delta`.
+  - **`liquid_crossing_month_index` de los dos lados lo publica ahora el MOTOR** (evaluado sobre el
+    objetivo consciente del plan, puente incluido) en vez del escaneo del handler, que miraba la
+    perpetuidad de 4.15.x. Con `pension_bridge` eran dos cruces distintos para la misma línea.
+  - **Presupuesto**: la descripción de `simulate_projection` sube de 574 a **594** caracteres (tope
+    600) para nombrar `profile_overrides`, a costa de comprimir la frase de `liability_overrides`;
+    el catálogo queda en **23.854 / 24.000** (margen 146). Los nuevos parámetros **no** cuentan: el
+    presupuesto mide descripciones de TOOL, no de campo.
+  - **Códigos nuevos** (los 9 del fixture): `profile_overrides_empty`, `profile_overrides_no_op`,
+    `swr_pct_set_twice`, `income_pause_timing_ambiguous`, `income_pause_months_zero`,
+    `income_pause_fraction_out_of_range`, `income_pause_month_out_of_range`,
+    `income_pause_date_out_of_horizon`, `solve_no_op`.
+  - **Errata corregida de paso**: la descripción de `fire_number_manual_amount` decía «Objetivo
+    manual» en las dos tools, y el campo es la **necesidad ANUAL neta** en euros de hoy — el
+    objetivo es esa cifra grosseada y dividida por el SWR (coinciden `FireNeed::Indexed` del motor y
+    `netAnnualNeed` de `apps/web/src/lib/fire.ts`; la UI ya lo rotula «Modo objetivo anual»). Un
+    modelo que leyera «objetivo» escribiría el capital y pediría 285 veces menos del que quiere.
+    Pin: `mcp_simulate.rs::the_fire_number_mode_axis_comes_back_through_profile_overrides`.
+
   **D21 llega gratis a las escrituras** porque las tools reusan las cores: una mutación sobre la
   fila de otro miembro devuelve 403 `not_row_owner` por MCP igual que por HTTP, y el preview de
   `delete_asset`/`delete_liability` falla igual de pronto — enseñaba el contenido de la fila ajena

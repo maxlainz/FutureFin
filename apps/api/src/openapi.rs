@@ -326,6 +326,7 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::liabilities::PaymentFrequency,
         crate::handlers::liabilities::RepaymentModel,
         crate::handlers::summary::SummaryResponse,
+        crate::handlers::summary::SummaryPlan,
         crate::handlers::summary::FinancialHealthMetrics,
         crate::handlers::summary::CategoryBreakdownLine,
         crate::handlers::summary::TypeTagBreakdownLine,
