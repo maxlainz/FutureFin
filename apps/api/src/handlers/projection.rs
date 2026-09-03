@@ -340,9 +340,9 @@ pub struct HouseholdMemberProjection {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub disposable_monthly: Option<Decimal>,
-    /// Mes de inicio de la media jornada. `null` hasta WP3.
+    /// Mes de inicio de la media jornada (rejilla 0-based). `null` sin fase parcial en el perfil.
     pub partial_retirement_month_index: Option<u32>,
-    /// Mes de inicio de la pensión con fecha. `null` hasta WP3.
+    /// Mes de inicio de la pensión con fecha (rejilla 0-based). `null` sin pensión con fecha.
     pub pension_start_month_index: Option<u32>,
     /// Mes en que la cartera de ESTE miembro se vacía **y eso le cuesta dinero**, en la rejilla
     /// común del hogar (#210) — misma definición de dos condiciones que el campo homónimo de la
@@ -707,10 +707,10 @@ pub struct ProjectionSeriesResponse {
     /// Fases atravesadas y el mes de la rejilla en que empieza cada una. Siempre arranca con
     /// `accumulating` en el mes 0. Vacío en `household`.
     pub phase_transitions: Vec<PhaseTransition>,
-    /// Primer mes con pensión pública con fecha. `null` hasta WP3 (la pensión sin fecha de hoy
+    /// Primer mes con pensión pública con fecha. `null` sin pensión con fecha (la pensión sin fecha de hoy
     /// viaja dentro del ingreso de jubilación y no tiene mes propio).
     pub pension_start_month_index: Option<u32>,
-    /// Primer mes de media jornada. `null` hasta WP3.
+    /// Primer mes de media jornada. `null` sin fase parcial en el perfil.
     pub partial_retirement_month_index: Option<u32>,
     /// Avisos de esta simulación. Literales cerrados: `birth_date_missing` /
     /// `target_retirement_age_missing` = una estrategia por edad degradó a `asap` porque le
@@ -1969,7 +1969,7 @@ pub(crate) struct BuiltProjection {
     /// - `fire_target_reading` es lo que se DIBUJA y se lee (`fire_target_series`,
     ///   `jubilacion_target_net_worth*`, `liquid_crossing_month_index`).
     ///
-    /// En las estrategias por cruce (`asap` y, hasta WP3, `partial`/`pension_bridge`) son el
+    /// En las estrategias por cruce (`asap`, `pension_bridge` y `partial` sin edad total) son el
     /// mismo objeto. En las estrategias por EDAD el motor recibe `fire_target: None` —un solo
     /// trigger por simulación (D17)— y esto sigue siendo `Some(..)`: la línea discontinua del
     /// chart no desaparece porque la edad haya tomado el mando, solo deja de decidir.
