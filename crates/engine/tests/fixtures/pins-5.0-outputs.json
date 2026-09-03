@@ -1,5 +1,5 @@
 {
-  "_doc": "Pin ADITIVO de las salidas nuevas del motor 5.0.0 (WP1b, seccion B.8 del plan de la issue #207): SHA-256 del texto canonico de retirement_month_index, liquid_crossing_month_index, pension_start_month_index, partial_retirement_month_index, phase_transitions y las tres series withdrawal / withdrawal_shortfall / withdrawal_excess mes a mes con el Decimal completo via Display, mas el recuento de warnings. Cubre los casos de PROYECCION de tests/common/cases.rs (los L* son calendarios de amortizacion y no tienen fases). Vive APARTE de pins-4.15.json a proposito: aquel demuestra que las salidas de 4.15.0 no se movieron y dejaria de poder demostrarlo si creciera con cada lectura nueva. GENERADO: no editar a mano. Regenerar SOLO si el cambio es intencionado: UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG (futurefin-change-control). En WP1b withdrawal_shortfall y withdrawal_excess son cero por construccion (fixed_real no tiene techo); WP2 los llena y este pin dira exactamente donde.",
+  "_doc": "Pin ADITIVO de las salidas nuevas del motor 5.0.0 (WP1b, seccion B.8 del plan de la issue #207): SHA-256 del texto canonico de retirement_month_index, liquid_crossing_month_index, pension_start_month_index, partial_retirement_month_index, phase_transitions y las tres series withdrawal / withdrawal_shortfall / withdrawal_excess mes a mes con el Decimal completo via Display, mas el recuento de warnings. Cubre los casos de PROYECCION de tests/common/cases.rs (los L* son calendarios de amortizacion y no tienen fases). Vive APARTE de pins-4.15.json a proposito: aquel demuestra que las salidas de 4.15.0 no se movieron y dejaria de poder demostrarlo si creciera con cada lectura nueva. GENERADO: no editar a mano. Regenerar SOLO si el cambio es intencionado: UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG (futurefin-change-control). Cubre projection_cases_all() (los casos de 4.15.0) MAS projection_cases_5_0() (P14-P17: el techo numerico de la issue #209 y las tres reglas de retirada nuevas). En los casos con fixed_real withdrawal_shortfall y withdrawal_excess son cero por construccion — el permitido ES la necesidad — y ahi es donde este pin demuestra que WP2 no movio la semantica de 4.15.0.",
   "engine_version": "5.0.0",
   "hash_algo": "sha256 over the canonical text described in golden_pins.rs",
   "cases": {
@@ -93,6 +93,34 @@
       "liquid_crossing_month_index": null,
       "withdrawal_total": "0",
       "phases": "accumulating@0"
+    },
+    "P14_techo_numeric": {
+      "sha256": "0a8803038f38fc4ee531ad5c6845d8b19c642a1311e78b993ffa09bf10b6fa87",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "840000",
+      "phases": "accumulating@0"
+    },
+    "P15_percent_of_balance_ceiling": {
+      "sha256": "9fe43f5bc701e3077961cd405de4b0deeefcc4886ace32df95f269b098113e74",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "518684.06099389898756237092108",
+      "phases": "accumulating@0|retired@1"
+    },
+    "P16_hybrid_rule_is_spend": {
+      "sha256": "16e21d418e47d904ea6e5d20b50bbdf862697706d1ae431f1f4afee377a90c38",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "733393.33558285015878468468241",
+      "phases": "accumulating@0|retired@1"
+    },
+    "P17_guardrails_taxes_es": {
+      "sha256": "12af97cd287d66ef58d3ea050f2ceca0667c3fcbf1caa481f37a22f545407b05",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "986541.8052190908357567812119",
+      "phases": "accumulating@0|retired@1"
     }
   }
 }

@@ -7,7 +7,7 @@
 //! ([`AllocationRule`]) ejecutadas en orden ascendente. Cada regla consume parte del sobrante
 //! para un activo destino hasta su tope opcional; lo que queda pasa a la siguiente regla.
 
-use crate::phases::{EngineWarning, Phase, PhasePlan};
+use crate::phases::{EngineWarning, Phase, PhasePlan, SpendMode};
 use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
@@ -33,12 +33,23 @@ pub enum EngineError {
     AssetValueOverflow,
     #[error("history timeline dates must be strictly ascending")]
     InvalidHistoryTimeline,
-    /// 5.0.0 WP1b: el `PhasePlan` pide una regla de retirada que este motor todavía no ejecuta
-    /// (todo lo que no es `fixed_real`; WP2 escribe `withdrawal.rs`). Se RECHAZA en vez de
-    /// degradar a `fixed_real`: una regla aceptada y no simulada publicaría el patrimonio de un
-    /// plan que nadie configuró — creíble y equivocado.
+    /// 5.0.0: el `PhasePlan` pide una regla de retirada que este motor todavía no ejecuta.
+    ///
+    /// **Desde WP2 no la produce ninguna regla**: las cuatro de `WithdrawalRule` se simulan
+    /// (`crates/engine/src/withdrawal.rs`). La variante sobrevive porque `apps/api` la mapea
+    /// JUNTO a [`EngineError::UnsupportedPhase`] al mismo `engine_feature_unavailable`
+    /// (`handlers/projection.rs::map_engine_err`), y retirarla es un cambio del API que
+    /// pertenece a WP3 — cuando la fase parcial y la pensión con fecha dejen de estar pendientes
+    /// y `UnsupportedPhase` se vaya con ella.
     #[error("withdrawal rule not implemented yet in this engine version")]
     UnsupportedWithdrawalRule,
+    /// 5.0.0 WP2: la regla de retirada trae un parámetro que no describe ninguna política
+    /// simulable (un porcentaje ≤ 0, un ajuste de guardarraíl ≥ 100 %). La API ya los acota mucho
+    /// antes (`handlers/retirement_profile.rs`), pero el motor es una **función pura** y su firma
+    /// admite cualquier `Decimal`: rechaza con un error tipado en vez de panicar o de simular un
+    /// plan distinto del configurado.
+    #[error("withdrawal rule parameters are outside the simulable range")]
+    InvalidWithdrawalRule,
     /// 5.0.0 WP1b: el `PhasePlan` declara una fase que este motor todavía no ejecuta (media
     /// jornada o pensión con fecha; WP3). Mismo criterio que
     /// [`EngineError::UnsupportedWithdrawalRule`].
@@ -809,18 +820,25 @@ pub struct ProjectionOutput {
     /// como mucho: `[(Accumulating, 0)]` y, si hay jubilación, `(Retired, retirement_month_index)`.
     /// `Partial` entra en WP3.
     pub phase_transitions: Vec<(Phase, u32)>,
-    /// Retirada NETA efectiva del mes: los euros que salieron de los activos para cubrir el
-    /// déficit (`need_assets_net` menos el descubierto neto de ese mes). `len == horizon+1`,
-    /// índice 0 = 0 (el mes 0 es el estado inicial, no un mes simulado). Con `fixed_real` ES el
-    /// drenaje de 4.15.0 — el que ya alimentaba `uncovered_deficit_total`.
+    /// Retirada NETA efectiva del mes: los euros que de verdad salieron de los activos —
+    /// `after_tax(bruto vendido)`, con el bruto decidido por la regla de retirada y el modo de
+    /// gasto (§B.2). `len == horizon+1`, índice 0 = 0 (el mes 0 es el estado inicial, no un mes
+    /// simulado). Con `fixed_real` ES el drenaje de 4.15.0 — el que ya alimentaba
+    /// `uncovered_deficit_total`.
     pub withdrawal: Vec<Decimal>,
-    /// Recorte de la regla: `max(0, necesidad − permitido)` (B.1.5 / D22-D24). **Informativo**:
-    /// no resta patrimonio ni cuenta como fracaso, y NO es `uncovered_deficit_total` (que mide lo
-    /// que los activos no pudieron vender). Todo ceros en WP1b: `fixed_real` no tiene techo, así
-    /// que nunca recorta. Lo llena WP2.
+    /// Recorte de la REGLA: `max(0, necesidad_neta − neto que el techo permitía)` (B.1.5 /
+    /// D22-D24). **Informativo y solo eso**: no resta patrimonio, no entra en
+    /// `uncovered_deficit_total` y no cuenta como fracaso. Mide cuánto gasto declarado dejó fuera
+    /// la política de retirada, NO cuánto no pudieron vender los activos — esa es la otra
+    /// magnitud, y confundirlas fue el hallazgo B2 de la revisión adversarial.
+    ///
+    /// Cero por construcción con `fixed_real` (no hay techo que recorte) y, en modo `ceiling`,
+    /// fuera de los meses de déficit.
     pub withdrawal_shortfall: Vec<Decimal>,
-    /// Exceso de la regla sobre la necesidad en modo `rule_is_spend` (se vende y se gasta). Todo
-    /// ceros en WP1b por la misma razón. Lo llena WP2.
+    /// Exceso de la regla sobre la necesidad en modo `rule_is_spend`: `max(0, retirada neta −
+    /// necesidad neta)`. Son euros VENDIDOS y GASTADOS — salen de la cartera y no vuelven a
+    /// entrar. Cero por construcción en modo `ceiling` (allí la retirada nunca supera la
+    /// necesidad) y con `fixed_real` en cualquiera de los dos modos.
     pub withdrawal_excess: Vec<Decimal>,
     /// Primer mes con pensión con fecha. `None` en WP1b (la pensión con fecha llega en WP3; la
     /// pensión plana de hoy viaja dentro de `income_retirement_monthly` y no tiene mes propio).
@@ -1001,6 +1019,379 @@ fn drain_from_assets(
         }
     }
     need
+}
+
+/// Baja la base de coste de un activo en proporción al VALOR drenado — `b' = b·v_post/v_pre`
+/// (#120) — sin panicar cuando el producto intermedio no cabe en un `Decimal` (issue **#209**).
+///
+/// El orden natural es multiplicar ANTES de dividir: drenar el activo entero deja la base en 0
+/// EXACTO, sin cola de redondeo, y ese orden es el que 4.15.0 pineó. Pero `b·v` desborda el rango
+/// de `Decimal` (~7,9e28) mucho antes que `b` o `v` por separado: con un activo cerca del techo
+/// de su columna (`NUMERIC(18,4)` ⇒ ~1e14) y una rentabilidad alta, `v` pasa de 7,9e14 y el
+/// producto revienta — `*` **panica** («Multiplication overflowed») y el pool bloqueante lo
+/// publica como un 400 `task_panic` opaco. Es la misma familia que el `checked_mul` del
+/// crecimiento de activos (`AssetValueOverflow`) y que los dos `checked_div` de #208.
+///
+/// El reordenamiento `b·(v_post/v_pre)` SOLO se ejecuta cuando el producto no cabe, así que
+/// ninguna entrada que hoy funciona cambia un dígito; y no puede desbordar a su vez porque el
+/// caller garantiza `0 ≤ v_post < v_pre` y el cociente queda en [0, 1).
+fn shrink_basis(basis: Decimal, v_post: Decimal, v_pre: Decimal) -> Decimal {
+    match basis.checked_mul(v_post) {
+        Some(product) => product / v_pre,
+        None => basis * (v_post / v_pre),
+    }
+}
+
+/// Lo que UNA venta mensual dejó tras de sí, con **las tres magnitudes de B.1.5 ya separadas**
+/// (D22/D24, hallazgo B2 de la revisión adversarial):
+///
+/// - `net_obtained` — euros que de verdad salieron de los activos y se gastaron.
+/// - `undrained` — la parte de la venta INTENTADA que los activos no pudieron fundar, en euros
+///   de gasto. Es la ÚNICA que resta patrimonio (deuda implícita del hogar).
+/// - `shortfall` / `excess` — la distancia entre lo que la regla permitió y el gasto declarado.
+///   **Informativas**: no tocan el balance, no cuentan como fracaso.
+#[derive(Debug, Clone, Copy)]
+struct MonthSale {
+    net_obtained: Decimal,
+    /// `None` = **no hubo venta** (mes de superávit sin regla que gastar), y entonces no se
+    /// acumula NADA — ni siquiera un cero.
+    ///
+    /// La distinción no es estética: `Decimal` conserva la ESCALA, y sumar `Decimal::ZERO`
+    /// (escala 0) a un acumulador que vale `0.000000000000000000` (escala 18) devuelve el
+    /// operando, no la suma — el mismo VALOR con otro `Display`, que es justo lo que el pin
+    /// dorado hashea. 4.15.0 solo tocaba el acumulador en los meses con venta, y este `Option`
+    /// es lo que reproduce ese contacto exacto. (Se descubrió con P11: mismo patrimonio, mismo
+    /// descubierto, `0.000000000000000000` contra `0`.)
+    undrained: Option<Decimal>,
+    shortfall: Decimal,
+    excess: Decimal,
+    /// La venta intentada igualó o superó TODO lo vendible (definición `>=` de #119). El caller
+    /// decide si este es el primer mes que lo hace.
+    depleted_portfolio: bool,
+}
+
+impl MonthSale {
+    const EMPTY: Self = Self {
+        net_obtained: Decimal::ZERO,
+        undrained: None,
+        shortfall: Decimal::ZERO,
+        excess: Decimal::ZERO,
+        depleted_portfolio: false,
+    };
+
+    /// Reparte el resultado de la venta entre las tres magnitudes.
+    ///
+    /// `attempted_net` = el neto que la venta intentada pretendía obtener; `target_is_need` = esa
+    /// venta ERA la necesidad (sin techo, o con un techo que no ataba).
+    fn account(
+        &mut self,
+        need_net: Decimal,
+        attempted_net: Decimal,
+        obtained_net: Decimal,
+        target_is_need: bool,
+        forced_by_rule: bool,
+        sold: bool,
+    ) {
+        self.net_obtained = obtained_net;
+        // DESCUBIERTO. Lo que los activos no pudieron fundar de la venta intentada, **acotado por
+        // la necesidad real**: bajo `rule_is_spend`, la parte discrecional de una venta que la
+        // cartera no cubre no es deuda — nadie se endeuda para gastar de más. Con el objetivo =
+        // necesidad se conserva la expresión LITERAL de 4.15.0 (sin `min` ni `max`), que es lo
+        // que mantiene el pin dorado bit a bit: `after_tax(gross_up(n))` recupera `n` salvo el
+        // último dígito de 28, y meter un `max(0, ·)` ahí movería casos pineados.
+        self.undrained = sold.then(|| {
+            if target_is_need {
+                need_net - obtained_net
+            } else {
+                (attempted_net.min(need_net) - obtained_net).max(Decimal::ZERO)
+            }
+        });
+        // RECORTE DE LA REGLA: la necesidad que el techo dejó fuera. NO crece cuando la cartera
+        // se agota — eso es el descubierto. Cero exacto cuando no hubo techo que atara, y no por
+        // redondeo: se publica el literal.
+        self.shortfall = if target_is_need {
+            Decimal::ZERO
+        } else {
+            (need_net - attempted_net).max(Decimal::ZERO)
+        };
+        // SOBRANTE: solo existe cuando la regla ES el gasto y permitió más de lo necesario. En
+        // `ceiling` la venta nunca supera la necesidad, así que se publica 0 exacto en vez de la
+        // cola de redondeo de `after_tax(gross_up(n)) − n`.
+        self.excess = if forced_by_rule {
+            (obtained_net - need_net).max(Decimal::ZERO)
+        } else {
+            Decimal::ZERO
+        };
+    }
+}
+
+/// **La venta del mes** (5.0.0 WP2): decide el bruto a vender, lo vende sobre los activos en el
+/// orden de `drain_order`, asienta la base de coste (#120) y devuelve las tres magnitudes.
+///
+/// Dos razones para vender, y pueden darse a la vez:
+/// 1. **la necesidad** — la caja del mes no llega (`need_net > 0`), como en 4.15.0;
+/// 2. **la regla como gasto** (`rule_is_spend`, R7) — el permitido se vende TODOS los meses
+///    jubilados, también con superávit.
+///
+/// El techo `allowed_gross` es **BRUTO** (R9): topa la VENTA, no los euros que llegan al bolsillo.
+/// Con `fixed_real` es `None` y esta función ejecuta, operando a operando, la rama de déficit de
+/// 4.15.0 — el pin dorado lo comprueba.
+#[allow(clippy::too_many_arguments)]
+fn execute_month_sale(
+    values: &mut [Decimal],
+    basis: &mut [Decimal],
+    basis_declared: &[bool],
+    liquid: &[bool],
+    rates: &[Option<Decimal>],
+    scalar_gain_ratio: Decimal,
+    brackets: &[crate::tax::TaxBracket],
+    taxes_enabled: bool,
+    need_net: Decimal,
+    allowed_gross: Option<Decimal>,
+    spend_mode: SpendMode,
+    watch_depletion: bool,
+) -> MonthSale {
+    let mut out = MonthSale::EMPTY;
+
+    // Objetivo BRUTO forzado por la regla: solo en `rule_is_spend` y solo si hay techo.
+    let forced_gross = match spend_mode {
+        SpendMode::RuleIsSpend => allowed_gross,
+        SpendMode::Ceiling => None,
+    };
+    match forced_gross {
+        // Techo no positivo (cartera vacía bajo `percent_of_balance`): no se vende nada, pero el
+        // recorte sigue siendo la necesidad entera — el hogar no gastó lo que había declarado.
+        Some(a) if a <= Decimal::ZERO => {
+            out.shortfall = need_net.max(Decimal::ZERO);
+            return out;
+        }
+        Some(_) => {}
+        // Sin venta forzada y sin necesidad no hay nada que hacer: es el mes de superávit de
+        // 4.15.0, donde la rama de déficit ni se rozaba.
+        None if need_net <= Decimal::ZERO => return out,
+        None => {}
+    }
+
+    // 4.12.1: sin escalón de caja — el déficit entero se cubre vendiendo. La virtud fiscal del
+    // difunto escalón la hereda el drenaje natural: la cuenta al 0 % drena primero (drain_order)
+    // y su base alimentada por la cascada deriva g = 0 (b = v).
+    //
+    // #178: la fracción de plusvalía gravable es POR ACTIVO cuando su base es un DATO —
+    // `purchase_price` declarado (aunque sea 0) O base alimentada por la propia cascada
+    // (`basis_declared`, extensión 4.12.1): `g_i = 1 − b_i/v_i`, clampada a [0,1] (bajo el agua
+    // ⇒ 0; las minusvalías no compensan — divergencia declarada). Sin dato, el ESCALAR
+    // configurado. `g_i` es invariante al drenaje del propio mes (b'/v_post = b/v_pre — teorema
+    // pineado), así que evaluarla aquí no aproxima nada.
+    //
+    // `checked_div`, no `/` (issue #208, misma familia que el tope del solver mixto): `*v > ZERO`
+    // no basta como guarda. El crecimiento NO toca `basis` (solo la cascada y el drenaje lo
+    // hacen), así que una rentabilidad muy negativa deja el valor pegado al mínimo representable
+    // (1e-28) con la base entera, y `b/v` se sale del rango de `Decimal` — `/` panicaba. El
+    // fallback es el que el `clamp` ya dictaba: `b/v` enorme ⇒ `1 − b/v` muy negativo ⇒ `g = 0`
+    // (activo todo coste). Ningún caso que hoy no desborda cambia de valor.
+    let gains: Vec<Decimal> = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if basis_declared[i] && *v > Decimal::ZERO {
+                match basis[i].checked_div(*v) {
+                    Some(ratio) => (Decimal::ONE - ratio).clamp(Decimal::ZERO, Decimal::ONE),
+                    None => Decimal::ZERO,
+                }
+            } else {
+                scalar_gain_ratio
+            }
+        })
+        .collect();
+    // Cortocircuito de `g` uniforme (sobre lo VENDIBLE): camino LITERAL de 4.11.0, operando a
+    // operando — el paseo mixto es algebraicamente igual pero no bit a bit (trocear un tramo
+    // lineal añade divisiones que rust_decimal redondea).
+    let mut uniform_g: Option<Decimal> = None;
+    let mut is_uniform = true;
+    for i in 0..values.len() {
+        if values[i] > Decimal::ZERO {
+            match uniform_g {
+                None => uniform_g = Some(gains[i]),
+                Some(u) if u == gains[i] => {}
+                Some(_) => {
+                    is_uniform = false;
+                    break;
+                }
+            }
+        }
+    }
+    let effective_uniform = if is_uniform {
+        Some(uniform_g.unwrap_or(scalar_gain_ratio))
+    } else {
+        None
+    };
+
+    if let Some(g_scalar) = effective_uniform {
+        // #140 fase 1: lo que falta se cubre VENDIENDO, y la venta tributa — el bruto a drenar es
+        // gross_up_monthly(neto) (M1: anualiza, grossea por tramos, divide). Con
+        // `taxes_enabled = false` es la identidad y la rama es bit-idéntica a 4.9.0; con todos
+        // los activos sin coste declarado, `g_scalar` ES el escalar y es bit-idéntica a 4.11.0.
+        //
+        // 5.0.0 WP2: sobre ese bruto se aplica el techo de la regla. `target_is_need` distingue
+        // «la venta ERA la necesidad» (el camino de 4.15.0) de «la venta la fijó la regla».
+        let (target_gross, target_is_need) = match forced_gross {
+            Some(a) => (a, false),
+            None => {
+                let need_gross =
+                    crate::tax::gross_up_monthly(need_net, brackets, taxes_enabled, g_scalar);
+                match allowed_gross {
+                    Some(a) if a < need_gross => (a, false),
+                    _ => (need_gross, true),
+                }
+            }
+        };
+        // Mes de agotamiento (#119): el primer mes cuya VENTA BRUTA intentada iguala o supera
+        // todo lo vendible. En el caso exacto la cartera se VACÍA este mes y el descubierto
+        // empieza el siguiente: por eso `>=`. 200.000 € al 0 % gastando 2.000 €/mes ⇒ mes 100 sin
+        // impuestos (NW(360) −520.000) y mes 80 con tramos ES (NW(360) −561.200, descubierto
+        // NETO).
+        if target_gross > Decimal::ZERO && watch_depletion {
+            let drainable: Decimal = values
+                .iter()
+                .map(|v| (*v).max(Decimal::ZERO))
+                .sum::<Decimal>();
+            if target_gross >= drainable {
+                out.depleted_portfolio = true;
+            }
+        }
+        let mut drawn_net = Decimal::ZERO;
+        if target_gross > Decimal::ZERO {
+            let mut taken = vec![Decimal::ZERO; values.len()];
+            let und_gross =
+                drain_from_assets(values, liquid, rates, target_gross, Some(&mut taken));
+            // El descubierto se acumula NETO (#140 D-4): mide euros de GASTO que faltaron, no
+            // ventas que no ocurrieron — lo vendido de verdad netea after_tax(bruto obtenido).
+            // Con impuestos apagados after_tax es la identidad.
+            let drawn_gross = target_gross - und_gross;
+            drawn_net =
+                crate::tax::after_tax_monthly(drawn_gross, brackets, taxes_enabled, g_scalar);
+            // #120: la base baja en proporción al VALOR drenado. Guarda v_pre > 0 obligatoria:
+            // Decimal / 0 PANICA (precedente task_panic).
+            for i in 0..values.len() {
+                if taken[i] > Decimal::ZERO {
+                    let v_pre = values[i] + taken[i];
+                    if v_pre > Decimal::ZERO {
+                        basis[i] = shrink_basis(basis[i], values[i], v_pre);
+                    }
+                }
+            }
+        }
+        let attempted_net = if target_is_need {
+            need_net
+        } else {
+            crate::tax::after_tax_monthly(target_gross, brackets, taxes_enabled, g_scalar)
+        };
+        out.account(
+            need_net,
+            attempted_net,
+            drawn_net,
+            target_is_need,
+            forced_gross.is_some(),
+            target_gross > Decimal::ZERO,
+        );
+    } else {
+        // Vía MIXTA (#178): el solver por tramos decide venta bruta Y reparto a la vez — la base
+        // agregada `Σ g_i·venta_i` atraviesa los tramos progresivos y ninguna `g` escalar puede
+        // representarla. El orden es EL MISMO de `drain_from_assets` (implementación única
+        // `drain_order`): divergir aquí gravaría una venta que no ocurre.
+        let order = drain_order(liquid, rates);
+        let segments: Vec<crate::tax::MixedSegment> = order
+            .iter()
+            .map(|&i| crate::tax::MixedSegment {
+                capacity_monthly: values[i].max(Decimal::ZERO),
+                gain_ratio: gains[i],
+            })
+            .collect();
+        // Con venta forzada el objetivo ya es BRUTO y el paseo va en directo. Sin ella se
+        // resuelve la necesidad (paseo inverso, el de 4.12.0) y solo se rehace en directo si el
+        // techo de verdad recorta esa venta.
+        let inverse = match forced_gross {
+            Some(_) => None,
+            None => Some(crate::tax::gross_up_mixed_monthly(
+                need_net,
+                &segments,
+                brackets,
+                taxes_enabled,
+            )),
+        };
+        let binding_cap = match (&inverse, forced_gross, allowed_gross) {
+            (None, Some(a), _) => Some(a),
+            (Some(dd), _, Some(a)) if dd.gross_monthly > a => Some(a),
+            _ => None,
+        };
+        let (per_segment, attempted_gross, obtained_net, attempted_net, target_is_need) =
+            match binding_cap {
+                Some(a) => {
+                    let w = crate::tax::mixed_drawdown_for_gross_cap(
+                        a,
+                        &segments,
+                        brackets,
+                        taxes_enabled,
+                    );
+                    // ¿Se vendió el techo entero? Si las capacidades no llegaron, la cartera se
+                    // vació: lo que no se pudo vender se atribuye a la NECESIDAD (el paseo no
+                    // puede poner precio fiscal a un bruto que ningún activo respalda — no hay
+                    // `g` que aplicarle). Es la dirección prudente y coincide con lo que
+                    // `fixed_real` habría acumulado. Bajo `ceiling` es inalcanzable: el techo
+                    // solo ata cuando es MENOR que una venta que la cartera sí soportaba.
+                    let fully_sold = w.gross_monthly >= a;
+                    let attempted_net = if fully_sold { w.net_monthly } else { need_net };
+                    (
+                        w.per_segment_monthly,
+                        a,
+                        w.net_monthly,
+                        attempted_net,
+                        false,
+                    )
+                }
+                None => {
+                    let dd = inverse.expect("sin venta forzada el paseo inverso siempre existe");
+                    // El descubierto sale NETO por construcción del solver — sin segunda llamada:
+                    // `after_tax_monthly` con una sola `g` sería incorrecta sobre un bruto mixto.
+                    let obtained = need_net - dd.net_shortfall_monthly;
+                    (
+                        dd.per_segment_monthly,
+                        dd.gross_monthly,
+                        obtained,
+                        need_net,
+                        true,
+                    )
+                }
+            };
+        // Agotamiento (#119), misma semántica `>=` de la vía escalar sobre la venta INTENTADA.
+        if watch_depletion {
+            let drainable: Decimal = segments.iter().map(|s| s.capacity_monthly).sum();
+            if attempted_gross >= drainable {
+                out.depleted_portfolio = true;
+            }
+        }
+        for (pos, &i) in order.iter().enumerate() {
+            let take = per_segment[pos];
+            if take > Decimal::ZERO {
+                values[i] -= take;
+                // #120: b' = b·v_post/v_pre, mismas guardas que la vía escalar.
+                let v_pre = values[i] + take;
+                if v_pre > Decimal::ZERO {
+                    basis[i] = shrink_basis(basis[i], values[i], v_pre);
+                }
+            }
+        }
+        out.account(
+            need_net,
+            attempted_net,
+            obtained_net,
+            target_is_need,
+            forced_gross.is_some(),
+            true,
+        );
+    }
+
+    out
 }
 
 /// Resolve a rule's cap into an absolute € ceiling for the destination asset.
@@ -1489,6 +1880,16 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
     // simulado: cero por definición, como el resto de series.
     let mut withdrawal_series: Vec<Decimal> = Vec::with_capacity(input.horizon_months as usize + 1);
     withdrawal_series.push(Decimal::ZERO);
+    // 5.0.0 WP2 — las otras dos magnitudes de B.1.5, con la misma base de índice: el recorte de
+    // la regla y el sobrante que `rule_is_spend` gasta. Ninguna de las dos toca el balance.
+    let mut shortfall_series: Vec<Decimal> = Vec::with_capacity(input.horizon_months as usize + 1);
+    shortfall_series.push(Decimal::ZERO);
+    let mut excess_series: Vec<Decimal> = Vec::with_capacity(input.horizon_months as usize + 1);
+    excess_series.push(Decimal::ZERO);
+    // Estado de la regla de retirada (§B.2). Vive FUERA del bucle porque `hybrid` y `guardrails`
+    // tienen memoria: un latch que no se recuerda no es un latch, y un guardarraíl que olvida su
+    // ajuste no es Guyton-Klinger.
+    let mut planner = crate::withdrawal::WithdrawalPlanner::new(plan.withdrawal);
 
     let start_month_first = month_first_calendar(input.ref_date);
 
@@ -1668,186 +2069,39 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             + planning_adj
             - retirement_withdrawal;
 
-        // 5.0.0 WP1b (§B.8): retirada NETA del mes. Se rellena solo en la rama de déficit y NO
-        // participa en ninguna decisión — es una lectura de lo que ya ocurrió.
-        let mut withdrawal_month = Decimal::ZERO;
-
-        if net_cash_month <= Decimal::ZERO {
-            // 4.12.1: sin escalón de caja — el déficit entero se cubre vendiendo. La virtud
-            // fiscal del difunto escalón la hereda el drenaje natural: la cuenta al 0 % drena
-            // primero (drain_order) y su base alimentada por la cascada deriva g = 0 (b = v).
-            let need_assets_net = -net_cash_month;
-            // #178: la fracción de plusvalía gravable es POR ACTIVO cuando su base es un DATO —
-            // `purchase_price` declarado (aunque sea 0) O base alimentada por la propia cascada
-            // (`basis_declared`, extensión 4.12.1): `g_i = 1 − b_i/v_i`, clampada a [0,1] (bajo
-            // el agua ⇒ 0; las minusvalías no compensan — divergencia declarada). Sin dato, el
-            // ESCALAR configurado. `g_i` es invariante al drenaje del propio mes
-            // (b'/v_post = b/v_pre — teorema pineado), así que evaluarla aquí no aproxima nada.
-            //
-            // `checked_div`, no `/` (issue #208, misma familia que el tope del solver mixto):
-            // `*v > ZERO` no basta como guarda. El crecimiento NO toca `basis` (solo la cascada
-            // y el drenaje lo hacen), así que una rentabilidad muy negativa deja el valor pegado
-            // al mínimo representable (1e-28) con la base entera, y `b/v` se sale del rango de
-            // `Decimal` — `/` panicaba. El fallback es el que el `clamp` ya dictaba: `b/v`
-            // enorme ⇒ `1 − b/v` muy negativo ⇒ `g = 0` (activo todo coste). Ningún caso que
-            // hoy no desborda cambia de valor.
-            let gains: Vec<Decimal> = values
-                .iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    if basis_declared[i] && *v > Decimal::ZERO {
-                        match basis[i].checked_div(*v) {
-                            Some(ratio) => {
-                                (Decimal::ONE - ratio).clamp(Decimal::ZERO, Decimal::ONE)
-                            }
-                            None => Decimal::ZERO,
-                        }
-                    } else {
-                        input.taxable_gain_ratio
-                    }
-                })
-                .collect();
-            // Cortocircuito de `g` uniforme (sobre lo VENDIBLE): camino LITERAL de 4.11.0,
-            // operando a operando — el paseo mixto es algebraicamente igual pero no bit a bit
-            // (trocear un tramo lineal añade divisiones que rust_decimal redondea).
-            let mut uniform_g: Option<Decimal> = None;
-            let mut is_uniform = true;
-            for i in 0..values.len() {
-                if values[i] > Decimal::ZERO {
-                    match uniform_g {
-                        None => uniform_g = Some(gains[i]),
-                        Some(u) if u == gains[i] => {}
-                        Some(_) => {
-                            is_uniform = false;
-                            break;
-                        }
-                    }
-                }
-            }
-            let effective_uniform = if is_uniform {
-                Some(uniform_g.unwrap_or(input.taxable_gain_ratio))
-            } else {
-                None
-            };
-
-            if let Some(g_scalar) = effective_uniform {
-                // #140 fase 1: lo que falta se cubre VENDIENDO, y la venta tributa — el bruto a
-                // drenar es gross_up_monthly(neto) (M1: anualiza, grossea por tramos, divide).
-                // Con `taxes_enabled = false` es la identidad y la rama es bit-idéntica a 4.9.0;
-                // con todos los activos sin coste declarado, `g_scalar` ES el escalar y la rama
-                // es bit-idéntica a 4.11.0.
-                let need_gross = crate::tax::gross_up_monthly(
-                    need_assets_net,
-                    &input.tax_brackets,
-                    input.taxes_enabled,
-                    g_scalar,
-                );
-                // Mes de agotamiento (#119): el primer mes cuya VENTA BRUTA necesaria iguala o
-                // supera todo lo vendible (la caja ya se restó arriba; el drenaje continúa sobre
-                // los ilíquidos). En el caso exacto la cartera se VACÍA este mes y el descubierto
-                // empieza el siguiente: por eso `>=`. Equivalencia exacta con el predicado
-                // histórico con impuestos apagados: `need ≥ surplus + A ⟺ need − surplus ≥ A`.
-                // 200.000 € al 0 % gastando 2.000 €/mes ⇒ mes 100 sin impuestos (NW(360)
-                // −520.000) y mes 80 con tramos ES (NW(360) −561.200, descubierto NETO).
-                if need_gross > Decimal::ZERO && assets_depleted_month_index.is_none() {
-                    let drainable: Decimal = values
-                        .iter()
-                        .map(|v| (*v).max(Decimal::ZERO))
-                        .sum::<Decimal>();
-                    if need_gross >= drainable {
-                        assets_depleted_month_index = Some(k);
-                    }
-                }
-                if need_gross > Decimal::ZERO {
-                    let mut taken = vec![Decimal::ZERO; values.len()];
-                    let und_gross = drain_from_assets(
-                        &mut values,
-                        &liquid,
-                        &rates,
-                        need_gross,
-                        Some(&mut taken),
-                    );
-                    // El descubierto se acumula NETO (#140 D-4): mide euros de GASTO que
-                    // faltaron, no ventas que no ocurrieron — lo vendido de verdad netea
-                    // after_tax(bruto obtenido), y lo que falta del gasto es la diferencia.
-                    // Con impuestos apagados after_tax es la identidad y esto es exactamente
-                    // el `und` de siempre.
-                    let drawn_gross = need_gross - und_gross;
-                    // 5.0.0 WP1b: el neto que de verdad salió de los activos ES la retirada del
-                    // mes. Misma expresión que antes, con nombre: se calcula una vez y se usa dos
-                    // (serie y descubierto), sin reordenar ni una operación.
-                    let drawn_net = crate::tax::after_tax_monthly(
-                        drawn_gross,
-                        &input.tax_brackets,
-                        input.taxes_enabled,
-                        g_scalar,
-                    );
-                    withdrawal_month = drawn_net;
-                    undrained_cumulative += need_assets_net - drawn_net;
-                    // #120: la base baja en proporción al VALOR drenado — b' = b·v_post/v_pre,
-                    // multiplicación antes de la división (drenar todo ⇒ b·0/v = 0 exacto).
-                    // Guarda v_pre > 0 obligatoria: Decimal / 0 PANICA (precedente task_panic).
-                    for i in 0..values.len() {
-                        if taken[i] > Decimal::ZERO {
-                            let v_pre = values[i] + taken[i];
-                            if v_pre > Decimal::ZERO {
-                                basis[i] = basis[i] * values[i] / v_pre;
-                            }
-                        }
-                    }
-                }
-            } else if need_assets_net > Decimal::ZERO {
-                // Vía MIXTA (#178): el solver por tramos decide venta bruta Y reparto a la vez
-                // — la base agregada `Σ g_i·venta_i` atraviesa los tramos progresivos y ninguna
-                // `g` escalar puede representarla. El orden es EL MISMO de `drain_from_assets`
-                // (implementación única `drain_order`): divergir aquí gravaría una venta que no
-                // ocurre.
-                let order = drain_order(&liquid, &rates);
-                let segments: Vec<crate::tax::MixedSegment> = order
-                    .iter()
-                    .map(|&i| crate::tax::MixedSegment {
-                        capacity_monthly: values[i].max(Decimal::ZERO),
-                        gain_ratio: gains[i],
-                    })
-                    .collect();
-                let dd = crate::tax::gross_up_mixed_monthly(
-                    need_assets_net,
-                    &segments,
-                    &input.tax_brackets,
-                    input.taxes_enabled,
-                );
-                // Agotamiento (#119), misma semántica `>=` de la vía escalar: si la venta
-                // necesaria consume TODO lo vendible (shortfall > 0, o exacto: bruto == Σ
-                // capacidades), la cartera se vacía este mes.
-                if assets_depleted_month_index.is_none() {
-                    let drainable: Decimal =
-                        segments.iter().map(|s| s.capacity_monthly).sum();
-                    if dd.gross_monthly >= drainable {
-                        assets_depleted_month_index = Some(k);
-                    }
-                }
-                // El descubierto sale NETO por construcción del solver — sin segunda llamada:
-                // `after_tax_monthly` con una sola `g` sería incorrecta sobre un bruto mixto.
-                undrained_cumulative += dd.net_shortfall_monthly;
-                // 5.0.0 WP1b: lo retirado NETO = lo que hacía falta menos lo que no se pudo
-                // vender. El acumulador de arriba no se toca.
-                withdrawal_month = need_assets_net - dd.net_shortfall_monthly;
-                for (pos, &i) in order.iter().enumerate() {
-                    let take = dd.per_segment_monthly[pos];
-                    if take > Decimal::ZERO {
-                        values[i] -= take;
-                        // #120: b' = b·v_post/v_pre, mismas guardas que la vía escalar.
-                        let v_pre = values[i] + take;
-                        if v_pre > Decimal::ZERO {
-                            basis[i] = basis[i] * values[i] / v_pre;
-                        }
-                    }
-                }
-            }
+        // 5.0.0 WP2 — REGLA DE RETIRADA (§B.2). El ancla de la fase jubilada (`L(R−1)`, `f(R−1)`)
+        // se fija el PRIMER mes jubilado con los MISMOS escalares que el cruce acaba de usar, y el
+        // techo del mes se pide UNA sola vez: `hybrid` y `guardrails` tienen memoria, así que
+        // pedirlo dos veces revisaría el guardarraíl dos veces.
+        //
+        // `None` = sin techo. Lo es con `fixed_real` (el permitido ES la necesidad) y lo es
+        // mientras el hogar no se ha jubilado: una regla de retirada gobierna la jubilación, no
+        // el mes malo de quien sigue trabajando.
+        let allowed_gross = if in_retirement {
+            planner.anchor_retirement(k, liquid_prev, expense_factor);
+            planner.allowed_gross(k, liquid_prev, expense_factor)
         } else {
-            // 4.12.1 (#175): la MISMA cascada, jubilado o no — nadie cambia de lógica al
-            // jubilarse. Los techos de la fase (#171) pasan de explicativos a vinculantes.
-            // `None`: el bucle corre hasta 840 veces por request y nadie lee la traza aquí.
+            None
+        };
+
+        // La necesidad NETA del mes: lo que la caja no cubre. Misma expresión y mismo valor que
+        // el `need_assets_net` que 4.15.0 calculaba dentro de la rama de déficit.
+        let need_assets_net = if net_cash_month <= Decimal::ZERO {
+            -net_cash_month
+        } else {
+            Decimal::ZERO
+        };
+
+        // 4.12.1 (#175): la MISMA cascada, jubilado o no — nadie cambia de lógica al jubilarse.
+        // Los techos de la fase (#171) pasan de explicativos a vinculantes. `None`: el bucle
+        // corre hasta 840 veces por request y nadie lee la traza aquí.
+        //
+        // **La venta ya no vive en un `else`**: baja a `execute_month_sale`, DESPUÉS del reparto.
+        // Hasta 4.15.0 las dos ramas eran excluyentes —o había déficit y se vendía, o había
+        // superávit y se repartía—, así que bajarla no mueve un dígito de ningún caso de 4.15.0.
+        // Quien necesita ese orden es `rule_is_spend` (R7): con superávit, la cascada invierte la
+        // caja del mes PRIMERO y la regla vende DESPUÉS, sobre el saldo ya reinvertido.
+        if net_cash_month > Decimal::ZERO {
             let (alloc, leftover) = distribute_contributions(
                 net_cash_month,
                 &input.allocation_rules,
@@ -1873,6 +2127,32 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
             }
         }
 
+        // La venta del mes: la necesidad (topada por la regla) y/o —en `rule_is_spend`— el gasto
+        // que la regla ES. Devuelve las TRES magnitudes de B.1.5 ya separadas.
+        let sale = execute_month_sale(
+            &mut values,
+            &mut basis,
+            &basis_declared,
+            &liquid,
+            &rates,
+            input.taxable_gain_ratio,
+            &input.tax_brackets,
+            input.taxes_enabled,
+            need_assets_net,
+            allowed_gross,
+            plan.spend_mode,
+            assets_depleted_month_index.is_none(),
+        );
+        if sale.depleted_portfolio && assets_depleted_month_index.is_none() {
+            assets_depleted_month_index = Some(k);
+        }
+        // Solo el descubierto RESTA patrimonio (D22/D24): el recorte y el sobrante de la regla
+        // son lecturas, y viajan en sus propias series. `None` = no hubo venta este mes y el
+        // acumulador NO se toca (ver el doc de `MonthSale::undrained`).
+        if let Some(undrained_month) = sale.undrained {
+            undrained_cumulative += undrained_month;
+        }
+
         for i in 0..values.len() {
             // Precalculado antes del bucle (`growth_multipliers`): mismo valor exacto que
             // `monthly_multiplier(rates[i])`, sin repetir la raíz doceava 840 veces.
@@ -1892,7 +2172,9 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
 
         let nw = nw_fn(&values, &principals, undrained_cumulative);
         net_series.push(nw);
-        withdrawal_series.push(withdrawal_month);
+        withdrawal_series.push(sale.net_obtained);
+        shortfall_series.push(sale.shortfall);
+        excess_series.push(sale.excess);
         liquid_series.push(liquid_fn(&values));
         contrib_series.push(contributed_fn(&basis));
         for (i, s) in per_asset_series.iter_mut().enumerate() {
@@ -1908,8 +2190,6 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
     if let Some(k) = retirement_month_index {
         phase_transitions.push((Phase::Retired, k));
     }
-    let zeros = || vec![Decimal::ZERO; input.horizon_months as usize + 1];
-
     Ok(ProjectionOutput {
         net_worth: net_series,
         contributed_capital: contrib_series,
@@ -1922,12 +2202,11 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         liquid_crossing_month_index,
         phase_transitions,
         withdrawal: withdrawal_series,
-        // `fixed_real` retira EXACTAMENTE la necesidad: no hay techo que recorte ni sobrante que
-        // gastar de más, así que las dos series son cero por construcción, no por no calcularse.
-        // Se publican ya (con su longitud definitiva) para que la forma de la salida no cambie
-        // cuando WP2 las llene.
-        withdrawal_shortfall: zeros(),
-        withdrawal_excess: zeros(),
+        // Con `fixed_real` estas dos siguen siendo cero mes a mes —el permitido ES la necesidad,
+        // así que no hay techo que recorte ni sobrante que gastar—, pero ahora por el camino
+        // general, no por un `vec![0]` que fingía calcularlas.
+        withdrawal_shortfall: shortfall_series,
+        withdrawal_excess: excess_series,
         pension_start_month_index: None,
         partial_retirement_month_index: None,
         warnings: Vec::new(),
@@ -4903,4 +5182,72 @@ mod tests {
             "el drag es ≈ +7.140,43: nuevo {t360}, viejo {viejo}"
         );
     }
+
+    /// **REGRESIÓN de la issue #209** (antes: PÁNICO «Multiplication overflowed»).
+    ///
+    /// La base de coste baja con lo vendido — `b' = b·v_post/v_pre` (#120) — y el producto
+    /// intermedio `b·v` desborda el rango de `Decimal` (~7,9e28) mucho antes que `b` o `v` por
+    /// separado. Reproductor del issue, verbatim: un activo líquido con
+    /// `value = purchase_price = 99.999.999.999.999` (el techo de `NUMERIC(18,4)`) al 20 %/año,
+    /// horizonte 840, gasto 1.000 €/mes.
+    ///
+    /// A mano: la base se queda pegada a ~1e14 (solo encoge) mientras el valor compone al 20 %,
+    /// así que el producto pasa de 7,9e28 en cuanto `v > 7,9e14`, o sea `1,2^t > 7,9` ⇒
+    /// `t ≈ 11,3 años` ⇒ **hacia el mes 136**. En producción eso era un 400 `task_panic` opaco y
+    /// permanente para ese hogar; el motor es una función pura y la API acepta esos importes.
+    ///
+    /// El arreglo reordena a `b·(v_post/v_pre)` **solo cuando el producto no cabe** (el cociente
+    /// es ≤ 1 y no puede desbordar), así que ningún caso pineado cambia un dígito — lo demuestra
+    /// el pin dorado, que sigue verde.
+    #[test]
+    fn the_cost_basis_update_survives_an_asset_at_the_numeric_ceiling() {
+        let techo = Decimal::from(99_999_999_999_999i64);
+        let asset = SimAsset {
+            id: Uuid::from_u128(0x209),
+            value: techo,
+            purchase_price: Some(techo),
+            is_liquid: true,
+            expected_annual_return_percent: Some(Decimal::from(20)),
+        };
+        let inp = base_input(
+            840,
+            Decimal::ZERO,
+            Decimal::from(1_000),
+            vec![asset],
+            vec![],
+        );
+        let out = project_net_worth_series(&inp)
+            .expect("un activo en el techo de la columna no puede hacer panicar al motor");
+
+        assert_eq!(out.net_worth.len(), 841);
+        // Y no basta con «no panica»: los números tienen que seguir siendo finitos y coherentes.
+        // El mes 136 es el primero cuyo producto `b·v` desbordaba: aquí se comprueba que la serie
+        // lo atraviesa y que la base sigue siendo positiva y ≤ el valor (nunca puede superarlo:
+        // el drenaje la baja en proporción y el crecimiento no la toca).
+        for k in [1usize, 136, 137, 500, 840] {
+            assert!(
+                out.net_worth[k] > Decimal::ZERO,
+                "mes {k}: {}",
+                out.net_worth[k]
+            );
+            assert!(
+                out.contributed_capital[k] > Decimal::ZERO
+                    && out.contributed_capital[k] <= out.per_asset_series[0][k],
+                "mes {k}: base {} contra valor {}",
+                out.contributed_capital[k],
+                out.per_asset_series[0][k]
+            );
+        }
+        assert_eq!(
+            out.uncovered_deficit_total,
+            Decimal::ZERO,
+            "1e14 € cubren 1.000 €/mes"
+        );
+        assert_eq!(out.assets_depleted_month_index, None);
+        // La base ENCOGE con cada venta y el valor CRECE: la plusvalía relativa `g = 1 − b/v`
+        // tiende a 1, que es la dirección que #178 describe.
+        assert!(out.contributed_capital[840] < out.contributed_capital[1]);
+        assert!(out.per_asset_series[0][840] > out.per_asset_series[0][1]);
+    }
+
 }

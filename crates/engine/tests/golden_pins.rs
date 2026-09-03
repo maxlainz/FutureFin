@@ -34,11 +34,14 @@
 #[path = "common/cases.rs"]
 mod cases;
 
-use cases::{liability_cases, projection_cases_all, projection_cases_audit, ref_date};
+use cases::{
+    liability_cases, projection_cases_5_0, projection_cases_all, projection_cases_audit,
+    projection_cases_dumped, ref_date,
+};
 use futurefin_engine::{
     first_month_allocation, liability_amortization_schedule, project_net_worth_series,
     AllocationSkipReason, FirstMonthAllocation, LiabilityPayoffAbsence, LiabilitySchedule, Phase,
-    ProjectionInput, ProjectionOutput,
+    ProjectionInput, ProjectionOutput, SpendMode, WithdrawalRule,
 };
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
@@ -550,10 +553,38 @@ fn the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery() {
     assert_eq!(
         audit.len(),
         7,
-        "la batería que audit_dump vuelca son los 6 casos P1–P6 más P13 (la regresión de la issue \
-         #208, añadida en WP1a de 5.0.0); si de verdad hace falta uno más en el CSV, el oráculo \
-         externo tiene que enterarse"
+        "la batería histórica son los 6 casos P1–P6 más P13 (la regresión de la issue #208, \
+         añadida en WP1a de 5.0.0); si de verdad hace falta uno más, el oráculo externo tiene que \
+         enterarse"
     );
+
+    // Y lo que el CSV vuelca de verdad: esa batería histórica MÁS los casos de 5.0.0, en ese
+    // orden. El CSV creció en WP2 (P14–P17) y esta línea es donde ese crecimiento está declarado:
+    // si alguien mete un caso en `projection_cases_5_0()` sin querer volcarlo, aquí se ve.
+    let dumped: Vec<&str> = projection_cases_dumped().iter().map(|c| c.name).collect();
+    let nuevos: Vec<&str> = projection_cases_5_0().iter().map(|c| c.name).collect();
+    assert_eq!(
+        dumped,
+        [audit.clone(), nuevos.clone()].concat(),
+        "el CSV de audit_dump es la batería histórica seguida de la de 5.0.0"
+    );
+    assert_eq!(
+        nuevos,
+        vec![
+            "P14_techo_numeric",
+            "P15_percent_of_balance_ceiling",
+            "P16_hybrid_rule_is_spend",
+            "P17_guardrails_taxes_es",
+        ],
+        "los casos de 5.0.0 y su orden también son contrato del CSV"
+    );
+    // Y ninguno de ellos puede haberse colado en el conjunto que `pins-4.15.json` hashea.
+    for n in &nuevos {
+        assert!(
+            !all.contains(n),
+            "{n} está en projection_cases_all(): eso obliga a regenerar pins-4.15.json"
+        );
+    }
 }
 
 /// **Anclas derivadas a mano** de P7 y P9. El hash prueba que el motor es reproducible; esto
@@ -668,6 +699,124 @@ fn p7_and_p9_are_anchored_by_hand_derived_numbers() {
         liquid9 < target9,
         "P9 no puede arrancar jubilado ({liquid9} ≥ {target9})"
     );
+}
+
+/// **Anclas derivadas a mano de los casos de 5.0.0** (P14–P17), gemelas de las de P7/P9: el hash
+/// prueba que el motor es reproducible; esto prueba que cada caso ejercita LA REGLA QUE DICE
+/// ejercitar. Sin ellas, un caso que dejara de recortar —o que nunca disparase un guardarraíl—
+/// pasaría el pin perfectamente el día que alguien lo regenerase.
+#[test]
+fn the_5_0_cases_are_anchored_by_hand_derived_numbers() {
+    let all = projection_cases_5_0();
+    let get = |name: &str| {
+        all.iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("{name} debe existir en la batería de 5.0.0"))
+    };
+    let dec = |v: &str| v.parse::<Decimal>().unwrap();
+
+    // ---- P14: el techo numérico de #209 ----------------------------------------------------
+    // Sin impuestos, `fixed_real` y 1.000 €/mes de déficit: la venta es 1.000 € clavados todos
+    // los meses, y lo que este caso demuestra es que los 840 corren — el producto `b·v` de la
+    // base de coste desborda hacia el mes 136 y antes de WP2 esto PANICABA.
+    let p14 = project_net_worth_series(&get("P14_techo_numeric").input).expect("P14 simula");
+    for k in [1usize, 136, 137, 840] {
+        assert_eq!(p14.withdrawal[k], Decimal::from(1_000), "P14 mes {k}");
+    }
+    assert!(p14.withdrawal_shortfall.iter().all(|v| *v == Decimal::ZERO));
+    assert_eq!(p14.uncovered_deficit_total, Decimal::ZERO);
+    assert!(
+        p14.net_worth[840] > Decimal::from(1_000_000_000_000i64),
+        "un activo de 1e14 al 20 % durante 70 años no puede acabar pequeño: {}",
+        p14.net_worth[840]
+    );
+
+    // ---- P15: el techo BRUTO con `g` mixta -------------------------------------------------
+    // Mes 1: permitido = 4 %·400.000/12 = **1.333,3333 € BRUTOS** (R9). La venta entera cabe en
+    // el primer activo (g = 0,2, capacidad 150.000), así que la base anual gravable es
+    // 12·1.333,33·0,2 = 3.200 € — dentro del tramo del 19 % ⇒ impuesto 608 €/año ⇒ neto anual
+    // 16.000 − 608 = 15.392 ⇒ **1.282,6667 €/mes**.
+    // Necesidad = 2.300 − 900 = 1.400 ⇒ recorte = 1.400 − 1.282,6667 = **117,3333**.
+    let p15 =
+        project_net_worth_series(&get("P15_percent_of_balance_ceiling").input).expect("P15 simula");
+    assert_eq!(p15.retirement_month_index, Some(1));
+    assert_eq!(p15.withdrawal[1].round_dp(4), dec("1282.6667"));
+    assert_eq!(p15.withdrawal_shortfall[1].round_dp(4), dec("117.3333"));
+    assert_eq!(
+        p15.withdrawal[1] + p15.withdrawal_shortfall[1],
+        Decimal::from(1_400),
+        "retirada + recorte = necesidad, exacto"
+    );
+    assert!(
+        p15.withdrawal_excess.iter().all(|v| *v == Decimal::ZERO),
+        "ceiling no gasta de más"
+    );
+    assert_eq!(
+        p15.uncovered_deficit_total.round_dp(8),
+        Decimal::ZERO,
+        "el recorte NO es descubierto: con 400.000 € vendibles no falta un euro por vender"
+    );
+
+    // ---- P16: la regla ES el gasto, y el latch de `hybrid` ---------------------------------
+    // Mes 1: permitido = 5 %·500.000/12 = **2.083,3333** (sin impuestos, neto = bruto). El hogar
+    // tiene SUPERÁVIT (1.800 − 1.500 = +300), así que la necesidad es 0 y todo lo vendido es
+    // sobrante que se gasta: `withdrawal_excess[1] == withdrawal[1]`.
+    let p16 = project_net_worth_series(&get("P16_hybrid_rule_is_spend").input).expect("P16 simula");
+    assert_eq!(p16.withdrawal[1].round_dp(4), dec("2083.3333"));
+    assert_eq!(p16.withdrawal_excess[1], p16.withdrawal[1]);
+    assert_eq!(p16.withdrawal_shortfall[1], Decimal::ZERO);
+    // El latch: la razón retirada/líquido(k−1) pasa de 5 %/12 a 3,5 %/12 UNA sola vez y no vuelve.
+    let ratio = |k: usize| (p16.withdrawal[k] / p16.liquid_worth[k - 1]).round_dp(8);
+    let inicial = dec("0.00416667"); // 5 %/12
+    let final_ = dec("0.00291667"); // 3,5 %/12
+    let latch = (1..p16.withdrawal.len())
+        .find(|&k| ratio(k) == final_)
+        .expect("el latch de hybrid tiene que dispararse dentro del horizonte");
+    assert_eq!(latch, 156, "el mes del latch de P16");
+    for k in 1..p16.withdrawal.len() {
+        assert_eq!(
+            ratio(k),
+            if k < latch { inicial } else { final_ },
+            "P16 mes {k}: la regla solo cambia una vez, en el latch"
+        );
+    }
+
+    // ---- P17: los guardarraíles ------------------------------------------------------------
+    // Mes 1: `W_R` = 4 %·700.000/12 = **2.333,3333 € BRUTOS**; con la escala ES y g = 1 el
+    // impuesto anual sobre 28.000 € es 6.000·19 % + 22.000·21 % = 1.140 + 4.620 = 5.760 ⇒ neto
+    // anual 22.240 ⇒ **1.853,3333 €/mes**. Necesidad 2.600 ⇒ recorte **746,6667**.
+    let p17 = project_net_worth_series(&get("P17_guardrails_taxes_es").input).expect("P17 simula");
+    assert_eq!(p17.withdrawal[1].round_dp(4), dec("1853.3333"));
+    assert_eq!(p17.withdrawal_shortfall[1].round_dp(4), dec("746.6667"));
+    assert_eq!(
+        p17.withdrawal[1] + p17.withdrawal_shortfall[1],
+        Decimal::from(2_600)
+    );
+    // La retirada se INDEXA al IPC, así que sube todos los meses… salvo cuando un guardarraíl
+    // recorta. El primer recorte es el de capital-preservation, y cae donde la cuenta a mano dice:
+    // la tasa efectiva `12·W_R·f(k−1)/L(k−1)` arranca en el 4 % y crece al 2,5 % anual (el líquido
+    // apenas se mueve), así que cruza el 4,8 % de la banda hacia el mes 92 — pero las revisiones
+    // solo ocurren cada 12 meses desde R = 1, y la primera posterior es **k = 97**.
+    let cortes: Vec<usize> = (2..p17.withdrawal.len())
+        .filter(|&k| p17.withdrawal[k] < p17.withdrawal[k - 1])
+        .collect();
+    assert_eq!(
+        cortes.first().copied(),
+        Some(97),
+        "el primer recorte de guardarraíl de P17 (cortes: {cortes:?})"
+    );
+    for k in &cortes {
+        assert_eq!(
+            (k - 1) % 12,
+            0,
+            "un guardarraíl solo puede moverse en una revisión anual desde R = 1 (mes {k})"
+        );
+    }
+    assert!(
+        cortes.len() >= 5,
+        "P17 existe para pinear MUCHAS revisiones, no una: {cortes:?}"
+    );
+    assert!(p17.withdrawal_excess.iter().all(|v| *v == Decimal::ZERO));
 }
 
 /// **REGRESIÓN de la issue #208** (era DIANA `#[ignore]` en WP0: entonces PANICABA; el arreglo
@@ -838,8 +987,17 @@ struct Pin50 {
     phases: String,
 }
 
+/// La batería del pin de 5.0.0 es la de 4.15.0 **más** los casos que WP2 añadió
+/// (`projection_cases_5_0`). Crece por aquí y solo por aquí: `projection_cases_all()` no puede
+/// crecer sin regenerar `pins-4.15.json`, que existe para no moverse.
+fn cases_5_0() -> Vec<cases::ProjCase> {
+    let mut out = projection_cases_all();
+    out.extend(projection_cases_5_0());
+    out
+}
+
 fn live_pins_5_0() -> Vec<Pin50> {
-    projection_cases_all()
+    cases_5_0()
         .into_iter()
         .map(|c| {
             let out = project_net_worth_series(&c.input)
@@ -876,8 +1034,11 @@ Vive APARTE de pins-4.15.json a proposito: aquel demuestra que las salidas de 4.
 movieron y dejaria de poder demostrarlo si creciera con cada lectura nueva. GENERADO: no editar \
 a mano. Regenerar SOLO si el cambio es intencionado: UPDATE_ENGINE_PINS_5_0=1 cargo test -p \
 futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG \
-(futurefin-change-control). En WP1b withdrawal_shortfall y withdrawal_excess son cero por \
-construccion (fixed_real no tiene techo); WP2 los llena y este pin dira exactamente donde.";
+(futurefin-change-control). Cubre projection_cases_all() (los casos de 4.15.0) MAS \
+projection_cases_5_0() (P14-P17: el techo numerico de la issue #209 y las tres reglas de retirada \
+nuevas). En los casos con fixed_real withdrawal_shortfall y withdrawal_excess son cero por \
+construccion — el permitido ES la necesidad — y ahi es donde este pin demuestra que WP2 no movio \
+la semantica de 4.15.0.";
 
 fn render_fixture_5_0(pins: &[Pin50]) -> String {
     let mut s = String::new();
@@ -1050,7 +1211,7 @@ fn the_5_0_hash_notices_a_moved_withdrawal_and_a_moved_phase() {
 /// perfectamente el día que alguien lo regenerase.
 #[test]
 fn the_phase_readings_agree_with_the_series_they_describe() {
-    for c in projection_cases_all() {
+    for c in cases_5_0() {
         let out = project_net_worth_series(&c.input)
             .unwrap_or_else(|e| panic!("el caso {} no debe fallar: {e}", c.name));
         let name = c.name;
@@ -1070,14 +1231,28 @@ fn the_phase_readings_agree_with_the_series_they_describe() {
             assert_eq!(serie[0], Decimal::ZERO, "{name}: {label}[0] debe ser 0");
         }
 
-        // 2) WP1b: `fixed_real` no recorta ni gasta de más.
+        // 2) Las tres magnitudes de B.1.5, según la regla y el modo:
+        //    · `fixed_real` no recorta ni gasta de más — el permitido ES la necesidad, en
+        //      CUALQUIERA de los dos modos (es lo que mantiene 4.15.0 bit-idéntico);
+        //    · en `ceiling` la retirada nunca supera la necesidad ⇒ sobrante 0 exacto;
+        //    · el recorte y el sobrante nunca son negativos: son magnitudes, no diferencias.
+        let fixed_real = matches!(c.input.phase_plan.withdrawal, WithdrawalRule::FixedReal);
+        if fixed_real {
+            assert!(
+                out.withdrawal_shortfall.iter().all(|v| *v == Decimal::ZERO),
+                "{name}: fixed_real no puede recortar"
+            );
+        }
+        if fixed_real || c.input.phase_plan.spend_mode == SpendMode::Ceiling {
+            assert!(
+                out.withdrawal_excess.iter().all(|v| *v == Decimal::ZERO),
+                "{name}: sin regla que gastar por encima de la necesidad, el sobrante es 0"
+            );
+        }
         assert!(
-            out.withdrawal_shortfall.iter().all(|v| *v == Decimal::ZERO),
-            "{name}: fixed_real no puede recortar"
-        );
-        assert!(
-            out.withdrawal_excess.iter().all(|v| *v == Decimal::ZERO),
-            "{name}: fixed_real no puede gastar por encima de la necesidad"
+            out.withdrawal_shortfall.iter().all(|v| *v >= Decimal::ZERO)
+                && out.withdrawal_excess.iter().all(|v| *v >= Decimal::ZERO),
+            "{name}: ni el recorte ni el sobrante pueden ser negativos"
         );
 
         // 3) Retirada ≥ 0 SIEMPRE, y solo puede haberla en un mes de déficit: si el patrimonio

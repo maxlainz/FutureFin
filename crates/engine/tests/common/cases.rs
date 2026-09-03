@@ -17,6 +17,12 @@
 //! **Orden:** `projection_cases_all()` = `projection_cases_audit()` ++ `projection_cases_extended()`,
 //! y `golden_pins.rs` tiene un test que lo comprueba: si alguien reordena la batería de auditoría,
 //! el CSV cambia de forma sin que el hash lo delate.
+//!
+//! **Dos baterías desde WP2 de 5.0.0.** `projection_cases_all()` es EXACTAMENTE lo que
+//! `pins-4.15.json` hashea y por eso **no crece**; los casos nuevos (reglas de retirada, techo
+//! numérico de #209) viven en `projection_cases_5_0()`, que solo consumen el pin aditivo
+//! `pins-5.0-outputs.json` y el CSV (`projection_cases_dumped()`). Un caso añadido al primer
+//! conjunto obligaría a regenerar el pin que existe justamente para no moverse.
 
 #![allow(dead_code)]
 
@@ -24,7 +30,7 @@ use chrono::NaiveDate;
 use futurefin_engine::{
     debt_payments_remaining_series, AllocationCap, AllocationKind, AllocationRule, FireNeed,
     FireTarget, PhasePlan, ProjectionInput, ProjectionLiabilityInput, RepaymentModel,
-    RetirementTrigger, SimAsset, TaxBracket,
+    RetirementTrigger, SimAsset, SpendMode, TaxBracket, WithdrawalRule,
 };
 use rust_decimal::Decimal;
 use uuid::Uuid;
@@ -790,9 +796,206 @@ pub fn projection_cases_extended() -> Vec<ProjCase> {
     out
 }
 
-/// Todos los casos de proyección: los del CSV primero, en su orden, y luego los añadidos.
+/// Todos los casos de proyección **de 4.15.0**: los del CSV primero, en su orden, y luego los
+/// añadidos. Es EXACTAMENTE el conjunto que `pins-4.15.json` hashea, y por eso **no crece**: un
+/// caso nuevo aquí obligaría a regenerar el pin que existe justamente para no moverse. Los casos
+/// de 5.0.0 viven en [`projection_cases_5_0`].
 pub fn projection_cases_all() -> Vec<ProjCase> {
     let mut out = projection_cases_audit();
     out.extend(projection_cases_extended());
+    out
+}
+
+/// **Casos de 5.0.0 (WP2): las reglas de retirada y el techo numérico de la issue #209.**
+///
+/// Viven APARTE de [`projection_cases_all`] a propósito: aquel conjunto es el que `pins-4.15.json`
+/// hashea para demostrar que el refactor no movió las salidas de 4.15.0, y añadirle un caso
+/// obligaría a regenerar ese fichero — que es justo lo que no puede pasar. Estos se pinean solo en
+/// `pins-5.0-outputs.json` (aditivo) y se vuelcan también al CSV de auditoría
+/// ([`projection_cases_dumped`]): semántica nueva merece oráculo externo, no solo un hash interno.
+///
+/// Cada uno cubre un camino que ninguno de los P1–P13 tocaba:
+///
+/// | caso | regla | modo | fiscalidad | qué ejercita |
+/// |---|---|---|---|---|
+/// | P14 | `fixed_real` | ceiling | sin impuestos | la base de coste en el techo de `NUMERIC(18,4)` (#209) |
+/// | P15 | `percent_of_balance` | ceiling | ES, `g` MIXTA | el techo BRUTO por el paseo directo mixto |
+/// | P16 | `hybrid` | rule_is_spend | sin impuestos | cascada + venta el MISMO mes, y el latch |
+/// | P17 | `guardrails` | ceiling | ES, `g` escalar | las revisiones anuales y el recorte indexado |
+pub fn projection_cases_5_0() -> Vec<ProjCase> {
+    let mut out = Vec::new();
+
+    // -----------------------------------------------------------------------------------------
+    // P14: un activo en el TECHO de su columna — la regresión de la issue **#209**.
+    //
+    // `value = purchase_price = 99.999.999.999.999` (el techo de `NUMERIC(18,4)`,
+    // `20260210120000_assets.sql`) al 20 %/año, gasto 1.000 €/mes, 840 meses. La base de coste
+    // solo encoge (~1e14) mientras el valor compone al 20 %, así que el producto `b·v` de
+    // `b' = b·v_post/v_pre` (#120) se sale del rango de `Decimal` (~7,9e28) en cuanto
+    // `v > 7,9e14` — o sea `1,2^t > 7,9`, unos 11,3 años: **hacia el mes 136**. Hasta WP2 eso era
+    // un pánico «Multiplication overflowed» y, en producción, un 400 `task_panic` opaco.
+    //
+    // Es `fixed_real`: el caso no va de reglas de retirada, va de que el motor no panique con
+    // importes que la API acepta. Por eso está aquí y no entre los P1–P13 — no existía cuando se
+    // escribió aquel pin, y meterlo allí habría obligado a regenerarlo.
+    // -----------------------------------------------------------------------------------------
+    let techo = Decimal::from(99_999_999_999_999i64);
+    out.push(ProjCase {
+        name: "P14_techo_numeric",
+        input: base_input(
+            840,
+            Decimal::ZERO,
+            Decimal::from(1_000),
+            vec![mk_asset_with_basis(
+                1,
+                techo,
+                true,
+                Some(Decimal::from(20)),
+                techo,
+            )],
+            vec![],
+        ),
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // P15: `percent_of_balance` al 4 % con TECHO (`ceiling`), impuestos ES y `g` MIXTA.
+    //
+    // Jubilado desde el mes 1 con 400.000 € líquidos repartidos en dos fondos con base de coste
+    // declarada (g = 0,2 y g = 0,6): el techo del mes 1 es `4 %·400.000/12 = 1.333,33 €` BRUTOS
+    // (R9), la necesidad es `2.300 − 900 = 1.400 €` NETOS y su bruto con la escala ES pasa de
+    // 1.700 — así que el techo ATA y la venta la resuelve el **paseo directo mixto**
+    // (`mixed_drawdown_for_gross_cap`), el camino que ningún caso anterior tocaba.
+    //
+    // Con inflación del 2 % el gasto crece y el techo baja con el saldo: el recorte
+    // (`withdrawal_shortfall`) crece mes a mes sin restar un euro de patrimonio — la separación
+    // de las tres magnitudes, pineada.
+    // -----------------------------------------------------------------------------------------
+    let mut p15 = base_input(
+        360,
+        Decimal::from(1_000),
+        Decimal::from(2_500),
+        vec![
+            // 0 — fondo conservador 3 %, coste 120.000 sobre 150.000 ⇒ g = 0,2 (drena primero).
+            mk_asset_with_basis(
+                1,
+                Decimal::from(150_000),
+                true,
+                Some(Decimal::from(3)),
+                Decimal::from(120_000),
+            ),
+            // 1 — fondo de RV 6 %, coste 100.000 sobre 250.000 ⇒ g = 0,6.
+            mk_asset_with_basis(
+                2,
+                Decimal::from(250_000),
+                true,
+                Some(Decimal::from(6)),
+                Decimal::from(100_000),
+            ),
+        ],
+        vec![rule_remainder(0)],
+    );
+    p15.annual_inflation_percent = Decimal::from(2);
+    p15.tax_brackets = es_tax_brackets_2025_26();
+    p15.taxes_enabled = true;
+    p15.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(1);
+    p15.phase_plan.income_retirement_monthly = Decimal::from(900);
+    p15.phase_plan.expense_retirement_monthly = Decimal::from(2_300);
+    p15.phase_plan.withdrawal = WithdrawalRule::PercentOfBalance {
+        pct: Decimal::from(4),
+    };
+    p15.phase_plan.spend_mode = SpendMode::Ceiling;
+    out.push(ProjCase {
+        name: "P15_percent_of_balance_ceiling",
+        input: p15,
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // P16: `hybrid` 5 % → 3,5 % con la regla COMO GASTO (`rule_is_spend`, R7).
+    //
+    // Jubilado desde el mes 1 con 500.000 € al 10 %, rentas de 1.800 €/mes y gasto de 1.500
+    // indexado al 2 %. Los primeros años hay SUPERÁVIT: la cascada reinvierte la caja del mes
+    // PRIMERO y la regla vende DESPUÉS —el único caso de la batería donde las dos cosas pasan el
+    // mismo mes—, y el sobrante (`withdrawal_excess`) se gasta y no vuelve. Cuando la inflación
+    // se come el margen, el mismo caso pasa a déficit sin cambiar de regla.
+    //
+    // El latch: `3,5·L(k−1) ≥ 5·500.000·f(k−1)`, o sea `L ≥ 714.285,71·f`. Con el 10 % de
+    // rentabilidad menos el 5 % que la regla saca, el líquido gana al umbral ~3 puntos al año y
+    // el cambio de porcentaje cae dentro del horizonte — el pin dice exactamente cuándo.
+    // -----------------------------------------------------------------------------------------
+    let mut p16 = base_input(
+        240,
+        Decimal::from(3_000),
+        Decimal::from(2_000),
+        vec![mk_asset(
+            1,
+            Decimal::from(500_000),
+            true,
+            Some(Decimal::from(10)),
+        )],
+        vec![rule_remainder(0)],
+    );
+    p16.annual_inflation_percent = Decimal::from(2);
+    p16.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(1);
+    p16.phase_plan.income_retirement_monthly = Decimal::from(1_800);
+    p16.phase_plan.expense_retirement_monthly = Decimal::from(1_500);
+    p16.phase_plan.withdrawal = WithdrawalRule::Hybrid {
+        start_pct: Decimal::from(5),
+        end_pct: d(35, 1),
+    };
+    p16.phase_plan.spend_mode = SpendMode::RuleIsSpend;
+    out.push(ProjCase {
+        name: "P16_hybrid_rule_is_spend",
+        input: p16,
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // P17: `guardrails` 4 / 20 / 10 con techo, impuestos ES e inflación 2,5 % a 40 años.
+    //
+    // 700.000 € al 4,5 %, gasto de jubilación 2.600 €/mes indexado y sin rentas: la retirada
+    // permitida arranca en `4 %·700.000/12 = 2.333,33 €` BRUTOS y se indexa al IPC, mientras la
+    // necesidad bruta (con la escala ES por delante) es mayor desde el primer mes — el techo ata
+    // SIEMPRE y el recorte es permanente.
+    //
+    // Lo que este caso pinea, y ninguno más hace, son las **revisiones anuales**: cada 12 meses
+    // desde el mes 1 la tasa efectiva `12·W/L(k−1)` se compara con la banda (3,2 %–4,8 %) y el
+    // multiplicador se mueve ±10 %. A 480 meses caben 39 revisiones: si alguna se desplaza un mes
+    // o el multiplicador se aplica al `W` del año en vez de a la base, el hash lo dice.
+    // -----------------------------------------------------------------------------------------
+    let mut p17 = base_input(
+        480,
+        Decimal::from(2_000),
+        Decimal::from(3_000),
+        vec![mk_asset(1, Decimal::from(700_000), true, Some(d(45, 1)))],
+        vec![rule_remainder(0)],
+    );
+    p17.annual_inflation_percent = d(25, 1);
+    p17.tax_brackets = es_tax_brackets_2025_26();
+    p17.taxes_enabled = true;
+    p17.taxable_gain_ratio = Decimal::ONE;
+    p17.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(1);
+    p17.phase_plan.income_retirement_monthly = Decimal::ZERO;
+    p17.phase_plan.expense_retirement_monthly = Decimal::from(2_600);
+    p17.phase_plan.withdrawal = WithdrawalRule::Guardrails {
+        pct: Decimal::from(4),
+        band_pct: Decimal::from(20),
+        adjust_pct: Decimal::from(10),
+    };
+    p17.phase_plan.spend_mode = SpendMode::Ceiling;
+    out.push(ProjCase {
+        name: "P17_guardrails_taxes_es",
+        input: p17,
+    });
+
+    out
+}
+
+/// Lo que `audit_dump` vuelca al CSV: la batería histórica (P1–P6 y P13) en su orden, **más** los
+/// casos de 5.0.0. El formato del CSV es un contrato con un oráculo externo y no crece sin que se
+/// declare: creció una vez en WP1a (P13, la regresión de #208) y otra en WP2 (P14–P17, el techo
+/// numérico y las reglas de retirada). Un caso del pin que NO esté aquí es deliberado: los P7–P12
+/// existen para que el hash cubra el motor entero, no para que el oráculo los reproduzca.
+pub fn projection_cases_dumped() -> Vec<ProjCase> {
+    let mut out = projection_cases_audit();
+    out.extend(projection_cases_5_0());
     out
 }

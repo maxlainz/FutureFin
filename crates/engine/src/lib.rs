@@ -6,6 +6,7 @@ mod phases;
 mod projection;
 mod runway;
 mod tax;
+mod withdrawal;
 
 pub use history::{
     add_months_signed, amortized_segment_value, anchored_cashflow_segment_value, evaluate_timeline,

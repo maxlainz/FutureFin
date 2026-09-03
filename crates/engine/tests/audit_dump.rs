@@ -12,16 +12,18 @@
 //!
 //! **Los casos ya no viven aquí**: desde WP0 de 5.0.0 son [`cases`]
 //! (`tests/common/cases.rs`), compartidos con `golden_pins.rs` para que el pin de bit-identidad
-//! y este volcado hablen exactamente de las mismas entradas. Este fichero vuelca la batería de
-//! auditoría (L1–L6, P1–P6 y P13) **y solo esa**: su CSV es un contrato con el oráculo externo y
-//! no crece cuando el pin gana casos — la única vez que ha crecido fue WP1a de 5.0.0, para que
-//! P13 (`P13_cash8k_denormal_g`, la regresión de la issue #208: gross-up mixto con una `g`
-//! denormal) quede verificado por el oráculo y no solo por un hash interno.
+//! y este volcado hablen exactamente de las mismas entradas. Este fichero vuelca lo que
+//! `projection_cases_dumped()` declara (L1–L6, P1–P6, P13 y los P14–P17 de 5.0.0) **y solo eso**:
+//! su CSV es un contrato con el oráculo externo y no crece cuando el pin gana casos. Ha crecido
+//! dos veces, las dos declaradas: WP1a de 5.0.0 (P13 `P13_cash8k_denormal_g`, la regresión de
+//! #208 — gross-up mixto con una `g` denormal) y WP2 (P14 `P14_techo_numeric`, el desbordamiento
+//! de la base de coste de #209, y P15–P17, las tres reglas de retirada nuevas: semántica nueva
+//! merece oráculo externo, no solo un hash interno).
 
 #[path = "common/cases.rs"]
 mod cases;
 
-use cases::{liability_cases, projection_cases_audit, ref_date};
+use cases::{liability_cases, projection_cases_dumped, ref_date};
 use futurefin_engine::{
     liability_amortization_schedule, project_net_worth_series, LiabilityPayoffAbsence,
     ProjectionInput, ProjectionLiabilityInput,
@@ -82,10 +84,11 @@ fn audit_dump_liability_schedules() {
     }
 }
 
-/// Batería de proyecciones (casos P*).
+/// Batería de proyecciones (casos P*): la histórica MÁS los casos de 5.0.0
+/// (`projection_cases_dumped`).
 #[test]
 fn audit_dump_projection_series() {
-    for c in projection_cases_audit() {
+    for c in projection_cases_dumped() {
         dump_projection(c.name, &c.input);
     }
 }

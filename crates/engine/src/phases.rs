@@ -8,11 +8,15 @@
 //! jornada, pensión con fecha, reglas de retirada) tengan un único sitio donde declararse en vez
 //! de multiplicar los `if` por el bucle.
 //!
-//! **Este WP no cambia una sola cifra.** El plan que el handler construye hoy
-//! ([`PhasePlan::classic`]) tiene exactamente la semántica de 4.15.0, y todo lo que aún no está
-//! implementado (reglas ≠ `fixed_real`, fase parcial, pensión con fecha) se rechaza con un error
-//! TIPADO —nunca se ignora en silencio: un plan aceptado y no simulado publicaría un patrimonio
-//! plausible y equivocado, que es justo la clase de fallo que esta casa no publica.
+//! **WP1b no cambió una sola cifra**: el plan que el handler construye hoy
+//! ([`PhasePlan::classic`]) tiene exactamente la semántica de 4.15.0. Lo que aún no está
+//! implementado (fase parcial y pensión con fecha, WP3) se rechaza con un error TIPADO —nunca se
+//! ignora en silencio: un plan aceptado y no simulado publicaría un patrimonio plausible y
+//! equivocado, que es justo la clase de fallo que esta casa no publica.
+//!
+//! **WP2 añadió las reglas de retirada**: las cuatro de [`WithdrawalRule`] y los dos
+//! [`SpendMode`] se simulan de verdad, y su aritmética vive en
+//! [`crate::withdrawal`](../withdrawal/index.html).
 
 use rust_decimal::Decimal;
 
@@ -61,10 +65,14 @@ pub enum SpendMode {
     RuleIsSpend,
 }
 
-/// Catálogo de reglas de retirada (D6). **En WP1b solo [`WithdrawalRule::FixedReal`] está
-/// implementada**; las otras tres devuelven [`EngineError::UnsupportedWithdrawalRule`] hasta que
-/// WP2 escriba `withdrawal.rs`. Rechazar es la única salida honesta: aceptar una regla y simular
-/// otra publicaría números creíbles de un plan que nadie configuró.
+/// Catálogo de reglas de retirada (D6). **Las cuatro se simulan desde WP2**
+/// (`crates/engine/src/withdrawal.rs`, §B.2 del plan de #207); lo que el motor rechaza ahora son
+/// los PARÁMETROS imposibles (un porcentaje ≤ 0, un ajuste ≥ 100 %) con
+/// [`EngineError::InvalidWithdrawalRule`]. Rechazar es la única salida honesta: aceptar una regla
+/// y simular otra publicaría números creíbles de un plan que nadie configuró.
+///
+/// Los `pct` son **BRUTOS de impuestos**, igual que el SWR (R9): el techo se aplica a la VENTA,
+/// no a los euros que llegan al bolsillo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WithdrawalRule {
     /// «Gasto fijo en euros de hoy» (R1): el permitido ES la necesidad del mes, indexada por el
@@ -72,17 +80,21 @@ pub enum WithdrawalRule {
     ///
     /// Con esta regla los dos [`SpendMode`] COINCIDEN, y no por casualidad: el permitido se define
     /// como el déficit del mes, así que en un mes sin déficit no hay nada que gastar del
-    /// patrimonio (`RuleIsSpend` retiraría un importe no positivo, que no es una retirada). La
-    /// distinción empieza a morder en WP2, con reglas cuyo permitido no depende de la necesidad.
+    /// patrimonio (`RuleIsSpend` retiraría un importe no positivo, que no es una retirada). Es la
+    /// propiedad que mantiene 4.15.0 bit-idéntico bajo cualquiera de los dos modos, y tiene test
+    /// propio (`under_fixed_real_both_spend_modes_are_the_same_simulation`).
     FixedReal,
-    /// % anual del líquido de cierre del mes anterior, dividido entre 12. WP2.
+    /// `pct/100 · líquido(k−1) / 12`: porcentaje anual del líquido de cierre del mes anterior.
     PercentOfBalance { pct: Decimal },
-    /// `start_pct` hasta el latch descrito en §B.2, luego `end_pct`. WP2.
+    /// `start_pct` hasta el latch de §B.2 (`end_pct·L(k−1) ≥ start_pct·L(R−1)·f(k−1)/f(R−1)`),
+    /// luego `end_pct` para siempre.
     Hybrid {
         start_pct: Decimal,
         end_pct: Decimal,
     },
-    /// Guyton-Klinger 2006 (capital-preservation + prosperity, sin la regla de 15 años). WP2.
+    /// Guyton-Klinger 2006, **solo capital-preservation y prosperity**: la regla de la ventana de
+    /// 15 años y el salto de inflación tras un recorte NO están implementados y se declara así en
+    /// [`crate::withdrawal`]. Omitirlas deja un modelo más reactivo — la dirección prudente.
     Guardrails {
         pct: Decimal,
         band_pct: Decimal,
@@ -208,10 +220,8 @@ impl PhasePlan {
         if self.partial.is_some() || self.pension.is_some() {
             return Err(EngineError::UnsupportedPhase);
         }
-        if !matches!(self.withdrawal, WithdrawalRule::FixedReal) {
-            return Err(EngineError::UnsupportedWithdrawalRule);
-        }
-        Ok(())
+        // WP2: las cuatro reglas se simulan; lo que no pasa son los parámetros imposibles.
+        crate::withdrawal::validate_rule(self.withdrawal)
     }
 }
 
@@ -245,7 +255,10 @@ mod tests {
     }
 
     /// Lo no implementado FALLA, no se ignora. Sin este control negativo, `ensure_supported`
-    /// sería decorativo y WP2/WP3 podrían entregar un plan que el motor simula a medias.
+    /// sería decorativo y WP3 podría entregar un plan que el motor simula a medias.
+    ///
+    /// **WP2 movió la frontera**: las cuatro reglas se aceptan (se simulan), y lo que se rechaza
+    /// son los parámetros imposibles. Las fases de WP3 siguen fuera.
     #[test]
     fn unsupported_rules_and_phases_are_rejected() {
         let base = PhasePlan::classic(Decimal::ZERO, Decimal::from(2_000));
@@ -266,12 +279,17 @@ mod tests {
         ] {
             let mut p = base.clone();
             p.withdrawal = rule;
-            assert_eq!(
-                p.ensure_supported(),
-                Err(EngineError::UnsupportedWithdrawalRule),
-                "{rule:?} no está implementada en WP1b y no puede aceptarse"
-            );
+            assert_eq!(p.ensure_supported(), Ok(()), "{rule:?} se simula desde WP2");
         }
+
+        // Un porcentaje que no es un porcentaje: error TIPADO, no una simulación creativa.
+        let mut p = base.clone();
+        p.withdrawal = WithdrawalRule::PercentOfBalance { pct: Decimal::ZERO };
+        assert_eq!(
+            p.ensure_supported(),
+            Err(EngineError::InvalidWithdrawalRule),
+            "un 0 % de retirada no es una regla, es una división del plan por cero"
+        );
 
         let mut p = base.clone();
         p.partial = Some(PartialPhase {
