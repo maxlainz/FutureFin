@@ -650,6 +650,41 @@ export const ERROR_MESSAGES: Record<string, string> = {
   asset_not_in_scope:
     "Uno de los activos de la simulación no existe o no se ve en esta vista. Recarga la página.",
 
+  // Escenarios con volatilidad (bandas de percentil, 5.0.0). El techo de caminos DEPENDE de la
+  // superficie (2.000 por HTTP, 1.000 por MCP), así que la frase no cita ninguna cifra: un
+  // número escrito aquí sería falso en la mitad de los casos.
+  household_bands_unavailable:
+    "Los escenarios con volatilidad son de una sola persona: los percentiles no se suman entre miembros. Cambia a tu vista (Yo).",
+  paths_out_of_range:
+    "Ese número de escenarios está fuera del rango permitido. Pide menos.",
+  invalid_percentiles:
+    "Los percentiles deben estar entre 1 y 99.",
+  invalid_seed:
+    "Esa semilla no es válida: tiene que ser un número entero sin signo.",
+
+  // Escenarios «¿y si…?» del perfil de jubilación (5.0.0, §E). Solo llegan por MCP: la SPA
+  // explora GUARDANDO la configuración (D30), así que estas frases las lee quien pilota
+  // FutureFin desde Claude o desde la API a mano — pero se traducen igual, porque el catálogo
+  // es el único sitio donde vive lo que ve una persona.
+  profile_overrides_empty:
+    "El escenario no cambia ni un dato de tu plan de jubilación. Indica al menos un valor distinto o quita el supuesto.",
+  profile_overrides_no_op:
+    "Los valores del escenario son los que ya tienes guardados, así que la simulación saldría idéntica. Cambia alguno.",
+  swr_pct_set_twice:
+    "Has indicado la tasa de retirada segura dos veces en el mismo escenario. Déjala en un solo sitio.",
+  income_pause_timing_ambiguous:
+    "Indica cuándo empieza la pausa de ingresos de una sola forma: el mes o la fecha, no las dos.",
+  income_pause_months_zero:
+    "Una pausa de cero meses es justo tu escenario actual. Indica cuántos meses dura, al menos uno.",
+  income_pause_fraction_out_of_range:
+    "Durante la pausa puedes conservar desde el 0 % hasta menos del 100 % de tu ingreso: con el 100 % no cambia nada.",
+  income_pause_month_out_of_range:
+    "Ese mes de inicio de la pausa queda fuera del horizonte que estás proyectando.",
+  income_pause_date_out_of_horizon:
+    "Esa fecha de inicio de la pausa queda fuera del horizonte que estás proyectando.",
+  solve_no_op:
+    "Has pedido calcular cuánto gasto extra aguanta tu fecha de jubilación y a la vez lo has desactivado. Pídelo o quítalo del escenario.",
+
   // ── Parámetros de consulta ────────────────────────────────────────────────────────────
   // La app nunca los provoca: manda siempre valores válidos. Existen porque desde 4.0.0 la API
   // rechaza el valor desconocido en vez de caer al default en silencio, y alguien que llame a la

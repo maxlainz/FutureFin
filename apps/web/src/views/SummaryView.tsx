@@ -3,6 +3,7 @@ import type {
   ProjectionSeriesApi,
   RetirementProfileApi,
   SummaryResponse,
+  UserResponse,
 } from "../api/types";
 import { EmptyState } from "../components/EmptyState";
 import { HelpPopover } from "../components/HelpPopover";
@@ -34,6 +35,7 @@ import { formatDeltaCurrency } from "../lib/expenses";
 import { RETIREMENT_STRATEGY_LABEL } from "../lib/retirementProfile";
 import {
   type PlanCardModel,
+  ownPlanCard,
   planMilestone,
   planStatusFromWarnings,
 } from "../lib/plan-card";
@@ -50,6 +52,7 @@ export function SummaryView({
   summary,
   summaryBusy,
   projectionSeries,
+  user,
   navigate,
   onAddFirstAsset,
   onAddFirstBudgetEntry,
@@ -63,6 +66,10 @@ export function SummaryView({
   summary: SummaryResponse | null;
   summaryBusy: boolean;
   projectionSeries: ProjectionSeriesApi | null;
+  /** Usuario de la sesión: su `birth_date` convierte el mes de jubilación del plan en una EDAD.
+   *  `summary.plan` publica el índice del mes y nada más (es un escalar del plan, no un punto de
+   *  la serie), así que la edad se resuelve aquí con el mismo ancla que usa el chart. */
+  user: UserResponse | null;
   /** Router de la app: la tarjeta «Tu plan» enlaza a «Tu cuenta» y a «Jubilación» cuando falta
    *  un dato del perfil. */
   navigate: (path: string, replace?: boolean) => void;
@@ -216,8 +223,11 @@ export function SummaryView({
   // planes: uno por fila de `members[]`. Los tres campos que se pintan salen del servidor tal
   // cual — la vista no deriva ninguna fecha ni ninguna edad.
   const planCards: PlanCardModel[] = (() => {
-    if (!hasMembership || !projectionSeries) return [];
+    if (!hasMembership) return [];
     if (ledgerPersonScope === "household") {
+      // El agregado no tiene plan (`absent_reason: household_aggregate` en las dos superficies):
+      // lo que hay son N planes, uno por fila de `members[]`, con SUS propias cifras de solve.
+      if (!projectionSeries) return [];
       return (projectionSeries.members ?? []).map((m) => ({
         key: m.user_id,
         name: m.username,
@@ -230,23 +240,29 @@ export function SummaryView({
           jubilacionAge: m.jubilacion_age,
           jubilacionAbsentReason: null,
         }),
-        status: planStatusFromWarnings(m.warnings),
+        // Dos vías para el mismo hecho: el booleano del solve de ESE miembro y su aviso. La
+        // tarjeta mira las dos porque el servidor puede publicar el rojo por cualquiera.
+        status:
+          m.underfunded === true
+            ? planStatusFromWarnings(["retire_at_age_underfunded"])
+            : planStatusFromWarnings(m.warnings),
+        figures: {
+          requiredSavingsMonthly: m.required_contribution_monthly ?? null,
+          disposableMonthly: m.disposable_monthly ?? null,
+        },
       }));
     }
-    return [
-      {
-        key: "mine",
-        name: null,
-        strategy: projectionSeries.strategy ?? null,
-        milestone: planMilestone({
-          jubilacionMonthIndex: projectionSeries.jubilacion_month_index,
-          jubilacionDateYmd: projectionSeries.jubilacion_date_ymd,
-          jubilacionAge: projectionSeries.jubilacion_age,
-          jubilacionAbsentReason: projectionSeries.jubilacion_absent_reason,
-        }),
-        status: planStatusFromWarnings(projectionSeries.warnings),
-      },
-    ];
+    // «Yo»: la fuente canónica es `summary.plan` (D27) — sale del MISMO objeto que pinta el
+    // chart, sin aritmética propia. La serie solo se usa de respaldo cuando el Resumen declara
+    // el plan ausente, y de ella salen además el ancla del mes 0 para fechar el hito.
+    const own = ownPlanCard({
+      plan: summary?.plan,
+      series: projectionSeries,
+      anchorDateYmd: projectionSeries?.anchor_date_ymd ?? null,
+      birthDateIso:
+        projectionSeries?.viewer_birth_date?.trim() || user?.birth_date?.trim() || null,
+    });
+    return own ? [own] : [];
   })();
 
   const goToPlanAction = (target: "account" | "retirement") => {
@@ -346,6 +362,41 @@ export function SummaryView({
                 <div className="plan-card-detail">
                   {c.milestone.detail ?? "\u00A0"}
                 </div>
+                {/* Las dos cifras del solve (D16/D17) SOLO con una estrategia por edad: con
+                    «Cuanto antes» y «Puente hasta la pensión» el servidor manda `null` porque no
+                    hay una R contra la que resolver, y una fila de guiones diría que la cifra
+                    existe y hoy falta. Se copian tal cual: `required_savings_monthly` ES el
+                    `required_contribution_monthly` del panel de Jubilación. */}
+                {c.figures &&
+                (c.figures.requiredSavingsMonthly != null ||
+                  c.figures.disposableMonthly != null) ? (
+                  <div className="plan-card-figures">
+                    {c.figures.requiredSavingsMonthly != null ? (
+                      <span>
+                        Ahorro necesario{" "}
+                        <strong>
+                          {formatCurrencyAmount(
+                            c.figures.requiredSavingsMonthly,
+                            currencyIso,
+                          )}
+                          /mes
+                        </strong>
+                      </span>
+                    ) : null}
+                    {c.figures.disposableMonthly != null ? (
+                      <span>
+                        Margen{" "}
+                        <strong>
+                          {formatCurrencyAmount(
+                            c.figures.disposableMonthly,
+                            currencyIso,
+                          )}
+                          /mes
+                        </strong>
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
                 <div className={`plan-card-status plan-card-status--${c.status.tone}`}>
                   {c.status.label}
                   {c.status.action ? (

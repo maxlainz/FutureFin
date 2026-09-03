@@ -4151,6 +4151,62 @@ fieldset.retirement-config-stack {
   min-height: 1.2em;
 }
 
+/* Segunda rejilla de Jubilación (5.0.0, §C): las tarjetas que dependen de la
+   ESTRATEGIA elegida. `solve` y no `strategy` en el nombre: `.retirement-strategy-grid`
+   ya existe SIN envolver (modificadora de las 5 radio-cards de estrategia, más arriba)
+   y se habría aplicado también a esta rejilla, metiéndole su `minmax(15rem)`. Rejilla que envuelve y no tira con scroll como la banda de
+   arriba — con media jornada + pensión son cuatro, y sumadas a las tres fijas
+   dejarían siete tarjetas en una sola línea desplazable. `margin-top` negativo no:
+   se apoya en el `margin-bottom` que .metric-grid ya trae. */
+.metric-grid.retirement-solve-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 12rem), 1fr));
+}
+
+/* Avisos de estrategia bajo la banda de KPIs de Jubilación (5.0.0, §C): matizan
+   el cálculo (coast inalcanzable, capital que mengua en media jornada, puente sin
+   descuento) y por eso viven junto a las cifras que matizan y no arriba con el
+   rojo, que cambia cómo se leen TODAS. Sin color propio: son `.muted`. */
+.retirement-strategy-notices {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  margin-top: 0.5rem;
+}
+
+/* Tono rojo de un KPI (5.0.0, D17): el plan está completo y NO llega. Mismo
+   tinte que `.error-banner` y que `.plan-card--danger` — un solo vocabulario de
+   «esto va mal». Solo la piel: la cifra sigue siendo tinta normal, porque el
+   número no está mal, lo que está mal es lo que significa. */
+.metric-card--danger {
+  background: color-mix(in oklch, var(--ff-neg) 8%, var(--ff-paper));
+  border-color: color-mix(in oklch, var(--ff-neg) 45%, var(--ff-line-soft));
+}
+
+.metric-card--danger .metric-value-detail {
+  color: var(--ff-neg);
+  font-weight: 600;
+}
+
+/* Las dos cifras del solve (D16/D17). Fila propia entre el hito y el estado:
+   son magnitudes al MES y el hito es una fecha — mezclarlas en el mismo renglón
+   invita a leer «55 años · 1.200 €» como una sola frase. `flex-wrap` porque en
+   móvil las dos no caben y apiladas siguen alineadas a la izquierda. */
+.plan-card-figures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.15rem 0.75rem;
+  margin-top: 0.25rem;
+  font-size: 0.78rem;
+  line-height: 1.3;
+  color: var(--ff-ink-soft);
+}
+
+.plan-card-figures strong {
+  color: var(--ff-ink);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
 .plan-card-status {
   margin-top: 0.3rem;
   font-size: 0.78rem;

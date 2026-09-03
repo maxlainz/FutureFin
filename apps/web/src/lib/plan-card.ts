@@ -12,17 +12,27 @@
  * la fija (`plan-card.test.ts`).
  */
 
-import type { RetirementStrategyApi } from "../api/types";
-import { formatDateDmy } from "./dates";
+import type {
+  ProjectionSeriesApi,
+  RetirementStrategyApi,
+  SummaryPlanApi,
+} from "../api/types";
+import {
+  addMonthsCivil,
+  ageCompletedYearsCivil,
+  formatDateDmy,
+  parseYmdComponents,
+} from "./dates";
 
 /**
  * Avisos que el plan sabe leer. Literales cerrados del contrato (`warnings[]` de
  * `GET /v1/projection/series` y de `members[]`).
  *
- * `retire_at_age_underfunded` **todavía no lo emite el motor** — lo publicará la ola de los solves
- * (`solve.rs`, §B.7: `underfunded = c > sobrante`). El mapeo se escribe ya, en rojo, para que el
- * día que llegue no haya que tocar la vista: un aviso sin traducción se pinta como nada, que es
- * peor que pintarlo mal.
+ * `retire_at_age_underfunded` lo emite el servidor desde WP5-2b (`solve.rs`, §B.7:
+ * `underfunded = c > sobrante`) y viaja además como el booleano `underfunded` del plan y de la
+ * serie. Las dos vías dicen lo mismo y `planStatusFromPlan` mira las dos: el objeto `plan` del
+ * Resumen NO trae `warnings[]`, así que sin el booleano la tarjeta se quedaría verde con un plan
+ * que no llega.
  */
 export type PlanWarning =
   | "birth_date_missing"
@@ -131,6 +141,18 @@ export function planMilestone(input: {
   };
 }
 
+/**
+ * Las dos cifras al mes que la tarjeta añade con una estrategia por edad (5.0.0 WP5-2b):
+ * decimal-strings **copiados** de `summary.plan`, sin una sola operación aritmética por el camino.
+ * `null` = esta estrategia no responde a esa pregunta; **nunca cero**.
+ */
+export type PlanFigures = {
+  /** €/mes — `required_savings_monthly`, que ES `required_contribution_monthly` de la serie. */
+  requiredSavingsMonthly: string | null;
+  /** €/mes — el margen, con la base que declare la estrategia. */
+  disposableMonthly: string | null;
+};
+
 /** Una tarjeta de plan ya resuelta — la del usuario en «Yo», o una por miembro en «Hogar». */
 export type PlanCardModel = {
   key: string;
@@ -139,4 +161,123 @@ export type PlanCardModel = {
   strategy: RetirementStrategyApi | null;
   milestone: PlanMilestone;
   status: PlanStatus;
+  /** Ausente en las tarjetas que no publican cifras (miembros del hogar por cruce, plan ausente). */
+  figures?: PlanFigures;
 };
+
+/**
+ * Estado de la tarjeta cuando la fuente es el objeto `plan` del Resumen, que **no trae
+ * `warnings[]`**: el rojo llega como el booleano `underfunded`.
+ *
+ * `true` = el plan está completo y no llega (D17); `false` = llega; **`null` = la pregunta no
+ * aplica a esta estrategia**, y colapsarlo con `false` pintaría de verde un plan que nadie ha
+ * evaluado. Se miran las DOS vías porque la tarjeta de miembro sí tiene avisos y la propia no.
+ */
+export function planStatusFromPlan(input: {
+  underfunded?: boolean | null;
+  warnings?: readonly string[] | null;
+}): PlanStatus {
+  if (input.underfunded === true) {
+    return planStatusFromWarnings(["retire_at_age_underfunded"]);
+  }
+  return planStatusFromWarnings(input.warnings);
+}
+
+/**
+ * Mes de la rejilla → fecha civil y edad, con el ancla de la proyección (`anchor_date_ymd`, el mes
+ * 0) y la fecha de nacimiento del usuario.
+ *
+ * El objeto `plan` del Resumen publica el ÍNDICE y nada más —es un escalar del plan, no un punto
+ * de la serie—, así que la fecha se resuelve aquí con el mismo ancla que usa el chart. Sin ancla
+ * (o sin fecha de nacimiento) devuelve `null` en la mitad que no se puede saber en vez de
+ * inventarse un día: una fecha aproximada en una tarjeta de estado se copia como si fuera exacta.
+ */
+export function resolvePlanMilestoneCivil(input: {
+  monthIndex: number | null | undefined;
+  anchorDateYmd?: string | null;
+  birthDateIso?: string | null;
+}): { ymd: string | null; age: number | null } {
+  const mi = input.monthIndex;
+  if (mi == null || !Number.isFinite(mi)) return { ymd: null, age: null };
+  const anchor = input.anchorDateYmd ? parseYmdComponents(input.anchorDateYmd) : null;
+  if (!anchor) return { ymd: null, age: null };
+  const civil = addMonthsCivil(anchor.y, anchor.m, anchor.d, mi);
+  const ymd = `${String(civil.y).padStart(4, "0")}-${String(civil.m).padStart(2, "0")}-${String(civil.d).padStart(2, "0")}`;
+  const birth = input.birthDateIso ? parseYmdComponents(input.birthDateIso) : null;
+  return {
+    ymd,
+    age: birth ? ageCompletedYearsCivil(civil, birth) : null,
+  };
+}
+
+/** Los campos de la respuesta de la serie que sirven de respaldo cuando el Resumen declara el
+ *  plan ausente (o cuando habla con un backend anterior a WP5-2b, que no publica `plan`). */
+export type PlanSeriesFallback = Pick<
+  ProjectionSeriesApi,
+  | "strategy"
+  | "jubilacion_month_index"
+  | "jubilacion_date_ymd"
+  | "jubilacion_age"
+  | "jubilacion_absent_reason"
+  | "warnings"
+>;
+
+/**
+ * La tarjeta propia («Yo»), leyendo **`summary.plan`** — la fuente canónica desde WP5-2b — y
+ * cayendo a la respuesta de la serie cuando el Resumen declara el plan ausente
+ * (`absent_reason`) o cuando el backend no lo publica.
+ *
+ * Por qué el respaldo y no un hueco: `absent_reason: projection_unavailable` significa que el
+ * Resumen no pudo calcular la proyección en ESA petición; la serie que el chart ya tiene cargada
+ * sigue siendo la del mismo usuario y el mismo plan. Preferir el hueco dejaría la tarjeta en
+ * blanco con datos en pantalla justo al lado. Lo que NO se mezcla nunca son las dos mitades: o
+ * todo el hito sale del plan, o todo sale de la serie.
+ */
+export function ownPlanCard(input: {
+  plan?: SummaryPlanApi | null;
+  series?: PlanSeriesFallback | null;
+  anchorDateYmd?: string | null;
+  birthDateIso?: string | null;
+}): PlanCardModel | null {
+  const plan = input.plan;
+  const usePlan = plan != null && plan.absent_reason == null;
+  if (usePlan) {
+    const civil = resolvePlanMilestoneCivil({
+      monthIndex: plan.jubilacion_month_index,
+      anchorDateYmd: input.anchorDateYmd,
+      birthDateIso: input.birthDateIso,
+    });
+    return {
+      key: "mine",
+      name: null,
+      strategy: plan.strategy,
+      milestone: planMilestone({
+        jubilacionMonthIndex: plan.jubilacion_month_index,
+        jubilacionDateYmd: civil.ymd,
+        jubilacionAge: civil.age,
+        // El plan sin `absent_reason` SIEMPRE tiene trigger: un índice nulo aquí es «no se jubila
+        // dentro del horizonte», que es un resultado y lo dice `planMilestone` por defecto.
+        jubilacionAbsentReason: null,
+      }),
+      status: planStatusFromPlan({ underfunded: plan.underfunded }),
+      figures: {
+        requiredSavingsMonthly: plan.required_savings_monthly,
+        disposableMonthly: plan.disposable_monthly,
+      },
+    };
+  }
+  const series = input.series;
+  if (!series) return null;
+  return {
+    key: "mine",
+    name: null,
+    strategy: series.strategy ?? null,
+    milestone: planMilestone({
+      jubilacionMonthIndex: series.jubilacion_month_index,
+      jubilacionDateYmd: series.jubilacion_date_ymd,
+      jubilacionAge: series.jubilacion_age,
+      jubilacionAbsentReason: series.jubilacion_absent_reason,
+    }),
+    status: planStatusFromWarnings(series.warnings),
+  };
+}

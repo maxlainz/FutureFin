@@ -149,8 +149,11 @@ export const HELP_TEXTS = {
       "patrimonio líquido cubre el objetivo; con las estrategias por edad es la edad que elegiste, " +
       "llegue o no el capital. El estado avisa cuando el plan corre con algo distinto de lo que " +
       "configuraste: sin tu fecha de nacimiento las estrategias por edad se simulan como «Cuanto " +
-      "antes», y en rojo cuando tu ahorro actual no basta para llegar a esa edad. En la vista del " +
-      "hogar hay una tarjeta por persona: cada una lleva su propio plan.",
+      "antes», y en rojo cuando tu ahorro actual no basta para llegar a esa edad. Con una edad " +
+      "objetivo la tarjeta añade dos cifras al mes: el ahorro necesario para llegar y el margen " +
+      "que te queda por encima — las MISMAS del panel de Jubilación, copiadas del mismo cálculo, " +
+      "nunca recalculadas aquí. En la vista del hogar hay una tarjeta por persona: cada una lleva " +
+      "su propio plan.",
   },
 
   // --- Jubilación -----------------------------------------------------------
@@ -271,14 +274,67 @@ export const HELP_TEXTS = {
       "más exigente contigo. Se compara con la probabilidad de éxito de los escenarios con " +
       "volatilidad; sin volatilidad declarada en tus activos no hay nada que comparar.",
   },
+  "retirement.required_contribution": {
+    title: "Ahorro necesario",
+    body:
+      "La aportación mensual MÍNIMA que te hace llegar a tu objetivo justo en la edad que has " +
+      "elegido: se busca simulando tu plan entero una y otra vez, no despejando una fórmula. Es " +
+      "un TECHO sobre lo que tu reparto invierte cada mes, no un importe que se aporte pase lo " +
+      "que pase — un mes con menos sobrante aporta el sobrante y ya está. El paréntesis es tu " +
+      "sobrante mensual máximo, para que la cifra tenga denominador: cuánto de tu margen se " +
+      "lleva el plan. En rojo significa que ni invirtiendo cada euro de sobrante llegas, y " +
+      "entonces la cifra ES tu sobrante entero. No existe en las estrategias que se disparan por " +
+      "cruce: ahí no hay una edad contra la que resolver nada.",
+  },
   "retirement.disposable": {
     title: "Margen disponible",
     body:
-      "Lo que te SOBRA respecto a lo que tu estrategia necesita: cuánto de tu ahorro mensual no " +
-      "hace falta para llegar a tu edad objetivo, y cuánto capital llevas por encima del camino " +
-      "mínimo. No es tu patrimonio ni tu ahorro: es la diferencia entre lo que tienes y lo que " +
-      "el plan exige. Solo existe en las estrategias con una edad objetivo — en «Cuanto antes» " +
-      "todo el ahorro va al objetivo por definición. Todavía no se calcula.",
+      "Lo que te SOBRA respecto a lo que tu estrategia exige, al mes y en capital acumulado. No " +
+      "es tu patrimonio ni tu ahorro: es la diferencia entre lo que tienes y lo que el plan " +
+      "necesita. La base cambia con la estrategia y por eso conviene mirarla: con una edad " +
+      "objetivo es tu sobrante mensual máximo menos el ahorro necesario; con Coast FIRE es TODO " +
+      "tu sobrante, pero solo a partir del mes coast — antes vale cero de verdad, porque cada " +
+      "euro que dejes de aportar retrasa la fecha. El capital acumulado va en euros del mes en " +
+      "que te jubilas, y debajo, esos mismos euros traídos a hoy. No existe en «Cuanto antes»: " +
+      "ahí todo el ahorro va al objetivo por definición.",
+  },
+  "retirement.coast_month": {
+    title: "Mes coast",
+    body:
+      "El primer mes a partir del cual puedes dejar de aportar y aun así llegar a tu objetivo en " +
+      "la edad que elegiste: desde ahí lo que ya tienes invertido hace el resto solo. Sale de " +
+      "simular el plan cortando la aportación en cada mes candidato, no de una regla de tres. " +
+      "«No alcanzable» significa que ni aportando todos los meses llegas — no que falte el dato — " +
+      "y entonces la línea discontinua del gráfico es lo mejor que da tu plan tal y como está.",
+  },
+  "retirement.coast_number": {
+    title: "Número coast",
+    body:
+      "El patrimonio LÍQUIDO con el que entras en el mes coast: el cierre del mes anterior en la " +
+      "simulación. Es el capital a partir del cual podrías dejar de aportar. No es tu objetivo de " +
+      "jubilación —que es bastante mayor— ni tu patrimonio total: la vivienda no entra, porque no " +
+      "produce retirada mensual. Es un valor leído de la simulación, no una fórmula cerrada.",
+  },
+  "retirement.partial_gap": {
+    title: "Hueco de media jornada",
+    body:
+      "El capital que haría falta para cubrir a perpetuidad lo que tu media jornada NO paga: tu " +
+      "gasto de esa fase menos el ingreso parcial que declaras y menos la parte de pensión que " +
+      "cobres entonces, con los impuestos por delante y dividido entre tu tasa segura de " +
+      "retirada. Es informativo: no dispara tu jubilación ni sustituye al objetivo. Cero " +
+      "significa que la media jornada se paga sola. La línea de abajo dice si, durante esa fase, " +
+      "tu capital sigue creciendo o lo estás consumiendo.",
+  },
+  "retirement.bridge": {
+    title: "Puente hasta la pensión",
+    body:
+      "Los años que van desde que te jubilas hasta que cobras la pensión que has declarado: ese " +
+      "tramo lo paga entero tu patrimonio. La cifra del paréntesis es la tasa de retirada " +
+      "efectiva de esos años —cuánto sacas de tu capital cada año— y puede estar por encima de " +
+      "tu tasa segura sin que sea un error: dura pocos años, no toda la vida. Debajo, qué parte " +
+      "de tu gasto cubrirá la pensión cuando llegue (puede ser todo o una parte: lo decide el " +
+      "importe que declaras) y a qué tasa anual se han descontado los años de puente, porque ese " +
+      "dinero sigue invertido mientras lo gastas.",
   },
 
   // --- Ajustes · Proyección -------------------------------------------------

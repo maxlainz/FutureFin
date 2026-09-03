@@ -52,6 +52,7 @@ import {
   type PhaseMark,
 } from "../lib/phase-strip";
 import { buildHouseholdMemberLines, memberValueAtMonth } from "../lib/member-lines";
+import { buildPlanAuxSeries } from "../lib/plan-series";
 import { ChartLegend } from "../components/charts/ChartLegend";
 import {
   formatAxisMoney,
@@ -395,6 +396,20 @@ export function ProjectionNetWorthChart({
     // más allá, esa persona no declaró vivir y la línea TERMINA. En «Yo» no hay `members[]` y
     // esto es un array vacío que no cuesta nada.
     const memberLines = buildHouseholdMemberLines(series.members, deflator);
+    // ── Series auxiliares discontinuas del plan (D29) ──────────────────────────────────
+    // «Capital necesario» y «si dejas de aportar en el mes coast»: dos ejecuciones MÁS del
+    // motor, no un descuento escalar. Vienen paralelas a `series.points` (solo futuro), así que
+    // se re-mapean con el MISMO `futureOffset` que el objetivo FIRE y se deflactan con el mismo
+    // `deflator` por `month_index` real. Con `asap`/`pension_bridge` no hay solve y la lista
+    // sale vacía: el chart queda idéntico a 4.15.x. `disposable_capital` NO se dibuja (D31).
+    const planAux = buildPlanAuxSeries({
+      requiredCapitalPath: series.required_capital_path,
+      coastPath: series.coast_path,
+      responsePointCount: series.points.length,
+      points: pts,
+      futureOffset: merged.futureOffset,
+      deflator,
+    });
     const startNwParsed = parseDisplayDecimal(series.starting_net_worth);
     const startNw = startNwParsed !== null ? startNwParsed : nw[0] ?? 0;
     // El histórico puede bajar el NW por debajo de 0 en el pasado: el eje debe permitir negativos
@@ -409,12 +424,15 @@ export function ProjectionNetWorthChart({
       assetStacks,
       allowNegativeAxis,
       memberLines,
+      planAux,
     };
   }, [
     pts,
     series.starting_net_worth,
     series.points.length,
     series.fire_target_series,
+    series.required_capital_path,
+    series.coast_path,
     series.members,
     merged.assetSeries,
     merged.futureOffset,
@@ -431,6 +449,15 @@ export function ProjectionNetWorthChart({
         historyIsAssetsOnly: merged.pastIsAssetsOnly,
         hasContributed: !ccRetired,
       }),
+      // D29 — auxiliares del plan. Salen de las MISMAS líneas que se dibujan (label y color
+      // incluidos), no de una lista paralela: una leyenda que se escribe aparte es una leyenda
+      // que un día rotula una curva que ya no está.
+      ...(baseSeries?.planAux ?? []).map((l) => ({
+        key: l.key,
+        label: l.label,
+        color: l.color,
+        swatch: "dashed" as const,
+      })),
       // D32 — Hogar: la curva gruesa es la Σ y bajo ella va una línea fina por miembro
       // (`lib/member-lines.ts`). Estas entradas rotulan ESA línea y, con el mismo color, su tick
       // de jubilación en la tira de fases. En «Yo» no hay `members[]` y esto no añade nada.
@@ -441,6 +468,7 @@ export function ProjectionNetWorthChart({
       historyStartMonth,
       merged.pastIsAssetsOnly,
       ccRetired,
+      baseSeries,
       series.members,
     ],
   );
@@ -505,6 +533,7 @@ export function ProjectionNetWorthChart({
       assetStacks,
       allowNegativeAxis,
       memberLines,
+      planAux,
     } = baseSeries;
     const totalMonths = series.months;
     // Dominio panorámico: incluye el pasado histórico (historyStartMonth ≤ 0). Sin histórico,
@@ -564,6 +593,17 @@ export function ProjectionNetWorthChart({
     const memberVisibleValues = memberVisible.flatMap((l) =>
       l.points.map((p) => p.value),
     );
+    // Las auxiliares del plan SÍ entran en el dominio Y (a diferencia del objetivo FIRE, que
+    // puede crecer un orden de magnitud por encima del patrimonio y aplastaría la curva): son
+    // series LÍQUIDAS de la misma simulación, viven en el mismo rango, y recortarlas contra el
+    // clipPath las haría parecer curvas que se ACABAN — que aquí significaría otra cosa.
+    const planAuxVisible = planAux.map((line) => ({
+      ...line,
+      values: visibleIndices.map((i) => line.values[i] ?? null),
+    }));
+    const planAuxVisibleValues = planAuxVisible.flatMap((l) =>
+      l.values.filter((v): v is number => v != null && Number.isFinite(v)),
+    );
 
     // El target FIRE inflado puede crecer muy por encima del patrimonio en horizontes largos;
     // dejarlo fuera del rango del eje Y para no aplastar la curva del patrimonio. La línea se
@@ -573,12 +613,14 @@ export function ProjectionNetWorthChart({
       ...ccVisible,
       ...assetVisibleValues,
       ...memberVisibleValues,
+      ...planAuxVisibleValues,
     );
     const dataMax = Math.max(
       ...nwVisible,
       ...ccVisible,
       ...assetVisibleValues,
       ...memberVisibleValues,
+      ...planAuxVisibleValues,
     );
     const rawSpan = dataMax - dataMin;
     const padY =
@@ -759,6 +801,8 @@ export function ProjectionNetWorthChart({
       visibleIndices,
       memberLines,
       memberVisible,
+      planAux,
+      planAuxVisible,
       phaseSegments: phaseSegmentsAll,
       phaseMarks: phaseMarksAll,
       phaseStripH,
@@ -931,6 +975,8 @@ export function ProjectionNetWorthChart({
     visibleIndices,
     memberLines,
     memberVisible,
+    planAux,
+    planAuxVisible,
     phaseSegments,
     phaseMarks,
     phaseStripH,
@@ -1073,6 +1119,21 @@ export function ProjectionNetWorthChart({
         .filter((s): s is string => s !== null)
         .join(" ")
     : null;
+  // D29 · auxiliares del plan. Mismo patrón que la línea FIRE: los `null` (el tramo histórico)
+  // se DESCARTAN en vez de dibujarse en el suelo del eje, así que la curva arranca en el mes 0.
+  const planAuxPolylines = planAuxVisible.map((line) => ({
+    key: line.key,
+    color: line.color,
+    dash: line.dash,
+    points: line.values
+      .map((v, j) =>
+        v == null || !Number.isFinite(v)
+          ? null
+          : `${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`,
+      )
+      .filter((t): t is string => t !== null)
+      .join(" "),
+  }));
   let areaD = "";
   if (nwVisible.length > 0) {
     const parts: string[] = [];
@@ -1783,6 +1844,26 @@ export function ProjectionNetWorthChart({
               opacity={0.225}
             />
           ) : null}
+          {/* D29 · «Capital necesario» y «si dejas de aportar en el mes coast»: DISCONTINUAS,
+              porque no son tu patrimonio — son la trayectoria que el plan exige y la que
+              tendrías si dejaras de aportar. Se pintan por encima del objetivo FIRE (que va al
+              22 % de opacidad, de fondo) y por debajo de la curva de patrimonio, que sigue
+              siendo la protagonista. Sin solve la lista está vacía y aquí no se dibuja nada. */}
+          {planAuxPolylines.map((line) =>
+            line.points === "" ? null : (
+              <polyline
+                key={line.key}
+                points={line.points}
+                fill="none"
+                stroke={line.color}
+                strokeWidth={1.5}
+                strokeDasharray={line.dash}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={0.85}
+              />
+            ),
+          )}
           {historyStartMonth < 0
             ? snapshotMarkers.map((mk, idx) => {
                 const val = valueAtMonth(mk.month_index, nw);
@@ -2200,6 +2281,19 @@ export function ProjectionNetWorthChart({
               propio, y el vértice siguiente sería el patrimonio de hasta un año DESPUÉS. Un
               miembro cuya línea ya terminó (horizonte propio más corto) no aparece: su ausencia
               es el dato, y un 0 diría que se quedó sin nada. */}
+          {/* D29 — auxiliares del plan en el mes hovered. Se indexan por POSICIÓN del array
+              (`hover` ya es la posición del punto, igual que `nw[hover]`) porque estas dos
+              series son paralelas a los puntos dibujados, no series propias con sus meses. Ya
+              vienen deflactadas con el mismo factor que el patrimonio de arriba. */}
+          {planAux.map((line) => {
+            const v = line.values[hover!];
+            if (v == null || !Number.isFinite(v)) return null;
+            return (
+              <div key={line.key}>
+                {line.label} — {formatCurrencyNumber(v, currencyIso)}
+              </div>
+            );
+          })}
           {memberLines.map((line) => {
             const v = memberValueAtMonth(line, pts[hover]!.month_index);
             if (v === null) return null;

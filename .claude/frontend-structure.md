@@ -169,9 +169,30 @@ src/
 │   │                             #   birth_date_missing > target_retirement_age_missing > «En plan»; literal
 │   │                             #   desconocido ⇒ «En plan», nunca hueco) y planMilestone (jubilación EFECTIVA;
 │   │                             #   `null` CON razón = no aplica, `null` SIN razón = no se jubila en el horizonte).
-│   │                             #   `retire_at_age_underfunded` aún NO lo emite el motor (llega con solve.rs): el
-│   │                             #   mapeo se escribe ya para que no se pinte como nada el día que llegue.
+│   │                             #   WP7-3b2: la fuente canónica de la tarjeta propia pasa a ser `summary.plan` —
+│   │                             #   ownPlanCard (plan si `absent_reason == null`, si no la serie ENTERA como
+│   │                             #   respaldo; nunca media de cada), planStatusFromPlan (el objeto `plan` NO trae
+│   │                             #   `warnings[]`: el rojo llega como el booleano `underfunded`, y `null` ahí es
+│   │                             #   «no aplica», no `false`) y resolvePlanMilestoneCivil (mes de la rejilla →
+│   │                             #   fecha con `anchor_date_ymd` + edad con la fecha de nacimiento; sin ancla no se
+│   │                             #   inventa fecha). PlanCardModel.figures = las dos cifras del solve, COPIADAS.
 │   │                             #   Test: plan-card.test.ts
+│   ├── retirement-tiles.ts       # 5.0.0 WP7-3b2 (D16/D17/D31, tabla §C de #207): tabla PURA estrategia → tarjetas
+│   │                             #   de Jubilación (+ avisos). buildRetirementTiles(series, currencyIso, monthLabel,
+│   │                             #   targetRetirementAge) → {tiles[] listos para MetricCard, notices[] con tono}.
+│   │                             #   asap ⇒ ninguna · retire_at_age ⇒ ahorro necesario + margen · coast ⇒ mes coast +
+│   │                             #   número coast + margen · partial ⇒ ahorro + margen + hueco · pensión CON FECHA
+│   │                             #   (cualquier estrategia) ⇒ puente. `null` ≠ 0: una tarjeta que la estrategia no
+│   │                             #   responde NO se pinta con guion. El margen lleva DOS bases con copia distinta
+│   │                             #   (techo−aportación vs sobrante desde el mes coast). El rotulador de meses lo
+│   │                             #   inyecta la vista (fechas o edades). Test: retirement-tiles.test.ts
+│   ├── plan-series.ts            # 5.0.0 WP7-3b2 (D29): las dos series DISCONTINUAS del chart —
+│   │                             #   buildPlanAuxSeries(required_capital_path, coast_path, …) → líneas con label,
+│   │                             #   token de color (--proj-required / --proj-coast), patrón de guion y valores
+│   │                             #   paralelos a los puntos DIBUJADOS (`null` en el histórico) ya deflactados por
+│   │                             #   `month_index` real. Mismo `futureOffset` que fire_target_series; longitud que
+│   │                             #   no casa ⇒ serie descartada entera. `disposable_capital` NO se dibuja (D31).
+│   │                             #   Test: plan-series.test.ts
 │   ├── history-merge.ts          # mergeProjectionWithHistory(series, history): une la serie histórica (month_index<0) con la
 │   │                             #   proyección en el vértice mes-0; identidad byte-idéntica si history null/vacío/anchor distinto.
 │   │                             #   Con net_worth null (pasivo sin fotografiar entero) cae a assets_total y marca pastIsAssetsOnly:
@@ -252,7 +273,13 @@ src/
 │   │                             #   Salud financiera (`.plan-card-grid`/`.plan-card`, helpId `summary.plan`) —
 │   │                             #   estrategia · hito · estado, con el modelo en `lib/plan-card.ts`. En Hogar,
 │   │                             #   una tarjeta por `members[]` («Planes del hogar»). Necesita la prop
-│   │                             #   `navigate` (nueva): el estado enlaza a «Tu cuenta» o a Jubilación
+│   │                             #   `navigate` (nueva): el estado enlaza a «Tu cuenta» o a Jubilación.
+│   │                             #   WP7-3b2: en «Yo» la tarjeta lee **`summary.plan`** (no la serie) y añade
+│   │                             #   `.plan-card-figures` — «Ahorro necesario X/mes · Margen Y/mes», copiadas del
+│   │                             #   objeto del servidor. El hito se fecha con `anchor_date_ymd` de la proyección y
+│   │                             #   la edad con `user.birth_date` (prop `user`, nueva). Con `absent_reason` cae a
+│   │                             #   la serie entera. En Hogar cada `members[]` trae sus propias dos cifras y su
+│   │                             #   propio `underfunded`
 │   ├── AssetsView.tsx            # 5.0.0 (§A.2, issue #207): campo «Volatilidad anual % (opc.)» en el form de alta/
 │   │                             #   edición + columna «Volat. % a.a.» en la tabla — solo desktop, y solo si algún
 │   │                             #   activo del grupo declara un valor > 0 (mismo patrón condicional que la columna
@@ -310,8 +337,19 @@ src/
 │   │                             #   éxito — inputs YA, sin la banda de Monte Carlo de WP6 todavía). Autosave de
 │   │                             #   420 ms (`queueProfileSave`) con guarda de validez (`retirementProfileIssue`,
 │   │                             #   mismos códigos que el servidor) contra `onSaveRetirementProfile` (`App.tsx`).
-│   │                             #   Tile «Margen disponible» presente pero PLACEHOLDER (guion + «aún no se calcula»
-│   │                             #   hasta que WP5 publique el solve). En Hogar (`scopeReadOnly` prop): el bloque de
+│   │                             #   WP7-3b2: la banda superior mantiene sus 3 tarjetas fijas (objetivo —con la BASE
+│   │                             #   en su subtítulo: «renta perpetua» / «puente hasta la pensión»—, jubilación,
+│   │                             #   años) y debajo aparece una SEGUNDA rejilla `.metric-grid.retirement-solve-grid`
+│   │                             #   con las tarjetas de la estrategia elegida (`lib/retirement-tiles.ts`): ahorro
+│   │                             #   necesario, margen, mes/número coast, hueco de media jornada, puente. Va aparte
+│   │                             #   porque la banda superior es una tira `nowrap` con scroll y con media jornada +
+│   │                             #   pensión serían siete tarjetas en una línea. El rojo de D17 (`underfunded`) sale
+│   │                             #   DOS veces: banner `.error-banner` arriba —con la edad objetivo GUARDADA, no la
+│   │                             #   del borrador— y `tone="danger"` en la tarjeta de ahorro. Los demás avisos
+│   │                             #   (`coast_not_reachable`, `partial_phase_capital_shrinking`,
+│   │                             #   `bridge_discount_no_liquid_assets`, `target_retirement_age_missing`) van bajo la
+│   │                             #   rejilla en `.retirement-strategy-notices`; `birth_date_missing` NO se repite
+│   │                             #   aquí (lo cuenta el banner de alta). En Hogar (`scopeReadOnly` prop): el bloque de
 │   │                             #   perfil entero se sustituye por un panel «Solo lectura»; `canEditProfile` es
 │   │                             #   propio de esta vista (`hasMembership && !scopeReadOnly`, SIN exigir
 │   │                             #   `role === "owner"` — el perfil es dato personal, lo edita cualquier rol,
@@ -328,8 +366,14 @@ src/
 │   │                                #   Sin fases ni marcas la tira mide 0 y la geometría es la de 4.15.x. Tooltip:
 │   │                                #   «Retirada del mes» / «Recorte» / «Exceso» solo desde retirement_month_index,
 │   │                                #   deflactados con el MISMO factor que el patrimonio. Leyenda: una entrada por
-│   │                                #   miembro en Hogar (TODO nombrado en el propio fichero: la línea fina por
-│   │                                #   miembro espera a que el API publique `members[].series`)
+│   │                                #   miembro en Hogar, con su línea fina ya pintada (`lib/member-lines.ts`).
+│   │                                #   WP7-3b2 (D29): **dos series auxiliares DISCONTINUAS** —«Capital necesario»
+│   │                                #   (`required_capital_path`) y «Si dejas de aportar en el mes coast»
+│   │                                #   (`coast_path`)—, modelo en `lib/plan-series.ts`: se pintan sobre el objetivo
+│   │                                #   FIRE y bajo la curva de patrimonio, entran en el dominio Y (a diferencia del
+│   │                                #   objetivo, que puede dwarfear la curva) y aparecen en leyenda Y tooltip con el
+│   │                                #   MISMO rótulo. Sin solve la lista está vacía y el chart es el de 4.15.x.
+│   │                                #   `disposable_capital` NO se dibuja (D31: tile en Jubilación)
 │   │                                #   Leyenda (4.0.6): HTML fuera del SVG (ChartLegend); el ResizeObserver mide .projection-chart-plot
 │   │                                #   (solo el SVG) y el viewBox casa EXACTO con la caja medida (los 38px de etiquetas X rotadas salen
 │   │                                #   de ph, no de lienzo extra — si no, `meet` encoge el dibujo con bandas laterales). Tooltip: top-5
@@ -637,8 +681,10 @@ Re-verified 2026-09-03 against `release/5.0.0` commits `b413471` (WP7 1/3 — vi
 defecto, segmentado «Yo | Hogar», hogar de solo lectura, aviso de alta de Jubilación) y `9ae5c24`
 (WP7 2/3 — tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo) y las
 rebanadas WP7 3a (tira de fases del chart, tarjeta «Plan» del Resumen, jubilación efectiva en el
-tile de Jubilación) y 3b1 (líneas finas por miembro, `target_basis_stored` en el formulario,
-vaciado tri-estado de los porcentajes del activo), issue #207. Re-verify with:
+tile de Jubilación), 3b1 (líneas finas por miembro, `target_basis_stored` en el formulario,
+vaciado tri-estado de los porcentajes del activo) y **3b2** (tarjetas por estrategia con los
+solves de WP5-2b, series auxiliares discontinuas del chart, tarjeta «Plan» leyendo
+`summary.plan`), issue #207. Re-verify with:
 
 - New lib modules exist: `ls apps/web/src/lib/retirement-intro.ts apps/web/src/lib/retirementProfile.ts`
 - `ledger.ts` scope helpers: `grep -n "export function resolveLedgerPersonScope\|export function isScopeReadOnly\|export function ledgerViewAmp\|export const LEDGER_PERSON_SCOPE_STORAGE_KEY" apps/web/src/lib/ledger.ts`
@@ -660,4 +706,12 @@ vaciado tri-estado de los porcentajes del activo), issue #207. Re-verify with:
 - El chart pinta las líneas de miembro bajo la Σ: `grep -n "memberVisible.map" apps/web/src/views/ProjectionNetWorthChart.tsx`
 - El formulario manda la elección ALMACENADA, no la resuelta: `grep -n "withStoredTargetBasis" apps/web/src/App.tsx apps/web/src/lib/retirementProfile.ts`
 - El tri-estado del activo vive en un solo sitio: `grep -n "buildAssetWriteBody" apps/web/src/App.tsx apps/web/src/lib/asset-form.ts`
+- WP7 3b2 — módulos nuevos: `ls apps/web/src/lib/retirement-tiles.ts apps/web/src/lib/plan-series.ts`
+- La tabla estrategia → tarjetas vive en el módulo puro, no en la vista: `grep -c "strategyTiles.tiles.map" apps/web/src/views/RetirementView.tsx` (exactamente 1) y `grep -c "key: \"" apps/web/src/lib/retirement-tiles.ts` (6 tarjetas: required_contribution, coast_month, coast_number, disposable, partial_gap, bridge)
+- Los campos nuevos del servidor están tipados: `grep -n "required_capital_path\|coast_path\|disposable_capital_today\|partial_phase_capital_growing\|bridge_effective_withdrawal_pct" apps/web/src/api/types.ts`
+- Las auxiliares se dibujan discontinuas y con token: `grep -n "planAuxPolylines" apps/web/src/views/ProjectionNetWorthChart.tsx` (definición + render) y `grep -n -- "--proj-required\|--proj-coast" apps/web/src/styles/theme.css` (dos veces cada uno: claro y oscuro)
+- `disposable_capital` NO se dibuja (D31): `grep -rn "disposable_capital" apps/web/src/views/ProjectionNetWorthChart.tsx apps/web/src/lib/plan-series.ts` — solo debe aparecer en los comentarios que explican por qué no está
+- La tarjeta «Tu plan» lee el Resumen, no la serie: `grep -n "ownPlanCard" apps/web/src/views/SummaryView.tsx apps/web/src/lib/plan-card.ts`
+- Los 9 códigos MCP-only de `simulate_projection` tienen frase: `grep -c "profile_overrides_empty\|profile_overrides_no_op\|swr_pct_set_twice\|income_pause_\|solve_no_op" apps/web/src/lib/errorMessages.ts`
+- El escáner de `helpTexts.test.ts` acepta la forma de objeto (los ids ya no viven solo en JSX): `grep -n 'helpId:' apps/web/src/lib/helpTexts.test.ts`
 - GastosView's documented exception to "hide, don't disable": `grep -n "disabled={!canEdit" apps/web/src/views/GastosView.tsx` (the two inline `<select>`s — categoría/tipo — stay `disabled`, not hidden)

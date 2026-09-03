@@ -3871,6 +3871,7 @@ export default function App() {
             summary={summary}
             summaryBusy={summaryBusy}
             projectionSeries={projectionSeries}
+            user={user}
           />
         ) : activeTab === "assets" ? (
           <AssetsView

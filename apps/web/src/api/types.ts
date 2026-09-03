@@ -389,6 +389,36 @@ export type CategoryBreakdownLineApi = {
   total: string;
 };
 
+/**
+ * El plan de jubilación del usuario tal y como lo publica `GET /v1/summary` (5.0.0 WP5-2b, D27).
+ *
+ * **No es un cálculo del Resumen**: sale del MISMO objeto que pinta el chart (la entrada de cache
+ * de la proyección del solicitante), copiando campos. `required_savings_monthly` ES
+ * `required_contribution_monthly` de `/v1/projection/series` con el nombre que se lee en un
+ * Resumen, y `disposable_monthly`/`underfunded` viajan con sus mismas bases y sus mismos `null`.
+ *
+ * Los seis campos van a `null` **A LA VEZ** cuando hay `absent_reason`: publicar uno suelto sería
+ * peor que no publicar ninguno.
+ */
+export type SummaryPlanApi = {
+  strategy: RetirementStrategyApi | null;
+  retirement_trigger: RetirementTriggerApi | null;
+  /** Mes EFECTIVO de jubilación en la rejilla de `points[].month_index` (0 = hoy). `null` con
+   *  `absent_reason` y también —sin él— cuando el plan no se jubila dentro del horizonte: eso es
+   *  un resultado, no un hueco. */
+  jubilacion_month_index: number | null;
+  /** €/mes (Decimal-string). `null` con las estrategias por cruce: no hay edad contra la que
+   *  resolver nada. */
+  required_savings_monthly: string | null;
+  /** €/mes (Decimal-string), con la base declarada por estrategia en el campo homónimo de la
+   *  serie. `null` cuando la estrategia no publica margen. */
+  disposable_monthly: string | null;
+  /** El rojo de D17. **`null` = la pregunta no aplica**, nunca `false` para decir «no aplica». */
+  underfunded: boolean | null;
+  /** `household_aggregate` | `projection_unavailable`. `null` ⟺ el plan es el del usuario. */
+  absent_reason: string | null;
+};
+
 export type SummaryResponse = {
   total_assets: string;
   total_liabilities: string;
@@ -397,6 +427,8 @@ export type SummaryResponse = {
   financial_health: FinancialHealthMetrics;
   assets_by_category: CategoryBreakdownLineApi[];
   liabilities_by_category: CategoryBreakdownLineApi[];
+  /** Tarjeta «Tu plan» (5.0.0, D27). Ausente en backends anteriores a WP5-2b. */
+  plan?: SummaryPlanApi;
 };
 
 export type BudgetTotalsApi = {
@@ -543,12 +575,22 @@ export type HouseholdMemberProjectionApi = {
   liquid_crossing_month_index: number | null;
   /** El mes efectivo otra vez, con el nombre del motor (= `jubilacion_month_index`, R8). */
   retirement_month_index: number | null;
-  /** Mes «coast». **Siempre `null` hoy**: lo calcula la bisección de `solve.rs`, que no está en
-   *  esta ola; se publica ya para que el consumidor no cambie de forma cuando llegue. */
+  /** Mes «coast» de ESTE miembro, en la rejilla común (5.0.0 WP5-2b). `null` con cualquier
+   *  estrategia que no sea `coast`, y también con `coast` cuando su plan no llega ni aportando
+   *  siempre (entonces lleva `coast_not_reachable` en sus `warnings`). */
   coast_fire_month_index: number | null;
-  /** Mes de inicio de la media jornada. `null` hasta WP3. */
+  /** `true` ⟺ ni invirtiendo cada euro de sobrante llega a su edad objetivo (D17). **`null` = la
+   *  pregunta no aplica a su estrategia**, nunca `false` para decir «no aplica». */
+  underfunded?: boolean | null;
+  /** €/mes (Decimal-string): su aportación mínima para llegar a su edad objetivo. `null` con las
+   *  estrategias por cruce. */
+  required_contribution_monthly?: string | null;
+  /** €/mes (Decimal-string): su margen, con la base de SU estrategia. `null` cuando no publica
+   *  margen. */
+  disposable_monthly?: string | null;
+  /** Mes de inicio de la media jornada. `null` si esa fase no ocurre. */
   partial_retirement_month_index: number | null;
-  /** Mes de inicio de la pensión con fecha. `null` hasta WP3. */
+  /** Mes de inicio de la pensión con fecha. `null` sin pensión declarada. */
   pension_start_month_index: number | null;
   /** Mes en que la cartera de ESTE miembro se vacía (el agregado publica el MÍNIMO). */
   assets_depleted_month_index: number | null;
@@ -717,6 +759,76 @@ export type ProjectionSeriesApi = {
    *  Cada fila trae sus marcadores, su horizonte propio y —desde WP5-2— **su serie**
    *  (`members[].series`), que es lo que el chart pinta como línea fina bajo la Σ. */
   members?: HouseholdMemberProjectionApi[];
+
+  // ── 5.0.0 WP5-2b — pensión con fecha, puente, media jornada y SOLVES (§B.3/§B.7 de #207) ──
+  //
+  // TODO este bloque va a `null`/vacío en `view=household`: el agregado suma N planes y ninguno
+  // de estos números tiene versión «del hogar» (¿el margen de quién?). Lo que sí existe por
+  // persona viaja en `members[]`.
+  /** **% ANUAL** (Decimal-string, `"5.0000"` = 5 %): la tasa con la que el puente descontó sus
+   *  flujos, ya resuelta desde `bridge_discount_basis`. **`null` ⟺ el objetivo no es puente** —
+   *  un `0` ahí se leería como «puente sin descontar» en vez de «no hay puente». Con
+   *  `bridge_discount_no_liquid_assets` en `warnings`, cayó a 0 por no haber activos líquidos. */
+  bridge_discount_annual_pct?: string | null;
+  /** **% ANUAL** (Decimal-string): `100·12·gasto_pleno(R−1)/líquido(R−1)` en el mes efectivo de
+   *  jubilación — lo que hay que sacar de la cartera mientras la pensión no llega. Puede estar
+   *  legítimamente por encima del SWR: dura pocos años. `null` sin pensión con fecha, sin base
+   *  puente, sin objetivo, sin jubilación en el horizonte o con líquido no positivo ese mes. */
+  bridge_effective_withdrawal_pct?: string | null;
+  /** **FRACCIÓN** (Decimal-string, `"0.6000"` = 60 %): qué parte del gasto cubre la pensión el
+   *  mes en que empieza. `≥ 1` ⇒ la pensión cubre el gasto entero. Ojo con el sufijo: esta es
+   *  una fracción y su vecina `bridge_effective_withdrawal_pct` un porcentaje. */
+  pension_coverage_ratio?: string | null;
+  /** Euros (Decimal-string): capital que sostendría a perpetuidad el HUECO de la media jornada.
+   *  Informativo, no dispara nada. `"0.0000"` = la media jornada se paga sola; `null` = no hay
+   *  fase parcial o no hay objetivo. */
+  partial_gap_target?: string | null;
+  /** `true` ⟺ hubo fase parcial y el líquido no bajó ni un mes; `false` = hubo y menguó (+
+   *  `partial_phase_capital_shrinking` en `warnings`); **`null` = no hubo fase parcial**. */
+  partial_phase_capital_growing?: boolean | null;
+  /** €/mes (Decimal-string): aportación mínima que hace `líquido(R−1) ≥ objetivo(R−1)`. Es un
+   *  TECHO sobre lo que la cascada invierte cada mes, no un importe que se aporte pase lo que
+   *  pase. `null` con `asap`/`pension_bridge` y con una estrategia por edad degradada sin fecha
+   *  de nacimiento — **no es cero**: esas estrategias no tienen `R` contra el que resolver. */
+  required_contribution_monthly?: string | null;
+  /** €/mes (Decimal-string): el techo de la búsqueda — el máximo sobrante mensual del horizonte.
+   *  Es el DENOMINADOR de la cifra de arriba («cuánto de mi margen se lleva el plan»). */
+  required_contribution_search_ceiling?: string | null;
+  /** El rojo de D17: `true` ⟺ ni invirtiendo cada euro de sobrante se llega, y entonces
+   *  `required_contribution_monthly === required_contribution_search_ceiling`. Viaja además como
+   *  `retire_at_age_underfunded` en `warnings`. **`null` = la pregunta no aplica**, nunca
+   *  `false`. */
+  underfunded?: boolean | null;
+  /** f64[] paralelo a `points[]` y con su misma decimación: la serie líquida **SIMULADA** de la
+   *  ejecución que aporta exactamente `required_contribution_monthly`. No es el objetivo
+   *  descontado a una tasa escalar (hallazgo M8). Vacío/ausente sin solve. */
+  required_capital_path?: number[];
+  /** €/mes (Decimal-string) con **dos bases según la estrategia**: `retire_at_age`/`partial` ⇒
+   *  `techo − aportación` (≥ 0); `coast` ⇒ el sobrante del mes 1 **desde el mes coast** y
+   *  `"0.0000"` antes. `null` = la estrategia no publica margen. */
+  disposable_monthly?: string | null;
+  /** f64[] paralelo a `points[]`: `líquido(k) − capital_necesario(k)` (o `− coast_path(k)` desde
+   *  el mes coast). **No se clampa a ≥ 0**: con la cascada dirigiendo el sobrante a un activo no
+   *  líquido puede caer por debajo, y esconderlo publicaría un colchón que no existe. D31 lo deja
+   *  FUERA del chart: es tile, no serie dibujada. */
+  disposable_capital?: number[];
+  /** Euros NOMINALES del mes de jubilación (Decimal-string). `null` sin solve o sin jubilación
+   *  dentro del horizonte. */
+  disposable_capital_at_retirement?: string | null;
+  /** Los mismos euros llevados a HOY con el mismo deflactor que `points[].net_worth_real`. Es la
+   *  mitad legible del tile: el nominal de dentro de 25 años impresiona y no dice nada. */
+  disposable_capital_today?: string | null;
+  /** Número de MES de la rejilla: el primero a partir del cual se puede dejar de aportar y
+   *  alcanzar igual el objetivo en la edad elegida. `null` con cualquier estrategia que no sea
+   *  `coast`; con `coast`, `null` = no se llega ni aportando siempre (+ `coast_not_reachable`). */
+  coast_fire_month_index?: number | null;
+  /** Euros (Decimal-string): el patrimonio LÍQUIDO con el que se **ENTRA** en el mes coast (el
+   *  cierre del mes anterior). Valor de la serie simulada, no un descuento cerrado. */
+  coast_number?: string | null;
+  /** f64[] paralelo a `points[]`: la serie «si dejas de aportar en el mes coast» (la discontinua
+   *  de D29). Con el coast no alcanzable es la serie de aportar TODOS los meses: la mejor que el
+   *  plan da. Vacío/ausente sin estrategia `coast`. */
+  coast_path?: number[];
 };
 
 export type FfbackupImportCounts = {

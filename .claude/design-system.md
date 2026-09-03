@@ -44,6 +44,17 @@ Radii: `--ff-radius-{frame=12, panel=14, kpi=12, pill=999, input=10}px`.
 
 Áreas de activos: `--proj-area-1` a `--proj-area-10` (paleta polícroma — azul/teal/violeta/... en claro, pasteles más claros en oscuro). Consumidos por [`ASSET_LINE_COLORS`](../apps/web/src/lib/projection-chart.ts).
 
+Series auxiliares del plan (5.0.0, D29, issue #207): **`--proj-required`** («Capital necesario») y
+**`--proj-coast`** («Si dejas de aportar en el mes coast»), las dos discontinuas y consumidas solo
+desde [`lib/plan-series.ts`](../apps/web/src/lib/plan-series.ts). Son **familia del acento** —lo
+que el plan exige, igual que el objetivo FIRE— y se separan entre sí por **luminancia y patrón de
+guion**, no por un hue nuevo: `color-mix(in oklch, var(--ff-accent) 80%|45%, var(--proj-nw))`, con
+dash `6 4` y `2 5`. Al derivarse de dos tokens que ya tienen rama clara y oscura, el mismo texto
+resuelve distinto en cada tema (mismo patrón que `--cf-savings-cash`); aun así se **repiten** en
+los dos bloques de `theme.css`, como sus vecinos. La paleta polícroma de `--proj-area-*` estaba
+descartada a propósito: esas diez son ÁREAS de activo y una línea fina del mismo hue se leería como
+un activo más.
+
 Direccionales: **`--proj-pos` / `--proj-neg`** (alias de `--ff-pos`/`--ff-neg` en las dos ramas de
 [`theme.css`](../apps/web/src/styles/theme.css)). Consumidores: las líneas/labels de planning inflow–outflow del
 chart de proyección (`App.css`, `.projection-chart-planning-inflow-line` y hermanas) y las barras de
@@ -255,6 +266,26 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 >
 > **Tarjeta de plan (`.plan-card-grid`/`.plan-card`)** (5.0.0, D27/D32, issue #207, `SummaryView.tsx`): tarjeta de ESTADO, no un KPI — reusa la piel de `.metric-card` (papel + filete suave + `--ff-radius-kpi` + `--ff-shadow-flat`) pero su cifra grande no es dinero, así que solo el hito va en monoespaciada; cuando no hay hito, el texto cae a la tipografía del cuerpo atenuada (`.plan-card-milestone--absent`) para que una explicación no se lea como un dato exacto. `.plan-card-detail` es un **slot siempre reservado** (`&nbsp;` sin edad), misma disciplina que el paréntesis de `MetricCard`: sin él, dos tarjetas del hogar con y sin edad dejan la línea de estado a alturas distintas. El estado rojo (`.plan-card--danger` + `.plan-card-status--danger`) usa **el mismo tinte que `.error-banner`** (`--ff-neg` al 8 % sobre `--ff-paper`) — un solo vocabulario de «esto va mal» en toda la app. En Hogar la rejilla lleva una tarjeta por miembro y colapsa a una columna ≤640px.
 >
+> **Tono rojo de KPI (`.metric-card--danger`, prop `tone="danger"` de `MetricCard`)** (5.0.0, D17,
+> issue #207): mismo tinte que `.error-banner` y que `.plan-card--danger` (`--ff-neg` al 8 % sobre
+> `--ff-paper`, borde al 45 %) — **un solo vocabulario de «esto va mal»**. Solo tiñe la piel y el
+> segundo slot (`.metric-value-detail`): la cifra sigue en tinta normal porque el número no está
+> mal; lo que está mal es lo que significa. Único consumidor hoy: «Ahorro necesario» de Jubilación
+> cuando `underfunded === true`.
+>
+> **Cifras del plan (`.plan-card-figures`)** (5.0.0 WP7-3b2, `SummaryView.tsx`): fila propia entre
+> el hito y el estado de `.plan-card`, con «Ahorro necesario X/mes · Margen Y/mes». Va en su renglón
+> y no junto al hito porque son magnitudes AL MES y el hito es una fecha — en la misma línea se leen
+> como una sola frase. `flex-wrap` para que en móvil apilen alineadas a la izquierda.
+>
+> **Segunda rejilla de Jubilación (`.metric-grid.retirement-solve-grid`)** y **avisos
+> (`.retirement-strategy-notices`)** (5.0.0 WP7-3b2, `RetirementView.tsx`): las tarjetas que dependen
+> de la estrategia elegida NO entran en la banda superior (`.workspace-kpi-strip`, que es `nowrap`
+> con scroll horizontal): con media jornada más una pensión serían siete tarjetas en una sola tira
+> desplazable. Van en una `.metric-grid` que **envuelve** (`minmax(min(100%, 12rem), 1fr)`), y bajo
+> ella los avisos que solo matizan el cálculo, en `.muted` y sin color propio — el rojo vive arriba,
+> en un `.error-banner`, porque cambia cómo se leen TODAS las cifras y no solo una.
+>
 > **`.retirement-radio-stack`** (radios nativos en línea, `<label class="field checkbox-field">` por opción, `role="radiogroup"` en el contenedor): existía en `App.css` **sin ningún consumidor** antes de 5.0.0. `9ae5c24` le da los dos primeros — la base del objetivo (`perpetuity`/`bridge_to_pension`) y el `kind` de la regla de retirada, ambos en `RetirementView.tsx` (`grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` → 2). No lo confundas con el segmented: aquí el foco/tabulación son los `<input>` nativos, no un `role="group"` de botones.
 
 ## Iconografía
@@ -374,9 +405,10 @@ ocultar.
 Re-verificado 2026-09-03 contra los commits `b413471` (WP7 1/3 — vista «Yo» por defecto,
 segmentado «Yo | Hogar», hogar de solo lectura, aviso de alta de Jubilación) y `9ae5c24` (WP7 2/3
 — tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo), más las
-rebanadas WP7 3a (tira de fases del chart de Proyección y tarjeta «Plan» del Resumen) y **3b1**
+rebanadas WP7 3a (tira de fases del chart de Proyección y tarjeta «Plan» del Resumen), **3b1**
 (líneas finas por miembro, «(derivada)» de la base del objetivo, vaciado de los porcentajes del
-activo), de la rama `release/5.0.0`, issue #207. Re-verificar con:
+activo) y **3b2** (tarjetas por estrategia y su rojo, series auxiliares discontinuas del chart,
+cifras del plan en el Resumen), de la rama `release/5.0.0`, issue #207. Re-verificar con:
 
 - Segmentado de la TopBar: `grep -n "ff-topbar-scope" apps/web/src/App.css apps/web/src/App.tsx`
 - Banner de ámbito, primer hijo de `<main>`: `grep -n "app-scope-banner" apps/web/src/App.css apps/web/src/App.tsx`
@@ -391,3 +423,8 @@ activo), de la rama `release/5.0.0`, issue #207. Re-verificar con:
 - Líneas de miembro y su color compartido: `grep -n "householdMemberColor" apps/web/src/lib/*.ts` (≥3 ficheros: definición, tira de fases y líneas)
 - La leyenda del miembro dibuja línea, no discontinua: `grep -n 'swatch: "line" as const' apps/web/src/lib/phase-strip.ts`
 - «(derivada)» y su salida en el formulario: `grep -n "targetBasisSource\|Volver a la derivada" apps/web/src/views/RetirementView.tsx`
+- Tokens de las auxiliares, en las DOS ramas del tema: `grep -c -- "--proj-required" apps/web/src/styles/theme.css` (2) y `grep -c -- "--proj-coast" apps/web/src/styles/theme.css` (2)
+- Y sin hex propio: `grep -n -- "--proj-required\|--proj-coast" apps/web/src/styles/theme.css` — las cuatro líneas son `color-mix`, ninguna un literal
+- Tono rojo de KPI: `grep -n "metric-card--danger" apps/web/src/App.css apps/web/src/components/MetricCard.tsx` y su único consumidor `grep -n 'tone={t.tone === "danger"' apps/web/src/views/RetirementView.tsx`
+- Segunda rejilla y avisos de Jubilación: `grep -n "retirement-solve-grid\|retirement-strategy-notices" apps/web/src/App.css apps/web/src/views/RetirementView.tsx` (el nombre NO es `retirement-strategy-grid`: esa clase ya existe **sin envolver** para las 5 radio-cards de estrategia y se habría aplicado también aquí)
+- Cifras del plan: `grep -n "plan-card-figures" apps/web/src/App.css apps/web/src/views/SummaryView.tsx`

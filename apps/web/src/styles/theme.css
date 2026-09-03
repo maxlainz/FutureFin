@@ -83,6 +83,15 @@
   --proj-axis: #737373;
   --proj-milestone: #a3a3a3;
 
+  /* Series auxiliares del plan (5.0.0, D29): «capital necesario» y «si dejas de
+     aportar en el mes coast». Familia del ACENTO —son lo que el plan exige, igual
+     que el objetivo FIRE— y se separan entre sí por luminancia (mezcla distinta con
+     la tinta de la curva de patrimonio) y por patrón de guion, nunca por hue nuevo.
+     Derivadas con `color-mix` de dos tokens que ya tienen rama clara y oscura, así
+     que se redefinen igual en las dos: el mismo texto resuelve distinto. */
+  --proj-required: color-mix(in oklch, var(--ff-accent) 80%, var(--proj-nw));
+  --proj-coast: color-mix(in oklch, var(--ff-accent) 45%, var(--proj-nw));
+
   /* Perspectiva histórica (pasado): línea NW histórica, fondo de la región
      pasada, divisor «Hoy» y marcadores de snapshot. */
   --proj-nw-past: #525252;
@@ -162,6 +171,15 @@
   --proj-meta: #d4d4d8;
   --proj-axis: #a1a1aa;
   --proj-milestone: #525252;
+
+  /* Series auxiliares del plan (5.0.0, D29): «capital necesario» y «si dejas de
+     aportar en el mes coast». Familia del ACENTO —son lo que el plan exige, igual
+     que el objetivo FIRE— y se separan entre sí por luminancia (mezcla distinta con
+     la tinta de la curva de patrimonio) y por patrón de guion, nunca por hue nuevo.
+     Derivadas con `color-mix` de dos tokens que ya tienen rama clara y oscura, así
+     que se redefinen igual en las dos: el mismo texto resuelve distinto. */
+  --proj-required: color-mix(in oklch, var(--ff-accent) 80%, var(--proj-nw));
+  --proj-coast: color-mix(in oklch, var(--ff-accent) 45%, var(--proj-nw));
 
   /* Perspectiva histórica (pasado) — aclarada para conservar contraste
      sobre el fondo zinc-900. */

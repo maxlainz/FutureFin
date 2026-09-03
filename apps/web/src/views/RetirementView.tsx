@@ -55,6 +55,10 @@ import {
   targetBasisSource,
 } from "../lib/retirementProfile";
 import { messageForError } from "../lib/errorMessages";
+import {
+  TARGET_BASIS_TILE_LABEL,
+  buildRetirementTiles,
+} from "../lib/retirement-tiles";
 import { type LedgerPersonScope } from "../lib/ledger";
 import {
   persistRetirementIntroDismissed,
@@ -458,6 +462,50 @@ export function RetirementView({
   const targetTodayReady =
     retirementMetricsReady && (profileDirty ? firePreviewReady : true);
 
+  /**
+   * Tarjetas y avisos POR ESTRATEGIA (D16/D17/D31, tabla §C del plan de #207).
+   *
+   * La correspondencia estrategia → tarjetas vive en `lib/retirement-tiles.ts` con su test; aquí
+   * solo se inyecta lo que esa tabla no puede saber: el rotulador del eje (fechas o edades, con
+   * la fecha de nacimiento y la zona horaria del hogar) y la edad objetivo **GUARDADA** — la del
+   * borrador sin guardar nombraría una edad que la simulación de la respuesta no usó, y el rojo
+   * diría «no llegas a los 52» mientras el servidor está contestando por los 55.
+   */
+  const strategyTiles = useMemo(
+    () =>
+      buildRetirementTiles({
+        series: retirementMetricsReady ? projectionSeries : null,
+        currencyIso,
+        monthLabel: (mi) =>
+          projectionXTickLabel(mi, mc > 0 ? mc : 1, {
+            ageUiMode: axisAgeMode,
+            birthDateIso: axisBirth,
+            anchorDateYmd: axisAnchor,
+            calendarTz,
+          }),
+        targetRetirementAge: savedProfile.target_retirement_age ?? null,
+      }),
+    [
+      retirementMetricsReady,
+      projectionSeries,
+      currencyIso,
+      mc,
+      axisAgeMode,
+      axisBirth,
+      axisAnchor,
+      calendarTz,
+      savedProfile.target_retirement_age,
+    ],
+  );
+  /** El rojo grande de D17 va ARRIBA, con el resto de banners; los avisos que solo matizan el
+   *  cálculo van bajo las tarjetas, donde está la cifra que matizan. */
+  const strategyDangerNotices = strategyTiles.notices.filter(
+    (n) => n.tone === "danger",
+  );
+  const strategyWarnNotices = strategyTiles.notices.filter(
+    (n) => n.tone === "warn",
+  );
+
   const renderRetirementAmount = useCallback(
     (annual: number, monthly: number): ReactNode => (
       <>
@@ -629,6 +677,16 @@ export function RetirementView({
         </div>
       ) : null}
 
+      {/* D17 — el rojo GRANDE: la edad manda y el capital no llega. No es un error (la
+          simulación existe, se publica entera y la fecha no se mueve), así que no lleva `alert`
+          ni pide corregir nada: dice que te jubilarás POR DEBAJO de tu objetivo. Va arriba,
+          antes de las cifras, porque cambia cómo se leen todas las de abajo. */}
+      {strategyDangerNotices.map((n) => (
+        <div key={n.code} className="banner error-banner" role="status">
+          {n.text}
+        </div>
+      ))}
+
       {installationInflationPct <= 0 ? (
         <div className="banner info-banner">
           Con la inflación a 0 %, tu objetivo se queda plano en dinero de hoy: la fecha que ves
@@ -675,6 +733,12 @@ export function RetirementView({
                       ? `${formatCurrencyNumber(targetAtCrossNominal, currencyIso)} al cruce`
                       : undefined
               }
+              /* 5.0.0: el MISMO importe significa dos cosas distintas según su base — capital
+                 para vivir de la renta para siempre, o capital para llegar hasta la pensión más
+                 lo que esta no cubra. Sin decirlo, dos hogares con la misma cifra creen tener el
+                 mismo plan. Sale de la base EFECTIVA del formulario (elegida o derivada), que es
+                 la que el servidor resuelve con el mismo criterio. */
+              detail={TARGET_BASIS_TILE_LABEL[basis]}
             />
             {/* 5.0.0 (R8): esta tarjeta ya NO es «el primer cruce». Es la jubilación EFECTIVA
                 —el mes en que el motor te jubila de verdad, sea por cruce o por edad—, que es
@@ -721,20 +785,39 @@ export function RetirementView({
                   : METRIC_DASH
               }
             />
-            {/* D31 — el margen es un TILE y nada más (ni área en el chart ni acción). La cifra
-                llega con los campos de Monte Carlo y los solves del servidor; hasta entonces la
-                tarjeta existe con un guion y la ayuda explica qué enseñará, en vez de aparecer
-                de la nada en la versión siguiente. Solo tiene sentido con una edad objetivo:
-                en «Cuanto antes» todo el ahorro va al objetivo por definición. */}
-            {strategy !== "asap" ? (
-              <MetricCard
-                label="Margen disponible"
-                helpId="retirement.disposable"
-                value={METRIC_DASH}
-                parenthetical="aún no se calcula"
-              />
-            ) : null}
           </div>
+          {/* Tarjetas POR ESTRATEGIA (§C): ahorro necesario, margen (D16/D31), mes y número
+              coast, hueco de media jornada y puente. Van en una SEGUNDA rejilla y no en la banda
+              de arriba por dos razones: la banda es de scroll horizontal sin envoltura y con la
+              media jornada más una pensión serían siete tarjetas en una tira; y estas responden
+              preguntas de la estrategia elegida, no del plan en general. La lista es VARIABLE a
+              propósito — una fila de guiones diría «esto se calcula y hoy falta el dato», y lo
+              cierto es que la estrategia elegida no hace esa pregunta. El rojo de la tarjeta de
+              ahorro es el mismo hecho que el banner de arriba, junto a la cifra que lo provoca. */}
+          {strategyTiles.tiles.length > 0 ? (
+            <div className="metric-grid retirement-solve-grid">
+              {strategyTiles.tiles.map((t) => (
+                <MetricCard
+                  key={t.key}
+                  label={t.label}
+                  helpId={t.helpId}
+                  value={t.value}
+                  parenthetical={t.parenthetical}
+                  detail={t.detail}
+                  tone={t.tone === "danger" ? "danger" : "default"}
+                />
+              ))}
+            </div>
+          ) : null}
+          {strategyWarnNotices.length > 0 ? (
+            <div className="retirement-strategy-notices">
+              {strategyWarnNotices.map((n) => (
+                <p key={n.code} className="muted tight">
+                  {n.text}
+                </p>
+              ))}
+            </div>
+          ) : null}
           {retirementMetricsReady && projectionSeries?.fire_target_absent_reason ? (
             <p className="muted tight">
               {FIRE_TARGET_ABSENT_REASON_ES[projectionSeries.fire_target_absent_reason] ??

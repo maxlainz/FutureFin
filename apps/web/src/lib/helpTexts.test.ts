@@ -25,6 +25,12 @@ for (const f of sourceFiles(SRC)) {
   const src = readFileSync(f, "utf8");
   if (f.endsWith("helpTexts.ts")) continue;
   for (const m of src.matchAll(/helpId="([^"]+)"/g)) used.add(m[1]);
+  // Forma de OBJETO (`helpId: "retirement.coast_month"`), no de prop JSX: desde 5.0.0 hay
+  // módulos puros que deciden qué tarjetas se pintan y con qué ayuda
+  // (`lib/retirement-tiles.ts`, tabla §C de #207). Sin este patrón el escáner los daba por
+  // huérfanos y la cobertura bidireccional empujaba a BORRAR textos que sí se usan — el fallo
+  // exacto que este test existe para impedir, del revés.
+  for (const m of src.matchAll(/helpId:\s*"([^"]+)"/g)) used.add(m[1]);
   // Acepta también la forma ternaria multilínea: HELP_TEXTS[cond ? "a" : "b"].
   for (const m of src.matchAll(/HELP_TEXTS\[([\s\S]{0,220}?)\]/g)) {
     // Solo cadenas con punto: los ids del catálogo lo llevan siempre, y así la condición
