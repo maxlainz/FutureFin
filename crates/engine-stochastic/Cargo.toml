@@ -15,9 +15,17 @@ futurefin-engine = { path = "../engine" }
 # dinero en `Decimal`, vive la traducción hacia y desde él.
 rust_decimal = { version = "1.41", features = ["maths"] }
 
-# Sin `rand` todavía, y es deliberado: WP5.5 solo abre el hueco (`growth_overrides`) y demuestra
-# que el bucle degenera. El RNG pineado (`rand_chacha`) entra en WP6 con la semilla de D23, y
-# entra AQUÍ — `crates/engine` sigue sin RNG y sin coma flotante.
+# El RNG de Monte Carlo (WP6, D11/D23). Vive AQUÍ y solo aquí: `crates/engine` sigue sin RNG y
+# sin coma flotante.
+#
+# **La reproducibilidad NO depende de esta versión**, y es a propósito: (1) ChaCha8 es un cifrado
+# de flujo especificado, así que la secuencia de bytes que sale de una clave de 32 bytes es la
+# misma en cualquier implementación correcta y en cualquier plataforma; (2) este crate construye
+# esos 32 bytes él mismo (`path_rng`, splitmix64) y **nunca llama a `SeedableRng::seed_from_u64`**,
+# cuya expansión sí es un detalle de la caja. El guardián de esa afirmación es el test
+# `the_chacha_stream_is_pinned`, que fija los tres primeros normales de una semilla conocida: si
+# una actualización moviera el flujo, falla ahí y no en silencio dentro de una banda.
+rand_chacha = "0.10"
 
 [dev-dependencies]
 # La batería de casos del motor se REUTILIZA por `#[path]` (`tests/common/cases.rs`): una sola

@@ -30,6 +30,24 @@
 //! más importa es [`F64Money::gains_equal`]: la selección uniforme-vs-mixta de la fracción de
 //! plusvalía se decide con una IGUALDAD, y una igualdad exacta en coma flotante haría que dos
 //! activos «con la misma `g`» tomaran caminos fiscales distintos por el último bit.
+//!
+//! # La capa de Monte Carlo
+//!
+//! El módulo [`mc`] es lo que ese tipo hace posible: [`project_percentile_bands`] corre miles de
+//! caminos del MISMO bucle con los factores de crecimiento sorteados
+//! ([`SimInput::growth_overrides`](futurefin_engine::SimInput::growth_overrides)) y publica
+//! bandas puntuales y probabilidades. El modelo de retornos, la semilla estable por usuario
+//! ([`seed_for`]) y —sobre todo— **la lista de lo que el modelo NO representa** (colas gruesas,
+//! autocorrelación, correlación imperfecta entre activos, bootstrap histórico) están escritos en
+//! el doc de ese módulo, no en un comentario suelto: un modelo estocástico sin sus supuestos
+//! declarados es un generador de números que parecen ciertos.
+
+mod mc;
+
+pub use mc::{
+    project_percentile_bands, run_path, seed_for, McConfig, McError, McOutcome,
+    DEFAULT_PATHS, DEFAULT_PERCENTILES, DEPLETION_STEP_MONTHS, MAX_PATHS,
+};
 
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
