@@ -550,10 +550,19 @@ describe("retirementProfileIssue — espejo de validate_retirement_profile", () 
 
     // --- Reglas de retirada: cada `kind` exige SUS campos --------------------------------
     ["fixed_real no pide nada", base({ withdrawal_rule: { ...rule } }), null],
+    // U4 — un porcentaje ausente ya NO es un hueco: hereda `swr_pct` (3,5 % por defecto), que es
+    // el punto entero de que la pantalla tenga un solo porcentaje editable.
     [
-      "percent_of_balance sin pct",
+      "percent_of_balance sin pct HEREDA el SWR",
       base({ withdrawal_rule: { ...rule, kind: "percent_of_balance" } }),
-      "withdrawal_pct_required",
+      null,
+    ],
+    // …y la consecuencia declarada, la misma que en Rust: con el SWR a 0 lo heredado no es un
+    // plan, y se dice en vez de devolver una simulación que no vende nada.
+    [
+      "percent_of_balance sin pct y SWR 0",
+      base({ swr_pct: "0", withdrawal_rule: { ...rule, kind: "percent_of_balance" } }),
+      "withdrawal_pct_out_of_range",
     ],
     [
       "percent_of_balance con pct",
@@ -577,8 +586,20 @@ describe("retirementProfileIssue — espejo de validate_retirement_profile", () 
       "withdrawal_pct_out_of_range",
     ],
     [
-      "hybrid sin start_pct",
+      "hybrid sin start_pct hereda el SWR (3,5) y el 3 % queda por debajo",
       base({ withdrawal_rule: { ...rule, kind: "hybrid", end_pct: "3" } }),
+      null,
+    ],
+    // El `end_pct` NO hereda nada: es el suelo del latch, no un porcentaje de retirada. Y se
+    // compara contra el heredado, que es el que va a retirar el motor.
+    [
+      "hybrid sin start_pct y end por encima del SWR heredado",
+      base({ withdrawal_rule: { ...rule, kind: "hybrid", end_pct: "3.9" } }),
+      "hybrid_end_pct_not_below_start",
+    ],
+    [
+      "hybrid sin end_pct sigue siendo un hueco",
+      base({ withdrawal_rule: { ...rule, kind: "hybrid" } }),
       "withdrawal_pct_required",
     ],
     [

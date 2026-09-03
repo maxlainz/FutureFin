@@ -2352,6 +2352,11 @@ export default function App() {
         withStoredTargetBasis(body.profile, body.target_basis_stored),
       );
       setRetirementProfile(saved);
+      // S1 (5.0.0 U1b) — este PATCH acepta también `birth_date`, y Jubilación lo usa para que la
+      // estrategia por edad no obligue a ir a «Tu cuenta» a mitad de la elección. Sin
+      // resincronizar aquí, `user` seguiría diciendo que falta la fecha que se acaba de guardar:
+      // el campo volvería a pedirla y el resto de la app la seguiría dando por ausente.
+      setUser((u) => (u && u.birth_date !== body.birth_date ? { ...u, birth_date: body.birth_date } : u));
       void loadProjectionSeriesPage();
       // El perfil ES el input del sorteo (estrategia, regla, colchón, umbral): sin esto la
       // sección «Riesgo» seguiría enseñando el abanico del plan anterior junto a la línea nueva.
@@ -3895,6 +3900,8 @@ export default function App() {
             open
             installation={installation.installation}
             assetCategories={assetCategories}
+            userBirthDate={user?.birth_date ?? null}
+            onSaveRetirementProfile={saveRetirementProfilePatch}
             onFinished={() => {
               setOnboardingForced(false);
               setOnboardingSkipped(false);
@@ -3942,7 +3949,6 @@ export default function App() {
             summary={summary}
             summaryBusy={summaryBusy}
             projectionSeries={projectionSeries}
-            user={user}
           />
         ) : activeTab === "assets" ? (
           <AssetsView
@@ -4236,6 +4242,7 @@ export default function App() {
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
             scopeReadOnly={scopeReadOnly}
             onSaveRetirementProfile={saveRetirementProfilePatch}
+            onSelectMineScope={() => setLedgerPersonScope("mine")}
             navigate={navigate}
           />
         ) : activeTab === "projection" ? (

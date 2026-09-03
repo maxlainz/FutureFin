@@ -2834,20 +2834,6 @@ fieldset.retirement-config-stack {
   line-height: 1.25;
 }
 
-.retirement-mode-amount {
-  font-size: 0.84rem;
-  font-weight: 600;
-  color: var(--ff-ink);
-  font-variant-numeric: tabular-nums;
-  font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
-}
-
-.retirement-mode-monthly {
-  color: var(--ff-muted);
-  font-size: 0.78em;
-  font-weight: normal;
-}
-
 @media (max-width: 900px) {
   .retirement-mode-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4151,28 +4137,6 @@ fieldset.retirement-config-stack {
   min-height: 1.2em;
 }
 
-/* Segunda rejilla de Jubilación (5.0.0, §C): las tarjetas que dependen de la
-   ESTRATEGIA elegida. `solve` y no `strategy` en el nombre: `.retirement-strategy-grid`
-   ya existe SIN envolver (modificadora de las 5 radio-cards de estrategia, más arriba)
-   y se habría aplicado también a esta rejilla, metiéndole su `minmax(15rem)`. Rejilla que envuelve y no tira con scroll como la banda de
-   arriba — con media jornada + pensión son cuatro, y sumadas a las tres fijas
-   dejarían siete tarjetas en una sola línea desplazable. `margin-top` negativo no:
-   se apoya en el `margin-bottom` que .metric-grid ya trae. */
-.metric-grid.retirement-solve-grid {
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 12rem), 1fr));
-}
-
-/* Avisos de estrategia bajo la banda de KPIs de Jubilación (5.0.0, §C): matizan
-   el cálculo (coast inalcanzable, capital que mengua en media jornada, puente sin
-   descuento) y por eso viven junto a las cifras que matizan y no arriba con el
-   rojo, que cambia cómo se leen TODAS. Sin color propio: son `.muted`. */
-.retirement-strategy-notices {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  margin-top: 0.5rem;
-}
-
 /* Tono rojo de un KPI (5.0.0, D17): el plan está completo y NO llega. Mismo
    tinte que `.error-banner` y que `.plan-card--danger` — un solo vocabulario de
    «esto va mal». Solo la piel: la cifra sigue siendo tinta normal, porque el
@@ -4410,18 +4374,6 @@ fieldset.retirement-config-stack {
   font-weight: 600;
 }
 
-/* Nota bajo el abanico. Es la frase que impide leer la mediana como un
-   camino, así que va pegada al chart y no en el pie del panel. */
-.risk-fan-note {
-  display: flex;
-  align-items: baseline;
-  gap: 0.35rem;
-  margin-top: 0.5rem;
-  font-size: 0.78rem;
-  line-height: 1.35;
-  color: var(--ff-ink-soft);
-}
-
 /* Tabla «Probabilidad de agotar el capital». `auto-fit` y no un `<table>`:
    son pares etiqueta/valor sin relación entre filas, y en móvil el
    requisito (D28) son DOS columnas — que aquí sale del propio `minmax`
@@ -4523,4 +4475,296 @@ fieldset.retirement-config-stack {
   grid-template-columns: repeat(auto-fill, minmax(min(100%, 13rem), 1fr));
   margin-top: 0.65rem;
   margin-bottom: 0;
+}
+
+/* ============================================================
+   JUBILACIÓN — rediseño UX U1b (5.0.0, issue #207)
+   ------------------------------------------------------------
+   Todo lo de aquí es ADITIVO y vive al final del archivo a
+   propósito: así ninguna línea anterior se desplaza y las anclas
+   por `file:línea` del freezer `no-hex-outside-theme.test.ts`
+   siguen apuntando donde apuntaban.
+   Cero hex: solo tokens `--ff-*` / `--proj-*` y `color-mix`
+   sobre ellos.
+   ============================================================ */
+
+/* ---- 1 · Cabecera: título + UN indicador de guardado (S6) ----
+   Sustituye a los seis «Guardado automático.» al pie de cada
+   panel, que podían contradecirse entre sí (uno decía «guardado»
+   mientras otro tenía un 400 en la mano). Se alinea a la derecha
+   del título y envuelve debajo cuando no cabe. */
+.workspace-header.retirement-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem 1rem;
+}
+
+.retirement-save-state {
+  font-size: 0.78rem;
+  color: var(--ff-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* El único estado con color propio. No es decoración: es la escala
+   de ESTADO ya sancionada (D17/D28) — «no se ha guardado» es un
+   hecho del plan, no un adorno. «Guardado» se queda en muted:
+   el caso bueno es el normal y teñirlo lo convierte en ruido. */
+.retirement-save-state--danger {
+  color: var(--ff-neg);
+  font-weight: 600;
+}
+
+/* ---- 2 · «Tu plan» ----
+   Marca de campo obligatorio sin rellenar (U2): el autosave está
+   parado hasta que llegue, y hay que decir cuál falta. Mismo rojo
+   de estado que el indicador de la cabecera, un solo vocabulario. */
+.retirement-required-hint {
+  color: var(--ff-neg);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+/* La cifra que el modo de gasto DERIVA, con su procedencia pegada
+   («1.250 €/mes · 15.000 €/año · del presupuesto»). Monoespaciada
+   porque las dos primeras mitades son dinero; envuelve en móvil. */
+.retirement-derived-line {
+  margin: 0;
+  font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--ff-ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Valor del slider de retirada, junto a él. */
+.retirement-slider-value {
+  font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ff-ink);
+}
+
+/* Enlaces de texto que no son acciones destructivas ni primarias:
+   el salto a «Avanzado» y la vuelta a la vista «Yo». Alineados a la
+   izquierda y sin ocupar todo el ancho del `.stack`, que los haría
+   parecer el botón principal del panel. */
+.retirement-advanced-link,
+.retirement-scope-link {
+  align-self: flex-start;
+  margin-left: -0.55rem;
+}
+
+.retirement-scope-link {
+  margin-top: 0.75rem;
+}
+
+/* ---- S11 · las cinco tarjetas de estrategia ----
+   Rejilla EXPLÍCITA y no `auto-fit`: con el reparto automático las
+   cinco caían en 4+1 a los anchos intermedios, y una tarjeta sola
+   en la segunda fila se lee como «la rara» en vez de como la
+   quinta opción de una lista. 5 en escritorio, 3+2 en tableta y
+   una columna en móvil. La especificidad doble gana a la regla de
+   `.retirement-mode-grid` (2 columnas a ≤900px), que es para la
+   rejilla de TRES modos y aquí desharía el 3+2. */
+.retirement-mode-grid.retirement-strategy-grid {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+/* bp:strategy 1023 — excepción POR COMPONENTE, no un eje nuevo:
+   solo gobierna esta rejilla de cinco. La estructura de la página
+   sigue en 720/640. */
+@media (max-width: 1023px) {
+  .retirement-mode-grid.retirement-strategy-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+/* bp:mobile 640 */
+@media (max-width: 640px) {
+  .retirement-mode-grid.retirement-strategy-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* ---- 3 · «Resultado» ----
+   La FRASE del plan (U7). Es la cabecera de resultados entera, así
+   que pesa como un título sin serlo. El TONO va en un filete
+   lateral y NUNCA en el color del texto: la regla de la casa
+   reserva verde/rojo para cifras delta, y la escala de estado
+   (D17/D28) tiñe pieles, no letras. Verde no tiene piel — «va
+   bien» es el estado normal —, así que `ok` usa el acento, que es
+   lo que la app ya usa para destacar UN elemento. */
+.retirement-sentence {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ff-ink);
+  border-left: 3px solid var(--ff-line-soft);
+  padding-left: 0.7rem;
+}
+
+.retirement-sentence--ok {
+  border-left-color: var(--ff-accent);
+}
+
+.retirement-sentence--warn {
+  border-left-color: var(--ff-warn);
+}
+
+.retirement-sentence--danger {
+  border-left-color: var(--ff-neg);
+}
+
+/* Las ≤3 tarjetas de la cabecera (U7). La variante existe SOLO
+   para que su subtítulo envuelva: ahí vive la BASE de la cifra
+   («de 658 €/mes de sobrante · es TODO tu sobrante y no basta»), y
+   media base es peor que ninguna. El recorte global de
+   `.metric-value-parenthetical` se queda como está — lo necesitan
+   las bandas `nowrap` con scroll, que aquí no aplican porque esta
+   rejilla envuelve. */
+.metric-grid.retirement-tiles-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.retirement-tiles-grid .metric-value-parenthetical {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.3;
+}
+
+/* El chart único (U5) y su barra de conmutadores. */
+.retirement-chart-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.retirement-chart-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+
+/* Rótulo de un hito dentro del SVG. El color lo pone el propio
+   marcador (acento el primario, meta los demás); aquí solo la
+   tipografía, que en un `<text>` no se hereda del CSS del padre. */
+.proj-mini-marker-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* «Riesgo», ya compacto: un KPI y la tabla por edad. Todo lo demás
+   (percentiles, cobertura, colchón, procedencia) baja al «Detalle
+   del cálculo». */
+.retirement-risk-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.retirement-detail > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ff-ink-soft);
+}
+
+.retirement-detail[open] > summary {
+  margin-bottom: 0.6rem;
+}
+
+/* ---- 4 · «Avanzado» ----
+   Su cabecera ES la línea de supuestos (U12): plegado o abierto,
+   el acordeón enuncia SIEMPRE lo que el plan da por hecho. Sin
+   esto, esconder un campo (U2) sería forzar su valor en silencio.
+   El marcador nativo se retira porque la línea es larga y el
+   triángulo la partía en dos renglones desalineados; la afordancia
+   la da el chip «Avanzado» de la derecha. */
+.retirement-advanced > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem 0.75rem;
+}
+
+.retirement-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.retirement-advanced-summary-text {
+  flex: 1 1 16rem;
+  min-width: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--ff-ink-soft);
+}
+
+.retirement-advanced-summary-cta {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ff-accent);
+  white-space: nowrap;
+}
+
+.retirement-advanced > summary:focus-visible {
+  outline: 2px solid var(--ff-accent);
+  outline-offset: 2px;
+  border-radius: var(--ff-radius-input);
+}
+
+.retirement-advanced-body {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--ff-line-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+}
+
+.retirement-advanced-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+/* ---- Hogar (U10) ----
+   Una frase por persona y nada más: el hogar no tiene plan propio,
+   así que una rejilla de tarjetas invitaría a comparar cifras con
+   bases distintas. Lista sin viñeta, del ancho del panel. */
+.household-plan-lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-size: 0.88rem;
+  line-height: 1.4;
+  color: var(--ff-ink);
+}
+
+/* El rótulo de la celda de agotamiento vuelve a poder ENVOLVER. Con `nowrap`, «AL FINAL DEL
+   HORIZONTE» (161 px medidos) no cabía en una columna de dos a 639 px y empujaba la PÁGINA
+   entera 7 px — la regla de oro del sistema responsive, que solo permite scroll lateral DENTRO
+   de una tabla. Los rótulos por edad («a los 75») caben en una línea igual; el único que
+   envuelve es el largo, y una celda dos renglones más alta no desalinea nada: la rejilla ya
+   iguala las alturas de la fila. */
+.risk-depletion-age {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }

@@ -7,6 +7,25 @@
  * Recibe la serie del endpoint /v1/projection/series ya cargada por App.tsx
  * (no hace fetch propio). Si `series` es null o no tiene puntos, renderiza
  * un placeholder vacío.
+ *
+ * **5.0.0 · rediseño UX U1b (decisión U5 de #207) — este componente absorbe el abanico.**
+ * Jubilación pasa de DOS gráficos (el determinista arriba y el fan de percentiles en la sección
+ * «Riesgo») a UNO: la misma curva, con el objetivo FIRE, la banda p10–p90 opcional encima y las
+ * marcas de los hitos del plan. Tres props nuevas y opcionales lo hacen posible —`band`,
+ * `markers` y `deflator`—, y las tres son no-ops cuando no se pasan: el Resumen sigue pintando
+ * byte a byte lo de 4.15.x.
+ *
+ * La objeción que documentaba `RiskFanChart` («dos fuentes con rejillas distintas no caben en un
+ * componente que dibuja UNA serie») sigue siendo cierta y por eso la banda **no** se empareja por
+ * posición: entra como una lista de `{month, p10, p90}` y se posiciona con `xAtMonth`, la misma
+ * escala temporal que ya usaban la tira de fases y el eje X. Lo que ha cambiado no es la
+ * dificultad, es la pregunta: con dos charts el usuario tenía que emparejar a ojo dos ejes X que
+ * ni siquiera empezaban en el mismo sitio.
+ *
+ * **La deflactación ocurre AQUÍ y en un solo sitio** (`deflator`): patrimonio, objetivo y banda
+ * pasan por el mismo factor mes a mes. Si la banda llegara ya deflactada y la curva no, el
+ * abanico dejaría de contener a la línea que dice contener — y el chart seguiría pareciendo
+ * correcto.
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -17,12 +36,24 @@ import {
   projectionXTickLabel,
 } from "../../lib/projection-chart";
 import { buildPhaseSegments } from "../../lib/phase-strip";
+import {
+  placeMarkerLabels,
+  type RetirementChartMarker,
+} from "../../lib/retirement-chart";
 
 export type MiniProjectionXAxisOpts = {
   ageUiMode: "dates" | "ages";
   birthDateIso?: string | null;
   anchorDateYmd?: string | null;
   calendarTz: string;
+};
+
+/** Un punto de la banda de percentiles, **en euros NOMINALES** y con su MES de la rejilla: la
+ *  deflactación la aplica el chart, para que sea la misma que la de la curva. */
+export type MiniProjectionBandPoint = {
+  month: number;
+  p10: number;
+  p90: number;
 };
 
 export function MiniProjection({
@@ -36,6 +67,9 @@ export function MiniProjection({
   zoomY = false,
   clampToMonth,
   xAxis,
+  band,
+  markers,
+  deflator,
 }: {
   series: ProjectionSeriesApi | null;
   /** Número de meses a mostrar; recorta si la serie es más larga. */
@@ -68,6 +102,23 @@ export function MiniProjection({
    * edad/fecha siguiendo la misma config que ProjectionNetWorthChart.
    */
   xAxis?: MiniProjectionXAxisOpts | null;
+  /**
+   * Banda p10–p90 de los escenarios con volatilidad (U5). En euros NOMINALES y **por MES**: la
+   * rejilla de la banda (siempre `hybrid`) no tiene por qué coincidir con la de `points[]`, así
+   * que emparejarlas por posición desplazaría el abanico décadas sin que nada fallara.
+   * Ausente ⇒ no se dibuja y no entra en el dominio del eje Y.
+   */
+  band?: readonly MiniProjectionBandPoint[] | null;
+  /** Hitos del plan (jubilación, coast, media jornada, pensión). Sus rótulos se ceden por
+   *  prioridad cuando no caben — `lib/retirement-chart.ts`, con test. */
+  markers?: readonly RetirementChartMarker[] | null;
+  /**
+   * Factor por el que se multiplica cada importe NOMINAL del mes: `deflationFactorAt(mi, pct)`
+   * para leer «en dinero de hoy», ausente (o `() => 1`) para leer en euros corrientes. Se aplica
+   * a patrimonio, objetivo FIRE y banda **por igual**; las áreas de activo se escalan al
+   * patrimonio y por tanto lo heredan.
+   */
+  deflator?: ((monthIndex: number) => number) | null;
 }) {
   // Medimos el ancho real del contenedor para que el viewBox del SVG use
   // unidades = px reales y los marcadores `<circle>` salgan redondos
@@ -125,10 +176,14 @@ export function MiniProjection({
     /** Meses que abarca la ventana visible (para las etiquetas del eje). */
     const visibleMonths = monthSpan + 1;
 
-    const nw = points.map((p) => p.net_worth);
+    // Un deflactor ausente es la identidad: el Resumen no pasa ninguno y su chart no cambia.
+    const df = deflator ?? (() => 1);
+    const nw = points.map((p) => p.net_worth * df(p.month_index));
     const fire =
       showFire && series.fire_target_series && series.fire_target_series.length > 0
-        ? series.fire_target_series.slice(0, total)
+        ? series.fire_target_series
+            .slice(0, total)
+            .map((v, i) => v * df(monthAt(i)))
         : null;
 
     const assetSeries =
@@ -136,7 +191,36 @@ export function MiniProjection({
         ? series.asset_series.map((a) => a.values.slice(0, total))
         : null;
 
-    const allValues = [...nw, ...(fire ?? [])];
+    // La banda se recorta a la VENTANA por mes (nunca por longitud: las dos rejillas difieren) y
+    // se deflacta con el mismo factor que la curva. Menos de dos puntos dibujables no es media
+    // banda: es ninguna, y una banda degenerada se leería como certeza.
+    const bandPoints = band
+      ? band
+          .filter(
+            (b) =>
+              Number.isFinite(b.month) &&
+              b.month >= monthStart &&
+              b.month <= monthEnd &&
+              Number.isFinite(b.p10) &&
+              Number.isFinite(b.p90),
+          )
+          .slice()
+          .sort((a, b) => a.month - b.month)
+          .map((b) => ({
+            month: b.month,
+            p10: b.p10 * df(b.month),
+            p90: b.p90 * df(b.month),
+          }))
+      : [];
+    const bandVisible = bandPoints.length >= 2;
+
+    const allValues = [
+      ...nw,
+      ...(fire ?? []),
+      ...(bandVisible
+        ? bandPoints.flatMap((b) => [b.p10, b.p90])
+        : []),
+    ];
     let vmin: number;
     let vmax: number;
     if (zoomY) {
@@ -236,6 +320,29 @@ export function MiniProjection({
       }
     }
 
+    // Área entre percentiles: p90 de ida y p10 de vuelta, en UN solo `path` cerrado — dos
+    // polígonos dejarían una costura de 1 px visible en oscuro.
+    const bandPath = bandVisible
+      ? `M ${bandPoints
+          .map((b) => `${xAtMonth(b.month).toFixed(1)},${yAt(b.p90).toFixed(1)}`)
+          .join(" L ")} L ${bandPoints
+          .slice()
+          .reverse()
+          .map((b) => `${xAtMonth(b.month).toFixed(1)},${yAt(b.p10).toFixed(1)}`)
+          .join(" L ")} Z`
+      : null;
+
+    const placedMarkers =
+      markers && markers.length > 0
+        ? placeMarkerLabels({
+            markers: markers.filter(
+              (m) => m.month >= monthStart && m.month <= monthEnd,
+            ),
+            xAtMonth,
+            width: W,
+          })
+        : [];
+
     return {
       total,
       monthStart,
@@ -243,6 +350,8 @@ export function MiniProjection({
       visibleMonths,
       nw,
       fire,
+      bandPath,
+      placedMarkers,
       W,
       H,
       padX,
@@ -271,6 +380,9 @@ export function MiniProjection({
     zoomY,
     clampToMonth,
     xAxis,
+    band,
+    markers,
+    deflator,
     containerW,
   ]);
 
@@ -295,6 +407,8 @@ export function MiniProjection({
     visibleMonths,
     nw,
     fire,
+    bandPath,
+    placedMarkers,
     W,
     H,
     padX,
@@ -358,6 +472,21 @@ export function MiniProjection({
           })
         : null}
 
+      {/* Banda 10–90 % de los escenarios (U5). Relleno tenue del acento —es la lectura del
+          plan, la misma familia que el objetivo FIRE— con la opacidad en el atributo y no
+          dentro del color, para que el mismo token resuelva en claro y en oscuro. Va DEBAJO de
+          todo: es el contexto sobre el que se leen la curva y el objetivo, no una serie más. */}
+      {bandPath ? (
+        <path
+          d={bandPath}
+          fill="var(--ff-accent)"
+          fillOpacity={0.16}
+          stroke="var(--ff-accent)"
+          strokeOpacity={0.3}
+          strokeWidth={0.8}
+        />
+      ) : null}
+
       {/* Target FIRE (acento, dash) */}
       {fire ? (
         <polyline
@@ -400,6 +529,39 @@ export function MiniProjection({
           />
         </g>
       ) : null}
+
+      {/* Hitos del plan (U5): jubilación, coast, media jornada y pensión sobre el MISMO eje.
+          La línea se pinta siempre; el rótulo solo cuando cabe (`placeMarkerLabels`), y el que
+          nunca se cede es el de la jubilación. Las secundarias van discontinuas y en el gris de
+          meta del chart grande: son contexto, no el hito que la página contesta. */}
+      {placedMarkers.map((m) => {
+        const primary = m.emphasis === "primary";
+        return (
+          <g key={`mini-marker-${m.key}`}>
+            <line
+              x1={m.x}
+              x2={m.x}
+              y1={padY}
+              y2={padY + ph}
+              stroke={primary ? "var(--ff-accent)" : "var(--proj-meta)"}
+              strokeWidth={primary ? 1.5 : 1}
+              strokeDasharray={primary ? undefined : "3 3"}
+            />
+            {m.showLabel ? (
+              <text
+                x={m.x}
+                y={padY + 11}
+                textAnchor={m.anchor}
+                className="proj-mini-marker-label"
+                fill={primary ? "var(--ff-accent)" : "var(--proj-meta)"}
+                fontSize="9.5"
+              >
+                {m.label}
+              </text>
+            ) : null}
+          </g>
+        );
+      })}
 
       {/* Tira de fases reducida (D29): banda sin rótulos bajo el plot. Las posiciones salen de
           `xAtMonth` (meses), nunca de `xAt` (posiciones del array): con `density=hybrid` los

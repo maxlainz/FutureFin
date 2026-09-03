@@ -198,6 +198,21 @@ export const HELP_TEXTS = {
       "haber llegado; si cae antes, podrías haberte ido antes. Cuando las dos fechas coinciden se " +
       "muestra una sola: es el mismo hecho.",
   },
+  "retirement.plan_sentence": {
+    title: "Tu hito de jubilación",
+    body:
+      "El mes en que la simulación te jubila de verdad, con tu edad y el plazo desde hoy. Qué lo " +
+      "dispara depende de tu estrategia: en «Cuanto antes» y «Puente hasta la pensión» manda el " +
+      "capital; en las de edad, la edad — te jubilas ese mes llegues o no al objetivo.",
+  },
+  "retirement.assumptions": {
+    title: "Supuestos del plan",
+    body:
+      "Todo lo que tu plan da por hecho sin preguntártelo: la tasa de retirada, la regla con la " +
+      "que sacas el dinero, el horizonte, el colchón y tu umbral de éxito. Aparece siempre, " +
+      "aunque la estrategia elegida no te enseñe esos campos — un supuesto que no se ve sigue " +
+      "moviendo tus números. Cámbialos en «Avanzado».",
+  },
   "retirement.strategy": {
     title: "Tu estrategia de jubilación",
     body:
@@ -241,8 +256,11 @@ export const HELP_TEXTS = {
       "necesitas, indexado, sin techo — es lo que hacía FutureFin hasta ahora. «Un % del saldo» " +
       "retira ese porcentaje de tu líquido del mes anterior: nunca se agota, pero tu nivel de " +
       "vida sube y baja con el mercado. «Híbrida» empieza alta y baja al llegar a un saldo. " +
-      "«Con bandas» recorta o sube la retirada al salirse de su banda. Los porcentajes son " +
-      "BRUTOS: el impuesto de la venta va dentro.",
+      "«Con bandas» recorta o sube la retirada al salirse de su banda. El porcentaje que retiran " +
+      "es UNO SOLO y es tu retirada anual: el mismo con el que se dimensiona tu objetivo, así " +
+      "que moverlo mueve las dos cosas a la vez y nunca hay dos cifras que no cuadren. Cada " +
+      "regla añade lo suyo y nada más: la híbrida, a cuánto BAJA; las bandas, su banda y su " +
+      "ajuste. Los porcentajes son BRUTOS: el impuesto de la venta va dentro.",
   },
   "retirement.spend_mode": {
     title: "Cómo se aplica la regla",

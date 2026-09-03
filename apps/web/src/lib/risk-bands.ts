@@ -92,6 +92,15 @@ function finite(n: unknown): n is number {
 /**
  * Banda + línea determinista → todo lo que el SVG necesita, en unidades de MES.
  *
+ * @deprecated 5.0.0 U1b — **sin consumidor de UI**. El rediseño funde los dos gráficos de
+ * Jubilación en uno (U5): la banda entra ahora en `MiniProjection` como una lista de
+ * `{month, p10, p90}` en euros NOMINALES, y la deflactación de las tres series (patrimonio,
+ * objetivo y banda) la aplica el chart una sola vez, que es lo que garantiza que el abanico
+ * contenga a la línea. `RiskFanChart.tsx` se retiró con él. Se conserva esta función —con su
+ * test— porque es donde vive la alineación de dos rejillas distintas por MES: si alguna vez
+ * vuelve a hacer falta un abanico con su mediana y su determinista, la aritmética no hay que
+ * volver a derivarla. Si al leer esto sigue sin consumidores, bórrala.
+ *
  * Devuelve `null` cuando no hay nada dibujable (menos de dos puntos de banda, o ninguna
  * intersección con la serie): media banda sin línea, o una línea sin banda, se leerían como un
  * abanico degenerado en vez de como «no hay dato», que es lo que son.
