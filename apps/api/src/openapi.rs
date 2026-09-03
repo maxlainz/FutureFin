@@ -284,6 +284,7 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::retirement_profile::BridgeDiscountBasis,
         crate::handlers::retirement_profile::WithdrawalRule,
         crate::handlers::retirement_profile::WithdrawalRuleKind,
+        crate::handlers::retirement_profile::PctSource,
         crate::handlers::retirement_profile::SpendMode,
         crate::handlers::retirement_profile::PensionPlan,
         crate::handlers::retirement_profile::PartialRetirement,
@@ -473,7 +474,7 @@ impl utoipa::Modify for SecurityAddon {
         ),
         (
             name = "backup",
-            description = "Backup `.ffbackup` por usuario: formato propio cifrado (AES-256-GCM, KDF Argon2id derivado de la contraseña de cuenta). Solo datos del usuario actual; portable entre instalaciones."
+            description = "Backup `.ffbackup` por usuario: formato propio cifrado (AES-256-GCM, KDF Argon2id derivado de la contraseña que llega en el cuerpo). En una cuenta CON contraseña esa es la de la cuenta y el servidor la verifica antes de cifrar; en una cuenta SIN contraseña (identidad delegada del add-on de Home Assistant) es una contraseña propia del archivo, que solo alimenta el KDF y solo tiene que no ir vacía. Solo datos del usuario actual; portable entre instalaciones."
         ),
         (
             name = "history",

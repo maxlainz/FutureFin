@@ -244,6 +244,10 @@ sin clasificar**; las tres tools nuevas y los cinco cambios de contrato están a
 | D21 (403 `not_row_owner`) | **Heredado, sin trabajo de tool**: la comprobación vive en las cores, así que las dos superficies fallan igual — incluidos los previews de borrado, que antes enseñaban la fila ajena **y entregaban el `confirm_token`**. Lo que sí hubo que arreglar a mano fueron **dos descripciones que mentían**: las de activos decían «Sin owner-check: cualquier member edita cualquier activo del hogar», frase que D21 volvió falsa y que nadie había recontado |
 | Default de `?view` → `mine` | **Heredado por las tools con scope** (`resolve_view` llama a `LedgerViewQuery::resolve`), pero **NO es gratis**: cambia la respuesta de toda tool que omita `view`. Deriva detectada y **no arreglable desde documentación**: el doc-comment de `resolve_view` (`mcp/server.rs:125-127`) sigue diciendo «`"household"` u **omitido** → Household». Registrada en la tabla de erratas de `futurefin-docs-and-writing` §7 |
 | `GET /v1/summary` gana `plan` | **Heredado**: `get_summary` comparte `summary_core`, así que el objeto `plan` (con su `absent_reason: household_aggregate`) llega solo |
+| **U4** — `withdrawal_rule.pct` / `start_pct` pasan a OPCIONALES y heredan `swr_pct`; el perfil resuelto publica `pct_source` | **Una tool actualizada, dos heredan.** `update_retirement_profile` cambia su descripción (+78) y los doc-comments de `WithdrawalRuleParam.pct`/`.start_pct`/`.end_pct`; **`simulate_projection.profile_overrides` hereda sin tocar nada** porque reusa EXACTAMENTE ese tipo de parámetro (`ProfileOverrideParam.withdrawal_rule: Option<WithdrawalRuleParam>`) — es el mismo argumento que la fila de `profile_overrides` de arriba, y aquí paga solo. `get_retirement_profile` publica `pct_source` sin código propio (comparte `get_retirement_profile_core`). **`pct_source` es SOLO SALIDA**: no está en `WithdrawalRuleParam`, así que el `inputSchema` no se mueve y el `constraints_sha256_12` de las dos tools tampoco — el fixture cambia **una sola** entrada (`update_retirement_profile`, por la descripción). Ningún contador de §5 se mueve |
+| **S4** — `PATCH {"pension": null}` suelta el `target_basis` almacenado | **Heredado, y esa es la prueba de que está en el sitio correcto**: la regla vive en `RetirementProfilePatch::apply_to`, que `update_retirement_profile` y `simulate_projection.profile_overrides` comparten con el PATCH HTTP. La tool lo enseña gratis en su preview (`target_basis_stored_after: null`) y el what-if simula lo que pasaría al guardarlo. Cero código en `server.rs` salvo la mención en el `instructions` |
+| `POST /v1/backup/user-export`: la contraseña deja de ser la de la cuenta en cuentas sin contraseña (issue #213) | **n/a**. `/v1/backup/*` es una **omisión deliberada ya registrada** en §3.1 (categoría «Encrypted blob transport»): ninguna tool toca el backup, y el cambio no crea razón para que la haya — al contrario, un flujo cuyo secreto lo **crea la persona** al descargar el archivo es todavía menos conversable. `grep -c 'backup' apps/api/src/mcp/server.rs` → **0**, y debe seguir siéndolo. El código nuevo `backup_password_empty` viaja por la misma `ApiError` y vive en `error-codes.json` + `errorMessages.ts`, como el resto |
+| `UserResponse` gana `has_password` (aditivo, issue #213) | **n/a**. `UserResponse` es la respuesta de `login`/`register`/`/v1/auth/sso`/`GET /v1/auth/me`, y **las cuatro rutas están excluidas** en §3.1 (categorías «Session lifecycle» y «OAuth protocol»): un cliente MCP llega ya autenticado por Bearer, no hay tarro de cookies que llenar. El campo no aparece en ninguna respuesta de tool — `grep -c 'has_password' apps/api/src/mcp/server.rs` → **0** |
 
 ### 3.4 View echo — object responses vs `list_*` envelopes (Fase 5, issue #86)
 
@@ -474,14 +478,17 @@ import json
 d = json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))
 L = [t['description_len'] for t in d['tools']]
 print(len(L), sum(L), max(L))"
-# 71 23793 545   ← 2026-09-03. Tope del test: TOTAL_BUDGET 24 000, PER_TOOL_MAX 600.
+# 71 23906 545   ← 2026-09-03, tras U4/S4 (margen 94). Tope: TOTAL_BUDGET 24 000, PER_TOOL_MAX 600.
 ```
 
 Historia del margen, que es lo que dice si cabe la siguiente tool: `52 21319 596` al cerrar la
 Fase 5 → `68 23975 596` en 4.12.1 → `68 23949 598` tras 4.15.0 (**51 caracteres de margen**, medidos
 antes de escribir, no los 25/126 que circulaban congelados) → **`70 23757 588`** tras WP4 (dos tools
 nuevas pagadas moviendo prosa duplicada al `instructions`, 243 de margen) → `70 23834 575` tras
-WP5-2 → **`71 23793 545`** hoy, con `get_projection_bands` dentro: **207 caracteres de margen**. Los
+WP5-2 → `71 23793 545` con `get_projection_bands` dentro (207 de margen) → `71 23828 545` tras el
+pase de correcciones del motor (172) → **`71 23906 545`** hoy, tras U4/S4: **94 caracteres de
+margen**, y la regla de la herencia pagada en el `instructions` y en los doc-comments de los campos
+(que son schema, no descripción de tool) en vez de en las descripciones. Los
 ~550 que hicieron sitio salieron de siete descripciones hacia el `instructions` —donde el cliente los
 lee una vez por sesión y no una vez por tool—, que es exactamente la salida que el mensaje de fallo
 del test prescribe. **La constante no se ha tocado nunca**, y ese es el punto: cuando no cabe, se

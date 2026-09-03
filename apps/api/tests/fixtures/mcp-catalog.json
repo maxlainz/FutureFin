@@ -1653,8 +1653,8 @@
         "$defs.WithdrawalRuleParam.start_pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "7dc7ff1d2a13",
-      "description_len": 288,
-      "description_sha256_12": "ef2ce78290b6",
+      "description_len": 366,
+      "description_sha256_12": "7f8c7eff3608",
       "name": "update_retirement_profile",
       "properties": [
         "birth_date",

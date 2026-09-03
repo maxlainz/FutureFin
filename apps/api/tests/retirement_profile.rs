@@ -233,9 +233,15 @@ async fn every_validation_rule_has_its_own_stable_code() {
             }),
             "partial_not_before_retirement",
         ),
-        // Reglas de retirada: cada `kind` exige LOS SUYOS.
+        // Reglas de retirada: cada `kind` exige LOS SUYOS. Tras U4, `pct` y `start_pct` ya NO
+        // están en esa lista (heredan `swr_pct`); sí siguen el `end_pct` del hybrid y la
+        // banda/ajuste de guardrails, que no son porcentajes de retirada.
         (
-            serde_json::json!({"withdrawal_rule": {"kind": "percent_of_balance"}}),
+            serde_json::json!({"withdrawal_rule": {"kind": "hybrid"}}),
+            "withdrawal_pct_required",
+        ),
+        (
+            serde_json::json!({"withdrawal_rule": {"kind": "guardrails", "pct": "4", "adjust_pct": "10"}}),
             "withdrawal_pct_required",
         ),
         (
@@ -499,4 +505,243 @@ async fn the_stored_target_basis_travels_next_to_the_resolved_one() {
     let g = app.get_with_cookie(PROFILE, &owner.cookie).await.json();
     assert_eq!(g["profile"]["target_basis"], "bridge_to_pension", "{g}");
     assert!(g["target_basis_stored"].is_null(), "{g}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// U4 — el porcentaje de retirada es ÚNICO
+// ---------------------------------------------------------------------------------------------
+
+/// **`withdrawal_rule.pct` omitido HEREDA `swr_pct`, y el perfil dice de dónde salió.**
+///
+/// Decisión del owner (U4): el usuario declara UN porcentaje de retirada. `swr_pct` dimensiona
+/// el objetivo FIRE y es a la vez el % de las reglas basadas en saldo; la SPA deja de mandar
+/// `pct`. Lo que este test fija es que la ausencia no es un error ni un cero, sino una herencia
+/// **declarada** (`pct_source`), y que un valor explícito sigue mandando —el wire de 4.15.x no
+/// se rompe.
+#[tokio::test]
+async fn a_withdrawal_pct_left_out_inherits_the_swr_and_declares_it() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // 1) `percent_of_balance` sin `pct`: 200, y el % resuelto ES el SWR.
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({
+                "swr_pct": "3.2",
+                "withdrawal_rule": {"kind": "percent_of_balance"}
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let w = &r.json()["profile"]["withdrawal_rule"];
+    assert_eq!(w["pct"], "3.2", "el % debe heredarse del SWR: {w}");
+    assert_eq!(w["pct_source"], "swr", "{w}");
+
+    // …y lo ALMACENADO sigue sin `pct`: la herencia se resuelve en lectura, no se materializa en
+    // el JSONB. Si se materializara, mover el SWR dejaría de mover la regla.
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT retirement_profile FROM users WHERE id = $1")
+            .bind(owner.user_id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("select profile");
+    assert!(
+        stored["withdrawal_rule"]["pct"].is_null(),
+        "el pct heredado no debe persistirse: {stored}"
+    );
+    assert!(
+        stored["withdrawal_rule"].get("pct_source").is_none(),
+        "pct_source es derivado y no se guarda: {stored}"
+    );
+
+    // 2) Mover el SWR mueve el % de la regla, porque es el MISMO número.
+    let r = app
+        .patch_json_with_cookie(PROFILE, serde_json::json!({"swr_pct": "2.5"}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let w = &r.json()["profile"]["withdrawal_rule"];
+    assert_eq!(w["pct"], "2.5", "{w}");
+    assert_eq!(w["pct_source"], "swr", "{w}");
+
+    // 3) Un `pct` explícito se honra y se declara como tal (compatibilidad con 4.15.x/MCP).
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({"withdrawal_rule": {"kind": "percent_of_balance", "pct": "5"}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let w = &r.json()["profile"]["withdrawal_rule"];
+    assert_eq!(w["pct"], "5", "{w}");
+    assert_eq!(w["pct_source"], "explicit", "{w}");
+
+    // 4) Cómo se SUELTA: la regla se sustituye entera, así que volver a mandarla sin `pct` lo
+    //    re-acopla al SWR. No hay `clear_pct` ni hace falta.
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({"withdrawal_rule": {"kind": "percent_of_balance"}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let w = &r.json()["profile"]["withdrawal_rule"];
+    assert_eq!(w["pct"], "2.5", "{w}");
+    assert_eq!(w["pct_source"], "swr", "{w}");
+
+    // 5) `fixed_real` no tiene porcentaje: `pct_source` NO viaja (ni siquiera como `null`).
+    //    Publicar «swr» ahí sugeriría un % en juego que esa regla no usa.
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({"withdrawal_rule": {"kind": "fixed_real"}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let w = &r.json()["profile"]["withdrawal_rule"];
+    assert!(w.get("pct_source").is_none(), "{w}");
+
+    // 6) `guardrails` hereda por `pct` igual que `percent_of_balance`; su banda y su ajuste
+    //    siguen siendo obligatorios (no son porcentajes de retirada).
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({
+                "withdrawal_rule": {"kind": "guardrails", "band_pct": "20", "adjust_pct": "10"}
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let w = &r.json()["profile"]["withdrawal_rule"];
+    assert_eq!(w["pct"], "2.5", "{w}");
+    assert_eq!(w["pct_source"], "swr", "{w}");
+}
+
+/// **El `end_pct` del hybrid se compara contra el `start_pct` RESUELTO.**
+///
+/// Es el caso que la herencia podría haber roto en silencio: sin `start_pct` explícito, un
+/// `end_pct` mayor o igual que el SWR describiría un latch que sube en vez de bajar. El código
+/// es el que ya existía —`hybrid_end_pct_not_below_start`—, porque la regla no ha cambiado: lo
+/// que ha cambiado es contra qué número se comprueba.
+#[tokio::test]
+async fn a_hybrid_without_start_pct_compares_end_pct_against_the_swr() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // SWR 3,5 (default) y `end_pct` 3,5: no es MENOR que el arranque resuelto → rechazo.
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({"withdrawal_rule": {"kind": "hybrid", "end_pct": "3.5"}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "hybrid_end_pct_not_below_start", "{r:?}");
+
+    // Por encima del SWR, lo mismo.
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({"withdrawal_rule": {"kind": "hybrid", "end_pct": "4"}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "hybrid_end_pct_not_below_start", "{r:?}");
+
+    // Por debajo, entra — y el arranque publicado es el SWR heredado.
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({"withdrawal_rule": {"kind": "hybrid", "end_pct": "2.5"}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let w = &r.json()["profile"]["withdrawal_rule"];
+    assert_eq!(w["start_pct"], "3.5", "{w}");
+    assert_eq!(w["end_pct"], "2.5", "{w}");
+    assert_eq!(w["pct_source"], "swr", "{w}");
+}
+
+/// **S4 — quitar la pensión suelta el `target_basis` almacenado.**
+///
+/// Medido en vivo antes del arreglo: tras `PATCH {"pension": null}` el perfil seguía devolviendo
+/// `target_basis_stored: "bridge_to_pension"` y resolvía `bridge_to_pension`, mientras
+/// `/v1/projection/series` publicaba `target_basis: null` (perpetuidad). Dos superficies
+/// contando dos planes distintos sobre los mismos datos, sin un campo que lo delatara.
+#[tokio::test]
+async fn removing_the_pension_releases_the_stored_target_basis() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // Pensión declarada + base fijada a mano al puente.
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({
+                "pension": {"monthly_amount_today": "1200", "starts_at_age": 67},
+                "target_basis": "bridge_to_pension"
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(r.json()["target_basis_stored"], "bridge_to_pension", "{r:?}");
+
+    // Quitarla suelta la base: vuelve a derivarse, y sin pensión eso es la perpetuidad.
+    let r = app
+        .patch_json_with_cookie(PROFILE, serde_json::json!({"pension": null}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let b = r.json();
+    assert!(b["profile"]["pension"].is_null(), "{b}");
+    assert!(
+        b["target_basis_stored"].is_null(),
+        "la base debe soltarse al quitar la pensión: {b}"
+    );
+    assert_eq!(b["profile"]["target_basis"], "perpetuity", "{b}");
+
+    // Y el GET dice lo mismo: la soltura se PERSISTIÓ, no es un adorno de la respuesta.
+    let g = app.get_with_cookie(PROFILE, &owner.cookie).await.json();
+    assert!(g["target_basis_stored"].is_null(), "{g}");
+    assert_eq!(g["profile"]["target_basis"], "perpetuity", "{g}");
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT retirement_profile FROM users WHERE id = $1")
+            .bind(owner.user_id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("select profile");
+    assert!(
+        stored["target_basis"].is_null(),
+        "el JSONB no debe conservar la base fijada: {stored}"
+    );
+
+    // Elegir la base en el MISMO patch que quita la pensión GANA: quien dice las dos cosas está
+    // eligiendo, no arrastrando un valor viejo.
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({
+                "pension": {"monthly_amount_today": "1200", "starts_at_age": 67}
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({"pension": null, "target_basis": "perpetuity"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(r.json()["target_basis_stored"], "perpetuity", "{r:?}");
 }

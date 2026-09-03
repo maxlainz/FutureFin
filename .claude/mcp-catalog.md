@@ -1089,6 +1089,36 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     `jq '[.tools[].description_len] | add' apps/api/tests/fixtures/mcp-catalog.json` (**23 828** el
     2026-09-03, margen 172; el «23 793» de tres párrafos más arriba describe el momento de WP6b y
     no el de hoy).
+- **5.0.0 / U4 + S4 (issue #207) — cero tools nuevas, una tool con descripción nueva y un campo de
+  salida más.** Evaluación de paridad: **`update_retirement_profile` actualizada** (descripción +
+  dos doc-comments de `WithdrawalRuleParam`, que `simulate_projection.profile_overrides` **hereda**
+  por compartir ese mismo tipo de parámetro); `get_retirement_profile` y `simulate_projection`
+  cambian **sin código propio** porque comparten cores. Ninguna omisión nueva; **ningún contador se
+  mueve** (siguen 71/30/41/41/18/8/41/19 — recuéntalos, no los copies).
+  - **U4 — el porcentaje de retirada es ÚNICO.** `withdrawal_rule.pct` (`percent_of_balance`,
+    `guardrails`) y `withdrawal_rule.start_pct` (`hybrid`) pasan a ser **opcionales** y, omitidos,
+    heredan el `swr_pct` del perfil. La herencia se resuelve en LECTURA (`resolve_withdrawal_rule`,
+    resolvedor único compartido con HTTP), así que mover el SWR mueve el % de la regla y **el
+    what-if también**: un `profile_overrides` que solo toca `swr_pct` mueve la retirada del
+    escenario, que es exactamente lo que un modelo espera al preguntar «¿y si bajo mi SWR?».
+  - **`withdrawal_rule.pct_source`** (`swr` | `explicit`) viaja en el perfil que devuelven
+    `get_retirement_profile` y el preview/apply de `update_retirement_profile` — **aditivo y solo de
+    salida** (no es un parámetro, no está en `WithdrawalRuleParam`, no aparece en el
+    `inputSchema`). En `fixed_real` **no viaja**: ausencia, no `null`, porque esa regla no tiene
+    porcentaje. Es la pieza que impide el diagnóstico falso «tu regla retira el 3,5 % que
+    elegiste» cuando en realidad nadie eligió nada.
+  - **S4 — `pension: null` (`clear_pension: true` por MCP) suelta también el `target_basis`
+    fijado**, para que se vuelva a derivar. Mandar `target_basis` en la misma llamada gana. Se ve en
+    el preview sin adivinar nada: `target_basis_stored_before`/`_after` ya viajaban desde WP5-2, y
+    ahora el `_after` sale `null`.
+  - **Presupuesto de descripciones**: la única que crece es `update_retirement_profile`
+    (**288 → 366**, +78); todo lo demás —la regla de la herencia y la soltura de la base— fue al
+    bloque **DOS PLANOS DE CONFIGURACIÓN** del `instructions` y a los doc-comments de los campos
+    (que son schema, no descripción de tool, y por tanto no entran en el tope de 600). Los dos
+    topes **no se tocaron**. Total tras el cambio:
+    `jq '[.tools[].description_len] | add' apps/api/tests/fixtures/mcp-catalog.json` → **23 906**
+    (margen 94 el 2026-09-03; eran 23 828 antes de esta ola). **Mídelo, no lo copies**: el margen
+    es de dos cifras y la próxima tool obliga a otra ronda de reequilibrio.
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
   mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,

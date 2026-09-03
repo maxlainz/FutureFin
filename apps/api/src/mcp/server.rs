@@ -2236,16 +2236,19 @@ pub struct WithdrawalRuleParam {
     /// permite bajar a end_pct) | "guardrails" (Guyton-Klinger).
     #[schemars(extend("enum" = ["fixed_real", "percent_of_balance", "hybrid", "guardrails"]))]
     pub kind: String,
-    /// % anual BRUTO de impuestos (0 < pct <= 20), string decimal. Requerido por
-    /// percent_of_balance y guardrails.
+    /// % anual BRUTO de impuestos (0 < pct <= 20), string decimal, para percent_of_balance y
+    /// guardrails. OPCIONAL: omitido HEREDA tu swr_pct — el porcentaje de retirada es ÚNICO, el
+    /// mismo que dimensiona el objetivo FIRE. Mándalo solo para desacoplarlo a propósito;
+    /// omitirlo otra vez lo vuelve a acoplar. La respuesta lo dice en pct_source (swr|explicit).
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub pct: Option<String>,
-    /// hybrid: % de partida (0 < pct <= 20).
+    /// hybrid: % de partida (0 < pct <= 20). OPCIONAL igual que pct: omitido hereda tu swr_pct.
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub start_pct: Option<String>,
-    /// hybrid: % al que se baja tras el latch. Estrictamente MENOR que start_pct.
+    /// hybrid: % al que se baja tras el latch. OBLIGATORIO (no hereda nada) y estrictamente
+    /// MENOR que el start_pct RESUELTO — o sea que si omites start_pct, menor que tu swr_pct.
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub end_pct: Option<String>,
@@ -2428,6 +2431,10 @@ impl UpdateRetirementProfileParams {
                 spend_mode: parse_enum_param(&w.spend_mode)
                     .map_err(|e| ApiError::BadRequest(format!("spend_mode: {e}")))?
                     .unwrap_or_default(),
+                // Derivado, nunca de entrada (U4): lo rellena `resolve_withdrawal_rule` al
+                // resolver el perfil. Aquí va `None` para que un `pct` omitido se herede del
+                // `swr_pct`, que es exactamente la conducta del PATCH HTTP.
+                pct_source: None,
             }),
         };
 
@@ -5597,7 +5604,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_retirement_profile",
-        description = "Cambia el plan de jubilación del usuario del token (y su fecha de nacimiento). Merge campo a campo: lo omitido NUNCA se resetea, los clear_* borran. Dato PERSONAL: cualquier rol edita el suyo, nadie el de otro. Mueve SU proyección entera — enseña antes el impacto con simulate_projection.",
+        description = "Cambia el plan de jubilación del usuario del token (y su fecha de nacimiento). Merge campo a campo: lo omitido NUNCA se resetea, los clear_* borran; `withdrawal_rule` se sustituye ENTERA y sus `pct` omitidos heredan `swr_pct`. Dato PERSONAL: cualquier rol edita el suyo, nadie el de otro. Mueve SU proyección entera — enseña antes el impacto con simulate_projection.",
         annotations(title = "Configurar jubilación", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_retirement_profile(
@@ -6973,7 +6980,16 @@ impl ServerHandler for FutureFinMcp {
                 SOLO el owner. El plan de JUBILACIÓN es de cada persona (get_retirement_profile / \
                 update_retirement_profile): estrategia, edad objetivo, SWR, modo del objetivo FIRE, \
                 edad límite del horizonte, regla de retirada, pensión con fecha, media jornada, \
-                colchón y umbral de éxito. Cualquier rol edita el SUYO y nadie el de otro. Y toda \
+                colchón y umbral de éxito. Cualquier rol edita el SUYO y nadie el de otro. EL \
+                PORCENTAJE DE RETIRADA ES ÚNICO: `swr_pct` dimensiona el objetivo FIRE Y es el % \
+                de las reglas basadas en saldo, así que `withdrawal_rule.pct` \
+                (`percent_of_balance`, `guardrails`) y `start_pct` (`hybrid`) son OPCIONALES y \
+                omitidos lo heredan; el perfil devuelve `withdrawal_rule.pct_source` = `swr` \
+                (heredado) o `explicit` (escrito a mano), y en `fixed_real` no viaja porque esa \
+                regla no tiene porcentaje. Como la regla se sustituye entera, volver a omitir el \
+                `pct` es lo que lo re-acopla al SWR. Y `pension: null` suelta también el \
+                `target_basis` que estuviera fijado, para que se vuelva a derivar: un puente \
+                hacia una pensión que ya no existe no describe nada. Y toda \
                 fila del ledger (activos, pasivos, presupuesto, próximos, reglas) tiene dueño: \
                 editar la de otro miembro es 403 `not_row_owner`, también para el owner.\n\nREINTENTOS. \
                 Si una escritura se corta (timeout, red) y no puedes descartar que llegara, no la \

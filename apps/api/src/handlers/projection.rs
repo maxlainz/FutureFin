@@ -1604,12 +1604,22 @@ pub(crate) fn months_until_target_age(today: NaiveDate, birth: NaiveDate, age: u
 /// mañana el catálogo del perfil gana una variante, esto deja de compilar — que es exactamente
 /// lo que debe pasar, en vez de mapearla en silencio a `fixed_real` y simular otra cosa.
 ///
-/// Los `pct` ausentes se traducen a `0`: la validación del perfil ya los exige con cada `kind`
-/// (`validate_retirement_profile`), así que un `None` aquí describe una fila escrita fuera de la
-/// API. Un `0` hace que el motor no retire nada y sea evidente en la serie; inventar un default
-/// «razonable» publicaría un plan que nadie configuró. En cualquier caso, hoy todas estas
-/// variantes salen por `engine_feature_unavailable` antes de simular nada (WP2).
-fn withdrawal_rule_to_engine(rule: &ProfileWithdrawalRule) -> EngineWithdrawalRule {
+/// **U4 — el porcentaje de retirada es el SWR del perfil cuando la regla no trae uno propio.**
+/// La herencia no se hace aquí: se delega en `resolve_withdrawal_rule`, el resolvedor único del
+/// módulo del perfil, para que lo que simula el motor sea exactamente lo que publica
+/// `GET /v1/auth/me/retirement-profile`. Llamarlo aquí es además una red: los perfiles que
+/// llegan ya vienen resueltos (todos los caminos pasan por `resolve_retirement_profile`), y
+/// como el resolvedor es idempotente, volver a pasarlo no mueve un valor explícito y sí evita
+/// que un futuro camino sin resolver mande un `pct` ausente al motor.
+///
+/// Un `pct` que siga ausente tras resolver solo puede venir de una fila escrita fuera de la API
+/// con un `kind` que no lo usa: se traduce a `0`, que hace que el motor no retire nada y sea
+/// evidente en la serie. Inventar un default «razonable» publicaría un plan que nadie configuró.
+fn withdrawal_rule_to_engine(
+    rule: &ProfileWithdrawalRule,
+    swr_pct: Decimal,
+) -> EngineWithdrawalRule {
+    let rule = &crate::handlers::retirement_profile::resolve_withdrawal_rule(rule, swr_pct);
     let z = Decimal::ZERO;
     match rule.kind {
         ProfileWithdrawalRuleKind::FixedReal => EngineWithdrawalRule::FixedReal,
@@ -2476,7 +2486,10 @@ pub(crate) async fn build_installation_projection_input(
         ),
         None => PhasePlan::classic(income_retirement, expense_retirement),
     };
-    phase_plan.withdrawal = withdrawal_rule_to_engine(&retirement_profile.withdrawal_rule);
+    phase_plan.withdrawal = withdrawal_rule_to_engine(
+        &retirement_profile.withdrawal_rule,
+        retirement_profile.swr_pct,
+    );
     phase_plan.spend_mode = match retirement_profile.withdrawal_rule.spend_mode {
         ProfileSpendMode::Ceiling => EngineSpendMode::Ceiling,
         ProfileSpendMode::RuleIsSpend => EngineSpendMode::RuleIsSpend,

@@ -825,3 +825,101 @@ async fn a_negative_expected_return_clamps_the_bridge_discount_to_zero_and_says_
         "con base `none` no hay nada que clampar: {sin_w:?}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// U4 — el porcentaje de retirada es ÚNICO (el `pct` omitido hereda `swr_pct`)
+// ---------------------------------------------------------------------------------------------
+
+/// **La herencia llega al MOTOR, no solo al formulario.**
+///
+/// El riesgo de U4 no es que el perfil publique un `pct` bonito: es que el `PhasePlan` que se
+/// arma en `handlers/projection.rs` reciba un `0` (o el número viejo) mientras la pantalla enseña
+/// el SWR. Eso sería un plan distinto del que el usuario lee, y no habría ningún campo que lo
+/// delatara — el modo de fallo de esta casa: la cifra plausible y equivocada.
+///
+/// Así que se comprueba sobre la salida real de `/v1/projection/series`, con una jubilación
+/// DENTRO del horizonte (estrategia por edad) para que la regla de retirada llegue a actuar:
+///
+/// 1. `percent_of_balance` sin `pct` y `percent_of_balance` con `pct = swr_pct` producen la
+///    **misma respuesta byte a byte**. Es la igualdad que define «heredar».
+/// 2. Un `pct` distinto produce otra serie. Sin este tercer caso, el punto 1 se cumpliría igual
+///    si el motor estuviera ignorando el `pct` por completo.
+#[tokio::test]
+async fn an_omitted_withdrawal_pct_reaches_the_engine_as_the_swr() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    taxes_off(&app, &owner).await;
+    // Cartera generosa y jubilación por EDAD: el drenaje empieza dentro del horizonte y la regla
+    // de retirada gobierna lo que se vende cada mes.
+    seed(&app, &owner, "4000", "2000", "5").await;
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": app.create_category(&owner, "asset", "Cartera").await,
+                   "name": "Global", "current_value": "400000",
+                   "is_liquid": true, "expected_annual_return_percent": "5"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    // `swr_pct` 3,5 (el default explícito) + jubilación a los 45: la DOB del arnés es 1990-01-01.
+    let rule = |pct: Option<&str>| -> Value {
+        let mut w = json!({"kind": "percent_of_balance", "spend_mode": "ceiling"});
+        if let Some(v) = pct {
+            w["pct"] = json!(v);
+        }
+        json!({
+            "strategy": "retire_at_age",
+            "target_retirement_age": 45,
+            "swr_pct": "3.5",
+            "withdrawal_rule": w
+        })
+    };
+
+    // (a) Sin `pct`: el perfil publica el SWR heredado.
+    patch_profile(&app, &owner, rule(None)).await;
+    let p = app
+        .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(p["profile"]["withdrawal_rule"]["pct"], "3.5", "{p}");
+    assert_eq!(p["profile"]["withdrawal_rule"]["pct_source"], "swr", "{p}");
+    let inherited = series(&app, &owner.cookie, "").await;
+
+    // La jubilación ocurre dentro del horizonte: sin eso la comparación sería trivial (dos
+    // curvas que nunca retiran nada coinciden con cualquier regla).
+    let jubilacion = inherited["jubilacion_month_index"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("la jubilación debe caer dentro del horizonte: {inherited}"));
+    assert!(
+        jubilacion > 0 && jubilacion < inherited["months"].as_u64().expect("months"),
+        "jubilación fuera del horizonte: {jubilacion} de {inherited}"
+    );
+
+    // (b) Con el MISMO número escrito a mano: byte a byte lo mismo.
+    patch_profile(&app, &owner, rule(Some("3.5"))).await;
+    let p = app
+        .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(
+        p["profile"]["withdrawal_rule"]["pct_source"], "explicit",
+        "{p}"
+    );
+    let explicit = series(&app, &owner.cookie, "").await;
+    assert_eq!(
+        serde_json::to_string(&inherited).expect("json"),
+        serde_json::to_string(&explicit).expect("json"),
+        "heredar el SWR debe dar EXACTAMENTE la misma serie que escribirlo a mano"
+    );
+
+    // (c) Y con otro número, otra serie: la prueba de que el `pct` de verdad gobierna el motor.
+    patch_profile(&app, &owner, rule(Some("1"))).await;
+    let other = series(&app, &owner.cookie, "").await;
+    assert_ne!(
+        serde_json::to_string(&inherited).expect("json"),
+        serde_json::to_string(&other).expect("json"),
+        "un pct distinto debe mover la serie; si no, el motor está ignorando la regla"
+    );
+}
