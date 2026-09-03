@@ -122,9 +122,11 @@ fn identity(ctx: &RequestContext<RoleServer>) -> Result<McpIdentity, ErrorData> 
         .ok_or_else(|| ErrorData::internal_error("missing request identity", None))
 }
 
-/// Misma semántica que `?view=` en HTTP, parseo compartido: `"mine"` → Mine, `"household"` u
-/// omitido → Household, **cualquier otra cosa → `invalid_view`**. Un LLM que escriba `"MINE"` o
-/// `"self"` recibe un error, no el hogar entero en silencio (auditoría MCP).
+/// Misma semántica que `?view=` en HTTP, parseo compartido: `"household"` → Household;
+/// ausente, vacío o `"mine"` → **Mine** (default desde 5.0.0, R2 — ver
+/// [`LedgerViewQuery::resolve`]); **cualquier otra cosa → `invalid_view`**. Un LLM que escriba
+/// `"MINE"` (mayúsculas) o `"self"` recibe un error, no una vista distinta de la pedida en
+/// silencio (auditoría MCP).
 fn resolve_view(view: &Option<String>) -> Result<LedgerView, ApiError> {
     LedgerViewQuery { view: view.clone() }.resolve()
 }
@@ -234,8 +236,10 @@ fn preview_payload(
 /// preview y el confirm el lote creció en 50 movimientos, la huella no casa y la confirmación se
 /// rechaza con `confirm_token_stale` en vez de borrar algo distinto de lo que se enseñó.
 ///
-/// **Dónde se usa y dónde no.** Un token cuesta un round-trip extra, así que no se exige en las 17
-/// tools con preview, solo en aquellas cuya confirmación destruye algo que la conversación no
+/// **Dónde se usa y dónde no.** Un token cuesta un round-trip extra, así que no se exige en todas
+/// las tools con preview (cuéntalas con `grep -c 'p\.confirm\.unwrap_or(false)' apps/api/src/mcp/server.rs`,
+/// el mismo contador que fija `every_write_tool_in_the_source_calls_require_mcp_write` en
+/// `mcp_write.rs`), solo en aquellas cuya confirmación destruye algo que la conversación no
 /// puede reconstruir: cascadas de tamaño no acotado (`delete_import`, `delete_asset`,
 /// `delete_liability`, `apply_categorization_rule`, `materialize_recurring`) y puertas de un solo
 /// sentido (`unreconcile_transfer`, `delete_snapshot` — un snapshot es un registro del pasado, no
@@ -407,7 +411,9 @@ const MATCH_ID_STRING: &str = r"^[0-9a-f]{24}$";
 /// Params de las tools que no aceptan ninguno.
 ///
 /// Existe solo para que su `inputSchema` publique `additionalProperties: false` como el de las
-/// otras 48: sin struct, rmcp emite el schema vacío genérico, que acepta cualquier campo. Una
+/// demás tools del catálogo (el total vive en el `assert_eq!(blocks.len(), …)` de
+/// `every_write_tool_in_the_source_calls_require_mcp_write`, en `mcp_write.rs` — no lo dupliques
+/// aquí): sin struct, rmcp emite el schema vacío genérico, que acepta cualquier campo. Una
 /// tool sin parámetros que traga `{"view": "mine"}` en silencio es exactamente el fallo de esta
 /// fase — `list_recurring_rules` es siempre own-user y `materialize_recurring` toca el hogar
 /// entero, así que ese `view` fantasma habría hecho creer al modelo que acotó algo.
@@ -2114,11 +2120,16 @@ pub struct DeleteByIdParams {
 /// `delete_snapshot`, `delete_import`, `delete_allocation_rule`): además del `confirm`, exigen el
 /// token del preview.
 ///
-/// La lista viva son las tools cuyo cuerpo contiene `confirm_token.as_deref` (hoy **8**, con
-/// `apply_categorization_rule`, `materialize_recurring` y `unreconcile_transfer`, que no usan este
-/// struct). Enumerarla a mano en prosa ya se quedó corta una vez —el `instructions` decía siete y
-/// omitía `delete_allocation_rule`—, así que si vuelves a escribir el número, cuéntalo con
-/// `grep -c 'two_phase(' apps/api/src/mcp/server.rs` (contar por `confirm_token.as_deref` falla: este comentario contiene la cadena y se cuenta a sí mismo).
+/// La lista viva son las tools cuyo cuerpo llama al método `as_deref` sobre el campo
+/// `confirm_token` de sus params, más `apply_categorization_rule`, `materialize_recurring` y
+/// `unreconcile_transfer`, que no usan este struct pero exigen el mismo token. Enumerarla a mano
+/// en prosa ya se quedó corta una vez —el `instructions` decía siete y omitía
+/// `delete_allocation_rule`—, y el propio contador de re-verificación se quedó corto dos veces
+/// más por contarse a sí mismo (dos comentarios sucesivos que mencionaban su propio patrón de
+/// búsqueda). Ese es precisamente el fallo a evitar: cualquier grep de re-verificación que
+/// contenga literalmente el patrón que busca se cuenta a sí mismo. El número vive, sin ese
+/// riesgo, en el `assert_eq!` de `every_write_tool_in_the_source_calls_require_mcp_write` en
+/// `mcp_write.rs` — ese test es la fuente, no este comentario.
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DeleteWithTokenParams {
@@ -5538,8 +5549,9 @@ impl FutureFinMcp {
                 let impact =
                     impact_since(&self.state, id.installation_id, id.user_id, impact_before).await;
                 // Sin confirm_token: el preview devuelve el before/after completo, así que
-                // deshacerlo es volver a llamar con los valores de `before`. Es la única tool
-                // destructiva del catálogo enteramente reversible desde su propio preview.
+                // deshacerlo es volver a llamar con los valores de `before`. Es una de las DOS
+                // tools destructivas del catálogo enteramente reversibles desde su propio
+                // preview — la otra es `update_retirement_profile`, mismo criterio.
                 Ok((
                     serde_json::json!({"applied": true, "outcome": outcome, "impact": impact}),
                     vec![installation_id],
@@ -6818,8 +6830,9 @@ impl FutureFinMcp {
 }
 
 // ---------------------------------------------------------------------------
-// Capacidad `prompts` (Fase 6, issue #87) — los tres flujos que un catálogo de 68 tools no
-// enseña por sí solo.
+// Capacidad `prompts` (Fase 6, issue #87) — los tres flujos que un catálogo grande de tools
+// sueltas no enseña por sí solo (el total vive en el `assert_eq!(blocks.len(), …)` de
+// `every_write_tool_in_the_source_calls_require_mcp_write`, en `mcp_write.rs`).
 //
 // **Qué son**: guiones ESTÁTICOS. Cero SQL, cero lectura de la instalación, cero identidad —
 // `prompts/get` no toca la base de datos, así que no hay nada que gatear por rol ni por el

@@ -2542,7 +2542,7 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
          es literalmente la fase 1, y el `match_id` que emite es lo que acota el espacio de \
          acciones alcanzables"
     );
-    // Las 7 que además exigen el token de un solo uso del preview (Fase 3). El `confirm`
+    // Las 8 que además exigen el token de un solo uso del preview (Fase 3). El `confirm`
     // booleano lo escribe el propio modelo, así que por sí solo nunca fue un control: sólo el
     // token demuestra que hubo un preview, y va ligado a la huella de los efectos.
     assert_eq!(
@@ -2993,7 +2993,7 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
     assert_eq!(retarget.status, http::StatusCode::OK, "{retarget:?}");
     let spare_cat = app.create_category(&owner, "expense", "Ocio").await;
 
-    // --- Los diecisiete previews. NINGUNO lleva `confirm`, así que nada se escribe.
+    // --- Los dieciocho previews. NINGUNO lleva `confirm`, así que nada se escribe.
     let cases: Vec<(&'static str, serde_json::Value)> = vec![
         ("delete_asset", json!({"id": asset_id})),
         ("delete_liability", json!({"id": liab_id})),
@@ -3014,8 +3014,10 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
         ("delete_allocation_rule", json!({"id": alloc_id})),
         ("delete_category", json!({"id": spare_cat})),
         ("update_installation_settings", json!({"base_currency": "EUR"})),
+        // 5.0.0 (issue #207): mismo criterio que `update_fire_settings`, pero por perfil.
+        ("update_retirement_profile", json!({"swr_pct": "3.5"})),
     ];
-    assert_eq!(cases.len(), 17, "los 17 previews del catálogo");
+    assert_eq!(cases.len(), 18, "los previews del catálogo (§5 de futurefin-mcp-parity)");
     for (tool, args) in cases {
         let preview = preview_of(args, tool).await;
         assert_shape(tool, &preview);

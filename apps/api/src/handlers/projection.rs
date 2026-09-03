@@ -1278,8 +1278,11 @@ fn projection_next_milestones(from: Decimal, count: usize) -> Vec<Decimal> {
 /// El exponente sale del `month_index` del punto, **jamás de su posición en el array**. Hoy
 /// coinciden cuando se recorre la serie mensual completa, pero bajo densidad `hybrid` los puntos no
 /// son equidistantes y la versión ingenua deflacta 70 años como si fueran 30 — es el bug que la
-/// v1.4.2 arregló en el chart. Un único helper con dos callers, por el mismo motivo por el que
-/// existe `fire_target_at_month_index`.
+/// v1.4.2 arregló en el chart. Un único helper con varios callers en este fichero — cuéntalos con
+/// un `grep -c` sobre el nombre de esta función seguido de un paréntesis abierto, en
+/// `apps/api/src/handlers/*.rs` (no lo escribo pegado aquí para que este comentario no se cuente
+/// a sí mismo; el resultado incluye la propia definición, así que son callers + 1) —, por el
+/// mismo motivo por el que existe `fire_target_at_month_index`.
 pub(crate) fn deflator_at_month_index(
     annual_inflation_percent: Decimal,
     month_index: u32,
@@ -3732,7 +3735,7 @@ pub async fn compute_projection_series_response(
         assets_depleted_month_index,
         // **Clamp a ≥ 0 en la PUBLICACIÓN, no en el motor.** El descubierto se acumula como
         // residuo de ventas brutas y puede salir con una cola de redondeo negativa del orden de
-        // −5e-25 (declarado en `MonthSale::account`, `crates/engine/src/projection.rs`): eso no
+        // −5e-25 (declarado en `MonthSale::account`, `crates/engine/src/sim_core.rs`): eso no
         // es «−0,0000000000000000000000005 € descubiertos», es cero. Se corrige aquí porque el
         // motor debe seguir publicando su aritmética tal cual —el golden la hashea— y quien
         // redondea para un humano es la capa que serializa.
