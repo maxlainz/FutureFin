@@ -139,7 +139,7 @@ END_HIPOTECA="$(python3 -c "
 import datetime as d
 print(d.date(d.date.today().year + 18, 6, 1).isoformat())
 ")"
-api POST /v1/liabilities "{\"category_id\":\"$CAT_HIPOTECA\",\"expense_category_id\":\"$CAT_VIVIENDA\",\"label\":\"Hipoteca vivienda\",\"principal\":\"126400\",\"apr_percent\":\"2.35\",\"payment_amount\":\"742\",\"payment_frequency\":\"monthly\",\"payment_end_date\":\"$END_HIPOTECA\",\"derive_principal_from_plan\":false}" >/dev/null
+api POST /v1/liabilities "{\"category_id\":\"$CAT_HIPOTECA\",\"expense_category_id\":\"$CAT_VIVIENDA\",\"label\":\"Hipoteca vivienda\",\"principal\":\"126400\",\"apr_percent\":\"2.35\",\"payment_amount\":\"742\",\"payment_frequency\":\"monthly\",\"payment_end_date\":\"$END_HIPOTECA\",\"repayment_model\":\"french\",\"derive_principal_from_plan\":false}" >/dev/null
 
 # ── Presupuesto ───────────────────────────────────────────────────────────────
 say "presupuesto"
