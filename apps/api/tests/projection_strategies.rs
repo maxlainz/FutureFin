@@ -923,3 +923,253 @@ async fn an_omitted_withdrawal_pct_reaches_the_engine_as_the_swr() {
         "un pct distinto debe mover la serie; si no, el motor está ignorando la regla"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Los bloques que la estrategia NO usa se conservan en el perfil, pero no entran en la simulación
+// ---------------------------------------------------------------------------------------------
+//
+// El perfil es acumulativo a propósito: cambiar de estrategia y volver no pierde nada, y el GET
+// resuelto sigue devolviendo cada bloque que el usuario llegó a rellenar. Lo que estos tests
+// pinean es la otra mitad del contrato — que un bloque GUARDADO no es una declaración de que esa
+// fase se viva—, porque el ensamblado del plan la incumplía en silencio.
+
+/// Camino del PRIMER punto en que dos respuestas difieren, descendiendo por objetos y arrays
+/// hasta el escalar. Baja hasta el fondo a propósito: la divergencia de este bug aparece en el
+/// mes ~40 de una serie de 600, así que quedarse en el campo de primer nivel imprimiría dos
+/// prefijos idénticos y diría «difieren» sin enseñar dónde.
+fn first_difference(a: &Value, b: &Value) -> Option<String> {
+    fn walk(a: &Value, b: &Value, path: &str) -> Option<String> {
+        if a == b {
+            return None;
+        }
+        match (a, b) {
+            (Value::Object(oa), Value::Object(ob)) => {
+                for (k, va) in oa {
+                    match ob.get(k) {
+                        Some(vb) => {
+                            if let Some(d) = walk(va, vb, &format!("{path}.{k}")) {
+                                return Some(d);
+                            }
+                        }
+                        None => return Some(format!("{path}.{k} solo existe en una de las dos")),
+                    }
+                }
+                ob.keys()
+                    .find(|k| !oa.contains_key(*k))
+                    .map(|k| format!("{path}.{k} solo existe en una de las dos"))
+            }
+            (Value::Array(aa), Value::Array(ab)) => {
+                if aa.len() != ab.len() {
+                    return Some(format!(
+                        "{path}: {} elementos con el bloque guardado, {} sin él",
+                        aa.len(),
+                        ab.len()
+                    ));
+                }
+                aa.iter()
+                    .zip(ab.iter())
+                    .enumerate()
+                    .find_map(|(i, (va, vb))| walk(va, vb, &format!("{path}[{i}]")))
+            }
+            _ => Some(format!("{path}: {a} con el bloque guardado, {b} sin él")),
+        }
+    }
+    walk(a, b, "")
+}
+
+/// Las dos respuestas tienen que ser la MISMA, byte a byte. La igualdad de `Value` da el mensaje
+/// legible; la de los dos strings serializados es la comprobación de verdad (el orden de los
+/// campos y el formato de cada cifra también son parte de lo que recibe el cliente).
+fn assert_same_series(with_block: &Value, without_block: &Value, what: &str) {
+    assert!(
+        with_block == without_block,
+        "{what}: la simulación cambió por un bloque que la estrategia NO usa. Primera \
+         diferencia → {}",
+        first_difference(with_block, without_block)
+            .unwrap_or_else(|| "(difieren en algo que no es un campo de primer nivel)".into())
+    );
+    assert_eq!(
+        serde_json::to_string(with_block).expect("json"),
+        serde_json::to_string(without_block).expect("json"),
+        "{what}: idénticas byte a byte, no solo equivalentes"
+    );
+}
+
+fn warnings_of(s: &Value) -> Vec<String> {
+    s["warnings"]
+        .as_array()
+        .expect("`warnings` es siempre un array, vacío si no hay nada que advertir")
+        .iter()
+        .map(|w| w.as_str().expect("avisos son literales").to_string())
+        .collect()
+}
+
+/// **Una media jornada guardada NO se simula con `asap`** — el bug medido en vivo sobre la demo
+/// (imagen construida de `debc52d`).
+///
+/// El perfil de la demo, literal: `strategy: "asap"` con una media jornada de una prueba anterior
+/// todavía guardada (empieza a los 40, 1.000 €/mes). El ensamblado del plan mapeaba
+/// `partial_retirement` al `PhasePlan` **mirara o no la estrategia**, así que la serie llegaba
+/// con `warnings: ["partial_phase_capital_shrinking"]`, con un `partial_retirement_month_index` y
+/// sin cruzar nunca el objetivo — de una fase que la jubilación rediseñada ni siquiera enseña
+/// para esa estrategia (U2), actuando sola sobre los números (U12).
+///
+/// La aritmética de por qué el síntoma era tan grande, con inflación 0 y sin impuestos: ingreso
+/// 3.000 y gasto 2.000 dan +1.000 €/mes; desde la media jornada el ingreso pasa a 1.000 contra
+/// los mismos 2.000 de gasto, o sea **−1.000 €/mes** sobre un capital de ~66.000 € que rinde ~275
+/// €/mes. El patrimonio menguaba, y el objetivo (`12·2000/0,04 = 600.000 €`) no se alcanzaba
+/// jamás. Sin la fase, el cruce llega sobre el mes ~285.
+#[tokio::test]
+async fn a_stored_partial_block_does_not_reach_the_engine_under_asap() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    taxes_off(&app, &owner).await;
+    seed(&app, &owner, "3000", "2000", "5").await;
+    patch_profile(
+        &app,
+        &owner,
+        json!({"strategy": "asap", "swr_pct": "4",
+               "partial_retirement": {"starts_at_age": 40, "income_monthly_today": "1000"}}),
+    )
+    .await;
+
+    let with_block = series(&app, &owner.cookie, "?months=600").await;
+
+    // El bloque SIGUE guardado: la puerta está en el ensamblado del plan, no en el guardado, y el
+    // perfil resuelto lo sigue publicando para cuando el usuario vuelva a `partial`.
+    let r = app
+        .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "perfil: {r:?}");
+    let profile = r.json();
+    assert_eq!(
+        profile["profile"]["partial_retirement"]["starts_at_age"], 40,
+        "el perfil almacenado NO se toca: {profile}"
+    );
+
+    // El mismo perfil sin el bloque. Es la referencia: lo que el usuario ve en la UI rediseñada.
+    patch_profile(&app, &owner, json!({"partial_retirement": null})).await;
+    let without_block = series(&app, &owner.cookie, "?months=600").await;
+
+    assert_same_series(
+        &with_block,
+        &without_block,
+        "`asap` con una media jornada guardada",
+    );
+
+    // Y los síntomas medidos, uno a uno.
+    assert!(
+        with_block["partial_retirement_month_index"].is_null(),
+        "`asap` no atraviesa ninguna media jornada: {with_block}"
+    );
+    assert!(
+        !warnings_of(&with_block).contains(&"partial_phase_capital_shrinking".to_string()),
+        "un aviso sobre una fase que esta estrategia no simula: {with_block}"
+    );
+    assert!(
+        with_block["partial_gap_target"].is_null()
+            && with_block["partial_phase_capital_growing"].is_null(),
+        "las tres lecturas de la fase describen la MISMA fase, y aquí no hay ninguna: \
+         {with_block}"
+    );
+    assert_eq!(
+        with_block["retirement_trigger"], "liquid_crossing",
+        "`asap` se jubila por cruce: {with_block}"
+    );
+    // La prueba de que el bug movía la CURVA y no solo unas lecturas: con la fase dentro, el
+    // capital menguaba desde los 40 y el cruce no llegaba nunca.
+    assert!(
+        with_block["jubilacion_month_index"].as_u64().is_some(),
+        "sin la fase parcial el cruce llega sobre el mes ~285: {with_block}"
+    );
+}
+
+/// **Lo mismo con `retire_at_age`**: la edad manda (D17), y una media jornada guardada de otra
+/// estrategia no puede meter una fase entre hoy y esa edad.
+///
+/// Perfil: jubilación total a los 55 con una media jornada guardada a los 40 (1.000 €/mes). Con
+/// el bug, el hogar pasaba quince años a −1.000 €/mes antes de jubilarse; sin él, ahorra +1.000
+/// hasta los 55. Dos curvas radicalmente distintas para un plan que la UI presenta igual.
+#[tokio::test]
+async fn a_stored_partial_block_does_not_reach_the_engine_under_retire_at_age() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    taxes_off(&app, &owner).await;
+    seed(&app, &owner, "3000", "2000", "5").await;
+    patch_profile(
+        &app,
+        &owner,
+        json!({"strategy": "retire_at_age", "swr_pct": "4", "target_retirement_age": 55,
+               "partial_retirement": {"starts_at_age": 40, "income_monthly_today": "1000"}}),
+    )
+    .await;
+
+    let with_block = series(&app, &owner.cookie, "?months=600").await;
+    patch_profile(&app, &owner, json!({"partial_retirement": null})).await;
+    let without_block = series(&app, &owner.cookie, "?months=600").await;
+
+    assert_same_series(
+        &with_block,
+        &without_block,
+        "`retire_at_age` con una media jornada guardada",
+    );
+
+    assert_eq!(with_block["strategy"], "retire_at_age", "{with_block}");
+    assert_eq!(
+        with_block["retirement_trigger"], "target_age",
+        "la EDAD sigue siendo quien jubila: {with_block}"
+    );
+    assert_eq!(
+        with_block["jubilacion_month_index"],
+        months_until_age(anchor_of(&with_block), owner_birth(), 55),
+        "y lo hace el mes en que cumple 55: {with_block}"
+    );
+    assert!(
+        with_block["partial_retirement_month_index"].is_null(),
+        "entre hoy y los 55 no hay ninguna fase que la estrategia haya declarado: {with_block}"
+    );
+    assert!(
+        !warnings_of(&with_block).contains(&"partial_phase_capital_shrinking".to_string()),
+        "{with_block}"
+    );
+}
+
+/// **`target_retirement_age` NUNCA filtró, y esto lo pinea.** Es la hermana simétrica de los dos
+/// tests de arriba, escrita al comprobar el alcance del bug: la edad objetivo ya pasaba por su
+/// propia puerta (`wants_age_trigger`), que la lee solo en `retire_at_age`/`coast` y, como fin
+/// OPCIONAL de la media jornada, en `partial`. Con `asap` guardada se conserva y no dispara nada.
+///
+/// Sin este pin, la puerta de la edad y la de la fase parcial son dos reglas del mismo párrafo
+/// con una sola red debajo.
+#[tokio::test]
+async fn a_stored_target_retirement_age_does_not_retire_an_asap_plan() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    taxes_off(&app, &owner).await;
+    seed(&app, &owner, "3000", "2000", "5").await;
+    patch_profile(
+        &app,
+        &owner,
+        json!({"strategy": "asap", "swr_pct": "4", "target_retirement_age": 55}),
+    )
+    .await;
+
+    let with_age = series(&app, &owner.cookie, "?months=600").await;
+    patch_profile(&app, &owner, json!({"target_retirement_age": null})).await;
+    let without_age = series(&app, &owner.cookie, "?months=600").await;
+
+    assert_same_series(
+        &with_age,
+        &without_age,
+        "`asap` con una edad objetivo guardada",
+    );
+
+    assert_eq!(
+        with_age["retirement_trigger"], "liquid_crossing",
+        "con `asap` jubila el cruce, no la edad guardada: {with_age}"
+    );
+    assert!(
+        !warnings_of(&with_age).contains(&"retire_at_age_underfunded".to_string()),
+        "un aviso de la estrategia por edad en un plan que no la usa: {with_age}"
+    );
+}

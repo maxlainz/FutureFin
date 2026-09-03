@@ -2370,11 +2370,44 @@ pub(crate) async fn build_installation_projection_input(
         }
     }
 
+    // -----------------------------------------------------------------------------------------
+    // QUÉ BLOQUES DEL PERFIL USA LA ESTRATEGIA — la puerta, y está SOLO aquí
+    // -----------------------------------------------------------------------------------------
+    // El perfil es ACUMULATIVO por diseño: conserva todos los bloques que el usuario llegó a
+    // rellenar (`partial_retirement`, `target_retirement_age`, `pension`…) para que cambiar de
+    // estrategia y volver no pierda nada, y `GET /v1/auth/me/retirement-profile` los sigue
+    // devolviendo enteros. **Un bloque guardado no es, por tanto, una declaración de que esa fase
+    // se viva**: quien la declara es la ESTRATEGIA. Aquí se decide qué entra al `PhasePlan`; el
+    // perfil almacenado no se toca.
+    //
+    // INCIDENTE (verificado en vivo sobre la demo, imagen construida de `debc52d`): un perfil con
+    // `strategy: "asap"` que conservaba una media jornada de una prueba anterior (empieza a los
+    // 40, 1.000 €/mes) se simulaba CON esa fase. La serie llegaba con
+    // `warnings: ["partial_phase_capital_shrinking"]`, con un `partial_retirement_month_index` y
+    // sin cruzar nunca el objetivo — una fase que la jubilación rediseñada ni siquiera enseña
+    // para esa estrategia (U2: los campos que la estrategia no usa no se muestran), actuando en
+    // silencio sobre los números (U12: nada puede actuar sin decirlo).
+    //
+    // Vive en UN solo sitio a propósito: `GET /v1/projection/series`, `GET /v1/projection/bands`
+    // (`projection_bands.rs`), el bucle por miembro de `?view=household`
+    // (`run_member_projection`) y el `profile_overrides` de `simulate_projection` construyen
+    // todos su input con esta función, así que heredan la regla sin repetirla.
+    //
+    // Lo que NO pasa por esta puerta, y es deliberado:
+    //   · `pension` — D15/R6: la pensión con fecha es un ingreso que esa persona cobrará gobierne
+    //     quien gobierne el trigger, y quien decide si además DIMENSIONA el objetivo es
+    //     `target_basis`, no la estrategia. Fuera de `partial`, `fraction_while_partial` queda
+    //     moot sola: sin fase parcial el bucle nunca entra en `Phase::Partial`.
+    //   · `target_retirement_age` — su puerta es `wants_age_trigger`, aquí abajo: solo es trigger
+    //     en `retire_at_age`/`coast`, y en `partial` solo como edad OPCIONAL de jubilación total.
+    //     Con `asap` o `pension_bridge` no se lee, y por eso no filtraba.
+    let plan_uses_partial_phase =
+        matches!(retirement_profile.strategy, RetirementStrategy::Partial);
+
     // `R`: mes del BUCLE (1-based) en que el miembro cumple `target_retirement_age`. Lo piden las
     // dos estrategias por edad y, opcionalmente, `partial` (fin de la media jornada).
     let wants_age_trigger = retirement_profile.strategy.requires_target_age()
-        || (matches!(retirement_profile.strategy, RetirementStrategy::Partial)
-            && retirement_profile.target_retirement_age.is_some());
+        || (plan_uses_partial_phase && retirement_profile.target_retirement_age.is_some());
     let forced_retirement_month: Option<u32> = if wants_age_trigger {
         match (birth_date, retirement_profile.target_retirement_age) {
             (Some(b), Some(age)) => {
@@ -2416,8 +2449,14 @@ pub(crate) async fn build_installation_projection_input(
         },
     };
 
-    // Media jornada (P7/D10). `start_month` es del BUCLE (1-based), como el trigger.
-    let partial: Option<PartialPhase> = match retirement_profile.partial_retirement.as_ref() {
+    // Media jornada (P7/D10). `start_month` es del BUCLE (1-based), como el trigger. El
+    // `.filter()` es la puerta de arriba: con cualquier otra estrategia el bloque guardado se
+    // queda en el perfil y NO entra al motor.
+    let partial: Option<PartialPhase> = match retirement_profile
+        .partial_retirement
+        .as_ref()
+        .filter(|_| plan_uses_partial_phase)
+    {
         None => None,
         Some(x) => match birth_date {
             Some(b) => Some(PartialPhase {
