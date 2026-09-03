@@ -97,6 +97,39 @@ fn single_asset_retiree(
     }
 }
 
+/// El mismo laboratorio con **dos** activos: una cuenta al 0 % (el colchón) y la renta variable.
+///
+/// «100 % renta variable **con manga de caja**» es lo que una estrategia de colchón significa: el
+/// dinero no invertido ES el colchón. Los dos escenarios que se comparan (con y sin colchón)
+/// arrancan de la MISMA cartera, así que lo único que cambia entre ellos es si la cuenta se
+/// vuelve a llenar en los meses buenos o se gasta una vez y ya.
+fn buffered_retiree(
+    cash: Decimal,
+    equity: Decimal,
+    monthly_expense: Decimal,
+    annual_return: Decimal,
+    horizon: u32,
+) -> ProjectionInput {
+    let mut input = single_asset_retiree(cash + equity, monthly_expense, annual_return, horizon);
+    input.assets = vec![
+        SimAsset {
+            id: uuid::Uuid::from_u128(1),
+            value: cash,
+            purchase_price: None,
+            is_liquid: true,
+            expected_annual_return_percent: Some(Decimal::ZERO),
+        },
+        SimAsset {
+            id: uuid::Uuid::from_u128(2),
+            value: equity,
+            purchase_price: None,
+            is_liquid: true,
+            expected_annual_return_percent: Some(annual_return),
+        },
+    ];
+    input
+}
+
 // =================================================================================================
 // 1. Reproducibilidad
 // =================================================================================================
@@ -652,22 +685,25 @@ fn mc_seed_for_is_stable() {
     }
 }
 
-/// **El colchón de caja (P4) está declarado y NO se simula — y este test lo dice en voz alta.**
+/// **Las dos maneras de que el colchón no haga nada, y son distintas.**
 ///
-/// `cash_buffer_months` viaja en la configuración porque el perfil de jubilación ya lo persiste
-/// (`users.retirement_profile`) y el handler tiene que poder pasarlo. Pero el núcleo genérico no
-/// expone ningún gancho para vender de un activo y abonar en otro dentro del mes, y la única
-/// alternativa sin tocar `crates/engine` —recolocar valor entre series después de simular— se
-/// saltaría el `gross_up` de la venta: un colchón que se rellena sin pagar plusvalías, es decir
-/// un número mejor que la realidad.
-///
-/// Mientras el gancho no exista, la salida honesta es esta: el campo se acepta, `buffer_active`
-/// dice `false`, y el resultado es **idéntico bit a bit** al de no pedirlo. Cuando el gancho
-/// llegue, este test cambiará de forma y se verá en el diff.
+/// 1. **Sin volatilidad declarada NO se instala.** No es que «no haya de dónde vender»:
+///    `PathEngine::new` exige tres cosas para simularlo —el usuario lo pide, hay un activo
+///    líquido que lo albergue y hay volatilidad de la que protegerse— y aquí falla la tercera.
+///    `z_k` se sigue sorteando (el flujo del RNG no depende de los datos) pero no mueve ningún
+///    retorno: rellenar «en los meses buenos» sería trasvasar valor —y pagar plusvalías—
+///    guiándose por un shock que no afecta a nada, y además rompería la puerta de degeneración de
+///    WP5.5 («σ=0 ⇒ la banda ES la línea determinista»). Resultado: `buffer_active: false`, las
+///    dos lecturas a `None` («no se midió», que no es «cero rellenos») y un [`McOutcome`]
+///    idéntico bit a bit al de no pedirlo.
+/// 2. **Con volatilidad SÍ se instala, y aun así no mueve nada si no hay de dónde vender.** P7
+///    tiene UN solo activo, que es a la vez el colchón: el conjunto vendible es vacío porque el
+///    colchón jamás se vende a sí mismo (eso sería un trasvase circular que sube su propia base
+///    sin mover un euro). `buffer_active: true`, `buffer_refills_p50: Some(0)` y las bandas
+///    EXACTAMENTE iguales que sin colchón.
 #[test]
-fn mc_cash_buffer_is_a_declared_no_op() {
+fn mc_cash_buffer_is_installed_only_when_it_can_mean_something() {
     let input = case("P7_jubilado_pension_impuestos");
-    let vols: Vec<Option<f64>> = input.assets.iter().map(|_| Some(12.0)).collect();
     let without = McConfig {
         seed: 5,
         paths: 32,
@@ -678,12 +714,154 @@ fn mc_cash_buffer_is_a_declared_no_op() {
         cash_buffer_months: Some(24),
         ..without.clone()
     };
-    let a = project_percentile_bands(&input, &vols, &without).expect("no falla");
-    let b = project_percentile_bands(&input, &vols, &with).expect("no falla");
+
+    // (1) σ = 0 en toda la cartera: el colchón no se instala y el resultado es el mismo objeto.
+    let flat: Vec<Option<f64>> = input.assets.iter().map(|_| None).collect();
+    let a = project_percentile_bands(&input, &flat, &without).expect("no falla");
+    let b = project_percentile_bands(&input, &flat, &with).expect("no falla");
     assert!(!a.buffer_active && !b.buffer_active);
+    assert_eq!(b.buffer_refills_p50, None);
+    assert_eq!(b.buffer_refill_net_total_p50, None);
     assert_eq!(
         a, b,
-        "pedir un colchón cambia el resultado: o se simula de verdad, o no se acepta el campo"
+        "con σ=0 el colchón no se instala: pedirlo no puede mover un dígito"
+    );
+
+    // (2) σ = 12 %: se instala, pero P7 tiene un solo activo y el colchón no se vende a sí mismo.
+    let vols: Vec<Option<f64>> = input.assets.iter().map(|_| Some(12.0)).collect();
+    let live_off = project_percentile_bands(&input, &vols, &without).expect("no falla");
+    let live_on = project_percentile_bands(&input, &vols, &with).expect("no falla");
+    println!(
+        "[colchón] P7 (1 activo) · σ=0 ⇒ instalado={} · σ=12 % ⇒ instalado={} rellenos={:?} movido={:?}",
+        b.buffer_active,
+        live_on.buffer_active,
+        live_on.buffer_refills_p50,
+        live_on.buffer_refill_net_total_p50
+    );
+    assert!(
+        live_on.buffer_active,
+        "con volatilidad el colchón se simula"
+    );
+    assert_eq!(live_on.buffer_refills_p50, Some(0));
+    assert_eq!(live_on.buffer_refill_net_total_p50, Some(0.0));
+    assert_eq!(
+        live_off.net_worth, live_on.net_worth,
+        "sin otro activo que vender, el colchón no puede mover una sola serie"
+    );
+    assert_eq!(live_off.liquid_worth, live_on.liquid_worth);
+}
+
+/// **Con volatilidad y con algo que vender, el colchón cambia la distribución — y la empeora.**
+///
+/// El laboratorio del issue con manga de caja: 1.000.000 € (80.000 en cuenta al 0 % = 24 meses de
+/// gasto, 920.000 en RV al 6,5 % con σ = 17 %), retirada fija real del 4 % del capital inicial, 35
+/// años, sin impuestos y sin IPC. Las dos ejecuciones parten de la MISMA cartera; lo único que
+/// cambia es si la cuenta se vuelve a llenar en los meses de shock positivo o se gasta una vez.
+///
+/// # Predicción y resultado
+///
+/// Se predijeron dos fuerzas opuestas: el **lastre de caja** (mantener 80.000 € fuera del mercado
+/// cuesta ~5.200 €/año de crecimiento esperado) contra el **riesgo de secuencia** (sin colchón se
+/// vende RV también después de una caída; con colchón, solo tras subir). La predicción escrita
+/// antes de ejecutar fue «p10 arriba, p90 abajo, éxito arriba: la cola manda en la ruina».
+///
+/// **La predicción falló en el signo, y el motivo está dentro del propio modelo.** Medido con
+/// 1.000 caminos y semilla 207:
+///
+/// ```text
+///   colchón (meses):   0        6        12       24       60
+///   éxito:             0,777    0,739    0,731    0,713    0,641
+///   p10 del mes 240:  95.581   56.822   52.993   57.136   56.352
+///   p50 final:      1.575.208 1.295.498 1.222.917 1.050.304  528.554
+/// ```
+///
+/// Monótono en el tamaño del colchón y **en contra** en todos los percentiles, la cola incluida.
+/// La razón no es un fallo del colchón: es que **este modelo no tiene autocorrelación** (está
+/// declarado en el doc del módulo `mc`). Con shocks mensuales independientes, un mes malo no dice
+/// nada del siguiente, así que no hay «mala racha que esperar sentado»: el colchón no compra
+/// ninguna información y el lastre —que sí es cierto todos los meses— se cobra entero. En los
+/// backtests históricos el colchón parece ayudar porque las series reales SÍ revierten a la
+/// media; esa propiedad no está aquí y por eso el resultado no puede ser el de la literatura de
+/// backtest.
+///
+/// Lo que este test fija, entonces: el colchón **actúa de verdad** (se rellena, mueve las bandas)
+/// y, dentro de este modelo, **cuesta rentabilidad sin comprar seguridad**. Si alguien añade
+/// reversión a la media al modelo, este `assert` se caerá — y eso será exactamente lo que hay que
+/// mirar.
+#[test]
+fn mc_cash_buffer_costs_return_without_buying_safety_in_this_model() {
+    let monthly =
+        Decimal::from(1_000_000) * Decimal::from(4) / Decimal::from(100) / Decimal::from(12);
+    let input = buffered_retiree(
+        Decimal::from(80_000),
+        Decimal::from(920_000),
+        monthly,
+        Decimal::try_from(6.5).unwrap(),
+        420,
+    );
+    let vols = vec![None, Some(17.0)];
+    let without = McConfig {
+        seed: 207,
+        paths: 1_000,
+        percentiles: vec![10, 50, 90],
+        cash_buffer_months: None,
+    };
+    let with = McConfig {
+        cash_buffer_months: Some(24),
+        ..without.clone()
+    };
+    let a = project_percentile_bands(&input, &vols, &without).expect("no falla");
+    let b = project_percentile_bands(&input, &vols, &with).expect("no falla");
+    assert!(!a.buffer_active && b.buffer_active);
+
+    let mid = 240usize;
+    let last = 420usize;
+    println!(
+        "\n[colchón] 1.000.000 € (80.000 cuenta + 920.000 RV 6,5 %/17 %) · 4 % real · 35 años · 1.000 caminos\n\
+         [colchón]   éxito             sin colchón = {:.3}   con colchón = {:.3}   (Δ {:+.3})\n\
+         [colchón]   líquido p10 mes 240 = {:>12.0} → {:>12.0} €\n\
+         [colchón]   líquido p50 final   = {:>12.0} → {:>12.0} €\n\
+         [colchón]   líquido p90 final   = {:>12.0} → {:>12.0} €\n\
+         [colchón]   rellenos p50 = {:?} de 420 meses · movido p50 = {:?} €",
+        a.success_probability,
+        b.success_probability,
+        b.success_probability - a.success_probability,
+        a.liquid_worth[0][mid],
+        b.liquid_worth[0][mid],
+        a.liquid_worth[1][last],
+        b.liquid_worth[1][last],
+        a.liquid_worth[2][last],
+        b.liquid_worth[2][last],
+        b.buffer_refills_p50,
+        b.buffer_refill_net_total_p50,
+    );
+
+    // (1) El colchón se rellena de verdad: ni cero meses ni cero euros. El total movido en la
+    //     mediana ronda el gasto acumulado del horizonte (1,4 M€ en 420 meses), porque
+    //     prácticamente TODO el gasto acaba pasando por la cuenta.
+    let refills = b.buffer_refills_p50.expect("se simuló");
+    let moved = b.buffer_refill_net_total_p50.expect("se simuló");
+    assert!(refills > 0 && moved > 0.0);
+    assert!(
+        refills < 420,
+        "solo se rellena en los meses de shock POSITIVO, que no son todos: {refills}"
+    );
+    // (2) Las bandas se MUEVEN: un colchón que no cambia la distribución no es un colchón.
+    assert_ne!(
+        a.liquid_worth, b.liquid_worth,
+        "el colchón no ha movido la banda: o no actúa, o el gancho está desconectado"
+    );
+    // (3) Y se mueven a peor, en la mediana y en la cola: ver el porqué en el doc.
+    assert!(
+        b.liquid_worth[1][last] < a.liquid_worth[1][last],
+        "el lastre de caja tiene que verse en la mediana"
+    );
+    assert!(
+        b.success_probability <= a.success_probability,
+        "con shocks independientes el colchón no puede MEJORAR la ruina: {:.3} > {:.3} \
+         — si el modelo ha ganado reversión a la media, actualiza este test Y la ayuda de la SPA",
+        b.success_probability,
+        a.success_probability
     );
 }
 

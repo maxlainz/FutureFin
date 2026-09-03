@@ -25,11 +25,11 @@ pub use phases::{
     RetirementTrigger, SpendMode, TargetBasis, WithdrawalRule,
 };
 pub use sim::{
-    AllocationCapG, AllocationRuleG, FireNeedG, FireTargetG, FireTargetView,
+    AllocationCapG, AllocationRuleG, CashBufferPlan, FireNeedG, FireTargetG, FireTargetView,
     FirstMonthAllocationG, IncomePauseG, PartialPhaseG, PensionScheduleG, PhasePlanG,
     RuleOutcomeG, SimAssetG, SimInput, SimLiability, SimOutput, TaxBracketG, WithdrawalRuleG,
 };
-pub use sim_core::{monthly_multiplier_g as monthly_growth_multiplier, simulate};
+pub use sim_core::{cash_buffer_index, monthly_multiplier_g as monthly_growth_multiplier, simulate};
 pub use projection::{
     debt_payments_remaining_series, fire_target_at_month_index, fire_target_base_at_month_index,
     first_month_allocation, inflation_factor_at_month_index,

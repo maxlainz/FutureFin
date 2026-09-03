@@ -109,6 +109,55 @@ navaja en coma flotante, y de esa rama cuelga qué es **recorte informativo** y 
 (`MixedGrossDrawdown::cap_exhausted`), que es quien lo sabe. Valía 8.138 € en P15; los dos pines
 dorados no se movieron.
 
+### Monte Carlo (5.0.0 WP6)
+
+`project_percentile_bands(input, volatilities, McConfig) -> McOutcome` corre `paths` caminos del
+MISMO bucle con los factores de crecimiento sorteados. **Un shock de mercado común por mes** (D11):
+un solo `z_k ~ N(0,1)` que todos los activos viven a la vez, `f_ik = m_i·exp(σ_i·z_k − σ_i²/2)` con
+`σ_i = annual_volatility_percent/100/√12` y `m_i` la raíz doceava del propio motor
+(`monthly_growth_multiplier`, no una copia). La corrección de Itô hace `E[f_ik] = m_i` **exacto**:
+la rentabilidad que el usuario declara es la ARITMÉTICA; la geométrica que el hogar cobra sale más
+baja, y esa diferencia es el coste de la volatilidad, no un error. `σ_i = 0` ⇒ `f_ik = m_i` por rama
+explícita. Semilla estable por usuario (D23, `seed_for(installation_id, user_id)` = FNV-1a +
+finalizador de splitmix64), un flujo ChaCha8 propio por camino (ampliar la muestra no reescribe la
+que había), normales por Box–Muller y percentiles por **rango más cercano** (siempre un valor
+observado, nunca una interpolación). `McOutcome` publica bandas **puntuales** p10/p50/p90 de
+`net_worth` y `liquid_worth` (la p50 NO es un camino y no cumple ninguna identidad contable),
+`success_probability` (D22: ningún agotamiento en todo el horizonte), agotamiento acumulado cada 60
+meses desde la jubilación, percentiles del mes de cruce, `underfunded_probability` y las dos
+lecturas del recorte (D24). **De este crate no sale un euro**: todo lo publicado es estadístico.
+Lo que el modelo NO representa —colas gruesas, autocorrelación, correlación imperfecta entre
+activos (con un `z` común es exactamente 1), bootstrap histórico, volatilidad de IPC/ingresos/gasto,
+rebalanceo— está escrito en el doc del módulo `mc`, no en un comentario suelto.
+
+### El colchón de caja (P4, 5.0.0 WP6b)
+
+`SimInput::cash_buffer: Option<CashBufferPlan<M>>` es el segundo gancho del núcleo, y como
+`growth_overrides` es `None` en todo el camino determinista (los dos pines dorados no se mueven).
+Con él, en cada mes **jubilado y autorizado** el motor llama a `refill_cash_buffer_g` DESPUÉS de la
+venta del mes y ANTES del crecimiento: repone el activo colchón hasta `target_months · gasto
+indexado del mes` vendiendo del orden de drenaje **restringido a `i ≠ buffer_index`**, con la misma
+maquinaria fiscal que la venta del mes (g por activo, cortocircuito escalar o paseo mixto,
+`shrink_basis_g`); el neto entra en el colchón como VALOR y como BASE (ya tributó al salir). Si la
+cartera no llega, se mueve lo que haya: un relleno es discrecional, no produce descubierto ni marca
+agotamiento. El activo colchón lo elige `cash_buffer_index` = el líquido de menor rentabilidad
+esperada, que por construcción es el primero del orden de drenaje y por tanto **el que la retirada
+ya vacía primero**, sin ninguna regla nueva. El motor no sabe qué es «volátil» (σ vive en el crate
+estocástico): quien instala el colchón es Monte Carlo, y solo si hay activo líquido que lo albergue
+Y volatilidad declarada — con σ=0 no se instala y el resultado es bit a bit el de no pedirlo
+(`McOutcome::buffer_active` lo dice; sus dos lecturas, `buffer_refills_p50` y
+`buffer_refill_net_total_p50`, son `None` cuando no se simuló, que no es «cero»).
+
+**Hallazgo medido, contra lo que la intuición promete**: en este modelo el colchón **empeora** el
+plan. Con 1.000.000 € (80.000 en cuenta al 0 % + 920.000 en RV al 6,5 %/17 %), retirada real del
+4 % y 35 años, la probabilidad de éxito cae de 0,775 a 0,713 y la mediana final de 1,55 M€ a
+1,05 M€; el deterioro es monótono en el tamaño del colchón (6/12/24/60 meses ⇒ 0,739/0,731/0,713/
+0,641) y afecta también al p10. La razón está declarada en el propio modelo: **sin autocorrelación**
+un mes malo no dice nada del siguiente, así que no hay mala racha que esperar sentado y el lastre
+—dinero fuera del mercado— se cobra entero. Los backtests históricos ven lo contrario porque las
+series reales revierten a la media, propiedad que este modelo no tiene. Lo pinea
+`mc_cash_buffer_costs_return_without_buying_safety_in_this_model`.
+
 ## Public API
 
 ```rust
@@ -732,6 +781,13 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
    (Erratum fixed 2026-08: this line used to say only "liquid assets", but `drain_from_assets`
    has always continued into illiquid assets once the liquids run dry.)
    **La fase parcial NO pasa por la regla de retirada**: las reglas se anclan en `L(R−1)`/`f(R−1)` —el patrimonio con el que se ENTRA en la jubilación— y en `Partial` ese ancla no existe todavía, así que un déficit de media jornada se vende como el de quien trabaja: necesidad fija, bruta, sin techo.
+7 bis. **Relleno del colchón de caja** (P4, WP6b), solo si `SimInput::cash_buffer` viene declarado,
+   el hogar está JUBILADO y el mes está autorizado (`refill_months[k−1]`; en Monte Carlo, `z_k > 0`):
+   `refill_cash_buffer_g` vende del orden de drenaje **sin el activo colchón** hasta reponerlo a
+   `target_months · gasto indexado del mes`, con la misma maquinaria fiscal del paso 7, y abona el
+   NETO en el colchón como valor y como base. Sin objetivo, sin capacidad o sin colchón declarado no
+   se ejecuta nada — y `None` es lo único que produce la conversión desde `ProjectionInput`, así que
+   el camino determinista no lo pisa. Ver §El colchón de caja para el porqué y el hallazgo medido.
 8. Apply compound growth (`× monthly_multiplier(rate)`) to each asset value — sin deflactar. `monthly_multiplier` = raíz 12ª del factor anual `1 + p/100`; `None` y `0` → factor 1; **las tasas negativas componen de verdad** (−50 % anual ⇒ ×0,5 en 12 meses); `p ≤ −100` se clampa a factor 0 (la capa API rechaza esos inputs con error tipado).
 9. Assign each liability its `closing_principal` from step 1. No recomputation, no `min` — just the
    assignment.

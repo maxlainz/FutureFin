@@ -170,3 +170,96 @@ fn the_cost_of_the_draw_against_the_cost_of_the_simulation() {
         (with - without) / with * 100.0
     );
 }
+
+/// Un jubilado de dos activos (cuenta al 0 % + RV) que pasa TODO el horizonte retirando: el caso
+/// donde el relleno del colchón se ejecuta de verdad, mes sí y mes también. P9, en cambio, apenas
+/// llega a jubilarse en la mayoría de los caminos, así que su «colchón activo» casi no lo ejerce.
+fn retired_lab(horizon: u32) -> ProjectionInput {
+    use futurefin_engine::{PhasePlan, SimAsset};
+    use rust_decimal::Decimal;
+    let monthly =
+        Decimal::from(1_000_000) * Decimal::from(4) / Decimal::from(100) / Decimal::from(12);
+    ProjectionInput {
+        ref_date: chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
+        horizon_months: horizon,
+        annual_inflation_percent: Decimal::ZERO,
+        tax_brackets: Vec::new(),
+        taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
+        income_regular_monthly: Decimal::ZERO,
+        expense_regular_monthly: monthly,
+        assets: vec![
+            SimAsset {
+                id: uuid::Uuid::from_u128(1),
+                value: Decimal::from(80_000),
+                purchase_price: None,
+                is_liquid: true,
+                expected_annual_return_percent: Some(Decimal::ZERO),
+            },
+            SimAsset {
+                id: uuid::Uuid::from_u128(2),
+                value: Decimal::from(920_000),
+                purchase_price: None,
+                is_liquid: true,
+                expected_annual_return_percent: Some(Decimal::try_from(6.5).unwrap()),
+            },
+        ],
+        allocation_rules: Vec::new(),
+        liabilities: Vec::new(),
+        planning_monthly_cash_adjustment: vec![Decimal::ZERO; horizon as usize],
+        phase_plan: PhasePlan::forced_at(1, Decimal::ZERO, monthly, Decimal::ZERO),
+        fire_target: None,
+    }
+}
+
+/// (e) **Lo que cuesta el colchón (P4)**: la misma ejecución de 500 caminos con y sin
+/// `cash_buffer_months`, en dos casos.
+///
+/// El relleno añade, en los meses jubilados con shock positivo, un `gross_up` y un drenaje sobre
+/// el orden restringido. En P9 la mayoría de los caminos no llegan a jubilarse, así que el
+/// colchón se instala pero casi no se ejerce: ese número mide el coste de tenerlo declarado. El
+/// jubilado de dos activos lo ejerce ~la mitad de los 420 meses y es la cota ALTA.
+///
+/// Se imprime también el éxito de cada uno: el colchón no es gratis en probabilidad, y el arnés
+/// de tiempos no es el sitio para esconderlo.
+#[test]
+#[ignore = "mide, no afirma: correr con --release --ignored --nocapture"]
+fn the_cost_of_the_cash_buffer() {
+    let paths = DEFAULT_PATHS;
+    let mut line = String::new();
+    for (label, input, v) in [
+        ("P9 (apenas se jubila)", p9(), vols()),
+        (
+            "jubilado 2 activos    ",
+            retired_lab(420),
+            vec![None, Some(17.0)],
+        ),
+    ] {
+        for months in [None, Some(24u32)] {
+            let config = McConfig {
+                seed: 20_260_903,
+                paths,
+                cash_buffer_months: months,
+                ..Default::default()
+            };
+            let t0 = Instant::now();
+            let out = project_percentile_bands(&input, &v, &config).expect("no falla");
+            let total = t0.elapsed().as_secs_f64() * 1000.0;
+            line.push_str(&format!(
+                "\n[mc-timing/{}] {label} · {paths} caminos · colchón {:>8}: {total:>8.1} ms \
+             ({:.3} ms/camino) · activo {} · rellenos p50 {:?} · éxito {:.3}",
+                profile(),
+                match months {
+                    None => "no".to_string(),
+                    Some(n) => format!("{n} meses"),
+                },
+                total / f64::from(paths),
+                out.buffer_active,
+                out.buffer_refills_p50,
+                out.success_probability,
+            ));
+            black_box(out);
+        }
+    }
+    println!("{line}");
+}

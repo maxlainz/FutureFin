@@ -38,7 +38,7 @@ use crate::projection::{
 };
 use crate::sim::{
     AllocationCapG, AllocationRuleG, FireTargetView, FirstMonthAllocationG, PhasePlanG,
-    RuleOutcomeG, SimInput, SimLiability, SimOutput, TaxBracketG,
+    RuleOutcomeG, SimAssetG, SimInput, SimLiability, SimOutput, TaxBracketG,
 };
 use crate::tax::MixedSegment;
 
@@ -304,6 +304,26 @@ pub(crate) fn drain_order_g<M: MoneyOps>(liquid: &[bool], rates: &[Option<M>]) -
         }
     });
     order
+}
+
+/// **El activo que hace de colchón** (P4, §B.6 del plan de #207): el LÍQUIDO de menor
+/// rentabilidad esperada, con empate por índice. `None` si no hay ningún activo líquido — sin
+/// activo líquido no hay dónde guardar un colchón, y el llamante no debe instalar ninguno.
+///
+/// Se deriva del ORDEN DE DRENAJE, no de una segunda comparación escrita a mano: es el primer
+/// líquido de [`drain_order_g`] y, por tanto, exactamente el activo que la venta del mes vacía
+/// primero. Esa coincidencia es lo que hace que el colchón funcione **sin ninguna regla nueva de
+/// retirada**: la retirada ya sale de él sola. Una segunda definición del desempate la rompería
+/// en silencio al primer cambio.
+pub fn cash_buffer_index<M: MoneyOps>(assets: &[SimAssetG<M>]) -> Option<usize> {
+    let liquid: Vec<bool> = assets.iter().map(|a| a.is_liquid).collect();
+    let rates: Vec<Option<M>> = assets
+        .iter()
+        .map(|a| a.expected_annual_return_percent)
+        .collect();
+    drain_order_g(&liquid, &rates)
+        .into_iter()
+        .find(|&i| liquid[i])
 }
 
 /// Drena `need` de los activos en el orden de [`drain_order_g`] y devuelve el DESCUBIERTO.
@@ -679,6 +699,168 @@ fn execute_month_sale_g<M: MoneyOps>(
     }
 
     out
+}
+
+// =============================================================================================
+// El colchón de caja (P4)
+// =============================================================================================
+
+/// **El relleno del colchón de caja** (P4, §B.6 del plan de #207): vende del RESTO de la cartera
+/// y abona el neto en el activo colchón. Devuelve el neto movido, siempre `≥ 0`.
+///
+/// # Qué es exactamente
+///
+/// Una **venta más**, con la misma maquinaria fiscal que la venta del mes
+/// ([`execute_month_sale_g`]): `g` por activo cuando su base es un dato, cortocircuito escalar
+/// cuando todas coinciden, paseo mixto por tramos cuando no, y `shrink_basis_g` sobre lo vendido.
+/// El euro que llega al colchón entra como **base de coste** (`basis[b] += net`), igual que una
+/// aportación de la cascada: ya pagó su plusvalía al salir del otro activo y no puede volver a
+/// pagarla al salir de este.
+///
+/// Lo único que el trasvase destruye es el impuesto de la venta, y eso lo recoge el patrimonio
+/// solo: no hace falta contabilidad aparte.
+///
+/// # De dónde vende, y de dónde NO
+///
+/// Del orden de drenaje ([`drain_order_g`]) **restringido a `i ≠ buffer_index`**: líquidos
+/// primero, menor rentabilidad esperada primero. Dos consecuencias que conviene decir:
+///
+/// - **Un activo ilíquido es alcanzable, pero el último**: solo cuando todos los líquidos están a
+///   cero. Es el mismo orden que ya usa la venta del mes, que también acaba vendiendo la vivienda
+///   cuando no queda otra; darle al relleno un orden propio sería una segunda política de venta.
+/// - **El motor no sabe qué activo es «volátil»**: `σ` vive en `crates/engine-stochastic`. Aquí el
+///   único excluido es el colchón mismo, y quien decide si el colchón siquiera se instala —en
+///   Monte Carlo, solo cuando hay volatilidad declarada de la que protegerse— es el llamante.
+///
+/// # Efecto colateral declarado sobre `contributed_capital`
+///
+/// `contributed_capital(k) = Σ basis_i(k)` es una identidad del motor, y un trasvase la SUBE en la
+/// plusvalía realizada neta de impuesto (`net − coste_vendido`): el euro de plusvalía, una vez
+/// tributado, es coste en su nuevo destino y no puede volver a tributar. Es correcto —es lo que
+/// hace un traspaso real en una cuenta gravable— pero deja de leerse como «lo que el hogar aportó
+/// de su bolsillo». No llega a ningún usuario: el colchón solo actúa en Monte Carlo, que publica
+/// bandas y probabilidades, nunca `contributed_capital`.
+///
+/// # Lo que NO hace
+///
+/// - **No produce descubierto.** Si la cartera no da para el objetivo, se mueve lo que haya: un
+///   relleno es discrecional y no dejar de rellenar no es una deuda del hogar.
+/// - **No marca agotamiento.** Vaciar la cartera rellenando no es el mes en que el hogar se quedó
+///   sin patrimonio; ese mes lo decide la venta que paga el gasto (#119).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refill_cash_buffer_g<M: MoneyOps>(
+    values: &mut [M],
+    basis: &mut [M],
+    basis_declared: &mut [bool],
+    liquid: &[bool],
+    rates: &[Option<M>],
+    scalar_gain_ratio: M,
+    brackets: &[TaxBracketG<M>],
+    taxes_enabled: bool,
+    buffer_index: usize,
+    target_net: M,
+) -> M {
+    if target_net <= M::zero() || buffer_index >= values.len() {
+        return M::zero();
+    }
+    // El conjunto vendible: el orden de drenaje SIN el colchón. Si el hogar solo tiene el
+    // colchón, aquí no queda nada y el relleno es cero — sin ramas especiales.
+    let order: Vec<usize> = drain_order_g(liquid, rates)
+        .into_iter()
+        .filter(|&i| i != buffer_index)
+        .collect();
+
+    // #178: misma regla que la venta del mes — `g_i = 1 − b_i/v_i` cuando la base es un DATO,
+    // el escalar configurado cuando no. `checked_div` por la misma razón que allí (#208).
+    let gains: Vec<M> = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            if basis_declared[i] && *v > M::zero() {
+                match basis[i].checked_div(*v) {
+                    Some(ratio) => (M::one() - ratio).clamp(M::zero(), M::one()),
+                    None => M::zero(),
+                }
+            } else {
+                scalar_gain_ratio
+            }
+        })
+        .collect();
+    // Cortocircuito uniforme sobre lo VENDIBLE del conjunto restringido, con la igualdad que
+    // declara el tipo ([`MoneyOps::gains_equal`]). Recorre el orden de drenaje —no los índices—
+    // porque ese es el conjunto que de verdad se va a vender.
+    let mut uniform_g: Option<M> = None;
+    let mut is_uniform = true;
+    for &i in &order {
+        if values[i] > M::zero() {
+            match uniform_g {
+                None => uniform_g = Some(gains[i]),
+                Some(u) if M::gains_equal(u, gains[i]) => {}
+                Some(_) => {
+                    is_uniform = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    let net_moved = if is_uniform {
+        // Vía escalar: el bruto a vender es `gross_up_monthly` del objetivo neto, topado por lo
+        // que haya. Con `taxes_enabled = false` es la identidad.
+        let g_scalar = uniform_g.unwrap_or(scalar_gain_ratio);
+        let target_gross =
+            crate::tax::gross_up_monthly_g(target_net, brackets, taxes_enabled, g_scalar);
+        let mut remaining = target_gross;
+        let mut drawn_gross = M::zero();
+        for &i in &order {
+            if remaining <= M::zero() {
+                break;
+            }
+            let take = values[i].max(M::zero()).min(remaining);
+            if take > M::zero() {
+                let v_pre = values[i];
+                values[i] = values[i] - take;
+                // #120: la base baja en proporción al VALOR vendido. `v_pre > 0` por el `take > 0`.
+                basis[i] = shrink_basis_g(basis[i], values[i], v_pre);
+                drawn_gross = drawn_gross + take;
+                remaining = remaining - take;
+            }
+        }
+        crate::tax::after_tax_monthly_g(drawn_gross, brackets, taxes_enabled, g_scalar)
+    } else {
+        // Vía MIXTA (#178): el paseo inverso decide venta bruta y reparto a la vez, porque la
+        // base agregada `Σ g_i·venta_i` atraviesa los tramos progresivos y ninguna `g` escalar
+        // la representa. Mismo orden que arriba.
+        let segments: Vec<MixedSegment<M>> = order
+            .iter()
+            .map(|&i| MixedSegment {
+                capacity_monthly: values[i].max(M::zero()),
+                gain_ratio: gains[i],
+            })
+            .collect();
+        let dd = crate::tax::gross_up_mixed_monthly(target_net, &segments, brackets, taxes_enabled);
+        for (pos, &i) in order.iter().enumerate() {
+            let take = dd.per_segment_monthly[pos];
+            if take > M::zero() {
+                let v_pre = values[i];
+                values[i] = values[i] - take;
+                basis[i] = shrink_basis_g(basis[i], values[i], v_pre);
+            }
+        }
+        // El solver publica el descubierto NETO; lo que se movió es el objetivo menos eso. Aquí
+        // ese «descubierto» no es deuda de nadie: es colchón que se quedó sin llenar.
+        (target_net - dd.net_shortfall_monthly).max(M::zero())
+    };
+
+    if net_moved <= M::zero() {
+        return M::zero();
+    }
+    values[buffer_index] = values[buffer_index] + net_moved;
+    // El euro movido ES base de coste en el colchón (como una aportación de la cascada, #120), y
+    // desde aquí la base de este activo es un DATO observado (#178).
+    basis[buffer_index] = basis[buffer_index] + net_moved;
+    basis_declared[buffer_index] = true;
+    net_moved
 }
 
 // =============================================================================================
@@ -1117,6 +1299,11 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
     shortfall_series.push(M::zero());
     let mut excess_series: Vec<M> = Vec::with_capacity(input.horizon_months as usize + 1);
     excess_series.push(M::zero());
+    // P4: lo que el colchón absorbió cada mes, con el mismo eje. Todo ceros sin colchón — y sin
+    // colchón el bucle ni evalúa el objetivo, así que el coste es un `push` de un cero.
+    let mut buffer_refill_series: Vec<M> = Vec::with_capacity(input.horizon_months as usize + 1);
+    buffer_refill_series.push(M::zero());
+    let mut buffer_refill_months: u32 = 0;
     // Estado de la regla de retirada (§B.2). Vive FUERA del bucle porque `hybrid` y `guardrails`
     // tienen memoria: un latch que no se recuerda no es un latch.
     let mut planner = crate::withdrawal::WithdrawalPlanner::new(plan.withdrawal);
@@ -1417,6 +1604,52 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
             undrained_cumulative = undrained_cumulative + undrained_month;
         }
 
+        // **El colchón de caja** (P4, §B.6): DESPUÉS de la venta —el colchón se rellena sobre el
+        // saldo que la retirada del mes ya dejó— y ANTES del crecimiento, para que el euro
+        // trasvasado componga este mes donde de verdad está.
+        //
+        // Tres puertas, y las tres tienen que abrirse: hay colchón declarado, el hogar está
+        // JUBILADO (antes de jubilarse la cascada ya reparte el superávit y no hay retirada de la
+        // que protegerse) y el mes está AUTORIZADO (en Monte Carlo, shock positivo). Sin colchón
+        // —el camino determinista— no se ejecuta ni una comparación de más.
+        let mut buffer_refill = M::zero();
+        if in_retirement {
+            if let Some(cb) = input
+                .cash_buffer
+                .as_ref()
+                .filter(|cb| cb.buffer_index < values.len())
+            {
+                if cb
+                    .refill_months
+                    .get((k - 1) as usize)
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    // Objetivo del mes: `n` meses del gasto YA INDEXADO menos lo que el colchón
+                    // conserva. Es el gasto de la fase (`expense`), no el gasto con deuda que usa
+                    // el tope `MonthsExpense` de la cascada: el colchón cubre la RETIRADA, y el
+                    // servicio de deuda ya sale de la caja del mes antes de que exista déficit.
+                    let target_net =
+                        (cb.target_months * expense - values[cb.buffer_index]).max(M::zero());
+                    buffer_refill = refill_cash_buffer_g(
+                        &mut values,
+                        &mut basis,
+                        &mut basis_declared,
+                        &liquid,
+                        &rates,
+                        input.taxable_gain_ratio,
+                        &input.tax_brackets,
+                        input.taxes_enabled,
+                        cb.buffer_index,
+                        target_net,
+                    );
+                    if buffer_refill > M::zero() {
+                        buffer_refill_months += 1;
+                    }
+                }
+            }
+        }
+
         // **Crecimiento.** El slice de factores del mes se elige UNA vez (no un `if` por activo):
         // sin `growth_overrides` —el único caso del camino determinista— es el vector hoisted de
         // siempre, así que el bucle interior ejecuta exactamente las mismas operaciones. Una fila
@@ -1448,6 +1681,7 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         withdrawal_series.push(sale.net_obtained);
         shortfall_series.push(sale.shortfall);
         excess_series.push(sale.excess);
+        buffer_refill_series.push(buffer_refill);
         let liquid_close = liquid_fn(&values);
         // §B.3: ¿la media jornada deja crecer el capital? Se compara el cierre del mes con el
         // cierre del anterior —el mismo par que el cruce usa— y basta UN mes a la baja.
@@ -1536,5 +1770,198 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         partial_phase_capital_growing,
         disposable_cash: disposable_series,
         disposable_cash_total: disposable_total,
+        buffer_refill_net: buffer_refill_series,
+        buffer_refill_months,
     })
+}
+
+// =============================================================================================
+// Tests del colchón (P4)
+// =============================================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal::Decimal;
+
+    fn es_brackets_g() -> Vec<TaxBracketG<Decimal>> {
+        TaxBracketG::<Decimal>::from_decimal_slice(&crate::tax::es_brackets_for_tests())
+    }
+
+    fn dec(v: &str) -> Decimal {
+        v.parse().expect("literal decimal válido")
+    }
+
+    /// **El relleno del colchón, derivado a mano antes de ejecutarlo.**
+    ///
+    /// Dos activos: colchón al 0 % con 1.000 € (base 1.000 ⇒ `g₀ = 0`) y renta variable al 10 %
+    /// con 100.000 € y base 50.000 ⇒ `g₁ = 1 − 50.000/100.000 = 0,5`. Escala ES, impuestos ON,
+    /// objetivo **3.000 € netos**.
+    ///
+    /// El conjunto vendible es `{1}` (el colchón nunca se vende a sí mismo), así que la `g` es
+    /// uniforme y la venta va por la vía escalar:
+    ///
+    /// ```text
+    ///   gross_up_anual(36.000, g = 0,5):  base B = 0,5·G cae en el tramo del 21 %
+    ///     tax(B) = 1.140 + 0,21·(B − 6.000) = 0,21·B − 120
+    ///     G − 0,21·0,5·G + 120 = 36.000  ⇒  0,895·G = 35.880  ⇒  G = 40.089,3854748603351955…
+    ///     comprobación: B = 20.044,69… ∈ (6.000, 50.000] ✓
+    ///   venta BRUTA mensual = G/12 = 3.340,78212290502793296…
+    ///   impuesto           = 3.340,782… − 3.000 = 340,78212290502793296…
+    /// ```
+    ///
+    /// Predicciones, escritas ANTES de ejecutar:
+    ///
+    /// | magnitud | predicho |
+    /// |---|---|
+    /// | neto movido | 3.000 exacto (par redondo `after_tax(gross_up(n)) = n`) |
+    /// | colchón: valor y base | 4.000 y 4.000 |
+    /// | RV: valor | 100.000 − 3.340,782122905027932960 = 96.659,217877094972067039… |
+    /// | RV: base | 50.000·96.659,2178…/100.000 = 48.329,6089385474860335… |
+    /// | patrimonio total | baja EXACTAMENTE el impuesto: 101.000 − 340,7821229050279329… |
+    #[test]
+    fn refill_cash_buffer_sells_gross_credits_net_and_shrinks_the_basis() {
+        let mut values = vec![dec("1000"), dec("100000")];
+        let mut basis = vec![dec("1000"), dec("50000")];
+        let mut declared = vec![true, true];
+        let liquid = vec![true, true];
+        let rates = vec![Some(Decimal::ZERO), Some(Decimal::from(10))];
+        let brackets = es_brackets_g();
+
+        // El colchón es el líquido de menor rentabilidad: el índice 0.
+        let assets: Vec<crate::sim::SimAssetG<Decimal>> = vec![
+            crate::sim::SimAssetG {
+                value: values[0],
+                purchase_price: Some(basis[0]),
+                is_liquid: true,
+                expected_annual_return_percent: rates[0],
+            },
+            crate::sim::SimAssetG {
+                value: values[1],
+                purchase_price: Some(basis[1]),
+                is_liquid: true,
+                expected_annual_return_percent: rates[1],
+            },
+        ];
+        assert_eq!(cash_buffer_index(&assets), Some(0));
+
+        let total_before: Decimal = values.iter().copied().sum();
+        let net = refill_cash_buffer_g(
+            &mut values,
+            &mut basis,
+            &mut declared,
+            &liquid,
+            &rates,
+            Decimal::ONE,
+            &brackets,
+            true,
+            0,
+            dec("3000"),
+        );
+        let total_after: Decimal = values.iter().copied().sum();
+        println!(
+            "\n[colchón] neto movido      = {net}\n\
+             [colchón] colchón valor/base = {} / {}\n\
+             [colchón] RV      valor/base = {} / {}\n\
+             [colchón] patrimonio {total_before} → {total_after} (impuesto {})",
+            values[0],
+            basis[0],
+            values[1],
+            basis[1],
+            total_before - total_after
+        );
+
+        // (1) El neto movido es EXACTAMENTE el objetivo: el par gross_up/after_tax es redondo.
+        assert_eq!(net, dec("3000"));
+        // (2) El colchón sube en el neto, y ese euro es BASE (ya tributó al salir de la RV).
+        assert_eq!(values[0], dec("4000"));
+        assert_eq!(basis[0], dec("4000"));
+        assert!(declared[0]);
+        // (3) La RV baja en el BRUTO vendido, no en el neto.
+        let gross_sold = dec("100000") - values[1];
+        let expected_gross = dec("3340.782122905027932960893855");
+        assert!(
+            (gross_sold - expected_gross).abs() < dec("0.000000000000000001"),
+            "venta bruta {gross_sold}, predicha {expected_gross}"
+        );
+        // (4) La base baja PROPORCIONALMENTE al valor vendido (#120): b' = b·v_post/v_pre.
+        let expected_basis = dec("50000") * values[1] / dec("100000");
+        assert_eq!(basis[1], expected_basis);
+        // (5) Lo único que el trasvase destruye es el impuesto — ni un euro más.
+        assert_eq!(total_before - total_after, gross_sold - net);
+    }
+
+    /// Sin nada que vender no hay relleno, y el colchón **jamás se vende a sí mismo** (eso sería
+    /// un trasvase circular que sube su propia base sin mover un euro).
+    #[test]
+    fn refill_cash_buffer_never_sells_the_buffer_itself() {
+        let mut values = vec![dec("1000")];
+        let mut basis = vec![dec("1000")];
+        let mut declared = vec![true];
+        let net = refill_cash_buffer_g(
+            &mut values,
+            &mut basis,
+            &mut declared,
+            &[true],
+            &[Some(Decimal::ZERO)],
+            Decimal::ONE,
+            &es_brackets_g(),
+            true,
+            0,
+            dec("5000"),
+        );
+        assert_eq!(net, Decimal::ZERO);
+        assert_eq!(values[0], dec("1000"));
+        assert_eq!(basis[0], dec("1000"));
+    }
+
+    /// Si la cartera no llega al objetivo se mueve **lo que haya**, sin descubierto: un relleno es
+    /// discrecional. Sin impuestos el bruto ES el neto, así que el número es exacto a mano.
+    #[test]
+    fn refill_cash_buffer_moves_what_it_can_without_creating_a_deficit() {
+        let mut values = vec![dec("100"), dec("700")];
+        let mut basis = vec![dec("100"), dec("700")];
+        let mut declared = vec![true, true];
+        let net = refill_cash_buffer_g(
+            &mut values,
+            &mut basis,
+            &mut declared,
+            &[true, true],
+            &[Some(Decimal::ZERO), Some(Decimal::from(10))],
+            Decimal::ONE,
+            &[],
+            false,
+            0,
+            dec("5000"),
+        );
+        assert_eq!(net, dec("700"), "se mueve toda la capacidad, no más");
+        assert_eq!(values[0], dec("800"));
+        assert_eq!(values[1], Decimal::ZERO);
+        assert_eq!(basis[1], Decimal::ZERO, "vender el activo entero deja base 0");
+    }
+
+    /// `cash_buffer_index` elige entre los LÍQUIDOS y solo entre ellos: una vivienda al 1 % no
+    /// puede hacer de colchón por mucho que sea el activo de menor rentabilidad.
+    #[test]
+    fn cash_buffer_index_only_considers_liquid_assets() {
+        let asset = |value: u32, liquid: bool, rate: Option<u32>| crate::sim::SimAssetG {
+            value: Decimal::from(value),
+            purchase_price: None,
+            is_liquid: liquid,
+            expected_annual_return_percent: rate.map(Decimal::from),
+        };
+        // Ilíquido al 1 %, líquido al 7 %, líquido al 2 % ⇒ gana el índice 2.
+        let assets = vec![
+            asset(1, false, Some(1)),
+            asset(1, true, Some(7)),
+            asset(1, true, Some(2)),
+        ];
+        assert_eq!(cash_buffer_index(&assets), Some(2));
+        // Empate por rentabilidad ⇒ menor índice.
+        let tie = vec![asset(1, true, Some(3)), asset(1, true, Some(3))];
+        assert_eq!(cash_buffer_index(&tie), Some(0));
+        // Sin líquidos no hay colchón posible.
+        assert_eq!(cash_buffer_index(&[asset(1, false, None)]), None);
+        assert_eq!(cash_buffer_index::<Decimal>(&[]), None);
+    }
 }
