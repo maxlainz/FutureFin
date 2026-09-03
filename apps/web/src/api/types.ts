@@ -15,6 +15,12 @@ export type UserResponse = {
   username: string;
   /** YYYY-MM-DD desde la API; ausente en clientes antiguos. */
   birth_date?: string | null;
+  /**
+   * ¿Tiene la cuenta contraseña propia? `false` = identidad delegada (el add-on de Home
+   * Assistant crea la cuenta sin contraseña y no debe tener ninguna). Decide qué pide el modal
+   * de exportar `.ffbackup`: la contraseña de la cuenta, o una contraseña propia del archivo.
+   */
+  has_password: boolean;
 };
 
 export type FireNumberModeApi = "manual" | "annual_expense" | "current_income";

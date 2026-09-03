@@ -29,6 +29,7 @@
     "backup_file_too_large",
     "backup_format_version_unsupported",
     "backup_not_a_ffbackup_file",
+    "backup_password_empty",
     "backup_payload_malformed",
     "backup_reference_not_distinct",
     "backup_reference_out_of_range",

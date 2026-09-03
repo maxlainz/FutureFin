@@ -349,7 +349,7 @@ indistinguible «tu base de datos está caída» de «vuelve a intentarlo».
 
 ### Cuentas sin contraseña — vale para los dos caminos
 
-`password_hash` es NULL y no hay ninguna contraseña que probar. Los tres flujos que la exigen
+`password_hash` es NULL y no hay ninguna contraseña que probar. Los **dos** flujos que la exigen
 devuelven **401 `sso_account_no_password`** (`handlers/auth.rs::sso_account_no_password`, un único
 constructor compartido):
 
@@ -357,7 +357,21 @@ constructor compartido):
 |---|---|
 | `POST /v1/auth/login` | No hay hash contra el que verificar. |
 | `POST /v1/auth/password` | **Fijar** una contraseña desde aquí crearía una segunda vía de acceso a una cuenta cuya autenticación pertenece al proveedor. Fuera de alcance en esta release. |
-| `POST /v1/backup/user-export` | La clave del `.ffbackup` se deriva de la contraseña de cuenta con Argon2id — sin contraseña no hay clave. |
+
+**`POST /v1/backup/user-export` era el tercero y dejó de serlo en 5.0.0** (issue #213). Rechazarlo
+no protegía nada: dejaba al único usuario del add-on de Home Assistant sin poder sacar sus propios
+datos, y la única salida era fijarle una contraseña de cuenta que la fila de arriba prohíbe a
+propósito. El desacople es que **la contraseña del `.ffbackup` no es una credencial de la cuenta**:
+
+| Cuenta | Qué contraseña pide el export | Qué hace el servidor con ella |
+|---|---|---|
+| `password_hash` NOT NULL | La **de la cuenta** | La verifica contra el hash (401 si no casa) **y** la usa de entrada del KDF. Sin cambios respecto a 4.x. |
+| `password_hash IS NULL` | Una **propia del archivo**, que el usuario crea al descargarlo | Solo entrada del KDF. Única regla: **no vacía** → 422 `backup_password_empty`. Quien pide ya está autenticado por `require_session_user` + `require_installation_member`. |
+
+El **import no distingue** —la contraseña siempre fue solo entrada del KDF—, así que los ficheros
+generados antes se siguen abriendo con la contraseña de cuenta de entonces. La SPA sabe cuál pedir
+por `UserResponse.has_password` (aditivo, 5.0.0), que viaja en `login`, `register`, `/v1/auth/sso`
+y `GET /v1/auth/me`.
 
 - **Es un 401 hablado a propósito** (`ApiError::UnauthorizedWith`, no el `Unauthorized` mudo).
   Decirlo revela que ese nombre existe como cuenta SSO, y es un intercambio buscado: sin el

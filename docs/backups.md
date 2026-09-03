@@ -5,7 +5,7 @@ claro qué cubre cada una antes de necesitarlas.
 
 | Capa | Qué copia | Alcance | Quién la ejecuta |
 |---|---|---|---|
-| **1. `.ffbackup` por usuario** | Los datos de **una** persona, cifrados con su contraseña | Sus activos, pasivos, presupuesto, movimientos… | Cada usuario, desde la app |
+| **1. `.ffbackup` por usuario** | Los datos de **una** persona, cifrados con una contraseña | Sus activos, pasivos, presupuesto, movimientos… | Cada usuario, desde la app |
 | **2. Backup automático pre-migración** | La base de datos entera, antes de cada actualización con migraciones | Todo | El contenedor, solo, sin que nadie lo pida |
 | **3. `pg_dump` manual** | La base de datos entera, cuando tú quieras | Todo | Tú, a mano o por cron |
 
@@ -24,7 +24,13 @@ llevarte tus números a otra instalación, o para tener algo tuyo que no dependa
 sobreviva.
 
 **Cómo se hace**: `Ajustes → Copias de seguridad → Copia de seguridad personal (.ffbackup)`, botón
-**Exportar mis datos**. Te pedirá tu contraseña de la cuenta.
+**Exportar mis datos**. Qué contraseña te pide depende de tu cuenta:
+
+- **Si entras con usuario y contraseña**, te pide **la de tu cuenta**, como siempre. El servidor la
+  comprueba antes de cifrar.
+- **Si entras con Home Assistant** (tu cuenta no tiene contraseña, ni debe tenerla), te pide
+  **crear una contraseña para ese archivo**, con confirmación. No es una contraseña de cuenta, no
+  se guarda en ninguna parte y solo sirve para abrir ese `.ffbackup`.
 
 **Qué lleva dentro**: las filas cuyo dueño eres tú — activos, reglas de reparto, pasivos, entradas
 de presupuesto, planificación, las categorías que usas, tus snapshots de histórico, tus
@@ -33,20 +39,21 @@ nacimiento y tus preferencias de interfaz. Incluye además una foto **informativ
 de la instalación (divisa, zona horaria, inflación, supuestos FIRE) que **no se aplica al
 importar**: es contexto, no configuración.
 
-**Cómo está cifrado**: AES-256-GCM con una clave derivada de tu contraseña de cuenta mediante
-Argon2id, con sal y nonce aleatorios en cada exportación, sobre una carga comprimida con gzip. El
-manifiesto del fichero va en claro —lo justo para que el servidor pueda rechazar una versión que
-no entiende sin descifrar nada—, y el resto no.
+**Cómo está cifrado**: AES-256-GCM con una clave derivada mediante Argon2id de esa contraseña —la
+de tu cuenta o la que creaste para el archivo, según el caso de arriba—, con sal y nonce aleatorios
+en cada exportación, sobre una carga comprimida con gzip. El manifiesto del fichero va en claro —lo
+justo para que el servidor pueda rechazar una versión que no entiende sin descifrar nada—, y el
+resto no.
 
-> **Si olvidas la contraseña que tenías en el momento de exportar, el archivo es irrecuperable.**
-> No hay puerta de atrás, y una contraseña equivocada da un error genérico indistinguible de un
-> fichero corrupto. Es a propósito.
+> **Si olvidas la contraseña con la que exportaste, el archivo es irrecuperable.** No hay puerta de
+> atrás, y una contraseña equivocada da un error genérico indistinguible de un fichero corrupto. Es
+> a propósito. Ojo con el caso de la cuenta con contraseña: lo que abre el archivo es la que tenías
+> **en el momento de exportar**, no la de hoy — cambiarla después no recifra nada.
 
-> **Las cuentas creadas por SSO no pueden exportar.** En el add-on de Home Assistant, quien entra
-> con su identidad de HA tiene la cuenta **sin contraseña** — y la clave del `.ffbackup` se deriva
-> precisamente de esa contraseña. El servidor responde `sso_account_no_password` en vez de generar
-> un fichero que nadie podría descifrar. Para sacar datos de ahí: exporta desde una cuenta que sí
-> tenga contraseña, o usa la copia de seguridad de Home Assistant, que se lleva `/data` entero. Ver
+> **Hasta la 5.0.0, las cuentas creadas por SSO no podían exportar.** Quien entra con su identidad
+> de Home Assistant tiene la cuenta sin contraseña, y el servidor respondía
+> `sso_account_no_password`. Ya no: el `.ffbackup` lleva su propia contraseña y esas cuentas
+> exportan como cualquier otra. Ver
 > [home-assistant.md](home-assistant.md#2-primer-arranque-y-usuarios).
 
 **Cómo se restaura**: en la misma pantalla, **Importar backup**. Dos cosas que hay que saber antes
@@ -73,7 +80,7 @@ La API por debajo, si prefieres automatizarlo (todos con cookie de sesión):
 
 | Endpoint | Notas |
 |---|---|
-| `POST /v1/backup/user-export` | Cuerpo `{"password": "..."}`. Devuelve el binario. |
+| `POST /v1/backup/user-export` | Cuerpo `{"password": "..."}`. Devuelve el binario. En cuentas con contraseña, `password` es la de la cuenta y se verifica (401 si no casa); en cuentas sin contraseña es la del archivo y solo tiene que no ir vacía (422 `backup_password_empty`). |
 | `POST /v1/backup/user-import/preview` | Descifra y devuelve recuentos **sin cambiar nada**. |
 | `POST /v1/backup/user-import` | Lo mismo, **más `"confirm_replace": true`**. Sin ese campo, 400. |
 

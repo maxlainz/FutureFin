@@ -90,6 +90,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   // ── Copia de seguridad (.ffbackup) ────────────────────────────────────────────────────
   backup_wrong_password:
     "La contraseña del archivo no es correcta. Es la que elegiste al exportarlo, no la de tu cuenta.",
+  backup_password_empty:
+    "Escribe una contraseña para este backup. Sin ella el archivo no se puede cifrar.",
   backup_not_a_ffbackup_file:
     "Ese archivo no es una copia de seguridad de FutureFin. Elige un archivo .ffbackup.",
   backup_file_corrupt:

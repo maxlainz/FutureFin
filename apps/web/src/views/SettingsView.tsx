@@ -261,6 +261,30 @@ export function SettingsView({
       ? undefined
       : categories.find((x) => x.id === editingCategoryId);
 
+  // ── Copia de seguridad personal: qué contraseña pide el modal de exportar ────────────────
+  //
+  // Una cuenta con contraseña sigue usando la suya (el servidor la verifica antes de cifrar).
+  // Una cuenta de identidad delegada —la que crea el add-on de Home Assistant— no tiene ninguna
+  // y **no debe** tenerla, así que crea aquí una contraseña propia del archivo, con confirmación
+  // porque una errata en un secreto que nadie más conoce deja el backup irrecuperable.
+  const backupNeedsOwnPassword = !user.has_password;
+  const [ffbackupExportPasswordRepeat, setFfbackupExportPasswordRepeat] =
+    useState("");
+  // La confirmación se borra cuando el modal se cierra, venga el cierre de donde venga: el
+  // botón Cancelar, la tecla Escape o el propio App.tsx al terminar la descarga. Colgarla del
+  // estado de apertura y no del handler es lo que cubre ese último camino.
+  useEffect(() => {
+    if (!ffbackupExportModalOpen) setFfbackupExportPasswordRepeat("");
+  }, [ffbackupExportModalOpen]);
+  const backupPasswordsDiffer =
+    backupNeedsOwnPassword &&
+    ffbackupExportPasswordRepeat.length > 0 &&
+    ffbackupExportPassword !== ffbackupExportPasswordRepeat;
+  const backupExportPasswordReady = backupNeedsOwnPassword
+    ? ffbackupExportPassword.length > 0 &&
+      ffbackupExportPassword === ffbackupExportPasswordRepeat
+    : true;
+
   const filteredCategories =
     categoryScopeFilter === "all"
       ? categories
@@ -1161,8 +1185,8 @@ export function SettingsView({
             <section className="panel">
               <h3 className="panel-title">Copia de seguridad personal</h3>
               <p className="muted">
-                Exporta o restaura un archivo <code>.ffbackup</code> cifrado con
-                tu contraseña que contiene solo tus datos: activos, pasivos,
+                Exporta o restaura un archivo <code>.ffbackup</code> cifrado
+                con una contraseña que contiene solo tus datos: activos, pasivos,
                 presupuesto, planificación, categorías usadas, fecha de
                 nacimiento y preferencias UI. Portable entre instalaciones.
               </p>
@@ -1377,27 +1401,65 @@ export function SettingsView({
       >
         <form className="stack" onSubmit={runFfbackupExport}>
           <ModalFormError message={ffbackupExportError} />
-          <p className="muted tight">
-            El archivo .ffbackup quedará cifrado con tu contraseña actual.
-            Guárdalo en un sitio seguro y recuerda la contraseña — sin ella
-            no se puede restaurar.
-          </p>
-          <label className="field">
-            <span>Tu contraseña</span>
-            <input
-              type="password"
-              autoComplete="current-password"
-              value={ffbackupExportPassword}
-              onChange={(e) => setFfbackupExportPassword(e.target.value)}
-              disabled={ffbackupExportBusy}
-              required
-            />
-          </label>
+          {backupNeedsOwnPassword ? (
+            <>
+              <p className="muted tight">
+                Solo protege este archivo: sin ella no se puede restaurar. No es
+                la contraseña de tu cuenta.
+              </p>
+              <label className="field">
+                <span>Crea una contraseña para este backup</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={ffbackupExportPassword}
+                  onChange={(e) => setFfbackupExportPassword(e.target.value)}
+                  disabled={ffbackupExportBusy}
+                  required
+                />
+              </label>
+              <label className="field">
+                <span>Repite la contraseña</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={ffbackupExportPasswordRepeat}
+                  onChange={(e) =>
+                    setFfbackupExportPasswordRepeat(e.target.value)
+                  }
+                  disabled={ffbackupExportBusy}
+                  required
+                />
+                {backupPasswordsDiffer ? (
+                  <small className="muted">Las dos contraseñas no coinciden.</small>
+                ) : null}
+              </label>
+            </>
+          ) : (
+            <>
+              <p className="muted tight">
+                El archivo .ffbackup quedará cifrado con tu contraseña actual.
+                Guárdalo en un sitio seguro y recuerda la contraseña — sin ella
+                no se puede restaurar.
+              </p>
+              <label className="field">
+                <span>Tu contraseña</span>
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  value={ffbackupExportPassword}
+                  onChange={(e) => setFfbackupExportPassword(e.target.value)}
+                  disabled={ffbackupExportBusy}
+                  required
+                />
+              </label>
+            </>
+          )}
           <div className="asset-form-actions">
             <button
               type="submit"
               className="btn primary"
-              disabled={ffbackupExportBusy}
+              disabled={ffbackupExportBusy || !backupExportPasswordReady}
             >
               {ffbackupExportBusy ? "Generando…" : "Descargar .ffbackup"}
             </button>
@@ -1439,7 +1501,7 @@ export function SettingsView({
                 />
               </label>
               <label className="field">
-                <span>Contraseña del backup</span>
+                <span>Contraseña de este backup</span>
                 <input
                   type="password"
                   autoComplete="off"
@@ -1450,6 +1512,10 @@ export function SettingsView({
                   disabled={ffbackupImportBusy}
                   required
                 />
+                <small className="muted">
+                  La de tu cuenta cuando lo exportaste, o la que creaste al
+                  descargarlo si entras con Home Assistant.
+                </small>
               </label>
               <div className="asset-form-actions">
                 <button

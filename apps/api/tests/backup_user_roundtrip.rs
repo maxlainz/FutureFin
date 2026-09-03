@@ -12,7 +12,7 @@ mod common;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{Datelike, NaiveDate};
-use common::{ResponseParts, TestApp};
+use common::{LoggedInOwner, ResponseParts, TestApp, TestConfig};
 use futurefin_api::handlers::backup_user::crypto::{encrypt_payload, frame_file};
 use futurefin_api::handlers::person_view::LedgerView;
 use futurefin_api::state::{Density, ProjectionCacheKey};
@@ -66,22 +66,43 @@ async fn create_liability(
     Uuid::parse_str(r.json()["id"].as_str().expect("liability id")).expect("liability uuid")
 }
 
-/// Calls the real export endpoint and returns the framed `.ffbackup` bytes, base64-encoded.
-async fn export_ffbackup_b64(app: &TestApp, cookie: &str) -> String {
+/// Llama al endpoint real de export y devuelve el `.ffbackup` enmarcado en base64.
+///
+/// Parametrizado por contraseña desde #213: en una cuenta con contraseña sigue siendo la de la
+/// cuenta, y en una cuenta sin contraseña es la del **archivo** — el mismo endpoint, dos
+/// significados, y los tests tienen que poder decir cuál están usando.
+async fn export_ffbackup_b64_with(app: &TestApp, cookie: &str, password: &str) -> String {
     let r = app
-        .post_json_with_cookie("/v1/backup/user-export", serde_json::json!({ "password": PW }), cookie)
+        .post_json_with_cookie(
+            "/v1/backup/user-export",
+            serde_json::json!({ "password": password }),
+            cookie,
+        )
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "export: status {:?}", r.status);
     B64.encode(&r.body)
 }
 
-async fn import_apply(app: &TestApp, cookie: &str, file_b64: &str) -> ResponseParts {
+async fn export_ffbackup_b64(app: &TestApp, cookie: &str) -> String {
+    export_ffbackup_b64_with(app, cookie, PW).await
+}
+
+async fn import_apply_with(
+    app: &TestApp,
+    cookie: &str,
+    file_b64: &str,
+    password: &str,
+) -> ResponseParts {
     app.post_json_with_cookie(
         "/v1/backup/user-import",
-        serde_json::json!({ "file_b64": file_b64, "password": PW, "confirm_replace": true }),
+        serde_json::json!({ "file_b64": file_b64, "password": password, "confirm_replace": true }),
         cookie,
     )
     .await
+}
+
+async fn import_apply(app: &TestApp, cookie: &str, file_b64: &str) -> ResponseParts {
+    import_apply_with(app, cookie, file_b64, PW).await
 }
 
 async fn import_preview(app: &TestApp, cookie: &str, file_b64: &str) -> ResponseParts {
@@ -1917,4 +1938,212 @@ async fn importing_a_v12_file_seeds_the_profile_only_when_there_is_none() {
     assert_eq!(profile["profile"]["strategy"], "retire_at_age", "{profile}");
     assert_eq!(profile["profile"]["target_retirement_age"], 55, "{profile}");
     assert_eq!(profile["profile"]["swr_pct"], "3.5", "{profile}");
+}
+
+// ---------------------------------------------------------------------------
+// #213 — la contraseña del `.ffbackup` deja de ser la de la CUENTA en las cuentas que no tienen
+// ninguna (identidad delegada del add-on de Home Assistant).
+//
+// Lo que fijan estos tres tests, en orden de importancia:
+//  1. Una cuenta SIN contraseña **puede exportar e importar**: el backup lleva su propio secreto
+//     y la sesión ya autenticó a quien lo pide. Antes respondía 401 `sso_account_no_password` y
+//     el usuario del add-on se quedaba sin poder sacar sus datos.
+//  2. Ese secreto **tiene que existir**: cadena vacía ⇒ 422 `backup_password_empty`. Derivar una
+//     clave del vacío produciría un fichero que abre cualquiera y que el usuario cree cifrado.
+//  3. Las cuentas CON contraseña **no se relajan**: siguen verificándola contra el hash (401), y
+//     ahí la cadena vacía es un 401, no el 422 nuevo. La puerta se abrió para el que no tenía
+//     llave, no para todos.
+// ---------------------------------------------------------------------------
+
+/// UUID de identidad externa que usa el proxy de confianza en estos tests (mismo valor que
+/// `sso_login.rs`, por reconocibilidad).
+const SSO_EXTERNAL_ID: &str = "11111111-2222-3333-4444-555555555555";
+/// La contraseña **del archivo**: no es de ninguna cuenta y no existe en la base de datos.
+const BACKUP_PW: &str = "solo-este-archivo";
+
+/// `TestApp` con el SSO por cabeceras encendido y todo peer aceptado — la configuración del
+/// add-on de Home Assistant detrás de su Ingress.
+async fn sso_app() -> TestApp {
+    TestApp::spawn_with(TestConfig {
+        trusted_header_auth: true,
+        trusted_peers_any: true,
+        ..Default::default()
+    })
+    .await
+}
+
+/// Da de alta (y deja con sesión abierta) al PRIMER usuario por SSO: sin contraseña, dueño del
+/// hogar por el mismo camino que el primer registro por contraseña.
+async fn sso_owner(app: &TestApp) -> LoggedInOwner {
+    let r = app
+        .post_with_headers(
+            "/v1/auth/sso",
+            &[("x-remote-user-id", SSO_EXTERNAL_ID), ("x-remote-user-display-name", "María")],
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "alta por SSO: {r:?}");
+    let body = r.json();
+    assert_eq!(body["has_password"], false, "una cuenta SSO no tiene contraseña: {body}");
+    let cookie = r.session_cookie().expect("el SSO pone ff_session");
+    let user_id = Uuid::parse_str(body["id"].as_str().expect("id")).expect("uuid");
+    // Y en la base de datos tampoco: el 401 viejo salía de aquí.
+    let hash: Option<String> =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("user row");
+    assert!(hash.is_none(), "la cuenta SSO no guarda contraseña");
+    LoggedInOwner {
+        username: body["username"].as_str().expect("username").to_string(),
+        cookie,
+        user_id,
+    }
+}
+
+/// Una cuenta SIN contraseña exporta con una contraseña **propia del archivo** y la vuelve a
+/// importar: los mismos recuentos que el roundtrip de una cuenta con contraseña.
+#[tokio::test]
+async fn an_account_without_a_password_round_trips_with_a_backup_password() {
+    let app = sso_app().await;
+    let owner = sso_owner(&app).await;
+
+    let asset_cat = app.create_category(&owner, "asset", "Cash").await;
+    let liab_cat = app.create_category(&owner, "liability", "Loan").await;
+    let liab_exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
+
+    let ua = create_asset(&app, &owner.cookie, &asset_cat, "A", "10000").await;
+    let ub = create_asset(&app, &owner.cookie, &asset_cat, "B", "5000").await;
+    let ul = create_liability(&app, &owner.cookie, &liab_cat, &liab_exp_cat, "L", "20000").await;
+
+    // Mismo material que `backup_v4_roundtrip_series_identical`: dos snapshots retroactivos
+    // (uno por kind) y la captura de hoy ⇒ 4 snapshots y 6 items.
+    let past = past_ymd(200);
+    let r = app
+        .post_json_with_cookie(
+            "/v1/history/snapshots",
+            serde_json::json!({
+                "kind": "asset",
+                "snapshot_date": past,
+                "items": [
+                    { "item_id": ua.to_string(), "label": "A", "value": "8000" },
+                    { "item_id": ub.to_string(), "label": "B", "value": "4000" }
+                ]
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "backfill asset: {r:?}");
+    let r = app
+        .post_json_with_cookie(
+            "/v1/history/snapshots",
+            serde_json::json!({
+                "kind": "liability",
+                "snapshot_date": past,
+                "items": [
+                    { "item_id": ul.to_string(), "label": "L", "value": "22000",
+                      "apr_percent": "3.5", "payment_amount": "500", "payment_frequency": "monthly" }
+                ]
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "backfill liability: {r:?}");
+    let r = app
+        .post_json_with_cookie("/v1/history/snapshots/capture", serde_json::json!({}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "capture: {r:?}");
+
+    let series_before = app.get_with_cookie("/v1/history/series", &owner.cookie).await;
+    assert_eq!(series_before.status, http::StatusCode::OK, "series before: {series_before:?}");
+    let points_before = series_before.json()["points"].clone();
+
+    // El export ya NO pide la contraseña de la cuenta: la que va aquí no existe en ninguna parte.
+    let backup = export_ffbackup_b64_with(&app, &owner.cookie, BACKUP_PW).await;
+
+    // Se ensucia el estado vivo y se restaura desde el fichero.
+    let del = app.delete_with_cookie(&format!("/v1/assets/{ub}"), &owner.cookie).await;
+    assert_eq!(del.status, http::StatusCode::NO_CONTENT, "delete asset: {del:?}");
+
+    let applied = import_apply_with(&app, &owner.cookie, &backup, BACKUP_PW).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "import apply: {applied:?}");
+    let counts = &applied.json()["imported"];
+    assert_eq!(counts["assets"].as_u64(), Some(2), "assets count");
+    assert_eq!(counts["liabilities"].as_u64(), Some(1), "liabilities count");
+    assert_eq!(counts["snapshots"].as_u64(), Some(4), "snapshots count");
+    assert_eq!(counts["snapshot_items"].as_u64(), Some(6), "snapshot_items count");
+
+    let series_after = app.get_with_cookie("/v1/history/series", &owner.cookie).await;
+    assert_eq!(
+        series_after.json()["points"],
+        points_before,
+        "la serie histórica debe sobrevivir intacta al roundtrip de una cuenta sin contraseña"
+    );
+
+    // Y la contraseña del archivo es SOLO del archivo: no se ha fijado nada en la cuenta.
+    let hash: Option<String> =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+            .bind(owner.user_id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("user row");
+    assert!(
+        hash.is_none(),
+        "exportar no puede fijarle una contraseña a una cuenta de identidad delegada"
+    );
+}
+
+/// Sin contraseña de cuenta y sin contraseña de archivo no hay nada de donde derivar la clave:
+/// 422 `backup_password_empty`, y ni un byte de fichero.
+#[tokio::test]
+async fn an_account_without_a_password_cannot_export_with_an_empty_backup_password() {
+    let app = sso_app().await;
+    let owner = sso_owner(&app).await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/backup/user-export",
+            serde_json::json!({ "password": "" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::UNPROCESSABLE_ENTITY, "{r:?}");
+    assert_eq!(r.json()["code"], "backup_password_empty", "{:?}", r.json());
+}
+
+/// La otra mitad del contrato: en una cuenta CON contraseña el export la sigue verificando
+/// contra el hash. Una contraseña equivocada —o vacía— es 401, nunca el 422 nuevo: ese camino
+/// es exclusivo de las cuentas sin contraseña.
+#[tokio::test]
+async fn an_account_with_a_password_still_has_it_verified_on_export() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let wrong = app
+        .post_json_with_cookie(
+            "/v1/backup/user-export",
+            serde_json::json!({ "password": "no es la mía" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(wrong.status, http::StatusCode::UNAUTHORIZED, "{wrong:?}");
+
+    let empty = app
+        .post_json_with_cookie(
+            "/v1/backup/user-export",
+            serde_json::json!({ "password": "" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(
+        empty.status,
+        http::StatusCode::UNAUTHORIZED,
+        "una cuenta con contraseña no entra por el camino del 422: {empty:?}"
+    );
+
+    // Y con la buena, sigue saliendo el fichero.
+    let ok = export_ffbackup_b64(&app, &owner.cookie).await;
+    assert!(!ok.is_empty(), "el export con la contraseña correcta sigue funcionando");
 }

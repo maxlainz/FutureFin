@@ -333,6 +333,13 @@ fn decode_request_blocking(
             parsed.manifest.schema_version,
         )));
     }
+    // La contraseña es **solo entrada del KDF**: no se compara con ninguna credencial de la
+    // cuenta, ni aquí ni en el preview. Esa indiferencia es lo que hace que el import valga para
+    // los dos mundos sin tocar una línea (issue #213): un fichero antiguo se abre con la
+    // contraseña de cuenta que su dueño tenía al exportarlo, y uno nuevo de una cuenta sin
+    // contraseña (SSO del add-on de Home Assistant) con la contraseña propia del archivo. Quien
+    // toque esto: verificar aquí contra `users.password_hash` dejaría inservibles todos los
+    // `.ffbackup` ya descargados.
     let plain = decrypt_payload(&parsed, &body.password).map_err(map_crypto_to_api)?;
     let any = parse_payload(parsed.manifest.schema_version, &plain)
         .map_err(ApiError::BadRequest)?;

@@ -909,7 +909,7 @@ Do not confuse them:
 |---|---|---|---|
 | (1) Automatic pre-migration | Entrypoint `pg_dump` → `ffdata` before migrations run | Whole DB | The container itself, unattended |
 | (2) Manual infrastructure | `scripts/backup-postgres.sh` → `pg_dump` to the host | Whole DB: all users, sessions, installation, `_sqlx_migrations` | Operator, cron |
-| (3) Application | `.ffbackup` export/import over the API | ONE user's own rows, encrypted with their account password | Each user, from the UI or curl |
+| (3) Application | `.ffbackup` export/import over the API | ONE user's own rows, encrypted with a password (the account's, or one created for the file — §5.4) | Each user, from the UI or curl |
 
 Layer (1) is the automatic net around upgrades — it lives *inside a Docker volume*, so it is
 not off-host disaster recovery. Layer (2) is your disaster-recovery copy. Layer (3) is per-user
@@ -1015,7 +1015,7 @@ number here, read it from the source of truth —
 
 | Endpoint | Role required | Notes |
 |---|---|---|
-| `POST /v1/backup/user-export` | any installation member | Body `{"password": "<account pw>", "ui_preferences": {...}?}`. Verifies the account password, streams a binary `.ffbackup` (`futurefin-<user>-<YYYYMMDD>.ffbackup`). |
+| `POST /v1/backup/user-export` | any installation member | Body `{"password": "…", "ui_preferences": {...}?}`, then streams a binary `.ffbackup` (`futurefin-<user>-<YYYYMMDD>.ffbackup`). **What `password` means depends on the account** (5.0.0, issue #213): `password_hash` NOT NULL ⇒ the **account password**, verified against the hash (401 on mismatch) and fed to the KDF; `password_hash IS NULL` (the identities the HA add-on provisions) ⇒ a **password of the file itself**, verified against nothing and only fed to the KDF — the one rule is that it must not be empty (422 `backup_password_empty`). |
 | `POST /v1/backup/user-import/preview` | write role (owner/member) | Body `{"file_b64": "<base64 of file>", "password": "..."}`. Decrypts and returns counts + `schema_version` without changing anything. 16 MiB body limit. |
 | `POST /v1/backup/user-import` | write role | Same body **plus `"confirm_replace": true`** (400 without it). 16 MiB body limit. |
 
@@ -1030,13 +1030,19 @@ Semantics you must not misremember:
   existing rows (allocation_rules first, then assets, etc., in FK dependency order) and
   inserts the backup's rows, all in one transaction. There is no merge mode. Always call
   `/preview` first; require the user-facing flow to show the counts before applying.
-- **Encryption is password-derived**: AES-256-GCM with a key derived from the user's account
-  password via Argon2id (m=19456, t=2, p=1), random salt+nonce per export, gzip-compressed
-  payload. File layout: magic `FFBK`, format_version byte, plaintext JSON manifest, ciphertext.
-  The manifest stays in clear so the server can reject unsupported versions without
-  decrypting. Wrong password ⇒ generic decrypt failure (indistinguishable from corruption,
-  by design). **If the user forgets the password that was current at export time, the file is
-  unrecoverable.**
+- **Encryption is password-derived, and the password is NOT necessarily an account credential**:
+  AES-256-GCM with a key derived via Argon2id (m=19456, t=2, p=1) from whatever password the
+  export request carried, random salt+nonce per export, gzip-compressed payload. File layout:
+  magic `FFBK`, format_version byte, plaintext JSON manifest, ciphertext. The manifest stays in
+  clear so the server can reject unsupported versions without decrypting. Wrong password ⇒
+  generic decrypt failure (indistinguishable from corruption, by design). **If the user forgets
+  the password they exported with, the file is unrecoverable.** Two operational consequences:
+  a backup taken from an account WITH a password stays tied to the password that was current at
+  export time (rotating it later re-encrypts nothing), while a backup taken from an account
+  WITHOUT one (HA add-on identities, 5.0.0) is tied to **no account credential at all** — losing
+  the account changes nothing about the file, and losing the file's password loses the file.
+  **The import side never changed and never verified anything against the account**, so every
+  `.ffbackup` produced before 5.0.0 still restores with the account password of its day.
 - **`schema_version` compatibility** (currently **10**; recount with the `grep` above): every
   older file still imports — the chain is applied in memory, `payload_v1_to_v2` → … →
   `payload_v9_to_v10`, so a v1 file walks all nine steps. Verify the chain has no hole with
