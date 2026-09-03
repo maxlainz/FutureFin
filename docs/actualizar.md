@@ -88,6 +88,11 @@ la versión anterior es la única copia que una 4.x podría volver a leer (ver e
   servidor simula **un plan por persona** y suma las curvas. Es una descripción más honesta de lo que
   pasa —dos personas pueden querer jubilarse a edades distintas—, pero la línea del hogar no será la
   misma que ayer.
+- **Dos excepciones más a «nada cambia», de un pase de correcciones del motor dentro de la propia
+  5.0.0**: si usas la regla de retirada en modo «Gasto» (`rule_is_spend`), la proyección puede
+  moverse porque se corrigió una venta de más que no debía ocurrir; y si en la sección Riesgo miras
+  la probabilidad de éxito de un plan que se jubila muy tarde en tu horizonte, esa cifra también
+  cambia — antes contaba como éxito a quien nunca llegaba a jubilarse, y ya no.
 
 ### 3. Filas «de nadie»: el reasignado de propietario
 

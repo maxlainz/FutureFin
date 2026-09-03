@@ -68,8 +68,8 @@ not authoritative — recount with the commands in "Provenance and maintenance".
 
 | Suite | Location | Needs | Command (from repo root) |
 |---|---|---|---|
-| Engine (**199 unitarios + 36 en `tests/`** el 2026-09-03 — el número se movió dos veces esa tarde; eran 67 el 2026-08-22) | `crates/engine/src/*.rs` `mod tests` **más cuatro binarios** en `crates/engine/tests/`: `golden_pins.rs`, `phases_wp3.rs`, `audit_dump.rs` y `timing.rs` (este todo `#[ignore]`) | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
-| **Crate estocástico** (**27** el 2026-09-03, **1 en rojo**) | `crates/engine-stochastic/` — `tests/degeneration.rs` es la **puerta de aceptación** del camino `f64`; `tests/monte_carlo.rs` (WP6a, `ba6bdfe`) las de Monte Carlo. Falla `mc_cash_buffer_changes_the_band_under_sequence_risk`: predicción falsada, no test flaky | Nothing | `cargo test -p futurefin-engine-stochastic` (paso propio en CI, job `rust`) |
+| Engine (**199 unitarios + 46 en `tests/`** el 2026-09-03, tras el pase de correcciones de la revisión adversarial — el número se movió dos veces esa tarde; eran 67 el 2026-08-22) | `crates/engine/src/*.rs` `mod tests` **más seis binarios** en `crates/engine/tests/`: `golden_pins.rs`, `phases_wp3.rs`, `audit_dump.rs`, `timing.rs` (este todo `#[ignore]`) y, desde el pase de correcciones, `fuzz_invariants.rs` y `review_fixes.rs` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
+| **Crate estocástico** (**29** el 2026-09-03, verde entero tras el pase de correcciones) | `crates/engine-stochastic/` — `tests/degeneration.rs` es la **puerta de aceptación** del camino `f64`; `tests/monte_carlo.rs` (WP6a, `ba6bdfe`) las de Monte Carlo. El `mc_cash_buffer_changes_the_band_under_sequence_risk` que fallaba (predicción falsada, no test flaky) se rehízo como `mc_cash_buffer_protects_and_the_drag_is_what_costs`, que separa el lastre (−3,5 pp) de la protección (+3,9 pp) | Nothing | `cargo test -p futurefin-engine-stochastic` (paso propio en CI, job `rust`) |
 | Backend integration (**43 files on 2026-08-27**; 33 files / 375 attributes on 2026-08-22) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
 | Frontend Vitest (**368, 16 files, as of 2026-08-22**) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
 
@@ -716,6 +716,17 @@ mismo día los midió así: `ls apps/api/tests/*.rs | wc -l` → **76** (esta fi
 `grep -rn '#[tokio::test]\|#[test]' apps/api/src | wc -l` → **112** (dice 91/57), casos de
 fire-parity → **17** (dice 7). Corrígelos en la pasada de API, con el comando.
 
+**Re-sincronizada el 2026-09-03 tras el pase de correcciones de la revisión adversarial** (commit
+`0668f37`, issue #207 cerrado): la fila del motor sube a 199 + 46 (dos binarios nuevos,
+`fuzz_invariants.rs` y `review_fixes.rs`), y la fila del crate estocástico deja de decir «1 en
+rojo» — la suite está VERDE entera (13 + 3 + 13 = 29 tests). El test que fallaba,
+`mc_cash_buffer_changes_the_band_under_sequence_risk`, no se relajó: se rehízo como
+`mc_cash_buffer_protects_and_the_drag_is_what_costs` tras corregir los dos bugs del modelo del
+colchón (relleno anticipativo, colchón sin filtro de liquidez). El mismo hallazgo de «suite en rojo»
+se repetía en otros cinco documentos (`futurefin-research-frontier`,
+`futurefin-projection-realism-campaign`, `futurefin-fire-domain-reference`,
+`.claude/financial-contracts.md`, `.claude/tests.md`) — todos corregidos en la misma pasada.
+
 - Motor y crate estocástico (2026-09-03): `cargo test -p futurefin-engine 2>&1 | grep "test result"`
   y `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`; sin compilar,
   `grep -c '#\[test\]' crates/engine/src/*.rs | awk -F: '{s+=$2} END{print s}'` (**199** — usa el
@@ -738,7 +749,9 @@ fire-parity → **17** (dice 7). Corrígelos en la pasada de API, con el comando
   `grep -c '#\[test\]' apps/api/src/ha_idp/mod.rs` (**11**) vs
   `grep -c '#\[test\]' apps/api/src/ha_idp/client.rs` (**0**, deliberate);
   no HTTP-mock crate crept in: `grep -rn "wiremock\|mockito\|httpmock" apps/api/Cargo.toml` (empty)
-- ~~Engine test count~~ — **desfasada tres trenes**: decía **67 on 2026-08-22** (projection 32 + history 22 + runway 13; 61 = 27+21+13 on 2026-08-19). Hoy son **199 unitarios + 36 en `tests/`**; ver la línea de 2026-09-03 más arriba, que además explica por qué el desglose de tres ficheros ya no vale.
+- ~~Engine test count~~ — **desfasada tres trenes**: decía **67 on 2026-08-22** (projection 32 + history 22 + runway 13; 61 = 27+21+13 on 2026-08-19). Hoy son **199 unitarios + 46 en `tests/`** (tras el pase de correcciones de la revisión adversarial, que sumó `fuzz_invariants.rs` y `review_fixes.rs`); ver la línea de 2026-09-03 más arriba, que además explica por qué el desglose de tres ficheros ya no vale.
+- **Crate estocástico verde entero (2026-09-03, pase de correcciones)**: `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"` → 13 (unitarios) + 3 (`degeneration.rs`) + 13 (`monte_carlo.rs`) = **29 tests, 0 fallos** (más 5 `#[ignore]` en `timing_mc.rs`, que miden y no afirman). El test que fallaba se rehízo:
+  `grep -n "fn mc_cash_buffer_protects_and_the_drag_is_what_costs" crates/engine-stochastic/tests/monte_carlo.rs`
 - Integration attributes: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**449 across 44 files on 2026-08-27**; 375 across 33 on 2026-08-22). Lib unit tests: `grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l` (**84 on 2026-08-27**; 72 after 4.3.0, 57 on 2026-08-22)
 - Frontend Vitest total — always ask the runner, never count `it(`: `npm test --workspace futurefin-web 2>&1 | grep "Tests "` (**368 in 16 files on 2026-08-22**; `chart-gestures.test.ts` and `fire.test.ts` generate tests in loops, so the static `it(` count is lower)
 - Migration count: `ls apps/api/migrations/*.sql | wc -l` (**44 on 2026-08-27**; 42 on 2026-08-22; 40 on 2026-08-19)

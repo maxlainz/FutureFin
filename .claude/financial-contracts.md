@@ -100,6 +100,22 @@ realidad** o entre superficies, no error de aritmética.
   Lo no cubierto se acumula en `undrained_cumulative` **NETO** (mide gasto que faltó, no ventas
   que no ocurrieron) y RESTA del patrimonio: la curva puede ser negativa y no se aplana —
   correcto.
+- **Bit-identidad con 4.15.0, restaurada fuera del golden** (pase de correcciones de la revisión
+  D20, hallazgos F1/F2): `undrained_cumulative` tiene que ACUMULARSE con el operando LITERAL que
+  publica el paseo de venta (`dd.net_shortfall_monthly`), no re-derivarse como `need − (need − s)`
+  — algebraicamente igual, pero cambia la ESCALA del `Decimal` (`"0"` vs `"0.00"`) y movía el
+  28.º dígito, y el `Display` es lo que el pin dorado hashea. `debt_service` tiene que sumarse con
+  la MISMA agrupación de 4.15.0 (`acc + ((cash + extra) + fee)`); reagrupar a
+  `((acc + cash) + extra) + fee` redondea distinto en el dígito 28 con dos pasivos y la diferencia
+  se propaga mes a mes en el drenaje. Pines `P24_undrained_scale` / `P25_debt_service_assoc`
+  (`crates/engine/tests/golden_pins.rs`). **Un golden de 19 casos no demuestra bit-identidad**: la
+  regresión de escala solo se veía en 438 de 3.000 entradas de un fuzz DIFERENCIAL contra el motor
+  de `main` (hogares aleatorios, mismas entradas por los dos motores); la campaña completa de fuzz
+  diferencial bajó las divergencias de 536/496/496 a 24/21/27 por 3.000 entradas en las tres
+  semillas, y las que quedan son todas «el motor viejo entraba en pánico» (desbordamientos que
+  4.15.0 no tipaba), no desacuerdos numéricos. Lección para `futurefin-failure-archaeology`: un
+  fuzz diferencial contra el motor anterior encuentra lo que un golden pequeño no puede, porque
+  compara la MISMA entrada por los dos caminos en vez de fijar unas pocas por adelantado.
 - **D10 CERRADO en 4.12.1**: `surplus_cash` (caja al 0 %, invisible e ilimitada) se ELIMINÓ del
   modelo por decisión del owner («antinatural, sin espejo en la realidad — el dinero siempre vive
   en un activo»): siembra + retro-siembra + sumidero indestructible (#176) hacen que el sobrante
@@ -208,10 +224,25 @@ realidad** o entre superficies, no error de aritmética.
     LÍQUIDOS por valor). `d ≤ −100 %` se lee como **sin descuento** — el puente sale MÁS caro, que
     es la dirección conservadora.
   - **`MAX_BRIDGE_MONTHS = 1.200`** (100 años): una pensión declarada más allá degrada a la
-    perpetuidad sobre la necesidad ÍNTEGRA — objetivo MÁS grande, nunca menor. Truncar el puente
-    iría en la dirección contraria (objetivo pequeño ⇒ cruce temprano ⇒ jubilación falsa), y esa es
-    la clase de número que esta casa no publica. El puente degrada también con `P = 0` (la pensión
-    ya se cobra), sin SWR positivo o sin necesidad HOY — la misma puerta de `i = 0` de §2.4.
+    perpetuidad sobre la necesidad ÍNTEGRA. **Esa degradación NO es siempre más prudente** (matiz
+    de la revisión D20): medido, el objetivo degradado puede salir MENOR que el puente que
+    sustituye (−27 % en el caso del issue con `d = 5 %`; −77 % con `d = 0`). Solo alcanzable con
+    una pensión declarada a más de 100 años vista — violación de contrato LATENTE, documentada en
+    la constante, no una garantía de «objetivo más grande, nunca menor». El puente degrada también
+    con `P = 0` (la pensión ya se cobra), sin SWR positivo o sin necesidad HOY — la misma puerta de
+    `i = 0` de §2.4.
+  - **`EngineError::BridgeDiscountOverflow`** (5.0.0, revisión adversarial hallazgo #1): con `d`
+    muy negativo la base `1 + d/100` se hunde hacia 0 y `q(j) = base^{j/12}` desborda el rango de
+    `Decimal` antes de terminar de tabular el puente — sin la puerta, `powd` PANICABA y un solo
+    activo con `expected_annual_return_percent: "-50"` bastaba para reventar
+    `/v1/projection/series` con un 500 opaco. Ahora `build_bridge_table` detecta el desbordamiento
+    (potencia o suma sufijo) y devuelve `None`; una LECTURA suelta del objetivo degrada a la
+    perpetuidad (nunca panica), pero una SIMULACIÓN que dependiera de ese puente fallaría en voz
+    alta con `BridgeDiscountOverflow` en vez de publicar un plan distinto del configurado. La cota
+    alcanzable de `d` depende de `P` (`crates/engine/src/target.rs::build_bridge_table`): **−99,6 %
+    a 10 años, −86,6 % a 27, −53,8 % a 70, −41,8 % en `MAX_BRIDGE_MONTHS`** — el rango practicable
+    se estrecha con el horizonte del puente porque la suma sufijo desborda antes que la propia
+    potencia.
   - Lecturas publicadas, **cada una con su unidad declarada**, y ningún `null` que signifique cero:
     `bridge_effective_withdrawal_pct` = `100·12·need_full_m(R−1)/L(R−1)` en **% ANUAL** (`None` sin
     puente, sin jubilación dentro del horizonte o con `L(R−1) ≤ 0`); `pension_coverage_ratio` =
@@ -333,6 +364,42 @@ importa**: con `fixed_real` el recorte es cero por construcción, así que
 `withdrawal_to_need_ratio` valía 1,0 («la regla cubrió el 100 %») en 1.000 caminos de un hogar que
 cubrió el 8,7 % de su gasto (hallazgo #4 de la revisión).
 
+**`assets_depleted_month_index` — DOS condiciones, no una** (`sim_core`, corregido en el pase de
+correcciones de la revisión D20): (1) primer mes cuya venta dejó lo vendible a CERO, medido
+DESPUÉS de vender sobre los saldos —nunca comparando la venta con la capacidad antes—, **y** (2)
+alguna venta sin fundar en ese mes o después. Sin la segunda condición, un aterrizaje EXACTO —la
+cartera se vacía justo el mes en que entra una pensión que cubre todo el gasto posterior— se
+publicaba como «cartera agotada» con `uncovered_deficit_total = 0`; con las dos, ese caso da
+`None` (pin: 200.000 €/2.000 €/mes ⇒ mes 100 con pensión desde el 121, y un euro menos de capital
+SÍ agota). **Corrige además un bug de 4.15.0**: el predicado antiguo (`venta_bruta >= drenable`,
+evaluado ANTES de vender) fallaba por un ULP en la vía mixta y publicaba `uncovered_deficit_total
+> 0` junto con «nunca agotado» — 184 → 47 casos por 3.000 entradas del corpus diferencial tras el
+fix, con los restantes ≤ 5,6·10⁻²³ € (cola de redondeo, no el bug). Regresión:
+`an_exact_landing_that_covers_every_later_need_is_not_a_depletion`.
+
+**La vía mixta bajo techo tasa el rechazo con la `g` marginal, no con lo que faltó vender**
+(hallazgo #3 de la revisión). Hasta el pase de correcciones, la vía mixta decidía si el techo de
+la regla ataba comparando contra `dd.gross_monthly` —que el paseo YA había recortado a la
+capacidad—, así que un techo por encima de lo vendible se descartaba en silencio: el rechazo
+completo de la regla se contaba como `uncovered_deficit_total` (caso mínimo: 1.095 € de
+descubierto en la vía mixta contra 916 recorte / 179 descubierto en la uniforme, con la MISMA
+venta byte a byte). Ahora se decide contra lo que la NECESIDAD pide y el neto del techo se tasa
+con la `g` MARGINAL (la del último tramo con material). **Los dos hogares no tienen por qué dar el
+mismo número tras el fix**: solo coinciden en lo que se vende, no en cómo se tasa el neto de un
+techo que la cartera no puede fundar — el uniforme tiene `g = 0,5` en todo, el mixto tiene el
+tramo barato agotado y `g = 1` en el margen, y de ahí quedan 21 € de diferencia (937 vs 916 de
+recorte, 158 vs 179 de descubierto) **por diseño**, la misma asimetría que ya existe cuando la
+venta es parcial. Regresión: `the_binding_allowance_is_a_cut_on_the_mixed_path_too`.
+
+**`rule_is_spend` financia el gasto de la regla PRIMERO con la caja del mes** (hallazgo #4 de la
+revisión). Hasta el pase de correcciones, un mes jubilado con superávit hacía las dos cosas: la
+cascada invertía el superávit en el fondo y la venta sacaba acto seguido el bruto de la regla del
+MISMO fondo — comprar y vender el mismo euro el mismo mes no mueve patrimonio, pero el ida y
+vuelta SÍ realiza plusvalía. Medido: 3.991,72 €/año de impuesto sobre un hogar con 1 M€ en un
+fondo a `g = 0,5`, jubilado, ingreso 5.000 €/gasto 2.000 € (3.000 €/mes de superávit) y una regla
+`percent_of_balance` al 4 % en `rule_is_spend` — ×10,7 el coste económico real. Ahora la venta es
+0 y el impuesto también. Regresión: `rule_is_spend_funds_the_month_surplus_first`.
+
 - Con `fixed_real`, `shortfall` y `excess` son cero **por construcción** (el permitido ES la
   necesidad), y ahí es donde el pin aditivo demuestra que las reglas no movieron la semántica de
   4.15.0.
@@ -351,7 +418,17 @@ cerrada y es deliberado (hallazgo M8): un «capital necesario» descontado a una
 cascada, los topes de las reglas, el servicio de deuda, los Próximos, la fiscalidad del drenaje y el
 propio latch — sería un número plausible que **ninguna simulación produce**. Cada bisección mantiene
 un extremo verificado BUENO y otro verificado MALO y devuelve el bueno, así que el valor publicado
-está *comprobado*; lo que la monotonía aporta es la minimalidad, no la validez.
+está *comprobado*; lo que la monotonía aporta es la minimalidad, no la validez. **Y la monotonía
+NO siempre aguanta** (revisión adversarial, contra la afirmación anterior de que «se aplana, no se
+invierte»): sobre valores por activo `líquido(R−1)` es no decreciente en la aportación, pero el
+criterio real es líquido POST-IMPUESTOS, y subir el techo cambia el MES en que cada tope por
+activo se llena — con él, la trayectoria de la BASE DE COSTE, y dos ejecuciones con el mismo valor
+por activo y distinta base pagan distinto impuesto por el mismo neto. Medido en un barrido de 320
+hogares aleatorios: 35 violaciones de 270 barridos del techo, la PEOR de 3,4416 € (~5.700 veces la
+resolución de la bisección). Hacen falta impuestos activados y al menos un activo ilíquido; apagar
+cualquiera de las dos cosas la hace desaparecer. No compromete el resultado: la bisección solo
+devuelve `hi` tras comprobar que `hi` CUMPLE, así que nunca es un falso positivo — lo que la
+inversión pone en duda es que `c` sea la mínima DEMOSTRABLE, no que sea válida.
 
 - `required_contribution_monthly`: la menor aportación mensual constante con `líquido(R−1) ≥ T(R−1)`.
   Es un **TECHO** sobre lo que la cascada invierte cada mes, no un importe que se aporte pase lo que
@@ -660,6 +737,15 @@ re-anclados al núcleo genérico, §2.4 gana el objetivo consciente del plan, §
 fases, §3 gana los pines de bit-identidad y §4 seis divergencias nuevas. **Todos los comandos de
 abajo se ejecutaron el 2026-09-03 y ninguno sale vacío.**
 
+**Re-sincronizado el 2026-09-03 tras el pase de correcciones de la revisión adversarial** (commit
+`0668f37`, issue #207 cerrado): §2.4 gana `BridgeDiscountOverflow` y la tabla de `d` alcanzable;
+§2.2 gana la restauración de bit-identidad (P24/P25) y el resultado del fuzz diferencial; §2.5
+gana la definición de dos condiciones de `assets_depleted_month_index` (con el bug de ULP de
+4.15.0 que corrige), el residuo de 21 € de la vía mixta, `rule_is_spend` financiado desde el
+superávit y la inversión de monotonía medida en los solves. Los seis documentos que citaban la
+suite del crate estocástico «en ROJO» quedan corregidos (era la predicción de un test, no un
+estado permanente — ver §El crate estocástico de `.claude/tests.md`).
+
 El arnés de verificación es permanente: `crates/engine/tests/audit_dump.rs` vuelca las series de la
 batería de casos límite (`cargo test -p futurefin-engine --test audit_dump -- --nocapture`),
 comparables con un oráculo externo, y desde 5.0.0 el pin dorado
@@ -699,3 +785,10 @@ el mismo cambio):
 - **La puerta de degeneración que sostiene esa frontera**: `grep -n "const EUR_TOLERANCE\|fn every_case_degenerates_from_decimal_to_floating_point" crates/engine-stochastic/tests/degeneration.rs` (2 hits) — 1 € por mes en todo el horizonte, cota relativa declarada solo por encima de 2⁵³ €
 - **Pines dorados (§3)**: `grep -n "fn golden_pins_match_4_15_0\|fn golden_pins_5_0_outputs_match" crates/engine/tests/golden_pins.rs` (2 hits); recuento de casos con el `python3 -c` de §3
 - La tabla de §4: cada fila con estado «pendiente» debe tener issue ABIERTO (`gh issue view <n>`); si el issue se cierra, la fila se actualiza o se borra en el mismo cambio.
+- **`BridgeDiscountOverflow` y la tabla de `d` alcanzable (§2.4)**: `grep -n "BridgeDiscountOverflow" crates/engine/src/{projection,sim_core,target}.rs` (5 hits: enum + 1 `return Err` + 3 doc-comments) y `grep -n "cota depende de \`P\`" crates/engine/src/target.rs`
+- **Bit-identidad restaurada (§2.2)**: `grep -n "fn p24_publishes_the_undrained_operand_with_the_scale_of_4_15_0\|fn p25_keeps_the_debt_service_grouping_of_4_15_0" crates/engine/tests/golden_pins.rs` (2 hits)
+- **`assets_depleted_month_index` de dos condiciones (§2.5)**: `grep -n "fn an_exact_landing_that_covers_every_later_need_is_not_a_depletion" crates/engine/tests/review_fixes.rs`
+- **Vía mixta bajo techo (§2.5)**: `grep -n "fn the_binding_allowance_is_a_cut_on_the_mixed_path_too" crates/engine/tests/review_fixes.rs`
+- **`rule_is_spend` financiado del superávit (§2.5)**: `grep -n "fn rule_is_spend_funds_the_month_surplus_first" crates/engine/tests/review_fixes.rs`
+- **Inversión de monotonía en los solves (§2.5)**: `grep -n "la peor de 3,4416" crates/engine/src/solve.rs`
+- **Suite estocástica verde (§4)**: `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"` (13 + 3 + 13 = 29, 0 fallos)

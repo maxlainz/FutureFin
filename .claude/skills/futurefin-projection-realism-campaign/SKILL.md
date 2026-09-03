@@ -168,22 +168,27 @@ Adds `proptest` as a dev-dependency of `crates/engine` only. Catches silent wron
   5. *Determinism*: same input twice ⇒ identical output (guards future stochastic work).
 - **Acceptance test**: proptest suite green over ≥ 10^4 generated cases per invariant; each invariant's domain caveat written into the test's doc comment; `cargo test -p futurefin-engine` still passes.
 
-### (b) Monte Carlo / stochastic returns — **capa base ENTREGADA en 5.0.0; la capa MC, en curso**
+### (b) Monte Carlo / stochastic returns — **ENTREGADA en 5.0.0, suite verde**
 
-**Estado (2026-09-03)**: lo que la obligación (1)–(4) exigía «antes de implementar» está escrito en
+**Estado (2026-09-03, tras el pase de correcciones de la revisión adversarial — commit `0668f37`,
+issue #207 cerrado)**: lo que la obligación (1)–(4) exigía «antes de implementar» está escrito en
 el plan de la issue #207 (§B.4/§B.5) y firmado por el owner (D11, D12, D22, D23, D25). Y la mitad
-difícil ya está en `main`… perdón, en la rama: **el bucle es genérico sobre su tipo numérico**
+difícil ya está en `main`: **el bucle es genérico sobre su tipo numérico**
 (`MoneyOps`) y `crates/engine-stochastic` lo instancia en `f64` con la **puerta de degeneración**
 verde — o sea, el coste que esta sección llamaba «a real design problem» está resuelto sin duplicar
-el bucle. Lo que faltaba cuando se escribió esto (RNG pineado, caminos, bandas de percentiles, probabilidad
-de éxito) es **WP6a**, y **Estado exacto el 2026-09-03**: WP6a está **commiteado** (`ba6bdfe`) —
+el bucle. WP6a (`ba6bdfe`) está commiteado —
 `crates/engine-stochastic/src/mc.rs` + `tests/monte_carlo.rs`, con `rand_chacha` pineado y
-`crates/engine` todavía sin RNG—, y **su suite NO está verde**: 10 de 11 pasan y falla
-`mc_cash_buffer_changes_the_band_under_sequence_risk`, cuya predicción («el colchón mejora la
-probabilidad de éxito») sale **falsada** por la medición (0,713 frente a 0,775 sin colchón). Es un
-*predict-then-run miss* de manual, y la regla de la casa es parar y reescribir la predicción o el
-modelo, nunca ajustar el test al código. Compruébalo tú:
-`cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`.
+`crates/engine` todavía sin RNG— y **su suite está VERDE entera: 29 tests, 0 fallos** (13
+unitarios + 3 de `degeneration.rs` + 13 de `monte_carlo.rs`). El `mc_cash_buffer_…` que fallaba
+—`mc_cash_buffer_changes_the_band_under_sequence_risk`, predicción «el colchón mejora la
+probabilidad de éxito» **falsada** por la medición (0,713 frente a 0,775 sin colchón)— fue un
+*predict-then-run miss* de manual, y se resolvió como manda la regla de la casa: parando y
+revisando el MODELO, no relajando el assert. El modelo del colchón tenía dos bugs (relleno
+anticipativo con el shock del propio mes, colchón elegido sin filtrar por liquidez); corregidos,
+el test se rehízo como `mc_cash_buffer_protects_and_the_drag_is_what_costs`, que separa el lastre
+de tener el colchón fuera del mercado (−7,9 pp) de la protección real de gastar de una reserva sin
+riesgo (+3,9 pp): con la cuenta a su rentabilidad real (0 %) sigue costando neto (−3,5 pp).
+Compruébalo tú: `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`.
 
 **El modelo, decidido** (D11/D12): **un shock de mercado común por mes** escalado por la sd de cada
 activo —factor `m_i·exp(σ_i z − σ_i²/2)` con `σ_i = annual_volatility_percent/100/√12`, de modo que
@@ -191,9 +196,15 @@ activo —factor `m_i·exp(σ_i z − σ_i²/2)` con `σ_i = annual_volatility_p
 de la correlación perfecta es **conservador** (bandas más anchas). Declarado como divergencia
 aceptada en `financial-contracts.md` §4.
 
-**Éxito = la cartera no se agota nunca** (D22), contando las pensiones futuras. **El recorte de una
-regla de retirada NO es fracaso** y viaja aparte (`withdrawal_shortfall`): es la separación de
-magnitudes de `financial-contracts.md` §2.5, y confundirlas fue un hallazgo de la revisión
+**Éxito YA NO es «la cartera no se agota nunca» (D22 original)** — corregido por la segunda
+revisión adversarial (D20): esa definición premiaba al hogar que **no se jubila jamás**, porque
+quien nunca drena nunca se agota (medido: 0,960 publicado frente a 0,940 entre los que sí llegan a
+jubilarse, en un hogar que cruza en el mes 655 de 840, con el 33,1 % de los caminos sin jubilarse
+contando como éxito — hasta +6,8 pp de sesgo con SWR 6 %). Hoy `success_probability` exige
+jubilarse dentro del horizonte (o un trigger por edad) **y** no agotar la cartera;
+`never_retired_probability` y `success_given_retired` se publican al lado. **El recorte de una
+regla de retirada sigue sin ser fracaso** y viaja aparte (`withdrawal_shortfall`): es la separación
+de magnitudes de `financial-contracts.md` §2.5, y confundirlas fue un hallazgo de la revisión
 adversarial, no una sutileza.
 
 **La puerta de aceptación pre-registrada, y sigue siendo la de esta sección**: (1) misma entrada +
@@ -309,6 +320,15 @@ Any Phase 2 implementation, and any Phase 1 "gap fix", follows this sequence:
 Verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`); **Fase 0, Fase 2 y los caminos vallados
 re-verificados el 2026-09-03 contra `release/5.0.0`** (issue #207) ejecutando cada comando de esta
 lista. Re-verify before trusting:
+
+**Re-sincronizado el 2026-09-03 tras el pase de correcciones de la revisión adversarial** (commit
+`0668f37`, issue #207 cerrado): §(b) pasa de «capa MC en curso, suite en rojo» a **entregada, suite
+verde** (29 tests, 0 fallos — `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`)
+y la definición de éxito se corrige (jubilarse dentro del horizonte **y** no agotar, no solo «no
+agotar nunca»). La misma afirmación de «suite en rojo» estaba repetida en otros cinco documentos
+(`futurefin-research-frontier`, `futurefin-fire-domain-reference`, `.claude/tests.md`,
+`.claude/financial-contracts.md`, `futurefin-validation-and-qa`), todos corregidos en la misma
+pasada.
 
 - Engine test count — **usa el GLOB**: `grep -c '#\[test\]' crates/engine/src/*.rs | awk -F: '{s+=$2} END{print s}'` (**199** el 2026-09-03, y 195 unas horas antes en la misma rama). La lista de cuatro ficheros que aquí vivía (`{projection,history,runway,net_return}`) daba **139** y se dejaba fuera los seis módulos que 5.0.0 creó. Handler: `grep -c '#\[test\]' apps/api/src/handlers/projection.rs` (**26** el 2026-09-03; decía 24). Total autoritativo, siempre del runner: `cargo test -p futurefin-engine 2>&1 | grep "test result"`.
 - Parity case count: `python3 -c "import json;print(len(json.load(open('apps/api/tests/fixtures/fire-parity.json'))['cases']))"` (**17** el 2026-09-03; tolerance `_tolerance_eur: 1.0`). Esta línea decía **7** y antes **6** — tercera vez que el mismo contador se queda corto en esta ficha.

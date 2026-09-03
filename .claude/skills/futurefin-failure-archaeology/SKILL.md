@@ -672,6 +672,24 @@ Vocabulary used below (defined once):
 - **Status**: cerrado en WP5.5; la puerta es
   `crates/engine-stochastic/tests/degeneration.rs::every_case_degenerates_from_decimal_to_floating_point`.
 
+### 2.27 Un golden de 19 casos no demuestra bit-identidad — el fuzz diferencial sí (revisión adversarial, issue #207, 5.0.0)
+
+- **Síntoma**: los pines dorados de 4.15.0 pasaban enteros tras el refactor del bucle por fases, y
+  aun así había dos divergencias reales de bit-identidad sin cazar.
+- **Causa raíz, dos mecanismos**: (1) `undrained_cumulative` se re-derivaba como `need − (need − s)`
+  en vez de acumularse con el operando LITERAL del paseo — algebraicamente igual, pero cambia la
+  ESCALA de `Decimal` (`"0"` vs `"0.00"`), y el `Display` es lo que el pin hashea. (2)
+  `debt_service += cash + extra + fee` se reagrupó de `acc + ((cash+extra)+fee)` a
+  `((acc+cash)+extra)+fee` — la asociatividad de `+=` no es libre: con dos pasivos redondea distinto
+  en el dígito 28.
+- **Por qué el golden no lo vio**: 19 casos fijados por adelantado no cubren cada combinación de
+  escala/redondeo que un refactor toca; el fuzz diferencial (`fuzz_invariants.rs`, hogares
+  aleatorios) compara la MISMA entrada contra el motor de `main` y encuentra la divergencia sin
+  haberla previsto — bajó de 536/496/496 a 24/21/27 divergencias por 3.000 entradas.
+- **Lección transferible**: un golden pineado prueba que lo que ya conoces no se movió; solo un
+  fuzz diferencial contra la versión anterior prueba que nada nuevo se movió tampoco.
+- **Status**: cerrado; pines `P24_undrained_scale`/`P25_debt_service_assoc`.
+
 ## 3. Designs that were tried and replaced
 
 | Old design | Specific failure mode | Replacement (current) |
@@ -774,6 +792,11 @@ readmite — las tres se leen con su scope note al lado. Re-verificar:
 - La puerta que la sostiene: `grep -n "const EUR_TOLERANCE\|fn every_case_degenerates_from_decimal_to_floating_point" crates/engine-stochastic/tests/degeneration.rs` (2 hits)
 - Los tres bugs de §2.24–§2.26, cerrados en el código: `grep -n "issue \*\*#209\*\*\|#209" crates/engine/src/sim_core.rs | head -3`, `grep -n "checked_div" crates/engine/src/tax.rs | head -3` y `grep -n "pub cap_exhausted" crates/engine/src/tax.rs`
 - La pensión con fecha es JSONB del perfil, no una columna resucitada: `grep -n "PensionSchedule" crates/engine/src/phases.rs | head -3` y `grep -rn "users.pension_" apps/api/src` (**debe salir vacío**: las columnas siguen muertas)
+
+**§2.27 added 2026-09-03 tras el pase de correcciones de la revisión adversarial** (commit
+`0668f37`, issue #207 cerrado), leyendo `crates/engine/tests/{golden_pins.rs,fuzz_invariants.rs}`.
+Re-verificar: `grep -n "fn p24_publishes_the_undrained_operand_with_the_scale_of_4_15_0\|fn p25_keeps_the_debt_service_grouping_of_4_15_0" crates/engine/tests/golden_pins.rs` (2 hits) y
+`grep -n "fn random_households_satisfy_the_accounting_identities" crates/engine/tests/fuzz_invariants.rs`.
 
 **§1 rows 22–23 and §2.18–§2.19 added 2026-08-28 for v4.4.0** (MCP Fase 5, issue #86), by reading
 `apps/api/src/handlers/projection.rs` (`ProjectionEvent` doc-comment) and

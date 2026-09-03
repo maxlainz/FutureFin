@@ -86,7 +86,7 @@ exception: it names a mechanism CI asserts, and it deliberately stops short of "
 
 | Claim you might be tempted to write | Minimum evidence required first |
 |---|---|
-| "Monte Carlo / percentile bands" | Engine module + tests proving seeded reproducibility AND zero-volatility degeneration to the deterministic series (item 6). **Estado 2026-09-03: NO reclamable todavía, y por poco.** Los dos tests que esta fila exige EXISTEN y PASAN — `mc_same_seed_bit_identical` y `mc_zero_volatility_degenerates_to_deterministic` (`crates/engine-stochastic/tests/monte_carlo.rs`, commit `ba6bdfe`) —, pero **la suite del crate está en ROJO**: falla `mc_cash_buffer_changes_the_band_under_sequence_risk`. La regla de esta tabla no admite «verde salvo uno»: se reclama con la suite verde. Compruébalo con `cargo test -p futurefin-engine-stochastic 2>&1 \| grep "test result"`, nunca con esta línea |
+| "Monte Carlo / percentile bands" | Engine module + tests proving seeded reproducibility AND zero-volatility degeneration to the deterministic series (item 6). **Estado 2026-09-03, tras el pase de correcciones de la revisión adversarial (commit `0668f37`, issue #207): CLAIMABLE.** La suite del crate estocástico está VERDE entera — 29 tests, 0 fallos (`cargo test -p futurefin-engine-stochastic 2>&1 \| grep "test result"` → 13 unitarios + 3 de `degeneration.rs` + 13 de `monte_carlo.rs`). Los tests que sostienen el claim: reproducibilidad por semilla (`mc_same_seed_bit_identical`), degeneración a la serie determinista con σ = 0 (`mc_zero_volatility_degenerates_to_deterministic`, más la puerta de aceptación `every_case_degenerates_from_decimal_to_floating_point` de `degeneration.rs`, que corre TODA la batería del motor, no un caso suelto), que no jubilarse nunca no cuenta como éxito (`mc_never_retiring_is_not_a_success`) y que la cobertura cuenta la necesidad que la cartera no pudo fundar, no solo lo que la regla rechazó (`mc_coverage_counts_the_need_the_portfolio_could_not_fund`). El test que fallaba —`mc_cash_buffer_changes_the_band_under_sequence_risk`, una predicción falsada, no un test flaky— no se relajó: el modelo del colchón tenía dos bugs (relleno anticipativo, colchón sin filtro de liquidez) y, corregidos, el test se rehízo como `mc_cash_buffer_protects_and_the_drag_is_what_costs`. Sigue habiendo letra pequeña que cualquier claim público debe llevar: sin autocorrelación entre meses, sin correlación imperfecta entre activos (un solo shock de mercado por mes), sin colas gruesas ni bootstrap histórico — declarado en el doc del módulo `mc`, no oculto |
 | "Deterministic / bit-exact projections" | **Parcialmente ganada en 5.0.0, y conviene decir por qué mitad.** Lo que existe y corre en CI son los **pines dorados** (`crates/engine/tests/golden_pins.rs`): hashean en SHA-256 el texto canónico de TODAS las salidas del motor por caso contra dos fixtures, y su control negativo (`the_hash_actually_notices_a_single_moved_decimal`) demuestra que la red no es decorativa. Eso prueba **reproducibilidad entre ejecuciones y entre versiones** sobre una batería fija. Lo que sigue sin existir es el **replay genérico** que esta fila pide —dos ejecuciones del mismo input arbitrario `assert_eq!`-idénticas, sobre entradas generadas, no fijadas—: eso es el ítem 1 (`prop_replay_bit_identical`). Reclama «reproducible sobre una batería pineada», no «bit-exacto para cualquier entrada». Contexto de CI: (`cargo test -p futurefin-engine --locked` — CI runs engine tests **and, since 4.0.0, the Postgres integration ones too** — job `integration`, `cargo test --workspace --locked` against a service Postgres; this parenthesis claimed the opposite until the Fase-7 sweep) |
 | "Property-tested engine invariants" | proptest suite merged and green (item 1), named properties listed in the CHANGELOG entry |
 | "Tax-aware withdrawals" | Engine drawdown tax model + regenerated parity fixture with both suites green (item 7) |
@@ -111,7 +111,7 @@ gates through `futurefin-mcp-parity` when executed.
 | 3 | Projection-as-auditable-artifact (recomputable snapshot) | 2, 3 | Med–High | Med | Low | **Parcialmente servido por el arnés golden (5.0.0); la mitad exportable sigue abierta** |
 | 4 | Sequence-of-returns risk surfacing (deterministic stress) | 1 | High | Med | Med | Via campaign |
 | 5 | Liability interest accrual (`RepaymentModel` + `apr_percent`) | 1 | High | — | — | **✅ Done — shipped 4.2.0** |
-| 6 | Monte Carlo percentile bands (seeded) | 1 | Med | High | High | **Capa base ✅ 5.0.0 (crate `engine-stochastic` + puerta de degeneración); capa MC en curso (WP6)** — sin reclamar hasta que sus tests estén commiteados y verdes |
+| 6 | Monte Carlo percentile bands (seeded) | 1 | Med | High | High | **✅ Entregado 5.0.0** (crate `engine-stochastic` + puerta de degeneración + capa MC, WP6) — suite verde (29 tests, 0 fallos) tras el pase de correcciones de la revisión adversarial, reclamable |
 | 7 | Tax-aware drawdown path | 1 | Med | Med–High | Med | **✅ Entregado 4.10.0/#140 + 4.12.0/#178**; lo que queda abierto es la ORDENACIÓN tax-aware del drenaje |
 | 8 | Variable/dynamic SWR strategies | 1 | Low–Med | Med | Med | **✅ Entregado en 5.0.0** como reglas de retirada (4 reglas × 2 modos, Guyton-Klinger incluido) |
 | 9 | Multi-currency correctness | — | Low | High | Med | Demoted — see inventory |
@@ -416,7 +416,7 @@ is a tracked, tested simplification for a future release, not a gap in this one.
 
 ---
 
-### 6. Monte Carlo percentile bands — **capa base ENTREGADA (5.0.0); la capa MC, en curso**
+### 6. Monte Carlo percentile bands — **ENTREGADA (5.0.0), suite verde tras el pase de correcciones**
 
 **Estado 2026-09-03, con precisión sobre qué existe y qué no:**
 
@@ -427,24 +427,39 @@ is a tracked, tested simplification for a future release, not a gap in this one.
   (`crates/engine-stochastic/tests/degeneration.rs`) demuestra que los dos caminos son la misma
   simulación: `net_worth` y `liquid_worth` mes a mes dentro de **1 € por mes** y las decisiones
   discretas EXACTAS, sobre todos los casos de la batería.
-- **Commiteado el 2026-09-03 (`ba6bdfe`), con la suite en ROJO**: la capa Monte Carlo (RNG
+- **Commiteado el 2026-09-03 (`ba6bdfe`) y, tras el pase de correcciones de la revisión adversarial
+  (commit `0668f37`, issue #207 cerrado), con la suite VERDE ENTERA**: la capa Monte Carlo (RNG
   `rand_chacha` pineado en el crate estocástico — `crates/engine` sigue **sin** RNG—, un stream por
-  `(seed, path)`, bandas puntuales p10/p50/p90, `success_probability`, agotamiento por edad). Los
-  dos tests que la tabla de claims exige pasan; **falla
-  `mc_cash_buffer_changes_the_band_under_sequence_risk`**, cuya predicción («el colchón mejora la
-  probabilidad de éxito») queda falsada por la medición (0,713 vs 0,775). Es un *predict-then-run
-  miss*, no un test flaky: la salida honesta es revisar la predicción o el modelo del colchón
-  (`futurefin-research-methodology` §2), no relajar el assert.
-- **Nada de esto es reclamable en público todavía** (tabla de claims): la evidencia que la regla
-  pide es la suite **commiteada y verde**. Hoy está commiteada y no verde. **Comprueba el estado
-  tú**: `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`.
+  `(seed, path)`, bandas puntuales p10/p50/p90, `success_probability`, agotamiento por edad).
+  **29 tests, 0 fallos** (`cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"` →
+  13 unitarios + 3 de `degeneration.rs` + 13 de `monte_carlo.rs`). El test que fallaba,
+  `mc_cash_buffer_changes_the_band_under_sequence_risk` —predicción «el colchón mejora la
+  probabilidad de éxito» falsada por la medición, 0,713 vs 0,775; un *predict-then-run miss*, no un
+  test flaky— se resolvió como manda `futurefin-research-methodology` §2: revisando el modelo, no
+  relajando el assert. El modelo del colchón tenía dos bugs (relleno anticipativo con el shock del
+  propio mes, colchón elegido sin filtrar por liquidez) y, corregidos, el test se rehízo como
+  `mc_cash_buffer_protects_and_the_drag_is_what_costs`, que separa el LASTRE de tener el colchón
+  fuera del mercado (−7,9 pp) de la PROTECCIÓN de gastar de una reserva sin riesgo (+3,9 pp): con
+  la cuenta a su rentabilidad real (0 %) el colchón sigue costando neto (−3,5 pp); al retorno de la
+  cartera, protege (+3,9 pp).
+- **Reclamable en público desde este pase** (tabla de claims, más arriba en este documento): la
+  evidencia que la regla pide es la suite commiteada y verde, y ya lo está. **Comprueba el estado
+  tú antes de citarlo**: `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`.
 
-**Las decisiones de modelo ya están tomadas y firmadas** (plan de la issue #207, D11/D12/D22/D23/D25):
-log-normal mensual con **un shock común escalado por la sd de cada activo** (no matriz de
-correlaciones: la instalación no tiene covarianzas, y el sesgo es conservador); **éxito = la cartera
-no se agota nunca**, con el recorte de una regla publicado aparte y **sin contar como fracaso**;
-semilla estable por usuario (`hash(installation_id, user_id)`); umbral por defecto 95 %,
-configurable. Las divergencias que eso acepta están registradas en `financial-contracts.md` §4.
+**Las decisiones de modelo, tomadas y firmadas — dos corregidas por la segunda revisión adversarial
+(D20)** (plan de la issue #207, D11/D12/D22/D23/D25): log-normal mensual con **un shock común
+escalado por la sd de cada activo** (no matriz de correlaciones: la instalación no tiene
+covarianzas, y el sesgo es conservador); semilla estable por usuario
+(`seed_for(installation_id, user_id)`); umbral por defecto 95 %, configurable. **Éxito YA NO es
+«la cartera no se agota nunca» (D22 original)**: esa definición premiaba al hogar que no se jubila
+jamás, porque quien nunca drena nunca se agota — medido en un hogar que cruza en el mes 655 de 840,
+0,960 publicado frente a 0,940 entre los que sí llegan a jubilarse, con el 33,1 % de los caminos
+sin jubilarse contando como éxito (hasta +6,8 pp de sesgo con SWR 6 %). Ahora `success_probability`
+exige jubilarse dentro del horizonte (o un trigger por edad) **y** no agotar la cartera;
+`never_retired_probability` y `success_given_retired` se publican al lado para separar «¿ocurre?»
+de «¿aguanta?». El recorte de una regla de retirada sigue publicado aparte y **sin contar como
+fracaso** (D22/D24 se mantiene en esa mitad). Las divergencias que todo esto acepta están
+registradas en `financial-contracts.md` §4.
 
 **El «gated behind item 4» de esta sección ya no aplica**: item 4 (estrés determinista) sigue sin
 hacerse, y la capa estocástica se construyó igualmente porque su coste real —el bucle genérico— era
@@ -743,11 +758,20 @@ está tan fresco como la última vez que alguien miró si la campaña ya lo cerr
 vez sobre una afirmación NEGATIVA («el drenaje no tributa»), que envejece igual que un número
 congelado y que nadie recuenta. Re-verificar:
 
+**Re-sincronizado el 2026-09-03 tras el pase de correcciones de la revisión adversarial** (commit
+`0668f37`, issue #207 cerrado): el ítem 6 pasa de «capa MC en curso, suite en rojo» a **entregado
+y reclamable** — la fila de la tabla de claims y la §6 de arriba se reescribieron enteras para
+decirlo con los nombres de test exactos. Esta misma afirmación de «suite en rojo» estaba repetida
+en otros cinco documentos (`futurefin-projection-realism-campaign`,
+`futurefin-fire-domain-reference`, `.claude/tests.md`, `.claude/financial-contracts.md`,
+`futurefin-validation-and-qa`), todos corregidos en la misma pasada.
+
 - **La coma flotante y el Monte Carlo viven en un crate aparte, y el motor sigue sin RNG**:
   `ls crates/engine-stochastic/{src,tests}/`, `grep -c "rand" crates/engine/Cargo.toml` (**0**) y
   `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"` — **este último es el que
-  decide si «Monte Carlo» es reclamable**: commiteada el 2026-09-03 en `ba6bdfe`, pero con 1 de 11
-  tests en rojo, así que hoy NO lo es.
+  decide si «Monte Carlo» es reclamable**: commiteada el 2026-09-03 en `ba6bdfe` y, tras el pase de
+  correcciones de la revisión adversarial (`0668f37`, issue #207 cerrado), con **29 tests, 0
+  fallos** — reclamable hoy.
 - **La puerta de degeneración es la evidencia de la mitad ya hecha**:
   `grep -n "const EUR_TOLERANCE\|fn every_case_degenerates_from_decimal_to_floating_point" crates/engine-stochastic/tests/degeneration.rs` (2 hits).
 - **El arnés golden es la mitad de «recomputable» del ítem 3**:

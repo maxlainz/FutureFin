@@ -223,20 +223,27 @@ termina más abajo que uno liso.
 
 ### Qué significa «Éxito del plan»
 
-**El éxito es una sola cosa: que la cartera no se agote nunca** dentro de tu horizonte, con tus
-pensiones y tus fases ya dentro de la simulación. El KPI dice en qué porcentaje de escenarios pasa
-eso, y se colorea contra tu umbral (de serie, 95 %): verde en el umbral, ámbar hasta diez puntos por
-debajo, rojo el resto.
+**El éxito exige DOS cosas a la vez: que llegues a jubilarte dentro de tu horizonte —o en tu edad
+objetivo— y que, una vez jubilado, la cartera no se agote nunca**, con tus pensiones y tus fases ya
+dentro de la simulación. Un plan que nunca te jubila no cuenta como éxito aunque el dinero siga
+entero: quedarte para siempre en la fase de ahorro no es lograr tu plan, es no haberlo intentado.
+Por eso, cuando algún escenario se queda sin jubilar, debajo aparecen dos cifras más: cuántos son
+los que no llegan a jubilarse, y qué parte de los que **sí** se jubilan aguanta el capital hasta el
+final. El KPI principal se colorea contra tu umbral (de serie, 95 %): verde en el umbral, ámbar
+hasta diez puntos por debajo, rojo el resto.
 
 **Que una regla de retirada te recorte el gasto en un año malo NO cuenta como fracaso.** Eso se mide
-aparte, debajo, porque son dos preguntas distintas: «¿me quedo sin dinero?» y «¿tengo que apretarme
-el cinturón?». Mezclarlas da un diagnóstico falso — con la regla del «% del saldo» nunca te quedas a
-cero, pero puedes acabar retirando céntimos.
-<!-- MC: revisar tras el pase de correcciones -->
+aparte, en la **cobertura de tu gasto**: dos cifras que ahora se calculan igual con cualquier regla,
+incluida «Gasto fijo» — antes se escondían ahí porque solo miraban lo que la regla se negaba a
+sacar, y esa regla no recorta nunca por definición, así que siempre habrían dado «100 % cubierto».
+Ahora cuentan también lo que la cartera no pudo pagar porque ya no quedaba de dónde, que es la otra
+manera —y la peor— de quedarte corto. Son dos preguntas distintas: «¿me quedo sin dinero?» y «¿tengo
+que apretarme el cinturón?». Mezclarlas da un diagnóstico falso — con la regla del «% del saldo»
+nunca te quedas a cero, pero puedes acabar retirando céntimos.
 
-La misma cifra aparece en el Resumen, como KPI «Éxito del plan», y sale **del mismo sorteo**: no se
-recalcula en dos sitios, porque entonces la misma pantalla enseñaría dos probabilidades del mismo
-plan.
+La misma cifra de éxito aparece en el Resumen, como KPI «Éxito del plan», y sale **del mismo
+sorteo**: no se recalcula en dos sitios, porque entonces la misma pantalla enseñaría dos
+probabilidades del mismo plan.
 
 Debajo, la tabla de **probabilidad de agotar el capital** por edad. Es **acumulada**: el porcentaje a
 los 80 incluye a todos los que se quedaron sin dinero a los 75. Solo puede crecer con la edad, y su
@@ -270,15 +277,20 @@ En «Horizonte y riesgo» puedes declarar un **colchón de caja**: unos meses de
 efectivo, para no tener que vender en un año malo. Solo existe en los escenarios con volatilidad —
 en la línea determinista no hay meses buenos ni malos que distinguir, así que no tendría criterio.
 
-Se rellena vendiendo del resto de la cartera **solo en los meses en que el mercado sube**, y esa
-venta paga su plusvalía como cualquier otra.
+Se rellena vendiendo del resto de la cartera **solo con el shock del mes YA ocurrido**, nunca
+adelantándose al mercado, y **solo entre tus activos líquidos** — nunca vendiendo la vivienda para
+llenarlo. Y necesita un activo líquido **sin volatilidad** declarada donde vivir: sin uno así, el
+colchón no se simula, y aquí se te dice por qué en vez de fingir que sí.
 
-**Y aquí va lo incómodo, que es justo lo que no vamos a esconderte**: en el modelo actual —que sortea
-cada mes de forma independiente— el colchón **baja** la probabilidad de éxito en vez de subirla. El
-dinero fuera del mercado no compone, y eso cuesta rentabilidad. Se ofrece porque hay hogares que
+**Y aquí va lo honesto, con las dos caras**: el colchón **SÍ protege** — medido, sube 3,9 puntos la
+probabilidad de éxito y casi dobla tu liquidez en el peor 10 % de los futuros —, pero **esa
+protección se paga**, y el precio es real: es la rentabilidad a la que renuncias por tener esos
+meses de gasto fuera del mercado en vez de invertidos. Si el dinero del colchón vive en una cuenta
+remunerada al 0 % —el caso más habitual—, ese coste se come la protección y el balance neto sale
+**negativo**, −3,5 puntos. El colchón no es gratis ni es mala idea por sistema: es tranquilidad que
+cuesta rentabilidad, y cuánto cuesta depende de dónde lo alojes. Se ofrece porque hay hogares que
 prefieren esa tranquilidad, y porque el número que importa es el tuyo: míralo en esta misma sección,
 con tus datos, antes de decidir.
-<!-- MC: revisar tras el pase de correcciones -->
 
 ---
 

@@ -454,6 +454,23 @@ seguidos sobre el bucle— sin una sola regresión silenciosa.
 | **Un producto acumulado en vez de la potencia** | `powd` enruta los exponentes ENTEROS por `checked_powu` (potencia exacta); calcular `q(j+1) = q(j)·q(1)` los desvía a `exp`/`ln` y mueve los últimos dígitos | Al precalcular una familia `(1+p)^{k/12}`, haz **la misma llamada** que hacía el bucle, nunca una recurrencia multiplicativa |
 | **Re-derivar aguas abajo un hecho que el algoritmo ya sabe** | Un llamante deducía «¿se vendió el techo entero?» comparando `gross >= cap`. Exacto en `Decimal`, **filo de navaja** en aritmética aproximada — y de esa rama colgaba qué es recorte informativo y qué es descubierto que resta patrimonio. Coste medido: 8.138 € en un caso | **Publica el booleano** desde donde se sabe. Dos definiciones del mismo hecho divergen en cuanto cambia el tipo, la escala o el redondeo |
 
+**Un golden de 19 casos no demuestra bit-identidad; el fuzz diferencial contra el motor anterior sí**
+(pase de correcciones de la revisión adversarial, 2026-09-03, issue #207). Dos regresiones de
+bit-identidad con 4.15.0 pasaron los 19 casos pineados y solo aparecieron al comparar el motor
+nuevo contra el de `main` sobre hogares ALEATORIOS (`crates/engine/tests/fuzz_invariants.rs`, 1.500
+casos; y una campaña de fuzz diferencial aparte, 3.000 entradas por semilla): (1) `undrained_cumulative`
+re-derivado como `need − (need − s)` en vez de acumularse con el operando LITERAL que publica el
+paseo — algebraicamente igual, pero cambia la ESCALA (`"0"` vs `"0.00"`), movió 438 de 3.000 hashes
+y es la misma trampa de «la escala del cero» de la tabla de arriba, encontrada por un mecanismo
+distinto; (2) `debt_service` reagrupado de `acc + ((cash + extra) + fee)` a
+`((acc + cash) + extra) + fee` — la asociatividad de `+=` no es libre en `Decimal`: con dos pasivos
+redondea distinto en el dígito 28 y la diferencia se propaga mes a mes. La campaña completa bajó las
+divergencias de 536/496/496 a 24/21/27 por 3.000 entradas (tres semillas), y las que quedan son
+todas «el motor viejo entraba en pánico» (desbordamientos que 4.15.0 no tipaba), no desacuerdos
+numéricos. **Por qué el golden no bastaba**: 19 casos fijados por adelantado no pueden cubrir cada
+combinación de escala y redondeo que un refactor puede tocar; el fuzz diferencial compara la MISMA
+entrada aleatoria por los dos caminos y encuentra la divergencia sin tener que haberla previsto.
+
 **El inverso exacto en vez de la bisección** (variante de la Recipe 1, aplicada aquí). WP2 necesitaba
 la operación **inversa** del gross-up mixto: dado un techo BRUTO, qué se vende de cada tramo y qué
 netea. La tentación es bisecar sobre la función directa. Pero `F(G) = G − tax(B(G))` es **lineal a
@@ -526,6 +543,11 @@ neither the Postgres integration tests nor Vitest. Both run in CI since 4.0.0 �
 = `cargo test --workspace --locked` against a `postgres:16.4-alpine` service, and job `web` runs
 `npm test --workspace futurefin-web`. Running them locally is the fast loop, not the only place). All line numbers are ~approximate anchors as of v1.4.3.
 
+**Ampliada el 2026-09-03 tras el pase de correcciones de la revisión adversarial** (commit
+`0668f37`, issue #207 cerrado): Recipe 7 gana el párrafo sobre por qué un golden de 19 casos no
+demuestra bit-identidad y el fuzz diferencial sí, con los dos mecanismos reales que se colaron
+(escala del cero, asociatividad de `+=`).
+
 Re-verify before trusting volatile facts:
 
 - Version: `grep -n '^version' apps/api/Cargo.toml`
@@ -537,6 +559,8 @@ Re-verify before trusting volatile facts:
 - f64 wire boundary unchanged: `grep -n "serialize_decimal_as_f64" apps/api/src/handlers/projection.rs`
 - Parity fixture cases + tolerance: `python3 -c "import json;print(len(json.load(open('apps/api/tests/fixtures/fire-parity.json'))['cases']))"` (**17** el 2026-09-03) y `grep -n "_tolerance_eur" apps/api/tests/fixtures/fire-parity.json`
 - **Recipe 7 (arnés golden, 5.0.0)**: `ls crates/engine/tests/fixtures/` (dos fixtures) y los cuatro tests que la sostienen — `grep -n "fn golden_pins_match_4_15_0\|fn the_hash_actually_notices_a_single_moved_decimal\|fn the_5_0_canonicalization_grew_without_moving_the_old_fields\|fn the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery" crates/engine/tests/golden_pins.rs` (4 hits)
+- **Recipe 7 — lo que el golden NO cazó y el fuzz diferencial sí (2026-09-03, pase de correcciones)**:
+  `grep -n "fn p24_publishes_the_undrained_operand_with_the_scale_of_4_15_0\|fn p25_keeps_the_debt_service_grouping_of_4_15_0" crates/engine/tests/golden_pins.rs` (2 hits) y el arnés de fuzz sobre hogares aleatorios `grep -n "fn random_households_satisfy_the_accounting_identities" crates/engine/tests/fuzz_invariants.rs`
 - **La trampa del `max` inherente, declarada en el trait**: `grep -n -B2 -A6 "fn max(self" crates/engine/src/money.rs`
 - **El inverso exacto en vez de la bisección** (Recipe 7): `grep -n "fn mixed_drawdown_for_gross_cap" crates/engine/src/tax.rs`; y la bisección legítima, `grep -n "pub const MAX_SOLVE_ITERATIONS" crates/engine/src/solve.rs`
 - **La segunda frontera f64 (Recipe 5)**: `grep -c "impl MoneyOps for F64Money" crates/engine-stochastic/src/lib.rs` (1) y el freezer intacto `grep -n "fn crates_engine_src_has_no_f64_outside_comments" crates/engine/src/lib.rs`

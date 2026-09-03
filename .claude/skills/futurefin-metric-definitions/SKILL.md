@@ -88,17 +88,17 @@ viéndola antes de creerte el verde.
 ## 6. Estado del catálogo
 
 **El recuento no se congela aquí: se cuenta.** `grep -c '^  "' apps/web/src/lib/helpTexts.ts` da
-**52** el 2026-09-03 (rama `release/5.0.0`; 29 en `main`, o sea **+23 en 5.0.0** — el mayor salto
-del catálogo desde que existe), y `grep -n '^  "' …` da la lista. Contraste cruzado, por si la
-indentación del fichero se moviera: `grep -cE '^    title: "' …` y `grep -cE '^    body:$' …`
-tienen que dar el mismo número.
+**53** el 2026-09-03 (rama `release/5.0.0`, tras el pase de correcciones de la revisión adversarial
+— `retirement.coverage` es la entrada nueva; 52 antes de ese pase, 29 en `main`), y
+`grep -n '^  "' …` da la lista. Contraste cruzado, por si la indentación del fichero se moviera:
+`grep -cE '^    title: "' …` y `grep -cE '^    body:$' …` tienen que dar el mismo número.
 
 | Vista | Ids |
 |---|---|
 | Resumen · salud financiera | `summary.savings`, `summary.liquid_assets`, `summary.runway`, `summary.net_worth`, `summary.net_return`, `summary.plan` **(5.0.0)**, `summary.success` **(5.0.0)** |
 | Jubilación · plan y perfil | `retirement.target`, `retirement.crossing_reading` · `retirement.strategy` · `retirement.target_age` · `retirement.pension` · `retirement.partial` · `retirement.withdrawal_rule` · `retirement.spend_mode` · `retirement.target_basis` · `retirement.bridge_discount` · `retirement.cash_buffer` · `retirement.success_threshold` **(las once, 5.0.0)** |
 | Jubilación · KPIs por estrategia (`lib/retirement-tiles.ts`) | `retirement.required_contribution` · `retirement.disposable` · `retirement.coast_month` · `retirement.coast_number` · `retirement.partial_gap` · `retirement.bridge` **(5.0.0)** |
-| Jubilación · Riesgo | `retirement.bands` · `retirement.success` · `retirement.depletion_by_age` **(5.0.0)** |
+| Jubilación · Riesgo | `retirement.bands` · `retirement.success` · `retirement.depletion_by_age` · `retirement.coverage` **(5.0.0; `coverage` añadido tras el pase de correcciones)** |
 | Ajustes → Plan | `settings.savings_source`, `settings.income_window`, `settings.expense_window`, `settings.window_mode`, `settings.swr`, `settings.inflation` |
 | Activos | `assets.volatility` **(5.0.0)** |
 | Movimientos | `expenses.expense_avg`, `expenses.income_avg`, `expenses.savings` **(4.15.0)**, `expenses.savings_rate` **(4.15.0)**, `expenses.refunds` **(4.15.0)** — `expenses.savings_transferred` y `expenses.transferred_rate` se **retiraron** en 4.15.0 |
@@ -194,7 +194,7 @@ Contrato de una línea por entrada (el texto completo vive en `helpTexts.ts`; es
 | `retirement.spend_mode` | Dos lecturas de la misma regla: como **techo** (retiras lo necesario, nunca más de lo permitido) o como **gasto** (retiras lo que dice la regla haya o no necesidad). No cambia el objetivo |
 | `retirement.target_basis` | Sobre qué se dimensiona el objetivo: renta perpetua (ignora la pensión) o puente hasta la pensión. **Si no eliges**, puente cuando hay pensión declarada y perpetua cuando no |
 | `retirement.bridge_discount` | Tasa con la que se descuentan los años de puente (rentabilidad de tus líquidos · tu SWR · sin descuento). Solo afecta al objetivo si la base es el puente |
-| `retirement.cash_buffer` | Meses de gasto siempre en efectivo. **Solo existe en los escenarios con volatilidad** y **cuesta rentabilidad** — ver abajo |
+| `retirement.cash_buffer` | Meses de gasto siempre en efectivo, en un líquido sin volatilidad. **Solo existe en los escenarios con volatilidad**; protege, pero la protección se paga con la rentabilidad que dejas fuera del mercado — ver abajo |
 | `retirement.success_threshold` | Tu listón de escenarios sin agotar cartera (de serie 95 %). «Es tu listón, no una predicción» |
 | `retirement.required_contribution` | Aportación mensual **mínima** que llega al objetivo en la edad elegida, hallada **simulando el plan entero**. Es un **techo** sobre lo que el reparto invierte, no un importe garantizado |
 | `retirement.disposable` | Lo que **sobra** por encima de lo que exige la estrategia. **Dos bases declaradas** — ver la norma de abajo |
@@ -203,8 +203,9 @@ Contrato de una línea por entrada (el texto completo vive en `helpTexts.ts`; es
 | `retirement.partial_gap` | Capital a perpetuidad para lo que la media jornada NO paga (gasto − ingreso parcial − parte de pensión, con impuestos por delante, ÷ SWR). Informativo: no dispara nada |
 | `retirement.bridge` | Años entre jubilación y pensión, pagados enteros por el patrimonio; el paréntesis es la tasa de retirada **efectiva** de esos años y **puede superar el SWR sin ser un error** |
 | `retirement.bands` | Miles de futuros del mismo plan sorteando cada mes; la franja va del escenario 10 al 90. **La mediana es el valor central de cada mes por separado: NO es un futuro concreto** |
-| `retirement.success` | % de escenarios en que la cartera aguanta el horizonte **sin agotarse**. Un **recorte** de la regla de retirada NO cuenta como fracaso: se mide aparte <!-- MC: revisar tras el pase de correcciones --> |
+| `retirement.success` | % de escenarios en que pasan DOS cosas a la vez: te jubilas dentro del horizonte (o en tu edad objetivo) **y** la cartera no se agota nunca. Un plan que nunca se jubila NO cuenta como éxito aunque el dinero siga entero — cuando hay escenarios así, se publican aparte cuántos son (`never_retired_probability`) y qué parte de los que sí se jubilan aguanta (`success_given_retired`). Un **recorte** de la regla de retirada tampoco cuenta como fracaso aquí: se mide en `retirement.coverage` |
 | `retirement.depletion_by_age` | Fracción **acumulada** de escenarios que agotaron la cartera a esa edad **o antes**; solo puede crecer con la edad |
+| `retirement.coverage` | Dos lecturas de la cobertura real de tu gasto de jubilación, **en TODAS las reglas de retirada, incluida `fixed_real`**: meses por debajo del gasto (mediana) y qué fracción de la necesidad se pagó de verdad — contando tanto lo que la regla se negó a sacar como lo que la cartera no pudo financiar. 100 % = cada euro de necesidad, cero meses por debajo. Antes se ocultaban con `fixed_real` porque solo medían el recorte de la regla (que ahí es 0 por construcción, dando 1,0 siempre); al incluir también el descubierto de la cartera, un fixture medido pasó de mostrar 1,0 a mostrar 0,0865 — justo el caso en que la cobertura tiene una sola causa y es la peor |
 | `summary.plan` | Estrategia + fecha y edad en que la simulación jubila de verdad. Las dos cifras del margen son **las mismas** del panel de Jubilación, copiadas, nunca recalculadas |
 | `summary.success` | El KPI coloreado del Resumen; es el **MISMO sorteo** que dibuja la sección Riesgo |
 | `assets.volatility` | Desviación típica **anual** del retorno del activo (no una pérdida esperada). **Solo alimenta las bandas**: la línea de proyección no la usa |
@@ -225,13 +226,17 @@ desambiguarlo de otro con el mismo nombre. La misma forma la usan `retirement.ta
 bases + default implícito), `retirement.spend_mode` («dos lecturas de la misma regla») y
 `retirement.bridge_discount` (tres tasas para la misma cifra).
 
-**Una entrada documenta un resultado incómodo, y así debe quedarse.** `retirement.cash_buffer` no
-promete protección: dice que el colchón **cuesta rentabilidad** y que, en el modelo actual —que
-sortea cada mes de forma independiente—, **baja** la probabilidad de éxito en vez de subirla, y
-manda al usuario a mirar la sección Riesgo con sus propios números. El texto se escribió **después**
-de que la medición falsara la predicción del diseño; escribir la promesa que se esperaba habría
-convertido una opción honesta en una recomendación falsa.
-<!-- MC: revisar tras el pase de correcciones -->
+**Una entrada documenta un resultado incómodo con las dos caras, y así debe quedarse.**
+`retirement.cash_buffer` no promete protección gratis, pero tampoco dice que solo cueste: los dos
+bugs que empujaban esa primera medición (relleno anticipativo con el shock del propio mes, colchón
+elegido sin filtrar por liquidez) se corrigieron en el pase de correcciones de la revisión
+adversarial, y con el modelo arreglado el colchón SÍ protege — medidos 3,9 puntos más de éxito y
+casi el doble de liquidez en el peor decil, **si el colchón renta como el resto de tu cartera**.
+Pero eso no es el caso realista: la protección se **paga** con la rentabilidad del dinero que sacas
+del mercado, y con una cuenta remunerada al 0 % el saldo neto sigue siendo negativo (−3,5 puntos).
+El texto exige además un activo líquido SIN volatilidad donde alojar el colchón — sin él no se
+simula, y se dice por qué. Ninguna de las dos frases es la promesa que se esperaba al diseñarlo:
+protege, pero lo que cuesta es real y depende de dónde vive el dinero.
 
 **Y una que declara su propia inutilidad cuando falta el dato**: `retirement.success` y
 `retirement.success_threshold` dicen las dos que **sin volatilidad declarada en los activos el
@@ -311,7 +316,15 @@ Introducido en 3.9.0 junto al popover de ayuda. **Ampliado el 2026-09-03 (5.0.0,
 §5 (el tercer patrón del escáner de cobertura, la forma `helpId:` de objeto), §6 (recuento por
 comando: 52; el mapa de vistas gana Jubilación·plan, Jubilación·KPIs, Jubilación·Riesgo y Activos) y
 §6.2 (las 23 entradas nuevas, la única edición —`retirement.target` subordinado a la estrategia—, la
-norma de las dos bases y las dos entradas que documentan un resultado incómodo). **Re-verificado y
+norma de las dos bases y las dos entradas que documentan un resultado incómodo).
+
+**Re-sincronizado el 2026-09-03 tras el pase de correcciones de la revisión adversarial** (commit
+`0668f37` del motor + su seguimiento en `apps/web`, issue #207 cerrado): el catálogo sube de 52 a
+**53** con la entrada nueva `retirement.coverage` (añadida a Jubilación·Riesgo); `retirement.success`
+y `summary.success` pasan a exigir las DOS condiciones (jubilarse dentro del horizonte y no agotar,
+nunca solo «no agotar»); `retirement.cash_buffer` gana el hallazgo corregido (protege +3,9 pp con el
+colchón a la rentabilidad de la cartera, cuesta neto −3,5 pp con una cuenta al 0 %); y los dos
+marcadores `<!-- MC: revisar tras el pase de correcciones -->` se resuelven y se retiran. **Re-verificado y
 ampliado el 2026-08-22 (4.0.0)**:
 §6 (estado del catálogo, `retirement.target`) y §6.1 (las cuatro derivas de la auditoría previa a la
 publicación, ya corregidas en `helpTexts.ts`). **Ampliado el 2026-08-28 (Fase 5 del tren 4.4.0,
@@ -322,10 +335,10 @@ issue #86)**: §7 — decisión razonada de NO dar entrada a `financial_health.b
 
 ```bash
 # Entradas del catálogo y consumidores
-grep -c '^  "' apps/web/src/lib/helpTexts.ts        # 52 el 2026-09-03 (29 en main; 16 a 2026-08-25)
+grep -c '^  "' apps/web/src/lib/helpTexts.ts        # 53 el 2026-09-03 tras el pase de correcciones (52 antes; 29 en main; 16 a 2026-08-25)
 grep -cE '^    title: "' apps/web/src/lib/helpTexts.ts   # mismo número: contraste de indentación
 grep -rn 'helpId=' apps/web/src --include='*.tsx' | wc -l   # 23 — consumidores en JSX
-grep -rn 'helpId:' apps/web/src --include='*.ts' | wc -l    # 9 — consumidores en forma de OBJETO (5.0.0)
+grep -rn 'helpId:' apps/web/src --include='*.ts' | wc -l    # 12 el 2026-09-03 (9 antes del pase de correcciones) — consumidores en forma de OBJETO (5.0.0)
 # Los nombres de producto de las 5 estrategias viven una sola vez (D33):
 grep -n 'RETIREMENT_STRATEGY_LABEL' -A 6 apps/web/src/lib/retirementProfile.ts
 # Los dos hechos que §6.1 afirma sobre el código, sin compilar:

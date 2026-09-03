@@ -148,15 +148,16 @@ cargo test -p futurefin-engine-stochastic          # también en ci.yml (job `ru
 Dos binarios de test: `degeneration.rs` (abajo) y —desde WP6a, commit `ba6bdfe`— `monte_carlo.rs`,
 las puertas de Monte Carlo (reproducibilidad por semilla, degeneración con σ = 0, orden de las
 bandas, media del terminal contra la varianza log-normal derivada, y la tabla de la issue #207).
-**Estado el 2026-09-03: la suite NO está verde** — 13 unitarios + 3 de degeneración pasan, y de los
-11 de `monte_carlo.rs` **falla `mc_cash_buffer_changes_the_band_under_sequence_risk`**: la predicción
-«el colchón mejora la probabilidad de éxito» sale falsada por la medición (0,713 frente a 0,775).
-Es un *predict-then-run miss*, no un test flaky; la salida honesta es revisar la predicción o el
-modelo del colchón, nunca relajar el assert. **Así se resolvió** en el pase de correcciones de la
-revisión D20: la predicción estaba bien y el modelo tenía dos bugs (relleno anticipativo y colchón
-alojado en un activo volátil); el test se rehízo como
+**Estado el 2026-09-03, tras el pase de correcciones de la revisión D20: la suite está VERDE
+entera** — 13 unitarios + 3 de degeneración + 13 de `monte_carlo.rs` = **29 tests, 0 fallos**
+(más los 5 `#[ignore]` de `timing_mc.rs`, que miden y no afirman). El `mc_cash_buffer_…` que fallaba
+—`mc_cash_buffer_changes_the_band_under_sequence_risk`, predicción «el colchón mejora la
+probabilidad de éxito» falsada por la medición (0,713 frente a 0,775)— era un *predict-then-run
+miss*, no un test flaky, y así se cerró: la predicción estaba bien y el modelo tenía dos bugs
+(relleno anticipativo y colchón alojado en un activo volátil); el test se rehízo como
 `mc_cash_buffer_protects_and_the_drag_is_what_costs`, que separa el LASTRE de la PROTECCIÓN y fija
-los dos signos medidos en vez de uno ajustado. Pídele el estado al runner, no a esta página:
+los dos signos medidos en vez de uno ajustado (−3,5 pp con la cuenta al 0 %, +3,9 pp al retorno del
+fondo). Pídele el estado al runner, no a esta página:
 `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`.
 
 `tests/degeneration.rs` es la **puerta de aceptación** de que el camino de coma flotante y el camino
@@ -664,8 +665,8 @@ grep -n "5433" apps/api/tests/common/mod.rs
 grep -c '#\[test\]' crates/engine/src/*.rs   # 199 en total el 2026-09-03 (139 con la lista vieja)
 grep -c '#\[test\]' crates/engine/tests/*.rs crates/engine-stochastic/tests/*.rs
 cargo test -p futurefin-engine 2>&1 | grep "test result"              # 199 + 2 + 10 + 24, y 7 ignored
-cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"   # 13 + 3 + 11 el 2026-09-03,
-                                                # con 1 en ROJO (ver §El crate estocástico)
+cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"   # 13 + 3 + 13 el 2026-09-03,
+                                                # verde entero (ver §El crate estocástico)
 grep -c '^#\[ignore' crates/engine/tests/timing.rs                    # 7 el 2026-09-03 (sin el ancla
                                                 # ^ salen 8: el doc-comment del módulo cita el atributo)
 grep -c '#\[test\]' crates/engine/src/{projection,history,runway,net_return}.rs
