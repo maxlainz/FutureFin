@@ -28,6 +28,14 @@
   --ff-pos: oklch(0.50 0.14 165);
   --ff-neg: oklch(0.55 0.18 25);
 
+  /* Ámbar de ESTADO (5.0.0, D28): el peldaño intermedio del semáforo «Éxito del plan» —
+     verde ≥ umbral, ámbar hasta 10 puntos por debajo, rojo el resto. Existe porque el
+     estado tiene TRES valores y con dos tokens el intermedio se pintaba de rojo (alarma
+     donde no la hay) o de nada (indistinguible de «bien»). Mismo croma y misma luminancia
+     que `--ff-neg` en cada rama, hue 75: es su hermano en la escala de estado, no un
+     acento nuevo. Restricción idéntica a pos/neg: nunca decora, solo marca estado. */
+  --ff-warn: oklch(0.60 0.14 75);
+
   /* ---------- Radii ---------- */
   --ff-radius-frame: 12px;
   --ff-radius-panel: 14px;
@@ -150,6 +158,7 @@
 
   --ff-pos: oklch(0.78 0.12 165);
   --ff-neg: oklch(0.78 0.15 25);
+  --ff-warn: oklch(0.80 0.13 75);
 
   --ff-shadow-elev:
     0 4px 6px -1px rgba(0, 0, 0, 0.4),

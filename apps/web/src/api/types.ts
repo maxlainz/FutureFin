@@ -417,6 +417,23 @@ export type SummaryPlanApi = {
   underfunded: boolean | null;
   /** `household_aggregate` | `projection_unavailable`. `null` ⟺ el plan es el del usuario. */
   absent_reason: string | null;
+
+  // ── 5.0.0 WP6b — el KPI «Éxito del plan» (D25/D28) ────────────────────────────────────────
+  /**
+   * FRACCIÓN (Decimal-string, 6 dp): caminos en los que la cartera no se agota nunca (D22).
+   *
+   * **Es EXACTAMENTE el número del fan chart** de `GET /v1/projection/bands` — el mismo cache,
+   * los mismos caminos, la misma semilla. Nunca se recalcula aquí: dos muestras distintas
+   * enseñarían dos éxitos del mismo plan en la misma pantalla.
+   */
+  success_probability?: string | null;
+  /** PORCENTAJE del perfil (50..=99, default 95). Se ecoa aunque no haya sorteo: es
+   *  configuración del usuario, no una salida del modelo. */
+  success_threshold_pct?: number | null;
+  success_verdict?: SuccessVerdictApi | null;
+  /** `bands_unavailable` — el sorteo falló y el resto del plan SÍ viaja. Distinto de
+   *  `absent_reason`: «no sabemos tu probabilidad» ≠ «no sabemos tu plan». */
+  success_absent_reason?: string | null;
 };
 
 export type SummaryResponse = {
@@ -829,6 +846,110 @@ export type ProjectionSeriesApi = {
    *  de D29). Con el coast no alcanzable es la serie de aportar TODOS los meses: la mejor que el
    *  plan da. Vacío/ausente sin estrategia `coast`. */
   coast_path?: number[];
+};
+
+/**
+ * Un punto del abanico de percentiles (5.0.0 WP6b, D28) — espejo de `ProjectionBandPoint`
+ * (`apps/api/src/handlers/projection_bands.rs`).
+ *
+ * **`month_index` es la MISMA rejilla que `points[]` de `/v1/projection/series`** (las bandas
+ * viajan siempre a densidad `hybrid`, sin `?density`), así que las dos se dibujan en el mismo eje
+ * sin traducir nada — y sin indexar arrays: la posición 13 es el mes 24 en las dos.
+ *
+ * Los seis valores son `number` (f64 a 2 decimales), no Decimal-string: son valores de CHART, la
+ * excepción declarada D4/I3, igual que `points[].net_worth`.
+ */
+export type ProjectionBandPointApi = {
+  month_index: number;
+  net_worth_p10: number;
+  net_worth_p50: number;
+  net_worth_p90: number;
+  /** Bandas del LÍQUIDO. Por HTTP viajan siempre; ausentes ⇒ el backend no las mandó, **nunca
+   *  cero**. La SPA no las dibuja hoy (el abanico es de patrimonio, como la línea determinista). */
+  net_worth_liquid_p10?: number;
+  net_worth_liquid_p50?: number;
+  net_worth_liquid_p90?: number;
+};
+
+/** Probabilidad ACUMULADA de haber agotado la cartera, cada cinco años desde la jubilación
+ *  efectiva. `age: null` ⟺ el usuario no tiene fecha de nacimiento (la fila sigue existiendo:
+ *  la cifra es real aunque no se pueda rotular con una edad). */
+export type DepletionProbabilityPointApi = {
+  month_index: number;
+  age: number | null;
+  /** FRACCIÓN (Decimal-string): `"0.1200"` = 12 de cada 100 escenarios. */
+  probability: string | null;
+};
+
+/** Percentiles del MES de jubilación — solo con trigger por cruce. Un `null` DENTRO del objeto
+ *  no es «no calculado»: es un percentil que cae sobre un camino que no se jubila nunca. */
+export type RetirementMonthPercentilesApi = {
+  p10: number | null;
+  p50: number | null;
+  p90: number | null;
+};
+
+/** `green` | `amber` | `red` (D28): verde en el umbral EXACTO, ámbar hasta 10 puntos
+ *  porcentuales por debajo, rojo el resto. Lo decide el SERVIDOR — el cliente no lo recalcula. */
+export type SuccessVerdictApi = "green" | "amber" | "red";
+
+/**
+ * `GET /v1/projection/bands?paths&seed` (5.0.0 WP6b) — espejo de `ProjectionBandsResponse`.
+ *
+ * **Solo existe en `view=mine`**: los percentiles no suman entre miembros y el servidor devuelve
+ * 400 `household_bands_unavailable` en Hogar (por eso `view` es siempre `"mine"`).
+ */
+export type ProjectionBandsApi = {
+  /** Siempre `"mine"`. Se ecoa como en el resto de respuestas con scope. */
+  view: string;
+  months: number;
+  horizon_basis: string;
+  anchor_date_ymd: string;
+  paths: number;
+  /**
+   * **STRING de dígitos, no número**: es un `u64` y `JSON.parse` lo redondea por encima de 2^53.
+   * Reenviarlo como número devolvería OTRO sorteo sin que nada fallara.
+   */
+  seed: string;
+  /** Fijo `[10, 50, 90]`, en el orden de los campos de `points[]`. */
+  percentiles: number[];
+  points: ProjectionBandPointApi[];
+  /** FRACCIÓN (Decimal-string, 6 dp): caminos en los que la cartera NO se agota nunca (D22).
+   *  El recorte de una regla **no es fracaso** y viaja aparte, abajo. */
+  success_probability: string | null;
+  /** PORCENTAJE (50..=99, default 95) del perfil. Se ecoa aunque no haya sorteo. */
+  success_threshold_pct: number;
+  success_verdict: SuccessVerdictApi;
+  /** Vacío ⟺ ningún camino se jubila dentro del horizonte. */
+  depletion_probability_by_age: DepletionProbabilityPointApi[];
+  /** `null` con trigger por EDAD (ahí el mes es un dato del plan, no una distribución). */
+  retirement_month_index_percentiles: RetirementMonthPercentilesApi | null;
+  /** FRACCIÓN (Decimal-string): D17 en versión probabilística. `null` con trigger por cruce —
+   *  es el excluyente del anterior, y `retirement_trigger` dice cuál toca. */
+  underfunded_probability: string | null;
+  /** Mediana de MESES jubilados en que la regla dejó corta la necesidad. `0` con `fixed_real`
+   *  por construcción: esa regla no tiene techo. */
+  months_below_need_p50: number;
+  /** FRACCIÓN (Decimal-string): qué parte de la necesidad cubrió la regla. `1` = entera.
+   *  `null` cuando ningún camino tiene meses jubilados con necesidad positiva. */
+  withdrawal_to_need_ratio_p50: string | null;
+  /** `false` ⟺ **ningún activo declara volatilidad**: las tres bandas SON la línea determinista,
+   *  y la UI tiene que decirlo en vez de dibujar un abanico plano que se lee como certeza. */
+  any_volatility_declared: boolean;
+  /** P4: ¿se SIMULÓ el colchón? Hacen falta las tres cosas — colchón en el perfil, líquido que
+   *  lo albergue y volatilidad de la que protegerse. `false` con colchón configurado NO es un
+   *  fallo: es que aquí no significa nada. */
+  buffer_active: boolean;
+  /** Mediana del NÚMERO de meses con relleno. `null` ⟺ `buffer_active: false` («no se midió»,
+   *  que no es «cero rellenos»). */
+  buffer_refills_p50: number | null;
+  /** Euros (Decimal-string): mediana del TOTAL movido al colchón. Es un estadístico de una
+   *  muestra sorteada, **no un saldo** — la copia tiene que decirlo. `null` sin colchón activo. */
+  buffer_refill_net_total_p50: string | null;
+  strategy: RetirementStrategyApi;
+  retirement_trigger: RetirementTriggerApi;
+  computed_in_ms: number;
+  model_note: string;
 };
 
 export type FfbackupImportCounts = {

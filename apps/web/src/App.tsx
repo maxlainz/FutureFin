@@ -199,6 +199,7 @@ import type {
   MemberApiRow,
   PlanningAmountBasisApi,
   PlanningFlowApiRow,
+  ProjectionBandsApi,
   ProjectionSeriesApi,
   RetirementProfileApi,
   RetirementProfilePatchApi,
@@ -567,6 +568,33 @@ export default function App() {
     useState<ProjectionSeriesApi | null>(null);
   const [projectionBusy, setProjectionBusy] = useState(false);
   const [projectionError, setProjectionError] = useState<string | null>(null);
+
+  /**
+   * Bandas de Monte Carlo (5.0.0 WP6b, D28) — la sección «Riesgo» de Jubilación.
+   *
+   * Es una SEGUNDA petición, más cara que la serie (un MISS mide ~55 ms en release contra el
+   * sub-ms de un HIT de proyección), así que:
+   *
+   *  - se pide **después** de la serie, nunca en paralelo: la línea determinista es lo que el
+   *    usuario ve primero y el abanico es su contexto, no al revés;
+   *  - se pide **solo en la pestaña Jubilación**, que es la única que la dibuja. El KPI «Éxito
+   *    del plan» del Resumen NO la necesita: sus tres campos llegan dentro de `summary.plan`,
+   *    del MISMO cache de bandas del servidor (así el tile y el fan chart citan la misma
+   *    ejecución de Monte Carlo, nunca dos sorteos distintos del mismo plan);
+   *  - **no se pide en Hogar**: el servidor devuelve 400 `household_bands_unavailable` porque
+   *    los percentiles no suman entre miembros. La vista lo dice en vez de pedirlo y fallar.
+   *
+   * Refresco: se recarga con la serie. Toda mutación que invalida la proyección en el servidor
+   * invalida también las bandas (los dos mapas se borran juntos), así que una banda vieja al
+   * lado de una línea nueva —dos cifras que se contradicen en la misma pantalla— no puede
+   * ocurrir mientras el cliente refetchee las dos a la vez.
+   */
+  const [projectionBands, setProjectionBands] =
+    useState<ProjectionBandsApi | null>(null);
+  const [projectionBandsBusy, setProjectionBandsBusy] = useState(false);
+  const [projectionBandsError, setProjectionBandsError] = useState<string | null>(
+    null,
+  );
 
   // Serie histórica (snapshots pasados). Es un enhancement del chart: cualquier
   // fallo cae a `null` en silencio (sin busy/error state) y el chart degrada a
@@ -1200,6 +1228,40 @@ export default function App() {
     }
   }, [ledgerPersonScope]);
 
+  /**
+   * `GET /v1/projection/bands` — el abanico de percentiles de la sección «Riesgo».
+   *
+   * **Solo en la vista «Yo»**: en Hogar el servidor contesta 400 `household_bands_unavailable`
+   * (los percentiles no suman entre miembros), así que ni se pide — se limpia el estado y la
+   * vista pinta «Solo en tu vista (Yo)». Pedirlo para enseñar el error sería gastar un request
+   * en descubrir algo que el cliente ya sabe.
+   *
+   * Sin `paths` ni `seed`: los defaults del servidor (500 caminos, semilla estable por usuario)
+   * son EXACTAMENTE la petición cuyo resultado alimenta también el KPI del Resumen, así que las
+   * dos superficies caen en la misma entrada de cache y citan el mismo sorteo.
+   */
+  const loadProjectionBands = useCallback(async () => {
+    if (ledgerPersonScope !== "mine") {
+      setProjectionBands(null);
+      setProjectionBandsError(null);
+      return;
+    }
+    setProjectionBandsBusy(true);
+    setProjectionBandsError(null);
+    try {
+      const data = await apiGet<ProjectionBandsApi>(
+        "/v1/projection/bands?view=mine",
+      );
+      setProjectionBands(data);
+    } catch (e: unknown) {
+      // El abanico es contexto, no el plan: su fallo no puede tumbar la vista de Jubilación.
+      setProjectionBands(null);
+      setProjectionBandsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjectionBandsBusy(false);
+    }
+  }, [ledgerPersonScope]);
+
   const loadHistorySeries = useCallback(async () => {
     // Purga síncrona antes del await: en un toggle Hogar↔Mío la serie del scope anterior no debe
     // sobrevivir la ventana de fetch (se fusionaría con la proyección del nuevo scope → empalme
@@ -1339,6 +1401,12 @@ export default function App() {
             setProjectionSeries((await projRes.json()) as ProjectionSeriesApi);
           }
         }
+        // Las bandas van DESPUÉS y sin `await` (§Riesgo, D28): son la segunda petición, la cara,
+        // y la sección que las dibuja está más abajo en la página. Bloquear aquí retrasaría los
+        // KPIs y el chart determinista, que es lo primero que se mira. Dentro del `try` a
+        // propósito: si el presupuesto o la serie fallaron, la vista ya está enseñando un error
+        // y un abanico encima no aporta nada.
+        void loadProjectionBands();
       } catch (e: unknown) {
         if (!silent) {
           setRetirementBudgetSnapshot(null);
@@ -1351,7 +1419,7 @@ export default function App() {
         }
       }
     },
-    [ledgerPersonScope, installation],
+    [ledgerPersonScope, installation, loadProjectionBands],
   );
 
   const loadCategories = useCallback(async () => {
@@ -2285,6 +2353,9 @@ export default function App() {
       );
       setRetirementProfile(saved);
       void loadProjectionSeriesPage();
+      // El perfil ES el input del sorteo (estrategia, regla, colchón, umbral): sin esto la
+      // sección «Riesgo» seguiría enseñando el abanico del plan anterior junto a la línea nueva.
+      void loadProjectionBands();
       return saved;
     } catch (e: unknown) {
       setRetirementProfileError(e instanceof Error ? e.message : String(e));
@@ -4150,6 +4221,9 @@ export default function App() {
             ledgerPersonScope={ledgerPersonScope}
             projectionSeries={projectionSeries}
             projectionBusy={projectionBusy}
+            projectionBands={projectionBands}
+            projectionBandsBusy={projectionBandsBusy}
+            projectionBandsError={projectionBandsError}
             retirementBudgetSnapshot={retirementBudgetSnapshot}
             summary={summary}
             retirementBusy={retirementBusy}

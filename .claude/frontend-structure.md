@@ -482,6 +482,63 @@ del usuario.
   sesión y el servidor lo acepta de cualquier rol — de ahí que `canEditProfile` en `RetirementView`
   no exija `role === "owner"` (ver tabla de arriba).
 
+## Bandas de Monte Carlo y sección «Riesgo» (5.0.0, D28, issue #207)
+
+`projectionBands` (`ProjectionBandsApi | null`, `App.tsx`) alimenta la sección «Riesgo» de
+Jubilación: el abanico p10/p50/p90, el semáforo «Éxito del plan», la tabla de agotamiento por edad
+y las lecturas de recorte/colchón. Es una **segunda petición, más cara que la serie** (un MISS de
+`GET /v1/projection/bands` mide ~55 ms en release contra el sub-ms de un HIT de proyección), y por
+eso su ciclo de vida tiene cuatro reglas:
+
+1. **Después de la serie, nunca antes ni en paralelo.** `loadProjectionBands()` se dispara al
+   final del `try` de `loadRetirementPage()`, sin `await`: la línea determinista y los KPIs son lo
+   primero que se mira y el abanico es su contexto. Dentro del `try` a propósito — si el
+   presupuesto o la serie fallaron, la vista ya enseña un error y un abanico encima no aporta nada.
+2. **Solo en la pestaña Jubilación.** Es la única que lo dibuja. El KPI «Éxito del plan» del
+   **Resumen NO lo necesita**: sus tres campos (`success_probability`, `success_threshold_pct`,
+   `success_verdict`, más `success_absent_reason`) llegan dentro de `summary.plan`, servidos por el
+   servidor desde el MISMO cache de bandas — así el tile y el fan chart citan **la misma ejecución**
+   de Monte Carlo. Pedir las bandas también desde el Resumen sería un segundo sorteo y dos éxitos
+   distintos del mismo plan en la misma sesión.
+3. **Nunca en Hogar.** El servidor devuelve 400 `household_bands_unavailable` (los percentiles no
+   suman entre miembros), así que el cliente ni lo intenta: limpia el estado y la sección pinta
+   «Solo en tu vista (Yo)». Gastar un request en descubrir algo que el cliente ya sabe es la única
+   forma de equivocarse aquí.
+4. **Se recarga con la serie.** Además del cambio de pestaña/ámbito, `saveRetirementProfilePatch`
+   la refetchea junto a `loadProjectionSeriesPage()`: el perfil ES el input del sorteo (estrategia,
+   regla de retirada, colchón, umbral). En el servidor las dos invalidaciones de la proyección
+   borran **los dos mapas** de cache, así que una banda vieja junto a una línea nueva —dos cifras
+   que se contradicen en la misma pantalla— no puede ocurrir mientras el cliente refetchee las dos.
+
+La URL no lleva `paths` ni `seed`: los defaults del servidor (500 caminos, semilla estable por
+usuario, D23) son exactamente la petición cuyo resultado alimenta también el KPI del Resumen, así
+que las dos superficies caen en la misma entrada de cache.
+
+- **Módulo puro**: [`lib/risk-bands.ts`](../apps/web/src/lib/risk-bands.ts) (`buildRiskFan`,
+  `successVerdictTone`, `formatSuccessScenarios`, `formatSuccessThreshold`, `buildDepletionRows`,
+  `buildRiskExtraRows`, `showsNoVolatilityNotice`, `riskFootnote`, `summarySuccessTile`), con test.
+  **Ni una decisión de modelo vive aquí**: el veredicto, la probabilidad y las medianas las calcula
+  el servidor y este módulo alinea, deflacta y traduce a copy.
+- **Chart**: [`components/charts/RiskFanChart.tsx`](../apps/web/src/components/charts/RiskFanChart.tsx)
+  — ver [`design-system.md`](design-system.md) §Componentes nuevos (charts) para el porqué de que no
+  sea una prop de `MiniProjection`.
+- **La trampa que este código existe para no pisar**: la banda viaja SIEMPRE a densidad `hybrid`
+  (`GET /v1/projection/bands` no acepta `?density`) mientras `points[]` de la serie suele ser
+  `monthly` (segunda fase del two-phase). **Son dos rejillas distintas**: se emparejan por
+  `month_index`, jamás por posición de array, y la determinista se recorta a la ventana de la banda
+  con `lastPointIndexAtOrBeforeMonth` (ver §Índice de array ≠ mes). Con `slice` por longitud el
+  abanico se desplaza décadas y el chart resultante sigue pareciendo correcto.
+- **Deflactación**: el toggle «En dinero de hoy» de la sección comparte llave de `localStorage`
+  con el de Proyección (`PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY`) — es la misma pregunta y dos
+  respuestas distintas en dos pestañas harían comparar cifras que no son comparables. El factor sale
+  de `deflation_annual_inflation_percent` de la RESPUESTA (#136-4a) y se aplica a las **cuatro**
+  series a la vez: deflactar solo la banda la separaría de la línea que dice contener.
+- **helpIds nuevos**: `retirement.bands` (bandas puntuales · la mediana no es un camino),
+  `retirement.success`, `retirement.depletion_by_age` y `summary.success` (versión corta del
+  anterior). Además, `retirement.cash_buffer` se **reescribió** con el resultado medido de P4: el
+  colchón se rellena solo en los meses buenos, cuesta rentabilidad y en el modelo actual BAJA la
+  probabilidad de éxito — el texto anterior prometía protección.
+
 ## Import conventions
 
 - **`api/`** depends only on `api/` and the DOM `fetch`. No React.
@@ -714,4 +771,12 @@ solves de WP5-2b, series auxiliares discontinuas del chart, tarjeta «Plan» ley
 - La tarjeta «Tu plan» lee el Resumen, no la serie: `grep -n "ownPlanCard" apps/web/src/views/SummaryView.tsx apps/web/src/lib/plan-card.ts`
 - Los 9 códigos MCP-only de `simulate_projection` tienen frase: `grep -c "profile_overrides_empty\|profile_overrides_no_op\|swr_pct_set_twice\|income_pause_\|solve_no_op" apps/web/src/lib/errorMessages.ts`
 - El escáner de `helpTexts.test.ts` acepta la forma de objeto (los ids ya no viven solo en JSX): `grep -n 'helpId:' apps/web/src/lib/helpTexts.test.ts`
+- WP7 3c — módulo y chart del riesgo: `ls apps/web/src/lib/risk-bands.ts apps/web/src/components/charts/RiskFanChart.tsx`
+- El abanico se pide DESPUÉS de la serie y solo en Jubilación: `grep -n "void loadProjectionBands()" apps/web/src/App.tsx` (2: el final de `loadRetirementPage` y el guardado del perfil)
+- El Resumen NO pide bandas —lee `summary.plan`—: `grep -n "projection/bands" apps/web/src/views/SummaryView.tsx` (**un solo acierto, y es el comentario que explica por qué no se pide**) y `grep -n "summarySuccessTile" apps/web/src/views/SummaryView.tsx`
+- Hogar no las pide: `grep -n -B2 'setProjectionBands(null)' apps/web/src/App.tsx` — la primera guarda de `loadProjectionBands` sale por ámbito, antes de tocar la red
+- El emparejamiento es por MES: `grep -n "lastPointIndexAtOrBeforeMonth" apps/web/src/lib/risk-bands.ts`
+- Los campos del contrato están tipados: `grep -n "success_probability\|any_volatility_declared\|depletion_probability_by_age\|buffer_refill_net_total_p50" apps/web/src/api/types.ts`
+- Los cuatro helpIds nuevos existen y se consumen (el test bidireccional lo exige): `grep -n '"retirement.bands"\|"retirement.success"\|"retirement.depletion_by_age"\|"summary.success"' apps/web/src/lib/helpTexts.ts`
+- La ayuda del colchón ya NO promete protección: `grep -n "CUESTA rentabilidad" apps/web/src/lib/helpTexts.ts` (1 acierto) y `grep -c "no verte obligado a vender" apps/web/src/lib/helpTexts.ts` (**0**)
 - GastosView's documented exception to "hide, don't disable": `grep -n "disabled={!canEdit" apps/web/src/views/GastosView.tsx` (the two inline `<select>`s — categoría/tipo — stay `disabled`, not hidden)

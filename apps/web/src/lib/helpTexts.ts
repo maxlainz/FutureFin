@@ -156,6 +156,16 @@ export const HELP_TEXTS = {
       "su propio plan.",
   },
 
+  "summary.success": {
+    title: "Éxito del plan",
+    body:
+      "En cuántos de los escenarios con volatilidad tu cartera aguanta el horizonte entero sin " +
+      "agotarse. El color la compara con tu umbral: verde si lo alcanza, ámbar hasta diez " +
+      "puntos por debajo, rojo más abajo. Es el MISMO sorteo que dibuja la sección Riesgo de " +
+      "Jubilación —no se recalcula aquí—, y allí está el detalle: la franja de escenarios y la " +
+      "probabilidad de agotar el capital por edad.",
+  },
+
   // --- Jubilación -----------------------------------------------------------
   "retirement.target": {
     title: "Patrimonio objetivo",
@@ -261,10 +271,13 @@ export const HELP_TEXTS = {
   "retirement.cash_buffer": {
     title: "Colchón de caja",
     body:
-      "Meses de gasto que quieres tener siempre en efectivo para no verte obligado a vender en " +
-      "un mal año. Solo actúa en los escenarios con volatilidad: en la proyección de siempre —la " +
-      "línea— no cambia nada, porque ahí no hay malos años que esquivar. Vacío significa sin " +
-      "colchón declarado.",
+      "Meses de gasto que quieres tener siempre en efectivo. Solo existe en los escenarios con " +
+      "volatilidad —la línea de siempre no lo simula— y se rellena únicamente en los meses " +
+      "buenos, vendiendo inversión. Eso CUESTA rentabilidad: el dinero fuera del mercado no " +
+      "compone, y en el modelo actual, que sortea cada mes de forma independiente, baja la " +
+      "probabilidad de éxito en vez de subirla. Se ofrece porque hay hogares que prefieren esa " +
+      "tranquilidad. Mira la sección Riesgo con tus propios números antes de decidir. Vacío " +
+      "significa sin colchón declarado.",
   },
   "retirement.success_threshold": {
     title: "Umbral de éxito",
@@ -335,6 +348,39 @@ export const HELP_TEXTS = {
       "de tu gasto cubrirá la pensión cuando llegue (puede ser todo o una parte: lo decide el " +
       "importe que declaras) y a qué tasa anual se han descontado los años de puente, porque ese " +
       "dinero sigue invertido mientras lo gastas.",
+  },
+
+  // --- Jubilación · Riesgo (5.0.0, D28) -------------------------------------
+  "retirement.bands": {
+    title: "Escenarios con volatilidad",
+    body:
+      "Miles de futuros posibles de tu mismo plan: cada mes el mercado sube o baja según la " +
+      "volatilidad que hayas declarado en tus activos, y el sorteo se repite cientos de veces. " +
+      "La franja recoge del escenario 10 al 90 —uno de cada diez queda por encima y uno de cada " +
+      "diez por debajo—, la línea discontinua es la mediana y la sólida es la proyección de " +
+      "siempre, la que el resto de la app enseña como dinero. Ojo con la mediana: es el valor " +
+      "central de cada mes por separado, así que NO es un futuro concreto y no cuadra con " +
+      "ninguna simulación. El sorteo usa la misma semilla cada vez, así que las cifras no " +
+      "bailan entre visitas.",
+  },
+  "retirement.success": {
+    title: "Éxito del plan",
+    body:
+      "En cuántos de esos escenarios tu cartera aguanta el horizonte entero sin agotarse, con " +
+      "tus pensiones y tus fases ya dentro. NO cuenta como fracaso que una regla de retirada te " +
+      "recorte el gasto en un año malo: eso se mide aparte, aquí abajo. El color compara esa " +
+      "cifra con tu umbral: verde si lo alcanza, ámbar hasta diez puntos por debajo, rojo más " +
+      "abajo. Sin volatilidad declarada en tus activos no hay escenarios que contar y el número " +
+      "no significa nada.",
+  },
+  "retirement.depletion_by_age": {
+    title: "Probabilidad de agotar el capital",
+    body:
+      "Qué parte de los escenarios ha agotado la cartera A ESA EDAD O ANTES, contando desde el " +
+      "mes en que te jubilas. Es acumulada, así que solo puede crecer con la edad: el 8 % a los " +
+      "80 incluye a todos los que se quedaron sin capital a los 75. Sale del mismo sorteo que " +
+      "la probabilidad de éxito, así que la última fila y el éxito cuentan lo mismo desde los " +
+      "dos lados.",
   },
 
   // --- Ajustes · Proyección -------------------------------------------------

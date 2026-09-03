@@ -3,7 +3,13 @@ import { METRIC_DASH } from "../lib/format";
 import { HelpPopover } from "./HelpPopover";
 import { HELP_TEXTS, type HelpTextId } from "../lib/helpTexts";
 
-export type MetricCardTone = "default" | "hero" | "accent" | "accent-2" | "danger";
+export type MetricCardTone =
+  | "default"
+  | "hero"
+  | "accent"
+  | "accent-2"
+  | "warn"
+  | "danger";
 
 export function MetricCard({
   label,
@@ -43,7 +49,10 @@ export function MetricCard({
   action?: ReactNode;
   /** Variante visual: hero (acento más marcado), accent / accent-2 (tinte suave), danger (el
    *  rojo de D17: el plan está completo y NO llega — mismo tinte que `.error-banner` y que la
-   *  tarjeta de plan del Resumen, un solo vocabulario de «esto va mal» en toda la app). */
+   *  tarjeta de plan del Resumen, un solo vocabulario de «esto va mal» en toda la app) y **warn**
+   *  (5.0.0 D28: el ámbar del semáforo «Éxito del plan», el peldaño entre «va bien» y «va mal»;
+   *  misma piel que `danger` con `--ff-warn`, para que los tres estados se lean como una escala
+   *  y no como tres decoraciones distintas). */
   tone?: MetricCardTone;
 }) {
   const toneClass =
@@ -53,9 +62,11 @@ export function MetricCard({
         ? " metric-card--accent"
         : tone === "accent-2"
           ? " metric-card--accent-2"
-          : tone === "danger"
-            ? " metric-card--danger"
-            : "";
+          : tone === "warn"
+            ? " metric-card--warn"
+            : tone === "danger"
+              ? " metric-card--danger"
+              : "";
   const showParen = parenthetical != null && parenthetical !== "";
   const showDetail = detail != null && detail !== "";
   const hasTrend = trend != null && trend !== false;

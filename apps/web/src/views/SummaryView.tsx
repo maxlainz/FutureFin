@@ -39,6 +39,7 @@ import {
   planMilestone,
   planStatusFromWarnings,
 } from "../lib/plan-card";
+import { summarySuccessTile } from "../lib/risk-bands";
 import { TAB_PATH, settingsSubTabPath } from "../lib/navigation";
 
 type LedgerPersonScope = "household" | "mine";
@@ -265,6 +266,17 @@ export function SummaryView({
     return own ? [own] : [];
   })();
 
+  /**
+   * KPI «Éxito del plan» (D28). Sale de `summary.plan.success_*` — el MISMO sorteo de Monte
+   * Carlo que dibuja la sección «Riesgo» de Jubilación, servido desde su cache: aquí no se pide
+   * `/v1/projection/bands` ni se recalcula nada. Si hubiera un segundo sorteo, el tile y el
+   * abanico contarían dos éxitos distintos del mismo plan.
+   *
+   * `null` = el backend no publica el bloque; entonces no se pinta tarjeta ninguna (un guion
+   * mudo se leería como «tu plan no tiene éxito medible»).
+   */
+  const successTile = summarySuccessTile(summary?.plan);
+
   const goToPlanAction = (target: "account" | "retirement") => {
     navigate(target === "account" ? settingsSubTabPath("general") : TAB_PATH.retirement);
   };
@@ -429,6 +441,22 @@ export function SummaryView({
               </article>
             ))}
           </div>
+          {/* D28 — «Éxito del plan» junto al plan que evalúa: la probabilidad sin la estrategia
+              al lado es un porcentaje sin sujeto. En Hogar y con el sorteo caído se pinta con
+              guion y su razón, nunca oculta: un hueco silencioso es indistinguible de «no lo
+              hemos medido porque no hacía falta». */}
+          {successTile ? (
+            <div className="metric-grid summary-success-grid">
+              <MetricCard
+                label="Éxito del plan"
+                helpId="summary.success"
+                value={successTile.value}
+                parenthetical={successTile.parenthetical}
+                detail={successTile.detail}
+                tone={successTile.tone}
+              />
+            </div>
+          ) : null}
         </section>
       ) : null}
 

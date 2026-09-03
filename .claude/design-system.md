@@ -10,6 +10,7 @@ Refresca de UI completa, **solo frontend**: no toca handlers, datos ni endpoints
 - **Único color de marca**: acento periwinkle (`oklch(0.56 0.13 250)` claro, `oklch(0.74 0.11 250)` oscuro). Cualquier "destacado" del UI usa solo este color.
 - **Sin tonos cálidos**: no hay crema, beige, etc. Si encuentras alguno en el código, restitúyelo a un zinc.
 - **Semánticos pos/neg**: verde/rojo **únicamente para texto de cifras delta** (deltas, saldos, "−€640"). Nunca en fondos, bordes, iconos o chrome decorativo.
+- **Escala de ESTADO — la excepción acotada** (`--ff-neg`, `--ff-warn`; 5.0.0, D17/D28): tres tarjetas y un banner tiñen su PIEL con un semáforo — `.error-banner`, `.plan-card--danger`, `.metric-card--danger` y `.metric-card--warn`. No contradice la regla de arriba: no es color de cifra ni decoración, es el estado de un plan («llega» / «al límite» / «no llega»), y el tinte es siempre el mismo (8 % sobre `--ff-paper`, borde al 45 %) para que se lea como **un solo vocabulario**. Fuera de esa lista, pos/neg/warn siguen prohibidos en fondos, bordes, iconos y chrome. **Verde no tiene piel**: «va bien» es el estado normal, y teñir también el caso bueno convierte el color en ruido.
 - **Gráficas — única excepción**: las charts (proyección, mini-projection, donut del Resumen) pueden usar varios colores funcionales para distinguir series. Sigue siendo una paleta sobria.
 
 ## Tokens
@@ -28,6 +29,17 @@ Definidos en [`apps/web/src/styles/theme.css`](../apps/web/src/styles/theme.css)
 | `--ff-accent` | `oklch(0.56 0.13 250)` | `oklch(0.74 0.11 250)` | Único color de marca |
 | `--ff-accent-fg` | `#fff` | tinta deep | Texto sobre acento (raro) |
 | `--ff-pos` / `--ff-neg` | oklch deep | oklch pastel | **Solo cifras delta** |
+| `--ff-warn` | `oklch(0.60 0.14 75)` | `oklch(0.80 0.13 75)` | **Ámbar de ESTADO** (5.0.0, D28) — el peldaño intermedio del semáforo. Mismas restricciones que pos/neg |
+
+> **`--ff-warn` — por qué hay un tercer color de estado (5.0.0, D28, issue #207).** El KPI «Éxito
+> del plan» tiene TRES valores, no dos: verde en el umbral o por encima, ámbar hasta diez puntos
+> porcentuales por debajo, rojo el resto. Con solo `--ff-pos`/`--ff-neg` el peldaño intermedio se
+> pintaba de rojo (alarma donde no la hay) o de nada (indistinguible de «va bien»), y el semáforo
+> dejaba de ser un semáforo. El token es el **hermano de `--ff-neg` en la escala de estado**: mismo
+> croma y misma luminancia en cada rama, hue 75. No es un acento nuevo y **no decora**: la
+> restricción es la de pos/neg — solo marca estado (hoy: la piel de `.metric-card--warn`), nunca
+> chrome, iconos ni texto decorativo. El veredicto lo decide el SERVIDOR (`success_verdict`); la SPA
+> solo lo traduce a tono.
 
 Radii: `--ff-radius-{frame=12, panel=14, kpi=12, pill=999, input=10}px`.
 
@@ -228,6 +240,42 @@ HTML normal —nunca dentro de un `<svg>`— con `flex-wrap` real.
   owner en duplicados, colapso, top-N del tooltip) vive PURA en
   [`lib/chart-legend.ts`](../apps/web/src/lib/chart-legend.ts) y está testeada en Vitest.
 
+### `RiskFanChart` — [`components/charts/RiskFanChart.tsx`](../apps/web/src/components/charts/RiskFanChart.tsx) (5.0.0, D28, issue #207)
+
+Abanico de percentiles de la sección «Riesgo» de Jubilación: **área entre p10 y p90 + mediana p50
+discontinua + línea determinista sólida**, las tres sobre el mismo eje X.
+
+- **Por qué NO es una prop más de `MiniProjection`** (la regla de «usa MiniProjection para
+  cualquier chart pequeño» tiene aquí su excepción declarada): aquel dibuja UNA serie sobre la
+  rejilla de `points[]`; este tiene **dos fuentes con rejillas distintas** —la banda viaja siempre
+  a densidad `hybrid` y la serie que el cliente tiene cargada suele ser `monthly`—, un área entre
+  percentiles y un eje Y que no puede anclarse a 0. Meterlo dentro habría añadido cinco props y una
+  segunda máquina de escalas al componente que ya usan Resumen y Jubilación.
+- **Todo por MES** (`xAtMonth`), nunca por posición de array: con dos densidades a la vez,
+  emparejar por índice desplaza el abanico décadas y el chart resultante **sigue pareciendo
+  correcto**. La aritmética (alineación, deflactación, rango) vive pura en
+  [`lib/risk-bands.ts`](../apps/web/src/lib/risk-bands.ts) con su test; el componente solo pinta.
+- **Color: dos tokens.** Banda y mediana en `--ff-accent` (es la lectura del plan, familia del
+  objetivo FIRE); la determinista en `--proj-nw`, el color con el que el patrimonio se dibuja en
+  toda la app, para que se reconozca la curva que ya se conoce. Se separan **además por patrón**
+  (relleno 16 % / guion `5 3` / sólida), así que la identidad nunca es solo color. La opacidad va
+  en `fillOpacity`/`strokeOpacity` y no dentro del color: el mismo token resuelve claro y oscuro.
+- El marcador de jubilación usa `--proj-fire`, el mismo que en el chart grande.
+- Leyenda obligatoria (3 series) vía `ChartLegend` con swatches `area` / `dashed` / `line`, y bajo
+  el chart la nota **«Bandas puntuales: la mediana no es un camino»** (`.risk-fan-note`, con el
+  `HelpPopover` de `retirement.bands` en la misma línea): la curva central se calcula ordenando los
+  valores de CADA mes, así que no corresponde a ninguna simulación. Es una instrucción de lectura,
+  por eso va pegada al chart y no en el pie — y por eso la ayuda cuelga de ella y no del título del
+  panel.
+
+Clases de la sección (todas en `App.css`, cero color propio salvo `--ff-warn`):
+`.metric-card--warn` (tono ámbar del KPI, misma construcción que `--danger`), `.risk-fan-note`,
+`.risk-depletion-grid` + `.risk-depletion-cell`/`-age`/`-value` (la tabla «Probabilidad de agotar
+el capital» — `auto-fit` con `minmax(min(50%, 7rem), 1fr)`, que da **dos columnas en móvil sin una
+media query nueva**), `.risk-extra-rows`/`.risk-extra-row`/`-head`/`-label`/`-value`/`-detail` y
+`.risk-footnote` (procedencia: ms, caminos y semilla; `overflow-wrap: anywhere` porque la semilla
+es un entero de 20 dígitos que no cabe a 360px).
+
 ### `PlanningDirectionChart` — [`components/charts/PlanningDirectionChart.tsx`](../apps/web/src/components/charts/PlanningDirectionChart.tsx)
 
 Barra apilada inflow/outflow de la pestaña Próximos (`<svg viewBox="0 0 100 12">`). SVG inline
@@ -272,6 +320,17 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 > segundo slot (`.metric-value-detail`): la cifra sigue en tinta normal porque el número no está
 > mal; lo que está mal es lo que significa. Único consumidor hoy: «Ahorro necesario» de Jubilación
 > cuando `underfunded === true`.
+>
+> **Tono ámbar de KPI (`.metric-card--warn`, prop `tone="warn"` de `MetricCard`)** (5.0.0, D28,
+> issue #207): el peldaño INTERMEDIO del semáforo «Éxito del plan». Misma construcción que
+> `--danger` —tinte al 8 %, borde al 45 %— pero con `--ff-warn`, para que verde/ámbar/rojo se lean
+> como una escala y no como tres decoraciones sin relación. Consumidores: «Éxito del plan» en
+> Jubilación (§Riesgo) y en el Resumen. El verde NO tiene piel propia: «va bien» es el estado
+> normal y teñir también el caso bueno convierte el color en ruido.
+>
+> **KPI de éxito del Resumen (`.metric-grid.summary-success-grid`)** (5.0.0, D28): una sola tarjeta
+> dentro del panel «Tu plan». `auto-fill` y **no** `auto-fit` a propósito: con `auto-fit` la única
+> tarjeta absorbería las pistas vacías y se estiraría a toda la fila.
 >
 > **Cifras del plan (`.plan-card-figures`)** (5.0.0 WP7-3b2, `SummaryView.tsx`): fila propia entre
 > el hito y el estado de `.plan-card`, con «Ahorro necesario X/mes · Margen Y/mes». Va en su renglón
@@ -428,3 +487,7 @@ cifras del plan en el Resumen), de la rama `release/5.0.0`, issue #207. Re-verif
 - Tono rojo de KPI: `grep -n "metric-card--danger" apps/web/src/App.css apps/web/src/components/MetricCard.tsx` y su único consumidor `grep -n 'tone={t.tone === "danger"' apps/web/src/views/RetirementView.tsx`
 - Segunda rejilla y avisos de Jubilación: `grep -n "retirement-solve-grid\|retirement-strategy-notices" apps/web/src/App.css apps/web/src/views/RetirementView.tsx` (el nombre NO es `retirement-strategy-grid`: esa clase ya existe **sin envolver** para las 5 radio-cards de estrategia y se habría aplicado también aquí)
 - Cifras del plan: `grep -n "plan-card-figures" apps/web/src/App.css apps/web/src/views/SummaryView.tsx`
+- **WP7 3c** — el abanico existe y no vive dentro de `MiniProjection`: `ls apps/web/src/components/charts/RiskFanChart.tsx` y `grep -c "p10\|p90" apps/web/src/components/charts/MiniProjection.tsx` (**0**)
+- `--ff-warn` está en las DOS ramas del tema y sin más consumidores que el tono de KPI: `grep -c -- "--ff-warn" apps/web/src/styles/theme.css` (2) y `grep -rn -- "var(--ff-warn)" apps/web/src/App.css` (solo `.metric-card--warn`)
+- Clases de la sección «Riesgo»: `grep -n "risk-fan-note\|risk-depletion-grid\|risk-extra-rows\|risk-footnote\|summary-success-grid" apps/web/src/App.css apps/web/src/views/RetirementView.tsx apps/web/src/views/SummaryView.tsx`
+- La aritmética del abanico vive PURA y testeada: `grep -c 'it(' apps/web/src/lib/risk-bands.test.ts`

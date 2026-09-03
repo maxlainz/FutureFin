@@ -4273,3 +4273,142 @@ fieldset.retirement-config-stack {
   letter-spacing: 0.02em;
   pointer-events: none;
 }
+
+/* ============================================================
+   SECCIÓN «RIESGO» DE JUBILACIÓN (5.0.0, D28, issue #207)
+   ------------------------------------------------------------
+   Abanico de percentiles + semáforo de éxito + tabla de
+   agotamiento por edad. Cero color propio salvo el ámbar de
+   estado (`--ff-warn`, definido en theme.css con sus dos ramas):
+   el resto son los mismos tokens que ya usan panel, KPI y tabla.
+   ============================================================ */
+
+/* Ámbar de un KPI (D28): el peldaño INTERMEDIO del semáforo. Misma
+   construcción que `.metric-card--danger` —tinte al 8 %, borde al 45 %—
+   para que verde/ámbar/rojo se lean como una escala y no como tres
+   decoraciones sin relación. Solo la piel: la cifra sigue en tinta
+   normal, porque el número no está mal; lo que matiza es su lectura. */
+.metric-card--warn {
+  background: color-mix(in oklch, var(--ff-warn) 8%, var(--ff-paper));
+  border-color: color-mix(in oklch, var(--ff-warn) 45%, var(--ff-line-soft));
+}
+
+.metric-card--warn .metric-value-detail {
+  color: var(--ff-warn);
+  font-weight: 600;
+}
+
+/* Nota bajo el abanico. Es la frase que impide leer la mediana como un
+   camino, así que va pegada al chart y no en el pie del panel. */
+.risk-fan-note {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--ff-ink-soft);
+}
+
+/* Tabla «Probabilidad de agotar el capital». `auto-fit` y no un `<table>`:
+   son pares etiqueta/valor sin relación entre filas, y en móvil el
+   requisito (D28) son DOS columnas — que aquí sale del propio `minmax`
+   sin una media query nueva. */
+.risk-depletion-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(50%, 7rem), 1fr));
+  gap: 0.4rem 0.75rem;
+  margin-top: 0.35rem;
+}
+
+.risk-depletion-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.4rem 0.55rem;
+  background: var(--ff-paper);
+  border: 1px solid var(--ff-line-soft);
+  border-radius: var(--ff-radius-kpi);
+  min-width: 0;
+}
+
+.risk-depletion-age {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ff-muted);
+  white-space: nowrap;
+}
+
+.risk-depletion-value {
+  font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--ff-ink);
+}
+
+/* Filas extra (jubilación probable, recorte, colchón): pares
+   etiqueta/valor apilados, con la base debajo en muted. Slot de detalle
+   NO reservado a propósito — no hay baseline compartida que alinear:
+   cada fila es independiente y su altura la marca su propio texto. */
+.risk-extra-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.risk-extra-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.risk-extra-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.6rem;
+}
+
+.risk-extra-label {
+  font-size: 0.78rem;
+  color: var(--ff-ink-soft);
+}
+
+.risk-extra-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--ff-ink);
+}
+
+.risk-extra-detail {
+  font-size: 0.74rem;
+  line-height: 1.3;
+  color: var(--ff-muted);
+}
+
+/* Pie del panel: coste, caminos y semilla. Letra pequeña de verdad —es
+   procedencia, no una cifra del plan— y `overflow-wrap` porque la
+   semilla es un entero de 20 dígitos que no cabe a 360px. */
+.risk-footnote {
+  margin-top: 0.6rem;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--ff-muted);
+  overflow-wrap: anywhere;
+}
+
+/* KPI «Éxito del plan» del Resumen (5.0.0, D28): una sola tarjeta dentro del
+   panel «Tu plan». `auto-fill` (y no `auto-fit`) es lo que la mantiene del
+   ancho de una KPI y no estirada a toda la fila: con `auto-fit` la única
+   tarjeta absorbería las pistas vacías. `margin-bottom: 0` porque ya está
+   dentro de un panel que trae su propio espaciado inferior. */
+.metric-grid.summary-success-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 13rem), 1fr));
+  margin-top: 0.65rem;
+  margin-bottom: 0;
+}

@@ -10,6 +10,7 @@ import type {
   BudgetSnapshotApi,
   InstallationAccess,
   PensionPlanApi,
+  ProjectionBandsApi,
   ProjectionSeriesApi,
   RetirementProfileApi,
   RetirementProfilePatchApi,
@@ -19,9 +20,11 @@ import type {
   WithdrawalRuleKindApi,
 } from "../api/types";
 import { HelpPopover } from "../components/HelpPopover";
+import { Switch } from "../components/Switch";
 import { HELP_TEXTS } from "../lib/helpTexts";
 import { MetricCard } from "../components/MetricCard";
 import { MiniProjection } from "../components/charts/MiniProjection";
+import { RiskFanChart } from "../components/charts/RiskFanChart";
 import { ChartLegend } from "../components/charts/ChartLegend";
 import {
   METRIC_DASH,
@@ -59,15 +62,27 @@ import {
   TARGET_BASIS_TILE_LABEL,
   buildRetirementTiles,
 } from "../lib/retirement-tiles";
+import {
+  buildDepletionRows,
+  buildRiskExtraRows,
+  buildRiskFan,
+  formatSuccessScenarios,
+  formatSuccessThreshold,
+  riskFootnote,
+  showsNoVolatilityNotice,
+  successVerdictTone,
+} from "../lib/risk-bands";
 import { type LedgerPersonScope } from "../lib/ledger";
 import {
   persistRetirementIntroDismissed,
   readRetirementIntroDismissed,
 } from "../lib/retirement-intro";
-import { settingsSubTabPath } from "../lib/navigation";
+import { TAB_PATH, settingsSubTabPath } from "../lib/navigation";
 import { appUrl } from "../lib/basePath";
 import {
+  PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY,
   complementaryProjectionTickLabel,
+  deflationFactorAt,
   formatYearsEsFromMonths,
   projectionXTickLabel,
   resolveProjectionAxisAgeMode,
@@ -104,6 +119,9 @@ export function RetirementView({
   ledgerPersonScope,
   projectionSeries,
   projectionBusy,
+  projectionBands,
+  projectionBandsBusy,
+  projectionBandsError,
   retirementBudgetSnapshot,
   summary,
   retirementBusy,
@@ -124,6 +142,11 @@ export function RetirementView({
   ledgerPersonScope: LedgerPersonScope;
   projectionSeries: ProjectionSeriesApi | null;
   projectionBusy: boolean;
+  /** Bandas de Monte Carlo de la sección «Riesgo» (5.0.0, D28). `null` = aún no han llegado, o
+   *  la vista es Hogar (ahí no existen: los percentiles no suman entre miembros). */
+  projectionBands: ProjectionBandsApi | null;
+  projectionBandsBusy: boolean;
+  projectionBandsError: string | null;
   retirementBudgetSnapshot: BudgetSnapshotApi | null;
   /** Solo se consume en modo B (promedio): los equivalentes efectivos del ahorro real. */
   summary: SummaryResponse | null;
@@ -504,6 +527,102 @@ export function RetirementView({
   );
   const strategyWarnNotices = strategyTiles.notices.filter(
     (n) => n.tone === "warn",
+  );
+
+  // ── Sección «Riesgo» (D28) ────────────────────────────────────────────────────────────────
+  //
+  // El toggle «En dinero de hoy» comparte llave de localStorage con el de Proyección a
+  // propósito: es la MISMA pregunta («¿en euros de qué año leo esto?») y dos respuestas
+  // distintas en dos pestañas de la misma app es exactamente el tipo de incoherencia que hace
+  // que un usuario compare dos cifras que no son comparables.
+  const [riskInflationAdjusted, setRiskInflationAdjusted] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    try {
+      const v = window.localStorage.getItem(
+        PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY,
+      );
+      return v == null ? true : v === "1";
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY,
+        riskInflationAdjusted ? "1" : "0",
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [riskInflationAdjusted]);
+
+  /**
+   * Tasa del deflactor: la de la RESPUESTA (`deflation_annual_inflation_percent`, la misma con
+   * la que el servidor construyó `net_worth_real`), y solo cae a la de la instalación con un
+   * backend antiguo. Es la misma regla que aplica el chart grande (#136-4a): re-obtenerla por
+   * otro canal era una vía de divergencia silenciosa.
+   */
+  const riskDeflationPct = useMemo(() => {
+    const raw = projectionSeries?.deflation_annual_inflation_percent;
+    const parsed = raw != null ? Number(raw) : Number.NaN;
+    return Number.isFinite(parsed) ? parsed : installationInflationPct;
+  }, [projectionSeries?.deflation_annual_inflation_percent, installationInflationPct]);
+
+  /**
+   * El abanico, listo para pintar. Las CUATRO series (p10/p50/p90 y la determinista) pasan por
+   * el MISMO deflactor mes a mes: deflactar solo unas las separaría y el abanico dejaría de
+   * contener a la línea que dice contener.
+   */
+  const riskFan = useMemo(() => {
+    if (!projectionBands || !projectionSeries) return null;
+    const pct = riskInflationAdjusted && riskDeflationPct !== 0 ? riskDeflationPct : 0;
+    return buildRiskFan({
+      bandPoints: projectionBands.points,
+      seriesPoints: projectionSeries.points,
+      deflator: (mi) => deflationFactorAt(mi, pct),
+      retirementMonthIndex: jubMi,
+    });
+  }, [
+    projectionBands,
+    projectionSeries,
+    riskInflationAdjusted,
+    riskDeflationPct,
+    jubMi,
+  ]);
+
+  const riskDepletionRows = useMemo(
+    () => buildDepletionRows(projectionBands?.depletion_probability_by_age),
+    [projectionBands?.depletion_probability_by_age],
+  );
+
+  const riskExtraRows = useMemo(
+    () =>
+      buildRiskExtraRows({
+        bands: projectionBands,
+        currencyIso,
+        monthLabel: (mi) =>
+          projectionXTickLabel(mi, mc > 0 ? mc : 1, {
+            ageUiMode: axisAgeMode,
+            birthDateIso: axisBirth,
+            anchorDateYmd: axisAnchor,
+            calendarTz,
+          }),
+        // La regla GUARDADA, no la del borrador: el borrador sin guardar describiría una
+        // simulación que el servidor no ha hecho, y las dos filas de recorte hablarían de una
+        // regla que no produjo esas cifras.
+        withdrawalRuleKind: savedProfile.withdrawal_rule?.kind ?? null,
+      }),
+    [
+      projectionBands,
+      currencyIso,
+      mc,
+      axisAgeMode,
+      axisBirth,
+      axisAnchor,
+      calendarTz,
+      savedProfile.withdrawal_rule?.kind,
+    ],
   );
 
   const renderRetirementAmount = useCallback(
@@ -954,6 +1073,175 @@ export function RetirementView({
         <section className="panel">
           <h3 className="panel-title">Patrimonio vs. objetivo FIRE</h3>
           <div className="ff-chart-skeleton ff-chart-skeleton--mini" aria-hidden style={{ minHeight: 240 }} />
+        </section>
+      ) : null}
+
+      {/* ── Sección «Riesgo» (D28) ────────────────────────────────────────────────────────
+          Va justo DEBAJO del chart determinista y por encima del formulario: es el mismo plan
+          con su incertidumbre encima, y leerlo después de la línea (y antes de tocar nada) es
+          el orden en el que la pregunta aparece sola. */}
+      {hasMembership ? (
+        <section className="panel">
+          <div className="panel-head-row">
+            <h3 className="panel-title">Riesgo</h3>
+            {!scopeReadOnly && projectionBands ? (
+              <Switch
+                variant="chart"
+                label="En dinero de hoy"
+                checked={riskInflationAdjusted}
+                onChange={setRiskInflationAdjusted}
+                ariaLabel="Mostrar los escenarios ajustados a inflación (en dinero de hoy)"
+              />
+            ) : null}
+          </div>
+
+          {scopeReadOnly ? (
+            /* Los percentiles NO suman entre miembros (el p90 del hogar no es la suma de los
+               p90), así que el servidor ni lo intenta: 400 `household_bands_unavailable`. Se
+               dice aquí en vez de gastar la petición en descubrirlo. */
+            <p className="muted tight bordered-top">
+              Solo en tu vista (Yo): los escenarios con volatilidad son de una sola persona —
+              los percentiles no se suman entre los miembros del hogar.
+            </p>
+          ) : projectionBandsError ? (
+            <div className="banner error-banner">{projectionBandsError}</div>
+          ) : !projectionBands ? (
+            projectionBandsBusy ? (
+              <div
+                className="ff-chart-skeleton ff-chart-skeleton--mini"
+                aria-hidden
+                style={{ minHeight: 220 }}
+              />
+            ) : (
+              <p className="muted tight bordered-top">
+                Aún no hay escenarios que mostrar.
+              </p>
+            )
+          ) : (
+            <div className="bordered-top">
+              <RiskFanChart
+                model={riskFan}
+                height={220}
+                xAxis={{
+                  ageUiMode: axisAgeMode,
+                  birthDateIso: axisBirth,
+                  anchorDateYmd: axisAnchor,
+                  calendarTz,
+                }}
+              />
+              <ChartLegend
+                size="sm"
+                structural={[
+                  {
+                    key: "band",
+                    label: "Banda 10–90 %",
+                    color: "var(--ff-accent)",
+                    swatch: "area",
+                  },
+                  {
+                    key: "median",
+                    label: "Mediana",
+                    color: "var(--ff-accent)",
+                    swatch: "dashed",
+                  },
+                  {
+                    key: "deterministic",
+                    label: "Determinista",
+                    color: "var(--proj-nw)",
+                    swatch: "line",
+                  },
+                ]}
+              />
+              {/* La frase que impide la lectura cara de este chart: la curva central se calcula
+                  ordenando los valores de CADA mes, así que no es ninguna simulación. Va pegada
+                  al chart, no en el pie, porque es una instrucción de lectura y no procedencia. */}
+              <p className="risk-fan-note">
+                <span>Bandas puntuales: la mediana no es un camino.</span>
+                <HelpPopover
+                  title={HELP_TEXTS["retirement.bands"].title}
+                  body={HELP_TEXTS["retirement.bands"].body}
+                />
+              </p>
+
+              {showsNoVolatilityNotice(projectionBands) ? (
+                /* Sin σ declarada las tres bandas SON la línea, y un abanico plano se lee como
+                   certeza — la lectura más cara posible de esta pantalla. */
+                <div className="banner info-banner">
+                  Sin volatilidad declarada: la banda es la línea. Añade la volatilidad anual a
+                  tus activos.{" "}
+                  <a
+                    href={appUrl(TAB_PATH.assets)}
+                    onClick={(e) => {
+                      if (e.button !== 0 || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey)
+                        return;
+                      e.preventDefault();
+                      navigate(TAB_PATH.assets);
+                    }}
+                  >
+                    Ir a Activos
+                  </a>
+                  .
+                </div>
+              ) : null}
+
+              <div className="metric-grid retirement-solve-grid">
+                <MetricCard
+                  label="Éxito del plan"
+                  helpId="retirement.success"
+                  value={formatSuccessScenarios(projectionBands.success_probability)}
+                  parenthetical={formatSuccessThreshold(
+                    projectionBands.success_threshold_pct,
+                  )}
+                  /* El veredicto lo decide el SERVIDOR (umbral exacto y 10 puntos de margen,
+                     D28): aquí solo se traduce a la piel que la app ya habla. */
+                  tone={(() => {
+                    const t = successVerdictTone(projectionBands.success_verdict);
+                    return t === "danger" ? "danger" : t === "warn" ? "warn" : "default";
+                  })()}
+                />
+              </div>
+
+              {riskDepletionRows.length > 0 ? (
+                <div className="risk-extra-rows">
+                  <div className="risk-extra-row">
+                    <span className="label-with-help risk-extra-label">
+                      Probabilidad de agotar el capital
+                      <HelpPopover
+                        title={HELP_TEXTS["retirement.depletion_by_age"].title}
+                        body={HELP_TEXTS["retirement.depletion_by_age"].body}
+                      />
+                    </span>
+                    <div className="risk-depletion-grid">
+                      {riskDepletionRows.map((r) => (
+                        <div key={r.key} className="risk-depletion-cell">
+                          <span className="risk-depletion-age">{r.label}</span>
+                          <span className="risk-depletion-value">{r.value}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
+              {riskExtraRows.length > 0 ? (
+                <div className="risk-extra-rows">
+                  {riskExtraRows.map((r) => (
+                    <div key={r.key} className="risk-extra-row">
+                      <div className="risk-extra-head">
+                        <span className="risk-extra-label">{r.label}</span>
+                        <span className="risk-extra-value">{r.value}</span>
+                      </div>
+                      {r.detail ? (
+                        <span className="risk-extra-detail">{r.detail}</span>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              <p className="risk-footnote">{riskFootnote(projectionBands)}</p>
+            </div>
+          )}
         </section>
       ) : null}
 
