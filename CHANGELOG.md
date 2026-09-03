@@ -510,6 +510,182 @@ pruebas; ninguna procede de una instalación real.**
   entera** en cada llamada: con densidad mensual y una pensión a 30 años, ~300.000 gross-ups por
   respuesta. Se construye una sola vez.
 
+### Segunda revisión de UX (U0–U12): jerarquía, orden y mínimo input
+
+Tras subir la imagen de 5.0.0 en local, el veredicto del owner sobre la pantalla de Jubilación fue
+**«jerarquía sin sentido, orden mal, campos redundantes, mínimo input»**. Le siguió una revisión
+adversarial —capturas, API y un inventario de **67 inputs**— y el rediseño resultante se publica
+DENTRO de 5.0.0, no como una versión aparte. Doce decisiones lo gobiernan:
+
+| Decisión | Qué fija |
+|---|---|
+| U1 | Config arriba → resultado → «Avanzado» plegado |
+| U2 | El formulario enseña solo los campos de la estrategia elegida |
+| U3 | El gasto en jubilación admite 3 modos |
+| U4 | El porcentaje de retirada es único |
+| U5 | Un solo chart + «Riesgo» compacto |
+| U6 | La pensión vive solo en Jubilación; el flag del presupuesto es para rentas |
+| U7 | Frase-hito + como mucho 3 tiles |
+| U8 | El asistente pide nacimiento + estrategia + el dato esencial de esa estrategia |
+| U9 | Tarjeta única en Resumen |
+| U10 | Hogar enseña sumas + una frase por miembro |
+| U11 | Todo el rediseño va dentro de 5.0.0 |
+| U12 | Nada se fuerza sin verse: línea «Supuestos» |
+
+Esta entrega documenta lo ya aterrizado fuera de la pantalla de Jubilación en sí (API, asistente,
+Resumen, barrido de copys y las libs puras que la alimentan). `RetirementView.tsx` y
+`components/charts/*` — donde viven U1, U5, U6, U7 y U12 de verdad — siguen en curso en un cambio
+aparte; su documentación es un pase posterior, cuando aterricen.
+
+- **El porcentaje de retirada es ÚNICO (U0)**: `swr_pct` dimensiona el objetivo y es también el
+  porcentaje de las reglas por saldo. `withdrawal_rule.pct` (`percent_of_balance`, `guardrails`) y
+  `start_pct` (`hybrid`) pasan a **opcionales**: ausentes, se resuelven contra `swr_pct` en un único
+  sitio (`resolve_withdrawal_rule`), por el que pasan el perfil, la proyección, las bandas y el
+  what-if de `simulate_projection`. Antes el mismo número se declaraba dos veces y mover el SWR
+  dejaba la regla retirando el porcentaje viejo. Un `pct` explícito se sigue honrando; se suelta
+  reenviando `withdrawal_rule` sin esa clave (el objeto se sustituye entero, semántica ya
+  existente). **Añadido**: `withdrawal_rule.pct_source` (solo salida: `swr` | `explicit`; ausente
+  en `fixed_real`, que no tiene porcentaje) — dice de dónde sale el número. **Corregido**: `PATCH
+  /v1/auth/me/retirement-profile` con `pension: null` suelta también el `target_basis` almacenado
+  — medido en vivo antes del fix: el perfil seguía diciendo `bridge_to_pension` mientras la serie ya
+  publicaba la perpetuidad. **MCP**: `update_retirement_profile` documenta lo anterior; catálogo
+  regenerado — **71 tools, cero altas**, presupuesto de descripciones en **23.906 / 24.000**.
+- **Corregido (bug de dinero) — el histórico apilaba timelines de la misma cuenta (U4-api)**:
+  `GET /v1/history/series` devolvía 25 `asset_series` para 5 activos, y `assets_total` saltaba
+  **264.869,60 → 532.046,80 → 801.531,60 → 0 → 274.100 €** en la demo. Causa raíz: `source_item_id`
+  es la identidad ENTRE snapshots, pero `POST /v1/history/snapshots` acuña uno nuevo cuando el
+  cuerpo no trae `item_id` (y la tool MCP `create_snapshot` ni lo expone), así que N fotos de la
+  misma cuenta eran N timelines que el LOCF de #130 apilaba y daba por borrados de golpe en el
+  punto vivo. Fix: la lectura resuelve la identidad (`resolve_item_identity`) — agrupa por
+  etiqueta dentro de cada `(owner, kind)`, canoniza al id del activo/pasivo vivo homónimo cuando es
+  inequívoco, y deja una serie solo-histórica por nombre para los borrados; la ambigüedad no
+  fusiona nada (perder una observación es perder dinero). Con datos bien formados —la SPA ya
+  reenvía el `item_id` del prefill— el cambio es un no-op bit a bit. Arregla también
+  `points[].assets_total` / `liabilities_total` / `net_worth` y la curva fina de `GET
+  /v1/history/cashflow`. **El lado de escritura queda abierto en el issue #215.**
+- **Corregido (issue #213) — el `.ffbackup` de una cuenta sin contraseña no se podía exportar
+  (U7)**: las cuentas del add-on de Home Assistant (SSO por cabeceras, `password_hash` NULL a
+  propósito) recibían 401 `sso_account_no_password` al pedir `POST /v1/backup/user-export`. Ahora
+  hay dos caminos: cuenta CON contraseña → como antes (se verifica y es la clave del KDF); cuenta
+  SIN contraseña → contraseña propia del archivo, solo entrada del KDF, única regla: no vacía (422
+  `backup_password_empty`). Los `.ffbackup` antiguos no se ven afectados: el import nunca verificó
+  contra la cuenta. **Añadido**: `UserResponse.has_password` (login, registro, SSO, `GET
+  /v1/auth/me`), para que el modal pida la contraseña correcta antes de fallar. SPA: el modal de
+  exportar dice «Crea una contraseña para este backup» + confirmación a quien no tiene contraseña
+  de cuenta, y «Tu contraseña» a quien sí la tiene; el de importar dice «Contraseña de este
+  backup».
+- **Cambiado — barrido de copys en la SPA (U4-spa)**: la cabecera de Proyección pasa de
+  «Jubilación» (con el importe del objetivo FIRE) a **«Objetivo al jubilarte»** — los demás hitos
+  siguen etiquetados «Hito». Fuera el subtítulo «Moneda EUR» / «Mensual · EUR» / «Importes · EUR»
+  de Activos, Pasivos, Presupuesto, Movimientos y Próximos (la divisa vive en Ajustes y en cada
+  cifra) y el chip «Mío · sin titular en Hogar» de esas mismas cinco pantallas (el segmentado «Yo |
+  Hogar» ya lo dice). «(opc.)» → «(opcional)» en las 17 etiquetas de esos formularios.
+- **Cambiado — Resumen: «Tu plan» en una tarjeta única (U2/U9/U10)**: las dos tarjetas rojas
+  apiladas (con hueco a la derecha) se sustituyen por **una tarjeta ancha en una fila** — la
+  frase-hito como título, coloreada por el estado; estrategia + hito secundario como subtítulo; el
+  KPI «Éxito del plan» a la derecha; el aviso, si lo hay, debajo (en ≤ 640 px el KPI cae bajo el
+  título). De paso corrige el hito equivocado con «Media jornada»: la tarjeta anterior titulaba la
+  ESTRATEGIA y fechaba la jubilación TOTAL en vez de la media jornada. En Hogar, «Planes del hogar»
+  pasa a ser una lista de frases —una por miembro, con el punto de color de su línea del chart— sin
+  cifras por persona (el hogar no tiene plan propio). Fuera el subtítulo «Moneda EUR» y el chip
+  «Mío · sin titular en Hogar» de Resumen. `lib/plan-card.ts` retira `ownPlanCard`/`planMilestone`
+  (sin consumidores).
+- **Cambiado — el asistente de bienvenida pide el plan mínimo (U3/U8)**: el paso «Tu plan» pedía
+  inflación y SWR (que se volvían a pedir en Ajustes y en Jubilación) y no sabía que existen
+  estrategias ni fecha de nacimiento. Ahora pide fecha de nacimiento, las 5 tarjetas de estrategia
+  y solo el dato esencial de la elegida (edad objetivo; media jornada — edad + ingreso; pensión —
+  importe + edad), en un único `PATCH` al perfil. Inflación y SWR se quedan en sus valores por
+  defecto (2,5 % / 3,5 %) y se ajustan luego en Jubilación.
+- **Añadido (técnico) — libs puras del rediseño (U1a)**: `plan-fields.ts` (matriz de visibilidad
+  de campos por estrategia — fuente única de qué se enseña y qué no), `plan-sentence.ts`
+  (frase-hito por estrategia, con tono y partes calculadas), tiles v2 (`buildRetirementTilesV2` +
+  `retirementDetailRows` en `retirement-tiles.ts`, como mucho 3 tarjetas — corrige de paso el tile
+  del puente, que medía los meses desde HOY —35 años y 10 meses en la demo— en vez de
+  pensión − jubilación —12 años—), `assumptions-line.ts` (línea «Supuestos»),
+  `household-plan-lines.ts` (frases del hogar) y `duration.ts` (tramos, nunca «y 0 meses»). De 816
+  a 992 tests (+ 61 del asistente de U3 = 1.053; ver `npm test --workspace futurefin-web`).
+- **Corregido (documentación) — marcadores falsos desde WP3/WP5-2b**: se retiran de
+  `api-routes.md` y de los doc-comments del handler los marcadores «`pension_start_month_index` /
+  `partial_retirement_month_index` son `null` hasta WP3» y «`partial`/`pension_bridge` se
+  comportan como `asap`»: `projection_strategies.rs` los contradice y la demo publica 430/46.
+- **Cambiado — la pantalla de Jubilación pasa de once bloques a tres (U1–U12)**: la primera vuelta
+  del rediseño (WP7) pintaba los RESULTADOS antes que el formulario que los produce, 8 tiles de dos
+  cifras con subtítulos recortados, dos charts con ejes X distintos (el determinista arriba y el
+  abanico de «Riesgo» abajo) y seis pies «Guardado automático.» — el owner la rechazó en redondo
+  («jerarquía sin sentido, orden mal, campos redundantes, mínimo input») tras subirla en local, y
+  esa forma queda registrada como RECHAZADA en `futurefin-failure-archaeology` §3, no como la
+  pantalla vigente. La sustituye:
+  - **«Tu plan»**: banner de alta sobre las 5 tarjetas de estrategia (5 columnas en escritorio,
+    3+2 en tableta, lista en móvil — nunca 4+1) y SOLO los campos que la estrategia elegida usa
+    (`lib/plan-fields.ts`, U2): fecha de nacimiento en línea cuando falta (no se repite si ya la
+    tienes), edad objetivo, media jornada, pensión (casilla + importe + edad) y «Gasto en
+    jubilación» con sus TRES modos (gasto actual del presupuesto, ingresos actuales, o una cifra
+    manual) más la cifra mensual/anual derivada con su procedencia pegada («1.250 €/mes ·
+    15.000 €/año · de tus partidas de jubilación del presupuesto»).
+  - **«Resultado»**: la frase-hito (`lib/plan-sentence.ts`) tonada por el estado del plan —un
+    filete lateral de 3 px, nunca el color del texto—, el aviso rojo SOLO cuando el plan no llega
+    (D17), como mucho 3 tarjetas con el subtítulo COMPLETO sin recortar (U7,
+    `buildRetirementTilesV2`), UN chart —patrimonio + objetivo FIRE + banda 10–90 % conmutable +
+    marcadores de jubilación/coast/media jornada/pensión, todo hasta el horizonte— y un «Riesgo»
+    compacto (Éxito del plan + agotamiento por edad, nada más); todo lo demás —objetivo nominal al
+    cruce, cobertura de la pensión, descuento del puente, los avisos que no son rojos— baja a
+    «Detalle del cálculo», plegado.
+  - **«Avanzado»**, plegado, cuyo `<summary>` ES la línea «Supuestos: retirada 3,5 % · gasto fijo
+    en euros de hoy · horizonte 90 años · sin colchón · umbral 95,0 %» (U12): esconder un campo
+    (U2) sin enunciar su valor sería forzarlo en silencio, así que la línea está SIEMPRE visible,
+    plegado o no. Agrupado por sección — Retirada, Objetivo, Media jornada, Pensión, Horizonte,
+    Riesgo, ya no «Horizonte y riesgo» combinadas.
+  - **Hogar**: solo el aviso de solo lectura + una frase por miembro (`lib/household-plan-lines.ts`)
+    + el enlace «Cambia a “Yo” para editar tu plan» — sin tarjetas ni cifras por persona, porque el
+    hogar no tiene plan propio.
+
+  Un único indicador de guardado en la cabecera (S6, `.retirement-save-state`) sustituye a los
+  seis pies «Guardado automático.» repartidos por panel, con precedencia fija error > guardando >
+  bloqueado > guardado. **El porcentaje de retirada es ÚNICO en la pantalla** (U4): el slider es
+  `swr_pct` y la regla lo hereda; si alguien lo fijó explícito por HTTP o MCP, la nota bajo el
+  selector lo dice («Regla al 4,0 %, fijado por API») en vez de dejar que el usuario mueva un
+  control que su plan ignora. La fracción de pensión que se cobra durante la media jornada se edita
+  ahora en PORCENTAJE (0 a 100, S3) — el campo anterior rotulaba «Parte que cobras en media
+  jornada (0 a 1)» y un `40` tecleado ahí declaraba cobrar 40 veces la pensión, que el servidor
+  recortaba a 1 sin decirlo.
+- **Cambiado (técnico) — `RiskFanChart` se retira; `MiniProjection` absorbe el abanico**: su única
+  consumidora (la sección «Riesgo» de WP7) desaparece con el rediseño. `MiniProjection` gana tres
+  props opcionales y no-op cuando no se pasan (el Resumen no las usa y su chart no cambia byte a
+  byte): `band` (banda 10–90 % en euros nominales, `{month, p10, p90}[]`, emparejada por MES —la
+  banda viaja siempre a densidad `hybrid` mientras `points[]` puede ser `monthly`—, pintada como UN
+  `path` cerrado sin trazo de mediana), `markers` (hasta cuatro hitos del plan con su rótulo cedido
+  por prioridad cuando no cabe, la jubilación nunca cede el suyo) y `deflator` (un único factor
+  aplicado a patrimonio, objetivo y banda a la vez). Libs nuevas con test: `retirement-form.ts`
+  (conversión fracción↔porcentaje, el indicador de guardado único, la guarda de campos obligatorios
+  que apaga el autosave, la nota del porcentaje de la regla) y `retirement-chart.ts` (los cuatro
+  marcadores del chart y la colisión de sus etiquetas). `helpTexts.ts`: +`retirement.assumptions`
+  (la línea «Supuestos»), +`retirement.plan_sentence` (la frase-hito), y `retirement.withdrawal_rule`
+  reescrita para el porcentaje único. 1.081 tests (`npm test --workspace futurefin-web`).
+- **Corregido — desbordamiento horizontal preexistente de 7 px a 639–641 px**: el rótulo «AL FINAL
+  DEL HORIZONTE» de la celda de agotamiento (161 px medidos) no cabía en una columna de dos con
+  `white-space: nowrap` y empujaba la PÁGINA entera 7 px — violación de la regla de oro del sistema
+  responsive (cero scroll horizontal fuera de una tabla), presente desde antes del rediseño y
+  arreglada de paso. `.risk-depletion-age` vuelve a envolver (`white-space: normal`); una celda dos
+  renglones más alta no desalinea nada porque la rejilla ya iguala las alturas de la fila.
+- **Cambiado — «(opc.)» → «(opcional)»** en Jubilación (la coletilla del campo «Edad de jubilación
+  objetivo» cuando la estrategia no lo exige).
+
+- **Una media jornada que el usuario ya no usaba seguía simulándose** (cazado al verificar la imagen
+  local del rediseño). Síntoma, medido sobre la demo: un perfil con `strategy: "asap"` devolvía
+  `warnings: ["partial_phase_capital_shrinking"]`, un `partial_retirement_month_index` y una curva que
+  no cruzaba nunca el objetivo — de una fase de media jornada que la Jubilación rediseñada ni siquiera
+  enseña para esa estrategia (U2), actuando sola sobre los números (U12). Causa: el perfil conserva a
+  propósito **todos** los bloques que el usuario llegó a rellenar (cambiar de estrategia y volver no
+  pierde nada), pero el ensamblado del plan mapeaba `partial_retirement` al `PhasePlan` **sin mirar la
+  estrategia**. Con ingreso 3.000 y gasto 2.000, la fase fantasma daba −1.000 €/mes desde el mes ~40 y
+  el cruce pasaba del mes ~285 a **nunca**. Ahora la fase parcial entra al motor **solo con
+  `strategy: partial`**, en una única puerta (`plan_uses_partial_phase`) que heredan
+  `/v1/projection/series`, `/v1/projection/bands`, el bucle por miembro de `?view=household` y el
+  `profile_overrides` de `simulate_projection`. El perfil almacenado no se toca. `target_retirement_age`
+  no filtraba —ya tenía su puerta— y queda pineado; `pension` sigue entrando con cualquier estrategia
+  por diseño (D15/R6). Tests: `projection_strategies.rs` (serie byte-idéntica con y sin bloque bajo
+  `asap` y `retire_at_age`).
+
 ### Breaking
 
 - **`installation.fire_settings` pierde cuatro claves**: `fire_number_mode`,

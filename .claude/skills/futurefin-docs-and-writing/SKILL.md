@@ -257,7 +257,7 @@ rule; v1.2.0 is the precedent).
 
 ## 7. STANDING ERRATA — known doc drift
 
-> **Estado a 2026-09-03**: la tabla tiene **17** filas abiertas — cuéntalas con
+> **Estado a 2026-09-03**: la tabla tiene **15** filas abiertas — cuéntalas con
 > `grep -c '^| [0-9]\+ |' .claude/skills/futurefin-docs-and-writing/SKILL.md`, que incluye las
 > cabeceras numeradas de las dos tablas. **Todas son del lado del CÓDIGO o de skills fuera del
 > alcance del pase que las encontró**; ninguna es una afirmación falsa en un `.claude/*.md` de
@@ -441,7 +441,6 @@ el código las arregló, y siete nuevas.** El pase que las encontró era documen
 | 20 | `apps/api/src/mcp/server.rs:125-127`, doc-comment de `resolve_view` | «`"mine"` → Mine, `"household"` u **omitido** → Household» | **Falso desde 5.0.0**: `LedgerViewQuery::resolve` (`person_view.rs:75-83`) devuelve **Mine** para `None`, `""` y `"mine"`. La segunda mitad de la frase («cualquier otra cosa → `invalid_view`») sigue siendo cierta. Es la deriva más cara de las siete: **toda tool con scope hereda ese default**, así que el comentario le está diciendo al siguiente que lea el fichero justo lo contrario de lo que hace el servidor. Comprobación: `grep -n 'fn resolve' -A 9 apps/api/src/handlers/person_view.rs` |
 | 21 | `apps/api/src/mcp/server.rs:237`, doc-comment de `two_phase` | «no se exige en las **17** tools con preview» | **18** (`grep -c 'p\.confirm\.unwrap_or(false)' apps/api/src/mcp/server.rs`). El párrafo que enumera el criterio sigue siendo correcto; solo caducó el número |
 | 22 | `apps/api/src/mcp/server.rs:5541`, comentario de `update_fire_settings` | «Es **la única** tool destructiva del catálogo enteramente reversible desde su propio preview» | **Son dos** desde 5.0.0: `update_retirement_profile` aplica el mismo criterio y lo dice en su propio comentario (`server.rs:5628-5630`). Un «la única» es un contador disfrazado de adjetivo, y caduca igual |
-| 27 | `.claude/skills/futurefin-failure-archaeology/SKILL.md:180` | Cita `warm_up_household_projection` como la función viva del warm-up post-login | **Ese símbolo ya no existe** (`grep -rn warm_up_household_projection apps crates` → 0): desde 5.0.0 es `warm_up_mine_projection` y calienta `view=mine`. La skill está fuera del alcance de este pase; el relato histórico sigue siendo correcto, solo caducó el nombre |
 | 25 | `apps/api/src/handlers/projection.rs`, comentario del clamp de `uncovered_deficit_total` | Cita `MonthSale::account` **en `projection.rs`** | Ese símbolo vive en `crates/engine/src/sim_core.rs`. Errata heredada de WP8a, que la dejó anotada al no poder tocar `apps/` |
 | 26 | `apps/api/tests/query_param_validation.rs` | — | Ver la fila **5**, ampliada: le falta ahora también `/v1/projection/bands` |
 
@@ -461,6 +460,27 @@ porque **no parece un número**: es una frase que describe una conducta, nadie l
 caducidad no la caza ningún `grep -c`. Amplía la norma de §3.1: los contadores caducan, los «la
 única» caducan, **y las frases que describen un default también** — escribe al lado el comando que
 lo prueba (`grep -n 'fn resolve' -A 9 …`), igual que harías con un número.
+
+**Retirada en esta pasada (U5a, rediseño de UX, issue #207)**: la fila 27
+(`warm_up_household_projection` citado en `futurefin-failure-archaeology`) — el símbolo ya se
+corrigió a `warm_up_mine_projection` en el commit `84f78b1`, anterior a esta pasada
+(`grep -n warm_up_mine_projection .claude/skills/futurefin-failure-archaeology/SKILL.md` → 1 hit,
+con el nombre viejo entre paréntesis como nota histórica). Se borra la fila; el párrafo de arriba
+(«Lo que estas siete vuelven a enseñar…») queda como registro de lo que encontró aquella pasada en
+su momento, no como un hecho vivo de la tabla.
+
+**Barrido 2026-09-03 para la segunda revisión de UX (U5a, issue #207) — una fila nueva, del lado
+del CÓDIGO** (pase documentación-only: `apps/web/src/App.css` fuera de alcance — no es uno de los
+ficheros de ese paquete de trabajo). Documentaba el comentario de `.plan-card-wide` en `App.css`
+(bloque «TARJETA «TU PLAN» ANCHA…»), que citaba dos símbolos (`PlanMilestone`/`PlanFigures`) que
+nunca existieron como componente y una migración pendiente de `.plan-card-grid`/`.plan-card`/
+`.plan-card-figures` que en realidad ya tenían cero consumidores.
+
+**Retirada en el pase de documentación U5b (mismo issue #207)**, que sí llevaba `App.css` dentro de
+su alcance (solo para este arreglo puntual): el comentario se reescribió sin los dos símbolos
+inexistentes y las tres clases muertas se borraron de `App.css` tras reconfirmar cero consumidores
+(`git grep -nE '(^|[^a-zA-Z0-9_-])plan-card(-grid|-figures)?([^a-zA-Z0-9_-]|$)' -- '*.tsx'`, vacío).
+Se borra la fila.
 
 ## Provenance and maintenance
 

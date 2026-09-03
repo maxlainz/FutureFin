@@ -182,11 +182,12 @@ mínimo que la app no puede adivinar y que, si se queda mal, hace que todas las 
    contabilidad, y también decide qué filas acepta el importador de CSV. La zona horaria viene
    rellenada con la de tu navegador; con la zona mal, "el gasto de hoy" puede caer en el día
    equivocado.
-2. **Tu plan** — la **inflación anual** que asumes (hace crecer tu objetivo con el tiempo) y la
-   **tasa de retirada segura**, el porcentaje de tu patrimonio que podrías gastar al año sin
-   agotarlo. La inflación se cambia luego en `Ajustes → Plan`; la tasa de retirada es **tuya**,
-   no del hogar, y vive en la pestaña **Jubilación** junto al resto de tu plan
-   ([Tu plan de jubilación](jubilacion.md)).
+2. **Tu plan** — tu **fecha de nacimiento** y con qué **estrategia** quieres jubilarte (cuanto
+   antes, a una edad fija, Coast FIRE, media jornada o puente hasta la pensión), más el único dato
+   que esa estrategia necesita (la edad objetivo; el ingreso de la media jornada; o el importe y
+   la edad de tu pensión). La inflación anual y la tasa de retirada segura se quedan en su valor
+   por defecto (2,5 % / 3,5 %) y se afinan luego, junto al resto de tu plan, en la pestaña
+   **Jubilación** ([Tu plan de jubilación](jubilacion.md)).
 3. **Primer activo** — opcional. Si lo dejas en blanco, no se crea nada.
 4. **Listo.**
 

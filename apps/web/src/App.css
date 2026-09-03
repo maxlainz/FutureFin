@@ -4053,94 +4053,17 @@ fieldset.retirement-config-stack {
   padding-left: 10px;
 }
 
-/* ============================================================
-   TARJETA «PLAN» DEL RESUMEN (5.0.0, D27/D32, issue #207)
-   ------------------------------------------------------------
-   Una tarjeta en «Yo», N (una por miembro) en «Hogar». Reusa el
-   lenguaje visual de `.metric-card` (papel + filete suave + radio
-   de KPI) en vez de inventar una piel nueva: es una tarjeta de
-   estado, no un KPI, así que la cifra grande no es monoespaciada
-   —no es dinero— pero todo lo demás casa con la banda de arriba.
-   Cero hex: solo tokens y color-mix sobre ellos.
-   ============================================================ */
-.plan-card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
-  gap: 0.65rem;
-  padding-top: 0.85rem;
-}
-
-.plan-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  min-width: 0;
-  padding: 0.7rem 0.85rem;
-  background: var(--ff-paper);
-  border: 1px solid var(--ff-line-soft);
-  border-radius: var(--ff-radius-kpi);
-  box-shadow: var(--ff-shadow-flat);
-}
-
-/* Estado rojo (D17/D28): el plan está completo y NO llega. Mismo tinte que
-   `.error-banner` — un solo vocabulario de «esto va mal» en toda la app. */
-.plan-card--danger {
-  background: color-mix(in oklch, var(--ff-neg) 8%, var(--ff-paper));
-  border-color: color-mix(in oklch, var(--ff-neg) 45%, var(--ff-line-soft));
-}
-
-.plan-card-name {
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ff-ink-soft);
-  font-weight: 500;
-  line-height: 1.2;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.plan-card-strategy {
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: var(--ff-ink);
-  line-height: 1.25;
-}
-
-.plan-card-milestone {
-  font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 1.05rem;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
-  line-height: 1.25;
-  color: var(--ff-ink);
-}
-
-/* Sin hito no hay cifra: es una explicación, y se pinta como tal (misma
-   tipografía del cuerpo, atenuada) para no leerse como un dato exacto. */
-.plan-card-milestone--absent {
-  font-family: inherit;
-  font-size: 0.86rem;
-  font-weight: 500;
-  letter-spacing: normal;
-  color: var(--ff-ink-soft);
-}
-
-/* Slot SIEMPRE reservado (`&nbsp;` cuando no hay edad): sin él, dos tarjetas
-   del hogar con y sin edad dejan la línea de estado a alturas distintas. */
-.plan-card-detail {
-  font-size: 0.78rem;
-  color: var(--ff-ink-soft);
-  line-height: 1.2;
-  min-height: 1.2em;
-}
-
 /* Tono rojo de un KPI (5.0.0, D17): el plan está completo y NO llega. Mismo
-   tinte que `.error-banner` y que `.plan-card--danger` — un solo vocabulario de
-   «esto va mal». Solo la piel: la cifra sigue siendo tinta normal, porque el
-   número no está mal, lo que está mal es lo que significa. */
+   tinte que `.error-banner` — un solo vocabulario de «esto va mal» en toda la
+   app. Solo la piel: la cifra sigue siendo tinta normal, porque el número no
+   está mal, lo que está mal es lo que significa. Único consumidor: la tarjeta
+   «Ahorro necesario» de Jubilación cuando `underfunded === true`
+   (`buildRetirementTilesV2`, `tone="danger"` de `MetricCard`). La rejilla
+   `.plan-card-grid`/`.plan-card`/`.plan-card-figures` que vivía junto a esta
+   regla —la D27 original, sustituida por `.plan-card-wide` en U9— se retiró
+   en el pase de documentación U5b tras confirmar cero consumidores en
+   `apps/web/src` (`git grep -nE '(^|[^a-zA-Z0-9_-])plan-card(-grid|-figures)?([^a-zA-Z0-9_-]|$)'
+   -- '*.tsx'`, vacío). */
 .metric-card--danger {
   background: color-mix(in oklch, var(--ff-neg) 8%, var(--ff-paper));
   border-color: color-mix(in oklch, var(--ff-neg) 45%, var(--ff-line-soft));
@@ -4151,58 +4074,15 @@ fieldset.retirement-config-stack {
   font-weight: 600;
 }
 
-/* Las dos cifras del solve (D16/D17). Fila propia entre el hito y el estado:
-   son magnitudes al MES y el hito es una fecha — mezclarlas en el mismo renglón
-   invita a leer «55 años · 1.200 €» como una sola frase. `flex-wrap` porque en
-   móvil las dos no caben y apiladas siguen alineadas a la izquierda. */
-.plan-card-figures {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.15rem 0.75rem;
-  margin-top: 0.25rem;
-  font-size: 0.78rem;
-  line-height: 1.3;
-  color: var(--ff-ink-soft);
-}
-
-.plan-card-figures strong {
-  color: var(--ff-ink);
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-
-.plan-card-status {
-  margin-top: 0.3rem;
-  font-size: 0.78rem;
-  line-height: 1.3;
-  color: var(--ff-ink-soft);
-}
-
-.plan-card-status--warn {
-  color: var(--ff-ink);
-}
-
-.plan-card-status--danger {
-  color: var(--ff-neg);
-  font-weight: 600;
-}
-
-@media (max-width: 640px) {
-  /* bp:640 — una tarjeta por fila; el nombre del miembro puede partir. */
-  .plan-card-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* ============================================================
    TARJETA «TU PLAN» ANCHA Y FRASES DEL HOGAR (5.0.0, U9/U10,
    issue #207)
    ------------------------------------------------------------
-   U9 sustituye la rejilla de arriba (`.plan-card-grid`, que se
-   queda como está — la sigue usando `PlanMilestone`/`PlanFigures`
-   hasta que Jubilación migre a su propia lectura de la frase) por
-   UNA tarjeta ancha en «Yo»: título = la oración del plan, coloreada
-   por su tono; subtítulo = estrategia + hito secundario; a la
+   U9 sustituye la rejilla D27 original (`.plan-card-grid`/`.plan-card`/
+   `.plan-card-figures`, retirada de `App.css` en el pase de documentación
+   U5b — cero consumidores en `apps/web/src`) por UNA tarjeta ancha en «Yo»:
+   título = la oración del plan, coloreada por su tono; subtítulo =
+   estrategia + hito secundario; a la
    derecha, el KPI «Éxito del plan» (reusa `.metric-card`, cero CSS
    nuevo ahí). U10 sustituye la rejilla en «Hogar» por una lista de
    frases con el punto de color de cada miembro. Cero hex: solo
@@ -4231,7 +4111,7 @@ fieldset.retirement-config-stack {
   color: var(--ff-ink);
 }
 
-/* Mismo tinte que `.plan-card-status--danger`/`.error-banner`: un solo
+/* Mismo tinte que `.plan-card-wide-warning--danger`/`.error-banner`: un solo
    vocabulario de «esto va mal». El ámbar (warn) no tiñe texto — es el
    estado normal de «hay algo que arreglar», no una alarma. */
 .plan-card-wide-title--danger {

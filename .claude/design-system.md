@@ -217,6 +217,41 @@ Props clave:
 
 **Marcador circular**: el SVG usa `viewBox=containerW × height` medido con `ResizeObserver`, por lo que las unidades del viewBox = píxeles reales y los `<circle>` salen circulares aun con `preserveAspectRatio="none"` para las polylines.
 
+#### Props opcionales `band` / `markers` / `deflator` (5.0.0, U1b, decisión U5 de #207)
+
+Jubilación pasaba de DOS charts —el determinista de arriba y el abanico `RiskFanChart` de la
+sección «Riesgo», con ejes X distintos— a UNO: `MiniProjection` absorbió el abanico. Las tres son
+**opcionales y no-op** cuando no se pasan (el Resumen no las usa y su chart sigue byte a byte el
+de 4.15.x):
+
+- **`band?: {month, p10, p90}[]`** — la banda 10–90 % de los escenarios con volatilidad, en euros
+  NOMINALES y **por MES** (nunca por posición: la banda viaja SIEMPRE a densidad `hybrid` y
+  `points[]` puede ser `monthly`, la segunda fase del two-phase). Se recorta a la ventana visible
+  por `month`, se ordena y se pinta como UN `path` cerrado (p90 de ida, p10 de vuelta) — nunca dos
+  polígonos, que dejarían una costura de 1 px en oscuro. Relleno `var(--ff-accent)` al 16 % +
+  trazo al 30 % (opacidad en el atributo, nunca en el color, para que el mismo token resuelva
+  claro/oscuro): es la lectura del plan, familia del objetivo FIRE. **Sin trazo de mediana** — el
+  componente no recibe `p50` en absoluto (el tipo `MiniProjectionBandPoint` no tiene ese campo);
+  la mediana sigue viva en otras lecturas (`lib/risk-bands.ts`, filas de detalle), pero ya no se
+  dibuja como línea. Menos de dos puntos dibujables no es media banda: es ninguna.
+- **`markers?: RetirementChartMarker[]`** (`lib/retirement-chart.ts`) — hasta cuatro hitos del
+  plan (jubilación/coast/media jornada/pensión), cada uno una línea vertical SIEMPRE pintada +
+  rótulo que se cede por prioridad si colisiona con uno ya puesto (`placeMarkerLabels`, `minGapPx`
+  = 46 por defecto; la jubilación nunca cede el suyo). La jubilación usa `--ff-accent` sólido
+  (1.5px); las secundarias, `--proj-meta` discontinuo (`3 3`, 1px) — son contexto, no el hito que
+  la página contesta.
+- **`deflator?: (monthIndex: number) => number`** — UN factor aplicado a patrimonio, objetivo FIRE
+  y banda **por igual**; las áreas de activo lo heredan al escalarse al patrimonio. Deflactar solo
+  una serie separaría el abanico de la línea que dice contener, y el chart seguiría pareciendo
+  correcto.
+
+**`RiskFanChart.tsx` se retiró en el mismo commit** (su única consumidora desaparece): dos fuentes
+con rejillas distintas —la objeción que justificaba un componente aparte— siguen siendo dos
+fuentes distintas, pero ya no exigen un componente propio: `band` entra ya emparejado por mes y el
+propio `MiniProjection` hace la intersección de ventana. La aritmética de alineación/deflactación
+que SÍ sigue viva por si hiciera falta un abanico con mediana en otro contexto vive en
+`buildRiskFan` (`lib/risk-bands.ts`), marcada `@deprecated` y sin consumidor de UI.
+
 ### `ChartLegend` — [`components/charts/ChartLegend.tsx`](../apps/web/src/components/charts/ChartLegend.tsx)
 
 Leyenda compartida de charts (4.0.6): la consumen el chart grande de Proyección, el
@@ -240,33 +275,14 @@ HTML normal —nunca dentro de un `<svg>`— con `flex-wrap` real.
   owner en duplicados, colapso, top-N del tooltip) vive PURA en
   [`lib/chart-legend.ts`](../apps/web/src/lib/chart-legend.ts) y está testeada en Vitest.
 
-### `RiskFanChart` — [`components/charts/RiskFanChart.tsx`](../apps/web/src/components/charts/RiskFanChart.tsx) (5.0.0, D28, issue #207)
+### Riesgo compacto y «Detalle del cálculo» (Jubilación) — sin chart propio (5.0.0, D28, issue #207)
 
-Abanico de percentiles de la sección «Riesgo» de Jubilación: **área entre p10 y p90 + mediana p50
-discontinua + línea determinista sólida**, las tres sobre el mismo eje X.
+Desde U1b la sección «Riesgo» de Jubilación ya no es un panel con su propio chart: es un bloque
+**compacto** —solo «Éxito del plan» + la tabla de agotamiento por edad— dentro del panel
+«Resultado», con todo lo demás plegado en «Detalle del cálculo» (el abanico vive en el chart único,
+ver §`MiniProjection` arriba). Los patrones de copy y CSS que gobernaban `RiskFanChart` (retirado)
+siguen vigentes para ese bloque compacto:
 
-- **Por qué NO es una prop más de `MiniProjection`** (la regla de «usa MiniProjection para
-  cualquier chart pequeño» tiene aquí su excepción declarada): aquel dibuja UNA serie sobre la
-  rejilla de `points[]`; este tiene **dos fuentes con rejillas distintas** —la banda viaja siempre
-  a densidad `hybrid` y la serie que el cliente tiene cargada suele ser `monthly`—, un área entre
-  percentiles y un eje Y que no puede anclarse a 0. Meterlo dentro habría añadido cinco props y una
-  segunda máquina de escalas al componente que ya usan Resumen y Jubilación.
-- **Todo por MES** (`xAtMonth`), nunca por posición de array: con dos densidades a la vez,
-  emparejar por índice desplaza el abanico décadas y el chart resultante **sigue pareciendo
-  correcto**. La aritmética (alineación, deflactación, rango) vive pura en
-  [`lib/risk-bands.ts`](../apps/web/src/lib/risk-bands.ts) con su test; el componente solo pinta.
-- **Color: dos tokens.** Banda y mediana en `--ff-accent` (es la lectura del plan, familia del
-  objetivo FIRE); la determinista en `--proj-nw`, el color con el que el patrimonio se dibuja en
-  toda la app, para que se reconozca la curva que ya se conoce. Se separan **además por patrón**
-  (relleno 16 % / guion `5 3` / sólida), así que la identidad nunca es solo color. La opacidad va
-  en `fillOpacity`/`strokeOpacity` y no dentro del color: el mismo token resuelve claro y oscuro.
-- El marcador de jubilación usa `--proj-fire`, el mismo que en el chart grande.
-- Leyenda obligatoria (3 series) vía `ChartLegend` con swatches `area` / `dashed` / `line`, y bajo
-  el chart la nota **«Bandas puntuales: la mediana no es un camino»** (`.risk-fan-note`, con el
-  `HelpPopover` de `retirement.bands` en la misma línea): la curva central se calcula ordenando los
-  valores de CADA mes, así que no corresponde a ninguna simulación. Es una instrucción de lectura,
-  por eso va pegada al chart y no en el pie — y por eso la ayuda cuelga de ella y no del título del
-  panel.
 - **La ayuda de las filas cuelga del RÓTULO de cada fila** (`.risk-extra-head`), no del panel:
   `RiskExtraRow` lleva un `helpId?` opcional y la vista envuelve el rótulo en
   `label-with-help risk-extra-label` — el mismo patrón que ya usaba la tabla de agotamiento. Una
@@ -282,13 +298,18 @@ discontinua + línea determinista sólida**, las tres sobre el mismo eje X.
   oración; si algún día hay dos, ese es el momento de darle una variante propia a `.metric-value`,
   no de acortar la frase.
 
-Clases de la sección (todas en `App.css`, cero color propio salvo `--ff-warn`):
-`.metric-card--warn` (tono ámbar del KPI, misma construcción que `--danger`), `.risk-fan-note`,
-`.risk-depletion-grid` + `.risk-depletion-cell`/`-age`/`-value` (la tabla «Probabilidad de agotar
-el capital» — `auto-fit` con `minmax(min(50%, 7rem), 1fr)`, que da **dos columnas en móvil sin una
-media query nueva**), `.risk-extra-rows`/`.risk-extra-row`/`-head`/`-label`/`-value`/`-detail` y
-`.risk-footnote` (procedencia: ms, caminos y semilla; `overflow-wrap: anywhere` porque la semilla
-es un entero de 20 dígitos que no cabe a 360px).
+Clases que sobreviven al retiro del chart (todas en `App.css`, cero color propio salvo
+`--ff-warn`): `.metric-card--warn` (tono ámbar del KPI, misma construcción que `--danger`;
+consumidor dinámico vía `successVerdictTone`, no un literal `tone="warn"` en el JSX — no lo busques
+así), `.risk-depletion-grid` + `.risk-depletion-cell`/`-age`/`-value` (la tabla «Probabilidad de
+agotar el capital» — `auto-fit` con `minmax(min(50%, 7rem), 1fr)`, que da **dos columnas en móvil
+sin una media query nueva**; `.risk-depletion-age` envuelve desde U5b — ver §Regla de oro más
+abajo, el desbordamiento de 639–641 px), `.risk-extra-rows`/`.risk-extra-row`/`-head`/`-label`/
+`-value`/`-detail` y `.risk-footnote` (procedencia: ms, caminos y semilla; `overflow-wrap: anywhere`
+porque la semilla es un entero de 20 dígitos que no cabe a 360px). **`.risk-fan-note` se retiró**
+junto con `RiskFanChart.tsx` — la nota «Bandas puntuales» que colgaba de ella vive ahora como fila
+de `retirementDetailRows` dentro de «Detalle del cálculo», con el mismo `HelpPopover` de
+`retirement.bands`.
 
 ### `PlanningDirectionChart` — [`components/charts/PlanningDirectionChart.tsx`](../apps/web/src/components/charts/PlanningDirectionChart.tsx)
 
@@ -326,7 +347,22 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 
 > **Radio-cards de configuración (`.retirement-mode-card`/`.retirement-mode-grid`)**: NO son un segmented — son `<label>` con un `<input type="radio" className="sr-only">` dentro, estilados como tarjeta (borde + `is-active` con tinte de acento). Nacieron para el modo del objetivo anual de Jubilación y 5.0.0 (D26, issue #207) los reusa tal cual para las **5 tarjetas de estrategia** (`RetirementView.tsx`, modificadora `.retirement-strategy-grid`: mismo `grid-template-columns` pero `repeat(auto-fit, minmax(min(100%, 15rem), 1fr))` porque cinco no caben en la rejilla fija de 3 del modo del objetivo — no-op en escritorio, colapsa solo en móvil, sin breakpoint nuevo).
 >
-> **Tarjeta de plan (`.plan-card-grid`/`.plan-card`)** (5.0.0, D27/D32, issue #207, `SummaryView.tsx`): tarjeta de ESTADO, no un KPI — reusa la piel de `.metric-card` (papel + filete suave + `--ff-radius-kpi` + `--ff-shadow-flat`) pero su cifra grande no es dinero, así que solo el hito va en monoespaciada; cuando no hay hito, el texto cae a la tipografía del cuerpo atenuada (`.plan-card-milestone--absent`) para que una explicación no se lea como un dato exacto. `.plan-card-detail` es un **slot siempre reservado** (`&nbsp;` sin edad), misma disciplina que el paréntesis de `MetricCard`: sin él, dos tarjetas del hogar con y sin edad dejan la línea de estado a alturas distintas. El estado rojo (`.plan-card--danger` + `.plan-card-status--danger`) usa **el mismo tinte que `.error-banner`** (`--ff-neg` al 8 % sobre `--ff-paper`) — un solo vocabulario de «esto va mal» en toda la app. En Hogar la rejilla lleva una tarjeta por miembro y colapsa a una columna ≤640px.
+> **Tarjeta ancha «Tu plan» (`.plan-card-wide*`)** (5.0.0, D27/D32 → U9, issue #207, `SummaryView.tsx`):
+> sustituye a la rejilla de tarjetas D27 original (`.plan-card-grid`/`.plan-card`/`.plan-card-figures`,
+> **retirada de `App.css` en el pase de documentación U5b** tras confirmar cero consumidores en
+> `apps/web/src` — `grep -n "^\.plan-card {\|^\.plan-card-grid {\|^\.plan-card-figures {" apps/web/src/App.css`
+> vacío). `.plan-card-wide` es un `flex` en fila:
+> `.plan-card-wide-main` (título = la frase-hito coloreada por tono con `.plan-card-wide-title--danger`,
+> subtítulo = estrategia + hito secundario) y `.plan-card-wide-kpi` con el KPI «Éxito del plan» a la
+> derecha (`.metric-card` sin CSS propio). `.plan-card-wide-warning` debajo, con su propia variante
+> `--danger`. En ≤640px el KPI cae bajo el título (`flex-direction: column`). Mismo vocabulario de
+> «esto va mal» que `.error-banner` (`--ff-neg` al 8 % sobre `--ff-paper`, borde al 45 %).
+>
+> **Frases del hogar (`.plan-sentence-list`/`.plan-sentence-item`/`.plan-sentence-dot`)** (5.0.0,
+> D32 → U10, issue #207, `SummaryView.tsx`): en Hogar, «Planes del hogar» no es una rejilla de
+> tarjetas — es una `<ul>` de frases, una por miembro, con `.plan-sentence-dot` pintado con
+> `householdMemberColor(idx)` (el MISMO color que la línea fina de ese miembro en el chart y su tick
+> de la tira de fases). Sin cifras por persona: el hogar no tiene plan propio.
 >
 > **Tono rojo de KPI (`.metric-card--danger`, prop `tone="danger"` de `MetricCard`)** (5.0.0, D17,
 > issue #207): mismo tinte que `.error-banner` y que `.plan-card--danger` (`--ff-neg` al 8 % sobre
@@ -346,18 +382,53 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 > dentro del panel «Tu plan». `auto-fill` y **no** `auto-fit` a propósito: con `auto-fit` la única
 > tarjeta absorbería las pistas vacías y se estiraría a toda la fila.
 >
-> **Cifras del plan (`.plan-card-figures`)** (5.0.0 WP7-3b2, `SummaryView.tsx`): fila propia entre
-> el hito y el estado de `.plan-card`, con «Ahorro necesario X/mes · Margen Y/mes». Va en su renglón
-> y no junto al hito porque son magnitudes AL MES y el hito es una fecha — en la misma línea se leen
-> como una sola frase. `flex-wrap` para que en móvil apilen alineadas a la izquierda.
+> **`.plan-card-figures` (5.0.0 WP7-3b2) queda retirado de `SummaryView.tsx` desde U9**: la fila
+> «Ahorro necesario X/mes · Margen Y/mes» no sobrevivió al rediseño — `planCardV2` no tiene esas dos
+> cifras sueltas, la ORACIÓN ya las integra. La clase **se retiró de `App.css`** en el pase de
+> documentación U5b (mismo caso que `.plan-card-grid`/`.plan-card` arriba).
 >
-> **Segunda rejilla de Jubilación (`.metric-grid.retirement-solve-grid`)** y **avisos
-> (`.retirement-strategy-notices`)** (5.0.0 WP7-3b2, `RetirementView.tsx`): las tarjetas que dependen
-> de la estrategia elegida NO entran en la banda superior (`.workspace-kpi-strip`, que es `nowrap`
-> con scroll horizontal): con media jornada más una pensión serían siete tarjetas en una sola tira
-> desplazable. Van en una `.metric-grid` que **envuelve** (`minmax(min(100%, 12rem), 1fr)`), y bajo
-> ella los avisos que solo matizan el cálculo, en `.muted` y sin color propio — el rojo vive arriba,
-> en un `.error-banner`, porque cambia cómo se leen TODAS las cifras y no solo una.
+> **Frase-hito con filete lateral de tono (`.retirement-sentence`)** (5.0.0, U1b → U7, issue #207,
+> `RetirementView.tsx`): la cabecera de «Resultado» es UNA oración (`lib/plan-sentence.ts`), y su
+> tono se marca con un `border-left: 3px solid` — `.retirement-sentence--ok` = `--ff-accent`,
+> `--warn` = `--ff-warn`, `--danger` = `--ff-neg` — **nunca con el color del TEXTO**, que se queda
+> en `--ff-ink` los tres casos. Es la misma regla que gobierna toda la escala de estado (D17/D28):
+> verde/rojo son para cifras delta, y la piel/filete es donde vive el semáforo. Un filete lateral
+> en vez de teñir el texto entero deja la frase larga legible sin que el tono compita con la
+> lectura — la misma razón por la que `.plan-card-wide-title--danger` sí tiñe texto (es un título
+> corto, no una oración) pero nunca un párrafo largo.
+>
+> **Tiles v2 con subtítulo que ENVUELVE (`.retirement-tiles-grid .metric-value-parenthetical`)**
+> (5.0.0, U1b → U7, issue #207, `RetirementView.tsx`): sustituye a la «segunda rejilla»
+> `.metric-grid.retirement-solve-grid` + avisos `.retirement-strategy-notices` de WP7-3b2 —
+> **las dos clases se retiraron, ni una tiene ya consumidor** (`grep -c "retirement-solve-grid\|retirement-strategy-notices" apps/web/src/App.css apps/web/src/views/RetirementView.tsx`
+> → 0 en los dos ficheros). U7 topa la cabecera a **3 tarjetas** (`RETIREMENT_TILES_V2_CAP`,
+> `lib/retirement-tiles.ts`), así que ya no hace falta una segunda rejilla aparte de la banda
+> superior: son las MISMAS `.metric-grid.retirement-tiles-grid` (`auto-fit`,
+> `minmax(min(100%, 15rem), 1fr)`). La variante existe solo para que el subtítulo pueda ENVOLVER
+> (`white-space: normal`, sin recorte): ahí vive la BASE de la cifra («de 658 €/mes de sobrante · es
+> TODO tu sobrante y no basta»), y U7 prohíbe truncarla — media base es peor que ninguna. Los
+> avisos que antes vivían en `.retirement-strategy-notices` se repartieron por tono: el rojo
+> (D17, `underfunded`) sube a un `.error-banner` sobre las tarjetas; el resto baja a
+> «Detalle del cálculo» como filas de `retirementDetailRows`.
+>
+> **Acordeón «Avanzado» cuyo resumen ES la línea «Supuestos» (`.retirement-advanced`)** (5.0.0,
+> U1b → U12, issue #207, `RetirementView.tsx`): un `<details class="panel retirement-advanced">`
+> cuyo `<summary>` (`.retirement-advanced-summary-text` + `.retirement-advanced-summary-cta`) pinta
+> `assumptionsLine(profile, ctx)` (`lib/assumptions-line.ts`) **SIEMPRE**, plegado o abierto —
+> «Supuestos: retirada 3,5 % · gasto fijo en euros de hoy · horizonte 90 años · sin colchón · umbral
+> 95,0 %». El marcador nativo del `<details>` se retira (`::-webkit-details-marker: none`) porque la
+> línea es larga y el triángulo la partía en dos renglones desalineados; la afordancia de que se
+> puede abrir la da el chip `.retirement-advanced-summary-cta` («Avanzado», mayúsculas pequeñas,
+> `--ff-accent`) a la derecha. Es el contrapeso exacto de U2 (esconder un campo por estrategia): sin
+> esta línea SIEMPRE visible, esconder un campo sería forzar su valor en silencio.
+>
+> **Indicador de guardado único (`.retirement-save-state`)** (5.0.0, U1b → S6, issue #207,
+> `RetirementView.tsx`): sustituye a los seis pies «Guardado automático.» de WP7, uno por panel, que
+> podían contradecirse entre sí. Vive en la cabecera (`role="status" aria-live="polite"`), texto
+> `muted` salvo el estado de error (`.retirement-save-state--danger`, `--ff-neg`) — precedencia fija
+> en `saveIndicatorLabel` (`lib/retirement-form.ts`): error > guardando > bloqueado > guardado. El
+> caso «guardado» se queda en tinta muted a propósito (misma regla que el verde sin piel: el estado
+> normal no se tiñe).
 >
 > **`.retirement-radio-stack`** (radios nativos en línea, `<label class="field checkbox-field">` por opción, `role="radiogroup"` en el contenedor): existía en `App.css` **sin ningún consumidor** antes de 5.0.0. `9ae5c24` le da los dos primeros — la base del objetivo (`perpetuity`/`bridge_to_pension`) y el `kind` de la regla de retirada, ambos en `RetirementView.tsx` (`grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` → 2). No lo confundas con el segmented: aquí el foco/tabulación son los `<input>` nativos, no un `role="group"` de botones.
 
@@ -472,6 +543,17 @@ ocultar.
    poder soltarla otra vez con el `null` del tri-estado. Sin el rótulo, una opción
    marcada se lee como una decisión tomada — y el formulario la reenvía, congelando una derivación
    que debía seguir moviéndose. Si añades otro campo derivado por el servidor, cópialo.
+6. **Una vista no repite la divisa en el subtítulo.** «Moneda EUR» / «Mensual · EUR» /
+   «Importes · EUR» se retiraron de Activos, Pasivos, Presupuesto, Movimientos, Próximos y Resumen
+   en el barrido de copys de 5.0.0 (issue #207): la divisa vive en `Ajustes → General` y en cada
+   cifra formateada (`formatCurrencyAmount` ya lleva el símbolo detrás) — un subtítulo que solo
+   repite eso no informa, ocupa una línea. Si una pantalla nueva necesita decir la divisa, es que
+   le falta un formateador, no un subtítulo.
+7. **El chip de scope no existe: el segmentado manda.** El chip «Mío · sin titular en Hogar» (y
+   variantes) se retiró de las mismas seis pantallas por el mismo barrido: el segmentado «Yo |
+   Hogar» de la TopBar (`.ff-topbar-scope`, ver §Shell) ya dice en qué vista está el usuario, y no
+   hace falta que cada pantalla lo repita con su propio chip. Una UI nueva que necesite anunciar el
+   scope se apoya en el segmentado — no reintroduzcas un chip de ámbito por pantalla.
 
 ## Provenance and maintenance
 
@@ -491,7 +573,7 @@ cifras del plan en el Resumen), de la rama `release/5.0.0`, issue #207. Re-verif
 - Anclas actuales del freezer: `grep -n 'App.css:' apps/web/src/styles/no-hex-outside-theme.test.ts` — deben casar con `grep -n "rgba(0, 0, 0," apps/web/src/App.css`
 - Tira de fases (clases y tokens): `grep -n "projection-phase-band\|projection-phase-label\|projection-phase-mark-label" apps/web/src/App.css apps/web/src/views/ProjectionNetWorthChart.tsx apps/web/src/components/charts/MiniProjection.tsx`
 - Su alto sale del plot, no de lienzo extra: `grep -n "layoutDims.ph - xAxisExtraBottom - phaseStripH" apps/web/src/views/ProjectionNetWorthChart.tsx`
-- Tarjeta de plan: `grep -n "plan-card" apps/web/src/App.css apps/web/src/views/SummaryView.tsx`
+- Tarjeta de plan (D27 original) sin consumidor en `SummaryView.tsx`: `git grep -n "plan-card-grid\|className=\"plan-card\"" -- 'apps/web/src/**/*.tsx'` vacío — la tarjeta viva es `.plan-card-wide*` (ver addendum U9/U10 abajo)
 - El viejo `<select>` de vista desapareció: `grep -n "ledger-view-select" apps/web/src/App.css apps/web/src/App.tsx` (debe imprimir vacío)
 - Líneas de miembro y su color compartido: `grep -n "householdMemberColor" apps/web/src/lib/*.ts` (≥3 ficheros: definición, tira de fases y líneas)
 - La leyenda del miembro dibuja línea, no discontinua: `grep -n 'swatch: "line" as const' apps/web/src/lib/phase-strip.ts`
@@ -499,11 +581,37 @@ cifras del plan en el Resumen), de la rama `release/5.0.0`, issue #207. Re-verif
 - Tokens de las auxiliares, en las DOS ramas del tema: `grep -c -- "--proj-required" apps/web/src/styles/theme.css` (2) y `grep -c -- "--proj-coast" apps/web/src/styles/theme.css` (2)
 - Y sin hex propio: `grep -n -- "--proj-required\|--proj-coast" apps/web/src/styles/theme.css` — las cuatro líneas son `color-mix`, ninguna un literal
 - Tono rojo de KPI: `grep -n "metric-card--danger" apps/web/src/App.css apps/web/src/components/MetricCard.tsx` y su único consumidor `grep -n 'tone={t.tone === "danger"' apps/web/src/views/RetirementView.tsx`
-- Segunda rejilla y avisos de Jubilación: `grep -n "retirement-solve-grid\|retirement-strategy-notices" apps/web/src/App.css apps/web/src/views/RetirementView.tsx` (el nombre NO es `retirement-strategy-grid`: esa clase ya existe **sin envolver** para las 5 radio-cards de estrategia y se habría aplicado también aquí)
-- Cifras del plan: `grep -n "plan-card-figures" apps/web/src/App.css apps/web/src/views/SummaryView.tsx`
-- **WP7 3c** — el abanico existe y no vive dentro de `MiniProjection`: `ls apps/web/src/components/charts/RiskFanChart.tsx` y `grep -c "p10\|p90" apps/web/src/components/charts/MiniProjection.tsx` (**0**)
+- Segunda rejilla y avisos de Jubilación (retirados en U1b, ver el addendum U5b más abajo): `grep -c "retirement-solve-grid\|retirement-strategy-notices" apps/web/src/App.css apps/web/src/views/RetirementView.tsx` (**0** en los dos)
+- Cifras del plan (D27 original, retiradas en U9): `grep -c "plan-card-figures" apps/web/src/views/SummaryView.tsx apps/web/src/App.css` (**0** en los dos desde U5b — la regla se borró de `App.css`, no solo su consumidor)
+- **El abanico vive dentro de `MiniProjection` desde U1b** (ya NO en un componente propio): `ls apps/web/src/components/charts/RiskFanChart.tsx` debe FALLAR (no existe) y `grep -c "p10\|p90" apps/web/src/components/charts/MiniProjection.tsx` da un número **NO-CERO** (13 el 2026-09-03) — antes de U1b daba 0 y esa cifra en 0 era la prueba de que el abanico vivía fuera; el mismo comando invertido es ahora la prueba de que vive dentro.
 - `--ff-warn` está en las DOS ramas del tema y sin más consumidores que el tono de KPI: `grep -c -- "--ff-warn" apps/web/src/styles/theme.css` (2) y `grep -rn -- "var(--ff-warn)" apps/web/src/App.css` (solo `.metric-card--warn`)
-- Clases de la sección «Riesgo»: `grep -n "risk-fan-note\|risk-depletion-grid\|risk-extra-rows\|risk-footnote\|summary-success-grid" apps/web/src/App.css apps/web/src/views/RetirementView.tsx apps/web/src/views/SummaryView.tsx`
+- Clases de la sección «Riesgo compacto» (`.risk-fan-note` retirada junto con `RiskFanChart.tsx`, ver addendum U5b): `grep -c "risk-fan-note" apps/web/src/App.css apps/web/src/views/RetirementView.tsx` (**0** en los dos) y `grep -n "risk-depletion-grid\|risk-extra-rows\|risk-footnote\|summary-success-grid" apps/web/src/App.css apps/web/src/views/RetirementView.tsx apps/web/src/views/SummaryView.tsx` (estas cuatro SIGUEN vivas)
 - La ayuda por fila reusa `label-with-help` y NO añadió CSS: `grep -n "label-with-help risk-extra-label" apps/web/src/views/RetirementView.tsx` (2: la tabla de agotamiento y las filas extra) y `grep -c "risk-extra-help" apps/web/src/App.css` (**0** — no hay clase nueva)
 - El valor del KPI de éxito es una oración, y envuelve sin CSS nuevo: `grep -n -A 6 '^\.metric-value-row' apps/web/src/App.css` (el `flex-wrap: wrap` que ya estaba es lo único que hace falta) y `grep -n "de cada 100 escenarios se jubilan" apps/web/src/lib/risk-bands.ts`
 - La aritmética del abanico vive PURA y testeada: `grep -c 'it(' apps/web/src/lib/risk-bands.test.ts`
+
+**Añadido 2026-09-03 para la segunda revisión de UX de Jubilación (U0–U12, issue #207), rama
+`release/5.0.0`**: la tarjeta ancha `.plan-card-wide*` y las frases del hogar `.plan-sentence-*`
+que sustituyen al trío D27 original en `SummaryView.tsx` (U9/U10), y las dos reglas nuevas de
+§Reglas para añadir UI nueva (divisa fuera del subtítulo, scope solo por el segmentado). Ese pase
+NO documentaba `RetirementView.tsx`/`components/charts/*` porque U1b los estaba reescribiendo en
+paralelo. Re-verify with:
+
+- La tarjeta ancha y sus piezas: `grep -n "plan-card-wide" apps/web/src/App.css apps/web/src/views/SummaryView.tsx`
+- Las frases del hogar: `grep -n "plan-sentence-list\|plan-sentence-item\|plan-sentence-dot" apps/web/src/App.css apps/web/src/views/SummaryView.tsx`
+- Las dos reglas de copy nuevas, sin regresión: `grep -rn "Moneda EUR\|Mensual · EUR\|Importes · EUR\|sin titular en Hogar" apps/web/src/views/*.tsx` — un único acierto (`SummaryView.tsx`, el comentario «S7» que explica la retirada), cero en JSX renderizado
+
+**Completado 2026-09-03 en el pase de documentación U5b (mismo issue #207), tras aterrizar
+`debc52d` (U1b)**: la sección `MiniProjection` gana las props `band`/`markers`/`deflator`; la
+sección `RiskFanChart` se sustituye por «Riesgo compacto y «Detalle del cálculo»» (el componente se
+retiró, y con él `.risk-fan-note`); las tres nuevas notas de patrón (frase-hito con filete de tono,
+tiles v2 con subtítulo que envuelve, acordeón «Avanzado»/indicador de guardado único); y el trío
+D27 original (`.plan-card-grid`/`.plan-card`/`.plan-card-figures`) **se retiró de verdad de
+`App.css`** — ya no es «sin consumidor, retiro pendiente». Re-verify with:
+
+- `RiskFanChart.tsx` no existe: `ls apps/web/src/components/charts/RiskFanChart.tsx` (falla)
+- `MiniProjection` tiene las tres props: `grep -n "band?:\|markers?:\|deflator?:" apps/web/src/components/charts/MiniProjection.tsx`
+- El trío D27 y `.risk-fan-note` fuera de `App.css` (regla, no solo consumidor): `grep -c "^\.plan-card {\|^\.plan-card-grid {\|^\.plan-card-figures {\|^\.risk-fan-note {" apps/web/src/App.css` (**0**)
+- La frase-hito usa filete, no color de texto: `grep -n -A 4 "^\.retirement-sentence {" apps/web/src/App.css` (sin `color` propio en el bloque base; el tono está en `border-left-color`, tres reglas después)
+- El acordeón «Avanzado» pinta `assumptions` en el `<summary>`: `grep -n "retirement-advanced-summary-text" apps/web/src/App.css apps/web/src/views/RetirementView.tsx`
+- Las secciones de «Avanzado» son SEIS, `Horizonte` y `Riesgo` YA NO están combinadas: `grep -n "ADVANCED_SECTION_LABEL" -A 8 apps/web/src/lib/retirement-form.ts`

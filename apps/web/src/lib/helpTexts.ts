@@ -376,11 +376,10 @@ export const HELP_TEXTS = {
       "Miles de futuros posibles de tu mismo plan: cada mes el mercado sube o baja según la " +
       "volatilidad que hayas declarado en tus activos, y el sorteo se repite cientos de veces. " +
       "La franja recoge del escenario 10 al 90 —uno de cada diez queda por encima y uno de cada " +
-      "diez por debajo—, la línea discontinua es la mediana y la sólida es la proyección de " +
-      "siempre, la que el resto de la app enseña como dinero. Ojo con la mediana: es el valor " +
-      "central de cada mes por separado, así que NO es un futuro concreto y no cuadra con " +
-      "ninguna simulación. El sorteo usa la misma semilla cada vez, así que las cifras no " +
-      "bailan entre visitas.",
+      "diez por debajo— y la línea sólida es la proyección de siempre, la que el resto de la app " +
+      "enseña como dinero. Ojo con la franja: sus bordes son el valor de cada mes por separado, " +
+      "así que NO son futuros concretos y no cuadran con ninguna simulación. El sorteo usa la " +
+      "misma semilla cada vez, así que las cifras no bailan entre visitas.",
   },
   "retirement.success": {
     title: "Éxito del plan",

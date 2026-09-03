@@ -699,6 +699,7 @@ Vocabulary used below (defined once):
 | **Migration auto-repair** (12-round checksum repair loop) | Masked genuine drift between shipped migration files and applied checksums; a silently "repaired" DB can diverge from what migrations say | Fail-loud `sqlx::migrate!().run()` (`apps/api/src/db.rs`); manual `DELETE FROM _sqlx_migrations WHERE version = X` only when the change is genuinely idempotent |
 | **GET-side purges** (`purge_expired_liabilities` called from 6 GET handlers) | GETs issued DELETEs: violates HTTP semantics, breaks caching (v1.4.0's cache would have been impossible), destroys audit data | `WHERE (payment_end_date IS NULL OR payment_end_date >= $today)` filter in liabilities/summary/budget/assets/projection reads; rows persist |
 | **Binary-search gross-up** (90 iterations to invert after-tax) | 90× slower than needed and convergence-threshold noise; obscured that the function is piecewise-linear | Closed-form per-bracket inversion `gross_up_net_annual_fire` (`handlers/projection.rs`); old binary search preserved as the test oracle `gross_up_binary_reference` |
+| **5.0.0-rc UX de Jubilación** (WP7 1–3, la primera vuelta del rediseño): resultados ANTES que inputs (la fila de tarjetas de resultado se pintaba por encima del formulario que las produce), 8 tiles con dos cifras cada uno (rejilla `.retirement-solve-grid` + la de arriba, sin jerarquía entre ellas), dos charts con ejes distintos (el grande de Proyección y el abanico de Riesgo no compartían ni escala ni ventana), seis pies «Guardado automático» repetidos por panel, y el tile del puente medía los meses desde HOY en vez de pensión − jubilación (bug S8, 35 años y 10 meses en la demo en vez de 12) | Tras subir la imagen en local, veredicto del owner: **«jerarquía sin sentido, orden mal, campos redundantes, mínimo input»**. Confirmado por una revisión adversarial con capturas, API y un inventario de 67 inputs (issue #207) | Segunda revisión de UX, doce decisiones (U1–U12): U1 config arriba → resultado → «Avanzado» plegado; U2 el formulario enseña solo los campos de la estrategia elegida; U3 el gasto en jubilación admite 3 modos; U4 el porcentaje de retirada es único; U5 un solo chart + «Riesgo» compacto; U6 la pensión vive solo en Jubilación (el flag del presupuesto es para rentas); U7 frase-hito + como mucho 3 tiles (corrige S8 de paso: `buildRetirementTilesV2`); U8 el asistente pide nacimiento + estrategia + el dato esencial de esa estrategia; U9 tarjeta única en Resumen; U10 Hogar enseña sumas + una frase por miembro; U11 todo el rediseño va dentro de 5.0.0, no en una versión aparte; U12 nada se fuerza sin verse (línea «Supuestos»). Ver CHANGELOG `## [5.0.0]` §«Segunda revisión de UX» |
 
 ## 4. "If you are tempted to X, read Y first"
 
@@ -741,6 +742,8 @@ Vocabulary used below (defined once):
 | Bind an MCP `Mcp-Session-Id` to its credential "just in case" | §2.17 — no defender exists until the server emits something on its own initiative; wait for that trigger |
 | Add `density` (or any resolution knob) as an MCP-tool parameter to explain a curve jump | §2.18 — a finer grid says WHERE, never WHY; add a named-event field instead |
 | Rename a field to disambiguate it from a same-named field elsewhere | §2.19 — declaring the field's `basis`/mode costs less than a rename and fixes legibility better |
+| Pintar resultados/tiles por ENCIMA del formulario que los produce, apilar tarjetas de resultado sin jerarquía entre ellas, o dar a cada chart su propio eje/ventana | §3 fila 6 — orden fijado por U1/U5/U7: config → resultado → «Avanzado» plegado, como mucho 3 tiles con una frase-hito, un solo chart |
+| Medir un tramo (puente, plazo) como «meses desde hoy» en vez de la resta entre los dos `month_index` reales | §3 fila 6 (bug S8) — `lib/duration.ts` separa la CUENTA ATRÁS (`formatYearsEsFromMonths`) del TRAMO (`formatMonthSpanEs`); no reuses la primera para lo segundo |
 
 ## 5. When NOT to use this skill
 
@@ -797,6 +800,16 @@ readmite — las tres se leen con su scope note al lado. Re-verificar:
 `0668f37`, issue #207 cerrado), leyendo `crates/engine/tests/{golden_pins.rs,fuzz_invariants.rs}`.
 Re-verificar: `grep -n "fn p24_publishes_the_undrained_operand_with_the_scale_of_4_15_0\|fn p25_keeps_the_debt_service_grouping_of_4_15_0" crates/engine/tests/golden_pins.rs` (2 hits) y
 `grep -n "fn random_households_satisfy_the_accounting_identities" crates/engine/tests/fuzz_invariants.rs`.
+
+**§3 fila 6 y sus dos filas de §4 se añadieron el 2026-09-03**, tras subir la imagen de 5.0.0 en
+local y recibir el veredicto del owner sobre la pantalla de Jubilación (issue #207, segunda
+revisión de UX — U0–U12, doc completa en `CHANGELOG.md` `## [5.0.0]` §«Segunda revisión de UX»).
+Documenta la primera vuelta del rediseño (WP7) como forma RECHAZADA, no la pantalla que la
+sustituye — `RetirementView.tsx` está siendo reescrita en un cambio aparte (U1b) y su
+documentación es un pase posterior. Re-verificar:
+- El bug S8 ya tiene su fix en una lib separada de la cuenta atrás: `grep -n "formatMonthSpanEs\|formatYearsEsFromMonths" apps/web/src/lib/duration.ts apps/web/src/lib/projection-chart.ts`
+- Las doce decisiones están escritas una sola vez y el CHANGELOG las enlaza: `grep -n "^| U[0-9]* |" CHANGELOG.md` (12 filas)
+- `buildRetirementTilesV2` corrige la medida del puente: `grep -n "pension_start\|RETIREMENT_TILES_V2_CAP" apps/web/src/lib/retirement-tiles.ts`
 
 **§1 rows 22–23 and §2.18–§2.19 added 2026-08-28 for v4.4.0** (MCP Fase 5, issue #86), by reading
 `apps/api/src/handlers/projection.rs` (`ProjectionEvent` doc-comment) and
