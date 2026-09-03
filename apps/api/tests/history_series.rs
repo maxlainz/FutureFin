@@ -869,3 +869,269 @@ async fn an_item_missing_from_one_capture_does_not_collapse_the_household() {
     // Alpha arrastra 40.000 (antes: 0) + Beta 10.000 exactos ⇒ 50.000, no 10.000.
     assert_close(total, 50_000.0, "el hogar no se desploma por una foto incompleta");
 }
+
+// ---------------------------------------------------------------------------
+// Identidad de los items entre snapshots (`source_item_id` generado por el servidor)
+// ---------------------------------------------------------------------------
+//
+// `source_item_id` es la clave de identidad ENTRE snapshots, pero el servidor la genera
+// (`Uuid::new_v4`) cuando el cliente no manda `item_id` — y la tool MCP `create_snapshot` ni
+// siquiera lo expone. Sin resolver esa identidad al leer, N fotos de la misma cuenta eran N
+// timelines que se APILABAN por LOCF: la instancia de demo servía 25 `asset_series` para 5
+// activos y un `assets_total` que se multiplicaba por el número de snapshots vigentes en cada
+// tramo (264.869 € → 532.046 € → 801.531 € → 0 €). Los cuatro tests siguientes fijan las cuatro
+// ramas de `resolve_item_identity` (handlers/history.rs).
+
+/// Crea un activo vivo y devuelve su id.
+async fn create_asset(
+    app: &TestApp,
+    user: &LoggedInOwner,
+    category_id: &str,
+    name: &str,
+    value: &str,
+) -> String {
+    let resp = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({"category_id": category_id, "name": name, "current_value": value}),
+            &user.cookie,
+        )
+        .await;
+    assert_eq!(resp.status, http::StatusCode::CREATED, "create asset: {resp:?}");
+    resp.json()["id"].as_str().expect("asset id").to_string()
+}
+
+/// `asset_series` indexado por `asset_id`.
+fn series_by_id(body: &serde_json::Value) -> std::collections::HashMap<String, &serde_json::Value> {
+    body["asset_series"]
+        .as_array()
+        .expect("asset_series array")
+        .iter()
+        .map(|s| (s["asset_id"].as_str().expect("asset_id").to_string(), s))
+        .collect()
+}
+
+/// Posición (base 0) del punto `month_index == k` dentro de `points`; `asset_series[].values` es
+/// paralelo a `points`, así que es también la posición del valor de cada serie.
+fn position_of(body: &serde_json::Value, k: i32) -> usize {
+    body["points"]
+        .as_array()
+        .expect("points array")
+        .iter()
+        .position(|p| i32_of(&p["month_index"]) == k)
+        .unwrap_or_else(|| panic!("no point with month_index {k}"))
+}
+
+/// Tres snapshots de backfill SIN `item_id` cuyas etiquetas casan con dos activos vivos ⇒
+/// exactamente DOS series, con los ids de los activos VIVOS (que es por lo que junta el chart), y
+/// un total que no se multiplica por el número de fotos.
+#[tokio::test]
+async fn backfill_without_item_id_collapses_into_one_series_per_live_asset() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    let (_, anchor) = server_today(&app, &owner.cookie).await;
+
+    let cuenta = create_asset(&app, &owner, &cat, "Cuenta corriente", "4200").await;
+    let fondo = create_asset(&app, &owner, &cat, "Fondo indexado global", "38600").await;
+
+    // Tres fotos a primero-de-mes (k = −3, −2, −1) con las MISMAS etiquetas que los activos
+    // vivos y sin `item_id`: es exactamente lo que hace `scripts/seed-demo.sh` y lo único que
+    // puede hacer la tool MCP `create_snapshot`.
+    for (k, cuenta_v, fondo_v) in [(-3, "1000", "10000"), (-2, "2000", "20000"), (-1, "3000", "30000")] {
+        backfill(
+            &app,
+            &owner,
+            "asset",
+            add_months_signed(anchor, k),
+            serde_json::json!([
+                {"label": "Cuenta corriente", "value": cuenta_v},
+                {"label": "Fondo indexado global", "value": fondo_v},
+            ]),
+        )
+        .await;
+    }
+
+    let (body, _, _) = get_series(&app, &owner.cookie, "").await;
+
+    // Predicción: 2 series (antes del arreglo, 8 = 3 fotos × 2 etiquetas + 2 activos vivos),
+    // con los ids de los activos vivos.
+    let series = series_by_id(&body);
+    assert_eq!(
+        series.len(),
+        2,
+        "una serie por activo vivo, no una por (foto, item): {}",
+        body["asset_series"]
+    );
+    let cuenta_s = series.get(&cuenta).expect("serie con el id del activo vivo Cuenta corriente");
+    let fondo_s = series.get(&fondo).expect("serie con el id del activo vivo Fondo indexado global");
+    assert_eq!(cuenta_s["asset_name"], "Cuenta corriente");
+    assert_eq!(fondo_s["asset_name"], "Fondo indexado global");
+
+    // `values` es paralelo a `points` (rejilla k=−3..=0 ⇒ 4 puntos).
+    let n_points = body["points"].as_array().unwrap().len();
+    assert_eq!(n_points, 4, "rejilla k=-3..=0");
+    for s in [cuenta_s, fondo_s] {
+        assert_eq!(
+            s["values"].as_array().unwrap().len(),
+            n_points,
+            "values paralelo a points"
+        );
+    }
+
+    // Predicción por mes. Las fotos caen en primero-de-mes, así que cada punto de la rejilla ES
+    // una fecha de snapshot y el motor devuelve el valor observado EXACTO; k=0 se evalúa en hoy,
+    // que es la observación virtual = valor vivo.
+    //   k=−3 → 1.000 / 10.000   (antes del arreglo: 1.000 / 10.000, la primera foto no se apila)
+    //   k=−2 → 2.000 / 20.000   (antes: 3.000 / 30.000 — la foto de k=−3 arrastraba su LOCF)
+    //   k=−1 → 3.000 / 30.000
+    //   k= 0 → 4.200 / 38.600   (valor vivo)
+    for (k, cuenta_v, fondo_v) in [(-3, 1000.0, 10000.0), (-2, 2000.0, 20000.0), (-1, 3000.0, 30000.0), (0, 4200.0, 38600.0)] {
+        let pos = position_of(&body, k);
+        assert_close(f64_of(&cuenta_s["values"][pos]), cuenta_v, &format!("Cuenta k={k}"));
+        assert_close(f64_of(&fondo_s["values"][pos]), fondo_v, &format!("Fondo k={k}"));
+        assert_close(
+            f64_of(&point_at(&body, k)["assets_total"]),
+            cuenta_v + fondo_v,
+            &format!("assets_total k={k}"),
+        );
+    }
+}
+
+/// Un activo BORRADO cuyas tres fotos no llevan `item_id` deja UNA serie solo-histórica, no tres.
+/// El contrato de la leyenda (`apps/web/src/lib/chart-legend.ts`) sigue en pie: su id no está en
+/// `/v1/assets`, así que no se sufija ni veta.
+#[tokio::test]
+async fn history_only_items_group_into_one_series_per_name() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    let (_, anchor) = server_today(&app, &owner.cookie).await;
+
+    let vieja = create_asset(&app, &owner, &cat, "Cartera vieja", "500").await;
+    for (k, v) in [(-3, "100"), (-2, "200"), (-1, "300")] {
+        backfill(
+            &app,
+            &owner,
+            "asset",
+            add_months_signed(anchor, k),
+            serde_json::json!([{"label": "Cartera vieja", "value": v}]),
+        )
+        .await;
+    }
+
+    // Se vende el activo: sus fotos sobreviven (`source_item_id` no es FK), sin fila viva que las
+    // reclame.
+    let del = app
+        .delete_with_cookie(&format!("/v1/assets/{vieja}"), &owner.cookie)
+        .await;
+    assert_eq!(del.status, http::StatusCode::NO_CONTENT, "{del:?}");
+
+    let (body, _, _) = get_series(&app, &owner.cookie, "").await;
+    let series = body["asset_series"].as_array().unwrap();
+    assert_eq!(series.len(), 1, "una serie por nombre, no una por foto: {series:?}");
+    assert_eq!(series[0]["asset_name"], "Cartera vieja");
+    assert_ne!(
+        series[0]["asset_id"].as_str().unwrap(),
+        vieja,
+        "el id vivo ya no existe: la serie solo-histórica se canoniza a un source_item_id"
+    );
+
+    // Predicción: k=−2 → 200 (antes del arreglo, 300 = 100 arrastrado + 200); k=0 → 0 (ausente
+    // del ledger vivo ⇒ vendido, la única ausencia que vale cero).
+    for (k, v) in [(-3, 100.0), (-2, 200.0), (-1, 300.0), (0, 0.0)] {
+        assert_close(
+            f64_of(&point_at(&body, k)["assets_total"]),
+            v,
+            &format!("assets_total k={k}"),
+        );
+    }
+}
+
+/// Dos activos VIVOS con el mismo nombre nunca se fusionan: la resolución por etiqueta solo actúa
+/// cuando el nombre identifica a una sola fila viva. Con `item_id` correcto (el camino de la SPA,
+/// que reenvía el del prefill) la resolución es un no-op.
+#[tokio::test]
+async fn two_live_assets_sharing_a_name_are_never_merged() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    let (_, anchor) = server_today(&app, &owner.cookie).await;
+
+    let uno = create_asset(&app, &owner, &cat, "Cuenta", "1000").await;
+    let dos = create_asset(&app, &owner, &cat, "Cuenta", "2000").await;
+
+    for (k, a, b) in [(-2, "100", "200"), (-1, "150", "250")] {
+        backfill(
+            &app,
+            &owner,
+            "asset",
+            add_months_signed(anchor, k),
+            serde_json::json!([
+                {"item_id": uno, "label": "Cuenta", "value": a},
+                {"item_id": dos, "label": "Cuenta", "value": b},
+            ]),
+        )
+        .await;
+    }
+
+    let (body, _, _) = get_series(&app, &owner.cookie, "").await;
+    let series = series_by_id(&body);
+    assert_eq!(series.len(), 2, "dos activos vivos homónimos siguen siendo dos series");
+    assert!(series.contains_key(&uno) && series.contains_key(&dos));
+    // Valores exactos en sus fechas de snapshot y en hoy (observación virtual = valor vivo).
+    for (k, a, b) in [(-2, 100.0, 200.0), (-1, 150.0, 250.0), (0, 1000.0, 2000.0)] {
+        let pos = position_of(&body, k);
+        assert_close(f64_of(&series[&uno]["values"][pos]), a, &format!("uno k={k}"));
+        assert_close(f64_of(&series[&dos]["values"][pos]), b, &format!("dos k={k}"));
+    }
+}
+
+/// Dos items con la MISMA etiqueta dentro de una MISMA foto son dos cosas distintas que el usuario
+/// llamó igual: la identidad se disuelve entera y cada uno vuelve a ser su propio timeline. Se
+/// acepta la pérdida de agrupación —no la de dinero—: el total sigue cuadrando exacto en cada
+/// fecha de snapshot, que es la garantía del motor.
+#[tokio::test]
+async fn duplicate_labels_within_one_snapshot_dissolve_the_identity() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (_, anchor) = server_today(&app, &owner.cookie).await;
+
+    for (k, a, b) in [(-2, "600", "400"), (-1, "700", "300")] {
+        backfill(
+            &app,
+            &owner,
+            "asset",
+            add_months_signed(anchor, k),
+            serde_json::json!([
+                {"label": "Cuenta", "value": a},
+                {"label": "Cuenta", "value": b},
+            ]),
+        )
+        .await;
+    }
+
+    let (body, _, _) = get_series(&app, &owner.cookie, "").await;
+    assert_eq!(
+        body["asset_series"].as_array().unwrap().len(),
+        4,
+        "identidad ambigua ⇒ no se fusiona nada (una serie por item, como antes)"
+    );
+    // Ni un euro perdido: el total es exacto en cada fecha de snapshot (600+400 y 700+300).
+    for (k, total) in [(-2, 1000.0), (-1, 1000.0)] {
+        assert_close(
+            f64_of(&point_at(&body, k)["assets_total"]),
+            total,
+            &format!("assets_total k={k}"),
+        );
+        // Y la suma de las series publicadas ES ese total (ninguna observación se perdió).
+        let pos = position_of(&body, k);
+        let sum: f64 = body["asset_series"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| f64_of(&s["values"][pos]))
+            .sum();
+        assert_close(sum, total, &format!("Σ asset_series k={k}"));
+    }
+}
