@@ -52,6 +52,7 @@ import {
   normalizeRetirementProfile,
   retirementProfileIssue,
   strategyRequiresTargetAge,
+  targetBasisSource,
 } from "../lib/retirementProfile";
 import { messageForError } from "../lib/errorMessages";
 import { type LedgerPersonScope } from "../lib/ledger";
@@ -222,9 +223,10 @@ export function RetirementView({
       .then((saved) => {
         if (seq !== profileSaveSeqRef.current || !saved) return;
         syncedProfileRef.current = saved;
-        // `target_basis` lo DERIVA el servidor cuando no está fijado (R6). Resincronizarlo con
-        // lo que acaba de responder impide que el borrador —que enseña el valor derivado— lo
-        // mande como elección explícita en el siguiente PATCH y congele la derivación.
+        // `saved.target_basis` es la elección ALMACENADA (`target_basis_stored`, `null` =
+        // derivada): App.tsx la sustituye al recibir la respuesta. Resincronizar el borrador con
+        // ella lo mantiene alineado con lo que el servidor tiene guardado, sin convertir en
+        // elección explícita lo que sigue siendo una derivación.
         setProfileDraft((d) =>
           d.target_basis === saved.target_basis
             ? d
@@ -496,6 +498,13 @@ export function RetirementView({
 
   const strategy = profileDraft.strategy;
   const basis = effectiveTargetBasis(profileDraft);
+  /**
+   * De dónde sale la base marcada en el radio. `derived` = nadie la ha elegido y el servidor la
+   * deriva (R6: puente si hay pensión declarada, perpetuidad si no), así que se rotula
+   * «(derivada)» y el radio marcado NO es una decisión del usuario: sigue moviéndose sola si
+   * mañana declara una pensión. `stored` = está fijada a mano, y entonces se ofrece soltarla.
+   */
+  const basisSource = targetBasisSource(profileDraft);
   const rule = profileDraft.withdrawal_rule;
   const pension = profileDraft.pension;
   const partial = profileDraft.partial_retirement;
@@ -1259,6 +1268,13 @@ export function RetirementView({
                         title={HELP_TEXTS["retirement.target_basis"].title}
                         body={HELP_TEXTS["retirement.target_basis"].body}
                       />
+                      {/* La opción marcada puede no ser una elección: mientras nadie la fija, la
+                          deriva el servidor a partir de si hay pensión declarada. Decirlo evita
+                          que se lea como una decisión tomada — y explica por qué se mueve sola
+                          al declarar una pensión. */}
+                      {basisSource === "derived" ? (
+                        <span className="muted"> (derivada)</span>
+                      ) : null}
                     </span>
                     <label className="field checkbox-field">
                       <input
@@ -1283,6 +1299,19 @@ export function RetirementView({
                       <span>Puente hasta la pensión</span>
                     </label>
                   </div>
+                  {/* FUERA del `radiogroup`: un botón enfocable entre radios rompe la navegación
+                      con flechas del grupo. Sin esta salida, fijar la base a mano es irreversible
+                      desde la UI — el tri-estado del PATCH acepta `null` para volver a derivarla
+                      y hasta aquí no había forma de mandarlo. */}
+                  {basisSource === "stored" ? (
+                    <button
+                      type="button"
+                      className="btn ghost text retirement-basis-reset"
+                      onClick={() => patchDraft((p) => ({ ...p, target_basis: null }))}
+                    >
+                      Volver a la derivada
+                    </button>
+                  ) : null}
                 </div>
               )}
 

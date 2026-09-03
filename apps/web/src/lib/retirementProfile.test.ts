@@ -44,6 +44,8 @@ import {
   isEmptyRetirementProfilePatch,
   normalizeRetirementProfile,
   retirementProfileIssue,
+  targetBasisSource,
+  withStoredTargetBasis,
 } from "./retirementProfile";
 
 const base = (over: Partial<RetirementProfileApi> = {}): RetirementProfileApi => ({
@@ -307,6 +309,78 @@ describe("buildRetirementProfilePatch — tri-estado", () => {
       target_basis: "bridge_to_pension",
     });
     expect(patch.target_basis).toBe("bridge_to_pension");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// La elección ALMACENADA de `target_basis` (WP5-2): «derivada» ≠ «elegida»
+// ---------------------------------------------------------------------------
+
+describe("target_basis almacenado vs resuelto", () => {
+  const pension = {
+    monthly_amount_today: "1200",
+    starts_at_age: 67,
+    indexed: true,
+    fraction_while_partial: "0",
+  };
+
+  it("withStoredTargetBasis pone la elección guardada donde el servidor puso la resuelta", () => {
+    // Lo que llega del servidor: `profile.target_basis` RESUELTO a puente (hay pensión) y
+    // `target_basis_stored: null` (nadie lo eligió).
+    const fromServer = base({ target_basis: "bridge_to_pension", pension });
+    const p = withStoredTargetBasis(fromServer, null);
+    expect(p.target_basis).toBeNull();
+    // Y lo que se PINTA no cambia: se deriva igual que en el servidor.
+    expect(effectiveTargetBasis(p)).toBe("bridge_to_pension");
+  });
+
+  it("una elección guardada se conserva tal cual", () => {
+    const p = withStoredTargetBasis(
+      base({ target_basis: "perpetuity", pension }),
+      "perpetuity",
+    );
+    expect(p.target_basis).toBe("perpetuity");
+    expect(effectiveTargetBasis(p)).toBe("perpetuity");
+  });
+
+  it("un backend sin el campo (undefined) deja el perfil intacto", () => {
+    // Inventar un `null` diría «derivada» sobre una elección que quizá sí existe.
+    const fromServer = base({ target_basis: "bridge_to_pension", pension });
+    expect(withStoredTargetBasis(fromServer, undefined)).toBe(fromServer);
+  });
+
+  it("targetBasisSource distingue los tres orígenes", () => {
+    expect(targetBasisSource(base({ target_basis: null }))).toBe("derived");
+    expect(targetBasisSource(base({ target_basis: null, pension }))).toBe("derived");
+    expect(targetBasisSource(base({ target_basis: "perpetuity" }))).toBe("stored");
+    expect(targetBasisSource(base({ strategy: "pension_bridge", pension }))).toBe(
+      "forced_by_strategy",
+    );
+  });
+
+  it("elegir el radio que YA estaba marcado por derivación sí fija la elección", () => {
+    // Este es el caso que la sustitución existe para permitir: el perfil deriva `perpetuity` y
+    // el usuario marca `perpetuity` para congelarla a propósito. Comparando el valor RESUELTO
+    // los dos lados se veían iguales y la fijación no se mandaba nunca.
+    const before = withStoredTargetBasis(base({ target_basis: "perpetuity" }), null);
+    const patch = buildRetirementProfilePatch(before, {
+      ...before,
+      target_basis: "perpetuity",
+    });
+    expect(patch.target_basis).toBe("perpetuity");
+  });
+
+  it("«Volver a la derivada» manda `null` EXPLÍCITO (el tri-estado del servidor)", () => {
+    const before = base({ target_basis: "perpetuity", pension });
+    const patch = buildRetirementProfilePatch(before, { ...before, target_basis: null });
+    expect("target_basis" in patch).toBe(true);
+    expect(patch.target_basis).toBeNull();
+  });
+
+  it("guardar otro campo con la base derivada no nombra `target_basis`", () => {
+    const before = withStoredTargetBasis(base({ target_basis: "perpetuity" }), null);
+    const patch = buildRetirementProfilePatch(before, { ...before, swr_pct: "3.2" });
+    expect(Object.keys(patch)).toEqual(["swr_pct"]);
   });
 });
 

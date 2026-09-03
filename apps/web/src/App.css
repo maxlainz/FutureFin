@@ -2761,6 +2761,14 @@
   flex: 1 0 100%;
 }
 
+/* «Volver a la derivada» (5.0.0, D13): vive FUERA del radiogroup —un botón enfocable entre radios
+   rompe la navegación con flechas—, así que hereda el `align-items: stretch` del `.field` y sin
+   esto ocuparía todo el ancho como si fuera la acción principal del panel. Es una salida. */
+.retirement-basis-reset {
+  align-self: flex-start;
+  margin-left: -0.55rem;
+}
+
 .retirement-config-stack {
   gap: 0.875rem;
 }

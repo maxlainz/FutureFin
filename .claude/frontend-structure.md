@@ -39,6 +39,16 @@ src/
 │                                 #   `RetirementProfilePatchApi`, tri-estado (clave ausente = no cambia, `null` borra
 │                                 #   lo opcional). También `AssetApiRow.annual_volatility_percent?: string | null`
 │                                 #   (§A.2 — desviación típica anual; solo alimenta Monte Carlo, WP6).
+│                                 #   WP5-2 añade tres piezas de contrato: `RetirementProfileResponseApi
+│                                 #   .target_basis_stored` (la elección ALMACENADA; `null` = el servidor la DERIVA,
+│                                 #   ausente = backend antiguo — sin ella el cliente no distingue «no lo he elegido»
+│                                 #   de «he elegido esto» y congela la derivación al reenviarla);
+│                                 #   `HouseholdMemberProjectionApi.series` (`MemberSeriesPointApi[]` —
+│                                 #   {month_index, net_worth, net_worth_liquid}, misma rejilla y misma decimación
+│                                 #   que `points[]`) + `.horizon_months` (el horizonte PROPIO del miembro, que puede
+│                                 #   ser menor que `months`: ahí termina su línea); y `AssetWriteBodyApi`, el cuerpo
+│                                 #   de POST/PATCH de activo con sus tres campos tri-estado, donde `undefined` y
+│                                 #   `null` significan cosas DISTINTAS a propósito.
 │
 ├── lib/                          # pure helpers, no React imports
 │   ├── format.ts                 # money/percent/decimal formatting (es-ES locale), parseDisplayDecimal, METRIC_DASH,
@@ -82,6 +92,14 @@ src/
 │   │                             #   «Guardado automático» sobre un valor que el PATCH iba a rechazar con 400; (3)
 │   │                             #   PATCH MÍNIMO tri-estado (buildRetirementProfilePatch/isEmptyRetirementProfilePatch)
 │   │                             #   — mandar el perfil entero resetearía en silencio lo que el usuario no tocó.
+│   │                             #   WP5-2/WP7-3b: **withStoredTargetBasis** (sustituye el `target_basis` RESUELTO
+│   │                             #   que publica el servidor por la elección ALMACENADA, `target_basis_stored`;
+│   │                             #   `undefined` = backend antiguo ⇒ no toca nada) y **targetBasisSource** →
+│   │                             #   `stored | derived | forced_by_strategy`. Sin la sustitución, el patch mínimo
+│   │                             #   no puede distinguir «el servidor derivó perpetuity» de «el usuario eligió
+│   │                             #   perpetuity»: la fijación explícita no se mandaba nunca, y el radio marcado se
+│   │                             #   leía como una decisión tomada. Lo que se PINTA sigue saliendo de
+│   │                             #   effectiveTargetBasis, que deriva con la misma regla R6 que Rust.
 │   │                             #   Además: las 5 estrategias (RETIREMENT_STRATEGIES + _LABEL/_BLURB, nombres D33) y
 │   │                             #   las cotas del formulario, DUPLICADAS a propósito contra `retirement_profile.rs`
 │   │                             #   §Cotas (MIN_PROFILE_AGE, MAX_WITHDRAWAL_PCT, MAX_GUARDRAIL_PCT,
@@ -118,12 +136,31 @@ src/
 │   │                             #   /v1/assets + /v1/installation/members; null = actual sin owner resoluble),
 │   │                             #   collapsedAssetLegendCap / applyLegendCollapse (chip «+N más»; nunca esconde
 │   │                             #   uno solo), topAssetTooltipRows (top-5 por |valor| + «Otros»). Test: chart-legend.test.ts
+│   │                             #   5.0.0 (D32): **householdMemberColor(idx)** — color de un miembro del hogar por
+│   │                             #   su POSICIÓN en `members[]`, ÚNICA definición del emparejamiento entre su línea
+│   │                             #   fina del chart, su tick de la tira de fases y su entrada de leyenda. Reusa
+│   │                             #   ASSET_LINE_COLORS. Cuando cada superficie lo calculaba por su cuenta, bastaba
+│   │                             #   con que una ordenara distinto para que la leyenda nombrara la curva de otro
+│   ├── member-lines.ts           # 5.0.0 (D32, issue #207): preparación PURA de las «líneas finas por miembro» del
+│   │                             #   chart en vista Hogar — buildHouseholdMemberLines (members[].series → vértices
+│   │                             #   {month_index, value} ya DEFLACTADOS con el factor que pasa el chart, recortados
+│   │                             #   al `horizon_months` PROPIO de cada miembro y con su color) y memberValueAtMonth
+│   │                             #   (el valor que lee el tooltip). **Todo en MESES**, nunca por posición: la serie
+│   │                             #   viene decimada como `points[]`. Dos reglas con consecuencia visible — la línea
+│   │                             #   TERMINA en el horizonte propio (nunca se extrapola: más allá esa persona no
+│   │                             #   declaró vivir) y memberValueAtMonth devuelve `null` en los dos extremos, así
+│   │                             #   que un miembro cuya curva ya acabó desaparece del tooltip en vez de repetir su
+│   │                             #   último importe. Solo `net_worth`: el líquido viaja pero NO se dibuja.
+│   │                             #   Test: member-lines.test.ts
 │   ├── phase-strip.ts            # 5.0.0 (D29, issue #207): geometría PURA de la tira de fases del chart —
 │   │                             #   buildPhaseSegments (phase_transitions → tramos contiguos recortados a la ventana,
 │   │                             #   con transitionMonth = el mes REAL del corte aunque la ventana lo tape),
 │   │                             #   phaseAtMonth, buildPhaseMarks (pensión = flecha; «Cruce» SOLO con
 │   │                             #   retirement_trigger === "target_age" y cruce ≠ jubilación efectiva; un tick por
-│   │                             #   miembro en Hogar) y buildHouseholdMemberLegendItems. **Todo en MESES**: no recibe
+│   │                             #   miembro en Hogar, coloreado con `householdMemberColor`) y
+│   │                             #   buildHouseholdMemberLegendItems (`swatch: "line"` desde WP7-3b: cada miembro
+│   │                             #   tiene ya su polyline fina, así que la muestra dibuja lo que hay pintado).
+│   │                             #   **Todo en MESES**: no recibe
 │   │                             #   `points`, así que la densidad no puede moverla (test de invariancia
 │   │                             #   monthly ≡ hybrid en phase-strip.test.ts). PHASE_LABELS trae el par largo/corto
 │   │                             #   («Trabajo»/«Trab.», «Media jornada»/«½ jorn.», «Jubilado»/«Jub.»)
@@ -151,6 +188,17 @@ src/
 │   │                             #   TxnSortDir; importe por |magnitud|, tiebreak estable), groupTransactionsByCategory/sortTransactionGroups (orden fijo: kind → |subtotal| desc; el subtotal
 │   │                             #   EXCLUYE las conciliadas, que sí siguen en rows — si no, divergiría de la comparativa del servidor en la misma pantalla) e isReconciled (3.5.0: fuente de
 │   │                             #   verdad = transfer_counterpart_id presente). Test: expenses.test.ts
+│   ├── asset-form.ts             # 5.0.0 (WP5-2): cuerpo PURO de POST/PATCH de un activo —
+│   │                             #   buildAssetWriteBody + assetOptionalDecimalPatch. Existe por el **TRI-ESTADO**
+│   │                             #   de sus tres importes opcionales (purchase_price,
+│   │                             #   expected_annual_return_percent, annual_volatility_percent): clave ausente = no
+│   │                             #   cambia, `null` = BORRA, valor = fija. La regla que hay que acertar es cuál emite
+│   │                             #   un campo VACÍO en una edición — `null` solo si el activo TENÍA valor (vaciar es
+│   │                             #   una orden de borrado: así se vuelve a determinista), y nada si ya estaba vacío
+│   │                             #   (un `null` sobre un hueco es un PATCH que no cambia nada, invalida la cache de
+│   │                             #   proyección y puede acabar en `patch_empty`). En un ALTA nunca hay `null`.
+│   │                             #   Antes vivía en tres `if` dentro de `submitAssetForm` y no se podía probar.
+│   │                             #   Test: asset-form.test.ts
 │   ├── files.ts                  # readFileAsBase64(File): base64 en trozos de 32 KiB. Compartido por el import .ffbackup (App.tsx) y el wizard de CSV
 │   ├── responsive.ts             # MOBILE_MAX_WIDTH (640 = bp:mobile), isMobileWidth (puro, test en node) y useIsMobile()
 │   │                             #   (matchMedia, lectura síncrona inicial). Gatea el patrón «columnas esenciales» de TODAS las
@@ -587,9 +635,10 @@ See [`tests.md`](tests.md). Setup: Vitest + `node` environment (no jsdom needed 
 
 Re-verified 2026-09-03 against `release/5.0.0` commits `b413471` (WP7 1/3 — vista «Yo» por
 defecto, segmentado «Yo | Hogar», hogar de solo lectura, aviso de alta de Jubilación) y `9ae5c24`
-(WP7 2/3 — tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo) y la
-rebanada WP7 3a (tira de fases del chart, tarjeta «Plan» del Resumen, jubilación efectiva en el
-tile de Jubilación), issue #207. Re-verify with:
+(WP7 2/3 — tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo) y las
+rebanadas WP7 3a (tira de fases del chart, tarjeta «Plan» del Resumen, jubilación efectiva en el
+tile de Jubilación) y 3b1 (líneas finas por miembro, `target_basis_stored` en el formulario,
+vaciado tri-estado de los porcentajes del activo), issue #207. Re-verify with:
 
 - New lib modules exist: `ls apps/web/src/lib/retirement-intro.ts apps/web/src/lib/retirementProfile.ts`
 - `ledger.ts` scope helpers: `grep -n "export function resolveLedgerPersonScope\|export function isScopeReadOnly\|export function ledgerViewAmp\|export const LEDGER_PERSON_SCOPE_STORAGE_KEY" apps/web/src/lib/ledger.ts`
@@ -601,9 +650,14 @@ tile de Jubilación), issue #207. Re-verify with:
 - Retirement-profile save wiring: `grep -n "saveRetirementProfilePatch\|loadRetirementProfile" apps/web/src/App.tsx`
 - Asset volatility field: `grep -n "annual_volatility_percent" apps/web/src/api/types.ts apps/web/src/views/AssetsView.tsx`
 - `.retirement-radio-stack` has live consumers: `grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` (≥1; it was defined in `App.css` with zero consumers before `9ae5c24`)
-- Test counts (don't cite the raw number without re-running): `grep -c 'it(' apps/web/src/lib/retirementProfile.test.ts apps/web/src/lib/retirement-intro.test.ts apps/web/src/lib/ledger.scope.test.ts`
+- Test counts (don't cite the raw number without re-running): `grep -c 'it(' apps/web/src/lib/retirementProfile.test.ts apps/web/src/lib/retirement-intro.test.ts apps/web/src/lib/ledger.scope.test.ts apps/web/src/lib/member-lines.test.ts apps/web/src/lib/asset-form.test.ts`
 - WP7 3a — tira de fases y tarjeta «Plan»: `ls apps/web/src/lib/phase-strip.ts apps/web/src/lib/plan-card.ts`
 - La tira NO indexa arrays (invariante monthly ≡ hybrid): `grep -n "los mismos tramos con la serie mensual y con la decimada" apps/web/src/lib/phase-strip.test.ts`
 - El chart calcula la fila del eje X UNA vez: `grep -c "xTickBaselineY" apps/web/src/views/ProjectionNetWorthChart.tsx` (≥3: definición + años + «Hoy»)
-- La línea fina por miembro sigue pendiente del API: `grep -n "TODO(5.0.0, D32" apps/web/src/views/ProjectionNetWorthChart.tsx apps/web/src/lib/phase-strip.ts`
+- WP7 3b1 — líneas por miembro y builders tri-estado: `ls apps/web/src/lib/member-lines.ts apps/web/src/lib/asset-form.ts`
+- El TODO de la línea fina por miembro ya no existe (WP5-2 publicó `members[].series`): `grep -rn "TODO(5.0.0, D32" apps/web/src` **debe imprimir vacío**
+- Un solo reparto de color para línea, tick y leyenda: `grep -rn "householdMemberColor" apps/web/src/lib/chart-legend.ts apps/web/src/lib/phase-strip.ts apps/web/src/lib/member-lines.ts` (los tres)
+- El chart pinta las líneas de miembro bajo la Σ: `grep -n "memberVisible.map" apps/web/src/views/ProjectionNetWorthChart.tsx`
+- El formulario manda la elección ALMACENADA, no la resuelta: `grep -n "withStoredTargetBasis" apps/web/src/App.tsx apps/web/src/lib/retirementProfile.ts`
+- El tri-estado del activo vive en un solo sitio: `grep -n "buildAssetWriteBody" apps/web/src/App.tsx apps/web/src/lib/asset-form.ts`
 - GastosView's documented exception to "hide, don't disable": `grep -n "disabled={!canEdit" apps/web/src/views/GastosView.tsx` (the two inline `<select>`s — categoría/tipo — stay `disabled`, not hidden)

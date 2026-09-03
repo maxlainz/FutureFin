@@ -164,6 +164,15 @@ export type RetirementProfileApi = {
 export type RetirementProfileResponseApi = {
   profile: RetirementProfileApi;
   birth_date: string | null;
+  /** **La elección ALMACENADA de `target_basis`, sin resolver** (5.0.0 WP5-2). `null` = nadie la
+   *  ha elegido y el servidor la DERIVA (R6: puente si hay pensión declarada, perpetuidad si no);
+   *  un valor = está fijada a mano y manda sobre la derivación.
+   *
+   *  `profile.target_basis` viene siempre RESUELTO, así que sin este campo el cliente no puede
+   *  distinguir «no lo he elegido» de «he elegido esto» — y un formulario que reenvía lo que leyó
+   *  CONGELA la derivación: declarar una pensión después ya no movería la base del objetivo.
+   *  Ausente (`undefined`) = backend anterior a WP5-2, donde la distinción no existe. */
+  target_basis_stored?: TargetBasisApi | null;
 };
 
 /**
@@ -270,6 +279,28 @@ export type AssetApiRow = {
   contribution_target_amount?: string | null;
   notes: string | null;
   sort_index: number;
+};
+
+/**
+ * Cuerpo de `POST /v1/assets` y `PATCH /v1/assets/{id}` tal y como lo arma el formulario
+ * (`lib/asset-form.ts`).
+ *
+ * **Tri-estado en los tres campos opcionales de importe** (`purchase_price`,
+ * `expected_annual_return_percent`, `annual_volatility_percent`) desde 5.0.0: clave AUSENTE = no
+ * cambia, `null` = BORRA el valor guardado, un decimal-string lo fija. Hasta 4.15.x los dos
+ * últimos eran opción simple en el servidor y un `null` era indistinguible de omitir: vaciar el
+ * campo no devolvía el activo a determinista. Por eso `undefined` y `null` significan cosas
+ * distintas aquí y el builder los emite a propósito.
+ */
+export type AssetWriteBodyApi = {
+  category_id?: string;
+  name?: string;
+  current_value?: string;
+  is_liquid?: boolean;
+  purchase_price?: string | null;
+  expected_annual_return_percent?: string | null;
+  annual_volatility_percent?: string | null;
+  notes?: string;
 };
 
 export type AllocationRuleKind = "fixed" | "percent" | "remainder";
@@ -496,8 +527,9 @@ export type PhaseTransitionApi = {
   month_index: number;
 };
 
-/** Lecturas de UN miembro dentro del agregado del hogar (5.0.0, D9 / §D). Sin series: el hogar
- *  publica UNA curva y esto dice de quién es cada marcador. */
+/** Lecturas de UN miembro dentro del agregado del hogar (5.0.0, D9 / §D): de quién es cada
+ *  marcador de la curva agregada y —desde WP5-2— su propia serie, que el chart dibuja como línea
+ *  fina bajo la Σ en grueso (D32). */
 export type HouseholdMemberProjectionApi = {
   user_id: string;
   username: string;
@@ -522,6 +554,32 @@ export type HouseholdMemberProjectionApi = {
   assets_depleted_month_index: number | null;
   /** Avisos de este miembro (p. ej. `birth_date_missing`). */
   warnings: string[];
+  /** **Horizonte PROPIO de este miembro en meses**, derivado de SU fecha de nacimiento y de SU
+   *  `horizon_lifespan_age`. El agregado se corre al horizonte COMÚN `max(horizontes)`, así que
+   *  este número puede ser MENOR que `months`: desde ahí, la curva de esta persona describiría
+   *  años que ella no declaró vivir, y la línea fina TERMINA (nunca se extrapola). Ausente en
+   *  backends anteriores a WP5-2 ⇒ la línea se dibuja entera. */
+  horizon_months?: number;
+  /** **Serie de ESTE miembro** (D32), paralela a `points[]`: los mismos `month_index`, la misma
+   *  decimación y los mismos `number` (excepción chart-only D4). Es lo que dibuja la «línea fina
+   *  por miembro» bajo la suma en grueso. Lleva `month_index` propio —y no dos arrays alineados
+   *  por posición— porque se lee POR SEPARADO de `points`. Ausente en backends antiguos. */
+  series?: MemberSeriesPointApi[];
+};
+
+/** Un punto de la serie de un miembro del hogar (5.0.0, D32). Deliberadamente **dos importes y no
+ *  siete**: el chart del hogar dibuja patrimonio (y compara líquido en las lecturas), y publicar
+ *  el resto de columnas por persona multiplicaría el payload para responder algo que nadie
+ *  pregunta. Números, no decimal-strings: es la excepción chart-only del contrato del dinero. */
+export type MemberSeriesPointApi = {
+  /** Mismo número de MES que `points[].month_index` (misma rejilla, misma decimación). NUNCA una
+   *  posición de array: con `density=hybrid` la posición 13 es el mes 24. */
+  month_index: number;
+  /** Patrimonio neto de este miembro en euros NOMINALES de ese mes. */
+  net_worth: number;
+  /** Su patrimonio LÍQUIDO nominal — la línea que hay que comparar con SU objetivo, no con el del
+   *  hogar (que no existe). **El chart NO la dibuja** (D32: una línea fina por miembro, no dos). */
+  net_worth_liquid: number;
 };
 
 export type ProjectionSeriesApi = {
@@ -656,8 +714,8 @@ export type ProjectionSeriesApi = {
    *  avisos viajan por miembro. */
   warnings?: string[];
   /** Un elemento por miembro del hogar, **solo en `view=household`** (D9). Vacío en `mine`.
-   *  **Sin series por miembro** (llegarán como `members[].series` en una ola posterior del API):
-   *  esto explica de quién es cada marcador. */
+   *  Cada fila trae sus marcadores, su horizonte propio y —desde WP5-2— **su serie**
+   *  (`members[].series`), que es lo que el chart pinta como línea fina bajo la Σ. */
   members?: HouseholdMemberProjectionApi[];
 };
 

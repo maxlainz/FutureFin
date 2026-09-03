@@ -350,6 +350,50 @@ export function effectiveTargetBasis(p: RetirementProfileApi): TargetBasisApi {
   return p.pension ? "bridge_to_pension" : "perpetuity";
 }
 
+/** De dónde sale la base del objetivo que se está aplicando. */
+export type TargetBasisSource =
+  /** El usuario la eligió a mano y está guardada. */
+  | "stored"
+  /** Nadie la ha elegido: la deriva el servidor (R6) y se mueve sola al declarar una pensión. */
+  | "derived"
+  /** La estrategia la impone (`pension_bridge` ES el puente); la elección guardada no pinta nada. */
+  | "forced_by_strategy";
+
+/**
+ * Origen de `effectiveTargetBasis`, para que el formulario pueda rotular «(derivada)» en vez de
+ * enseñar una elección que nadie hizo.
+ *
+ * Sin esta distinción, el radio marcado se lee como una decisión del usuario: la reenviaría en el
+ * primer PATCH, y declarar una pensión después ya no movería la base del objetivo, que se quedaría
+ * en la perpetuidad conservadora que nadie pidió. **Exige que `p.target_basis` lleve la elección
+ * ALMACENADA** (`withStoredTargetBasis`), no la resuelta que publica el servidor.
+ */
+export function targetBasisSource(p: RetirementProfileApi): TargetBasisSource {
+  if (p.strategy === "pension_bridge") return "forced_by_strategy";
+  return p.target_basis == null ? "derived" : "stored";
+}
+
+/**
+ * El perfil que llega del servidor, con `target_basis` sustituido por la elección **ALMACENADA**
+ * (`target_basis_stored` de la respuesta; `null` = derivada).
+ *
+ * `profile.target_basis` viaja siempre RESUELTO, así que un formulario que lo use como estado
+ * pierde la única información que necesita para no congelar la derivación al guardar cualquier
+ * otro campo. Lo que se pinta sigue saliendo de `effectiveTargetBasis`, que deriva con la misma
+ * regla R6 que el servidor: la sustitución no cambia lo que ve el usuario, solo lo que se manda.
+ *
+ * `stored === undefined` = backend anterior a WP5-2, que no publica la elección almacenada: se
+ * conserva el valor resuelto (el comportamiento de 4.15.x) porque inventar un `null` diría
+ * «derivada» sobre una elección que quizá sí existe.
+ */
+export function withStoredTargetBasis(
+  profile: RetirementProfileApi,
+  stored: TargetBasisApi | null | undefined,
+): RetirementProfileApi {
+  if (stored === undefined) return profile;
+  return { ...profile, target_basis: stored };
+}
+
 /** `true` para las estrategias cuyo trigger es una EDAD (y que por tanto la exigen). */
 export function strategyRequiresTargetAge(s: RetirementStrategyApi): boolean {
   return s === "retire_at_age" || s === "coast";
@@ -573,7 +617,12 @@ function samePartial(
  *  * **`target_basis` solo viaja si el borrador lo cambia.** El servidor lo DERIVA cuando está
  *    sin fijar (R6); mandarlo en cada PATCH congelaría esa derivación con el valor que se estaba
  *    enseñando, y al declarar después una pensión el objetivo se quedaría en perpetuidad —la
- *    opción conservadora que nadie pidió— sin ningún aviso.
+ *    opción conservadora que nadie pidió— sin ningún aviso. Para que esa comparación signifique
+ *    «el usuario ha tocado el radio» y no «el servidor resolvió otra cosa», los dos lados deben
+ *    llevar la elección ALMACENADA (`withStoredTargetBasis`): con el valor RESUELTO en `before`,
+ *    un perfil derivado a `perpetuity` y un radio que el usuario marca en `perpetuity` se ven
+ *    iguales y la fijación explícita no se manda nunca. El `null` del borrador («volver a la
+ *    derivada») viaja como `null` explícito, que es lo que el tri-estado del servidor espera.
  */
 export function buildRetirementProfilePatch(
   before: RetirementProfileApi,

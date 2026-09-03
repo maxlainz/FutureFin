@@ -24,8 +24,7 @@ import type {
   ProjectionPhaseApi,
   RetirementTriggerApi,
 } from "../api/types";
-import type { ChartLegendItem } from "./chart-legend";
-import { ASSET_LINE_COLORS } from "./projection-chart";
+import { householdMemberColor, type ChartLegendItem } from "./chart-legend";
 
 /** Ventana visible del chart, en meses de la rejilla (`startMonth` puede ser negativo: el chart se
  *  extiende al pasado con el histórico, donde no hay fases que pintar). */
@@ -177,8 +176,10 @@ export type PhaseMark = {
  *   jubilación efectiva. Con `asap` los dos son el mismo mes por construcción, y rotular dos veces
  *   el mismo instante sugiere dos hechos donde hay uno. Es una LECTURA («el capital habría bastado
  *   aquí»), nunca un marcador vertical: los verticales son solo de la jubilación efectiva.
- * - **Miembros** (Hogar, D32): el mes de jubilación de cada miembro con su nombre. El agregado
- *   publica UNA curva, así que esto es lo único que dice de quién es cada hito.
+ * - **Miembros** (Hogar, D32): el mes de jubilación de cada miembro con su nombre, en el color que
+ *   `householdMemberColor` reparte por posición — el MISMO de su línea fina y de su entrada de
+ *   leyenda. La curva gruesa es la Σ y no se jubila: estas marcas son lo que dice de quién es cada
+ *   hito.
  */
 export function buildPhaseMarks(input: {
   pensionStartMonthIndex?: number | null;
@@ -234,7 +235,7 @@ export function buildPhaseMarks(input: {
       month: m.retirement_month_index,
       label: m.username,
       shortLabel: m.username,
-      color: ASSET_LINE_COLORS[idx % ASSET_LINE_COLORS.length]!,
+      color: householdMemberColor(idx),
     });
   });
 
@@ -243,14 +244,13 @@ export function buildPhaseMarks(input: {
 
 /**
  * Entradas de leyenda de los miembros del hogar (D32): mismo modelo `ChartLegendItem` que el resto
- * del chart, mismo orden y mismos colores que sus marcas en la tira, para que el nombre de la
- * leyenda y el tick de la tira se puedan emparejar de un vistazo.
+ * del chart, mismo orden y mismos colores (`householdMemberColor`) que sus marcas en la tira y que
+ * su línea fina, para que nombre, tick y curva se emparejen de un vistazo.
  *
- * TODO(5.0.0, D32 · línea fina por miembro): cuando el API publique `members[].series` (ola
- * posterior a WP5-1: hoy el agregado NO trae series por miembro, ver `.claude/api-routes.md`
- * §Projection), estas mismas entradas pasan a rotular una polyline fina por miembro sobre la Σ, con
- * `swatch: "line"` y este mismo color. Hasta entonces el swatch es `dashed` porque lo único que
- * hay pintado de cada miembro es su tick en la tira, no una serie.
+ * `swatch: "line"` desde WP5-2/WP7-3b: cada miembro tiene ya una polyline fina propia sobre la Σ
+ * en grueso (`lib/member-lines.ts`), así que la muestra dibuja lo que hay pintado. Mientras el
+ * agregado no traía `members[].series`, lo único de cada persona era su tick y el swatch era
+ * `dashed` — la muestra prometía una línea que no existía.
  */
 export function buildHouseholdMemberLegendItems(
   members: readonly HouseholdMemberProjectionApi[] | null | undefined,
@@ -258,8 +258,8 @@ export function buildHouseholdMemberLegendItems(
   return (members ?? []).map((m, idx) => ({
     key: `member-${m.user_id}`,
     label: m.username,
-    color: ASSET_LINE_COLORS[idx % ASSET_LINE_COLORS.length]!,
-    swatch: "dashed" as const,
-    title: `Jubilación de ${m.username}`,
+    color: householdMemberColor(idx),
+    swatch: "line" as const,
+    title: `Patrimonio de ${m.username} · su jubilación, marcada en la tira de fases`,
   }));
 }

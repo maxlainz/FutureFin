@@ -56,7 +56,9 @@ import { savingsSourceUsesTransactions } from "./lib/fire";
 import {
   isEmptyRetirementProfilePatch,
   normalizeRetirementProfile,
+  withStoredTargetBasis,
 } from "./lib/retirementProfile";
+import { buildAssetWriteBody } from "./lib/asset-form";
 import { readFileAsBase64 } from "./lib/files";
 import { chartPerf } from "./lib/perf";
 import { PROJECTION_FOCUS_STORAGE_KEY } from "./lib/projection-chart";
@@ -806,7 +808,15 @@ export default function App() {
       const body = await apiGet<RetirementProfileResponseApi>(
         "/v1/auth/me/retirement-profile",
       );
-      setRetirementProfile(normalizeRetirementProfile(body.profile));
+      // `target_basis` se guarda con la elección ALMACENADA, no con la resuelta que publica el
+      // servidor: es la única forma de que el formulario distinga «no lo he elegido» de «he
+      // elegido esto» y no congele la derivación (R6) al guardar cualquier otro campo. Lo que se
+      // PINTA sigue derivándose igual (`effectiveTargetBasis`), así que el usuario ve lo mismo.
+      setRetirementProfile(
+        normalizeRetirementProfile(
+          withStoredTargetBasis(body.profile, body.target_basis_stored),
+        ),
+      );
     } catch (e: unknown) {
       setRetirementProfile(null);
       setRetirementProfileError(e instanceof Error ? e.message : String(e));
@@ -2270,7 +2280,9 @@ export default function App() {
         throw await apiErrorFromResponse(res);
       }
       const body = (await res.json()) as RetirementProfileResponseApi;
-      const saved = normalizeRetirementProfile(body.profile);
+      const saved = normalizeRetirementProfile(
+        withStoredTargetBasis(body.profile, body.target_basis_stored),
+      );
       setRetirementProfile(saved);
       void loadProjectionSeriesPage();
       return saved;
@@ -2546,41 +2558,26 @@ export default function App() {
     setAssetSaving(true);
     setAssetsError(null);
     try {
-      const base: Record<string, unknown> = {
-        category_id: assetFormCategoryId,
-        name: assetFormName.trim(),
-        current_value: toApiDecimalString(assetFormValue),
-        is_liquid: assetFormLiquid,
-      };
-      const er = toApiDecimalString(assetFormExpectedReturn);
-      if (er) {
-        base.expected_annual_return_percent = er;
-      }
-      // Volatilidad (5.0.0, §A.2): mismo trato que la rentabilidad esperada — solo viaja si el
-      // usuario la ha escrito.
-      //
-      // LIMITACIÓN CONOCIDA, del servidor y no de aquí: `PATCH /v1/assets/{id}` recibe estos
-      // dos ejes como opción SIMPLE (`assets.rs`, `new_vol`/`new_exp`), así que un `null`
-      // explícito es indistinguible de omitir la clave y el handler conserva el valor actual.
-      // Vaciar el campo NO devuelve el activo a determinista. Mandar `null` no lo arreglaría:
-      // solo fingiría que sí. Se deja igual que su hermano para que el día que el servidor
-      // gane el tri-estado (como ya lo tiene `purchase_price`) el arreglo sea uno solo.
-      const vol = toApiDecimalString(assetFormVolatility);
-      if (vol !== "") {
-        base.annual_volatility_percent = vol;
-      }
-
-      const ppTrim = toApiDecimalString(assetFormPurchase);
-      if (editingAssetId) {
-        // PATCH: siempre enviar precio de compra — omisión antes podía dejar ambigüedad con el servidor.
-        base.purchase_price = ppTrim === "" ? null : ppTrim;
-      } else if (ppTrim !== "") {
-        base.purchase_price = ppTrim;
-      }
-      const nt = assetFormNotes.trim();
-      if (nt) {
-        base.notes = nt;
-      }
+      // Tri-estado de los tres importes opcionales (5.0.0): vaciar un campo que TENÍA valor manda
+      // `null` y lo borra —así se vuelve a un activo sin rentabilidad declarada o determinista—;
+      // vaciar uno que ya estaba vacío no nombra la clave. La regla vive entera en
+      // `lib/asset-form.ts`, con sus tests: aquí se decidía con tres `if` y no se podía probar.
+      const base = buildAssetWriteBody(
+        {
+          categoryId: assetFormCategoryId,
+          name: assetFormName,
+          currentValue: assetFormValue,
+          purchase: assetFormPurchase,
+          isLiquid: assetFormLiquid,
+          expectedReturn: assetFormExpectedReturn,
+          volatility: assetFormVolatility,
+          notes: assetFormNotes,
+        },
+        // `null` = alta. Una edición cuya fila no esté cargada (imposible desde la lista, pero
+        // el tipo lo admite) entra como edición SIN valores previos conocidos: nunca emite un
+        // borrado que nadie pidió.
+        editingId ? (previousRow ?? {}) : null,
+      );
 
       let createdAsset: AssetApiRow | null = null;
       if (editingAssetId) {

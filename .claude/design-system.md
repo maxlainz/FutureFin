@@ -292,6 +292,22 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
   [`lib/phase-strip.ts`](../apps/web/src/lib/phase-strip.ts) — **todo por `month_index`**, nunca
   por posición del array. `MiniProjection` tiene una versión reducida opt-in (`showPhases`): banda
   de 6px sin rótulos.
+- **Líneas finas por miembro** (5.0.0, D32, issue #207, solo vista Hogar): la curva de la Σ sigue
+  siendo la gruesa (`--proj-nw`, 2,85px) y **debajo** va una polyline de 1,3px al 80 % de opacidad
+  por cada miembro, con su patrimonio neto. El color sale de `householdMemberColor(idx)`
+  ([`lib/chart-legend.ts`](../apps/web/src/lib/chart-legend.ts)) — la paleta `--proj-area-1..10`
+  otra vez, y **una sola definición** para las tres superficies de la misma persona: su línea, su
+  tick en la tira de fases y su entrada de leyenda (que por eso pasa de `dashed` a `line`).
+  Emparejarlas por su cuenta era pedir que la leyenda acabara nombrando la curva de otro. Solo se
+  dibuja el patrimonio: el líquido viaja en `members[].series` pero **no se pinta** (dos líneas por
+  persona convierten el chart en una maraña, y el líquido solo significa algo contra el objetivo de
+  esa persona, que el agregado no publica). Los valores entran en el dominio Y —un miembro puede
+  caer por debajo de la Σ— porque una línea recortada por el clip se lee como una línea que se
+  ACABA, y aquí eso significa otra cosa: **una línea que termina antes del borde derecho es un
+  horizonte propio más corto** (`members[].horizon_months`), nunca un dato que falte. Modelo puro y
+  por `month_index` en [`lib/member-lines.ts`](../apps/web/src/lib/member-lines.ts); `MiniProjection`
+  sigue siendo **solo Σ**. El tooltip añade una fila por miembro con el valor del mes, y omite a
+  quien ya no tiene línea ahí.
 - **Milestones con collision-avoidance**: si dos milestones quedan cerca horizontalmente, el segundo sube al siguiente "carril" (14px arriba) y la línea punteada se estira hasta la nueva `y2`. Ver [`ProjectionNetWorthChart.tsx`](../apps/web/src/views/ProjectionNetWorthChart.tsx) en el bloque `(() => { … lanes … })()`.
 
 ## Paneles de Ajustes — norma de texto (4.0.6)
@@ -344,14 +360,23 @@ ocultar.
 2. **Verifica claro y oscuro antes de mergear**. Toggle desde Ajustes y revisa: KPIs, modales, tooltips, hover states, focus rings.
 3. **No mezcles tab-bar legacy con TopBar**. La nav es responsabilidad exclusiva de `TopBar`. Sub-tabs (como las de Ajustes) van como pills con clase `ff-nav-pill`.
 4. **No introduzcas color decorativo**. Pos/neg = cifras delta. Acento = destacar UN ítem (botón primario, KPI hero, marker de jubilación, slice principal de un donut). El resto vive en grayscale.
+5. **Un valor que el servidor DERIVA se rotula como derivado.** Patrón fijado en 5.0.0 por «Base del
+   objetivo» de Jubilación: el radio marca la opción que se está aplicando y, mientras nadie la haya
+   elegido, el rótulo del grupo lleva un ` (derivada)` atenuado (`.muted` inline) y aparece la salida
+   «Volver a la derivada» (`btn ghost text` + `.retirement-basis-reset`, **fuera** del `radiogroup`:
+   un botón enfocable entre radios rompe la navegación con flechas) en cuanto sí está fijada, para
+   poder soltarla otra vez con el `null` del tri-estado. Sin el rótulo, una opción
+   marcada se lee como una decisión tomada — y el formulario la reenvía, congelando una derivación
+   que debía seguir moviéndose. Si añades otro campo derivado por el servidor, cópialo.
 
 ## Provenance and maintenance
 
 Re-verificado 2026-09-03 contra los commits `b413471` (WP7 1/3 — vista «Yo» por defecto,
 segmentado «Yo | Hogar», hogar de solo lectura, aviso de alta de Jubilación) y `9ae5c24` (WP7 2/3
-— tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo), más la
-rebanada WP7 3a (tira de fases del chart de Proyección y tarjeta «Plan» del Resumen), de la rama
-`release/5.0.0`, issue #207. Re-verificar con:
+— tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo), más las
+rebanadas WP7 3a (tira de fases del chart de Proyección y tarjeta «Plan» del Resumen) y **3b1**
+(líneas finas por miembro, «(derivada)» de la base del objetivo, vaciado de los porcentajes del
+activo), de la rama `release/5.0.0`, issue #207. Re-verificar con:
 
 - Segmentado de la TopBar: `grep -n "ff-topbar-scope" apps/web/src/App.css apps/web/src/App.tsx`
 - Banner de ámbito, primer hijo de `<main>`: `grep -n "app-scope-banner" apps/web/src/App.css apps/web/src/App.tsx`
@@ -363,3 +388,6 @@ rebanada WP7 3a (tira de fases del chart de Proyección y tarjeta «Plan» del R
 - Su alto sale del plot, no de lienzo extra: `grep -n "layoutDims.ph - xAxisExtraBottom - phaseStripH" apps/web/src/views/ProjectionNetWorthChart.tsx`
 - Tarjeta de plan: `grep -n "plan-card" apps/web/src/App.css apps/web/src/views/SummaryView.tsx`
 - El viejo `<select>` de vista desapareció: `grep -n "ledger-view-select" apps/web/src/App.css apps/web/src/App.tsx` (debe imprimir vacío)
+- Líneas de miembro y su color compartido: `grep -n "householdMemberColor" apps/web/src/lib/*.ts` (≥3 ficheros: definición, tira de fases y líneas)
+- La leyenda del miembro dibuja línea, no discontinua: `grep -n 'swatch: "line" as const' apps/web/src/lib/phase-strip.ts`
+- «(derivada)» y su salida en el formulario: `grep -n "targetBasisSource\|Volver a la derivada" apps/web/src/views/RetirementView.tsx`

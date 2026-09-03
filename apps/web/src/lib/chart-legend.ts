@@ -26,6 +26,24 @@ export type ChartLegendItem = {
   title?: string;
 };
 
+/**
+ * Color de un miembro del hogar por su POSICIÓN en `members[]` (5.0.0, D32).
+ *
+ * Única definición del emparejamiento: la línea fina del chart, el tick de la tira de fases y la
+ * entrada de leyenda de la misma persona salen todas de aquí. Mientras cada una calculaba su
+ * color por su cuenta, bastaba con que una ordenara distinto para que el nombre de la leyenda
+ * señalara la curva de otro — y un chart del hogar que atribuye el patrimonio a quien no es
+ * exactamente el error que la vista agregada existe para no cometer.
+ *
+ * Reusa la paleta de activos (`ASSET_LINE_COLORS`, tokens `var(--proj-asset-*)`): un hogar no
+ * tiene diez miembros, así que el reciclado módulo 10 es teórico.
+ */
+export function householdMemberColor(index: number): string {
+  const n = ASSET_LINE_COLORS.length;
+  const i = Number.isFinite(index) ? Math.max(0, Math.trunc(index)) : 0;
+  return ASSET_LINE_COLORS[i % n]!;
+}
+
 /** Cap de activos visibles colapsados cuando no hay ancho medido (mini charts). */
 export const DEFAULT_LEGEND_ASSET_CAP = 4;
 /** Activos listados uno a uno en el tooltip antes de agregar en «Otros». */
