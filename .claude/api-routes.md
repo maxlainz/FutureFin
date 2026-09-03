@@ -174,10 +174,10 @@ Forma (todas las claves opcionales en el wire):
 
 | Campo | Valores / cota | Nota |
 |---|---|---|
-| `strategy` | `asap` (default) · `retire_at_age` · `coast` · `partial` · `pension_bridge` | `retire_at_age`/`coast` exigen `target_retirement_age` (`target_retirement_age_required`); `pension_bridge` exige `pension` (`pension_required_for_bridge`) |
+| `strategy` | `asap` (default) · `retire_at_age` · `coast` · `partial` · `pension_bridge` | `retire_at_age`/`coast` exigen `target_retirement_age` (`target_retirement_age_required`); `pension_bridge` exige `pension` (`pension_required_for_bridge`); `partial` exige `partial_retirement` (`partial_retirement_required`, 5.0.0 WP5-2 — sin él la estrategia se comportaba como `asap` en silencio mientras la UI decía «Media jornada») |
 | `target_retirement_age` | `[18, horizon_lifespan_age]` | `retirement_age_out_of_range` |
 | `fire_number_mode`, `fire_number_manual_amount`, `swr_pct`, `horizon_lifespan_age` | **MOVIDOS desde `fire_settings`** — mismos tipos, defaults y cotas | mismos códigos de error que tenían allí |
-| `target_basis` | `perpetuity` · `bridge_to_pension` | **Se DERIVA si no se fija**: `bridge_to_pension` con `pension` declarada, `perpetuity` sin ella; `pension_bridge` lo fuerza. La respuesta lo publica siempre resuelto |
+| `target_basis` | `perpetuity` · `bridge_to_pension` | **Se DERIVA si no se fija**: `bridge_to_pension` con `pension` declarada, `perpetuity` sin ella; `pension_bridge` lo fuerza. `profile.target_basis` va siempre RESUELTO y la elección almacenada viaja aparte en **`target_basis_stored`** (ver abajo). En el PATCH es tri-estado: omitir no toca, un valor la fija, `null` la suelta para volver a derivarla. El schema OpenAPI del campo anuncia el **enum** `TargetBasis`, no un string libre (5.0.0 WP5-2; test `openapi_contract::the_retirement_profile_patch_advertises_the_target_basis_enum`) |
 | `bridge_discount_basis` | `expected_return` (default) · `swr` · `none` | |
 | `withdrawal_rule` | `{kind, pct?, start_pct?, end_pct?, band_pct?, adjust_pct?, spend_mode}` | Se sustituye ENTERA. `percent_of_balance`→`pct`; `hybrid`→`start_pct` > `end_pct`; `guardrails`→`pct`+`band_pct`+`adjust_pct`. `pct` en `(0,20]`, banda/ajuste en `(0,50]` |
 | `pension` | `{monthly_amount_today > 0, starts_at_age ∈ [50, horizon], indexed=true, fraction_while_partial ∈ [0,1]}` | |
@@ -185,10 +185,22 @@ Forma (todas las claves opcionales en el wire):
 | `cash_buffer_months` | `[0, 60]` | Solo actúa en Monte Carlo |
 | `success_threshold_pct` | `[50, 99]`, default 95 | |
 
+**Respuesta de las dos rutas** (`RetirementProfileResponse`): `{profile, birth_date,
+target_basis_stored}`.
+
 **El merge va sobre lo ALMACENADO, no sobre lo resuelto**, y no es un detalle de implementación:
 `target_basis` se deriva, así que mergear sobre el resuelto persistiría el `perpetuity` derivado de
 un perfil sin pensión como si el usuario lo hubiera elegido — y al declarar después su pensión el
 objetivo se quedaría en perpetuidad sin ningún aviso.
+
+**`target_basis_stored` (5.0.0 WP5-2) cierra la otra mitad de ese mismo agujero, la del CLIENTE.**
+`profile.target_basis` sale siempre resuelto, así que un formulario que lee el perfil y lo reescribe
+entero volvía a persistir la derivación como elección — el servidor mergeaba bien y el cliente
+congelaba igual. `target_basis_stored: null` significa «nadie lo ha elegido, se deriva»; un valor,
+«lo eligió a mano». Regla para un cliente: manda `target_basis` solo si este campo no es `null`, o
+`null` explícito para soltarlo. Va también en el outcome del PATCH
+(`target_basis_stored_before` / `_after`), que es lo que enseña el preview de la tool MCP.
+Test: `retirement_profile.rs::the_stored_target_basis_travels_next_to_the_resolved_one`.
 
 **En WP4 el motor todavía no simula las fases ni las reglas**: se guardan, se validan y se publican.
 Lo que ya está vivo son los cuatro ejes movidos, que la proyección lee del perfil del solicitante
@@ -439,7 +451,7 @@ sin destino, igual que borrarlo). La migración
 `20260901160000_allocation_rules_reenable_disabled_sinks.sql` reactivó retroactivamente los
 sumideros que ya estaban apagados (con el mismo espejo en el import de backups).
 
-**Plusvalía latente (4.4.0, Fase 6)** — `AssetResponse` gana cuatro campos, **todos sin `skip_serializing_if`: viajan siempre, con `null` explícito**: `unrealized_pnl` (Decimal-as-string), `unrealized_pnl_absent_reason`, `unrealized_pnl_pct` (Decimal-as-string, 1 decimal) y `unrealized_pnl_pct_absent_reason`. Base: la columna `assets.purchase_price` — **no** aportaciones, **no** snapshots, **no** coste medio ponderado. `pnl = current_value − purchase_price`, `pct = pnl/purchase_price × 100`. **Lo caro no es la resta, es la etiqueta**: no es rentabilidad (no anualiza ni descuenta las aportaciones posteriores a la compra, así que en un activo con reglas de reparto activas el número está inflado), y `purchase_price` es opcional, así que hay que distinguir tres estados — `NULL` ⇒ ambos `null` con `no_purchase_price`; `= 0` ⇒ el pnl es el valor entero y el porcentaje es `null` con `zero_purchase_price`; `> 0` ⇒ ambos. Presente en GET, POST y PATCH (los tres pasan por `row_to_response`); **no** aparece en `/v1/summary`. **Trampa conocida (issue #95)**: el `null` que el doc-comment del PATCH promete para **borrar** `purchase_price` es inalcanzable por HTTP —serde colapsa `null` presente y clave ausente en `None`, así que sale 400 `patch_empty`—; la vía viva es el flag `clear_purchase_price` de la tool MCP. Hay un test que fija ese 400 para que no se lea como descuido de esta feature.
+**Plusvalía latente (4.4.0, Fase 6)** — `AssetResponse` gana cuatro campos, **todos sin `skip_serializing_if`: viajan siempre, con `null` explícito**: `unrealized_pnl` (Decimal-as-string), `unrealized_pnl_absent_reason`, `unrealized_pnl_pct` (Decimal-as-string, 1 decimal) y `unrealized_pnl_pct_absent_reason`. Base: la columna `assets.purchase_price` — **no** aportaciones, **no** snapshots, **no** coste medio ponderado. `pnl = current_value − purchase_price`, `pct = pnl/purchase_price × 100`. **Lo caro no es la resta, es la etiqueta**: no es rentabilidad (no anualiza ni descuenta las aportaciones posteriores a la compra, así que en un activo con reglas de reparto activas el número está inflado), y `purchase_price` es opcional, así que hay que distinguir tres estados — `NULL` ⇒ ambos `null` con `no_purchase_price`; `= 0` ⇒ el pnl es el valor entero y el porcentaje es `null` con `zero_purchase_price`; `> 0` ⇒ ambos. Presente en GET, POST y PATCH (los tres pasan por `row_to_response`); **no** aparece en `/v1/summary`. **Tri-estado del PATCH** (issue #95, cerrado con `deserialize_double_option`; test `patch_null_clears.rs`): en `purchase_price` el `null` presente BORRA de verdad, la clave ausente no toca y un valor sustituye. Por MCP el JSON Schema no puede expresar ese tri-estado, así que el `null` se materializa con el flag `clear_purchase_price` de `update_asset`.
 
 **Objetivo resuelto**: `fetch_asset_resolved_targets` dejó su propio `match cap_kind` y llama a `allocation_rules::resolve_cap_ceiling_eur`, la misma función que el techo del ETA de `/v1/allocation-rules/goals` — el objetivo de la pantalla de activos y el de la ETA son el mismo número por construcción.
 
@@ -449,6 +461,19 @@ de los retornos (`"17"` = 17 %/año), no un rango ni un peor caso. `null` o `0` 
 determinista. **El camino Decimal del motor la ignora siempre** (D12): declararla no mueve ni un
 euro de la proyección de hoy — solo la leerá el Monte Carlo. El `CHECK` de columna es más laxo
 (`>= 0`) a propósito, para poder importar backups viejos.
+
+**Los TRES decimales opcionales del activo son tri-estado en el PATCH (5.0.0 WP5-2)**:
+`purchase_price`, `expected_annual_return_percent` y `annual_volatility_percent`. Omitir no toca ·
+`null` BORRA · un valor sustituye, todos por el mismo `merge_optional_decimal_patch_with`
+(validador por campo: `>= 0` el precio, `> −100` la rentabilidad, `[0, 100]` la volatilidad — las
+cotas se comprueban sobre el valor que va a la columna, no sobre el patchset). Los dos últimos eran
+`Option<Decimal>` hasta 4.15.x, así que `null` y clave ausente eran el mismo caso y **no había
+forma de volver a «rentabilidad no declarada» ni de devolver un activo al determinismo**: una
+volatilidad escrita por error solo se deshacía borrando y recreando el activo, con su histórico
+dentro. En MCP, `update_asset` gana `clear_expected_annual_return_percent` y
+`clear_annual_volatility_percent` (valor + `clear_*` a la vez → 400 `field_set_and_clear`).
+Tests: `patch_null_clears.rs::asset_return_and_volatility_are_tri_state`,
+`mcp_write.rs::update_asset_clears_the_return_and_the_volatility`.
 
 Each `AssetResponse` row carries `owner_user_id` (serializado como uuid string). Desde **5.0.0** la
 columna es `NOT NULL` (D14), así que viaja siempre; el `Option` del tipo se conserva por
@@ -715,7 +740,7 @@ filas (`LedgerView::Mine` atado a ese miembro)— al horizonte común `max(horiz
 | `asset_series[]` | **concatenadas** (ya vienen identificadas por `asset_id`; sumarlas destruiría la única desagregación que el chart necesita) |
 | `events[]`, `liabilities_negative_amortization[]` | concatenados, con el tope GLOBAL de 100 eventos |
 | `uncovered_deficit_total`, `unallocated_savings_total`, `starting_net_worth`, `monthly_delta_assumption` | **Σ** |
-| `assets_depleted_month_index` | **MÍNIMO** (el hogar se queda sin cartera cuando el PRIMERO se queda sin la suya); el detalle por persona en `members[]` |
+| `assets_depleted_month_index` | **MÍNIMO** (el hogar se queda sin cartera cuando el PRIMERO se queda sin la suya); el detalle por persona en `members[]`. En la rejilla 0-based como el resto desde 5.0.0 (#210) |
 | `fire_target_series` | `[]` + `fire_target_absent_reason: "household_aggregate"` |
 | `jubilacion_*`, `retirement_*`, `strategy`, `retirement_trigger`, `phase_transitions`, `pension_start_month_index`, `partial_retirement_month_index`, `fire_target_debt_component` | `null` / `[]` + `jubilacion_absent_reason: "household_aggregate"` |
 | `liquid_crossing_month_index` | `null` + `liquid_crossing_absent_reason: "household_aggregate"` |
@@ -726,12 +751,31 @@ filas (`LedgerView::Mine` atado a ese miembro)— al horizonte común `max(horiz
 `members[]` = `{user_id, username, strategy, jubilacion_month_index, jubilacion_age,
 liquid_crossing_month_index, retirement_month_index, coast_fire_month_index (siempre `null` hasta
 `solve.rs`), partial_retirement_month_index, pension_start_month_index,
-assets_depleted_month_index, warnings[]}`. **Sin series por miembro**: el hogar publica UNA curva y
-esto explica de quién es cada marcador; N series completas multiplicarían el payload por el número
-de miembros para contestar algo que se responde con seis enteros. Un usuario **pendiente de
+assets_depleted_month_index, warnings[], horizon_months, series[]}`. Un usuario **pendiente de
 aprobación NO es del hogar** (la frontera es `installation_memberships`, la misma que decide el
 acceso) y un miembro sin datos aporta una serie plana de ceros y su fila, no un hueco. Vacío en
 `view=mine`. Tests: `apps/api/tests/projection_household_aggregate.rs`.
+
+- **`horizon_months`** = el horizonte PROPIO de esa persona (su DOB + su `horizon_lifespan_age`),
+  que puede ser MENOR que `months`: el agregado corre al común `max(horizontes)`, así que desde ahí
+  la curva de ese miembro describe años que no declaró vivir. Sin el campo, «su plan llega hasta
+  aquí» y «su plan se acaba aquí» se dibujan igual.
+- **`series[]`** (D32, 5.0.0 WP5-2) = `[{month_index, net_worth, net_worth_liquid}]`, **f64
+  chart-only (D4/I3)**, en la MISMA rejilla y con la MISMA decimación que `points[]` — la
+  decimación es una decisión del servidor por respuesta, no por serie. Lleva `month_index` propio
+  (y no dos arrays alineados por posición como `fire_target_series`) porque estas series se leen
+  por separado de `points`. Invariante testeado: **Σ `members[].series` == `points[]`** mes a mes,
+  en los dos campos. Dos importes y no siete a propósito: lo demás solo se lee del agregado.
+  Hasta WP5-1 este bloque decía «sin series por miembro»; D32 pide la línea fina por persona bajo
+  la suma en grueso, y una suma **no se puede desagregar en cliente**.
+- **Payload, medido** (2026-09-03; dos miembros, un activo + nómina + gasto cada uno, horizonte
+  derivado ~780 meses ⇒ 78 puntos hybrid, bytes sin gzip): `mine/hybrid` 21.009 ·
+  `household/hybrid` **34.161**, de los cuales `members[].series` **11.748** (~5,9 KB por miembro,
+  lineal con el hogar) y `points[]` 15.457 · `household/monthly` 300.724. Por eso la tool MCP
+  `get_projection` —que fuerza `hybrid`— deja `members[].series` **opt-in**
+  (`include_member_series`, default `false`), igual que `asset_series`; por HTTP viaja siempre.
+  Guardas: `projection_household_aggregate.rs::the_household_payload_stays_within_its_budget_at_hybrid_density`
+  y `mcp_http.rs::get_projection_household_omits_member_series_unless_asked`.
 
 `simulate_projection` **rechaza** `view=household` con **400 `household_not_simulable`**: un
 what-if mueve UN plan y el hogar tiene N. El rechazo vive en `simulate_projection_core`, no en la
@@ -760,6 +804,7 @@ Response (`ProjectionSeriesResponse`) includes:
   - `jubilacion_absent_reason` ∈ {`household_aggregate`, `no_retirement_trigger`} — por qué los `jubilacion_*`/`retirement_*` están vacíos **por construcción**. `null` ⟺ hay trigger, y entonces un índice nulo significa «no se alcanza dentro del horizonte», que es un resultado y no un hueco.
   - `phase_transitions[]` = `{phase: accumulating|partial|retired, month_index}` en la rejilla publicada — la fuente del carril de fases del chart (D29). El orden ES el dato: las fases son monótonas y la que no ocurre no aparece.
   - `pension_start_month_index`, `partial_retirement_month_index` — `null` hasta WP3 (la pensión sin fecha de hoy viaja dentro del ingreso de jubilación y no tiene mes propio).
+  - **`assets_depleted_month_index` también va por `engine_month_to_grid` desde 5.0.0 (#210, breaking)**. Se publicó en meses del BUCLE desde 4.6.0/#119 y era el ÚNICO índice de la respuesta desplazado un mes respecto de `points[].month_index` y de `jubilacion_month_index`: compararlos, o usarlo para buscar un punto, daba un mes de más. El mes civil no se mueve; cambia el nombre del mes. Un cliente de 4.x que hiciera esa comparación debe dejar de restar 1. Pin movido: `projection_failure_states.rs` (escenario de #119, 100 → 99, con la aritmética del descubierto —que es la del bucle— intacta). Vale también en `members[]` y en los dos lados de `simulate_projection`, cuyo `assets_depleted_months_delta` NO se mueve (los dos lados se desplazan igual).
   - `warnings[]` — literales cerrados: `birth_date_missing` / `target_retirement_age_missing` = una estrategia por edad **degradó a `asap`** porque le faltaba el dato. **Nunca un 500 en una lectura**; en `household` va vacío y los avisos viajan por miembro.
   - **D17, un solo trigger por simulación**: con `retire_at_age`/`coast` el handler pasa `PhasePlan::forced_at(R)` y **`fire_target: None`** al motor, donde `R` = `months_until_target_age(hoy, DOB, edad) + 1` (mes del bucle). El objetivo se sigue calculando y publicando (`fire_target_series`, `jubilacion_target_net_worth*`) desde `BuiltProjection::fire_target_reading`: la línea discontinua no desaparece porque la edad tome el mando, solo deja de decidir. `months_until_target_age` se define sobre `age_completed_years` + `proj_add_months` (la aritmética que ya publica `jubilacion_age`), lo que compra un invariante comprobable: **`jubilacion_age == target_retirement_age` exactamente**. Tests: `apps/api/tests/projection_age_strategy.rs`.
   - **`partial` y `pension_bridge` se comportan hoy como `asap`** (marcador `// WP3` en `build_installation_projection_input`): sus bloques `pension`/`partial_retirement` NO se pasan al plan porque el motor los rechaza (`UnsupportedPhase`), y aceptar la estrategia para simular otra cosa publicaría el patrimonio de un plan que nadie configuró.
@@ -772,7 +817,7 @@ Response (`ProjectionSeriesResponse`) includes:
 - `points[].net_worth_real` + `deflation_annual_inflation_percent` (4.4.0, Fase 6) — el patrimonio de cada punto **en euros de hoy**, servido en vez de rehecho por cada cliente, y la base con la que se calculó (Decimal-as-string; la asunción de la instalación, rango [−2, 50] desde 4.9.0 — con deflación el deflactor es > 1 y lo real queda POR ENCIMA de lo nominal). `net_worth_real` es un escalar por punto serializado como `f64` (`serialize_decimal_as_f64`), misma excepción chart-only que sus vecinos `net_worth`/`contributed_capital` — **no** un array nuevo. (En `GET /v1/projection/deflate`, en cambio, todo viaja como Decimal-as-string: ahí no hay chart que alimentar.) **Fórmula**: `net_worth / (1 + i/100)^(month_index/12)` vía `deflator_at_month_index`, con el exponente sacado del **`month_index`, jamás de la posición del array** — es literalmente el bug de v1.4.2, y con `density=hybrid` (la que fuerza la tool MCP) las dos lecturas divergen de verdad. **Se publica SIEMPRE, también con inflación 0** (donde el deflactor es exactamente `1` y el par sale como el mismo número): omitirlo dejaría al consumidor sin distinguir «no hay inflación» de «esta versión no publica el campo». Contraste deliberado: `milestones_real` sí queda vacío con inflación EXACTAMENTE 0, contrato previo intacto — con inflación negativa (#146) se publica, y los hitos reales llegan ANTES que los nominales. **Esto NO reabre el motor «real puro»** rechazado en v1.2.0 (`futurefin-failure-archaeology` §1 fila 3): el motor sigue simulando 100 % en nominal y esto es capa de presentación — la forma testable de esa afirmación es la igualdad de arriba, o sea cero información que el motor no haya producido ya.
 - `savings_source` + `savings_income_basis` / `savings_expense_basis` (v2.2.0; los `*_basis` sustituyen al escalar `savings_source_months_with_data` desde 3.9.0; su denominador se llama **`avg_months`** desde 4.0.0 — ver la nota de renombrado en §Summary) — fuente del ahorro **efectiva** (tras el fallback) que produjo `monthly_delta_assumption`, y de qué meses sale cada lado del promedio; mismo naming y semántica que en `/v1/summary`. Aditivos: los sirve `BuiltProjection` sin queries extra, para que el chart etiquete la base del Δ mensual sin pedir `/v1/summary`.
 
-**Estados de fallo (4.6.0, #119)** — la superficie HTTP publica lo que el motor ya calculaba: `assets_depleted_month_index` (primer mes cuyo déficit iguala o supera TODO lo drenable — la cartera se vacía ese mes; `null` = no se agota en el horizonte), `uncovered_deficit_total` (déficit acumulado no cubierto, Decimal-string; ya se restaba de `net_worth`), **`unallocated_savings_total`** (4.12.1, #175 — Decimal-string; ahorro que ninguna regla de la cascada absorbió, acumulado; NO entra en `net_worth` ni en `contributed_capital` — el modelo se niega a simular un euro sin destino declarado; `"0.0000"` es el caso normal: en producción es inalcanzable con activos vivos, sumidero indestructible #176) + **`unallocated_savings_reason`** (`null` = no hay sobrante varado; `"no_assets"` = el scope no tiene activos; `"no_sink"` = hay activos sin sumidero habilitado — residual, mismo vocabulario que `/v1/allocation-rules/resolution`), `liabilities_negative_amortization[]` (pasivos cuya cuota no cubre el devengo — la deuda CRECE; más estrecho que `payment_does_not_reduce_principal`: un `interest_only` congelado NO aparece) y `fire_target_absent_reason` (`manual_amount_missing` | `net_need_not_positive` | `swr_not_positive`, los mismos literales que `simulate_projection` — nota: el primero no tiene camino vivo por la API, la escritura lo rechaza antes). `simulate_projection` gana además `assets_depleted_month_index` en ambos lados y su delta.
+**Estados de fallo (4.6.0, #119)** — la superficie HTTP publica lo que el motor ya calculaba: `assets_depleted_month_index` (primer mes cuyo déficit iguala o supera TODO lo drenable — la cartera se vacía ese mes; `null` = no se agota en el horizonte; **desde 5.0.0 va en la rejilla 0-based** como todos los demás `*_month_index`, ver abajo), `uncovered_deficit_total` (déficit acumulado no cubierto, Decimal-string; ya se restaba de `net_worth`), **`unallocated_savings_total`** (4.12.1, #175 — Decimal-string; ahorro que ninguna regla de la cascada absorbió, acumulado; NO entra en `net_worth` ni en `contributed_capital` — el modelo se niega a simular un euro sin destino declarado; `"0.0000"` es el caso normal: en producción es inalcanzable con activos vivos, sumidero indestructible #176) + **`unallocated_savings_reason`** (`null` = no hay sobrante varado; `"no_assets"` = el scope no tiene activos; `"no_sink"` = hay activos sin sumidero habilitado — residual, mismo vocabulario que `/v1/allocation-rules/resolution`), `liabilities_negative_amortization[]` (pasivos cuya cuota no cubre el devengo — la deuda CRECE; más estrecho que `payment_does_not_reduce_principal`: un `interest_only` congelado NO aparece) y `fire_target_absent_reason` (`manual_amount_missing` | `net_need_not_positive` | `swr_not_positive`, los mismos literales que `simulate_projection` — nota: el primero no tiene camino vivo por la API, la escritura lo rechaza antes). `simulate_projection` gana además `assets_depleted_month_index` en ambos lados y su delta.
 
 > La misma excepción f64 cubre los arrays por punto de `GET /v1/history/series` (`points[].net_worth/assets_total/liabilities_total`, `asset_series[].values`, `markers[].total`) y la curva fina de `/v1/history/cashflow` — misma justificación chart-only. **Desde 4.4.0 los del histórico usan su propio serializador** (`serialize_decimal_as_chart_f64` / `serialize_opt_decimal_as_chart_f64`, privados en `handlers/history.rs`), que además **recorta a 2 decimales** (`CHART_DP`); `handlers/projection.rs` conserva `serialize_decimal_as_f64` (`pub(crate)`) sin recorte para la proyección. El motivo del recorte: los valores del histórico nacen de una interpolación (`(v1 − v0) · días/días` para activos, amortización francesa para pasivos), así que arrastraban la escala completa de `rust_decimal` al JSON — `78012.333333333333333333333` son 25 caracteres por punto × ~290 puntos × 4 series. Ningún consumidor los usa a esa precisión (el chart posiciona píxeles, un agente cita euros) y los trece decimales sobrantes solo sugerían una exactitud que la interpolación no tiene. Es redondeo de **publicación**, como `money_out` y `round_ratio`: la interpolación y el anclaje siguen exactos.
 

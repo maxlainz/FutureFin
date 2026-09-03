@@ -1340,3 +1340,168 @@ async fn household_view_is_refused_with_a_typed_error() {
         "con asap el cruce es el trigger: {body}"
     );
 }
+
+/// **P11 — el crecimiento del ingreso y los escalones son ejes de CAJA, y se recortan (o no) en
+/// la jubilación** (5.0.0, D30; solo MCP).
+///
+/// Lo que este test clava, en el orden en que se puede equivocar:
+///
+/// 1. **Es caja, no ingreso**: `income_monthly`, `net_recurring_monthly` y `savings_rate` salen
+///    con delta 0 EXACTO. Si el eje entrara por `income_regular_monthly`, movería a la vez el
+///    capital y el OBJETIVO (modo `current_income`) y el delta no significaría nada.
+/// 2. **Mueve el resultado**: patrimonio final arriba y jubilación no más tarde.
+/// 3. **El corte en la jubilación se publica** (`income_growth_stops_at_month_index`) — es el
+///    número que hace medible la aproximación de la doble pasada.
+/// 4. **Los escalones NO se recortan**: un escalón negativo lejano llega igual.
+/// 5. **Anti-no-op**: un `0` en cualquiera de los dos es un 400, no un escenario mudo idéntico
+///    al baseline (precedente `liability_override_empty`).
+#[tokio::test]
+async fn income_growth_and_steps_are_cash_axes_with_a_published_cut() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    seed(&app, &owner).await;
+
+    let base = tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+    assert!(
+        base["scenario"]["income_growth_stops_at_month_index"].is_null(),
+        "sin el eje no hay corte que publicar: {base}"
+    );
+
+    let grown = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"income_growth_real_pct_annual": "2"}),
+            ),
+        )
+        .await,
+    );
+
+    // 1. Es caja: el trío ingreso/neto recurrente/tasa de ahorro NO se mueve.
+    assert_eq!(dec(&grown["deltas"]["income_monthly_delta"]), 0.0, "{grown}");
+    assert_eq!(dec(&grown["deltas"]["net_recurring_monthly_delta"]), 0.0, "{grown}");
+    assert_eq!(
+        grown["scenario"]["savings_rate"], grown["baseline"]["savings_rate"],
+        "la tasa de ahorro es sobre el neto RECURRENTE: {grown}"
+    );
+    // …pero el objetivo tampoco se mueve: el eje no reescribe la meta por la puerta de atrás.
+    assert_eq!(
+        grown["scenario"]["fire_target_base"], grown["baseline"]["fire_target_base"],
+        "{grown}"
+    );
+
+    // 2. Y sin embargo el resultado sí cambia: más caja compuesta durante décadas.
+    assert!(
+        dec(&grown["deltas"]["final_net_worth_delta"]) > 0.0,
+        "un 2 % real anual durante el horizonte tiene que dejar más patrimonio: {grown}"
+    );
+    let b = grown["baseline"]["jubilacion_month_index"].as_u64();
+    let sc = grown["scenario"]["jubilacion_month_index"].as_u64();
+    if let (Some(b), Some(sc)) = (b, sc) {
+        assert!(sc <= b, "más ingreso no puede retrasar la jubilación: {sc} vs {b}");
+    }
+
+    // 3. El corte se publica, y solo en el escenario.
+    assert!(
+        grown["baseline"]["income_growth_stops_at_month_index"].is_null(),
+        "el baseline no lleva el eje: {grown}"
+    );
+    let stop = grown["scenario"]["income_growth_stops_at_month_index"]
+        .as_u64()
+        .expect("el escenario publica dónde para el crecimiento");
+    let horizon = grown["horizon_months"].as_u64().unwrap();
+    assert!(stop <= horizon, "el corte cae dentro del horizonte: {stop} vs {horizon}");
+
+    // 4. Un escalón cae donde se le dice, y `date` y `month_index` son el MISMO eje que el
+    //    one-off (mes 1 = el mes civil del ancla).
+    let anchor = base["anchor_date_ymd"].as_str().unwrap();
+    let (y, m) = (
+        anchor[0..4].parse::<i32>().unwrap(),
+        anchor[5..7].parse::<u32>().unwrap(),
+    );
+    let (ty, tm) = if m + 3 > 12 { (y + 1, m + 3 - 12) } else { (y, m + 3) };
+    let by_date = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"income_steps": [{"date": format!("{ty:04}-{tm:02}-15"), "delta_monthly": "500"}]}),
+            ),
+        )
+        .await,
+    );
+    let by_index = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"income_steps": [{"month_index": 4, "delta_monthly": "500"}]}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(by_date["deltas"], by_index["deltas"], "date ≡ month_index");
+    assert!(
+        dec(&by_date["deltas"]["final_net_worth_delta"]) > 0.0,
+        "+500 €/mes desde el mes 4 tiene que dejar más patrimonio: {by_date}"
+    );
+    assert!(
+        by_date["scenario"]["income_growth_stops_at_month_index"].is_null(),
+        "los escalones no llevan corte: no se recortan en la jubilación: {by_date}"
+    );
+    // Un escalón NEGATIVO resta, y los escalones se acumulan entre sí.
+    let down = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"income_steps": [
+                    {"month_index": 4, "delta_monthly": "500"},
+                    {"month_index": 60, "delta_monthly": "-500"}
+                ]}),
+            ),
+        )
+        .await,
+    );
+    assert!(
+        dec(&down["deltas"]["final_net_worth_delta"])
+            < dec(&by_date["deltas"]["final_net_worth_delta"]),
+        "quitar el escalón a los 5 años deja MENOS que mantenerlo: {down}"
+    );
+
+    // 5. Anti-no-op y cotas: cada uno con su código estable.
+    for (body, needle) in [
+        (json!({"income_growth_real_pct_annual": "0"}), "income_growth_no_op"),
+        (json!({"income_growth_real_pct_annual": "25"}), "income_growth_out_of_range"),
+        (json!({"income_growth_real_pct_annual": "-11"}), "income_growth_out_of_range"),
+        (
+            json!({"income_steps": [{"month_index": 4, "delta_monthly": "0"}]}),
+            "income_step_delta_zero",
+        ),
+        (
+            json!({"income_steps": [{"delta_monthly": "100"}]}),
+            "income_step_timing_ambiguous",
+        ),
+        (
+            json!({"income_steps": [{"month_index": 4, "date": "2030-01-01", "delta_monthly": "100"}]}),
+            "income_step_timing_ambiguous",
+        ),
+        (
+            json!({"months": 120, "income_steps": [{"month_index": 500, "delta_monthly": "100"}]}),
+            "income_step_month_out_of_range",
+        ),
+    ] {
+        let envelope = mcp_post(&app, &token, tool_call("simulate_projection", body.clone())).await;
+        let result = &envelope["result"];
+        assert_eq!(result["isError"], true, "debía fallar con {body}: {envelope}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(needle), "{body} debe nombrar «{needle}» y dice: {text}");
+    }
+}
+

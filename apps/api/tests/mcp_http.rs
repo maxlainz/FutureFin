@@ -342,6 +342,97 @@ async fn get_projection_is_hybrid_without_asset_series_and_caches() {
     );
 }
 
+/// **`members[].series` es opt-in en la tool, y la respuesta del hogar cabe en el contexto.**
+///
+/// Mismo criterio y mismo default que `asset_series`, tomado con la medida delante: por HTTP el
+/// agregado de dos miembros a densidad `hybrid` pesa ~34 KB y **11,7 KB son las series por
+/// miembro** (~5,9 KB cada una, lineal con el tamaño del hogar). Un modelo no dibuja: los hitos
+/// de cada persona ya viajan en `members[]` como enteros. Se deja pedible —y no retirada— porque
+/// el token de un miembro NO puede pedir el `view=mine` de otro, así que esta es la única vía
+/// para ver su curva.
+#[tokio::test]
+async fn get_projection_household_omits_member_series_unless_asked() {
+    /// Tope del payload de UNA lectura de proyección del hogar en la tool. No persigue el byte:
+    /// caza el crecimiento lineal (un campo nuevo por punto se multiplica por ~78 puntos y por el
+    /// número de miembros). Si se pone rojo, recorta lo que se publica, no subas la constante.
+    const TOOL_HOUSEHOLD_MAX_BYTES: usize = 32_000;
+
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let bob = app.register_and_approve_member(&owner, "bob", "member").await;
+    let token = create_token(&app, &owner).await;
+
+    for (u, tag) in [(&owner, "A"), (&bob, "B")] {
+        let cat = app.create_category(u, "asset", &format!("Fondos {tag}")).await;
+        let r = app
+            .post_json_with_cookie(
+                "/v1/assets",
+                serde_json::json!({"category_id": cat, "name": format!("Indexado {tag}"),
+                                   "current_value": "20000"}),
+                &u.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("get_projection", serde_json::json!({"view": "household"})),
+    )
+    .await;
+    let text = envelope["result"]["content"][0]["text"]
+        .as_str()
+        .expect("texto de la tool")
+        .to_string();
+    let proj: serde_json::Value = serde_json::from_str(&text).expect("json");
+    let members = proj["members"].as_array().expect("members");
+    assert_eq!(members.len(), 2, "{members:?}");
+    for m in members {
+        assert_eq!(
+            m["series"].as_array().map(|a| a.len()),
+            Some(0),
+            "series por miembro vacía por defecto: {m}"
+        );
+        // …pero los hitos y el horizonte propio SÍ viajan: es lo que sustituye a la curva.
+        assert!(m["horizon_months"].as_u64().is_some_and(|v| v > 0), "{m}");
+        assert!(m["username"].is_string(), "{m}");
+    }
+    println!("get_projection household/hybrid sin series por miembro: {} B", text.len());
+    assert!(
+        text.len() <= TOOL_HOUSEHOLD_MAX_BYTES,
+        "la lectura del hogar por MCP pesa {} B y el tope es {TOOL_HOUSEHOLD_MAX_BYTES}",
+        text.len()
+    );
+
+    // Con el flag sí llegan, en la misma rejilla que `points`.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "get_projection",
+            serde_json::json!({"view": "household", "include_member_series": true}),
+        ),
+    )
+    .await;
+    let with = tool_text_json(&envelope);
+    let grid: Vec<serde_json::Value> = with["points"]
+        .as_array()
+        .expect("points")
+        .iter()
+        .map(|p| p["month_index"].clone())
+        .collect();
+    for m in with["members"].as_array().expect("members") {
+        let own: Vec<serde_json::Value> = m["series"]
+            .as_array()
+            .expect("series")
+            .iter()
+            .map(|p| p["month_index"].clone())
+            .collect();
+        assert_eq!(own, grid, "misma rejilla que points: {m}");
+    }
+}
+
 #[tokio::test]
 async fn validation_error_is_tool_error_with_http_error_body() {
     let app = TestApp::spawn().await;

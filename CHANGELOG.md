@@ -71,8 +71,67 @@ El perfil de WP4 ya no es solo configuración: **la estrategia gobierna la simul
   `simulate_projection` ecoa `strategy`, `retirement_trigger` y `liquid_crossing_month_index` por
   lado.
 
+### El pase de contrato del API: índices, tri-estados y what-if de ingreso (5.0.0, WP5-2)
+
+Cuatro deudas de contrato que la SPA destapó al construir encima, más los dos ejes de what-if que
+no necesitaban motor. Ninguna es una regresión del trabajo en curso: son promesas que el código
+llevaba tiempo sin cumplir y que solo se ven cuando alguien intenta usarlas.
+
+- **`members[]` publica la SERIE de cada miembro** (D32): `series: [{month_index, net_worth,
+  net_worth_liquid}]`, en la misma rejilla y con la misma decimación que `points[]`, más
+  `horizon_months` (el horizonte PROPIO de esa persona, que puede ser menor que el común del hogar).
+  Es lo que dibuja la línea fina por miembro bajo la suma en grueso, y **no se puede derivar en
+  cliente**: una suma no se desagrega. Invariante testeado: Σ `members[].series` == `points[]`, mes
+  a mes. Medido antes de decidir (dos miembros, densidad `hybrid`, sin gzip): la respuesta pasa de
+  21,0 KB en `mine` a **34,2 KB** en `household`, de los cuales **11,7 KB** son las series por
+  miembro (~5,9 KB cada una, lineal con el tamaño del hogar). Por eso la tool MCP `get_projection`
+  —que fuerza `hybrid` porque el contexto de un modelo es caro— las deja **opt-in**
+  (`include_member_series`, default `false`), igual que `asset_series`; por HTTP viajan siempre.
+- **`GET|PATCH /v1/auth/me/retirement-profile` publican `target_basis_stored`**: la elección
+  ALMACENADA de la base del objetivo, `null` = «no elegida, se deriva». `profile.target_basis` sale
+  siempre resuelto, así que un formulario que leía el perfil y lo reescribía entero persistía la
+  derivación como si fuera una elección — y al declarar la pensión después, el objetivo se quedaba
+  en la perpetuidad conservadora que nadie pidió. El servidor ya mergeaba sobre lo almacenado; esto
+  cierra la mitad del agujero que estaba en el cliente.
+- **`strategy: "partial"` exige `partial_retirement`** (400 `partial_retirement_required`), la
+  tercera pata de la familia de `target_retirement_age_required` y `pension_required_for_bridge`.
+  Sin ella la estrategia se comportaba como `asap` en silencio mientras la UI enseñaba «Media
+  jornada» sobre una proyección que no la tenía.
+- **`PATCH /v1/assets/{id}`: `expected_annual_return_percent` y `annual_volatility_percent` pasan a
+  tri-estado** (omitir no toca · `null` BORRA · un valor sustituye), como `purchase_price`. Hasta
+  4.15.x `null` y clave ausente eran el mismo caso, así que **no había forma de volver a
+  «rentabilidad no declarada» ni de devolver un activo al determinismo**: una volatilidad escrita
+  por error solo se deshacía borrando y recreando el activo, con su histórico dentro. En MCP,
+  `update_asset` gana `clear_expected_annual_return_percent` y `clear_annual_volatility_percent`.
+- **`simulate_projection` gana los dos ejes de ingreso de P11** (solo MCP, D30):
+  `income_growth_real_pct_annual` (crecimiento REAL del sueldo, `[−10, 20]` % anual) e
+  `income_steps` (hasta 24 escalones `{month_index | date, delta_monthly}`, con signo). Son ejes de
+  **caja**: entran como un Próximo, así que `income_monthly`, `net_recurring_monthly` y
+  `savings_rate` salen con delta 0 exacto y el objetivo FIRE no se mueve por la puerta de atrás.
+  El crecimiento se aplica **solo mientras el escenario no está jubilado** —una primera pasada sin
+  el eje decide dónde cortar— y el corte se publica en `income_growth_stops_at_month_index` porque
+  es aproximado: si el sueldo extra adelanta la jubilación, los meses entre ese número y
+  `jubilacion_month_index` llevan una nómina que un jubilado no cobraría, y esa diferencia es la
+  ventana. Los escalones NO se recortan: el mes lo nombra quien llama. Un `0` en cualquiera de los
+  dos es un 400, no un escenario mudo idéntico al baseline.
+- **`model_note` reescrito en las dos superficies** (P6): dicen quién decide qué. La ESTRATEGIA
+  elige el disparador (cruce o edad) y la base del objetivo; el **SWR solo dimensiona** ese
+  objetivo, no gobierna lo que se retira; ya jubilado manda la **regla de retirada** (por defecto
+  `fixed_real` = la necesidad declarada, indexada y sin techo); `withdrawal_shortfall` es
+  informativo y **no es** `uncovered_deficit_total`; y el agregado del hogar es una lectura
+  informativa, no el plan de nadie.
+
 ### Breaking
 
+- **`assets_depleted_month_index` pasa a la rejilla 0-based** (issue #210), en
+  `GET /v1/projection/series` (raíz y `members[]`) y en los dos lados de `simulate_projection`. Se
+  publicaba en la convención 1-based del bucle del motor desde 4.6.0 y era el **único** índice de
+  esas respuestas desplazado un mes respecto de `points[].month_index`, `jubilacion_month_index` y
+  todos los demás `*_month_index`: compararlos, o usarlo para buscar un punto de la serie, daba un
+  mes de más. El mes civil no se mueve — cambia el nombre del mes. Un cliente de 4.x que restara 1
+  para compensar debe dejar de hacerlo. `assets_depleted_months_delta` de `simulate_projection` no
+  se mueve (los dos lados se desplazan igual). Pin movido: escenario de #119 en
+  `projection_failure_states.rs`, mes 100 → 99.
 - **El default de `?view` pasa de `household` a `mine`** (R2), en HTTP y en MCP. Omitir el parámetro
   —o mandarlo vacío— devuelve ahora **los datos del usuario que pregunta**; el hogar entero hay que
   pedirlo con `?view=household` / `view: "household"`. Afecta a las ocho respuestas que ecoan `view`

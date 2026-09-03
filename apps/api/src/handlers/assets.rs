@@ -162,15 +162,19 @@ pub struct PatchAssetBody {
     #[schema(value_type = Option<Object>, nullable = true)]
     pub purchase_price: Option<serde_json::Value>,
     pub is_liquid: Option<bool>,
-    #[serde(default)]
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub expected_annual_return_percent: Option<Decimal>,
-    /// Volatilidad anual en % (0–100). Omitir = sin cambio.
-    #[serde(default)]
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub annual_volatility_percent: Option<Decimal>,
+    /// Rentabilidad anual esperada en % (> −100). **Tri-estado desde 5.0.0**: omitir = sin
+    /// cambio, `null` = borrarla (el activo vuelve a la rentabilidad no declarada), un valor la
+    /// fija. Hasta 4.15.x `null` era indistinguible de omitir y no había forma de deshacer una
+    /// rentabilidad escrita por error.
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
+    #[schema(value_type = Option<Object>, nullable = true)]
+    pub expected_annual_return_percent: Option<serde_json::Value>,
+    /// Volatilidad anual en % (0–100). **Tri-estado desde 5.0.0**: omitir = sin cambio, `null` =
+    /// borrarla (el activo vuelve a ser determinista), un valor la fija. Sin el `null` no había
+    /// camino de vuelta al determinismo, que es justo el estado por defecto.
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
+    #[schema(value_type = Option<Object>, nullable = true)]
+    pub annual_volatility_percent: Option<serde_json::Value>,
     pub notes: Option<String>,
     pub sort_index: Option<i32>,
 }
@@ -231,11 +235,21 @@ fn assert_non_negative(d: Decimal, field: &'static str) -> Result<(), ApiError> 
     Ok(())
 }
 
-/// PATCH: clave ausente → conservar `current`; `null` JSON → `None` en BD; valor → sustituir.
-fn merge_optional_decimal_patch(
+/// PATCH: clave ausente → conservar `current`; `null` JSON → `None` en BD; valor → sustituir,
+/// tras pasar por `check`.
+///
+/// El validador es un parámetro y no una llamada fija a `assert_non_negative` porque los tres
+/// campos tri-estado de un activo tienen cotas distintas: `purchase_price` es `>= 0`,
+/// `expected_annual_return_percent` admite negativos hasta −100 (excluido) y
+/// `annual_volatility_percent` vive en `[0, 100]`. Con la cota cableada dentro, extender el
+/// tri-estado a los otros dos habría significado copiar el parseo — que es exactamente la parte
+/// que no se puede duplicar sin que las dos copias se separen (`"1.234,56 €"` se acepta en una
+/// y se rechaza en la otra sin que ningún test lo note).
+fn merge_optional_decimal_patch_with(
     patch: &Option<serde_json::Value>,
     current: Option<Decimal>,
     field: &'static str,
+    check: impl Fn(Decimal) -> Result<(), ApiError>,
 ) -> Result<Option<Decimal>, ApiError> {
     match patch {
         None => Ok(current),
@@ -252,10 +266,19 @@ fn merge_optional_decimal_patch(
                     ApiError::BadRequest(format!("decimal_invalid: {field} must be a valid decimal"))
                 })?
             };
-            assert_non_negative(d, field)?;
+            check(d)?;
             Ok(Some(d))
         }
     }
+}
+
+/// El caso `>= 0` de [`merge_optional_decimal_patch_with`] (`purchase_price`).
+fn merge_optional_decimal_patch(
+    patch: &Option<serde_json::Value>,
+    current: Option<Decimal>,
+    field: &'static str,
+) -> Result<Option<Decimal>, ApiError> {
+    merge_optional_decimal_patch_with(patch, current, field, |d| assert_non_negative(d, field))
 }
 
 async fn assert_asset_category(
@@ -692,8 +715,6 @@ pub(crate) async fn patch_asset_core(
     id: Uuid,
     body: PatchAssetBody,
 ) -> Result<AssetResponse, ApiError> {
-    assert_return_percent(body.expected_annual_return_percent)?;
-    assert_volatility_percent(body.annual_volatility_percent)?;
     if body.category_id.is_none()
         && body.name.is_none()
         && body.current_value.is_none()
@@ -748,17 +769,23 @@ pub(crate) async fn patch_asset_core(
 
     let new_liquid = body.is_liquid.unwrap_or(current.is_liquid);
 
-    let new_exp = if body.expected_annual_return_percent.is_some() {
-        body.expected_annual_return_percent
-    } else {
-        current.expected_annual_return_percent
-    };
+    // Tri-estado (5.0.0): omitir conserva, `null` BORRA, un valor sustituye — la misma forma que
+    // `purchase_price` ha tenido siempre. Las cotas se comprueban DENTRO del merge, sobre el
+    // valor que de verdad va a la columna, no sobre el patchset: con el `null` en juego, validar
+    // el patchset dejaba pasar exactamente el caso que se quería cazar.
+    let new_exp = merge_optional_decimal_patch_with(
+        &body.expected_annual_return_percent,
+        current.expected_annual_return_percent,
+        "expected_annual_return_percent",
+        |d| assert_return_percent(Some(d)),
+    )?;
 
-    let new_vol = if body.annual_volatility_percent.is_some() {
-        body.annual_volatility_percent
-    } else {
-        current.annual_volatility_percent
-    };
+    let new_vol = merge_optional_decimal_patch_with(
+        &body.annual_volatility_percent,
+        current.annual_volatility_percent,
+        "annual_volatility_percent",
+        |d| assert_volatility_percent(Some(d)),
+    )?;
 
     let new_notes = match &body.notes {
         Some(_) => normalize_notes(&body.notes)?,

@@ -56,7 +56,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `grep -c '#\[tool(' apps/api/src/mcp/server.rs` y
   `grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs`.
   Las 10 iniciales: `get_summary`, `get_projection` (density **hybrid fija**,
-  `asset_series` opt-in con `include_asset_series`, comparte la cache de proyección del handler;
+  `asset_series` opt-in con `include_asset_series` y `members[].series` opt-in con
+  `include_member_series` —los dos default `false`, ver el bullet de WP5-2 y sus bytes medidos—,
+  comparte la cache de proyección del handler;
   `months` declara su rango real 12..840 en el schema y solo la variante sin `months` sale de
   cache), `get_budget`, `get_transactions_summary` (denominador = `avg_months`, meses reales **y
   clasificados**, ventana **anclada a hoy** — la misma media que la proyección, 4.8.0/#125;
@@ -82,7 +84,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   > - **`get_projection`**: con `view: "household"` la respuesta es un **AGREGADO** —la SUMA de una
   >   simulación por miembro, cada una con su estrategia— así que **no trae `jubilacion_*` ni
   >   `fire_target_series`** (viajan con `absent_reason: "household_aggregate"`) y el hito de cada
-  >   persona va en `members[]`. Está en la descripción de la tool y en el `instructions`.
+  >   persona va en `members[]`, con su `horizon_months` propio. Está en la descripción de la tool y
+  >   en el `instructions`. La CURVA de cada miembro existe (`members[].series`) pero es opt-in por
+  >   tamaño: `include_member_series: true`.
   > - **`simulate_projection`**: `view: "household"` es **error `household_not_simulable`**. Un
   >   what-if mueve UN plan y el hogar tiene N; su schema declara el rechazo en la descripción del
   >   parámetro para que el modelo no lo intente. Test: `mcp_simulate.rs::household_view_is_refused_with_a_typed_error`.
@@ -402,8 +406,14 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     `get_budget`, la equivalencia `net_actual` ↔ `income_minus_expense` que `get_history_cashflow`
     ya declara desde su lado, la regla de reintentos/`idempotency_key`) y se añadió el párrafo
     **DOS PLANOS DE CONFIGURACIÓN** (hogar vs. persona, y el dueño de cada fila del ledger).
-    Estado: **`70 23757 588`** — quedan **243 caracteres**. Sigue siendo un margen de una tool
-    corta: presupuesta el reequilibrio al planificar la siguiente, no al final.
+    Estado tras WP4: **`70 23757 588`** — quedaban **243 caracteres**. **5.0.0/WP5-2** no añadió
+    tools pero sí tocó dos descripciones y las pagó dentro: `update_asset` sube (376→416) para
+    declarar el tri-estado de sus tres decimales, y las DOS descripciones de activos dejan de
+    mentir con «Sin owner-check: cualquier member edita cualquier activo del hogar» —una frase que
+    D21 volvió falsa en WP4 y que nadie había recontado—, lo que devuelve `update_asset_value` de
+    404 a 382. Estado: **`70 23834 575`** — quedan **166 caracteres**, y la tool más larga baja de
+    598 a 575. Sigue siendo un margen de una tool corta: presupuesta el reequilibrio al planificar
+    la siguiente (WP6 trae `get_projection_bands`), no al final.
   - **Hallazgo que reordena lo que queda**: medido DESPUÉS del recorte, el `inputSchema` del
     catálogo son ~55 KB, **~2,7× las descripciones** (medida puntual de la auditoría de la Fase 5, no
     una constante congelada: re-derívala con un `tools/list` contra un servidor vivo pesando
@@ -806,6 +816,60 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   los publica; `create_asset`/`update_asset` ganan `annual_volatility_percent` y `list_assets` lo
   devuelve (sale gratis: reusa `list_assets_core`). `update_asset_value` **no** lo gana a propósito
   — es el subset de VALORACIÓN, y la volatilidad es un supuesto del activo, no su valor de hoy.
+
+- **5.0.0 / WP5-2 (issue #207) — cero tools nuevas, cuatro contratos que sí cambian.** Evaluación de
+  paridad: **tool actualizada** en los cuatro casos; ninguna omisión nueva.
+  - **`get_projection` gana `include_member_series` (default `false`)** — el gemelo exacto de
+    `include_asset_series`, y la decisión está **medida**, no supuesta. Con `view: "household"` la
+    respuesta HTTP publica desde WP5-2 la serie completa de cada miembro (`members[].series`, D32:
+    la línea fina bajo la suma en grueso). Bytes sin gzip, 2026-09-03, dos miembros con un activo +
+    nómina + gasto cada uno y horizonte derivado ~780 meses (78 puntos hybrid): `mine/hybrid`
+    **21.009** · `household/hybrid` **34.161**, de los cuales `members[].series` son **11.748**
+    (~5,9 KB por miembro, **lineal con el tamaño del hogar**) y `points[]` 15.457 ·
+    `household/monthly` 300.724. La tool fuerza `hybrid` justo porque el contexto es caro, así que
+    ahí las series por miembro son **opt-in**: un modelo no dibuja, y todo lo que puede preguntar de
+    una persona —cuándo se jubila, cuándo cruza, cuándo se le agota la cartera, su horizonte propio,
+    sus avisos— ya viaja en `members[]` como enteros. **No se retiran** de la tool porque el token de
+    un miembro NO puede pedir el `view=mine` de otro: esta es la única vía para ver su curva, y
+    cerrarla sería quitar una pregunta legítima en vez de abaratarla. Guardas:
+    `mcp_http.rs::get_projection_household_omits_member_series_unless_asked` (tope 32 KB para la
+    respuesta de la tool) y
+    `projection_household_aggregate.rs::the_household_payload_stays_within_its_budget_at_hybrid_density`
+    (tope 68 KB para la HTTP, el doble de lo medido — caza el crecimiento lineal, no el byte).
+  - **`simulate_projection` gana los dos ejes de P11** (D30, what-if solo MCP):
+    `income_growth_real_pct_annual` (crecimiento REAL del sueldo, `[−10, 20]` % anual; `"0"` es 400
+    `income_growth_no_op`) e `income_steps` (≤ 24 entradas `{month_index | date, delta_monthly}`,
+    delta con signo y ≠ 0). **Los dos son ejes de CAJA**: entran por
+    `planning_monthly_cash_adjustment` como un Próximo, así que `income_monthly`,
+    `net_recurring_monthly` y `savings_rate` salen con delta 0 EXACTO y el objetivo FIRE en modo
+    `current_income` **no** se mueve — meterlos por `income_regular_monthly` habría movido a la vez
+    el capital y la meta, y el delta no significaría nada. El crecimiento se aplica **solo mientras
+    el escenario no está jubilado**, con una PRIMERA pasada del escenario sin el eje para saber
+    dónde cortar; como esa pasada no conoce el adelanto que el propio sueldo produce, el corte se
+    **publica** en `scenario.income_growth_stops_at_month_index` y la ventana de error es
+    exactamente su diferencia con `scenario.jubilacion_month_index`. Los `income_steps` **no** se
+    recortan: el mes lo nombra el llamante. El eje de mes de los pasos es el de `one_off_expense`
+    (**1 = el mes civil del ancla**), no la rejilla 0-based de `points[]`. Test:
+    `mcp_simulate.rs::income_growth_and_steps_are_cash_axes_with_a_published_cut`.
+  - **`update_asset` gana `clear_expected_annual_return_percent` y
+    `clear_annual_volatility_percent`** — el PATCH HTTP hizo tri-estado esos dos decimales (hasta
+    4.15.x `null` y clave ausente eran el mismo caso, así que **no había forma de volver a
+    «rentabilidad no declarada» ni de devolver un activo al determinismo**), y el JSON Schema no
+    puede expresar el tri-estado: mismo molde `clear_*` que `clear_purchase_price`, mismo 400
+    `field_set_and_clear` cuando llegan valor y `clear_*` a la vez. `update_asset_value` sigue sin
+    ellos: es el subset de VALORACIÓN y borrar es editar, no valorar. Test:
+    `mcp_write.rs::update_asset_clears_the_return_and_the_volatility`.
+  - **`get_retirement_profile` / `update_retirement_profile` publican `target_basis_stored`** — la
+    elección ALMACENADA de la base del objetivo (`null` = no elegida, se DERIVA de si hay pensión).
+    `profile.target_basis` sale siempre resuelto, así que un cliente que leyera y reescribiera el
+    perfil entero persistía la derivación como elección y congelaba el objetivo en la perpetuidad
+    conservadora. En el outcome del PATCH viajan los dos lados
+    (`target_basis_stored_before`/`_after`), que es lo que enseña el preview.
+  - **`assets_depleted_month_index` cambia de convención (#210, breaking)**: pasa de meses del BUCLE
+    (1-based) a la rejilla 0-based de `points[].month_index`, en `get_projection` (raíz y
+    `members[]`) y en los DOS lados de `simulate_projection`. Era el único índice de esas respuestas
+    desplazado un mes: compararlo con `jubilacion_month_index` daba un mes de más. El delta
+    `assets_depleted_months_delta` no se mueve (los dos lados se desplazan igual).
 
   **D21 llega gratis a las escrituras** porque las tools reusan las cores: una mutación sobre la
   fila de otro miembro devuelve 403 `not_row_owner` por MCP igual que por HTTP, y el preview de

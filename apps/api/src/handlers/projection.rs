@@ -301,11 +301,48 @@ pub struct HouseholdMemberProjection {
     pub partial_retirement_month_index: Option<u32>,
     /// Mes de inicio de la pensión con fecha. `null` hasta WP3.
     pub pension_start_month_index: Option<u32>,
-    /// Mes en que la cartera de ESTE miembro se vacía. El agregado publica el MÍNIMO; aquí se ve
-    /// de quién es.
+    /// Mes en que la cartera de ESTE miembro se vacía, en la rejilla común del hogar (#210). El
+    /// agregado publica el MÍNIMO; aquí se ve de quién es.
     pub assets_depleted_month_index: Option<u32>,
     /// Avisos de este miembro (p. ej. `birth_date_missing`).
     pub warnings: Vec<String>,
+    /// **Horizonte PROPIO de este miembro en meses**, derivado de SU fecha de nacimiento y de SU
+    /// `horizon_lifespan_age`. El agregado se corre al horizonte COMÚN `max(horizontes)`
+    /// (`horizon_basis: "household_max_lifespan"`), así que este número puede ser MENOR que
+    /// `months`: desde ahí, la curva de esta persona describe años que ella no declaró vivir.
+    /// Sin el campo, el chart no puede distinguir «su plan llega hasta aquí» de «su plan se
+    /// acaba aquí», y las dos cosas se dibujan igual.
+    pub horizon_months: u32,
+    /// **Serie de ESTE miembro** (D32), paralela a `points[]`: los mismos `month_index`, la
+    /// misma decimación y los mismos f64 (excepción chart-only D4/I3). Es lo que dibuja la
+    /// «línea fina por miembro» bajo la suma en grueso.
+    ///
+    /// Lleva `month_index` propio —y no solo dos arrays alineados por posición como
+    /// `fire_target_series`— porque estas series se leen POR SEPARADO de `points`: un chart que
+    /// pinta cuatro líneas de dos fuentes distintas no puede depender de que ambas se hayan
+    /// decimado igual, y aquí el coste de decirlo son cuatro bytes por punto.
+    pub series: Vec<MemberSeriesPoint>,
+}
+
+/// Un punto de la serie de un miembro del hogar. Deliberadamente **dos importes y no siete**: el
+/// chart del hogar dibuja patrimonio y líquido por persona; el resto de columnas de
+/// [`ProjectionPoint`] (aportado, deflactado, retirada, recorte, exceso) solo se leen del
+/// agregado, y publicarlas por miembro multiplicaría el payload por 3,5 para responder algo que
+/// nadie pregunta. La regla es la misma que la de `members[]`: el detalle por persona existe
+/// para explicar la suma, no para duplicarla.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct MemberSeriesPoint {
+    /// Mismo número de MES que `points[].month_index` (misma rejilla, misma decimación).
+    pub month_index: u32,
+    /// Patrimonio neto de este miembro en euros NOMINALES de ese mes.
+    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[schema(value_type = f64)]
+    pub net_worth: Decimal,
+    /// Su patrimonio LÍQUIDO nominal — la línea que hay que comparar con SU objetivo, no con el
+    /// del hogar (que no existe).
+    #[serde(serialize_with = "serialize_decimal_as_f64")]
+    #[schema(value_type = f64)]
+    pub net_worth_liquid: Decimal,
 }
 
 /// Punto **interno** para los cálculos que recorren la serie mensual completa (milestones,
@@ -409,6 +446,12 @@ pub struct ProjectionSeriesResponse {
     /// restando del patrimonio. Número de MES (misma base que `points[].month_index`), nunca una
     /// posición de array. `null` explícito = no se agota dentro del horizonte — no «no
     /// calculado». (#119)
+    ///
+    /// **Breaking en 5.0.0 (#210): va en la rejilla 0-based como el resto de `*_month_index`.**
+    /// Hasta 4.15.x se publicaba en la convención 1-based del bucle del motor, así que era el
+    /// único índice de la respuesta desplazado un mes respecto de `jubilacion_month_index` y de
+    /// `points[].month_index`. Un consumidor de 4.x que lo compare con otro índice o lo use para
+    /// buscar un punto debe restarle 1 al migrar… o mejor, dejar de restar nada.
     pub assets_depleted_month_index: Option<u32>,
     /// Déficit acumulado NO cubierto al final del horizonte, en euros. `"0.0000"` significa cero
     /// euros descubiertos, no «no aplica». Ya se restaba de `net_worth`; ahora se declara. (#119)
@@ -1095,6 +1138,27 @@ pub(crate) fn deflator_at_month_index(
     Decimal::ONE / infl_factor.powd(years)
 }
 
+/// Factor de capitalización de una tasa REAL anual `g` a los `month_index` meses:
+/// `(1 + g/100)^(month_index/12)`. Con `g == 0` o `month_index == 0` devuelve `ONE` **exacto**,
+/// sin pasar por `powd`.
+///
+/// Es la gemela de `deflator_at_month_index` (misma base, exponente positivo) y comparte forma
+/// con `inflation_factor_at_month_index` del motor, que **no está re-exportada** por
+/// `futurefin_engine` (vive en un `mod projection` privado). Se escribe aquí en vez de deducirla
+/// como `1 / deflator(...)`: esa vuelta introduce un error de redondeo en un factor que multiplica
+/// dinero, y el redondeo de presentación no es sitio para meterlo. Si algún día la del motor se
+/// exporta, este helper se retira y se llama a aquella — hay una petición abierta para eso.
+///
+/// El eje es `month_index/12`, el mismo que indexa el gasto y el objetivo: el mes 1 del bucle
+/// (índice 0) tiene factor 1 y crecimiento extra exactamente 0.
+fn real_growth_factor_at_month_index(annual_percent: Decimal, month_index: u32) -> Decimal {
+    if annual_percent.is_zero() || month_index == 0 {
+        return Decimal::ONE;
+    }
+    let years = Decimal::from(month_index) / Decimal::from(12u32);
+    (Decimal::ONE + annual_percent / Decimal::from(100u32)).powd(years)
+}
+
 /// Deflacta una serie de puntos a euros de hoy. Es la versión a resolución mensual completa de la
 /// deflactación **visual** que hace el chart de la web (`ProjectionNetWorthChart.baseSeries`);
 /// calcularla aquí preserva la precisión del `reached_month_index` de los milestones bajo densidad
@@ -1390,8 +1454,10 @@ fn strategy_label(s: RetirementStrategy) -> String {
 /// conversión es `k − 1` y no una elección de estilo: con `k` a pelo, `jubilacion_date_ymd` se
 /// iría un mes al futuro y los pins de 4.15.x se moverían sin que nada del modelo cambiara.
 ///
-/// (`assets_depleted_month_index` se publica en meses del BUCLE desde #119 y NO se toca aquí:
-/// mover un contrato ya publicado no es parte de esta ola. Divergencia declarada.)
+/// **Sin excepciones desde 5.0.0 (#210).** `assets_depleted_month_index` se publicó en meses del
+/// BUCLE desde #119 y era la única salida de la respuesta que hablaba otro idioma: compararla con
+/// `jubilacion_month_index` o usarla para indexar `points[]` daba un mes de más. Se pasa por aquí
+/// como el resto — breaking declarado en el CHANGELOG de 5.0.0.
 fn engine_month_to_grid(k: Option<u32>) -> Option<u32> {
     k.map(|k| k.saturating_sub(1))
 }
@@ -2444,6 +2510,10 @@ struct MemberRun {
     username: String,
     profile: RetirementProfile,
     birth_date: Option<NaiveDate>,
+    /// Horizonte PROPIO del miembro (el que tendría en `view=mine`), no el común del hogar con
+    /// el que se ha simulado. Se calcula donde se conoce su perfil y su DOB, y viaja hasta
+    /// `members[].horizon_months`.
+    own_horizon_months: u32,
     built: BuiltProjection,
     output: futurefin_engine::ProjectionOutput,
     negative_amortization: Vec<LiabilityNegativeAmortization>,
@@ -2501,6 +2571,7 @@ async fn run_member_projection(
     birth_date: Option<NaiveDate>,
     today: NaiveDate,
     months: u32,
+    own_horizon_months: u32,
     inflation_annual_percent: Decimal,
     fire_settings: &FireSettings,
 ) -> Result<MemberRun, ApiError> {
@@ -2585,6 +2656,7 @@ async fn run_member_projection(
         username,
         profile,
         birth_date,
+        own_horizon_months,
         built,
         output,
         negative_amortization,
@@ -2670,6 +2742,10 @@ pub async fn compute_projection_series_response(
         for m in member_rows {
             let profile =
                 resolve_retirement_profile(m.retirement_profile.map(|j| j.0));
+            // El horizonte PROPIO del miembro, con la MISMA regla que `view=mine` usaría para
+            // él: es lo que `members[].horizon_months` publica para que el chart sepa hasta
+            // dónde llega el plan de cada uno dentro de la rejilla común.
+            let own = projection_horizon_months(today, &[m.birth_date], profile.horizon_lifespan_age).0;
             acc.push(
                 run_member_projection(
                     state,
@@ -2680,6 +2756,7 @@ pub async fn compute_projection_series_response(
                     m.birth_date,
                     today,
                     months,
+                    own,
                     inflation_annual_percent,
                     &fire_settings,
                 )
@@ -2697,6 +2774,8 @@ pub async fn compute_projection_series_response(
                 retirement_profile.clone(),
                 session_birth_date,
                 today,
+                months,
+                // En `mine` el horizonte común ES el suyo (o el `?months=` que pidió).
                 months,
                 inflation_annual_percent,
                 &fire_settings,
@@ -2738,8 +2817,10 @@ pub async fn compute_projection_series_response(
         unallocated_savings_total += r.output.unallocated_savings_total;
         monthly_delta_assumption += r.built.monthly_net_regular;
         // MÍNIMO, no suma: el hogar se queda sin cartera cuando el PRIMERO de sus miembros se
-        // queda sin la suya — el detalle de quién y cuándo vive en `members[]`.
-        if let Some(k) = r.output.assets_depleted_month_index {
+        // queda sin la suya — el detalle de quién y cuándo vive en `members[]`. Se convierte a la
+        // rejilla ANTES de minimizar (#210): la variable guarda meses publicables, no meses de
+        // bucle, así que ningún camino puede escapársele sin convertir.
+        if let Some(k) = engine_month_to_grid(r.output.assets_depleted_month_index) {
             assets_depleted_month_index =
                 Some(assets_depleted_month_index.map_or(k, |acc: u32| acc.min(k)));
         }
@@ -2965,14 +3046,14 @@ pub async fn compute_projection_series_response(
         })
         .unwrap_or_default();
 
-    // Avisos del ensamblado + los del motor. El enum `EngineWarning` está VACÍO en esta ola (no
-    // hay ni un aviso que el bucle sepa emitir todavía), así que el `match` sin brazos es la
-    // forma honesta de escribirlo: cuando WP2/WP3 le añadan variantes, esto dejará de compilar
-    // hasta que alguien decida su literal público.
+    // Avisos del ensamblado + los del motor. El literal público de cada aviso del motor lo pone
+    // `EngineWarning::code()` (en el propio crate), no un `match` aquí: un mapeo duplicado en el
+    // handler se queda atrás en cuanto el enum crece, y un aviso con dos nombres es un aviso que
+    // nadie puede buscar.
     let warnings: Vec<String> = solo
         .map(|r| {
             let mut w = r.built.warnings.clone();
-            w.extend(r.output.warnings.iter().map(|x| match *x {}));
+            w.extend(r.output.warnings.iter().map(|x| x.code().to_string()));
             w
         })
         .unwrap_or_default();
@@ -3016,12 +3097,31 @@ pub async fn compute_projection_series_response(
                     pension_start_month_index: engine_month_to_grid(
                         r.output.pension_start_month_index,
                     ),
-                    assets_depleted_month_index: r.output.assets_depleted_month_index,
+                    assets_depleted_month_index: engine_month_to_grid(
+                        r.output.assets_depleted_month_index,
+                    ),
                     warnings: {
                         let mut w = r.built.warnings.clone();
-                        w.extend(r.output.warnings.iter().map(|x| match *x {}));
+                        w.extend(r.output.warnings.iter().map(|x| x.code().to_string()));
                         w
                     },
+                    horizon_months: r.own_horizon_months,
+                    // MISMOS `kept_indices` que `points[]`: la decimación es una decisión del
+                    // servidor por respuesta, no por serie, y dos densidades distintas en el
+                    // mismo JSON serían dos rejillas que el chart tendría que reconciliar.
+                    // `filter_map` (y no `map`) por la misma razón que en `points`: si algún día
+                    // una serie del motor viniera más corta, se cae un punto, no se inventa un 0.
+                    series: kept_indices
+                        .iter()
+                        .filter_map(|&i| {
+                            let idx = i as usize;
+                            Some(MemberSeriesPoint {
+                                month_index: i,
+                                net_worth: *r.output.net_worth.get(idx)?,
+                                net_worth_liquid: series_at(&r.output.liquid_worth, idx),
+                            })
+                        })
+                        .collect(),
                 }
             })
             .collect()
@@ -3061,9 +3161,7 @@ pub async fn compute_projection_series_response(
         // En modos B/C esto es `sum / meses reales`: sin `money_out` viajaba con ~25 decimales
         // mientras `simulate_projection` publicaba la misma cifra con cuatro.
         monthly_delta_assumption: money_out(monthly_delta_assumption),
-        model_note:
-            "Motor mensual: presupuesto regular sin cuotas derivadas de pasivos, servicio de deuda activo por mes, ajustes por Próximos, crecimiento compuesto por activo en términos nominales. El GASTO (regular y de jubilación) se indexa mes a mes a la inflación de la instalación; los INGRESOS quedan planos a propósito (las subidas se pelean, no se regalan), y el target FIRE se evalúa mes a mes ajustado por inflación para preservar el poder adquisitivo del usuario. La jubilación la dispara la ESTRATEGIA del perfil: por cruce del líquido con el objetivo (`asap`) o por edad (`retire_at_age`/`coast`), y entonces el cruce pasa a ser una lectura. Con `view=household` la curva es la SUMA de una simulación independiente por miembro, cada una con su estrategia: por eso el hogar no publica jubilación propia."
-                .into(),
+        model_note: PROJECTION_MODEL_NOTE.into(),
         anchor_date_ymd: today.format("%Y-%m-%d").to_string(),
         show_age_mode: show_age_mode.clone(),
         use_age_on_x_axis: show_age_mode.trim() == "ages"
@@ -3163,7 +3261,34 @@ pub(crate) struct SimulationSpec {
     /// post-build sobre el input clonado del escenario, porque ninguno de ellos mueve el target
     /// FIRE ni las bases de los caps (que dependen de `payment_amount`, que NO se toca).
     pub liability_overrides: Vec<LiabilityOverrideSpec>,
+    /// **P11 — crecimiento REAL del ingreso, % anual** (5.0.0, D30; solo MCP). `[−10, 20]`, y
+    /// `0` es un 400: un eje que no puede mover nada se rechaza, no se acepta en silencio.
+    ///
+    /// Entra como ajuste de CAJA mes a mes (`planning_monthly_cash_adjustment`), no como una
+    /// subida de `income_regular_monthly`: el ingreso base es lo que ancla el objetivo FIRE en
+    /// modo `current_income` y las bases de los caps, y una subida de sueldo no debe reescribir
+    /// el objetivo del escenario por un camino que el usuario no pidió. La consecuencia está
+    /// declarada: `income_monthly`, `net_recurring_monthly` y `savings_rate` NO se mueven — el
+    /// que se mueve es `net_cash_monthly`, igual que con `extra_monthly_savings`.
+    pub income_growth_real_pct_annual: Option<Decimal>,
+    /// **P11 — escalones de ingreso** (≤ 24). Cada uno suma `delta_monthly` (con signo, ≠ 0) a
+    /// la caja **desde su mes y hasta el final del horizonte**. A diferencia del crecimiento,
+    /// NO se recortan en la jubilación: el usuario ha nombrado el mes, así que quitárselo sería
+    /// simular otra cosa.
+    pub income_steps: Vec<IncomeStepSpec>,
     pub include_series: bool,
+}
+
+/// Un escalón de ingreso del what-if: «desde el mes X, +/− N €/mes».
+#[derive(Debug, Clone)]
+pub(crate) struct IncomeStepSpec {
+    /// Mes 1-based del ancla, exactamente el mismo eje que `one_off_expense.month_index` y
+    /// `liability_overrides[].lump_sum_month_index`: el mes 1 es el mes civil de
+    /// `anchor_date_ymd`. **No** es la rejilla 0-based de `points[].month_index`.
+    pub month_index: Option<u32>,
+    pub date: Option<NaiveDate>,
+    /// Con signo y distinto de cero (un escalón de 0 es un no-op y se rechaza).
+    pub delta_monthly: Decimal,
 }
 
 /// Un override what-if sobre un pasivo. Los cuatro ejes están **gateados contra el no-op
@@ -3205,7 +3330,8 @@ pub(crate) struct SimKpis {
     /// Primer mes en que la cartera se vacía del todo (misma definición y motor que el campo
     /// homónimo de `/v1/projection/series`, #119). `null` = no se agota en el horizonte. Es la
     /// respuesta a «si gasto X más, ¿cuándo me quedo sin nada?» — la pregunta que más justifica
-    /// un what-if.
+    /// un what-if. Desde 5.0.0 va en la rejilla 0-based como el resto de índices (#210); el
+    /// delta `assets_depleted_months_delta` no se mueve (los dos lados se desplazan igual).
     pub assets_depleted_month_index: Option<u32>,
     /// Espejo de `/v1/projection/series` (4.12.1): ahorro que ninguna regla absorbió — fuera
     /// del balance, solo cuantificado. `"0.0000"` = caso normal.
@@ -3385,6 +3511,18 @@ pub(crate) struct SimKpis {
     /// `jubilacion_month_index`; con una estrategia por edad puede ser posterior (no llegas) o
     /// anterior (podrías haberte ido antes). `null` = no hay objetivo o no se cruza.
     pub liquid_crossing_month_index: Option<u32>,
+    /// **Primer mes SIN el crecimiento de `income_growth_real_pct_annual`** (P11), en la rejilla
+    /// de `points[].month_index`. `null` ⟺ el eje no se pidió (siempre en el baseline); cuando
+    /// este lado no se jubila dentro del horizonte vale `horizon_months` —un índice una casilla
+    /// más allá del último mes— y no `null`, para que «no se pidió» y «se aplicó entero» no
+    /// compartan valor.
+    ///
+    /// Existe porque el corte NO es exacto y callarlo sería publicar una cifra sin base: se
+    /// calcula con una PRIMERA pasada del escenario **sin** este eje, y el ingreso extra puede
+    /// adelantar la jubilación respecto de ella. Si `jubilacion_month_index` acaba siendo menor
+    /// que este número, los meses entre ambos llevan un sueldo que un jubilado no cobraría — la
+    /// ventana es exactamente esa diferencia, y aquí está para poder medirla.
+    pub income_growth_stops_at_month_index: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3518,6 +3656,9 @@ fn sim_kpis(
     // input: derivarlo aquí a partir del array significaría adivinar qué parte de él es el
     // override y qué parte son los Próximos reales del hogar.
     monthly_cash_adjustment: Decimal,
+    // Primer mes de la rejilla SIN el crecimiento de ingreso (P11). Igual que el anterior: lo
+    // sabe el llamante, que es quien construyó el vector, y aquí solo se ecoa.
+    income_growth_stops_at_month_index: Option<u32>,
 ) -> SimKpis {
     let debt_service_monthly = built.debt_service_monthly;
     // 5.0.0 (R8): el mes publicado es el EFECTIVO del motor, traducido a la rejilla — con `asap`
@@ -3648,7 +3789,8 @@ fn sim_kpis(
 
     SimKpis {
         jubilacion_month_index,
-        assets_depleted_month_index: output.assets_depleted_month_index,
+        // #210 — misma rejilla 0-based que el resto de `*_month_index` desde 5.0.0.
+        assets_depleted_month_index: engine_month_to_grid(output.assets_depleted_month_index),
         unallocated_savings_total: money_out(output.unallocated_savings_total),
         unallocated_savings_reason: unallocated_reason_of(
             &input.assets,
@@ -3708,6 +3850,7 @@ fn sim_kpis(
         strategy: strategy_label(profile.strategy),
         retirement_trigger: built.retirement_trigger,
         liquid_crossing_month_index,
+        income_growth_stops_at_month_index,
     }
 }
 
@@ -3719,7 +3862,32 @@ fn sim_kpis(
 /// porque el plan mejore, sino porque el motor capitaliza en NOMINAL y solo el objetivo FIRE crece
 /// con la inflación — bajarla sube la rentabilidad real de todos los activos y congela el objetivo
 /// a la vez, gratis, en el mismo movimiento. Lo mismo, en pequeño, con `swr_pct`.
-const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos del hogar (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario − baseline. El motor capitaliza en euros NOMINALES; la inflación indexa el GASTO mes a mes (regular y de jubilación, eje (k−1)/12: el mes 1 cobra el gasto declarado tal cual) y el objetivo FIRE, y deja los INGRESOS planos a propósito (decisión del owner: las subidas se pelean). Bajar `annual_inflation_percent` abarata TODO el gasto futuro, sube la rentabilidad real de los activos Y frena el objetivo a la vez: puede adelantar la jubilación años sin que nada del plan haya mejorado — léelo como un cambio de supuesto, no como una mejora. Admite negativos hasta −2 (deflación sostenida: gasto y objetivo DECRECEN). Igual con `swr_pct`: subirlo baja el objetivo por división, no por ahorrar más. Los ejes de caja (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, no `net_recurring_monthly` ni `savings_rate`. `final_net_worth` está en euros nominales del último mes del horizonte; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null. `liability_overrides` amortiza deuda: el importe sale de la caja del mes Y baja el principal a la vez, así que el efecto instantáneo sobre el patrimonio es CERO salvo por la compensación por reembolso anticipado (default 2 % del extra, techo legal a tipo fijo de la Ley 5/2019 art. 23; `early_repayment_fee_pct: \"0\"` la quita): esa comisión sale de la caja y NO amortiza — el what-if deja de ser gratis por defecto. No se modela la caída al 1,5 % tras el año 10, ni los topes de tipo variable (0,25 %/0,15 %), ni el límite de la pérdida financiera del prestamista: si tu préstamo es variable o veterano, pasa el % que te aplique. `early_repayment_effect: \"reduce_payment\"` baja la cuota en vez de acortar el plazo — con una amortización PUNTUAL (lump) el mes de extinción se conserva EXACTAMENTE; con amortización extra RECURRENTE puede adelantarse algo (nunca atrasarse), porque el importe fijo cancela antes cerca del final. Lo que se gana está en `liability_total_interest_delta` (negativo = interés que ya no se devenga; compara contra `liability_early_repayment_fee_total_delta`, el coste) y en que la cuota liberada vuelve sola a la cascada, no en un salto de patrimonio el día que amortizas. Si el pasivo no devenga intereses (`fixed_payments`, o sin TIN), amortizar antes no mejora nada y el escenario lo dirá con deltas a cero.";
+const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario − baseline. QUIÉN DECIDE QUÉ: la ESTRATEGIA del perfil elige el disparador de la jubilación (`retirement_trigger`: cruce del líquido con el objetivo, o la EDAD en `retire_at_age`/`coast` — llegue o no el capital; entonces el cruce es solo lectura, `liquid_crossing_month_index`) y la base del objetivo (`perpetuity` o `bridge_to_pension`). El SWR solo DIMENSIONA el objetivo (gasto anual grosseado / SWR), no gobierna lo que se retira: subirlo baja el objetivo por división, no por ahorrar más. Ya jubilado manda `withdrawal_rule`; por defecto `fixed_real` = la necesidad declarada, indexada y SIN techo. Con una regla con techo, `withdrawal_shortfall` es lo que la regla no dejó sacar (informativo: no resta patrimonio ni es un fracaso) y `withdrawal_excess` lo que se retira de más en `rule_is_spend`; `uncovered_deficit_total` es lo que los activos no pudieron vender, que es otra cosa. `view=household` no se simula (400 `household_not_simulable`): el agregado del hogar es informativo y no es el plan de nadie. El motor capitaliza en euros NOMINALES; la inflación indexa el GASTO mes a mes (regular y de jubilación, eje (k−1)/12: el mes 1 cobra el gasto declarado tal cual) y el objetivo, y deja los INGRESOS planos a propósito. Bajar `annual_inflation_percent` abarata TODO el gasto futuro, sube la rentabilidad real de los activos Y frena el objetivo a la vez: puede adelantar la jubilación años sin que nada del plan haya mejorado — léelo como un cambio de supuesto, no como una mejora. Admite negativos hasta −2 (deflación sostenida: gasto y objetivo DECRECEN). Los ejes de CAJA (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`, `income_growth_real_pct_annual`, `income_steps`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, y `net_recurring_monthly` y `savings_rate` salen con delta 0 EXACTO por diseño. `income_growth_real_pct_annual` añade `ingreso · ((1+g)^((k−1)/12) − 1)` al mes k y solo mientras el escenario NO está jubilado; el corte se calcula con una PRIMERA pasada del escenario sin el eje, así que es aproximado: si el sueldo extra adelanta la jubilación, los meses entre `scenario.jubilacion_month_index` y `scenario.income_growth_stops_at_month_index` llevan una nómina que un jubilado no cobraría — esa diferencia es la ventana, y los dos números viajan para poder medirla. Los `income_steps` NO se recortan en la jubilación: el mes lo nombra el llamante. `final_net_worth` está en euros nominales del último mes del horizonte; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null. `liability_overrides` amortiza deuda: el importe sale de la caja del mes Y baja el principal a la vez, así que el efecto instantáneo sobre el patrimonio es CERO salvo por la compensación por reembolso anticipado (default 2 % del extra, techo legal a tipo fijo de la Ley 5/2019 art. 23; `early_repayment_fee_pct: \"0\"` la quita): esa comisión sale de la caja y NO amortiza. No se modela la caída al 1,5 % tras el año 10, ni los topes de tipo variable (0,25 %/0,15 %), ni el límite de la pérdida financiera del prestamista: si tu préstamo es variable o veterano, pasa el % que te aplique. `early_repayment_effect: \"reduce_payment\"` baja la cuota en vez de acortar el plazo — con una amortización PUNTUAL el mes de extinción se conserva EXACTAMENTE; con amortización extra RECURRENTE puede adelantarse algo (nunca atrasarse). Lo que se gana está en `liability_total_interest_delta` (negativo = interés que ya no se devenga; compara contra `liability_early_repayment_fee_total_delta`, el coste) y en que la cuota liberada vuelve sola a la cascada, no en un salto de patrimonio el día que amortizas. Si el pasivo no devenga intereses (`fixed_payments`, o sin TIN), amortizar antes no mejora nada y el escenario lo dirá con deltas a cero.";
+
+/// Nota de modelo de `GET /v1/projection/series` (P6, 5.0.0).
+///
+/// Dice **quién decide qué**, que es lo que la versión de 4.15.x no decía: hasta 5.0.0 la
+/// jubilación era un cruce y el SWR parecía gobernarlo todo. Ahora hay tres piezas distintas —la
+/// estrategia elige el disparador y la base del objetivo, el SWR solo dimensiona ese objetivo, y
+/// la regla de retirada gobierna lo que sale de la cartera— y confundirlas produce lecturas
+/// plausibles y falsas. Es constante y no un `format!` para que sea la MISMA cadena en cada
+/// respuesta (un `model_note` que cambia entre llamadas es ruido en la cache y en el diff).
+const PROJECTION_MODEL_NOTE: &str = "Motor mensual en euros NOMINALES: presupuesto regular sin las cuotas derivadas de pasivos, servicio de deuda por mes, ajustes por Próximos y crecimiento compuesto por activo. El GASTO (regular y de jubilación) se indexa a la inflación de la instalación con el eje (k−1)/12 —el mes 1 cobra el gasto declarado tal cual— y los INGRESOS quedan planos a propósito. Quien decide la jubilación es la ESTRATEGIA del perfil, y decide DOS cosas: el disparador (`retirement_trigger`: el cruce del líquido con el objetivo, o la EDAD en `retire_at_age`/`coast`, llegue o no el capital — entonces el cruce pasa a ser lectura en `liquid_crossing_month_index`) y la base del objetivo (`perpetuity`, o `bridge_to_pension` = capital para llegar a la pensión más la perpetuidad sobre lo que la pensión no cubra). El SWR solo DIMENSIONA ese objetivo (gasto anual grosseado / SWR); no gobierna lo que se retira. Ya jubilado manda `withdrawal_rule`: por defecto `fixed_real`, es decir la necesidad declarada, indexada y SIN techo. Con una regla con techo, `withdrawal_shortfall` es lo que la regla no dejó sacar (informativo: no resta patrimonio ni cuenta como fracaso) y `withdrawal_excess` lo que se retira de más en modo `rule_is_spend`; `uncovered_deficit_total` es otra cosa distinta — lo que los activos no pudieron vender. Con `view=household` la curva es la SUMA de una simulación independiente por miembro, cada una con su estrategia: una lectura INFORMATIVA del conjunto, no el plan de nadie, y por eso el hogar no publica jubilación propia (el hito de cada uno va en `members[]`).";
+
+/// Cotas del eje P11 `income_growth_real_pct_annual` (% REAL anual, 5.0.0).
+///
+/// El techo es 20 y no 50 porque esto no es una rentabilidad: es la subida SOSTENIDA del sueldo
+/// por encima de la inflación, año tras año y durante todo el horizonte. Un 20 % real anual
+/// multiplica el ingreso por 38 en veinte años — ya es el límite de lo que se puede pedir sin
+/// que la pregunta deje de describir una carrera profesional. El suelo negativo existe porque
+/// «¿y si mi sueldo pierde poder adquisitivo un 2 % al año?» es exactamente la misma pregunta.
+const MIN_INCOME_GROWTH_PCT: Decimal = Decimal::from_parts(10, 0, 0, true, 0);
+const MAX_INCOME_GROWTH_PCT: Decimal = Decimal::from_parts(20, 0, 0, false, 0);
+
+/// Tope de `income_steps`. Veinticuatro escalones cubren dos décadas de cambios anuales; por
+/// encima, lo que el usuario está describiendo es una serie, y una serie se declara en el
+/// presupuesto, no en un what-if.
+const MAX_INCOME_STEPS: usize = 24;
 
 /// Decimales de `SimKpis::savings_rate`. Debe seguir siendo el mismo que el `RATIO_DP` de
 /// `handlers/summary.rs`: si divergen, se reabre la incoherencia de precisión entre superficies que
@@ -3854,6 +4022,39 @@ pub(crate) async fn simulate_projection_core(
                     "liability_override_empty: each entry of liability_overrides must set at least one of extra_monthly_principal, lump_sum, apr_percent or repayment_model".into(),
                 ));
             }
+        }
+    }
+
+    // ---- P11: crecimiento del ingreso y escalones (5.0.0, D30 — solo MCP) ------------------
+    // Cotas y anti-no-op, en el CORE como el resto: la capa MCP parsea strings, no decide
+    // semántica. Un `0` no es «sin crecimiento», es una llamada que no puede mover nada.
+    if let Some(g) = spec.income_growth_real_pct_annual {
+        if g.is_zero() {
+            return Err(ApiError::BadRequest(
+                "income_growth_no_op: income_growth_real_pct_annual must not be 0 — a zero growth is exactly the baseline, so the scenario would come back identical with nothing to say why; omit the axis instead".into(),
+            ));
+        }
+        if g < MIN_INCOME_GROWTH_PCT || g > MAX_INCOME_GROWTH_PCT {
+            return Err(ApiError::BadRequest(format!(
+                "income_growth_out_of_range: income_growth_real_pct_annual must be between {MIN_INCOME_GROWTH_PCT} and {MAX_INCOME_GROWTH_PCT} (percent per year)"
+            )));
+        }
+    }
+    if spec.income_steps.len() > MAX_INCOME_STEPS {
+        return Err(ApiError::BadRequest(format!(
+            "income_steps_too_many: income_steps accepts at most {MAX_INCOME_STEPS} entries"
+        )));
+    }
+    for st in &spec.income_steps {
+        if st.delta_monthly.is_zero() {
+            return Err(ApiError::BadRequest(
+                "income_step_delta_zero: income_steps[].delta_monthly must not be 0 — a zero step changes nothing and the scenario would equal the baseline".into(),
+            ));
+        }
+        if st.month_index.is_some() == st.date.is_some() {
+            return Err(ApiError::BadRequest(
+                "income_step_timing_ambiguous: income_steps[] requires exactly one of month_index or date".into(),
+            ));
         }
     }
 
@@ -4109,9 +4310,12 @@ pub(crate) async fn simulate_projection_core(
                 target.extra_principal_monthly = extra;
             }
             if let Some(amount) = ov.lump_sum_amount {
-                // Mes 1-based, misma rejilla que `points[].month_index`: el mes 1 es el mes civil
-                // del ancla. Se resuelve a un índice discreto (y no por el reparto de un planning
-                // flow) porque una amortización es un acto puntual en un mes concreto.
+                // Mes **1-based del ancla** (el mes 1 es el mes civil de `anchor_date_ymd`), el
+                // mismo eje que `one_off_expense.month_index` e `income_steps[].month_index` —
+                // **NO** la rejilla 0-based de `points[].month_index`, que es lo que este
+                // comentario decía hasta 5.0.0. Se resuelve a un índice discreto (y no por el
+                // reparto de un planning flow) porque una amortización es un acto puntual en un
+                // mes concreto.
                 let k = match (ov.lump_sum_month_index, ov.lump_sum_date) {
                     (Some(k), None) => k,
                     (None, Some(d)) => {
@@ -4161,6 +4365,85 @@ pub(crate) async fn simulate_projection_core(
         );
     }
 
+    // ---- P11 (D30): crecimiento del ingreso y escalones, SOLO en el escenario ---------------
+    //
+    // Los dos entran por `planning_monthly_cash_adjustment`, el mismo mecanismo que un Próximo:
+    // pasan por la cascada real y por el servicio de deuda del mes, y NO tocan
+    // `income_regular_monthly`. Esa elección tiene consecuencia declarada — el objetivo FIRE en
+    // modo `current_income` y las bases de los caps se derivan del ingreso base, así que una
+    // subida de sueldo simulada aquí no reescribe el objetivo del escenario. Subirla por el otro
+    // camino haría que «¿y si me suben el sueldo?» moviera la meta a la vez que el capital, y el
+    // delta no significaría nada.
+    let mut income_growth_stops_at: Option<u32> = None;
+    {
+        let anchor = proj_month_first(ctx.today);
+        // Escalones: `delta` desde su mes HASTA EL FINAL. No se recortan en la jubilación —
+        // el usuario nombró el mes, y quitárselo sería simular otra cosa.
+        for st in &spec.income_steps {
+            let k = match (st.month_index, st.date) {
+                (Some(k), None) => k,
+                (None, Some(d)) => {
+                    let diff = month_diff(anchor, proj_month_first(d));
+                    if diff < 0 {
+                        return Err(ApiError::BadRequest(
+                            "income_step_date_out_of_horizon: income_steps[].date is outside the projection horizon".into(),
+                        ));
+                    }
+                    (diff as u32).saturating_add(1)
+                }
+                _ => unreachable!("validated above"),
+            };
+            if !(1..=months).contains(&k) {
+                return Err(ApiError::BadRequest(format!(
+                    "income_step_month_out_of_range: income_steps[].month_index must be between 1 and {months}"
+                )));
+            }
+            for slot in scenario_input.planning_monthly_cash_adjustment[(k - 1) as usize..]
+                .iter_mut()
+            {
+                *slot += st.delta_monthly;
+            }
+        }
+
+        if let Some(g) = spec.income_growth_real_pct_annual {
+            // PRIMERA PASADA (medida antes de elegirla: **+11,5 ms** por llamada en build de
+            // DEBUG sobre el fixture de `mcp_simulate`, de 14,4 ms a 25,9 ms — dos simulaciones
+            // pasan a tres; el listón que había que pasar era 50 ms y release va varias veces más
+            // rápido, así que la pasada extra se queda). Se corre el
+            // MISMO escenario sin este eje para saber en qué mes se jubila, y el crecimiento se
+            // aplica solo a los meses de ACUMULACIÓN. Sin ella, el vector llevaría sueldo hasta
+            // el final del horizonte y el escenario cobraría una nómina 40 años después de
+            // jubilarse — un regalo silencioso justo en el eje que más se usa para decidir.
+            //
+            // El corte NO es exacto y por eso se PUBLICA (`income_growth_stops_at_month_index`):
+            // el ingreso extra puede adelantar la jubilación respecto de esta pasada, y los meses
+            // entre la nueva y la de la sonda siguen llevando sueldo. La ventana es exactamente
+            // `income_growth_stops_at_month_index − jubilacion_month_index` del escenario.
+            let probe_input = scenario_input.clone();
+            let probe = crate::heavy::run_projection_sim("projection", move || {
+                project_net_worth_series(&probe_input)
+            })
+            .await?
+            .map_err(map_engine_err)?;
+            // Índice `i` del vector ⟺ mes `i` de la rejilla ⟺ mes `i+1` del bucle, así que el
+            // primer índice YA jubilado es exactamente `engine_month_to_grid(R)`.
+            let stop = engine_month_to_grid(probe.retirement_month_index).unwrap_or(months);
+            income_growth_stops_at = Some(stop);
+            let base_income = scenario_input.income_regular_monthly;
+            for (i, slot) in scenario_input
+                .planning_monthly_cash_adjustment
+                .iter_mut()
+                .enumerate()
+                .take(stop as usize)
+            {
+                // Mismo eje `(k−1)/12` que la indexación del gasto y del objetivo: el mes 1
+                // (índice 0) cobra el sueldo declarado tal cual y el extra es exactamente 0.
+                let factor = real_growth_factor_at_month_index(g, i as u32);
+                *slot += base_income * (factor - Decimal::ONE);
+            }
+        }
+    }
+
     // ---- Doble simulación en el pool blocking (CPU-bound; patrón del marker) -----------------
     // Bajo el MISMO techo que la proyección real (`heavy::run_projection_sim`). Es el llamante
     // que más lo necesita: `simulate_projection` es cache-neutral por diseño, así que cada
@@ -4189,6 +4472,8 @@ pub(crate) async fn simulate_projection_core(
         ctx.birth_date,
         // El baseline es la instalación tal cual: por definición no lleva ajuste de caja.
         Decimal::ZERO,
+        // …ni crecimiento de ingreso: el eje es del escenario.
+        None,
     );
     let scenario = sim_kpis(
         &scenario_input,
@@ -4201,6 +4486,7 @@ pub(crate) async fn simulate_projection_core(
         ctx.birth_date,
         // El MISMO `monthly_adj` que se sumó a `planning_monthly_cash_adjustment` arriba.
         monthly_adj,
+        income_growth_stops_at,
     );
 
     // Deflactores comparables ⟺ las dos inflaciones EFECTIVAS coinciden. Se lee del eco de cada

@@ -51,8 +51,8 @@ use crate::handlers::planning::{
     patch_planning_flow_core,
 };
 use crate::handlers::projection::{
-    deflate_amount_core, projection_series_cached, simulate_projection_core, LiabilityOverrideSpec,
-    SimulationSpec,
+    deflate_amount_core, projection_series_cached, simulate_projection_core, IncomeStepSpec,
+    LiabilityOverrideSpec, SimulationSpec,
 };
 use crate::handlers::summary::summary_core;
 use crate::handlers::transactions::aggregate::aggregate_transactions_core;
@@ -439,6 +439,12 @@ pub struct ProjectionParams {
     /// para mantener la respuesta compacta.
     #[serde(default)]
     pub include_asset_series: Option<bool>,
+    /// Solo con `view: "household"`: incluir la SERIE completa de cada miembro
+    /// (`members[].series`). **Default false** — mide ~6 KB por miembro a esta densidad, y los
+    /// hitos de cada persona (jubilación, cruce, agotamiento, avisos) ya viajan en `members[]`
+    /// como enteros. Pídela solo si necesitas la curva de otro miembro punto a punto.
+    #[serde(default)]
+    pub include_member_series: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -895,6 +901,27 @@ pub struct LiabilityOverrideParam {
     pub early_repayment_effect: Option<String>,
 }
 
+/// Un escalón de ingreso del what-if (P11, 5.0.0): «desde el mes X, +/− N €/mes».
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IncomeStepParam {
+    /// Mes del escalón (1..=horizonte). **1 = el mes civil del ancla**, el mismo eje que
+    /// `one_off_expense.month_index` y `lump_sum_month_index`; NO es la rejilla 0-based de
+    /// `points[].month_index`. Exactamente uno de `month_index` o `date`.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 840))]
+    pub month_index: Option<u32>,
+    /// Fecha "YYYY-MM-DD" del escalón. Exactamente uno de `month_index` o `date`.
+    #[serde(default)]
+    #[schemars(regex(pattern = DATE_YMD_STRING))]
+    pub date: Option<String>,
+    /// Cambio MENSUAL de caja desde ese mes y hasta el final del horizonte, string decimal CON
+    /// SIGNO y distinto de 0 ("500" = cobras 500 más al mes; "-500" = 500 menos). Un "0" es un
+    /// 400: no cambiaría nada.
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
+    pub delta_monthly: String,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SimulateParams {
@@ -976,6 +1003,23 @@ pub struct SimulateParams {
     /// FIRE, impuestos y ventanas del promedio. `swr_pct` es el mismo eje y se pide arriba, suelto.
     #[serde(default)]
     pub fire_settings_overrides: Option<FireSettingsOverrideParam>,
+    /// **Crecimiento REAL del sueldo, % anual** (−10 a 20, string decimal; "0" es un 400 porque
+    /// no movería nada): «¿y si me suben un 2 % por encima de la inflación cada año?». El extra
+    /// del mes k es `ingreso · ((1+g)^((k−1)/12) − 1)`, así que el mes 1 cobra el sueldo
+    /// declarado tal cual. Entra como CAJA: mueve `net_cash_monthly`, y NO `income_monthly`,
+    /// `net_recurring_monthly` ni `savings_rate` — tampoco el objetivo FIRE en modo
+    /// `current_income`, que se sigue anclando al ingreso declarado. Se aplica solo mientras el
+    /// escenario NO está jubilado; el corte se publica en
+    /// `scenario.income_growth_stops_at_month_index` y es aproximado (ver `model_note`).
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
+    pub income_growth_real_pct_annual: Option<String>,
+    /// **Escalones de ingreso** (máx. 24): «desde marzo cobro 300 más», «en 2030 dejo el
+    /// segundo trabajo y pierdo 800». Cada uno suma su `delta_monthly` a la caja desde su mes y
+    /// hasta el final del horizonte, y —a diferencia del crecimiento— NO se recorta en la
+    /// jubilación: el mes lo has nombrado tú. Se acumulan entre sí.
+    #[serde(default)]
+    pub income_steps: Option<Vec<IncomeStepParam>>,
     /// «¿Me compensa amortizar antes?»: amortización extra (mensual y/o puntual), TIN y modelo
     /// por pasivo. La respuesta lo contesta con `liability_total_interest_delta` (negativo =
     /// interés que el escenario NO paga) y `liability_debt_free_month_index`, no con un salto de
@@ -1412,15 +1456,23 @@ pub struct UpdateAssetParams {
     #[serde(default)]
     pub is_liquid: Option<bool>,
     /// Rentabilidad anual esperada en % (> -100; negativos componen pérdidas), string decimal.
+    /// Incompatible con clear_expected_annual_return_percent.
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub expected_annual_return_percent: Option<String>,
+    /// true = borrar la rentabilidad esperada (el activo vuelve a no declararla).
+    #[serde(default)]
+    pub clear_expected_annual_return_percent: Option<bool>,
     /// Volatilidad anual de los retornos en % (0–100), string decimal: desviación típica ANUAL,
     /// no un rango. Omitir o "0" = activo determinista (cuenta, depósito). El camino determinista
-    /// del motor la IGNORA: solo la lee el Monte Carlo.
+    /// del motor la IGNORA: solo la lee el Monte Carlo. Incompatible con
+    /// clear_annual_volatility_percent.
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub annual_volatility_percent: Option<String>,
+    /// true = borrar la volatilidad (el activo vuelve a determinista).
+    #[serde(default)]
+    pub clear_annual_volatility_percent: Option<bool>,
     #[serde(default)]
     pub notes: Option<String>,
 }
@@ -2695,6 +2747,20 @@ impl FutureFinMcp {
             if !p.include_asset_series.unwrap_or(false) {
                 r.asset_series = Vec::new();
             }
+            // Mismo criterio y mismo default que `asset_series`, con la medida delante: en un
+            // hogar de dos miembros a densidad `hybrid` la respuesta HTTP pesa ~34 KB y
+            // **11,7 KB son las series por miembro** (~5,9 KB cada una, y crece lineal con el
+            // hogar). Eso es geometría de chart: un modelo no dibuja, y todo lo que puede
+            // preguntar de un miembro —cuándo se jubila, cuándo cruza, cuándo se le agota la
+            // cartera, qué avisos tiene— ya viaja en `members[]` como enteros. Se deja opt-in y
+            // no se retira porque el token de un miembro NO puede pedir el `view=mine` de otro:
+            // esta es la única vía para ver la curva ajena, y quitarla sería cerrar una
+            // pregunta legítima en vez de abaratarla.
+            if !p.include_member_series.unwrap_or(false) {
+                for m in r.members.iter_mut() {
+                    m.series = Vec::new();
+                }
+            }
             r
         });
         to_tool_result(res)
@@ -3001,6 +3067,26 @@ impl FutureFinMcp {
                 parse_opt("annual_inflation_percent", &p.annual_inflation_percent)?;
             spec.retirement_annual_expense =
                 parse_opt("retirement_annual_expense", &p.retirement_annual_expense)?;
+            spec.income_growth_real_pct_annual = parse_opt(
+                "income_growth_real_pct_annual",
+                &p.income_growth_real_pct_annual,
+            )?;
+            if let Some(steps) = &p.income_steps {
+                for st in steps {
+                    spec.income_steps.push(IncomeStepSpec {
+                        month_index: st.month_index,
+                        date: st
+                            .date
+                            .as_deref()
+                            .map(|raw| parse_date_param("income_steps.date", raw))
+                            .transpose()?,
+                        delta_monthly: parse_decimal_param(
+                            "income_steps.delta_monthly",
+                            &st.delta_monthly,
+                        )?,
+                    });
+                }
+            }
             spec.fire_settings_overrides = p
                 .fire_settings_overrides
                 .as_ref()
@@ -4130,7 +4216,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_asset_value",
-        description = "Actualiza la valoración de un activo («mi fondo vale ahora 52.300 €»): current_value y/o expected_annual_return_percent (> -100; los negativos componen pérdidas). Subset deliberado del PATCH completo — para nombre, categoría o liquidez usa update_asset. Sin owner-check: cualquier member edita cualquier activo del hogar (contrato del ledger). Devuelve valor anterior y nuevo. Mueve la proyección entera.",
+        description = "Actualiza la valoración de un activo («mi fondo vale ahora 52.300 €»): current_value y/o expected_annual_return_percent (> -100; los negativos componen pérdidas). Subset deliberado del PATCH completo — para nombre, categoría, liquidez o para BORRAR un campo usa update_asset. Solo el DUEÑO del activo (403 not_row_owner). Devuelve valor anterior y nuevo. Mueve la proyección entera.",
         annotations(title = "Actualizar valor de activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_asset_value(
@@ -4158,13 +4244,18 @@ impl FutureFinMcp {
                         .transpose()?,
                     purchase_price: None,
                     is_liquid: None,
-                    expected_annual_return_percent: p
-                        .expected_annual_return_percent
-                        .as_deref()
-                        .map(|v| parse_decimal_param("expected_annual_return_percent", v))
-                        .transpose()?,
+                    // Se valida aquí (y se descarta el Decimal) para que un string mal formado
+                    // dé `decimal_invalid` con el nombre del campo, igual que antes del
+                    // tri-estado: el PATCH volverá a parsearlo, pero el mensaje es el nuestro.
+                    expected_annual_return_percent: match &p.expected_annual_return_percent {
+                        None => None,
+                        Some(v) => {
+                            parse_decimal_param("expected_annual_return_percent", v)?;
+                            Some(serde_json::Value::String(v.clone()))
+                        }
+                    },
                     // Subset de VALORACIÓN: la volatilidad es un supuesto del activo, no su
-                    // valor de hoy. Se cambia con `update_asset`.
+                    // valor de hoy. Se cambia con `update_asset` (que además puede BORRARLA).
                     annual_volatility_percent: None,
                     notes: None,
                     sort_index: None,
@@ -4213,7 +4304,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_asset",
-        description = "Edita cualquier campo de un activo: nombre, categoría (scope asset), valor actual, precio de compra (clear_purchase_price lo borra), liquidez (`is_liquid` gobierna el runway y el disparador SWR) y rentabilidad esperada. Para solo actualizar la valoración basta update_asset_value. Sin owner-check: cualquier member edita cualquier activo del hogar. Mueve la proyección entera.",
+        description = "Edita cualquier campo de un activo: nombre, categoría (scope asset), valor actual, liquidez (`is_liquid` gobierna runway y disparador SWR), precio de compra, rentabilidad esperada y volatilidad. Los tres últimos son tri-estado: omitir no toca, su `clear_*` BORRA (sin volatilidad = determinista). Solo la valoración: update_asset_value. Solo el DUEÑO (403 not_row_owner). Mueve la proyección entera.",
         annotations(title = "Editar activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_asset(
@@ -4223,6 +4314,23 @@ impl FutureFinMcp {
     ) -> Result<CallToolResult, ErrorData> {
         let id = identity(&ctx)?;
         let run = || -> Result<(Uuid, crate::handlers::assets::PatchAssetBody), ApiError> {
+            // El PATCH distingue omitir (sin cambio) de null (borrar); un JSON Schema de tool no
+            // puede expresar ese tri-estado, así que cada `clear_*` materializa el null. Los tres
+            // campos tri-estado del activo comparten helper para que la regla «valor y clear a la
+            // vez es contradictorio» no se escriba tres veces con tres mensajes distintos.
+            let tri = |value: &Option<String>,
+                       clear: Option<bool>,
+                       field: &str|
+             -> Result<Option<serde_json::Value>, ApiError> {
+                match (value, clear.unwrap_or(false)) {
+                    (Some(_), true) => Err(ApiError::BadRequest(format!(
+                        "field_set_and_clear: {field} and clear_{field} are mutually exclusive"
+                    ))),
+                    (Some(v), false) => Ok(Some(serde_json::Value::String(v.clone()))),
+                    (None, true) => Ok(Some(serde_json::Value::Null)),
+                    (None, false) => Ok(None),
+                }
+            };
             if p.purchase_price.is_some() && p.clear_purchase_price.unwrap_or(false) {
                 return Err(ApiError::BadRequest(
                     "purchase_price_set_and_clear: purchase_price and clear_purchase_price are \
@@ -4230,13 +4338,21 @@ impl FutureFinMcp {
                         .into(),
                 ));
             }
-            // El PATCH distingue omitir (sin cambio) de null (borrar): clear_purchase_price
-            // materializa ese null que el JSON Schema de la tool no puede expresar.
             let purchase_price = if p.clear_purchase_price.unwrap_or(false) {
                 Some(serde_json::Value::Null)
             } else {
                 p.purchase_price.clone().map(serde_json::Value::String)
             };
+            let expected_annual_return_percent = tri(
+                &p.expected_annual_return_percent,
+                p.clear_expected_annual_return_percent,
+                "expected_annual_return_percent",
+            )?;
+            let annual_volatility_percent = tri(
+                &p.annual_volatility_percent,
+                p.clear_annual_volatility_percent,
+                "annual_volatility_percent",
+            )?;
             Ok((
                 parse_uuid_param("asset_id", &p.asset_id)?,
                 crate::handlers::assets::PatchAssetBody {
@@ -4253,16 +4369,8 @@ impl FutureFinMcp {
                         .transpose()?,
                     purchase_price,
                     is_liquid: p.is_liquid,
-                    expected_annual_return_percent: p
-                        .expected_annual_return_percent
-                        .as_deref()
-                        .map(|v| parse_decimal_param("expected_annual_return_percent", v))
-                        .transpose()?,
-                    annual_volatility_percent: p
-                        .annual_volatility_percent
-                        .as_deref()
-                        .map(|v| parse_decimal_param("annual_volatility_percent", v))
-                        .transpose()?,
+                    expected_annual_return_percent,
+                    annual_volatility_percent,
                     notes: p.notes.clone(),
                     sort_index: None,
                 },

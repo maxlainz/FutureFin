@@ -538,6 +538,16 @@ pub(crate) fn validate_retirement_profile(p: &RetirementProfile) -> Result<(), A
             "pension_required_for_bridge: strategy pension_bridge needs a pension block".into(),
         ));
     }
+    // Espejo exacto de las dos reglas de arriba: una estrategia que nombra una fase exige el
+    // bloque que la define. Sin él, `partial` no tenía fase parcial que simular y se comportaba
+    // como `asap` en silencio — la UI enseñaba «Media jornada» sobre una proyección que no la
+    // tenía. Es la tercera pata de la misma familia (`target_retirement_age_required`,
+    // `pension_required_for_bridge`), no una regla nueva.
+    if p.strategy == RetirementStrategy::Partial && p.partial_retirement.is_none() {
+        return Err(ApiError::BadRequest(
+            "partial_retirement_required: strategy partial needs a partial_retirement block".into(),
+        ));
+    }
 
     // ---- Edades ----------------------------------------------------------------------------
     let horizon = p.horizon_lifespan_age;
@@ -812,6 +822,17 @@ pub struct RetirementProfileResponse {
     pub profile: RetirementProfile,
     #[schema(value_type = Option<String>, format = "date")]
     pub birth_date: Option<NaiveDate>,
+    /// **La elección ALMACENADA de `target_basis`, sin resolver.** `null` = el usuario no la ha
+    /// elegido y el servidor la DERIVA (R6: `bridge_to_pension` si hay pensión declarada,
+    /// `perpetuity` si no); un valor = la eligió a mano y manda sobre la derivación.
+    ///
+    /// Existe porque `profile.target_basis` sale siempre resuelto, así que sin este campo un
+    /// cliente no puede distinguir «no lo he elegido» de «he elegido esto» — y al reenviar lo
+    /// que leyó (un formulario que reescribe todos sus campos) congelaba la derivación:
+    /// declarar una pensión después ya no cambiaba la base del objetivo, que se quedaba en la
+    /// perpetuidad conservadora que nadie pidió. Un formulario debe mandar `target_basis` solo
+    /// cuando este campo no sea `null`, o `null` explícito para volver a derivar.
+    pub target_basis_stored: Option<TargetBasis>,
 }
 
 /// Cuerpo del PATCH. Tri-estado en todo lo opcional: **omitir = no cambiar**, `null` = borrar.
@@ -832,8 +853,12 @@ pub struct PatchRetirementProfileBody {
     pub swr_pct: Option<String>,
     #[serde(default)]
     pub horizon_lifespan_age: Option<u32>,
+    /// `perpetuity` | `bridge_to_pension`; `null` vuelve a la base DERIVADA (R6). El
+    /// `value_type` nombra el enum y no un string libre: un cliente generado a partir del
+    /// documento tiene que ver las dos únicas variantes que el `Deserialize` acepta, o
+    /// descubrirá la lista con un 400.
     #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
-    #[schema(value_type = Option<String>, nullable = true)]
+    #[schema(value_type = Option<TargetBasis>, nullable = true)]
     pub target_basis: Option<Option<TargetBasis>>,
     #[serde(default)]
     pub bridge_discount_basis: Option<BridgeDiscountBasis>,
@@ -919,9 +944,12 @@ pub(crate) async fn get_retirement_profile_core(
             .fetch_optional(pool)
             .await?;
     let (stored, birth_date) = row.ok_or(ApiError::NotFound)?;
+    let stored = stored.map(|j| j.0);
+    let target_basis_stored = stored.as_ref().and_then(|p| p.target_basis);
     Ok(RetirementProfileResponse {
-        profile: resolve_retirement_profile(stored.map(|j| j.0)),
+        profile: resolve_retirement_profile(stored),
         birth_date,
+        target_basis_stored,
     })
 }
 
@@ -980,6 +1008,9 @@ pub(crate) async fn patch_retirement_profile_core(
     // declarar después su pensión el objetivo se quedaría en perpetuidad — la opción conservadora
     // que nadie pidió, sin ningún aviso. Lo mismo valdría para cualquier campo derivado futuro.
     let base = stored.clone().unwrap_or_else(default_retirement_profile);
+    // La elección almacenada ANTES del patch: `None` = derivada. Viaja al outcome junto a la de
+    // después para que el preview de la tool enseñe qué se está fijando y qué se está soltando.
+    let base_target_basis_stored = stored.as_ref().and_then(|p| p.target_basis);
     let before = resolve_retirement_profile(stored);
 
     let after_stored = patchset.apply_to(&base);
@@ -1018,6 +1049,8 @@ pub(crate) async fn patch_retirement_profile_core(
     Ok(RetirementProfilePatchOutcome {
         before,
         after,
+        target_basis_stored_before: base_target_basis_stored,
+        target_basis_stored_after: after_stored.target_basis,
         birth_date_before: birth_before,
         birth_date_after: birth_after,
     })
@@ -1028,6 +1061,12 @@ pub(crate) async fn patch_retirement_profile_core(
 pub(crate) struct RetirementProfilePatchOutcome {
     pub before: RetirementProfile,
     pub after: RetirementProfile,
+    /// La elección ALMACENADA de `target_basis` a cada lado (`null` = derivada). Misma razón que
+    /// el campo homónimo de [`RetirementProfileResponse`]: `before.target_basis` y
+    /// `after.target_basis` van resueltos, así que sin esto un preview no puede decir si el
+    /// patch está FIJANDO la base o soltándola para que se derive.
+    pub target_basis_stored_before: Option<TargetBasis>,
+    pub target_basis_stored_after: Option<TargetBasis>,
     pub birth_date_before: Option<NaiveDate>,
     pub birth_date_after: Option<NaiveDate>,
 }
@@ -1059,6 +1098,7 @@ pub async fn patch_retirement_profile(
     Ok(Json(RetirementProfileResponse {
         profile: outcome.after,
         birth_date: outcome.birth_date_after,
+        target_basis_stored: outcome.target_basis_stored_after,
     }))
 }
 

@@ -4172,3 +4172,83 @@ async fn retirement_profile_tools_are_personal_and_preview_before_writing() {
     let owners = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
     assert_eq!(owners["profile"]["strategy"], "retire_at_age", "{owners}");
 }
+
+/// **`update_asset` puede BORRAR la rentabilidad esperada y la volatilidad** (5.0.0, WP5-2).
+///
+/// Un JSON Schema de tool no puede expresar «omitir vs null», así que el tri-estado del PATCH
+/// viaja por `clear_*` — el mismo molde que `clear_purchase_price` desde 4.x. Sin esto, un modelo
+/// que escribió una volatilidad por error solo podía deshacerlo borrando y recreando el activo:
+/// la tool tenía la capacidad de romper un estado que no tenía la capacidad de reparar.
+#[tokio::test]
+async fn update_asset_clears_the_return_and_the_volatility() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "asset", "Indexados").await;
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "create_asset",
+            json!({"name": "RV global", "category_id": cat, "current_value": "10000",
+                   "expected_annual_return_percent": "6", "annual_volatility_percent": "16"}),
+        ),
+    )
+    .await;
+    let asset_id = tool_json(&envelope)["id"].as_str().unwrap().to_string();
+
+    async fn row(app: &TestApp, cookie: &str, id: &str) -> serde_json::Value {
+        let rows = app.get_with_cookie("/v1/assets", cookie).await.json();
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["id"] == id)
+            .cloned()
+            .expect("el activo sigue ahí")
+    }
+
+    // Los dos `clear_*` en la misma llamada: el activo vuelve a determinista y sin rentabilidad.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_asset",
+            json!({"asset_id": asset_id, "clear_expected_annual_return_percent": true,
+                   "clear_annual_volatility_percent": true}),
+        ),
+    )
+    .await;
+    assert!(tool_json(&envelope)["summary"].is_string(), "{envelope}");
+    let a = row(&app, &owner.cookie, &asset_id).await;
+    assert!(a["expected_annual_return_percent"].is_null(), "{a}");
+    assert!(a["annual_volatility_percent"].is_null(), "{a}");
+
+    // Valor y `clear_*` a la vez es una intención contradictoria: 400 con el código compartido
+    // con el perfil de jubilación (`field_set_and_clear`), no una elección a ciegas.
+    for body in [
+        json!({"asset_id": asset_id, "expected_annual_return_percent": "5",
+               "clear_expected_annual_return_percent": true}),
+        json!({"asset_id": asset_id, "annual_volatility_percent": "15",
+               "clear_annual_volatility_percent": true}),
+    ] {
+        let envelope = mcp_post(&app, &token, tool_call("update_asset", body.clone())).await;
+        let err = tool_error(&envelope, "bad_request");
+        assert_eq!(err["code"], "field_set_and_clear", "{body} → {err}");
+    }
+
+    // Y el camino normal (poner un valor) sigue funcionando después de haberlos borrado.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_asset",
+            json!({"asset_id": asset_id, "annual_volatility_percent": "18"}),
+        ),
+    )
+    .await;
+    assert!(tool_json(&envelope)["summary"].is_string(), "{envelope}");
+    let a = row(&app, &owner.cookie, &asset_id).await;
+    assert_eq!(a["annual_volatility_percent"], "18.0000", "{a}");
+    assert!(a["expected_annual_return_percent"].is_null(), "borrada sigue borrada: {a}");
+}

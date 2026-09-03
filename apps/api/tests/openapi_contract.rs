@@ -188,3 +188,33 @@ fn no_dangling_schema_references() {
     }
     assert!(colgantes.is_empty(), "$ref sin componente: {colgantes:?}");
 }
+
+/// `PatchRetirementProfileBody.target_basis` debe anunciar el ENUM, no un string libre.
+///
+/// El fallo que cierra: el campo llevaba `#[schema(value_type = Option<String>)]` heredado del
+/// molde de los otros tri-estado, así que el documento decía «cualquier string» sobre un
+/// `Deserialize` que solo acepta dos literales. Un cliente generado a partir de él nace pudiendo
+/// mandar `"perpetuidad"` y descubre la lista con un 400 — y el `$ref` al componente `TargetBasis`
+/// existía, publicado y sin que nada apuntara a él.
+#[test]
+fn the_retirement_profile_patch_advertises_the_target_basis_enum() {
+    let doc = doc();
+    let field = &doc["components"]["schemas"]["PatchRetirementProfileBody"]["properties"]
+        ["target_basis"];
+    assert!(!field.is_null(), "el campo existe en el componente: {doc}");
+    // utoipa envuelve el `Option<T>` nullable; la prueba es que en algún punto del subárbol del
+    // campo se nombre el componente `TargetBasis` y en ninguno se declare `type: string` suelto.
+    let rendered = field.to_string();
+    assert!(
+        rendered.contains("TargetBasis"),
+        "target_basis debe referirse al enum TargetBasis, no a un string libre: {rendered}"
+    );
+
+    // …y el componente referido enumera exactamente las dos variantes que el Deserialize acepta.
+    let variants = doc["components"]["schemas"]["TargetBasis"]["enum"]
+        .as_array()
+        .expect("TargetBasis publica su lista de variantes");
+    let mut got: Vec<&str> = variants.iter().filter_map(|v| v.as_str()).collect();
+    got.sort_unstable();
+    assert_eq!(got, vec!["bridge_to_pension", "perpetuity"], "{variants:?}");
+}

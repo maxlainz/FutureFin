@@ -198,6 +198,13 @@ async fn every_validation_rule_has_its_own_stable_code() {
             serde_json::json!({"strategy": "pension_bridge"}),
             "pension_required_for_bridge",
         ),
+        // …y media jornada sin fase de media jornada: la tercera pata de la misma familia.
+        // Sin ella, `partial` se comportaba como `asap` en silencio mientras la UI enseñaba
+        // «Media jornada» sobre una proyección que no la tenía.
+        (
+            serde_json::json!({"strategy": "partial"}),
+            "partial_retirement_required",
+        ),
         // Edades fuera de rango.
         (
             serde_json::json!({"strategy": "retire_at_age", "target_retirement_age": 12}),
@@ -419,4 +426,77 @@ async fn an_installation_upgraded_from_4_15_keeps_its_fire_target() {
         .await
         .json();
     assert_ne!(b["jubilacion_target_net_worth"], "600000.0000", "{b}");
+}
+
+/// **La elección ALMACENADA de `target_basis` viaja aparte de la resuelta** (deuda de contrato
+/// detectada por WP7-2 y cerrada en WP5-2).
+///
+/// El fallo que cierra: `profile.target_basis` sale SIEMPRE resuelto, así que un formulario que
+/// lee el perfil y lo reescribe entero persistía el `perpetuity` DERIVADO de no tener pensión
+/// como si el usuario lo hubiera elegido. Al declarar la pensión después, la base se quedaba en
+/// perpetuidad —la opción conservadora que nadie pidió— sin un solo aviso. Con
+/// `target_basis_stored: null` el cliente sabe que no hay elección y puede no mandar el campo.
+#[tokio::test]
+async fn the_stored_target_basis_travels_next_to_the_resolved_one() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // 1) Sin tocar nada: resuelto `perpetuity`, almacenado `null` = «no elegido, se deriva».
+    let b = app.get_with_cookie(PROFILE, &owner.cookie).await.json();
+    assert_eq!(b["profile"]["target_basis"], "perpetuity", "{b}");
+    assert!(b["target_basis_stored"].is_null(), "nadie ha elegido nada: {b}");
+
+    // 2) Un PATCH que NO nombra `target_basis` no elige por el usuario, ni siquiera cuando toca
+    //    otra cosa del mismo formulario.
+    let r = app
+        .patch_json_with_cookie(PROFILE, serde_json::json!({"swr_pct": "3"}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let b = r.json();
+    assert!(b["target_basis_stored"].is_null(), "el PATCH no debe fijar la base: {b}");
+
+    // 3) Declarar la pensión DESPUÉS voltea la base resuelta a `bridge_to_pension` (R6) — que es
+    //    exactamente lo que la derivación congelada impedía.
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({"pension": {"monthly_amount_today": "1200", "starts_at_age": 67}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let b = r.json();
+    assert_eq!(b["profile"]["target_basis"], "bridge_to_pension", "{b}");
+    assert!(b["target_basis_stored"].is_null(), "sigue derivada, no elegida: {b}");
+
+    // 4) Elegirla explícitamente sí la fija, y entonces manda sobre la derivación.
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({"target_basis": "perpetuity"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let b = r.json();
+    assert_eq!(b["profile"]["target_basis"], "perpetuity", "{b}");
+    assert_eq!(b["target_basis_stored"], "perpetuity", "elegida a mano: {b}");
+
+    // 5) …y `null` explícito la suelta: se vuelve a derivar (y con pensión eso es el puente).
+    let r = app
+        .patch_json_with_cookie(
+            PROFILE,
+            serde_json::json!({"target_basis": null}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let b = r.json();
+    assert_eq!(b["profile"]["target_basis"], "bridge_to_pension", "{b}");
+    assert!(b["target_basis_stored"].is_null(), "soltada: {b}");
+
+    // El GET dice lo mismo que dijo el PATCH: una sola verdad, dos rutas.
+    let g = app.get_with_cookie(PROFILE, &owner.cookie).await.json();
+    assert_eq!(g["profile"]["target_basis"], "bridge_to_pension", "{g}");
+    assert!(g["target_basis_stored"].is_null(), "{g}");
 }
