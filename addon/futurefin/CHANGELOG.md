@@ -5,6 +5,29 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 5.0.0
+
+La jubilación deja de ser una sola fecha del hogar y pasa a ser **el plan de cada persona**. En la
+pestaña Jubilación eliges tu estrategia entre cinco tarjetas —«Cuanto antes (FIRE clásico)», «A una
+edad fija», «Ahorrar ahora y dejar crecer (Coast FIRE)», «Media jornada» y «Puente hasta la
+pensión»— y solo aparecen los ajustes que esa estrategia necesita: edad objetivo, pensión pública
+con la edad en que la cobrarás, media jornada, regla de retirada, colchón de caja. Cada uno tiene
+su plan; el hogar se ve agregado y solo en lectura con el control «Yo | Hogar».
+
+- **Lo que te cuesta cumplir el plan**: ahorro necesario al mes, margen que te sobra, el mes en
+  que puedes dejar de aportar (coast), el hueco de la media jornada y el puente hasta la pensión,
+  con aviso en rojo si con tu ahorro actual no llegas.
+- **Sección «Riesgo»**: miles de escenarios con la volatilidad que declares en cada activo,
+  banda 10–90 %, probabilidad de que el plan aguante (jubilarte y no agotar el capital), y cuándo
+  se agotaría por edad. La semilla es estable: la misma persona ve los mismos escenarios.
+- **Proyección** con la tira de fases (trabajo, media jornada, jubilación), las series «capital
+  necesario» y «si dejas de aportar», y el detalle de cada retirada.
+- **Al actualizar**: tus ajustes de SWR y modo de objetivo pasan a tu perfil sin moverse; la vista
+  por defecto pasa a ser la tuya; solo puedes editar tus propias filas (las que no tenían dueño
+  pasan al propietario del hogar); las copias `.ffbackup` suben a la versión 13. Haz una copia
+  antes de actualizar (el contenedor la hace sola antes de migrar). Detalle en
+  `docs/actualizar.md` del proyecto.
+
 ## 4.15.0
 
 - En Movimientos, lo que antes se llamaba «Ahorro» pasa a llamarse **«Inversión»** (lo que mueves a
