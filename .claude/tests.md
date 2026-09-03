@@ -38,12 +38,21 @@ puerto; el default documentado sigue siendo el TCP de 5433.
 
 ## Backend
 
-### Engine unit tests (`crates/engine/src/{projection.rs,history.rs,runway.rs,net_return.rs}`)
-- `projection.rs` `mod tests`: **56** tests (`grep -c '#[test]'`, 2026-08-28 tras la Fase 6; eran 44 el 2026-08-25 y 32 el 2026-08-22) covering cascade allocation, retirement drain, FIRE target inflation, off-by-one between `fire_target_at_month_index(k+1)` and the handler's series. **Pin pre-4.2.0** (`liability_pin_input` + su test): congela la salida del engine con un input rico (2 activos, reglas con cap + remainder, pasivo de 100.000 con cuota 500 y fin en 2090, planning, `fire_target`) en los meses 0/1/2/12/200/201/300, el calendario de amortización implícito (**extinción en el mes 200**) y el `debt_service` del mes 1 — se escribió **antes** de la reforma para que `fixed_payments` tuviera que seguir pasando bit a bit después. **Bloque 4.2.0** (`RepaymentModel` + `apr_percent`): el TIN es inerte en `fixed_payments` (misma serie con y sin él, sobre el propio pin), francés a mano cuatro meses, extinción al 3 % en el **mes 278** con última cuota parcial, cuota por debajo del interés haciendo **crecer** la deuda (100.500 → 101.005), `interest_only` con principal constante y caja = cuota, `revolving_matches_french_recurrence` (equivalencia deliberada, pineada), `payment_end` congelando el residual en los cuatro modelos, cuota 0 sin devengo (contrato de los modos B/C), tope de la cuota en el **payoff** (401,00 con `french`, 400 con `fixed_payments`), TIN absurdo saturando sin pánico, y `present_value_of_payments` contra la forma cerrada.
-- `history.rs` `mod tests`: **22** tests (2026-08-22; v1.5.0 + cash-flow tier-2) covering linear interpolation (midpoint exact, endpoints), the French-amortization curve (matches a pure schedule when the residual is 0, residual correction passes through both endpoints, midpoint above the linear chord, fallbacks when payment ≤ interest / no terms / apr=0, clamp ≥ 0), timeline rules (item absent from an intermediate snapshot = 0 between pairs, appears/disappears when present in only one, first-month clamp, virtual-today join with a deleted item → 0), and `month_index_of` / `add_months_signed` with negative deltas across a year boundary.
-- `runway.rs` `mod tests`: 13 tests (v2.3.0; 8 in v2.2.0) covering `liquid_runway_months` — exact reduction to `A/g` with no return/inflation (no tolerances), return extends / inflation shortens, `Indefinite` via the **SWR threshold** (`withdrawal_within_swr_is_indefinite`, renamed from `return_covering_expense_is_indefinite`), value-weighted multiplier (vs the naive per-asset mean), negative return **shortens** the runway (losses compound since the `monthly_multiplier` fix — before it behaved as zero growth), `NoExpenseBase` with zero expense (which also pins the check *order* against the threshold), `Months(0)` with zero balance. The five added in v2.3.0: `swr_threshold_exact_equality_is_indefinite` (exact `Decimal` boundary, 300.000 @ 4 %), `just_below_swr_threshold_is_finite` (one euro under → finite, `A/g` intact), `swr_zero_never_indefinite` (also defensive with `swr < 0`), `cap_reached_without_swr_is_months_at_cap` (surviving the cap is the `Months(1200)` **floor**, not `Indefinite`), `grossed_expense_raises_threshold` (the 5th parameter participates; the engine never recomputes `12 × monthly_expense`). Predicted values in each test's doc comment.
+### Engine unit tests (`crates/engine/src/*.rs`)
+
+> **5.0.0 partió el motor en más ficheros, y con él el comando de recuento.** El módulo que
+> antes cabía en cuatro ficheros son hoy trece: a `projection.rs`/`history.rs`/`runway.rs`/
+> `net_return.rs` se suman `money.rs` (el trait `MoneyOps`), `sim.rs` + `sim_core.rs` (los tipos
+> espejo y el bucle genérico, **sin `mod tests` propio**: lo que los prueba son los pines dorados),
+> `phases.rs`, `withdrawal.rs`, `target.rs`, `solve.rs` y `tax.rs`. **Cuenta con el glob, no con la
+> lista**: `grep -c '#\[test\]' crates/engine/src/*.rs` — la lista de cuatro ficheros que esta
+> página usaba se dejaba 56 tests fuera el 2026-09-03. El total autoritativo lo da el runner:
+> `cargo test -p futurefin-engine 2>&1 | grep "test result"`.
+- `projection.rs` `mod tests`: recuéntalos con `grep -c '#\[test\]' crates/engine/src/projection.rs` (**87** el 2026-09-03; 56 el 2026-08-28, 44 el 2026-08-25, 32 el 2026-08-22 — la serie completa está aquí precisamente porque el número se ha quedado corto cuatro veces) covering cascade allocation, retirement drain, FIRE target inflation, off-by-one between `fire_target_at_month_index(k+1)` and the handler's series. **Pin pre-4.2.0** (`liability_pin_input` + su test): congela la salida del engine con un input rico (2 activos, reglas con cap + remainder, pasivo de 100.000 con cuota 500 y fin en 2090, planning, `fire_target`) en los meses 0/1/2/12/200/201/300, el calendario de amortización implícito (**extinción en el mes 200**) y el `debt_service` del mes 1 — se escribió **antes** de la reforma para que `fixed_payments` tuviera que seguir pasando bit a bit después. **Bloque 4.2.0** (`RepaymentModel` + `apr_percent`): el TIN es inerte en `fixed_payments` (misma serie con y sin él, sobre el propio pin), francés a mano cuatro meses, extinción al 3 % en el **mes 278** con última cuota parcial, cuota por debajo del interés haciendo **crecer** la deuda (100.500 → 101.005), `interest_only` con principal constante y caja = cuota, `revolving_matches_french_recurrence` (equivalencia deliberada, pineada), `payment_end` congelando el residual en los cuatro modelos, cuota 0 sin devengo (contrato de los modos B/C), tope de la cuota en el **payoff** (401,00 con `french`, 400 con `fixed_payments`), TIN absurdo saturando sin pánico, y `present_value_of_payments` contra la forma cerrada.
+- `history.rs` `mod tests`: **23** el 2026-09-03 (22 el 2026-08-22; v1.5.0 + cash-flow tier-2) covering linear interpolation (midpoint exact, endpoints), the French-amortization curve (matches a pure schedule when the residual is 0, residual correction passes through both endpoints, midpoint above the linear chord, fallbacks when payment ≤ interest / no terms / apr=0, clamp ≥ 0), timeline rules (item absent from an intermediate snapshot = 0 between pairs, appears/disappears when present in only one, first-month clamp, virtual-today join with a deleted item → 0), and `month_index_of` / `add_months_signed` with negative deltas across a year boundary.
+- `runway.rs` `mod tests`: **20** el 2026-09-03 (13 en v2.3.0; 8 en v2.2.0) covering `liquid_runway_months` — exact reduction to `A/g` with no return/inflation (no tolerances), return extends / inflation shortens, `Indefinite` via the **SWR threshold** (`withdrawal_within_swr_is_indefinite`, renamed from `return_covering_expense_is_indefinite`), value-weighted multiplier (vs the naive per-asset mean), negative return **shortens** the runway (losses compound since the `monthly_multiplier` fix — before it behaved as zero growth), `NoExpenseBase` with zero expense (which also pins the check *order* against the threshold), `Months(0)` with zero balance. The five added in v2.3.0: `swr_threshold_exact_equality_is_indefinite` (exact `Decimal` boundary, 300.000 @ 4 %), `just_below_swr_threshold_is_finite` (one euro under → finite, `A/g` intact), `swr_zero_never_indefinite` (also defensive with `swr < 0`), `cap_reached_without_swr_is_months_at_cap` (surviving the cap is the `Months(1200)` **floor**, not `Indefinite`), `grossed_expense_raises_threshold` (the 5th parameter participates; the engine never recomputes `12 × monthly_expense`). Predicted values in each test's doc comment.
 - `net_return.rs` `mod tests`: **9** tests (`net_return_percentages`): ponderación por valor (y que NO es la media aritmética de las tasas), el interés de los pasivos restando + amplificación por apalancamiento, deuda cara → rendimiento negativo, `None` en la tasa contando como 0 % **sin salir del denominador** (activo y pasivo), tasa esperada negativa, `NW ≤ 0` → `None` (deuda mayor, empate exacto y cartera vacía), inflación 0 → real ≡ nominal exacto, real por **división de factores** estrictamente por debajo de la resta simple, y el caso trabajado de la documentación (3,5556 % / 1,5251 %). Números predichos en el comentario de cada test.
-- Engine total: **100** as of 2026-08-28 (56 + 22 + 13 + 9; **eran 88** el 2026-08-25 con 44 en `projection.rs` — los 12 nuevos son el bloque de la Fase 6: calendario de amortización (`schedule_payment_identity_holds_in_every_model`, `schedule_payoff_absent_reasons_are_distinguishable`…) y amortización extra (`extra_principal_is_net_worth_neutral_without_interest`, `extra_principal_frees_the_quota_into_the_cascade`, `extra_principal_saves_exactly_the_interest_not_accrued`, `extra_principal_lump_sum_lands_on_its_month_and_caps_at_the_balance`, `zero_extra_principal_is_bit_identical_to_the_pin`, `extra_principal_needs_an_active_payment_plan`); eran 76 = 32+22+13+9 antes de la reforma de pasivos de 4.2.0; eran 67 el 2026-08-22 sin `net_return.rs`; antes 61 = 27+21+13 el 2026-08-18; los 5 nuevos cubren `monthly_multiplier` con tasas negativas — composición, clamp ≤ −100, pin de las positivas y decaimiento en simulación) — recuéntalo con `cargo test -p futurefin-engine 2>&1 | grep "test result"` o, sin compilar, `grep -c '#\[test\]' crates/engine/src/{projection,history,runway,net_return}.rs`.
+- Engine total: **199 unitarios de `src/` + 36 de `tests/`** el 2026-09-03, verde entero (el runner: 199 + `audit_dump` 2 + `golden_pins` 10 + `phases_wp3` 24, más los 7 `#[ignore]` de `timing.rs`). Los 199 de `src/` son 87 `projection` + 23 `history` + 20 `runway` + 17 `tax` + 14 `withdrawal` + 12 `target` + 9 `net_return` + 7 `phases` + 4 `money` + 4 `sim_core` + 2 `lib` (el freezer); `sim.rs` y `solve.rs` no llevan `mod tests` propio — los prueba el golden. **El número se movió dos veces en la misma tarde** mientras la rama seguía viva: pídeselo al runner. Histórico del contador: **100** el 2026-08-28 (56 + 22 + 13 + 9; **eran 88** el 2026-08-25 con 44 en `projection.rs` — los 12 nuevos son el bloque de la Fase 6: calendario de amortización (`schedule_payment_identity_holds_in_every_model`, `schedule_payoff_absent_reasons_are_distinguishable`…) y amortización extra (`extra_principal_is_net_worth_neutral_without_interest`, `extra_principal_frees_the_quota_into_the_cascade`, `extra_principal_saves_exactly_the_interest_not_accrued`, `extra_principal_lump_sum_lands_on_its_month_and_caps_at_the_balance`, `zero_extra_principal_is_bit_identical_to_the_pin`, `extra_principal_needs_an_active_payment_plan`); eran 76 = 32+22+13+9 antes de la reforma de pasivos de 4.2.0; eran 67 el 2026-08-22 sin `net_return.rs`; antes 61 = 27+21+13 el 2026-08-18; los 5 nuevos cubren `monthly_multiplier` con tasas negativas — composición, clamp ≤ −100, pin de las positivas y decaimiento en simulación) — recuéntalo con `cargo test -p futurefin-engine 2>&1 | grep "test result"` o, sin compilar, `grep -c '#\[test\]' crates/engine/src/{projection,history,runway,net_return}.rs`.
 - Pure: no Postgres, no env. `cargo test -p futurefin-engine` runs both. **Desde 4.0.0 CI corre TODO** — engine, unitarios de la lib e integración contra Postgres: ver §CI.
 - **4.5.0 / Ola 1 de la resolución** añade además: `apps/api/tests/patch_null_clears.rs`
   (6 tests — trío null-borra/ausente-intacto/valor-aplica por campo de #95/#113, más la cota
@@ -65,6 +74,102 @@ puerto; el default documentado sigue siendo el TCP de 5433.
   batería de casos límite L1-L6/P1-P6 para compararlos con oráculos externos —
   `cargo test -p futurefin-engine --test audit_dump -- --nocapture`), y el test de integración
   `apps/api/tests/asset_order_determinism.rs` (orden total `sort_index, name, id`).
+
+### Arneses del motor (`crates/engine/tests/`) — golden, fases, tiempos y volcado (5.0.0)
+
+Cuatro binarios de test, con **una sola batería de casos** detrás (`tests/common/cases.rs`): dos
+baterías escritas por separado divergen en silencio al primer caso que alguien «mejora» en un solo
+lado, y entonces el pin deja de pinear lo que el volcado vuelca. Cuenta los casos con
+`grep -c 'name: "' crates/engine/tests/common/cases.rs` (**29** el 2026-09-03: 6 calendarios `L*`, 13 proyecciones de la batería de 4.15.0 y 10 de la de 5.0.0); los nombres, con el `python3` de más abajo.
+
+| Binario | Qué es | Cómo se corre |
+|---|---|---|
+| `golden_pins.rs` | **La red de bit-identidad del refactor 5.0.0.** Canonicaliza a TEXTO todas las salidas del motor caso a caso —hasta el último dígito de cada `Decimal`, vía `Display`— y las resume en un SHA-256 por caso | `cargo test -p futurefin-engine --test golden_pins` |
+| `phases_wp3.rs` | Fases, pensión con fecha, objetivo con puente y solves, **con el número predicho a mano en el comentario que precede a cada assert** (disciplina de `futurefin-research-methodology`). Casi todo a 0 % de rentabilidad, 0 % de inflación y sin impuestos: así cada euro de la serie es una suma que cabe en una línea y una discrepancia señala el mes exacto | `cargo test -p futurefin-engine --test phases_wp3` |
+| `audit_dump.rs` | Volcado CSV para un **oráculo externo** (reimplementación independiente que compara mes a mes sin pasar por la API ni por la BD). No afirma nada por sí mismo | `cargo test -p futurefin-engine --test audit_dump -- --nocapture > dump.csv` |
+| `timing.rs` | **Mide, no afirma**: todos sus tests van `#[ignore]` porque no hay umbral defendible (el número depende del portátil). **Corre siempre en `--release` para decidir nada**: en `debug` los `checked_*` sin optimizar cuestan un orden de magnitud | `cargo test -p futurefin-engine --release --test timing -- --ignored --nocapture` |
+
+**Los dos fixtures dorados, y por qué son dos** (`crates/engine/tests/fixtures/`):
+
+- **`pins-4.15.json`** hashea lo que 4.15.0 ya publicaba: `net_worth`, `liquid_worth`,
+  `contributed_capital`, `per_asset_series` mes a mes, `assets_depleted_month_index`,
+  `uncovered_deficit_total`, `unallocated_savings_total`, el `first_month_allocation` entero con su
+  traza regla a regla, y el `liability_amortization_schedule` de cada pasivo. **Su batería NO crece**:
+  es `projection_cases_all()`, y añadirle un caso obligaría a regenerar el fichero que existe
+  justamente para no moverse.
+- **`pins-5.0-outputs.json`** es **aditivo**: las lecturas nuevas (índices de fase, transiciones, las
+  tres series `withdrawal*`, `disposable_cash`, las lecturas de puente y media jornada) sobre
+  `projection_cases_all()` **más** `projection_cases_5_0()` (los casos P14–P23). Vive aparte a
+  propósito: el primero demuestra que las salidas de 4.15.0 no se movieron, y dejaría de poder
+  demostrarlo si creciera con cada lectura nueva.
+
+```bash
+# Qué casos cubre cada fixture (nunca un número escrito a mano)
+python3 -c "import json;d=json.load(open('crates/engine/tests/fixtures/pins-4.15.json'));print(len(d['cases']),[c['name'] for c in d['cases']])"
+python3 -c "import json;d=json.load(open('crates/engine/tests/fixtures/pins-5.0-outputs.json'));print(len(d['cases']))"
+```
+
+**Regenerar es un acto DECLARADO, y no todo cambio da derecho a hacerlo.**
+
+```bash
+UPDATE_ENGINE_PINS=1     cargo test -p futurefin-engine --test golden_pins   # capa 4.15.0
+UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins   # capa aditiva 5.0.0
+```
+
+- **Puede regenerarse** `pins-5.0-outputs.json` cuando la canonicalización **CRECE** (un campo nuevo
+  de `ProjectionOutput` entra en el texto hasheado). Eso movió los SHA-256 de los casos existentes en
+  WP3 sin mover un solo número suyo, y quien lo demuestra es
+  `the_5_0_canonicalization_grew_without_moving_the_old_fields`: rehashea la capa vieja **sola**
+  contra los SHA-256 de antes. Sin ese control, el día que alguien rompa el drenaje y regenere el
+  fichero el diff dirá exactamente lo mismo que hoy.
+- **No puede regenerarse `pins-4.15.json` para «hacer pasar» un refactor.** Todo el tren 5.0.0
+  (fases, cuatro reglas de retirada, objetivo con puente, núcleo genérico `MoneyOps`) lo dejó
+  **byte-idéntico**. Un pin de esa capa que se mueve significa que la aritmética cambió, y entonces
+  el cambio necesita **entrada de CHANGELOG con el delta medido** (`futurefin-change-control`): un
+  pin regenerado sin ella es un cambio de números que nadie declaró.
+- Que la red funcione tiene su propio control negativo:
+  `the_hash_actually_notices_a_single_moved_decimal` y
+  `the_5_0_hash_notices_a_moved_withdrawal_and_a_moved_phase` mutan una salida a propósito y exigen
+  que el hash se mueva. Y `the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery` impide que
+  reordenar la batería cambie el CSV sin que el hash lo delate.
+
+### El crate estocástico y su puerta de degeneración (`crates/engine-stochastic`)
+
+`crates/engine-stochastic` **no tiene bucle de simulación**: tiene el tipo `F64Money`, que implementa
+`MoneyOps`, y con él instancia el bucle de `futurefin-engine`. Su suite se corre aparte porque **no
+necesita base de datos** y CI la quiere en el job barato:
+
+```bash
+cargo test -p futurefin-engine-stochastic          # también en ci.yml (job `rust`) y en scripts/test-all.sh
+```
+
+Dos binarios de test: `degeneration.rs` (abajo) y —desde WP6a, commit `ba6bdfe`— `monte_carlo.rs`,
+las puertas de Monte Carlo (reproducibilidad por semilla, degeneración con σ = 0, orden de las
+bandas, media del terminal contra la varianza log-normal derivada, y la tabla de la issue #207).
+**Estado el 2026-09-03: la suite NO está verde** — 13 unitarios + 3 de degeneración pasan, y de los
+11 de `monte_carlo.rs` **falla `mc_cash_buffer_changes_the_band_under_sequence_risk`**: la predicción
+«el colchón mejora la probabilidad de éxito» sale falsada por la medición (0,713 frente a 0,775).
+Es un *predict-then-run miss*, no un test flaky; la salida honesta es revisar la predicción o el
+modelo del colchón, nunca relajar el assert. Pídele el estado al runner, no a esta página:
+`cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`.
+
+`tests/degeneration.rs` es la **puerta de aceptación** de que el camino de coma flotante y el camino
+exacto son la MISMA simulación: para **todos** los casos de la batería del motor —reutilizada por
+`#[path = "../../engine/tests/common/cases.rs"]`, una sola definición y dos crates que la corren—
+compara `net_worth` y `liquid_worth` **mes a mes en todo el horizonte** y, exactos, las decisiones
+DISCRETAS del bucle (`retirement_month_index`, `liquid_crossing_month_index`,
+`assets_depleted_month_index`, `phase_transitions`).
+
+- **La cota de contrato es 1 € por mes** (`EUR_TOLERANCE`). Por encima de `2^53 ≈ 9,0e15 €` la
+  distancia entre dos `f64` consecutivos ya es mayor que un euro, así que exigir «± 1 €» ahí no es
+  estricto, es **imposible** — y una cota imposible no mide nada, solo obliga a desactivar el test.
+  Esos casos (sintéticos: activos en el techo de `NUMERIC(18,4)` al 20 % durante 70 años) van con
+  cota RELATIVA (`REL_TOLERANCE = 1e-12`) **y se marcan en la tabla que el test imprime**.
+- **Ningún caso se excluye y ninguna cota se relaja «porque falla»**: cada fila imprime su máximo, su
+  mes y qué regla se le aplicó. Medido el 2026-09-03: máximo `|Δ|` **1,47e-7 €** (P9, 840 meses).
+- Es la salvaguarda con la que la arqueología readmite la coma flotante: el freezer
+  `crates_engine_src_has_no_f64_outside_comments` de `crates/engine` **no se ha tocado** ni se le ha
+  añadido una excepción.
 
 ### Integration tests (`apps/api/tests/`)
 - Each test spins up the full Axum router (`routes::app_router()`) and drives it via `tower::ServiceExt::oneshot` against a real Postgres.
@@ -476,7 +581,7 @@ CI existe: `.github/workflows/ci.yml` corre en push a `main` y en PR contra `mai
 | Job | Corre | NO corre |
 |---|---|---|
 | `secrets-scan` | `./scripts/scan-sensitive.sh` sobre los ficheros trackeados — primero y barato. Existe porque hasta agosto de 2026 `apps/api/tests/fixtures/` llevaba extractos bancarios reales y nada lo detectó (`futurefin-data-hygiene`) | — |
-| `rust` | `./scripts/audit-releases.sh --version` (el CHANGELOG cubre la versión de Cargo.toml), `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked` | **clippy y rustfmt**, instalados pero con los pasos **comentados a propósito**: el repo nunca ha pasado por ellos (50 avisos únicos en 20 ficheros; `cargo fmt --check` marca 1.175 bloques en 72 ficheros) y activarlos hoy dejaría CI en rojo desde el primer push — una CI roja de serie enseña a ignorar la CI. Para activarlos: limpieza en un commit aparte, `cargo fmt --all` **solo** en el suyo, y descomentar |
+| `rust` | `./scripts/audit-releases.sh --version` (el CHANGELOG cubre la versión de Cargo.toml), `cargo build -p futurefin-api --locked`, `cargo test -p futurefin-engine --locked` y —desde 5.0.0— `cargo test -p futurefin-engine-stochastic --locked` (**paso propio**: la puerta de degeneración no necesita Postgres y tiene que fallar en el job barato, no dentro del `cargo test --workspace` de integración). Lo mismo hace `scripts/test-all.sh`, para que también la vea `SKIP_DB=1` | **clippy y rustfmt**, instalados pero con los pasos **comentados a propósito**: el repo nunca ha pasado por ellos (50 avisos únicos en 20 ficheros; `cargo fmt --check` marca 1.175 bloques en 72 ficheros) y activarlos hoy dejaría CI en rojo desde el primer push — una CI roja de serie enseña a ignorar la CI. Para activarlos: limpieza en un commit aparte, `cargo fmt --all` **solo** en el suyo, y descomentar |
 | `web` | `npm ci` (**no `npm install`**: reescribía el lockfile en silencio, así que CI probaba potencialmente otro árbol de dependencias que el que publica el Dockerfile), `typecheck:web`, **`lint:web`**, **`npm test` (Vitest)**, `build:web` — en ese orden, el build el último por caro | render de componentes (los tests son de función pura, entorno `node`) |
 | `integration` (4.0.0) | `cargo test --workspace --locked` con un **servicio Postgres 16.4-alpine** y `TEST_DATABASE_URL` apuntando a `127.0.0.1:5432` (en local el puerto documentado sigue siendo 5433, para no chocar con el Postgres de desarrollo). Cubre de una vez engine + unitarios de la lib + integración. `timeout-minutes: 45`. El healthcheck usa `pg_isready -h 127.0.0.1` **a propósito**: sin host, durante el `initdb` la imagen levanta un servidor temporal que solo escucha en el socket Unix y `pg_isready` da OK antes de que la base exista | — |
 | `docker-stack` (3.0.0) | shellcheck (`docker-entrypoint.sh`, `scripts/*.sh`, scripts de skills) + build de la imagen autocontenida + **sanity** (majors PG 15 y 16 presentes, label `com.futurefin.postgres.majors=15,16`, arranque **sin volumen** debe ABORTAR) + **instalación nueva** (volumen virgen → `initializing fresh PostgreSQL 16`, `/v1/ready`, alta + login + categoría «Ácido Ñandú» vía API) + **recreate estilo watchtower** conservando datos + **apagado limpio** (greps de `shutdown signal received`, `database pool closed`, `database system is shut down`, `clean shutdown complete` y `ExitCode == 0`) + **stack 2.3.0 REAL con datos** → **imagen 4.x sobre el compose V2 sin tocar** (desde 4.0.0 ya NO arranca en compat: exit code ≠ 0 y logs con `ya no habla con bases de datos externas` + `3.9.0`) → **migración al compose V3 reutilizando el volumen** (`adopting ownership of PGDATA`, `reindexing database after adoption`, login idéntico, categoría con Ñ/acentos intacta, username duplicado → 409/422, backup `pre-migration-*.sql.gz` presente) + **escenario 3: `DATABASE_URL` externa heredada + volumen vacío** (ya no prueba la automigración —retirada en 4.0.0— sino que el contenedor **aborta**: exit ≠ 0, logs con `ya no habla con bases de datos externas` y `docs/actualizar.md`, y el volumen **sigue vacío**, sin inicializar nada a medias) + **pg_upgrade 15→16** (marker row sobrevive, `SHOW server_version` empieza por 16, `pgdata_old_15/`, backup `pre-pgupgrade-15-to-16-*.sql.gz`) | UI real (no hay E2E de navegador); las guardas de arranque que abortan (`pre-migration backup FAILED`, rol inexistente, swap de pg_upgrade interrumpido) salvo la de «sin volumen» |
@@ -496,6 +601,16 @@ npm run lint:web
 (Checklist completo: [`.claude/skills/futurefin-change-control/SKILL.md`](skills/futurefin-change-control/SKILL.md).)
 
 ## Procedencia y re-verificación
+
+**Ampliada el 2026-09-03 para 5.0.0** (rama `release/5.0.0`, issue #207): §Engine unit tests
+recuenta con glob en vez de con una lista de cuatro ficheros, y nacen §Arneses del motor (golden,
+fases, tiempos, volcado) y §El crate estocástico. Los recuentos de ESE bloque se midieron ese día
+con los comandos de abajo. **Los recuentos de las suites de `apps/api` y de Vitest NO se
+re-verificaron en esa pasada** y van un tren por detrás — el barrido de provenance del 2026-09-03
+midió `ls apps/api/tests/*.rs | wc -l` = **76** (esta página dice 62),
+`grep -rn '#[tokio::test]\|#[test]' apps/api/src | wc -l` = **112** (dice 91),
+`ls apps/api/migrations | wc -l` = **59** (dice 49) y el agregado de atributos de integración
+= **750** (dice 609); corrígelos en la pasada de API, con el comando, no con estos números.
 
 Contenido verificado leyendo el código; la tabla de CI y las notas de contenedor se
 re-verificaron el **2026-08-16 (v3.0.0)**, la suite `oauth_flow.rs`, los helpers nuevos de
@@ -537,6 +652,15 @@ ls .github/testdata/ && grep -n "image:\|services:" .github/testdata/docker-comp
 # La base de tests sigue en 5433 por TCP
 grep -n "5433" apps/api/tests/common/mod.rs
 # Recuentos sin compilar
+# OJO: la lista de CUATRO ficheros del motor se quedó corta con 5.0.0 (money/phases/withdrawal/
+# target/solve/tax/sim/sim_core). Usa el glob, y el total del runner por encima de cualquier grep:
+grep -c '#\[test\]' crates/engine/src/*.rs   # 199 en total el 2026-09-03 (139 con la lista vieja)
+grep -c '#\[test\]' crates/engine/tests/*.rs crates/engine-stochastic/tests/*.rs
+cargo test -p futurefin-engine 2>&1 | grep "test result"              # 199 + 2 + 10 + 24, y 7 ignored
+cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"   # 13 + 3 + 11 el 2026-09-03,
+                                                # con 1 en ROJO (ver §El crate estocástico)
+grep -c '^#\[ignore' crates/engine/tests/timing.rs                    # 7 el 2026-09-03 (sin el ancla
+                                                # ^ salen 8: el doc-comment del módulo cita el atributo)
 grep -c '#\[test\]' crates/engine/src/{projection,history,runway,net_return}.rs
 grep -rcE '^\s*#\[(tokio::test(\(.*\))?|test)\]' apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'
                                         # OJO: la regex ESTRICTA de antes ("#\[tokio::test\]\|#\[test\]")
@@ -575,6 +699,9 @@ ls apps/api/migrations | wc -l          # 49 — **la Fase 6 no añade ninguna**
 #   Tras la Fase 5 el runner daba: 731 passed; 0 failed; 0 IGNORED
 # El "0 ignored" es parte del dato: la Fase 2 retiró el único `#[ignore]` que había
 # (`every_input_schema_forbids_unknown_properties`). Si aparece uno, es nuevo — investígalo.
+# **Ya no vale para el workspace entero desde 5.0.0**: `crates/engine/tests/timing.rs` aporta 7
+# `#[ignore]` DELIBERADOS (miden, no afirman; ver §Arneses del motor). El "0 ignored" sigue siendo
+# el contrato de `apps/api/tests/`, y ahí sí: un ignored nuevo en integración es un test apagado.
 # (551 el 2026-08-25; Vitest 417 en 18 ficheros a esa misma fecha, sin recontar en esta pasada.)
 cargo test --workspace 2>&1 | grep "test result"
 npm test --workspace futurefin-web 2>&1 | grep "Tests "

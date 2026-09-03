@@ -188,6 +188,8 @@ the *test* asserts through `f64` parsing of the decimal strings, hence ±0.01 to
 | Closed form vs iterative reference | ±0.01 € | Iterative side only converges, doesn't terminate exactly. |
 | Cross-language Rust↔TS parity | ±1 € | TS side computes in f64 end-to-end (see Recipe 4/5). |
 | Discrete outputs (month indices, marker months, point counts) | exact, always | An off-by-one here is a bug, never noise. |
+| **Refactor de todo un bucle numérico** (5.0.0) | **hash SHA-256 del texto canónico, byte a byte** | Cinco escalares no cubren 10.000 números por caso, y la ESCALA de un `Decimal` se mueve sin que el valor cambie. Ver Recipe 7. |
+| **Camino `Decimal` vs camino `f64` del mismo modelo** (5.0.0) | **1 € por mes** en toda la serie; decisiones DISCRETAS exactas; cota relativa 1e-12 solo por encima de `2^53 €`, y el caso marcado | Por encima de `2^53` el espaciado de los `f64` ya supera el euro: exigir ±1 € ahí no es estricto, es imposible, y una cota imposible se acaba desactivando. `crates/engine-stochastic/tests/degeneration.rs`. |
 
 **Check your work**
 - [ ] Test existed and was green BEFORE the refactor commit (check `git log` order).
@@ -265,7 +267,8 @@ Adding a case = append to `cases[]` with `name`, `fire_settings`, `monthly`, `ex
 ## Recipe 5 — Decimal precision analysis (when f64 is provably safe)
 
 The non-negotiable: money is `rust_decimal::Decimal` in domain/engine/DB; amounts cross the API as
-decimal strings. The *one deliberate exception* (v1.4.0): large projection arrays
+decimal strings. **Hay DOS excepciones deliberadas, y la segunda es de 5.0.0** — ver el recuadro tras
+los pasos. La primera (v1.4.0): large projection arrays
 (`points[].net_worth`, `points[].contributed_capital`, `fire_target_series`,
 `asset_series[].values`) serialize as f64 via `serialize_decimal_as_f64`
 (`apps/api/src/handlers/projection.rs` ~line 177), cutting ~30 KB JSON and ~5 000 client-side
@@ -300,6 +303,37 @@ an existing f64 shortcut is safe.
 5. Write the bound (M, n, result, consumer class) in the PR/CHANGELOG. "It's fine" is not an argument;
    "≤ 7×10⁻⁷ € on a display-only value" is.
 
+**La segunda excepción sancionada (5.0.0): `crates/engine-stochastic`.** Es el caso que el paso 4
+declara imposible —*iterated state* (840 meses de aritmética encadenada) en `f64`— y aun así se
+aprobó. Merece la pena entender **por qué no contradice la regla**:
+
+- **Qué se publica**: NADA en euros. Solo magnitudes estadísticas (probabilidad de éxito,
+  percentiles de una banda, probabilidad de agotamiento por edad). Todo importe monetario sale del
+  camino `Decimal`. La regla del paso 4 sigue intacta: *iterated state* que alimenta un KPI en euros
+  es `Decimal` obligatorio, y aquí no alimenta ninguno.
+- **La objeción (a) del paso 4 —los umbrales discretos— NO se resuelve con una cota de error, se
+  MIDE**: la puerta de degeneración exige que `retirement_month_index`,
+  `liquid_crossing_month_index`, `assets_depleted_month_index` y `phase_transitions` salgan
+  **exactos** en los dos caminos, sobre toda la batería. Si un umbral se voltea, el test falla; no
+  se argumenta que no puede pasar.
+- **La objeción (b) —tres cascadas sutilmente distintas— se elimina por construcción**: no hay dos
+  implementaciones. Hay **un bucle genérico** (`MoneyOps`) con dos instanciaciones, así que un
+  cambio de modelo entra una vez y los dos caminos lo ven a la vez. Duplicar el bucle era la
+  alternativa, y es exactamente la familia de fallos que esta casa tiene fichada.
+- **La objeción (c) —es un no-negociable de CLAUDE.md— se respeta al pie de la letra**: el freezer
+  `crates_engine_src_has_no_f64_outside_comments` **no se tocó ni ganó una excepción**. Lo que lo
+  hace posible es la **regla del huérfano**: el trait es público, así que otro crate lo implementa
+  sobre su propio newtype sin que `crates/engine` conozca la coma flotante.
+- **Las políticas del tipo aproximado van DECLARADAS**, no escondidas: qué hace `total_cmp` con
+  `NaN`, cuándo devuelven `None` los `checked_*` (⟺ resultado no finito), cuánta precisión pierde
+  `from_decimal`, y la única igualdad con tolerancia del núcleo (`gains_equal`, 1e-12) — aparte
+  porque `PartialEq` sigue siendo exacta. **Una tolerancia escondida en un `PartialEq` es lo que
+  esta receta existe para evitar.**
+
+Si vas a proponer una tercera excepción, la barra es esta: **de aquí no sale un euro**, hay una
+puerta que compara contra el camino exacto sobre casos reales, las decisiones discretas se exigen
+idénticas, y no se duplica la implementación.
+
 **Check your work**
 - [ ] M, n, and the computed bound written down where the decision is recorded.
 - [ ] The f64 value is terminal: grep the frontend to confirm nothing arithmetic-critical consumes
@@ -331,9 +365,17 @@ audit below — no test currently pins it; a replay regression test asserting tw
 **Audit recipe (verified clean 2026-07-02)**
 
 ```bash
-# 1. No clock / RNG / env / IO reads inside the engine:
-grep -rnE "now\(\)|SystemTime|Instant|thread_rng|rand::|env::var|new_v4|std::fs|std::io" crates/engine/src/
+# 1. No clock / RNG / env / IO reads inside the engine.
+#    OJO (2026-09-03): el comando de siempre ya NO sale vacío — devuelve `crates/engine/src/lib.rs:
+#    use std::fs;`, que es el módulo `#[cfg(test)]` del freezer de f64 leyéndose a sí mismo. No es
+#    una violación de pureza (no se compila fuera de tests), pero un grep que imprime cuando el doc
+#    dice «nothing» enseña a ignorar el grep. Excluye el fichero del freezer:
+grep -rnE "now\(\)|SystemTime|Instant|thread_rng|rand::|env::var|new_v4|std::fs|std::io" crates/engine/src/ \
+  | grep -v '^crates/engine/src/lib.rs:'
 # → must print nothing.
+#    Y el control que 5.0.0 añade: el RNG entra en el crate estocástico, NUNCA aquí.
+grep -c "rand" crates/engine/Cargo.toml        # → 0
+grep -n "rand_chacha" crates/engine-stochastic/Cargo.toml   # → ahí sí, pineado
 
 # 2. Clock support isn't even compiled in: chrono has default-features=false, features=["alloc"]
 #    (no "clock" feature → Utc::now()/Local::now() unavailable at compile time):
@@ -363,6 +405,93 @@ liquidity+rate could drain in unspecified order. Values would still sum the same
       output is asserted by a test.
 - [ ] Double-run check: `cargo test -p futurefin-engine` twice; any flaky test is a determinism
       bug by definition.
+
+---
+
+## Recipe 7 — Refactor bit-idéntico con arnés golden (el motor por fases, 5.0.0)
+
+**Cuándo usarla:** vas a mover, generalizar o reescribir código numérico que **no puede cambiar ni
+un dígito**, y el cambio es demasiado grande para la Recipe 3 (un test de endpoint con cinco
+escalares no cubre 10.000 números por caso). Casos reales: hoistar un invariante fuera del bucle,
+sustituir cuatro escalares por un objeto, hacer el bucle **genérico sobre su tipo numérico**.
+
+La diferencia con la Recipe 3 no es de grado: allí capturas *unos* valores y confías en que sean
+representativos. Aquí capturas **todo lo que la función publica**, para **toda** una batería, y
+reduces el resultado a un hash por caso. Es lo que hizo posible el tren 5.0.0 —cinco refactores
+seguidos sobre el bucle— sin una sola regresión silenciosa.
+
+**Pasos**
+
+1. **Una batería, un sitio.** Extrae los casos a un módulo compartido
+   (`crates/engine/tests/common/cases.rs`) y haz que TODOS los consumidores lo usen. Dos baterías
+   escritas por separado divergen en cuanto alguien «mejora» una, y entonces el pin deja de pinear
+   lo que el volcado vuelca. Añade el test que fija la relación entre ellas
+   (`the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery`).
+2. **Canonicaliza a TEXTO, no a `f64`.** Cada número por su `Display` completo — en `Decimal` eso
+   incluye la **escala**, que es justo lo que un refactor mueve sin querer. Un `assert` sobre el
+   valor no habría visto nada.
+3. **Hashea por caso y guarda el fixture.** SHA-256 del texto canónico. El hash da la señal binaria
+   («esto cambió»); guarda además **cuatro escalares legibles** por caso (patrimonio final, líquido
+   final, aportado, mes de agotamiento) para que un hash que se mueve tenga un titular en el diff.
+   Sin eso, un pin roto se «arregla» regenerando sin mirar.
+4. **Escribe el control negativo.** Muta una salida a propósito y exige que el hash se mueva
+   (`the_hash_actually_notices_a_single_moved_decimal`). Un arnés sin él es un test que siempre pasa.
+5. **Regenerar es un acto declarado**, con variable de entorno propia (`UPDATE_ENGINE_PINS=1`) y
+   **obligación de CHANGELOG**. Un pin regenerado sin entrada es un cambio de números que nadie
+   declaró.
+6. **Cuando el arnés tenga que CRECER** (una salida nueva entra en la canonicalización), no lo metas
+   en el mismo fichero: **fixture aditivo aparte**. El pin viejo demuestra que lo viejo no se movió,
+   y dejaría de poder demostrarlo si creciera. Y añade el test de dos etapas que rehashea la capa
+   vieja **sola** contra los hashes anteriores
+   (`the_5_0_canonicalization_grew_without_moving_the_old_fields`).
+
+**Las cuatro trampas que este refactor encontró, y ninguna la habría cazado un `assert` de valor**
+
+| Trampa | Qué pasa | Cómo se evita |
+|---|---|---|
+| **`max` inherente vs `Ord::max`** | `rust_decimal` tiene `min`/`max` **inherentes** que devuelven `self` en el empate; `Ord::max` devuelve `other`. Mismo valor, **distinta escala** ⇒ distinto `Display` ⇒ distinto hash: `x.max(ZERO)` con `x = 0.000000000000000000` da `"0"` por `Ord` y `"0.000000000000000000"` por el inherente | Al abstraer a un trait, **delega en el método inherente**, no en el del `Ord`. Y `clamp` no es `max(lo).min(hi)`: `Ord::clamp` devuelve `self` intacto dentro del intervalo, y esa identidad conserva la escala |
+| **La escala del cero** | Sumar un cero de escala 0 a un acumulador de escala 18 devuelve **el operando**, no la suma — mismo valor, otro `Display`. Por eso una magnitud que a veces «no aplica» debe ser `Option<M>` y **no acumularse cuando no hubo evento**, en vez de sumar un 0 | Distingue «no ocurrió» de «ocurrió y vale cero» **en el tipo** |
+| **Un producto acumulado en vez de la potencia** | `powd` enruta los exponentes ENTEROS por `checked_powu` (potencia exacta); calcular `q(j+1) = q(j)·q(1)` los desvía a `exp`/`ln` y mueve los últimos dígitos | Al precalcular una familia `(1+p)^{k/12}`, haz **la misma llamada** que hacía el bucle, nunca una recurrencia multiplicativa |
+| **Re-derivar aguas abajo un hecho que el algoritmo ya sabe** | Un llamante deducía «¿se vendió el techo entero?» comparando `gross >= cap`. Exacto en `Decimal`, **filo de navaja** en aritmética aproximada — y de esa rama colgaba qué es recorte informativo y qué es descubierto que resta patrimonio. Coste medido: 8.138 € en un caso | **Publica el booleano** desde donde se sabe. Dos definiciones del mismo hecho divergen en cuanto cambia el tipo, la escala o el redondeo |
+
+**El inverso exacto en vez de la bisección** (variante de la Recipe 1, aplicada aquí). WP2 necesitaba
+la operación **inversa** del gross-up mixto: dado un techo BRUTO, qué se vende de cada tramo y qué
+netea. La tentación es bisecar sobre la función directa. Pero `F(G) = G − tax(B(G))` es **lineal a
+trozos** —pendiente `1 − r·g_j` mientras se vacía el tramo `j` bajo el tipo `r`— y sus quiebros son
+conocidos: las fronteras de capacidad (cambia `g`) y los techos de tramo fiscal (cambia `r`).
+**Recorrer los quiebros da el resultado EXACTO en ≤ `n + |tramos|` pasos**, sin tolerancias, sin
+oscilación en las fronteras y con números reproducibles a mano. La bisección sobre esa misma función
+es la familia que la arqueología ya retiró (§2.23). Regla general: **antes de bisecar, pregúntate si
+la función es lineal a trozos con quiebros que puedes enumerar.**
+
+**Cuándo la bisección SÍ es la respuesta.** El mismo tren la usa, y a propósito, en `solve.rs`: ahí
+la función objetivo es **la simulación entera** (cascada, topes, deuda, fiscalidad, latch de
+jubilación), no hay forma cerrada ni la habrá, y una aproximación escalar produciría un número
+plausible que ninguna simulación produce. Dos disciplinas para que siga siendo honesta:
+(1) **presupuesto fijo de iteraciones** (24 ⇒ el intervalo se divide por ~1,7e7), no un umbral de
+convergencia; (2) el invariante clásico —un extremo verificado BUENO y otro verificado MALO— y se
+devuelve el BUENO, así que el valor publicado se **ejecutó** y cumplió el criterio. La monotonía
+aporta la minimalidad, no la validez, y sus rendijas van declaradas en el doc-comment.
+
+**Los comandos**
+
+```bash
+cargo test -p futurefin-engine --test golden_pins            # los dos pines
+UPDATE_ENGINE_PINS=1     cargo test -p futurefin-engine --test golden_pins   # regenerar capa 4.15
+UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins   # regenerar capa aditiva
+cargo test -p futurefin-engine --release --test timing -- --ignored --nocapture  # el coste, en release
+cargo test -p futurefin-engine-stochastic                    # la puerta de degeneración
+git diff --stat crates/engine/tests/fixtures/                # DEBE salir vacío en un refactor bit-idéntico
+```
+
+**Check your work**
+
+- [ ] El fixture del pin **no aparece en el `git diff`** del refactor. Si aparece, el refactor no era
+      bit-idéntico: explica el delta antes de seguir, no regeneres.
+- [ ] El control negativo existe y falla cuando debe.
+- [ ] La medición de coste se hizo en `--release` (en `debug` los `checked_*` sin optimizar dan un
+      orden de magnitud de diferencia, y un número de `debug` solo compara con otro de `debug`).
+- [ ] Si el cambio **debía** mover números, el delta está en el CHANGELOG con su cifra.
 
 ---
 
@@ -401,11 +530,15 @@ Re-verify before trusting volatile facts:
 
 - Version: `grep -n '^version' apps/api/Cargo.toml`
 - Migration count: `ls apps/api/migrations | wc -l`
-- Gross-up closed form still in place + tests: `grep -n "gross_up_net_annual_fire\|gross_up_binary_reference" apps/api/src/handlers/projection.rs`
-- TS side still binary search (or has adopted the closed form): `grep -n "for (let i = 0; i < 90" apps/web/src/lib/fire.ts`
+- Gross-up closed form still in place + tests: `grep -n "gross_up_net_annual_fire\|gross_up_binary_reference" apps/api/src/handlers/projection.rs` — **ojo, `gross_up_binary_reference` ya no vive ahí**: el oráculo de bisección se mudó con la fiscalidad; vive en `crates/engine/src/tax.rs` desde que la fiscalidad se mudó al motor (`grep -n "fn gross_up_binary_reference" crates/engine/src/tax.rs`, 1 hit el 2026-09-03). El oráculo de bisección **sigue existiendo como test**, que es justo lo que la Recipe 1 pide.
+- ~~TS side still binary search~~ — **adoptó la forma cerrada en la Ola 2 (#118, 4.6.0) y este grep salía VACÍO**: `grep -n "export function grossUpNetAnnualFire" apps/web/src/lib/fire.ts`
 - Single fire-target helper still sole source: `grep -rn "fire_target_at_month_index" crates apps/api/src | grep -v test`
 - Chart deflates by month_index: `grep -n "deflator(p.month_index)" apps/web/src/views/ProjectionNetWorthChart.tsx`
 - f64 wire boundary unchanged: `grep -n "serialize_decimal_as_f64" apps/api/src/handlers/projection.rs`
-- Parity fixture cases + tolerance: `grep -n "_tolerance_eur\|\"name\"" apps/api/tests/fixtures/fire-parity.json`
+- Parity fixture cases + tolerance: `python3 -c "import json;print(len(json.load(open('apps/api/tests/fixtures/fire-parity.json'))['cases']))"` (**17** el 2026-09-03) y `grep -n "_tolerance_eur" apps/api/tests/fixtures/fire-parity.json`
+- **Recipe 7 (arnés golden, 5.0.0)**: `ls crates/engine/tests/fixtures/` (dos fixtures) y los cuatro tests que la sostienen — `grep -n "fn golden_pins_match_4_15_0\|fn the_hash_actually_notices_a_single_moved_decimal\|fn the_5_0_canonicalization_grew_without_moving_the_old_fields\|fn the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery" crates/engine/tests/golden_pins.rs` (4 hits)
+- **La trampa del `max` inherente, declarada en el trait**: `grep -n -B2 -A6 "fn max(self" crates/engine/src/money.rs`
+- **El inverso exacto en vez de la bisección** (Recipe 7): `grep -n "fn mixed_drawdown_for_gross_cap" crates/engine/src/tax.rs`; y la bisección legítima, `grep -n "pub const MAX_SOLVE_ITERATIONS" crates/engine/src/solve.rs`
+- **La segunda frontera f64 (Recipe 5)**: `grep -c "impl MoneyOps for F64Money" crates/engine-stochastic/src/lib.rs` (1) y el freezer intacto `grep -n "fn crates_engine_src_has_no_f64_outside_comments" crates/engine/src/lib.rs`
 - Engine purity greps: the four commands in Recipe 6.
 - CI scope (what is / isn't covered): `grep -nE "cargo (test|build)|npm" .github/workflows/ci.yml`

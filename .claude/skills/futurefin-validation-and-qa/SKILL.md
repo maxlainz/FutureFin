@@ -61,19 +61,24 @@ withdrawn in retirement); **gross-up** = inflating a net annual need to the pre-
 amount using progressive tax brackets; **installation** = the singleton row all data belongs
 to; **cascade** = the ordered allocation-rules pipeline distributing monthly surplus to assets.
 
-## 2. Test inventory (as of 2026-08-19, post-3.5.0)
+## 2. Test inventory (as of 2026-08-19, post-3.5.0; **fila del motor y crate estocástico al día a 2026-09-03**)
 
 Three suites. None share infrastructure; run all three before merging. Counts below are date-stamped,
 not authoritative — recount with the commands in "Provenance and maintenance".
 
 | Suite | Location | Needs | Command (from repo root) |
 |---|---|---|---|
-| Engine unit tests (**67** as of 2026-08-22) | `crates/engine/src/{projection.rs (32), history.rs (22), runway.rs (13)}` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
+| Engine (**199 unitarios + 36 en `tests/`** el 2026-09-03 — el número se movió dos veces esa tarde; eran 67 el 2026-08-22) | `crates/engine/src/*.rs` `mod tests` **más cuatro binarios** en `crates/engine/tests/`: `golden_pins.rs`, `phases_wp3.rs`, `audit_dump.rs` y `timing.rs` (este todo `#[ignore]`) | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
+| **Crate estocástico** (**27** el 2026-09-03, **1 en rojo**) | `crates/engine-stochastic/` — `tests/degeneration.rs` es la **puerta de aceptación** del camino `f64`; `tests/monte_carlo.rs` (WP6a, `ba6bdfe`) las de Monte Carlo. Falla `mc_cash_buffer_changes_the_band_under_sequence_risk`: predicción falsada, no test flaky | Nothing | `cargo test -p futurefin-engine-stochastic` (paso propio en CI, job `rust`) |
 | Backend integration (**43 files on 2026-08-27**; 33 files / 375 attributes on 2026-08-22) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
 | Frontend Vitest (**368, 16 files, as of 2026-08-22**) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
 
 **Whole-workspace total: 498 on 2026-08-22** (`cargo test --workspace`), which is engine + the 57 API
-lib unit tests + integration. Ask the runner for totals; a `grep` of attributes is an approximation
+lib unit tests + integration. **Ese total está muy desfasado a 2026-09-03** y esta pasada no lo
+recontó entero (solo el motor): pídeselo al runner
+(`cargo test --workspace 2>&1 | grep "test result"`), y ojo — desde 5.0.0 el workspace incluye un
+crate más y **el «0 ignored» dejó de valer para el conjunto**: `timing.rs` aporta 7 `#[ignore]`
+deliberados. El «0 ignored» sigue siendo el contrato de `apps/api/tests/`. Ask the runner for totals; a `grep` of attributes is an approximation
 (loops generate tests on the frontend, and an attribute is not always an executed test).
 
 Plus API lib unit tests run by `cargo test --workspace` (no Postgres; count with
@@ -388,6 +393,56 @@ startup path (a new guard, a new migration mode) means adding a step there in th
 
 ## 4. Golden / certified inventory
 
+### `crates/engine/tests/fixtures/pins-4.15.json` + `pins-5.0-outputs.json` — el arnés golden del motor (5.0.0)
+
+La red que hizo posible reescribir el bucle cinco veces en un tren sin una regresión silenciosa.
+`crates/engine/tests/golden_pins.rs` canonicaliza a **texto** todas las salidas del motor caso a caso
+—hasta el último dígito de cada `Decimal`, vía `Display`, **la escala incluida**— y las resume en un
+SHA-256 por caso. La batería es única y compartida (`crates/engine/tests/common/cases.rs`), también
+con `audit_dump.rs` y `timing.rs`.
+
+| Fixture | Qué hashea | Regla |
+|---|---|---|
+| `pins-4.15.json` | Lo que 4.15.0 ya publicaba: series `net_worth`/`liquid_worth`/`contributed_capital`/`per_asset_series` mes a mes, agotamiento, descubierto, no asignado, el `first_month_allocation` entero con su traza regla a regla, y el calendario de cada pasivo | **Su batería NO crece** (`projection_cases_all()`): añadirle un caso obligaría a regenerar el fichero que existe para no moverse |
+| `pins-5.0-outputs.json` | **Aditivo**: índices de fase, transiciones, las tres series `withdrawal*`, `disposable_cash` y las lecturas de puente/media jornada, sobre esa batería **más** los casos P14–P23 | Puede regenerarse cuando la canonicalización **CRECE**, y hay un test que lo demuestra (abajo) |
+
+**Qué puede y qué no puede regenerarse** (`UPDATE_ENGINE_PINS=1` / `UPDATE_ENGINE_PINS_5_0=1`,
+mismo patrón que `UPDATE_MCP_CATALOG=1`):
+
+- **`pins-4.15.json` no se regenera para hacer pasar un refactor.** Todo el tren 5.0.0 lo dejó
+  byte-idéntico. Si se mueve, la aritmética cambió, y entonces hace falta **entrada de CHANGELOG con
+  el delta medido** (`futurefin-change-control`). Un pin regenerado sin ella es un cambio de números
+  que nadie declaró — y en un `git diff` el fichero regenerado *por añadir un campo* y el regenerado
+  *por romper el drenaje* se ven exactamente igual.
+- Por eso el control de dos etapas: `the_5_0_canonicalization_grew_without_moving_the_old_fields`
+  rehashea **la capa vieja sola** contra los SHA-256 previos. Es lo que distingue «añadí campos» de
+  «moví números».
+- Y por eso los controles negativos: `the_hash_actually_notices_a_single_moved_decimal` y
+  `the_5_0_hash_notices_a_moved_withdrawal_and_a_moved_phase` mutan una salida a propósito. Un arnés
+  sin control negativo es un test que siempre pasa.
+- `the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery` impide que reordenar la batería
+  cambie el CSV del oráculo externo sin que el hash lo delate.
+
+**Regla operativa para cualquier PR que toque el motor**: `git diff --stat
+crates/engine/tests/fixtures/` **debe salir vacío** salvo que el cambio sea intencionadamente
+output-changing, y entonces el delta va en el CHANGELOG.
+
+### `crates/engine-stochastic/tests/degeneration.rs` — la puerta del camino `f64` (5.0.0)
+
+El test de aceptación de que el camino de coma flotante y el exacto son **la misma simulación**:
+sobre **todos** los casos de la batería compara `net_worth` y `liquid_worth` mes a mes en todo el
+horizonte y, **exactas**, las decisiones discretas (mes de jubilación, cruce, agotamiento,
+transiciones de fase). Cota de contrato: **1 € por mes** (máximo medido 1,47e-7 € en P9 a 840 meses).
+
+- **Ningún caso se excluye y ninguna cota se relaja «porque falla»**: cada fila imprime su máximo, su
+  mes y qué regla se le aplicó. La única cota relativa (1e-12) es para los casos sintéticos por
+  encima de `2^53 €`, donde el espaciado de los propios `f64` ya supera el euro — una cota imposible
+  no mide nada, solo obliga a desactivar el test— **y esos casos van marcados**.
+- Es la salvaguarda con la que se readmite la coma flotante (`futurefin-failure-archaeology` §2.9
+  scope note): el freezer de `crates/engine` sigue intacto y sin excepciones.
+- **Ya pagó su coste**: cazó un filo de navaja preexistente que ninguna suite `Decimal` podía ver
+  (`cap_exhausted`, 8.138 € en el caso P15 — §2.26 de la arqueología).
+
 ### `apps/api/tests/fixtures/fire-parity.json` — the canonical cross-language fixture
 
 The FIRE target math is **deliberately duplicated**: the client (`apps/web/src/lib/fire.ts`)
@@ -537,11 +592,28 @@ guessed margin: it returns as soon as the entries appear.
 
 ### Engine unit test
 
-Add to `mod tests` in `crates/engine/src/projection.rs`. Use the existing builders
-`mk_asset`, `rule_fixed`, `rule_percent`, `rule_remainder`, `base_input` — do not
-hand-construct `ProjectionInput`. Assert exact `Decimal` values (pure math, no tolerance
-needed) and derive them by hand in a comment first (predict-then-measure). Run:
-`cargo test -p futurefin-engine -- <name>`.
+Add to `mod tests` **del módulo que estás tocando** (`crates/engine/src/{projection,phases,target,
+withdrawal,tax,history,runway,net_return,money}.rs` — desde 5.0.0 el motor son trece ficheros, y
+`sim.rs`/`sim_core.rs`/`solve.rs` no llevan `mod tests` propio a propósito: lo que los prueba son los
+pines dorados y `tests/phases_wp3.rs`). Use the existing builders `mk_asset`, `rule_fixed`,
+`rule_percent`, `rule_remainder`, `base_input` — do not hand-construct `ProjectionInput`. Assert
+exact `Decimal` values (pure math, no tolerance needed) and derive them by hand in a comment first
+(predict-then-measure). Run: `cargo test -p futurefin-engine -- <name>`.
+
+**Cuándo NO es un unit test lo que necesitas** (5.0.0):
+
+- **Semántica nueva de fases/reglas/solves** → `crates/engine/tests/phases_wp3.rs`, cuyo contrato es
+  que **cada assert lleva su número predicho a mano en el comentario que lo precede**. Casi todos sus
+  casos van con rentabilidad 0 %, inflación 0 % y sin impuestos: no por realismo, sino para que cada
+  euro de la serie sea una suma que cabe en una línea y una discrepancia señale el mes exacto. Los
+  caminos con fiscalidad, inflación y `powd` los cubren los pines.
+- **Un refactor que no debe cambiar números** → no escribas asserts nuevos: corre el golden
+  (§4) y exige `git diff --stat crates/engine/tests/fixtures/` **vacío**.
+- **Un caso límite que merece oráculo externo** → añádelo a `projection_cases_5_0()` en
+  `crates/engine/tests/common/cases.rs`; entra a la vez en el pin aditivo y en el CSV de
+  `audit_dump.rs`. **No lo añadas a `projection_cases_all()`**: esa batería es la que `pins-4.15.json`
+  hashea y crecer la obligaría a regenerar el fichero que existe para no moverse.
+- **Una medición de coste** → `crates/engine/tests/timing.rs`, en `--release` y con `#[ignore]`.
 
 ### Frontend test
 
@@ -577,10 +649,20 @@ test pure functions only; extract logic out of components to make it testable.
   `210000`) lived in exactly that hole. Before you write "covered by unit tests", `grep -c '#[test]'`
   the file.
 - **No property-based tests** on the engine (e.g. invariants like "cascade never allocates
-  more than the surplus", "NW series is deterministic under input permutation"). Labeled a
-  candidate direction — see `.claude/skills/futurefin-research-frontier/SKILL.md`.
-- **No load/performance tests.** The projection-cache tests assert relative hit/miss speed
-  only; there is no throughput or memory baseline.
+  more than the surplus", "NW series is deterministic under input permutation"). Sigue abierto —
+  compruébalo con `grep -rn proptest crates/ apps/ --include=Cargo.toml` (vacío el 2026-09-03) — y
+  es el ítem 1 de `.claude/skills/futurefin-research-frontier/SKILL.md`. **Lo que 5.0.0 sí cubrió de
+  ese hueco**: los pines dorados dan reproducibilidad bit a bit sobre una batería FIJA, y la puerta
+  de degeneración compara dos implementaciones del mismo modelo. Lo que sigue faltando es la
+  generación de entradas.
+- **No load/performance tests** en el sentido de throughput o memoria. **Matiz de 5.0.0**: sí hay un
+  **arnés de tiempos** del motor (`crates/engine/tests/timing.rs`, todo `#[ignore]` a propósito:
+  mide, no afirma — un test que falla porque una máquina va lenta enseña a ignorar el CI). Se corre
+  en `--release` y da ms por proyección, por bisección y por lote; sirvió para decidir cotas con
+  evidencia (28,5 ms → 12,6 ms tras el hoist de WP1a). Y la afirmación sobre la cache está
+  desfasada: `projection_cache.rs` ya no cronometra — **prueba el HIT envenenando la entrada** con
+  un centinela, porque el test de cronómetro era el más flaky del repo y tenía una rama de escape
+  por la que pasaba sin medir nada.
 
 ## When NOT to use this skill
 
@@ -626,6 +708,23 @@ the table**: Fases 2/3 of the same MCP-audit train (issues #83/#92) had already 
 but left unresolved (§ "Integration test files") — treat every count in this skill outside the
 Fase-5 additions as unverified until recounted. Re-verify volatile facts with:
 
+**Ampliada el 2026-09-03 para 5.0.0** (rama `release/5.0.0`, issue #207): la fila del motor y la del
+crate estocástico del §2, el arnés golden y la puerta de degeneración del §4, la receta de «cuándo NO
+es un unit test» del §5 y las dos filas de huecos del §6. **Esta pasada solo re-verificó lo del
+motor**; los contadores de `apps/api` y Vitest siguen sin recontar y el barrido de provenance del
+mismo día los midió así: `ls apps/api/tests/*.rs | wc -l` → **76** (esta ficha dice 62/44),
+`grep -rn '#[tokio::test]\|#[test]' apps/api/src | wc -l` → **112** (dice 91/57), casos de
+fire-parity → **17** (dice 7). Corrígelos en la pasada de API, con el comando.
+
+- Motor y crate estocástico (2026-09-03): `cargo test -p futurefin-engine 2>&1 | grep "test result"`
+  y `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`; sin compilar,
+  `grep -c '#\[test\]' crates/engine/src/*.rs | awk -F: '{s+=$2} END{print s}'` (**199** — usa el
+  glob, no una lista de ficheros) y `grep -c '#\[test\]' crates/engine/tests/*.rs crates/engine-stochastic/tests/*.rs`
+- Arnés golden intacto: `ls crates/engine/tests/fixtures/` (2) y los cuatro tests que lo sostienen,
+  `grep -n "fn golden_pins_match_4_15_0\|fn the_hash_actually_notices_a_single_moved_decimal\|fn the_5_0_canonicalization_grew_without_moving_the_old_fields\|fn the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery" crates/engine/tests/golden_pins.rs` (4 hits)
+- Puerta de degeneración: `grep -n "const EUR_TOLERANCE\|const REL_TOLERANCE\|fn every_case_degenerates_from_decimal_to_floating_point" crates/engine-stochastic/tests/degeneration.rs` (3 hits)
+- Los dos crates de motor corren en CI y en `test-all.sh`: `grep -n "futurefin-engine" .github/workflows/ci.yml scripts/test-all.sh` (≥4 hits)
+- Los `#[ignore]` del motor son deliberados y solo los de tiempos: `grep -c '^#\[ignore' crates/engine/tests/timing.rs` (**7**)
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
 - Workspace total: `cargo test --workspace 2>&1 | grep "test result"` (**498 on 2026-08-22** — stale, do not trust without recounting; several files were added since)
 - **Fase 5 additions (2026-08-28)**: `grep -c '#\[tokio::test\]' apps/api/tests/context_fields.rs`
@@ -639,7 +738,7 @@ Fase-5 additions as unverified until recounted. Re-verify volatile facts with:
   `grep -c '#\[test\]' apps/api/src/ha_idp/mod.rs` (**11**) vs
   `grep -c '#\[test\]' apps/api/src/ha_idp/client.rs` (**0**, deliberate);
   no HTTP-mock crate crept in: `grep -rn "wiremock\|mockito\|httpmock" apps/api/Cargo.toml` (empty)
-- Engine test count: `cargo test -p futurefin-engine 2>&1 | grep "test result"` (**67 on 2026-08-22** = projection 32 + history 22 + runway 13; it was 61 = 27+21+13 on 2026-08-19)
+- ~~Engine test count~~ — **desfasada tres trenes**: decía **67 on 2026-08-22** (projection 32 + history 22 + runway 13; 61 = 27+21+13 on 2026-08-19). Hoy son **199 unitarios + 36 en `tests/`**; ver la línea de 2026-09-03 más arriba, que además explica por qué el desglose de tres ficheros ya no vale.
 - Integration attributes: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**449 across 44 files on 2026-08-27**; 375 across 33 on 2026-08-22). Lib unit tests: `grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l` (**84 on 2026-08-27**; 72 after 4.3.0, 57 on 2026-08-22)
 - Frontend Vitest total — always ask the runner, never count `it(`: `npm test --workspace futurefin-web 2>&1 | grep "Tests "` (**368 in 16 files on 2026-08-22**; `chart-gestures.test.ts` and `fire.test.ts` generate tests in loops, so the static `it(` count is lower)
 - Migration count: `ls apps/api/migrations/*.sql | wc -l` (**44 on 2026-08-27**; 42 on 2026-08-22; 40 on 2026-08-19)

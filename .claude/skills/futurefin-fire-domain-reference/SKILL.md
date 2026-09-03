@@ -8,8 +8,11 @@ description: >
   retirement drawdown/drain, milestones vs milestones_real, deflation for display, the
   projection horizon rule, fire-parity.json, or any question like "why does the target grow?",
   "why did jubilación move?", "is this number in today-euros?", "how is the surplus split
-  across assets?". Also load it BEFORE editing crates/engine/src/projection.rs,
-  apps/api/src/handlers/projection.rs or apps/web/src/lib/fire.ts. Do NOT use it as a bug
+  across assets?"; and, since 5.0.0, retirement STRATEGIES (asap / retire_at_age / coast /
+  partial / pension_bridge), phases, dated pension, the bridge target, withdrawal rules
+  (fixed_real / percent_of_balance / hybrid / guardrails) and the solves. Also load it BEFORE
+  editing crates/engine/src/{projection,sim_core,phases,target,withdrawal,solve}.rs,
+  apps/api/src/handlers/{projection,retirement_profile}.rs or apps/web/src/lib/fire.ts. Do NOT use it as a bug
   triage runbook (futurefin-debugging-playbook), to change the economic model
   (futurefin-change-control + futurefin-projection-realism-campaign), or for env/config axes
   (futurefin-config-and-flags).
@@ -24,7 +27,16 @@ description: >
 
 Everything here is the model **as implemented** (verified against code on 2026-07-02,
 v1.4.3; §2b re-verified 2026-08-14 against v2.2.0; §2c, §4, §5, §7 y §9 revisados 2026-08-28 con la
-Fase 6 del tren 4.4.0), not textbook FIRE theory.
+Fase 6 del tren 4.4.0; **§1, §2, §4, §4b, §5, §6, §7 y §9 reescritos el 2026-09-03 para el motor por
+FASES de 5.0.0**, rama `release/5.0.0`, issue #207), not textbook FIRE theory.
+
+> **Lo que 5.0.0 cambia de raíz, y por qué casi todo lo de abajo se movió**: la jubilación deja de
+> ser un evento del hogar disparado por un cruce y pasa a ser una **estrategia por usuario**
+> (`users.retirement_profile`) que decide el disparador, la base del objetivo, las fases y la regla
+> de retirada. `installation.fire_settings` **pierde** `fire_number_mode`,
+> `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age` — viven ahora en el perfil
+> (`apps/api/src/handlers/retirement_profile.rs`) — y conserva los supuestos COMPARTIDOS (inflación,
+> impuestos, `savings_source` y sus ventanas, divisa, tz). §4b es el mapa nuevo.
 
 > **⚠️ Los números de línea de este fichero son masivamente obsoletos y NO se han corregido uno a
 > uno.** `crates/engine/src/projection.rs` creció ~880 líneas con la Fase 6 (issue #87) y
@@ -37,16 +49,29 @@ Fase 6 del tren 4.4.0), not textbook FIRE theory.
 > caduca en silencio y miente con más credibilidad que la ausencia.
 
 Primary sources (ground truth, in this order):
-- `crates/engine/src/projection.rs` — the simulation (pure, `Decimal`-only, **56** unit tests tras
-  la Fase 6; esta línea decía 22 desde v1.4.3 — cuéntalos con
-  `grep -c '#\[test\]' crates/engine/src/projection.rs`).
-- `apps/api/src/handlers/projection.rs` — FIRE number, gross-up, horizon, deflation, milestones.
-- `apps/api/src/handlers/installation.rs` — `FireSettings` defaults + validation.
+- `crates/engine/src/` — the simulation (pure, `Decimal`-only). **Ya no es un fichero**: desde
+  5.0.0 el bucle vive en `sim_core.rs` (genérico sobre el trait `MoneyOps` de `money.rs`) y
+  `projection.rs` conserva los tipos públicos y los envoltorios `Decimal`; el plan de fases está en
+  `phases.rs`, el objetivo consciente del plan en `target.rs`, las reglas de retirada en
+  `withdrawal.rs`, las inversas en `solve.rs` y la fiscalidad en `tax.rs`. Cuenta sus tests con
+  `grep -c '#\[test\]' crates/engine/src/*.rs` (**199** el 2026-09-03; la línea que aquí decía
+  «56» contaba un solo fichero, y antes decía 22 desde v1.4.3).
+- `apps/api/src/handlers/projection.rs` — FIRE number, gross-up, horizon, deflation, milestones,
+  y el ensamblado del `PhasePlan` desde el perfil.
+- `apps/api/src/handlers/retirement_profile.rs` — **el perfil de jubilación por usuario** (5.0.0):
+  defaults, cotas y resolución de las cinco estrategias.
+- `apps/api/src/handlers/installation.rs` — `FireSettings` (ya solo los supuestos compartidos) +
+  la escala de tramos por defecto.
 - `apps/web/src/lib/fire.ts` — client-side duplicate for the live preview (server stays source of truth).
 - `apps/api/tests/fixtures/fire-parity.json` — canonical cases shared by both sides.
 
 Historical note: `projection_target_age` was **removed** in v1.0.6 (migration
-`20260516120000_drop_projection_target_age.sql`); FIRE crossover is the sole retirement trigger.
+`20260516120000_drop_projection_target_age.sql`) y durante nueve versiones el cruce FIRE fue el
+único disparador. **5.0.0 readmite la edad como disparador, pero no como campo suelto**: es el
+trigger de dos ESTRATEGIAS (`retire_at_age`, `coast`) y de ninguna otra, con el invariante de un
+solo trigger por simulación que §4b describe — lo que v1.0.6 mató fue la coexistencia ambigua de
+dos disparadores, no la idea de jubilarse a una edad. La readmisión está registrada como tal en
+`futurefin-failure-archaeology` §1 fila 1 y §2.2 (scope note 5.0.0).
 `horizon_basis` strings are `lifespan_age | fallback_no_demographics | months_override` since
 4.9.0/#149 (`lifespan_90` hasta 4.8.0 — el 90 dejó de ser constante), con `horizon_lifespan_age`
 ecoado al lado. (The docs/comments that still described the old model were fixed on 2026-07-02.)
@@ -62,7 +87,14 @@ ecoado al lado. (The docs/comments that still described the old model were fixed
 | **Nominal euros** | Euros of the moment they occur ("euros del momento"). All engine series are nominal. |
 | **Real euros / today-euros** | Nominal divided by `(1+inflation/100)^(years)`. Display-only concept. |
 | **Deflation** | The nominal→real division above. Done in the handler (`deflate_points_to_today`) and in the chart, never inside the engine. |
-| **Jubilación** | Retirement. UI tab name and API field prefix (`jubilacion_month_index`). Triggered **only** by the FIRE crossover — there is no target-age trigger. |
+| **Jubilación** | Retirement. UI tab name and API field prefix (`jubilacion_month_index`). **Desde 5.0.0 el disparador lo elige la ESTRATEGIA**: el cruce del líquido (`asap`, `pension_bridge`) o una EDAD (`retire_at_age`, `coast`), y solo uno por simulación (§4b). `jubilacion_month_index` es el mes EFECTIVO; el cruce puro, cuando no dispara, se publica aparte como `liquid_crossing_month_index`. La afirmación «there is no target-age trigger», cierta desde v1.0.6, **dejó de serlo el 2026-09-03** — la readmisión es deliberada y acotada (`futurefin-failure-archaeology` §1 fila 1, scope note 5.0.0). |
+| **Estrategia** | Una de las cinco de `RetirementProfile::strategy`: `asap`, `retire_at_age`, `coast`, `partial`, `pension_bridge`. Es dato **por usuario**, no de la instalación, y gobierna cómo corre el motor entero. §4b. |
+| **Fase** | `Accumulating` → (`Partial`) → `Retired`, latch **monótono** (`crates/engine/src/phases.rs::Phase`). Decide de qué partida sale el ingreso y con qué base se indexa el gasto. |
+| **Regla de retirada** | Cuánto se puede vender cada mes jubilado: `fixed_real` (default, = el drenaje de 4.15.0), `percent_of_balance`, `hybrid`, `guardrails`. Sus `pct` son **BRUTOS de impuestos**, como el SWR. §4b. |
+| **Modo de gasto** (`spend_mode`) | `ceiling` = la regla es un TECHO (se vende `min(necesidad, permitido)`, solo en déficit); `rule_is_spend` = la regla ES el gasto (se vende `permitido` todos los meses jubilados). |
+| **Puente** (`bridge_to_pension`) | Base de objetivo que dimensiona el capital para llegar hasta la pensión MÁS la perpetuidad sobre lo que la pensión no cubra. §4b. |
+| **Coast** | El mes desde el que se puede dejar de aportar y aun así llegar al objetivo en la edad objetivo. El «número coast» es el líquido con el que se ENTRA en ese mes. |
+| **Margen disponible** (`disposable_cash`) | Caja que un techo de aportación dejó FUERA de la cascada. **No es patrimonio**: no se invierte, no compone y no entra en `net_worth` — mismo trato que `unallocated_savings_total`. |
 | **Sobrante / surplus** | Positive monthly net cash (`income − expense − debt_service + planning_adj`). Fed into the allocation cascade — **also in retirement, the SAME cascade, no exception** (4.12.1, #175). Unrouted surplus does NOT enter net worth: it accumulates in `unallocated_savings_total`, unreachable in production with live assets (indestructible sink, #176). |
 | **Cascade** | The ordered list of `allocation_rules` that distributes the monthly surplus across assets. §6. |
 | **Debt service** | Sum of active liability monthly payments, each capped by remaining principal. |
@@ -74,8 +106,14 @@ ecoado al lado. (The docs/comments that still described the old model were fixed
 ## 2. The FIRE number: three modes
 
 Server: `compute_fire_need` (handler) construye el `FireNeed` por modo y el ENGINE evalúa el
-objetivo POR MES (`fire_target_base_at_month_index`, 4.10.0/#170). Settings:
-`installation.fire_settings` JSONB, defaults applied on read by `resolve_fire_settings`.
+objetivo POR MES (`fire_target_base_at_month_index`, 4.10.0/#170). Settings: **desde 5.0.0
+`fire_number_mode`, `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age` viven en
+`users.retirement_profile`** (mismas cotas, mismo patrón tri-estado: `resolve_retirement_profile`
++ `validate_*` en `handlers/retirement_profile.rs`), no en `installation.fire_settings` — que
+conserva `taxes_enabled`, `tax_brackets`, `taxable_gain_ratio`, `savings_source` y sus cuatro
+ventanas, y sigue resolviéndose con `resolve_fire_settings`. La fórmula de abajo **no cambia**;
+lo que cambió es de dónde salen sus parámetros, y que **con pensión CON FECHA el objetivo lo
+evalúa el evaluador consciente del plan** (§4b), no esta función.
 
 ```
 need(k) =
@@ -334,21 +372,32 @@ The single most important idea in the codebase. Philosophy: **"haciendo lo que h
   preexistente, no causada por la Fase 6; se arregla aquí porque un lector que la creyera
   concluiría que un activo con rentabilidad esperada negativa se queda plano.
 - **Inflation moves the FIRE target AND the loop's expense — never incomes** (4.9.0, #139/#146).
-  `FireTarget { base_amount, annual_inflation_percent, debt_payments_remaining }` for the target;
+  El objetivo viaja como
+  `FireTarget { need, swr_pct, tax_brackets, taxes_enabled, taxable_gain_ratio, annual_inflation_percent, debt_payments_remaining }`;
   `ProjectionInput.annual_inflation_percent` indexes the expense with the same
   `inflation_factor_at_month_index` on the `(k−1)/12` axis. The old handler clamps to ≥ 0 are
   GONE (#146: range [−2, 50]; negative inflation composes — target and expense DECREASE);
   re-verify with `grep -n "inflation" apps/api/src/handlers/projection.rs | grep -c "max(Decimal::ZERO)"` (must print 0).
 
-The single formula — `fire_target_at_month_index` (projection.rs:171-182), public in the engine
-crate and consumed by BOTH the engine and the handler:
+The single formula — `fire_target_at_month_index`, public in the engine crate and consumed by BOTH
+the engine and the handler. **Ojo: este bloque describía hasta el 2026-09-03 el modelo PRE-#170**
+(`FireTarget.base_amount × (1+i)^(m/12)`, con la base pre-calculada e inflada entera). `base_amount`
+se **retiró en 4.10.0/#170** y el objetivo se evalúa mes a mes SOBRE LA NECESIDAD; el §2 de esta
+misma ficha ya lo decía bien, así que el fichero se contradecía a sí mismo. La forma vigente:
 
 ```
-target(month_index) = base_amount × (1 + inflation/100)^(month_index / 12) + debt_term(month_index)
-month_index = 0 → base_amount + debt_term(0).   inflation = 0 → flat BASE at every month.
-debt_term(m) (4.8.0, #142) = Σ cuota cash-outs remaining AFTER month m + residual tail
-                             (from FireTarget.debt_payments_remaining; 0 with no liabilities).
+target(i) = gross_up(need(i)·12, tramos, taxes_enabled, g) / (swr_pct/100) + debt_term(i)
+need(i)   = la necesidad REAL del mes según `FireNeed` (§2), indexada por f(i)
+i = 0     → la fórmula histórica: la vista previa y fire-parity.json no se mueven
+debt_term(i) (4.8.0, #142) = Σ cuota cash-outs remaining AFTER month i + residual tail
+                             (from FireTarget.debt_payments_remaining; 0 with no liabilities),
+                             y NO se infla — las cuotas son nominales por contrato.
 ```
+
+El gross-up de la necesidad inflada **no es** el gross-up inflado: la escala es afín, no homogénea,
+y los tramos son NOMINALES (fiscal drag). Por eso la evaluación por mes aplica a los tres modos.
+Y **con pensión CON FECHA el objetivo lo evalúa `PlanFireTarget`** (§4b), que sin pensión LLAMA a
+esta misma función del núcleo — la bit-identidad es por construcción, no por revisión.
 
 **The target is no longer monotonic (4.8.0)**: growing base + decaying debt term. No optimization
 may assume monotonicity (binary-search crossing, early exit); the crossing scan is linear. With
@@ -406,9 +455,164 @@ nuevo, pineado en `simulate_liability_kpis.rs::net_cash_monthly_stays_verifiable
 ahí las cuotas ya viven dentro del promedio de gasto, así que amortizar dos veces el mismo euro
 sería doble conteo.
 
+### 4b. El plan de jubilación: estrategias, fases, objetivo con puente y solves (5.0.0)
+
+Todo lo de esta sección vive en `crates/engine/src/{phases,target,withdrawal,solve}.rs` y lo ejecuta
+`sim_core::simulate`. Quien traduce el perfil del usuario a un `PhasePlan` es
+`apps/api/src/handlers/projection.rs`; **el motor no conoce estrategias ni fechas de nacimiento**,
+solo el plan que le pasan.
+
+#### Las cinco estrategias y el invariante del trigger único
+
+| Estrategia | Trigger | Objetivo | Lecturas propias |
+|---|---|---|---|
+| `asap` | cruce del líquido | `perpetuity` / `bridge` | `liquid_crossing_month_index`, series `withdrawal_*` |
+| `retire_at_age` | `AtMonth(R)` | `T(R−1)` | `required_contribution_monthly` + `search_ceiling`, `required_capital_path`, `disposable_*`, `underfunded` |
+| `coast` | `AtMonth(R)` | `T(R−1)` | `coast_fire_month_index`, `coast_number`, `coast_path` |
+| `partial` | parcial en `AtMonth(X)`; total por cruce o `AtMonth(R)` | perpetuity/bridge; `partial_gap_target` informativo | `partial_retirement_month_index`, `partial_gap_target`, `partial_phase_capital_growing` |
+| `pension_bridge` | cruce del líquido | `bridge_to_pension` forzado | `bridge_effective_withdrawal_pct`, `pension_coverage_ratio`, `pension_start_month_index` |
+
+- **Un solo trigger por simulación**, y lo impone la ESTRATEGIA (handler), no el motor. El bucle
+  conserva la UNIÓN de 4.15.0 —`cruce || k ≥ R`, o sea `min(cruce, R)`— porque es lo que el pin
+  dorado tiene fotografiado; el eje que apaga el cruce es `PhasePlan::crossing_is_reading_only`.
+  Con `true`, el cruce **no jubila** y solo se anota en `liquid_crossing_month_index`.
+- **Por qué un flag y no `fire_target: None`**: las estrategias por edad SIGUEN necesitando el
+  objetivo — el chart lo pinta y el infra-financiado se mide contra él. Desactivar el cruce quitando
+  el objetivo habría tirado también la lectura.
+- **El invariante que hay que testear es de COMPORTAMIENTO, no del enum**: en cada estrategia, el
+  mes en que el ingreso cambia a jubilación == `retirement_month_index` == el marcador del chart ==
+  el primer mes de `Retired`.
+- **La edad manda** (D17): en `retire_at_age`/`coast` el hogar se jubila en `R` aunque el capital no
+  llegue, con `EngineWarning::RetireAtAgeUnderfunded`. El aviso mira el **objetivo**, no el trigger:
+  si quien jubiló fue el cruce, `L(R−1) ≥ T(R−1)` por definición y la rama no puede darse.
+- Sin `users.birth_date` las estrategias por edad **degradan a `asap`** con `warnings:
+  ["birth_date_missing"]` — nunca un 500 ni una edad inventada.
+
+#### Las fases
+
+`Accumulating → (Partial) → Retired`, latch **monótono** (#141 generalizado). Por fase cambia:
+
+- **ingreso**: regular | `partial.income_monthly` (PLANO, #139) | `income_retirement_monthly`;
+- **gasto**: `expense_regular` | la base de la parcial (`expense_basis`: el de jubilación por
+  defecto, el regular si el perfil lo dice) | `expense_retirement`, **siempre × f(k−1)**;
+- **pensión CON fecha**: es ingreso en **cualquier** fase desde `start_index` (rejilla **0-based**,
+  la de `fire_target_at_month_index`, NO la 1-based del trigger), indexada con el mismo factor que
+  el gasto o plana, y × `fraction_while_partial` durante la media jornada. La pensión SIN fecha
+  sigue viajando dentro de `income_retirement_monthly` y de `FireNeed::ExpenseMinusPension`;
+- **`income_pause`** (what-if MCP) multiplica el ingreso GANADO en una ventana **semiabierta**
+  `[from, from+months)`. La pensión con fecha **no** se pausa.
+
+La fase parcial **no pasa por la regla de retirada**: las reglas se anclan en `L(R−1)`, que ahí
+todavía no existe. `partial_phase_capital_growing` es `true` ⟺ hubo parcial y el líquido no bajó ni
+un mes; el motor publica `bool` y la API `Option<bool>` (`null` = no hubo parcial).
+
+#### El objetivo consciente del plan — las dos bases
+
+`crates/engine/src/target.rs::PlanFireTarget::at`. Rejilla **0-based** `i = k−1`, y **una unidad por
+término** (mezclar €/mes con €/año hacía salir el puente ×12 sin que nada fallara):
+`need_full_m(i) = max(0, E·f(i) − I_persist)` y `need_net_m(i) = need_full_m(i) − P_m(i)`, ambas en
+€/mes, con `P_m(i) = 0` mientras `i < P = pension.start_index`.
+
+- **`perpetuity`** (default): `T(i) = gross_up(12·need(i))/SWR + deuda(i)`, con `need = need_full_m`
+  mientras `i < P` —la pensión no existe todavía y no se cuenta con ella, la lectura conservadora—
+  y `need_net_m` desde `P`. Si `need_net_m(i) ≤ 0`, **`T(i) = deuda(i)`, jamás `None`**: un objetivo
+  ausente ahí se leería como «no se jubila nunca» cuando la verdad es «se jubila ya».
+- **`bridge_to_pension`**, para `i < P`:
+  `T(i) = Σ_{m=i}^{P−1} gross_up_monthly(need_full_m(m))·(1+d)^{−(m−i)/12} + [gross_up(12·need_net_m(P))/SWR]·(1+d)^{−(P−i)/12} + deuda(i)`,
+  y desde `P` coincide término a término con la perpetuidad neta. Se computa como **suma sufijo**
+  (`q(j) = inflation_factor_at_month_index(d, j)`, `(1+d)^{−(m−i)/12} = q(i)/q(m)`): `O(P)` una vez,
+  `O(1)` por evaluación, frente al `O(P²)` de la suma directa. Esa forma **es** la definición.
+- **Los dos escenarios de la pensión, sin asumir ninguno**: si cubre el 100 % del gasto el término
+  perpetuo es 0 exacto y el objetivo es solo el puente + deuda; si cubre una parte, queda la
+  perpetuidad sobre el resto. Lo decide el importe declarado frente al gasto.
+- `d = bridge_discount_annual_pct` (`expected_return` | `swr` | `none`, default `expected_return`;
+  lo resuelve el handler ponderando por valor la rentabilidad esperada de los activos LÍQUIDOS).
+  `d ≤ −100 %` ⇒ sin descuento (puente más caro: conservador).
+- **`MAX_BRIDGE_MONTHS = 1.200`**: una pensión más allá degrada a la perpetuidad sobre la necesidad
+  ÍNTEGRA — objetivo MÁS grande, nunca menor. Truncar el puente iría en la dirección contraria
+  (objetivo pequeño ⇒ cruce temprano ⇒ jubilación falsa).
+- Lecturas con su unidad, y ningún `null` que signifique cero:
+  `bridge_effective_withdrawal_pct` = `100·12·need_full_m(R−1)/L(R−1)` en **% ANUAL** —la pregunta
+  que el puente plantea y la perpetuidad esconde: mientras la pensión no llega hay que sacar el
+  gasto ENTERO, y eso puede estar muy por encima del SWR, legítimamente, porque dura pocos años—;
+  `pension_coverage_ratio` = `P_m(P)/(E·f(P))` en **FRACCIÓN**; `partial_gap_target` en **€**.
+
+#### Las cuatro reglas de retirada × dos modos
+
+`crates/engine/src/withdrawal.rs`. `L(k−1)` es el líquido de cierre del mes anterior —el mismo que
+consume el cruce—, `R` el primer mes jubilado, y el ancla `(L(R−1), f(R−1))`. **Los `pct` son BRUTOS
+de impuestos**, igual que el SWR: topan la VENTA, no lo que llega al bolsillo.
+
+| Regla | Permitido BRUTO del mes jubilado `k` |
+|---|---|
+| `fixed_real` | la necesidad del mes, **sin techo**. El drenaje de 4.15.0 bit a bit |
+| `percent_of_balance {pct}` | `pct/100 · L(k−1) / 12` |
+| `hybrid {start,end}` | `start_pct` hasta el latch `end·L(k−1) ≥ start·L(R−1)·f(k−1)/f(R−1)`, `end_pct` después |
+| `guardrails {pct,band,adjust}` | `W_R · mult · f(k−1)/f(R−1)`, `mult` revisado cada 12 meses desde `R` |
+
+- `ceiling` vende `min(necesidad, permitido)` **solo en déficit**; `rule_is_spend` vende `permitido`
+  **todos** los meses jubilados. Con `fixed_real` ambos coinciden por construcción (el permitido ES
+  el déficit), y eso es lo que mantiene 4.15.0 bit-idéntico bajo cualquiera de los dos.
+- `WithdrawalPlanner::allowed_gross` se llama **exactamente una vez por mes jubilado y en orden
+  creciente**: `hybrid` y `guardrails` tienen memoria (un latch y un multiplicador acumulado), y esa
+  memoria ES el modelo — Guyton-Klinger sin ratchet acumulado no es Guyton-Klinger.
+- Guyton-Klinger implementa **solo** capital-preservation y prosperity; la *portfolio management
+  rule* (ventana de 15 años) y la *inflation rule* **no** están implementadas y va declarado
+  (`financial-contracts.md` §4). En determinista con rentabilidad > SWR la prosperity dispara todos
+  los años: es lo que la regla dice sobre un camino sin volatilidad, y por eso los guardarraíles
+  solo tienen sentido pleno con Monte Carlo.
+
+**Las tres magnitudes de la venta** (`sim_core::MonthSale::account`) — confundirlas es el error caro:
+`withdrawal` es la retirada neta efectiva; `withdrawal_shortfall` es **lo que la REGLA rechazó** y es
+**informativo** (no resta patrimonio, no cuenta como fracaso); `uncovered_deficit_total` es lo que
+**los ACTIVOS no pudieron vender** y sí resta; `withdrawal_excess` es lo vendido y gastado de más en
+`rule_is_spend`. Con `fixed_real`, `shortfall` y `excess` son cero por construcción.
+
+#### Los solves (inversas)
+
+`crates/engine/src/solve.rs`, `MAX_SOLVE_ITERATIONS = 24`, **bisección sobre el motor entero** — una
+`project_net_worth_series` completa por evaluación. No hay forma cerrada y es deliberado: un capital
+necesario descontado a una tasa escalar ignora la cascada, los topes, la deuda, los Próximos y la
+fiscalidad del drenaje. Cada bisección mantiene un extremo verificado BUENO y otro MALO y devuelve el
+bueno, así que el valor publicado está *comprobado*.
+
+- **El techo de búsqueda es el MÁXIMO SOBRANTE MENSUAL del horizonte**, no el neto recurrente del
+  mes 1: medido sobre el caso P9, con el techo del mes 1 (500 €/mes) la ejecución cierra en
+  **91.444 €** y sin techo en **725.197 €** — la cota vieja habría encendido `underfunded` en hogares
+  que sí llegan. El sobrante del mes 1 se conserva como SUELO y se publica (`search_ceiling`).
+- **El número coast** es el líquido con el que se **ENTRA** en el mes de coast (`coast_path[coast−1]`,
+  el cierre del anterior), no un descuento cerrado del objetivo.
+- `max_extra_monthly_expense_keeping_date` sube **solo el gasto REGULAR**; con trigger por EDAD
+  devuelve la cota como **suelo honesto**, no como infinito.
+- `retirement_delay_months` es `null` si cualquiera de los dos escenarios no se jubila dentro del
+  horizonte — «la pausa te saca del horizonte» es una respuesta, pero no un número de meses.
+
+#### El reparto `Decimal` / `f64` en 5.0.0
+
+El bucle es **una sola implementación** parametrizada por su tipo numérico (`MoneyOps`,
+`crates/engine/src/money.rs`), con dos instanciaciones:
+
+- **`Decimal`** en `crates/engine` — ejecuta la MISMA secuencia de llamadas que 4.15.0 (mismos
+  operandos, mismo orden, mismos desempates), y por eso el pin dorado no puede moverse. La trampa
+  medida: `rust_decimal` tiene `min`/`max` **inherentes** que devuelven `self` en el empate,
+  mientras `Ord::max` devuelve `other` — mismo valor, distinta ESCALA, distinto `Display`, distinto
+  hash. `MoneyOps::max` delega en el inherente a propósito.
+- **`F64Money`** en `crates/engine-stochastic` — el único sitio con coma flotante, y **de él no sale
+  un euro**: solo magnitudes ESTADÍSTICAS (probabilidad de éxito, percentiles, probabilidad de
+  agotamiento por edad), donde un error relativo de 1e-15 no cambia ninguna decisión. Todo importe
+  en euros que la app publica sale del camino `Decimal`. El freezer
+  `crates_engine_src_has_no_f64_outside_comments` **sigue intacto y sin excepciones**.
+- La puerta que sostiene el reparto es `crates/engine-stochastic/tests/degeneration.rs`: los dos
+  caminos, sobre TODOS los casos de la batería, dentro de **1 € por mes** en todo el horizonte
+  (máximo medido 1,47e-7 € en P9 a 840 meses) y con las decisiones DISCRETAS —mes de jubilación,
+  cruce, agotamiento, transiciones— **exactas**.
+
 ## 5. The monthly simulation loop, step by step
 
-`project_net_worth_series` en `crates/engine/src/projection.rs`. Series index 0 = today's state;
+`project_net_worth_series` (`crates/engine/src/projection.rs`) es hoy un **envoltorio de una
+línea**: convierte `ProjectionInput` al tipo del núcleo —una copia campo a campo, cero
+operaciones— y llama a `sim_core::simulate`, que es donde vive toda la aritmética del mes desde
+5.0.0 (WP5.5). Los pasos de abajo son los de `simulate`. Series index 0 = today's state;
 month `k` (1-based) simulates the calendar month `month_first(ref_date) + (k−1)`. Net worth
 identity (4.12.1 — `surplus_cash` retired, #175): `NW = Σ asset values − Σ liability principals −
 undrained_cumulative`. Companion identities: `liquid_worth = Σ liquid asset values` and
@@ -437,19 +641,27 @@ For each month `k = 1..=horizon_months`:
    conocer: el techo de un cap `months_expense` es `N × (expense + debt_service)`, así que **se mueve**
    en un what-if que amortiza — alcanzable solo desde `simulate_projection` y **sin test que lo
    cubra**.
-2. **Retirement check (4.8.0)**: `fire_reached = liquid_prev ≥ target(k−1)` via
-   `fire_target_at_month_index` — the basis is the **LIQUID** worth of the previous month
-   (Σ `is_liquid` assets, GROSS, no principal subtracted — #143, `surplus_cash` retired from this
-   term in 4.12.1/#175 — theorem: the crossing could only move LATER with that change, never
-   earlier, and in production it is invariant; paired with the
-   target's full-quota debt term of #142), not total NW. The state is an **absorbing latch**
-   (#141): `retired = retired || fire_reached || k ≥ retirement_start_month` — once retired,
-   always retired, even if worth later dips below the target (until 4.7.x the model re-checked
-   every month and flickered between regular and retirement budgets). The handler always passes
-   `retirement_start_month = None` and `retirement_monthly_withdrawal = 0` — FIRE crossover is
-   the sole trigger, and the drain is driven purely by the income drop.
-3. **Pick the budget**: in retirement use `income_retirement_monthly` /
-   `expense_retirement_monthly`; otherwise the regular pair.
+2. **Transición de fase (4.8.0, reescrito en 5.0.0)**: `fire_reached = liquid_prev ≥ target(k−1)`,
+   con el objetivo evaluado por `PlanFireTarget::at` (§4b) — que sin pensión con fecha LLAMA a
+   `fire_target_at_month_index`, la misma función de siempre. La base es el patrimonio **LÍQUIDO**
+   del mes anterior (Σ activos `is_liquid`, BRUTO, sin restar principal — #143, `surplus_cash`
+   retirado del término en 4.12.1/#175; teorema: el cruce solo pudo irse MÁS TARDE con ese cambio,
+   nunca antes, y en producción es invariante; emparejado con el término de cuota completa del
+   objetivo, #142), **no** el NW total. El estado es un **latch absorbente** (#141):
+   `retired = retired || (fire_reached && !crossing_is_reading_only) || k ≥ mes forzado` — una vez
+   jubilado, siempre jubilado (hasta 4.7.x el modelo re-comprobaba cada mes y parpadeaba entre
+   presupuestos).
+   **Lo que 5.0.0 cambió aquí**: el handler ya NO pasa siempre «sin mes forzado». Con una estrategia
+   por EDAD pasa `RetirementTrigger::AtMonth(R)` **y** `crossing_is_reading_only = true`, así que el
+   cruce se evalúa igual —se publica en `liquid_crossing_month_index`— pero no jubila. La frase
+   «FIRE crossover is the sole trigger, and the drain is driven purely by the income drop» era
+   cierta hasta 4.15.0 y **dejó de serlo el 2026-09-03**. La fase del mes sale de ahí:
+   `Retired` manda sobre `Partial`, y a `Partial` solo se entra si el latch de jubilación no cerró.
+3. **Ingreso y gasto de la FASE** (§4b): ingreso regular | `partial.income_monthly` |
+   `income_retirement_monthly`, más la **pensión con fecha** desde su índice en cualquier fase (y ×
+   `fraction_while_partial` en la parcial); gasto `expense_regular` | la base de la parcial |
+   `expense_retirement`, **siempre × f(k−1)** (#139). `income_pause`, si viaja, multiplica el
+   ingreso GANADO dentro de su ventana semiabierta y nunca la pensión.
 4. **Net cash**: `income − expense − debt_service + planning_adj[k−1] −
    retirement_withdrawal`. Planning flows with a `due_date` land in their calendar month; undated
    ones are spread over 90 days from `ref_date`. Budget expenses with an
@@ -462,15 +674,25 @@ For each month `k = 1..=horizon_months`:
    sales, #178). Whatever no rule absorbs does **NOT** enter net worth: it accumulates separately
    in `unallocated_savings_total`, unreachable in production with live assets (indestructible
    sink, #176).
-6. **Deficit** (`net_cash ≤ 0`): **no cash-first step** — the whole deficit is sold, gross, from
-   assets (4.12.1, #175: the `surplus_cash`-first step died) via `drain_from_assets` — order:
+6. **Venta del mes** (`sim_core::execute_month_sale_g`) — **ya no vive en un `else` de la cascada**:
+   se ejecuta DESPUÉS del reparto. Hasta 4.15.0 las dos ramas eran excluyentes, así que bajarla no
+   mueve un dígito de ningún caso de 4.15.0; quien necesita ese orden es `rule_is_spend`, que vende
+   también en meses de superávit. Hay **dos razones para vender y pueden darse a la vez**: la
+   necesidad (`need_net > 0`, como siempre) y la regla como gasto. El techo de la regla es BRUTO y
+   la venta devuelve las **tres magnitudes** de §4b. Con `fixed_real` el techo es `None` y esta
+   función ejecuta, operando a operando, la rama de déficit de 4.15.0.
+   **No cash-first step** — the whole deficit is sold, gross, from
+   assets (4.12.1, #175: the `surplus_cash`-first step died) via `drain_from_assets_g` — order:
    **liquid before illiquid, and within each group lowest `expected_annual_return_percent` first**
    (ties by input order; illiquid assets ARE drained if liquids run out). The tax exemption cash
    used to carry is inherited by the drain itself: the 0%-return account drains first and, if its
    basis was fed by the cascade, derives `g = 0` (`b = v`). Any shortfall the assets cannot cover
    accumulates in `undrained_cumulative`, which is *subtracted* from NW (implicit debt).
 7. **Compound growth**: each asset value ×= monthly multiplier. Growth applies AFTER
-   this month's contribution/drain.
+   this month's contribution/drain. El multiplicador por activo se **precalcula una vez** fuera del
+   bucle (WP1a de 5.0.0: es loop-invariante; 31,5 → 12,6 ms por proyección de 840 meses en release),
+   con la MISMA llamada a `powd` — el pin dorado lo comprueba bit a bit. `checked_mul`, nunca `*`:
+   desbordar es `EngineError::AssetValueOverflow`, no un pánico convertido en 400 opaco.
 8. **Principal reduction**: each liability is **assigned the closing balance computed in step 1**
    (`principals[i] = closing`), never a fresh `P − payment`. It only equals «principal −= payment»
    in `fixed_payments` with no extra repayment: with an accruing model the closing is
@@ -482,9 +704,11 @@ For each month `k = 1..=horizon_months`:
 
 ## 6. Allocation cascade semantics
 
-`distribute_contributions` (projection.rs:249-305) + `resolve_cap_ceiling` (220-235). Rules come
-from the `allocation_rules` table ordered `priority ASC, id ASC`, `enabled = true` only, with
-`target_asset_id` resolved to an index (projection.rs:679-770).
+`sim_core::distribute_contributions_g` + `sim_core::resolve_cap_ceiling_g` (los envoltorios
+`Decimal` públicos siguen en `projection.rs`; **los números de línea que aquí vivían apuntaban a
+`projection.rs` y llevaban dos releases podridos** — localiza por nombre). Rules come from the
+`allocation_rules` table ordered `priority ASC, id ASC`, `enabled = true` only, with
+`target_asset_id` resolved to an index by the handler.
 
 Per rule, in order, over the `remaining` surplus:
 - Resolve the cap ceiling: `Amount(v)` → `v`; `MonthsExpense(N)` → `N × (expense + debt_service)`;
@@ -494,6 +718,10 @@ Per rule, in order, over the `remaining` surplus:
 - Intent: `fixed` → `min(amount, remaining)`; `percent` → `remaining × pct/100` (**percent of
   what is left at this step**, not of the original surplus); `remainder` → all of `remaining`.
 - `take = min(intent, cap_room, remaining)`; add to target, subtract from remaining.
+- **Techo de aportación (5.0.0)**: lo que la cascada VE es `min(sobrante, contribution_cap_monthly)`
+  —y 0 desde `contributions_stop_month`—; el resto sale del balance a `disposable_cash` (§4b). Sin
+  techo el pool es el sobrante entero y no se ejecuta ni una operación de más (bit-identidad). Estas
+  dos palancas no son ajustes de producto: son sobre lo que bisecan los solves.
 - Whatever no rule absorbs is returned as leftover → `unallocated_savings_total` (4.12.1, #175) —
   it does NOT enter net worth; `unallocated_savings_reason` (`null` | `"no_assets"` | `"no_sink"`)
   explains why (unreachable in production with live assets, indestructible sink #176).
@@ -536,8 +764,10 @@ All anchors in this section are in the HANDLER file `apps/api/src/handlers/proje
   deflated series) are both computed on the FULL monthly series (`points_full`), not the
   decimated one, to keep `reached_month_index` exact under `hybrid`
   (projection.rs:1062-1118). `milestones_real` is empty when inflation = 0 and the web reuses
-  `milestones`. The FIRE crossover (`jubilacion_month_index`) is likewise detected on the full
-  series (projection.rs:1126-1134).
+  `milestones`. La jubilación (`jubilacion_month_index`) se detecta igualmente sobre la serie
+  completa — y **desde 5.0.0 ya no es «el cruce»**: es el `retirement_month_index` EFECTIVO que
+  publica el motor (cruce o edad, §4b), y el cruce puro viaja aparte en
+  `liquid_crossing_month_index`, con `retirement_trigger` diciendo cuál de los dos mandó.
 - **`jubilacion_month_index` does NOT index any served series (issue #82, 4.4.0) — it never did.**
   It is a MONTH number; `points`/`fire_target_series`/`asset_series[].values` are **position**-
   indexed and, under `density=hybrid` (the density the MCP tool `get_projection` forces), carry
@@ -549,9 +779,10 @@ All anchors in this section are in the HANDLER file `apps/api/src/handlers/proje
     falls in the segment `[p, p+1)`; chosen over "next" because reading `points[p]` is
     conservative — it underweights net worth instead of overstating it).
   - **`jubilacion_target_net_worth_nominal`** — the FIRE target AT the crossing month, in NOMINAL
-    euros of that month. `jubilacion_target_net_worth` (the older field) is in TODAY's euros
-    (`FireTarget.base_amount`, undeflated); with inflation the two diverge by a growing factor
-    over decades. Evaluated EXACTLY via `fire_target_at_month_index(ft, jubilacion_month_index)`
+    euros of that month. `jubilacion_target_net_worth` (the older field) is the target evaluated at
+    **month index 0**, es decir en euros de HOY (el campo `FireTarget.base_amount` que esta línea
+    citaba **se retiró en 4.10.0/#170**: ya no hay base pre-calculada, el objetivo se evalúa mes a
+    mes sobre la necesidad); with inflation the two diverge by a growing factor over decades. Evaluated EXACTLY via `fire_target_at_month_index(ft, jubilacion_month_index)`
     — never interpolated between two points of `fire_target_series`, which under `hybrid` may not
     even contain the crossing month as a served point.
   Pin: `apps/api/tests/projection_number_semantics.rs`.
@@ -581,8 +812,14 @@ Inputs: mode `annual_expense`, `swr_pct 3.5`, taxes on, default ES brackets;
    solution. Check: tax = 1.140 + 0,21×16.632,91 = 4.632,91; 22.632,91 − 4.632,91 = 18.000 ✓.
 3. Target = 22.632,91 / 0,035 = **646.654,61 €** — matches the fixture's
    `expected_target_nw: 646654.611` (tolerance ±1 €).
-4. That becomes `FireTarget.base_amount`. With 2% inflation the moving target 10 years out is
-   646.654,61 × 1,02^10 ≈ 788.267 €; jubilación fires the first month nominal NW ≥ target(month).
+4. Eso es `target(0)`, el objetivo evaluado en el índice 0 — lo que la API publica como
+   `jubilacion_target_net_worth`. (Este paso decía «`FireTarget.base_amount`», un campo **retirado
+   en 4.10.0/#170**: hoy no hay base pre-calculada, cada mes se evalúa sobre su necesidad.) Con un
+   2 % de inflación el objetivo móvil a 10 años ronda 646.654,61 × 1,02^10 ≈ 788.267 € **cuando la
+   necesidad se indexa entera** —el caso de este fixture, sin pensión plana ni deuda—; con pensión
+   la base crece MÁS rápido que `f(k)` (#170) y con deuda el término decreciente tira hacia abajo,
+   así que el objetivo **no es monótono** y esta aproximación no vale en general. La jubilación se
+   dispara según la estrategia (§4b): por cruce del líquido, o por edad.
 
 **Parity discipline**: the fixture is consumed by BOTH `apps/api/tests/fire_parity.rs`
 (full-stack, needs `TEST_DATABASE_URL`; NOT run in CI) and `apps/web/src/lib/fire.test.ts`
@@ -590,14 +827,23 @@ Inputs: mode `annual_expense`, `swr_pct 3.5`, taxes on, default ES brackets;
 or the need formula on either side, regenerate expected values in the JSON and make **both**
 suites pass. The JSON's `_formula` field is the contract.
 
-## 9. What this model deliberately does NOT do (all UNIMPLEMENTED, candidates only)
+## 9. What this model deliberately does NOT do — **y lo que ya SÍ hace** (revisado 2026-09-03)
 
-Deterministic single-path projection; constant nominal returns; no stochastic returns / Monte
-Carlo, no sequence-of-returns risk, no variable/guardrail SWR, no tax-aware withdrawal ordering
-(the gross-up taxes the whole withdrawal through the brackets — no cost-basis tracking at
-withdrawal time), no per-asset inflation, no contribution indexation to wage growth. These are
-open research directions — see `.claude/skills/futurefin-research-frontier/SKILL.md`; any move
-on them goes through `.claude/skills/futurefin-projection-realism-campaign/SKILL.md`.
+**Esta lista era de 2026-07 y 5.0.0 se llevó por delante la mitad. Lo que queda sin implementar**:
+no per-asset inflation, no contribution indexation to wage growth, sin rebalanceo, sin tests
+property-based del motor. Siguen siendo direcciones abiertas —
+`.claude/skills/futurefin-research-frontier/SKILL.md`—; cualquier movimiento pasa por
+`.claude/skills/futurefin-projection-realism-campaign/SKILL.md`.
+
+**Lo que SÍ hace ya, y esta lista negaba** (cada fila con su ancla: una negación caducada se lee
+como verdad tanto como un número congelado — es la lección de §3.1 de `futurefin-docs-and-writing`):
+
+| Decía «no lo hace» | Estado real |
+|---|---|
+| «no variable/guardrail SWR» | **Implementado en 5.0.0**: cuatro reglas de retirada × dos modos de gasto, guardarraíles de Guyton-Klinger incluidos (`crates/engine/src/withdrawal.rs`, §4b) |
+| «no tax-aware withdrawal … no cost-basis tracking at withdrawal time» | **Falso desde 4.10.0/#140 + 4.12.0/#178**: todo drenaje vende BRUTO por la escala de tramos, la base de coste es POR ACTIVO y baja al vender (`b' = b·v_post/v_pre`), y la `g` de cada activo se DERIVA de su base viva. Lo que sigue sin existir es la **ordenación** tax-aware del drenaje (el orden es líquidos primero, menor rentabilidad primero) |
+| «deterministic single-path projection; no stochastic returns / Monte Carlo» | **A medias, y hay que decir cuál**: el bucle ya es genérico sobre su tipo numérico y `crates/engine-stochastic` lo instancia en `f64` con su puerta de degeneración verde (§4b). La capa Monte Carlo —RNG pineado, caminos, bandas p10/p50/p90, probabilidad de éxito— **entró commiteada el 2026-09-03 (`ba6bdfe`) pero con la suite en ROJO**: falla `mc_cash_buffer_changes_the_band_under_sequence_risk` (el colchón sale peor, no mejor, que sin él). Comprueba el estado con `cargo test -p futurefin-engine-stochastic 2>&1 \| grep "test result"` antes de afirmar nada en público (`futurefin-research-frontier` §Claims) |
+| «no sequence-of-returns risk» | Sigue sin superficie propia, pero deja de ser inalcanzable en cuanto WP6 aterrice |
 
 **Lo que sí hace desde 4.4.0 y conviene no confundir con la lista de arriba**: amortización
 anticipada (mensual y puntual) como **eje what-if** de `simulate_projection`, con tres límites
@@ -625,19 +871,30 @@ el `closing_principal` que el motor ya derivaba y tiraba.
 
 ## Provenance and maintenance
 
-Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verify before trusting:
+Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`); **re-verificados y
+ampliados el 2026-09-03 contra `release/5.0.0`** (issue #207) — todos los comandos de abajo se
+ejecutaron ese día y **ninguno sale vacío**. Cinco salían vacíos antes de esta pasada y van marcados
+como tales: un grep vacío es la señal, no el ruido. Re-verify before trusting:
 
 - Single target formula + signature: `grep -n "pub fn fire_target_at_month_index" crates/engine/src/projection.rs`
+- **Objetivo consciente del plan (§4b)**: `grep -n "pub fn fire_target_at_month_index_with_plan\|pub struct PlanFireTarget\|pub const MAX_BRIDGE_MONTHS" crates/engine/src/target.rs` (3 hits) y su consumidor `grep -n "fire_target_at_month_index_with_plan" apps/api/src/handlers/projection.rs`
+- **Las cinco estrategias y sus cotas viven en el PERFIL, no en la instalación**: `grep -n "enum RetirementStrategy" -A8 apps/api/src/handlers/retirement_profile.rs` y `grep -n -A12 "fn default_retirement_profile" apps/api/src/handlers/retirement_profile.rs`
+- **Trigger único + cruce como lectura**: `grep -n "crossing_is_reading_only" crates/engine/src/sim_core.rs apps/api/src/handlers/projection.rs` (≥4 hits) y el invariante de comportamiento `grep -n "fn the_phase_readings_agree_with_the_series_they_describe" crates/engine/tests/golden_pins.rs`
+- **Degradación sin fecha de nacimiento**: `grep -n "birth_date_missing" apps/api/src/handlers/projection.rs`
+- **Reglas de retirada y sus dos modos**: `grep -n "enum WithdrawalRule\|enum SpendMode" crates/engine/src/phases.rs` y `grep -n "fn allowed_gross\|fn review_guardrails\|fn validate_rule" crates/engine/src/withdrawal.rs` (3 hits)
+- **Solves y su techo de búsqueda**: `grep -n "pub const MAX_SOLVE_ITERATIONS\|fn search_ceiling\|pub fn coast_fire_month_index" crates/engine/src/solve.rs` (3 hits); la medición de P9 (91.444 € vs 725.197 €) está en el doc-comment de `search_ceiling`
+- **Reparto Decimal/f64**: `grep -n "pub trait MoneyOps" crates/engine/src/money.rs`, `grep -c "impl MoneyOps for F64Money" crates/engine-stochastic/src/lib.rs` (1), el freezer intacto `grep -n "fn crates_engine_src_has_no_f64_outside_comments" crates/engine/src/lib.rs` y la puerta `grep -n "const EUR_TOLERANCE" crates/engine-stochastic/tests/degeneration.rs`
+- **Estado de Monte Carlo antes de afirmar nada**: `ls crates/engine-stochastic/tests/` + `git log --oneline -- crates/engine-stochastic`
 - Trigger uses k−1 / liquid_prev + absorbing latch (4.8.0): `grep -n "plan_target.at(ft_view\|liquid_prev\|retired = retired" crates/engine/src/sim_core.rs` (el bucle vive en el núcleo genérico desde 5.0.0 WP5.5)
-- FIRE number modes + inputs: `grep -n "compute_fire_target_nw" apps/api/src/handlers/projection.rs` (mode A passes `expense_retirement`; mode B passes the raw `expense_avg` — see §2b)
+- FIRE number modes + inputs: `grep -n "fn compute_fire_need" apps/api/src/handlers/projection.rs` (mode A passes `expense_retirement`; mode B passes the raw `expense_avg` — see §2b). **El grep anterior (`compute_fire_target_nw`) llevaba vacío desde el 4.10.0/#170 que renombró la función**, mientras el §2 de esta misma ficha ya usaba el nombre bueno
 - Mode B (`savings_source`) base + quota subtraction (4.8.0, #142 — the 3.4.0 `payment_amount = None` zeroing is GONE): `grep -n "savings_source\|transactions_avg\|expense_from_avg\|active_quotas" apps/api/src/handlers/projection.rs`
 - Mode B/C reach into summary/assets/series: `grep -n "expense_reg\|expense_tot" apps/api/src/handlers/summary.rs` (el patrón anterior —`expense_der = Decimal::ZERO\|expense_tot = avg.expense_avg`— daba **vacío** desde un refactor: `expense_der` solo sobrevive dentro de un comentario y `expense_tot` se deriva de la resolución compartida, no de `avg.expense_avg`); `grep -n "assets_projection_context" apps/api/src/handlers/{projection,assets}.rs`
 - Runway model + cap: `grep -n "pub fn liquid_runway_months\|MAX_RUNWAY_MONTHS\|RunwayOutcome" crates/engine/src/runway.rs` and `grep -n "liquid_runway_months\|runway_is_indefinite" apps/api/src/handlers/summary.rs`
 - Runway infinite case is the SWR threshold, not the cap (v2.3.0): `grep -n "swr_pct" crates/engine/src/runway.rs` (the `Indefinite` branch must compare `annual_expense_for_swr * 100 <= balance_0 * swr_pct`) and `grep -n "annual_expense_gross\|gross_up_net_annual_fire" apps/api/src/handlers/summary.rs` (the handler must reuse the target's gross-up)
 - Frontend reads the mode from `financial_health` (not the root): `grep -n "savings_source" apps/web/src/api/types.ts apps/web/src/views/RetirementView.tsx` (RetirementView is the only view reading the field directly; SummaryView consumes `financial_health` as a whole without touching `savings_source`)
 - Closed-form gross-up: `grep -n "gross_up_net_annual_fire" apps/api/src/handlers/projection.rs`
-- Defaults (SWR 3.5, ES brackets): `grep -n -A8 "fn default_fire_settings" apps/api/src/handlers/installation.rs`
-- SWR bound 0–4: `grep -n "swr_pct must be between" apps/api/src/handlers/installation.rs`
+- Defaults: los tramos ES siguen en `grep -n -A8 "fn default_fire_settings" apps/api/src/handlers/installation.rs`, pero **el SWR 3,5 se mudó al perfil en 5.0.0**: `grep -n -A12 "fn default_retirement_profile" apps/api/src/handlers/retirement_profile.rs`
+- SWR bound 0–4: `grep -n "swr_pct must be between" apps/api/src/handlers/retirement_profile.rs` — **el grep contra `installation.rs` quedó VACÍO con 5.0.0**: el mensaje viajó entero con el campo
 - Horizon constants (5/70/30, basis strings, configurable age): `grep -n "MIN_HORIZON_LIFESPAN_AGE\|FALLBACK_YEARS\|lifespan_age" apps/api/src/handlers/{projection,installation}.rs`
 - Deflation by month_index (**el núcleo desde 4.4.0 es `deflator_at_month_index`, con tres consumidores**):
   `grep -n -A10 "fn deflator_at_month_index" apps/api/src/handlers/projection.rs` y
@@ -650,9 +907,9 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
   la identidad contable la pinea `schedule_payment_identity_holds_in_every_model` y el contraste
   entre superficies, `apps/api/tests/simulate_liability_kpis.rs::the_what_if_debt_kpis_agree_with_the_liability_schedule`.
 - Sink invariant: `grep -n "uncapped_remainder\|sink_must_be_last" apps/api/src/handlers/allocation_rules.rs`
-- Client still binary-search (90 iters): `grep -n "for (let i = 0; i < 90" apps/web/src/lib/fire.ts`
+- ~~Client still binary-search (90 iters)~~: `grep -n "for (let i = 0; i < 90" apps/web/src/lib/fire.ts` daba **VACÍO** y nadie lo notó — el cliente adoptó la forma cerrada en la Ola 2 (#118, 4.6.0), como el §3 de esta misma ficha ya decía. Lo vigente: `grep -n "export function grossUpNetAnnualFire" apps/web/src/lib/fire.ts`
 - Budget retirement fields: `grep -n "persists_after_retirement\|ends_at_retirement" apps/api/src/handlers/budget.rs | head`
-- Fixture case count + tolerance: `grep -c '"name"' apps/api/tests/fixtures/fire-parity.json` (7 as of 2026-07-09, incl. the mode-B avg-style tripwire) and `grep -n "_tolerance_eur" apps/api/tests/fixtures/fire-parity.json`
+- Fixture case count + tolerance: `python3 -c "import json;print(len(json.load(open('apps/api/tests/fixtures/fire-parity.json'))['cases']))"` (**17** el 2026-09-03; esta línea decía **7** desde 2026-07-09 y el mismo número congelado vivía en otras tres fichas de la biblioteca) and `grep -n "_tolerance_eur" apps/api/tests/fixtures/fire-parity.json`
 - If line anchors look stale: `git log --oneline -3 -- crates/engine/src/projection.rs apps/api/src/handlers/projection.rs`.
   **INCIDENTE (2026-08-28)**: TODOS los anclajes numéricos del §5 estaban obsoletos —
   `crates/engine/src/projection.rs` creció ~880 líneas con la Fase 6 y `project_net_worth_series`
@@ -661,7 +918,8 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
   numérico en un fichero vivo caduca en silencio y miente con más credibilidad que la ausencia.
 - `jubilacion_series_position`/`jubilacion_target_net_worth_nominal` (issue #82, 4.4.0):
   `grep -n "jubilacion_series_position\|jubilacion_target_net_worth_nominal" apps/api/src/handlers/projection.rs` and the pin `grep -n "jubilacion_series_position_indexes_the_arrays" apps/api/tests/projection_number_semantics.rs`
-- `simulate_projection`'s `model_note` (Fase 5, issue #86, 4.4.0): `grep -n "const SIMULATE_MODEL_NOTE" -A3 apps/api/src/handlers/projection.rs` (full text of the warning); `apps/api/tests/mcp_simulate.rs` pins the cache-neutral behavior this note sits next to.
+- `simulate_projection`'s `model_note` (Fase 5, issue #86, 4.4.0): `grep -n "const SIMULATE_MODEL_NOTE" -A3 apps/api/src/handlers/projection.rs` (full text of the warning); `apps/api/tests/mcp_simulate.rs` pins the cache-neutral behavior this note sits next to. **5.0.0 lo reescribió entero** alrededor del perfil y las estrategias (trigger, `withdrawal_rule`, solves, `income_pause`, hogar no simulable): lo que §4 resume de él es la mitad que sigue viva —el aviso sobre inflación y SWR—, no su texto actual. Léelo del código, no de aquí.
+- Recuento de tests del motor: `grep -c '#\[test\]' crates/engine/src/*.rs | awk -F: '{s+=$2} END{print s}'` (**199** el 2026-09-03) — el glob importa: la lista de cuatro ficheros que otras fichas usan se deja fuera `money`, `phases`, `withdrawal`, `target`, `solve` y `tax`.
 
 If you change anything this file describes, update this skill in the same change (CLAUDE.md
 rule: keep `.claude/` docs of record current) and re-run both parity suites.

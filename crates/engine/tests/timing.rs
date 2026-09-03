@@ -1,6 +1,6 @@
 //! **Arnés de tiempos del motor** — la línea base contra la que se mide el refactor 5.0.0.
 //!
-//! Los tres tests van `#[ignore]` a propósito: miden, no afirman. Un test que falla porque una
+//! Los tests van `#[ignore]` (recuéntalos: `grep -c "#\[ignore\]" crates/engine/tests/timing.rs`) a propósito: miden, no afirman. Un test que falla porque una
 //! máquina va lenta enseña a ignorar el CI, y aquí no hay ningún umbral defendible (el número
 //! depende del portátil, de la carga y del perfil de compilación).
 //!

@@ -86,8 +86,8 @@ exception: it names a mechanism CI asserts, and it deliberately stops short of "
 
 | Claim you might be tempted to write | Minimum evidence required first |
 |---|---|
-| "Monte Carlo / percentile bands" | Engine module + tests proving seeded reproducibility AND zero-volatility degeneration to the deterministic series (item 6) |
-| "Deterministic / bit-exact projections" | A replay test asserting two runs of `project_net_worth_series` on the same input are `assert_eq!`-identical, running in CI (`cargo test -p futurefin-engine --locked` — CI runs engine tests **and, since 4.0.0, the Postgres integration ones too** — job `integration`, `cargo test --workspace --locked` against a service Postgres; this parenthesis claimed the opposite until the Fase-7 sweep) |
+| "Monte Carlo / percentile bands" | Engine module + tests proving seeded reproducibility AND zero-volatility degeneration to the deterministic series (item 6). **Estado 2026-09-03: NO reclamable todavía, y por poco.** Los dos tests que esta fila exige EXISTEN y PASAN — `mc_same_seed_bit_identical` y `mc_zero_volatility_degenerates_to_deterministic` (`crates/engine-stochastic/tests/monte_carlo.rs`, commit `ba6bdfe`) —, pero **la suite del crate está en ROJO**: falla `mc_cash_buffer_changes_the_band_under_sequence_risk`. La regla de esta tabla no admite «verde salvo uno»: se reclama con la suite verde. Compruébalo con `cargo test -p futurefin-engine-stochastic 2>&1 \| grep "test result"`, nunca con esta línea |
+| "Deterministic / bit-exact projections" | **Parcialmente ganada en 5.0.0, y conviene decir por qué mitad.** Lo que existe y corre en CI son los **pines dorados** (`crates/engine/tests/golden_pins.rs`): hashean en SHA-256 el texto canónico de TODAS las salidas del motor por caso contra dos fixtures, y su control negativo (`the_hash_actually_notices_a_single_moved_decimal`) demuestra que la red no es decorativa. Eso prueba **reproducibilidad entre ejecuciones y entre versiones** sobre una batería fija. Lo que sigue sin existir es el **replay genérico** que esta fila pide —dos ejecuciones del mismo input arbitrario `assert_eq!`-idénticas, sobre entradas generadas, no fijadas—: eso es el ítem 1 (`prop_replay_bit_identical`). Reclama «reproducible sobre una batería pineada», no «bit-exacto para cualquier entrada». Contexto de CI: (`cargo test -p futurefin-engine --locked` — CI runs engine tests **and, since 4.0.0, the Postgres integration ones too** — job `integration`, `cargo test --workspace --locked` against a service Postgres; this parenthesis claimed the opposite until the Fase-7 sweep) |
 | "Property-tested engine invariants" | proptest suite merged and green (item 1), named properties listed in the CHANGELOG entry |
 | "Tax-aware withdrawals" | Engine drawdown tax model + regenerated parity fixture with both suites green (item 7) |
 | "Safe upgrades / never lose data" | Pre-migration dump hook + a restore actually exercised in a test or documented drill (item 2). **Partly earned in 3.0.0**: the automatic pre-migration dump exists and the CI `docker-stack` job exercises V2→V3 with real data, automigration and pg_upgrade 15→16. **The downgrade guard was earned on 2026-08-27** (`db.rs` → `MigrationError::Downgrade` + operator banner, pinned by `apps/api/tests/migration_guard.rs`), so "refuses to start instead of running an old schema over new data, and says so in words you can act on" is now claimable. Still unearned, and therefore still unclaimable: a restore drill run against a *production-shaped* dump. Word claims to what the evidence covers — "backs itself up before every migration" and "refuses to downgrade" are provable today; "never lose data" is not. |
@@ -108,12 +108,12 @@ gates through `futurefin-mcp-parity` when executed.
 |---|---|---|---|---|---|---|
 | 1 | Property-based engine invariants (proptest) | 2 | High | Low | Low | Do first |
 | 2 | Migration-safety tooling (pre-migration dump ✅ 3.0.0; downgrade guard + `migration_guard.rs` ✅ 2026-08-27) | 3 | High | Low | Low | **Done except the restore drill** |
-| 3 | Projection-as-auditable-artifact (recomputable snapshot) | 2, 3 | Med–High | Med | Low | Do |
+| 3 | Projection-as-auditable-artifact (recomputable snapshot) | 2, 3 | Med–High | Med | Low | **Parcialmente servido por el arnés golden (5.0.0); la mitad exportable sigue abierta** |
 | 4 | Sequence-of-returns risk surfacing (deterministic stress) | 1 | High | Med | Med | Via campaign |
 | 5 | Liability interest accrual (`RepaymentModel` + `apr_percent`) | 1 | High | — | — | **✅ Done — shipped 4.2.0** |
-| 6 | Monte Carlo percentile bands (seeded) | 1 | Med | High | High | Candidate, gate behind 4 |
-| 7 | Tax-aware drawdown path | 1 | Med | Med–High | Med | Candidate, via campaign |
-| 8 | Variable/dynamic SWR strategies | 1 | Low–Med | Med | Med | Deferred until 6 exists |
+| 6 | Monte Carlo percentile bands (seeded) | 1 | Med | High | High | **Capa base ✅ 5.0.0 (crate `engine-stochastic` + puerta de degeneración); capa MC en curso (WP6)** — sin reclamar hasta que sus tests estén commiteados y verdes |
+| 7 | Tax-aware drawdown path | 1 | Med | Med–High | Med | **✅ Entregado 4.10.0/#140 + 4.12.0/#178**; lo que queda abierto es la ORDENACIÓN tax-aware del drenaje |
+| 8 | Variable/dynamic SWR strategies | 1 | Low–Med | Med | Med | **✅ Entregado en 5.0.0** como reglas de retirada (4 reglas × 2 modos, Guyton-Klinger incluido) |
 | 9 | Multi-currency correctness | — | Low | High | Med | Demoted — see inventory |
 | 10 | MCP catalog context budget: descriptions done, `inputSchema` next | 3 | Med | Low | Low | Do next |
 
@@ -128,8 +128,16 @@ the engine/handler `(k-1)/12` off-by-one) shows example-based tests miss whole i
 **FutureFin's asset:** the engine is a pure function of `ProjectionInput` — proptest can generate
 thousands of households with zero mocking. 22+ example tests already encode expected shapes.
 
-**Invariants grounded in the actual simulation loop** (`project_net_worth_series`,
-`crates/engine/src/projection.rs:386`):
+**Estado 2026-09-03: sigue ABIERTO y sigue siendo el primero.** `grep -rn proptest crates/ apps/
+--include=Cargo.toml` sale vacío. Lo que 5.0.0 sí trajo y cambia la economía del ítem: el motor es
+ahora **genérico sobre su tipo numérico**, así que una propiedad escrita una vez se puede correr
+sobre las **dos** instanciaciones; y los pines dorados cubren ya la parte «reproducible», con lo que
+proptest puede concentrarse en las invariantes estructurales, que es donde estaba el valor.
+
+**Invariants grounded in the actual simulation loop** (`sim_core::simulate` desde 5.0.0 — los
+números de línea de abajo son de `projection.rs` **antes** del refactor y están podridos: localiza
+por nombre de función, y ojo con los sufijos `_g` del núcleo genérico
+—`distribute_contributions_g`, `resolve_cap_ceiling_g`, `drain_order_g`—):
 
 - **I1 — cascade conserves the pool.** In `distribute_contributions` (line 249),
   `sum(alloc) + leftover == pool` and every `alloc[i] >= 0`. Observable via
@@ -167,9 +175,23 @@ thousands of households with zero mocking. 22+ example tests already encode expe
    `cargo test -p futurefin-engine` (CI already runs this target, `.github/workflows/ci.yml`).
 
 **You have a result when:** all six properties are green in CI AND a deliberate mutation (e.g.
-change `k - 1` to `k` in the `fire_reached` check at projection.rs:478, or drop the
+change `k - 1` to `k` in the `fire_reached` check of `sim_core::simulate`, or drop the
 `live_values[target] += take` line) is caught by at least one property. If no property catches
 either mutation, the suite is decorative — fix the generators before merging.
+
+**Invariantes nuevas que 5.0.0 pone sobre la mesa** (todas testables sobre la salida, sin mirar el
+enum, que es la disciplina que el propio motor ya usa):
+- **I7 — un solo trigger.** El mes en que el ingreso cambia a jubilación == `retirement_month_index`
+  == el primer mes de `Retired` en `phase_transitions`. Hay ya un test-ejemplo
+  (`golden_pins.rs::the_phase_readings_agree_with_the_series_they_describe`); la versión property
+  lo generalizaría a cualquier plan.
+- **I8 — el recorte no toca el balance.** `withdrawal_shortfall` puede ser cualquier cosa sin mover
+  `net_worth` ni `uncovered_deficit_total`. Es la separación de magnitudes de D22/D24, y es
+  exactamente el tipo de invariante que un test de ejemplo no cubre en todo su dominio.
+- **I9 — monotonía de las fases.** `phase_transitions` es estrictamente creciente en mes y nunca
+  retrocede de `Retired` a `Partial` ni a `Accumulating`.
+- **I10 — identidad del techo de aportación.** En un mes con sobrante > 0:
+  `sobrante == Σ aportado + no_asignado + disposable_cash[k]`.
 
 ---
 
@@ -260,11 +282,31 @@ over a migrated volume prints a message a non-Rust user can act on — **done** 
 on date X, with which inputs, under which engine version" and re-verify it later. Numbers are
 ephemeral; disputes ("it said I'd retire in 2041 last month") are unresolvable.
 
+**Estado 2026-09-03 — qué parte ya está servida y cuál NO, con precisión.** 5.0.0 trajo el arnés
+golden (`crates/engine/tests/golden_pins.rs` + los dos fixtures), y conviene no confundirlo con este
+ítem:
+
+- **Lo que el golden SÍ da**: una canonicalización a TEXTO de todas las salidas del motor por caso,
+  su SHA-256, un procedimiento de regeneración declarado (`UPDATE_ENGINE_PINS*`) y un control
+  negativo que prueba que el hash se mueve cuando un dígito se mueve. Es decir: **la mitad
+  "recomputable" del ítem, para una batería FIJA y dentro del repo**, y ya demuestra que la
+  proyección de una versión dada es reproducible bit a bit.
+- **Lo que NO da, y es la mitad que este ítem pide**: (a) los casos son **fixtures del repo**, no la
+  instalación de nadie — no hay forma de exportar «lo que MI proyección decía el día X»; (b) no hay
+  artefacto **serializable** (`ProjectionInput`/`ProjectionOutput` no viajan como JSON auditable);
+  (c) no hay endpoint ni manifiesto con `app_version`/`anchor_date`; (d) nada de esto es
+  **verificable offline por el usuario**, que es la promesa entera.
+- En texto público: se puede decir «la proyección es reproducible y está pineada bit a bit en el
+  repositorio»; **no** se puede decir «auditable» ni «recomputable por el usuario» hasta que (a)–(d)
+  existan.
+
 **FutureFin's asset:** the engine is pure — `ProjectionInput` fully determines
 `ProjectionOutput`. `ProjectionInput` already derives `Serialize`/`Deserialize` partially
 (`SimAsset` does; check remaining structs) and the encrypted user-backup layer
 (`apps/api/src/handlers/backup_user/`) already ships `schema_version` + `app_version`
-(`export.rs:71`) — the manifest pattern to copy.
+(`export.rs:71`) — the manifest pattern to copy. **Ojo 5.0.0**: el input ganó `PhasePlan` (fases,
+pensión, regla de retirada, base del objetivo), así que un artefacto que no lo serialice entero no
+reproduce nada — y el `engine_version` del fixture golden es el patrón de versionado a copiar.
 
 **First three steps in this repo:**
 1. Make `ProjectionInput` and `ProjectionOutput` fully `Serialize + Deserialize` in
@@ -374,7 +416,44 @@ is a tracked, tested simplification for a future release, not a gap in this one.
 
 ---
 
-### 6. Monte Carlo percentile bands — candidate, gated behind item 4
+### 6. Monte Carlo percentile bands — **capa base ENTREGADA (5.0.0); la capa MC, en curso**
+
+**Estado 2026-09-03, con precisión sobre qué existe y qué no:**
+
+- **Existe y está commiteado**: el bucle del motor es genérico sobre su tipo numérico (`MoneyOps`) y
+  `crates/engine-stochastic` lo **instancia** en `f64` (`F64Money`) — no lo duplica. Con eso, el
+  «honest cost assessment» de abajo deja de ser un problema abierto: los caminos comparten una sola
+  definición del modelo. La **puerta de degeneración**
+  (`crates/engine-stochastic/tests/degeneration.rs`) demuestra que los dos caminos son la misma
+  simulación: `net_worth` y `liquid_worth` mes a mes dentro de **1 € por mes** y las decisiones
+  discretas EXACTAS, sobre todos los casos de la batería.
+- **Commiteado el 2026-09-03 (`ba6bdfe`), con la suite en ROJO**: la capa Monte Carlo (RNG
+  `rand_chacha` pineado en el crate estocástico — `crates/engine` sigue **sin** RNG—, un stream por
+  `(seed, path)`, bandas puntuales p10/p50/p90, `success_probability`, agotamiento por edad). Los
+  dos tests que la tabla de claims exige pasan; **falla
+  `mc_cash_buffer_changes_the_band_under_sequence_risk`**, cuya predicción («el colchón mejora la
+  probabilidad de éxito») queda falsada por la medición (0,713 vs 0,775). Es un *predict-then-run
+  miss*, no un test flaky: la salida honesta es revisar la predicción o el modelo del colchón
+  (`futurefin-research-methodology` §2), no relajar el assert.
+- **Nada de esto es reclamable en público todavía** (tabla de claims): la evidencia que la regla
+  pide es la suite **commiteada y verde**. Hoy está commiteada y no verde. **Comprueba el estado
+  tú**: `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`.
+
+**Las decisiones de modelo ya están tomadas y firmadas** (plan de la issue #207, D11/D12/D22/D23/D25):
+log-normal mensual con **un shock común escalado por la sd de cada activo** (no matriz de
+correlaciones: la instalación no tiene covarianzas, y el sesgo es conservador); **éxito = la cartera
+no se agota nunca**, con el recorte de una regla publicado aparte y **sin contar como fracaso**;
+semilla estable por usuario (`hash(installation_id, user_id)`); umbral por defecto 95 %,
+configurable. Las divergencias que eso acepta están registradas en `financial-contracts.md` §4.
+
+**El «gated behind item 4» de esta sección ya no aplica**: item 4 (estrés determinista) sigue sin
+hacerse, y la capa estocástica se construyó igualmente porque su coste real —el bucle genérico— era
+compartido con el refactor por fases. No es una excepción a la disciplina: es que la premisa del
+gate (el coste prohibitivo) cambió, y eso se dice, no se calla.
+
+**Diseño y pasos originales, conservados como referencia (los nombres de fichero NO se cumplieron:
+el crate es `crates/engine-stochastic`, no `crates/engine/src/stochastic.rs`, precisamente para no
+meter `f64` en `crates/engine`):**
 
 **Why consumer tools fall short:** those that do offer Monte Carlo hide the return model and are
 non-reproducible (fresh RNG per view — the number changes on refresh, killing trust).
@@ -409,11 +488,24 @@ public text (claims table above).
 
 ### 7. Tax-aware drawdown path — candidate, via campaign
 
-**Verified inconsistency worth fixing:** taxes exist only in FIRE-target sizing — the closed-form
-gross-up (`gross_up_net_annual_fire`) inflates the target so SWR withdrawals cover taxes. But the
-simulated retirement phase drains the NET need from assets with no tax
-(`drain_from_assets`, projection.rs:505–513): the post-crossing depletion picture is optimistic.
-The ingredient for capital-gains math already exists per asset: `SimAsset.purchase_price` (basis).
+**⚠️ La «verified inconsistency» de este ítem SE ARREGLÓ en 4.10.0/#140 y 4.12.0/#178, y esta
+sección siguió describiéndola como viva.** Corregido el 2026-09-03. Lo que hoy hace el motor: **todo
+drenaje vende BRUTO** por la escala de tramos (`gross_up_monthly` dentro del bucle), la base de coste
+es **por activo** y baja al vender (`b' = b·v_post/v_pre`, #120), y la fracción de plusvalía gravable
+`g_i = 1 − b_i/v_i` se **deriva** de esa base viva cuando el coste está declarado; con `g`
+heterogénea, la forma cerrada por tramos (`gross_up_mixed_monthly`) recorre el mapa lineal a trozos
+sin iterar. Ancla medida del issue: agotamiento **mes 403 → 561**. La comprobación de abajo
+(«Drain is tax-free / gross-up only in target») está por tanto **invertida**: si algún día vuelve a
+ser cierta, es una regresión.
+
+**Lo que SIGUE abierto de este ítem** —y es lo que el propio texto de abajo ya marcaba como decisión
+separada— es la **ORDENACIÓN tax-aware del drenaje**: hoy el orden es líquidos primero, menor
+rentabilidad esperada primero, desempate por índice (`drain_order_g`), sin mirar la carga fiscal
+latente de cada activo. Vender primero lo que menos plusvalía acumula es una política distinta, con
+efecto medible y sin implementar.
+
+**Diseño original, conservado como referencia (su premisa ya no aplica):** the ingredient for
+capital-gains math already exists per asset: `SimAsset.purchase_price` (basis).
 
 **First three steps in this repo:**
 1. Campaign design note quantifying the gap on a fixture household (predict the depletion-month
@@ -431,12 +523,26 @@ The ingredient for capital-gains math already exists per asset: `SimAsset.purcha
 today's model by exactly the hand-computed amount (±1 month), and disabling taxes reproduces the
 current series bit-exactly.
 
-### 8. Variable/dynamic SWR strategies — deferred
+### 8. Variable/dynamic SWR strategies — **✅ ENTREGADO en 5.0.0 (WP2)**
 
-Guardrails-style rules (spend less after bad years) only produce different outcomes when returns
-VARY — under today's constant-return model every strategy degenerates to the fixed SWR. Zero
-value before item 6 (or at least item 4) exists. Revisit then; until that day, the only useful
-groundwork is keeping `swr_pct` validation and the fixture cases honest. Do not build UI for it.
+Entregado, y con un nombre distinto del que esta sección usaba: no es un «SWR variable» —el SWR
+sigue dimensionando SOLO el objetivo— sino una **regla de retirada** por perfil
+(`RetirementProfile::withdrawal_rule` × `spend_mode`), simulada en el bucle
+(`crates/engine/src/withdrawal.rs`). Cuatro reglas: `fixed_real` (default, = el drenaje de 4.15.0),
+`percent_of_balance`, `hybrid` y **`guardrails`** (Guyton-Klinger 2006, con sus dos omisiones
+declaradas). Semántica en `futurefin-fire-domain-reference` §4b; contrato en
+`financial-contracts.md` §2.5.
+
+**La advertencia de esta sección era correcta y hay que conservarla, no borrarla**: sobre un camino
+determinista con rentabilidad > SWR la regla de prosperity dispara **todos los años** (ratchet), así
+que los guardarraíles **solo tienen sentido pleno con el ítem 6**. Eso va dicho en el `helpTexts` de
+la regla, donde lo lee el usuario, no solo aquí. Y sí hay UI: las cinco tarjetas de estrategia con
+formulario contextual (D26) — lo que esta línea desaconsejaba («do not build UI for it») se hizo a
+propósito, con la regla degenerando a los números de hoy por defecto.
+
+**Lo que sigue abierto en esta dirección**: reglas basadas en CAPE u otra señal externa (exigirían
+un dato que la instalación no tiene), y medir el valor de cada regla con Monte Carlo — que es
+literalmente para lo que el ítem 6 existe.
 
 ### 9. Multi-currency correctness — demoted
 
@@ -617,7 +723,7 @@ nothing automatically un-lists a shipped item here. Re-verify before relying on 
   (must hit; the old marker `principals[i] -= pay` is gone — `grep -n` for it now returns nothing,
   which is the expected, correct state, not drift) and
   `grep -n '^## \[4.2.0\]' CHANGELOG.md`.
-- Drain is tax-free / gross-up only in target: `grep -n 'gross_up_net_annual_fire\|drain_from_assets' apps/api/src/handlers/projection.rs crates/engine/src/{projection,sim_core}.rs`
+- ~~Drain is tax-free / gross-up only in target~~ — **INVERTIDA desde 4.10.0/#140**: el drenaje tributa. `grep -n 'gross_up_net_annual_fire\|drain_from_assets' apps/api/src/handlers/projection.rs crates/engine/src/{projection,sim_core}.rs` sigue sirviendo para localizar las funciones, pero lo que hay que comprobar hoy es lo contrario: `grep -n "fn gross_up_mixed_monthly" crates/engine/src/tax.rs` (debe existir).
 - Backup script defaults: `grep -n 'BACKUP_DIR=\|KEEP_BACKUPS=\|ENV_FILE=' scripts/backup-postgres.sh`
   (since 3.0.0 it `compose exec`s into the single `futurefin` service and `ENV_FILE` is optional)
 - Migration runner (auto on startup, fails loud): `cat apps/api/src/db.rs`
@@ -629,6 +735,43 @@ nothing automatically un-lists a shipped item here. Re-verify before relying on 
 - Currency/locale state: `grep -n 'EUR.*USD.*GBP' apps/api/src/handlers/installation.rs; grep -n DISPLAY_NUMBER_LOCALE apps/web/src/lib/format.ts`
 - Horizon basis strings: `grep -n '"lifespan_90"\|"fallback_no_demographics"\|"months_override"' apps/api/src/handlers/projection.rs`
 - Migration count: `ls apps/api/migrations | wc -l` (34 as of 2026-08-16; 31 as of 2026-07-02)
+
+**Ítems 1, 3, 6, 7 y 8 y la tabla de claims re-verificados el 2026-09-03 contra `release/5.0.0`**
+(issue #207). Tres ítems cambiaron de estado (7 y 8 entregados, 6 a medias) y uno —el 7— llevaba
+describiendo como bug vivo algo arreglado en 4.10.0: la lección de este fichero (un «candidato» solo
+está tan fresco como la última vez que alguien miró si la campaña ya lo cerró) volvió a morder, esta
+vez sobre una afirmación NEGATIVA («el drenaje no tributa»), que envejece igual que un número
+congelado y que nadie recuenta. Re-verificar:
+
+- **La coma flotante y el Monte Carlo viven en un crate aparte, y el motor sigue sin RNG**:
+  `ls crates/engine-stochastic/{src,tests}/`, `grep -c "rand" crates/engine/Cargo.toml` (**0**) y
+  `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"` — **este último es el que
+  decide si «Monte Carlo» es reclamable**: commiteada el 2026-09-03 en `ba6bdfe`, pero con 1 de 11
+  tests en rojo, así que hoy NO lo es.
+- **La puerta de degeneración es la evidencia de la mitad ya hecha**:
+  `grep -n "const EUR_TOLERANCE\|fn every_case_degenerates_from_decimal_to_floating_point" crates/engine-stochastic/tests/degeneration.rs` (2 hits).
+- **El arnés golden es la mitad de «recomputable» del ítem 3**:
+  `ls crates/engine/tests/fixtures/` (dos fixtures) y
+  `grep -n "fn the_hash_actually_notices_a_single_moved_decimal" crates/engine/tests/golden_pins.rs`
+  (el control negativo, sin el cual el pin sería decorativo).
+- **El ítem 8 está entregado**: `grep -n "enum WithdrawalRule" crates/engine/src/phases.rs` y
+  `grep -n "fn review_guardrails" crates/engine/src/withdrawal.rs`.
+- **El ítem 7 está entregado en su mitad fiscal, abierto en la de ORDENACIÓN**:
+  `grep -n "fn gross_up_mixed_monthly" crates/engine/src/tax.rs` (existe ⇒ el drenaje tributa) y
+  `grep -n -A6 "fn drain_order_g" crates/engine/src/sim_core.rs` (el orden sigue sin mirar la
+  plusvalía latente).
+- **El ítem 1 sigue abierto**: `grep -rn proptest crates/ apps/ --include=Cargo.toml` (**vacío**).
+- **README sigue sin reclamar nada**: `grep -in 'monte\|stochastic\|bit-exact\|deterministic' README.md`
+  (**vacío** el 2026-09-03, con el crate estocástico ya en el árbol — que es exactamente cuando la
+  regla de claims vale algo).
+
+**Contadores medidos el 2026-09-03 que esta ficha da por otros**, con el comando al lado porque
+ninguno es de este WP y todos estaban desfasados: `ls apps/api/tests/*.rs | wc -l` → **76** (la
+línea del ítem 2 dice 62); `ls apps/api/migrations | wc -l` → **59** (la última línea de este
+bloque dice 34); y el presupuesto MCP →
+`python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
+→ **70 23854 594** (el bloque del ítem 10 dice `68 23874 596`, o sea **146** de margen, no 126).
+Corrígelos en la pasada de API/MCP, con el comando y no con estos números.
 
 **Item 10 added 2026-08-28 (MCP Fase 5 doc sweep, issue #86, branch `feat/mcp-fase-5-contexto`,
 unreleased at verification time — `Cargo.toml` still 4.3.1).** Verified against
