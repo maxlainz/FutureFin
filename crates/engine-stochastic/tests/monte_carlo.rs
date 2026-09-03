@@ -25,7 +25,8 @@ mod cases;
 
 use cases::{projection_cases_5_0, projection_cases_all, ProjCase};
 use futurefin_engine::{
-    project_net_worth_series, PhasePlan, ProjectionInput, SimAsset, SpendMode, WithdrawalRule,
+    project_net_worth_series, AllocationKind, AllocationRule, FireNeed, FireTarget, PhasePlan,
+    ProjectionInput, SimAsset, SpendMode, WithdrawalRule,
 };
 use futurefin_engine_stochastic::{
     project_percentile_bands, run_path, seed_for, simulate_f64, McConfig, McOutcome,
@@ -97,6 +98,41 @@ fn single_asset_retiree(
     }
 }
 
+/// Un hogar que **todavía no se ha jubilado**: ahorra, invierte todo el sobrante y se jubilará
+/// cuando el líquido cruce su número FIRE. Es el laboratorio de la definición de éxito (D22): sin
+/// un trigger por cruce, «no jubilarse nunca» no es un suceso posible.
+fn crossing_household(
+    start: Decimal,
+    income: Decimal,
+    expense: Decimal,
+    annual_return: Decimal,
+    swr_pct: Decimal,
+    horizon: u32,
+) -> ProjectionInput {
+    let mut input = single_asset_retiree(start, expense, annual_return, horizon);
+    input.income_regular_monthly = income;
+    input.allocation_rules = vec![AllocationRule {
+        target_index: 0,
+        kind: AllocationKind::Remainder,
+        amount: None,
+        cap: None,
+    }];
+    input.phase_plan = PhasePlan::classic(Decimal::ZERO, expense);
+    input.fire_target = Some(FireTarget {
+        need: FireNeed::ExpenseMinusPension {
+            expense_monthly: expense,
+            pension_monthly: Decimal::ZERO,
+        },
+        swr_pct,
+        tax_brackets: Vec::new(),
+        taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
+        annual_inflation_percent: Decimal::ZERO,
+        debt_payments_remaining: vec![Decimal::ZERO; horizon as usize + 1],
+    });
+    input
+}
+
 /// El mismo laboratorio con **dos** activos: una cuenta al 0 % (el colchón) y la renta variable.
 ///
 /// «100 % renta variable **con manga de caja**» es lo que una estrategia de colchón significa: el
@@ -110,6 +146,30 @@ fn buffered_retiree(
     annual_return: Decimal,
     horizon: u32,
 ) -> ProjectionInput {
+    buffered_retiree_at(
+        cash,
+        equity,
+        monthly_expense,
+        annual_return,
+        Decimal::ZERO,
+        horizon,
+    )
+}
+
+/// El mismo laboratorio con la rentabilidad del COLCHÓN como eje propio.
+///
+/// Sin este eje no se puede separar lo que el colchón hace de lo que cuesta tenerlo: una cuenta
+/// al 0 % arrastra ~5.200 €/año sobre 80.000 €, y ese lastre se confundía con «el colchón no
+/// protege». Poniendo el colchón a la misma rentabilidad esperada que la RV —σ = 0, misma media—
+/// el lastre desaparece y queda solo el efecto de la POLÍTICA.
+fn buffered_retiree_at(
+    cash: Decimal,
+    equity: Decimal,
+    monthly_expense: Decimal,
+    annual_return: Decimal,
+    cash_return: Decimal,
+    horizon: u32,
+) -> ProjectionInput {
     let mut input = single_asset_retiree(cash + equity, monthly_expense, annual_return, horizon);
     input.assets = vec![
         SimAsset {
@@ -117,7 +177,7 @@ fn buffered_retiree(
             value: cash,
             purchase_price: None,
             is_liquid: true,
-            expected_annual_return_percent: Some(Decimal::ZERO),
+            expected_annual_return_percent: Some(cash_return),
         },
         SimAsset {
             id: uuid::Uuid::from_u128(2),
@@ -271,11 +331,34 @@ fn mc_zero_volatility_degenerates_to_deterministic() {
         }
 
         // (b) La probabilidad de éxito es EXACTAMENTE 0 o 1, y es la del camino determinista.
-        let expected = if det.assets_depleted_month_index.is_none() {
+        //
+        // Desde el pase de correcciones de la revisión adversarial, «éxito» exige que el plan
+        // OCURRA: el hogar se jubila dentro del horizonte (o el trigger es por edad, y entonces
+        // la jubilación es un dato) y además no agota la cartera. Con σ=0 todos los caminos son
+        // el determinista, así que la expectativa se lee de él en los dos términos.
+        let age_triggered = c
+            .input
+            .phase_plan
+            .retirement_trigger
+            .forced_month()
+            .is_some();
+        let expected = if (age_triggered || det.retirement_month_index.is_some())
+            && det.assets_depleted_month_index.is_none()
+        {
             1.0
         } else {
             0.0
         };
+        assert_eq!(
+            out.never_retired_probability,
+            if age_triggered || det.retirement_month_index.is_some() {
+                0.0
+            } else {
+                1.0
+            },
+            "{}: con σ=0 «no se jubila nunca» tampoco admite matices",
+            c.name
+        );
         assert_eq!(
             out.success_probability, expected,
             "{}: con σ=0 el éxito no admite matices",
@@ -556,8 +639,13 @@ fn mc_success_probability_of_the_issue_table() {
         "retirar más no puede arruinar menos: {ruin4} ≤ {ruin3}"
     );
 
-    // Con `fixed_real` la regla NO recorta nunca: el hogar retira lo que necesita hasta que no
-    // queda nada. El recorte es cero y lo que hay es agotamiento — la separación de D22/D24.
+    // Con `fixed_real` la regla NO recorta nunca (`withdrawal_shortfall ≡ 0`, la separación de
+    // D22/D24), pero la NECESIDAD NO CUBIERTA sí existe cuando la cartera se acaba, y desde el
+    // pase de correcciones cuenta: `months_below_need_p50` mide meses con `recorte + descubierto
+    // > 0`. El camino mediano al 3 % no se arruina y no tiene ninguno; al 4 % la mediana tampoco
+    // (la ruina está en el 12-30 %), así que ambos siguen en 0 — lo que cambia es que ahora
+    // cuentan por la razón correcta, y el caso que lo demuestra es
+    // `mc_coverage_counts_the_need_the_portfolio_could_not_fund`.
     assert_eq!(out3.months_below_need_p50, 0);
     assert_eq!(out4.months_below_need_p50, 0);
 
@@ -573,22 +661,22 @@ fn mc_success_probability_of_the_issue_table() {
     for w in cumulative.windows(2) {
         assert!(w[1] >= w[0], "una probabilidad ACUMULADA no puede bajar");
     }
-    // La última fila NO es la ruina total: la tabla avanza de 60 en 60 desde la jubilación (mes
-    // 1) y se detiene en el último múltiplo que cabe en el horizonte —el mes 361 de 420—, así que
-    // los caminos que se agotan en los últimos cinco años quedan fuera. Es acumulada y acotada
-    // por la ruina, no igual a ella; quien lea la tabla tiene que saberlo.
+    // **La última fila ES el horizonte** (corrección de la revisión adversarial): la rejilla
+    // avanza de 60 en 60 desde la jubilación y antes se detenía en el último múltiplo que cabía
+    // —el mes 361 de 420—, dejando fuera sin avisar a los caminos que se agotaban en los últimos
+    // cinco años. Ahora cierra en el mes 420 y esa fila ES la ruina total.
     let last_row = *cumulative.last().expect("hay filas");
-    assert!(
-        last_row <= ruin4,
-        "la tabla acumulada ({last_row}) no puede pasarse de la ruina total ({ruin4})"
-    );
     assert_eq!(
         out4.depletion_probability_by_age
             .last()
             .expect("hay filas")
             .0,
-        361,
-        "la última fila es el último múltiplo de 60 que cabe en el horizonte"
+        420,
+        "la última fila de la tabla es el HORIZONTE, no el último múltiplo de 60"
+    );
+    assert!(
+        (last_row - ruin4).abs() < 1e-12,
+        "la última fila ({last_row}) es la ruina total ({ruin4})"
     );
 }
 
@@ -687,20 +775,17 @@ fn mc_seed_for_is_stable() {
 
 /// **Las dos maneras de que el colchón no haga nada, y son distintas.**
 ///
-/// 1. **Sin volatilidad declarada NO se instala.** No es que «no haya de dónde vender»:
-///    `PathEngine::new` exige tres cosas para simularlo —el usuario lo pide, hay un activo
-///    líquido que lo albergue y hay volatilidad de la que protegerse— y aquí falla la tercera.
-///    `z_k` se sigue sorteando (el flujo del RNG no depende de los datos) pero no mueve ningún
-///    retorno: rellenar «en los meses buenos» sería trasvasar valor —y pagar plusvalías—
-///    guiándose por un shock que no afecta a nada, y además rompería la puerta de degeneración de
-///    WP5.5 («σ=0 ⇒ la banda ES la línea determinista»). Resultado: `buffer_active: false`, las
-///    dos lecturas a `None` («no se midió», que no es «cero rellenos») y un [`McOutcome`]
-///    idéntico bit a bit al de no pedirlo.
-/// 2. **Con volatilidad SÍ se instala, y aun así no mueve nada si no hay de dónde vender.** P7
-///    tiene UN solo activo, que es a la vez el colchón: el conjunto vendible es vacío porque el
-///    colchón jamás se vende a sí mismo (eso sería un trasvase circular que sube su propia base
-///    sin mover un euro). `buffer_active: true`, `buffer_refills_p50: Some(0)` y las bandas
-///    EXACTAMENTE iguales que sin colchón.
+/// 1. **Sin volatilidad declarada NO se instala** (`no_volatility`): `z_k` se sigue sorteando
+///    —el flujo del RNG no depende de los datos— pero no mueve ningún retorno, así que rellenar
+///    «tras un mes bueno» sería trasvasar valor y pagar plusvalías guiándose por un shock que no
+///    afecta a nada. Resultado: `buffer_active: false`, las dos lecturas a `None` («no se midió»,
+///    que no es «cero rellenos») y un [`McOutcome`] idéntico al de no pedirlo salvo el motivo.
+/// 2. **Sin un activo líquido SIN RIESGO tampoco** (`no_safe_liquid_asset`), y esto es la
+///    corrección de la revisión adversarial: el índice del colchón salía de `cash_buffer_index`,
+///    que se deriva del orden de drenaje y no sabe de volatilidad. En una cartera de un solo
+///    fondo con σ = 12 % elegía **ese fondo** como colchón — un colchón con la volatilidad de la
+///    cartera no es un colchón, es la misma cartera con más impuestos.
+/// 3. **Con un activo líquido a σ = 0 sí se instala**, y entonces las lecturas existen.
 #[test]
 fn mc_cash_buffer_is_installed_only_when_it_can_mean_something() {
     let input = case("P7_jubilado_pension_impuestos");
@@ -715,90 +800,117 @@ fn mc_cash_buffer_is_installed_only_when_it_can_mean_something() {
         ..without.clone()
     };
 
-    // (1) σ = 0 en toda la cartera: el colchón no se instala y el resultado es el mismo objeto.
+    // (1) σ = 0 en toda la cartera: no hay riesgo del que protegerse.
     let flat: Vec<Option<f64>> = input.assets.iter().map(|_| None).collect();
     let a = project_percentile_bands(&input, &flat, &without).expect("no falla");
     let b = project_percentile_bands(&input, &flat, &with).expect("no falla");
     assert!(!a.buffer_active && !b.buffer_active);
+    assert_eq!(
+        a.buffer_inactive_reason.map(|r| r.code()),
+        Some("not_requested")
+    );
+    assert_eq!(
+        b.buffer_inactive_reason.map(|r| r.code()),
+        Some("no_volatility")
+    );
     assert_eq!(b.buffer_refills_p50, None);
     assert_eq!(b.buffer_refill_net_total_p50, None);
     assert_eq!(
-        a, b,
-        "con σ=0 el colchón no se instala: pedirlo no puede mover un dígito"
+        a,
+        McOutcome {
+            buffer_inactive_reason: a.buffer_inactive_reason,
+            ..b.clone()
+        },
+        "con σ=0 el colchón no se instala: pedirlo no puede mover un dígito (salvo el motivo)"
     );
 
-    // (2) σ = 12 %: se instala, pero P7 tiene un solo activo y el colchón no se vende a sí mismo.
+    // (2) σ = 12 % en TODO: hay riesgo, pero no hay dónde alojar el colchón. Antes se instalaba
+    //     sobre el propio fondo volátil.
     let vols: Vec<Option<f64>> = input.assets.iter().map(|_| Some(12.0)).collect();
     let live_off = project_percentile_bands(&input, &vols, &without).expect("no falla");
     let live_on = project_percentile_bands(&input, &vols, &with).expect("no falla");
-    println!(
-        "[colchón] P7 (1 activo) · σ=0 ⇒ instalado={} · σ=12 % ⇒ instalado={} rellenos={:?} movido={:?}",
-        b.buffer_active,
-        live_on.buffer_active,
-        live_on.buffer_refills_p50,
-        live_on.buffer_refill_net_total_p50
-    );
     assert!(
-        live_on.buffer_active,
-        "con volatilidad el colchón se simula"
+        !live_on.buffer_active,
+        "un fondo con σ = 12 % no puede ser su propio colchón"
     );
-    assert_eq!(live_on.buffer_refills_p50, Some(0));
-    assert_eq!(live_on.buffer_refill_net_total_p50, Some(0.0));
+    assert_eq!(
+        live_on.buffer_inactive_reason.map(|r| r.code()),
+        Some("no_safe_liquid_asset")
+    );
+    assert_eq!(live_on.buffer_refills_p50, None);
     assert_eq!(
         live_off.net_worth, live_on.net_worth,
-        "sin otro activo que vender, el colchón no puede mover una sola serie"
+        "un colchón que no se instala no puede mover una sola serie"
     );
     assert_eq!(live_off.liquid_worth, live_on.liquid_worth);
-}
 
-/// **Con volatilidad y con algo que vender, el colchón cambia la distribución — y la empeora.**
-///
-/// El laboratorio del issue con manga de caja: 1.000.000 € (80.000 en cuenta al 0 % = 24 meses de
-/// gasto, 920.000 en RV al 6,5 % con σ = 17 %), retirada fija real del 4 % del capital inicial, 35
-/// años, sin impuestos y sin IPC. Las dos ejecuciones parten de la MISMA cartera; lo único que
-/// cambia es si la cuenta se vuelve a llenar en los meses de shock positivo o se gasta una vez.
-///
-/// # Predicción y resultado
-///
-/// Se predijeron dos fuerzas opuestas: el **lastre de caja** (mantener 80.000 € fuera del mercado
-/// cuesta ~5.200 €/año de crecimiento esperado) contra el **riesgo de secuencia** (sin colchón se
-/// vende RV también después de una caída; con colchón, solo tras subir). La predicción escrita
-/// antes de ejecutar fue «p10 arriba, p90 abajo, éxito arriba: la cola manda en la ruina».
-///
-/// **La predicción falló en el signo, y el motivo está dentro del propio modelo.** Medido con
-/// 1.000 caminos y semilla 207:
-///
-/// ```text
-///   colchón (meses):   0        6        12       24       60
-///   éxito:             0,777    0,739    0,731    0,713    0,641
-///   p10 del mes 240:  95.581   56.822   52.993   57.136   56.352
-///   p50 final:      1.575.208 1.295.498 1.222.917 1.050.304  528.554
-/// ```
-///
-/// Monótono en el tamaño del colchón y **en contra** en todos los percentiles, la cola incluida.
-/// La razón no es un fallo del colchón: es que **este modelo no tiene autocorrelación** (está
-/// declarado en el doc del módulo `mc`). Con shocks mensuales independientes, un mes malo no dice
-/// nada del siguiente, así que no hay «mala racha que esperar sentado»: el colchón no compra
-/// ninguna información y el lastre —que sí es cierto todos los meses— se cobra entero. En los
-/// backtests históricos el colchón parece ayudar porque las series reales SÍ revierten a la
-/// media; esa propiedad no está aquí y por eso el resultado no puede ser el de la literatura de
-/// backtest.
-///
-/// Lo que este test fija, entonces: el colchón **actúa de verdad** (se rellena, mueve las bandas)
-/// y, dentro de este modelo, **cuesta rentabilidad sin comprar seguridad**. Si alguien añade
-/// reversión a la media al modelo, este `assert` se caerá — y eso será exactamente lo que hay que
-/// mirar.
-#[test]
-fn mc_cash_buffer_costs_return_without_buying_safety_in_this_model() {
+    // (3) Añadiendo una cuenta LÍQUIDA a σ = 0, el colchón ya tiene casa.
     let monthly =
         Decimal::from(1_000_000) * Decimal::from(4) / Decimal::from(100) / Decimal::from(12);
-    let input = buffered_retiree(
+    let two = buffered_retiree(
         Decimal::from(80_000),
         Decimal::from(920_000),
         monthly,
         Decimal::try_from(6.5).unwrap(),
         420,
     );
+    let installed = project_percentile_bands(&two, &[None, Some(17.0)], &with).expect("no falla");
+    println!(
+        "[colchón] instalación · σ=0 ⇒ {:?} · σ=12 % en todo ⇒ {:?} · cuenta σ=0 + RV σ=17 % ⇒ activo={}",
+        b.buffer_inactive_reason.map(|r| r.code()),
+        live_on.buffer_inactive_reason.map(|r| r.code()),
+        installed.buffer_active
+    );
+    assert!(installed.buffer_active);
+    assert_eq!(installed.buffer_inactive_reason, None);
+    assert!(installed.buffer_refills_p50.expect("se simuló") > 0);
+}
+
+/// **El colchón, descompuesto: cuánto cuesta tenerlo y cuánto protege.**
+///
+/// El laboratorio del issue con manga de caja: 1.000.000 € (80.000 en cuenta = 24 meses de gasto,
+/// 920.000 en RV al 6,5 % con σ = 17 %), retirada fija real del 4 % del capital inicial, 35 años,
+/// sin impuestos y sin IPC, semilla 207, 1.000 caminos.
+///
+/// # Por qué el test tiene DOS escenarios y no uno
+///
+/// La versión anterior medía un solo escenario —la cuenta al 0 %— y concluyó «el colchón empeora
+/// el plan». La revisión adversarial (D20) mostró que esa conclusión mezclaba **tres** efectos
+/// distintos, dos de ellos ajenos a la política de colchón:
+///
+/// 1. **Lastre de caja.** Mantener 80.000 € al 0 % en vez de al 6,5 % cuesta ~5.200 €/año de
+///    crecimiento esperado. No es el colchón: es la cuenta.
+/// 2. **Protección.** Gastar de una reserva sin riesgo evita vender RV justo después de una
+///    caída. Es lo que el colchón dice hacer.
+/// 3. **Anticipación.** El código autorizaba el relleno con el shock del PROPIO mes (`z_k`) y el
+///    relleno se ejecuta ANTES del crecimiento: vendía RV al precio de antes de una subida que ya
+///    sabía que venía. Eso no es un colchón, es una apuesta con información del futuro — y salía
+///    cara. Corregido a `z_{k−1}` en el pase de correcciones.
+///
+/// # Medido, con el modelo corregido (relleno NO anticipativo)
+///
+/// ```text
+///   colchón de 24 meses           éxito sin → con        Δ
+///   cuenta al 0 %   (con lastre)  0,7750 → 0,7400     −3,50 pp
+///   cuenta al 6,5 % (sin lastre)  0,7800 → 0,8190     +3,90 pp
+/// ```
+///
+/// - **Descomposición**: lastre = 0,7400 − 0,8190 = **−7,90 pp**; protección = 0,8190 − 0,7800 =
+///   **+3,90 pp**; y la anticipación que se retiró valía **+2,7 pp** (el mismo escenario al 0 %
+///   daba 0,713 con `z_k` y da 0,740 con `z_{k−1}`).
+/// - Con el lastre fuera, el colchón **mejora** el plan y sobre todo la cola: el líquido p10 del
+///   mes 240 pasa de 99.409 € a 197.767 €, casi el doble.
+/// - Con la cuenta al 0 % el colchón sigue costando, y eso es lo que la ayuda de la UI tiene que
+///   decir: *la protección es real, pero no es gratis — la paga la rentabilidad que renuncias
+///   por tener 24 meses de gasto fuera del mercado*.
+///
+/// La predicción escrita antes de ejecutar («con el colchón a la rentabilidad de la RV el éxito
+/// SUBE; al 0 % puede seguir costando») se cumplió en los dos signos. El `assert` fija esos dos
+/// signos, no un número ajustado.
+#[test]
+fn mc_cash_buffer_protects_and_the_drag_is_what_costs() {
+    let monthly =
+        Decimal::from(1_000_000) * Decimal::from(4) / Decimal::from(100) / Decimal::from(12);
     let vols = vec![None, Some(17.0)];
     let without = McConfig {
         seed: 207,
@@ -810,58 +922,82 @@ fn mc_cash_buffer_costs_return_without_buying_safety_in_this_model() {
         cash_buffer_months: Some(24),
         ..without.clone()
     };
-    let a = project_percentile_bands(&input, &vols, &without).expect("no falla");
-    let b = project_percentile_bands(&input, &vols, &with).expect("no falla");
-    assert!(!a.buffer_active && b.buffer_active);
+    let run = |cash_return: Decimal| {
+        let input = buffered_retiree_at(
+            Decimal::from(80_000),
+            Decimal::from(920_000),
+            monthly,
+            Decimal::try_from(6.5).unwrap(),
+            cash_return,
+            420,
+        );
+        let a = project_percentile_bands(&input, &vols, &without).expect("no falla");
+        let b = project_percentile_bands(&input, &vols, &with).expect("no falla");
+        (a, b)
+    };
+    let (flat_off, flat_on) = run(Decimal::ZERO);
+    let (fair_off, fair_on) = run(Decimal::try_from(6.5).unwrap());
+    assert!(!flat_off.buffer_active && flat_on.buffer_active);
+    assert!(!fair_off.buffer_active && fair_on.buffer_active);
 
-    let mid = 240usize;
-    let last = 420usize;
+    let drag = flat_on.success_probability - fair_on.success_probability;
+    let protection = fair_on.success_probability - fair_off.success_probability;
     println!(
         "\n[colchón] 1.000.000 € (80.000 cuenta + 920.000 RV 6,5 %/17 %) · 4 % real · 35 años · 1.000 caminos\n\
-         [colchón]   éxito             sin colchón = {:.3}   con colchón = {:.3}   (Δ {:+.3})\n\
-         [colchón]   líquido p10 mes 240 = {:>12.0} → {:>12.0} €\n\
-         [colchón]   líquido p50 final   = {:>12.0} → {:>12.0} €\n\
-         [colchón]   líquido p90 final   = {:>12.0} → {:>12.0} €\n\
-         [colchón]   rellenos p50 = {:?} de 420 meses · movido p50 = {:?} €",
-        a.success_probability,
-        b.success_probability,
-        b.success_probability - a.success_probability,
-        a.liquid_worth[0][mid],
-        b.liquid_worth[0][mid],
-        a.liquid_worth[1][last],
-        b.liquid_worth[1][last],
-        a.liquid_worth[2][last],
-        b.liquid_worth[2][last],
-        b.buffer_refills_p50,
-        b.buffer_refill_net_total_p50,
+         [colchón]   cuenta al 0 %   : éxito {:.4} → {:.4}  (Δ {:+.4})   líquido p10 mes 240 {:>10.0} → {:>10.0} €\n\
+         [colchón]   cuenta al 6,5 % : éxito {:.4} → {:.4}  (Δ {:+.4})   líquido p10 mes 240 {:>10.0} → {:>10.0} €\n\
+         [colchón]   descomposición  : lastre {:+.4}   protección {:+.4}\n\
+         [colchón]   rellenos p50 = {:?} de 420 · movido p50 = {:?} €",
+        flat_off.success_probability,
+        flat_on.success_probability,
+        flat_on.success_probability - flat_off.success_probability,
+        flat_off.liquid_worth[0][240],
+        flat_on.liquid_worth[0][240],
+        fair_off.success_probability,
+        fair_on.success_probability,
+        protection,
+        fair_off.liquid_worth[0][240],
+        fair_on.liquid_worth[0][240],
+        drag,
+        protection,
+        fair_on.buffer_refills_p50,
+        fair_on.buffer_refill_net_total_p50,
     );
 
-    // (1) El colchón se rellena de verdad: ni cero meses ni cero euros. El total movido en la
-    //     mediana ronda el gasto acumulado del horizonte (1,4 M€ en 420 meses), porque
-    //     prácticamente TODO el gasto acaba pasando por la cuenta.
-    let refills = b.buffer_refills_p50.expect("se simuló");
-    let moved = b.buffer_refill_net_total_p50.expect("se simuló");
-    assert!(refills > 0 && moved > 0.0);
+    // (1) El colchón ACTÚA: se rellena, y no todos los meses (solo tras un shock positivo).
+    let refills = fair_on.buffer_refills_p50.expect("se simuló");
+    assert!(refills > 0 && refills < 420, "rellenos = {refills}");
+    assert!(fair_on.buffer_refill_net_total_p50.expect("se simuló") > 0.0);
+    assert_ne!(fair_off.liquid_worth, fair_on.liquid_worth);
+
+    // (2) **Sin lastre, el colchón PROTEGE**: más éxito y, sobre todo, mucha más cola.
     assert!(
-        refills < 420,
-        "solo se rellena en los meses de shock POSITIVO, que no son todos: {refills}"
-    );
-    // (2) Las bandas se MUEVEN: un colchón que no cambia la distribución no es un colchón.
-    assert_ne!(
-        a.liquid_worth, b.liquid_worth,
-        "el colchón no ha movido la banda: o no actúa, o el gancho está desconectado"
-    );
-    // (3) Y se mueven a peor, en la mediana y en la cola: ver el porqué en el doc.
-    assert!(
-        b.liquid_worth[1][last] < a.liquid_worth[1][last],
-        "el lastre de caja tiene que verse en la mediana"
+        protection > 0.0,
+        "con el colchón a la rentabilidad de la cartera el éxito tiene que subir: {:.4} ≤ {:.4}",
+        fair_on.success_probability,
+        fair_off.success_probability
     );
     assert!(
-        b.success_probability <= a.success_probability,
-        "con shocks independientes el colchón no puede MEJORAR la ruina: {:.3} > {:.3} \
-         — si el modelo ha ganado reversión a la media, actualiza este test Y la ayuda de la SPA",
-        b.success_probability,
-        a.success_probability
+        fair_on.liquid_worth[0][240] > fair_off.liquid_worth[0][240],
+        "la protección se ve en la COLA (p10), que es donde vive la ruina"
+    );
+
+    // (3) **El lastre es lo que cuesta**, y cuesta más de lo que la protección aporta: por eso el
+    //     escenario realista (cuenta al 0 %) sigue en negativo.
+    assert!(
+        drag < 0.0,
+        "el lastre de caja no puede ser gratis: {drag:+.4}"
+    );
+    assert!(
+        flat_on.success_probability < flat_off.success_probability,
+        "con la cuenta al 0 % el colchón sigue costando en este modelo: {:.4} ≥ {:.4}",
+        flat_on.success_probability,
+        flat_off.success_probability
+    );
+    assert!(
+        drag.abs() > protection,
+        "y el lastre ({drag:+.4}) tiene que dominar a la protección ({protection:+.4}), que es lo \
+         que explica el signo del escenario realista"
     );
 }
 
@@ -921,5 +1057,115 @@ fn mc_readings_follow_the_retirement_trigger() {
     assert!(
         p > 0.5,
         "el caso está pineado como infra-financiado en el camino determinista: {p}"
+    );
+}
+
+// =================================================================================================
+// 8. Las dos lecturas que la segunda revisión adversarial (D20) corrigió
+// =================================================================================================
+
+/// **La cobertura cuenta la necesidad que la CARTERA no pudo fundar, no solo la que la regla
+/// rechazó.**
+///
+/// El hogar: 100.000 € al 4 % con σ = 15 %, 3.000 €/mes de gasto, 400 meses. Se arruina en el mes
+/// 35 (mediana) y pasa 364 de los 400 meses con la cartera vacía. Con `fixed_real` la regla NO
+/// recorta nunca (`withdrawal_shortfall ≡ 0` por construcción: el permitido ES la necesidad), así
+/// que el denominador `Σ(w + s)` era `Σ w` y el cociente salía **1,0 en los 1.000 caminos** — «la
+/// regla cubrió el 100 % de la necesidad» sobre hogares que cubrieron el 8,8 %.
+///
+/// Lo que faltaba estaba en la tercera magnitud, `unmet_need`, que el motor no publicaba mes a
+/// mes. Ahora sí, y el cociente es `Σ w / Σ (w + recorte + descubierto)`.
+#[test]
+fn mc_coverage_counts_the_need_the_portfolio_could_not_fund() {
+    let input = single_asset_retiree(
+        Decimal::from(100_000),
+        Decimal::from(3_000),
+        Decimal::from(4),
+        400,
+    );
+    let config = McConfig {
+        seed: 207,
+        paths: 1_000,
+        percentiles: vec![10, 50, 90],
+        cash_buffer_months: None,
+    };
+    let out = project_percentile_bands(&input, &[Some(15.0)], &config).expect("no falla");
+    let ratio = out
+        .withdrawal_to_need_ratio_p50
+        .expect("hay meses jubilados");
+    println!(
+        "\n[cobertura] 100.000 € al 4 %/15 % · 3.000 €/mes · 400 meses · 1.000 caminos\n\
+         [cobertura]   éxito = {:.4}   cobertura p50 = {ratio:.4}   meses por debajo p50 = {}",
+        out.success_probability, out.months_below_need_p50
+    );
+
+    assert_eq!(out.success_probability, 0.0, "ningún camino sobrevive");
+    assert!(
+        (0.05..0.15).contains(&ratio),
+        "la cobertura real ronda el 8,8 %, no el 100 %: medido {ratio}"
+    );
+    assert!(
+        out.months_below_need_p50 > 300,
+        "el camino mediano pasa la mayor parte del horizonte sin cubrir su gasto: {}",
+        out.months_below_need_p50
+    );
+}
+
+/// **No jubilarse nunca no es un éxito.**
+///
+/// El hogar: 1.000 € de partida, 2.100 € de ingreso contra 2.000 € de gasto, 6,5 % con σ = 17 %,
+/// SWR 4 % (objetivo 600.000 €), 840 meses, todo el sobrante a un único fondo. El camino
+/// determinista se jubila en el mes 655 — al filo del horizonte—, así que **un tercio de los
+/// caminos sorteados no llega nunca**.
+///
+/// Con la definición anterior (D22: «la cartera no se agota»), esos 331 caminos contaban como
+/// éxito porque un hogar que nunca se jubila nunca drena: 0,960 publicado. Entre los que sí se
+/// jubilan, la ruina es del 6 % y el éxito 0,940. La diferencia llega a **+6,8 pp** en el barrido
+/// medido (SWR 6 %, ingreso 2.050).
+#[test]
+fn mc_never_retiring_is_not_a_success() {
+    let input = crossing_household(
+        Decimal::from(1_000),
+        Decimal::from(2_100),
+        Decimal::from(2_000),
+        Decimal::try_from(6.5).unwrap(),
+        Decimal::from(4),
+        840,
+    );
+    let config = McConfig {
+        seed: 207,
+        paths: 1_000,
+        percentiles: vec![10, 50, 90],
+        cash_buffer_months: None,
+    };
+    let out = project_percentile_bands(&input, &[Some(17.0)], &config).expect("no falla");
+    let conditional = out.success_given_retired.expect("algún camino se jubila");
+    println!(
+        "\n[éxito] cruce a 840 meses · 1.000 caminos\n\
+         [éxito]   éxito = {:.4}   nunca se jubilan = {:.4}   éxito | jubilado = {conditional:.4}",
+        out.success_probability, out.never_retired_probability
+    );
+
+    // Un tercio de los caminos no llega: eso ya no se cuenta como plan cumplido.
+    assert!(
+        (0.30..0.36).contains(&out.never_retired_probability),
+        "nunca se jubilan: {}",
+        out.never_retired_probability
+    );
+    assert!(
+        (out.success_probability - (1.0 - out.never_retired_probability) * conditional).abs()
+            < 1e-9,
+        "éxito = P(jubilarse) × P(no agotar | jubilado)"
+    );
+    // Y la lectura vieja («no agotar», sin exigir jubilarse) era exactamente 0,960: la diferencia
+    // con la nueva es la fracción que no llega.
+    assert!(
+        out.success_probability < 0.70,
+        "el éxito honesto de este hogar está muy por debajo del 0,960 que se publicaba: {}",
+        out.success_probability
+    );
+    assert!(
+        (0.92..0.96).contains(&conditional),
+        "condicional a jubilarse, la ruina sigue siendo baja: {conditional}"
     );
 }

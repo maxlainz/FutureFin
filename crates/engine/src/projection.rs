@@ -9,9 +9,7 @@
 
 use crate::phases::{EngineWarning, Phase, PhasePlan};
 use crate::sim::{SimInput, SimLiability};
-use crate::sim_core::{
-    self, liability_extra_principal_g, liability_month_g, plan_alive_g,
-};
+use crate::sim_core::{self, liability_extra_principal_g, liability_month_g, plan_alive_g};
 use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
@@ -36,6 +34,30 @@ pub enum EngineError {
     AssetValueOverflow,
     #[error("history timeline dates must be strictly ascending")]
     InvalidHistoryTimeline,
+    /// 5.0.0: la tabla del objetivo PUENTE no cabe en el tipo numérico — descuento
+    /// `bridge_discount_annual_pct` demasiado negativo para el número de meses hasta la pensión.
+    ///
+    /// **Rango alcanzable y por qué existe el error.** El descuento no se escribe: se DERIVA de
+    /// la rentabilidad esperada ponderada de los activos líquidos, y `expected_annual_return_percent`
+    /// solo está acotada por `> −100`. Con `d < 0` el factor `q(j) = (1+d/100)^{j/12}` se hunde
+    /// hacia cero, el término descontado `G(m)/q(m)` explota y la suma sufijo se sale del rango
+    /// de `Decimal` (~7,9e28). La cota depende del número de meses hasta la pensión `P`:
+    ///
+    /// | `P` (meses) | primer `d` que desborda |
+    /// |---|---|
+    /// | 120 (10 años) | −99,6 % |
+    /// | 204 | −95,9 % |
+    /// | 324 | −86,6 % |
+    /// | 600 | −66,1 % |
+    /// | 840 (70 años) | −53,8 % |
+    /// | 1200 (`MAX_BRIDGE_MONTHS`) | −41,8 % |
+    ///
+    /// Hasta el pase de correcciones de la revisión adversarial esto **panicaba** dentro de
+    /// `powd` («Pow overflowed») o de un `+`/`*` de `Decimal`, y salía como un 500 opaco de
+    /// `/v1/projection/series`. Ahora es un error tipado; acotar `d` aguas arriba es trabajo de
+    /// la API, no del motor, que es una función pura y admite cualquier `Decimal` en su firma.
+    #[error("the bridge target table overflowed: bridge_discount_annual_pct is too negative for the months until the pension")]
+    BridgeDiscountOverflow,
     /// 5.0.0: el `PhasePlan` pide una regla de retirada que este motor todavía no ejecuta.
     ///
     /// **Desde WP2 no la produce ninguna regla**: las cuatro de `WithdrawalRule` se simulan
@@ -630,15 +652,33 @@ pub struct ProjectionOutput {
     /// Length == `assets.len()`; inner length == `horizon_months + 1` (months 0..=horizon).
     /// Nominal, igual que `net_worth`.
     pub per_asset_series: Vec<Vec<Decimal>>,
-    /// Primer mes (1-based, misma base que el bucle) cuya venta bruta necesaria iguala o supera
-    /// TODO lo drenable (todos los activos): la cartera se vacía ese mes y desde el
-    /// siguiente el descubierto se acumula. `None` = no se agota dentro del horizonte — no es
-    /// «no calculado». La definición vive en el bucle (caso exacto con `>=`, no «primer mes con
-    /// descubierto», que daría el mes siguiente al vaciado). Issue #119.
+    /// **El mes en que la cartera se quedó sin nada Y eso costó dinero** (1-based, misma base que
+    /// el bucle). Se publica solo si se cumplen las DOS condiciones, y en este orden:
+    ///
+    /// 1. Es el PRIMER mes cuya venta dejó lo vendible a cero (o no se pudo fundar). Se mide
+    ///    DESPUÉS de vender, sobre los saldos: si cada activo entregó su capacidad entera,
+    ///    `v − v = 0` exacto en cualquier tipo numérico. El viejo predicado `venta_bruta ≥
+    ///    drenable` comparaba dos cantidades calculadas por caminos distintos y `Decimal` y `f64`
+    ///    lo resolvían al revés en el aterrizaje exacto.
+    /// 2. Desde ese mes en adelante, **alguna venta se quedó sin fundar**. Sin esto, un puente que
+    ///    se vacía EXACTAMENTE el mes en que entra una pensión que cubre todo el gasto posterior
+    ///    —un plan perfecto— se publicaba como «cartera agotada en el mes 120» con
+    ///    `uncovered_deficit_total = 0`.
+    ///
+    /// `None` = no se agota dentro del horizonte; no es «no calculado». Issue #119 + hallazgo #2
+    /// de la segunda revisión adversarial.
     pub assets_depleted_month_index: Option<u32>,
     /// Déficit acumulado NO cubierto al final del horizonte (= `undrained_cumulative`). `0` es
     /// cero euros descubiertos, no «no aplica». Ya se restaba del patrimonio publicado; ahora
     /// además se declara. Issue #119.
+    ///
+    /// **Puede traer una cola de ±1e-24 € y NO se clampa aquí.** El acumulador suma el operando
+    /// LITERAL de 4.15.0 (`need − after_tax(bruto)` en la vía escalar, `net_shortfall_monthly` en
+    /// la mixta), y `after_tax(gross_up(n))` devuelve `n` solo hasta el redondeo a 28 dígitos:
+    /// medido, hasta −1,7e-24 € en un hogar que nunca se acerca a quedarse sin cartera. Tocarlo
+    /// con un `max(0,·)` movería el pin dorado, y este campo existe para NO moverse. **Quien
+    /// publica clampa**: la serie [`Self::unmet_need`] ya sale clampada, y el handler de la API
+    /// clampa este total antes de ponerlo en el JSON.
     pub uncovered_deficit_total: Decimal,
     /// Ahorro mensual que ninguna regla de la cascada absorbió, acumulado en euros nominales
     /// (4.12.1, decisión del owner). NO entra en `net_worth`, NO compone y NO cuenta en
@@ -693,6 +733,18 @@ pub struct ProjectionOutput {
     /// entrar. Cero por construcción en modo `ceiling` (allí la retirada nunca supera la
     /// necesidad) y con `fixed_real` en cualquiera de los dos modos.
     pub withdrawal_excess: Vec<Decimal>,
+    /// **Necesidad NETA que el mes NO obtuvo** porque los activos no pudieron fundar la venta:
+    /// el incremento mensual de `uncovered_deficit_total`, clampado a 0 (el acumulador conserva
+    /// el operando literal de 4.15.0, que puede llevar una cola de ±1e-24; una serie publicada
+    /// no). `len == horizon+1`, índice 0 = 0.
+    ///
+    /// Es la TERCERA magnitud del mes y la que faltaba: `withdrawal` es lo que se obtuvo,
+    /// `withdrawal_shortfall` lo que la REGLA rechazó y `unmet_need` lo que la CARTERA no dio.
+    /// Su suma es la necesidad neta del mes, y sin ella cualquier cociente de cobertura miente
+    /// en el caso que más importa —la cartera agotada— porque con `fixed_real` el recorte es
+    /// cero por construcción (hallazgo #4 de la revisión adversarial: un cociente publicado de
+    /// 1,0 sobre caminos que cubrían el 8,8 % de la necesidad).
+    pub unmet_need: Vec<Decimal>,
     /// Primer mes con pensión con fecha. `None` en WP1b (la pensión con fecha llega en WP3; la
     /// pensión plana de hoy viaja dentro de `income_retirement_monthly` y no tiene mes propio).
     pub pension_start_month_index: Option<u32>,
@@ -725,7 +777,16 @@ pub struct ProjectionOutput {
     pub pension_coverage_ratio: Option<Decimal>,
     /// Capital que sostendría a perpetuidad el HUECO de la media jornada:
     /// `gross_up(12·gap_m(X))/SWR` (§B.3). Informativo: no dispara nada.
-    /// `None` sin fase parcial o sin objetivo; `Some(0)` = la media jornada se paga sola.
+    ///
+    /// `None` cuando la fase parcial **no llegó a vivirse** (declarada o no: si el hogar se jubila
+    /// del todo antes de `X`, no hay hueco que medir), sin objetivo, o sin fase parcial en el
+    /// plan; `Some(0)` = la media jornada se paga sola.
+    ///
+    /// Va atado a [`Self::partial_retirement_month_index`], igual que
+    /// [`Self::partial_phase_capital_growing`]: los dos describen la MISMA fase y no pueden usar
+    /// criterios distintos para existir. Antes del pase de correcciones de la revisión
+    /// adversarial este se calculaba de la fase DECLARADA y publicaba 270.000 € para una media
+    /// jornada que el cruce FIRE había dejado 58 meses atrás.
     pub partial_gap_target: Option<Decimal>,
     /// `true` ⟺ **hubo** fase parcial y el patrimonio LÍQUIDO no bajó ni un mes durante ella.
     ///
@@ -754,8 +815,7 @@ pub(crate) fn month_first_calendar(d: NaiveDate) -> NaiveDate {
 }
 
 pub(crate) fn add_months(d: NaiveDate, n: u32) -> NaiveDate {
-    d.checked_add_months(Months::new(n))
-        .unwrap_or(d)
+    d.checked_add_months(Months::new(n)).unwrap_or(d)
 }
 
 pub(crate) fn month_window(month_first: NaiveDate) -> (NaiveDate, NaiveDate) {
@@ -1029,7 +1089,9 @@ mod tests {
     /// antiguo — mantiene válidos, sin mover un dígito, los pins escritos contra base_amount.
     fn ft_flat(base: Decimal, inflation: Decimal) -> FireTarget {
         FireTarget {
-            need: FireNeed::Indexed { annual_net_today: base },
+            need: FireNeed::Indexed {
+                annual_net_today: base,
+            },
             swr_pct: Decimal::from(100u32),
             tax_brackets: Vec::new(),
             taxes_enabled: false,
@@ -1115,7 +1177,11 @@ mod tests {
             dec_s("138802.7999147153"),
             "serie[0] = Σ cuotas del plan entero"
         );
-        assert_eq!(serie[278], Decimal::ZERO, "extinguido: no queda nada que cubrir");
+        assert_eq!(
+            serie[278],
+            Decimal::ZERO,
+            "extinguido: no queda nada que cubrir"
+        );
         assert_eq!(
             serie[139].round_dp(6),
             dec_s("69302.799915"),
@@ -1201,7 +1267,10 @@ mod tests {
                 out.net_worth[k as usize] < t
             })
             .count();
-        assert!(dips > 100, "el escenario debe vivir bajo el target inflado: dips={dips}");
+        assert!(
+            dips > 100,
+            "el escenario debe vivir bajo el target inflado: dips={dips}"
+        );
 
         for k in 0..=120usize {
             // (#120: el activo no tiene purchase_price y el jubilado va en déficit — base 0,
@@ -1219,7 +1288,10 @@ mod tests {
         //   ⟹  V_120 = 1,02^10 · (500.000 − 2.000·120) = 1,21899441999475713024 × 260.000
         //            = 316.938,549198… → 316.938,55 (exacto en Decimal, sin tolerancia:
         // el exponente 120/12 = 10 normaliza a entero y powd va por checked_powu).
-        assert_eq!(out.net_worth[120].round_dp(2), "316938.55".parse::<Decimal>().unwrap());
+        assert_eq!(
+            out.net_worth[120].round_dp(2),
+            "316938.55".parse::<Decimal>().unwrap()
+        );
     }
 
     #[test]
@@ -1338,8 +1410,10 @@ mod tests {
         let values = vec![Decimal::from(704)];
         let mut trace = Vec::new();
         // WP5.5: la cascada vive en el núcleo genérico; la regla pública se convierte (copia).
-        let rules_g: Vec<crate::sim::AllocationRuleG<Decimal>> =
-            rules.iter().map(crate::sim::AllocationRuleG::from).collect();
+        let rules_g: Vec<crate::sim::AllocationRuleG<Decimal>> = rules
+            .iter()
+            .map(crate::sim::AllocationRuleG::from)
+            .collect();
         let (alloc, leftover) = crate::sim_core::distribute_contributions_g(
             Decimal::ZERO,
             &rules_g,
@@ -1364,7 +1438,13 @@ mod tests {
     #[test]
     fn depletion_month_and_uncovered_deficit_are_reported() {
         let a = mk_asset(1, Decimal::from(30_000), true, None);
-        let inp = base_input(60, Decimal::from(1_000), Decimal::from(2_500), vec![a], vec![]);
+        let inp = base_input(
+            60,
+            Decimal::from(1_000),
+            Decimal::from(2_500),
+            vec![a],
+            vec![],
+        );
         let out = project_net_worth_series(&inp).unwrap();
         assert_eq!(out.assets_depleted_month_index, Some(20));
         assert_eq!(out.uncovered_deficit_total, Decimal::from(60_000));
@@ -1441,10 +1521,7 @@ mod tests {
             Decimal::from(1000),
             Decimal::ZERO,
             vec![a, b],
-            vec![
-                rule_fixed(0, Decimal::from(200), None),
-                rule_remainder(1),
-            ],
+            vec![rule_fixed(0, Decimal::from(200), None), rule_remainder(1)],
         );
         let nom = first_month_per_asset_contribution_nominals(&inp).unwrap();
         assert_eq!(nom[0], Decimal::from(200));
@@ -1485,7 +1562,11 @@ mod tests {
             Decimal::ZERO,
             vec![a, b],
             vec![
-                rule_percent(0, Decimal::from(100), Some(AllocationCap::Amount(Decimal::from(1000)))),
+                rule_percent(
+                    0,
+                    Decimal::from(100),
+                    Some(AllocationCap::Amount(Decimal::from(1000))),
+                ),
                 rule_remainder(1),
             ],
         );
@@ -1505,7 +1586,11 @@ mod tests {
             Decimal::ZERO,
             vec![a, b],
             vec![
-                rule_percent(0, Decimal::from(100), Some(AllocationCap::Amount(Decimal::from(1000)))),
+                rule_percent(
+                    0,
+                    Decimal::from(100),
+                    Some(AllocationCap::Amount(Decimal::from(1000))),
+                ),
                 rule_remainder(1),
             ],
         );
@@ -1525,7 +1610,11 @@ mod tests {
             Decimal::from(600),
             vec![a, b],
             vec![
-                rule_percent(0, Decimal::from(100), Some(AllocationCap::MonthsExpense(Decimal::from(2)))),
+                rule_percent(
+                    0,
+                    Decimal::from(100),
+                    Some(AllocationCap::MonthsExpense(Decimal::from(2))),
+                ),
                 rule_remainder(1),
             ],
         );
@@ -1572,7 +1661,11 @@ mod tests {
             Decimal::ZERO,
             vec![a],
             vec![
-                rule_fixed(0, Decimal::from(300), Some(AllocationCap::Amount(Decimal::from(500)))),
+                rule_fixed(
+                    0,
+                    Decimal::from(300),
+                    Some(AllocationCap::Amount(Decimal::from(500))),
+                ),
                 AllocationRule {
                     target_index: 0,
                     kind: AllocationKind::Remainder,
@@ -1648,7 +1741,11 @@ mod tests {
             mk_asset(3, Decimal::from(100), false, None),
         ];
         let rules = vec![
-            rule_fixed(0, Decimal::from(150), Some(AllocationCap::MonthsExpense(Decimal::from(6)))),
+            rule_fixed(
+                0,
+                Decimal::from(150),
+                Some(AllocationCap::MonthsExpense(Decimal::from(6))),
+            ),
             rule_percent(1, Decimal::from(40), None),
             rule_remainder(2),
         ];
@@ -1690,12 +1787,21 @@ mod tests {
         inp.planning_monthly_cash_adjustment = vec![Decimal::from(193)];
         let b = first_month_allocation(&inp).unwrap();
         assert_eq!(b.planning_component, Decimal::from(193));
-        assert_eq!(b.recurring_net, a.recurring_net, "la parte estable no se mueve");
+        assert_eq!(
+            b.recurring_net, a.recurring_net,
+            "la parte estable no se mueve"
+        );
         assert_eq!(b.base_cash, Decimal::from(1743));
         assert_eq!(b.base_cash, b.recurring_net + b.planning_component);
-        assert_eq!(b.per_asset.iter().sum::<Decimal>() + b.leftover, b.base_cash);
+        assert_eq!(
+            b.per_asset.iter().sum::<Decimal>() + b.leftover,
+            b.base_cash
+        );
         // El wrapper de compatibilidad devuelve exactamente `per_asset`.
-        assert_eq!(first_month_per_asset_contribution_nominals(&inp).unwrap(), b.per_asset);
+        assert_eq!(
+            first_month_per_asset_contribution_nominals(&inp).unwrap(),
+            b.per_asset
+        );
     }
 
     #[test]
@@ -1709,7 +1815,11 @@ mod tests {
             mk_asset(4, Decimal::ZERO, true, None),
         ];
         let rules = vec![
-            rule_fixed(0, Decimal::from(100), Some(AllocationCap::Amount(Decimal::from(1000)))),
+            rule_fixed(
+                0,
+                Decimal::from(100),
+                Some(AllocationCap::Amount(Decimal::from(1000))),
+            ),
             rule_fixed(1, Decimal::ZERO, None),
             rule_fixed(2, Decimal::from(500), None),
             rule_remainder(3),
@@ -1717,18 +1827,34 @@ mod tests {
         let inp = base_input(1, Decimal::from(500), Decimal::ZERO, assets, rules);
         let a = first_month_allocation(&inp).unwrap();
 
-        assert_eq!(a.rules.len(), 4, "se emite una traza por regla, también las saltadas");
-        assert_eq!(a.rules[0].skipped_reason, Some(AllocationSkipReason::CapFull));
+        assert_eq!(
+            a.rules.len(),
+            4,
+            "se emite una traza por regla, también las saltadas"
+        );
+        assert_eq!(
+            a.rules[0].skipped_reason,
+            Some(AllocationSkipReason::CapFull)
+        );
         assert_eq!(a.rules[0].cap_ceiling, Some(Decimal::from(1000)));
         assert_eq!(a.rules[0].cap_room, Some(Decimal::ZERO));
-        assert_eq!(a.rules[1].skipped_reason, Some(AllocationSkipReason::ZeroAmount));
+        assert_eq!(
+            a.rules[1].skipped_reason,
+            Some(AllocationSkipReason::ZeroAmount)
+        );
         assert_eq!(a.rules[2].skipped_reason, None);
         assert_eq!(a.rules[2].amount_resolved, Decimal::from(500));
         // La caja se agotó en la regla 2: la 3 nunca llegó a evaluarse. `NotReached` y `NoCash` son
         // diagnósticos distintos («las de arriba se lo comieron» vs «no te sobra dinero») y por eso
         // no se colapsan.
-        assert_eq!(a.rules[3].skipped_reason, Some(AllocationSkipReason::NotReached));
-        assert_eq!(a.per_asset.iter().sum::<Decimal>() + a.leftover, a.base_cash);
+        assert_eq!(
+            a.rules[3].skipped_reason,
+            Some(AllocationSkipReason::NotReached)
+        );
+        assert_eq!(
+            a.per_asset.iter().sum::<Decimal>() + a.leftover,
+            a.base_cash
+        );
     }
 
     #[test]
@@ -1741,7 +1867,11 @@ mod tests {
         assert_eq!(a.base_cash, Decimal::from(-400));
         assert_eq!(a.recurring_net, Decimal::from(-400));
         assert_eq!(a.per_asset[0], Decimal::ZERO);
-        assert_eq!(a.leftover, Decimal::ZERO, "con caja negativa no hay sobrante");
+        assert_eq!(
+            a.leftover,
+            Decimal::ZERO,
+            "con caja negativa no hay sobrante"
+        );
         assert_eq!(a.rules.len(), 2);
         assert!(a
             .rules
@@ -1757,7 +1887,11 @@ mod tests {
             mk_asset(2, Decimal::ZERO, true, None),
         ];
         let rules = vec![
-            rule_fixed(0, Decimal::from(500), Some(AllocationCap::Amount(Decimal::from(1000)))),
+            rule_fixed(
+                0,
+                Decimal::from(500),
+                Some(AllocationCap::Amount(Decimal::from(1000))),
+            ),
             rule_remainder(1),
         ];
         let inp = base_input(1, Decimal::from(1000), Decimal::ZERO, assets, rules);
@@ -1965,8 +2099,8 @@ mod tests {
         assert_eq!(t0, Decimal::from(750_000));
         let t20y = fire_target_at_month_index(Some(&ft), 240).unwrap();
         // 750_000 × 1.03^20 ≈ 1_354_583. Comprobamos con tolerancia ≤ 1€.
-        let factor = (Decimal::ONE + Decimal::from(3) / Decimal::from(100u32))
-            .powd(Decimal::from(20u32));
+        let factor =
+            (Decimal::ONE + Decimal::from(3) / Decimal::from(100u32)).powd(Decimal::from(20u32));
         let expected = Decimal::from(750_000) * factor;
         let diff = (t20y - expected).abs();
         assert!(
@@ -2033,11 +2167,19 @@ mod tests {
             3,
             Decimal::from(3000),
             Decimal::from(1000),
-            vec![mk_asset(1, Decimal::from(1_000_000), true, Some(Decimal::ZERO))],
+            vec![mk_asset(
+                1,
+                Decimal::from(1_000_000),
+                true,
+                Some(Decimal::ZERO),
+            )],
             vec![rule_remainder(0)],
         );
         inp.phase_plan.expense_retirement_monthly = Decimal::from(1000);
-        inp.fire_target = Some(ft_flat(Decimal::from_str_exact("342857.142857").unwrap(), Decimal::ZERO));
+        inp.fire_target = Some(ft_flat(
+            Decimal::from_str_exact("342857.142857").unwrap(),
+            Decimal::ZERO,
+        ));
 
         let out = project_net_worth_series(&inp).expect("simulación");
         assert_eq!(
@@ -2064,7 +2206,11 @@ mod tests {
         let mut sin_target = inp.clone();
         sin_target.fire_target = None;
         let alloc2 = first_month_allocation(&sin_target).expect("cascada sin target");
-        assert_eq!(alloc2.per_asset[0], Decimal::from(2000), "sin target FIRE la cascada es la de siempre");
+        assert_eq!(
+            alloc2.per_asset[0],
+            Decimal::from(2000),
+            "sin target FIRE la cascada es la de siempre"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2090,7 +2236,12 @@ mod tests {
     fn liability_pin_input() -> ProjectionInput {
         let assets = vec![
             mk_asset(0xA1, Decimal::from(50_000), true, Some(Decimal::from(7))),
-            mk_asset(0xB2, Decimal::from(20_000), false, Some(Decimal::new(35, 1))),
+            mk_asset(
+                0xB2,
+                Decimal::from(20_000),
+                false,
+                Some(Decimal::new(35, 1)),
+            ),
         ];
         let rules = vec![
             rule_fixed(
@@ -2157,7 +2308,11 @@ mod tests {
         assert_eq!(out.net_worth.len(), 301, "301 puntos: meses 0..=300");
 
         // (1) Serie de patrimonio neto — valores exactos capturados sobre 4.1.0.
-        assert_eq!(out.net_worth[0], dec("-30000"), "mes 0 = 50.000 + 20.000 − 100.000");
+        assert_eq!(
+            out.net_worth[0],
+            dec("-30000"),
+            "mes 0 = 50.000 + 20.000 − 100.000"
+        );
         assert_eq!(out.net_worth[1], dec("-26902.580260129782587857672390"));
         assert_eq!(out.net_worth[2], dec("-24046.794776804757383934090581"));
         assert_eq!(out.net_worth[12], dec("4876.52949312863908655995354"));
@@ -2172,9 +2327,21 @@ mod tests {
             out.per_asset_series.iter().map(|s| s[k]).sum::<Decimal>() - out.net_worth[k]
         };
         assert_eq!(principal_at(0), Decimal::from(100_000));
-        assert_eq!(principal_at(1), Decimal::from(99_500), "cuota íntegra a principal: 0 % interés");
-        assert_eq!(principal_at(199), Decimal::from(500), "queda la última cuota");
-        assert_eq!(principal_at(200), Decimal::ZERO, "el pasivo se extingue en el mes 200");
+        assert_eq!(
+            principal_at(1),
+            Decimal::from(99_500),
+            "cuota íntegra a principal: 0 % interés"
+        );
+        assert_eq!(
+            principal_at(199),
+            Decimal::from(500),
+            "queda la última cuota"
+        );
+        assert_eq!(
+            principal_at(200),
+            Decimal::ZERO,
+            "el pasivo se extingue en el mes 200"
+        );
         assert_eq!(principal_at(201), Decimal::ZERO, "y no resucita");
 
         // (3) Neutralidad del servicio de deuda. El mes 201 es el primero sin cuota, así que
@@ -2202,7 +2369,10 @@ mod tests {
         let alloc = first_month_allocation(&inp).unwrap();
         assert_eq!(alloc.debt_service, Decimal::from(500));
         assert_eq!(alloc.base_cash, Decimal::from(2250));
-        assert_eq!(alloc.per_asset, vec![Decimal::from(300), Decimal::from(1950)]);
+        assert_eq!(
+            alloc.per_asset,
+            vec![Decimal::from(300), Decimal::from(1950)]
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2266,7 +2436,10 @@ mod tests {
 
         let a = project_net_worth_series(&base).unwrap();
         let b = project_net_worth_series(&con_apr).unwrap();
-        assert_eq!(a.net_worth, b.net_worth, "el TIN no debe mover fixed_payments");
+        assert_eq!(
+            a.net_worth, b.net_worth,
+            "el TIN no debe mover fixed_payments"
+        );
         assert_eq!(a.contributed_capital, b.contributed_capital);
         assert_eq!(a.per_asset_series, b.per_asset_series);
     }
@@ -2328,7 +2501,11 @@ mod tests {
             Decimal::ZERO,
             "el pasivo se extingue en el mes 278"
         );
-        assert_eq!(implicit_principal(&out, 279), Decimal::ZERO, "y no resucita");
+        assert_eq!(
+            implicit_principal(&out, 279),
+            Decimal::ZERO,
+            "y no resucita"
+        );
 
         // Caja del mes 278 = payoff del saldo anterior − cierre = cuota PARCIAL, < 500.
         let cash_278 = p277 * (Decimal::ONE + Decimal::from(3) / Decimal::from(1200))
@@ -2632,7 +2809,11 @@ mod tests {
         // Saturado: el principal deja de crecer y la cuota lo va royendo 500 €/mes.
         let p1 = implicit_principal(&out, 839);
         let p2 = implicit_principal(&out, 840);
-        assert_eq!(p1 - p2, Decimal::from(500), "saturado, la cuota va a principal");
+        assert_eq!(
+            p1 - p2,
+            Decimal::from(500),
+            "saturado, la cuota va a principal"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2687,7 +2868,11 @@ mod tests {
 
         let m12 = sch.months.iter().find(|m| m.month_index == 12).unwrap();
         assert_eq!(m12.extra_principal, Decimal::from(20_000));
-        assert_eq!(m12.early_repayment_fee, Decimal::from(400), "20.000 × 2 % = 400,00");
+        assert_eq!(
+            m12.early_repayment_fee,
+            Decimal::from(400),
+            "20.000 × 2 % = 400,00"
+        );
         assert_eq!(
             m12.payment + m12.extra_principal,
             m12.interest_accrued + m12.principal_repaid,
@@ -2728,8 +2913,7 @@ mod tests {
         reduced.early_repayment_effect = EarlyRepaymentEffect::ReducePayment;
         let sch = liability_amortization_schedule(&reduced, ref_2026(), 480);
         assert_eq!(
-            sch.payoff_month_index,
-            base_sch.payoff_month_index,
+            sch.payoff_month_index, base_sch.payoff_month_index,
             "reducir cuota conserva el mes de extinción"
         );
         let m13 = sch.months.iter().find(|m| m.month_index == 13).unwrap();
@@ -2766,7 +2950,10 @@ mod tests {
                 l.extra_principal_monthly = Decimal::from(50);
                 l.extra_principal_lump_sums = vec![(7, Decimal::from(1_000))];
                 let sch = liability_amortization_schedule(&l, ref_2026(), 120);
-                assert!(!sch.months.is_empty(), "{model:?}/{apr:?}: calendario vacío");
+                assert!(
+                    !sch.months.is_empty(),
+                    "{model:?}/{apr:?}: calendario vacío"
+                );
                 for m in &sch.months {
                     assert_eq!(
                         m.payment + m.extra_principal,
@@ -2923,10 +3110,7 @@ mod tests {
             sch.months[9].closing_principal,
             dec("58.40087129915940991000")
         );
-        assert_eq!(
-            sch.months[10].payment,
-            dec("58.9848800121510040091000")
-        );
+        assert_eq!(sch.months[10].payment, dec("58.9848800121510040091000"));
         assert_eq!(sch.months[10].closing_principal, Decimal::ZERO);
         assert_eq!(
             sch.total_interest,
@@ -3021,7 +3205,10 @@ mod tests {
             Some(Decimal::from(5)),
         );
         let s1 = liability_amortization_schedule(&sin_plan, ref_2026(), 120);
-        assert_eq!(s1.payoff_absent, Some(LiabilityPayoffAbsence::NoPaymentPlan));
+        assert_eq!(
+            s1.payoff_absent,
+            Some(LiabilityPayoffAbsence::NoPaymentPlan)
+        );
         assert!(s1.months.is_empty());
         assert_eq!(s1.final_principal, Decimal::from(50_000));
         assert_eq!(s1.total_cash_out, Decimal::ZERO);
@@ -3073,7 +3260,10 @@ mod tests {
             s3b.payoff_absent,
             Some(LiabilityPayoffAbsence::PaymentDoesNotReducePrincipal)
         );
-        assert!(s3b.final_principal > Decimal::from(100_000), "la deuda crece");
+        assert!(
+            s3b.final_principal > Decimal::from(100_000),
+            "la deuda crece"
+        );
 
         // (4) Baja, pero no llega a cero dentro de los meses pedidos.
         let largo = liab(
@@ -3282,7 +3472,10 @@ mod tests {
         );
         sin_cuota.extra_principal_monthly = Decimal::from(1_000);
         let sch = liability_amortization_schedule(&sin_cuota, ref_2026(), 60);
-        assert_eq!(sch.payoff_absent, Some(LiabilityPayoffAbsence::NoPaymentPlan));
+        assert_eq!(
+            sch.payoff_absent,
+            Some(LiabilityPayoffAbsence::NoPaymentPlan)
+        );
         assert_eq!(sch.final_principal, Decimal::from(50_000));
         assert_eq!(sch.total_extra_principal, Decimal::ZERO);
 
@@ -3326,7 +3519,11 @@ mod tests {
             Decimal::from(100_000)
         );
         assert_eq!(
-            present_value_of_payments(Decimal::from(500), Decimal::from(200), Some(Decimal::from(-2))),
+            present_value_of_payments(
+                Decimal::from(500),
+                Decimal::from(200),
+                Some(Decimal::from(-2))
+            ),
             Decimal::from(100_000),
             "un TIN negativo degenera igual que la ausencia de TIN"
         );
@@ -3378,7 +3575,10 @@ mod tests {
             fire_target_at_month_index(inp.fire_target.as_ref(), m)
                 .is_some_and(|t| out.liquid_worth[m as usize] >= t)
         });
-        assert_eq!(cruce, None, "con gasto indexado e ingresos planos no hay cruce en 70 años");
+        assert_eq!(
+            cruce, None,
+            "con gasto indexado e ingresos planos no hay cruce en 70 años"
+        );
 
         // Primer déficit de caja en el mes 247: la aportación del 246 aún entra; desde el 247
         // el déficit se cubre VENDIENDO — y con #120 (Ola 6) la base de coste baja con la
@@ -3448,7 +3648,11 @@ mod tests {
                 Decimal::from(3_000),
                 Decimal::from(1_000),
                 vec![colchon],
-                vec![rule_fixed(0, Decimal::from(500), Some(AllocationCap::MonthsExpense(Decimal::from(6))))],
+                vec![rule_fixed(
+                    0,
+                    Decimal::from(500),
+                    Some(AllocationCap::MonthsExpense(Decimal::from(6))),
+                )],
             );
             inp.annual_inflation_percent = inflacion;
             project_net_worth_series(&inp).unwrap()
@@ -3487,7 +3691,10 @@ mod tests {
             dec_s("705667.2174722891568870686720"),
             "diez años: ×0,98^10, exacto por checked_powu"
         );
-        assert!(t(1) < t(0) && t(6) < t(1) && t(13) < t(12), "estrictamente decreciente");
+        assert!(
+            t(1) < t(0) && t(6) < t(1) && t(13) < t(12),
+            "estrictamente decreciente"
+        );
     }
 
     /// #171 (Ola 6): la traza de `first_month_allocation` resuelve los techos con los escalares
@@ -3547,7 +3754,10 @@ mod tests {
 
         // B' · jubilado con DÉFICIT (rama else, NoCash): mismos techos de jubilación.
         let b2 = build(true, Decimal::from(1_000), me6());
-        assert_eq!(b2.rules[0].skipped_reason, Some(AllocationSkipReason::NoCash));
+        assert_eq!(
+            b2.rules[0].skipped_reason,
+            Some(AllocationSkipReason::NoCash)
+        );
         assert_eq!(b2.rules[0].cap_ceiling, Some(Decimal::from(12_000)));
         assert_eq!(b2.rules[0].cap_room, Some(Decimal::from(9_000)));
 
@@ -3580,7 +3790,11 @@ mod tests {
             out.contributed_capital[1] < out.contributed_capital[0],
             "la serie deja de ser monótona: vender BAJA lo aportado"
         );
-        assert_eq!(out.per_asset_series[0][1], Decimal::ZERO, "A se vació entero");
+        assert_eq!(
+            out.per_asset_series[0][1],
+            Decimal::ZERO,
+            "A se vació entero"
+        );
         assert_eq!(out.per_asset_series[1][1], Decimal::from(15_000));
     }
 
@@ -3596,7 +3810,13 @@ mod tests {
     #[test]
     fn retirement_surplus_without_rules_is_stranded_and_quantified() {
         let fondo = mk_asset(0xE3, Decimal::from(1_000_000), true, Some(Decimal::from(5)));
-        let mut inp = base_input(24, Decimal::from(3_000), Decimal::from(1_000), vec![fondo], vec![]);
+        let mut inp = base_input(
+            24,
+            Decimal::from(3_000),
+            Decimal::from(1_000),
+            vec![fondo],
+            vec![],
+        );
         inp.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(1);
         inp.phase_plan.income_retirement_monthly = Decimal::from(2_000);
         inp.phase_plan.expense_retirement_monthly = Decimal::from(1_000);
@@ -3648,9 +3868,12 @@ mod tests {
     #[test]
     fn the_simulated_withdrawal_also_pays_taxes() {
         let brackets = crate::tax::es_brackets_for_tests();
-        let objetivo =
-            crate::tax::gross_up_net_annual_fire(Decimal::from(24_000), &brackets, true, Decimal::ONE)
-                / dec_s("0.035");
+        let objetivo = crate::tax::gross_up_net_annual_fire(
+            Decimal::from(24_000),
+            &brackets,
+            true,
+            Decimal::ONE,
+        ) / dec_s("0.035");
         let build = |taxed: bool| {
             let fondo = mk_asset(0xF7, objetivo, true, Some(Decimal::from(5)));
             let mut inp = base_input(
@@ -3699,7 +3922,11 @@ mod tests {
         inp.tax_brackets = crate::tax::es_brackets_for_tests();
         inp.taxes_enabled = true;
         let out = project_net_worth_series(&inp).unwrap();
-        assert_eq!(out.assets_depleted_month_index, Some(80), "con bruto se agota antes");
+        assert_eq!(
+            out.assets_depleted_month_index,
+            Some(80),
+            "con bruto se agota antes"
+        );
         assert_eq!(out.net_worth[360].round_dp(2), dec_s("-561200.00"));
         assert_eq!(out.uncovered_deficit_total.round_dp(2), dec_s("561200.00"));
     }
@@ -3725,7 +3952,11 @@ mod tests {
         inp.tax_brackets = crate::tax::es_brackets_for_tests();
         inp.taxes_enabled = true;
         let out = project_net_worth_series(&inp).unwrap();
-        assert_eq!(out.assets_depleted_month_index, Some(97), "g derivada retrasa el agotamiento");
+        assert_eq!(
+            out.assets_depleted_month_index,
+            Some(97),
+            "g derivada retrasa el agotamiento"
+        );
         assert_eq!(out.net_worth[360].round_dp(2), dec_s("-527600.00"));
         assert_eq!(out.uncovered_deficit_total.round_dp(2), dec_s("527600.00"));
     }
@@ -3741,13 +3972,7 @@ mod tests {
         a.purchase_price = Some(Decimal::from(8_000));
         let mut b = mk_asset(0xFB, Decimal::from(5_000), true, Some(Decimal::from(5)));
         b.purchase_price = Some(Decimal::from(1_000));
-        let mut inp = base_input(
-            12,
-            Decimal::ZERO,
-            Decimal::from(1_000),
-            vec![a, b],
-            vec![],
-        );
+        let mut inp = base_input(12, Decimal::ZERO, Decimal::from(1_000), vec![a, b], vec![]);
         inp.tax_brackets = crate::tax::es_brackets_for_tests();
         inp.taxes_enabled = true;
         let out = project_net_worth_series(&inp).unwrap();
@@ -3846,7 +4071,11 @@ mod tests {
                 pension_monthly: Decimal::from(1_000),
             },
             swr_pct: dec_s("3.5"),
-            tax_brackets: if taxed { crate::tax::es_brackets_for_tests() } else { Vec::new() },
+            tax_brackets: if taxed {
+                crate::tax::es_brackets_for_tests()
+            } else {
+                Vec::new()
+            },
             taxes_enabled: taxed,
             taxable_gain_ratio: Decimal::ONE,
             annual_inflation_percent: Decimal::from(2),
@@ -3854,7 +4083,11 @@ mod tests {
         };
         let t = |ft: &FireTarget, k: u32| fire_target_at_month_index(Some(ft), k).unwrap();
         let sin = build(false);
-        for (k, esperado) in [(0u32, "342857.1429"), (120, "493024.7451"), (240, "676078.2144")] {
+        for (k, esperado) in [
+            (0u32, "342857.1429"),
+            (120, "493024.7451"),
+            (240, "676078.2144"),
+        ] {
             let got = t(&sin, k);
             assert!(
                 (got - dec_s(esperado)).abs() < dec_s("0.01"),
@@ -3862,7 +4095,11 @@ mod tests {
             );
         }
         let es = build(true);
-        for (k, esperado) in [(0u32, "429656.4195"), (120, "619741.9920"), (240, "851455.2442")] {
+        for (k, esperado) in [
+            (0u32, "429656.4195"),
+            (120, "619741.9920"),
+            (240, "851455.2442"),
+        ] {
             let got = t(&es, k);
             assert!(
                 (got - dec_s(esperado)).abs() < dec_s("0.01"),
@@ -3931,7 +4168,9 @@ mod tests {
     #[test]
     fn fiscal_drag_the_grossup_of_the_inflated_need_beats_the_inflated_grossup() {
         let ft = FireTarget {
-            need: FireNeed::Indexed { annual_net_today: Decimal::from(24_000) },
+            need: FireNeed::Indexed {
+                annual_net_today: Decimal::from(24_000),
+            },
             swr_pct: dec_s("3.5"),
             tax_brackets: crate::tax::es_brackets_for_tests(),
             taxes_enabled: true,
@@ -3940,14 +4179,16 @@ mod tests {
             debt_payments_remaining: Vec::new(),
         };
         let t0 = fire_target_at_month_index(Some(&ft), 0).unwrap();
-        assert!((t0 - dec_s("863652.8029")).abs() < dec_s("0.01"), "k=0 sin mover: {t0}");
+        assert!(
+            (t0 - dec_s("863652.8029")).abs() < dec_s("0.01"),
+            "k=0 sin mover: {t0}"
+        );
         let t360 = fire_target_at_month_index(Some(&ft), 360).unwrap();
         assert!(
             (t360 - dec_s("1571527.9413")).abs() < dec_s("0.01"),
             "t(360) con drag: {t360}"
         );
-        let viejo = t0
-            * inflation_factor_at_month_index(Decimal::from(2), 360);
+        let viejo = t0 * inflation_factor_at_month_index(Decimal::from(2), 360);
         assert!(
             (t360 - viejo - dec_s("7140.43")).abs() < dec_s("0.02"),
             "el drag es ≈ +7.140,43: nuevo {t360}, viejo {viejo}"
@@ -4020,5 +4261,4 @@ mod tests {
         assert!(out.contributed_capital[840] < out.contributed_capital[1]);
         assert!(out.per_asset_series[0][840] > out.per_asset_series[0][1]);
     }
-
 }

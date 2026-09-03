@@ -93,7 +93,7 @@ cuando trae la fila del mes, el paso de crecimiento usa esos factores en vez del
 hoisted por activo. `None` —lo único que produce la conversión desde `ProjectionInput`— deja el
 bucle donde estaba. Una fila mal dimensionada se ignora en vez de panicar.
 
-**La puerta de degeneración** (`crates/engine-stochastic/tests/degeneration.rs`) corre los 23 casos
+**La puerta de degeneración** (`crates/engine-stochastic/tests/degeneration.rs`) corre los 25 casos
 de la batería del motor por los dos caminos y compara `net_worth` y `liquid_worth` mes a mes en
 todo el horizonte más los índices discretos. Medido: **máximo 1,5e-7 € en 840 meses** (P9), y los
 cuatro índices (`retirement_month_index`, `liquid_crossing_month_index`,
@@ -102,12 +102,24 @@ cuatro índices (`retirement_month_index`, `liquid_crossing_month_index`,
 `NUMERIC(18,4)` al 20 % durante 70 años ⇒ patrimonio ~3,5e19 €), donde el espaciado de los `f64`
 ya supera el euro: allí la cota es `1e-12` relativa y se mide 2,0e-14.
 
-Hallazgo que esta puerta cazó y se arregló en el mismo WP: la venta mixta con techo deducía «¿se
-vendió el techo entero?» comparando `gross_monthly >= gross_cap` — exacto en `Decimal`, filo de
-navaja en coma flotante, y de esa rama cuelga qué es **recorte informativo** y qué es
-**descubierto que resta patrimonio**. Ahora el booleano lo publica el paseo
-(`MixedGrossDrawdown::cap_exhausted`), que es quien lo sabe. Valía 8.138 € en P15; los dos pines
-dorados no se movieron.
+Hallazgos que esta puerta cazó, **todos de la misma familia**: un booleano publicado colgando de
+una comparación exacta entre dos cantidades que los dos tipos calculan por caminos distintos.
+
+1. La venta mixta con techo deducía «¿se vendió el techo entero?» comparando
+   `gross_monthly >= gross_cap`. Ahora el booleano lo publica el paseo
+   (`MixedGrossDrawdown::cap_exhausted`), que es quien lo sabe. Valía 8.138 € en P15.
+2. El **agotamiento** se decidía con `venta_bruta >= drenable` ANTES de vender. En el aterrizaje
+   exacto —el capital que iguala al euro el objetivo del puente— `Decimal` decía `None` y `f64`
+   decía `Some(120)`, y `f64` es el tipo sobre el que corre cada camino de Monte Carlo: el mismo
+   plan salía «arruinado» en el fan chart y «perfecto» en la línea. Ahora se mide DESPUÉS de
+   vender, sobre los saldos (§Agotamiento).
+3. `partial_phase_capital_growing` compara el líquido de cierre de dos meses consecutivos, y en
+   una serie PLANA los dos valores son iguales en `Decimal` y difieren en un ulp en `f64`. El `<`
+   lo decide ahora el tipo (`MoneyOps::strictly_below`, tolerancia relativa `1e-9` declarada en el
+   crate estocástico), igual que el `==` de las `g`. Eran 5 de 2.901 entradas del corpus
+   diferencial.
+
+Los dos pines dorados no se movieron con ninguno de los tres.
 
 ### Monte Carlo (5.0.0 WP6)
 
@@ -123,9 +135,26 @@ finalizador de splitmix64), un flujo ChaCha8 propio por camino (ampliar la muest
 que había), normales por Box–Muller y percentiles por **rango más cercano** (siempre un valor
 observado, nunca una interpolación). `McOutcome` publica bandas **puntuales** p10/p50/p90 de
 `net_worth` y `liquid_worth` (la p50 NO es un camino y no cumple ninguna identidad contable),
-`success_probability` (D22: ningún agotamiento en todo el horizonte), agotamiento acumulado cada 60
-meses desde la jubilación, percentiles del mes de cruce, `underfunded_probability` y las dos
-lecturas del recorte (D24). **De este crate no sale un euro**: todo lo publicado es estadístico.
+`success_probability`, `never_retired_probability`, `success_given_retired`, agotamiento acumulado
+cada 60 meses desde la jubilación **más una última fila en el horizonte**, percentiles del mes de
+cruce, `underfunded_probability` y las dos lecturas de cobertura (D24).
+
+**Éxito = el plan OCURRE y AGUANTA** (corrección de la segunda revisión adversarial sobre D22).
+D22 decía «la cartera no se agota nunca», y con un trigger por cruce eso premiaba al hogar que no
+se jubila jamás: quien nunca drena nunca se agota. Medido en un hogar que cruza en el mes 655 de
+840, el 33,1 % de los caminos no se jubilaba y los 1.000 contaban como éxito — 0,960 publicado
+frente a 0,940 entre los que sí llegan, y hasta **+6,8 pp** de sesgo en el barrido (SWR 6 %). Hoy:
+`success_probability` = se jubila dentro del horizonte (o el trigger es por edad, y entonces la
+jubilación es un dato) **y** no agota; `never_retired_probability` y `success_given_retired` se
+publican al lado para que las dos preguntas se lean por separado.
+
+**Las dos lecturas de cobertura cuentan la necesidad que la CARTERA no pudo fundar**, no solo la
+que la regla rechazó: `withdrawal_to_need_ratio_p50 = Σw / Σ(w + recorte + descubierto)` y
+`months_below_need_p50` cuenta los meses con `recorte + descubierto > 0`. Antes el denominador era
+`Σ(w + recorte)`, y con `fixed_real` el recorte es CERO por construcción — el permitido ES la
+necesidad—, así que el cociente salía **1,0 en los 1.000 caminos** de un hogar que cubrió el 8,7 %
+de su gasto y pasó 366 de 400 meses sin cartera. La tercera magnitud vive ahora en la serie
+`ProjectionOutput::unmet_need`. **De este crate no sale un euro**: todo lo publicado es estadístico.
 Lo que el modelo NO representa —colas gruesas, autocorrelación, correlación imperfecta entre
 activos (con un `z` común es exactamente 1), bootstrap histórico, volatilidad de IPC/ingresos/gasto,
 rebalanceo— está escrito en el doc del módulo `mc`, no en un comentario suelto.
@@ -136,27 +165,57 @@ rebalanceo— está escrito en el doc del módulo `mc`, no en un comentario suel
 `growth_overrides` es `None` en todo el camino determinista (los dos pines dorados no se mueven).
 Con él, en cada mes **jubilado y autorizado** el motor llama a `refill_cash_buffer_g` DESPUÉS de la
 venta del mes y ANTES del crecimiento: repone el activo colchón hasta `target_months · gasto
-indexado del mes` vendiendo del orden de drenaje **restringido a `i ≠ buffer_index`**, con la misma
+indexado del mes` vendiendo del orden de drenaje **restringido a `i ≠ buffer_index` y a los
+LÍQUIDOS**, con la misma
 maquinaria fiscal que la venta del mes (g por activo, cortocircuito escalar o paseo mixto,
 `shrink_basis_g`); el neto entra en el colchón como VALOR y como BASE (ya tributó al salir). Si la
 cartera no llega, se mueve lo que haya: un relleno es discrecional, no produce descubierto ni marca
-agotamiento. El activo colchón lo elige `cash_buffer_index` = el líquido de menor rentabilidad
-esperada, que por construcción es el primero del orden de drenaje y por tanto **el que la retirada
-ya vacía primero**, sin ninguna regla nueva. El motor no sabe qué es «volátil» (σ vive en el crate
-estocástico): quien instala el colchón es Monte Carlo, y solo si hay activo líquido que lo albergue
-Y volatilidad declarada — con σ=0 no se instala y el resultado es bit a bit el de no pedirlo
-(`McOutcome::buffer_active` lo dice; sus dos lecturas, `buffer_refills_p50` y
-`buffer_refill_net_total_p50`, son `None` cuando no se simuló, que no es «cero»).
+agotamiento. El filtro de liquidez lo puso la segunda revisión adversarial: sin él, un hogar cuyo
+único activo no-colchón era la vivienda **liquidaba el piso** para engordar una cuenta (61 de 65
+rellenos de un camino vendían la vivienda EN CAÍDA, y llegaba a 0 en el mes 420).
 
-**Hallazgo medido, contra lo que la intuición promete**: en este modelo el colchón **empeora** el
-plan. Con 1.000.000 € (80.000 en cuenta al 0 % + 920.000 en RV al 6,5 %/17 %), retirada real del
-4 % y 35 años, la probabilidad de éxito cae de 0,775 a 0,713 y la mediana final de 1,55 M€ a
-1,05 M€; el deterioro es monótono en el tamaño del colchón (6/12/24/60 meses ⇒ 0,739/0,731/0,713/
-0,641) y afecta también al p10. La razón está declarada en el propio modelo: **sin autocorrelación**
-un mes malo no dice nada del siguiente, así que no hay mala racha que esperar sentado y el lastre
-—dinero fuera del mercado— se cobra entero. Los backtests históricos ven lo contrario porque las
-series reales revierten a la media, propiedad que este modelo no tiene. Lo pinea
-`mc_cash_buffer_costs_return_without_buying_safety_in_this_model`.
+El activo colchón lo elige **`safe_cash_buffer_index(assets, risk_free)`** = el primer LÍQUIDO del
+orden de drenaje que además está marcado sin riesgo. El motor no sabe qué es «volátil» (σ vive en
+el crate estocástico), así que la marca la pasa el llamante. `cash_buffer_index` —el líquido de
+menor rentabilidad, sin mirar σ— sigue existiendo y **ya no decide el colchón**: en una cartera de
+«RV líquida + vivienda» elegía la renta variable, y un colchón con σ = 17 % no es un colchón, es la
+misma cartera con más impuestos.
+
+Quien instala el colchón es Monte Carlo, y solo con las tres puertas abiertas: se pidió, hay
+volatilidad de la que protegerse y hay un líquido a σ = 0 donde alojarlo. Si falta alguna,
+`McOutcome::buffer_active` es `false` y **`buffer_inactive_reason` dice cuál**
+(`not_requested` | `no_volatility` | `no_safe_liquid_asset`); las dos lecturas
+(`buffer_refills_p50`, `buffer_refill_net_total_p50`) son `None`, que no es «cero».
+
+**El relleno es NO ANTICIPATIVO**: el mes `k` se autoriza con el shock que ya ocurrió, `z_{k−1}`, y
+el mes 1 no rellena nunca. Antes se usaba el `z` del propio mes y el relleno corre ANTES del
+crecimiento, o sea que vendía renta variable **al precio de antes de una subida que ya sabía que
+venía**. Medido a 10.000 caminos: la regla anticipativa daba 0,7828 de éxito contra 0,8077 de la
+retardada (−2,5 pp) y, en un McNemar pareado sobre las MISMAS sendas, 249 caminos se arruinaban
+solo bajo la anticipativa y **ninguno** solo bajo la retardada.
+
+**El colchón, descompuesto.** La versión anterior de este párrafo decía «en este modelo el colchón
+empeora el plan», y esa frase mezclaba tres efectos, dos de ellos ajenos a la política de colchón:
+el **lastre** de tener 80.000 € al 0 % en vez de al 6,5 %, la **protección** de gastar de una
+reserva sin riesgo, y la **anticipación** del bug de `z_k`. Separados (1.000 caminos, semilla 207,
+1.000.000 € = 80.000 en cuenta + 920.000 en RV al 6,5 %/17 %, retirada real del 4 %, 35 años,
+colchón de 24 meses):
+
+| escenario | éxito sin → con colchón | Δ |
+|---|---|---|
+| cuenta al 0 % (con lastre) | 0,7750 → 0,7400 | **−3,50 pp** |
+| cuenta al 6,5 % (sin lastre, σ = 0) | 0,7800 → **0,8190** | **+3,90 pp** |
+
+Lastre = −7,90 pp; protección = +3,90 pp; y la anticipación que se retiró valía +2,7 pp (el mismo
+escenario al 0 % daba 0,713 con `z_k`). **Con el lastre fuera el colchón protege**, y sobre todo en
+la cola: el líquido p10 del mes 240 pasa de 99.409 € a 197.767 €, casi el doble. Con la cuenta al
+0 % —el caso realista— sigue costando, y eso es lo que la ayuda de la UI tiene que decir: *la
+protección es real, pero la paga la rentabilidad a la que renuncias por tener 24 meses de gasto
+fuera del mercado*. Lo pinea `mc_cash_buffer_protects_and_the_drag_is_what_costs`.
+
+Sigue en pie lo que el modelo NO tiene: **sin autocorrelación**, un mes malo no dice nada del
+siguiente, así que el colchón no compra información sobre la secuencia; los backtests históricos
+ven un efecto mayor porque las series reales revierten a la media.
 
 ## Public API
 
@@ -437,6 +496,9 @@ impl PlanFireTarget<'_> {
     pub fn partial_gap_target(&self, plan: &PhasePlan, expense_regular: Decimal) -> Option<Decimal>
 }
 pub const MAX_BRIDGE_MONTHS: u32 = 1_200;  // más allá, el puente degrada a perpetuidad ÍNTEGRA
+// OJO: la degradación NO es siempre más prudente. Medido, el objetivo degradado puede ser MENOR
+// que el puente (−27 % en el caso del issue con d = 5 %; −77 % con d = 0). Solo alcanzable con una
+// pensión declarada a >100 años vista: violación de contrato LATENTE, documentada en la constante.
 ```
 
 **Una unidad por término** (hallazgo B1 de la revisión adversarial: mezclar €/mes con €/año hace
@@ -860,8 +922,8 @@ pub struct ProjectionOutput {
     pub liquid_worth: Vec<Decimal>,      // 4.8.0 (#143): Σ activos is_liquid (BRUTA) — la base del cruce; surplus_cash retirado del término en 4.12.1 (#175)
     pub contributed_capital: Vec<Decimal>, // Σ basis por activo (nominal) — desde 4.10.0/#120 PUEDE DECRECER: vender baja la base (b' = b·v_post/v_pre); «cumulative» murió con la Ola 6; surplus_cash retirado del término en 4.12.1 (#175)
     pub per_asset_series: Vec<Vec<Decimal>>, // value per asset per month (nominal)
-    pub assets_depleted_month_index: Option<u32>, // 4.6.0 (#119): primer mes con déficit ≥ TODO lo drenable
-    pub uncovered_deficit_total: Decimal,         // 4.6.0 (#119): undrained_cumulative final
+    pub assets_depleted_month_index: Option<u32>, // 4.6.0 (#119) + 5.0.0: primer mes que dejó lo vendible a CERO **y** con alguna venta sin fundar desde él
+    pub uncovered_deficit_total: Decimal,         // 4.6.0 (#119): undrained_cumulative final — operando LITERAL de 4.15.0, puede traer cola de ±1e-24; quien publica clampa
     pub unallocated_savings_total: Decimal,       // 4.12.1 (#175): ahorro que ninguna regla absorbió, acumulado — NO entra en net_worth ni en contributed_capital; "0" con activos vivos (sumidero indestructible #176)
     // --- 5.0.0 WP1b (§B.8): LECTURAS de fase. Ninguna cambia la aritmética; todas se derivan de
     //     valores que el bucle ya tenía. `pins-4.15.json` NO las hashea (sigue probando que las de
@@ -872,13 +934,14 @@ pub struct ProjectionOutput {
     pub withdrawal: Vec<Decimal>,                   // retirada NETA del mes = after_tax(bruto vendido) (len horizon+1, [0] = 0)
     pub withdrawal_shortfall: Vec<Decimal>,         // recorte de la REGLA — informativo (D22/D24), NO es uncovered_deficit_total; 0 con fixed_real
     pub withdrawal_excess: Vec<Decimal>,            // sobrante de rule_is_spend sobre la necesidad — 0 en ceiling y con fixed_real
+    pub unmet_need: Vec<Decimal>,                   // 5.0.0 (revisión D20): necesidad que la CARTERA no fundó — incremento mensual del descubierto, clampado a 0
     pub pension_start_month_index: Option<u32>,     // WP3: `pension.start_index + 1` (1-based), None si cae fuera del horizonte
     pub partial_retirement_month_index: Option<u32>,// WP3: primer mes de media jornada — None si la fase no se pisó
     pub warnings: Vec<EngineWarning>,               // WP3: el bucle emite RetireAtAgeUnderfunded y PartialPhaseCapitalShrinking
     // --- 5.0.0 WP3 (§B.3, §B.7): lecturas de pensión, puente, media jornada y margen ---
     pub bridge_effective_withdrawal_pct: Option<Decimal>, // 100·12·need_full_m(R−1)/L(R−1) — % ANUAL; None sin pensión+puente
     pub pension_coverage_ratio: Option<Decimal>,    // P_m(P)/(E·f(P)) — FRACCIÓN (0,6 = 60 %); None sin pensión con fecha
-    pub partial_gap_target: Option<Decimal>,        // gross_up(12·gap_m(X))/SWR — informativo; Some(0) = la media jornada se paga sola
+    pub partial_gap_target: Option<Decimal>,        // gross_up(12·gap_m(X))/SWR — informativo; None si la fase NO se vivió (mismo gate que partial_phase_capital_growing); Some(0) = la media jornada se paga sola
     pub partial_phase_capital_growing: bool,        // true ⟺ HUBO fase parcial Y el líquido no bajó ni un mes en ella
     pub disposable_cash: Vec<Decimal>,              // caja que el techo de aportación dejó fuera de la cascada (len horizon+1, [0] = 0)
     pub disposable_cash_total: Decimal,             // Σ de la serie. "0" son cero euros, no «no aplica»
@@ -961,19 +1024,40 @@ fue el hallazgo B2 de la revisión adversarial, que las tenía confundidas):
 |---|---|---|
 | `withdrawal` | lo que se retiró y se gastó, NETO | — (es la salida de caja) |
 | `withdrawal_shortfall` | la necesidad que la REGLA no dejó retirar (`max(0, necesidad_neta − neto que el techo permitía)`) | **NO** — es un recorte de gasto, no un impago |
-| `uncovered_deficit_total` | lo que los ACTIVOS no pudieron vender de la venta intentada | **SÍ**, como siempre (deuda implícita) |
+| `unmet_need` / `uncovered_deficit_total` | lo que los ACTIVOS no pudieron vender de la venta intentada (serie mensual / acumulado) | **SÍ**, como siempre (deuda implícita) |
 | `withdrawal_excess` | lo que `rule_is_spend` vendió POR ENCIMA de la necesidad y se gastó | — (sale de la cartera vía `withdrawal`) |
 
-En un mes de déficit **con la venta fundada al completo** se cumple exacto
-`withdrawal + withdrawal_shortfall = necesidad_neta` (y, en `rule_is_spend` con techo ≥ necesidad,
-`withdrawal − withdrawal_excess = necesidad_neta`). Cuando la cartera no llega, la diferencia se va
-a `uncovered_deficit_total`, no al recorte: el recorte **no crece** con el agotamiento.
+**La identidad del mes, exacta y siempre** (la comprueba `tests/fuzz_invariants.rs` sobre 1.500
+hogares aleatorios):
+
+```text
+withdrawal + withdrawal_shortfall + unmet_need − withdrawal_excess = necesidad_neta
+```
+
+El sobrante RESTA porque es gasto discrecional que ya está dentro de `withdrawal`. La serie
+`unmet_need` es la que faltaba: sin ella el reparto solo cerraba cuando la venta se fundaba al
+completo, y cualquier cociente de cobertura mentía justo en el caso que importa —la cartera
+agotada—, porque con `fixed_real` el recorte es cero por construcción.
+
+**Y el techo ata en las DOS vías.** Hasta la segunda revisión adversarial, la vía mixta decidía si
+el techo ataba comparando contra `dd.gross_monthly`, que el paseo ya había recortado a la
+capacidad: un techo POR ENCIMA de lo vendible se descartaba en silencio y su rechazo se
+contabilizaba como descubierto — 916 € de patrimonio en el caso mínimo de la revisión, con la
+venta byte a byte idéntica a la de la vía escalar. Ahora se decide contra lo que la NECESIDAD pide,
+y el neto de un techo que la cartera no puede fundar se tasa con la `g` **marginal** (la del último
+tramo con material, extendido): es la generalización exacta de la vía escalar — con todas las `g`
+iguales devuelve `after_tax_monthly(techo, g)` dígito a dígito.
 
 El handler no publica todavía todas estas lecturas:
 `jubilacion_month_index` sigue derivándose en `handlers/projection.rs` (R8 es WP5).
 
-Sobre los dos campos de 4.6.0 (#119): la definición del mes de agotamiento vive en el bucle — el
-caso exacto usa `>=` («la cartera se vacía este mes»), no «primer mes con descubierto», que daría
+Sobre los dos campos de 4.6.0 (#119): la definición del mes de agotamiento vive en el bucle. Desde
+el pase de correcciones de la revisión D20 son **dos condiciones**: (1) primer mes cuya venta dejó
+lo vendible a cero —medido DESPUÉS de vender, sobre los saldos, no comparando la venta con la
+capacidad antes— y (2) alguna venta sin fundar en ese mes o después. Sin la segunda, un puente que
+se vacía EXACTAMENTE el mes en que entra una pensión que cubre todo el gasto posterior se publicaba
+como «cartera agotada» con `uncovered_deficit_total = 0`. El texto histórico decía que el caso
+exacto usa `>=` («la cartera se vacía este mes»), no «primer mes con descubierto», que daría
 el mes siguiente; pineado con 200.000 € / 2.000 €/mes ⇒ mes 100 y NW(360) = −520.000. Cero series
 nuevas a propósito: la serie del descubierto es derivable de la identidad del NW, y un cuarto
 array de 841 Decimals no lo pinta nadie.

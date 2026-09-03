@@ -86,7 +86,7 @@ use rand_chacha::rand_core::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use futurefin_engine::{
-    cash_buffer_index, monthly_growth_multiplier, simulate, CashBufferPlan, EngineError,
+    monthly_growth_multiplier, safe_cash_buffer_index, simulate, CashBufferPlan, EngineError,
     EngineWarning, ProjectionInput, RetirementTrigger, SimInput, SimOutput,
 };
 
@@ -374,10 +374,40 @@ struct PathEngine {
     /// **P4**: `(índice del activo colchón, meses de gasto objetivo)`. `None` = no se simula
     /// colchón, y entonces `sim.cash_buffer` nunca se rellena.
     buffer: Option<(usize, F64Money)>,
-    /// Autorizaciones de relleno del mes (`z_k > 0`), reutilizadas camino a camino: viajan al
-    /// motor con `mem::take` y vuelven después de simular, igual que el buffer de factores. Vacío
-    /// cuando no hay colchón.
+    /// Por qué NO se instaló el colchón. `None` ⟺ `buffer.is_some()`.
+    buffer_inactive_reason: Option<BufferInactiveReason>,
+    /// Autorizaciones de relleno del mes (`z_{k−1} > 0`, NO anticipativas), reutilizadas camino a
+    /// camino: viajan al motor con `mem::take` y vuelven después de simular, igual que el buffer
+    /// de factores. Vacío cuando no hay colchón.
     refill_buf: Vec<bool>,
+}
+
+/// **Por qué el colchón de caja (P4) no se está simulando.** Nunca es `None` cuando
+/// [`McOutcome::buffer_active`] es `false`: un colchón inactivo sin motivo es un número que el
+/// usuario pidió y no recibió, sin explicación.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufferInactiveReason {
+    /// No se pidió (`McConfig::cash_buffer_months = None`).
+    NotRequested,
+    /// Ningún activo declara volatilidad: no hay riesgo de secuencia del que protegerse, y
+    /// rellenar «en los meses buenos» sería trasvasar valor y pagar plusvalía guiándose por un
+    /// shock que no mueve nada. El resultado es BIT A BIT el de no pedirlo.
+    NoVolatility,
+    /// No hay ningún activo **líquido con σ = 0** donde alojarlo. Un colchón volátil no protege
+    /// de nada, y vender un activo ilíquido para financiarlo es exactamente el desastre que el
+    /// colchón dice evitar: antes que eso, no se instala.
+    NoSafeLiquidAsset,
+}
+
+impl BufferInactiveReason {
+    /// El literal público, estable, que la API y la ayuda de la UI citan.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::NotRequested => "not_requested",
+            Self::NoVolatility => "no_volatility",
+            Self::NoSafeLiquidAsset => "no_safe_liquid_asset",
+        }
+    }
 }
 
 impl PathEngine {
@@ -423,10 +453,20 @@ impl PathEngine {
         // La condición 3 es también lo que mantiene la puerta de degeneración: `σ=0 ⇒ la banda es
         // la línea determinista`, colchón pedido o no.
         let any_volatility = sigmas.iter().any(|s| *s > 0.0);
-        let buffer = config
-            .cash_buffer_months
-            .filter(|_| any_volatility)
-            .and_then(|n| cash_buffer_index(&sim.assets).map(|i| (i, F64Money(f64::from(n)))));
+        // **El colchón exige un activo LÍQUIDO Y SIN RIESGO** (corrección de la revisión
+        // adversarial). `cash_buffer_index` sale del orden de drenaje, que no sabe de
+        // volatilidad, y en una cartera «RV líquida + vivienda» elegía la RENTA VARIABLE como
+        // colchón: un colchón con σ = 17 % no es un colchón, es la misma cartera con más
+        // impuestos. Si no hay dónde ponerlo, no se instala y se dice POR QUÉ.
+        let risk_free: Vec<bool> = sigmas.iter().map(|s| *s == 0.0).collect();
+        let (buffer, buffer_inactive_reason) = match config.cash_buffer_months {
+            None => (None, Some(BufferInactiveReason::NotRequested)),
+            Some(_) if !any_volatility => (None, Some(BufferInactiveReason::NoVolatility)),
+            Some(n) => match safe_cash_buffer_index(&sim.assets, &risk_free) {
+                Some(i) => (Some((i, F64Money(f64::from(n)))), None),
+                None => (None, Some(BufferInactiveReason::NoSafeLiquidAsset)),
+            },
+        };
         let refill_buf = if buffer.is_some() {
             vec![false; months]
         } else {
@@ -439,6 +479,7 @@ impl PathEngine {
             seed: config.seed,
             buf,
             buffer,
+            buffer_inactive_reason,
             refill_buf,
         })
     }
@@ -457,16 +498,30 @@ impl PathEngine {
             .take()
             .expect("el buffer siempre vuelve al final de `run`");
         let mut rng = path_rng(self.seed, path_index);
+        // El shock del mes ANTERIOR, que es el único que el hogar ha podido observar cuando
+        // decide rellenar. Arranca en `false`: el mes 1 no tiene pasado.
+        let mut prev_z_positive = false;
         for (k, row) in buf.iter_mut().enumerate() {
             // UN shock por mes, sorteado SIEMPRE — también con la cartera entera a σ=0. Que el
             // flujo del RNG no dependa de los datos es lo que hace comparables dos ejecuciones
             // sobre carteras distintas con la misma semilla.
             let z = standard_normal(&mut rng);
-            // P4: el MISMO `z` que fija los factores del mes autoriza (o no) el relleno. Un
-            // segundo sorteo desacoplaría el colchón del mercado que dice estar leyendo.
+            // **P4, relleno NO ANTICIPATIVO** (corrección de la revisión adversarial). El mes `k`
+            // se autoriza con el shock que YA OCURRIÓ, `z_{k−1}`; el mes 1 no rellena nunca
+            // porque no hay mes anterior.
+            //
+            // Antes se usaba el `z` del propio mes, y el relleno se ejecuta ANTES del
+            // crecimiento (`sim_core.rs`, bloque del colchón justo delante del paso de
+            // crecimiento): eso vendía renta variable **al precio de antes de la subida, en el
+            // mes en que iba a subir**. Es información del futuro, y se pagaba: con la cartera
+            // volátil al 6,5 % y 10.000 caminos, el éxito bajaba de 0,8077 (regla `z_{k−1}`) a
+            // 0,7828 (regla `z_k`), −2,5 pp; y en un McNemar pareado sobre las MISMAS sendas,
+            // 249 caminos se arruinaban solo bajo la regla anticipativa y **ninguno** solo bajo
+            // la retardada.
             if let Some(flag) = self.refill_buf.get_mut(k) {
-                *flag = z > 0.0;
+                *flag = prev_z_positive;
             }
+            prev_z_positive = z > 0.0;
             for (i, cell) in row.iter_mut().enumerate() {
                 let s = self.sigmas[i];
                 *cell = if s == 0.0 {
@@ -547,6 +602,19 @@ pub struct McOutcome {
     /// El recorte de una regla (`withdrawal_shortfall`) **no es fracaso** (D24) y se publica
     /// aparte en [`Self::months_below_need_p50`] y [`Self::withdrawal_to_need_ratio_p50`].
     pub success_probability: f64,
+    /// **Fracción de caminos que NO se jubilan** dentro del horizonte
+    /// (`retirement_month_index == None`). Con trigger por EDAD es 0 por construcción.
+    ///
+    /// Se publica porque es el denominador escondido del éxito: un plan por cruce con una
+    /// probabilidad de éxito alta y un tercio de caminos que no se jubilan nunca no es un buen
+    /// plan, es un plan que no ocurre.
+    pub never_retired_probability: f64,
+    /// Éxito **entre los caminos que sí se jubilan**: de los que llegan a la jubilación, cuántos
+    /// no agotan la cartera. `None` si ningún camino se jubila.
+    ///
+    /// Junto a [`Self::success_probability`] separa las dos preguntas que D22 mezclaba: «¿ocurre
+    /// el plan?» y «¿aguanta?».
+    pub success_given_retired: Option<f64>,
     /// Probabilidad ACUMULADA de agotamiento en `(mes, p)`, cada
     /// [`DEPLETION_STEP_MONTHS`] meses desde la jubilación efectiva. `p` es la fracción de
     /// caminos con `assets_depleted_month_index ≤ mes`. El caller traduce meses a edades.
@@ -584,6 +652,9 @@ pub struct McOutcome {
     /// Con `false`, [`Self::buffer_refills_p50`] y [`Self::buffer_refill_net_total_p50`] son
     /// `None` — «no se midió», que no es lo mismo que «cero rellenos».
     pub buffer_active: bool,
+    /// Por qué NO se simuló el colchón. `None` ⟺ [`Self::buffer_active`]. Nunca es `None` con
+    /// `buffer_active = false`: el usuario que pidió un colchón y no lo tuvo merece el motivo.
+    pub buffer_inactive_reason: Option<BufferInactiveReason>,
     /// Mediana, entre los caminos, del NÚMERO de meses con relleno efectivo del colchón.
     /// `None` ⟺ `!buffer_active`.
     ///
@@ -706,11 +777,17 @@ pub fn project_percentile_bands(
             for k in (r as usize)..len {
                 let w = out.withdrawal[k].0;
                 let s = out.withdrawal_shortfall[k].0;
-                if s > 0.0 {
+                // **La necesidad no cubierta entra en el denominador** (hallazgo #4 de la
+                // revisión). Con `fixed_real` el recorte `s` es CERO por construcción —el
+                // permitido ES la necesidad—, así que `Σw / Σ(w+s)` valía 1,0 siempre, también
+                // en los caminos que se quedaban sin cartera en el mes 35 de 400 y cubrían el
+                // 8,8 % de lo que necesitaban. Lo que faltaba estaba en la otra magnitud.
+                let u = out.unmet_need[k].0;
+                if s + u > 0.0 {
                     below += 1;
                 }
                 sum_w += w;
-                sum_need += w + s;
+                sum_need += w + s + u;
             }
         }
         months_below.push(f64::from(below));
@@ -751,7 +828,30 @@ pub fn project_percentile_bands(
     // Probabilidades
     // ------------------------------------------------------------------------------------------
     let n_f = n as f64;
-    let success_probability = depleted.iter().filter(|d| d.is_none()).count() as f64 / n_f;
+    // **Éxito y jubilación** (hallazgo #7 de la revisión, decisión de modelo). D22 decía «la
+    // cartera no se agota nunca», y con un trigger por CRUCE eso premiaba al hogar que no se
+    // jubila jamás: un camino que trabaja hasta los 105 años sin llegar al objetivo nunca drena
+    // y por tanto nunca se agota. En el hogar medido, el 33,1 % de los caminos no se jubilaba y
+    // los 1.000 se contaban como éxito: 0,960 publicado frente a 0,940 entre los que sí se
+    // jubilan.
+    //
+    // Éxito = **el plan ocurre Y aguanta**: el hogar se jubila dentro del horizonte (o el plan es
+    // por edad, y entonces la jubilación es un dato, no un suceso) y la cartera no se agota. La
+    // fracción que no se jubila se publica aparte, y el condicional también.
+    let age_triggered = input.phase_plan.retirement_trigger.forced_month().is_some();
+    let never_retired = retired_at.iter().filter(|r| r.is_none()).count();
+    let never_retired_probability = never_retired as f64 / n_f;
+    let success_probability = (0..n)
+        .filter(|&p| (age_triggered || retired_at[p].is_some()) && depleted[p].is_none())
+        .count() as f64
+        / n_f;
+    let retired_count = n - never_retired;
+    let success_given_retired = (retired_count > 0).then(|| {
+        (0..n)
+            .filter(|&p| retired_at[p].is_some() && depleted[p].is_none())
+            .count() as f64
+            / retired_count as f64
+    });
 
     // Ancla de la tabla de agotamiento: la jubilación del camino DETERMINISTA (la que la app
     // dibuja) y, a falta de ella, la mediana de los sorteados.
@@ -778,6 +878,18 @@ pub fn project_percentile_bands(
                 .count() as f64;
             depletion_probability_by_age.push((m, hit / n_f));
             m += DEPLETION_STEP_MONTHS;
+        }
+        // **La última fila es el HORIZONTE** (hallazgo #8 de la revisión). La rejilla avanza de
+        // 60 en 60 desde el ancla y se paraba en el último múltiplo que cabía: con ancla 655 y
+        // horizonte 840, la tabla terminaba en el mes 835 y dejaba 5 meses fuera sin decirlo.
+        // Ahora siempre cierra en el horizonte, que es la fila que el usuario lee como «al final
+        // del plan».
+        if depletion_probability_by_age
+            .last()
+            .is_none_or(|(m, _)| *m < input.horizon_months)
+        {
+            let hit = depleted.iter().filter(|d| d.is_some()).count() as f64;
+            depletion_probability_by_age.push((input.horizon_months, hit / n_f));
         }
     }
 
@@ -825,12 +937,15 @@ pub fn project_percentile_bands(
         net_worth,
         liquid_worth,
         success_probability,
+        never_retired_probability,
+        success_given_retired,
         depletion_probability_by_age,
         retirement_month_index_percentiles,
         underfunded_probability,
         months_below_need_p50,
         withdrawal_to_need_ratio_p50,
         buffer_active,
+        buffer_inactive_reason: engine.buffer_inactive_reason,
         buffer_refills_p50,
         buffer_refill_net_total_p50,
         any_volatility_declared,

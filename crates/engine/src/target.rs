@@ -59,9 +59,15 @@
 //! ```
 //!
 //! y `Σ_{m=i}^{P−1} G(m)/q(m)` es una **suma sufijo**: `O(P)` UNA vez por simulación, `O(1)` por
-//! evaluación. Es la forma implementada y por tanto **la definición**: en `i = 0` (donde `q(0) = 1`
-//! exacto) coincide término a término con la suma directa, y para `i > 0` difiere de ella en el
-//! redondeo de `powd`, no en el valor.
+//! evaluación. Es la forma implementada y por tanto **la definición**.
+//!
+//! Difiere de la suma directa **en el redondeo, también en `i = 0`** — el comentario anterior
+//! decía «coincide término a término» allí, y no es cierto. Medido con `P = 840`, gasto 2.000,
+//! SWR 3,5 %, IPC 2,5 %, impuestos ES: en `i = 0` la diferencia es **4e-28 €** (el sufijo suma de
+//! `P−1` hacia 0 y la directa de 0 hacia arriba: 3e-28; y la perpetuidad se multiplica por
+//! `1/q(P)` en vez de dividirse por `q(P)`: 1e-28 más). El máximo sobre toda la serie es
+//! **2,47e-20 € en `i = 839`** (1,25e-26 relativo). Es redondeo de `Decimal` a 28 dígitos, no una
+//! discrepancia de valor — pero «bit-igual» era una promesa falsa y se copiaba sin comprobar.
 //!
 //! Nunca por producto acumulado (`q(j+1) = q(j)·q(1)`): la casa ya tiene fichado que `powd` enruta
 //! los exponentes enteros por `checked_powu` y un producto acumulado los desviaría a `exp`/`ln`.
@@ -86,20 +92,45 @@ use rust_decimal::Decimal;
 use crate::money::MoneyOps;
 use crate::phases::{PhasePlan, TargetBasis};
 use crate::projection::FireTarget;
-use crate::sim::{
-    FireNeedG, FireTargetView, PensionScheduleG, PhasePlanG, TaxBracketG,
+use crate::sim::{FireNeedG, FireTargetView, PensionScheduleG, PhasePlanG, TaxBracketG};
+use crate::sim_core::{
+    checked_inflation_factor_at_index_g, debt_term_at_index_g, fire_target_at_index_g,
+    inflation_factor_at_index_g,
 };
-use crate::sim_core::{debt_term_at_index_g, fire_target_at_index_g, inflation_factor_at_index_g};
 use crate::tax::gross_up_net_annual_fire_g;
 
 /// Tope del puente, en meses: 100 años. Una pensión declarada MÁS ALLÁ de este índice no cae
 /// dentro de ningún horizonte que este motor simule (el máximo publicado son 840 meses), así que
 /// dimensionar un puente hasta ella sería tabular cien mil `gross_up` para nada.
 ///
-/// La degradación es la PRUDENTE y está declarada: el objetivo pasa a ser la perpetuidad sobre la
-/// necesidad ÍNTEGRA — o sea, MÁS grande, nunca menor. Truncar el puente iría en la dirección
-/// contraria (objetivo pequeño ⇒ cruce temprano ⇒ jubilación falsa), y esa es la clase de número
-/// que esta casa no publica.
+/// La degradación está declarada: el objetivo pasa a ser la perpetuidad sobre la necesidad
+/// ÍNTEGRA, que es el objetivo de 4.15.0 evaluado sin pensión.
+///
+/// # El acantilado, medido (revisión adversarial, hallazgo #10)
+///
+/// **La degradación NO es siempre más prudente**, contra lo que este comentario afirmaba hasta el
+/// pase de correcciones. Que la perpetuidad sea mayor o menor que el puente depende del descuento
+/// `d`, porque el puente descuenta `P` meses de gasto íntegro a esa tasa. Medido con gasto 2.000,
+/// pensión plana 1.200, SWR 4 %, sin IPC ni impuestos, comparando `P = 1200` con `P = 1201`:
+///
+/// | `d` | puente (`P=1200`) | degradado (`P=1201`) | cambio |
+/// |---|---|---|---|
+/// | 0 % | 2.640.000 € | 600.000 € | **−77 %** |
+/// | 3 % | 783.130 € | 600.000 € | **−23 %** |
+/// | 5 % | 490.980 € | 600.000 € | +22 % |
+/// | 7 % | 355.589 € | 600.000 € | +69 % |
+/// | 10 % | 252.810 € | 600.000 € | +137 % |
+///
+/// Con el caso realista del issue (SWR 3,5 %, IPC 2,5 %, impuestos ES, `d = 5 %`) el salto medido
+/// fue **−27,2 %**: 1.185.878 € → 863.653 €. Un objetivo MENOR significa cruce temprano y
+/// jubilación falsa, que es exactamente lo que este comentario prometía evitar.
+///
+/// **Por qué se deja el acantilado y no se hace un taper.** `P > MAX_BRIDGE_MONTHS` exige una
+/// pensión declarada a más de 100 años vista, y las cotas de la API —edad de pensión en
+/// `[50, 105]`— lo dejan solo al alcance de un miembro de menos de 5 años. Es una violación de
+/// contrato LATENTE, no un número vivo: suavizar el corte añadiría una segunda fórmula de
+/// objetivo (y una segunda cosa que mantener) para un caso que no ocurre. Lo que sí se hace es
+/// **decirlo aquí** en vez de prometer lo contrario.
 pub const MAX_BRIDGE_MONTHS: u32 = 1_200;
 
 /// Tabla del puente, calculada UNA vez por simulación.
@@ -133,6 +164,10 @@ pub(crate) struct PlanTargetG<M: MoneyOps> {
     /// `Some` solo con base puente, pensión con fecha `P ∈ [1, MAX_BRIDGE_MONTHS]` y un objetivo
     /// que pasa la puerta de `i = 0`. En cualquier otro caso el puente degrada a perpetuidad.
     bridge: Option<BridgeTable<M>>,
+    /// La tabla del puente NO cupo en el tipo: descuento tan negativo que `(1+d)^{j/12}`, la suma
+    /// sufijo o el producto de la evaluación se salen del rango. El evaluador degrada a la
+    /// perpetuidad; `simulate` lo convierte en `EngineError::BridgeDiscountOverflow`.
+    bridge_discount_overflow: bool,
 }
 
 impl<M: MoneyOps> PlanTargetG<M> {
@@ -143,6 +178,7 @@ impl<M: MoneyOps> PlanTargetG<M> {
             pension: plan.pension,
             basis: plan.target_basis,
             bridge: None,
+            bridge_discount_overflow: false,
         };
         let (Some(ft), Some(pen)) = (target, plan.pension) else {
             return out;
@@ -162,13 +198,21 @@ impl<M: MoneyOps> PlanTargetG<M> {
             // degradación declarada (ver la constante).
             return out;
         }
-        out.bridge = Some(build_bridge_table(
-            ft,
-            pen,
-            plan.bridge_discount_annual_pct,
-            p,
-        ));
+        // `None` = la tabla no cabe en el tipo (descuento muy negativo sobre un puente largo).
+        // El evaluador DEGRADA a la perpetuidad sobre la necesidad íntegra —la misma degradación
+        // declarada de `p > MAX_BRIDGE_MONTHS`, y por tanto nunca un pánico— y además IZA la
+        // bandera, que `simulate` convierte en `EngineError::BridgeDiscountOverflow`. Una lectura
+        // suelta degrada; una simulación falla en voz alta.
+        match build_bridge_table(ft, pen, plan.bridge_discount_annual_pct, p) {
+            Some(t) => out.bridge = Some(t),
+            None => out.bridge_discount_overflow = true,
+        }
         out
+    }
+
+    /// ¿La tabla del puente desbordó el tipo? Ver [`PlanTargetG::bridge_discount_overflow`].
+    pub(crate) fn overflowed(&self) -> bool {
+        self.bridge_discount_overflow
     }
 
     /// El objetivo en el índice **0-based** `month_index`. `None` = no hay objetivo (sin
@@ -266,9 +310,7 @@ impl<M: MoneyOps> PlanTargetG<M> {
         let ft = target?;
         let f = inflation_factor_at_index_g(ft.annual_inflation_percent, month_index);
         Some(match ft.need {
-            FireNeedG::Indexed { annual_net_today } => {
-                annual_net_today * f / M::from_u32(12)
-            }
+            FireNeedG::Indexed { annual_net_today } => annual_net_today * f / M::from_u32(12),
             FireNeedG::ExpenseMinusPension {
                 expense_monthly, ..
             } => expense_monthly * f,
@@ -278,7 +320,10 @@ impl<M: MoneyOps> PlanTargetG<M> {
     /// `P_m(P)/(E·f(P))` — qué FRACCIÓN del gasto cubre la pensión el mes en que empieza (D15:
     /// el modelo la lee, no la supone). `None` sin pensión con fecha, sin objetivo, o con un
     /// gasto no positivo en `P` (no hay base contra la que medir — jamás un 0 inventado).
-    pub(crate) fn pension_coverage_ratio(&self, target: Option<FireTargetView<'_, M>>) -> Option<M> {
+    pub(crate) fn pension_coverage_ratio(
+        &self,
+        target: Option<FireTargetView<'_, M>>,
+    ) -> Option<M> {
         let pen = self.pension?;
         let expense = self.expense_monthly_at(target, pen.start_index)?;
         if expense <= M::zero() {
@@ -356,7 +401,7 @@ fn build_bridge_table<M: MoneyOps>(
     pen: PensionScheduleG<M>,
     bridge_discount_annual_pct: M,
     p: u32,
-) -> BridgeTable<M> {
+) -> Option<BridgeTable<M>> {
     // Un descuento ≤ −100 % dejaría la base `1 + d/100` en cero o negativa y `powd` sin raíz real.
     // Se lee como «sin descuento», que es la lectura conservadora (el puente sale MÁS caro).
     let d_pct = if bridge_discount_annual_pct <= -M::from_u32(100) {
@@ -368,7 +413,20 @@ fn build_bridge_table<M: MoneyOps>(
     let n = p as usize;
     let mut disc = Vec::with_capacity(n + 1);
     for j in 0..=p {
-        disc.push(inflation_factor_at_index_g(d_pct, j));
+        // **Aritmética con red** (revisión adversarial, hallazgo #1). Con `d` muy negativo la base
+        // `1 + d/100` es < 1 y `q(j) = base^{j/12}` se hunde hacia 0; el término descontado
+        // `G(m)/q(m)` explota y, antes de eso, la propia potencia se sale del rango de `Decimal`
+        // y `powd` PANICA. Medido: `d = −50 %` con la pensión a 70 años (P = 840) — un solo
+        // activo líquido con `expected_annual_return_percent: "-50"` y el descuento por defecto
+        // `expected_return` bastan— reventaba `/v1/projection/series` con un 500 opaco.
+        //
+        // La cota depende de `P`: −99,6 % a 10 años, −86,6 % a 27, −53,8 % a 70, −41,8 % en
+        // `MAX_BRIDGE_MONTHS`. Aquí no se elige ninguna: se detecta el desbordamiento y se
+        // devuelve `None`, que el llamante convierte en `EngineError::BridgeDiscountOverflow`.
+        match checked_inflation_factor_at_index_g(d_pct, j) {
+            Some(q) => disc.push(q),
+            None => return None,
+        }
     }
 
     // Suma SUFIJO, de `P−1` hacia 0: `T(i) = G(i)/q(i) + T(i+1)`, `T(P) = 0`.
@@ -389,7 +447,12 @@ fn build_bridge_table<M: MoneyOps>(
         // `q(m) > 0` para cualquier `d > −100`; el fallback «sin descuento» solo protege de un
         // valor degenerado, y NO puede quedarse corto (dividir por 1 da el término entero).
         let discounted = gross_monthly.checked_div(disc[m]).unwrap_or(gross_monthly);
-        suffix[m] = discounted + suffix[m + 1];
+        // La suma sufijo es donde el descuento negativo desborda ANTES que la potencia en los
+        // horizontes largos (`Addition overflowed` a partir de `d = −53,8 %` con P = 840).
+        match discounted.checked_add(suffix[m + 1]) {
+            Some(v) => suffix[m] = v,
+            None => return None,
+        }
     }
 
     // Perpetuidad en `P` sobre lo que la pensión NO cubre. `0` exacto si la cubre entera.
@@ -402,12 +465,29 @@ fn build_bridge_table<M: MoneyOps>(
         perpetuity_from_annual_net(ft, annual_net_p)
     };
 
-    BridgeTable {
+    // Y la EVALUACIÓN también tiene que caber: `at()` calcula `q(i)·T(i)` y
+    // `perp·q(i)/q(P)`, y esas multiplicaciones desbordaban por su cuenta (`Multiplication
+    // overflowed` a partir de `d = −95,9 %` con P = 204). Se comprueban aquí, una vez, en vez de
+    // dejar que la consulta `O(1)` del bucle panique en el mes 300.
+    let q_p = disc[n];
+    for i in 0..=n {
+        if disc[i].checked_mul(suffix[i]).is_none() {
+            return None;
+        }
+        if !perp_at_p.is_zero() && q_p > M::zero() {
+            let ratio = disc[i].checked_div(q_p).unwrap_or(M::one());
+            if perp_at_p.checked_mul(ratio).is_none() {
+                return None;
+            }
+        }
+    }
+
+    Some(BridgeTable {
         p,
         disc,
         suffix,
         perp_at_p,
-    }
+    })
 }
 
 /// El objetivo del plan en el índice `i`, de un solo disparo y **en el tipo del núcleo** — lo que
@@ -534,7 +614,9 @@ pub fn fire_target_at_month_index_with_plan(
 mod tests {
     use super::*;
     use crate::phases::{ExpenseBasis, PartialPhase, PensionSchedule};
-    use crate::projection::{fire_target_at_month_index, inflation_factor_at_month_index, FireNeed};
+    use crate::projection::{
+        fire_target_at_month_index, inflation_factor_at_month_index, FireNeed,
+    };
     use crate::tax::TaxBracket;
 
     fn dec(s: &str) -> Decimal {
@@ -598,7 +680,9 @@ mod tests {
                 pct: Decimal::from(21u32),
             },
         ];
-        target.debt_payments_remaining = (0..40).map(|m| Decimal::from(40_000u32 - m * 1_000)).collect();
+        target.debt_payments_remaining = (0..40)
+            .map(|m| Decimal::from(40_000u32 - m * 1_000))
+            .collect();
 
         let plan = PhasePlan::classic(Decimal::ZERO, Decimal::from(2_000u32));
         for i in 0..60u32 {
@@ -657,7 +741,10 @@ mod tests {
             Some(Decimal::from(12_000u32)),
             "desde P solo queda la deuda"
         );
-        assert!(at(240).is_some(), "nunca None: el cruce es INMEDIATO, no imposible");
+        assert!(
+            at(240).is_some(),
+            "nunca None: el cruce es INMEDIATO, no imposible"
+        );
     }
 
     /// **Puente de 3 meses sin descuento**, predicho a mano.
@@ -738,8 +825,7 @@ mod tests {
             TargetBasis::BridgeToPension,
             Decimal::from(5u32),
         );
-        let perpetuity =
-            plan_with_pension(36, 1_200, true, TargetBasis::Perpetuity, Decimal::ZERO);
+        let perpetuity = plan_with_pension(36, 1_200, true, TargetBasis::Perpetuity, Decimal::ZERO);
         for i in 36..60u32 {
             assert_eq!(
                 fire_target_at_month_index_with_plan(Some(&target), &bridge, i),
@@ -772,13 +858,7 @@ mod tests {
     fn the_precomputed_evaluator_matches_the_one_shot_function() {
         let mut target = ft(expense_need(2_100, 250), dec("3.5"));
         target.annual_inflation_percent = dec("2.2");
-        let plan = plan_with_pension(
-            48,
-            900,
-            true,
-            TargetBasis::BridgeToPension,
-            dec("4.5"),
-        );
+        let plan = plan_with_pension(48, 900, true, TargetBasis::BridgeToPension, dec("4.5"));
         let evaluator = PlanFireTarget::new(Some(&target), &plan);
         for i in 0..72u32 {
             assert_eq!(
@@ -833,7 +913,8 @@ mod tests {
             expense_basis: ExpenseBasis::Retirement,
         });
         assert_eq!(
-            PlanFireTarget::new(Some(&target), &plan).partial_gap_target(&plan, Decimal::from(3_000u32)),
+            PlanFireTarget::new(Some(&target), &plan)
+                .partial_gap_target(&plan, Decimal::from(3_000u32)),
             Some(Decimal::ZERO)
         );
     }

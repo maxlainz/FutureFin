@@ -139,18 +139,9 @@ impl<M: MoneyOps> IncomePauseG<M> {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WithdrawalRuleG<M> {
     FixedReal,
-    PercentOfBalance {
-        pct: M,
-    },
-    Hybrid {
-        start_pct: M,
-        end_pct: M,
-    },
-    Guardrails {
-        pct: M,
-        band_pct: M,
-        adjust_pct: M,
-    },
+    PercentOfBalance { pct: M },
+    Hybrid { start_pct: M, end_pct: M },
+    Guardrails { pct: M, band_pct: M, adjust_pct: M },
 }
 
 /// El plan de fases, en el tipo del núcleo. Gemelo de [`PhasePlan`], campo a campo.
@@ -437,6 +428,7 @@ pub struct SimOutput<M> {
     pub withdrawal: Vec<M>,
     pub withdrawal_shortfall: Vec<M>,
     pub withdrawal_excess: Vec<M>,
+    pub unmet_need: Vec<M>,
     pub pension_start_month_index: Option<u32>,
     pub partial_retirement_month_index: Option<u32>,
     pub warnings: Vec<EngineWarning>,
@@ -621,6 +613,7 @@ impl From<SimOutput<Decimal>> for ProjectionOutput {
             withdrawal: o.withdrawal,
             withdrawal_shortfall: o.withdrawal_shortfall,
             withdrawal_excess: o.withdrawal_excess,
+            unmet_need: o.unmet_need,
             pension_start_month_index: o.pension_start_month_index,
             partial_retirement_month_index: o.partial_retirement_month_index,
             warnings: o.warnings,

@@ -19,8 +19,12 @@
 //! #208 — gross-up mixto con una `g` denormal), WP2 (P14 `P14_techo_numeric`, el desbordamiento
 //! de la base de coste de #209, y P15–P17, las tres reglas de retirada nuevas) y WP3 (P18–P23:
 //! pensión con fecha, objetivo puente, media jornada, cruce como lectura, techo de aportación y
-//! pausa de ingresos). El criterio no cambia: semántica nueva merece oráculo externo, no solo un
-//! hash interno.
+//! pausa de ingresos) y una cuarta en el pase de correcciones de la segunda revisión adversarial
+//! (P24 `P24_undrained_scale` y P25 `P25_debt_service_assoc`, los dos reproductores mínimos de
+//! bit-identidad con 4.15.0 que el fuzz diferencial encontró: la ESCALA del descubierto en la vía
+//! mixta y la AGRUPACIÓN del servicio de deuda con dos pasivos). El criterio no cambia: semántica
+//! nueva —o una regresión que el oráculo externo puede confirmar— merece volcado, no solo un hash
+//! interno.
 
 #[path = "common/cases.rs"]
 mod cases;

@@ -28,10 +28,10 @@
 
 use chrono::NaiveDate;
 use futurefin_engine::{
-    debt_payments_remaining_series, AllocationCap, AllocationKind, AllocationRule, ExpenseBasis,
-    FireNeed, FireTarget, IncomePause, PartialPhase, PensionSchedule, PhasePlan, ProjectionInput,
-    ProjectionLiabilityInput, RepaymentModel, RetirementTrigger, SimAsset, SpendMode, TargetBasis,
-    TaxBracket, WithdrawalRule,
+    debt_payments_remaining_series, AllocationCap, AllocationKind, AllocationRule,
+    EarlyRepaymentEffect, ExpenseBasis, FireNeed, FireTarget, IncomePause, PartialPhase,
+    PensionSchedule, PhasePlan, ProjectionInput, ProjectionLiabilityInput, RepaymentModel,
+    RetirementTrigger, SimAsset, SpendMode, TargetBasis, TaxBracket, WithdrawalRule,
 };
 use rust_decimal::Decimal;
 use uuid::Uuid;
@@ -1276,6 +1276,119 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
     out.push(ProjCase {
         name: "P23_income_pause",
         input: p23,
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // P24: **la ESCALA del descubierto en la vía mixta** — reproductor mínimo del hallazgo F1 de
+    // la revisión adversarial (fuzz diferencial contra 4.15.0, semilla 0x5EED1234ABCD0001 caso
+    // #2, reducido por el shrinker a estas 12 líneas).
+    //
+    // Un solo mes. Dos activos LÍQUIDOS con `g` distinta (el 0 sin base declarada ⇒ `g` = el
+    // escalar = 1; el 1 con base 588.831 sobre un valor de 294.416 ⇒ `b/v > 1` ⇒ `g` = 0), así
+    // que el drenaje va por el PASEO MIXTO. El pasivo mete dos amortizaciones puntuales en el
+    // mes 1 que llevan la necesidad a 28.417,03 € — escala 2 — y la cartera (682.878 €) la cubre
+    // entera, de modo que el paseo publica `net_shortfall_monthly = 0` con **escala 0**.
+    //
+    // 4.15.0 acumulaba ese operando tal cual (`undrained_cumulative += dd.net_shortfall_monthly`)
+    // y publicaba `uncovered_deficit_total` = **`0`**. Re-derivarlo como
+    // `need − (need − shortfall)` da el mismo VALOR con otra escala — **`0.00`** — y eso es un
+    // `Display` distinto, que es exactamente lo que el pin dorado hashea. 438 de 3.000 entradas
+    // del fuzz cayeron por aquí y NINGÚN caso de la batería lo tocaba.
+    // -----------------------------------------------------------------------------------------
+    let mut p24 = base_input(
+        1,
+        Decimal::ZERO,
+        Decimal::from(141),
+        vec![
+            mk_asset(1, Decimal::from(388_462), true, Some(Decimal::ZERO)),
+            mk_asset_with_basis(
+                2,
+                Decimal::from(294_416),
+                true,
+                Some(Decimal::ZERO),
+                Decimal::from(588_831),
+            ),
+        ],
+        vec![],
+    );
+    p24.taxable_gain_ratio = Decimal::ONE;
+    p24.liabilities = vec![ProjectionLiabilityInput {
+        principal: Decimal::from(118_187),
+        monthly_payment: Decimal::from(228),
+        payment_end: None,
+        repayment_model: RepaymentModel::FixedPayments,
+        apr_percent: None,
+        min_payment_pct: None,
+        min_payment_eur: None,
+        extra_principal_monthly: Decimal::ZERO,
+        extra_principal_lump_sums: vec![(1, d(1_490_733, 2)), (1, d(1_059_170, 2))],
+        early_repayment_fee_pct: None,
+        early_repayment_effect: EarlyRepaymentEffect::ReduceTerm,
+    }];
+    p24.phase_plan = PhasePlan::forced_at(1, Decimal::ZERO, Decimal::from(2_690), Decimal::ZERO);
+    out.push(ProjCase {
+        name: "P24_undrained_scale",
+        input: p24,
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // P25: **la ASOCIATIVIDAD del servicio de deuda** — reproductor mínimo del hallazgo F2 de la
+    // revisión (mismo fuzz, caso #1911 reducido).
+    //
+    // DOS pasivos, y ahí está todo: 4.15.0 escribía `debt_service += cash + extra + fee`, o sea
+    // `acc + ((cash + extra) + fee)`. El refactor genérico lo desparejó en `((acc + cash) + extra)
+    // + fee` — la misma álgebra, y NO el mismo número: cada suma de `Decimal` redondea a 28
+    // dígitos. Con un solo pasivo el acumulador vale 0 y las dos formas coinciden; hace falta el
+    // segundo para que `acc` llegue con dígitos propios.
+    //
+    // El pasivo 0 es de cuota fija con amortización extra recurrente y efecto «reducir cuota»
+    // (la cuota se recalcula con una DIVISIÓN, que es la que fabrica la cola de 28 dígitos); el 1
+    // es revolving con mínimo porcentual. La divergencia sale en `per_asset_series[1][13]`:
+    // `…422555` (4.15.0) frente a `…422545`.
+    // -----------------------------------------------------------------------------------------
+    let mut p25 = base_input(
+        18,
+        Decimal::ZERO,
+        Decimal::from(1_204),
+        vec![
+            mk_asset(1, Decimal::from(355_772), true, Some(Decimal::ZERO)),
+            mk_asset(2, Decimal::from(71_315), true, Some(Decimal::from(-40))),
+        ],
+        vec![],
+    );
+    p25.taxable_gain_ratio = Decimal::ZERO;
+    p25.liabilities = vec![
+        ProjectionLiabilityInput {
+            principal: Decimal::from(218_138),
+            monthly_payment: Decimal::from(2_178),
+            payment_end: None,
+            repayment_model: RepaymentModel::FixedPayments,
+            apr_percent: None,
+            min_payment_pct: None,
+            min_payment_eur: None,
+            extra_principal_monthly: d(4_703, 1),
+            extra_principal_lump_sums: vec![],
+            early_repayment_fee_pct: None,
+            early_repayment_effect: EarlyRepaymentEffect::ReducePayment,
+        },
+        ProjectionLiabilityInput {
+            principal: Decimal::from(4_555),
+            monthly_payment: Decimal::from(647),
+            payment_end: None,
+            repayment_model: RepaymentModel::Revolving,
+            apr_percent: None,
+            min_payment_pct: Some(d(2_071, 3)),
+            min_payment_eur: None,
+            extra_principal_monthly: d(3_215_707, 4),
+            extra_principal_lump_sums: vec![],
+            early_repayment_fee_pct: None,
+            early_repayment_effect: EarlyRepaymentEffect::ReduceTerm,
+        },
+    ];
+    p25.phase_plan = PhasePlan::classic(Decimal::ZERO, Decimal::from(148));
+    out.push(ProjCase {
+        name: "P25_debt_service_assoc",
+        input: p25,
     });
 
     out

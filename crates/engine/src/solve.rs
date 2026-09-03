@@ -207,12 +207,32 @@ fn run_stopping_at(input: &ProjectionInput, stop: u32) -> Result<ProjectionOutpu
 /// todos los meses siguientes, porque el crecimiento es multiplicativo y positivo y el drenaje
 /// solo puede ser menor o igual con más saldo.
 ///
-/// **Dos rendijas declaradas**, y por eso la bisección devuelve un extremo VERIFICADO en vez de
-/// fiarse: (1) si la cascada dirige el sobrante a un activo con `is_liquid = false`, aportar más
-/// no sube `líquido` — la función se aplana, no se invierte, y el resultado sigue siendo válido;
-/// (2) sin `crossing_is_reading_only`, aportar más puede ADELANTAR el cruce y con él la caída de
-/// ingresos, lo que hace que la serie líquida deje de ser monótona en `c`. Esta segunda es la
-/// razón por la que el solve pertenece a las estrategias por edad, donde el cruce es lectura.
+/// **El argumento de arriba es sobre VALORES, y el criterio es líquido POST-IMPUESTOS.** Ahí se
+/// rompe. Tres rendijas declaradas, y por eso la bisección devuelve un extremo VERIFICADO en vez
+/// de fiarse del teorema:
+///
+/// 1. Si la cascada dirige el sobrante a un activo con `is_liquid = false`, aportar más no sube
+///    `líquido`: la función se aplana.
+/// 2. Sin `crossing_is_reading_only`, aportar más puede ADELANTAR el cruce y con él la caída de
+///    ingresos. Esta es la razón por la que el solve pertenece a las estrategias por edad, donde
+///    el cruce es lectura.
+/// 3. **Se INVIERTE**, y esto lo midió la revisión adversarial contra la afirmación anterior («se
+///    aplana, no se invierte»). Subir el techo cambia el MES en que cada tope por activo
+///    (`IncomeMultiple`, `MonthsExpense`, `Amount`) se llena, y con él la trayectoria de la BASE
+///    DE COSTE. El drenaje tributa a `g_i = clamp(1 − b_i/v_i, 0, 1)`: dos ejecuciones con el
+///    mismo valor por activo y distinta base pagan distinto impuesto por el mismo neto, así que
+///    aportar MÁS puede dejar el líquido post-impuestos por DEBAJO. Medido en un barrido de 320
+///    hogares aleatorios: **35 violaciones de 270 barridos del techo, la peor de 3,4416 €** —
+///    unas 5.700 veces la resolución de la bisección (~0,0006 € sobre un techo de 10.000 €/mes).
+///    Hacen falta impuestos activados **y** al menos un activo ilíquido: apagar cualquiera de las
+///    dos cosas hace desaparecer la inversión en los tres casos peores.
+///
+/// **El invariante que de verdad se garantiza no es la monotonía: es el extremo verificado.** La
+/// bisección devuelve `hi` solo después de comprobar que `hi` CUMPLE, así que el resultado nunca
+/// es un falso positivo. Lo que la inversión pone en duda es la MINIMALIDAD, y eso es lo que hay
+/// que leer aquí: `c` es la mínima observada por la bisección, no la mínima demostrable. En el
+/// eje de `contributions_stop_month` la monotonía sí aguanta: las 41 violaciones medidas son
+/// ≤ 3,3e-24, cola de redondeo.
 pub fn required_contribution_monthly(
     input: &ProjectionInput,
     target_month: u32,

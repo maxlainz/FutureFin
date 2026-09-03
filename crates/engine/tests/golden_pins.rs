@@ -583,6 +583,11 @@ fn the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery() {
             "P21_retire_at_age_reading_only",
             "P22_solve_required_contribution",
             "P23_income_pause",
+            // Pase de correcciones tras la segunda revisión adversarial (D20): los dos
+            // reproductores mínimos de bit-identidad con 4.15.0 que el fuzz diferencial
+            // encontró y que NINGÚN caso de la batería tocaba.
+            "P24_undrained_scale",
+            "P25_debt_service_assoc",
         ],
         "los casos de 5.0.0 y su orden también son contrato del CSV"
     );
@@ -1096,7 +1101,9 @@ futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG \
 (futurefin-change-control). Cubre projection_cases_all() (los casos de 4.15.0) MAS \
 projection_cases_5_0() (P14-P17: el techo numerico de la issue #209 y las tres reglas de retirada \
 nuevas; P18-P23: pension con fecha, objetivo puente, media jornada, cruce como lectura, techo de \
-aportacion y pausa de ingresos). En los casos con fixed_real withdrawal_shortfall y \
+aportacion y pausa de ingresos; P24-P25: los dos reproductores minimos de bit-identidad con \
+4.15.0 del pase de correcciones — la ESCALA del descubierto en la via mixta y la AGRUPACION del \
+servicio de deuda). En los casos con fixed_real withdrawal_shortfall y \
 withdrawal_excess son cero por construccion — el permitido ES la necesidad — y ahi es donde este \
 pin demuestra que WP2 no movio la semantica de 4.15.0. WP3 AMPLIO la canonicalizacion con \
 bridge_effective_withdrawal_pct, pension_coverage_ratio, partial_gap_target, \
@@ -1269,23 +1276,84 @@ fn golden_pins_5_0_outputs_match() {
 fn the_5_0_canonicalization_grew_without_moving_the_old_fields() {
     // Copiado de `pins-5.0-outputs.json` en el commit anterior a WP3.
     const BEFORE_WP3: &[(&str, &str)] = &[
-        ("P1_deficit_cronico", "cd6cf9782c9c3acd96ad570bb083329cac0b31423ca307766d78c4f8234de6ed"),
-        ("P2_fire_mes0", "d605c5913cbfae026ada0b8f2a091ecd1b872e034d430616cbc94baf75bafbdd"),
-        ("P3_superavit_jubilacion", "d503198bec6b501f9d51190088829998a181734865ed58cdd2d930b53999a3af"),
-        ("P4_ret_menos100", "00c7d139b6ebe6028e536877cff5eccdb043fd80070693243209b6ddcf43422d"),
-        ("P5_flat_nominal_30y", "9d7f4c00daa1631505ff9bb3ac17744e641fc1bf7d177a9482346a17a35a667f"),
-        ("P6_venc_saldo_vivo_proj", "20ca98734ba7e5046ebe66c27977b79a8e747ad929f3481f4b5c208502d54c9f"),
-        ("P13_cash8k_denormal_g", "8a0506535261b28d1def11871bf651ea7cbc4041ebd46949d85329f294939fad"),
-        ("P7_jubilado_pension_impuestos", "5976365c10d39b9c97d170c11282395f15132089b0928b9f8e49cdf744ed4a13"),
-        ("P8_drenaje_g_mixta", "aa13136c4690ae18f0db0f4141226ec71b82d5c63f82190f72533d1c6944c19a"),
-        ("P9_hogar_realista", "ece489a9a4d555464c2530c75df39768dc0b5bafdcceac2023634a2e87d7ceba"),
-        ("P10_jubilacion_forzada", "44ec6ec48a0e1911e3b264f103be52913f7c4ee2bc8ce923f8a83953d83974c8"),
-        ("P11_deflacion_negativa", "e279575d83d2a3265cf199fe5ac1acf279736d27a050fe54a73ad523f8a2a5ba"),
-        ("P12_topes_de_cascada", "876813e073579eb47b4cfa3f5592be2c0c2bf7d897ae3adfaac39b5d351a37d4"),
-        ("P14_techo_numeric", "0a8803038f38fc4ee531ad5c6845d8b19c642a1311e78b993ffa09bf10b6fa87"),
-        ("P15_percent_of_balance_ceiling", "9fe43f5bc701e3077961cd405de4b0deeefcc4886ace32df95f269b098113e74"),
-        ("P16_hybrid_rule_is_spend", "16e21d418e47d904ea6e5d20b50bbdf862697706d1ae431f1f4afee377a90c38"),
-        ("P17_guardrails_taxes_es", "12af97cd287d66ef58d3ea050f2ceca0667c3fcbf1caa481f37a22f545407b05"),
+        (
+            "P1_deficit_cronico",
+            "cd6cf9782c9c3acd96ad570bb083329cac0b31423ca307766d78c4f8234de6ed",
+        ),
+        (
+            "P2_fire_mes0",
+            "d605c5913cbfae026ada0b8f2a091ecd1b872e034d430616cbc94baf75bafbdd",
+        ),
+        (
+            "P3_superavit_jubilacion",
+            "d503198bec6b501f9d51190088829998a181734865ed58cdd2d930b53999a3af",
+        ),
+        (
+            "P4_ret_menos100",
+            "00c7d139b6ebe6028e536877cff5eccdb043fd80070693243209b6ddcf43422d",
+        ),
+        (
+            "P5_flat_nominal_30y",
+            "9d7f4c00daa1631505ff9bb3ac17744e641fc1bf7d177a9482346a17a35a667f",
+        ),
+        (
+            "P6_venc_saldo_vivo_proj",
+            "20ca98734ba7e5046ebe66c27977b79a8e747ad929f3481f4b5c208502d54c9f",
+        ),
+        (
+            "P13_cash8k_denormal_g",
+            "8a0506535261b28d1def11871bf651ea7cbc4041ebd46949d85329f294939fad",
+        ),
+        (
+            "P7_jubilado_pension_impuestos",
+            "5976365c10d39b9c97d170c11282395f15132089b0928b9f8e49cdf744ed4a13",
+        ),
+        (
+            "P8_drenaje_g_mixta",
+            "aa13136c4690ae18f0db0f4141226ec71b82d5c63f82190f72533d1c6944c19a",
+        ),
+        (
+            "P9_hogar_realista",
+            "ece489a9a4d555464c2530c75df39768dc0b5bafdcceac2023634a2e87d7ceba",
+        ),
+        (
+            "P10_jubilacion_forzada",
+            "44ec6ec48a0e1911e3b264f103be52913f7c4ee2bc8ce923f8a83953d83974c8",
+        ),
+        (
+            "P11_deflacion_negativa",
+            "e279575d83d2a3265cf199fe5ac1acf279736d27a050fe54a73ad523f8a2a5ba",
+        ),
+        (
+            "P12_topes_de_cascada",
+            "876813e073579eb47b4cfa3f5592be2c0c2bf7d897ae3adfaac39b5d351a37d4",
+        ),
+        (
+            "P14_techo_numeric",
+            "0a8803038f38fc4ee531ad5c6845d8b19c642a1311e78b993ffa09bf10b6fa87",
+        ),
+        (
+            "P15_percent_of_balance_ceiling",
+            "9fe43f5bc701e3077961cd405de4b0deeefcc4886ace32df95f269b098113e74",
+        ),
+        // **Movido A PROPÓSITO** en el pase de correcciones de la segunda revisión adversarial
+        // (fix D): con `rule_is_spend`, el gasto de la regla se financia primero con la caja del
+        // mes y solo el resto se vende. P16 tiene superávit jubilado (1.800 de ingreso contra
+        // 1.500 de gasto) y es el único caso de la batería que ejercita esa rama. Con los
+        // impuestos APAGADOS de P16 el patrimonio apenas se mueve (+2e-25 en el último mes), pero
+        // el hogar deja de comprar y vender el mismo fondo cada mes: `contributed_capital` final
+        // pasa de 8.263,80 € a **0** — nunca hubo compra. El delta ECONÓMICO de la corrección se
+        // mide con impuestos: en el hogar de `b4` de la revisión (1 M€, base 500 k, ES) el
+        // impuesto anual pasa de 3.991,72 € a **0** y el patrimonio a 12 meses sube 4.006 €.
+        // Valor anterior: 16e21d418e47d904ea6e5d20b50bbdf862697706d1ae431f1f4afee377a90c38.
+        (
+            "P16_hybrid_rule_is_spend",
+            "41eff3912b94cc42af48d852da2307c8ac1cad1e990bdbe5f9cd439adc5ce3b1",
+        ),
+        (
+            "P17_guardrails_taxes_es",
+            "12af97cd287d66ef58d3ea050f2ceca0667c3fcbf1caa481f37a22f545407b05",
+        ),
     ];
 
     let live = live_pins_5_0();
@@ -1484,9 +1552,12 @@ fn the_phase_readings_agree_with_the_series_they_describe() {
             out.partial_retirement_month_index,
             "{name}: la media jornada solo se publica si se pisó de verdad"
         );
-        for k in [out.retirement_month_index, out.partial_retirement_month_index]
-            .into_iter()
-            .flatten()
+        for k in [
+            out.retirement_month_index,
+            out.partial_retirement_month_index,
+        ]
+        .into_iter()
+        .flatten()
         {
             assert!(
                 k >= 1 && k <= c.input.horizon_months,
@@ -1575,4 +1646,58 @@ fn the_phase_readings_agree_with_the_series_they_describe() {
             );
         }
     }
+}
+
+// =============================================================================================
+// Los dos reproductores mínimos de la revisión adversarial (F1 y F2)
+// =============================================================================================
+
+/// Busca un caso de la batería de 5.0.0 por nombre.
+fn case_5_0(name: &str) -> ProjectionInput {
+    projection_cases_5_0()
+        .into_iter()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("el caso {name} tiene que existir en projection_cases_5_0()"))
+        .input
+}
+
+/// **P24 — la ESCALA del descubierto, no solo su valor** (hallazgo F1 de la revisión).
+///
+/// El acumulador `undrained_cumulative` de 4.15.0 sumaba el OPERANDO que el paseo mixto publica
+/// (`dd.net_shortfall_monthly`). Re-derivarlo como `need − (need − shortfall)` da el mismo valor
+/// con la escala de `need`: aquí, `0.00` en vez de `0`.
+///
+/// El `Display` es lo que el pin dorado hashea, así que la regresión NO es cosmética: mueve el
+/// hash de 438 de cada 3.000 entradas del fuzz diferencial contra 4.15.0. El `assert` va sobre el
+/// texto a propósito — `assert_eq!(x, Decimal::ZERO)` pasaría con el bug puesto.
+#[test]
+fn p24_publishes_the_undrained_operand_with_the_scale_of_4_15_0() {
+    let out = project_net_worth_series(&case_5_0("P24_undrained_scale")).unwrap();
+    assert_eq!(
+        out.uncovered_deficit_total.to_string(),
+        "0",
+        "el descubierto tiene que salir con la ESCALA del operando del paseo (0), no con la de \
+         la necesidad (0.00): re-derivar `need − (need − s)` rompe la bit-identidad con 4.15.0"
+    );
+    // Y la venta ocurrió de verdad: sin déficit el caso no probaría nada.
+    assert!(
+        out.withdrawal[1] > Decimal::ZERO,
+        "el mes 1 tiene que vender: si no, el acumulador ni se toca"
+    );
+}
+
+/// **P25 — la asociatividad del servicio de deuda** (hallazgo F2 de la revisión).
+///
+/// 4.15.0 escribía `debt_service += cash + extra + fee` = `acc + ((cash + extra) + fee)`. Con dos
+/// pasivos, `((acc + cash) + extra) + fee` redondea distinto en el dígito 28 y la diferencia se
+/// propaga al drenaje mes a mes. Con el desparejado puesto, el valor de abajo termina en `…494`.
+#[test]
+fn p25_keeps_the_debt_service_grouping_of_4_15_0() {
+    let out = project_net_worth_series(&case_5_0("P25_debt_service_assoc")).unwrap();
+    assert_eq!(
+        out.per_asset_series[1][13].to_string(),
+        "342.92580242825260678640281503",
+        "el servicio de deuda tiene que agruparse como el `+=` de 4.15.0 \
+         (`acc + (cash + extra + fee)`); desparejarlo devuelve …281494"
+    );
 }

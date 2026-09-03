@@ -141,9 +141,29 @@ pub trait MoneyOps:
     /// lo que 4.15.0 hacía: cualquier otra ruta (producto acumulado, `exp`/`ln`) cambia dígitos.
     fn powd_fraction(self, num: u32, den: u32) -> Self;
 
+    /// La misma potencia, **sin panicar cuando el resultado no cabe**. `None` = desbordó.
+    ///
+    /// Existe porque un descuento de puente muy negativo (`d = −50 %` con la pensión a 70 años,
+    /// que la API de hoy deja pasar) lleva `(1+d/100)^{j/12}` fuera del rango de `Decimal` y
+    /// `powd` **panica**: un 500 opaco en `/v1/projection/series`. La casa ya usa `checked_powd`
+    /// en `history.rs` y en `projection.rs`; esta era la única potencia sin red.
+    fn checked_powd_fraction(self, num: u32, den: u32) -> Option<Self>;
+
     /// ¿Son «la misma» fracción de plusvalía gravable? Decide el cortocircuito uniforme/mixto de
     /// la venta mensual. Política del tipo, no del núcleo.
     fn gains_equal(a: Self, b: Self) -> bool;
+
+    /// **¿`a` está de verdad por debajo de `b`?** Política del tipo para los `<` cuyo resultado
+    /// es un BOOLEANO PUBLICADO, no una cantidad: en `Decimal` es el `<` exacto; en aritmética
+    /// aproximada, `a < b − ε·max(|b|, 1)` con la tolerancia que el tipo declare.
+    ///
+    /// Existe por medición: `partial_phase_capital_growing` compara el líquido de cierre de dos
+    /// meses consecutivos, y en una serie PLANA (el hogar que ni gana ni pierde durante la media
+    /// jornada) los dos valores son iguales en `Decimal` y difieren en un ulp en `f64`. El mismo
+    /// hogar publicaba «capital creciente» por un camino y «capital menguante» —con su aviso— por
+    /// el otro: 5 de 2.901 entradas del corpus diferencial, y el único desacuerdo de rama que
+    /// quedaba entre los dos tipos junto al cruce.
+    fn strictly_below(a: Self, b: Self) -> bool;
 
     /// Suma de un iterador, con el MISMO plegado que `Iterator::sum` para `Decimal`
     /// (`fold(zero, +)`). Escrita aquí para no depender de una impl de `Sum` que el tipo puede no
@@ -236,8 +256,17 @@ impl MoneyOps for Decimal {
         self.powd(Decimal::from(num) / Decimal::from(den))
     }
     #[inline]
+    fn checked_powd_fraction(self, num: u32, den: u32) -> Option<Self> {
+        self.checked_powd(Decimal::from(num) / Decimal::from(den))
+    }
+    #[inline]
     fn gains_equal(a: Self, b: Self) -> bool {
         a == b
+    }
+    #[inline]
+    fn strictly_below(a: Self, b: Self) -> bool {
+        // Exacto: en el dominio, `a < b` ES la pregunta.
+        a < b
     }
 }
 

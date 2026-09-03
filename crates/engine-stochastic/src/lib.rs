@@ -45,8 +45,8 @@
 mod mc;
 
 pub use mc::{
-    project_percentile_bands, run_path, seed_for, McConfig, McError, McOutcome,
-    DEFAULT_PATHS, DEFAULT_PERCENTILES, DEPLETION_STEP_MONTHS, MAX_PATHS,
+    project_percentile_bands, run_path, seed_for, BufferInactiveReason, McConfig, McError,
+    McOutcome, DEFAULT_PATHS, DEFAULT_PERCENTILES, DEPLETION_STEP_MONTHS, MAX_PATHS,
 };
 
 use rust_decimal::prelude::ToPrimitive;
@@ -73,6 +73,21 @@ use futurefin_engine::{
 /// no una tolerancia escondida en un `PartialEq`**: `PartialEq` para [`F64Money`] sigue siendo la
 /// igualdad exacta de `f64`, y quien decide el cortocircuito es [`MoneyOps::gains_equal`].
 pub const GAIN_RATIO_EQ_TOLERANCE: f64 = 1e-12;
+
+/// **Tolerancia RELATIVA del `<` publicado** ([`MoneyOps::strictly_below`]).
+///
+/// El motor publica un booleano —`partial_phase_capital_growing`, con su aviso— a partir de
+/// comparar el líquido de cierre de dos meses consecutivos. En una serie PLANA (media jornada que
+/// ni gana ni pierde) esos dos cierres son iguales en `Decimal` y difieren en un ulp aquí, y el
+/// mismo hogar salía «capital creciente» por un camino y «capital menguante» por el otro: 5 de
+/// 2.901 entradas del corpus diferencial, medidas.
+///
+/// `a < b − 1e-9·max(|b|, 1)` — es decir, un nanoeuro en cifras pequeñas y una milmillonésima
+/// parte en las grandes. Holgado frente al ruido de 840 meses de aritmética; estrecho frente a
+/// cualquier mengua que a un hogar le importe (un céntimo es 1e7 veces mayor sobre 1.000 €).
+/// **Política declarada, no una tolerancia escondida**: `PartialOrd` para [`F64Money`] sigue
+/// siendo el `<` exacto de `f64`.
+pub const STRICTLY_BELOW_REL_TOLERANCE: f64 = 1e-9;
 
 /// El dinero del camino estocástico: un `f64` con nombre.
 ///
@@ -238,10 +253,20 @@ impl MoneyOps for F64Money {
     fn powd_fraction(self, num: u32, den: u32) -> Self {
         F64Money(self.0.powf(f64::from(num) / f64::from(den)))
     }
+    #[inline]
+    fn checked_powd_fraction(self, num: u32, den: u32) -> Option<Self> {
+        // Misma política que el resto de la familia `checked_*` de este tipo: `Some` solo si el
+        // resultado es FINITO. Un `inf` de `powf` es el gemelo del «Pow overflowed» de `Decimal`.
+        finite(self.0.powf(f64::from(num) / f64::from(den)))
+    }
 
     #[inline]
     fn gains_equal(a: Self, b: Self) -> bool {
         (a.0 - b.0).abs() <= GAIN_RATIO_EQ_TOLERANCE
+    }
+    #[inline]
+    fn strictly_below(a: Self, b: Self) -> bool {
+        a.0 < b.0 - STRICTLY_BELOW_REL_TOLERANCE * b.0.abs().max(1.0)
     }
 }
 
@@ -326,7 +351,10 @@ mod tests {
         let a = F64Money(0.25);
         let b = F64Money(0.25 + 1e-15);
         assert!(a != b, "PartialEq sigue siendo exacto");
-        assert!(MoneyOps::gains_equal(a, b), "gains_equal tolera el último bit");
+        assert!(
+            MoneyOps::gains_equal(a, b),
+            "gains_equal tolera el último bit"
+        );
         let far = F64Money(0.25 + 1e-9);
         assert!(
             !MoneyOps::gains_equal(a, far),
