@@ -133,6 +133,11 @@ jobs:
         run: cargo build -p futurefin-api --locked
       - name: cargo test (engine — no DB required)
         run: cargo test -p futurefin-engine --locked
+      # La puerta de degeneración: el camino de coma flotante (Monte Carlo) contra el exacto, mes a
+      # mes. Tampoco necesita base de datos, así que corre en el job rápido y no solo dentro del
+      # `cargo test --workspace` del job de integración.
+      - name: cargo test (engine-stochastic — no DB required)
+        run: cargo test -p futurefin-engine-stochastic --locked
 
       # ── Gates preparados pero DESACTIVADOS a propósito (2026-08-22) ──────────
       # El repo nunca ha pasado por clippy ni por rustfmt, así que activarlos hoy

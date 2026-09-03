@@ -7,13 +7,15 @@
 //! ([`AllocationRule`]) ejecutadas en orden ascendente. Cada regla consume parte del sobrante
 //! para un activo destino hasta su tope opcional; lo que queda pasa a la siguiente regla.
 
-use crate::phases::{EngineWarning, Phase, PhasePlan, SpendMode};
-use crate::target::PlanFireTarget;
+use crate::phases::{EngineWarning, Phase, PhasePlan};
+use crate::sim::{SimInput, SimLiability};
+use crate::sim_core::{
+    self, liability_extra_principal_g, liability_month_g, plan_alive_g,
+};
 use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -190,37 +192,19 @@ pub enum EarlyRepaymentEffect {
     ReducePayment,
 }
 
-/// ¿Tiene el pasivo un plan de pago vivo en el mes que empieza en `m_start`?
-///
-/// Predicado ÚNICO: `monthly_payment > 0` **y** (`payment_end` ausente o `>= m_start`). Estaba
-/// triplicado (cobro de la cuota, amortización del principal y `first_month_allocation`), tres
-/// copias que había que mantener sincronizadas a mano. Sin plan activo el pasivo no cobra caja,
-/// no amortiza y —desde 4.2.0— **tampoco devenga intereses**: es una resta constante al
-/// patrimonio, que es justo el contrato que explotan los modos B/C del handler (pasan
-/// `monthly_payment = 0` para congelar el principal).
-fn liability_active(liab: &ProjectionLiabilityInput, m_start: NaiveDate) -> bool {
-    plan_alive(liab.monthly_payment, liab.payment_end, m_start)
-}
-
-/// ¿Plan de pago vivo? — la mitad reutilizable de [`liability_active`].
-fn plan_alive(monthly_payment: Decimal, payment_end: Option<NaiveDate>, m_start: NaiveDate) -> bool {
-    monthly_payment > Decimal::ZERO
-        && match payment_end {
-            None => true,
-            Some(end) => end >= m_start,
-        }
-}
-
 /// ¿Devenga interés este pasivo en el mes que empieza en `m_start`?
 ///
 /// ÚNICA definición del predicado (Ola 3, #121): la cumplen por construcción los brazos de
-/// [`liability_month`], y la consumen el KPI `net_return` de `/v1/summary` y su espejo TS
+/// `liability_month_g`, y la consumen el KPI `net_return` de `/v1/summary` y su espejo TS
 /// `liabilityAccruesInterest` (`apps/web/src/lib/ledger.ts`). Antes eran tres copias y las tres
 /// decían cosas distintas: el KPI restaba el TIN de pasivos que la simulación cobraba a 0 €.
 ///
 /// Los modelos que devengan son todos menos `FixedPayments` (post-#144 `interest_only` cobra
 /// `P·i` de verdad), siempre que haya TIN > 0 y plan de pago vivo — sin plan, el pasivo es una
 /// resta constante al patrimonio: ni caja, ni amortización, ni devengo.
+///
+/// **5.0.0 WP5.5**: la mitad «¿plan vivo?» del predicado vive en el núcleo genérico
+/// (`sim_core::plan_alive_g`), que es donde la ejecuta el bucle. Aquí solo se instancia.
 pub fn liability_interest_accrues(
     model: RepaymentModel,
     apr_percent: Option<Decimal>,
@@ -230,134 +214,7 @@ pub fn liability_interest_accrues(
 ) -> bool {
     model != RepaymentModel::FixedPayments
         && matches!(apr_percent, Some(a) if a > Decimal::ZERO)
-        && plan_alive(monthly_payment, payment_end, m_start)
-}
-
-/// Un mes de vida de un pasivo: devuelve `(caja que sale, principal de cierre)`.
-///
-/// Única implementación de la recurrencia — la consumen el bucle de simulación (para el
-/// `debt_service` y para el principal del mes siguiente) y `first_month_allocation`. Dos
-/// implementaciones divergirían en silencio y el chart contaría una historia distinta que la
-/// KPI de aportación.
-///
-/// Convención común a todos los modelos que devengan: **interés sobre el saldo de apertura y
-/// cuota a fin de mes**, `P' = P·(1 + i) − M` — la misma recurrencia que `theo(y)` en
-/// `history.rs`, para que la interpolación del pasado y la proyección del futuro sean la misma
-/// curva.
-///
-/// - inactivo → `(0, P)`: ni caja, ni amortización, ni devengo.
-/// - `FixedPayments` → `cash = min(M, P)`, `P' = P − cash`. **Bit-idéntico** al modelo pre-4.2.0.
-///   Sin TIN por contrato desde la Ola 3 (la validación lo rechaza): es el préstamo al 0 %.
-/// - `French` → `payoff = P·(1 + i)`, `cash = min(M, payoff)`, `P' = payoff − cash`. El tope de
-///   la cuota es el **payoff**, no el principal: cancelar el préstamo cuesta el saldo *con* el
-///   interés del mes.
-/// - `InterestOnly` (Ola 3, #144) → `cash = min(M, P·i)`, `P' = P + P·i − cash`. La cuota del
-///   mes ES el interés del período; la declarada solo topa por arriba, y por debajo el déficit
-///   capitaliza (carencia real). Nunca amortiza: eso es `extra_principal_monthly`.
-/// - `Revolving` (Ola 3, #144) → misma recurrencia francesa pero la cuota NO es la declarada:
-///   `m = max(min_payment_pct·P/100, min_payment_eur)`, `cash = min(m, payoff)`. Con pct 0 y
-///   suelo = cuota declarada degenera bit-idéntico en la francesa (forma del backfill).
-///
-/// **Saturación, nunca pánico**: si el `checked_mul`/`checked_add` del payoff desborda (TIN
-/// absurdo × horizonte largo), se devuelve el principal sin devengar más. La salida sigue siendo
-/// finita y la simulación termina.
-fn liability_month(
-    liab: &ProjectionLiabilityInput,
-    principal: Decimal,
-    monthly_payment: Decimal,
-    active: bool,
-) -> (Decimal, Decimal) {
-    if !active {
-        return (Decimal::ZERO, principal);
-    }
-    let i = match liab.apr_percent {
-        Some(apr) if apr > Decimal::ZERO => apr / Decimal::from(1200),
-        _ => Decimal::ZERO,
-    };
-    match liab.repayment_model {
-        RepaymentModel::FixedPayments => {
-            let cash = monthly_payment.min(principal).max(Decimal::ZERO);
-            (cash, principal - cash)
-        }
-        RepaymentModel::InterestOnly => {
-            // Carencia REAL (Ola 3/#144; contrato en .claude/financial-contracts.md §2.1): la cuota ES el interés del período
-            // (saldo × TIN/1200), no un pago libre. La cuota declarada es un TOPE por arriba:
-            //   M ≥ interés ⇒ cash = interés, principal plano;
-            //   M < interés ⇒ cash = M y el déficit CAPITALIZA (la deuda crece) — como un
-            //   producto español de verdad. Nunca amortiza: adelantar capital en carencia es
-            //   `extra_principal`, no la cuota. Hasta 4.6.0 aquí se aceptaba una cuota
-            //   arbitraria como «interés» (300 €/mes sobre una deuda de 300 €: 252.000 € de
-            //   interés fantasma en 70 años).
-            let interest = principal.checked_mul(i).unwrap_or(Decimal::ZERO);
-            let cash = monthly_payment.min(interest).max(Decimal::ZERO);
-            (cash, principal + interest - cash)
-        }
-        RepaymentModel::Revolving => {
-            // Revolving REAL (Ola 3/#144): cuota mínima = max(pct × saldo de APERTURA, suelo €).
-            // La cuota declarada (`monthly_payment`) NO entra en la caja: alimenta el
-            // presupuesto, y esa divergencia está declarada (SCHEDULE_MODEL_NOTE, helpTexts).
-            // Con pct = 0 y suelo = cuota declarada la recurrencia degenera EXACTAMENTE en la
-            // francesa (el backfill de la migración garantiza bit-identidad para lo existente).
-            let payoff = Decimal::ONE
-                .checked_add(i)
-                .and_then(|factor| principal.checked_mul(factor))
-                .unwrap_or(principal);
-            let pct_cuota = liab
-                .min_payment_pct
-                .unwrap_or(Decimal::ZERO)
-                .max(Decimal::ZERO)
-                / Decimal::from(100)
-                * principal;
-            let m = pct_cuota.max(liab.min_payment_eur.unwrap_or(Decimal::ZERO));
-            let cash = m.min(payoff).max(Decimal::ZERO);
-            (cash, payoff - cash)
-        }
-        RepaymentModel::French => {
-            let payoff = Decimal::ONE
-                .checked_add(i)
-                .and_then(|factor| principal.checked_mul(factor))
-                .unwrap_or(principal);
-            let cash = monthly_payment.min(payoff).max(Decimal::ZERO);
-            (cash, payoff - cash)
-        }
-    }
-}
-
-/// Amortización extra del mes `month` (1-based), ya topada al saldo que quedaría tras la cuota.
-///
-/// Única implementación, como [`liability_month`]: la consumen el bucle de simulación, el
-/// calendario de amortización y `first_month_allocation`. Devuelve siempre un importe en
-/// `0 ..= closing_after_payment`, así que sumarla al servicio de deuda y restarla del principal
-/// no puede producir ni caja fantasma ni principal negativo.
-///
-/// Sin plan de pago activo devuelve `(0, 0)`: amortizar «extra» un pasivo que no cobra cuota no
-/// adelanta nada (no hay devengo que evitar ni cuota que liberar) y además rompería el contrato
-/// de los modos B/C del handler, donde el principal es una resta CONSTANTE al patrimonio.
-///
-/// Devuelve `(extra, fee)` (#151): `fee = extra × early_repayment_fee_pct / 100` es la
-/// compensación por reembolso anticipado — sale de la caja del mes como coste puro y NO baja el
-/// principal. Sin la comisión, el what-if de amortizar era gratis por construcción.
-fn liability_extra_principal(
-    liab: &ProjectionLiabilityInput,
-    month: u32,
-    closing_after_payment: Decimal,
-    active: bool,
-) -> (Decimal, Decimal) {
-    if !active {
-        return (Decimal::ZERO, Decimal::ZERO);
-    }
-    let mut wanted = liab.extra_principal_monthly.max(Decimal::ZERO);
-    for (m, amount) in &liab.extra_principal_lump_sums {
-        if *m == month {
-            wanted += (*amount).max(Decimal::ZERO);
-        }
-    }
-    let extra = wanted
-        .min(closing_after_payment.max(Decimal::ZERO))
-        .max(Decimal::ZERO);
-    let fee = extra * liab.early_repayment_fee_pct.unwrap_or(Decimal::ZERO).max(Decimal::ZERO)
-        / Decimal::from(100);
-    (extra, fee)
+        && plan_alive_g(monthly_payment, payment_end, m_start)
 }
 
 /// Valor actual de una renta de `months` cuotas mensuales de `monthly_payment`, descontada al
@@ -571,6 +428,10 @@ pub fn liability_amortization_schedule(
     horizon_months: u32,
 ) -> LiabilitySchedule {
     let horizon = horizon_months.clamp(1, MAX_LIABILITY_SCHEDULE_MONTHS);
+    // 5.0.0 WP5.5: la recurrencia del pasivo vive en el núcleo genérico, así que el calendario
+    // convierte el pasivo UNA vez (una copia campo a campo) y ejecuta EXACTAMENTE los mismos
+    // helpers que el bucle de simulación. Cero matemática nueva, igual que antes.
+    let liab: &SimLiability<Decimal> = &SimLiability::from(liab);
     let opening_principal = liab.principal.max(Decimal::ZERO);
     let start_month_first = month_first_calendar(ref_date);
 
@@ -591,15 +452,15 @@ pub fn liability_amortization_schedule(
         for k in 1..=horizon {
             let month_first = add_months(start_month_first, k - 1);
             let (m_start, _m_end) = month_window(month_first);
-            let active = liability_active(liab, m_start);
+            let active = sim_core::liability_active_g(liab, m_start);
             if !active {
                 plan_ended = true;
                 break;
             }
 
             let (payment, closing_after_payment) =
-                liability_month(liab, principal, effective_payment, true);
-            let (extra, fee) = liability_extra_principal(liab, k, closing_after_payment, true);
+                liability_month_g(liab, principal, effective_payment, true);
+            let (extra, fee) = liability_extra_principal_g(liab, k, closing_after_payment, true);
             let closing = closing_after_payment - extra;
 
             // Derivación en este orden a propósito: los saldos mandan, el interés es el residuo.
@@ -709,21 +570,9 @@ pub enum FireNeed {
     },
 }
 
-impl FireNeed {
-    /// Necesidad neta ANUAL con el factor de inflación `f` ya evaluado.
-    ///
-    /// `pub(crate)` desde WP3: [`crate::target`] la consume para no reescribir la necesidad con
-    /// otros paréntesis — la fórmula duplicada es la trampa que #170 ya pagó una vez.
-    pub(crate) fn annual_net_at(&self, f: Decimal) -> Decimal {
-        match self {
-            FireNeed::Indexed { annual_net_today } => *annual_net_today * f,
-            FireNeed::ExpenseMinusPension { expense_monthly, pension_monthly } => {
-                (*expense_monthly * f - *pension_monthly).max(Decimal::ZERO)
-                    * Decimal::from(12u32)
-            }
-        }
-    }
-}
+/// **5.0.0 WP5.5**: `annual_net_at` —la expresión de la necesidad— vive en el gemelo genérico
+/// ([`crate::sim::FireNeedG`]), que es el que ejecuta el núcleo. Una sola definición: la fórmula
+/// duplicada es la trampa que #170 ya pagó una vez.
 
 #[derive(Debug, Clone)]
 pub struct ProjectionInput {
@@ -904,556 +753,105 @@ pub(crate) fn month_first_calendar(d: NaiveDate) -> NaiveDate {
     NaiveDate::from_ymd_opt(d.year(), d.month(), 1).unwrap_or(d)
 }
 
-fn add_months(d: NaiveDate, n: u32) -> NaiveDate {
+pub(crate) fn add_months(d: NaiveDate, n: u32) -> NaiveDate {
     d.checked_add_months(Months::new(n))
         .unwrap_or(d)
 }
 
-fn month_window(month_first: NaiveDate) -> (NaiveDate, NaiveDate) {
+pub(crate) fn month_window(month_first: NaiveDate) -> (NaiveDate, NaiveDate) {
     let start = month_first;
     let next_first = add_months(month_first, 1);
     let end = next_first.pred_opt().unwrap_or(start);
     (start, end)
 }
 
-/// Factor de crecimiento **mensual** equivalente a una tasa anual nominal (raíz 12ª del factor
-/// anual). Tasas ausentes o exactamente 0 se tratan como crecimiento 0 (factor 1). Las tasas
-/// **negativas componen de verdad** (−50 % anual ⇒ factor mensual ≈ 0,9439, ×0,5 a los 12 meses);
-/// una tasa ≤ −100 % se clampa a factor 0 (pérdida total: el factor anual 1 + p/100 sería ≤ 0 y
-/// no tiene raíz 12ª real). La capa API rechaza inputs ≤ −100 con error tipado; el clamp protege
-/// frente a valores absurdos ya persistidos.
+/// Factor de crecimiento **mensual** equivalente a una tasa anual nominal — envoltorio `Decimal`
+/// de [`crate::sim_core::monthly_multiplier_g`], que es donde vive la semántica (tasas negativas
+/// que componen, clamp a 0 por debajo de −100 %).
 ///
 /// `pub(crate)` porque `runway.rs` lo comparte: el runway debe usar EXACTAMENTE la misma
-/// conversión anual→mensual que la simulación, o divergiría del chart de proyección. Nota: desde
-/// 4.9.0 (#146) la inflación del gasto del runway también puede ser negativa ([−2, 50]) — el
-/// factor < 1 hace decrecer el gasto de verdad, mismo contrato que los retornos negativos.
+/// conversión anual→mensual que la simulación, o divergiría del chart de proyección.
 pub(crate) fn monthly_multiplier(annual_percent: Option<Decimal>) -> Decimal {
-    let Some(p) = annual_percent else {
-        return Decimal::ONE;
-    };
-    if p.is_zero() {
-        return Decimal::ONE;
-    }
-    let annual_factor = Decimal::ONE + p / Decimal::from(100);
-    if annual_factor <= Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-    annual_factor.powd(Decimal::ONE / Decimal::from(12))
+    sim_core::monthly_multiplier_g(annual_percent)
+}
+
+/// Factor de indexación al IPC en el índice de mes `m`: `(1 + annual_percent/100)^(m/12)`.
+///
+/// Envoltorio `Decimal` de [`crate::sim_core::inflation_factor_at_index_g`] — **única
+/// implementación del factor**: la consumen el objetivo FIRE, la indexación del gasto del bucle
+/// (#139) y, desde 5.0.0, `apps/api` para su factor de crecimiento real (en vez de mantener una
+/// copia local).
+///
+/// `m = 0` o `annual_percent == 0` ⇒ `ONE` **exacto**. La guarda es `is_zero()`, NO `<= ZERO`
+/// (#146): una inflación negativa DEBE componer.
+pub fn inflation_factor_at_month_index(annual_percent: Decimal, month_index: u32) -> Decimal {
+    sim_core::inflation_factor_at_index_g(annual_percent, month_index)
+}
+
+/// La BASE del objetivo (sin el término de deuda) en el mes `month_index` — evaluada sobre la
+/// necesidad REAL del mes (#170): `gross_up(need(k), tramos, g) / SWR`. La puerta de `k = 0`
+/// decide para TODA la serie: sin necesidad positiva HOY no hay objetivo en ningún mes — un
+/// `max(0,·)` suelto publicaría `target = 0` y un cruce FIRE inmediato y falso (D-8; el caso 4 de
+/// fire-parity, pensión > gasto, es su regresión).
+///
+/// El gross-up de la necesidad INFLADA no es el gross-up inflado: la escala es afín, no
+/// homogénea, y los tramos son NOMINALES — retirar más euros nominales dentro de 30 años SÍ cae
+/// en tramos más altos (fiscal drag: +7.140,43 € a 30 años con 24.000 €/año al 2 %, sin pensión).
+pub fn fire_target_base_at_month_index(ft: &FireTarget, month_index: u32) -> Option<Decimal> {
+    let brackets = crate::sim::TaxBracketG::<Decimal>::from_decimal_slice(&ft.tax_brackets);
+    sim_core::fire_target_base_at_index_g(fire_target_view(ft, &brackets), month_index)
 }
 
 /// Target FIRE en el `month_index` indicado (0 = punto de partida, 12 = un año después, etc.).
 ///
-/// Es la **única fuente de verdad**: tanto el motor (para decidir `fire_reached`) como el
-/// handler de la API (para construir `fire_target_series`) la consumen, evitando off-by-one
-/// entre la serie y el cruce.
-/// Factor de indexación al IPC en el índice de mes `m`: `(1 + annual_percent/100)^(m/12)`.
+/// Es la **única fuente de verdad** del objetivo clásico: tanto el motor (para decidir
+/// `fire_reached`) como el handler de la API (para construir `fire_target_series`) la consumen,
+/// evitando off-by-one entre la serie y el cruce.
 ///
-/// `m = 0` o `annual_percent == 0` ⇒ `ONE` **exacto**, sin pasar por `powd`. La guarda es
-/// **`is_zero()`, NO `<= ZERO`** (#146): una inflación negativa DEBE componer — con `i = −2 %`
-/// el factor a 10 años es `0,98^10 = 0,81707280688754689024` y en los múltiplos de 12 el
-/// exponente normaliza a entero y `powd` va por `checked_powu` (potencia exacta, sin `exp`/`ln`).
-/// Con `−100 < i < 0` la base `1 + i/100` es positiva y `powd` converge sin caso especial;
-/// la capa API rechaza `i < −2` (`inflation_out_of_range`).
+/// OJO: el objetivo **NO es monótono**, y por DOS razones — término de deuda decreciente (#142)
+/// y, con pensión, base que crece MÁS rápido que f(k) (#170). Cualquier optimización que asuma
+/// monotonía (búsqueda binaria del cruce, salida temprana) quedaría rota en silencio: escaneo
+/// lineal, siempre.
 ///
-/// Única implementación del factor: la consumen el objetivo FIRE (`fire_target_at_month_index`)
-/// y, desde #139, la indexación del gasto del bucle — la misma trampa de fórmula duplicada que
-/// v1.3.0 cerró para el target, cerrada aquí para el gasto antes de nacer.
-pub fn inflation_factor_at_month_index(annual_percent: Decimal, month_index: u32) -> Decimal {
-    if month_index == 0 || annual_percent.is_zero() {
-        return Decimal::ONE;
-    }
-    let years = Decimal::from(month_index) / Decimal::from(12u32);
-    (Decimal::ONE + annual_percent / Decimal::from(100u32)).powd(years)
-}
-
-/// La BASE del objetivo (sin el término de deuda) en el mes `month_index` — evaluada sobre la
-/// necesidad REAL del mes (#170): `gross_up(need(k), tramos, g) / SWR`. La puerta de k = 0 vive
-/// AQUÍ y decide para TODA la serie: sin necesidad positiva HOY no hay objetivo en ningún mes —
-/// un `max(0,·)` suelto publicaría `target = 0` y un cruce FIRE inmediato y falso (D-8; el
-/// caso 4 de fire-parity, pensión > gasto, es su regresión). Con deflación la necesidad puede
-/// AGOTARSE dentro del horizonte: entonces la base es 0 y el objetivo queda en solo-deuda —
-/// correcto y con test propio.
-///
-/// El gross-up de la necesidad INFLADA no es el gross-up inflado: la escala es afín, no
-/// homogénea, y los tramos son NOMINALES — retirar más euros nominales dentro de 30 años SÍ cae
-/// en tramos más altos (fiscal drag: +7.140,43 € a 30 años con 24.000 €/año al 2 %, sin
-/// pensión). Por eso la evaluación por mes aplica a los TRES modos, no solo al que resta
-/// pensión.
-pub fn fire_target_base_at_month_index(ft: &FireTarget, month_index: u32) -> Option<Decimal> {
-    if ft.swr_pct <= Decimal::ZERO {
-        return None;
-    }
-    if ft.need.annual_net_at(Decimal::ONE) <= Decimal::ZERO {
-        return None;
-    }
-    let f = inflation_factor_at_month_index(ft.annual_inflation_percent, month_index);
-    let net_annual = ft.need.annual_net_at(f);
-    let gross = crate::tax::gross_up_net_annual_fire(
-        net_annual,
-        &ft.tax_brackets,
-        ft.taxes_enabled,
-        ft.taxable_gain_ratio,
-    );
-    Some(gross / (ft.swr_pct / Decimal::from(100u32)))
-}
-
-/// Término finito de deuda (#142) en el `month_index` indicado: cuotas restantes tras ese mes +
-/// cola residual, con la cola del vector como valor de saturación fuera de rango.
-///
-/// **Implementación única** (`pub(crate)` desde WP3): la consumen `fire_target_at_month_index` y
-/// el objetivo consciente del plan ([`crate::target`]). Dos copias divergirían en el primer
-/// cambio de saturación y el objetivo del puente dejaría de emparejar con el clásico.
-pub(crate) fn debt_term_at_month_index(ft: &FireTarget, month_index: u32) -> Decimal {
-    ft.debt_payments_remaining
-        .get(month_index as usize)
-        .or(ft.debt_payments_remaining.last())
-        .copied()
-        .unwrap_or(Decimal::ZERO)
-}
-
+/// **Esta función es la de 4.15.0 y se queda así**: el objetivo por FASES (pensión con fecha,
+/// puente) vive en [`crate::target`] y, cuando el plan no trae pensión, ejecuta esta misma
+/// función del núcleo. Que el camino común pase por aquí es lo que hace que el pin dorado no
+/// pueda moverse.
 pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> Option<Decimal> {
     let ft = ft?;
-    let base = fire_target_base_at_month_index(ft, month_index)?;
-    // Término finito de deuda (#142): cuotas restantes tras `month_index` + cola residual.
-    // OJO: el objetivo NO es monótono, ahora por DOS razones — término de deuda decreciente
-    // (#142) y, con pensión, base que crece MÁS rápido que f(k) (#170: el exceso relativo es
-    // I·(f(k)−1)/(E−I)). Cualquier optimización que asuma monotonía (búsqueda binaria del
-    // cruce, salida temprana) quedaría rota en silencio: escaneo lineal, siempre.
-    //
-    // **Esta función es la de 4.15.0 y se queda así**: el objetivo por FASES (pensión con fecha,
-    // puente) vive en [`crate::target`] y, cuando el plan no trae pensión, la llama a ella. Que
-    // el camino común pase por aquí es lo que hace que el pin dorado no pueda moverse.
-    Some(base + debt_term_at_month_index(ft, month_index))
+    let brackets = crate::sim::TaxBracketG::<Decimal>::from_decimal_slice(&ft.tax_brackets);
+    sim_core::fire_target_at_index_g(Some(fire_target_view(ft, &brackets)), month_index)
 }
 
-/// Drena `need` de los activos (líquidos primero, menor rentabilidad primero, empate por
-/// índice) y devuelve el DESCUBIERTO. Con `taken: Some(slice)` acumula además `taken[i] += lo
-/// drenado del activo i` — el reparto que #120 necesita para bajar la base de coste por activo
-/// (mismo patrón económico que el `Option<&mut Vec<RuleOutcome>>` de `distribute_contributions`:
-/// el bucle caliente pasa el slice que ya tiene, sin asignar nada por mes).
+/// La vista PRESTADA de un objetivo público, con la escala de tramos ya convertida.
 ///
-/// Un valor individual NEGATIVO nunca «financia» el drenaje (take clampado a ≥ 0): la escritura
-/// valida `current_value ≥ 0` pero la BD no tiene CHECK, y sin el clamp un negativo colado por
-/// restore/edición directa SUBÍA el valor y la necesidad a la vez (min(v, need) < 0). El
-/// negativo sigue pesando en los totales del caller; simplemente no se vende.
+/// La escala se convierte (5 elementos); la serie de deuda —hasta 841 números— se **presta**.
+/// Convertir el objetivo entero en cada evaluación costaría ~11 MB de copias por request para
+/// leer un elemento del vector, y `fire_target_at_month_index` la llama una vez por mes.
+fn fire_target_view<'a>(
+    ft: &'a FireTarget,
+    brackets: &'a [crate::sim::TaxBracketG<Decimal>],
+) -> crate::sim::FireTargetView<'a, Decimal> {
+    crate::sim::FireTargetView {
+        need: crate::sim::FireNeedG::from(&ft.need),
+        swr_pct: ft.swr_pct,
+        tax_brackets: brackets,
+        taxes_enabled: ft.taxes_enabled,
+        taxable_gain_ratio: ft.taxable_gain_ratio,
+        annual_inflation_percent: ft.annual_inflation_percent,
+        debt_payments_remaining: &ft.debt_payments_remaining,
+    }
+}
+
 /// Orden TOTAL de drenaje: líquidos primero; dentro de cada grupo, menor rentabilidad esperada
-/// primero (`None` cuenta como 0); empate por índice. **Implementación ÚNICA** (#178): la
-/// consumen `drain_from_assets`, la rama de déficit del bucle (que necesita el orden ANTES de
-/// vender para montar los tramos de `g`) y el bucle finito del runway — una segunda copia haría
-/// divergir en silencio la base gravada y la venta ejecutada.
+/// primero (`None` cuenta como 0); empate por índice.
+///
+/// Envoltorio `Decimal` de [`crate::sim_core::drain_order_g`], que es la **implementación ÚNICA**
+/// (#178). Lo consume el bucle finito del runway; el bucle de simulación llama al genérico
+/// directamente. Una segunda copia haría divergir en silencio la base gravada y la venta
+/// ejecutada.
 pub(crate) fn drain_order(liquid: &[bool], rates: &[Option<Decimal>]) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..liquid.len()).collect();
-    order.sort_by(|&i, &j| {
-        let li = liquid[i];
-        let lj = liquid[j];
-        match (li, lj) {
-            (true, false) => Ordering::Less,
-            (false, true) => Ordering::Greater,
-            _ => rates[i]
-                .unwrap_or(Decimal::ZERO)
-                .cmp(&rates[j].unwrap_or(Decimal::ZERO))
-                .then_with(|| i.cmp(&j)),
-        }
-    });
-    order
-}
-
-fn drain_from_assets(
-    values: &mut [Decimal],
-    liquid: &[bool],
-    rates: &[Option<Decimal>],
-    mut need: Decimal,
-    mut taken: Option<&mut [Decimal]>,
-) -> Decimal {
-    if need <= Decimal::ZERO {
-        return Decimal::ZERO;
-    }
-    let order = drain_order(liquid, rates);
-    for idx in order {
-        if need <= Decimal::ZERO {
-            break;
-        }
-        let take = values[idx].max(Decimal::ZERO).min(need);
-        values[idx] -= take;
-        need -= take;
-        if let Some(t) = taken.as_deref_mut() {
-            t[idx] += take;
-        }
-    }
-    need
-}
-
-/// Baja la base de coste de un activo en proporción al VALOR drenado — `b' = b·v_post/v_pre`
-/// (#120) — sin panicar cuando el producto intermedio no cabe en un `Decimal` (issue **#209**).
-///
-/// El orden natural es multiplicar ANTES de dividir: drenar el activo entero deja la base en 0
-/// EXACTO, sin cola de redondeo, y ese orden es el que 4.15.0 pineó. Pero `b·v` desborda el rango
-/// de `Decimal` (~7,9e28) mucho antes que `b` o `v` por separado: con un activo cerca del techo
-/// de su columna (`NUMERIC(18,4)` ⇒ ~1e14) y una rentabilidad alta, `v` pasa de 7,9e14 y el
-/// producto revienta — `*` **panica** («Multiplication overflowed») y el pool bloqueante lo
-/// publica como un 400 `task_panic` opaco. Es la misma familia que el `checked_mul` del
-/// crecimiento de activos (`AssetValueOverflow`) y que los dos `checked_div` de #208.
-///
-/// El reordenamiento `b·(v_post/v_pre)` SOLO se ejecuta cuando el producto no cabe, así que
-/// ninguna entrada que hoy funciona cambia un dígito; y no puede desbordar a su vez porque el
-/// caller garantiza `0 ≤ v_post < v_pre` y el cociente queda en [0, 1).
-fn shrink_basis(basis: Decimal, v_post: Decimal, v_pre: Decimal) -> Decimal {
-    match basis.checked_mul(v_post) {
-        Some(product) => product / v_pre,
-        None => basis * (v_post / v_pre),
-    }
-}
-
-/// Lo que UNA venta mensual dejó tras de sí, con **las tres magnitudes de B.1.5 ya separadas**
-/// (D22/D24, hallazgo B2 de la revisión adversarial):
-///
-/// - `net_obtained` — euros que de verdad salieron de los activos y se gastaron.
-/// - `undrained` — la parte de la venta INTENTADA que los activos no pudieron fundar, en euros
-///   de gasto. Es la ÚNICA que resta patrimonio (deuda implícita del hogar).
-/// - `shortfall` / `excess` — la distancia entre lo que la regla permitió y el gasto declarado.
-///   **Informativas**: no tocan el balance, no cuentan como fracaso.
-#[derive(Debug, Clone, Copy)]
-struct MonthSale {
-    net_obtained: Decimal,
-    /// `None` = **no hubo venta** (mes de superávit sin regla que gastar), y entonces no se
-    /// acumula NADA — ni siquiera un cero.
-    ///
-    /// La distinción no es estética: `Decimal` conserva la ESCALA, y sumar `Decimal::ZERO`
-    /// (escala 0) a un acumulador que vale `0.000000000000000000` (escala 18) devuelve el
-    /// operando, no la suma — el mismo VALOR con otro `Display`, que es justo lo que el pin
-    /// dorado hashea. 4.15.0 solo tocaba el acumulador en los meses con venta, y este `Option`
-    /// es lo que reproduce ese contacto exacto. (Se descubrió con P11: mismo patrimonio, mismo
-    /// descubierto, `0.000000000000000000` contra `0`.)
-    undrained: Option<Decimal>,
-    shortfall: Decimal,
-    excess: Decimal,
-    /// La venta intentada igualó o superó TODO lo vendible (definición `>=` de #119). El caller
-    /// decide si este es el primer mes que lo hace.
-    depleted_portfolio: bool,
-}
-
-impl MonthSale {
-    const EMPTY: Self = Self {
-        net_obtained: Decimal::ZERO,
-        undrained: None,
-        shortfall: Decimal::ZERO,
-        excess: Decimal::ZERO,
-        depleted_portfolio: false,
-    };
-
-    /// Reparte el resultado de la venta entre las tres magnitudes.
-    ///
-    /// `attempted_net` = el neto que la venta intentada pretendía obtener; `target_is_need` = esa
-    /// venta ERA la necesidad (sin techo, o con un techo que no ataba).
-    fn account(
-        &mut self,
-        need_net: Decimal,
-        attempted_net: Decimal,
-        obtained_net: Decimal,
-        target_is_need: bool,
-        forced_by_rule: bool,
-        sold: bool,
-    ) {
-        self.net_obtained = obtained_net;
-        // DESCUBIERTO. Lo que los activos no pudieron fundar de la venta intentada, **acotado por
-        // la necesidad real**: bajo `rule_is_spend`, la parte discrecional de una venta que la
-        // cartera no cubre no es deuda — nadie se endeuda para gastar de más. Con el objetivo =
-        // necesidad se conserva la expresión LITERAL de 4.15.0 (sin `min` ni `max`), que es lo
-        // que mantiene el pin dorado bit a bit: `after_tax(gross_up(n))` recupera `n` salvo el
-        // último dígito de 28, y meter un `max(0, ·)` ahí movería casos pineados.
-        self.undrained = sold.then(|| {
-            if target_is_need {
-                need_net - obtained_net
-            } else {
-                (attempted_net.min(need_net) - obtained_net).max(Decimal::ZERO)
-            }
-        });
-        // RECORTE DE LA REGLA: la necesidad que el techo dejó fuera. NO crece cuando la cartera
-        // se agota — eso es el descubierto. Cero exacto cuando no hubo techo que atara, y no por
-        // redondeo: se publica el literal.
-        self.shortfall = if target_is_need {
-            Decimal::ZERO
-        } else {
-            (need_net - attempted_net).max(Decimal::ZERO)
-        };
-        // SOBRANTE: solo existe cuando la regla ES el gasto y permitió más de lo necesario. En
-        // `ceiling` la venta nunca supera la necesidad, así que se publica 0 exacto en vez de la
-        // cola de redondeo de `after_tax(gross_up(n)) − n`.
-        self.excess = if forced_by_rule {
-            (obtained_net - need_net).max(Decimal::ZERO)
-        } else {
-            Decimal::ZERO
-        };
-    }
-}
-
-/// **La venta del mes** (5.0.0 WP2): decide el bruto a vender, lo vende sobre los activos en el
-/// orden de `drain_order`, asienta la base de coste (#120) y devuelve las tres magnitudes.
-///
-/// Dos razones para vender, y pueden darse a la vez:
-/// 1. **la necesidad** — la caja del mes no llega (`need_net > 0`), como en 4.15.0;
-/// 2. **la regla como gasto** (`rule_is_spend`, R7) — el permitido se vende TODOS los meses
-///    jubilados, también con superávit.
-///
-/// El techo `allowed_gross` es **BRUTO** (R9): topa la VENTA, no los euros que llegan al bolsillo.
-/// Con `fixed_real` es `None` y esta función ejecuta, operando a operando, la rama de déficit de
-/// 4.15.0 — el pin dorado lo comprueba.
-#[allow(clippy::too_many_arguments)]
-fn execute_month_sale(
-    values: &mut [Decimal],
-    basis: &mut [Decimal],
-    basis_declared: &[bool],
-    liquid: &[bool],
-    rates: &[Option<Decimal>],
-    scalar_gain_ratio: Decimal,
-    brackets: &[crate::tax::TaxBracket],
-    taxes_enabled: bool,
-    need_net: Decimal,
-    allowed_gross: Option<Decimal>,
-    spend_mode: SpendMode,
-    watch_depletion: bool,
-) -> MonthSale {
-    let mut out = MonthSale::EMPTY;
-
-    // Objetivo BRUTO forzado por la regla: solo en `rule_is_spend` y solo si hay techo.
-    let forced_gross = match spend_mode {
-        SpendMode::RuleIsSpend => allowed_gross,
-        SpendMode::Ceiling => None,
-    };
-    match forced_gross {
-        // Techo no positivo (cartera vacía bajo `percent_of_balance`): no se vende nada, pero el
-        // recorte sigue siendo la necesidad entera — el hogar no gastó lo que había declarado.
-        Some(a) if a <= Decimal::ZERO => {
-            out.shortfall = need_net.max(Decimal::ZERO);
-            return out;
-        }
-        Some(_) => {}
-        // Sin venta forzada y sin necesidad no hay nada que hacer: es el mes de superávit de
-        // 4.15.0, donde la rama de déficit ni se rozaba.
-        None if need_net <= Decimal::ZERO => return out,
-        None => {}
-    }
-
-    // 4.12.1: sin escalón de caja — el déficit entero se cubre vendiendo. La virtud fiscal del
-    // difunto escalón la hereda el drenaje natural: la cuenta al 0 % drena primero (drain_order)
-    // y su base alimentada por la cascada deriva g = 0 (b = v).
-    //
-    // #178: la fracción de plusvalía gravable es POR ACTIVO cuando su base es un DATO —
-    // `purchase_price` declarado (aunque sea 0) O base alimentada por la propia cascada
-    // (`basis_declared`, extensión 4.12.1): `g_i = 1 − b_i/v_i`, clampada a [0,1] (bajo el agua
-    // ⇒ 0; las minusvalías no compensan — divergencia declarada). Sin dato, el ESCALAR
-    // configurado. `g_i` es invariante al drenaje del propio mes (b'/v_post = b/v_pre — teorema
-    // pineado), así que evaluarla aquí no aproxima nada.
-    //
-    // `checked_div`, no `/` (issue #208, misma familia que el tope del solver mixto): `*v > ZERO`
-    // no basta como guarda. El crecimiento NO toca `basis` (solo la cascada y el drenaje lo
-    // hacen), así que una rentabilidad muy negativa deja el valor pegado al mínimo representable
-    // (1e-28) con la base entera, y `b/v` se sale del rango de `Decimal` — `/` panicaba. El
-    // fallback es el que el `clamp` ya dictaba: `b/v` enorme ⇒ `1 − b/v` muy negativo ⇒ `g = 0`
-    // (activo todo coste). Ningún caso que hoy no desborda cambia de valor.
-    let gains: Vec<Decimal> = values
-        .iter()
-        .enumerate()
-        .map(|(i, v)| {
-            if basis_declared[i] && *v > Decimal::ZERO {
-                match basis[i].checked_div(*v) {
-                    Some(ratio) => (Decimal::ONE - ratio).clamp(Decimal::ZERO, Decimal::ONE),
-                    None => Decimal::ZERO,
-                }
-            } else {
-                scalar_gain_ratio
-            }
-        })
-        .collect();
-    // Cortocircuito de `g` uniforme (sobre lo VENDIBLE): camino LITERAL de 4.11.0, operando a
-    // operando — el paseo mixto es algebraicamente igual pero no bit a bit (trocear un tramo
-    // lineal añade divisiones que rust_decimal redondea).
-    let mut uniform_g: Option<Decimal> = None;
-    let mut is_uniform = true;
-    for i in 0..values.len() {
-        if values[i] > Decimal::ZERO {
-            match uniform_g {
-                None => uniform_g = Some(gains[i]),
-                Some(u) if u == gains[i] => {}
-                Some(_) => {
-                    is_uniform = false;
-                    break;
-                }
-            }
-        }
-    }
-    let effective_uniform = if is_uniform {
-        Some(uniform_g.unwrap_or(scalar_gain_ratio))
-    } else {
-        None
-    };
-
-    if let Some(g_scalar) = effective_uniform {
-        // #140 fase 1: lo que falta se cubre VENDIENDO, y la venta tributa — el bruto a drenar es
-        // gross_up_monthly(neto) (M1: anualiza, grossea por tramos, divide). Con
-        // `taxes_enabled = false` es la identidad y la rama es bit-idéntica a 4.9.0; con todos
-        // los activos sin coste declarado, `g_scalar` ES el escalar y es bit-idéntica a 4.11.0.
-        //
-        // 5.0.0 WP2: sobre ese bruto se aplica el techo de la regla. `target_is_need` distingue
-        // «la venta ERA la necesidad» (el camino de 4.15.0) de «la venta la fijó la regla».
-        let (target_gross, target_is_need) = match forced_gross {
-            Some(a) => (a, false),
-            None => {
-                let need_gross =
-                    crate::tax::gross_up_monthly(need_net, brackets, taxes_enabled, g_scalar);
-                match allowed_gross {
-                    Some(a) if a < need_gross => (a, false),
-                    _ => (need_gross, true),
-                }
-            }
-        };
-        // Mes de agotamiento (#119): el primer mes cuya VENTA BRUTA intentada iguala o supera
-        // todo lo vendible. En el caso exacto la cartera se VACÍA este mes y el descubierto
-        // empieza el siguiente: por eso `>=`. 200.000 € al 0 % gastando 2.000 €/mes ⇒ mes 100 sin
-        // impuestos (NW(360) −520.000) y mes 80 con tramos ES (NW(360) −561.200, descubierto
-        // NETO).
-        if target_gross > Decimal::ZERO && watch_depletion {
-            let drainable: Decimal = values
-                .iter()
-                .map(|v| (*v).max(Decimal::ZERO))
-                .sum::<Decimal>();
-            if target_gross >= drainable {
-                out.depleted_portfolio = true;
-            }
-        }
-        let mut drawn_net = Decimal::ZERO;
-        if target_gross > Decimal::ZERO {
-            let mut taken = vec![Decimal::ZERO; values.len()];
-            let und_gross =
-                drain_from_assets(values, liquid, rates, target_gross, Some(&mut taken));
-            // El descubierto se acumula NETO (#140 D-4): mide euros de GASTO que faltaron, no
-            // ventas que no ocurrieron — lo vendido de verdad netea after_tax(bruto obtenido).
-            // Con impuestos apagados after_tax es la identidad.
-            let drawn_gross = target_gross - und_gross;
-            drawn_net =
-                crate::tax::after_tax_monthly(drawn_gross, brackets, taxes_enabled, g_scalar);
-            // #120: la base baja en proporción al VALOR drenado. Guarda v_pre > 0 obligatoria:
-            // Decimal / 0 PANICA (precedente task_panic).
-            for i in 0..values.len() {
-                if taken[i] > Decimal::ZERO {
-                    let v_pre = values[i] + taken[i];
-                    if v_pre > Decimal::ZERO {
-                        basis[i] = shrink_basis(basis[i], values[i], v_pre);
-                    }
-                }
-            }
-        }
-        let attempted_net = if target_is_need {
-            need_net
-        } else {
-            crate::tax::after_tax_monthly(target_gross, brackets, taxes_enabled, g_scalar)
-        };
-        out.account(
-            need_net,
-            attempted_net,
-            drawn_net,
-            target_is_need,
-            forced_gross.is_some(),
-            target_gross > Decimal::ZERO,
-        );
-    } else {
-        // Vía MIXTA (#178): el solver por tramos decide venta bruta Y reparto a la vez — la base
-        // agregada `Σ g_i·venta_i` atraviesa los tramos progresivos y ninguna `g` escalar puede
-        // representarla. El orden es EL MISMO de `drain_from_assets` (implementación única
-        // `drain_order`): divergir aquí gravaría una venta que no ocurre.
-        let order = drain_order(liquid, rates);
-        let segments: Vec<crate::tax::MixedSegment> = order
-            .iter()
-            .map(|&i| crate::tax::MixedSegment {
-                capacity_monthly: values[i].max(Decimal::ZERO),
-                gain_ratio: gains[i],
-            })
-            .collect();
-        // Con venta forzada el objetivo ya es BRUTO y el paseo va en directo. Sin ella se
-        // resuelve la necesidad (paseo inverso, el de 4.12.0) y solo se rehace en directo si el
-        // techo de verdad recorta esa venta.
-        let inverse = match forced_gross {
-            Some(_) => None,
-            None => Some(crate::tax::gross_up_mixed_monthly(
-                need_net,
-                &segments,
-                brackets,
-                taxes_enabled,
-            )),
-        };
-        let binding_cap = match (&inverse, forced_gross, allowed_gross) {
-            (None, Some(a), _) => Some(a),
-            (Some(dd), _, Some(a)) if dd.gross_monthly > a => Some(a),
-            _ => None,
-        };
-        let (per_segment, attempted_gross, obtained_net, attempted_net, target_is_need) =
-            match binding_cap {
-                Some(a) => {
-                    let w = crate::tax::mixed_drawdown_for_gross_cap(
-                        a,
-                        &segments,
-                        brackets,
-                        taxes_enabled,
-                    );
-                    // ¿Se vendió el techo entero? Si las capacidades no llegaron, la cartera se
-                    // vació: lo que no se pudo vender se atribuye a la NECESIDAD (el paseo no
-                    // puede poner precio fiscal a un bruto que ningún activo respalda — no hay
-                    // `g` que aplicarle). Es la dirección prudente y coincide con lo que
-                    // `fixed_real` habría acumulado. Bajo `ceiling` es inalcanzable: el techo
-                    // solo ata cuando es MENOR que una venta que la cartera sí soportaba.
-                    let fully_sold = w.gross_monthly >= a;
-                    let attempted_net = if fully_sold { w.net_monthly } else { need_net };
-                    (
-                        w.per_segment_monthly,
-                        a,
-                        w.net_monthly,
-                        attempted_net,
-                        false,
-                    )
-                }
-                None => {
-                    let dd = inverse.expect("sin venta forzada el paseo inverso siempre existe");
-                    // El descubierto sale NETO por construcción del solver — sin segunda llamada:
-                    // `after_tax_monthly` con una sola `g` sería incorrecta sobre un bruto mixto.
-                    let obtained = need_net - dd.net_shortfall_monthly;
-                    (
-                        dd.per_segment_monthly,
-                        dd.gross_monthly,
-                        obtained,
-                        need_net,
-                        true,
-                    )
-                }
-            };
-        // Agotamiento (#119), misma semántica `>=` de la vía escalar sobre la venta INTENTADA.
-        if watch_depletion {
-            let drainable: Decimal = segments.iter().map(|s| s.capacity_monthly).sum();
-            if attempted_gross >= drainable {
-                out.depleted_portfolio = true;
-            }
-        }
-        for (pos, &i) in order.iter().enumerate() {
-            let take = per_segment[pos];
-            if take > Decimal::ZERO {
-                values[i] -= take;
-                // #120: b' = b·v_post/v_pre, mismas guardas que la vía escalar.
-                let v_pre = values[i] + take;
-                if v_pre > Decimal::ZERO {
-                    basis[i] = shrink_basis(basis[i], values[i], v_pre);
-                }
-            }
-        }
-        out.account(
-            need_net,
-            attempted_net,
-            obtained_net,
-            target_is_need,
-            forced_gross.is_some(),
-            true,
-        );
-    }
-
-    out
+    sim_core::drain_order_g(liquid, rates)
 }
 
 /// Resolve a rule's cap into an absolute € ceiling for the destination asset.
@@ -1467,38 +865,12 @@ pub fn resolve_cap_ceiling(
     monthly_expense_with_debt: Decimal,
     monthly_income: Decimal,
 ) -> Option<Decimal> {
-    match cap {
-        None => None,
-        Some(AllocationCap::Amount(v)) => Some(v.max(Decimal::ZERO)),
-        Some(AllocationCap::MonthsExpense(n)) => {
-            Some((n.max(Decimal::ZERO) * monthly_expense_with_debt).max(Decimal::ZERO))
-        }
-        Some(AllocationCap::IncomeMultiple(n)) => {
-            Some((n.max(Decimal::ZERO) * monthly_income).max(Decimal::ZERO))
-        }
-    }
-}
-
-/// Techo absoluto y hueco restante del cap de UNA regla, contra los valores VIVOS de los
-/// activos. `(None, None)` para regla sin tope o con `target_index` fuera de rango (esa
-/// invalidez la señala su propio `skipped_reason`, no este par).
-fn rule_cap_ceiling_and_room(
-    rule: &AllocationRule,
-    live_values: &[Decimal],
-    monthly_expense_with_debt: Decimal,
-    monthly_income: Decimal,
-) -> (Option<Decimal>, Option<Decimal>) {
-    let Some(ceiling) = resolve_cap_ceiling(
-        rule.cap.clone(),
-        monthly_expense_with_debt,
-        monthly_income,
-    ) else {
-        return (None, None);
-    };
-    let room = live_values
-        .get(rule.target_index)
-        .map(|v| (ceiling - *v).max(Decimal::ZERO));
-    (Some(ceiling), room)
+    let cap = cap.map(|c| match c {
+        AllocationCap::Amount(v) => crate::sim::AllocationCapG::Amount(v),
+        AllocationCap::MonthsExpense(v) => crate::sim::AllocationCapG::MonthsExpense(v),
+        AllocationCap::IncomeMultiple(v) => crate::sim::AllocationCapG::IncomeMultiple(v),
+    });
+    sim_core::resolve_cap_ceiling_g(cap, monthly_expense_with_debt, monthly_income)
 }
 
 /// Por qué una regla de la cascada no recibió (o recibió menos de lo que pedía).
@@ -1540,154 +912,6 @@ pub struct RuleOutcome {
     /// Espacio que quedaba bajo el techo al evaluar la regla (`None` = sin cap).
     pub cap_room: Option<Decimal>,
     pub skipped_reason: Option<AllocationSkipReason>,
-}
-
-/// Cascade-distribute a positive `pool` across assets following the ordered `rules`.
-///
-/// For each rule (in order):
-/// - resolve the destination asset's cap_room (`ceiling − current_value`); rule is skipped if 0.
-/// - compute the rule's intent:
-///   - `Fixed`     → `min(amount, remaining)`
-///   - `Percent`   → `remaining × amount / 100` (over what's left at this step)
-///   - `Remainder` → `remaining`
-/// - take `min(intent, cap_room?, remaining)`, add to `alloc[target]`, subtract from `remaining`.
-///
-/// Returns `(alloc, leftover)`: `alloc[i]` ≥ 0 added to asset `i`; `leftover` is the pool that
-/// no rule absorbed (caller routes it to `surplus_cash`).
-///
-/// `trace` es un **sumidero opcional**: con `None` no se asigna nada y el coste es idéntico al de
-/// antes de existir — importa porque el bucle de proyección llama a esta función hasta 840 veces
-/// por request y nadie lee la traza ahí. Con `Some`, se emite un [`RuleOutcome`] por regla,
-/// incluidas las que no reciben nada. Una sola implementación de la cascada: dos divergirían en
-/// silencio al primer cambio de caps, y una explicación que no coincide con lo que el motor hace es
-/// peor que no tener explicación.
-fn distribute_contributions(
-    pool: Decimal,
-    rules: &[AllocationRule],
-    values: &[Decimal],
-    monthly_expense_with_debt: Decimal,
-    monthly_income: Decimal,
-    mut trace: Option<&mut Vec<RuleOutcome>>,
-) -> (Vec<Decimal>, Decimal) {
-    let n = values.len();
-    let mut alloc = vec![Decimal::ZERO; n];
-    if pool <= Decimal::ZERO || n == 0 {
-        if let Some(t) = trace.as_deref_mut() {
-            for (rule_index, rule) in rules.iter().enumerate() {
-                // Issue #96: el techo se resuelve TAMBIÉN sin sobrante — depende de la regla y
-                // de los escalares del mes, no de la caja. Antes aquí iba `None` y el llamante
-                // (goals/resolución) tenía que duplicar la fórmula para poder publicar el techo.
-                let (ceiling, room) = rule_cap_ceiling_and_room(
-                    rule,
-                    values,
-                    monthly_expense_with_debt,
-                    monthly_income,
-                );
-                t.push(RuleOutcome {
-                    rule_index,
-                    target_index: rule.target_index,
-                    amount_intent: Decimal::ZERO,
-                    amount_resolved: Decimal::ZERO,
-                    cap_ceiling: ceiling,
-                    cap_room: room,
-                    skipped_reason: Some(AllocationSkipReason::NoCash),
-                });
-            }
-        }
-        return (alloc, pool.max(Decimal::ZERO));
-    }
-    let mut remaining = pool;
-    // Live view of asset values for cap calculations as the cascade progresses (so multiple
-    // rules into the same asset respect a shared ceiling).
-    let mut live_values: Vec<Decimal> = values.to_vec();
-
-    for (rule_index, rule) in rules.iter().enumerate() {
-        // Emite la traza de una regla que no llegó a repartir y sigue.
-        macro_rules! skip {
-            ($reason:expr, $intent:expr, $ceiling:expr, $room:expr) => {{
-                if let Some(t) = trace.as_deref_mut() {
-                    t.push(RuleOutcome {
-                        rule_index,
-                        target_index: rule.target_index,
-                        amount_intent: $intent,
-                        amount_resolved: Decimal::ZERO,
-                        cap_ceiling: $ceiling,
-                        cap_room: $room,
-                        skipped_reason: Some($reason),
-                    });
-                }
-            }};
-        }
-
-        if remaining <= Decimal::ZERO {
-            // La caja se agotó: esta regla y todas las siguientes quedan sin evaluar. Se emiten
-            // igualmente — omitirlas reproduciría el hueco de observabilidad que la traza cierra.
-            if let Some(t) = trace.as_deref_mut() {
-                for (i, r) in rules.iter().enumerate().skip(rule_index) {
-                    t.push(RuleOutcome {
-                        rule_index: i,
-                        target_index: r.target_index,
-                        amount_intent: Decimal::ZERO,
-                        amount_resolved: Decimal::ZERO,
-                        cap_ceiling: None,
-                        cap_room: None,
-                        skipped_reason: Some(AllocationSkipReason::NotReached),
-                    });
-                }
-            }
-            break;
-        }
-        let target = rule.target_index;
-        if target >= n {
-            skip!(
-                AllocationSkipReason::InvalidTarget,
-                Decimal::ZERO,
-                None,
-                None
-            );
-            continue;
-        }
-        let ceiling = resolve_cap_ceiling(rule.cap, monthly_expense_with_debt, monthly_income);
-        let cap_room = ceiling.map(|c| (c - live_values[target]).max(Decimal::ZERO));
-        if let Some(room) = cap_room {
-            if room <= Decimal::ZERO {
-                skip!(AllocationSkipReason::CapFull, Decimal::ZERO, ceiling, cap_room);
-                continue;
-            }
-        }
-        let intent = match rule.kind {
-            AllocationKind::Fixed => rule.amount.unwrap_or(Decimal::ZERO).max(Decimal::ZERO),
-            AllocationKind::Percent => {
-                let pct = rule.amount.unwrap_or(Decimal::ZERO).max(Decimal::ZERO);
-                (remaining * pct) / Decimal::from(100)
-            }
-            AllocationKind::Remainder => remaining,
-        };
-        let mut take = intent.min(remaining);
-        if let Some(room) = cap_room {
-            take = take.min(room);
-        }
-        if take <= Decimal::ZERO {
-            skip!(AllocationSkipReason::ZeroAmount, intent, ceiling, cap_room);
-            continue;
-        }
-        alloc[target] += take;
-        live_values[target] += take;
-        remaining -= take;
-        if let Some(t) = trace.as_deref_mut() {
-            t.push(RuleOutcome {
-                rule_index,
-                target_index: target,
-                amount_intent: intent,
-                amount_resolved: take,
-                cap_ceiling: ceiling,
-                cap_room,
-                skipped_reason: None,
-            });
-        }
-    }
-
-    (alloc, remaining.max(Decimal::ZERO))
 }
 
 /// Resolución completa de la cascada del **primer mes**: lo que se reparte, de dónde sale y qué
@@ -1745,757 +969,16 @@ pub fn first_month_per_asset_contribution_nominals(
 pub fn first_month_allocation(
     input: &ProjectionInput,
 ) -> Result<FirstMonthAllocation, EngineError> {
-    if input.horizon_months < 1 {
-        return Err(EngineError::InvalidHorizon);
-    }
-    // Mismas puertas que el bucle: esta función RESUELVE EL MES 1 igual que él, así que no puede
-    // aceptar un plan que él rechaza (publicaría una cascada de una simulación que no existe).
-    input.phase_plan.ensure_supported()?;
-    if input.planning_monthly_cash_adjustment.len() != input.horizon_months as usize {
-        return Err(EngineError::InvalidPlanningAdjustments);
-    }
-    let n = input.assets.len();
-    let mut out = vec![Decimal::ZERO; n];
-    for r in &input.allocation_rules {
-        if r.target_index >= n {
-            return Err(EngineError::InvalidAllocationRuleTarget);
-        }
-    }
-    // Sin activos NO hay atajo a ceros (#127): la caja del mes 1 (ingreso − gasto − deuda) existe
-    // aunque no haya dónde asignarla, y los KPIs (`net_recurring_monthly`, `net_cash_monthly`)
-    // la leen de aquí. Con `n == 0` no puede haber reglas (la validación de arriba las rechaza
-    // todas) y `distribute_contributions` sobre cero activos devuelve el pool entero como
-    // sobrante, así que la ruta general ya es correcta.
-
-    let values: Vec<Decimal> = input.assets.iter().map(|a| a.value).collect();
-    let principals: Vec<Decimal> = input
-        .liabilities
-        .iter()
-        .map(|l| l.principal.max(Decimal::ZERO))
-        .collect();
-
-    let start_month_first = month_first_calendar(input.ref_date);
-    let month_first = add_months(start_month_first, 0);
-    let (m_start, _m_end) = month_window(month_first);
-
-    let mut debt_service = Decimal::ZERO;
-    for (i, liab) in input.liabilities.iter().enumerate() {
-        // Mismos helpers que el bucle de simulación; el principal de cierre se descarta aquí
-        // porque esta función solo resuelve el mes 1 — pero la amortización extra SÍ entra en el
-        // servicio de deuda, que es lo que decide cuánto sobrante llega a la cascada.
-        let active = liability_active(liab, m_start);
-        let opening = principals.get(i).copied().unwrap_or(Decimal::ZERO);
-        let (cash, closing) = liability_month(
-            liab,
-            opening,
-            liab.monthly_payment,
-            active,
-        );
-        let (extra, fee) = liability_extra_principal(liab, 1, closing, active);
-        debt_service += cash + extra + fee;
-    }
-
-    let planning_adj = input.planning_monthly_cash_adjustment[0];
-
-    // Estado del mes 1, resuelto EXACTAMENTE como lo hace el bucle de simulación.
-    //
-    // Antes esta función solo miraba `retirement_start_month` y siempre usaba el ingreso y el
-    // gasto regulares, ignorando `fire_target`. En un hogar que ya está por encima de su número
-    // FIRE eso publicaba una aportación **con el signo contrario a la realidad**: el bucle
-    // detecta el cruce en el mes 1 (`nw_prev ≥ target(0)`), conmuta a ingreso de jubilación y
-    // drena de los activos, mientras `/v1/assets` y `/v1/allocation-rules/resolution` seguían
-    // diciendo «aportas 2.000 €/mes» y explicando regla a regla una cascada que no se ejecuta
-    // jamás. No es un caso patológico: es el estado final del público al que sirve la app.
-    //
-    // El mes 0 no tiene sobrante acumulado ni caja pendiente. El cruce se decide contra el
-    // patrimonio LÍQUIDO (#143), igual que en el bucle: Σ de los activos vendibles.
-    let liquid_month_zero: Decimal = input
-        .assets
-        .iter()
-        .zip(values.iter())
-        .filter(|(a, _)| a.is_liquid)
-        .map(|(_, v)| *v)
-        .sum();
-    //
-    // 5.0.0 WP1b: el estado de la fase sale del MISMO `PhasePlan` que consume el bucle — antes
-    // eran dos lecturas independientes de los mismos cuatro campos, y una de las dos ya se había
-    // quedado atrás una vez (la que ignoraba `fire_target`). WP3 mantiene el paralelismo campo a
-    // campo: mismo objetivo consciente del plan, misma fase, misma pensión, mismo techo.
-    let plan = &input.phase_plan;
-    let fire_reached = crate::target::fire_target_at_month_index_with_plan(
-        input.fire_target.as_ref(),
-        plan,
-        0,
-    )
-    .is_some_and(|t| liquid_month_zero >= t);
-    let in_retirement = (fire_reached && !plan.crossing_is_reading_only)
-        || plan.retirement_trigger.forced_month().is_some_and(|s| 1 >= s);
-    let phase = if in_retirement {
-        Phase::Retired
-    } else if plan.partial.is_some_and(|p| 1 >= p.start_month) {
-        Phase::Partial
-    } else {
-        Phase::Accumulating
-    };
-    let income = match phase {
-        Phase::Retired => plan.income_retirement_monthly,
-        Phase::Partial => plan
-            .partial
-            .map_or(input.income_regular_monthly, |p| p.income_monthly),
-        Phase::Accumulating => input.income_regular_monthly,
-    };
-    let income = match plan.income_pause.and_then(|p| p.factor_at(1)) {
-        Some(f) => income * f,
-        None => income,
-    };
-    // El mes 1 evalúa el índice 0 y `f(0) = 1` exacto, así que una pensión indexada que ya
-    // hubiera empezado se cobra por su importe de hoy — el mismo valor que el bucle calcula.
-    let pension_income = match plan.pension {
-        Some(pen) => {
-            let gross = pen.monthly_at(0, Decimal::ONE);
-            if matches!(phase, Phase::Partial) {
-                gross * pen.partial_fraction()
-            } else {
-                gross
-            }
-        }
-        None => Decimal::ZERO,
-    };
-    let income = if pension_income.is_zero() {
-        income
-    } else {
-        income + pension_income
-    };
-    let expense = match phase {
-        Phase::Retired => plan.expense_retirement_monthly,
-        Phase::Partial => plan
-            .partial_expense_basis_monthly(input.expense_regular_monthly)
-            .unwrap_or(input.expense_regular_monthly),
-        Phase::Accumulating => input.expense_regular_monthly,
-    };
-    let retirement_withdrawal = if in_retirement {
-        plan.extra_monthly_withdrawal
-    } else {
-        Decimal::ZERO
-    };
-
-    let recurring_net = income - expense - debt_service;
-    let planning_component = planning_adj - retirement_withdrawal;
-    let net_cash_month = recurring_net + planning_component;
-
-    let mut rules_trace: Vec<RuleOutcome> = Vec::new();
-    // 4.12.1 (#175): la cascada corre TAMBIÉN jubilado — la rama que aquí publicaba ceros con
-    // `InRetirement` murió con `surplus_cash`. #171 sigue vivo en los escalares: los techos se
-    // resuelven con la FASE del mes (`expense + debt_service`, `income` ya elegidos arriba), y
-    // desde 4.12.1 esos techos GOBIERNAN euros de verdad, no solo la explicación.
-    // Mismo techo de aportación que el bucle (§B.7): si la cascada del mes 1 no lo respetara,
-    // `/v1/assets` volvería a explicar un reparto que la simulación no ejecuta — la divergencia
-    // exacta que WP1b cerró.
-    let (pool, disposable) = match plan.contribution_cap_at(1) {
-        Some(cap) if net_cash_month > Decimal::ZERO => {
-            let invested = net_cash_month.min(cap);
-            (invested, net_cash_month - invested)
-        }
-        _ => (net_cash_month, Decimal::ZERO),
-    };
-    let (alloc, leftover) = {
-        distribute_contributions(
-            pool,
-            &input.allocation_rules,
-            &values,
-            expense + debt_service,
-            income,
-            Some(&mut rules_trace),
-        )
-    };
-    // `distribute_contributions` ya devuelve ceros y `leftover = max(pool, 0)` con caja ≤ 0, así
-    // que no hace falta el corte temprano de antes: el resultado es idéntico.
-    for i in 0..n {
-        out[i] = alloc[i];
-    }
-    Ok(FirstMonthAllocation {
-        per_asset: out,
-        base_cash: net_cash_month,
-        recurring_net,
-        planning_component,
-        debt_service,
-        leftover: if net_cash_month > Decimal::ZERO {
-            leftover
-        } else {
-            Decimal::ZERO
-        },
-        disposable,
-        rules: rules_trace,
-    })
+    let sim = SimInput::<Decimal>::from(input);
+    sim_core::first_month_allocation_g(&sim).map(FirstMonthAllocation::from)
 }
 
+/// La simulación mensual completa. **5.0.0 WP5.5**: envoltorio de
+/// [`crate::sim_core::simulate`] — convierte la entrada al tipo del núcleo (una copia campo a
+/// campo, cero operaciones) y devuelve la salida movida sin copiar un número.
 pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOutput, EngineError> {
-    if input.horizon_months < 1 {
-        return Err(EngineError::InvalidHorizon);
-    }
-    // 5.0.0 WP1b: lo que este motor no sabe simular no se simula (ver `PhasePlan`).
-    input.phase_plan.ensure_supported()?;
-    let plan: &PhasePlan = &input.phase_plan;
-    if input.planning_monthly_cash_adjustment.len() != input.horizon_months as usize {
-        return Err(EngineError::InvalidPlanningAdjustments);
-    }
-    let n = input.assets.len();
-    for r in &input.allocation_rules {
-        if r.target_index >= n {
-            return Err(EngineError::InvalidAllocationRuleTarget);
-        }
-    }
-
-    let mut values: Vec<Decimal> = input.assets.iter().map(|a| a.value).collect();
-    let liquid: Vec<bool> = input.assets.iter().map(|a| a.is_liquid).collect();
-    let rates: Vec<Option<Decimal>> = input
-        .assets
-        .iter()
-        .map(|a| a.expected_annual_return_percent)
-        .collect();
-    // Factor de crecimiento mensual POR ACTIVO, calculado UNA vez (WP1a de 5.0.0). Es
-    // loop-invariante por construcción: `rates` se deriva de `input.assets` y nadie la muta en
-    // toda la función (el bucle solo la LEE, para `drain_order` y `drain_from_assets`). Hasta
-    // 4.15.0 el paso de crecimiento llamaba a `monthly_multiplier` —y con ella a `powd`— una vez
-    // por activo Y POR MES: hasta 840 raíces doceavas idénticas por activo en cada request.
-    // MISMA llamada, MISMO argumento, mismo `Decimal` resultante: el pin dorado
-    // (`tests/golden_pins.rs`) lo comprueba bit a bit. Medido en `tests/timing.rs` (release, P9 a
-    // 840 meses, media de 100 pasadas): **31,5 ms → 12,3 ms por proyección**, −61 %.
-    //
-    // Lo que NO se precalcula, y por qué: `inflation_factor_at_month_index(…, k−1)` y
-    // `fire_target_at_month_index(…, k−1)` se evalúan una vez por mes DENTRO del bucle y así se
-    // quedan. Un vector por `k` haría EXACTAMENTE las mismas llamadas (las dos se evalúan
-    // incondicionalmente cada mes, no dependen del estado), así que no ahorra una sola `powd`:
-    // medido, 12,4 ms contra 12,3 ms — ruido — a cambio de dos vectores de 840 `Decimal`. La
-    // regla que sí ahorraba (`monthly_multiplier`) ahorraba porque su argumento no depende de
-    // `k`; estas dos sí dependen. Y jamás por producto acumulado: `powd` enruta los exponentes
-    // enteros por `checked_powu` (potencia exacta), pineado en
-    // `negative_inflation_shrinks_the_target_instead_of_flattening_it`.
-    let growth_multipliers: Vec<Decimal> = rates.iter().map(|r| monthly_multiplier(*r)).collect();
-
-    let mut principals: Vec<Decimal> = input
-        .liabilities
-        .iter()
-        .map(|l| l.principal.max(Decimal::ZERO))
-        .collect();
-    // Cuota efectiva por pasivo (#151): solo la muta «reducir cuota» (λ-escala). Con el efecto
-    // default (`ReduceTerm`) nunca se toca y la simulación es bit-idéntica a 4.6.0.
-    let mut effective_payment: Vec<Decimal> = input
-        .liabilities
-        .iter()
-        .map(|l| l.monthly_payment)
-        .collect();
-    // La jubilación es un estado ABSORBENTE (#141): una vez cruzado el objetivo (o alcanzado
-    // `retirement_start_month`), el hogar no «vuelve al trabajo» porque el patrimonio caiga un
-    // mes por debajo del target inflado — nadie recupera la nómina íntegra el mes siguiente a
-    // jubilarse. Hasta 4.7.0 la re-evaluación mensual reinsertaba sueldos completos en las
-    // caídas (hasta el 77 % del patrimonio final era fantasma en el escenario del issue).
-    // `jubilacion_month_index` (primer cruce) no cambia de contrato.
-    let mut retired = false;
-    // 5.0.0 WP1b — lecturas de fase (§B.8). `retirement_month_index` es el mes EFECTIVO (lo que
-    // el latch decide); `liquid_crossing_month_index` es el cruce puro y NO gobierna nada.
-    let mut retirement_month_index: Option<u32> = None;
-    let mut liquid_crossing_month_index: Option<u32> = None;
-    // 5.0.0 WP3 — la fase parcial es el segundo latch, y también monótono: se entra por
-    // `k ≥ partial.start_month` y solo se sale hacia `Retired`.
-    let mut partial_month_index: Option<u32> = None;
-    let mut partial_capital_shrank = false;
-    let mut warnings: Vec<EngineWarning> = Vec::new();
-    // 5.0.0 WP3 — el objetivo CONSCIENTE DEL PLAN (§B.3). Se construye UNA vez: con puente activo
-    // tabula `O(P)` gross-ups y potencias, y consultarlo mes a mes es `O(1)`. Sin pensión con
-    // fecha llama a `fire_target_at_month_index` tal cual, así que el camino de 4.15.0 sigue
-    // pasando por la misma función y el pin dorado no puede moverse.
-    let plan_target = PlanFireTarget::new(input.fire_target.as_ref(), plan);
-    // Caja que el techo de aportación deja fuera de la cascada (§B.7). Índice 0 = 0, como todas.
-    let mut disposable_series: Vec<Decimal> =
-        Vec::with_capacity(input.horizon_months as usize + 1);
-    disposable_series.push(Decimal::ZERO);
-    let mut disposable_total = Decimal::ZERO;
-    // Retirada neta efectiva del mes (§B.8). El índice 0 es el estado inicial, no un mes
-    // simulado: cero por definición, como el resto de series.
-    let mut withdrawal_series: Vec<Decimal> = Vec::with_capacity(input.horizon_months as usize + 1);
-    withdrawal_series.push(Decimal::ZERO);
-    // 5.0.0 WP2 — las otras dos magnitudes de B.1.5, con la misma base de índice: el recorte de
-    // la regla y el sobrante que `rule_is_spend` gasta. Ninguna de las dos toca el balance.
-    let mut shortfall_series: Vec<Decimal> = Vec::with_capacity(input.horizon_months as usize + 1);
-    shortfall_series.push(Decimal::ZERO);
-    let mut excess_series: Vec<Decimal> = Vec::with_capacity(input.horizon_months as usize + 1);
-    excess_series.push(Decimal::ZERO);
-    // Estado de la regla de retirada (§B.2). Vive FUERA del bucle porque `hybrid` y `guardrails`
-    // tienen memoria: un latch que no se recuerda no es un latch, y un guardarraíl que olvida su
-    // ajuste no es Guyton-Klinger.
-    let mut planner = crate::withdrawal::WithdrawalPlanner::new(plan.withdrawal);
-
-    let start_month_first = month_first_calendar(input.ref_date);
-
-    let mut net_series = Vec::with_capacity(input.horizon_months as usize + 1);
-    let mut contrib_series = Vec::with_capacity(input.horizon_months as usize + 1);
-    let mut per_asset_series: Vec<Vec<Decimal>> = input
-        .assets
-        .iter()
-        .map(|_| Vec::with_capacity(input.horizon_months as usize + 1))
-        .collect();
-
-    // #120 (Ola 6): base de coste POR ACTIVO (coste medio, no FIFO — la BD guarda UN
-    // purchase_price por activo). Arranca en el precio de compra (> 0) y desde aquí:
-    // sube con lo que la cascada aporta a ese activo, y BAJA proporcionalmente al valor
-    // drenado (`b·(v−d)/v`): drenar todo un activo deja su base en 0 exacto. La rentabilidad
-    // nunca la toca — el hueco valor−base ES la plusvalía latente.
-    //
-    // `contributed_capital(k) = Σ basis_i(k)` — IDENTIDAD, no acumulador (desde 4.12.1 sin
-    // término de caja: `surplus_cash` murió — el dinero siempre vive en un activo). La serie
-    // publicada sigue SIN ser monótona («cumulative» murió con #120).
-    let mut basis: Vec<Decimal> = input
-        .assets
-        .iter()
-        .map(|a| a.purchase_price.filter(|p| *p > Decimal::ZERO).unwrap_or(Decimal::ZERO))
-        .collect();
-    // #178 extensión (4.12.1): un activo cuya base ALIMENTA la simulación (la cascada le aportó)
-    // deriva su g aunque no declarara purchase_price — el euro aportado ES el dato: el motor
-    // observó su precio. Sin esto, el drenaje del sumidero sin coste declarado tributaría al
-    // escalar (default 1) euros que nunca fueron plusvalía — 784,81 € inventados en un
-    // descubierto de 3.000 € — y la exención del difunto escalón «caja primero» no se heredaría.
-    // Degrada bien: un fondo de 100.000 sin coste que recibe 500 queda en g = 0,995.
-    let mut basis_declared: Vec<bool> = input
-        .assets
-        .iter()
-        .map(|a| a.purchase_price.is_some())
-        .collect();
-    let contributed_fn =
-        |basis: &[Decimal]| -> Decimal { basis.iter().copied().sum::<Decimal>() };
-    let mut undrained_cumulative = Decimal::ZERO;
-    let mut assets_depleted_month_index: Option<u32> = None;
-    // 4.12.1 (decisión 3 del owner): el ahorro que ninguna regla absorbe NO entra al balance —
-    // no compone, no cuenta como aportado, no es riqueza líquida. Solo se CUANTIFICA aquí.
-    // En producción es inalcanzable con activos vivos (sumidero indestructible #176 +
-    // retro-siembra); existe porque el motor es una función pura y debe definir el estado.
-    let mut unallocated_savings_total = Decimal::ZERO;
-
-    let nw_fn = |vals: &[Decimal], pr: &[Decimal], und: Decimal| -> Decimal {
-        let ta: Decimal = vals.iter().copied().sum();
-        let tl: Decimal = pr.iter().copied().sum();
-        ta - tl - und
-    };
-    // Base líquida del cruce (#143): lo vendible — activos `is_liquid`. Brutos a propósito
-    // (sin restar pasivos ni descubierto): el objetivo empareja ese hueco con su término de
-    // cuotas completas (`debt_payments_remaining`). Desde 4.12.1 sin término de caja — teorema:
-    // el cruce solo pudo irse MÁS TARDE con este cambio, nunca adelantarse.
-    let liquid_fn = |vals: &[Decimal]| -> Decimal {
-        input
-            .assets
-            .iter()
-            .zip(vals.iter())
-            .filter(|(a, _)| a.is_liquid)
-            .map(|(_, v)| *v)
-            .sum::<Decimal>()
-    };
-    let mut liquid_series = Vec::with_capacity(input.horizon_months as usize + 1);
-
-    net_series.push(nw_fn(&values, &principals, undrained_cumulative));
-    liquid_series.push(liquid_fn(&values));
-    contrib_series.push(contributed_fn(&basis));
-    for (i, s) in per_asset_series.iter_mut().enumerate() {
-        s.push(values[i]);
-    }
-
-    for k in 1..=input.horizon_months {
-        let month_first = add_months(start_month_first, k - 1);
-        let (m_start, _m_end) = month_window(month_first);
-
-        // Servicio de deuda del mes. Desde 4.2.0 la recurrencia del pasivo se resuelve **una
-        // sola vez** por mes: aquí salen a la vez la caja que se paga y el principal de cierre,
-        // que se guarda y se aplica en el paso de amortización más abajo. Antes eran dos
-        // recorridos que recalculaban el mismo `min(cuota, principal)`; con intereses de por
-        // medio recalcularlo sería recalcular el devengo, y una de las dos copias acabaría
-        // divergiendo. El orden de los pasos del mes NO cambia (servicio de deuda → caja →
-        // crecimiento de activos → amortización → NW) y nada muta `principals` entre este punto
-        // y aquel.
-        let mut debt_service = Decimal::ZERO;
-        let mut closing_principals: Vec<Decimal> = Vec::with_capacity(principals.len());
-        for (i, liab) in input.liabilities.iter().enumerate() {
-            if i >= principals.len() {
-                break;
-            }
-            let active = liability_active(liab, m_start);
-            let (cash, closing) =
-                liability_month(liab, principals[i], effective_payment[i], active);
-            // Amortización extra (what-if): sale de la caja del mes como servicio de deuda Y baja
-            // el principal el mismo importe. Las dos cosas o ninguna — hacer solo la primera
-            // drenaría caja sin reducir deuda, y solo la segunda imprimiría dinero. La comisión
-            // (#151) es la excepción asimétrica A PROPÓSITO: sale de la caja y NO baja nada —
-            // es coste puro, lo que hace que el what-if de amortizar deje de ser gratis.
-            let (extra, fee) = liability_extra_principal(liab, k, closing, active);
-            debt_service += cash + extra + fee;
-            let new_closing = closing - extra;
-            // «Reducir cuota» (#151): λ = P'/P sobre el saldo TRAS la cuota del mes. Mismo
-            // cociente P·i/M ⇒ misma extinción para un lump; con extra recurrente solo `≤`
-            // (ver `EarlyRepaymentEffect`).
-            if extra > Decimal::ZERO
-                && liab.early_repayment_effect == EarlyRepaymentEffect::ReducePayment
-                && closing > Decimal::ZERO
-            {
-                effective_payment[i] = effective_payment[i] * new_closing / closing;
-            }
-            closing_principals.push(new_closing);
-        }
-
-        let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
-        // La casilla del mes se reserva ANTES de la cascada para poder escribirla desde dentro del
-        // `if` del sobrante sin depender del orden de los `push` del final del mes.
-        disposable_series.push(Decimal::ZERO);
-
-        // El cruce se decide contra el patrimonio LÍQUIDO al cierre del mes k-1 (#143): la
-        // regla del SWR está calibrada sobre cartera vendible; una vivienda no produce
-        // retirada. El total (`nw_fn`) sigue siendo lo que se publica y drena.
-        let liquid_prev = liquid_fn(&values);
-        // 5.0.0 WP3: el objetivo lo evalúa el evaluador CONSCIENTE DEL PLAN. Sin pensión con
-        // fecha delega en `fire_target_at_month_index(…, k−1)` — misma llamada, mismos dígitos.
-        let target_prev = plan_target.at(k - 1);
-        let fire_reached = target_prev.map_or(false, |t| liquid_prev >= t);
-        // Lectura pura (5.0.0 WP1b): el cruce se evalúa TODOS los meses —también después de que
-        // el latch cierre, porque la línea de arriba no depende de `retired`— así que anotar su
-        // primera vez no toca una sola decisión ni una sola cifra. Con las estrategias por edad
-        // (D17) esta será la única lectura del cruce, y el trigger será la edad.
-        if fire_reached && liquid_crossing_month_index.is_none() {
-            liquid_crossing_month_index = Some(k);
-        }
-        // Latch (#141): `retired` solo puede pasar a true; el objetivo deja de mirarse después.
-        //
-        // 5.0.0 WP1b conserva la UNIÓN de 4.15.0 —cruce O mes forzado, es decir `min(cruce, s)`—
-        // en vez de hacer exclusivo el trigger. Motivos, por orden: (1) `P10_jubilacion_forzada`
-        // del pin dorado fuerza el mes 37 sin objetivo FIRE, y con un `fire_target` presente la
-        // exclusión movería el caso; (2) la regla «un solo trigger por simulación» (D17) es de
-        // ESTRATEGIA, no del motor, y quien la hace cumplir es el HANDLER en WP3: para una
-        // estrategia por edad pasará `fire_target: None`, con lo que el cruce no puede dispararse
-        // porque no hay contra qué cruzar. El motor se queda tonto y pineado a propósito.
-        //
-        // **5.0.0 WP3 (D17)**: con `crossing_is_reading_only` el cruce deja de jubilar y solo se
-        // anota. Es la única forma de que una estrategia por edad conserve el objetivo para el
-        // chart y para medir el infra-financiado sin que ese mismo objetivo dispare la
-        // jubilación — pasarle `fire_target: None` al motor, la vía que WP1b anticipaba, tiraba
-        // también la lectura. El default es `false`, así que `P10_jubilacion_forzada` (mes
-        // forzado, sin objetivo) sigue pineado exactamente donde estaba.
-        retired = retired
-            || (fire_reached && !plan.crossing_is_reading_only)
-            || plan.retirement_trigger.forced_month().map_or(false, |s| k >= s);
-        if retired && retirement_month_index.is_none() {
-            retirement_month_index = Some(k);
-            // D17, «aviso rojo grande»: se entra en la jubilación con el líquido POR DEBAJO del
-            // objetivo de ese mes. Se mira el OBJETIVO, no el trigger: si quien jubiló fue el
-            // cruce, `liquid_prev ≥ t` por definición y esta rama no puede darse.
-            if target_prev.is_some_and(|t| liquid_prev < t) {
-                warnings.push(EngineWarning::RetireAtAgeUnderfunded);
-            }
-        }
-        let in_retirement = retired;
-        // Fase del mes (§B.1), monótona: `Retired` manda sobre `Partial`, y la parcial solo se
-        // entra si el latch de jubilación aún no cerró.
-        let phase = if in_retirement {
-            Phase::Retired
-        } else if plan.partial.is_some_and(|p| k >= p.start_month) {
-            if partial_month_index.is_none() {
-                partial_month_index = Some(k);
-            }
-            Phase::Partial
-        } else {
-            Phase::Accumulating
-        };
-        let income = match phase {
-            Phase::Retired => plan.income_retirement_monthly,
-            // Ingreso de la media jornada: PLANO como todos los ingresos del motor (#139).
-            Phase::Partial => plan
-                .partial
-                .map_or(input.income_regular_monthly, |p| p.income_monthly),
-            Phase::Accumulating => input.income_regular_monthly,
-        };
-        // Pausa de ingresos (P8.c): multiplica el ingreso GANADO de la fase, y solo dentro de la
-        // ventana. Fuera de ella no se ejecuta ninguna multiplicación — por eso `factor_at`
-        // devuelve `Option` y no un 1: `x·1` en `Decimal` conserva el valor pero puede cambiar la
-        // escala, y la escala es justo lo que el pin dorado hashea.
-        let income = match plan.income_pause.and_then(|p| p.factor_at(k)) {
-            Some(f) => income * f,
-            None => income,
-        };
-        // #139 (Ola 5): el GASTO se indexa al IPC de la instalación con el factor único
-        // (`inflation_factor_at_month_index`) sobre el MISMO eje que el trigger del target,
-        // `(k−1)/12` — el mes 1 cobra el gasto base tal cual (`f(1)=1`: lo que el usuario acaba
-        // de teclear no se mueve), y ambas ramas (regular y jubilación) escalan por el mismo
-        // factor, así que la discontinuidad del cruce es la de hoy × f(k*) — sin saltos nuevos.
-        // Los INGRESOS quedan planos a propósito (decisión del owner: «las subidas hay que
-        // pelearlas»); con inflación negativa el gasto DECRECE (#146). En B/C el escalar llega
-        // ya restado de cuotas declaradas (#142) y se indexa el residuo: la cuota es nominal
-        // por contrato y el motor la cobra aparte sin inflar.
-        let expense_factor = inflation_factor_at_month_index(input.annual_inflation_percent, k - 1);
-        let expense = expense_factor
-            * match phase {
-                Phase::Retired => plan.expense_retirement_monthly,
-                // D10: el gasto de la media jornada es CONFIGURABLE — el de jubilación por
-                // defecto, el regular si el perfil lo dice. Se indexa con el MISMO factor que
-                // los otros dos (#139): la fase cambia qué partida rige, no cómo se infla.
-                Phase::Partial => plan
-                    .partial_expense_basis_monthly(input.expense_regular_monthly)
-                    .unwrap_or(input.expense_regular_monthly),
-                Phase::Accumulating => input.expense_regular_monthly,
-            };
-
-        // **Pensión con fecha** (§B.1 paso 3): es INGRESO en cualquier fase desde `start_index`,
-        // con la rejilla 0-based (`k−1`) y el MISMO factor de inflación que el gasto del bucle si
-        // está indexada. Durante la media jornada se cobra la fracción declarada (D8).
-        //
-        // Se suma SOLO si es positiva: sin pensión con fecha —el caso de 4.15.0— aquí no se
-        // ejecuta ni una suma, y `income` llega al flujo de caja tal cual.
-        let pension_income = match plan.pension {
-            Some(pen) => {
-                let gross = pen.monthly_at(k - 1, expense_factor);
-                if matches!(phase, Phase::Partial) {
-                    gross * pen.partial_fraction()
-                } else {
-                    gross
-                }
-            }
-            None => Decimal::ZERO,
-        };
-        let income = if pension_income.is_zero() {
-            income
-        } else {
-            income + pension_income
-        };
-
-        let retirement_withdrawal = if in_retirement {
-            plan.extra_monthly_withdrawal
-        } else {
-            Decimal::ZERO
-        };
-
-        let net_cash_month = income
-            - expense
-            - debt_service
-            + planning_adj
-            - retirement_withdrawal;
-
-        // 5.0.0 WP2 — REGLA DE RETIRADA (§B.2). El ancla de la fase jubilada (`L(R−1)`, `f(R−1)`)
-        // se fija el PRIMER mes jubilado con los MISMOS escalares que el cruce acaba de usar, y el
-        // techo del mes se pide UNA sola vez: `hybrid` y `guardrails` tienen memoria, así que
-        // pedirlo dos veces revisaría el guardarraíl dos veces.
-        //
-        // `None` = sin techo. Lo es con `fixed_real` (el permitido ES la necesidad) y lo es
-        // mientras el hogar no se ha jubilado: una regla de retirada gobierna la jubilación, no
-        // el mes malo de quien sigue trabajando.
-        //
-        // **La media jornada NO pasa por la regla** (WP3): las reglas se anclan en `L(R−1)` y
-        // `f(R−1)` —el patrimonio con el que se ENTRA en la jubilación—, y en la fase parcial ese
-        // ancla todavía no existe. Un déficit de media jornada se vende como el déficit de quien
-        // trabaja: necesidad fija, bruta, sin techo.
-        let allowed_gross = if in_retirement {
-            planner.anchor_retirement(k, liquid_prev, expense_factor);
-            planner.allowed_gross(k, liquid_prev, expense_factor)
-        } else {
-            None
-        };
-
-        // La necesidad NETA del mes: lo que la caja no cubre. Misma expresión y mismo valor que
-        // el `need_assets_net` que 4.15.0 calculaba dentro de la rama de déficit.
-        let need_assets_net = if net_cash_month <= Decimal::ZERO {
-            -net_cash_month
-        } else {
-            Decimal::ZERO
-        };
-
-        // 4.12.1 (#175): la MISMA cascada, jubilado o no — nadie cambia de lógica al jubilarse.
-        // Los techos de la fase (#171) pasan de explicativos a vinculantes. `None`: el bucle
-        // corre hasta 840 veces por request y nadie lee la traza aquí.
-        //
-        // **La venta ya no vive en un `else`**: baja a `execute_month_sale`, DESPUÉS del reparto.
-        // Hasta 4.15.0 las dos ramas eran excluyentes —o había déficit y se vendía, o había
-        // superávit y se repartía—, así que bajarla no mueve un dígito de ningún caso de 4.15.0.
-        // Quien necesita ese orden es `rule_is_spend` (R7): con superávit, la cascada invierte la
-        // caja del mes PRIMERO y la regla vende DESPUÉS, sobre el saldo ya reinvertido.
-        if net_cash_month > Decimal::ZERO {
-            // **Techo de aportación** (§B.7): la cascada solo ve `min(sobrante, c)`; el resto es
-            // caja DISPONIBLE — no se invierte, no compone y no entra en el patrimonio (mismo
-            // trato que `unallocated_savings_total`, y por la misma razón). Sin techo el pool es
-            // el sobrante entero y no se ejecuta ni una operación de más: bit-identidad.
-            let pool = match plan.contribution_cap_at(k) {
-                Some(cap) => {
-                    let invested = net_cash_month.min(cap);
-                    let disposable = net_cash_month - invested;
-                    if disposable > Decimal::ZERO {
-                        disposable_series[k as usize] = disposable;
-                        disposable_total += disposable;
-                    }
-                    invested
-                }
-                None => net_cash_month,
-            };
-            let (alloc, leftover) = distribute_contributions(
-                pool,
-                &input.allocation_rules,
-                &values,
-                expense + debt_service,
-                income,
-                None,
-            );
-            for i in 0..values.len() {
-                if alloc[i] > Decimal::ZERO {
-                    values[i] += alloc[i];
-                    // También jubilado (#120): lo reinvertido ES base de coste — sube b_i y
-                    // abarata las ventas futuras (#178). Y desde aquí la base de este activo
-                    // es un DATO observado: deriva su g aunque no declarara purchase_price.
-                    basis[i] += alloc[i];
-                    basis_declared[i] = true;
-                }
-            }
-            if leftover > Decimal::ZERO {
-                // Decisión 3 (owner, 2026-08-31): el euro sin destino declarado NO se simula —
-                // fuera del balance, solo cuantificado. Inalcanzable en producción (#176).
-                unallocated_savings_total += leftover;
-            }
-        }
-
-        // La venta del mes: la necesidad (topada por la regla) y/o —en `rule_is_spend`— el gasto
-        // que la regla ES. Devuelve las TRES magnitudes de B.1.5 ya separadas.
-        let sale = execute_month_sale(
-            &mut values,
-            &mut basis,
-            &basis_declared,
-            &liquid,
-            &rates,
-            input.taxable_gain_ratio,
-            &input.tax_brackets,
-            input.taxes_enabled,
-            need_assets_net,
-            allowed_gross,
-            plan.spend_mode,
-            assets_depleted_month_index.is_none(),
-        );
-        if sale.depleted_portfolio && assets_depleted_month_index.is_none() {
-            assets_depleted_month_index = Some(k);
-        }
-        // Solo el descubierto RESTA patrimonio (D22/D24): el recorte y el sobrante de la regla
-        // son lecturas, y viajan en sus propias series. `None` = no hubo venta este mes y el
-        // acumulador NO se toca (ver el doc de `MonthSale::undrained`).
-        if let Some(undrained_month) = sale.undrained {
-            undrained_cumulative += undrained_month;
-        }
-
-        for i in 0..values.len() {
-            // Precalculado antes del bucle (`growth_multipliers`): mismo valor exacto que
-            // `monthly_multiplier(rates[i])`, sin repetir la raíz doceava 840 veces.
-            let m = growth_multipliers[i];
-            // `checked_mul`, no `*`: con una tasa desorbitada y horizonte largo el producto
-            // desborda Decimal y `*` PANICA — el pool blocking lo convertía en un 400
-            // `task_panic` permanente e ininteligible (auditoría 2026-08). Error tipado.
-            values[i] = values[i]
-                .checked_mul(m)
-                .ok_or(EngineError::AssetValueOverflow)?;
-        }
-
-        // Amortización: solo se asienta el cierre ya calculado arriba. Sin recomputar nada.
-        for (i, closing) in closing_principals.iter().enumerate() {
-            principals[i] = *closing;
-        }
-
-        let nw = nw_fn(&values, &principals, undrained_cumulative);
-        net_series.push(nw);
-        withdrawal_series.push(sale.net_obtained);
-        shortfall_series.push(sale.shortfall);
-        excess_series.push(sale.excess);
-        let liquid_close = liquid_fn(&values);
-        // §B.3: ¿la media jornada deja crecer el capital? Se compara el cierre del mes con el
-        // cierre del anterior —el mismo par que el cruce usa— y basta UN mes a la baja para que
-        // la respuesta sea que no.
-        if matches!(phase, Phase::Partial)
-            && liquid_close < liquid_series[(k - 1) as usize]
-        {
-            partial_capital_shrank = true;
-        }
-        liquid_series.push(liquid_close);
-        contrib_series.push(contributed_fn(&basis));
-        for (i, s) in per_asset_series.iter_mut().enumerate() {
-            s.push(values[i]);
-        }
-    }
-
-    // Fases atravesadas (§B.8), en orden y con el mes 1-based en que empieza cada una: se arranca
-    // acumulando en el mes 0, la media jornada se inserta ENTRE las dos si llegó a existir, y la
-    // jubilación cierra. `partial_month_index` solo se rellena si la fase se pisó de verdad —
-    // una media jornada declarada DESPUÉS del cruce nunca ocurre, y publicarla igualmente
-    // pintaría en el chart una fase que la simulación no vivió.
-    let mut phase_transitions: Vec<(Phase, u32)> = Vec::with_capacity(3);
-    phase_transitions.push((Phase::Accumulating, 0));
-    if let Some(k) = partial_month_index {
-        phase_transitions.push((Phase::Partial, k));
-    }
-    if let Some(k) = retirement_month_index {
-        phase_transitions.push((Phase::Retired, k));
-    }
-
-    // -----------------------------------------------------------------------------------------
-    // Lecturas de WP3 (§B.3). Ninguna toca la aritmética: todas se derivan de series ya cerradas.
-    // -----------------------------------------------------------------------------------------
-    if partial_month_index.is_some() && partial_capital_shrank {
-        warnings.push(EngineWarning::PartialPhaseCapitalShrinking);
-    }
-    let partial_phase_capital_growing = partial_month_index.is_some() && !partial_capital_shrank;
-
-    // Primer mes del BUCLE (1-based) en que la pensión con fecha entra en caja. El mes `k`
-    // evalúa el índice `k−1`, así que la pensión de `start_index` se cobra en `start_index + 1`.
-    // `None` si ese mes cae fuera del horizonte: la pensión existe en el plan pero esta
-    // simulación no llega a verla.
-    let pension_start_month_index = plan.pension.and_then(|pen| {
-        let month = pen.start_index.saturating_add(1);
-        (month <= input.horizon_months).then_some(month)
-    });
-
-    // Tasa de retirada efectiva del puente: `100 · 12·need_full_m(R−1) / L(R−1)`.
-    // `12·need_full_m(i)` ES `need_full_annual_at(i)` — no se multiplica y divide por 12 para
-    // volver al mismo sitio.
-    let bridge_effective_withdrawal_pct = (plan.pension.is_some()
-        && plan.target_basis == crate::phases::TargetBasis::BridgeToPension)
-        .then(|| {
-            let r = retirement_month_index?;
-            let liquid_at_r = *liquid_series.get((r - 1) as usize)?;
-            if liquid_at_r <= Decimal::ZERO {
-                return None;
-            }
-            let need_annual = plan_target.need_full_annual_at(r - 1)?;
-            need_annual
-                .checked_mul(Decimal::from(100u32))
-                .and_then(|x| x.checked_div(liquid_at_r))
-        })
-        .flatten();
-
-    let pension_coverage_ratio = plan_target.pension_coverage_ratio();
-    let partial_gap_target =
-        plan_target.partial_gap_target(plan, input.expense_regular_monthly);
-
-    Ok(ProjectionOutput {
-        net_worth: net_series,
-        contributed_capital: contrib_series,
-        per_asset_series,
-        assets_depleted_month_index,
-        uncovered_deficit_total: undrained_cumulative,
-        unallocated_savings_total,
-        liquid_worth: liquid_series,
-        retirement_month_index,
-        liquid_crossing_month_index,
-        phase_transitions,
-        withdrawal: withdrawal_series,
-        // Con `fixed_real` estas dos siguen siendo cero mes a mes —el permitido ES la necesidad,
-        // así que no hay techo que recorte ni sobrante que gastar—, pero ahora por el camino
-        // general, no por un `vec![0]` que fingía calcularlas.
-        withdrawal_shortfall: shortfall_series,
-        withdrawal_excess: excess_series,
-        pension_start_month_index,
-        partial_retirement_month_index: partial_month_index,
-        warnings,
-        bridge_effective_withdrawal_pct,
-        pension_coverage_ratio,
-        partial_gap_target,
-        partial_phase_capital_growing,
-        disposable_cash: disposable_series,
-        disposable_cash_total: disposable_total,
-    })
+    let sim = SimInput::<Decimal>::from(input);
+    sim_core::simulate(&sim).map(ProjectionOutput::from)
 }
 
 #[cfg(test)]
@@ -2854,9 +1337,12 @@ mod tests {
         )];
         let values = vec![Decimal::from(704)];
         let mut trace = Vec::new();
-        let (alloc, leftover) = distribute_contributions(
+        // WP5.5: la cascada vive en el núcleo genérico; la regla pública se convierte (copia).
+        let rules_g: Vec<crate::sim::AllocationRuleG<Decimal>> =
+            rules.iter().map(crate::sim::AllocationRuleG::from).collect();
+        let (alloc, leftover) = crate::sim_core::distribute_contributions_g(
             Decimal::ZERO,
-            &rules,
+            &rules_g,
             &values,
             Decimal::from(1_500),
             Decimal::from(3_000),

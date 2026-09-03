@@ -628,7 +628,7 @@ el `closing_principal` que el motor ya derivaba y tiraba.
 Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verify before trusting:
 
 - Single target formula + signature: `grep -n "pub fn fire_target_at_month_index" crates/engine/src/projection.rs`
-- Trigger uses k−1 / liquid_prev + absorbing latch (4.8.0): `grep -n "fire_target_at_month_index(input.fire_target\|liquid_prev\|retired = retired" crates/engine/src/projection.rs`
+- Trigger uses k−1 / liquid_prev + absorbing latch (4.8.0): `grep -n "plan_target.at(ft_view\|liquid_prev\|retired = retired" crates/engine/src/sim_core.rs` (el bucle vive en el núcleo genérico desde 5.0.0 WP5.5)
 - FIRE number modes + inputs: `grep -n "compute_fire_target_nw" apps/api/src/handlers/projection.rs` (mode A passes `expense_retirement`; mode B passes the raw `expense_avg` — see §2b)
 - Mode B (`savings_source`) base + quota subtraction (4.8.0, #142 — the 3.4.0 `payment_amount = None` zeroing is GONE): `grep -n "savings_source\|transactions_avg\|expense_from_avg\|active_quotas" apps/api/src/handlers/projection.rs`
 - Mode B/C reach into summary/assets/series: `grep -n "expense_reg\|expense_tot" apps/api/src/handlers/summary.rs` (el patrón anterior —`expense_der = Decimal::ZERO\|expense_tot = avg.expense_avg`— daba **vacío** desde un refactor: `expense_der` solo sobrevive dentro de un comentario y `expense_tot` se deriva de la resolución compartida, no de `avg.expense_avg`); `grep -n "assets_projection_context" apps/api/src/handlers/{projection,assets}.rs`
@@ -643,10 +643,10 @@ Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`). Re-verif
   `grep -n -A10 "fn deflator_at_month_index" apps/api/src/handlers/projection.rs` y
   `grep -n "net_worth_real\|deflation_annual_inflation_percent\|deflate_amount_core" apps/api/src/handlers/projection.rs`
 - **Negative returns DO compound** (§4, corrección 2026-08-28):
-  `grep -n -A14 "fn monthly_multiplier" crates/engine/src/projection.rs` — solo `None` y `0` dan
+  `grep -n -A14 "fn monthly_multiplier_g" crates/engine/src/sim_core.rs` — solo `None` y `0` dan
   factor 1; `p ≤ −100` se clampa a 0. Si vuelves a leer «rates ≤ 0 → no growth» en algún doc, es drift.
 - Calendario de amortización y amortización extra (4.4.0, Fase 6):
-  `grep -n "pub fn liability_amortization_schedule\|MAX_LIABILITY_SCHEDULE_MONTHS\|enum LiabilityPayoffAbsence\|extra_principal_monthly\|fn liability_extra_principal" crates/engine/src/projection.rs`;
+  `grep -n "pub fn liability_amortization_schedule\|MAX_LIABILITY_SCHEDULE_MONTHS\|enum LiabilityPayoffAbsence\|extra_principal_monthly\|fn liability_extra_principal" crates/engine/src/{projection,sim_core}.rs`;
   la identidad contable la pinea `schedule_payment_identity_holds_in_every_model` y el contraste
   entre superficies, `apps/api/tests/simulate_liability_kpis.rs::the_what_if_debt_kpis_agree_with_the_liability_schedule`.
 - Sink invariant: `grep -n "uncapped_remainder\|sink_must_be_last" apps/api/src/handlers/allocation_rules.rs`

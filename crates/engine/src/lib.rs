@@ -1,10 +1,13 @@
 //! Monthly net-worth projection.
 
 mod history;
+mod money;
 mod net_return;
 mod phases;
 mod projection;
 mod runway;
+mod sim;
+mod sim_core;
 mod solve;
 mod target;
 mod tax;
@@ -15,14 +18,21 @@ pub use history::{
     month_index_of, CashFlowEntry, HistoryItem, HistoryItemKind, HistoryObservation,
     HistoryTimeline, LoanTerms,
 };
+pub use money::MoneyOps;
 pub use net_return::{net_return_percentages, NetReturn};
 pub use phases::{
     EngineWarning, ExpenseBasis, IncomePause, PartialPhase, PensionSchedule, Phase, PhasePlan,
     RetirementTrigger, SpendMode, TargetBasis, WithdrawalRule,
 };
+pub use sim::{
+    AllocationCapG, AllocationRuleG, FireNeedG, FireTargetG, FireTargetView,
+    FirstMonthAllocationG, IncomePauseG, PartialPhaseG, PensionScheduleG, PhasePlanG,
+    RuleOutcomeG, SimAssetG, SimInput, SimLiability, SimOutput, TaxBracketG, WithdrawalRuleG,
+};
+pub use sim_core::{monthly_multiplier_g as monthly_growth_multiplier, simulate};
 pub use projection::{
     debt_payments_remaining_series, fire_target_at_month_index, fire_target_base_at_month_index,
-    first_month_allocation,
+    first_month_allocation, inflation_factor_at_month_index,
     first_month_per_asset_contribution_nominals, liability_amortization_schedule,
     liability_interest_accrues,
     present_value_of_payments, project_net_worth_series, resolve_cap_ceiling, AllocationCap,

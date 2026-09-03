@@ -409,7 +409,7 @@ casos límite (`cargo test -p futurefin-engine --test audit_dump -- --nocapture`
 un oráculo externo. Re-verificación (un comando por contrato; si un grep no devuelve nada, el
 ancla se movió — actualiza esta ficha en el mismo cambio):
 
-- Devengo francés: `grep -n "payoff = P·(1 + i)" -r crates/engine/src/ || grep -n "fn liability_month" crates/engine/src/projection.rs`
+- Devengo francés: `grep -rn "payoff = P·(1 + i)" crates/engine/src/ || grep -n "fn liability_month_g" crates/engine/src/sim_core.rs`
 - Convención TIN/1200 compartida: `grep -rn "1200" crates/engine/src/{projection,history}.rs | grep -c "apr"` (≥2)
 - Raíz 12ª: `grep -n "fn monthly_multiplier" crates/engine/src/projection.rs`
 - Target móvil único: `grep -rn "fn fire_target_at_month_index" crates/engine/src/projection.rs` y sus ≥2 llamantes en `apps/api/src/handlers/projection.rs`

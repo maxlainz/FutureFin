@@ -30,7 +30,7 @@ mod cases;
 use cases::{projection_cases_5_0, projection_cases_all};
 use futurefin_engine::{
     project_net_worth_series, required_contribution_monthly, PensionSchedule, ProjectionInput,
-    TargetBasis,
+    SimInput, TargetBasis,
 };
 use rust_decimal::Decimal;
 use std::hint::black_box;
@@ -170,5 +170,35 @@ fn one_required_contribution_solve_on_p9() {
         "[timing/{profile}] solve required_contribution (P9, 840 meses, {iterations} iteraciones): \
          {:.3} ms  ⇒ c = {contribution}",
         elapsed.as_secs_f64() * 1000.0,
+    );
+}
+
+/// (g) **El peaje del núcleo genérico** (WP5.5): lo único que `project_net_worth_series` hace de
+/// más desde que el bucle es genérico es convertir su entrada al tipo del núcleo — una copia
+/// campo a campo, sin una sola operación aritmética. Se mide aparte porque «no se nota» es una
+/// afirmación, y las afirmaciones de rendimiento de esta casa llevan número.
+///
+/// P9 es el caso caro: 840 ajustes de planning, 841 términos de deuda, 5 activos, 2 pasivos y 3
+/// reglas. Compárese con (a): si la conversión costara una fracción apreciable de los ~12 ms de
+/// una proyección, el envoltorio no sería gratis y habría que replantear la frontera.
+#[test]
+#[ignore = "mide, no afirma: correr con --ignored --nocapture"]
+fn the_cost_of_converting_the_input_to_the_generic_core() {
+    let input = p9();
+    let n = 1_000u32;
+    let warm = SimInput::<Decimal>::from(&input);
+    black_box(&warm);
+    let t0 = Instant::now();
+    for _ in 0..n {
+        let sim = SimInput::<Decimal>::from(black_box(&input));
+        black_box(&sim);
+    }
+    let elapsed = t0.elapsed();
+    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    println!(
+        "[timing/{profile}] conversión ProjectionInput → SimInput (P9, 840 meses): \
+         {n} conversiones en {:.3} ms  ({:.4} ms/conversión)",
+        elapsed.as_secs_f64() * 1000.0,
+        elapsed.as_secs_f64() * 1000.0 / f64::from(n),
     );
 }

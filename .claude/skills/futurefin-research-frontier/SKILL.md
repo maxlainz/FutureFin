@@ -617,7 +617,7 @@ nothing automatically un-lists a shipped item here. Re-verify before relying on 
   (must hit; the old marker `principals[i] -= pay` is gone — `grep -n` for it now returns nothing,
   which is the expected, correct state, not drift) and
   `grep -n '^## \[4.2.0\]' CHANGELOG.md`.
-- Drain is tax-free / gross-up only in target: `grep -n 'gross_up_net_annual_fire\|drain_from_assets' apps/api/src/handlers/projection.rs crates/engine/src/projection.rs`
+- Drain is tax-free / gross-up only in target: `grep -n 'gross_up_net_annual_fire\|drain_from_assets' apps/api/src/handlers/projection.rs crates/engine/src/{projection,sim_core}.rs`
 - Backup script defaults: `grep -n 'BACKUP_DIR=\|KEEP_BACKUPS=\|ENV_FILE=' scripts/backup-postgres.sh`
   (since 3.0.0 it `compose exec`s into the single `futurefin` service and `ENV_FILE` is optional)
 - Migration runner (auto on startup, fails loud): `cat apps/api/src/db.rs`

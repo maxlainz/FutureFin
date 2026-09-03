@@ -5,8 +5,16 @@
 > [`financial-contracts.md`](financial-contracts.md) (auditoría 2026-08).
 
 Pure Rust crate — no I/O, no DB, no async. Pure financial math (projection + history interpolation).
-Only `Decimal` arithmetic. Siete módulos:
-- `projection.rs` — monthly net-worth / FIRE simulation (this doc's main subject).
+La API pública es **solo `Decimal`** (`ls crates/engine/src/*.rs` para la lista viva de módulos):
+- `money.rs` — el trait `MoneyOps` (5.0.0 WP5.5): el contrato numérico del núcleo, con la única
+  implementación que vive aquí, la de `Decimal`. Ver §Núcleo genérico y crate estocástico.
+- `sim.rs` — los tipos del núcleo (`SimInput`/`SimOutput` y los gemelos `*G`) y las conversiones
+  desde y hacia la superficie pública. Copias campo a campo, cero aritmética.
+- `sim_core.rs` — **el bucle**, genérico sobre `MoneyOps`: fases, cascada, venta del mes,
+  crecimiento, recurrencia de pasivos, factores y objetivo clásico.
+- `projection.rs` — los tipos públicos, el calendario de amortización, el valor actual de una renta
+  y los ENVOLTORIOS `Decimal` de todo lo anterior (`project_net_worth_series`,
+  `first_month_allocation`, `fire_target_at_month_index`…). Sigue siendo el sujeto de este doc.
 - `phases.rs` — el `PhasePlan` de 5.0.0: trigger, fases, pensión con fecha, regla de retirada y los
   ejes de §B.3/§B.7 (ver [ProjectionInput fields](#projectioninput-fields)).
 - `withdrawal.rs` — las cuatro reglas de retirada de la fase jubilada (5.0.0 WP2, §Reglas de retirada).
@@ -23,6 +31,83 @@ Only `Decimal` arithmetic. Siete módulos:
   `swr_pct` × liquid balance **AND the portfolio's weighted expected return is > 0** (4.8.0, #128);
   the finite case drains sequentially, lowest-return first, like the simulation; see
   [Runway](#runway-runwayrs) below). Consumed by `GET /v1/summary`.
+
+## Núcleo genérico y crate estocástico (5.0.0 WP5.5)
+
+**El bucle es uno solo y está parametrizado por su tipo numérico.** Monte Carlo (WP6) necesita
+correr la MISMA simulación miles de veces, y en `Decimal` cuesta ~12 ms por proyección de 840
+meses. La salida no fue duplicar el bucle en coma flotante —dos bucles divergen en silencio al
+primer cambio— sino hacerlo genérico:
+
+```rust
+pub trait MoneyOps: Copy + PartialOrd + PartialEq + Sized + Debug
+    + Add<Output=Self> + Sub<Output=Self> + Mul<Output=Self> + Div<Output=Self> + Neg<Output=Self>
+{
+    fn zero() -> Self;  fn one() -> Self;  fn max_value() -> Self;
+    fn from_decimal(Decimal) -> Self;  fn to_decimal(self) -> Decimal;
+    fn from_u32(u32) -> Self;  fn from_i64(i64) -> Self;
+    fn checked_add(self, Self) -> Option<Self>;
+    fn checked_mul(self, Self) -> Option<Self>;
+    fn checked_div(self, Self) -> Option<Self>;
+    fn min(self, Self) -> Self;  fn max(self, Self) -> Self;  fn clamp(self, Self, Self) -> Self;
+    fn is_zero(self) -> bool;  fn is_sign_negative(self) -> bool;
+    fn total_cmp(&self, &Self) -> Ordering;
+    fn powd_fraction(self, num: u32, den: u32) -> Self;   // la familia (1+p)^{k/12}
+    fn gains_equal(a: Self, b: Self) -> bool;             // el cortocircuito uniforme/mixto de g
+    fn sum_of(impl Iterator<Item = Self>) -> Self;        // el mismo plegado que `Iterator::sum`
+}
+
+pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, EngineError>
+```
+
+`project_net_worth_series` y `first_month_allocation` son ENVOLTORIOS: convierten
+`ProjectionInput` a `SimInput<Decimal>` (copia campo a campo, **cero operaciones**; medido: 1,2 µs
+sobre P9, contra ~12 ms de la proyección) y devuelven la salida movida sin copiar un número.
+
+**Por qué la instanciación `Decimal` no puede mover un dígito**: no es equivalencia algebraica, es
+que ejecuta la MISMA secuencia de llamadas. Tres detalles que lo hacen cierto y que un refactor
+descuidado rompería:
+
+| detalle | por qué |
+|---|---|
+| `min`/`max` delegan en los **inherentes** de `rust_decimal`, NO en `Ord` | el inherente devuelve `self` en el empate y `Ord::max` devuelve `other`: `x.max(ZERO)` con `x = 0.000000000000000000` da `"0"` por `Ord` y `"0.000000000000000000"` por el inherente. **El pin dorado hashea el `Display`.** |
+| `clamp` es `Ord::clamp` (no `max(lo).min(hi)`) | dentro del intervalo devuelve `self` intacto, escala incluida |
+| `powd_fraction(k, 12)` construye el exponente como `from_u32(k)/from_u32(12)` y llama a `powd` | `powd` enruta los exponentes enteros por `checked_powu` (potencia exacta); un producto acumulado los desviaría a `exp`/`ln` |
+
+**El `f64` vive FUERA de este crate.** El freezer `crates_engine_src_has_no_f64_outside_comments`
+(`lib.rs`) sigue intacto y **sin excepciones**: la única implementación de `MoneyOps` en
+`crates/engine` es la de `Decimal`. La de coma flotante es `F64Money` y vive en
+**`crates/engine-stochastic`** (regla del huérfano: el trait es público). Ese crate no tiene bucle
+propio — instancia este —, y su contrato es que **de él no sale un euro**: publica magnitudes
+estadísticas (probabilidad de éxito, percentiles, agotamiento por edad), nunca un KPI monetario.
+El dinero de la app sale siempre del camino `Decimal`.
+
+Sus políticas están declaradas una por una en el doc de `F64Money` (`checked_*` = `None` con
+no-finito; `total_cmp` = `f64::total_cmp` porque `drain_order` ORDENA y `f64` no es `Ord`;
+`gains_equal` con tolerancia `GAIN_RATIO_EQ_TOLERANCE = 1e-12`; `from_decimal` pierde los ~12
+últimos de los 28 dígitos). La igualdad con tolerancia está en el TRAIT y no escondida en un
+`PartialEq`: `PartialEq` para `F64Money` sigue siendo el `==` exacto de `f64`.
+
+**El gancho de Monte Carlo** es `SimInput::growth_overrides: Option<Vec<Vec<M>>>` (`[k−1][i]`):
+cuando trae la fila del mes, el paso de crecimiento usa esos factores en vez del multiplicador
+hoisted por activo. `None` —lo único que produce la conversión desde `ProjectionInput`— deja el
+bucle donde estaba. Una fila mal dimensionada se ignora en vez de panicar.
+
+**La puerta de degeneración** (`crates/engine-stochastic/tests/degeneration.rs`) corre los 23 casos
+de la batería del motor por los dos caminos y compara `net_worth` y `liquid_worth` mes a mes en
+todo el horizonte más los índices discretos. Medido: **máximo 1,5e-7 € en 840 meses** (P9), y los
+cuatro índices (`retirement_month_index`, `liquid_crossing_month_index`,
+`assets_depleted_month_index`, `phase_transitions`) coinciden EXACTAMENTE en todos los casos. La
+única fila con cota relativa es `P14_techo_numeric`, sintético (activo en el techo de
+`NUMERIC(18,4)` al 20 % durante 70 años ⇒ patrimonio ~3,5e19 €), donde el espaciado de los `f64`
+ya supera el euro: allí la cota es `1e-12` relativa y se mide 2,0e-14.
+
+Hallazgo que esta puerta cazó y se arregló en el mismo WP: la venta mixta con techo deducía «¿se
+vendió el techo entero?» comparando `gross_monthly >= gross_cap` — exacto en `Decimal`, filo de
+navaja en coma flotante, y de esa rama cuelga qué es **recorte informativo** y qué es
+**descubierto que resta patrimonio**. Ahora el booleano lo publica el paseo
+(`MixedGrossDrawdown::cap_exhausted`), que es quien lo sabe. Valía 8.138 € en P15; los dos pines
+dorados no se movieron.
 
 ## Public API
 

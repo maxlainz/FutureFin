@@ -894,6 +894,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "futurefin-engine-stochastic"
+version = "1.0.0"
+dependencies = [
+ "chrono",
+ "futurefin-engine",
+ "rust_decimal",
+ "uuid",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"

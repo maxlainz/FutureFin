@@ -346,7 +346,7 @@ grep -rn "new_v4" crates/engine/src/    # → nothing; tests use Uuid::from_u128
 
 # 4. No iteration-order nondeterminism: engine uses Vec everywhere; the one sort with potential
 #    ties (drain order) has an explicit deterministic tie-break:
-grep -n "then_with" crates/engine/src/projection.rs   # → `.then_with(|| i.cmp(&j))` in drain_from_assets
+grep -n "then_with" crates/engine/src/sim_core.rs      # → `.then_with(|| i.cmp(&j))` in drain_order_g
 ```
 
 Point 4 is a subtle one worth internalizing: `drain_from_assets` sorts assets (liquid first, then

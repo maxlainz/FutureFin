@@ -68,20 +68,29 @@
 //!
 //! # Bit-identidad con 4.15.0
 //!
-//! **Sin pensión con fecha, [`PlanFireTarget::at`] LLAMA a
-//! [`fire_target_at_month_index`](crate::fire_target_at_month_index)** en vez de reproducir su
-//! fórmula. No es elegancia: es la única forma de que el pin dorado no pueda moverse por un
-//! paréntesis. La misma disciplina rige la rama `i < P` de la perpetuidad, que es literalmente el
-//! objetivo de 4.15.0 evaluado en `i`.
+//! **Sin pensión con fecha, [`PlanTargetG::at`] LLAMA al objetivo de 4.15.0**
+//! ([`crate::sim_core::fire_target_at_index_g`]) en vez de reproducir su fórmula. No es
+//! elegancia: es la única forma de que el pin dorado no pueda moverse por un paréntesis. La misma
+//! disciplina rige la rama `i < P` de la perpetuidad, que es literalmente el objetivo de 4.15.0
+//! evaluado en `i`.
+//!
+//! # 5.0.0 WP5.5 — dos capas
+//!
+//! El evaluador de verdad es [`PlanTargetG`], genérico sobre [`MoneyOps`] y **sin lifetime**: el
+//! objetivo se le pasa como [`FireTargetView`] en cada llamada, que es `Copy` y presta los dos
+//! vectores en vez de copiarlos. [`PlanFireTarget`] es su cara pública en `Decimal`, con la misma
+//! firma que WP3 publicó.
 
 use rust_decimal::Decimal;
 
-use crate::phases::{PensionSchedule, PhasePlan, TargetBasis};
-use crate::projection::{
-    debt_term_at_month_index, fire_target_at_month_index, inflation_factor_at_month_index,
-    FireNeed, FireTarget,
+use crate::money::MoneyOps;
+use crate::phases::{PhasePlan, TargetBasis};
+use crate::projection::FireTarget;
+use crate::sim::{
+    FireNeedG, FireTargetView, PensionScheduleG, PhasePlanG, TaxBracketG,
 };
-use crate::tax::gross_up_net_annual_fire;
+use crate::sim_core::{debt_term_at_index_g, fire_target_at_index_g, inflation_factor_at_index_g};
+use crate::tax::gross_up_net_annual_fire_g;
 
 /// Tope del puente, en meses: 100 años. Una pensión declarada MÁS ALLÁ de este índice no cae
 /// dentro de ningún horizonte que este motor simule (el máximo publicado son 840 meses), así que
@@ -93,45 +102,44 @@ use crate::tax::gross_up_net_annual_fire;
 /// que esta casa no publica.
 pub const MAX_BRIDGE_MONTHS: u32 = 1_200;
 
-const TWELVE: Decimal = Decimal::from_parts(12, 0, 0, false, 0);
-const HUNDRED: Decimal = Decimal::from_parts(100, 0, 0, false, 0);
-
 /// Tabla del puente, calculada UNA vez por simulación.
 #[derive(Debug, Clone)]
-struct BridgeTable {
+struct BridgeTable<M> {
     /// `P`, el índice 0-based en que empieza la pensión.
     p: u32,
     /// `q(j) = (1+d)^{j/12}` para `j ∈ [0, P]`.
-    disc: Vec<Decimal>,
+    disc: Vec<M>,
     /// `T(i) = Σ_{m=i}^{P−1} G(m)/q(m)` para `i ∈ [0, P]` (`T(P) = 0`), con
     /// `G(m) = gross_up(12·need_full_m(m))/12` en €/mes.
-    suffix: Vec<Decimal>,
+    suffix: Vec<M>,
     /// `gross_up(12·need_net_m(P))/SWR`, en €. **0 exacto** cuando la pensión cubre el gasto
     /// entero — el escenario «la pensión llega para todo» de D15.
-    perp_at_p: Decimal,
+    perp_at_p: M,
 }
 
 /// El objetivo de jubilación de UN plan, listo para evaluarse en cualquier índice en `O(1)`.
 ///
-/// Se construye una vez por simulación (`PlanFireTarget::new`) y el bucle la consulta mes a mes.
-/// Es una FUNCIÓN pura de sus dos entradas: no guarda estado mutable ni depende del orden de las
-/// consultas.
+/// Se construye una vez por simulación y el bucle lo consulta mes a mes. Es una FUNCIÓN pura de
+/// sus entradas: no guarda estado mutable ni depende del orden de las consultas.
+///
+/// **El objetivo viaja como argumento, no como campo**, y a propósito: así el tipo no tiene
+/// lifetime y la cara pública en `Decimal` puede poseer la escala de tramos convertida sin
+/// convertirse en una estructura autorreferencial. El contrato es que se le pase SIEMPRE el mismo
+/// objetivo con el que se construyó — la tabla del puente se tabuló con él.
 #[derive(Debug, Clone)]
-pub struct PlanFireTarget<'a> {
-    target: Option<&'a FireTarget>,
-    pension: Option<PensionSchedule>,
+pub(crate) struct PlanTargetG<M: MoneyOps> {
+    pension: Option<PensionScheduleG<M>>,
     basis: TargetBasis,
     /// `Some` solo con base puente, pensión con fecha `P ∈ [1, MAX_BRIDGE_MONTHS]` y un objetivo
     /// que pasa la puerta de `i = 0`. En cualquier otro caso el puente degrada a perpetuidad.
-    bridge: Option<BridgeTable>,
+    bridge: Option<BridgeTable<M>>,
 }
 
-impl<'a> PlanFireTarget<'a> {
+impl<M: MoneyOps> PlanTargetG<M> {
     /// Construye el evaluador. Coste: `O(1)` sin pensión con fecha o sin base puente; `O(P)`
     /// (una potencia y un gross-up por mes hasta la pensión) con el puente activo.
-    pub fn new(target: Option<&'a FireTarget>, plan: &PhasePlan) -> Self {
+    pub(crate) fn new(target: Option<FireTargetView<'_, M>>, plan: &PhasePlanG<M>) -> Self {
         let mut out = Self {
-            target,
             pension: plan.pension,
             basis: plan.target_basis,
             bridge: None,
@@ -142,33 +150,37 @@ impl<'a> PlanFireTarget<'a> {
         if out.basis != TargetBasis::BridgeToPension {
             return out;
         }
-        // La MISMA puerta que `fire_target_base_at_month_index`: sin SWR positivo o sin necesidad
-        // HOY no hay objetivo en ningún mes, y tabular un puente para un objetivo que no existe
-        // sería trabajo para tirar.
-        if ft.swr_pct <= Decimal::ZERO || ft.need.annual_net_at(Decimal::ONE) <= Decimal::ZERO {
+        // La MISMA puerta que `fire_target_base_at_index_g`: sin SWR positivo o sin necesidad HOY
+        // no hay objetivo en ningún mes, y tabular un puente para un objetivo que no existe sería
+        // trabajo para tirar.
+        if ft.swr_pct <= M::zero() || ft.need.annual_net_at(M::one()) <= M::zero() {
             return out;
         }
         let p = pen.start_index;
         if p == 0 || p > MAX_BRIDGE_MONTHS {
-            // `p == 0`: la pensión ya está cobrándose, no hay puente que cruzar — todas las
-            // evaluaciones caen en la rama `i ≥ P`. `p > MAX`: degradación declarada (ver la
-            // constante).
+            // `p == 0`: la pensión ya está cobrándose, no hay puente que cruzar. `p > MAX`:
+            // degradación declarada (ver la constante).
             return out;
         }
-        out.bridge = Some(build_bridge_table(ft, pen, plan.bridge_discount_annual_pct, p));
+        out.bridge = Some(build_bridge_table(
+            ft,
+            pen,
+            plan.bridge_discount_annual_pct,
+            p,
+        ));
         out
     }
 
     /// El objetivo en el índice **0-based** `month_index`. `None` = no hay objetivo (sin
-    /// `FireTarget`, sin SWR positivo o sin necesidad hoy) — **nunca** «cero».
-    pub fn at(&self, month_index: u32) -> Option<Decimal> {
-        let ft = self.target?;
+    /// objetivo, sin SWR positivo o sin necesidad hoy) — **nunca** «cero».
+    pub(crate) fn at(&self, target: Option<FireTargetView<'_, M>>, month_index: u32) -> Option<M> {
+        let ft = target?;
         // Sin pensión con fecha, el objetivo es EL DE 4.15.0, llamado tal cual: bit-identidad por
         // construcción, no por revisión.
         let Some(pen) = self.pension else {
-            return fire_target_at_month_index(Some(ft), month_index);
+            return fire_target_at_index_g(Some(ft), month_index);
         };
-        if ft.swr_pct <= Decimal::ZERO || ft.need.annual_net_at(Decimal::ONE) <= Decimal::ZERO {
+        if ft.swr_pct <= M::zero() || ft.need.annual_net_at(M::one()) <= M::zero() {
             return None;
         }
 
@@ -180,30 +192,34 @@ impl<'a> PlanFireTarget<'a> {
                     let q_i = b.disc[i];
                     let bridge_sum = q_i * b.suffix[i];
                     let perp = if b.perp_at_p.is_zero() {
-                        Decimal::ZERO
+                        M::zero()
                     } else {
                         let q_p = b.disc[b.p as usize];
                         // `q(i)/q(P)` = `(1+d)^{−(P−i)/12}`. Un `q(P)` degenerado se lee como
                         // «sin descuento» en vez de panicar (el motor es una función pura).
-                        let ratio = if q_p > Decimal::ZERO {
-                            q_i.checked_div(q_p).unwrap_or(Decimal::ONE)
+                        let ratio = if q_p > M::zero() {
+                            q_i.checked_div(q_p).unwrap_or(M::one())
                         } else {
-                            Decimal::ONE
+                            M::one()
                         };
                         b.perp_at_p * ratio
                     };
-                    Some(bridge_sum + perp + debt_term_at_month_index(ft, month_index))
+                    Some(
+                        bridge_sum
+                            + perp
+                            + debt_term_at_index_g(ft.debt_payments_remaining, month_index),
+                    )
                 }
                 // PERPETUIDAD antes de `P` (y puente degradado): la pensión aún no existe, así
                 // que la necesidad es la ÍNTEGRA — que es exactamente el objetivo de 4.15.0.
-                None => fire_target_at_month_index(Some(ft), month_index),
+                None => fire_target_at_index_g(Some(ft), month_index),
             };
         }
 
         // `i ≥ P`: perpetuidad sobre la necesidad NETA de pensión, en las dos bases.
-        let debt = debt_term_at_month_index(ft, month_index);
-        let annual_net = self.annual_net_need_at(ft, pen, month_index);
-        if annual_net <= Decimal::ZERO {
+        let debt = debt_term_at_index_g(ft.debt_payments_remaining, month_index);
+        let annual_net = annual_net_need_at(ft, pen, month_index);
+        if annual_net <= M::zero() {
             // La pensión cubre el gasto entero: no hace falta capital para vivir, solo para la
             // deuda que quede. Cruce inmediato, y jamás `None` (B3 de la revisión).
             return Some(debt);
@@ -211,32 +227,29 @@ impl<'a> PlanFireTarget<'a> {
         Some(perpetuity_from_annual_net(ft, annual_net) + debt)
     }
 
-    /// `max(0, 12·(E·f(i) − I_persist) − 12·P_m(i))`, en €/AÑO. Privada porque el signo de esta
-    /// magnitud ya viaja en `at`.
-    fn annual_net_need_at(&self, ft: &FireTarget, pen: PensionSchedule, i: u32) -> Decimal {
-        let f = inflation_factor_at_month_index(ft.annual_inflation_percent, i);
-        let annual_full = ft.need.annual_net_at(f);
-        (annual_full - pen.monthly_at(i, f) * TWELVE).max(Decimal::ZERO)
-    }
-
     /// `12·need_full_m(i)` — la necesidad ÍNTEGRA del índice `i` en €/AÑO, **antes** de restar la
     /// pensión con fecha. `None` sin objetivo.
-    ///
-    /// Es la que alimenta `bridge_effective_withdrawal_pct`: la tasa de retirada que el hogar
-    /// tendría que sostener DURANTE el puente, cuando la pensión todavía no llega.
-    pub fn need_full_annual_at(&self, month_index: u32) -> Option<Decimal> {
-        let ft = self.target?;
-        let f = inflation_factor_at_month_index(ft.annual_inflation_percent, month_index);
+    pub(crate) fn need_full_annual_at(
+        &self,
+        target: Option<FireTargetView<'_, M>>,
+        month_index: u32,
+    ) -> Option<M> {
+        let ft = target?;
+        let f = inflation_factor_at_index_g(ft.annual_inflation_percent, month_index);
         Some(ft.need.annual_net_at(f))
     }
 
     /// `P_m(i)` en €/mes, con la inflación DEL OBJETIVO. `ZERO` sin pensión con fecha o antes de
     /// `P` (cero euros, no «no aplica»: la pensión existe y vale cero ese mes).
-    pub fn pension_monthly_at(&self, month_index: u32) -> Decimal {
-        let (Some(ft), Some(pen)) = (self.target, self.pension) else {
-            return Decimal::ZERO;
+    pub(crate) fn pension_monthly_at(
+        &self,
+        target: Option<FireTargetView<'_, M>>,
+        month_index: u32,
+    ) -> M {
+        let (Some(ft), Some(pen)) = (target, self.pension) else {
+            return M::zero();
         };
-        let f = inflation_factor_at_month_index(ft.annual_inflation_percent, month_index);
+        let f = inflation_factor_at_index_g(ft.annual_inflation_percent, month_index);
         pen.monthly_at(month_index, f)
     }
 
@@ -245,27 +258,34 @@ impl<'a> PlanFireTarget<'a> {
     /// No es la necesidad: `FireNeed::ExpenseMinusPension` le resta después el ingreso que
     /// persiste. Se publica aparte porque `pension_coverage_ratio` mide la pensión contra el
     /// GASTO («qué parte de lo que gasto me la paga la pensión»), no contra el hueco.
-    pub fn expense_monthly_at(&self, month_index: u32) -> Option<Decimal> {
-        let ft = self.target?;
-        let f = inflation_factor_at_month_index(ft.annual_inflation_percent, month_index);
-        Some(match &ft.need {
-            FireNeed::Indexed { annual_net_today } => *annual_net_today * f / TWELVE,
-            FireNeed::ExpenseMinusPension {
+    pub(crate) fn expense_monthly_at(
+        &self,
+        target: Option<FireTargetView<'_, M>>,
+        month_index: u32,
+    ) -> Option<M> {
+        let ft = target?;
+        let f = inflation_factor_at_index_g(ft.annual_inflation_percent, month_index);
+        Some(match ft.need {
+            FireNeedG::Indexed { annual_net_today } => {
+                annual_net_today * f / M::from_u32(12)
+            }
+            FireNeedG::ExpenseMinusPension {
                 expense_monthly, ..
-            } => *expense_monthly * f,
+            } => expense_monthly * f,
         })
     }
 
     /// `P_m(P)/(E·f(P))` — qué FRACCIÓN del gasto cubre la pensión el mes en que empieza (D15:
     /// el modelo la lee, no la supone). `None` sin pensión con fecha, sin objetivo, o con un
     /// gasto no positivo en `P` (no hay base contra la que medir — jamás un 0 inventado).
-    pub fn pension_coverage_ratio(&self) -> Option<Decimal> {
+    pub(crate) fn pension_coverage_ratio(&self, target: Option<FireTargetView<'_, M>>) -> Option<M> {
         let pen = self.pension?;
-        let expense = self.expense_monthly_at(pen.start_index)?;
-        if expense <= Decimal::ZERO {
+        let expense = self.expense_monthly_at(target, pen.start_index)?;
+        if expense <= M::zero() {
             return None;
         }
-        self.pension_monthly_at(pen.start_index).checked_div(expense)
+        self.pension_monthly_at(target, pen.start_index)
+            .checked_div(expense)
     }
 
     /// `gross_up(12·gap_m)/SWR` con el hueco que la media jornada deja abierto (§B.3):
@@ -280,50 +300,67 @@ impl<'a> PlanFireTarget<'a> {
     ///
     /// `Some(0)` = el hueco es cero (la media jornada se paga sola): cero euros, no «no aplica».
     /// `None` = no hay fase parcial, no hay objetivo, o el SWR no es positivo.
-    pub fn partial_gap_target(&self, plan: &PhasePlan, expense_regular: Decimal) -> Option<Decimal> {
-        let ft = self.target?;
-        if ft.swr_pct <= Decimal::ZERO {
+    pub(crate) fn partial_gap_target(
+        &self,
+        target: Option<FireTargetView<'_, M>>,
+        plan: &PhasePlanG<M>,
+        expense_regular: M,
+    ) -> Option<M> {
+        let ft = target?;
+        if ft.swr_pct <= M::zero() {
             return None;
         }
         let partial = plan.partial?;
         let basis_monthly = plan.partial_expense_basis_monthly(expense_regular)?;
         // `X.max(1) − 1`: un `start_month` de 0 arranca en el mes 1 del bucle, cuyo índice es 0.
         let i = partial.start_month.max(1) - 1;
-        let f = inflation_factor_at_month_index(ft.annual_inflation_percent, i);
+        let f = inflation_factor_at_index_g(ft.annual_inflation_percent, i);
         let pension_share = match self.pension {
             Some(pen) => pen.monthly_at(i, f) * pen.partial_fraction(),
-            None => Decimal::ZERO,
+            None => M::zero(),
         };
-        let gap = (basis_monthly * f - partial.income_monthly - pension_share).max(Decimal::ZERO);
-        if gap <= Decimal::ZERO {
-            return Some(Decimal::ZERO);
+        let gap = (basis_monthly * f - partial.income_monthly - pension_share).max(M::zero());
+        if gap <= M::zero() {
+            return Some(M::zero());
         }
-        Some(perpetuity_from_annual_net(ft, gap * TWELVE))
+        Some(perpetuity_from_annual_net(ft, gap * M::from_u32(12)))
     }
+}
+
+/// `max(0, 12·(E·f(i) − I_persist) − 12·P_m(i))`, en €/AÑO. Privada porque el signo de esta
+/// magnitud ya viaja en `at`.
+fn annual_net_need_at<M: MoneyOps>(
+    ft: FireTargetView<'_, M>,
+    pen: PensionScheduleG<M>,
+    i: u32,
+) -> M {
+    let f = inflation_factor_at_index_g(ft.annual_inflation_percent, i);
+    let annual_full = ft.need.annual_net_at(f);
+    (annual_full - pen.monthly_at(i, f) * M::from_u32(12)).max(M::zero())
 }
 
 /// `gross_up(net_annual)/(SWR/100)` — la perpetuidad, con la MISMA escala y el MISMO switch que
 /// el drenaje (#140). El llamante garantiza `swr_pct > 0` y `net_annual > 0`.
-fn perpetuity_from_annual_net(ft: &FireTarget, net_annual: Decimal) -> Decimal {
-    let gross = gross_up_net_annual_fire(
+fn perpetuity_from_annual_net<M: MoneyOps>(ft: FireTargetView<'_, M>, net_annual: M) -> M {
+    let gross = gross_up_net_annual_fire_g(
         net_annual,
-        &ft.tax_brackets,
+        ft.tax_brackets,
         ft.taxes_enabled,
         ft.taxable_gain_ratio,
     );
-    gross / (ft.swr_pct / HUNDRED)
+    gross / (ft.swr_pct / M::from_u32(100))
 }
 
-fn build_bridge_table(
-    ft: &FireTarget,
-    pen: PensionSchedule,
-    bridge_discount_annual_pct: Decimal,
+fn build_bridge_table<M: MoneyOps>(
+    ft: FireTargetView<'_, M>,
+    pen: PensionScheduleG<M>,
+    bridge_discount_annual_pct: M,
     p: u32,
-) -> BridgeTable {
+) -> BridgeTable<M> {
     // Un descuento ≤ −100 % dejaría la base `1 + d/100` en cero o negativa y `powd` sin raíz real.
     // Se lee como «sin descuento», que es la lectura conservadora (el puente sale MÁS caro).
-    let d_pct = if bridge_discount_annual_pct <= -HUNDRED {
-        Decimal::ZERO
+    let d_pct = if bridge_discount_annual_pct <= -M::from_u32(100) {
+        M::zero()
     } else {
         bridge_discount_annual_pct
     };
@@ -331,37 +368,36 @@ fn build_bridge_table(
     let n = p as usize;
     let mut disc = Vec::with_capacity(n + 1);
     for j in 0..=p {
-        disc.push(inflation_factor_at_month_index(d_pct, j));
+        disc.push(inflation_factor_at_index_g(d_pct, j));
     }
 
     // Suma SUFIJO, de `P−1` hacia 0: `T(i) = G(i)/q(i) + T(i+1)`, `T(P) = 0`.
-    let mut suffix = vec![Decimal::ZERO; n + 1];
+    let mut suffix = vec![M::zero(); n + 1];
     for m in (0..n).rev() {
-        let f = inflation_factor_at_month_index(ft.annual_inflation_percent, m as u32);
+        let f = inflation_factor_at_index_g(ft.annual_inflation_percent, m as u32);
         // `G(m) = gross_up_monthly(need_full_m(m))` escrito SIN el viaje de ida y vuelta por 12:
         // `gross_up_monthly(x)` es por definición `gross_up_annual(12x)/12`, y aquí el anual ya lo
-        // tenemos (`annual_net_at` es la misma expresión que 4.15.0 usa para el objetivo).
-        // Dividir por 12 lo que acabamos de multiplicar por 12 no cambiaría el valor pero sí los
-        // dígitos, y este término se suma cientos de veces.
+        // tenemos. Dividir por 12 lo que acabamos de multiplicar por 12 no cambiaría el valor pero
+        // sí los dígitos, y este término se suma cientos de veces.
         let annual_full = ft.need.annual_net_at(f);
-        let gross_monthly = gross_up_net_annual_fire(
+        let gross_monthly = gross_up_net_annual_fire_g(
             annual_full,
-            &ft.tax_brackets,
+            ft.tax_brackets,
             ft.taxes_enabled,
             ft.taxable_gain_ratio,
-        ) / TWELVE;
+        ) / M::from_u32(12);
         // `q(m) > 0` para cualquier `d > −100`; el fallback «sin descuento» solo protege de un
-        // `Decimal` degenerado, y NO puede quedarse corto (dividir por 1 da el término entero).
+        // valor degenerado, y NO puede quedarse corto (dividir por 1 da el término entero).
         let discounted = gross_monthly.checked_div(disc[m]).unwrap_or(gross_monthly);
         suffix[m] = discounted + suffix[m + 1];
     }
 
     // Perpetuidad en `P` sobre lo que la pensión NO cubre. `0` exacto si la cubre entera.
-    let f_p = inflation_factor_at_month_index(ft.annual_inflation_percent, p);
-    let annual_net_p = (ft.need.annual_net_at(f_p) - pen.monthly_at(p, f_p) * TWELVE)
-        .max(Decimal::ZERO);
-    let perp_at_p = if annual_net_p <= Decimal::ZERO {
-        Decimal::ZERO
+    let f_p = inflation_factor_at_index_g(ft.annual_inflation_percent, p);
+    let annual_net_p =
+        (ft.need.annual_net_at(f_p) - pen.monthly_at(p, f_p) * M::from_u32(12)).max(M::zero());
+    let perp_at_p = if annual_net_p <= M::zero() {
+        M::zero()
     } else {
         perpetuity_from_annual_net(ft, annual_net_p)
     };
@@ -374,12 +410,114 @@ fn build_bridge_table(
     }
 }
 
+/// El objetivo del plan en el índice `i`, de un solo disparo y **en el tipo del núcleo** — lo que
+/// consume `first_month_allocation`.
+pub(crate) fn plan_target_at<M: MoneyOps>(
+    target: Option<FireTargetView<'_, M>>,
+    plan: &PhasePlanG<M>,
+    month_index: u32,
+) -> Option<M> {
+    PlanTargetG::new(target, plan).at(target, month_index)
+}
+
+// =============================================================================================
+// Cara pública, en `Decimal`
+// =============================================================================================
+
+/// El objetivo de jubilación de UN plan, evaluable en `O(1)` en cualquier índice.
+///
+/// Cara pública de [`PlanTargetG`]: posee la escala de tramos ya convertida al tipo del núcleo
+/// (5 elementos, una vez) y presta el resto — en particular la serie de `debt_payments_remaining`,
+/// que puede tener 841 números y **no se copia en ninguna evaluación**.
+#[derive(Debug, Clone)]
+pub struct PlanFireTarget<'a> {
+    target: Option<&'a FireTarget>,
+    brackets: Vec<TaxBracketG<Decimal>>,
+    plan: PhasePlanG<Decimal>,
+    inner: PlanTargetG<Decimal>,
+}
+
+impl<'a> PlanFireTarget<'a> {
+    pub fn new(target: Option<&'a FireTarget>, plan: &PhasePlan) -> Self {
+        let brackets = target
+            .map(|ft| TaxBracketG::<Decimal>::from_decimal_slice(&ft.tax_brackets))
+            .unwrap_or_default();
+        let plan_g = PhasePlanG::<Decimal>::from(plan);
+        let inner = PlanTargetG::new(decimal_view(target, &brackets), &plan_g);
+        Self {
+            target,
+            brackets,
+            plan: plan_g,
+            inner,
+        }
+    }
+
+    fn view(&self) -> Option<FireTargetView<'_, Decimal>> {
+        decimal_view(self.target, &self.brackets)
+    }
+
+    /// El objetivo en el índice **0-based** `month_index`. `None` = no hay objetivo, nunca «cero».
+    pub fn at(&self, month_index: u32) -> Option<Decimal> {
+        self.inner.at(self.view(), month_index)
+    }
+
+    /// `12·need_full_m(i)`, €/año.
+    pub fn need_full_annual_at(&self, month_index: u32) -> Option<Decimal> {
+        self.inner.need_full_annual_at(self.view(), month_index)
+    }
+
+    /// `P_m(i)`, €/mes.
+    pub fn pension_monthly_at(&self, month_index: u32) -> Decimal {
+        self.inner.pension_monthly_at(self.view(), month_index)
+    }
+
+    /// `E·f(i)`, €/mes (sin restar nada).
+    pub fn expense_monthly_at(&self, month_index: u32) -> Option<Decimal> {
+        self.inner.expense_monthly_at(self.view(), month_index)
+    }
+
+    /// `P_m(P)/(E·f(P))`, FRACCIÓN.
+    pub fn pension_coverage_ratio(&self) -> Option<Decimal> {
+        self.inner.pension_coverage_ratio(self.view())
+    }
+
+    /// El capital que sostendría a perpetuidad el hueco de la media jornada. El `plan` que se
+    /// pasa aquí es el mismo con el que se construyó el evaluador.
+    pub fn partial_gap_target(
+        &self,
+        plan: &PhasePlan,
+        expense_regular: Decimal,
+    ) -> Option<Decimal> {
+        let _ = &self.plan;
+        let plan_g = PhasePlanG::<Decimal>::from(plan);
+        self.inner
+            .partial_gap_target(self.view(), &plan_g, expense_regular)
+    }
+}
+
+/// La vista prestada de un objetivo público, con la escala de tramos ya convertida.
+fn decimal_view<'b>(
+    target: Option<&'b FireTarget>,
+    brackets: &'b [TaxBracketG<Decimal>],
+) -> Option<FireTargetView<'b, Decimal>> {
+    let ft = target?;
+    Some(FireTargetView {
+        need: FireNeedG::from(&ft.need),
+        swr_pct: ft.swr_pct,
+        tax_brackets: brackets,
+        taxes_enabled: ft.taxes_enabled,
+        taxable_gain_ratio: ft.taxable_gain_ratio,
+        annual_inflation_percent: ft.annual_inflation_percent,
+        debt_payments_remaining: &ft.debt_payments_remaining,
+    })
+}
+
 /// El objetivo de un PLAN en el índice 0-based `month_index` — la versión de un solo disparo de
 /// [`PlanFireTarget`].
 ///
 /// **Contrato de bit-identidad**: con `plan.pension == None` devuelve EXACTAMENTE lo que devuelve
-/// [`fire_target_at_month_index`](crate::fire_target_at_month_index), porque lo LLAMA. Los dos
-/// pines dorados dependen de ello.
+/// [`fire_target_at_month_index`](crate::fire_target_at_month_index), porque ejecuta la misma
+/// función del núcleo. Los dos pines dorados dependen de ello.
 ///
 /// Coste: `O(P)` por llamada con el puente activo (reconstruye la tabla). Para recorrer una serie
 /// entera —el bucle, el chart— construye un [`PlanFireTarget`] UNA vez y consúltalo con
@@ -395,7 +533,8 @@ pub fn fire_target_at_month_index_with_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::phases::{ExpenseBasis, PartialPhase, PhasePlan};
+    use crate::phases::{ExpenseBasis, PartialPhase, PensionSchedule};
+    use crate::projection::{fire_target_at_month_index, inflation_factor_at_month_index, FireNeed};
     use crate::tax::TaxBracket;
 
     fn dec(s: &str) -> Decimal {

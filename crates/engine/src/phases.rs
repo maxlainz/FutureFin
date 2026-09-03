@@ -20,7 +20,6 @@
 
 use rust_decimal::Decimal;
 
-use crate::projection::EngineError;
 
 /// Qué dispara la jubilación TOTAL.
 ///
@@ -153,23 +152,12 @@ impl PensionSchedule {
     /// `inflation_factor_at_month_index` volvería a crear la fórmula doble que #139 cerró.
     ///
     /// Un importe negativo se lee como 0: una pensión negativa no es una pensión.
+    /// **5.0.0 WP5.5**: delega en el gemelo genérico
+    /// ([`crate::sim::PensionScheduleG::monthly_at`]) — una sola definición de `P_m(i)`, la que
+    /// el núcleo ejecuta. La cota `[0, 1]` de la fracción parcial vive allí por la misma razón.
     pub fn monthly_at(self, i: u32, inflation_factor: Decimal) -> Decimal {
-        if i < self.start_index {
-            return Decimal::ZERO;
-        }
-        let base = self.monthly_today.max(Decimal::ZERO);
-        if self.indexed {
-            base * inflation_factor
-        } else {
-            base
-        }
-    }
-
-    /// La fracción que se cobra durante [`Phase::Partial`], clampada a `[0, 1]`. La cota vive
-    /// aquí (y no en un `validate_*`) porque el motor es una función pura cuya firma admite
-    /// cualquier `Decimal`: clampar es la degradación DECLARADA, no un silencio.
-    pub(crate) fn partial_fraction(self) -> Decimal {
-        self.fraction_while_partial.clamp(Decimal::ZERO, Decimal::ONE)
+        self.to_generic::<Decimal>()
+            .monthly_at(i, inflation_factor)
     }
 }
 
@@ -205,19 +193,6 @@ pub struct IncomePause {
     /// Negativo se lee como 0: el motor es una función pura y su firma admite cualquier
     /// `Decimal`, pero un ingreso negativo no es una pausa.
     pub income_fraction: Decimal,
-}
-
-impl IncomePause {
-    /// Multiplicador que rige el mes `k` (1-based): `Some(fraction)` dentro de la ventana,
-    /// `None` fuera — y `None` significa «no multipliques», no «multiplica por 1»: así el mes
-    /// fuera de la ventana ejecuta EXACTAMENTE las mismas operaciones que sin pausa.
-    pub(crate) fn factor_at(&self, k: u32) -> Option<Decimal> {
-        if self.months == 0 {
-            return None;
-        }
-        let end = self.from_month.saturating_add(self.months);
-        (k >= self.from_month && k < end).then(|| self.income_fraction.max(Decimal::ZERO))
-    }
 }
 
 /// Fases del bucle, en orden monótono: una vez avanzada, no se vuelve atrás (latch #141
@@ -336,37 +311,11 @@ impl PhasePlan {
         }
     }
 
-    /// Puerta de entrada de las dos funciones que simulan (`project_net_worth_series` y
-    /// `first_month_allocation`): lo que el motor no sabe ejecutar NO se ejecuta.
-    ///
-    /// **WP3 retiró el rechazo de `partial` y `pension`**: las dos fases se simulan. Lo que sigue
-    /// aquí son los parámetros imposibles de una regla de retirada
-    /// ([`EngineError::InvalidWithdrawalRule`]). El resto de ejes nuevos degradan con clamps
-    /// DECLARADOS en el punto de uso (fracción de pensión a `[0,1]`, techo de aportación y
-    /// fracción de pausa a `≥ 0`) en vez de con un error: son multiplicadores, no capacidades.
-    pub(crate) fn ensure_supported(&self) -> Result<(), EngineError> {
-        crate::withdrawal::validate_rule(self.withdrawal)
-    }
-
-    /// Techo de aportación EFECTIVO del mes `k` (1-based). `None` = sin techo.
-    ///
-    /// El corte de `contributions_stop_month` manda sobre el techo constante: parar de aportar es
-    /// un techo de 0, no «el mínimo de los dos».
-    pub(crate) fn contribution_cap_at(&self, k: u32) -> Option<Decimal> {
-        if self.contributions_stop_month.is_some_and(|s| k >= s) {
-            return Some(Decimal::ZERO);
-        }
-        self.contribution_cap_monthly.map(|c| c.max(Decimal::ZERO))
-    }
-
-    /// El gasto (en euros de HOY, sin indexar) que rige en la fase parcial, según
-    /// [`PartialPhase::expense_basis`]. `None` si el plan no tiene fase parcial.
-    pub(crate) fn partial_expense_basis_monthly(&self, expense_regular: Decimal) -> Option<Decimal> {
-        self.partial.map(|p| match p.expense_basis {
-            ExpenseBasis::Retirement => self.expense_retirement_monthly,
-            ExpenseBasis::Regular => expense_regular,
-        })
-    }
+    // **5.0.0 WP5.5 — los tres helpers de comportamiento se mudaron al gemelo genérico**
+    // (`crate::sim::PhasePlanG`): `ensure_supported`, `contribution_cap_at` y
+    // `partial_expense_basis_monthly` son lo que EJECUTA el núcleo, y el núcleo ya no habla
+    // `Decimal`. Este tipo se queda como lo que siempre fue de cara afuera: la forma pública del
+    // plan, la que `apps/api` construye.
 }
 
 /// Avisos del motor. **WP3 le puso las tres primeras variantes**: el enum nació vacío en WP1b
@@ -411,6 +360,14 @@ impl EngineWarning {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projection::EngineError;
+    use crate::sim::PhasePlanG;
+
+    /// **WP5.5**: el COMPORTAMIENTO del plan vive en el gemelo genérico (es lo que el núcleo
+    /// ejecuta); este helper es la conversión, que es una copia campo a campo.
+    fn g(p: &PhasePlan) -> PhasePlanG<Decimal> {
+        PhasePlanG::from(p)
+    }
 
     #[test]
     fn classic_is_the_4_15_semantics() {
@@ -420,7 +377,7 @@ mod tests {
         assert_eq!(p.extra_monthly_withdrawal, Decimal::ZERO);
         assert_eq!(p.spend_mode, SpendMode::Ceiling);
         assert!(p.partial.is_none() && p.pension.is_none());
-        assert_eq!(p.ensure_supported(), Ok(()));
+        assert_eq!(g(&p).ensure_supported(), Ok(()));
     }
 
     #[test]
@@ -428,7 +385,7 @@ mod tests {
         let p = PhasePlan::forced_at(37, Decimal::ZERO, Decimal::from(2_000), Decimal::from(400));
         assert_eq!(p.retirement_trigger.forced_month(), Some(37));
         assert_eq!(p.extra_monthly_withdrawal, Decimal::from(400));
-        assert_eq!(p.ensure_supported(), Ok(()));
+        assert_eq!(g(&p).ensure_supported(), Ok(()));
     }
 
     /// Lo no implementado FALLA, no se ignora. Sin este control negativo, `ensure_supported`
@@ -456,14 +413,14 @@ mod tests {
         ] {
             let mut p = base.clone();
             p.withdrawal = rule;
-            assert_eq!(p.ensure_supported(), Ok(()), "{rule:?} se simula desde WP2");
+            assert_eq!(g(&p).ensure_supported(), Ok(()), "{rule:?} se simula desde WP2");
         }
 
         // Un porcentaje que no es un porcentaje: error TIPADO, no una simulación creativa.
         let mut p = base.clone();
         p.withdrawal = WithdrawalRule::PercentOfBalance { pct: Decimal::ZERO };
         assert_eq!(
-            p.ensure_supported(),
+            g(&p).ensure_supported(),
             Err(EngineError::InvalidWithdrawalRule),
             "un 0 % de retirada no es una regla, es una división del plan por cero"
         );
@@ -475,7 +432,7 @@ mod tests {
             income_monthly: Decimal::from(1_000),
             expense_basis: ExpenseBasis::Retirement,
         });
-        assert_eq!(p.ensure_supported(), Ok(()));
+        assert_eq!(g(&p).ensure_supported(), Ok(()));
 
         let mut p = base;
         p.pension = Some(PensionSchedule {
@@ -484,7 +441,7 @@ mod tests {
             indexed: true,
             fraction_while_partial: Decimal::ZERO,
         });
-        assert_eq!(p.ensure_supported(), Ok(()));
+        assert_eq!(g(&p).ensure_supported(), Ok(()));
     }
 
     /// La rejilla de la pensión es 0-based y el corte es `i ≥ start_index` — no `>`.
@@ -504,9 +461,9 @@ mod tests {
         assert_eq!(flat.monthly_at(240, Decimal::from(2)), Decimal::from(1_200));
 
         // Clamps declarados: fracción fuera de [0,1] e importe negativo.
-        assert_eq!(p.partial_fraction(), d(5, 1));
+        assert_eq!(p.to_generic::<Decimal>().partial_fraction(), d(5, 1));
         assert_eq!(
-            PensionSchedule { fraction_while_partial: Decimal::from(3), ..p }.partial_fraction(),
+            PensionSchedule { fraction_while_partial: Decimal::from(3), ..p }.to_generic::<Decimal>().partial_fraction(),
             Decimal::ONE
         );
         assert_eq!(
@@ -520,16 +477,16 @@ mod tests {
     #[test]
     fn contribution_cap_and_stop_month() {
         let mut p = PhasePlan::classic(Decimal::ZERO, Decimal::from(2_000));
-        assert_eq!(p.contribution_cap_at(1), None, "sin techo por defecto");
+        assert_eq!(g(&p).contribution_cap_at(1), None, "sin techo por defecto");
         p.contribution_cap_monthly = Some(Decimal::from(500));
-        assert_eq!(p.contribution_cap_at(1), Some(Decimal::from(500)));
+        assert_eq!(g(&p).contribution_cap_at(1), Some(Decimal::from(500)));
         p.contributions_stop_month = Some(60);
-        assert_eq!(p.contribution_cap_at(59), Some(Decimal::from(500)));
-        assert_eq!(p.contribution_cap_at(60), Some(Decimal::ZERO));
+        assert_eq!(g(&p).contribution_cap_at(59), Some(Decimal::from(500)));
+        assert_eq!(g(&p).contribution_cap_at(60), Some(Decimal::ZERO));
         // Un techo negativo se lee como 0, no como «sin techo».
         p.contributions_stop_month = None;
         p.contribution_cap_monthly = Some(Decimal::from(-1));
-        assert_eq!(p.contribution_cap_at(1), Some(Decimal::ZERO));
+        assert_eq!(g(&p).contribution_cap_at(1), Some(Decimal::ZERO));
     }
 
     /// La ventana de la pausa es SEMIABIERTA y `None` fuera significa «no multipliques».
@@ -540,17 +497,17 @@ mod tests {
             months: 3,
             income_fraction: d(5, 1),
         };
-        assert_eq!(pause.factor_at(9), None);
-        assert_eq!(pause.factor_at(10), Some(d(5, 1)));
-        assert_eq!(pause.factor_at(12), Some(d(5, 1)));
-        assert_eq!(pause.factor_at(13), None, "10, 11 y 12: tres meses, no cuatro");
+        assert_eq!(pause.to_generic::<Decimal>().factor_at(9), None);
+        assert_eq!(pause.to_generic::<Decimal>().factor_at(10), Some(d(5, 1)));
+        assert_eq!(pause.to_generic::<Decimal>().factor_at(12), Some(d(5, 1)));
+        assert_eq!(pause.to_generic::<Decimal>().factor_at(13), None, "10, 11 y 12: tres meses, no cuatro");
         assert_eq!(
-            IncomePause { months: 0, ..pause }.factor_at(10),
+            IncomePause { months: 0, ..pause }.to_generic::<Decimal>().factor_at(10),
             None,
             "una pausa de cero meses no es una pausa"
         );
         assert_eq!(
-            IncomePause { income_fraction: Decimal::from(-1), ..pause }.factor_at(10),
+            IncomePause { income_fraction: Decimal::from(-1), ..pause }.to_generic::<Decimal>().factor_at(10),
             Some(Decimal::ZERO)
         );
     }

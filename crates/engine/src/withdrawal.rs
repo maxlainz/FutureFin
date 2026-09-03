@@ -1,7 +1,7 @@
 //! **Reglas de retirada de la fase jubilada** (WP2 de 5.0.0, §B.2 del plan de la issue #207).
 //!
 //! Hasta 4.15.0 el motor tenía UNA regla y no la llamaba así: en cada mes jubilado con déficit
-//! vendía exactamente lo que la caja no cubría. Eso es [`WithdrawalRule::FixedReal`] — «gasto
+//! vendía exactamente lo que la caja no cubría. Eso es `WithdrawalRule::FixedReal` — «gasto
 //! fijo en euros de hoy», sin techo. Este módulo añade las otras tres del catálogo (D6) y el
 //! modo que decide cómo se relaciona la regla con el gasto declarado (D5):
 //!
@@ -25,12 +25,15 @@
 //!   un techo del 4 % es menor que ese 4 %, y eso es el contrato, no un error de unidad.
 //!
 //! El módulo NO vende: solo dice CUÁNTO se puede vender. Quien ejecuta la venta (y quien decide
-//! si además hay que vender en un mes de superávit, R7) es el bucle de `projection.rs`.
+//! si además hay que vender en un mes de superávit, R7) es el bucle de `sim_core.rs`.
+//!
+//! **5.0.0 WP5.5**: todo el módulo es genérico sobre [`MoneyOps`]. La instanciación `Decimal`
+//! ejecuta las mismas operaciones en el mismo orden que WP2 escribió — incluida la saturación a
+//! `Decimal::MAX` del techo de los guardarraíles, que aquí es `M::max_value()`.
 
-use rust_decimal::Decimal;
-
-use crate::phases::WithdrawalRule;
+use crate::money::MoneyOps;
 use crate::projection::EngineError;
+use crate::sim::WithdrawalRuleG;
 
 /// `pct/100 · balance / 12` — el permitido MENSUAL bruto de una regla de porcentaje.
 ///
@@ -42,11 +45,11 @@ use crate::projection::EngineError;
 ///
 /// Balance ≤ 0 (cartera vacía o en negativo) ⇒ permitido 0: un porcentaje de nada es nada, y
 /// nunca una retirada negativa.
-fn monthly_allowance(pct: Decimal, balance: Decimal) -> Decimal {
-    if balance <= Decimal::ZERO || pct <= Decimal::ZERO {
-        return Decimal::ZERO;
+fn monthly_allowance<M: MoneyOps>(pct: M, balance: M) -> M {
+    if balance <= M::zero() || pct <= M::zero() {
+        return M::zero();
     }
-    let twelve_hundred = Decimal::from(1_200u32);
+    let twelve_hundred = M::from_u32(1_200);
     match balance.checked_mul(pct) {
         Some(p) => p / twelve_hundred,
         None => (balance / twelve_hundred) * pct,
@@ -56,13 +59,13 @@ fn monthly_allowance(pct: Decimal, balance: Decimal) -> Decimal {
 /// Ancla de la fase jubilada: el mes en que empezó y los dos escalares que las reglas con memoria
 /// (hybrid, guardrails) necesitan para siempre.
 #[derive(Debug, Clone, Copy)]
-struct RetirementAnchor {
+struct RetirementAnchor<M> {
     /// `R`, 1-based (la base de `retirement_month_index`).
     month: u32,
     /// `L_R = L(R−1)`: líquido al cierre del mes anterior al primero jubilado.
-    liquid: Decimal,
+    liquid: M,
     /// `f(R−1)`: factor de inflación con el que el bucle indexó el gasto de ese primer mes.
-    factor: Decimal,
+    factor: M,
 }
 
 /// Estado de la regla de retirada a lo largo de la simulación.
@@ -73,26 +76,26 @@ struct RetirementAnchor {
 /// modelo — Guyton-Klinger sin ratchet acumulado no es Guyton-Klinger. Llamarla dos veces el
 /// mismo mes revisaría el guardarraíl dos veces.
 #[derive(Debug, Clone)]
-pub(crate) struct WithdrawalPlanner {
-    rule: WithdrawalRule,
-    anchor: Option<RetirementAnchor>,
+pub(crate) struct WithdrawalPlanner<M: MoneyOps> {
+    rule: WithdrawalRuleG<M>,
+    anchor: Option<RetirementAnchor<M>>,
     /// `hybrid`: el latch ya cerró y rige `end_pct`. Monótono, como todos los latches del motor.
     hybrid_end_latched: bool,
     /// `guardrails`: producto acumulado de los ajustes disparados. Multiplica a `W_R`, NO al
     /// `W` del mes: así la indexación por inflación sigue funcionando sobre la base ajustada.
-    guardrail_multiplier: Decimal,
+    guardrail_multiplier: M,
     /// Último mes servido, solo para el `debug_assert` del contrato de uso.
     #[cfg(debug_assertions)]
     last_month: u32,
 }
 
-impl WithdrawalPlanner {
-    pub(crate) fn new(rule: WithdrawalRule) -> Self {
+impl<M: MoneyOps> WithdrawalPlanner<M> {
+    pub(crate) fn new(rule: WithdrawalRuleG<M>) -> Self {
         Self {
             rule,
             anchor: None,
             hybrid_end_latched: false,
-            guardrail_multiplier: Decimal::ONE,
+            guardrail_multiplier: M::one(),
             #[cfg(debug_assertions)]
             last_month: 0,
         }
@@ -100,7 +103,7 @@ impl WithdrawalPlanner {
 
     /// Fija el ancla de la jubilación la PRIMERA vez que se llama; después es no-op (el latch de
     /// jubilación del bucle es absorbente, #141, así que el ancla tampoco se mueve).
-    pub(crate) fn anchor_retirement(&mut self, month: u32, liquid_prev: Decimal, factor: Decimal) {
+    pub(crate) fn anchor_retirement(&mut self, month: u32, liquid_prev: M, factor: M) {
         if self.anchor.is_none() {
             self.anchor = Some(RetirementAnchor {
                 month,
@@ -115,12 +118,7 @@ impl WithdrawalPlanner {
     ///
     /// `liquid_prev` = `L(k−1)`, `factor` = `f(k−1)`: los dos valores que el bucle ya tiene en la
     /// mano ese mes. Nada se recalcula aquí.
-    pub(crate) fn allowed_gross(
-        &mut self,
-        month: u32,
-        liquid_prev: Decimal,
-        factor: Decimal,
-    ) -> Option<Decimal> {
+    pub(crate) fn allowed_gross(&mut self, month: u32, liquid_prev: M, factor: M) -> Option<M> {
         #[cfg(debug_assertions)]
         {
             debug_assert!(
@@ -136,9 +134,9 @@ impl WithdrawalPlanner {
             // Sin techo: el permitido ES la necesidad del mes, que el bucle ya conoce. Devolver
             // `None` (y no la necesidad) es lo que hace que la rama de déficit siga siendo la de
             // 4.15.0 operando a operando.
-            WithdrawalRule::FixedReal => None,
-            WithdrawalRule::PercentOfBalance { pct } => Some(monthly_allowance(pct, liquid_prev)),
-            WithdrawalRule::Hybrid { start_pct, end_pct } => {
+            WithdrawalRuleG::FixedReal => None,
+            WithdrawalRuleG::PercentOfBalance { pct } => Some(monthly_allowance(pct, liquid_prev)),
+            WithdrawalRuleG::Hybrid { start_pct, end_pct } => {
                 if !self.hybrid_end_latched
                     && self.hybrid_switch_reached(start_pct, end_pct, liquid_prev, factor, &anchor)
                 {
@@ -151,7 +149,7 @@ impl WithdrawalPlanner {
                 };
                 Some(monthly_allowance(pct, liquid_prev))
             }
-            WithdrawalRule::Guardrails {
+            WithdrawalRuleG::Guardrails {
                 pct,
                 band_pct,
                 adjust_pct,
@@ -179,11 +177,11 @@ impl WithdrawalPlanner {
     /// denormal) se lee como «sin indexación» en vez de panicar: el motor es una función pura.
     fn hybrid_switch_reached(
         &self,
-        start_pct: Decimal,
-        end_pct: Decimal,
-        liquid_prev: Decimal,
-        factor: Decimal,
-        anchor: &RetirementAnchor,
+        start_pct: M,
+        end_pct: M,
+        liquid_prev: M,
+        factor: M,
+        anchor: &RetirementAnchor<M>,
     ) -> bool {
         let indexation = indexation_factor(factor, anchor.factor);
         let end_withdrawal = monthly_allowance(end_pct, liquid_prev);
@@ -198,20 +196,15 @@ impl WithdrawalPlanner {
     }
 
     /// `W_k = W_R · mult · f(k−1)/f(R−1)` — la retirada de Guyton-Klinger del mes, en bruto.
-    fn guardrail_withdrawal(
-        &self,
-        pct: Decimal,
-        factor: Decimal,
-        anchor: &RetirementAnchor,
-    ) -> Decimal {
+    fn guardrail_withdrawal(&self, pct: M, factor: M, anchor: &RetirementAnchor<M>) -> M {
         let base = monthly_allowance(pct, anchor.liquid);
         let indexation = indexation_factor(factor, anchor.factor);
         base.checked_mul(self.guardrail_multiplier)
             .and_then(|v| v.checked_mul(indexation))
             // Un techo que no cabe en `Decimal` no ata ninguna venta real; saturar es la lectura
             // honesta («sin límite práctico») y no panica.
-            .unwrap_or(Decimal::MAX)
-            .max(Decimal::ZERO)
+            .unwrap_or(M::max_value())
+            .max(M::zero())
     }
 
     /// Las DOS reglas de Guyton-Klinger 2006 que este motor implementa, sobre la tasa efectiva
@@ -233,19 +226,19 @@ impl WithdrawalPlanner {
     /// los guardarraíles solo tienen sentido pleno con Monte Carlo (WP6).
     fn review_guardrails(
         &mut self,
-        pct: Decimal,
-        band_pct: Decimal,
-        adjust_pct: Decimal,
-        current_withdrawal: Decimal,
-        liquid_prev: Decimal,
+        pct: M,
+        band_pct: M,
+        adjust_pct: M,
+        current_withdrawal: M,
+        liquid_prev: M,
     ) {
-        if liquid_prev <= Decimal::ZERO {
+        if liquid_prev <= M::zero() {
             // Sin cartera no hay tasa efectiva que medir (y `x/0` panica). El multiplicador se
             // queda como está: no se inventa un ajuste sobre una división imposible.
             return;
         }
-        let hundred = Decimal::from(100u32);
-        let annual = match current_withdrawal.checked_mul(Decimal::from(12u32)) {
+        let hundred = M::from_u32(100);
+        let annual = match current_withdrawal.checked_mul(M::from_u32(12)) {
             Some(v) => v,
             None => return,
         };
@@ -254,10 +247,12 @@ impl WithdrawalPlanner {
         };
         let ratio_0 = pct / hundred;
         let band = band_pct / hundred;
-        if ratio > ratio_0 * (Decimal::ONE + band) {
-            self.guardrail_multiplier *= Decimal::ONE - adjust_pct / hundred;
-        } else if ratio < ratio_0 * (Decimal::ONE - band) {
-            self.guardrail_multiplier *= Decimal::ONE + adjust_pct / hundred;
+        if ratio > ratio_0 * (M::one() + band) {
+            self.guardrail_multiplier =
+                self.guardrail_multiplier * (M::one() - adjust_pct / hundred);
+        } else if ratio < ratio_0 * (M::one() - band) {
+            self.guardrail_multiplier =
+                self.guardrail_multiplier * (M::one() + adjust_pct / hundred);
         }
     }
 }
@@ -266,11 +261,11 @@ impl WithdrawalPlanner {
 /// `Decimal`, se lee como 1 (sin indexación). Ninguna inflación que la API acepta ([−2, 50] %)
 /// llega ahí — el factor de −2 % a 70 años sigue valiendo 0,24 —, pero el motor es una función
 /// pura y no puede panicar con una entrada que su firma admite.
-fn indexation_factor(factor: Decimal, anchor_factor: Decimal) -> Decimal {
-    if anchor_factor <= Decimal::ZERO {
-        return Decimal::ONE;
+fn indexation_factor<M: MoneyOps>(factor: M, anchor_factor: M) -> M {
+    if anchor_factor <= M::zero() {
+        return M::one();
     }
-    factor.checked_div(anchor_factor).unwrap_or(Decimal::ONE)
+    factor.checked_div(anchor_factor).unwrap_or(M::one())
 }
 
 /// Cotas que el MOTOR exige a una regla. No duplican las de la API (`pct` en (0, 20],
@@ -279,13 +274,13 @@ fn indexation_factor(factor: Decimal, anchor_factor: Decimal) -> Decimal {
 /// función pura: **rechaza con un error tipado, nunca panica ni degrada en silencio a otra
 /// regla** (una regla aceptada y simulada como otra publicaría el patrimonio de un plan que nadie
 /// configuró).
-pub(crate) fn validate_rule(rule: WithdrawalRule) -> Result<(), EngineError> {
-    let positive = |x: Decimal| x > Decimal::ZERO;
+pub(crate) fn validate_rule<M: MoneyOps>(rule: WithdrawalRuleG<M>) -> Result<(), EngineError> {
+    let positive = |x: M| x > M::zero();
     let ok = match rule {
-        WithdrawalRule::FixedReal => true,
-        WithdrawalRule::PercentOfBalance { pct } => positive(pct),
-        WithdrawalRule::Hybrid { start_pct, end_pct } => positive(start_pct) && positive(end_pct),
-        WithdrawalRule::Guardrails {
+        WithdrawalRuleG::FixedReal => true,
+        WithdrawalRuleG::PercentOfBalance { pct } => positive(pct),
+        WithdrawalRuleG::Hybrid { start_pct, end_pct } => positive(start_pct) && positive(end_pct),
+        WithdrawalRuleG::Guardrails {
             pct,
             band_pct,
             adjust_pct,
@@ -295,7 +290,7 @@ pub(crate) fn validate_rule(rule: WithdrawalRule) -> Result<(), EngineError> {
                 && positive(adjust_pct)
                 // Un ajuste ≥ 100 % dejaría la retirada en cero (o negativa) para siempre al
                 // primer recorte: no es un guardarraíl, es un interruptor.
-                && adjust_pct < Decimal::from(100u32)
+                && adjust_pct < M::from_u32(100)
         }
     };
     if ok {
@@ -308,7 +303,8 @@ pub(crate) fn validate_rule(rule: WithdrawalRule) -> Result<(), EngineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::phases::{PhasePlan, RetirementTrigger, SpendMode};
+    use crate::phases::{PhasePlan, RetirementTrigger, SpendMode, WithdrawalRule};
+    use rust_decimal::Decimal;
     use crate::projection::{
         project_net_worth_series, AllocationKind, AllocationRule, ProjectionInput,
         ProjectionOutput, SimAsset,
@@ -413,7 +409,7 @@ mod tests {
             },
         ] {
             assert_eq!(
-                validate_rule(rule),
+                validate_rule(rule.to_generic::<Decimal>()),
                 Err(EngineError::InvalidWithdrawalRule),
                 "{rule:?} no puede aceptarse"
             );
@@ -432,7 +428,7 @@ mod tests {
                 "y el bucle tampoco la simula: {rule:?}"
             );
         }
-        assert_eq!(validate_rule(WithdrawalRule::FixedReal), Ok(()));
+        assert_eq!(validate_rule(WithdrawalRule::FixedReal.to_generic::<Decimal>()), Ok(()));
     }
 
     // ── `percent_of_balance` ────────────────────────────────────────────────────────────────

@@ -7,13 +7,26 @@
 //!
 //! El espejo TS (preview del formulario) es `apps/web/src/lib/fire.ts`
 //! (`taxOnGrossCapitalAnnual` / `grossUpNetAnnualFire`), atado por `fire-parity.json`.
+//!
+//! **5.0.0 WP5.5 — el paseo es GENÉRICO.** Toda la aritmética de este módulo vive ahora en
+//! funciones `*_g` parametrizadas por [`MoneyOps`]; las cuatro funciones públicas son envoltorios
+//! `Decimal` que solo CONVIERTEN la escala de tramos (una copia, sin una sola operación) y
+//! delegan. El núcleo de simulación no pasa por los envoltorios: su `SimInput` ya lleva la escala
+//! en el tipo del núcleo, así que un mes de simulación no convierte nada.
 
 use rust_decimal::Decimal;
+
+use crate::money::MoneyOps;
+use crate::sim::TaxBracketG;
 
 /// Tramo de la escala del ahorro. `up_to = None` = tramo abierto (el último por contrato:
 /// `validate_tax_brackets` en la API lo exige). La serde (Decimal-as-string) es EXACTAMENTE la
 /// histórica del tipo cuando vivía en `installation.rs` — el JSONB almacenado de `fire_settings`
 /// deserializa idéntico.
+///
+/// **Es el tipo PÚBLICO y sigue siendo `Decimal`**: su gemelo aritmético
+/// ([`crate::sim::TaxBracketG`]) existe solo dentro del núcleo. Tocar este tipo es tocar un
+/// contrato persistido; tocar aquel es tocar una copia en memoria.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct TaxBracket {
@@ -28,23 +41,32 @@ pub struct TaxBracket {
 /// Impuesto sobre una base bruta anual, escala MARGINAL por tramos. Producción desde la Ola 6
 /// (el `undrained` neto y el after-tax del drain la necesitan); antes era un helper de test.
 pub fn tax_on_gross_capital_annual(gross: Decimal, brackets: &[TaxBracket]) -> Decimal {
-    if gross <= Decimal::ZERO || brackets.is_empty() {
-        return Decimal::ZERO;
+    tax_on_gross_capital_annual_g(gross, &TaxBracketG::<Decimal>::from_decimal_slice(brackets))
+}
+
+/// El paseo por tramos, en el tipo del núcleo. Misma expresión, mismo orden y mismos paréntesis
+/// que la versión `Decimal` de 4.15.0.
+pub(crate) fn tax_on_gross_capital_annual_g<M: MoneyOps>(
+    gross: M,
+    brackets: &[TaxBracketG<M>],
+) -> M {
+    if gross <= M::zero() || brackets.is_empty() {
+        return M::zero();
     }
-    let mut prev_ceiling = Decimal::ZERO;
-    let mut tax = Decimal::ZERO;
+    let mut prev_ceiling = M::zero();
+    let mut tax = M::zero();
     for b in brackets {
-        let r = b.pct / Decimal::from(100u32);
+        let r = b.pct / M::from_u32(100);
         match b.up_to {
             None => {
-                let taxable = (gross - prev_ceiling).max(Decimal::ZERO);
-                tax += taxable * r;
+                let taxable = (gross - prev_ceiling).max(M::zero());
+                tax = tax + taxable * r;
                 break;
             }
             Some(ceiling) => {
                 let slice_end = gross.min(ceiling);
-                let taxable = (slice_end - prev_ceiling).max(Decimal::ZERO);
-                tax += taxable * r;
+                let taxable = (slice_end - prev_ceiling).max(M::zero());
+                tax = tax + taxable * r;
                 prev_ceiling = ceiling;
                 if gross <= ceiling {
                     break;
@@ -66,35 +88,49 @@ pub fn gross_up_monthly(
     taxes_enabled: bool,
     taxable_gain_ratio: Decimal,
 ) -> Decimal {
-    if !taxes_enabled || net_monthly <= Decimal::ZERO {
-        return net_monthly.max(Decimal::ZERO);
+    gross_up_monthly_g(
+        net_monthly,
+        &TaxBracketG::<Decimal>::from_decimal_slice(brackets),
+        taxes_enabled,
+        taxable_gain_ratio,
+    )
+}
+
+pub(crate) fn gross_up_monthly_g<M: MoneyOps>(
+    net_monthly: M,
+    brackets: &[TaxBracketG<M>],
+    taxes_enabled: bool,
+    taxable_gain_ratio: M,
+) -> M {
+    if !taxes_enabled || net_monthly <= M::zero() {
+        return net_monthly.max(M::zero());
     }
-    gross_up_net_annual_fire(
-        net_monthly * Decimal::from(12u32),
+    gross_up_net_annual_fire_g(
+        net_monthly * M::from_u32(12),
         brackets,
         taxes_enabled,
         taxable_gain_ratio,
-    ) / Decimal::from(12u32)
+    ) / M::from_u32(12)
 }
 
 /// Un tramo del drenaje mixto (#178): capacidad vendible MENSUAL (≥ 0, ya clampada por el
 /// caller) y su fracción de plusvalía gravable `g` ∈ [0,1], en el ORDEN de drenaje.
 #[derive(Debug, Clone, Copy)]
-pub struct MixedSegment {
-    pub capacity_monthly: Decimal,
-    pub gain_ratio: Decimal,
+pub struct MixedSegment<M> {
+    pub capacity_monthly: M,
+    pub gain_ratio: M,
 }
 
 /// Resultado del solver mixto (#178). Todo MENSUAL, como el par `gross_up_monthly` /
 /// `after_tax_monthly` al que sustituye en la rama de déficit.
 #[derive(Debug, Clone)]
-pub struct MixedDrawdown {
+pub struct MixedDrawdown<M> {
     /// Venta bruta total del mes.
-    pub gross_monthly: Decimal,
+    pub gross_monthly: M,
     /// Paralelo a `segments`: bruto vendido de cada tramo.
-    pub per_segment_monthly: Vec<Decimal>,
+    pub per_segment_monthly: Vec<M>,
     /// Neto que las capacidades no llegaron a cubrir (descubierto del mes, en euros de GASTO).
-    pub net_shortfall_monthly: Decimal,
+    pub net_shortfall_monthly: M,
 }
 
 /// Gross-up EXACTO con `g` POR TRAMO (#178): el bruto mínimo que, vendido secuencialmente sobre
@@ -125,19 +161,19 @@ pub struct MixedDrawdown {
 /// `rust_decimal` redondea a 28 dígitos) — la rama de déficit y el runway usan el camino
 /// literal de 4.11.0 cuando todos los `g` coinciden, y este solver solo cuando de verdad hay
 /// mezcla.
-pub fn gross_up_mixed_monthly(
-    net_monthly: Decimal,
-    segments: &[MixedSegment],
-    brackets: &[TaxBracket],
+pub fn gross_up_mixed_monthly<M: MoneyOps>(
+    net_monthly: M,
+    segments: &[MixedSegment<M>],
+    brackets: &[TaxBracketG<M>],
     taxes_enabled: bool,
-) -> MixedDrawdown {
-    let twelve = Decimal::from(12u32);
+) -> MixedDrawdown<M> {
+    let twelve = M::from_u32(12);
     let mut out = MixedDrawdown {
-        gross_monthly: Decimal::ZERO,
-        per_segment_monthly: vec![Decimal::ZERO; segments.len()],
-        net_shortfall_monthly: Decimal::ZERO,
+        gross_monthly: M::zero(),
+        per_segment_monthly: vec![M::zero(); segments.len()],
+        net_shortfall_monthly: M::zero(),
     };
-    if net_monthly <= Decimal::ZERO {
+    if net_monthly <= M::zero() {
         return out;
     }
     let n_annual = net_monthly * twelve;
@@ -146,32 +182,32 @@ pub fn gross_up_mixed_monthly(
         // Llenado secuencial puro: cada euro bruto netea un euro.
         let mut remaining = n_annual;
         for (j, s) in segments.iter().enumerate() {
-            if remaining <= Decimal::ZERO {
+            if remaining <= M::zero() {
                 break;
             }
-            let take = (s.capacity_monthly * twelve).max(Decimal::ZERO).min(remaining);
+            let take = (s.capacity_monthly * twelve).max(M::zero()).min(remaining);
             out.per_segment_monthly[j] = take / twelve;
-            out.gross_monthly += take / twelve;
-            remaining -= take;
+            out.gross_monthly = out.gross_monthly + take / twelve;
+            remaining = remaining - take;
         }
-        out.net_shortfall_monthly = remaining.max(Decimal::ZERO) / twelve;
+        out.net_shortfall_monthly = remaining.max(M::zero()) / twelve;
         return out;
     }
 
-    let hundred = Decimal::from(100u32);
-    let mut base = Decimal::ZERO; // base imponible ANUAL acumulada
-    let mut net_acc = Decimal::ZERO;
-    let mut gross_annual = Decimal::ZERO;
+    let hundred = M::from_u32(100);
+    let mut base = M::zero(); // base imponible ANUAL acumulada
+    let mut net_acc = M::zero();
+    let mut gross_annual = M::zero();
     let mut m = 0usize; // índice de tramo fiscal — monótono, nunca retrocede
 
     for (j, s) in segments.iter().enumerate() {
-        let mut cap = (s.capacity_monthly * twelve).max(Decimal::ZERO);
-        let g = s.gain_ratio.clamp(Decimal::ZERO, Decimal::ONE);
-        let mut taken_annual = Decimal::ZERO;
-        while cap > Decimal::ZERO && net_acc < n_annual && m < brackets.len() {
+        let mut cap = (s.capacity_monthly * twelve).max(M::zero());
+        let g = s.gain_ratio.clamp(M::zero(), M::one());
+        let mut taken_annual = M::zero();
+        while cap > M::zero() && net_acc < n_annual && m < brackets.len() {
             let r = brackets[m].pct / hundred;
-            let den = Decimal::ONE - r * g;
-            if den <= Decimal::ZERO {
+            let den = M::one() - r * g;
+            if den <= M::zero() {
                 // Tipo efectivo ≥ 100 % para ESTE g: nada de lo que quede en este tramo netea.
                 break;
             }
@@ -193,7 +229,7 @@ pub fn gross_up_mixed_monthly(
                 None => cap,
             };
             // …topado por el techo del tramo fiscal (la base llena el tramo)…
-            if g > Decimal::ZERO {
+            if g > M::zero() {
                 if let Some(ceiling) = brackets[m].up_to {
                     // `g` denormal: la venta que haría falta para llenar el tramo fiscal no es
                     // representable ⇒ este tramo no se llena nunca con este activo y el tope no
@@ -207,14 +243,14 @@ pub fn gross_up_mixed_monthly(
             }
             // …y por la capacidad del activo.
             x = x.min(cap);
-            if x <= Decimal::ZERO {
+            if x <= M::zero() {
                 break;
             }
-            net_acc += x * den;
-            base += x * g;
-            gross_annual += x;
-            cap -= x;
-            taken_annual += x;
+            net_acc = net_acc + x * den;
+            base = base + x * g;
+            gross_annual = gross_annual + x;
+            cap = cap - x;
+            taken_annual = taken_annual + x;
             if let Some(ceiling) = brackets[m].up_to {
                 if base >= ceiling {
                     m += 1;
@@ -224,7 +260,7 @@ pub fn gross_up_mixed_monthly(
         out.per_segment_monthly[j] = taken_annual / twelve;
     }
     out.gross_monthly = gross_annual / twelve;
-    out.net_shortfall_monthly = (n_annual - net_acc).max(Decimal::ZERO) / twelve;
+    out.net_shortfall_monthly = (n_annual - net_acc).max(M::zero()) / twelve;
     out
 }
 
@@ -232,14 +268,26 @@ pub fn gross_up_mixed_monthly(
 /// qué netea. Es el gemelo de [`MixedDrawdown`] con la flecha al revés — allí se conoce el neto
 /// que hace falta, aquí el bruto que la regla de retirada permite (§B.2 del plan de #207).
 #[derive(Debug, Clone)]
-pub struct MixedGrossDrawdown {
+pub struct MixedGrossDrawdown<M> {
     /// Bruto realmente vendido: el techo, o menos si las capacidades no llegan.
-    pub gross_monthly: Decimal,
+    pub gross_monthly: M,
     /// Paralelo a `segments`: bruto vendido de cada tramo.
-    pub per_segment_monthly: Vec<Decimal>,
+    pub per_segment_monthly: Vec<M>,
     /// Neto que esa venta deja en el bolsillo, tras el impuesto por tramos sobre la base
     /// agregada `Σ g_i·venta_i`.
-    pub net_monthly: Decimal,
+    pub net_monthly: M,
+    /// **¿Se vendió el techo ENTERO?** `false` ⟺ las capacidades se agotaron antes (la cartera no
+    /// daba para el techo que la regla permitía).
+    ///
+    /// Lo dice el paseo, que es quien lo sabe: `remaining ≤ 0` al terminar. El caller lo
+    /// necesitaba y hasta 5.0.0 WP5.5 lo DEDUCÍA comparando `gross_monthly ≥ gross_cap`, que es
+    /// exacto en `Decimal` pero un filo de navaja en aritmética aproximada — `(a·12)/12` puede
+    /// caer un ulp por debajo de `a` y convertir «se vendió todo» en «faltó capacidad», que es
+    /// una rama COMPLETAMENTE distinta del reparto de magnitudes (recorte informativo vs
+    /// descubierto que resta patrimonio). Publicar el booleano en vez de re-derivarlo cierra esa
+    /// clase entera de divergencia: medido en la puerta de degeneración de
+    /// `crates/engine-stochastic`, valía 8.138 € de patrimonio en el caso P15.
+    pub cap_exhausted: bool,
 }
 
 /// **Paseo DIRECTO por el mapa lineal a trozos** (5.0.0 WP2): vende exactamente `gross_cap`
@@ -266,19 +314,22 @@ pub struct MixedGrossDrawdown {
 /// `gross_cap ≤ 0` ⇒ no se vende nada. Un tipo efectivo ≥ 100 % sobre un tramo (que la API no
 /// permite: los `pct` están acotados) haría el neto marginal negativo; el resultado se publica
 /// clampado a 0 porque **vender no puede costarle dinero al hogar** en este modelo.
-pub fn mixed_drawdown_for_gross_cap(
-    gross_cap_monthly: Decimal,
-    segments: &[MixedSegment],
-    brackets: &[TaxBracket],
+pub fn mixed_drawdown_for_gross_cap<M: MoneyOps>(
+    gross_cap_monthly: M,
+    segments: &[MixedSegment<M>],
+    brackets: &[TaxBracketG<M>],
     taxes_enabled: bool,
-) -> MixedGrossDrawdown {
-    let twelve = Decimal::from(12u32);
+) -> MixedGrossDrawdown<M> {
+    let twelve = M::from_u32(12);
     let mut out = MixedGrossDrawdown {
-        gross_monthly: Decimal::ZERO,
-        per_segment_monthly: vec![Decimal::ZERO; segments.len()],
-        net_monthly: Decimal::ZERO,
+        gross_monthly: M::zero(),
+        per_segment_monthly: vec![M::zero(); segments.len()],
+        net_monthly: M::zero(),
+        cap_exhausted: false,
     };
-    if gross_cap_monthly <= Decimal::ZERO {
+    if gross_cap_monthly <= M::zero() {
+        // Un techo no positivo no deja nada por vender: se «agotó» por definición.
+        out.cap_exhausted = true;
         return out;
     }
     let cap_annual = gross_cap_monthly * twelve;
@@ -286,40 +337,39 @@ pub fn mixed_drawdown_for_gross_cap(
     if !taxes_enabled {
         let mut remaining = cap_annual;
         for (j, s) in segments.iter().enumerate() {
-            if remaining <= Decimal::ZERO {
+            if remaining <= M::zero() {
                 break;
             }
-            let take = (s.capacity_monthly * twelve)
-                .max(Decimal::ZERO)
-                .min(remaining);
+            let take = (s.capacity_monthly * twelve).max(M::zero()).min(remaining);
             out.per_segment_monthly[j] = take / twelve;
-            out.gross_monthly += take / twelve;
-            remaining -= take;
+            out.gross_monthly = out.gross_monthly + take / twelve;
+            remaining = remaining - take;
         }
         out.net_monthly = out.gross_monthly;
+        out.cap_exhausted = remaining <= M::zero();
         return out;
     }
 
-    let hundred = Decimal::from(100u32);
-    let mut base = Decimal::ZERO; // base imponible ANUAL acumulada
-    let mut net_acc = Decimal::ZERO;
-    let mut gross_annual = Decimal::ZERO;
+    let hundred = M::from_u32(100);
+    let mut base = M::zero(); // base imponible ANUAL acumulada
+    let mut net_acc = M::zero();
+    let mut gross_annual = M::zero();
     let mut remaining = cap_annual;
     let mut m = 0usize; // índice de tramo fiscal — monótono, nunca retrocede
 
     for (j, s) in segments.iter().enumerate() {
-        let mut cap = (s.capacity_monthly * twelve).max(Decimal::ZERO);
-        let g = s.gain_ratio.clamp(Decimal::ZERO, Decimal::ONE);
-        let mut taken_annual = Decimal::ZERO;
-        while cap > Decimal::ZERO && remaining > Decimal::ZERO {
+        let mut cap = (s.capacity_monthly * twelve).max(M::zero());
+        let g = s.gain_ratio.clamp(M::zero(), M::one());
+        let mut taken_annual = M::zero();
+        while cap > M::zero() && remaining > M::zero() {
             // Sin escala (o agotada — imposible por contrato: el último tramo es abierto) el
             // resto se vende sin impuesto adicional.
             let (r, ceiling) = match brackets.get(m) {
                 Some(b) => (b.pct / hundred, b.up_to),
-                None => (Decimal::ZERO, None),
+                None => (M::zero(), None),
             };
             let mut x = remaining.min(cap);
-            if g > Decimal::ZERO {
+            if g > M::zero() {
                 if let Some(c) = ceiling {
                     // `checked_div` por la misma razón que en el paseo inverso (#208): con una
                     // `g` DENORMAL el cociente se sale del rango de `Decimal` y `/` panica. Un
@@ -331,7 +381,7 @@ pub fn mixed_drawdown_for_gross_cap(
                     }
                 }
             }
-            if x <= Decimal::ZERO {
+            if x <= M::zero() {
                 // El tramo fiscal está lleno EXACTAMENTE aquí: se avanza y se reintenta. Si no
                 // es eso, se corta — un `x` no positivo que no avanza sería un bucle infinito.
                 match ceiling {
@@ -342,13 +392,13 @@ pub fn mixed_drawdown_for_gross_cap(
                     _ => break,
                 }
             }
-            let den = Decimal::ONE - r * g;
-            net_acc += x * den;
-            base += x * g;
-            gross_annual += x;
-            cap -= x;
-            remaining -= x;
-            taken_annual += x;
+            let den = M::one() - r * g;
+            net_acc = net_acc + x * den;
+            base = base + x * g;
+            gross_annual = gross_annual + x;
+            cap = cap - x;
+            remaining = remaining - x;
+            taken_annual = taken_annual + x;
             if let Some(c) = ceiling {
                 if base >= c {
                     m += 1;
@@ -358,7 +408,8 @@ pub fn mixed_drawdown_for_gross_cap(
         out.per_segment_monthly[j] = taken_annual / twelve;
     }
     out.gross_monthly = gross_annual / twelve;
-    out.net_monthly = (net_acc / twelve).max(Decimal::ZERO);
+    out.net_monthly = (net_acc / twelve).max(M::zero());
+    out.cap_exhausted = remaining <= M::zero();
     out
 }
 
@@ -372,14 +423,28 @@ pub fn after_tax_monthly(
     taxes_enabled: bool,
     taxable_gain_ratio: Decimal,
 ) -> Decimal {
-    if !taxes_enabled || gross_monthly <= Decimal::ZERO {
+    after_tax_monthly_g(
+        gross_monthly,
+        &TaxBracketG::<Decimal>::from_decimal_slice(brackets),
+        taxes_enabled,
+        taxable_gain_ratio,
+    )
+}
+
+pub(crate) fn after_tax_monthly_g<M: MoneyOps>(
+    gross_monthly: M,
+    brackets: &[TaxBracketG<M>],
+    taxes_enabled: bool,
+    taxable_gain_ratio: M,
+) -> M {
+    if !taxes_enabled || gross_monthly <= M::zero() {
         return gross_monthly;
     }
     gross_monthly
-        - tax_on_gross_capital_annual(
-            gross_monthly * Decimal::from(12u32) * taxable_gain_ratio,
+        - tax_on_gross_capital_annual_g(
+            gross_monthly * M::from_u32(12) * taxable_gain_ratio,
             brackets,
-        ) / Decimal::from(12u32)
+        ) / M::from_u32(12)
 }
 
 /// Devuelve el `gross` tal que `gross − tax(taxable_gain_ratio·gross) == net_annual`, sin
@@ -398,13 +463,27 @@ pub fn gross_up_net_annual_fire(
     taxes_enabled: bool,
     taxable_gain_ratio: Decimal,
 ) -> Decimal {
-    if !taxes_enabled || net_annual <= Decimal::ZERO {
-        return net_annual.max(Decimal::ZERO);
+    gross_up_net_annual_fire_g(
+        net_annual,
+        &TaxBracketG::<Decimal>::from_decimal_slice(brackets),
+        taxes_enabled,
+        taxable_gain_ratio,
+    )
+}
+
+pub(crate) fn gross_up_net_annual_fire_g<M: MoneyOps>(
+    net_annual: M,
+    brackets: &[TaxBracketG<M>],
+    taxes_enabled: bool,
+    taxable_gain_ratio: M,
+) -> M {
+    if !taxes_enabled || net_annual <= M::zero() {
+        return net_annual.max(M::zero());
     }
-    let hundred = Decimal::from(100u32);
+    let hundred = M::from_u32(100);
     let g = taxable_gain_ratio;
-    let mut prev_ceiling = Decimal::ZERO;
-    let mut k_cumulative = Decimal::ZERO;
+    let mut prev_ceiling = M::zero();
+    let mut k_cumulative = M::zero();
     for b in brackets {
         let r = b.pct / hundred;
         // Fase 2 (#140): la base imponible es `g·G` — se busca `G − tax(g·G) = net`, así que en
@@ -414,8 +493,8 @@ pub fn gross_up_net_annual_fire(
         // de esta fase (con net 250.000 y g 0,5 la base cae DOS tramos por debajo). Con
         // `g = ONE` todo colapsa término a término a la forma histórica: `r·ONE` y `ONE·gross`
         // son exactos en rust_decimal, así que la igualdad es de valor exacto, sin tolerancia.
-        let denom = Decimal::ONE - r * g;
-        if denom <= Decimal::ZERO {
+        let denom = M::one() - r * g;
+        if denom <= M::zero() {
             // Tipo efectivo ≥ 100 %: imposible netear. `prev_ceiling` TAL CUAL — no `prev/g`,
             // que con g = ONE cambiaría la escala del Decimal (mismo valor, otro to_string).
             return prev_ceiling;
@@ -428,7 +507,7 @@ pub fn gross_up_net_annual_fire(
                     return gross;
                 }
                 let width = ceiling - prev_ceiling;
-                k_cumulative += r * width;
+                k_cumulative = k_cumulative + r * width;
                 prev_ceiling = ceiling;
             }
         }
@@ -633,7 +712,39 @@ mod tests {
     // ── Solver mixto (#178) — números del spike, verificados por TRES fuentes (spike Opus +
     // réplica independiente en sesión + estos tests). Tramos ES, todo sintético. ──
 
-    fn seg(v: u32, g: &str) -> MixedSegment {
+    /// **WP5.5**: los dos paseos mixtos son genéricos. Estos dos envoltorios de test aceptan la
+    /// escala PÚBLICA (`Vec<TaxBracket>`) y convierten, para que los casos —que son números
+    /// verificados a mano— se lean exactamente igual que antes. Sombrean a los del `use super::*`
+    /// a propósito.
+    fn gross_up_mixed_monthly(
+        net_monthly: Decimal,
+        segments: &[MixedSegment<Decimal>],
+        brackets: &[TaxBracket],
+        taxes_enabled: bool,
+    ) -> MixedDrawdown<Decimal> {
+        super::gross_up_mixed_monthly(
+            net_monthly,
+            segments,
+            &TaxBracketG::<Decimal>::from_decimal_slice(brackets),
+            taxes_enabled,
+        )
+    }
+
+    fn mixed_drawdown_for_gross_cap(
+        gross_cap_monthly: Decimal,
+        segments: &[MixedSegment<Decimal>],
+        brackets: &[TaxBracket],
+        taxes_enabled: bool,
+    ) -> MixedGrossDrawdown<Decimal> {
+        super::mixed_drawdown_for_gross_cap(
+            gross_cap_monthly,
+            segments,
+            &TaxBracketG::<Decimal>::from_decimal_slice(brackets),
+            taxes_enabled,
+        )
+    }
+
+    fn seg(v: u32, g: &str) -> MixedSegment<Decimal> {
         MixedSegment {
             capacity_monthly: Decimal::from(v),
             gain_ratio: g.parse().unwrap(),

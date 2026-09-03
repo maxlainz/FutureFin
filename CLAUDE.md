@@ -147,13 +147,20 @@ Las secuencias canónicas viven en el manual (`docs/`) y en las referencias — 
 
 ### Workspace layout
 ```
-Cargo workspace: apps/api + crates/domain + crates/engine
+Cargo workspace: apps/api + crates/domain + crates/engine + crates/engine-stochastic
 npm workspace:   apps/web (futurefin-web)
 ```
 
 **crates/domain** — shared primitives: `UserId` (newtype over `Uuid`), re-exports `Decimal` and `Uuid`. No `f64` for monetary values anywhere in the domain.
 
 **crates/engine** — pure projection math (`project_net_worth_series`), historical-snapshot interpolation (`history.rs`), liquidity runway (`runway.rs`) y, desde 4.2.0, pasivos que devengan interés (`RepaymentModel`). No I/O, no DB; only `Decimal` arithmetic; has unit tests. API pública, bucle de simulación y semántica completa: [`.claude/engine.md`](.claude/engine.md).
+
+**crates/engine-stochastic** — la evaluación estocástica (Monte Carlo) del MISMO bucle: no tiene
+simulación propia, tiene el tipo `F64Money` que implementa `MoneyOps` e instancia el núcleo
+genérico de `crates/engine` en coma flotante (5.0.0). El freezer `f64` del motor **no se toca**: la
+coma flotante vive solo aquí, y de aquí **no sale un euro** — sus salidas son estadísticas
+(probabilidad de éxito, percentiles), nunca un KPI monetario. Puerta de aceptación:
+`tests/degeneration.rs` (los dos caminos, mes a mes, todo el horizonte).
 
 **apps/api** — Axum HTTP server. Mapa de módulos y receta para añadir un handler: [`.claude/backend-structure.md`](.claude/backend-structure.md); contrato de cada ruta: [`.claude/api-routes.md`](.claude/api-routes.md).
 
