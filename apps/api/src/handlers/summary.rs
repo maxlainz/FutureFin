@@ -509,8 +509,16 @@ pub struct SummaryPlan {
     pub absent_reason: Option<&'static str>,
 
     // ---- 5.0.0 WP6b — el KPI «Éxito del plan» (D25/D28) --------------------------------------
-    /// **Probabilidad de éxito de Monte Carlo**: fracción de caminos en los que la cartera no se
-    /// agota nunca dentro del horizonte (D22). `0.87` = 87 de cada 100 escenarios.
+    /// **Probabilidad de éxito de Monte Carlo**: fracción de caminos en los que el plan OCURRE y
+    /// AGUANTA — el hogar se jubila dentro del horizonte (o la estrategia es por EDAD, y entonces
+    /// la jubilación es un dato) **y** la cartera no se agota nunca. `0.87` = 87 de cada 100
+    /// escenarios.
+    ///
+    /// La definición cambió en el pase de correcciones de la revisión adversarial del motor: la
+    /// vieja —solo «no se agota»— premiaba al hogar que no se jubila jamás. Los dos campos que
+    /// van justo debajo, `never_retired_probability` y `success_given_retired`, son las otras dos
+    /// caras de la misma cifra y **se leen juntas**: un 0,63 con un tercio de caminos que no se
+    /// jubilan no describe el mismo plan que un 0,63 con todos jubilándose.
     ///
     /// **Es EXACTAMENTE el número que dibuja el fan chart** de `GET /v1/projection/bands`: sale
     /// del mismo cache, con los caminos y la semilla por defecto. Si el Resumen lo recalculara
@@ -519,14 +527,32 @@ pub struct SummaryPlan {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub success_probability: Option<Decimal>,
-    /// Umbral del perfil en PORCENTAJE (`success_threshold_pct`, default 95). Se ecoa aunque el
-    /// sorteo no se haya podido hacer: es configuración del usuario, no una salida del modelo.
+    /// Umbral del perfil en PORCENTAJE (`success_threshold_pct`, default 95): contra qué se
+    /// coloreó el veredicto.
+    ///
+    /// **Viaja con el resto del bloque del éxito, y cae con él.** Es configuración del usuario y
+    /// no una salida del modelo, pero se lee de la respuesta de bandas —la misma de la que sale
+    /// la probabilidad— para que las dos cifras no puedan describir dos ejecuciones distintas:
+    /// con `success_absent_reason` puesto, este campo es `null` como los demás. Un umbral suelto
+    /// sin nada que colorear no responde a ninguna pregunta y sugeriría que el sorteo sí se hizo.
     pub success_threshold_pct: Option<u32>,
     /// `green` | `amber` | `red` con el semáforo de D28 (verde en el umbral, ámbar hasta 10
     /// puntos porcentuales por debajo). `null` ⟺ no hay probabilidad que colorear.
     #[schema(value_type = Option<String>)]
     pub success_verdict: Option<&'static str>,
-    /// Por qué faltan `success_probability`/`success_verdict` cuando el resto del plan SÍ está:
+    /// **Fracción de caminos que NO se jubilan** dentro del horizonte, del MISMO sorteo que
+    /// `success_probability`. `"0"` por construcción con una estrategia por edad. Sin ella, un
+    /// «Éxito del plan: 63 %» no distingue el plan que falla del plan que no llega a empezar.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub never_retired_probability: Option<Decimal>,
+    /// **Éxito entre los caminos que sí se jubilan.** `null` cuando ninguno lo hace: ahí la
+    /// pregunta «¿aguanta?» no tiene sobre qué formularse, y un `0` la respondería en falso.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub success_given_retired: Option<Decimal>,
+    /// Por qué faltan las cifras del éxito (`success_probability`, `success_verdict`,
+    /// `never_retired_probability`, `success_given_retired`) cuando el resto del plan SÍ está:
     /// `bands_unavailable` (el sorteo falló; el Resumen es una lectura y no se cae por eso).
     /// `null` ⟺ la probabilidad viaja, o el plan entero está ausente y lo dice `absent_reason`.
     #[schema(value_type = Option<String>)]
@@ -534,8 +560,9 @@ pub struct SummaryPlan {
 }
 
 impl SummaryPlan {
-    /// El plan ausente, con su razón. **Todos** los campos van a `null` a la vez —los seis del
-    /// plan y los tres del éxito—: publicar uno suelto sería peor que no publicar ninguno.
+    /// El plan ausente, con su razón. **Todos** los campos van a `null` a la vez —los del plan
+    /// y los del éxito—: publicar uno suelto sería peor que no publicar ninguno. (Sin contarlos:
+    /// el número se quedó obsoleto en cuanto el bloque del éxito creció.)
     fn absent(reason: &'static str) -> Self {
         SummaryPlan {
             strategy: None,
@@ -548,6 +575,8 @@ impl SummaryPlan {
             success_probability: None,
             success_threshold_pct: None,
             success_verdict: None,
+            never_retired_probability: None,
+            success_given_retired: None,
             // El hueco ya lo explica `absent_reason`; una segunda razón para lo mismo se leería
             // como si hubieran fallado dos cosas distintas.
             success_absent_reason: None,
@@ -615,7 +644,7 @@ async fn summary_plan(state: &AppState, iid: Uuid, user_id: Uuid) -> SummaryPlan
 /// distintas del mismo plan, y el usuario vería el KPI del Resumen discrepar del gráfico de
 /// Jubilación sin ninguna explicación posible.
 ///
-/// Un fallo aquí **no tumba el Resumen**: se publican los tres campos a `null` con
+/// Un fallo aquí **no tumba el Resumen**: se publican a `null` todos los campos del éxito con
 /// `success_absent_reason`, y el resto del plan sigue viajando.
 async fn attach_success(state: &AppState, iid: Uuid, user_id: Uuid, mut plan: SummaryPlan) -> SummaryPlan {
     use crate::handlers::projection_bands::{projection_bands_cached, DEFAULT_BANDS_PATHS};
@@ -636,6 +665,8 @@ async fn attach_success(state: &AppState, iid: Uuid, user_id: Uuid, mut plan: Su
             plan.success_probability = bands.success_probability;
             plan.success_threshold_pct = Some(bands.success_threshold_pct);
             plan.success_verdict = Some(bands.success_verdict);
+            plan.never_retired_probability = bands.never_retired_probability;
+            plan.success_given_retired = bands.success_given_retired;
         }
         Err(e) => {
             tracing::warn!(error = %e, "no se pudieron calcular las bandas para el KPI de éxito");
@@ -663,6 +694,8 @@ fn plan_from_series(
         success_probability: None,
         success_threshold_pct: None,
         success_verdict: None,
+        never_retired_probability: None,
+        success_given_retired: None,
         success_absent_reason: None,
     }
 }

@@ -425,6 +425,132 @@ async fn the_withdrawal_series_are_monthly_flows_and_the_positions_index_the_arr
     );
 }
 
+/// **`unmet_need`: la tercera magnitud del mes** (pase de correcciones de la revisión
+/// adversarial, hallazgo B2/#4).
+///
+/// `withdrawal` es lo que se obtuvo, `withdrawal_shortfall` lo que la REGLA rechazó y
+/// `unmet_need` lo que la CARTERA no pudo dar. Confundir las dos últimas es el fallo que este
+/// campo existe para hacer imposible: con la regla por defecto (`fixed_real`, sin techo) el
+/// recorte es **cero por construcción**, así que un hogar que se queda sin cartera publicaba
+/// ceros en todas las columnas de retirada y su único rastro era un escalar al final.
+///
+/// El hogar: 500 € de ingreso contra 2.500 € de gasto y una hucha de 3.000 € al 0 %. El
+/// descubierto empieza a los dos meses y no para.
+///
+/// Lo que se pinea:
+/// 1. `points[0].unmet_need == 0` — el mes 0 es el estado de hoy, no un mes simulado.
+/// 2. **Nunca negativo y a la escala monetaria**: el motor conserva en el acumulador el operando
+///    literal de 4.15.0 y su serie llega con una polvareda de ±1e-25 € incluso en un hogar
+///    solvente (medido: 7 de 66 puntos en el arnés de `mcp_simulate`). Lo que se publica va
+///    clampado Y redondeado a 4 decimales — es la única columna del punto cuyo signo se lee como
+///    un veredicto, y servir la polvareda encendería meses en rojo al azar.
+/// 3. **Σ mensual = `uncovered_deficit_total`**: la serie es la descomposición del escalar, no
+///    otra cuenta. Sin esta identidad las dos cifras podrían derivar sin que nada avisara.
+/// 4. `withdrawal_shortfall` es **todo ceros** en el mismo hogar: son magnitudes distintas.
+#[tokio::test]
+async fn unmet_need_is_non_negative_starts_at_zero_and_adds_up_to_the_uncovered_total() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let inc = app.create_category(&owner, "income", "Nómina").await;
+    let exp = app.create_category(&owner, "expense", "Vida").await;
+    let ast = app.create_category(&owner, "asset", "Fondos").await;
+    budget(&app, &owner.cookie, &inc, "500").await;
+    budget(&app, &owner.cookie, &exp, "2500").await;
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": ast, "name": "Hucha", "current_value": "3000",
+                   "is_liquid": true, "expected_annual_return_percent": "0"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    let r = app
+        .get_with_cookie(
+            "/v1/projection/series?months=24&density=monthly",
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let s = r.json();
+    let pts = s["points"].as_array().expect("points");
+    assert_eq!(pts.len(), 25, "densidad mensual: 0..=24 ({s})");
+
+    assert_eq!(
+        pts[0]["unmet_need"].as_f64(),
+        Some(0.0),
+        "el mes 0 es el estado de hoy, no un mes simulado: {}",
+        pts[0]
+    );
+    let mut suma = 0.0f64;
+    let mut algun_positivo = false;
+    for p in pts {
+        let u = p["unmet_need"]
+            .as_f64()
+            .unwrap_or_else(|| panic!("`unmet_need` debe ser un número: {p}"));
+        assert!(
+            u >= 0.0,
+            "la serie publicada sale clampada; un negativo aquí es la cola de 1e-24 sin clampar: {p}"
+        );
+        algun_positivo |= u > 0.0;
+        suma += u;
+        assert_eq!(
+            p["withdrawal_shortfall"].as_f64(),
+            Some(0.0),
+            "con `fixed_real` la REGLA no recorta nunca — si esto deja de ser cero, las dos \
+             magnitudes se han vuelto a mezclar: {p}"
+        );
+    }
+    assert!(
+        algun_positivo,
+        "este hogar se queda sin cartera al segundo mes: el descubierto tiene que verse: {s}"
+    );
+    assert_ne!(
+        s["assets_depleted_month_index"],
+        Value::Null,
+        "y la cartera se agota de verdad: {s}"
+    );
+
+    // La serie ES la descomposición del escalar. Tolerancia absoluta de un céntimo: el total lo
+    // publica el motor con su propia escala y la suma se hace aquí en `f64`.
+    let total = dec(&s["uncovered_deficit_total"]);
+    assert!(
+        (suma - total).abs() < 0.01,
+        "Σ points[].unmet_need = {suma} debe ser `uncovered_deficit_total` = {total}: {s}"
+    );
+}
+
+/// El espejo: un hogar que ahorra no tiene descubierto **en ningún mes**, y el escalar y la serie
+/// dicen lo mismo. Un cero de verdad, no un hueco — y **exactamente** cero, que es lo que compra
+/// el redondeo de publicación: sin él, aquí saldrían unos cuantos `1e-25`.
+#[tokio::test]
+async fn a_solvent_household_publishes_unmet_need_zero_everywhere() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_crossing_household(&app, &owner).await;
+
+    let r = app
+        .get_with_cookie(
+            "/v1/projection/series?months=120&density=monthly",
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let s = r.json();
+    for p in s["points"].as_array().expect("points") {
+        assert_eq!(
+            p["unmet_need"].as_f64(),
+            Some(0.0),
+            "sin descubierto la columna es cero, no falta: {p}"
+        );
+    }
+    assert_eq!(
+        s["uncovered_deficit_total"], "0.0000",
+        "y el escalar dice lo mismo: {s}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 2. `final_net_worth_real_delta` con deflactores incomparables
 // ---------------------------------------------------------------------------

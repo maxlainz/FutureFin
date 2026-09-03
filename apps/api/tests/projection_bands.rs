@@ -97,6 +97,45 @@ fn f(v: &Value) -> f64 {
         .unwrap_or_else(|| panic!("se esperaba un número, llegó {v}"))
 }
 
+/// Una probabilidad publicada: string decimal → `f64`. Va por `as_str` a propósito: si algún día
+/// una de estas cifras dejara de viajar como cadena, el test debe caerse aquí y no comparar
+/// silenciosamente contra un `null` convertido en 0.
+fn prob(v: &Value) -> f64 {
+    v.as_str()
+        .unwrap_or_else(|| panic!("se esperaba un string decimal, llegó {v}"))
+        .parse()
+        .expect("probabilidad parseable")
+}
+
+/// **La identidad del éxito**: un camino que no se jubila no puede contar como éxito, así que
+/// `success_probability ≤ 1 − never_retired_probability`. Con trigger por edad
+/// `never_retired_probability` es 0 y la cota es trivial; con trigger por cruce es la que ata las
+/// dos cifras y la que la definición vieja violaba (publicaba 0,96 con el 33,1 % sin jubilarse).
+///
+/// La tolerancia es el redondeo de publicación: las dos salen redondeadas a 6 decimales.
+fn assert_success_identity(b: &Value) {
+    let success = prob(&b["success_probability"]);
+    let never = prob(&b["never_retired_probability"]);
+    assert!(
+        success <= 1.0 - never + 1e-6,
+        "success_probability ({success}) > 1 − never_retired_probability ({never}): un camino \
+         que no se jubila no puede ser un éxito — {b}"
+    );
+    // Y el condicional, cuando existe, es el mismo numerador sobre el denominador correcto:
+    // `success · 1 = given_retired · (1 − never)` con trigger por CRUCE. Con trigger por EDAD el
+    // numerador de `success` incluye los caminos sin jubilación, así que la identidad no aplica.
+    if b["retirement_trigger"] == "liquid_crossing" {
+        if let Some(g) = b["success_given_retired"].as_str() {
+            let given: f64 = g.parse().expect("probabilidad parseable");
+            assert!(
+                (success - given * (1.0 - never)).abs() <= 1e-5,
+                "success ({success}) debe ser given_retired ({given}) · (1 − never) ({}): {b}",
+                1.0 - never
+            );
+        }
+    }
+}
+
 /// Ancho de la banda en el ÚLTIMO punto, relativo a la mediana: la medida de dispersión que un
 /// vector de volatilidades descolocado falsearía.
 fn relative_spread(b: &Value) -> f64 {
@@ -137,8 +176,22 @@ async fn bands_exist_for_mine_and_the_household_is_a_declared_400() {
     // P4: sin `cash_buffer_months` en el perfil no hay colchón que simular, y los dos
     // contadores van a `null` — «no se midió», que no es «cero rellenos».
     assert_eq!(b["buffer_active"], false, "{b}");
+    assert_eq!(
+        b["buffer_inactive_reason"], "not_requested",
+        "un colchón apagado sin motivo se lee como un fallo: {b}"
+    );
     assert!(b["buffer_refills_p50"].is_null(), "{b}");
     assert!(b["buffer_refill_net_total_p50"].is_null(), "{b}");
+    // Las tres cifras del éxito viajan JUNTAS: la probabilidad sola no dice si el plan ocurre.
+    assert!(
+        b["never_retired_probability"].is_string(),
+        "la fracción de caminos que no se jubilan es el denominador escondido del éxito: {b}"
+    );
+    assert!(
+        b["success_given_retired"].is_string() || b["success_given_retired"].is_null(),
+        "el condicional viaja o es null (ningún camino se jubila), nunca ausente: {b}"
+    );
+    assert_success_identity(&b);
     assert!(
         b["model_note"].as_str().expect("nota").contains("no se agota"),
         "la nota debe declarar qué significa ÉXITO: {b}"
@@ -743,6 +796,10 @@ async fn the_cash_buffer_is_simulated_only_when_it_can_mean_something() {
     let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}&seed=13")).await;
     assert_eq!(b["buffer_active"], true, "colchón + líquido + σ > 0: {b}");
     assert!(
+        b["buffer_inactive_reason"].is_null(),
+        "`null` ⟺ se simuló: {b}"
+    );
+    assert!(
         b["buffer_refills_p50"].is_u64(),
         "con el colchón vivo el CONTADOR de rellenos viaja: {b}"
     );
@@ -772,6 +829,131 @@ async fn the_cash_buffer_is_simulated_only_when_it_can_mean_something() {
         b["buffer_active"], false,
         "sin volatilidad el colchón no protege de nada: {b}"
     );
+    assert_eq!(
+        b["buffer_inactive_reason"], "no_volatility",
+        "el motivo distingue «no lo pediste» de «lo pediste y no cabía»: {b}"
+    );
     assert!(b["buffer_refills_p50"].is_null(), "{b}");
     assert!(b["buffer_refill_net_total_p50"].is_null(), "{b}");
+}
+
+/// **El tercer motivo: colchón pedido, volatilidad declarada y NINGÚN sitio seguro donde
+/// alojarlo.**
+///
+/// `cash_buffer_index` sale del orden de drenaje, que no sabe de volatilidad: en una cartera de
+/// pura renta variable elegía la propia RV como colchón, y un colchón con σ = 25 % no es un
+/// colchón, es la misma cartera con más impuestos. Desde el pase de correcciones de la revisión
+/// adversarial, si no hay un líquido con σ = 0 el colchón **no se instala** y se dice por qué.
+#[tokio::test]
+async fn without_a_risk_free_liquid_asset_the_buffer_says_why_it_did_not_run() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    // Un único líquido, y VOLÁTIL: hay riesgo de secuencia (σ > 0) pero no hay refugio (σ = 0).
+    seed(&app, &owner, "2500", "2000", &[("Bolsa", "300000", Some("25"))]).await;
+    patch_profile(&app, &owner, json!({"cash_buffer_months": 12})).await;
+
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}&seed=13")).await;
+    assert_eq!(b["any_volatility_declared"], true, "{b}");
+    assert_eq!(
+        b["buffer_active"], false,
+        "no hay ningún activo líquido con σ = 0 donde ponerlo: {b}"
+    );
+    assert_eq!(
+        b["buffer_inactive_reason"], "no_safe_liquid_asset",
+        "y el motivo no puede confundirse con `no_volatility`, que aquí sería falso: {b}"
+    );
+    assert!(b["buffer_refills_p50"].is_null(), "{b}");
+    assert!(b["buffer_refill_net_total_p50"].is_null(), "{b}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// 11. La definición de éxito (pase de correcciones de la revisión adversarial)
+// ---------------------------------------------------------------------------------------------
+
+/// **El hogar que no se jubila JAMÁS ya no cuenta como éxito.**
+///
+/// Es la regresión exacta del hallazgo #7. Con la definición vieja —«la cartera no se agota
+/// nunca»— un plan por CRUCE que no llega al objetivo en todo el horizonte nunca drena, y por
+/// tanto nunca se agota: se publicaba `success_probability = 1` sobre un plan que no ocurre.
+///
+/// El hogar de este test ahorra 50 €/mes contra un objetivo de seis cifras: no cruza ni en el
+/// último mes del horizonte. σ = 0 hace el resultado BINARIO y por tanto exacto — sin sorteo que
+/// interpretar, las tres cifras son `0`, `1` y `null`.
+#[tokio::test]
+async fn a_plan_that_never_retires_is_not_a_success_anymore() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner, "2000", "1950", &[("Hucha", "1000", Some("0"))]).await;
+
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}")).await;
+    assert_eq!(b["retirement_trigger"], "liquid_crossing", "{b}");
+    assert_eq!(
+        b["never_retired_probability"], "1",
+        "ningún camino llega al objetivo: {b}"
+    );
+    assert_eq!(
+        b["success_probability"], "0",
+        "un plan que no ocurre no es un éxito — con la definición vieja esto valía 1: {b}"
+    );
+    assert_eq!(
+        b["success_given_retired"], Value::Null,
+        "sin ningún camino jubilado, «¿aguanta?» no tiene sobre qué formularse: {b}"
+    );
+    assert_eq!(b["success_verdict"], "red", "{b}");
+    assert_success_identity(&b);
+
+    // Y la razón por la que la definición vieja lo llamaba éxito sigue siendo verdad: la cartera
+    // no se agota. Es exactamente eso lo que dejó de bastar.
+    let s = app
+        .get_with_cookie("/v1/projection/series?density=hybrid", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(
+        s["jubilacion_month_index"],
+        Value::Null,
+        "el camino determinista tampoco se jubila: {s}"
+    );
+    assert_eq!(
+        s["assets_depleted_month_index"],
+        Value::Null,
+        "y nunca se agota — el 1 de antes salía justo de aquí: {s}"
+    );
+    // La tabla de agotamiento va VACÍA: sin jubilación no existe «la probabilidad de agotar a
+    // los 75». Un array vacío y un cero son cosas distintas.
+    assert_eq!(
+        b["depletion_probability_by_age"].as_array().map(Vec::len),
+        Some(0),
+        "{b}"
+    );
+}
+
+/// El espejo con DISPERSIÓN: con volatilidad alta unos caminos se jubilan y otros no, así que las
+/// tres cifras son estrictamente intermedias y la identidad las ata.
+#[tokio::test]
+async fn with_dispersion_the_three_success_readings_stay_consistent() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    // Cerca del objetivo y muy volátil: el cruce depende del mercado que toque.
+    seed(&app, &owner, "3000", "2000", &[("Indexado", "300000", Some("30"))]).await;
+
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS_SPREAD}&seed=7")).await;
+    assert_eq!(b["retirement_trigger"], "liquid_crossing", "{b}");
+    assert_success_identity(&b);
+
+    let never = prob(&b["never_retired_probability"]);
+    assert!((0.0..=1.0).contains(&never), "{b}");
+    // El condicional existe ⟺ algún camino se jubila, y nunca es menor que el éxito absoluto:
+    // el mismo numerador sobre un denominador más pequeño.
+    match b["success_given_retired"].as_str() {
+        Some(g) => {
+            let given: f64 = g.parse().expect("probabilidad");
+            assert!(never < 1.0, "hay caminos jubilados: {b}");
+            assert!(
+                given + 1e-9 >= prob(&b["success_probability"]),
+                "el condicional no puede ser menor que el absoluto: {b}"
+            );
+            assert!((0.0..=1.0).contains(&given), "{b}");
+        }
+        None => assert_eq!(never, 1.0, "solo es null si NADIE se jubila: {b}"),
+    }
 }

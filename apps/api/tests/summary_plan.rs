@@ -147,6 +147,8 @@ async fn the_household_view_has_no_plan_and_says_why() {
         "success_probability",
         "success_threshold_pct",
         "success_verdict",
+        "never_retired_probability",
+        "success_given_retired",
     ] {
         assert!(plan[k].is_null(), "{k} debía ir a null en household: {plan}");
     }
@@ -251,6 +253,21 @@ async fn the_success_kpi_is_the_same_run_the_risk_chart_draws() {
     assert_eq!(
         plan["success_threshold_pct"], b["success_threshold_pct"],
         "{plan} / {b}"
+    );
+    // **Las tres cifras del éxito viajan juntas y del MISMO sorteo.** La probabilidad sola no
+    // distingue el plan que falla del plan que no llega a empezar: con la definición vieja del
+    // éxito, un hogar con un tercio de caminos sin jubilarse publicaba 0,96.
+    assert_eq!(
+        plan["never_retired_probability"], b["never_retired_probability"],
+        "el denominador escondido del éxito sale del mismo sitio: plan={plan} bands={b}"
+    );
+    assert_eq!(
+        plan["success_given_retired"], b["success_given_retired"],
+        "y el condicional también: plan={plan} bands={b}"
+    );
+    assert!(
+        plan["never_retired_probability"].is_string(),
+        "nunca ausente: un hueco aquí se leería como cero: {plan}"
     );
     // Y el umbral es el del PERFIL, no una constante: al cambiarlo, las dos superficies lo siguen.
     patch_profile(&app, &owner, json!({"success_threshold_pct": 80})).await;

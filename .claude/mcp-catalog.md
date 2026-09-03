@@ -97,10 +97,11 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   >   dijera.
 - **`get_projection_bands` — el RIESGO del plan (5.0.0/WP6b, P3 del issue #207).** Monte Carlo
   sobre el mismo motor que dibuja la línea determinista: bandas puntuales p10/p50/p90 del
-  patrimonio y del líquido, `success_probability` con su veredicto, agotamiento por edad,
-  percentiles del mes de jubilación, las dos lecturas del RECORTE y las del COLCHÓN de caja (P4:
-  `buffer_active` + `buffer_refills_p50` + `buffer_refill_net_total_p50`, los dos últimos `null`
-  cuando no se simuló — que no es «cero rellenos»). Params: `view` (solo `mine`),
+  patrimonio y del líquido, `success_probability` con su veredicto **y sus dos caras**
+  (`never_retired_probability`, `success_given_retired`), agotamiento por edad,
+  percentiles del mes de jubilación, las dos lecturas de COBERTURA y las del COLCHÓN de caja (P4:
+  `buffer_active` + `buffer_inactive_reason` + `buffer_refills_p50` + `buffer_refill_net_total_p50`,
+  los dos últimos `null` cuando no se simuló — que no es «cero rellenos»). Params: `view` (solo `mine`),
   `paths` (1–**1 000**, default 500), `seed` (string de dígitos) e `include_liquid_bands`.
   Cuatro decisiones que hay que leer juntas:
   - **Sin `density`** — fuerza `hybrid`, igual que `get_projection` y por el mismo veto
@@ -120,10 +121,28 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     la que trae al modelo aquí. Con el flag apagado las tres claves **desaparecen**; no se sirve un
     `0` que se leería como «sin líquido». Por HTTP viajan siempre.
 
+  **ÉXITO = el plan OCURRE y AGUANTA** (pase de correcciones de la revisión adversarial del motor):
+  el hogar **se jubila dentro del horizonte** —o la estrategia es por EDAD, y entonces la jubilación
+  es un dato y no un suceso— **Y** la cartera no se agota nunca. D22 decía solo «no se agota», y con
+  un trigger por CRUCE eso premiaba al hogar que **no se jubila jamás**: quien nunca llega al
+  objetivo nunca drena. Por eso la respuesta —y el `instructions`— obligan a leer las tres juntas:
+  `never_retired_probability` (cuántos caminos no se jubilan; `"0"` por construcción con trigger por
+  edad) y `success_given_retired` (éxito entre los que sí; **`null` ⟺ ninguno se jubila**, que no es
+  un cero). Identidad: `success_probability ≤ 1 − never_retired_probability`. Un 0,63 con un tercio
+  de caminos sin jubilarse no describe el mismo plan que un 0,63 con todos jubilándose, y ese es
+  exactamente el diagnóstico falso que un modelo daría citando la cifra sola.
+
+  El RECORTE de la regla sigue **sin ser fracaso** (D24) y sigue viajando aparte, pero
+  `months_below_need_p50` y `withdrawal_to_need_ratio_p50` cuentan ahora **el recorte Y el gasto que
+  la cartera no pudo financiar**: con `fixed_real` el recorte es cero por construcción, así que un
+  cociente que solo lo mirara valdría 1,0 también en los caminos que se quedan sin cartera. Y la
+  **última fila de `depletion_probability_by_age` es SIEMPRE el horizonte** —la ruina total del
+  plan—, así que el paso hasta ella puede ser de menos de cinco años.
+
   El **contexto de las cifras** está en `model_note` (el modelo entero: shock común, corrección de
   Itô, bandas PUNTUALES, y la lista de lo que NO se modela) y en el bloque **MONTE CARLO** del
-  `instructions`, que es donde vive lo transversal: ÉXITO = la cartera no se agota nunca (D22), el
-  recorte NO es fracaso (D24), `any_volatility_declared: false` significa «la banda es la línea» y
+  `instructions`, que es donde vive lo transversal: la definición de éxito de arriba, el recorte que
+  no es fracaso, y `any_volatility_declared: false` significa «la banda es la línea» y
   no «tu plan es seguro». Tests: `mcp_http.rs::get_projection_bands_matches_http_and_hides_the_liquid_bands_by_default`.
 
 - **Tools de lectura añadidas en el issue #2 (9)**: `list_allocation_rules` (la cascada como
@@ -999,7 +1018,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   para el eje. Ninguna omisión nueva.
   - **`get_projection_bands`** — su bullet propio está arriba, en la lista de lecturas.
   - **`simulate_projection` gana `monte_carlo: {paths ≤ 1000, seed?}`**: los dos lados publican
-    `success_probability`, `success_verdict`, `underfunded_probability` y `months_below_need_p50`,
+    `success_probability`, `success_verdict`, `underfunded_probability` y `months_below_need_p50`
+    —y, desde el pase de correcciones de abajo, `never_retired_probability`,
+    `success_given_retired` y `buffer_inactive_reason`—,
     y `deltas` gana `success_probability_delta`. **No lleva bandas** — son ~16 KB por lado y un
     what-if devuelve dos; el fan chart vive en su endpoint, que además lo cachea. Los dos lados
     sortean con la MISMA semilla, así que el delta mide el cambio del PLAN y no el ruido de dos
@@ -1021,6 +1042,53 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     decía con más detalle. Total tras el cambio: **23 793 / 24 000** (margen 207). La constante
     **no** se tocó — la salida cuando no cabe es mover prosa, no subir el techo.
 
+- **5.0.0 / pase de correcciones tras la revisión adversarial del motor (issue #207) — cero tools
+  nuevas, tres contratos que crecen.** Evaluación de paridad: **tres tools actualizadas**
+  (`get_projection`, `get_projection_bands`, `simulate_projection`); ninguna omisión nueva y
+  **ningún contador se mueve** (recuéntalos con los dos `grep` del bullet de lecturas, no de
+  memoria). Lo que un modelo lee distinto a partir de aquí:
+  - **`get_projection` gana `points[].unmet_need`** — el gasto del MES que los activos no pudieron
+    financiar, neto y `≥ 0` (f64 y misma decimación `hybrid` que sus vecinos; `0` en el índice 0).
+    **Son TRES magnitudes por mes y no dos**: `withdrawal` es lo que se OBTUVO,
+    `withdrawal_shortfall` lo que la REGLA rechazó y `unmet_need` lo que la CARTERA no pudo dar —
+    su suma es la necesidad neta del mes. Confundir las dos últimas es el error caro, porque con
+    `fixed_real` el recorte es **cero por construcción** y un modelo que solo lo mirara concluiría
+    «cubre todo su gasto» de un hogar sin cartera. **No viaja en `members[].series`**, que sigue
+    siendo mínima (patrimonio + líquido).
+  - **`assets_depleted_month_index` exige ahora DOS condiciones** —cartera a cero tras la VENTA **y**
+    alguna venta posterior sin fundar—, en `get_projection` (raíz y `members[]`) y en los dos lados
+    de `simulate_projection`. Un aterrizaje exacto sobre una pensión que cubre todo el gasto
+    posterior es **`null`**, no «cartera agotada»: antes se publicaba como ruina con
+    `uncovered_deficit_total = 0`. El campo sigue en la rejilla 0-based de #210.
+  - **`get_projection_bands`** — la definición de éxito, sus dos caras, las dos lecturas de
+    cobertura y el cierre en el horizonte de `depletion_probability_by_age` están en su bullet
+    propio, arriba; `buffer_inactive_reason` dice por qué NO se simuló el colchón (`not_requested` |
+    `no_volatility` | `no_safe_liquid_asset`), y es `null` ⟺ `buffer_active: true`.
+  - **`simulate_projection`**: los dos lados ganan `never_retired_probability`,
+    `success_given_retired` y `buffer_inactive_reason` junto a las cifras de Monte Carlo que ya
+    tenían, y con `include_series` la `series` gana **`baseline_unmet_need` y
+    `scenario_unmet_need`** (f64 sobre la misma rejilla que `month_indices`, así que restarlas punto
+    a punto es legítimo). Viajan porque son la única columna que dice **DÓNDE** deja de cubrirse el
+    plan: `assets_depleted_month_index` da un mes y `uncovered_deficit_total` un total, y entre los
+    dos no se ve el perfil del hueco.
+  - **`partial_gap_target` se gatea sobre la fase VIVIDA** (`partial_retirement_month_index != null`)
+    y no sobre la declarada — en `get_projection` y en los dos lados de `simulate_projection`. Un
+    hogar que se jubila ANTES de la media jornada que tenía apuntada publicaba el capital de una
+    fase que nunca ocurrió; su gemelo `partial_phase_capital_growing` ya se gateaba así.
+  - **Código de error nuevo, compartido con HTTP**: `bridge_discount_out_of_range` (**422**), del
+    `map_engine_err` que las tools reusan — el objetivo puente descontado desborda `Decimal` porque
+    la tasa derivada es demasiado negativa. Aguas arriba hay un clamp a 0 con el aviso
+    `bridge_discount_clamped` en `warnings`, así que por esta superficie la rama es inalcanzable;
+    el código existe para que el fallo tenga nombre en vez de ser un 500 opaco. Está en el fixture
+    `tests/fixtures/error-codes.json` con su copia en español, como el resto.
+  - **Presupuesto de descripciones**: la única que crece es la de `get_projection_bands`
+    (**490 → 525**), que gana la definición corregida de éxito y el nombre de sus dos caras; el
+    resto de la prosa nueva fue al párrafo **MONTE CARLO** del `instructions`, que el cliente lee
+    una vez por sesión y no una vez por tool. Los dos topes —600 por tool y 24 000 el catálogo—
+    **no se tocaron**. El total se cuenta, nunca se recuerda:
+    `jq '[.tools[].description_len] | add' apps/api/tests/fixtures/mcp-catalog.json` (**23 828** el
+    2026-09-03, margen 172; el «23 793» de tres párrafos más arriba describe el momento de WP6b y
+    no el de hoy).
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
   mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,

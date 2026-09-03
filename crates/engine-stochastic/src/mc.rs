@@ -781,7 +781,7 @@ pub fn project_percentile_bands(
                 // revisión). Con `fixed_real` el recorte `s` es CERO por construcción —el
                 // permitido ES la necesidad—, así que `Σw / Σ(w+s)` valía 1,0 siempre, también
                 // en los caminos que se quedaban sin cartera en el mes 35 de 400 y cubrían el
-                // 8,8 % de lo que necesitaban. Lo que faltaba estaba en la otra magnitud.
+                // 8,65 % de lo que necesitaban. Lo que faltaba estaba en la otra magnitud.
                 let u = out.unmet_need[k].0;
                 if s + u > 0.0 {
                     below += 1;

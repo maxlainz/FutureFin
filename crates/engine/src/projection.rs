@@ -743,7 +743,7 @@ pub struct ProjectionOutput {
     /// Su suma es la necesidad neta del mes, y sin ella cualquier cociente de cobertura miente
     /// en el caso que más importa —la cartera agotada— porque con `fixed_real` el recorte es
     /// cero por construcción (hallazgo #4 de la revisión adversarial: un cociente publicado de
-    /// 1,0 sobre caminos que cubrían el 8,8 % de la necesidad).
+    /// 1,0 sobre caminos que cubrían el 8,65 % de la necesidad).
     pub unmet_need: Vec<Decimal>,
     /// Primer mes con pensión con fecha. `None` en WP1b (la pensión con fecha llega en WP3; la
     /// pensión plana de hoy viaja dentro de `income_retirement_monthly` y no tiene mes propio).

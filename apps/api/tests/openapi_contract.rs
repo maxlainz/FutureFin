@@ -247,6 +247,11 @@ fn the_plan_and_the_strategy_solves_are_declared_in_the_document() {
         "success_threshold_pct",
         "success_verdict",
         "success_absent_reason",
+        // Pase de correcciones de la revisión adversarial: las dos caras que la probabilidad
+        // sola escondía. Sin ellas, un «Éxito del plan» no distingue el plan que falla del que
+        // no llega a empezar.
+        "never_retired_probability",
+        "success_given_retired",
     ] {
         assert!(!plan[k].is_null(), "SummaryPlan.{k} no está declarado: {plan}");
     }
@@ -291,6 +296,8 @@ fn the_plan_and_the_strategy_solves_are_declared_in_the_document() {
         "percentiles",
         "points",
         "success_probability",
+        "never_retired_probability",
+        "success_given_retired",
         "success_threshold_pct",
         "success_verdict",
         "depletion_probability_by_age",
@@ -300,6 +307,7 @@ fn the_plan_and_the_strategy_solves_are_declared_in_the_document() {
         "withdrawal_to_need_ratio_p50",
         "any_volatility_declared",
         "buffer_active",
+        "buffer_inactive_reason",
         "buffer_refills_p50",
         "buffer_refill_net_total_p50",
         "strategy",
@@ -333,6 +341,29 @@ fn the_plan_and_the_strategy_solves_are_declared_in_the_document() {
             "ProjectionBandPoint.{k} no está declarado"
         );
     }
+
+    // `points[]` de la serie: la TERCERA magnitud del mes. `withdrawal` es lo que se obtuvo,
+    // `withdrawal_shortfall` lo que la REGLA rechazó y `unmet_need` lo que la CARTERA no dio —
+    // un cliente que no sepa que existe la tercera lee un plan agotado como un plan cubierto.
+    let punto_serie = &doc["components"]["schemas"]["ProjectionPoint"]["properties"];
+    for k in [
+        "withdrawal",
+        "withdrawal_shortfall",
+        "withdrawal_excess",
+        "unmet_need",
+    ] {
+        assert!(
+            !punto_serie[k].is_null(),
+            "ProjectionPoint.{k} no está declarado"
+        );
+    }
+    // Es un NÚMERO, como el resto de importes del punto (excepción chart-only D4/I3), no un
+    // string decimal: la serie es geometría de chart y el escalar hermano
+    // (`uncovered_deficit_total`) sigue siendo el string que se cita como dinero.
+    assert_eq!(
+        punto_serie["unmet_need"]["type"], "number",
+        "ProjectionPoint.unmet_need debe declararse como número: {punto_serie}"
+    );
 
     // Y por miembro del hogar, las cuatro que explican de quién es cada marcador.
     let miembro = &doc["components"]["schemas"]["HouseholdMemberProjection"]["properties"];

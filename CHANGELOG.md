@@ -217,11 +217,15 @@ existía en el modelo. Desde 5.0.0 existe.
   por DEBAJO de la línea determinista. **Con σ = 0 en toda la cartera la banda ES la línea**, y la
   respuesta lo dice (`any_volatility_declared: false`) para que un «éxito 100 %» no se lea como
   «tu plan es seguro».
-- **ÉXITO significa una cosa: la cartera no se agota NUNCA** dentro del horizonte, con las
-  pensiones y las fases ya dentro de la simulación (D22). El **recorte** de una regla de retirada
-  con techo **no es fracaso** y viaja aparte (`months_below_need_p50`,
-  `withdrawal_to_need_ratio_p50`): son dos preguntas distintas y mezclarlas da un diagnóstico
-  falso. `success_verdict` colorea contra el umbral del perfil (`success_threshold_pct`, default
+- **ÉXITO es que el plan OCURRA y AGUANTE**: el hogar se jubila dentro del horizonte —o la
+  estrategia es por EDAD, y entonces la jubilación es un dato— **y** la cartera no se agota nunca,
+  con las pensiones y las fases ya dentro de la simulación. D22 decía solo la segunda mitad y esa
+  definición **se corrigió antes de publicar** — ver «Corrección tras la revisión adversarial del
+  motor» más abajo, con la medida del sesgo y las dos cifras que ahora viajan al lado. El
+  **recorte** de una regla de retirada con techo **no es fracaso** y viaja aparte
+  (`months_below_need_p50`, `withdrawal_to_need_ratio_p50`, que desde la misma corrección cuentan
+  también el gasto que la cartera no pudo financiar): son dos preguntas distintas y mezclarlas da
+  un diagnóstico falso. `success_verdict` colorea contra el umbral del perfil (`success_threshold_pct`, default
   95 %): **verde** en el umbral exacto, **ámbar** hasta 10 puntos porcentuales por debajo, **rojo**
   el resto.
 - **La semilla es estable por usuario** (`hash(installation_id, user_id)`, D23). Sin eso la
@@ -276,13 +280,115 @@ existía en el modelo. Desde 5.0.0 existe.
   sobre unos activos que ya no existen, junto a una línea ya actualizada, son dos cifras que se
   contradicen en la misma pantalla.
 - **El colchón de caja (P4) se simula, y solo aquí.** `cash_buffer_months` del perfil se rellena
-  vendiendo del resto de la cartera **solo en los meses de shock positivo** —se vende después de
-  que el mercado suba, no después de que baje— y esa venta paga su plusvalía como cualquier otra.
-  El API publica `buffer_active` (se simuló o no: hacen falta el colchón declarado, un líquido que
-  lo albergue y volatilidad de la que protegerse), `buffer_refills_p50` y
+  vendiendo del resto de la cartera **solo tras un shock positivo YA ocurrido** —el del mes
+  anterior, nunca el del propio mes: ver la corrección de más abajo, que es lo que impide vender
+  «sabiendo» una subida que aún no ha pasado— y esa venta paga su plusvalía como cualquier otra.
+  El API publica `buffer_active` (se simuló o no: hacen falta el colchón declarado, un líquido
+  **sin riesgo** que lo albergue y volatilidad de la que protegerse) con su
+  `buffer_inactive_reason`, `buffer_refills_p50` y
   `buffer_refill_net_total_p50`; los dos últimos son `null` cuando no se simuló, que no es «cero
   rellenos». En el camino determinista **no hay colchón** por diseño: sin sorteo no hay mes bueno
   ni malo que distinguir, así que el trasvase no tendría criterio.
+
+### Corrección tras la revisión adversarial del motor
+
+Antes de publicar 5.0.0 se sometió el motor entero a una segunda revisión adversarial (issue #207):
+no «¿pasan los tests?», sino «¿qué cifra plausible está mal?». Lo que salió está abajo, hallazgo a
+hallazgo: todos **silenciosos** —números creíbles, ninguna excepción, ningún test en rojo— y todos
+con su corrección medida. **Todas las cifras de abajo salen de hogares SINTÉTICOS del arnés de
+pruebas; ninguna procede de una instalación real.**
+
+- **Un descubierto de un ULP se publicaba junto a «nunca agotado» (bug de 4.15.0).** Síntoma: una
+  respuesta afirmaba a la vez `assets_depleted_month_index: null` y `uncovered_deficit_total > 0`,
+  o sea «tu cartera nunca se vacía» y «hubo gasto sin pagar». Causa raíz: el mes de agotamiento lo
+  decidía el predicado «venta bruta ≥ drenable», que compara dos cantidades **calculadas por
+  caminos distintos**, así que en el aterrizaje exacto `Decimal` y `f64` lo resolvían al revés.
+  Ahora lo decide **la VENTA**, medida sobre los saldos DESPUÉS de vender. Medido sobre 3.000
+  entradas del fuzz: **184 → 47 casos** con la contradicción, y los 47 que quedan traen un
+  descubierto **≤ 5,6e-23 €** — la cola de redondeo del acumulador, no euros. En `f64`, **cero
+  volteos de depleción; antes 60**.
+- **Un plan perfecto se publicaba como ruina.** `assets_depleted_month_index` exige desde ahora
+  **DOS condiciones**: que la venta dejara la cartera a cero **y** que alguna venta posterior se
+  quedara sin fundar. Sin la segunda, un puente que se vacía EXACTAMENTE el mes en que entra una
+  pensión que cubre todo el gasto posterior —el aterrizaje que un plan bien hecho busca— salía como
+  «cartera agotada» con `uncovered_deficit_total = 0`. Ese caso es hoy **`null`**.
+- **La vía mixta bajo techo contabilizaba el recorte de la regla como impago.** Con una regla con
+  techo y varios tramos fiscales, el rechazo de la regla es `withdrawal_shortfall` —gasto que no se
+  hace—, no descubierto —gasto que no se pudo pagar—; el motor los mezclaba, y el neto de un techo
+  que la cartera no puede fundar se tasa ahora con la `g` **marginal**. Caso b1: el descubierto cae
+  de **1.095 € a 158 €**. Caso b1e (`guardrails`): el recorte pasa de **0 a 1.567,62 €**, que es
+  donde tenía que estar desde el principio. Las dos magnitudes viajan por separado en la serie
+  precisamente para que nadie las vuelva a sumar.
+- **`rule_is_spend` vendía cartera para pagar un gasto que la caja del mes ya cubría.** El modo
+  «lo que la regla permite, se gasta» financia ahora ese gasto **primero con el superávit del mes**
+  y solo vende lo que falte. Antes vendía siempre, pagaba la plusvalía y volvía a aportar el
+  sobrante: puro churn fiscal, **3.991,72 €/año** en el caso b4, hoy **0**. El pin P16 se regeneró
+  con el capital aportado en **8.263,80 € → 0** — el euro que daba la vuelta ya no cuenta como
+  aportación.
+- **El colchón de caja, descompuesto y honesto.** Dos correcciones y una medición. (1) El relleno
+  es **no anticipativo**: el mes `k` se autoriza con el shock que YA ocurrió (`z_{k−1}`), no con el
+  del propio mes — como el relleno corre antes del crecimiento, la versión anterior vendía renta
+  variable **al precio de antes de una subida que ya sabía que venía**. (2) Solo se instala si hay
+  un activo **líquido con σ = 0** donde alojarlo: sin ese filtro, un hogar cuyo único activo
+  no-colchón era la vivienda **liquidaba el piso** para engordar una cuenta corriente. Con el
+  experimento rehecho, el colchón deja de ser «bueno» o «malo» y se descompone: con una cuenta al
+  **0 %** cuesta **−3,5 pp** de éxito (**−7,9 pp** de lastre por tener el dinero parado, **+3,9 pp**
+  de protección real); alojado a la rentabilidad del fondo, **+3,9 pp**. Y donde de verdad se ve es
+  en la cola: sin el lastre, el líquido p10 del mes 240 pasa de **99.409 € a 197.767 €**, casi el
+  doble. La lectura no es «el colchón es bueno» ni «es malo»: **compra suelo, y lo paga la
+  rentabilidad a la que renuncias**. Cuando no se simula, la respuesta dice por qué:
+  **`buffer_inactive_reason`** ∈ `not_requested` | `no_volatility` | `no_safe_liquid_asset`, y
+  `null` ⟺ sí se simuló.
+- **El cociente de cobertura valía 1,0 incluso sin cartera.** `withdrawal_to_need_ratio_p50` y
+  `months_below_need_p50` miraban solo el recorte de la REGLA, que con `fixed_real` es **cero por
+  construcción** (el permitido ES la necesidad). Resultado: un hogar que se quedaba sin cartera
+  publicaba «cubrió todo su gasto», porque nadie le había recortado nada — simplemente no había de
+  dónde sacarlo. Ahora el denominador incluye el descubierto —`Σ retirada / Σ (retirada + recorte +
+  descubierto)`— y el contador cuenta los meses con recorte **o** descubierto: el caso d4 pasa de
+  **1,0 a 0,0865**, es decir de «lo cubrió entero» a «cubrió menos de una décima parte».
+- **El éxito premiaba al hogar que no se jubila jamás.** La definición anterior era solo «la cartera
+  no se agota nunca», y con un disparador por CRUCE quien nunca llega al objetivo nunca drena, así
+  que nunca se agota: contaba como éxito. Desde ahora **ÉXITO = el plan OCURRE y AGUANTA** (se
+  jubila dentro del horizonte —o la estrategia es por EDAD, y entonces la jubilación es un dato— y
+  la cartera no se agota nunca). El hogar sintético que cruza en el mes 655 de 840 publicaba
+  **0,96** con un **33,1 %** de caminos que no se jubilaban; hoy publica **0,629**, con
+  `never_retired_probability` **0,331** y `success_given_retired` **0,940** al lado. **Las tres se
+  leen juntas** y hay identidad comprobable: `success_probability ≤ 1 − never_retired_probability`.
+- **Lo que gana el wire**, para que ninguna de las cifras de arriba haya que deducirla:
+  - `GET /v1/projection/series` → **`points[].unmet_need`**: el gasto del mes que los activos no
+    pudieron financiar, neto y ≥ 0 (número JSON y misma decimación que sus vecinos). Son **tres**
+    magnitudes por mes y no dos — lo que se obtuvo (`withdrawal`), lo que la regla rechazó
+    (`withdrawal_shortfall`) y lo que la cartera no pudo dar (`unmet_need`) —, y su suma es la
+    necesidad neta. No viaja en `members[].series`, que sigue siendo mínima.
+  - `GET /v1/projection/bands` → **`never_retired_probability`**, **`success_given_retired`** y
+    **`buffer_inactive_reason`**; `months_below_need_p50` y `withdrawal_to_need_ratio_p50` con la
+    semántica corregida de arriba, y la **última fila de `depletion_probability_by_age` es siempre
+    el horizonte** —la ruina total del plan—, así que el paso hasta ella puede ser de menos de cinco
+    años. Antes se paraba en el último múltiplo de 60 que cabía y dejaba meses fuera sin decirlo.
+  - `GET /v1/summary` → **`plan.never_retired_probability`** y **`plan.success_given_retired`**,
+    leídos de la MISMA entrada de cache que `success_probability` (el tile del Resumen y el fan
+    chart citan una sola ejecución de Monte Carlo).
+  - MCP `simulate_projection` → los dos lados ganan las tres lecturas nuevas, y con `include_series`
+    la respuesta trae **`baseline_unmet_need`** y **`scenario_unmet_need`**: son la única columna
+    que dice DÓNDE deja de cubrirse el plan, porque un mes de agotamiento y un total acumulado no
+    enseñan el perfil del hueco.
+- **Un descuento de puente negativo encarece el puente, y suficientemente negativo lo hace explotar.**
+  Con `bridge_discount_basis: expected_return` y una cartera líquida con rentabilidad esperada
+  NEGATIVA, la tasa derivada se **acota a 0** antes de entrar al motor y se avisa con
+  `bridge_discount_clamped` en `warnings` (solo cuando la tasa se iba a usar: base puente + pensión
+  con fecha resuelta). El motivo no es cosmético: descontar responde «cuánto capital necesito HOY
+  para pagar un flujo futuro», y con `d < 0` cada euro futuro cuesta **más** de un euro hoy — el
+  objetivo crece sin límite conforme se aleja la pensión. Pasado un umbral que depende de los meses
+  de puente, la tabla **desborda `Decimal`**: eso era un `panic` dentro de `powd` que salía como un
+  **500 opaco** y hoy es un **422 `bridge_discount_out_of_range`** tipado, con su copia en español.
+  Las otras dos bases no pueden producirlo (`none` es 0 por definición y `swr` está acotada por el
+  PATCH).
+- **`partial_gap_target` se gatea sobre la fase VIVIDA, no sobre la declarada.** Un hogar que cruza
+  su número FIRE en el mes 2 y se jubila 58 meses antes de la media jornada que tenía apuntada
+  publicaba el capital que sostendría el hueco de una fase que **nunca ocurrió**. Ahora es `null`
+  salvo que haya `partial_retirement_month_index` — el mismo criterio que su gemelo
+  `partial_phase_capital_growing`, que ya lo aplicaba: eran dos campos de la misma fase con dos
+  reglas distintas.
 
 ### Breaking
 

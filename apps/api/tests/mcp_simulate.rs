@@ -857,6 +857,21 @@ async fn one_off_by_date_equals_month_index_and_series_are_opt_in() {
     assert!(n > 10);
     assert_eq!(series["baseline_net_worth"].as_array().unwrap().len(), n);
     assert_eq!(series["scenario_net_worth"].as_array().unwrap().len(), n);
+    // **El descubierto por mes, por lado** (5.0.0, pase de correcciones de la revisión
+    // adversarial): es la única columna que dice DÓNDE deja de cubrirse el plan —
+    // `assets_depleted_month_index` da un mes y `uncovered_deficit_total` un total, y entre los
+    // dos no se ve el perfil del hueco—. Este hogar ahorra, así que son ceros: un cero de verdad,
+    // publicado, no una columna ausente.
+    for k in ["baseline_unmet_need", "scenario_unmet_need"] {
+        let v = series[k]
+            .as_array()
+            .unwrap_or_else(|| panic!("falta {k}: {by_date}"));
+        assert_eq!(v.len(), n, "{k} comparte rejilla con month_indices: {by_date}");
+        assert!(
+            v.iter().all(|x| x.as_f64() == Some(0.0)),
+            "este hogar no tiene descubierto: {k} = {v:?}"
+        );
+    }
     assert!(by_index.get("series").is_none());
 }
 
@@ -1839,8 +1854,8 @@ async fn the_new_what_if_axes_refuse_calls_that_cannot_move_anything() {
 ///    demás ejes tienen anti-no-op porque devolverían un escenario idéntico al baseline sin decir
 ///    por qué; éste no cambia el escenario, lo describe, y «¿qué probabilidad tiene mi plan tal
 ///    cual está?» es una pregunta legítima.
-/// 2. Los cuatro campos aparecen **en los dos lados** y `success_probability_delta` en `deltas`.
-/// 3. Sin el eje, los cuatro son `null` — no 0. Un cero se leería como «ningún escenario aguanta».
+/// 2. El bloque del éxito aparece **en los dos lados** y `success_probability_delta` en `deltas`.
+/// 3. Sin el eje, todos son `null` — no 0. Un cero se leería como «ningún escenario aguanta».
 #[tokio::test]
 async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_the_scenario() {
     let app = TestApp::spawn().await;
@@ -1854,8 +1869,11 @@ async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_th
         for k in [
             "success_probability",
             "success_verdict",
+            "never_retired_probability",
+            "success_given_retired",
             "underfunded_probability",
             "months_below_need_p50",
+            "buffer_inactive_reason",
         ] {
             assert!(sin[lado][k].is_null(), "{lado}.{k} sin el eje: {sin}");
         }
@@ -1890,6 +1908,34 @@ async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_th
         assert!(con[lado]["months_below_need_p50"].is_u64(), "{lado}: {con}");
         // Sin trigger por edad, la infra-financiación no aplica ni con el eje pedido.
         assert!(con[lado]["underfunded_probability"].is_null(), "{lado}: {con}");
+        // **Las dos caras nuevas del éxito** (pase de correcciones de la revisión adversarial):
+        // sin ellas, un `success_probability` no distingue el plan que falla del que no llega a
+        // empezar. `never_retired_probability` viaja SIEMPRE con el eje pedido; el condicional
+        // puede ser `null` si ningún camino se jubila, y entonces el otro vale 1.
+        let never = con[lado]["never_retired_probability"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{lado} debe traer never_retired_probability: {con}"))
+            .parse::<f64>()
+            .expect("probabilidad");
+        let success = con[lado]["success_probability"]
+            .as_str()
+            .expect("probabilidad")
+            .parse::<f64>()
+            .expect("probabilidad");
+        assert!(
+            success <= 1.0 - never + 1e-6,
+            "{lado}: un camino que no se jubila no puede ser un éxito ({success} vs 1 − {never}): {con}"
+        );
+        match con[lado]["success_given_retired"].as_str() {
+            Some(_) => assert!(never < 1.0, "{lado}: {con}"),
+            None => assert_eq!(never, 1.0, "{lado}: solo es null si NADIE se jubila: {con}"),
+        }
+        // El colchón: sin `cash_buffer_months` en el perfil, el motivo es `not_requested` — un
+        // `null` aquí significaría «se simuló», que es otra cosa.
+        assert_eq!(
+            con[lado]["buffer_inactive_reason"], "not_requested",
+            "{lado}: {con}"
+        );
     }
     // Sin ningún otro override los dos lados son el MISMO plan y la MISMA semilla ⇒ delta 0 exacto.
     assert_eq!(

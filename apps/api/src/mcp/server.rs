@@ -1085,9 +1085,11 @@ pub struct SimulateParams {
     /// Inversas caras, opt-in: hoy solo «¿cuánto más puedo gastar sin mover la fecha?».
     #[serde(default)]
     pub solve: Option<SolveParam>,
-    /// **Monte Carlo sobre los dos lados** (opt-in): añade `success_probability`,
-    /// `success_verdict`, `underfunded_probability` y `months_below_need_p50` a `baseline` y a
-    /// `scenario`, y `success_probability_delta` a `deltas`. Sin bandas (usa get_projection_bands).
+    /// **Monte Carlo sobre los dos lados** (opt-in): añade a `baseline` y a `scenario` el bloque
+    /// del éxito —`success_probability` (se jubila Y no agota), `success_verdict`,
+    /// `never_retired_probability`, `success_given_retired`, `underfunded_probability`,
+    /// `months_below_need_p50` y `buffer_inactive_reason`— y `success_probability_delta` a
+    /// `deltas`. Sin bandas (usa get_projection_bands).
     #[serde(default)]
     pub monte_carlo: Option<MonteCarloParam>,
 }
@@ -3008,7 +3010,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_projection_bands",
-        description = "Riesgo del plan por Monte Carlo, solo `view: \"mine\"` (el hogar es 400 `household_bands_unavailable`: los percentiles no suman). Bandas puntuales p10/p50/p90 del patrimonio (~82 puntos; el líquido con `include_liquid_bands`), `success_probability` con su veredicto contra el umbral del perfil, agotamiento por edad y percentiles del mes de jubilación. Semilla estable por usuario: la misma pregunta da la misma cifra. Lee `model_note` antes de citar nada — el modelo tiene supuestos fuertes.",
+        description = "Riesgo del plan por Monte Carlo, solo `view: \"mine\"` (el hogar es 400 `household_bands_unavailable`: los percentiles no suman). Bandas puntuales p10/p50/p90 del patrimonio (~82 puntos; el líquido con `include_liquid_bands`), agotamiento por edad y percentiles del mes de jubilación. ÉXITO = se jubila dentro del horizonte (o la estrategia es por edad) Y la cartera nunca se agota: léelo junto a `never_retired_probability` y `success_given_retired`, no solo. Semilla estable por usuario. Lee `model_note` antes de citar nada.",
         annotations(title = "Riesgo del plan (Monte Carlo)", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_projection_bands(
@@ -7005,11 +7007,20 @@ impl ServerHandler for FutureFinMcp {
                 what-if necesita un plan, y el hogar tiene N.\n\nMONTE CARLO. `get_projection_bands` \
                 —y el eje opt-in `monte_carlo` de `simulate_projection`— contestan «¿qué \
                 probabilidad tiene mi plan?» sorteando cientos de caminos del MISMO motor que \
-                dibuja la línea determinista. ÉXITO significa UNA cosa: la cartera **no se agota \
-                nunca** dentro del horizonte, con las pensiones y las fases ya dentro de la \
-                simulación. El RECORTE de una regla de retirada NO es fracaso y viaja aparte \
-                (`months_below_need_p50`, `withdrawal_to_need_ratio_p50`): son dos preguntas \
-                distintas y mezclarlas da un diagnóstico falso. Las bandas son PUNTUALES: cada \
+                dibuja la línea determinista. ÉXITO son DOS cosas a la vez: que el hogar **se \
+                jubile dentro del horizonte** (o que la estrategia sea por EDAD, y entonces la \
+                jubilación es un dato y no un suceso) **y** que la cartera **no se agote nunca**, \
+                con las pensiones y las fases ya dentro de la simulación. Nunca cites \
+                `success_probability` sola: al lado viajan `never_retired_probability` (cuántos \
+                caminos no llegan a jubilarse — 0 con trigger por edad) y `success_given_retired` \
+                (éxito entre los que sí), y un 0,63 con un tercio sin jubilarse no describe el \
+                mismo plan que un 0,63 con todos jubilándose. El RECORTE de una regla de retirada \
+                NO es fracaso y viaja aparte (`months_below_need_p50`, \
+                `withdrawal_to_need_ratio_p50`, que cuentan el recorte de la regla Y el gasto que \
+                la cartera no pudo financiar): son dos preguntas distintas y mezclarlas da un \
+                diagnóstico falso. La última fila de `depletion_probability_by_age` es SIEMPRE el \
+                horizonte —la ruina total del plan—, así que el paso hasta ella puede ser menor de \
+                cinco años. Las bandas son PUNTUALES: cada \
                 percentil se calcula mes a mes sobre los caminos de ESE mes, así que la curva p50 \
                 no es ninguna simulación real y no cumple ninguna identidad contable — no la cites \
                 punto a punto como «tu patrimonio probable». Con `any_volatility_declared: false` \

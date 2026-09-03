@@ -797,8 +797,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "eb03dba2646f",
-      "description_len": 490,
-      "description_sha256_12": "58b1aab6d6c1",
+      "description_len": 525,
+      "description_sha256_12": "83e6b76b4a1e",
       "name": "get_projection_bands",
       "properties": [
         "include_liquid_bands",

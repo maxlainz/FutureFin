@@ -42,6 +42,7 @@
     "birth_date_too_old",
     "birth_date_type",
     "bridge_discount_basis",
+    "bridge_discount_out_of_range",
     "budget_entry_category_scope_unsupported",
     "budget_entry_is_liability_derived",
     "cap_kind_invalid",

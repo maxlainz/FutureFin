@@ -256,15 +256,48 @@ pub struct ProjectionBandsResponse {
     /// Bandas puntuales, decimadas a `hybrid` (mes 0..12 mensual, luego anual, más el último mes
     /// del horizonte). Misma rejilla que `points[]` de la serie.
     pub points: Vec<ProjectionBandPoint>,
-    /// **D22 — la definición de éxito**: fracción de caminos en los que la cartera NO se agota
-    /// nunca dentro del horizonte, con las pensiones y las fases ya dentro de la simulación.
-    /// `0.87` = 87 de cada 100 escenarios.
+    /// **La definición de éxito: el plan OCURRE y AGUANTA.** Fracción de caminos en los que el
+    /// hogar **se jubila dentro del horizonte** —o la estrategia es por EDAD, y entonces la
+    /// jubilación es un dato del plan y no un suceso— **Y** la cartera no se agota nunca, con las
+    /// pensiones y las fases ya dentro de la simulación. `0.87` = 87 de cada 100 escenarios.
+    ///
+    /// **Cambió en el pase de correcciones de la revisión adversarial** (hallazgo #7). D22 decía
+    /// solo «la cartera no se agota nunca», y con un trigger por CRUCE eso premiaba al hogar que
+    /// **no se jubila jamás**: quien trabaja hasta los 105 años sin llegar al objetivo nunca
+    /// drena, así que nunca se agota. Medido sobre un hogar sintético: 0,960 publicados con el
+    /// 33,1 % de los caminos sin jubilarse. Hoy ese mismo hogar publica 0,629, con
+    /// `never_retired_probability = 0,331` y `success_given_retired = 0,940` al lado — tres
+    /// cifras que se leen juntas, y ninguna de las tres es la que se publicaba antes.
     ///
     /// El RECORTE de una regla de retirada **no es fracaso** (D24) y viaja aparte, en
     /// `months_below_need_p50` / `withdrawal_to_need_ratio_p50`.
+    ///
+    /// **Identidad comprobable**: `success_probability ≤ 1 − never_retired_probability` con
+    /// trigger por cruce (los caminos que no se jubilan no pueden contar como éxito); con trigger
+    /// por edad `never_retired_probability` es `"0"` y la cota es trivial.
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub success_probability: Option<Decimal>,
+    /// **Fracción de caminos que NO se jubilan dentro del horizonte.** Con trigger por EDAD es
+    /// `"0"` por construcción: ahí la jubilación llega llegue o no el capital.
+    ///
+    /// Se publica porque es el **denominador escondido** del éxito: un plan por cruce con una
+    /// probabilidad de éxito alta y un tercio de caminos que no se jubilan nunca no es un buen
+    /// plan, es un plan que no ocurre. `null` solo si el `f64` no fuera representable —
+    /// inalcanzable con el cociente de dos contadores—, nunca para decir «cero».
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub never_retired_probability: Option<Decimal>,
+    /// **Éxito entre los caminos que SÍ se jubilan**: de los que llegan a la jubilación, cuántos
+    /// no agotan la cartera. `null` ⟺ ningún camino se jubila dentro del horizonte — ahí la
+    /// pregunta «¿aguanta?» no tiene sobre qué formularse, y un `0` la respondería en falso.
+    ///
+    /// Junto a `success_probability` separa las dos preguntas que la definición vieja mezclaba:
+    /// «¿ocurre el plan?» y «¿aguanta?». Un `success_given_retired` alto con un
+    /// `never_retired_probability` alto describe un plan sólido que casi nunca llega a empezar.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub success_given_retired: Option<Decimal>,
     /// Umbral configurado en el perfil (`success_threshold_pct`, 50..=99, default 95), en
     /// PORCENTAJE. Se ecoa porque el veredicto de abajo no se puede auditar sin él.
     pub success_threshold_pct: u32,
@@ -274,6 +307,13 @@ pub struct ProjectionBandsResponse {
     /// Probabilidad acumulada de agotamiento cada cinco años desde la jubilación efectiva.
     /// **Vacío** cuando ningún camino se jubila dentro del horizonte: sin jubilación no existe
     /// «la probabilidad de agotar a los 75».
+    ///
+    /// **La última fila es siempre el HORIZONTE** (hallazgo #8 de la revisión adversarial), o
+    /// sea la ruina total del plan: «cuántos escenarios se quedan sin cartera antes de que se
+    /// acabe el plan». La rejilla avanza de 60 en 60 desde el ancla y antes se paraba en el
+    /// último múltiplo que cabía — con ancla en el mes 655 y horizonte 840 la tabla terminaba en
+    /// el 835 y dejaba cinco meses fuera sin decirlo. La consecuencia visible es que la última
+    /// fila puede estar a menos de cinco años de la anterior: el paso NO es uniforme al final.
     pub depletion_probability_by_age: Vec<DepletionProbabilityPoint>,
     /// Percentiles del mes de jubilación. `null` con trigger por EDAD (ver el tipo).
     pub retirement_month_index_percentiles: Option<RetirementMonthPercentiles>,
@@ -283,13 +323,23 @@ pub struct ProjectionBandsResponse {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub underfunded_probability: Option<Decimal>,
-    /// Mediana entre caminos del NÚMERO DE MESES jubilados en que la regla de retirada dejó
-    /// corta la necesidad. Con `fixed_real` (el default) es 0 por construcción: esa regla no
-    /// tiene techo.
+    /// Mediana entre caminos del **NÚMERO DE MESES jubilados en que el hogar no cubrió su
+    /// gasto**: cuenta el recorte de la regla (`withdrawal_shortfall > 0`) **y** el gasto que la
+    /// cartera no pudo financiar (`unmet_need > 0`).
+    ///
+    /// Contar solo el recorte lo dejaba en `0` por construcción con `fixed_real` —la regla sin
+    /// techo no recorta nunca—, también en los caminos que se quedaban sin cartera en el mes 35
+    /// de 400: el mes sin dinero no aparecía en ninguna cifra publicada.
     pub months_below_need_p50: u32,
-    /// Mediana entre caminos de `Σ retirada / Σ (retirada + recorte)` sobre los meses jubilados:
-    /// **qué FRACCIÓN de la necesidad cubrió la regla**. `1` = la cubrió entera. `null` cuando
-    /// ningún camino tiene meses jubilados con necesidad positiva.
+    /// Mediana entre caminos de `Σ retirada / Σ (retirada + recorte + descubierto)` sobre los
+    /// meses jubilados: **qué FRACCIÓN de su gasto cubrió el hogar de verdad**. `1` = lo cubrió
+    /// entero. `null` cuando ningún camino tiene meses jubilados con necesidad positiva.
+    ///
+    /// **El descubierto entra en el denominador** (hallazgo #4 de la revisión adversarial). Con
+    /// `fixed_real` el recorte es cero por construcción —el permitido ES la necesidad—, así que
+    /// el cociente valía `1,0` SIEMPRE, también sobre caminos que se quedaban sin cartera en el
+    /// mes 35 de 400. El hogar sintético medido publica hoy `0.086500` donde antes publicaba
+    /// `1.000000`.
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub withdrawal_to_need_ratio_p50: Option<Decimal>,
@@ -307,6 +357,16 @@ pub struct ProjectionBandsResponse {
     /// tiene colchón: sin sorteo no hay mes bueno ni malo que distinguir, así que el trasvase no
     /// tendría criterio.
     pub buffer_active: bool,
+    /// **Por qué NO se simuló el colchón**: `not_requested` (el perfil no declara
+    /// `cash_buffer_months`) | `no_volatility` (ningún activo declara volatilidad: no hay riesgo
+    /// de secuencia del que protegerse, y el resultado es BIT A BIT el de no pedirlo) |
+    /// `no_safe_liquid_asset` (no hay ningún activo líquido con σ = 0 donde alojarlo; un colchón
+    /// volátil no protege de nada). `null` ⟺ `buffer_active: true`.
+    ///
+    /// Nunca es `null` con `buffer_active: false`: quien pidió un colchón y no lo tuvo merece el
+    /// motivo, y sin él «no pasó nada» se lee como «no funcionó».
+    #[schema(value_type = Option<String>)]
+    pub buffer_inactive_reason: Option<&'static str>,
     /// Mediana entre caminos del NÚMERO de meses con relleno efectivo. **`null` ⟺
     /// `buffer_active: false`** — «no se midió», que no es «cero rellenos».
     pub buffer_refills_p50: Option<u32>,
@@ -338,7 +398,7 @@ pub struct ProjectionBandsResponse {
 /// Vive en la respuesta y no solo en la documentación por la misma razón que
 /// `PROJECTION_MODEL_NOTE`: un consumidor conversacional lee el JSON, no el repositorio, y una
 /// probabilidad de ruina sin sus supuestos es un número que parece cierto.
-pub(crate) const BANDS_MODEL_NOTE: &str = "Monte Carlo sobre el MISMO bucle que la línea determinista, con los factores de crecimiento sorteados. MODELO: un shock de mercado COMÚN por mes (un solo z~N(0,1) que viven todos los activos a la vez), escalado por la volatilidad de cada uno: factor = m·exp(σz − σ²/2) con σ = annual_volatility_percent/100/√12. La corrección de Itô es exacta, así que la media del factor mensual ES el factor determinista y la rentabilidad esperada que escribiste se respeta; la GEOMÉTRICA —la que se cobra— sale más baja, y esa diferencia no es un error: es el coste de la volatilidad, y se ve en que la banda p50 queda por DEBAJO de la línea determinista. σ = 0 ⇒ el camino determinista exacto. PUNTUAL QUIERE DECIR PUNTUAL: cada percentil se calcula mes a mes sobre los caminos de ESE mes, así que la curva p50 NO es una simulación real y no cumple ninguna identidad contable — no la cites como «tu patrimonio probable» punto a punto. SEMILLA estable por usuario: las mismas cifras hoy y dentro de un año, salvo que cambies los datos o pases `seed`. ÉXITO = la cartera no se agota NUNCA dentro del horizonte, con pensiones y fases dentro de la simulación; el RECORTE de una regla de retirada no es fracaso y viaja aparte (`months_below_need_p50`, `withdrawal_to_need_ratio_p50`). LO QUE NO SE MODELA, dicho para que nadie lo suponga: colas gruesas (el shock es log-normal, así que la probabilidad de ruina es OPTIMISTA en la cola), autocorrelación o reversión a la media (los meses son independientes: sin ciclos), correlación imperfecta entre activos (con un shock común la correlación es exactamente 1 y una cartera diversificada NO se beneficia aquí de su diversificación: el modelo es conservador en ese eje), bootstrap histórico (el sorteo es paramétrico: nada de esto es «lo que pasó entre 1929 y 1964»), volatilidad de la inflación, de los ingresos, del gasto o del tipo de la deuda (solo los activos sortean), y rebalanceo (cada activo compone por su cuenta). El patrimonio, el objetivo y la aportación necesaria en EUROS siguen saliendo del camino exacto en Decimal: de aquí solo salen probabilidades y percentiles.";
+pub(crate) const BANDS_MODEL_NOTE: &str = "Monte Carlo sobre el MISMO bucle que la línea determinista, con los factores de crecimiento sorteados. MODELO: un shock de mercado COMÚN por mes (un solo z~N(0,1) que viven todos los activos a la vez), escalado por la volatilidad de cada uno: factor = m·exp(σz − σ²/2) con σ = annual_volatility_percent/100/√12. La corrección de Itô es exacta, así que la media del factor mensual ES el factor determinista y la rentabilidad esperada que escribiste se respeta; la GEOMÉTRICA —la que se cobra— sale más baja, y esa diferencia no es un error: es el coste de la volatilidad, y se ve en que la banda p50 queda por DEBAJO de la línea determinista. σ = 0 ⇒ el camino determinista exacto. PUNTUAL QUIERE DECIR PUNTUAL: cada percentil se calcula mes a mes sobre los caminos de ESE mes, así que la curva p50 NO es una simulación real y no cumple ninguna identidad contable — no la cites como «tu patrimonio probable» punto a punto. SEMILLA estable por usuario: las mismas cifras hoy y dentro de un año, salvo que cambies los datos o pases `seed`. ÉXITO = el plan OCURRE y AGUANTA: el hogar se jubila dentro del horizonte (o la estrategia es por EDAD, y entonces la jubilación es un dato) Y la cartera no se agota nunca, con pensiones y fases dentro de la simulación. Con un trigger por CRUCE, la definición vieja —solo «no se agota»— premiaba al hogar que NO se jubila jamás: quien nunca llega al objetivo nunca drena. Por eso viajan al lado `never_retired_probability` (cuántos caminos no se jubilan; 0 por construcción con trigger por edad) y `success_given_retired` (éxito entre los que sí se jubilan): las tres se leen juntas. El RECORTE de una regla de retirada no es fracaso y viaja aparte, en `months_below_need_p50` y `withdrawal_to_need_ratio_p50` — que cuentan el recorte de la regla Y el gasto que la cartera no pudo financiar, porque con `fixed_real` el recorte es cero por construcción y un cociente que solo lo mirara valdría 1,0 también en los caminos que se quedan sin cartera. `depletion_probability_by_age` cierra SIEMPRE en el horizonte: esa última fila es la ruina total del plan, y el paso hasta ella puede ser menor de cinco años. `buffer_inactive_reason` dice por qué no se simuló el colchón cuando `buffer_active` es false. LO QUE NO SE MODELA, dicho para que nadie lo suponga: colas gruesas (el shock es log-normal, así que la probabilidad de ruina es OPTIMISTA en la cola), autocorrelación o reversión a la media (los meses son independientes: sin ciclos), correlación imperfecta entre activos (con un shock común la correlación es exactamente 1 y una cartera diversificada NO se beneficia aquí de su diversificación: el modelo es conservador en ese eje), bootstrap histórico (el sorteo es paramétrico: nada de esto es «lo que pasó entre 1929 y 1964»), volatilidad de la inflación, de los ingresos, del gasto o del tipo de la deuda (solo los activos sortean), y rebalanceo (cada activo compone por su cuenta). El patrimonio, el objetivo y la aportación necesaria en EUROS siguen saliendo del camino exacto en Decimal: de aquí solo salen probabilidades y percentiles.";
 
 /// Traduce un [`McError`] a la respuesta HTTP. Las tres variantes de configuración son 400 con
 /// código estable; el fallo del motor reusa `map_engine_err`, que ya publica los códigos que el
@@ -606,6 +666,8 @@ fn assemble_bands_response(
         percentiles: outcome.percentiles.clone(),
         points,
         success_probability: probability_out(outcome.success_probability),
+        never_retired_probability: probability_out(outcome.never_retired_probability),
+        success_given_retired: outcome.success_given_retired.and_then(probability_out),
         success_threshold_pct,
         success_verdict: success_verdict(outcome.success_probability, success_threshold_pct),
         depletion_probability_by_age,
@@ -617,6 +679,10 @@ fn assemble_bands_response(
             .and_then(probability_out),
         any_volatility_declared: outcome.any_volatility_declared,
         buffer_active: outcome.buffer_active,
+        // El literal público lo pone el propio crate (`BufferInactiveReason::code`), no un
+        // `match` aquí: un mapeo duplicado se queda atrás en cuanto el enum crece, y un motivo
+        // con dos nombres es un motivo que nadie puede buscar.
+        buffer_inactive_reason: outcome.buffer_inactive_reason.map(|r| r.code()),
         buffer_refills_p50: outcome.buffer_refills_p50,
         buffer_refill_net_total_p50: outcome
             .buffer_refill_net_total_p50

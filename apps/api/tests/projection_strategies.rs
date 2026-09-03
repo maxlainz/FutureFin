@@ -175,6 +175,78 @@ async fn partial_publishes_the_270k_gap_of_the_issue_example() {
     );
 }
 
+/// **La media jornada declarada que NUNCA se vive no publica su hueco** (pase de correcciones de
+/// la revisión adversarial).
+///
+/// `partial_gap_target` se calculaba de la fase DECLARADA en el perfil, no de la fase que el
+/// hogar atravesó: un plan que cruza su número FIRE a los 40 y se jubila del todo publicaba
+/// «capital del hueco de la media jornada: 270.000 €» para una media jornada de los 60 que el
+/// cruce había dejado décadas atrás. Ahora va atado a `partial_retirement_month_index`, igual que
+/// `partial_phase_capital_growing`: los tres describen la MISMA fase y no pueden usar criterios
+/// distintos para existir.
+///
+/// El hogar: 900.000 € líquidos contra un objetivo de `12·1.500/0,04 = 450.000 €`. Cruza el
+/// primer mes, así que la media jornada de los 60 no llega a empezar nunca.
+#[tokio::test]
+async fn a_partial_phase_that_never_happens_publishes_no_gap_target() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    taxes_off(&app, &owner).await;
+    let inc = app.create_category(&owner, "income", "Nómina").await;
+    let exp = app.create_category(&owner, "expense", "Vida").await;
+    let ast = app.create_category(&owner, "asset", "Fondos").await;
+    for (cat, amount) in [(&inc, "6000"), (&exp, "1500")] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/budget/entries",
+                json!({"category_id": cat, "amount": amount, "ends_at_retirement": false}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": ast, "name": "Indexado", "current_value": "900000",
+                   "is_liquid": true, "expected_annual_return_percent": "5"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    patch_profile(
+        &app,
+        &owner,
+        json!({"strategy": "partial", "swr_pct": "4",
+               "partial_retirement": {"starts_at_age": 60, "income_monthly_today": "1100"}}),
+    )
+    .await;
+
+    let s = series(&app, &owner.cookie, "?months=600").await;
+    assert_eq!(s["strategy"], "partial", "la fase SÍ está declarada: {s}");
+    let k = s["jubilacion_month_index"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("con 900.000 contra 450.000 el cruce es inmediato: {s}"));
+    let x = months_until_age(anchor_of(&s), owner_birth(), 60);
+    assert!(
+        k < u64::from(x),
+        "el cruce ({k}) tiene que ir MUY por delante de los 60 (mes {x}) para que la fase no \
+         llegue a vivirse: {s}"
+    );
+    assert!(
+        s["partial_retirement_month_index"].is_null(),
+        "la fase declarada no se vivió: {s}"
+    );
+    assert!(
+        s["partial_gap_target"].is_null(),
+        "un hueco de una fase que nunca ocurrió es una cifra inventada: {s}"
+    );
+    assert!(
+        s["partial_phase_capital_growing"].is_null(),
+        "y su lectura hermana también: los tres describen la misma fase: {s}"
+    );
+}
+
 /// **Sin fase parcial, `partial_phase_capital_growing` es `null`, no `false`.** El motor publica
 /// un `bool` porque es una función pura y debe definir el estado; el wire no puede permitirse que
 /// «no hay media jornada» y «la hay y se come el capital» compartan valor.
@@ -498,5 +570,258 @@ async fn a_coast_that_never_reaches_the_target_says_so() {
     assert!(
         !s["coast_path"].as_array().expect("coast_path").is_empty(),
         "{s}"
+    );
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// El aterrizaje exacto (pase de correcciones de la revisión adversarial)
+// ---------------------------------------------------------------------------------------------
+
+/// **La cartera que se vacía EXACTAMENTE el mes en que entra una pensión que cubre todo el gasto
+/// NO está agotada.**
+///
+/// Es el hallazgo #2 de la segunda revisión adversarial. Hasta el pase de correcciones,
+/// `assets_depleted_month_index` lo decidía un solo predicado —«venta bruta ≥ drenable»— evaluado
+/// ANTES de vender, así que un plan perfecto (24 meses de puente pagados al céntimo con una
+/// pensión detrás que cubre el 125 % del gasto) se publicaba como «cartera agotada en el mes
+/// 311» con `uncovered_deficit_total = 0`: dos cifras de la misma respuesta contándose la una a
+/// la otra que mentían. Hoy hacen falta DOS condiciones —la venta dejó la cartera a cero **Y**
+/// alguna venta posterior se quedó sin fundar—, y aquí la segunda no se cumple.
+///
+/// **El puente se mide, no se supone.** Una primera pasada con una cartera holgada dice cuánto
+/// cuesta el puente entero (`Σ points[].withdrawal`: después de la pensión no se retira nada, así
+/// que la suma del horizonte ES el coste del puente); la segunda pone en el activo exactamente
+/// esa cifra. Sin este rodeo el test dependería de que 24 × 2.000 sea la cuenta correcta, que es
+/// justo lo que no puede darse por hecho en un test de aterrizajes exactos.
+#[tokio::test]
+async fn an_exact_landing_on_a_fully_covering_pension_is_not_a_depleted_portfolio() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    taxes_off(&app, &owner).await;
+    let inc = app.create_category(&owner, "income", "Nómina").await;
+    let exp = app.create_category(&owner, "expense", "Vida").await;
+    let ast = app.create_category(&owner, "asset", "Fondos").await;
+    // El ingreso TERMINA al jubilarse y el gasto no: durante la acumulación la caja es 0 exacta
+    // (2.000 − 2.000), así que el activo no crece ni mengua y el puente empieza con el saldo que
+    // este test le ponga.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/budget/entries",
+            json!({"category_id": inc, "amount": "2000", "ends_at_retirement": true}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let r = app
+        .post_json_with_cookie(
+            "/v1/budget/entries",
+            json!({"category_id": exp, "amount": "2000", "ends_at_retirement": false}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    // 0 % de rentabilidad: el saldo solo cambia por lo que se vende, y la aritmética del
+    // aterrizaje es exacta en `Decimal`.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": ast, "name": "Puente", "current_value": "500000",
+                   "is_liquid": true, "expected_annual_return_percent": "0"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let asset_id = r.json()["id"].as_str().expect("asset id").to_string();
+
+    // Jubilación por EDAD a los 60 (mes conocido, sin depender del cruce) y pensión CON FECHA a
+    // los 62 que cubre el 125 % del gasto: 24 meses de puente y ni un euro de venta después.
+    patch_profile(
+        &app,
+        &owner,
+        json!({"strategy": "retire_at_age", "target_retirement_age": 60, "swr_pct": "4",
+               "target_basis": "bridge_to_pension",
+               "pension": {"monthly_amount_today": "2500", "starts_at_age": 62}}),
+    )
+    .await;
+
+    // --- Pasada 1: cartera holgada. Se MIDE el coste del puente. -------------------------------
+    let holgado = series(&app, &owner.cookie, "?months=600&density=monthly").await;
+    assert_eq!(holgado["retirement_trigger"], "target_age", "{holgado}");
+    let r_grid = holgado["jubilacion_month_index"].as_u64().expect("jubilación");
+    let p_grid = holgado["pension_start_month_index"]
+        .as_u64()
+        .expect("pensión con fecha");
+    assert_eq!(
+        p_grid - r_grid,
+        24,
+        "60 → 62 son 24 meses de puente: {holgado}"
+    );
+    let puntos = holgado["points"].as_array().expect("points");
+    let coste_puente: f64 = puntos.iter().map(|p| p["withdrawal"].as_f64().unwrap()).sum();
+    assert!(
+        (coste_puente - 48_000.0).abs() < 1.0,
+        "24 meses × 2.000 € = 48.000 €, medidos {coste_puente}: {holgado}"
+    );
+    // Después de la pensión no se vende nada: la suma de arriba es el puente ENTERO y no una
+    // parte de un drenaje que sigue.
+    for p in puntos.iter().filter(|p| p["month_index"].as_u64().unwrap() > p_grid) {
+        assert_eq!(
+            p["withdrawal"].as_f64(),
+            Some(0.0),
+            "la pensión cubre el gasto: no hay venta después: {p}"
+        );
+    }
+
+    // --- Pasada 2: el aterrizaje EXACTO. -------------------------------------------------------
+    let exacto = format!("{coste_puente:.4}");
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{asset_id}"),
+            json!({"current_value": exacto}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    let s = series(&app, &owner.cookie, "?months=600&density=monthly").await;
+    assert_eq!(
+        s["assets_depleted_month_index"],
+        Value::Null,
+        "la cartera se vacía al céntimo el último mes del puente, y NADIE se queda sin cobrar: \
+         eso no es una ruina, es un plan perfecto ({s})"
+    );
+    assert_eq!(
+        s["uncovered_deficit_total"], "0.0000",
+        "y el escalar hermano lo confirma — las dos cifras ya no pueden contradecirse: {s}"
+    );
+    let pts = s["points"].as_array().expect("points");
+    for p in pts {
+        assert_eq!(
+            p["unmet_need"].as_f64(),
+            Some(0.0),
+            "ninguna venta se quedó sin fundar: {p}"
+        );
+    }
+    // El aterrizaje es REAL: el líquido del cierre del último mes del puente es cero al céntimo.
+    let liquido = |m: u64| -> f64 {
+        pts.iter()
+            .find(|p| p["month_index"].as_u64() == Some(m))
+            .unwrap_or_else(|| panic!("sin punto {m}"))["net_worth_liquid"]
+            .as_f64()
+            .unwrap()
+    };
+    assert!(
+        liquido(p_grid).abs() < 0.01,
+        "cierre del último mes del puente: {} (debería ser 0)",
+        liquido(p_grid)
+    );
+    assert!(
+        liquido(p_grid - 1) > 0.0,
+        "y el mes anterior todavía tenía saldo: {}",
+        liquido(p_grid - 1)
+    );
+
+    // --- Control negativo: un mes de puente MENOS y el veredicto cambia. ------------------------
+    // Sin esto, el test pasaría igual con un handler que publicara `null` siempre.
+    let corto = format!("{:.4}", coste_puente - 2_000.0);
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{asset_id}"),
+            json!({"current_value": corto}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let corta = series(&app, &owner.cookie, "?months=600&density=monthly").await;
+    assert_ne!(
+        corta["assets_depleted_month_index"],
+        Value::Null,
+        "faltando 2.000 € el último mes del puente SÍ se queda sin fundar: {corta}"
+    );
+    assert!(
+        dec(&corta["uncovered_deficit_total"]) > 0.0,
+        "y el descubierto ya no es cero: {corta}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// El descuento del puente no puede ser negativo
+// ---------------------------------------------------------------------------------------------
+
+/// **Una cartera líquida con pérdidas esperadas NO produce un descuento negativo**: se sube a 0 y
+/// se dice con `bridge_discount_clamped`.
+///
+/// Descontar es responder «cuánto capital necesito HOY para pagar un flujo futuro». Con `d < 0` el
+/// factor `(1+d/100)^{j/12}` es menor que 1 y cada euro futuro cuesta MÁS de un euro hoy: el
+/// objetivo puente saldría por encima de la suma llana de sus flujos, que es lo contrario de lo
+/// que descontar significa. Y suficientemente negativo (−53,8 % a 840 meses de puente, −41,8 % a
+/// 1200) la tabla desborda `Decimal` y el motor devuelve `BridgeDiscountOverflow` — que la API
+/// mapea a 422 `bridge_discount_out_of_range`, hoy inalcanzable por este camino precisamente por
+/// este clamp.
+///
+/// Se comprueba por su EFECTO y no solo por el nombre: el objetivo con la tasa clampada tiene que
+/// ser exactamente el mismo que con `bridge_discount_basis: none`.
+#[tokio::test]
+async fn a_negative_expected_return_clamps_the_bridge_discount_to_zero_and_says_so() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    taxes_off(&app, &owner).await;
+    // La cartera líquida espera PERDER un 5 % anual: la base `expected_return` daría −5 %.
+    seed(&app, &owner, "3000", "2000", "-5").await;
+    patch_profile(
+        &app,
+        &owner,
+        json!({"strategy": "pension_bridge", "swr_pct": "4",
+               "bridge_discount_basis": "expected_return",
+               "pension": {"monthly_amount_today": "1200", "starts_at_age": 67}}),
+    )
+    .await;
+
+    let s = series(&app, &owner.cookie, "?months=600").await;
+    assert_eq!(
+        s["bridge_discount_annual_pct"], "0.0000",
+        "el descuento se sube a 0, no se pasa negativo al motor: {s}"
+    );
+    let warnings: Vec<&str> = s["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(|w| w.as_str())
+        .collect();
+    assert!(
+        warnings.contains(&"bridge_discount_clamped"),
+        "un objetivo que deja de descontarse cambia de tamaño y hay que decirlo: {warnings:?} en {s}"
+    );
+    assert!(
+        !warnings.contains(&"bridge_discount_no_liquid_assets"),
+        "hay activo líquido de sobra: el motivo es otro y no puede confundirse: {warnings:?}"
+    );
+    let clampado = s["fire_target_series"].as_array().expect("serie")[0]
+        .as_f64()
+        .expect("f64");
+
+    // El mismo hogar declarando explícitamente «no descuentes»: el objetivo debe coincidir.
+    patch_profile(&app, &owner, json!({"bridge_discount_basis": "none"})).await;
+    let sin = series(&app, &owner.cookie, "?months=600").await;
+    assert_eq!(sin["bridge_discount_annual_pct"], "0.0000", "{sin}");
+    let sin_hoy = sin["fire_target_series"].as_array().expect("serie")[0]
+        .as_f64()
+        .expect("f64");
+    assert!(
+        (clampado - sin_hoy).abs() < 1.0,
+        "clampar a 0 tiene que ser exactamente «no descontar»: {clampado} vs {sin_hoy}"
+    );
+    // Y el aviso desaparece cuando la base ya no es la rentabilidad esperada: el clamp solo
+    // existe donde puede pasar.
+    let sin_w: Vec<&str> = sin["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(|w| w.as_str())
+        .collect();
+    assert!(
+        !sin_w.contains(&"bridge_discount_clamped"),
+        "con base `none` no hay nada que clampar: {sin_w:?}"
     );
 }
