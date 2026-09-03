@@ -368,6 +368,8 @@ passing it. Keeping separate `.env` files — the dev one (`PORT=8081` + `DATABA
 prod/local one (`FUTUREFIN_IMAGE`/`FUTUREFIN_TAG`/`APP_PORT`) passed with `--env-file` — is still
 good hygiene. `FUTUREFIN_DB_MODE=embedded` no longer buys you anything: it is a synonym of `auto`.
 
+- **`docker-stack` falla en «Build image» con `failed to read /src/crates/<crate>/Cargo.toml` aunque todo compile en local** (5.0.0, PR #211) → `apps/api/Dockerfile` enumera los crates a mano (`COPY crates/domain`, `COPY crates/engine`, `COPY crates/engine-stochastic`) y un miembro nuevo del workspace que no se copie rompe `cargo build --locked` DENTRO de la imagen → añade su `COPY` y comprueba que `grep -c '^COPY crates/' apps/api/Dockerfile` coincide con el número de crates de `members` en `Cargo.toml`.
+
 ## 8. When NOT to use this skill
 
 - Cataloging or adding **env vars, entrypoint `FUTUREFIN_*` vars, compose knobs, query params,
