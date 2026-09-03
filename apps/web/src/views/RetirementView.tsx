@@ -591,9 +591,16 @@ export function RetirementView({
     jubMi,
   ]);
 
+  // `months` viaja para que la ÚLTIMA fila se pueda reconocer como el horizonte (la ruina total)
+  // por su MES y no por su posición: con un backend anterior al pase de correcciones la tabla no
+  // cierra en el horizonte y la comprobación falla cerrada, conservando el rótulo por edad.
   const riskDepletionRows = useMemo(
-    () => buildDepletionRows(projectionBands?.depletion_probability_by_age),
-    [projectionBands?.depletion_probability_by_age],
+    () =>
+      buildDepletionRows(
+        projectionBands?.depletion_probability_by_age,
+        projectionBands?.months,
+      ),
+    [projectionBands?.depletion_probability_by_age, projectionBands?.months],
   );
 
   const riskExtraRows = useMemo(
@@ -608,10 +615,6 @@ export function RetirementView({
             anchorDateYmd: axisAnchor,
             calendarTz,
           }),
-        // La regla GUARDADA, no la del borrador: el borrador sin guardar describiría una
-        // simulación que el servidor no ha hecho, y las dos filas de recorte hablarían de una
-        // regla que no produjo esas cifras.
-        withdrawalRuleKind: savedProfile.withdrawal_rule?.kind ?? null,
       }),
     [
       projectionBands,
@@ -621,7 +624,6 @@ export function RetirementView({
       axisBirth,
       axisAnchor,
       calendarTz,
-      savedProfile.withdrawal_rule?.kind,
     ],
   );
 
@@ -1228,7 +1230,23 @@ export function RetirementView({
                   {riskExtraRows.map((r) => (
                     <div key={r.key} className="risk-extra-row">
                       <div className="risk-extra-head">
-                        <span className="risk-extra-label">{r.label}</span>
+                        {/* La ayuda cuelga del ROTULO, no del panel: estas filas miden cosas
+                            distintas y una sola ayuda arriba explicaría la que el usuario no
+                            está mirando. Solo la llevan las que su rótulo no puede explicar
+                            enteras (la cobertura, el colchón). */}
+                        <span
+                          className={
+                            r.helpId ? "label-with-help risk-extra-label" : "risk-extra-label"
+                          }
+                        >
+                          {r.label}
+                          {r.helpId ? (
+                            <HelpPopover
+                              title={HELP_TEXTS[r.helpId].title}
+                              body={HELP_TEXTS[r.helpId].body}
+                            />
+                          ) : null}
+                        </span>
                         <span className="risk-extra-value">{r.value}</span>
                       </div>
                       {r.detail ? (

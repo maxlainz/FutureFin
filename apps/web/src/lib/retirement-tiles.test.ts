@@ -269,6 +269,22 @@ describe("avisos", () => {
     ]);
   });
 
+  // Hermano del anterior y caso DISTINTO (5.0.0, pase de correcciones §H): sí hay líquidos, pero
+  // su rentabilidad esperada es negativa y el motor sube el descuento a 0. Sin el aviso, el
+  // objetivo que se pinta no es el que la configuración del usuario describe y nada lo dice.
+  it("puente con rentabilidad negativa: el descuento se topa en 0 % y se avisa", () => {
+    const m = build({
+      strategy: "pension_bridge",
+      pension_start_month_index: 120,
+      bridge_discount_annual_pct: "0.0000",
+      warnings: ["bridge_discount_clamped"],
+    });
+    expect(m.notices.map((n) => n.code)).toEqual(["bridge_discount_clamped"]);
+    expect(m.notices[0]!.tone).toBe("warn");
+    expect(m.notices[0]!.text).toContain("negativa");
+    expect(m.notices[0]!.text).toContain("0 %");
+  });
+
   it("`birth_date_missing` NO genera aviso aquí: lo cuenta el banner de alta (D33)", () => {
     const m = build({ strategy: "retire_at_age", warnings: ["birth_date_missing"] });
     expect(m.notices).toEqual([]);

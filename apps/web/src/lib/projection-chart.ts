@@ -143,6 +143,68 @@ export function lastPointIndexAtOrBeforeMonth(
   return last;
 }
 
+/** Una fila de flujos de retirada del tooltip. El importe ya viene DEFLACTADO: el tooltip pinta
+ *  euros de hoy o nominales según el toggle, y mezclar las dos bases en la misma caja sería la
+ *  forma más barata de contar una mentira. */
+export type WithdrawalTooltipRow = {
+  key: "withdrawal" | "shortfall" | "unmet" | "excess";
+  label: string;
+  amount: number;
+};
+
+/**
+ * Flujos de la retirada del mes hovered (5.0.0 §B.8 + pase de correcciones §F).
+ *
+ * Cuatro reglas, todas ellas cosas que se rompen sin que nada falle:
+ *
+ *  1. **Solo desde el mes de jubilación.** Antes son cero por construcción, y una fila de «0 €»
+ *     en cada punto del horizonte de acumulación es ruido, no información.
+ *  2. **Un mismo factor de deflactación para las cuatro**, el del patrimonio de arriba.
+ *  3. **«Recorte» y «No financiado» son cosas DISTINTAS y las dos pueden estar a la vez**:
+ *     `withdrawal_shortfall` es lo que la REGLA se negó a sacar (hay dinero, el techo no deja) y
+ *     `unmet_need` lo que la CARTERA no dio (no había de dónde vender). Fundirlas en una sola
+ *     fila —o enseñar solo la primera, como hasta el pase— convierte quedarse sin capital en un
+ *     problema de configuración de la regla.
+ *  4. **Un cero no se pinta** (umbral de medio euro, el redondeo de la divisa): «Recorte — 0 €»
+ *     afirma que se midió un recorte. La retirada sí se pinta aunque sea cero: ahí el cero es el
+ *     dato (ese mes no vendiste nada).
+ */
+export function buildWithdrawalTooltipRows(
+  point: {
+    month_index: number;
+    withdrawal?: number;
+    withdrawal_shortfall?: number;
+    unmet_need?: number;
+    withdrawal_excess?: number;
+  },
+  retirementMonthIndex: number | null | undefined,
+  deflationFactor: number,
+): WithdrawalTooltipRow[] {
+  if (retirementMonthIndex == null || !Number.isFinite(retirementMonthIndex)) return [];
+  if (point.month_index < retirementMonthIndex) return [];
+  const rows: WithdrawalTooltipRow[] = [];
+  const money = (v: number | undefined) =>
+    v === undefined || !Number.isFinite(v) ? null : v * deflationFactor;
+
+  const w = money(point.withdrawal);
+  if (w !== null) rows.push({ key: "withdrawal", label: "Retirada del mes", amount: w });
+  const short = money(point.withdrawal_shortfall);
+  if (short !== null && Math.abs(short) >= 0.5) {
+    rows.push({ key: "shortfall", label: "Recorte", amount: short });
+  }
+  // `unmet_need` es `≥ 0` por contrato: solo se pinta en positivo, y su ausencia (backend
+  // anterior al pase) no pinta nada — nunca un 0 que afirmaría «se financió todo».
+  const unmet = money(point.unmet_need);
+  if (unmet !== null && unmet >= 0.5) {
+    rows.push({ key: "unmet", label: "No financiado", amount: unmet });
+  }
+  const excess = money(point.withdrawal_excess);
+  if (excess !== null && Math.abs(excess) >= 0.5) {
+    rows.push({ key: "excess", label: "Exceso", amount: excess });
+  }
+  return rows;
+}
+
 export function buildProjectionMonthTickIndices(
   mc: number,
   maxTicks: number,

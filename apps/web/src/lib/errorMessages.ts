@@ -496,6 +496,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   partial_income_negative: "El ingreso de la media jornada no puede ser negativo.",
   target_basis: "Esa base del objetivo de jubilación no es válida.",
   bridge_discount_basis: "Esa forma de descontar el puente hasta la pensión no es válida.",
+  bridge_discount_out_of_range:
+    "La tasa con la que se descuenta el puente hasta la pensión se sale de lo que se puede calcular. Revisa la rentabilidad esperada de tus activos líquidos, o acorta el puente retrasando la jubilación o adelantando la pensión.",
   withdrawal_rule_kind: "Esa regla de retirada no existe.",
   spend_mode: "Esa forma de relacionar la regla de retirada con tu gasto no es válida.",
   expense_basis: "Esa base de gasto para la media jornada no es válida.",

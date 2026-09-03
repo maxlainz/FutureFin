@@ -6,7 +6,7 @@
  * Aquí no se dibuja nada y no se recalcula NADA del modelo: el veredicto, la probabilidad y las
  * medianas las decide el servidor (`GET /v1/projection/bands`) y este módulo se limita a
  * alinearlas, deflactarlas y traducirlas a copy. Que sea un módulo aparte con test es
- * deliberado — lo que aquí puede romperse en silencio son tres cosas, y ninguna se ve mirando
+ * deliberado — lo que aquí puede romperse en silencio son cuatro cosas, y ninguna se ve mirando
  * la pantalla:
  *
  *  1. **La alineación por `month_index`.** La banda viaja SIEMPRE a densidad `hybrid`; la serie
@@ -20,6 +20,10 @@
  *  3. **El redondeo de la probabilidad.** «100 de cada 100 escenarios» con un plan que falla en
  *     alguno es exactamente la mentira silenciosa que esta app existe para no contar: el
  *     redondeo se topa a 99 mientras la probabilidad no sea 1 exacta (y a 1 mientras no sea 0).
+ *  4. **El SUJETO de la probabilidad.** Desde el pase de correcciones de 5.0.0 (§F/§G) el éxito
+ *     exige jubilarse Y no agotar, y la cobertura cuenta también el gasto que la cartera no
+ *     pudo financiar. Las dos son cifras cuyo nombre corto —«éxito», «recorte»— sobrevivió a su
+ *     definición: la copy tiene que llevar la condición dentro, no en el popover.
  *
  * Y una regla de lectura que la copy no puede olvidar: **la mediana no es un camino**. El p50 de
  * cada mes se calcula ordenando los valores de ESE mes, así que la curva p50 no corresponde a
@@ -39,6 +43,7 @@ import {
   formatFractionAsPercent,
   parseDisplayDecimal,
 } from "./format";
+import type { HelpTextId } from "./helpTexts";
 import { lastPointIndexAtOrBeforeMonth } from "./projection-chart";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -191,21 +196,47 @@ export function successVerdictTone(
 }
 
 /**
- * `success_probability` → «87 de cada 100 escenarios».
+ * Fracción → «de cada 100», con los DOS topes que impiden la mentira por redondeo: mientras la
+ * probabilidad no sea 1 EXACTA el redondeo no llega a 100, y mientras no sea 0 exacta no baja a
+ * 0. `0.999` es un plan que falla en uno de cada mil y «100 de cada 100» lo diría infalible.
  *
- * Dos topes deliberados: mientras la probabilidad no sea 1 EXACTA el redondeo no llega a 100, y
- * mientras no sea 0 exacta no baja a 0. `0.999` es un plan que falla en uno de cada mil y
- * «100 de cada 100» lo diría infalible.
+ * `null` ⟺ no hay cifra que contar (ni la hay que inventar).
+ */
+export function scenariosPerHundred(
+  probability: string | null | undefined,
+): number | null {
+  const p = probability == null ? null : parseDisplayDecimal(String(probability));
+  if (p == null || !Number.isFinite(p)) return null;
+  let n = Math.round(p * 100);
+  if (n >= 100 && p < 1) n = 99;
+  if (n <= 0 && p > 0) n = 1;
+  return n;
+}
+
+/**
+ * `success_probability` → «87 de cada 100 escenarios se jubilan y no agotan el capital».
+ *
+ * La frase dice las DOS condiciones porque desde el pase de correcciones de 5.0.0 el éxito son
+ * dos y no una (§G): el camino tiene que **jubilarse dentro del horizonte** —o jubilarlo la
+ * edad— **y** no agotar la cartera. Con la definición vieja («no se agota») un plan que no
+ * llegaba a jubilar a nadie puntuaba altísimo por no gastar nunca, y el número más caro de la
+ * app decía lo contrario de lo que pasaba. Un rótulo corto —«87 de cada 100 escenarios»— vuelve
+ * a dejar esa lectura abierta, así que la condición viaja EN la cifra, no en el popover.
  */
 export function formatSuccessScenarios(
   probability: string | null | undefined,
 ): string {
-  const p = probability == null ? null : parseDisplayDecimal(String(probability));
-  if (p == null || !Number.isFinite(p)) return METRIC_DASH;
-  let n = Math.round(p * 100);
-  if (n >= 100 && p < 1) n = 99;
-  if (n <= 0 && p > 0) n = 1;
-  return `${n} de cada 100 escenarios`;
+  const n = scenariosPerHundred(probability);
+  if (n == null) return METRIC_DASH;
+  return `${n} de cada 100 escenarios se jubilan y no agotan el capital`;
+}
+
+/** «4 de cada 100» — la misma cifra sin sujeto, para las filas que ya lo llevan en el rótulo. */
+export function formatScenariosPerHundred(
+  probability: string | null | undefined,
+): string {
+  const n = scenariosPerHundred(probability);
+  return n == null ? METRIC_DASH : `${n} de cada 100`;
 }
 
 /** «umbral 95 %» — el denominador del semáforo. Sin él, «87 de cada 100» no se puede auditar. */
@@ -235,18 +266,39 @@ export type DepletionRow = {
  * Las filas SIN edad no se esconden: la probabilidad es real aunque no se pueda rotular con una
  * edad, y ocultarlas dejaría la tabla vacía a quien no ha puesto su fecha de nacimiento — que es
  * justo quien más necesita el aviso.
+ *
+ * **La última fila es el HORIZONTE, no una edad más** (5.0.0, pase de correcciones §H): la
+ * rejilla avanza de cinco en cinco años desde la jubilación y ahora cierra siempre en el último
+ * mes del plan, así que esa celda es la RUINA TOTAL — todos los escenarios que se quedaron sin
+ * capital en algún momento. Rotularla «a los 87» la haría parecer un peldaño más de la escalera
+ * y el usuario leería el peor número de la tabla como si le faltara horizonte por delante.
+ *
+ * Se reconoce por su MES (`month_index + 1 >= horizonMonths`, porque la rejilla es 0-based y
+ * `months` es un recuento), nunca por ser la última posición: con un backend anterior al pase la
+ * última fila **no** es el horizonte, y la comprobación falla cerrada dejando su rótulo por edad
+ * en vez de inventar una ruina total que ese backend no calculó.
  */
 export function buildDepletionRows(
   points: readonly DepletionProbabilityPointApi[] | null | undefined,
+  horizonMonths?: number | null,
 ): DepletionRow[] {
   if (!Array.isArray(points)) return [];
-  return points
-    .filter((p) => finite(p.month_index))
-    .map((p) => ({
-      key: `dep-${p.month_index}`,
-      label: finite(p.age) ? `a los ${p.age}` : `mes ${p.month_index}`,
-      value: formatFractionAsPercent(p.probability),
-    }));
+  const rows = points.filter((p) => finite(p.month_index));
+  const lastMonth = rows.length > 0 ? rows[rows.length - 1]!.month_index : null;
+  const horizonMonth =
+    finite(horizonMonths) && lastMonth != null && lastMonth + 1 >= horizonMonths
+      ? lastMonth
+      : null;
+  return rows.map((p) => ({
+    key: `dep-${p.month_index}`,
+    label:
+      p.month_index === horizonMonth
+        ? "al final del horizonte"
+        : finite(p.age)
+          ? `a los ${p.age}`
+          : `mes ${p.month_index}`,
+    value: formatFractionAsPercent(p.probability),
+  }));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -259,6 +311,9 @@ export type RiskExtraRow = {
   value: string;
   /** Segunda línea, cuando el número necesita su base para no leerse mal. */
   detail?: string;
+  /** Ayuda del catálogo, cuando la fila mide algo que su rótulo no puede explicar entero. La
+   *  pinta la vista junto al rótulo; el escáner de `helpTexts.test.ts` ve esta forma de objeto. */
+  helpId?: HelpTextId;
 };
 
 export type RiskExtraRowsInput = {
@@ -268,10 +323,22 @@ export type RiskExtraRowsInput = {
   /** Rotulador de un mes de la rejilla → etiqueta del eje («2043», «a los 55»). Lo inyecta la
    *  vista: depende del modo del eje, de la fecha de nacimiento y de la zona horaria. */
   monthLabel: (monthIndex: number) => string;
-  /** `withdrawal_rule.kind` GUARDADO. Con `fixed_real` las dos filas de recorte no se pintan:
-   *  esa regla no tiene techo y sus dos cifras son 0 y 1 por construcción — publicarlas
-   *  sugeriría que se midió algo. */
-  withdrawalRuleKind: string | null | undefined;
+};
+
+/**
+ * Copy de cada razón por la que el colchón NO se simuló (5.0.0, pase de correcciones §E).
+ *
+ * `not_requested` **no está a propósito**: no hay colchón configurado, no falta nada, y una fila
+ * diciéndolo convertiría el estado normal en una carencia. Las otras dos sí se enseñan porque en
+ * las dos el usuario SÍ pidió un colchón y no lo tuvo — callarlo dejaría un ajuste guardado que
+ * la simulación ignora en silencio, que es la peor combinación posible.
+ *
+ * Un literal desconocido (backend más nuevo) tampoco pinta fila: inventar la razón es peor que
+ * no darla.
+ */
+const BUFFER_INACTIVE_REASON_ES: Record<string, string> = {
+  no_volatility: "sin volatilidad declarada",
+  no_safe_liquid_asset: "sin un activo líquido sin volatilidad donde guardarlo",
 };
 
 /**
@@ -287,6 +354,33 @@ export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
   const rows: RiskExtraRow[] = [];
   const money = (s: string | null | undefined) =>
     formatCurrencyOrDash(s, input.currencyIso);
+
+  // ── Las dos mitades del éxito nuevo (§G del pase de correcciones) ────────────────────────
+  //
+  // Van las PRIMERAS y solo cuando hay algo que contar: si ningún camino se queda sin jubilar,
+  // el éxito del tile ya es la historia entera y estas dos filas serían un 0 y una repetición.
+  // Cuando sí los hay, la de arriba dice cuántos y la de abajo devuelve la lectura que el
+  // usuario creía estar leyendo antes del pase — el éxito ENTRE los que llegan a jubilarse.
+  const neverRetired = scenariosPerHundred(b.never_retired_probability);
+  if (neverRetired != null && neverRetired > 0) {
+    rows.push({
+      key: "never_retired",
+      label: "No llegan a jubilarse en el horizonte",
+      value: formatScenariosPerHundred(b.never_retired_probability),
+      detail:
+        "escenarios en los que el plan nunca te jubila: no cuentan como éxito aunque el dinero siga entero",
+    });
+    // `null` = no hay denominador (nadie se jubila), y entonces no hay condicional que enseñar.
+    // Un «—» aquí se leería como dato perdido en vez de como pregunta sin sujeto.
+    if (b.success_given_retired != null) {
+      rows.push({
+        key: "success_given_retired",
+        label: "Éxito entre los que se jubilan",
+        value: formatFractionAsPercent(b.success_given_retired),
+        detail: "de los escenarios que sí te jubilan, los que además no agotan el capital",
+      });
+    }
+  }
 
   // ── «Jubilación probable» (solo trigger por cruce) ──────────────────────────────────────
   const pct = b.retirement_month_index_percentiles;
@@ -311,21 +405,31 @@ export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
     });
   }
 
-  // ── Las dos lecturas del RECORTE, que NO es fracaso (D24) ────────────────────────────────
-  if (input.withdrawalRuleKind != null && input.withdrawalRuleKind !== "fixed_real") {
-    rows.push({
-      key: "months_below_need",
-      label: "Meses con recorte (mediana)",
-      value: `${b.months_below_need_p50}`,
-      detail: "meses jubilados en que la regla retiró menos de lo que necesitabas",
-    });
-    rows.push({
-      key: "withdrawal_to_need",
-      label: "Retirada / gasto (mediana)",
-      value: formatFractionAsPercent(b.withdrawal_to_need_ratio_p50),
-      detail: "qué parte de la necesidad cubrió la regla; 100 % = la cubrió entera",
-    });
-  }
+  // ── Las dos lecturas de la COBERTURA, en TODAS las reglas ────────────────────────────────
+  //
+  // Hasta el pase de correcciones estas dos filas se escondían con `fixed_real` porque medían
+  // solo el recorte de la REGLA, y esa regla no tiene techo: sus cifras eran 0 y 1 por
+  // construcción. Desde §F miden algo distinto — incluyen también **el gasto que la cartera no
+  // pudo financiar** —, así que con `fixed_real` son perfectamente informativas: la regla no
+  // recorta nunca, pero el dinero se puede acabar igual. Esconderlas ahí era esconder justo el
+  // caso en que la cobertura tiene una sola causa y es la peor (un fixture medido pasó de `1,0`
+  // a `0,0865` al dejar de ignorar el descubierto). Por eso ya no hay condición de regla, y por
+  // eso el parámetro de la entrada que la gobernaba desapareció con ella: uno que ya no decide
+  // nada es una invitación a volver a esconderlas.
+  rows.push({
+    key: "months_below_need",
+    label: "Meses por debajo del gasto (mediana)",
+    value: `${b.months_below_need_p50}`,
+    detail: "meses jubilados en que gastaste menos de lo que necesitabas",
+    helpId: "retirement.coverage",
+  });
+  rows.push({
+    key: "withdrawal_to_need",
+    label: "Retirada / gasto (mediana)",
+    value: formatFractionAsPercent(b.withdrawal_to_need_ratio_p50),
+    detail:
+      "qué parte de la necesidad se pagó de verdad, por el techo de la regla y por lo que la cartera no dio; 100 % = entera",
+  });
 
   // ── Colchón (P4). El importe es la mediana de un TOTAL MOVIDO, no un saldo ───────────────
   if (b.buffer_active) {
@@ -338,7 +442,21 @@ export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
         b.buffer_refill_net_total_p50 != null
           ? `${money(b.buffer_refill_net_total_p50)} movidos al colchón (mediana entre escenarios, no un saldo)`
           : undefined,
+      helpId: "retirement.cash_buffer",
     });
+  } else {
+    // Colchón pedido y NO simulado: se dice por qué. Es un ajuste guardado que la simulación
+    // ignora, y sin esta fila el usuario cree que está protegido por algo que no corrió.
+    const reason = BUFFER_INACTIVE_REASON_ES[b.buffer_inactive_reason ?? ""];
+    if (reason != null) {
+      rows.push({
+        key: "buffer",
+        label: "Colchón de caja",
+        value: "No simulado",
+        detail: reason,
+        helpId: "retirement.cash_buffer",
+      });
+    }
   }
 
   return rows;
@@ -412,6 +530,7 @@ export function summarySuccessTile(
         success_verdict?: SuccessVerdictApi | string | null;
         success_absent_reason?: string | null;
         absent_reason?: string | null;
+        never_retired_probability?: string | null;
       }
     | null
     | undefined,
@@ -431,9 +550,17 @@ export function summarySuccessTile(
     };
   }
   const tone = successVerdictTone(plan.success_verdict);
+  // Subtítulo solo cuando hay escenarios sin jubilar: es la mitad que el número grande ya no
+  // cuenta sola desde §G, y la que explica un éxito bajo que no se debe a agotar el capital
+  // sino a no llegar nunca. Con cero, la tarjeta no gana nada diciendo «0 de cada 100».
+  const neverRetired = scenariosPerHundred(plan.never_retired_probability);
   return {
     value: formatSuccessScenarios(plan.success_probability),
     parenthetical: threshold,
+    detail:
+      neverRetired != null && neverRetired > 0
+        ? `${formatScenariosPerHundred(plan.never_retired_probability)} no llegan a jubilarse`
+        : undefined,
     tone: tone === "danger" ? "danger" : tone === "warn" ? "warn" : "default",
   };
 }

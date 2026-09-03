@@ -87,6 +87,7 @@ export type RetirementNoticeCode =
   | "coast_not_reachable"
   | "partial_phase_capital_shrinking"
   | "bridge_discount_no_liquid_assets"
+  | "bridge_discount_clamped"
   | "target_retirement_age_missing";
 
 export type RetirementNoticeTone = "danger" | "warn";
@@ -305,6 +306,18 @@ export function buildRetirementTiles(
       tone: "warn",
       text:
         "Sin activos líquidos declarados no hay rentabilidad con la que descontar el puente: se calcula sin descuento, y el objetivo sale más alto.",
+    });
+  }
+  // Hermano del anterior y distinto caso (5.0.0, pase de correcciones §H): SÍ hay líquidos, pero
+  // su rentabilidad esperada es negativa. Descontar el puente a una tasa negativa lo encarecería
+  // exponencialmente —y a horizontes largos se sale de lo calculable—, así que el motor la sube
+  // a 0 y lo dice. El aviso existe porque el objetivo resultante NO es el que la configuración
+  // del usuario describe, y sin la frase esa diferencia sería invisible.
+  if (warnings.has("bridge_discount_clamped")) {
+    notices.push({
+      code: "bridge_discount_clamped",
+      tone: "warn",
+      text: "La rentabilidad esperada de tus líquidos es negativa: el puente se descuenta al 0 %.",
     });
   }
   if (warnings.has("target_retirement_age_missing")) {

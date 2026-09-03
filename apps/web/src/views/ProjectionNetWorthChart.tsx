@@ -29,6 +29,7 @@ import {
 import {
   ASSET_LINE_COLORS,
   buildProjectionChartLayout,
+  buildWithdrawalTooltipRows,
   deflationFactorAt,
   formatProjectionChartHorizonLine,
   niceYTicks,
@@ -2242,39 +2243,20 @@ export function ProjectionNetWorthChart({
               {formatCurrencyOrDashNumber(cc[hover], currencyIso)}
             </div>
           ) : null}
-          {/* Flujos de la RETIRADA (5.0.0, §B.8) — solo en los meses jubilados: antes de la
-              jubilación son cero por construcción y una fila de «0 €» en cada punto del
-              horizonte de acumulación es ruido, no información. Se deflactan con el MISMO
-              factor que el patrimonio de arriba, o el tooltip mezclaría euros de hoy con
-              euros nominales del mes en la misma caja. `withdrawal_shortfall` y
-              `withdrawal_excess` solo se pintan si no son cero: con la regla `fixed_real`
-              (el default) son cero SIEMPRE. */}
-          {(() => {
-            const p = pts[hover]!;
-            const retMi = series.retirement_month_index;
-            if (retMi == null || p.month_index < retMi) return null;
-            const f = deflationFactorAt(p.month_index, effectivePct);
-            const money = (v: number | undefined) =>
-              v === undefined || !Number.isFinite(v) ? null : v * f;
-            const w = money(p.withdrawal);
-            const short = money(p.withdrawal_shortfall);
-            const excess = money(p.withdrawal_excess);
-            return (
-              <>
-                {w !== null ? (
-                  <div>
-                    Retirada del mes — {formatCurrencyNumber(w, currencyIso)}
-                  </div>
-                ) : null}
-                {short !== null && Math.abs(short) >= 0.5 ? (
-                  <div>Recorte — {formatCurrencyNumber(short, currencyIso)}</div>
-                ) : null}
-                {excess !== null && Math.abs(excess) >= 0.5 ? (
-                  <div>Exceso — {formatCurrencyNumber(excess, currencyIso)}</div>
-                ) : null}
-              </>
-            );
-          })()}
+          {/* Flujos de la RETIRADA (5.0.0, §B.8 + pase de correcciones §F). El modelo —qué filas
+              existen, con qué umbral y con qué rótulo— vive PURO y testeado en
+              `buildWithdrawalTooltipRows`; aquí solo se formatea. «Recorte» (lo que la REGLA
+              rechazó) y «No financiado» (lo que la CARTERA no dio) son filas distintas a
+              propósito: fundirlas convertiría quedarse sin capital en un problema de la regla. */}
+          {buildWithdrawalTooltipRows(
+            pts[hover]!,
+            series.retirement_month_index,
+            deflationFactorAt(pts[hover]!.month_index, effectivePct),
+          ).map((r) => (
+            <div key={r.key}>
+              {r.label} — {formatCurrencyNumber(r.amount, currencyIso)}
+            </div>
+          ))}
           {/* D32 — Hogar: el valor de cada miembro en el mes hovered, en el orden y con los
               nombres de la leyenda. Se lee el ÚLTIMO vértice servido en ese mes o antes
               (`memberValueAtMonth`): con `density=hybrid` la mayoría de los meses no tiene punto

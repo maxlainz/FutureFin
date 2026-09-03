@@ -267,6 +267,20 @@ discontinua + línea determinista sólida**, las tres sobre el mismo eje X.
   valores de CADA mes, así que no corresponde a ninguna simulación. Es una instrucción de lectura,
   por eso va pegada al chart y no en el pie — y por eso la ayuda cuelga de ella y no del título del
   panel.
+- **La ayuda de las filas cuelga del RÓTULO de cada fila** (`.risk-extra-head`), no del panel:
+  `RiskExtraRow` lleva un `helpId?` opcional y la vista envuelve el rótulo en
+  `label-with-help risk-extra-label` — el mismo patrón que ya usaba la tabla de agotamiento. Una
+  sola ayuda en el título explicaría la fila que el usuario no está mirando. Sin `helpId` la fila
+  conserva su `<span class="risk-extra-label">` pelado y no gasta el icono.
+- **La cifra de «Éxito del plan» es una FRASE, no un número corto** (5.0.0, pase de correcciones
+  §G): «87 de cada 100 escenarios se jubilan y no agotan el capital». `.metric-value` es mono a
+  1.25rem dentro de un `.metric-value-row` con `flex-wrap: wrap`, así que envuelve a dos o tres
+  renglones y la tarjeta crece — **es deliberado y no se recorta**: el rótulo corto anterior
+  describía la definición vieja del éxito y sobrevivió a ella. El primer slot sigue siendo el
+  umbral y el segundo, en el Resumen, los escenarios que no llegan a jubilarse (`nowrap` +
+  ellipsis, como todo `.metric-value-detail`). Es el único KPI de la app cuyo valor es una
+  oración; si algún día hay dos, ese es el momento de darle una variante propia a `.metric-value`,
+  no de acortar la frase.
 
 Clases de la sección (todas en `App.css`, cero color propio salvo `--ff-warn`):
 `.metric-card--warn` (tono ámbar del KPI, misma construcción que `--danger`), `.risk-fan-note`,
@@ -490,4 +504,6 @@ cifras del plan en el Resumen), de la rama `release/5.0.0`, issue #207. Re-verif
 - **WP7 3c** — el abanico existe y no vive dentro de `MiniProjection`: `ls apps/web/src/components/charts/RiskFanChart.tsx` y `grep -c "p10\|p90" apps/web/src/components/charts/MiniProjection.tsx` (**0**)
 - `--ff-warn` está en las DOS ramas del tema y sin más consumidores que el tono de KPI: `grep -c -- "--ff-warn" apps/web/src/styles/theme.css` (2) y `grep -rn -- "var(--ff-warn)" apps/web/src/App.css` (solo `.metric-card--warn`)
 - Clases de la sección «Riesgo»: `grep -n "risk-fan-note\|risk-depletion-grid\|risk-extra-rows\|risk-footnote\|summary-success-grid" apps/web/src/App.css apps/web/src/views/RetirementView.tsx apps/web/src/views/SummaryView.tsx`
+- La ayuda por fila reusa `label-with-help` y NO añadió CSS: `grep -n "label-with-help risk-extra-label" apps/web/src/views/RetirementView.tsx` (2: la tabla de agotamiento y las filas extra) y `grep -c "risk-extra-help" apps/web/src/App.css` (**0** — no hay clase nueva)
+- El valor del KPI de éxito es una oración, y envuelve sin CSS nuevo: `grep -n -A 6 '^\.metric-value-row' apps/web/src/App.css` (el `flex-wrap: wrap` que ya estaba es lo único que hace falta) y `grep -n "de cada 100 escenarios se jubilan" apps/web/src/lib/risk-bands.ts`
 - La aritmética del abanico vive PURA y testeada: `grep -c 'it(' apps/web/src/lib/risk-bands.test.ts`

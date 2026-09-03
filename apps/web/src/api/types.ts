@@ -420,13 +420,20 @@ export type SummaryPlanApi = {
 
   // ── 5.0.0 WP6b — el KPI «Éxito del plan» (D25/D28) ────────────────────────────────────────
   /**
-   * FRACCIÓN (Decimal-string, 6 dp): caminos en los que la cartera no se agota nunca (D22).
+   * FRACCIÓN (Decimal-string, 6 dp): caminos que **se jubilan dentro del horizonte** (o los
+   * jubila la edad) **y** además nunca agotan la cartera (D22 + pase de correcciones §G).
    *
    * **Es EXACTAMENTE el número del fan chart** de `GET /v1/projection/bands` — el mismo cache,
    * los mismos caminos, la misma semilla. Nunca se recalcula aquí: dos muestras distintas
    * enseñarían dos éxitos del mismo plan en la misma pantalla.
    */
   success_probability?: string | null;
+  /** FRACCIÓN (Decimal-string, 6 dp): caminos que NO llegan a jubilarse. Mismo campo y mismo
+   *  sorteo que el de las bandas; el Resumen lo usa para el subtítulo de la tarjeta. */
+  never_retired_probability?: string | null;
+  /** FRACCIÓN (Decimal-string, 6 dp): éxito entre los caminos que sí se jubilan. `null` = no hay
+   *  denominador (nadie se jubila), nunca cero. */
+  success_given_retired?: string | null;
   /** PORCENTAJE del perfil (50..=99, default 95). Se ecoa aunque no haya sorteo: es
    *  configuración del usuario, no una salida del modelo. */
   success_threshold_pct?: number | null;
@@ -536,6 +543,10 @@ export type ProjectionPointApi = {
    * el mes 0. No es el gasto (el ingreso de la fase lo cubre primero) ni la venta BRUTA (el
    * impuesto de la plusvalía se paga vendiendo de más y ese exceso sigue dentro del patrimonio).
    * Es un flujo del MES, no un acumulado, y se decima por densidad igual que `net_worth`.
+   *
+   * **5.0.0, pase de correcciones §D**: en modo `rule_is_spend` la regla financia su gasto
+   * PRIMERO con el superávit del mes, y ese trozo cuenta aquí — antes se vendía cartera para
+   * gastar un dinero que ya estaba en la cuenta y el churn fiscal aparecía de la nada.
    */
   withdrawal?: number;
   /**
@@ -548,6 +559,19 @@ export type ProjectionPointApi = {
   /** f64 (5.0.0): exceso de la regla sobre la necesidad en modo `rule_is_spend` (se vende y se
    *  gasta). Todo ceros con `fixed_real` / `ceiling`. */
   withdrawal_excess?: number;
+  /**
+   * f64 (5.0.0, pase de correcciones §F): **gasto del mes que los activos NO pudieron
+   * financiar**, neto y `≥ 0`.
+   *
+   * Es la OTRA mitad de quedarse corto, y no se puede confundir con su vecina:
+   * `withdrawal_shortfall` es lo que la REGLA rechazó sacar (hay dinero, el techo no deja);
+   * `unmet_need` es lo que la CARTERA no dio (no había de dónde vender). Un mes puede tener las
+   * dos, una, o ninguna. Sumar las dos NO da «lo que faltó»: son cortes distintos del mismo mes.
+   *
+   * Ausente en backends anteriores al pase — la fila del tooltip simplemente no se pinta, que es
+   * lo correcto: un `0 €` afirmaría que se financió todo.
+   */
+  unmet_need?: number;
 };
 
 export type ProjectionMilestoneApi = {
@@ -652,7 +676,13 @@ export type ProjectionSeriesApi = {
   /** Primer mes cuya venta bruta necesaria iguala o supera TODO lo drenable (todos los
    *  activos): la cartera se vacía ese mes y desde el siguiente el descubierto se acumula restando
    *  del patrimonio para siempre. Número de MES (misma base que `points[].month_index`), nunca una
-   *  posición de array. `null` explícito = no se agota dentro del horizonte, no «no calculado». (#119) */
+   *  posición de array. `null` explícito = no se agota dentro del horizonte, no «no calculado». (#119)
+   *
+   *  **5.0.0, pase de correcciones §B**: lo decide la VENTA, y solo se publica si alguna venta
+   *  posterior se quedó sin financiar. Un aterrizaje exacto —la cartera llega a cero justo
+   *  cuando una pensión pasa a cubrir todo el gasto— sale `null`: no se agotó nada, se acabó de
+   *  usar. Antes ese caso se publicaba como agotamiento y la app avisaba de una ruina que no
+   *  ocurría. */
   assets_depleted_month_index: number | null;
   /** Déficit acumulado NO cubierto al final del horizonte, en euros. `"0.0000"` = cero euros
    *  descubiertos, no «no aplica». Ya se restaba de `net_worth`; aquí se declara. (#119) */
@@ -798,7 +828,9 @@ export type ProjectionSeriesApi = {
   pension_coverage_ratio?: string | null;
   /** Euros (Decimal-string): capital que sostendría a perpetuidad el HUECO de la media jornada.
    *  Informativo, no dispara nada. `"0.0000"` = la media jornada se paga sola; `null` = no hay
-   *  fase parcial o no hay objetivo. */
+   *  fase parcial o no hay objetivo. **5.0.0, pase de correcciones §H**: se publica solo si la
+   *  fase parcial OCURRIÓ de verdad en la simulación — una edad parcial configurada que la
+   *  jubilación total se come antes de llegar ya no produce cifra. */
   partial_gap_target?: string | null;
   /** `true` ⟺ hubo fase parcial y el líquido no bajó ni un mes; `false` = hubo y menguó (+
    *  `partial_phase_capital_shrinking` en `warnings`); **`null` = no hubo fase parcial**. */
@@ -873,7 +905,13 @@ export type ProjectionBandPointApi = {
 
 /** Probabilidad ACUMULADA de haber agotado la cartera, cada cinco años desde la jubilación
  *  efectiva. `age: null` ⟺ el usuario no tiene fecha de nacimiento (la fila sigue existiendo:
- *  la cifra es real aunque no se pueda rotular con una edad). */
+ *  la cifra es real aunque no se pueda rotular con una edad).
+ *
+ *  **5.0.0, pase de correcciones §H**: la rejilla avanza de 60 en 60 desde el ancla y **cierra
+ *  SIEMPRE en el horizonte**, así que la ÚLTIMA fila es la ruina total del plan y no una edad
+ *  más. Antes se paraba en el último múltiplo que cabía y dejaba meses fuera sin decirlo. El
+ *  cliente la reconoce por su mes (`month_index + 1 >= months`), no por su posición: con un
+ *  backend anterior al pase esa comprobación falla y la fila conserva su rótulo por edad. */
 export type DepletionProbabilityPointApi = {
   month_index: number;
   age: number | null;
@@ -914,9 +952,26 @@ export type ProjectionBandsApi = {
   /** Fijo `[10, 50, 90]`, en el orden de los campos de `points[]`. */
   percentiles: number[];
   points: ProjectionBandPointApi[];
-  /** FRACCIÓN (Decimal-string, 6 dp): caminos en los que la cartera NO se agota nunca (D22).
-   *  El recorte de una regla **no es fracaso** y viaja aparte, abajo. */
+  /**
+   * FRACCIÓN (Decimal-string, 6 dp): caminos con éxito.
+   *
+   * **5.0.0, pase de correcciones §G — la definición CAMBIÓ**: éxito ⟺ el plan **se jubila**
+   * dentro del horizonte (o lo dispara la edad) **Y** la cartera no se agota nunca. Antes bastaba
+   * con no agotarse, así que un plan que no llegaba a jubilar a nadie salía con un éxito
+   * altísimo por no gastar. Con la definición nueva ese mismo caso se parte en dos cifras
+   * (`never_retired_probability` y `success_given_retired`) y ninguna miente por omisión.
+   *
+   * El recorte de una regla sigue **sin ser fracaso** aquí: la cobertura viaja aparte, abajo.
+   */
   success_probability: string | null;
+  /** FRACCIÓN (Decimal-string, 6 dp): caminos que **no llegan a jubilarse** dentro del
+   *  horizonte. `> 0` es la mitad que `success_probability` ya no puede contar sola. Ausente en
+   *  backends anteriores al pase de correcciones ⇒ las filas no se pintan. */
+  never_retired_probability?: string | null;
+  /** FRACCIÓN (Decimal-string, 6 dp): éxito CONDICIONADO a jubilarse — de los caminos que sí se
+   *  jubilan, los que además no agotan la cartera. `null` ⟺ ningún camino se jubila (no hay
+   *  denominador), que **no es cero**. */
+  success_given_retired?: string | null;
   /** PORCENTAJE (50..=99, default 95) del perfil. Se ecoa aunque no haya sorteo. */
   success_threshold_pct: number;
   success_verdict: SuccessVerdictApi;
@@ -927,11 +982,15 @@ export type ProjectionBandsApi = {
   /** FRACCIÓN (Decimal-string): D17 en versión probabilística. `null` con trigger por cruce —
    *  es el excluyente del anterior, y `retirement_trigger` dice cuál toca. */
   underfunded_probability: string | null;
-  /** Mediana de MESES jubilados en que la regla dejó corta la necesidad. `0` con `fixed_real`
-   *  por construcción: esa regla no tiene techo. */
+  /** Mediana de MESES jubilados en que **se gastó menos de lo necesario**. **5.0.0, pase de
+   *  correcciones §F**: cuenta las dos formas de quedarse corto —el techo de la regla y lo que
+   *  la cartera no pudo pagar—, así que ya **no** es 0 por construcción con `fixed_real`: esa
+   *  regla no tiene techo, pero su cartera sí se puede quedar sin nada. */
   months_below_need_p50: number;
-  /** FRACCIÓN (Decimal-string): qué parte de la necesidad cubrió la regla. `1` = entera.
-   *  `null` cuando ningún camino tiene meses jubilados con necesidad positiva. */
+  /** FRACCIÓN (Decimal-string): qué parte de la necesidad se pagó DE VERDAD. `1` = entera.
+   *  `null` cuando ningún camino tiene meses jubilados con necesidad positiva. Misma corrección
+   *  §F: incluye el descubierto, no solo el recorte de la regla (un caso medido pasó de `1,0` a
+   *  `0,0865` al dejar de ignorar lo que la cartera no financió). */
   withdrawal_to_need_ratio_p50: string | null;
   /** `false` ⟺ **ningún activo declara volatilidad**: las tres bandas SON la línea determinista,
    *  y la UI tiene que decirlo en vez de dibujar un abanico plano que se lee como certeza. */
@@ -940,6 +999,18 @@ export type ProjectionBandsApi = {
    *  lo albergue y volatilidad de la que protegerse. `false` con colchón configurado NO es un
    *  fallo: es que aquí no significa nada. */
   buffer_active: boolean;
+  /**
+   * POR QUÉ no se simuló, cuando `buffer_active` es `false` (5.0.0, pase de correcciones §E).
+   * Tres literales cerrados y `null` cuando sí se simuló:
+   *
+   *  - `not_requested` — no hay colchón en el perfil. **No se enseña**: no falta nada.
+   *  - `no_volatility` — ningún activo declara σ, así que no hay de qué protegerse.
+   *  - `no_safe_liquid_asset` — no hay un activo líquido SIN volatilidad donde guardarlo (un
+   *    colchón que también baja con el mercado no es un colchón).
+   *
+   * Ausente en backends anteriores al pase ⇒ la fila no se pinta, como hasta ahora.
+   */
+  buffer_inactive_reason?: string | null;
   /** Mediana del NÚMERO de meses con relleno. `null` ⟺ `buffer_active: false` («no se midió»,
    *  que no es «cero rellenos»). */
   buffer_refills_p50: number | null;

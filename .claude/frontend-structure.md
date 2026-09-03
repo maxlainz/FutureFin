@@ -364,8 +364,12 @@ src/
 │   │                                #   viewBox tiene que seguir casando con la caja medida; `xTickBaselineY` unifica
 │   │                                #   la fila de etiquetas X (años y «Hoy»), que antes se calculaba dos veces.
 │   │                                #   Sin fases ni marcas la tira mide 0 y la geometría es la de 4.15.x. Tooltip:
-│   │                                #   «Retirada del mes» / «Recorte» / «Exceso» solo desde retirement_month_index,
-│   │                                #   deflactados con el MISMO factor que el patrimonio. Leyenda: una entrada por
+│   │                                #   «Retirada del mes» / «Recorte» / «No financiado» / «Exceso» solo desde
+│   │                                #   retirement_month_index, deflactados con el MISMO factor que el patrimonio; el
+│   │                                #   modelo (qué filas, con qué umbral) vive PURO en `buildWithdrawalTooltipRows`
+│   │                                #   (lib/projection-chart.ts) con test. «Recorte» = lo que la REGLA rechazó;
+│   │                                #   «No financiado» (`unmet_need`, pase de correcciones §F) = lo que la CARTERA no
+│   │                                #   dio — dos filas distintas y pueden salir las dos. Leyenda: una entrada por
 │   │                                #   miembro en Hogar, con su línea fina ya pintada (`lib/member-lines.ts`).
 │   │                                #   WP7-3b2 (D29): **dos series auxiliares DISCONTINUAS** —«Capital necesario»
 │   │                                #   (`required_capital_path`) y «Si dejas de aportar en el mes coast»
@@ -533,11 +537,54 @@ que las dos superficies caen en la misma entrada de cache.
   respuestas distintas en dos pestañas harían comparar cifras que no son comparables. El factor sale
   de `deflation_annual_inflation_percent` de la RESPUESTA (#136-4a) y se aplica a las **cuatro**
   series a la vez: deflactar solo la banda la separaría de la línea que dice contener.
-- **helpIds nuevos**: `retirement.bands` (bandas puntuales · la mediana no es un camino),
-  `retirement.success`, `retirement.depletion_by_age` y `summary.success` (versión corta del
-  anterior). Además, `retirement.cash_buffer` se **reescribió** con el resultado medido de P4: el
-  colchón se rellena solo en los meses buenos, cuesta rentabilidad y en el modelo actual BAJA la
-  probabilidad de éxito — el texto anterior prometía protección.
+- **helpIds**: `retirement.bands` (bandas puntuales · la mediana no es un camino),
+  `retirement.success`, `retirement.depletion_by_age`, `retirement.coverage` y `summary.success`.
+  `RiskExtraRow` lleva un `helpId?` opcional y la vista pinta el `HelpPopover` **junto al rótulo
+  de la fila**, no en el título del panel: las filas miden cosas distintas y una sola ayuda arriba
+  explicaría la que el usuario no está mirando. Hoy lo llevan la cobertura
+  (`retirement.coverage`, en la fila de meses, que explica las DOS) y el colchón
+  (`retirement.cash_buffer`).
+
+### El pase de correcciones del motor (5.0.0, issue #207) y su copy
+
+Cuatro cifras de esta sección **cambiaron de significado conservando el nombre** — la clase de
+deriva más cara de la app, porque un rótulo corto sobrevive a su definición sin que nada falle:
+
+- **Éxito (§G)** = el plan **se jubila** dentro del horizonte (o lo dispara la edad) **Y** no
+  agota la cartera. Con la definición vieja («no se agota»), un plan que no jubilaba a nadie
+  puntuaba altísimo por no gastar nunca. Por eso el tile ya **no** dice «87 de cada 100
+  escenarios» sino «87 de cada 100 escenarios **se jubilan y no agotan el capital**»
+  (`formatSuccessScenarios`, un solo formateador para Jubilación y Resumen), y con
+  `never_retired_probability > 0` aparecen debajo dos filas: «No llegan a jubilarse en el
+  horizonte» y «Éxito entre los que se jubilan» (`success_given_retired`; `null` = nadie se
+  jubila ⇒ la fila **no** se pinta, porque no hay denominador, no porque falte el dato). En el
+  Resumen la misma cifra viaja como subtítulo de la tarjeta.
+- **Cobertura (§F)**: `months_below_need_p50` y `withdrawal_to_need_ratio_p50` ya cuentan también
+  **el gasto que la cartera no pudo financiar**, no solo el recorte de la regla. Consecuencia en
+  la UI: las dos filas se pintan con **todas** las reglas, `fixed_real` incluida — antes se
+  escondían ahí porque valían 0 y 1 por construcción, y esconderlas ahora ocultaría justo el caso
+  en que la única causa es quedarse sin cartera. `RiskExtraRowsInput` **perdió**
+  `withdrawalRuleKind`: un parámetro que ya no decide nada es una invitación a volver a
+  esconderlas.
+- **Agotamiento por edad (§H)**: `depletion_probability_by_age` cierra siempre en el horizonte, y
+  esa última celda es la **ruina total**. `buildDepletionRows` recibe `bands.months` y la rotula
+  «al final del horizonte» cuando `month_index + 1 >= months` — por su MES, nunca por ser la
+  última posición: con un backend anterior al pase la comprobación falla cerrada y conserva el
+  rótulo por edad en vez de inventar una ruina que ese backend no calculó.
+- **Colchón (§E)**: `buffer_inactive_reason` (`not_requested` | `no_volatility` |
+  `no_safe_liquid_asset`). `not_requested` **no se pinta** (no falta nada); los otros dos sí, como
+  fila «Colchón de caja — No simulado» con la razón: un colchón guardado que la simulación ignora
+  en silencio es la peor combinación posible. Un literal desconocido tampoco pinta fila. Y
+  `retirement.cash_buffer` se **reescribió por segunda vez** con la medición corregida: el colchón
+  **protege** (+3,9 pp de éxito y casi el doble de liquidez en el peor decil cuando renta como la
+  cartera) pero **se paga** con la rentabilidad del dinero fuera del mercado (−3,5 pp netos con
+  una cuenta al 0 %). El texto de WP7-3c decía que BAJABA el éxito sin más: era el resultado de un
+  experimento que el pase falsó.
+
+Todos los campos nuevos van **opcionales** en `api/types.ts` (`never_retired_probability`,
+`success_given_retired`, `buffer_inactive_reason`, `points[].unmet_need`): la SPA se escribió
+contra los nombres de cable antes de que la API los publicara, y ausentes significa «esa fila no
+se pinta», nunca un cero tranquilizador.
 
 ## Import conventions
 
@@ -777,6 +824,12 @@ solves de WP5-2b, series auxiliares discontinuas del chart, tarjeta «Plan» ley
 - Hogar no las pide: `grep -n -B2 'setProjectionBands(null)' apps/web/src/App.tsx` — la primera guarda de `loadProjectionBands` sale por ámbito, antes de tocar la red
 - El emparejamiento es por MES: `grep -n "lastPointIndexAtOrBeforeMonth" apps/web/src/lib/risk-bands.ts`
 - Los campos del contrato están tipados: `grep -n "success_probability\|any_volatility_declared\|depletion_probability_by_age\|buffer_refill_net_total_p50" apps/web/src/api/types.ts`
-- Los cuatro helpIds nuevos existen y se consumen (el test bidireccional lo exige): `grep -n '"retirement.bands"\|"retirement.success"\|"retirement.depletion_by_age"\|"summary.success"' apps/web/src/lib/helpTexts.ts`
-- La ayuda del colchón ya NO promete protección: `grep -n "CUESTA rentabilidad" apps/web/src/lib/helpTexts.ts` (1 acierto) y `grep -c "no verte obligado a vender" apps/web/src/lib/helpTexts.ts` (**0**)
+- Los cinco helpIds de la sección existen y se consumen (el test bidireccional lo exige): `grep -n '"retirement.bands"\|"retirement.success"\|"retirement.depletion_by_age"\|"retirement.coverage"\|"summary.success"' apps/web/src/lib/helpTexts.ts`
+- La ayuda del colchón dice las DOS caras y ninguna sola: `grep -c "PROTEGE" apps/web/src/lib/helpTexts.ts` (1) y `grep -c "se PAGA" apps/web/src/lib/helpTexts.ts` (1); ya **no** dice que baje el éxito a secas — `grep -c "baja la probabilidad de éxito" apps/web/src/lib/helpTexts.ts` (**0**), igual que `grep -c "no verte obligado a vender" …` (**0**)
+- La cifra del éxito lleva sus DOS condiciones dentro, no en el popover: `grep -c "se jubilan y no agotan el capital" apps/web/src/lib/risk-bands.ts` (**2**: el doc-comment y el `return` de `formatSuccessScenarios`, el único formateador que usan Jubilación y Resumen)
+- Las filas de cobertura ya no dependen de la regla: `grep -c "withdrawalRuleKind" apps/web/src/lib/risk-bands.ts apps/web/src/views/RetirementView.tsx apps/web/src/lib/risk-bands.test.ts` (**0** en los tres)
+- La fila del horizonte se reconoce por su MES: `grep -n "al final del horizonte" apps/web/src/lib/risk-bands.ts` y `grep -n "projectionBands?.months" apps/web/src/views/RetirementView.tsx`
+- Las tres razones del colchón inactivo están mapeadas y `not_requested` NO: `grep -n -A 4 "BUFFER_INACTIVE_REASON_ES" apps/web/src/lib/risk-bands.ts` (dos entradas, `no_volatility` y `no_safe_liquid_asset`)
+- El modelo del tooltip de retirada vive puro y con test: `grep -n "buildWithdrawalTooltipRows" apps/web/src/lib/projection-chart.ts apps/web/src/views/ProjectionNetWorthChart.tsx apps/web/src/lib/projection-chart.test.ts`
+- Los campos del pase están tipados y son OPCIONALES: `grep -n "never_retired_probability?\|success_given_retired?\|buffer_inactive_reason?\|unmet_need?" apps/web/src/api/types.ts`
 - GastosView's documented exception to "hide, don't disable": `grep -n "disabled={!canEdit" apps/web/src/views/GastosView.tsx` (the two inline `<select>`s — categoría/tipo — stay `disabled`, not hidden)
