@@ -23,6 +23,14 @@ import {
   formatDateDmy,
   parseYmdComponents,
 } from "./dates";
+import {
+  planSentence,
+  type PlanSentenceAgeMode,
+  type PlanSentenceParts,
+  type PlanSentenceSeries,
+} from "./plan-sentence";
+import { RETIREMENT_STRATEGY_LABEL } from "./retirementProfile";
+import { summarySuccessTile } from "./risk-bands";
 
 /**
  * Avisos que el plan sabe leer. Literales cerrados del contrato (`warnings[]` de
@@ -116,6 +124,10 @@ export type PlanMilestone = {
  * `null` en el índice significa cosas distintas según venga o no acompañado de razón, y la
  * diferencia es justo lo que hay que decir en pantalla: **con** razón, la pregunta no aplica en
  * esta respuesta; **sin** razón, hay plan y no se jubila dentro del horizonte.
+ *
+ * @deprecated — retirar en U1b/U2. U9 sustituye el trío «hito grande + edad + estado» por una
+ * ORACIÓN (`lib/plan-sentence.ts`), que es lo que `planCardV2` construye. Sigue vivo mientras
+ * `SummaryView.tsx` pinte la tarjeta antigua.
  */
 export function planMilestone(input: {
   jubilacionMonthIndex?: number | null;
@@ -232,6 +244,9 @@ export type PlanSeriesFallback = Pick<
  * sigue siendo la del mismo usuario y el mismo plan. Preferir el hueco dejaría la tarjeta en
  * blanco con datos en pantalla justo al lado. Lo que NO se mezcla nunca son las dos mitades: o
  * todo el hito sale del plan, o todo sale de la serie.
+ *
+ * @deprecated — retirar en U1b/U2. Su sustituta es `planCardV2`, que devuelve la tarjeta ANCHA de
+ * U9 (frase · estrategia · «Éxito del plan» · aviso) en vez del trío hito/edad/estado.
  */
 export function ownPlanCard(input: {
   plan?: SummaryPlanApi | null;
@@ -279,5 +294,164 @@ export function ownPlanCard(input: {
       jubilacionAbsentReason: series.jubilacion_absent_reason,
     }),
     status: planStatusFromWarnings(series.warnings),
+  };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// V2 — la tarjeta ANCHA del Resumen (U9)
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/** El aviso, ya listo para su fila: texto + a dónde se va a arreglarlo. */
+export type PlanCardWarningV2 = {
+  text: string;
+  actionLabel: string;
+  target: "account" | "retirement";
+};
+
+/** El KPI «Éxito del plan» dentro de la tarjeta. Es el MISMO sorteo que dibuja la sección
+ *  «Riesgo» de Jubilación: aquí solo se rotula, jamás se recalcula. */
+export type PlanCardSuccessV2 = {
+  label: string;
+  value: string;
+  tone: "default" | "warn" | "danger";
+  /** El umbral — el denominador del semáforo, sin el que «87 de cada 100» no se puede auditar. */
+  parenthetical?: string;
+  /** Los escenarios que no llegan a jubilarse, o la razón de que no haya cifra. */
+  detail?: string;
+};
+
+export type PlanCardV2 = {
+  /** La ORACIÓN del plan (`planSentence`), que es el título de la tarjeta. */
+  title: string;
+  /** Estrategia + el hito secundario que esa estrategia añade. */
+  subtitle: string;
+  tone: PlanStatusTone;
+  success: PlanCardSuccessV2 | null;
+  warning: PlanCardWarningV2 | null;
+};
+
+/** La serie del usuario, con lo que la frase y el estado necesitan. */
+export type PlanCardV2Series = PlanSentenceSeries & Pick<ProjectionSeriesApi, "warnings">;
+
+export type PlanCardV2Input = {
+  /** `summary.plan` — la fuente canónica del ESTADO y del éxito. */
+  plan?: SummaryPlanApi | null;
+  /** La serie que el chart de la misma pantalla ya tiene cargada. */
+  series?: PlanCardV2Series | null;
+  monthLabel: (monthIndex: number) => string;
+  ageMode?: PlanSentenceAgeMode;
+  /** Edad objetivo GUARDADA del perfil. */
+  targetRetirementAge: number | null;
+};
+
+/** `SummaryPlanApi` visto como serie para la frase. Los hitos secundarios van a `null` porque el
+ *  objeto `plan` **no los publica**: es un resumen de cinco escalares, no la simulación. */
+function planAsSentenceSeries(plan: SummaryPlanApi): PlanSentenceSeries {
+  return {
+    strategy: plan.strategy,
+    jubilacion_month_index: plan.jubilacion_month_index,
+    jubilacion_age: null,
+    coast_fire_month_index: null,
+    partial_retirement_month_index: null,
+    pension_start_month_index: null,
+    underfunded: plan.underfunded,
+  };
+}
+
+/** Frase corta del hito secundario de cada estrategia; `null` cuando la estrategia no tiene uno. */
+function secondaryPhrase(parts: PlanSentenceParts): string | null {
+  if (parts.secondaryLabel == null) return null;
+  switch (parts.secondaryKind) {
+    case "coast":
+      return `dejas de aportar en ${parts.secondaryLabel}`;
+    case "partial":
+      return `desde ${parts.secondaryLabel}`;
+    case "pension":
+      return `pensión desde ${parts.secondaryLabel}`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * La tarjeta «Tu plan» del Resumen, rediseñada (U9): **una sola tarjeta ancha** con la frase de
+ * arriba, la estrategia debajo, el KPI «Éxito del plan» y una fila de aviso.
+ *
+ * Sustituye a la rejilla de tres tarjetas cortas cuyo hito («12/05/2043») no decía qué estrategia
+ * lo produjo ni si el plan llegaba — tres datos sin sujeto.
+ *
+ * ## De dónde sale cada mitad, y por qué no se mezclan
+ *
+ * - **La FRASE sale de la serie** cuando la hay. La serie es estrictamente más rica —tiene el mes
+ *   coast, el de media jornada y el de la pensión, que `summary.plan` no publica— y es el mismo
+ *   objeto que el chart está dibujando dos centímetros más abajo. Sin serie, la frase se arma con
+ *   `plan` y sus hitos secundarios quedan vacíos: se pierde el matiz, nunca se inventa.
+ * - **El ESTADO y el ÉXITO salen de `plan`**, que es su fuente canónica (WP5-2b): `underfunded`
+ *   como booleano y el sorteo de Monte Carlo ya resuelto por el servidor. Los avisos textuales
+ *   (`birth_date_missing`, `target_retirement_age_missing`) solo viven en la serie, así que se
+ *   leen de ahí — no son otra versión del mismo hecho, son hechos que `plan` no publica.
+ *
+ * La precedencia del aviso es la de siempre (`planStatusFromWarnings`): `retire_at_age_underfunded`
+ * (rojo) > `birth_date_missing` > `target_retirement_age_missing` > «En plan».
+ *
+ * El `tone` de la tarjeta es el del ESTADO, no el de la frase: la frase describe el hito y el
+ * estado describe el plan, y cuando discrepan manda el segundo (D17).
+ */
+export function planCardV2(input: PlanCardV2Input): PlanCardV2 {
+  const plan = input.plan ?? null;
+  const usePlan = plan != null && plan.absent_reason == null;
+  const series = input.series ?? null;
+
+  const sentenceSource: PlanSentenceSeries | null =
+    series ?? (usePlan ? planAsSentenceSeries(plan) : null);
+
+  const sentence = planSentence({
+    series: sentenceSource,
+    targetRetirementAge: input.targetRetirementAge,
+    monthLabel: input.monthLabel,
+    ageMode: input.ageMode,
+  });
+
+  const status = planStatusFromPlan({
+    underfunded: usePlan ? plan.underfunded : (sentenceSource?.underfunded ?? null),
+    warnings: series?.warnings ?? null,
+  });
+
+  const strategy = (usePlan ? plan.strategy : null) ?? sentence.parts.strategy;
+  const secondary = secondaryPhrase(sentence.parts);
+  const subtitle = [
+    strategy != null ? RETIREMENT_STRATEGY_LABEL[strategy] : "Sin estrategia",
+    secondary,
+  ]
+    .filter((x): x is string => x != null)
+    .join(" · ");
+
+  const successTile = summarySuccessTile(plan);
+
+  return {
+    title: sentence.text,
+    subtitle,
+    // El tono es el del ESTADO — salvo cuando no hay NADA que evaluar (ni plan ni serie): ahí el
+    // estado diría «En plan» en verde sobre una tarjeta que dice «Sin plan que mostrar», y «no
+    // sé nada de ti» no es «vas bien».
+    tone: sentenceSource == null ? sentence.tone : status.tone,
+    success:
+      successTile == null
+        ? null
+        : {
+            label: "Éxito del plan",
+            value: successTile.value,
+            tone: successTile.tone,
+            parenthetical: successTile.parenthetical,
+            detail: successTile.detail,
+          },
+    warning:
+      status.warning == null || status.action == null
+        ? null
+        : {
+            text: status.label,
+            actionLabel: status.action.label,
+            target: status.action.target,
+          },
   };
 }
