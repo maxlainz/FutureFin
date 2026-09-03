@@ -4231,6 +4231,118 @@ fieldset.retirement-config-stack {
 }
 
 /* ============================================================
+   TARJETA «TU PLAN» ANCHA Y FRASES DEL HOGAR (5.0.0, U9/U10,
+   issue #207)
+   ------------------------------------------------------------
+   U9 sustituye la rejilla de arriba (`.plan-card-grid`, que se
+   queda como está — la sigue usando `PlanMilestone`/`PlanFigures`
+   hasta que Jubilación migre a su propia lectura de la frase) por
+   UNA tarjeta ancha en «Yo»: título = la oración del plan, coloreada
+   por su tono; subtítulo = estrategia + hito secundario; a la
+   derecha, el KPI «Éxito del plan» (reusa `.metric-card`, cero CSS
+   nuevo ahí). U10 sustituye la rejilla en «Hogar» por una lista de
+   frases con el punto de color de cada miembro. Cero hex: solo
+   tokens y color-mix sobre ellos.
+   ============================================================ */
+.plan-card-wide {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.25rem;
+  padding-top: 0.85rem;
+}
+
+.plan-card-wide-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.plan-card-wide-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ff-ink);
+}
+
+/* Mismo tinte que `.plan-card-status--danger`/`.error-banner`: un solo
+   vocabulario de «esto va mal». El ámbar (warn) no tiñe texto — es el
+   estado normal de «hay algo que arreglar», no una alarma. */
+.plan-card-wide-title--danger {
+  color: var(--ff-neg);
+}
+
+.plan-card-wide-subtitle {
+  font-size: 0.82rem;
+  color: var(--ff-ink-soft);
+  line-height: 1.3;
+}
+
+/* Ancho de una KPI normal (mismo criterio que `.summary-success-grid`);
+   `max-width: 100%` para que nunca desborde en tarjetas estrechas. */
+.plan-card-wide-kpi {
+  flex: 0 0 auto;
+  width: 13rem;
+  max-width: 100%;
+}
+
+.plan-card-wide-warning {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--ff-line-soft);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: var(--ff-ink-soft);
+}
+
+.plan-card-wide-warning--danger {
+  color: var(--ff-neg);
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  /* bp:640 — el KPI cede su columna y cae bajo el título/subtítulo. */
+  .plan-card-wide {
+    flex-direction: column;
+  }
+  .plan-card-wide-kpi {
+    width: 100%;
+  }
+}
+
+/* U10 — «Planes del hogar»: una frase por miembro, con el MISMO punto de
+   color que su línea fina en el chart y su tick en la tira de fases
+   (`householdMemberColor`, `lib/chart-legend.ts`). Sin tarjetas ni
+   cifras por persona: el agregado no tiene plan propio. */
+.plan-sentence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin: 0;
+  padding-top: 0.85rem;
+  list-style: none;
+}
+
+.plan-sentence-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  font-size: 0.88rem;
+  line-height: 1.4;
+  color: var(--ff-ink);
+}
+
+.plan-sentence-dot {
+  flex: 0 0 auto;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: var(--ff-radius-pill);
+  transform: translateY(-0.12em);
+}
+
+/* ============================================================
    TIRA DE FASES DEL CHART DE PROYECCIÓN (5.0.0, D29, issue #207)
    ------------------------------------------------------------
    Bajo el eje X: qué fase vive cada tramo del horizonte, más las
