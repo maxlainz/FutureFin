@@ -43,15 +43,15 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `http::request::Parts` hasta el `RequestContext` de cada tool. Fallo → 401/403 JSON
   `{error, code, message}` (el `ErrorBody` del API, con su código estable); **solo el 401** añade
   `WWW-Authenticate` (ver la nota del challenge en la sección OAuth).
-- **Tools de lectura — 28**, más `simulate_projection`, que tiene bullet propio: **29 con
-  `read_only_hint = true`** de las 70 del catálogo. Diecinueve se enumeran aquí (las 10 iniciales en
+- **Tools de lectura — 29**, más `simulate_projection`, que tiene bullet propio: **30 con
+  `read_only_hint = true`** de las 71 del catálogo. Diecinueve se enumeran aquí (las 10 iniciales en
   este bullet, las 9 del issue #2 en el siguiente), la vigésima es `get_allocation_resolution` (bullet
   de la cascada, más abajo) y las **siete de la Fase 6** tienen bloque propio al final de la sección.
   **Los contadores no se cuentan a mano**: los congela
   `mcp_write.rs::every_write_tool_in_the_source_calls_require_mcp_write` (un `#[test]` sin BD que
-  trocea `server.rs`), y son los mismos de `futurefin-mcp-parity` §5 — **70 tools / 29 lectura /
-  41 escritura / 18 con preview-confirm / 8 con `confirm_token` / 18 con `impact`** (5.0.0/WP4:
-  `get_retirement_profile` y `update_retirement_profile`). Verificación de
+  trocea `server.rs`), y son los mismos de `futurefin-mcp-parity` §5 — **71 tools / 30 lectura /
+  41 escritura / 18 con preview-confirm / 8 con `confirm_token` / 19 con `impact`** (5.0.0/WP4:
+  `get_retirement_profile` y `update_retirement_profile`; WP6b: `get_projection_bands`). Verificación de
   un vistazo:
   `grep -c '#\[tool(' apps/api/src/mcp/server.rs` y
   `grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs`.
@@ -90,6 +90,42 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   > - **`simulate_projection`**: `view: "household"` es **error `household_not_simulable`**. Un
   >   what-if mueve UN plan y el hogar tiene N; su schema declara el rechazo en la descripción del
   >   parámetro para que el modelo no lo intente. Test: `mcp_simulate.rs::household_view_is_refused_with_a_typed_error`.
+  > - **`get_projection_bands`** (5.0.0/WP6b): `view: "household"` es **error
+  >   `household_bands_unavailable`**. Los percentiles NO suman entre miembros, y con el shock de
+  >   mercado común de D11 los dos ni siquiera son independientes: sumar dos bandas daría una
+  >   demasiado ancha en el centro y demasiado estrecha en las colas, sin que ningún campo lo
+  >   dijera.
+- **`get_projection_bands` — el RIESGO del plan (5.0.0/WP6b, P3 del issue #207).** Monte Carlo
+  sobre el mismo motor que dibuja la línea determinista: bandas puntuales p10/p50/p90 del
+  patrimonio y del líquido, `success_probability` con su veredicto, agotamiento por edad,
+  percentiles del mes de jubilación, las dos lecturas del RECORTE y las del COLCHÓN de caja (P4:
+  `buffer_active` + `buffer_refills_p50` + `buffer_refill_net_total_p50`, los dos últimos `null`
+  cuando no se simuló — que no es «cero rellenos»). Params: `view` (solo `mine`),
+  `paths` (1–**1 000**, default 500), `seed` (string de dígitos) e `include_liquid_bands`.
+  Cuatro decisiones que hay que leer juntas:
+  - **Sin `density`** — fuerza `hybrid`, igual que `get_projection` y por el mismo veto
+    (arqueología §2.18/veto 22).
+  - **`paths` topa en 1 000 por MCP y en 2 000 por HTTP.** La mitad a propósito: un agente en bucle
+    es el llamante que más satura el semáforo de simulaciones, y la diferencia estadística entre
+    1 000 y 2 000 caminos es menor que el ancho de la propia banda. Medido en release: 204 ms vs
+    391 ms a 840 meses.
+  - **`seed` viaja como STRING** (aquí y en `simulate_projection.monte_carlo.seed`): es un `u64` y
+    `JSON.parse` lo redondea por encima de 2^53 — una semilla que cambia en el ida y vuelta no
+    reproduce nada, que es el fallo silencioso exacto que la reproducibilidad existe para evitar.
+    Omitida = la ESTABLE del usuario (D23), la misma con la que la SPA dibuja su fan chart.
+  - **`include_liquid_bands` (default `false`)** — el gemelo de `include_asset_series` /
+    `include_member_series`, con la medida delante: la respuesta HTTP completa pesa **16,4 KB** a
+    densidad hybrid (66 puntos, seis series) y **~9,9 KB sin las tres del líquido**, o sea que la
+    mitad de los puntos responden a una sola pregunta («cómo se vacía la hucha») que casi nunca es
+    la que trae al modelo aquí. Con el flag apagado las tres claves **desaparecen**; no se sirve un
+    `0` que se leería como «sin líquido». Por HTTP viajan siempre.
+
+  El **contexto de las cifras** está en `model_note` (el modelo entero: shock común, corrección de
+  Itô, bandas PUNTUALES, y la lista de lo que NO se modela) y en el bloque **MONTE CARLO** del
+  `instructions`, que es donde vive lo transversal: ÉXITO = la cartera no se agota nunca (D22), el
+  recorte NO es fracaso (D24), `any_volatility_declared: false` significa «la banda es la línea» y
+  no «tu plan es seguro». Tests: `mcp_http.rs::get_projection_bands_matches_http_and_hides_the_liquid_bands_by_default`.
+
 - **Tools de lectura añadidas en el issue #2 (9)**: `list_allocation_rules` (la cascada como
   reglas, no solo su resultado resuelto), `list_categories` (catálogo id/scope/nombre, filtro
   `scope`, prerrequisito para escribir), `get_category_monthly_series` (serie mensual cero-rellena
@@ -946,6 +982,34 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   **y emitía el `confirm_token`** que la ejecuta. Regresión:
   `mcp_write.rs::mcp_writes_cannot_touch_another_members_rows` y
   `mcp_confirm_and_impact.rs::el_preview_de_un_borrado_ajeno_no_emite_token`.
+
+- **5.0.0 / WP6b (issue #207) — 70 → 71 tools: Monte Carlo.** Una tool nueva de LECTURA,
+  `get_projection_bands` (contadores: 71 / 30 / 41), y un eje nuevo en `simulate_projection`.
+  Evaluación de paridad: **tool añadida** para `GET /v1/projection/bands`; **tool actualizada**
+  para el eje. Ninguna omisión nueva.
+  - **`get_projection_bands`** — su bullet propio está arriba, en la lista de lecturas.
+  - **`simulate_projection` gana `monte_carlo: {paths ≤ 1000, seed?}`**: los dos lados publican
+    `success_probability`, `success_verdict`, `underfunded_probability` y `months_below_need_p50`,
+    y `deltas` gana `success_probability_delta`. **No lleva bandas** — son ~16 KB por lado y un
+    what-if devuelve dos; el fan chart vive en su endpoint, que además lo cachea. Los dos lados
+    sortean con la MISMA semilla, así que el delta mide el cambio del PLAN y no el ruido de dos
+    muestras. La respuesta ecoa `monte_carlo {paths, seed (string), any_volatility_declared,
+    success_threshold_pct}`: sin la semilla el resultado no es reproducible y por tanto no es un
+    resultado.
+  - **Es el único eje de `simulate_projection` SIN anti-no-op, y está declarado**: los demás
+    (`income_growth`, `profile_overrides`, `solve`, los de pasivos) se rechazan cuando no pueden
+    mover nada porque devolverían un escenario idéntico al baseline sin decir por qué. Éste no
+    cambia el escenario: le AÑADE información. `{"monte_carlo": {"paths": 500}}` con el resto del
+    cuerpo vacío es la pregunta legítima «¿qué probabilidad de éxito tiene mi plan tal cual está?».
+    Test: `mcp_simulate.rs::the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_the_scenario`.
+  - **Presupuesto de descripciones, rebalanceado de verdad.** La tool nueva son 490 caracteres y el
+    margen antes de WP6b eran **146** (23 854 / 24 000). Se movieron ~550 caracteres de siete
+    descripciones al `instructions` —donde el cliente los lee una vez por sesión y no una vez por
+    tool—: el párrafo **MONTE CARLO** entero es nuevo, y a CATEGORÍAS y ESCRITURA se les añadió lo
+    que salió de `update_categorization_rule`, `materialize_recurring`, `list_assets` y
+    `update_liability`; de `get_projection` se retiró la frase del hogar, que el bloque SCOPE ya
+    decía con más detalle. Total tras el cambio: **23 793 / 24 000** (margen 207). La constante
+    **no** se tocó — la salida cuando no cabe es mover prosa, no subir el techo.
 
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de

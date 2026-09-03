@@ -20,6 +20,7 @@ pub mod pending_users;
 pub mod person_view;
 pub mod planning;
 pub mod projection;
+pub mod projection_bands;
 pub mod retirement_profile;
 pub mod session;
 pub mod spa;

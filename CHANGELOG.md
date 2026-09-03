@@ -196,6 +196,94 @@ sabía contestar: **cuánto hay que ahorrar para llegar**, y **cuánto sobra**.
   negativo, es cero. El motor no cambia (su aritmética la congela el golden); redondea quien
   serializa.
 
+### Monte Carlo: la probabilidad de que el plan aguante (5.0.0, WP6)
+
+Hasta 4.15.x la proyección contestaba «con estos supuestos, esto es lo que pasa» — **un solo
+futuro**, dibujado con una precisión que no tiene. El riesgo de secuencia de retornos (dos carteras
+con la misma rentabilidad media y años malos en distinto orden acaban en sitios muy distintos) no
+existía en el modelo. Desde 5.0.0 existe.
+
+- **`GET /v1/projection/bands?paths&seed`** corre cientos de caminos del **mismo motor** que dibuja
+  la línea determinista, con los factores de crecimiento sorteados, y publica bandas puntuales
+  **p10/p50/p90** del patrimonio y del líquido, la probabilidad de éxito con su veredicto, el
+  agotamiento por edad y los percentiles del mes de jubilación. No es un segundo modelo financiero:
+  es el de siempre, evaluado muchas veces (crate nuevo `futurefin-engine-stochastic`, WP5.5).
+- **El modelo, dicho entero.** Un **shock de mercado COMÚN** por mes (un solo `z ~ N(0,1)` que
+  viven todos los activos a la vez), escalado por la volatilidad de cada uno:
+  `factor = m·exp(σz − σ²/2)` con `σ = annual_volatility_percent/100/√12`. La corrección de Itô es
+  exacta, así que **la media del factor mensual ES el factor determinista** y la rentabilidad
+  esperada que el usuario escribió se respeta; la GEOMÉTRICA —la que el hogar cobra— sale más baja,
+  y esa diferencia no es un error: es el coste de la volatilidad, y se ve en que la banda p50 queda
+  por DEBAJO de la línea determinista. **Con σ = 0 en toda la cartera la banda ES la línea**, y la
+  respuesta lo dice (`any_volatility_declared: false`) para que un «éxito 100 %» no se lea como
+  «tu plan es seguro».
+- **ÉXITO significa una cosa: la cartera no se agota NUNCA** dentro del horizonte, con las
+  pensiones y las fases ya dentro de la simulación (D22). El **recorte** de una regla de retirada
+  con techo **no es fracaso** y viaja aparte (`months_below_need_p50`,
+  `withdrawal_to_need_ratio_p50`): son dos preguntas distintas y mezclarlas da un diagnóstico
+  falso. `success_verdict` colorea contra el umbral del perfil (`success_threshold_pct`, default
+  95 %): **verde** en el umbral exacto, **ámbar** hasta 10 puntos porcentuales por debajo, **rojo**
+  el resto.
+- **La semilla es estable por usuario** (`hash(installation_id, user_id)`, D23). Sin eso la
+  probabilidad bailaría a cada refresco, que es justo lo que hace inservible a una herramienta de
+  este tipo: la misma pregunta da la misma cifra hoy y dentro de un año. Se puede pedir otro
+  mercado con `?seed=`, y la semilla **viaja de vuelta como cadena de dígitos** — es un entero de
+  64 bits y `JSON.parse` lo redondea por encima de 2⁵³, así que un número JSON habría hecho que
+  «repetir el mismo sorteo» devolviera otro en silencio.
+- **Lo que este modelo NO representa, dicho en la propia respuesta** (`model_note`) en vez de en
+  una nota al pie: colas gruesas (el shock es log-normal, así que la probabilidad de ruina es
+  **optimista en la cola**), autocorrelación o reversión a la media (los meses son independientes:
+  no hay ciclos), correlación imperfecta entre activos (con un shock común la correlación es
+  exactamente 1, así que una cartera diversificada **no se beneficia aquí** de su diversificación:
+  conservador en ese eje), bootstrap histórico (el sorteo es paramétrico: nada de esto es «lo que
+  pasó entre 1929 y 1964»), volatilidad de la inflación, de los ingresos, del gasto o del tipo de
+  la deuda, y rebalanceo. Un modelo estocástico sin sus supuestos declarados es un generador de
+  números que parecen ciertos.
+- **Un ejemplo de lo que la tabla de agotamiento enseña** (cifras SINTÉTICAS, de un plan de
+  laboratorio con 2.000 €/mes de gasto y SWR 4 %; ninguna instalación real):
+
+  | Edad | Probabilidad de haber agotado la cartera |
+  |---|---|
+  | 70 | 1 % |
+  | 75 | 4 % |
+  | 80 | 11 % |
+  | 85 | 19 % |
+  | 90 | 26 % |
+
+  La lectura que importa no es ninguna fila suelta: es que la ruina **se acumula con los años**, y
+  que un plan «con el 4 % de siempre» puede tener una de cada cuatro trayectorias sin dinero al
+  final del horizonte sin que la línea determinista lo insinúe.
+- **Solo `view=mine`.** El hogar devuelve **400 `household_bands_unavailable`**: los percentiles no
+  suman entre miembros y, con el shock común, los dos ni siquiera son independientes — sumar dos
+  bandas daría una demasiado ancha en el centro y demasiado estrecha en las colas sin que ninguna
+  cifra lo dijera. Misma razón por la que `simulate_projection` rechaza el hogar.
+- **El Resumen gana el KPI «Éxito del plan»** (`summary.plan.success_probability`,
+  `success_threshold_pct`, `success_verdict`), y sale **de la misma ejecución** que dibuja el fan
+  chart: si el tile y el gráfico sortearan por su cuenta enseñarían dos probabilidades del mismo
+  plan en la misma pantalla. En `view=household` van a `null` con `absent_reason:
+  "household_aggregate"`, como el resto del plan.
+- **MCP**: tool nueva `get_projection_bands` (solo lectura; `paths` topa en 1.000 frente a los
+  2.000 de HTTP, y las bandas del líquido son opt-in con `include_liquid_bands` — la respuesta pesa
+  16,4 KB y la mitad son esas tres series). `simulate_projection` gana el eje
+  `monte_carlo: {paths, seed}`, que añade la probabilidad de éxito a los **dos** lados y su delta,
+  con la misma semilla en ambos para que el delta mida el cambio del plan y no el ruido de dos
+  muestras. Catálogo: **70 → 71 tools** (30 de lectura, 41 de escritura), con el presupuesto de
+  descripciones rebalanceado moviendo ~550 caracteres al `instructions` del servidor — la
+  constante no se toca.
+- **Coste, medido** (release, 840 meses): 500 caminos 104 ms · 1.000 caminos 204 ms · 2.000
+  caminos 391 ms. El endpoint cachea por `(instalación, usuario, caminos, semilla)` con el TTL de
+  la proyección y **se invalida con las mismas mutaciones que la serie** — una banda calculada
+  sobre unos activos que ya no existen, junto a una línea ya actualizada, son dos cifras que se
+  contradicen en la misma pantalla.
+- **El colchón de caja (P4) se simula, y solo aquí.** `cash_buffer_months` del perfil se rellena
+  vendiendo del resto de la cartera **solo en los meses de shock positivo** —se vende después de
+  que el mercado suba, no después de que baje— y esa venta paga su plusvalía como cualquier otra.
+  El API publica `buffer_active` (se simuló o no: hacen falta el colchón declarado, un líquido que
+  lo albergue y volatilidad de la que protegerse), `buffer_refills_p50` y
+  `buffer_refill_net_total_p50`; los dos últimos son `null` cuando no se simuló, que no es «cero
+  rellenos». En el camino determinista **no hay colchón** por diseño: sin sorteo no hay mes bueno
+  ni malo que distinguir, así que el trasvase no tendría criterio.
+
 ### Breaking
 
 - **`liquid_crossing_month_index` lo publica ahora el MOTOR, y con el objetivo del PLAN.** Hasta

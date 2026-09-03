@@ -16,6 +16,10 @@ use crate::handlers::retirement_profile::{
     WithdrawalRule as ProfileWithdrawalRule, WithdrawalRuleKind as ProfileWithdrawalRuleKind,
 };
 use crate::handlers::person_view::LedgerView;
+/// Monte Carlo (5.0.0, WP6b): el eje `monte_carlo` de `simulate_projection` reusa las MISMAS
+/// conversiones y el mismo semáforo que `GET /v1/projection/bands`. Ninguna cifra estadística
+/// tiene dos caminos.
+use crate::handlers::projection_bands::{map_mc_err, probability_out, volatilities_f64};
 /// Alias local: `RepaymentModel` a secas es el del **engine** en este fichero (ver el `use` de
 /// `futurefin_engine`); este es el del lado API, que sabe hablar con la columna SQL.
 use crate::handlers::liabilities::{payoff_absence_code, RepaymentModel as LiabRepaymentModel};
@@ -98,7 +102,7 @@ fn resolve_density(q: &ProjectionSeriesQuery) -> Result<Density, ApiError> {
 /// el punto que cualquiera lee como «patrimonio al final». Con `?months=19` se perdía el 32 %
 /// del horizonte pedido. Invisible desde la web (el horizonte derivado siempre es años × 12),
 /// pero alcanzable por `?months=N` y por la tool MCP `get_projection`, que fuerza `hybrid`.
-fn density_month_indices(density: Density, months: u32) -> Vec<u32> {
+pub(crate) fn density_month_indices(density: Density, months: u32) -> Vec<u32> {
     match density {
         Density::Monthly => (0..months).collect(),
         Density::Hybrid => {
@@ -844,6 +848,12 @@ struct AssetEngineRow {
     purchase_price: Option<Decimal>,
     is_liquid: bool,
     expected_annual_return_percent: Option<Decimal>,
+    /// Desviación típica ANUAL de los retornos, en puntos porcentuales (`[0, 100]`, `NULL` =
+    /// activo determinista). **El camino `Decimal` la ignora por completo**: entra en el
+    /// ensamblado únicamente para viajar, alineada con `input.assets`, hasta Monte Carlo
+    /// (`projection_bands.rs`). Cargarla aquí y no en una segunda query es lo que garantiza la
+    /// alineación — el orden de los activos es una propiedad de ESTE `SELECT`.
+    annual_volatility_percent: Option<Decimal>,
 }
 
 #[derive(Debug, FromRow)]
@@ -1472,7 +1482,7 @@ fn age_completed_years(today: NaiveDate, birth: NaiveDate) -> i32 {
 ///
 /// Nota: `ProjectionMilestone::reached_date_ymd` sí ancla al día 1 (contrato ya publicado, se deja
 /// como está). Ambas coinciden siempre en año y mes; solo difieren en el día.
-fn jubilacion_civil(
+pub(crate) fn jubilacion_civil(
     today: NaiveDate,
     birth: Option<NaiveDate>,
     mi: Option<u32>,
@@ -1578,7 +1588,7 @@ fn withdrawal_rule_to_engine(rule: &ProfileWithdrawalRule) -> EngineWithdrawalRu
 
 /// Literal público de una estrategia del perfil. Se deriva del `Serialize` del enum para que no
 /// haya dos listas de strings que puedan divergir.
-fn strategy_label(s: RetirementStrategy) -> String {
+pub(crate) fn strategy_label(s: RetirementStrategy) -> String {
     serde_json::to_value(s)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
@@ -1604,7 +1614,7 @@ fn strategy_label(s: RetirementStrategy) -> String {
 /// BUCLE desde #119 y era la única salida de la respuesta que hablaba otro idioma: compararla con
 /// `jubilacion_month_index` o usarla para indexar `points[]` daba un mes de más. Se pasa por aquí
 /// como el resto — breaking declarado en el CHANGELOG de 5.0.0.
-fn engine_month_to_grid(k: Option<u32>) -> Option<u32> {
+pub(crate) fn engine_month_to_grid(k: Option<u32>) -> Option<u32> {
     k.map(|k| k.saturating_sub(1))
 }
 
@@ -1827,6 +1837,17 @@ pub(crate) struct BuiltProjection {
     pub allocation_rule_ids: Vec<Uuid>,
     /// `(id, name)` por activo en el mismo orden que `input.assets` — evita un segundo SELECT.
     pub asset_id_name: Vec<(Uuid, String)>,
+    /// **Volatilidad anual (%) por activo, alineada posición a posición con `input.assets`**
+    /// (5.0.0, §A.2/§B.5). `None` = activo determinista (cuenta corriente, depósito).
+    ///
+    /// Va aquí y no dentro de `SimAsset` porque el motor `Decimal` **no la usa**: es entrada
+    /// exclusiva de `futurefin_engine_stochastic::project_percentile_bands`, que la recibe como
+    /// un vector paralelo y **falla** (`VolatilityLengthMismatch`) si no coincide en longitud con
+    /// los activos. Se construye en el MISMO `map` que `assets` y `asset_id_name`, así que la
+    /// alineación es una propiedad de construcción y no algo que haya que re-derivar: una
+    /// volatilidad que se descoloca produce bandas estrechas y creíbles, el peor fallo posible
+    /// aquí (regresión: `projection_bands.rs::the_volatility_vector_follows_the_asset_order`).
+    pub asset_volatility_percent: Vec<Option<Decimal>>,
     /// `(id, label)` por pasivo, **alineado posición a posición** con `input.liabilities`. Misma
     /// razón que `allocation_rule_ids`: el índice del engine es una propiedad de construcción, no
     /// algo que se pueda re-derivar de la tabla sin volver a la BD y arriesgarse a otro orden.
@@ -2091,7 +2112,7 @@ pub(crate) async fn build_installation_projection_input(
     let assets_scope = view.scope_where("");
     let assets_sql = format!(
         r#"SELECT id, name, current_value, purchase_price, is_liquid,
-                  expected_annual_return_percent
+                  expected_annual_return_percent, annual_volatility_percent
            FROM assets
            WHERE {assets_scope}
            ORDER BY sort_index ASC, name ASC, id ASC"#
@@ -2142,10 +2163,14 @@ pub(crate) async fn build_installation_projection_input(
         .collect();
 
     let mut asset_id_name: Vec<(Uuid, String)> = Vec::with_capacity(assets_rows.len());
+    // Se rellena en el MISMO `map` que `assets`: la alineación con `input.assets` es entonces una
+    // propiedad de construcción, no una invariante que alguien deba recordar más tarde.
+    let mut asset_volatility_percent: Vec<Option<Decimal>> = Vec::with_capacity(assets_rows.len());
     let assets: Vec<SimAsset> = assets_rows
         .into_iter()
         .map(|r| {
             asset_id_name.push((r.id, r.name));
+            asset_volatility_percent.push(r.annual_volatility_percent);
             SimAsset {
                 id: r.id,
                 value: r.current_value,
@@ -2419,6 +2444,7 @@ pub(crate) async fn build_installation_projection_input(
         monthly_net_regular,
         allocation_rule_ids,
         asset_id_name,
+        asset_volatility_percent,
         liability_id_label,
         planning_rows,
         effective_savings_source,
@@ -3836,7 +3862,30 @@ pub(crate) struct SimulationSpec {
     /// bisección entera sobre el motor (hasta 26 proyecciones). `Some(false)` es un 400: pedir
     /// el bloque `solve` sin pedir ningún solve no puede devolver nada.
     pub solve_extra_monthly_expense_keeping_date: Option<bool>,
+    /// **P3 — Monte Carlo sobre los DOS lados** (5.0.0, WP6b). Opt-in porque cuesta `2 · paths`
+    /// simulaciones f64 (≈ 0,4 s a 1 000 caminos y 840 meses) y `simulate_projection` es
+    /// cache-neutral por diseño: cada what-if paga sus caminos enteros.
+    ///
+    /// **No lleva anti-no-op, y es la única excepción declarada del bloque.** Los demás ejes
+    /// (`income_growth`, `profile_overrides`, `solve`, los de pasivos) se rechazan cuando no
+    /// pueden mover nada porque devolverían un escenario idéntico al baseline sin decir por qué.
+    /// Este no cambia el escenario: **AÑADE información** sobre los dos lados que ya se iban a
+    /// simular. `monte_carlo` con el resto del cuerpo vacío es la pregunta legítima «¿qué
+    /// probabilidad de éxito tiene mi plan tal cual está?», y con `paths` a lo que sea siempre
+    /// hay algo nuevo que contestar — incluso con toda la cartera a volatilidad cero, donde la
+    /// respuesta es «éxito 1 o 0, sin dispersión» y `any_volatility_declared` lo dice.
+    pub monte_carlo: Option<MonteCarloSpec>,
     pub include_series: bool,
+}
+
+/// El eje de Monte Carlo del what-if. `seed` es un override consciente: omitido, se usa la
+/// semilla ESTABLE del usuario (D23), que es la misma con la que `GET /v1/projection/bands`
+/// dibuja su fan chart — así el what-if y el gráfico comparan mercados idénticos y el delta de
+/// probabilidad mide el CAMBIO DEL PLAN y no el ruido de dos muestras distintas.
+#[derive(Debug, Clone)]
+pub(crate) struct MonteCarloSpec {
+    pub paths: u32,
+    pub seed: Option<u64>,
 }
 
 /// Pausa de ingresos del what-if (P8.c). El mes es **1-based del ancla**, el mismo eje que
@@ -4145,6 +4194,27 @@ pub(crate) struct SimKpis {
     /// `bridge_discount_no_liquid_assets`, `retire_at_age_underfunded`, `coast_not_reachable`,
     /// `partial_phase_capital_shrinking`. Vacío = nada que advertir.
     pub warnings: Vec<String>,
+
+    // ---- 5.0.0 WP6b — Monte Carlo de ESTE lado (P3, D22/D25/D28) ----------------------------
+    // Los cuatro son `null` cuando no se pidió el eje `monte_carlo`, y van por lado porque el
+    // escenario puede llevar otra estrategia entera: la probabilidad de éxito de dos planes
+    // distintos no se compara restando dos cifras que describen cosas distintas — por eso el
+    // único delta es el de la probabilidad, y solo cuando los dos lados la tienen.
+    /// **D22 — fracción de caminos en que la cartera no se agota nunca** dentro del horizonte.
+    /// `null` ⟺ no se pidió `monte_carlo`. **No hay bandas aquí**: las series de percentil pesan
+    /// (~19 KB a densidad hybrid) y un what-if devuelve DOS lados; el fan chart vive en
+    /// `GET /v1/projection/bands`, que además lo cachea.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub success_probability: Option<Decimal>,
+    /// `green` | `amber` | `red` con el umbral del PERFIL de este lado (D28).
+    pub success_verdict: Option<&'static str>,
+    /// Fracción de caminos que llegan a la edad objetivo por debajo del objetivo (D17). `null`
+    /// también con el eje pedido si el plan de este lado no se jubila por edad.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub underfunded_probability: Option<Decimal>,
+    /// Mediana entre caminos de los meses jubilados con recorte de la regla de retirada (D24: el
+    /// recorte NO es fracaso y por eso viaja aparte del éxito). Con `fixed_real` es 0.
+    pub months_below_need_p50: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4235,6 +4305,17 @@ pub(crate) struct SimDeltas {
     /// `scenario − baseline` de la tasa de retirada del puente, en PUNTOS PORCENTUALES.
     #[serde(with = "rust_decimal::serde::str_option")]
     pub bridge_effective_withdrawal_pct_delta: Option<Decimal>,
+    /// **`scenario − baseline` de la probabilidad de éxito de Monte Carlo**, en FRACCIÓN
+    /// (`0.12` = doce puntos porcentuales más de escenarios que aguantan). `null` ⟺ no se pidió
+    /// el eje `monte_carlo`.
+    ///
+    /// Es comparable porque los dos lados sortean con la MISMA semilla: las realizaciones de
+    /// mercado son idénticas y lo único que cambia entre las dos columnas es el plan, así que la
+    /// diferencia mide el cambio y no el ruido de dos muestras. Es el único delta de este eje —
+    /// el veredicto es un color (se lee comparando las dos columnas) y `months_below_need_p50` es
+    /// una mediana de enteros cuya resta no significa nada estable.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub success_probability_delta: Option<Decimal>,
 }
 
 /// **Lo que la pausa de ingresos le cuesta a la fecha de jubilación** (P8.c). Los dos meses viajan
@@ -4304,6 +4385,31 @@ pub(crate) struct SimulateProjectionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "rust_decimal::serde::str_option")]
     pub max_extra_monthly_expense_keeping_date: Option<Decimal>,
+    /// Presente ⟺ se pidió el eje `monte_carlo`. Ecoa lo que hace falta para REPETIR el sorteo y
+    /// para leerlo; las cifras por lado viven en `baseline`/`scenario`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monte_carlo: Option<MonteCarloKpis>,
+}
+
+/// El eco del sorteo. **La semilla es lo que convierte una probabilidad en un resultado**: sin
+/// ella nadie puede repetir la ejecución, y dos llamadas con semillas distintas no son
+/// comparables aunque sus deltas lo parezcan.
+#[derive(Debug, Serialize)]
+pub(crate) struct MonteCarloKpis {
+    /// Caminos sorteados **por lado** (el coste total es el doble).
+    pub paths: u32,
+    /// Semilla efectiva, **como cadena de dígitos**: es un entero de 64 bits y `JSON.parse` lo
+    /// redondea por encima de 2^53. Misma convención que `GET /v1/projection/bands`.
+    pub seed: String,
+    /// `false` ⟺ ningún activo declara volatilidad: entonces los dos lados sortean el camino
+    /// determinista y la probabilidad de éxito solo puede ser `1` o `0`. Sin este campo, un
+    /// `success_probability: "1"` se leería como «tu plan es seguro» cuando significa «no has
+    /// declarado ninguna volatilidad».
+    pub any_volatility_declared: bool,
+    /// Umbral del PERFIL DEL BASELINE en porcentaje, para poder auditar los dos veredictos. El
+    /// del escenario puede diferir si `profile_overrides` lo cambió: entonces cada lado se
+    /// colorea con el suyo, que es lo correcto, y esta cifra dice contra qué se midió el baseline.
+    pub success_threshold_pct: u32,
 }
 
 fn require_non_negative(name: &str, v: Option<Decimal>) -> Result<Decimal, ApiError> {
@@ -4568,6 +4674,12 @@ fn sim_kpis(
         bridge_effective_withdrawal_pct: output.bridge_effective_withdrawal_pct.map(money_out),
         bridge_discount_annual_pct: built.bridge_discount_annual_pct.map(money_out),
         warnings: merge_warnings(&built.warnings, output, solves),
+        // El eje `monte_carlo` los rellena DESPUÉS, en el core: `sim_kpis` es una función de
+        // ensamblado y lanzar aquí 2·paths simulaciones la sacaría del semáforo de CPU.
+        success_probability: None,
+        success_verdict: None,
+        underfunded_probability: None,
+        months_below_need_p50: None,
     }
 }
 
@@ -5323,7 +5435,7 @@ pub(crate) async fn simulate_projection_core(
     let baseline_solves = baseline_solve_join?.map_err(map_engine_err)?;
     let scenario_solves = scenario_solve_join?.map_err(map_engine_err)?;
 
-    let baseline = sim_kpis(
+    let mut baseline = sim_kpis(
         &baseline_built.input,
         &baseline_out,
         &baseline_built,
@@ -5338,7 +5450,7 @@ pub(crate) async fn simulate_projection_core(
         None,
         &baseline_solves,
     );
-    let scenario = sim_kpis(
+    let mut scenario = sim_kpis(
         &scenario_input,
         &scenario_out,
         &scenario_built,
@@ -5352,6 +5464,68 @@ pub(crate) async fn simulate_projection_core(
         income_growth_stops_at,
         &scenario_solves,
     );
+
+    // ---- P3: Monte Carlo sobre los DOS lados (WP6b) -----------------------------------------
+    // La MISMA semilla para los dos: las realizaciones de mercado son idénticas y lo único que
+    // cambia entre columnas es el plan, así que el delta de probabilidad mide el cambio y no el
+    // ruido de dos muestras. Se corre DESPUÉS de las series y de los solves, en paralelo entre
+    // sí, bajo el mismo semáforo de CPU que todo lo demás.
+    let monte_carlo = match &spec.monte_carlo {
+        None => None,
+        Some(mc) => {
+            use crate::handlers::projection_bands::{
+                resolve_paths, resolve_seed, success_verdict, MCP_MAX_PATHS,
+            };
+            let paths = resolve_paths(Some(mc.paths), MCP_MAX_PATHS)?;
+            let seed = resolve_seed(iid, user_id, mc.seed);
+            let config = |profile: &RetirementProfile| futurefin_engine_stochastic::McConfig {
+                seed,
+                paths,
+                percentiles: crate::handlers::projection_bands::BANDS_PERCENTILES.to_vec(),
+                cash_buffer_months: profile.cash_buffer_months,
+            };
+            // Las volatilidades salen del ensamblado de CADA lado, alineadas con sus activos:
+            // el escenario puede haber movido tasas por activo, pero nunca el ORDEN, y aun así
+            // cada lado usa su propio vector para que un cambio futuro no los descoloque.
+            let b_vols = volatilities_f64(&baseline_built);
+            let s_vols = volatilities_f64(&scenario_built);
+            let b_input = baseline_built.input.clone();
+            let s_input = scenario_input.clone();
+            let b_cfg = config(&ctx.retirement_profile);
+            let s_cfg = config(&profile_eff);
+            let (b_join, s_join) = tokio::join!(
+                crate::heavy::run_projection_sim("monte carlo baseline", move || {
+                    futurefin_engine_stochastic::project_percentile_bands(&b_input, &b_vols, &b_cfg)
+                }),
+                crate::heavy::run_projection_sim("monte carlo scenario", move || {
+                    futurefin_engine_stochastic::project_percentile_bands(&s_input, &s_vols, &s_cfg)
+                }),
+            );
+            let b_out = b_join?.map_err(map_mc_err)?;
+            let s_out = s_join?.map_err(map_mc_err)?;
+            let apply = |k: &mut SimKpis, out: &futurefin_engine_stochastic::McOutcome, threshold: u32| {
+                k.success_probability = probability_out(out.success_probability);
+                k.success_verdict = Some(success_verdict(out.success_probability, threshold));
+                k.underfunded_probability =
+                    out.underfunded_probability.and_then(probability_out);
+                k.months_below_need_p50 = Some(out.months_below_need_p50);
+            };
+            apply(
+                &mut baseline,
+                &b_out,
+                ctx.retirement_profile.success_threshold_pct,
+            );
+            apply(&mut scenario, &s_out, profile_eff.success_threshold_pct);
+            Some(MonteCarloKpis {
+                paths,
+                seed: seed.to_string(),
+                // Los dos lados comparten activos, así que comparten la respuesta; se toma la del
+                // baseline porque es el lado sin overrides.
+                any_volatility_declared: b_out.any_volatility_declared,
+                success_threshold_pct: ctx.retirement_profile.success_threshold_pct,
+            })
+        }
+    };
 
     // Deflactores comparables ⟺ las dos inflaciones EFECTIVAS coinciden. Se lee del eco de cada
     // lado (`SimKpis::annual_inflation_percent`) y no de `ctx`/`inflation_eff` sueltos: así la
@@ -5451,6 +5625,15 @@ pub(crate) async fn simulate_projection_core(
             baseline.bridge_effective_withdrawal_pct,
             scenario.bridge_effective_withdrawal_pct,
         ),
+        // Sin `money_out`: es una FRACCIÓN, no euros. Se resta sobre los dos valores ya
+        // redondeados a 6 decimales porque los dos vienen del MISMO estimador (un cociente de
+        // contadores con `paths ≤ 1000` en el denominador), así que el redondeo no puede mover
+        // el delta más allá de su última cifra.
+        success_probability_delta: match (baseline.success_probability, scenario.success_probability)
+        {
+            (Some(b), Some(sc)) => Some((sc - b).round_dp(SIM_RATIO_DP)),
+            _ => None,
+        },
     };
 
     let series = if spec.include_series {
@@ -5485,6 +5668,7 @@ pub(crate) async fn simulate_projection_core(
         series,
         income_pause: income_pause_kpis,
         max_extra_monthly_expense_keeping_date,
+        monte_carlo,
     })
 }
 
@@ -5680,6 +5864,9 @@ pub fn projection_router() -> Router {
     Router::new()
         .route("/series", get(get_projection_series))
         .route("/deflate", get(get_projection_deflate))
+        // `/bands` vive en su propio módulo (`projection_bands.rs`) pero cuelga de este router:
+        // es la misma familia de rutas y comparte ancla, rejilla y ensamblado con `/series`.
+        .merge(crate::handlers::projection_bands::projection_bands_router())
 }
 
 /// Recompute de la proyección **`view=mine`** del usuario que acaba de entrar (ambas densidades)

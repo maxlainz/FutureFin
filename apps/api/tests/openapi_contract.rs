@@ -242,6 +242,11 @@ fn the_plan_and_the_strategy_solves_are_declared_in_the_document() {
         "disposable_monthly",
         "underfunded",
         "absent_reason",
+        // 5.0.0 WP6b — el KPI «Éxito del plan» (D28) y su razón de ausencia propia.
+        "success_probability",
+        "success_threshold_pct",
+        "success_verdict",
+        "success_absent_reason",
     ] {
         assert!(!plan[k].is_null(), "SummaryPlan.{k} no está declarado: {plan}");
     }
@@ -269,6 +274,63 @@ fn the_plan_and_the_strategy_solves_are_declared_in_the_document() {
         assert!(
             !serie[k].is_null(),
             "ProjectionSeriesResponse.{k} no está declarado"
+        );
+    }
+
+    // `/v1/projection/bands` → el contrato entero de Monte Carlo. Se declara aquí y no solo en el
+    // handler porque es la superficie que un cliente lee ANTES de llamar: un campo que existe en
+    // el JSON y no en la spec es un campo que nadie consume.
+    let bandas = &doc["components"]["schemas"]["ProjectionBandsResponse"]["properties"];
+    for k in [
+        "view",
+        "months",
+        "horizon_basis",
+        "anchor_date_ymd",
+        "paths",
+        "seed",
+        "percentiles",
+        "points",
+        "success_probability",
+        "success_threshold_pct",
+        "success_verdict",
+        "depletion_probability_by_age",
+        "retirement_month_index_percentiles",
+        "underfunded_probability",
+        "months_below_need_p50",
+        "withdrawal_to_need_ratio_p50",
+        "any_volatility_declared",
+        "buffer_active",
+        "buffer_refills_p50",
+        "buffer_refill_net_total_p50",
+        "strategy",
+        "retirement_trigger",
+        "computed_in_ms",
+        "model_note",
+    ] {
+        assert!(
+            !bandas[k].is_null(),
+            "ProjectionBandsResponse.{k} no está declarado"
+        );
+    }
+    // La semilla es un **string** en la spec: un `u64` como número JSON pierde precisión por
+    // encima de 2^53, y una semilla que cambia al ida-y-vuelta no reproduce nada.
+    assert_eq!(
+        bandas["seed"]["type"], "string",
+        "la semilla debe declararse como string: {bandas}"
+    );
+    let punto = &doc["components"]["schemas"]["ProjectionBandPoint"]["properties"];
+    for k in [
+        "month_index",
+        "net_worth_p10",
+        "net_worth_p50",
+        "net_worth_p90",
+        "net_worth_liquid_p10",
+        "net_worth_liquid_p50",
+        "net_worth_liquid_p90",
+    ] {
+        assert!(
+            !punto[k].is_null(),
+            "ProjectionBandPoint.{k} no está declarado"
         );
     }
 

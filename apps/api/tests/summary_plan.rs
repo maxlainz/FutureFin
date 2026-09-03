@@ -142,6 +142,11 @@ async fn the_household_view_has_no_plan_and_says_why() {
         "required_savings_monthly",
         "disposable_monthly",
         "underfunded",
+        // 5.0.0 WP6b: el KPI «Éxito del plan» cae con el resto. El hogar es la suma de N planes
+        // independientes y «la probabilidad de éxito del hogar» no es una cifra que exista.
+        "success_probability",
+        "success_threshold_pct",
+        "success_verdict",
     ] {
         assert!(plan[k].is_null(), "{k} debía ir a null en household: {plan}");
     }
@@ -210,4 +215,70 @@ async fn reading_the_summary_warms_the_projection_cache_for_the_chart() {
         app.cache_contains(&key).await,
         "el Resumen calcula por el camino cacheado: el chart que viene detrás es un HIT"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// El KPI «Éxito del plan» (5.0.0 WP6b, D28)
+// ---------------------------------------------------------------------------------------------
+
+/// **El KPI del Resumen y el fan chart de Jubilación citan la MISMA ejecución.**
+///
+/// No es una preferencia de estilo: dos ejecuciones de Monte Carlo con semillas distintas dan dos
+/// probabilidades distintas del mismo plan, y el usuario vería el tile del Resumen discrepar del
+/// gráfico sin ninguna explicación posible. Se comprueba por identidad contra
+/// `GET /v1/projection/bands` con los caminos y la semilla por defecto — exactamente la petición
+/// que hace la sección «Riesgo».
+#[tokio::test]
+async fn the_success_kpi_is_the_same_run_the_risk_chart_draws() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner, "2400", "1000").await;
+
+    let plan = summary(&app, &owner.cookie, "?view=mine").await["plan"].clone();
+    assert!(plan["absent_reason"].is_null(), "{plan}");
+    assert!(plan["success_absent_reason"].is_null(), "{plan}");
+
+    let b = app
+        .get_with_cookie("/v1/projection/bands", &owner.cookie)
+        .await;
+    assert_eq!(b.status, http::StatusCode::OK, "{b:?}");
+    let b = b.json();
+    assert_eq!(
+        plan["success_probability"], b["success_probability"],
+        "el KPI y el chart deben ser la MISMA cifra: plan={plan} bands={b}"
+    );
+    assert_eq!(plan["success_verdict"], b["success_verdict"], "{plan} / {b}");
+    assert_eq!(
+        plan["success_threshold_pct"], b["success_threshold_pct"],
+        "{plan} / {b}"
+    );
+    // Y el umbral es el del PERFIL, no una constante: al cambiarlo, las dos superficies lo siguen.
+    patch_profile(&app, &owner, json!({"success_threshold_pct": 80})).await;
+    let plan = summary(&app, &owner.cookie, "?view=mine").await["plan"].clone();
+    assert_eq!(plan["success_threshold_pct"], 80, "{plan}");
+}
+
+/// Leer el Resumen deja **calientes las bandas**: el GET de `/v1/projection/bands` que la SPA
+/// hace un instante después es un HIT y no vuelve a sortear. Es el mismo trato que el bloque
+/// `plan` ya tenía con la serie — el coste se paga una vez, no dos.
+#[tokio::test]
+async fn reading_the_summary_warms_the_bands_cache_for_the_risk_section() {
+    use futurefin_api::state::BandsCacheKey;
+
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner, "2400", "1000").await;
+    let iid = app.installation_id().await;
+    assert!(
+        app.state.bands_cache.read().await.is_empty(),
+        "la mutación del alta debía dejar las bandas vacías"
+    );
+
+    let _ = summary(&app, &owner.cookie, "?view=mine").await;
+    let cache = app.state.bands_cache.read().await;
+    assert_eq!(cache.len(), 1, "el Resumen debe dejar UNA entrada de bandas");
+    let k: &BandsCacheKey = cache.keys().next().expect("una clave");
+    assert_eq!(k.installation_id, iid, "{k:?}");
+    assert_eq!(k.user_id, owner.user_id, "{k:?}");
+    assert_eq!(k.paths, 500, "los caminos por defecto: {k:?}");
 }

@@ -193,6 +193,7 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "get_history_cashflow",
             "get_liability_schedule",
             "get_projection",
+            "get_projection_bands",
             "get_retirement_profile",
             "get_settings",
             "get_summary",
@@ -350,6 +351,116 @@ async fn get_projection_is_hybrid_without_asset_series_and_caches() {
 /// de cada persona ya viajan en `members[]` como enteros. Se deja pedible —y no retirada— porque
 /// el token de un miembro NO puede pedir el `view=mine` de otro, así que esta es la única vía
 /// para ver su curva.
+/// **`get_projection_bands`** (5.0.0 WP6b): paridad con el endpoint HTTP salvo por el opt-in de
+/// las bandas del líquido, y el hogar rechazado con el mismo código.
+///
+/// El `include_liquid_bands` no es un capricho: la respuesta entera mide ~16 KB a densidad
+/// hybrid, y **la mitad de los puntos son las tres series del líquido**. Un modelo que pregunta
+/// «¿qué probabilidad de éxito tengo?» no dibuja nada, así que por defecto se le ahorran — el
+/// mismo criterio (y la misma medida delante) que `include_asset_series` e
+/// `include_member_series`. La clave desaparece entera: nadie recibe un `0` que leer como «sin
+/// líquido».
+#[tokio::test]
+async fn get_projection_bands_matches_http_and_hides_the_liquid_bands_by_default() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "asset", "Inversión").await;
+    let create = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({
+                "category_id": cat,
+                "name": "Fondo global",
+                "current_value": "50000",
+                "is_liquid": true,
+                "expected_annual_return_percent": "5",
+                "annual_volatility_percent": "15",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(create.status, http::StatusCode::CREATED, "{create:?}");
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "get_projection_bands",
+            serde_json::json!({"paths": 24, "seed": "3"}),
+        ),
+    )
+    .await;
+    let bands = tool_text_json(&envelope);
+    assert_eq!(bands["view"], "mine", "{bands}");
+    assert_eq!(bands["paths"], 24, "{bands}");
+    assert_eq!(bands["seed"], "3", "la semilla viaja como string: {bands}");
+    let points = bands["points"].as_array().expect("puntos");
+    assert!(points.len() < 150, "densidad hybrid: {} puntos", points.len());
+    for p in points {
+        assert!(p["net_worth_p50"].is_number(), "{p}");
+        assert!(
+            p.get("net_worth_liquid_p50").is_none(),
+            "sin `include_liquid_bands` la clave no existe (no es null): {p}"
+        );
+    }
+
+    // Paridad con HTTP: misma entrada de cache, así que las cifras del plan coinciden.
+    let http = app
+        .get_with_cookie(
+            "/v1/projection/bands?paths=24&seed=3",
+            &owner.cookie,
+        )
+        .await
+        .json();
+    assert_eq!(
+        bands["success_probability"], http["success_probability"],
+        "MCP y HTTP citan la misma ejecución: {bands} / {http}"
+    );
+    assert_eq!(bands["success_verdict"], http["success_verdict"]);
+    assert_eq!(
+        points.len(),
+        http["points"].as_array().unwrap().len(),
+        "misma rejilla"
+    );
+
+    // Con el opt-in, las seis series viajan y son las mismas que por HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "get_projection_bands",
+            serde_json::json!({"paths": 24, "seed": "3", "include_liquid_bands": true}),
+        ),
+    )
+    .await;
+    let full = tool_text_json(&envelope);
+    assert_eq!(full["points"], http["points"], "con el opt-in, paridad total");
+
+    // El hogar: mismo código que por HTTP, como error de tool (no un 500 ni una banda inventada).
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("get_projection_bands", serde_json::json!({"view": "household"})),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+    let text = envelope["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("household_bands_unavailable"),
+        "debe nombrar el código: {text}"
+    );
+
+    // Y el techo del MCP es la MITAD del de HTTP: 2.000 caminos son válidos por HTTP y 400 aquí.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("get_projection_bands", serde_json::json!({"paths": 2000})),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+}
+
 #[tokio::test]
 async fn get_projection_household_omits_member_series_unless_asked() {
     /// Tope del payload de UNA lectura de proyección del hogar en la tool. No persigue el byte:
@@ -2501,7 +2612,7 @@ fn catalog_fixture_path() -> std::path::PathBuf {
 
 /// Congela el **contrato de entrada** de TODAS las tools, no sólo sus nombres.
 /// (Sin contar cuántas son: el número quedó obsoleto dos veces — `52` describía la Fase 5 y el
-/// catálogo lleva 70 desde 5.0.0. Cuéntalas con
+/// catálogo lleva 71 desde 5.0.0. Cuéntalas con
 /// `jq '.tools | length' apps/api/tests/fixtures/mcp-catalog.json`.)
 ///
 /// `tools_list_returns_exactly_the_v1_catalog` (arriba) compara un `Vec<String>` de nombres y

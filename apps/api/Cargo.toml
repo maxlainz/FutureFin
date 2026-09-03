@@ -28,6 +28,8 @@ cookie = "0.18"
 dotenvy = "0.15"
 futurefin-domain = { path = "../../crates/domain" }
 futurefin-engine = { path = "../../crates/engine", features = ["openapi"] }
+# Monte Carlo (5.0.0, WP6): el ÚNICO consumidor del camino f64. `crates/engine` sigue sin RNG.
+futurefin-engine-stochastic = { path = "../../crates/engine-stochastic" }
 http = "1"
 # TLS: `rustls-tls` en las DOS dependencias que hablan con Home Assistant (reqwest y
 # tokio-tungstenite). `default-tls` arrastraría OpenSSL, que la imagen runtime NO lleva; y

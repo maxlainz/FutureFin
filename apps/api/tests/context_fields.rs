@@ -190,6 +190,38 @@ async fn every_view_aware_response_echoes_the_view_it_applied() {
 /// `/v1/budget.totals` y en `/v1/summary.financial_health`, y valen cosas distintas en cuanto el
 /// modo deja de ser `budget`. Ninguno se renombra (rompería la SPA); lo que hacen los dos `basis`
 /// es que la diferencia sea legible sin conocer el modo.
+/// **`/v1/projection/bands` también declara su vista** — y es el único endpoint con scope cuya
+/// respuesta `household` NO existe.
+///
+/// Va aparte del bucle de arriba a propósito: allí la prueba es que `mine` y `household`
+/// devuelven lo mismo salvo el eco; aquí lo que hay que fijar es lo contrario, que el hogar se
+/// RECHAZA con un código propio en vez de servir una suma de percentiles que no significa nada.
+/// Sin el eco de `view`, una banda de un hogar de un solo miembro sería indistinguible de la
+/// suya, que es exactamente el síntoma que motivó el campo.
+#[tokio::test]
+async fn projection_bands_echo_mine_and_refuse_the_household() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        serde_json::json!({"category_id": cat, "name": "Bolsa", "current_value": "10000"}),
+        &owner.cookie,
+    )
+    .await;
+
+    let omitido = get(&app, &owner.cookie, "/v1/projection/bands?paths=8").await;
+    assert_eq!(omitido["view"], "mine", "omitir `view` es `mine`: {omitido}");
+    let explicito = get(&app, &owner.cookie, "/v1/projection/bands?paths=8&view=mine").await;
+    assert_eq!(explicito["view"], "mine", "{explicito}");
+
+    let r = app
+        .get_with_cookie("/v1/projection/bands?view=household", &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "household_bands_unavailable", "{r:?}");
+}
+
 #[tokio::test]
 async fn budget_and_summary_declare_whether_their_totals_are_plan_or_actual() {
     let app = TestApp::spawn().await;

@@ -1,5 +1,6 @@
 use crate::handlers::person_view::LedgerView;
 use crate::handlers::projection::ProjectionSeriesResponse;
+use crate::handlers::projection_bands::ProjectionBandsResponse;
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +43,31 @@ pub struct ProjectionCacheEntry {
 
 pub type ProjectionCacheMap = HashMap<ProjectionCacheKey, ProjectionCacheEntry>;
 
+/// Clave del cache de **bandas de Monte Carlo** (5.0.0, §F del plan de #207).
+///
+/// No lleva `view` y no es un olvido: las bandas solo existen en `view=mine`
+/// (`household_bands_unavailable`, ver `projection_bands.rs`), así que un campo con un solo valor
+/// posible solo serviría para que alguien creyera que hay una entrada `household` que buscar.
+///
+/// Sí llevan `paths` y `seed`: los dos son ENTRADA del sorteo, no del entorno. Dos peticiones con
+/// semillas distintas describen dos mercados distintos y compartir entrada entre ellas serviría
+/// una respuesta que no corresponde a la pregunta — el mismo error que la clave de proyección
+/// arregló con `owner_user_id`.
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+pub struct BandsCacheKey {
+    pub installation_id: Uuid,
+    pub user_id: Uuid,
+    pub paths: u32,
+    pub seed: u64,
+}
+
+pub struct BandsCacheEntry {
+    pub response: Arc<ProjectionBandsResponse>,
+    pub last_used: Instant,
+}
+
+pub type BandsCacheMap = HashMap<BandsCacheKey, BandsCacheEntry>;
+
 pub struct AppState {
     pub version: &'static str,
     pub pool: PgPool,
@@ -68,6 +94,15 @@ pub struct AppState {
     /// responde `ha_sso_disabled`. Predicado único: `ha_idp::ha_login_available`.
     pub ha_sso: Option<HaSso>,
     pub projection_cache: RwLock<ProjectionCacheMap>,
+    /// Cache de las bandas de Monte Carlo. **Propio y no una densidad más del de proyección**: su
+    /// clave lleva dos ejes que la serie no tiene (`paths`, `seed`) y su contenido cuesta un orden
+    /// de magnitud más (500 simulaciones f64 frente a una `Decimal`), así que mezclarlos habría
+    /// hecho que un cambio de semilla tirara la serie determinista por el suelo.
+    ///
+    /// Comparte TTL (`PROJECTION_CACHE_TTL`) y —lo que de verdad importa— **las dos
+    /// invalidaciones**: `invalidate_projection_by_installation` y `..._by_user` borran los dos
+    /// mapas. Una banda calculada sobre unos activos que ya no existen es peor que no tener banda.
+    pub bands_cache: RwLock<BandsCacheMap>,
 }
 
 /// Configuración viva del login con Home Assistant: el origen público de HA y el proveedor.
@@ -102,6 +137,7 @@ impl AppState {
             trusted_header_auth: false,
             ha_sso: None,
             projection_cache: RwLock::new(HashMap::new()),
+            bands_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -175,18 +211,65 @@ impl AppState {
         );
     }
 
+    /// Hit del cache de bandas, con el MISMO TTL sliding que la proyección.
+    pub async fn bands_cache_get(&self, key: &BandsCacheKey) -> Option<Arc<ProjectionBandsResponse>> {
+        {
+            let cache = self.bands_cache.read().await;
+            let entry = cache.get(key)?;
+            if entry.last_used.elapsed() < PROJECTION_CACHE_TTL {
+                let response = entry.response.clone();
+                drop(cache);
+                let mut cache = self.bands_cache.write().await;
+                if let Some(e) = cache.get_mut(key) {
+                    e.last_used = Instant::now();
+                }
+                return Some(response);
+            }
+        }
+        let mut cache = self.bands_cache.write().await;
+        cache.remove(key);
+        None
+    }
+
+    pub async fn bands_cache_insert(
+        &self,
+        key: BandsCacheKey,
+        response: Arc<ProjectionBandsResponse>,
+    ) {
+        let mut cache = self.bands_cache.write().await;
+        cache.insert(
+            key,
+            BandsCacheEntry {
+                response,
+                last_used: Instant::now(),
+            },
+        );
+    }
+
     /// Tras una mutación: borra todas las entries del installation. Ambas
     /// vistas (`household` + `mine` de todos los miembros) se invalidan
     /// porque cualquier cambio afecta la simulación.
+    ///
+    /// **Desde 5.0.0 borra también las bandas** (`bands_cache`). Van juntas a propósito: las
+    /// bandas salen del MISMO `ProjectionInput` que la serie, así que toda mutación que
+    /// invalide una invalida la otra por construcción. Separarlas dejaría un fan chart calculado
+    /// sobre activos borrados junto a una línea determinista ya actualizada — dos cifras que se
+    /// contradicen en la misma pantalla, que es el peor fallo de cache posible.
     pub async fn invalidate_projection_by_installation(&self, installation_id: Uuid) {
         let mut cache = self.projection_cache.write().await;
         let before = cache.len();
         cache.retain(|key, _| key.installation_id != installation_id);
         let removed = before - cache.len();
-        if removed > 0 {
+        drop(cache);
+        let mut bands = self.bands_cache.write().await;
+        let bands_before = bands.len();
+        bands.retain(|key, _| key.installation_id != installation_id);
+        let bands_removed = bands_before - bands.len();
+        if removed > 0 || bands_removed > 0 {
             tracing::info!(
                 installation_id = %installation_id,
                 removed,
+                bands_removed,
                 "projection cache invalidated by installation"
             );
         }
@@ -199,10 +282,17 @@ impl AppState {
         let before = cache.len();
         cache.retain(|key, _| key.owner_user_id != Some(user_id));
         let removed = before - cache.len();
-        if removed > 0 {
+        drop(cache);
+        // Mismo criterio para las bandas: son del usuario por construcción (`view=mine`).
+        let mut bands = self.bands_cache.write().await;
+        let bands_before = bands.len();
+        bands.retain(|key, _| key.user_id != user_id);
+        let bands_removed = bands_before - bands.len();
+        if removed > 0 || bands_removed > 0 {
             tracing::info!(
                 user_id = %user_id,
                 removed,
+                bands_removed,
                 "projection cache invalidated by user (logout)"
             );
         }

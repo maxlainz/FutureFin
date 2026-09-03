@@ -29,7 +29,7 @@ use std::sync::Arc;
 /// `upcoming_coverage_ratio`, `debt_to_assets_ratio`…). 6 decimales de fracción = 4 decimales de
 /// porcentaje (`0,0001 %` de resolución), muy por encima del único decimal que pinta la UI.
 /// `rust_decimal` produce hasta 28 dígitos por división y `serde::str` los serializaba todos.
-const RATIO_DP: u32 = 6;
+pub(crate) const RATIO_DP: u32 = 6;
 
 /// Decimales de `runway_months`. Alineado con `sim_kpis` (`handlers/projection.rs`), que ya
 /// redondeaba a 1: el mismo número no puede tener dos precisiones según la superficie.
@@ -507,11 +507,35 @@ pub struct SummaryPlan {
     /// no se cae por eso). `null` ⟺ el plan de arriba es el del usuario.
     #[schema(value_type = Option<String>)]
     pub absent_reason: Option<&'static str>,
+
+    // ---- 5.0.0 WP6b — el KPI «Éxito del plan» (D25/D28) --------------------------------------
+    /// **Probabilidad de éxito de Monte Carlo**: fracción de caminos en los que la cartera no se
+    /// agota nunca dentro del horizonte (D22). `0.87` = 87 de cada 100 escenarios.
+    ///
+    /// **Es EXACTAMENTE el número que dibuja el fan chart** de `GET /v1/projection/bands`: sale
+    /// del mismo cache, con los caminos y la semilla por defecto. Si el Resumen lo recalculara
+    /// por su cuenta con otra muestra, el KPI y el gráfico enseñarían dos éxitos distintos del
+    /// mismo plan en la misma pantalla.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub success_probability: Option<Decimal>,
+    /// Umbral del perfil en PORCENTAJE (`success_threshold_pct`, default 95). Se ecoa aunque el
+    /// sorteo no se haya podido hacer: es configuración del usuario, no una salida del modelo.
+    pub success_threshold_pct: Option<u32>,
+    /// `green` | `amber` | `red` con el semáforo de D28 (verde en el umbral, ámbar hasta 10
+    /// puntos porcentuales por debajo). `null` ⟺ no hay probabilidad que colorear.
+    #[schema(value_type = Option<String>)]
+    pub success_verdict: Option<&'static str>,
+    /// Por qué faltan `success_probability`/`success_verdict` cuando el resto del plan SÍ está:
+    /// `bands_unavailable` (el sorteo falló; el Resumen es una lectura y no se cae por eso).
+    /// `null` ⟺ la probabilidad viaja, o el plan entero está ausente y lo dice `absent_reason`.
+    #[schema(value_type = Option<String>)]
+    pub success_absent_reason: Option<&'static str>,
 }
 
 impl SummaryPlan {
-    /// El plan ausente, con su razón. Los seis campos van a `null` a la vez: publicar uno suelto
-    /// sería peor que no publicar ninguno.
+    /// El plan ausente, con su razón. **Todos** los campos van a `null` a la vez —los seis del
+    /// plan y los tres del éxito—: publicar uno suelto sería peor que no publicar ninguno.
     fn absent(reason: &'static str) -> Self {
         SummaryPlan {
             strategy: None,
@@ -521,6 +545,12 @@ impl SummaryPlan {
             disposable_monthly: None,
             underfunded: None,
             absent_reason: Some(reason),
+            success_probability: None,
+            success_threshold_pct: None,
+            success_verdict: None,
+            // El hueco ya lo explica `absent_reason`; una segunda razón para lo mismo se leería
+            // como si hubieran fallado dos cosas distintas.
+            success_absent_reason: None,
         }
     }
 }
@@ -530,6 +560,10 @@ pub(crate) const PLAN_ABSENT_HOUSEHOLD: &str = "household_aggregate";
 /// La proyección no se pudo calcular. El Resumen es una LECTURA y no se cae por ello — pero lo
 /// dice, en vez de servir seis `null` indistinguibles de «no tienes plan».
 pub(crate) const PLAN_ABSENT_PROJECTION_UNAVAILABLE: &str = "projection_unavailable";
+/// El sorteo de Monte Carlo falló pero el plan determinista sí está. Se distingue del anterior a
+/// propósito: «no sabemos tu probabilidad de éxito» y «no sabemos tu plan» son dos situaciones
+/// muy distintas para quien lee el Resumen.
+pub(crate) const PLAN_ABSENT_BANDS_UNAVAILABLE: &str = "bands_unavailable";
 
 /// Lee el plan de jubilación del usuario **del objeto que sirve el chart**.
 ///
@@ -572,6 +606,45 @@ async fn summary_plan(state: &AppState, iid: Uuid, user_id: Uuid) -> SummaryPlan
     }
 }
 
+/// **El KPI «Éxito del plan» del Resumen** (D28), leído del MISMO sitio que el fan chart.
+///
+/// Va por `projection_bands_cached` con los caminos y la semilla por defecto, que es exactamente
+/// la petición que hace la sección «Riesgo»: en el caso normal esto es un HIT y no cuesta nada, y
+/// en un MISS deja la entrada caliente para el GET que viene detrás. **Nunca hay una segunda
+/// muestra**: dos ejecuciones de Monte Carlo con semillas distintas darían dos probabilidades
+/// distintas del mismo plan, y el usuario vería el KPI del Resumen discrepar del gráfico de
+/// Jubilación sin ninguna explicación posible.
+///
+/// Un fallo aquí **no tumba el Resumen**: se publican los tres campos a `null` con
+/// `success_absent_reason`, y el resto del plan sigue viajando.
+async fn attach_success(state: &AppState, iid: Uuid, user_id: Uuid, mut plan: SummaryPlan) -> SummaryPlan {
+    use crate::handlers::projection_bands::{projection_bands_cached, DEFAULT_BANDS_PATHS};
+    if plan.absent_reason.is_some() {
+        return plan;
+    }
+    match projection_bands_cached(
+        state,
+        user_id,
+        iid,
+        LedgerView::Mine,
+        DEFAULT_BANDS_PATHS,
+        None,
+    )
+    .await
+    {
+        Ok(bands) => {
+            plan.success_probability = bands.success_probability;
+            plan.success_threshold_pct = Some(bands.success_threshold_pct);
+            plan.success_verdict = Some(bands.success_verdict);
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "no se pudieron calcular las bandas para el KPI de éxito");
+            plan.success_absent_reason = Some(PLAN_ABSENT_BANDS_UNAVAILABLE);
+        }
+    }
+    plan
+}
+
 /// Proyección → plan. Copia de campos, sin una sola cuenta: cualquier aritmética aquí sería la
 /// segunda implementación de algo que la proyección ya resolvió.
 fn plan_from_series(
@@ -585,6 +658,12 @@ fn plan_from_series(
         disposable_monthly: s.disposable_monthly,
         underfunded: s.underfunded,
         absent_reason: None,
+        // Los rellena `attach_success` con la entrada del cache de bandas: aquí no se calcula
+        // nada, igual que el resto de esta función.
+        success_probability: None,
+        success_threshold_pct: None,
+        success_verdict: None,
+        success_absent_reason: None,
     }
 }
 
@@ -922,7 +1001,9 @@ pub(crate) async fn summary_core(
         liabilities_by_category,
         liabilities_by_type_tag,
         plan: match view {
-            LedgerView::Mine => summary_plan(state, iid, user_id).await,
+            LedgerView::Mine => {
+                attach_success(state, iid, user_id, summary_plan(state, iid, user_id).await).await
+            }
             LedgerView::Household => SummaryPlan::absent(PLAN_ABSENT_HOUSEHOLD),
         },
     })

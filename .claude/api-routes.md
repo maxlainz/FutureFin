@@ -649,7 +649,8 @@ leyendo el JSONB crudo: una segunda interpretación del mismo dato es como diver
 
 **`plan` — la tarjeta «Tu plan» del Resumen (5.0.0 WP5-2b, D27).** Objeto con
 `{strategy, retirement_trigger, jubilacion_month_index, required_savings_monthly,
-disposable_monthly, underfunded, absent_reason}`.
+disposable_monthly, underfunded, absent_reason}` **+ el KPI «Éxito del plan» de WP6b**
+(`success_probability`, `success_threshold_pct`, `success_verdict`, `success_absent_reason`).
 
 - **Sale del MISMO objeto que pinta el chart**: se lee de la entrada de cache de proyección del
   solicitante (las dos densidades; estas seis cifras son escalares del plan y no dependen de la
@@ -657,6 +658,15 @@ disposable_monthly, underfunded, absent_reason}`.
   la densidad que la SPA pide primero, así que el MISS **deja la cache caliente** y el GET de la
   serie que viene detrás es un HIT. Cero aritmética propia: `plan_from_series` copia campos. Si
   hubiera una segunda fórmula, las dos superficies podrían contestar distinto a la misma pregunta.
+- **El KPI de éxito sale del cache de BANDAS por el mismo camino** (`projection_bands_cached` con
+  los caminos y la semilla por defecto — exactamente la petición que hace la sección «Riesgo»), así
+  que el tile del Resumen y el fan chart de Jubilación citan **la misma ejecución** de Monte Carlo.
+  Dos ejecuciones con semillas distintas darían dos probabilidades del mismo plan y el usuario las
+  vería discrepar en la misma pantalla. Un MISS aquí también deja las bandas calientes. Si el
+  sorteo falla, el Resumen **no se cae**: los tres campos van a `null` con
+  `success_absent_reason: "bands_unavailable"`, distinto de `absent_reason:
+  "projection_unavailable"` — «no sabemos tu probabilidad» y «no sabemos tu plan» son dos
+  situaciones muy distintas. Regresión: `summary_plan.rs::the_success_kpi_is_the_same_run_the_risk_chart_draws`.
 - **`required_savings_monthly` ES `required_contribution_monthly`** de `/v1/projection/series` —
   el mismo número del mismo solve, con el nombre que se lee en un Resumen. `disposable_monthly` y
   `underfunded` viajan tal cual, con sus mismas bases y sus mismos `null` (que no son ceros: son
@@ -933,11 +943,97 @@ Response (`ProjectionSeriesResponse`) includes:
 
 **`GET /v1/projection/deflate` (4.4.0, Fase 6)** — convierte un importe entre euros nominales de un mes futuro y euros de hoy, **en las dos direcciones a la vez** (`deflator`, `amount_in_today_euros`, `amount_in_month_euros`). Query: `amount` (con signo) y **exactamente uno** de `month_index` (0..840) o `date` — la guardia es literalmente `month_index.is_some() == date.is_some()`, así que **mandar los dos Y no mandar ninguno** dan el mismo `deflate_timing_ambiguous`; una fecha pasada `deflate_date_in_past`, un mes fuera de rango `deflate_month_out_of_range` (por cualquiera de las dos vías, también desde una `date` lejana). **No acepta `?view=`**: la inflación asumida es de la **instalación**, no de una persona, así que un scope aquí sería un parámetro que no significa nada. No simula: reusa el mismo `deflator_at_month_index` que produce `net_worth_real` y `milestones_real` (un solo deflactor para las tres superficies, pineado en `projection_deflation.rs::the_served_deflator_is_the_one_behind_milestones_real`). Core `deflate_amount_core`.
 
-**Cache server-side**: `AppState` mantiene un cache in-memory por `(installation_id, view, owner_user_id, density)` (`ProjectionCacheKey`, `state.rs`) con sliding TTL de 60 min. **`owner_user_id` es SIEMPRE `Some(_)`, también en `household` (4.0.0)**: hasta entonces solo viajaba en `mine`, y la respuesta de `household` lleva demografía del **solicitante** (`viewer_birth_date`, el horizonte derivado de su edad, `jubilacion_age`, el eje de edades), así que el primer miembro que pedía la proyección dejaba la suya cacheada para todo el hogar — un miembro recibía la fecha de nacimiento de otro y, con el orden inverso, un horizonte de 360 meses en vez de 648: si su cruce FIRE caía en el mes 400, la app le decía «no llegas a jubilarte». Regresión: `apps/api/tests/projection_cache.rs`. Hits sub-ms; el GET sin cache hace el cómputo full (~500 ms). Invalidación automática: cualquier mutación en assets/liabilities/budget/planning/allocation/installation/user.birth_date llama `state.invalidate_projection_by_installation(iid)`; las mutaciones de **transactions** invalidan **solo en los modos que usan transacciones** (`fire_settings.savings_source ∈ {transactions_avg, budget_income_real_expense}`, i.e. `SavingsSource::uses_transactions()`; ver sección Transactions). Logout llama `state.invalidate_projection_by_user(user_id)` (solo `view=mine`). Warm-up: `tokio::spawn` tras `POST /v1/auth/login` recomputa **`view=mine`** del usuario que entra (`warm_up_mine_projection`, renombrado en 5.0.0) para que el primer GET sea hit — desde R2 esa es la vista por defecto y la que pide la SPA; calentar `household` dejaría en la cache una entrada que nadie consulta y que además cuesta N simulaciones. Sin warm-up tras mutación (evita race condition de warm-ups concurrentes).
+**Cache server-side**: `AppState` mantiene DOS caches in-memory. El de la serie va por
+`(installation_id, view, owner_user_id, density)` (`ProjectionCacheKey`, `state.rs`); el de las
+bandas de Monte Carlo, por `(installation_id, user_id, paths, seed)` (`BandsCacheKey`, 5.0.0 —
+ver §Projection bands). **Las dos invalidaciones borran los dos mapas.** El resto de esta nota
+describe el primero: con sliding TTL de 60 min. **`owner_user_id` es SIEMPRE `Some(_)`, también en `household` (4.0.0)**: hasta entonces solo viajaba en `mine`, y la respuesta de `household` lleva demografía del **solicitante** (`viewer_birth_date`, el horizonte derivado de su edad, `jubilacion_age`, el eje de edades), así que el primer miembro que pedía la proyección dejaba la suya cacheada para todo el hogar — un miembro recibía la fecha de nacimiento de otro y, con el orden inverso, un horizonte de 360 meses en vez de 648: si su cruce FIRE caía en el mes 400, la app le decía «no llegas a jubilarte». Regresión: `apps/api/tests/projection_cache.rs`. Hits sub-ms; el GET sin cache hace el cómputo full (~500 ms). Invalidación automática: cualquier mutación en assets/liabilities/budget/planning/allocation/installation/user.birth_date llama `state.invalidate_projection_by_installation(iid)`; las mutaciones de **transactions** invalidan **solo en los modos que usan transacciones** (`fire_settings.savings_source ∈ {transactions_avg, budget_income_real_expense}`, i.e. `SavingsSource::uses_transactions()`; ver sección Transactions). Logout llama `state.invalidate_projection_by_user(user_id)` (solo `view=mine`). Warm-up: `tokio::spawn` tras `POST /v1/auth/login` recomputa **`view=mine`** del usuario que entra (`warm_up_mine_projection`, renombrado en 5.0.0) para que el primer GET sea hit — desde R2 esa es la vista por defecto y la que pide la SPA; calentar `household` dejaría en la cache una entrada que nadie consulta y que además cuesta N simulaciones. Sin warm-up tras mutación (evita race condition de warm-ups concurrentes).
 
 **Compresión**: todos los endpoints pasan por `tower_http::compression::CompressionLayer::new().gzip(true)`. `/v1/projection/series` baja de ~260 KB a ~30 KB con `Content-Encoding: gzip`.
 
 **Densidad (`?density=hybrid`)**: con `?density=hybrid` el response decima los arrays grandes (`points`, `fire_target_series`, `asset_series[].values`) a un patrón mixto — mes 0..12 mensual + mes 24, 36, … **y siempre el último mes del horizonte** (`density_month_indices`, `handlers/projection.rs`). Ese último empujón es de 4.0.0 y no es cosmético: el bucle anual solo emitía múltiplos de 12, así que con un horizonte que no lo fuera la serie se cortaba antes de tiempo sin decir nada — con `?months=100&density=hybrid` el último punto era el mes 96 y los meses 97–100 no existían en `points`, ni en `fire_target_series`, ni en `asset_series[].values`, y desaparecía el punto que cualquiera lee como «patrimonio al final»; con `?months=19` se perdía el 32 % del horizonte pedido. Invisible desde la web (el horizonte derivado siempre es años × 12) pero alcanzable por `?months=N` y por la tool MCP `get_projection`, que **fuerza** `hybrid` — o sea, era el camino por defecto de un consumidor conversacional. Pin: `hybrid_density_always_includes_the_last_month_of_the_horizon`. Total ~82 puntos en lugar de ~841. JSON ~5 KB. El compute interno del engine es idéntico (840 meses); solo cambia la serialización. Cada densidad tiene su propia entry en el cache (`ProjectionCacheKey.density`). Milestones, FIRE crossover y compound marker se calculan sobre el array full (no decimado) para no perder precisión. El campo `density: "monthly" | "hybrid"` viaja en el response para que el cliente sepa qué tiene.
+
+### Projection bands (`GET /v1/projection/bands`) — **5.0.0, Monte Carlo (WP6b)**
+
+Bandas de percentil del patrimonio y del líquido, probabilidad de éxito del plan y agotamiento por
+edad. Superficie HTTP de `futurefin_engine_stochastic::project_percentile_bands`; handler
+`apps/api/src/handlers/projection_bands.rs`, montado dentro de `projection_router()`.
+
+| Query | Cota | Default | Fuera de rango |
+|---|---|---|---|
+| `view` | `mine` \| `household` | `mine` | `household` → **400 `household_bands_unavailable`**; otro valor → 400 `invalid_view` |
+| `paths` | `1..=2000` | 500 (`DEFAULT_PATHS`) | 400 `paths_out_of_range` (se rechaza, **no se clampa**) |
+| `seed` | `u64` en dígitos decimales | `seed_for(installation_id, user_id)` (D23) | 400 `invalid_seed` |
+
+**No acepta `density` ni `months`.** La densidad es **siempre `hybrid`** (arqueología §2.18, veto 22:
+el mismo motivo por el que `get_projection` no lo expone — servir la banda mensual multiplicaría el
+payload por cinco sin responder ninguna pregunta nueva) y el horizonte es el derivado del perfil: un
+horizonte a medida cambiaría la banda y no cabe en la clave del cache.
+
+**Por qué el hogar no tiene bandas.** Los percentiles **no suman**: el p90 del hogar no es el p90 de
+Ana más el p90 de Bea, y con el shock de mercado común de D11 los dos miembros ni siquiera son
+independientes. Sumar las dos bandas daría una demasiado ancha en el centro y demasiado estrecha en
+las colas sin que ningún campo lo dijera. Es la misma razón por la que `simulate_projection` rechaza
+el hogar (`household_not_simulable`): un plan es de una persona.
+
+**El ensamblado es el MISMO que el de la serie** — `build_installation_projection_input` con
+`LedgerView::Mine`, el perfil resuelto del solicitante y su fecha de nacimiento —, así que la línea
+determinista de `/series` y su abanico describen el mismo plan por construcción. Las volatilidades
+viajan en `BuiltProjection::asset_volatility_percent`, un vector **paralelo a `input.assets`**
+rellenado en el mismo `map` que los construye (una σ descolocada produce bandas estrechas y
+creíbles: el peor fallo posible aquí; regresión `projection_bands.rs::the_volatility_vector_follows_the_asset_order`).
+
+Response (`ProjectionBandsResponse`):
+
+- `view` (siempre `"mine"`), `months`, `horizon_basis`, `anchor_date_ymd`, `paths`, `percentiles`
+  (fijo `[10,50,90]`), `strategy`, `retirement_trigger`, `computed_in_ms`, `model_note`.
+- **`seed` es un STRING de dígitos**, no un número: es un `u64` y `JSON.parse` lo redondea por
+  encima de 2^53 — una semilla que cambia en el ida y vuelta no reproduce nada. Se acepta también
+  como string en `?seed=`.
+- `points[]` — `month_index` (**misma rejilla que `points[]` de `/series`**) + `net_worth_p10/p50/p90`
+  y `net_worth_liquid_p10/p50/p90`, f64 con **2 decimales** (excepción chart-only D4/I3, misma
+  resolución que `/v1/history/series`: el valor viene de un `f64` y publicar sus 17 dígitos sería
+  precisión inventada sobre el percentil de una muestra). Las tres del líquido las omite la tool MCP
+  salvo con `include_liquid_bands`.
+- `success_probability` (fracción, string, 6 dp — la misma política que `savings_rate`),
+  `success_threshold_pct` (del perfil, %) y `success_verdict` ∈ `green` | `amber` | `red` (D28:
+  verde en el umbral EXACTO, ámbar hasta 10 puntos porcentuales por debajo, rojo el resto).
+- `depletion_probability_by_age[]` — `{month_index (rejilla), age (null sin DOB), probability}`
+  cada 5 años desde la jubilación efectiva; **vacío** si ningún camino se jubila dentro del
+  horizonte.
+- `retirement_month_index_percentiles` `{p10,p50,p90}` en la rejilla — **solo con trigger por
+  cruce**; `null` con trigger por edad. Un `null` DENTRO del objeto es un percentil que cae sobre un
+  camino que no se jubila nunca.
+- `underfunded_probability` — **solo con trigger por edad** (D17 en versión probabilística); `null`
+  con trigger por cruce. Es el excluyente del anterior, y `retirement_trigger` dice cuál toca.
+- `months_below_need_p50` y `withdrawal_to_need_ratio_p50` — la dimensión del RECORTE, que **no es
+  fracaso** (D24) y por eso no entra en `success_probability`.
+- `any_volatility_declared` (con `false` las tres bandas SON la línea determinista).
+- **P4, el colchón de caja**: `buffer_active` dice si se SIMULÓ —hacen falta las tres cosas a la
+  vez: `cash_buffer_months` en el perfil, un líquido que lo albergue y volatilidad de la que
+  protegerse—, y con él viajan `buffer_refills_p50` (un CONTADOR de meses con relleno) y
+  `buffer_refill_net_total_p50` (mediana del total movido). Los dos son `null` con
+  `buffer_active: false`: «no se midió», que no es «cero rellenos». El colchón **solo existe en
+  Monte Carlo**: sin sorteo no hay mes bueno ni malo que distinguir y el trasvase no tendría
+  criterio. El total va en euros y aun así **no es un KPI monetario del hogar** — es la mediana de
+  un total sobre una muestra sorteada.
+
+**Cache propio** (`AppState::bands_cache`, `BandsCacheKey { installation_id, user_id, paths, seed }`)
+con el TTL de la proyección. Sin `view` en la clave: solo existe una vista posible. Las DOS
+invalidaciones de la proyección —`invalidate_projection_by_installation` y `..._by_user`— borran
+**los dos mapas**: las bandas salen del mismo `ProjectionInput`, y una banda vieja junto a una línea
+nueva son dos cifras que se contradicen en la misma pantalla.
+
+**Presupuesto de tiempo, medido** (`crates/engine-stochastic/tests/timing_mc.rs`, release, caso P9 de
+840 meses): 100 caminos 20,5 ms · 500 caminos 104,2 ms · 1 000 caminos 204,1 ms · 2 000 caminos
+391,4 ms. Extremo a extremo, un MISS del endpoint con los 500 por defecto mide **55 ms en release**
+(49 ms de motor) y **541 ms en debug**; un HIT, 1–4 ms. El presupuesto se aplica **a priori**,
+acotando `paths`, y no con un `timeout`: `spawn_blocking` no se puede cancelar, así que un timeout
+solo liberaría al llamante mientras la CPU sigue ardiendo. Corre bajo el semáforo de simulaciones
+(`heavy::run_projection_sim`). Payload medido: **16,4 KB** a densidad hybrid con las seis series
+(66 puntos), ~9,9 KB sin las del líquido.
+
+Tests: `apps/api/tests/projection_bands.rs` (14), más el eco de `view` en `context_fields.rs`.
 
 **Two-phase loading en el cliente**: `App.tsx` dispara `?density=hybrid` y `?density=monthly` en paralelo. El hybrid suele llegar primero (JSON más pequeño) → se renderiza el chart con menos puntos. Cuando llega el monthly, se reemplaza dentro de `startTransition()` (sin bloquear inputs). Si ambos son cache hit, ambos llegan en <10 ms → el hybrid no añade latencia perceptible.
 

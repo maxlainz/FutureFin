@@ -2509,12 +2509,12 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     const SRC: &str = include_str!("../src/mcp/server.rs");
     let blocks = tool_blocks();
 
-    // Contadores de futurefin-mcp-parity §5 (70 / 29 / 41 / 41, a 2026-09-02, WP4 de 5.0.0:
-    // `get_retirement_profile` y `update_retirement_profile`).
+    // Contadores de futurefin-mcp-parity §5 (71 / 30 / 41 / 41, a 2026-09-03, WP6b de 5.0.0:
+    // `get_projection_bands` — la primera tool nueva que NO es de escritura desde WP4).
     let read_only = blocks.iter().filter(|b| b.read_only).count();
     let writes = blocks.iter().filter(|b| !b.read_only).count();
-    assert_eq!(blocks.len(), 70, "total de tools (§5 de futurefin-mcp-parity)");
-    assert_eq!(read_only, 29, "tools de lectura + simulate (§5)");
+    assert_eq!(blocks.len(), 71, "total de tools (§5 de futurefin-mcp-parity)");
+    assert_eq!(read_only, 30, "tools de lectura + simulate (§5)");
     assert_eq!(writes, 41, "tools de escritura (§5)");
     assert_eq!(
         read_only + writes,

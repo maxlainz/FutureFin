@@ -846,6 +846,7 @@ dependencies = [
  "flate2",
  "futurefin-domain",
  "futurefin-engine",
+ "futurefin-engine-stochastic",
  "futures-util",
  "http",
  "http-body-util",

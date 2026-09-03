@@ -1826,3 +1826,152 @@ async fn the_new_what_if_axes_refuse_calls_that_cannot_move_anything() {
         assert!(text.contains(needle), "{body} debe nombrar «{needle}» y dice: {text}");
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// El eje `monte_carlo` (5.0.0 WP6b, P3)
+// ---------------------------------------------------------------------------------------------
+
+/// **Un eje que AÑADE información en vez de mover el escenario.**
+///
+/// Tres cosas se pinean aquí:
+///
+/// 1. `monte_carlo` **solo**, con el cuerpo por lo demás vacío, es una petición VÁLIDA. Todos los
+///    demás ejes tienen anti-no-op porque devolverían un escenario idéntico al baseline sin decir
+///    por qué; éste no cambia el escenario, lo describe, y «¿qué probabilidad tiene mi plan tal
+///    cual está?» es una pregunta legítima.
+/// 2. Los cuatro campos aparecen **en los dos lados** y `success_probability_delta` en `deltas`.
+/// 3. Sin el eje, los cuatro son `null` — no 0. Un cero se leería como «ningún escenario aguanta».
+#[tokio::test]
+async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_the_scenario() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    // Sin el eje: los cuatro campos van a `null` y no hay bloque `monte_carlo`.
+    let sin = tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+    for lado in ["baseline", "scenario"] {
+        for k in [
+            "success_probability",
+            "success_verdict",
+            "underfunded_probability",
+            "months_below_need_p50",
+        ] {
+            assert!(sin[lado][k].is_null(), "{lado}.{k} sin el eje: {sin}");
+        }
+    }
+    assert!(sin["deltas"]["success_probability_delta"].is_null(), "{sin}");
+    assert!(sin["monte_carlo"].is_null(), "sin el eje no hay bloque: {sin}");
+
+    // Con el eje SOLO (sin ningún otro override): válido, y con las cuatro cifras en ambos lados.
+    let con = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"monte_carlo": {"paths": 24, "seed": "7"}}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(con["monte_carlo"]["paths"], 24, "{con}");
+    assert_eq!(
+        con["monte_carlo"]["seed"], "7",
+        "la semilla se ecoa como STRING: {con}"
+    );
+    assert_eq!(con["monte_carlo"]["success_threshold_pct"], 95, "{con}");
+    for lado in ["baseline", "scenario"] {
+        assert!(
+            con[lado]["success_probability"].is_string(),
+            "{lado} debe traer la probabilidad: {con}"
+        );
+        assert!(con[lado]["success_verdict"].is_string(), "{lado}: {con}");
+        assert!(con[lado]["months_below_need_p50"].is_u64(), "{lado}: {con}");
+        // Sin trigger por edad, la infra-financiación no aplica ni con el eje pedido.
+        assert!(con[lado]["underfunded_probability"].is_null(), "{lado}: {con}");
+    }
+    // Sin ningún otro override los dos lados son el MISMO plan y la MISMA semilla ⇒ delta 0 exacto.
+    assert_eq!(
+        con["baseline"]["success_probability"], con["scenario"]["success_probability"],
+        "misma semilla y mismo plan: las dos columnas deben coincidir: {con}"
+    );
+    assert_eq!(
+        dec(&con["deltas"]["success_probability_delta"]),
+        0.0,
+        "{con}"
+    );
+    // Y el escenario sigue siendo el baseline: el eje no mueve NADA del plan.
+    assert_eq!(
+        con["deltas"]["jubilacion_months_delta"], 0,
+        "el eje describe, no simula otra cosa: {con}"
+    );
+
+    // **No hay bandas en simulate**: son ~16 KB por lado y el fan chart vive en su endpoint.
+    for lado in ["baseline", "scenario"] {
+        assert!(con[lado]["points"].is_null(), "{lado} no lleva bandas: {con}");
+    }
+}
+
+/// Con una estrategia por EDAD aparece `underfunded_probability`, y un plan que no llega la
+/// publica > 0. Es el rojo de D17 en versión probabilística: «cuántos de estos mercados te dejan
+/// llegar a los 55 sin el capital que necesitas».
+#[tokio::test]
+async fn an_age_strategy_publishes_the_underfunded_probability() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({
+                    "monte_carlo": {"paths": 24},
+                    "profile_overrides": {"strategy": "retire_at_age", "target_retirement_age": 45},
+                }),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["scenario"]["retirement_trigger"], "target_age", "{out}");
+    assert!(
+        out["scenario"]["underfunded_probability"].is_string(),
+        "con trigger por edad la pregunta existe: {out}"
+    );
+    // El baseline sigue siendo `asap` (por cruce), así que allí NO aplica — y por eso el campo es
+    // `null` en una columna y un número en la otra sin que eso sea una incoherencia.
+    assert!(
+        out["baseline"]["underfunded_probability"].is_null(),
+        "{out}"
+    );
+}
+
+/// Las cotas del eje: `paths` fuera de `1..=1000` y una semilla que no es un `u64` son 400 con su
+/// código. El techo del MCP es la MITAD del de HTTP a propósito (esta tool no cachea nada y un
+/// agente en bucle es el llamante que más satura el semáforo).
+#[tokio::test]
+async fn the_monte_carlo_axis_enforces_its_bounds() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    for (body, needle) in [
+        (json!({"monte_carlo": {"paths": 0}}), "paths_out_of_range"),
+        (json!({"monte_carlo": {"paths": 1001}}), "paths_out_of_range"),
+        (
+            json!({"monte_carlo": {"paths": 8, "seed": "no-soy-un-numero"}}),
+            "invalid",
+        ),
+    ] {
+        let envelope = mcp_post(&app, &token, tool_call("simulate_projection", body.clone())).await;
+        let result = &envelope["result"];
+        assert_eq!(result["isError"], true, "debía fallar con {body}: {envelope}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(needle), "{body} debe nombrar «{needle}» y dice: {text}");
+    }
+}

@@ -82,6 +82,7 @@ use crate::handlers::categories::{
 };
 #[allow(unused_imports)]
 use crate::handlers::projection::{__path_get_projection_deflate, __path_get_projection_series};
+use crate::handlers::projection_bands::__path_get_projection_bands;
 #[allow(unused_imports)]
 use crate::handlers::transactions::crud::{
     __path_create_batch, __path_create_transaction, __path_delete_import, __path_patch_batch,
@@ -208,6 +209,7 @@ impl utoipa::Modify for SecurityAddon {
         delete_planning_flow,
         get_projection_series,
         get_projection_deflate,
+        get_projection_bands,
         capture_snapshots,
         list_snapshots,
         create_snapshot,
@@ -344,6 +346,10 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::projection::ProjectionSeriesResponse,
         crate::handlers::projection::DeflateResponse,
         crate::handlers::projection::ProjectionPoint,
+        crate::handlers::projection_bands::ProjectionBandsResponse,
+        crate::handlers::projection_bands::ProjectionBandPoint,
+        crate::handlers::projection_bands::DepletionProbabilityPoint,
+        crate::handlers::projection_bands::RetirementMonthPercentiles,
         crate::handlers::projection::LiabilityNegativeAmortization,
         crate::handlers::history::SnapshotResponse,
         crate::handlers::history::SnapshotItemResponse,

@@ -1,6 +1,6 @@
 {
   "_doc": "Contrato de entrada de las tools MCP. GENERADO — no editar a mano: UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- tools_list_freezes_the_input_contract. `description_sha256_12` son los 6 primeros bytes del SHA-256 de la descripción publicada. `constraints` son las restricciones del inputSchema por posición ($ = raíz, $.x = propiedad, $.x[] = items, $defs.T.x = anidado), y `constraints_sha256_12` su hash: cubren additionalProperties, enum, pattern, type, required y las cotas numéricas y de longitud a cada nivel.",
-  "tool_count": 70,
+  "tool_count": 71,
   "tools": [
     {
       "constraints": {
@@ -275,8 +275,8 @@
         "$.type_tag": "maxLength=120 minLength=1 type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "6f59f279529f",
-      "description_len": 535,
-      "description_sha256_12": "01597734e1c0",
+      "description_len": 484,
+      "description_sha256_12": "5c9005815abd",
       "name": "create_liability",
       "properties": [
         "apr_percent",
@@ -777,13 +777,33 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "abf02fd0ffa6",
-      "description_len": 575,
-      "description_sha256_12": "ecb42eb0fd8c",
+      "description_len": 495,
+      "description_sha256_12": "2d134bd1f42c",
       "name": "get_projection",
       "properties": [
         "include_asset_series",
         "include_member_series",
         "months",
+        "view"
+      ],
+      "required": []
+    },
+    {
+      "constraints": {
+        "$": "additionalProperties=false type=\"object\"",
+        "$.include_liquid_bands": "type=[\"boolean\",\"null\"]",
+        "$.paths": "format=\"uint32\" maximum=1000 minimum=1 type=[\"integer\",\"null\"]",
+        "$.seed": "pattern=\"^\\\\d{1,20}$\" type=[\"null\",\"string\"]",
+        "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "eb03dba2646f",
+      "description_len": 490,
+      "description_sha256_12": "58b1aab6d6c1",
+      "name": "get_projection_bands",
+      "properties": [
+        "include_liquid_bands",
+        "paths",
+        "seed",
         "view"
       ],
       "required": []
@@ -864,8 +884,8 @@
         "$.view": "enum=[\"household\",\"mine\"] type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "1f46a8682c1e",
-      "description_len": 535,
-      "description_sha256_12": "017f80ebed72",
+      "description_len": 484,
+      "description_sha256_12": "fb43fe92dc31",
       "name": "list_assets",
       "properties": [
         "view"
@@ -1074,8 +1094,8 @@
         "$.confirm_token": "maxLength=200 minLength=1 type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "ffbe2eb3027d",
-      "description_len": 549,
-      "description_sha256_12": "704bc77435bc",
+      "description_len": 421,
+      "description_sha256_12": "8fcb154158b4",
       "name": "materialize_recurring",
       "properties": [
         "confirm",
@@ -1116,6 +1136,8 @@
         "$.income_steps[]": "$ref=\"#/$defs/IncomeStepParam\"",
         "$.liability_overrides": "type=[\"array\",\"null\"]",
         "$.liability_overrides[]": "$ref=\"#/$defs/LiabilityOverrideParam\"",
+        "$.monte_carlo|anyOf[0]": "$ref=\"#/$defs/MonteCarloParam\"",
+        "$.monte_carlo|anyOf[1]": "type=\"null\"",
         "$.months": "format=\"uint32\" maximum=840 minimum=12 type=[\"integer\",\"null\"]",
         "$.one_off_expense|anyOf[0]": "$ref=\"#/$defs/OneOffExpenseParam\"",
         "$.one_off_expense|anyOf[1]": "type=\"null\"",
@@ -1158,6 +1180,9 @@
         "$defs.LiabilityOverrideParam.lump_sum_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
         "$defs.LiabilityOverrideParam.lump_sum_month_index": "format=\"uint32\" maximum=840 minimum=1 type=[\"integer\",\"null\"]",
         "$defs.LiabilityOverrideParam.repayment_model": "enum=[\"fixed_payments\",\"french\",\"interest_only\",\"revolving\"] type=[\"null\",\"string\"]",
+        "$defs.MonteCarloParam": "additionalProperties=false type=\"object\"",
+        "$defs.MonteCarloParam.paths": "format=\"uint32\" maximum=1000 minimum=1 type=[\"integer\",\"null\"]",
+        "$defs.MonteCarloParam.seed": "pattern=\"^\\\\d{1,20}$\" type=[\"null\",\"string\"]",
         "$defs.OneOffExpenseParam": "additionalProperties=false required=[\"amount\"] type=\"object\"",
         "$defs.OneOffExpenseParam.amount": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=\"string\"",
         "$defs.OneOffExpenseParam.date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
@@ -1208,9 +1233,9 @@
         "$defs.WithdrawalRuleParam.spend_mode": "enum=[\"ceiling\",\"rule_is_spend\"] type=[\"null\",\"string\"]",
         "$defs.WithdrawalRuleParam.start_pct": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "7573da00494f",
-      "description_len": 594,
-      "description_sha256_12": "e8874106ac99",
+      "constraints_sha256_12": "13d30b7fa8d5",
+      "description_len": 545,
+      "description_sha256_12": "8f9b221cd2dd",
       "name": "simulate_projection",
       "properties": [
         "annual_inflation_percent",
@@ -1224,6 +1249,7 @@
         "income_pause",
         "income_steps",
         "liability_overrides",
+        "monte_carlo",
         "months",
         "one_off_expense",
         "profile_overrides",
@@ -1398,8 +1424,8 @@
         "$.source": "type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "bc81071ada40",
-      "description_len": 539,
-      "description_sha256_12": "e399642775a2",
+      "description_len": 418,
+      "description_sha256_12": "62333d925cef",
       "name": "update_categorization_rule",
       "properties": [
         "assign_category_id",
@@ -1515,8 +1541,8 @@
         "$.type_tag": "maxLength=120 type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "6e2bd16034b4",
-      "description_len": 552,
-      "description_sha256_12": "4fd7864cc639",
+      "description_len": 481,
+      "description_sha256_12": "0d5feb2e0ba6",
       "name": "update_liability",
       "properties": [
         "apr_percent",
