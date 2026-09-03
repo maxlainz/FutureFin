@@ -112,7 +112,10 @@ Reglas de presentación de toda cifra y texto del UI (los helpers viven en
 
 ## Shell
 
-- **TopBar única** ([`components/TopBar.tsx`](../apps/web/src/components/TopBar.tsx)): marca `FF · FutureFin` izquierda, pills de navegación derecha, slot `extras` (selector de vista mío/hogar) anclado en esquina superior derecha, botón hamburguesa solo `≤720px`.
+- **TopBar única** ([`components/TopBar.tsx`](../apps/web/src/components/TopBar.tsx)): marca `FF · FutureFin` izquierda, pills de navegación derecha, slot `extras` anclado en esquina superior derecha, botón hamburguesa solo `≤720px`.
+- **Slot `extras` — control segmentado «Yo | Hogar»** (5.0.0, D9/D32, issue #207): sustituye al `<select>` de vista mío/hogar. Reusa la piel de `.ff-theme-toggle` (mismo lenguaje visual que el toggle de tema, ver §Componentes) con la clase modificadora `.ff-topbar-scope` — solo compacta padding/tipografía (`button { padding: 0.3rem 0.72rem; font-size: 0.78rem }`) para que quepa junto al título, el indicador de salud y la hamburguesa sin romper la regla de oro (cero scroll horizontal a 360px). `role="group"` + `aria-pressed` por botón (no `role="radiogroup"`: son dos botones independientes con `is-active`, patrón idéntico a `ThemeToggle`), **más estrecho que el `<select>` anterior en todos los breakpoints** (verificable: `git show b413471 --stat -- apps/web/src/App.css` — el bloque `.ledger-view-select` se borra entero, incluida su variante `≤720px`).
+- **Banner de ámbito `.app-scope-banner`** (5.0.0, D9/D32): cuando la vista es Hogar (`scopeReadOnly`), «Vista agregada del hogar · solo lectura» se pinta como **primer hijo de `<main>`, en TODAS las pestañas** — no solo las del ledger, porque el ámbito es global y quien navega directo a Jubilación desde el drawer no ha visto ningún otro banner. Reusa `.banner.info-banner` (cero color propio, resuelve claro/oscuro solo); la clase propia (`display:flex; flex-direction:column`) solo existe porque en Proyección `.app-main` es un flex-column con `overflow:hidden` y sin `flex: 0 0 auto` el banner cedería altura al chart.
+- **Banner de alta `.retirement-intro-banner`** (5.0.0, D33, issue #207, solo en `RetirementView.tsx`): «Elige tu estrategia de jubilación» (+ «Añade tu fecha de nacimiento», enlace a «Tu cuenta», si falta), descartable UNA vez por navegador (`lib/retirement-intro.ts`). También `.banner.info-banner` por debajo — cero color propio — con dos clases de layout: `.retirement-intro-banner` (`flex; justify-content: space-between; flex-wrap: wrap`, texto y botón de descarte en la misma línea, apilados si no caben) y `.retirement-intro-banner-text` (columna, `min-width: 0` para que el texto largo no reviente el flex). Nunca se muestra junto al de Hogar: solo aparece cuando `!scopeReadOnly`.
 - **Sin tab-bar separada**: la `.tab-bar` legacy está `display:none`. Toda la navegación vive en TopBar.
 - **Móvil**: hamburguesa abre `MobileNavDrawer` ([`components/MobileNavDrawer.tsx`](../apps/web/src/components/MobileNavDrawer.tsx)) — drawer lateral derecho con todas las secciones. Sin bottom-nav.
 - **Cuenta**: el chip de usuario + Salir vivían en la cabecera; ahora la cuenta vive en `Ajustes` como `AccountCard` ([`components/AccountCard.tsx`](../apps/web/src/components/AccountCard.tsx)) con avatar, badge de rol, botones Editar cuenta + Cerrar sesión. La cabecera queda limpia.
@@ -246,7 +249,11 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 
 > **Switch (`components/Switch.tsx`, clases `.ff-switch*`)**: el toggle track+thumb accesible (`role="switch"`, focus-visible con outline `--ff-accent`, disabled al 55 %). Nació en la barra de Proyección y se extrajo a componente al añadir el toggle «Permitir escritura vía MCP» de Ajustes → Integraciones; `variant="chart"` conserva el label small-caps compacto de las barras de chart. Para booleanos de formulario clásicos sigue existiendo `label.field.checkbox-field`.
 
-> **Segmented control (`.ff-theme-toggle`)**: el único segmented que queda es el toggle de tema Auto/Claro/Oscuro (`ThemeToggle`, clase `.ff-theme-toggle`). La antigua clase compartida **`.ff-segmented` se eliminó** tras 2.0.0: la «fuente del ahorro» de la entonces `Ajustes → Proyección` (hoy `Ajustes → Plan`) pasó a un `<select>` nativo estándar (con `<small>` de ayuda asociada por `aria-describedby`, fuera del `<label>`). Si necesitas un nuevo control inline de 2–3 opciones, valora primero un `<select>`; si de verdad hace falta un segmented, reintroduce la variante en el bloque de `.ff-theme-toggle` en `App.css`. Verifica claro **y** oscuro.
+> **Segmented control (`.ff-theme-toggle`)**: dos consumidores desde 5.0.0 — el toggle de tema Auto/Claro/Oscuro (`ThemeToggle`, clase base `.ff-theme-toggle`) y el segmentado «Yo | Hogar» de la TopBar (`.ff-theme-toggle.ff-topbar-scope`, ver §Shell), que reusa la misma piel con una modificadora que solo compacta padding/tipografía — cero declaraciones nuevas de color. **Ya no es cierto que sea el único que queda**; si actualizas este párrafo por un tercer consumidor, dilo aquí y no lo dejes desactualizado otra vez. La antigua clase compartida **`.ff-segmented` se eliminó** tras 2.0.0: la «fuente del ahorro» de la entonces `Ajustes → Proyección` (hoy `Ajustes → Plan`) pasó a un `<select>` nativo estándar (con `<small>` de ayuda asociada por `aria-describedby`, fuera del `<label>`). Si necesitas un nuevo control inline de 2–3 opciones, valora primero un `<select>`; si de verdad hace falta un segmented con botones, extiende `.ff-theme-toggle` con una modificadora (precedente: `.ff-topbar-scope`), no reintroduzcas `.ff-segmented`. Verifica claro **y** oscuro.
+
+> **Radio-cards de configuración (`.retirement-mode-card`/`.retirement-mode-grid`)**: NO son un segmented — son `<label>` con un `<input type="radio" className="sr-only">` dentro, estilados como tarjeta (borde + `is-active` con tinte de acento). Nacieron para el modo del objetivo anual de Jubilación y 5.0.0 (D26, issue #207) los reusa tal cual para las **5 tarjetas de estrategia** (`RetirementView.tsx`, modificadora `.retirement-strategy-grid`: mismo `grid-template-columns` pero `repeat(auto-fit, minmax(min(100%, 15rem), 1fr))` porque cinco no caben en la rejilla fija de 3 del modo del objetivo — no-op en escritorio, colapsa solo en móvil, sin breakpoint nuevo).
+>
+> **`.retirement-radio-stack`** (radios nativos en línea, `<label class="field checkbox-field">` por opción, `role="radiogroup"` en el contenedor): existía en `App.css` **sin ningún consumidor** antes de 5.0.0. `9ae5c24` le da los dos primeros — la base del objetivo (`perpetuity`/`bridge_to_pension`) y el `kind` de la regla de retirada, ambos en `RetirementView.tsx` (`grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` → 2). No lo confundas con el segmented: aquí el foco/tabulación son los `<input>` nativos, no un `role="group"` de botones.
 
 ## Iconografía
 
@@ -296,9 +303,41 @@ sobra»). TODO panel de Ajustes sigue esta plantilla; si añades uno nuevo, cóp
    `muted tight` y `settings-meta-dl` los sustituyen). Listas en modales: `.muted-list`, sin
    estilos inline.
 
+## Vista de solo lectura (Hogar) — norma de renderizado (5.0.0, D9/D32, issue #207)
+
+La vista Hogar es un agregado informativo y de **solo lectura** (para la tabla completa de qué
+vista consume qué boolean, ver [`frontend-structure.md`](frontend-structure.md) §Ámbito del hogar
+y candado de solo lectura). La norma de renderizado es **ocultar el control, no deshabilitarlo**:
+un botón «Añadir» o «Editar» desaparece del DOM en vez de quedarse gris y sin acción — un control
+deshabilitado sigue anunciando una acción que no va a pasar nada, y en móvil sigue ocupando espacio
+táctil para nada.
+
+**Única excepción documentada**: los dos `<select>` inline de la tabla de Movimientos
+(`GastosView.tsx` — categoría y tipo de cada fila, clase `.exp-inline-select`) se quedan
+`disabled={!canEdit}` en vez de ocultarse (`grep -n "disabled={!canEdit" apps/web/src/views/GastosView.tsx`
+→ 2 hits). Ocultarlos colapsaría dos columnas enteras de la tabla en Hogar, desalineando el resto
+de columnas frente a la vista «Yo» — el mismo principio de «slot siempre reservado» que gobierna
+los adornos numéricos (§Layout). Si añades una segunda excepción, anótala aquí; si no, la norma es
+ocultar.
+
 ## Reglas para añadir UI nueva
 
-1. **Usa los tokens**. Nunca hardcoded hex. Si necesitas un color que no está, primero pregúntate si puedes vivir con `color-mix(in oklch, var(--ff-accent) X%, var(--ff-paper))`. Si no, añade un token nuevo en `theme.css` con variantes claro/oscuro.
+1. **Usa los tokens**. Nunca hardcoded hex. Si necesitas un color que no está, primero pregúntate si puedes vivir con `color-mix(in oklch, var(--ff-accent) X%, var(--ff-paper))`. Si no, añade un token nuevo en `theme.css` con variantes claro/oscuro. El enforcement automático es el freezer [`styles/no-hex-outside-theme.test.ts`](../apps/web/src/styles/no-hex-outside-theme.test.ts): sus contadas excepciones sancionadas (p. ej. la sombra del tooltip de Proyección, issue #105) se registran en `RGBA_ZERO_EXCEPTIONS` por **`file:línea` exacta, no por patrón** — cualquier edición de `App.css` que inserte líneas por encima desplaza el anclaje y rompe el test aunque el CSS no haya cambiado de verdad. 5.0.0 lo movió (2399/2400 → 2425/2426, cuando el segmentado «Yo | Hogar» y los banners de ámbito/alta se insertaron más arriba en el archivo). Si el freezer falla así: `grep -n "rgba(0, 0, 0," apps/web/src/App.css` para encontrar las líneas reales de hoy y actualiza los literales de `RGBA_ZERO_EXCEPTIONS` a esos números — no borres la excepción, muévela.
 2. **Verifica claro y oscuro antes de mergear**. Toggle desde Ajustes y revisa: KPIs, modales, tooltips, hover states, focus rings.
 3. **No mezcles tab-bar legacy con TopBar**. La nav es responsabilidad exclusiva de `TopBar`. Sub-tabs (como las de Ajustes) van como pills con clase `ff-nav-pill`.
 4. **No introduzcas color decorativo**. Pos/neg = cifras delta. Acento = destacar UN ítem (botón primario, KPI hero, marker de jubilación, slice principal de un donut). El resto vive en grayscale.
+
+## Provenance and maintenance
+
+Re-verificado 2026-09-03 contra los commits `b413471` (WP7 1/3 — vista «Yo» por defecto,
+segmentado «Yo | Hogar», hogar de solo lectura, aviso de alta de Jubilación) y `9ae5c24` (WP7 2/3
+— tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo) de la rama
+`release/5.0.0`, issue #207. Re-verificar con:
+
+- Segmentado de la TopBar: `grep -n "ff-topbar-scope" apps/web/src/App.css apps/web/src/App.tsx`
+- Banner de ámbito, primer hijo de `<main>`: `grep -n "app-scope-banner" apps/web/src/App.css apps/web/src/App.tsx`
+- Banner de alta de Jubilación: `grep -n "retirement-intro-banner" apps/web/src/App.css apps/web/src/views/RetirementView.tsx`
+- `.retirement-radio-stack` tiene consumidores (cero antes de `9ae5c24`): `grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` (≥1)
+- Excepción de solo lectura en Movimientos: `grep -n "disabled={!canEdit" apps/web/src/views/GastosView.tsx`
+- Anclas actuales del freezer: `grep -n 'App.css:' apps/web/src/styles/no-hex-outside-theme.test.ts` — deben casar con `grep -n "rgba(0, 0, 0," apps/web/src/App.css`
+- El viejo `<select>` de vista desapareció: `grep -n "ledger-view-select" apps/web/src/App.css apps/web/src/App.tsx` (debe imprimir vacío)

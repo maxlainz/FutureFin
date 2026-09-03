@@ -24,7 +24,21 @@ src/
 │   │                             #   arrancar: la cookie caducada con la pestaña abierta dejaba banners acumulándose sin salida.
 │   │                             #   `status: 0` NO lo dispara — un corte de red no es una sesión caducada)
 │   ├── client.test.ts            # mocks `globalThis.fetch`, asserts credentials/Content-Type/204
-│   └── types.ts                  # all *Api / *Response / *Row types (mirror of Rust handler structs)
+│   └── types.ts                  # all *Api / *Response / *Row types (mirror of Rust handler structs).
+│                                 #   5.0.0 (D13, issue #207): `FireSettingsApi` (supuestos del HOGAR — impuestos,
+│                                 #   ventanas del promedio, plusvalía gravable; sigue siendo owner-only) PIERDE los
+│                                 #   cuatro ejes personales `fire_number_mode`/`fire_number_manual_amount`/`swr_pct`/
+│                                 #   `horizon_lifespan_age`, que pasan a `RetirementProfileApi` (espejo exacto de
+│                                 #   `RetirementProfile`, `apps/api/src/handlers/retirement_profile.rs`; editable por
+│                                 #   CUALQUIER rol, es dato del propio usuario, no owner-only) — más
+│                                 #   `RetirementStrategyApi`/`TargetBasisApi`/`BridgeDiscountBasisApi`/
+│                                 #   `WithdrawalRuleKindApi`/`SpendModeApi`/`PartialExpenseBasisApi`/
+│                                 #   `WithdrawalRuleApi`/`PensionPlanApi`/`PartialRetirementApi`. La respuesta de
+│                                 #   `GET|PATCH /v1/auth/me/retirement-profile` es `RetirementProfileResponseApi
+│                                 #   {profile, birth_date}` (mismo PATCH acepta `birth_date`); el cuerpo del PATCH es
+│                                 #   `RetirementProfilePatchApi`, tri-estado (clave ausente = no cambia, `null` borra
+│                                 #   lo opcional). También `AssetApiRow.annual_volatility_percent?: string | null`
+│                                 #   (§A.2 — desviación típica anual; solo alimenta Monte Carlo, WP6).
 │
 ├── lib/                          # pure helpers, no React imports
 │   ├── format.ts                 # money/percent/decimal formatting (es-ES locale), parseDisplayDecimal, METRIC_DASH,
@@ -39,11 +53,54 @@ src/
 │   │                             #   4.2.0: REPAYMENT_MODEL_LABEL/ORDER + liabilityDerivedPrincipalNum /
 │   │                             #   liabilityDerivedPrincipalPreview (Σ cuotas en fixed_payments, valor actual al TIN
 │   │                             #   en french; devuelve null en todo estado que el POST rechazaría con 400)
+│   │                             #   5.0.0 (D9/D32, issue #207): LEDGER_PERSON_SCOPE_STORAGE_KEY (la clave de
+│   │                             #   localStorage, antes vivía inline en App.tsx) + resolveLedgerPersonScope
+│   │                             #   (localStorage → scope inicial; ausente/vacío/desconocido ⇒ `mine`, el nuevo
+│   │                             #   default — antes caía a `household`) + isScopeReadOnly (`household` ⇒ true; es
+│   │                             #   UX, no la frontera: el servidor rechaza igual con 403 `not_row_owner`) +
+│   │                             #   ledgerViewAmp (mismo `?view=` para encadenar tras otro parámetro). `ledgerViewQs`
+│   │                             #   cambia de contrato: los DOS scopes viajan ahora `?view=` EXPLÍCITO (antes
+│   │                             #   `household` era el string vacío) — con el default del API pasando a `mine`
+│   │                             #   (`LedgerViewQuery::resolve`), omitir el parámetro en Hogar devolvería solo lo
+│   │                             #   propio, sin ningún error.
 │   ├── ledger.repayment-model.test.ts  # 4.2.0 — paridad con apps/api/tests/fixtures/liability-derived-principal-parity.json
 │   │                             #   (patrón fire-parity: mismo JSON leído por el test Rust y por Vitest) + puertas del preview
+│   ├── ledger.scope.test.ts      # 5.0.0 — los cuatro helpers de scope de arriba (`grep -c 'it(' apps/web/src/lib/ledger.scope.test.ts`)
+│   ├── retirement-intro.ts       # 5.0.0 (D33, issue #207): aviso de alta «Elige tu estrategia de jubilación» en
+│   │                             #   Jubilación, enseñado UNA vez por navegador. RETIREMENT_INTRO_DISMISSED_STORAGE_KEY
+│   │                             #   + isRetirementIntroDismissed (puro) + readRetirementIntroDismissed /
+│   │                             #   persistRetirementIntroDismissed, tolerantes a un localStorage que lanza (Safari
+│   │                             #   privado, el iframe del Ingress de Home Assistant): sesgo elegido, si no se puede
+│   │                             #   leer el aviso SE ENSEÑA (mejor un clic de más que ocultar para siempre que la
+│   │                             #   estrategia es una elección). Test: retirement-intro.test.ts
+│   ├── retirementProfile.ts      # 5.0.0 (D13, issue #207): perfil de jubilación POR USUARIO en cliente. Tres
+│   │                             #   responsabilidades y ninguna más — (1) defaults/clamps en LECTURA
+│   │                             #   (normalizeRetirementProfile/normalizeWithdrawalRule), espejo de
+│   │                             #   `resolve_retirement_profile` (`apps/api/src/handlers/retirement_profile.rs`);
+│   │                             #   (2) guarda de validez en ESCRITURA (retirementProfileIssue/withdrawalRuleIssue),
+│   │                             #   MISMOS códigos estables que el servidor, para que el autosave nunca prometa
+│   │                             #   «Guardado automático» sobre un valor que el PATCH iba a rechazar con 400; (3)
+│   │                             #   PATCH MÍNIMO tri-estado (buildRetirementProfilePatch/isEmptyRetirementProfilePatch)
+│   │                             #   — mandar el perfil entero resetearía en silencio lo que el usuario no tocó.
+│   │                             #   Además: las 5 estrategias (RETIREMENT_STRATEGIES + _LABEL/_BLURB, nombres D33) y
+│   │                             #   las cotas del formulario, DUPLICADAS a propósito contra `retirement_profile.rs`
+│   │                             #   §Cotas (MIN_PROFILE_AGE, MAX_WITHDRAWAL_PCT, MAX_GUARDRAIL_PCT,
+│   │                             #   MAX_CASH_BUFFER_MONTHS, MIN/MAX_SUCCESS_THRESHOLD_PCT, MAX_SWR_PCT,
+│   │                             #   MIN/MAX_HORIZON_LIFESPAN_AGE — la cota del SWR/horizonte no cambió al moverse de
+│   │                             #   `fire.ts`, solo el dueño del dato). Test: retirementProfile.test.ts
+│   │                             #   (`grep -c 'it(' apps/web/src/lib/retirementProfile.test.ts`; recorre la tabla de
+│   │                             #   cotas entera para que una divergencia con Rust sea un test rojo, no un 400 en
+│   │                             #   producción)
 │   ├── fire.ts                   # client-side FIRE math for the live form preview (mirror of handlers/projection.rs):
 │   │                             #   defaultFireSettingsApi, normalizeInstallationFireSettings, taxOnGrossCapitalAnnual,
 │   │                             #   grossUpNetAnnualFire, computeFireAnnualNeedNetEur, findFirstMonthNetWorthAtLeastInflated
+│   │                             #   5.0.0 (D13): `fire_number_mode`/`fire_number_manual_amount`/`swr_pct`/
+│   │                             #   `horizon_lifespan_age` SALIERON de `FireSettingsApi` — son personales, viven en
+│   │                             #   `RetirementProfileApi` (`lib/retirementProfile.ts` de arriba) — así que
+│   │                             #   `defaultFireSettingsApi`/`normalizeInstallationFireSettings` ya no los tocan;
+│   │                             #   `runwaySwrParenthetical` pasó de leer `FireSettingsApi` a leer
+│   │                             #   `RetirementProfileApi` (es el SWR que enseña el paréntesis de la tarjeta
+│   │                             #   Autonomía cuando el runway es indefinido)
 │   ├── projection-chart.ts       # chart helpers: tick builders (startMonth param → soporta meses negativos), SVG layout,
 │   │                             #   **lastPointIndexAtOrBeforeMonth** (mes → posición en `points`; OBLIGATORIO para recortar una
 │   │                             #   ventana por mes: con density=hybrid la posición 13 es el mes 24 y `Math.min(mes, len-1)` no
@@ -122,7 +179,12 @@ src/
 │
 ├── views/                        # one file per tab — receives props from App.tsx, owns local UI state
 │   ├── SummaryView.tsx           # KPIs → Salud financiera → Proyección 12m (zoomY) → Desglose
-│   ├── AssetsView.tsx
+│   ├── AssetsView.tsx            # 5.0.0 (§A.2, issue #207): campo «Volatilidad anual % (opc.)» en el form de alta/
+│   │                             #   edición + columna «Volat. % a.a.» en la tabla — solo desktop, y solo si algún
+│   │                             #   activo del grupo declara un valor > 0 (mismo patrón condicional que la columna
+│   │                             #   «Rent. % a.a.»; en móvil no entra ni en la sub-línea). Vacío/`0` = activo
+│   │                             #   determinista; el valor solo alimenta las futuras bandas de Monte Carlo (WP6), el
+│   │                             #   camino determinista lo ignora. Help text `assets.volatility` en `helpTexts.ts`.
 │   ├── LiabilitiesView.tsx       # tabla sin columna Tipo. 4.2.0: select «Modelo» + InlineHint por modelo, controles
 │   │                             #   (weekly, derive) deshabilitados donde el server daría 400, preview del principal
 │   │                             #   derivado, y chip del modelo en el listado SOLO cuando ≠ cuota fija (chip existente,
@@ -161,7 +223,25 @@ src/
 │   ├── RecurringRulesModal.tsx   # modal «Recurrentes» (botón en la toolbar de Movimientos): lista GET /v1/transactions/recurring y permite «Detener» (DELETE) cada regla
 │   │                             #   (conserva las instancias ya materializadas). Patrón ManualCashEntryModal: fetch al abrir, toda la lógica de presentación aquí (nada en lib/)
 │   ├── UpcomingView.tsx          # Planning
-│   ├── RetirementView.tsx        # KPIs + MiniProjection (zoomY, clampToMonth=jub+12, xAxis) + FIRE config
+│   ├── RetirementView.tsx        # KPIs + MiniProjection (zoomY, clampToMonth=jub+12, xAxis) + perfil de jubilación.
+│   │                             #   5.0.0 (D26/D33, issue #207) reescribió el bloque de configuración: aviso de alta
+│   │                             #   descartable (`lib/retirement-intro.ts`) → **5 tarjetas de estrategia**
+│   │                             #   (`.retirement-mode-card`/`.retirement-mode-grid.retirement-strategy-grid`, reusa
+│   │                             #   el patrón ya existente del modo del objetivo, no un componente nuevo) →
+│   │                             #   **formulario contextual**: solo los campos de la estrategia elegida (edad
+│   │                             #   objetivo, pensión con fecha e indexación, media jornada, regla de retirada +
+│   │                             #   modo — aquí vive el primer/único consumidor de `.retirement-radio-stack`, antes
+│   │                             #   sin uso) más los ejes movidos desde `fire_settings` (modo/importe del objetivo,
+│   │                             #   SWR, edad límite del horizonte) y los de riesgo (colchón de caja, umbral de
+│   │                             #   éxito — inputs YA, sin la banda de Monte Carlo de WP6 todavía). Autosave de
+│   │                             #   420 ms (`queueProfileSave`) con guarda de validez (`retirementProfileIssue`,
+│   │                             #   mismos códigos que el servidor) contra `onSaveRetirementProfile` (`App.tsx`).
+│   │                             #   Tile «Margen disponible» presente pero PLACEHOLDER (guion + «aún no se calcula»
+│   │                             #   hasta que WP5 publique el solve). En Hogar (`scopeReadOnly` prop): el bloque de
+│   │                             #   perfil entero se sustituye por un panel «Solo lectura»; `canEditProfile` es
+│   │                             #   propio de esta vista (`hasMembership && !scopeReadOnly`, SIN exigir
+│   │                             #   `role === "owner"` — el perfil es dato personal, lo edita cualquier rol,
+│   │                             #   `viewer` incluido).
 │   ├── ProjectionView.tsx        # wraps ProjectionNetWorthChart
 │   ├── ProjectionNetWorthChart.tsx  # gran SVG chart, drag/zoom/hover, colores vía --proj-* tokens; se extiende a meses
 │   │                                #   negativos con la serie histórica (áreas + marcadores + divisor «Hoy») vía mergeProjectionWithHistory.
@@ -172,6 +252,15 @@ src/
 │   │                                #   de ph, no de lienzo extra — si no, `meet` encoge el dibujo con bandas laterales). Tooltip: top-5
 │   │                                #   activos por |valor| + «Otros (k)». Prop assetOwnerNames (App.tsx) desambigua duplicados en hogar
 │   ├── SettingsView.tsx          # AccountCard + sub-tabs como pills («Usuarios» owner-only, «MCP» con tokens/conexiones/toggle de escritura) + ThemeToggle en "Datos y sistema"
+│   │                             #   5.0.0 (D13/D26, issue #207): Ajustes → Plan PIERDE el modo/importe del objetivo,
+│   │                             #   el SWR y la edad límite del horizonte (enlace «Jubilación» en su lugar — viven
+│   │                             #   ahora en el perfil por usuario). La plusvalía gravable de la retirada, que
+│   │                             #   vivía ANIDADA bajo el bloque de ventanas del promedio —invisible en el modo
+│   │                             #   `budget` (serie, el default), solo visible en `transactions_avg`/
+│   │                             #   `budget_income_real_expense`: era un bug, no una decisión— sube a nivel de panel
+│   │                             #   y es visible en los tres modos. `planEditable = isOwner && !scopeReadOnly` sigue
+│   │                             #   gateando el panel entero: `fire_settings` SIGUE siendo owner-only, a diferencia
+│   │                             #   del perfil de jubilación de Jubilación (ver RetirementView.tsx arriba).
 │   ├── ApiTokensPanel.tsx        # Ajustes → Integraciones: tokens de API (MCP). Self-fetch (patrón HistorySettingsPanel); crear (modal
 │   │                             #   label + caducidad), secreto mostrado UNA vez con copiar, tabla (prefix/último uso/vigencia),
 │   │                             #   revocar con modal de confirmación. Visible para cualquier miembro (v3.0.0).
@@ -206,6 +295,65 @@ src/
 ```
 
 > Para los **tokens, paleta y reglas visuales** del rediseño V1 consulta [`design-system.md`](design-system.md).
+
+## Ámbito del hogar y candado de solo lectura (5.0.0, D9/D32, issue #207)
+
+`ledgerPersonScope` (`"mine" | "household"`, `lib/ledger.ts`) persiste en `localStorage` bajo
+`LEDGER_PERSON_SCOPE_STORAGE_KEY` y **por defecto es `mine`** — antes de 5.0.0 era `household`.
+El cambio es D9: la jubilación pasa a ser una estrategia POR USUARIO, así que la vista natural al
+entrar es la propia; `resolveLedgerPersonScope` decide el valor inicial (ausente, vacío o
+desconocido ⇒ `mine`). El control es el segmentado «Yo | Hogar» de la TopBar (ver
+[`design-system.md`](design-system.md) §Shell), no el `<select>` anterior.
+
+`App.tsx` deriva de `ledgerPersonScope` **dos booleanos módulo-scope**, y ninguna vista repite la
+regla:
+
+- **`scopeReadOnly`** (`= isScopeReadOnly(ledgerPersonScope)`, cierto en Hogar).
+- **`canEditLedger`** (`= installation?.role !== "viewer" && !scopeReadOnly`).
+
+Hogar es un agregado informativo y de **solo lectura** (D9/D32): el servidor es quien de verdad lo
+impone (403 `not_row_owner` en toda mutación de una fila ajena, D21) — lo de aquí es UX, no la
+frontera de seguridad.
+
+| Vista | Boolean consumido | Qué desaparece en solo lectura |
+|---|---|---|
+| Activos, Pasivos, Presupuesto, reglas de asignación, Próximos | prop `canEdit={canEditLedger}` | Alta, edición, borrado, reordenación |
+| Movimientos (`GastosView`) | prop `canEdit={canEditLedger}` | Igual, **más** el materialize de recurrentes en silencio al montar (`if (!hasMembership \|\| !canEdit …) return`) |
+| Histórico (`HistorySettingsPanel` vía `SettingsView`) | prop `canEditHistory={canEditLedger}` + `scopeReadOnly` (mensaje) | Alta, edición, borrado de snapshots |
+| Jubilación (`RetirementView`) | prop `scopeReadOnly` → deriva su PROPIO `canEditProfile = hasMembership && !scopeReadOnly` (sin exigir `role === "owner"`: el perfil es dato personal) | Todo el bloque de perfil (tarjetas de estrategia + formulario contextual); se sustituye por un panel «Solo lectura» |
+| Ajustes → Plan (`SettingsView`) | `planEditable = isOwner && !scopeReadOnly` (aquí SÍ exige owner: `fire_settings` sigue siendo del hogar) | El panel entero de supuestos del hogar |
+| Resumen (`SummaryView`) | `canEditLedger` decide si `onAddFirstAsset`/`onAddFirstBudgetEntry` se pasan o quedan `undefined` | Los CTA de estado vacío (sin `onAction`, `EmptyState` se queda en texto) |
+| Asistente inicial (onboarding) | `!scopeReadOnly` dentro de `showOnboarding` | El wizard completo no se ofrece en Hogar |
+
+Un banner `.app-scope-banner` («Vista agregada del hogar · solo lectura») se pinta como **primer
+hijo de `<main>`** en TODAS las pestañas cuando `scopeReadOnly` — no solo en las del ledger, porque
+el ámbito es global y quien llega a Jubilación o a Resumen desde el drawer no ha pasado por ninguna
+otra pantalla. Ver [`design-system.md`](design-system.md) §Shell.
+
+## Perfil de jubilación por usuario (5.0.0, D13, issue #207)
+
+`retirementProfile` (`RetirementProfileApi | null`, `App.tsx`) es el perfil del usuario de la
+sesión — estrategia, edad objetivo, SWR, modo/importe del objetivo, edad límite del horizonte,
+pensión con fecha, media jornada, regla de retirada, colchón y umbral de éxito. Es un INPUT del
+motor, así que vive en `App.tsx` y no en `RetirementView`: lo consume también el Resumen (el SWR
+del paréntesis de la tarjeta Autonomía, vía `runwaySwrParenthetical`). `null` mientras no ha
+llegado — nunca se sustituye por el default para pintar, o la vista enseñaría un plan que no es el
+del usuario.
+
+- **Carga**: `loadRetirementProfile()` se dispara en el mismo `useEffect` que `loadInstallation()`
+  al iniciar sesión — no depende de la membresía, es dato del token
+  (`GET /v1/auth/me/retirement-profile`, `patch_retirement_profile_core` lo acepta de cualquier
+  rol).
+- **Guardado**: `saveRetirementProfilePatch(patch)`, hermana de `saveFireSettingsPatch` (que desde
+  5.0.0 solo cubre los supuestos del HOGAR — impuestos, ventanas del promedio, plusvalía gravable).
+  Manda el PATCH **mínimo** tri-estado (`buildRetirementProfilePatch`, `lib/retirementProfile.ts`),
+  actualiza el estado con el perfil YA RESUELTO que devuelve el servidor (`target_basis` se
+  DERIVA ahí — el draft local tiene que resincronizarse) y recarga la serie de proyección
+  (`loadProjectionSeriesPage()`), igual que `saveFireSettingsPatch`, para que Jubilación / Resumen /
+  Proyección no se queden enseñando el plan anterior hasta el siguiente cambio de pestaña.
+- **A diferencia de `fire_settings`, NO es owner-only**: es el dato personal del usuario de la
+  sesión y el servidor lo acepta de cualquier rol — de ahí que `canEditProfile` en `RetirementView`
+  no exija `role === "owner"` (ver tabla de arriba).
 
 ## Import conventions
 
@@ -393,8 +541,29 @@ Cuando activo:
 
 - **API mutation handlers** (`submitAssetForm`, `deleteLiabilityRow`, etc.) stay in `App.tsx`. They close over `setAssets`, `setLiabilities`, etc. Moving them out requires a state library (Redux / Zustand / TanStack Query) — out of scope.
 - **Auth gate flow** (login/register/pending screens) is inline in `App.tsx`. `BootstrapInstallationPanel` is extracted but the login/register form is small enough that splitting it adds ceremony. v3.1.0 needed a login form **outside** `App.tsx` (the OAuth consent screen) and deliberately **duplicated** it as `auth/LoginPanel.tsx` instead of extracting the original — see §Ruta `/oauth/authorize`.
-- **FIRE client-side math** (`lib/fire.ts`) duplicates the Rust engine's tax/gross-up logic. Intentional: it powers the **live preview** of the FIRE settings form (user types `swr_pct`, sees the target update without a round-trip). If you change tax brackets server-side, mirror the change here.
+- **FIRE client-side math** (`lib/fire.ts`) duplicates the Rust engine's tax/gross-up logic. Intentional: it powers the **live preview** of the FIRE target for the household-level axes (`taxes_enabled`, `tax_brackets`, `taxable_gain_ratio`…). If you change tax brackets server-side, mirror the change here.
+- **Retirement-profile client-side bounds** (`lib/retirementProfile.ts`, 5.0.0, D13, issue #207) duplicate the Rust bounds of `retirement_profile.rs` §Cotas (`MIN_PROFILE_AGE`, `MAX_WITHDRAWAL_PCT`, `MAX_CASH_BUFFER_MONTHS`, `MIN/MAX_HORIZON_LIFESPAN_AGE`…). Intentional for the same reason as `fire.ts`: the autosave guard (`retirementProfileIssue`) has to reject client-side, with the SAME stable codes the server would return, before firing a PATCH the server would 400 on. Since 5.0.0 the strategy/objective axes (`fire_number_mode`, `swr_pct`, `horizon_lifespan_age`, `target_retirement_age`, the withdrawal rule, pension, partial retirement…) are **per-user**, not installation-wide — they moved out of `FireSettingsApi`/`installation.fire_settings` into `RetirementProfileApi`/`users.retirement_profile`; a plan/settings claim that still calls the projection axes "installation-only" is stale. If you change a bound in `retirement_profile.rs`, mirror it here — `retirementProfile.test.ts` walks the whole bounds table so a divergence is a red test, not a 400 in production.
 
 ## Frontend tests
 
 See [`tests.md`](tests.md). Setup: Vitest + `node` environment (no jsdom needed for the current test set). All tests are in `*.test.ts` files colocated with the module they test.
+
+## Provenance and maintenance
+
+Re-verified 2026-09-03 against `release/5.0.0` commits `b413471` (WP7 1/3 — vista «Yo» por
+defecto, segmentado «Yo | Hogar», hogar de solo lectura, aviso de alta de Jubilación) y `9ae5c24`
+(WP7 2/3 — tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo),
+issue #207. Re-verify with:
+
+- New lib modules exist: `ls apps/web/src/lib/retirement-intro.ts apps/web/src/lib/retirementProfile.ts`
+- `ledger.ts` scope helpers: `grep -n "export function resolveLedgerPersonScope\|export function isScopeReadOnly\|export function ledgerViewAmp\|export const LEDGER_PERSON_SCOPE_STORAGE_KEY" apps/web/src/lib/ledger.ts`
+- Default scope is `mine`: `grep -n 'return stored?.trim() === "household" ? "household" : "mine"' apps/web/src/lib/ledger.ts`
+- `App.tsx` derives exactly two module-scope booleans from `ledgerPersonScope`: `grep -n "const scopeReadOnly = isScopeReadOnly\|const canEditLedger =" apps/web/src/App.tsx`
+- `canEditFire` no longer exists (it was transient in `b413471`, replaced by `scopeReadOnly` + `RetirementView`'s own `canEditProfile` in `9ae5c24`): `grep -rn canEditFire apps/web/src` should print nothing
+- `FireSettingsApi` no longer carries the four moved axes: `grep -n "fire_number_mode\|swr_pct\|horizon_lifespan_age" apps/web/src/api/types.ts` — no hit should fall inside the `FireSettingsApi` type block (most are in `RetirementProfileApi`/`RetirementProfilePatchApi`; `ProjectionSeriesApi.horizon_lifespan_age` is a separate, pre-existing echo field and stays)
+- `RetirementProfileApi` shape: `grep -n "export type RetirementProfileApi" -A 20 apps/web/src/api/types.ts`
+- Retirement-profile save wiring: `grep -n "saveRetirementProfilePatch\|loadRetirementProfile" apps/web/src/App.tsx`
+- Asset volatility field: `grep -n "annual_volatility_percent" apps/web/src/api/types.ts apps/web/src/views/AssetsView.tsx`
+- `.retirement-radio-stack` has live consumers: `grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` (≥1; it was defined in `App.css` with zero consumers before `9ae5c24`)
+- Test counts (don't cite the raw number without re-running): `grep -c 'it(' apps/web/src/lib/retirementProfile.test.ts apps/web/src/lib/retirement-intro.test.ts apps/web/src/lib/ledger.scope.test.ts`
+- GastosView's documented exception to "hide, don't disable": `grep -n "disabled={!canEdit" apps/web/src/views/GastosView.tsx` (the two inline `<select>`s — categoría/tipo — stay `disabled`, not hidden)
