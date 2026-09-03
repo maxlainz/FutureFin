@@ -40,7 +40,6 @@ export function AssetsView({
   installation,
   installationBusy,
   hasMembership,
-  ledgerPersonScope,
   canEdit,
   formError,
   projectionSeries,
@@ -121,7 +120,6 @@ export function AssetsView({
    */
   onOpenCategorySettings?: () => void;
 }) {
-  const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
   const isMobile = useIsMobile();
 
@@ -208,20 +206,12 @@ export function AssetsView({
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Activos</h2>
-        <p className="workspace-sub">
-          {installationBusy
-            ? "Cargando…"
-            : !hasMembership
-              ? "Sin acceso hasta aprobación."
-              : `Moneda ${currency}`}
-        </p>
+        {installationBusy || !hasMembership ? (
+          <p className="workspace-sub">
+            {installationBusy ? "Cargando…" : "Sin acceso hasta aprobación."}
+          </p>
+        ) : null}
       </div>
-
-      {hasMembership && ledgerPersonScope === "mine" ? (
-        <div className="banner info-banner tight-banner">
-          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
-        </div>
-      ) : null}
 
       {!installationBusy && !hasMembership ? (
         <div className="banner info-banner">Sin acceso al hogar.</div>
@@ -314,7 +304,7 @@ export function AssetsView({
                 />
               </label>
               <label className="field">
-                <span>Precio compra (opc.)</span>
+                <span>Precio compra (opcional)</span>
                 <input
                   value={assetFormPurchase}
                   onChange={(e) => setAssetFormPurchase(e.target.value)}
@@ -333,7 +323,7 @@ export function AssetsView({
               </label>
               <label className="field">
                 <span className="label-with-help">
-                Rentab. anual esperada % (opc.)
+                Rentab. anual esperada % (opcional)
                 <HelpPopover
                   title={HELP_TEXTS["assets.expected_return"].title}
                   body={HELP_TEXTS["assets.expected_return"].body}
@@ -349,7 +339,7 @@ export function AssetsView({
               </label>
               <label className="field">
                 <span className="label-with-help">
-                  Volatilidad anual % (opc.)
+                  Volatilidad anual % (opcional)
                   <HelpPopover
                     title={HELP_TEXTS["assets.volatility"].title}
                     body={HELP_TEXTS["assets.volatility"].body}
@@ -365,7 +355,7 @@ export function AssetsView({
               </label>
             </div>
             <label className="field">
-              <span>Notas (opc.)</span>
+              <span>Notas (opcional)</span>
               <textarea
                 value={assetFormNotes}
                 onChange={(e) => setAssetFormNotes(e.target.value)}

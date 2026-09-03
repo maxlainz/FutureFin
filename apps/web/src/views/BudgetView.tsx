@@ -49,7 +49,6 @@ export function BudgetView({
   installation,
   installationBusy,
   hasMembership,
-  ledgerPersonScope,
   canEdit,
   formError,
   budgetModalOpen,
@@ -170,7 +169,6 @@ export function BudgetView({
    */
   onOpenCategorySettings?: () => void;
 }) {
-  const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
   const isMobile = useIsMobile();
 
@@ -249,15 +247,9 @@ export function BudgetView({
               ? "Sin acceso hasta aprobación."
               : budgetLoading
                 ? "Cargando…"
-                : `Mensual · ${currency}`}
+                : "Mensual"}
         </p>
       </div>
-
-      {hasMembership && ledgerPersonScope === "mine" ? (
-        <div className="banner info-banner tight-banner">
-          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
-        </div>
-      ) : null}
 
       {!installationBusy && !hasMembership ? (
         <div className="banner info-banner">Sin acceso al hogar.</div>
@@ -576,7 +568,7 @@ export function BudgetView({
               </label>
             </div>
             <label className="field">
-              <span>Notas (opc.)</span>
+              <span>Notas (opcional)</span>
               <textarea
                 value={budgetFormNotes}
                 onChange={(e) => setBudgetFormNotes(e.target.value)}

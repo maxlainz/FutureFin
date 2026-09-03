@@ -1727,7 +1727,7 @@ function EditTransactionModal({
             />
           </label>
           <label className="field">
-            <span>Fecha valor (opc.)</span>
+            <span>Fecha valor (opcional)</span>
             <input
               type="date"
               value={valueDate}
@@ -1795,7 +1795,7 @@ function EditTransactionModal({
         </div>
         <div className="asset-form-grid">
           <label className="field">
-            <span>Activo vinculado (opc.)</span>
+            <span>Activo vinculado (opcional)</span>
             <select
               value={linkedAssetId}
               onChange={(e) => setLinkedAssetId(e.target.value)}
@@ -1809,7 +1809,7 @@ function EditTransactionModal({
             </select>
           </label>
           <label className="field">
-            <span>Pasivo vinculado (opc.)</span>
+            <span>Pasivo vinculado (opcional)</span>
             <select
               value={linkedLiabilityId}
               onChange={(e) => setLinkedLiabilityId(e.target.value)}
@@ -1824,7 +1824,7 @@ function EditTransactionModal({
           </label>
         </div>
         <label className="field">
-          <span>Notas (opc.)</span>
+          <span>Notas (opcional)</span>
           <textarea
             value={notes}
             rows={2}

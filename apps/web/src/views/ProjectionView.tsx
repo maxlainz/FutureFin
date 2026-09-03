@@ -252,7 +252,7 @@ export function ProjectionView({
                 return (
                   <MetricCard
                     key={`${m.target}-${m.reached_month_index}`}
-                    label={isJubilacion ? "Jubilación" : "Hito"}
+                    label={isJubilacion ? "Objetivo al jubilarte" : "Hito"}
                     value={
                       isJubilacion
                         ? jubilacionTargetNoPen !== null

@@ -37,7 +37,6 @@ export function LiabilitiesView({
   installation,
   installationBusy,
   hasMembership,
-  ledgerPersonScope,
   canEdit,
   formError,
   liabilityModalOpen,
@@ -143,7 +142,6 @@ export function LiabilitiesView({
    */
   onOpenCategorySettings?: () => void;
 }) {
-  const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
   const isMobile = useIsMobile();
 
@@ -193,20 +191,12 @@ export function LiabilitiesView({
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Pasivos</h2>
-        <p className="workspace-sub">
-          {installationBusy
-            ? "Cargando…"
-            : !hasMembership
-              ? "Sin acceso hasta aprobación."
-              : `Moneda ${currency}`}
-        </p>
+        {installationBusy || !hasMembership ? (
+          <p className="workspace-sub">
+            {installationBusy ? "Cargando…" : "Sin acceso hasta aprobación."}
+          </p>
+        ) : null}
       </div>
-
-      {hasMembership && ledgerPersonScope === "mine" ? (
-        <div className="banner info-banner tight-banner">
-          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
-        </div>
-      ) : null}
 
       {!installationBusy && !hasMembership ? (
         <div className="banner info-banner">Sin acceso al hogar.</div>
@@ -315,7 +305,7 @@ export function LiabilitiesView({
                 </select>
               </label>
               <label className="field">
-                <span>Tipo (opc.)</span>
+                <span>Tipo (opcional)</span>
                 <input
                   value={liabilityFormTypeTag}
                   onChange={(e) => setLiabilityFormTypeTag(e.target.value)}
@@ -413,7 +403,7 @@ export function LiabilitiesView({
                 ) : null}
               </label>
               <label className="field">
-                <span>TIN % (opc.)</span>
+                <span>TIN % (opcional)</span>
                 <input
                   value={liabilityFormApr}
                   onChange={(e) => setLiabilityFormApr(e.target.value)}
@@ -425,7 +415,7 @@ export function LiabilitiesView({
               <label className="field">
                 <span>
                   Cuota plan
-                  {liabilityFormDerivePrincipal ? "" : " (opc.)"}
+                  {liabilityFormDerivePrincipal ? "" : " (opcional)"}
                 </span>
                 <input
                   value={liabilityFormPaymentAmount}
@@ -452,7 +442,7 @@ export function LiabilitiesView({
               <label className="field">
                 <span>
                   Fin plan
-                  {liabilityFormDerivePrincipal ? "" : " (opc.)"}
+                  {liabilityFormDerivePrincipal ? "" : " (opcional)"}
                 </span>
                 <input
                   type="date"
@@ -462,7 +452,7 @@ export function LiabilitiesView({
               </label>
             </div>
             <label className="field">
-              <span>Notas (opc.)</span>
+              <span>Notas (opcional)</span>
               <textarea
                 value={liabilityFormNotes}
                 onChange={(e) => setLiabilityFormNotes(e.target.value)}

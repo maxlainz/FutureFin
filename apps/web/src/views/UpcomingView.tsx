@@ -31,7 +31,6 @@ export function UpcomingView({
   installation,
   installationBusy,
   hasMembership,
-  ledgerPersonScope,
   canEdit,
   formError,
   planningModalOpen,
@@ -113,7 +112,6 @@ export function UpcomingView({
   onOpenCategorySettings?: () => void;
 }) {
   const currencyIso = installation?.installation.base_currency ?? "";
-  const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const isMobile = useIsMobile();
   // #126: un Próximo con fecha anterior al día 1 del mes en curso ya no desaparece de la
   // proyección — carga íntegro en el mes actual, y esta marca es la única señal que el usuario
@@ -163,7 +161,7 @@ export function UpcomingView({
       ? "Sin acceso hasta aprobación."
       : planningLoading
         ? "Cargando…"
-        : `Importes · ${currency}`;
+        : "Importes";
 
   // Política de ceros: la unidad es el BLOQUE. Con flujos planificados se pintan las tres
   // cifras aunque alguna valga 0 €; sin ninguno, la banda y la distribución desaparecen y
@@ -196,12 +194,6 @@ export function UpcomingView({
         <h2 className="workspace-title">Próximos</h2>
         <p className="workspace-sub">{planningWorkspaceSub}</p>
       </div>
-
-      {hasMembership && ledgerPersonScope === "mine" ? (
-        <div className="banner info-banner tight-banner">
-          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
-        </div>
-      ) : null}
 
       {hasMembership && !planningIsEmpty ? (
         <div className="metric-grid workspace-kpi-strip planning-direction-strip">
@@ -378,7 +370,7 @@ export function UpcomingView({
                     />
                   </label>
                   <label className="field">
-                    <span>Hasta (opc. — vacío = sin fin)</span>
+                    <span>Hasta (opcional — vacío = sin fin)</span>
                     <input
                       type="date"
                       value={planningFormWindowEnd}
@@ -389,7 +381,7 @@ export function UpcomingView({
               ) : (
                 <>
                   <label className="field">
-                    <span>Fecha prevista (opc.)</span>
+                    <span>Fecha prevista (opcional)</span>
                     <input
                       type="date"
                       value={planningFormDue}
@@ -417,7 +409,7 @@ export function UpcomingView({
               )}
             </div>
             <label className="field">
-              <span>Notas (opc.)</span>
+              <span>Notas (opcional)</span>
               <textarea
                 value={planningFormNotes}
                 onChange={(e) => setPlanningFormNotes(e.target.value)}
