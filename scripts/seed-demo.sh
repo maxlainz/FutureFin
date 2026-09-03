@@ -55,12 +55,16 @@ ymd() { python3 -c "
 import datetime as d
 print((d.date.today() + d.timedelta(days=int('$1'))).isoformat())
 "; }
+# Día 15 de cada mes, salvo en el mes en curso, donde se recorta a HOY: un alta manual con
+# op_date futura es 400 `op_date_in_future`, y hasta 5.0.0 este script solo funcionaba del 15 en
+# adelante (encontrado sembrando la demo un día 3).
 month_ago() { python3 -c "
 import datetime as d
-t = d.date.today().replace(day=15)
-m = t.month - int('$1'); y = t.year
+today = d.date.today()
+m = today.month - int('$1'); y = today.year
 while m <= 0: m += 12; y -= 1
-print(d.date(y, m, 15).isoformat())
+day = min(15, today.day) if (y, m) == (today.year, today.month) else 15
+print(d.date(y, m, day).isoformat())
 "; }
 
 echo "Sembrando datos de demo en $BASE"
