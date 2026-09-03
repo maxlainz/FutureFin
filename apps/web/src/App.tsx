@@ -3844,6 +3844,7 @@ export default function App() {
         <Suspense fallback={<p className="muted tight">Cargando…</p>}>
         {activeTab === "summary" ? (
           <SummaryView
+            navigate={navigate}
             // Los CTA de estado vacío abren un modal de alta: sin `canEditLedger` el modal no
             // se monta (la vista destino lo gatea), así que el botón llevaría a una pantalla
             // donde no pasa nada. Sin `onAction`, `EmptyState` se queda en texto.

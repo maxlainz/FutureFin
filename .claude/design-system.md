@@ -253,6 +253,8 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 
 > **Radio-cards de configuración (`.retirement-mode-card`/`.retirement-mode-grid`)**: NO son un segmented — son `<label>` con un `<input type="radio" className="sr-only">` dentro, estilados como tarjeta (borde + `is-active` con tinte de acento). Nacieron para el modo del objetivo anual de Jubilación y 5.0.0 (D26, issue #207) los reusa tal cual para las **5 tarjetas de estrategia** (`RetirementView.tsx`, modificadora `.retirement-strategy-grid`: mismo `grid-template-columns` pero `repeat(auto-fit, minmax(min(100%, 15rem), 1fr))` porque cinco no caben en la rejilla fija de 3 del modo del objetivo — no-op en escritorio, colapsa solo en móvil, sin breakpoint nuevo).
 >
+> **Tarjeta de plan (`.plan-card-grid`/`.plan-card`)** (5.0.0, D27/D32, issue #207, `SummaryView.tsx`): tarjeta de ESTADO, no un KPI — reusa la piel de `.metric-card` (papel + filete suave + `--ff-radius-kpi` + `--ff-shadow-flat`) pero su cifra grande no es dinero, así que solo el hito va en monoespaciada; cuando no hay hito, el texto cae a la tipografía del cuerpo atenuada (`.plan-card-milestone--absent`) para que una explicación no se lea como un dato exacto. `.plan-card-detail` es un **slot siempre reservado** (`&nbsp;` sin edad), misma disciplina que el paréntesis de `MetricCard`: sin él, dos tarjetas del hogar con y sin edad dejan la línea de estado a alturas distintas. El estado rojo (`.plan-card--danger` + `.plan-card-status--danger`) usa **el mismo tinte que `.error-banner`** (`--ff-neg` al 8 % sobre `--ff-paper`) — un solo vocabulario de «esto va mal» en toda la app. En Hogar la rejilla lleva una tarjeta por miembro y colapsa a una columna ≤640px.
+>
 > **`.retirement-radio-stack`** (radios nativos en línea, `<label class="field checkbox-field">` por opción, `role="radiogroup"` en el contenedor): existía en `App.css` **sin ningún consumidor** antes de 5.0.0. `9ae5c24` le da los dos primeros — la base del objetivo (`perpetuity`/`bridge_to_pension`) y el `kind` de la regla de retirada, ambos en `RetirementView.tsx` (`grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` → 2). No lo confundas con el segmented: aquí el foco/tabulación son los `<input>` nativos, no un `role="group"` de botones.
 
 ## Iconografía
@@ -274,6 +276,22 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 - **«Hoy» vive en la fila del eje X** (4.0.6): la etiqueta del divisor de hoy se alinea con las etiquetas de año (misma baseline y rotación), no flota sobre el plot pegada al subtítulo; cuando está visible, se apartan las etiquetas de año a <40px del divisor. El divisor vertical no cambia.
 - **Comportamiento móvil (≤640, `useIsMobile`)** (4.0.6): estilo MiniProjection pero navegable — (1) «Vista cercana» activada POR DEFECTO vía override efímero en `ProjectionView` (estado, no storage: el toggle funciona pero nunca pisa `PROJECTION_FOCUS_STORAGE_KEY` → escritorio conserva su memoria); (2) sin etiquetas del eje Y ni caption EUR (`hideYAxisLabels` → `ml=16`, el plot gana todo el margen; el valor exacto vive en el tooltip); (3) la 2.ª línea de meta se parte en dos (`compactHeader` reserva la altura). La vista cercana (todas las plataformas) deja **margen tras el último hito** (~12 %) para que la etiqueta del marcador «Jubilación» no quede pisada por el borde, y el suelo de los milestones es `mt+22` para que un hito pegado al techo del plot no pierda la mitad superior de su etiqueta por el clip.
 - **Tooltip independiente del tema**: forzado a `color: #fafafa !important` + bg `rgba(10,10,10,0.92)`. Antes usaba `var(--ff-frame)` que en oscuro daba texto oscuro sobre fondo oscuro.
+- **Tira de fases bajo el eje X** (5.0.0, D29, issue #207): banda de 12px (+12 para la fila de
+  rótulos de las marcas) entre el suelo del plot y la fila de etiquetas del eje X, con un tramo por
+  fase («Trabajo» / «Media jornada» / «Jubilado»; en móvil «Trab.» / «½ jorn.» / «Jub.»), la
+  pensión como **flecha** y el cruce del objetivo como **tick discontinuo rotulado «Cruce»** —
+  este último SOLO cuando `retirement_trigger === "target_age"` y el cruce cae en un mes distinto
+  del de la jubilación efectiva; cuando coinciden se rotula una sola vez, porque es un solo hecho.
+  Los **marcadores verticales** siguen siendo exclusivos de la jubilación efectiva (carriles y
+  `isJubilacion` intactos): la tira es **aditiva**. Su alto sale del **plot** (`ph`), jamás de
+  lienzo extra — la misma regla que los 38px de las etiquetas rotadas, y por el mismo motivo (un
+  viewBox más alto que la caja medida haría que `meet` encogiera el dibujo con bandas laterales).
+  Sin fases ni marcas la tira mide 0 y la geometría es byte a byte la de 4.15.x. Color: **tinte
+  progresivo del acento** (`--ff-accent` al 7 / 18 / 32 % contra `--ff-paper`), la misma escala
+  ordinal que las variantes de `.metric-card`, no color decorativo. Modelo puro en
+  [`lib/phase-strip.ts`](../apps/web/src/lib/phase-strip.ts) — **todo por `month_index`**, nunca
+  por posición del array. `MiniProjection` tiene una versión reducida opt-in (`showPhases`): banda
+  de 6px sin rótulos.
 - **Milestones con collision-avoidance**: si dos milestones quedan cerca horizontalmente, el segundo sube al siguiente "carril" (14px arriba) y la línea punteada se estira hasta la nueva `y2`. Ver [`ProjectionNetWorthChart.tsx`](../apps/web/src/views/ProjectionNetWorthChart.tsx) en el bloque `(() => { … lanes … })()`.
 
 ## Paneles de Ajustes — norma de texto (4.0.6)
@@ -331,7 +349,8 @@ ocultar.
 
 Re-verificado 2026-09-03 contra los commits `b413471` (WP7 1/3 — vista «Yo» por defecto,
 segmentado «Yo | Hogar», hogar de solo lectura, aviso de alta de Jubilación) y `9ae5c24` (WP7 2/3
-— tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo) de la rama
+— tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo), más la
+rebanada WP7 3a (tira de fases del chart de Proyección y tarjeta «Plan» del Resumen), de la rama
 `release/5.0.0`, issue #207. Re-verificar con:
 
 - Segmentado de la TopBar: `grep -n "ff-topbar-scope" apps/web/src/App.css apps/web/src/App.tsx`
@@ -340,4 +359,7 @@ segmentado «Yo | Hogar», hogar de solo lectura, aviso de alta de Jubilación) 
 - `.retirement-radio-stack` tiene consumidores (cero antes de `9ae5c24`): `grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` (≥1)
 - Excepción de solo lectura en Movimientos: `grep -n "disabled={!canEdit" apps/web/src/views/GastosView.tsx`
 - Anclas actuales del freezer: `grep -n 'App.css:' apps/web/src/styles/no-hex-outside-theme.test.ts` — deben casar con `grep -n "rgba(0, 0, 0," apps/web/src/App.css`
+- Tira de fases (clases y tokens): `grep -n "projection-phase-band\|projection-phase-label\|projection-phase-mark-label" apps/web/src/App.css apps/web/src/views/ProjectionNetWorthChart.tsx apps/web/src/components/charts/MiniProjection.tsx`
+- Su alto sale del plot, no de lienzo extra: `grep -n "layoutDims.ph - xAxisExtraBottom - phaseStripH" apps/web/src/views/ProjectionNetWorthChart.tsx`
+- Tarjeta de plan: `grep -n "plan-card" apps/web/src/App.css apps/web/src/views/SummaryView.tsx`
 - El viejo `<select>` de vista desapareció: `grep -n "ledger-view-select" apps/web/src/App.css apps/web/src/App.tsx` (debe imprimir vacío)

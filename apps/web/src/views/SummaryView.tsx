@@ -5,6 +5,9 @@ import type {
   SummaryResponse,
 } from "../api/types";
 import { EmptyState } from "../components/EmptyState";
+import { HelpPopover } from "../components/HelpPopover";
+import { HELP_TEXTS } from "../lib/helpTexts";
+import { appUrl } from "../lib/basePath";
 import { MetricCard } from "../components/MetricCard";
 import {
   SummaryBreakdownBlock,
@@ -28,6 +31,13 @@ import {
 } from "../lib/format";
 import { runwaySwrParenthetical } from "../lib/fire";
 import { formatDeltaCurrency } from "../lib/expenses";
+import { RETIREMENT_STRATEGY_LABEL } from "../lib/retirementProfile";
+import {
+  type PlanCardModel,
+  planMilestone,
+  planStatusFromWarnings,
+} from "../lib/plan-card";
+import { TAB_PATH, settingsSubTabPath } from "../lib/navigation";
 
 type LedgerPersonScope = "household" | "mine";
 
@@ -40,6 +50,7 @@ export function SummaryView({
   summary,
   summaryBusy,
   projectionSeries,
+  navigate,
   onAddFirstAsset,
   onAddFirstBudgetEntry,
 }: {
@@ -52,6 +63,9 @@ export function SummaryView({
   summary: SummaryResponse | null;
   summaryBusy: boolean;
   projectionSeries: ProjectionSeriesApi | null;
+  /** Router de la app: la tarjeta «Tu plan» enlaza a «Tu cuenta» y a «Jubilación» cuando falta
+   *  un dato del perfil. */
+  navigate: (path: string, replace?: boolean) => void;
   /**
    * Lleva al formulario de nuevo activo (pestaña Activos con el modal ya abierto). El Resumen
    * no tiene formularios propios, así que su estado vacío delega en el de Activos — pero cae
@@ -195,6 +209,50 @@ export function SummaryView({
   // rejillas de ceros ni tres paneles diciendo «Sin datos.».
   const nothingYet = ledgerEmpty && healthEmpty;
 
+  // ── Tarjeta «Tu plan» (D27) y tarjetas por miembro (D32) ──────────────────────────────
+  //
+  // En «Yo» es UNA tarjeta con la estrategia del usuario; en «Hogar» el agregado no tiene plan
+  // (`strategy: null`, `jubilacion_absent_reason: "household_aggregate"`) y lo que hay son N
+  // planes: uno por fila de `members[]`. Los tres campos que se pintan salen del servidor tal
+  // cual — la vista no deriva ninguna fecha ni ninguna edad.
+  const planCards: PlanCardModel[] = (() => {
+    if (!hasMembership || !projectionSeries) return [];
+    if (ledgerPersonScope === "household") {
+      return (projectionSeries.members ?? []).map((m) => ({
+        key: m.user_id,
+        name: m.username,
+        strategy: m.strategy,
+        milestone: planMilestone({
+          jubilacionMonthIndex: m.jubilacion_month_index,
+          // El agregado no publica fecha civil por miembro (solo el mes y la edad): con la edad
+          // basta para el hito y no se inventa una fecha que el servidor no ha calculado.
+          jubilacionDateYmd: null,
+          jubilacionAge: m.jubilacion_age,
+          jubilacionAbsentReason: null,
+        }),
+        status: planStatusFromWarnings(m.warnings),
+      }));
+    }
+    return [
+      {
+        key: "mine",
+        name: null,
+        strategy: projectionSeries.strategy ?? null,
+        milestone: planMilestone({
+          jubilacionMonthIndex: projectionSeries.jubilacion_month_index,
+          jubilacionDateYmd: projectionSeries.jubilacion_date_ymd,
+          jubilacionAge: projectionSeries.jubilacion_age,
+          jubilacionAbsentReason: projectionSeries.jubilacion_absent_reason,
+        }),
+        status: planStatusFromWarnings(projectionSeries.warnings),
+      },
+    ];
+  })();
+
+  const goToPlanAction = (target: "account" | "retirement") => {
+    navigate(target === "account" ? settingsSubTabPath("general") : TAB_PATH.retirement);
+  };
+
   const liquidAssetsPctOfTotalAssets =
     showMetrics && summary && fh
       ? (() => {
@@ -251,6 +309,76 @@ export function SummaryView({
           <MetricCard label="Pasivos totales" value={tl} />
           <MetricCard label="Ratio deuda / activos" helpId="summary.debt_to_assets_ratio" value={dta} />
         </div>
+      ) : null}
+
+      {/* D27 — tarjeta «Plan» FIJA: la estrategia decide qué significa la fecha de jubilación que
+          el resto de la app enseña, así que el Resumen la dice sin que haya que ir a Jubilación.
+          En Hogar (D32) el agregado no tiene un plan: se pinta una tarjeta compacta por miembro,
+          que es lo único que explica de quién es cada marcador del chart. */}
+      {hasMembership && !nothingYet && planCards.length > 0 ? (
+        <section className="panel">
+          <div className="panel-head-row">
+            <h3 className="panel-title">
+              {ledgerPersonScope === "household" ? "Planes del hogar" : "Tu plan"}
+            </h3>
+            <HelpPopover
+              title={HELP_TEXTS["summary.plan"].title}
+              body={HELP_TEXTS["summary.plan"].body}
+            />
+          </div>
+          <div className="plan-card-grid bordered-top">
+            {planCards.map((c) => (
+              <article
+                key={c.key}
+                className={`plan-card${c.status.tone === "danger" ? " plan-card--danger" : ""}`}
+              >
+                {c.name ? <div className="plan-card-name">{c.name}</div> : null}
+                <div className="plan-card-strategy">
+                  {c.strategy ? RETIREMENT_STRATEGY_LABEL[c.strategy] : METRIC_DASH}
+                </div>
+                <div
+                  className={`plan-card-milestone${c.milestone.reached ? "" : " plan-card-milestone--absent"}`}
+                >
+                  {c.milestone.value}
+                </div>
+                {/* Slot SIEMPRE reservado (misma disciplina que el paréntesis de MetricCard):
+                    sin él, dos tarjetas del hogar con y sin edad quedan desalineadas. */}
+                <div className="plan-card-detail">
+                  {c.milestone.detail ?? "\u00A0"}
+                </div>
+                <div className={`plan-card-status plan-card-status--${c.status.tone}`}>
+                  {c.status.label}
+                  {c.status.action ? (
+                    <>
+                      {" · "}
+                      <a
+                        href={appUrl(
+                          c.status.action.target === "account"
+                            ? settingsSubTabPath("general")
+                            : TAB_PATH.retirement,
+                        )}
+                        onClick={(e) => {
+                          if (
+                            e.button !== 0 ||
+                            e.metaKey ||
+                            e.altKey ||
+                            e.ctrlKey ||
+                            e.shiftKey
+                          )
+                            return;
+                          e.preventDefault();
+                          goToPlanAction(c.status.action!.target);
+                        }}
+                      >
+                        {c.status.action.label}
+                      </a>
+                    </>
+                  ) : null}
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
       ) : null}
 
       {!nothingYet ? (

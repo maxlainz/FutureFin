@@ -509,6 +509,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   cash_buffer_out_of_range: "El colchón de caja debe estar entre 0 y 60 meses.",
   success_threshold_out_of_range:
     "El umbral de éxito debe estar entre el 50 % y el 99 %.",
+  partial_retirement_required:
+    "«Media jornada» necesita que declares la fase parcial: a qué edad empieza y con qué ingreso.",
   field_set_and_clear:
     "Has pedido a la vez fijar y borrar el mismo campo. Elige una de las dos cosas.",
 
@@ -611,10 +613,28 @@ export const ERROR_MESSAGES: Record<string, string> = {
   // ── Simulación y proyección ───────────────────────────────────────────────────────────
   engine_rejected_input:
     "Con los datos actuales no se puede calcular la proyección. Revisa activos, reglas de reparto y presupuesto.",
+  household_not_simulable:
+    "La vista del hogar no se puede simular: elige tu vista (Yo).",
+  engine_feature_unavailable:
+    "Esta configuración de jubilación aún no está disponible en el motor.",
   task_panic:
     "El cálculo de la proyección se ha interrumpido. Vuelve a intentarlo en unos segundos.",
   months_out_of_range:
     "El horizonte de la proyección debe estar entre 12 y 840 meses.",
+  income_growth_no_op:
+    "Un crecimiento del ingreso del 0 % es justo tu escenario actual: pon otra cifra o quita el supuesto.",
+  income_growth_out_of_range:
+    "El crecimiento real del ingreso debe estar entre −10 % y 20 % al año.",
+  income_steps_too_many:
+    "Son demasiados cambios de ingreso en un mismo escenario: como mucho 24.",
+  income_step_delta_zero:
+    "Un cambio de ingreso de 0 € no cambia nada. Indica cuánto sube o baja, o quítalo.",
+  income_step_timing_ambiguous:
+    "Indica cuándo ocurre cada cambio de ingreso de una sola forma: el mes o la fecha, no las dos.",
+  income_step_month_out_of_range:
+    "Ese cambio de ingreso cae fuera del horizonte que estás proyectando.",
+  income_step_date_out_of_horizon:
+    "Esa fecha de cambio de ingreso queda fuera del horizonte que estás proyectando.",
   retirement_expense_not_positive:
     "El gasto anual en jubilación debe ser mayor que cero.",
   one_off_amount_not_positive:

@@ -118,6 +118,23 @@ src/
 │   │                             #   /v1/assets + /v1/installation/members; null = actual sin owner resoluble),
 │   │                             #   collapsedAssetLegendCap / applyLegendCollapse (chip «+N más»; nunca esconde
 │   │                             #   uno solo), topAssetTooltipRows (top-5 por |valor| + «Otros»). Test: chart-legend.test.ts
+│   ├── phase-strip.ts            # 5.0.0 (D29, issue #207): geometría PURA de la tira de fases del chart —
+│   │                             #   buildPhaseSegments (phase_transitions → tramos contiguos recortados a la ventana,
+│   │                             #   con transitionMonth = el mes REAL del corte aunque la ventana lo tape),
+│   │                             #   phaseAtMonth, buildPhaseMarks (pensión = flecha; «Cruce» SOLO con
+│   │                             #   retirement_trigger === "target_age" y cruce ≠ jubilación efectiva; un tick por
+│   │                             #   miembro en Hogar) y buildHouseholdMemberLegendItems. **Todo en MESES**: no recibe
+│   │                             #   `points`, así que la densidad no puede moverla (test de invariancia
+│   │                             #   monthly ≡ hybrid en phase-strip.test.ts). PHASE_LABELS trae el par largo/corto
+│   │                             #   («Trabajo»/«Trab.», «Media jornada»/«½ jorn.», «Jubilado»/«Jub.»)
+│   ├── plan-card.ts              # 5.0.0 (D27/D32): modelo PURO de la tarjeta «Tu plan» del Resumen —
+│   │                             #   planStatusFromWarnings (PRECEDENCIA: retire_at_age_underfunded rojo >
+│   │                             #   birth_date_missing > target_retirement_age_missing > «En plan»; literal
+│   │                             #   desconocido ⇒ «En plan», nunca hueco) y planMilestone (jubilación EFECTIVA;
+│   │                             #   `null` CON razón = no aplica, `null` SIN razón = no se jubila en el horizonte).
+│   │                             #   `retire_at_age_underfunded` aún NO lo emite el motor (llega con solve.rs): el
+│   │                             #   mapeo se escribe ya para que no se pinte como nada el día que llegue.
+│   │                             #   Test: plan-card.test.ts
 │   ├── history-merge.ts          # mergeProjectionWithHistory(series, history): une la serie histórica (month_index<0) con la
 │   │                             #   proyección en el vértice mes-0; identidad byte-idéntica si history null/vacío/anchor distinto.
 │   │                             #   Con net_worth null (pasivo sin fotografiar entero) cae a assets_total y marca pastIsAssetsOnly:
@@ -173,12 +190,21 @@ src/
 │       ├── CategoryComparisonBars.tsx   # exporta SOLO MonthlyCashflowBars (cash-flow mes a mes desde months[], tokens --cf-income/--cf-expense/--cf-savings; verde/rojo = colores
 │       │                                #   FUNCIONALES de serie, excepción de charts del design system, no chrome). El chart CategoryComparisonBars (barras Budget vs Promedio) y el
 │       │                                #   token --exp-average se ELIMINARON tras 2.0.0: el Real vive en la tabla/KPIs y la tendencia vs presupuesto pasó a la banda de KPIs
-│       ├── MiniProjection.tsx    # SVG compacto reusado en Resumen y Jubilación
+│       ├── MiniProjection.tsx    # SVG compacto reusado en Resumen y Jubilación. 5.0.0: prop `showPhases`
+│       │                         #   (opt-in, default false) = versión REDUCIDA de la tira de fases — banda de
+│       │                         #   6px sin rótulos, misma `buildPhaseSegments` que el chart grande y posicionada
+│       │                         #   con `xAtMonth` (meses), nunca con `xAt` (posiciones). Encendida solo en
+│       │                         #   Jubilación: en la ventana de 12 meses del Resumen la fase no cambia
 │       └── ChartLegend.tsx       # leyenda compartida (chart grande + minis): HTML fuera del SVG, estructurales
 │                                 #   siempre visibles + activos truncados con chip «+N más» (modelo en lib/chart-legend.ts)
 │
 ├── views/                        # one file per tab — receives props from App.tsx, owns local UI state
-│   ├── SummaryView.tsx           # KPIs → Salud financiera → Proyección 12m (zoomY) → Desglose
+│   ├── SummaryView.tsx           # KPIs → **Tu plan** → Salud financiera → Proyección 12m (zoomY) → Desglose.
+│   │                             #   5.0.0 (D27/D32, issue #207): tarjeta «Plan» FIJA entre la banda de KPIs y
+│   │                             #   Salud financiera (`.plan-card-grid`/`.plan-card`, helpId `summary.plan`) —
+│   │                             #   estrategia · hito · estado, con el modelo en `lib/plan-card.ts`. En Hogar,
+│   │                             #   una tarjeta por `members[]` («Planes del hogar»). Necesita la prop
+│   │                             #   `navigate` (nueva): el estado enlaza a «Tu cuenta» o a Jubilación
 │   ├── AssetsView.tsx            # 5.0.0 (§A.2, issue #207): campo «Volatilidad anual % (opc.)» en el form de alta/
 │   │                             #   edición + columna «Volat. % a.a.» en la tabla — solo desktop, y solo si algún
 │   │                             #   activo del grupo declara un valor > 0 (mismo patrón condicional que la columna
@@ -247,6 +273,15 @@ src/
 │   │                                #   negativos con la serie histórica (áreas + marcadores + divisor «Hoy») vía mergeProjectionWithHistory.
 │   │                                #   Overlay fino de cash-flow (v1.6.0): props cashflow/cashflowDaily/onRequestDailyCashflow — pinta la curva
 │   │                                #   fina (fine.grid por month_fraction real, deflactada igual) sobre la zona pasada; daily lazy al hacer zoom histórico.
+│   │                                #   5.0.0 (D29/D32, issue #207): **tira de fases bajo el eje X** (modelo en
+│   │                                #   lib/phase-strip.ts) con su alto sacado del PLOT, nunca de lienzo extra — el
+│   │                                #   viewBox tiene que seguir casando con la caja medida; `xTickBaselineY` unifica
+│   │                                #   la fila de etiquetas X (años y «Hoy»), que antes se calculaba dos veces.
+│   │                                #   Sin fases ni marcas la tira mide 0 y la geometría es la de 4.15.x. Tooltip:
+│   │                                #   «Retirada del mes» / «Recorte» / «Exceso» solo desde retirement_month_index,
+│   │                                #   deflactados con el MISMO factor que el patrimonio. Leyenda: una entrada por
+│   │                                #   miembro en Hogar (TODO nombrado en el propio fichero: la línea fina por
+│   │                                #   miembro espera a que el API publique `members[].series`)
 │   │                                #   Leyenda (4.0.6): HTML fuera del SVG (ChartLegend); el ResizeObserver mide .projection-chart-plot
 │   │                                #   (solo el SVG) y el viewBox casa EXACTO con la caja medida (los 38px de etiquetas X rotadas salen
 │   │                                #   de ph, no de lienzo extra — si no, `meet` encoge el dibujo con bandas laterales). Tooltip: top-5
@@ -552,8 +587,9 @@ See [`tests.md`](tests.md). Setup: Vitest + `node` environment (no jsdom needed 
 
 Re-verified 2026-09-03 against `release/5.0.0` commits `b413471` (WP7 1/3 — vista «Yo» por
 defecto, segmentado «Yo | Hogar», hogar de solo lectura, aviso de alta de Jubilación) y `9ae5c24`
-(WP7 2/3 — tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo),
-issue #207. Re-verify with:
+(WP7 2/3 — tarjetas de estrategia, formulario contextual del perfil, volatilidad del activo) y la
+rebanada WP7 3a (tira de fases del chart, tarjeta «Plan» del Resumen, jubilación efectiva en el
+tile de Jubilación), issue #207. Re-verify with:
 
 - New lib modules exist: `ls apps/web/src/lib/retirement-intro.ts apps/web/src/lib/retirementProfile.ts`
 - `ledger.ts` scope helpers: `grep -n "export function resolveLedgerPersonScope\|export function isScopeReadOnly\|export function ledgerViewAmp\|export const LEDGER_PERSON_SCOPE_STORAGE_KEY" apps/web/src/lib/ledger.ts`
@@ -566,4 +602,8 @@ issue #207. Re-verify with:
 - Asset volatility field: `grep -n "annual_volatility_percent" apps/web/src/api/types.ts apps/web/src/views/AssetsView.tsx`
 - `.retirement-radio-stack` has live consumers: `grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` (≥1; it was defined in `App.css` with zero consumers before `9ae5c24`)
 - Test counts (don't cite the raw number without re-running): `grep -c 'it(' apps/web/src/lib/retirementProfile.test.ts apps/web/src/lib/retirement-intro.test.ts apps/web/src/lib/ledger.scope.test.ts`
+- WP7 3a — tira de fases y tarjeta «Plan»: `ls apps/web/src/lib/phase-strip.ts apps/web/src/lib/plan-card.ts`
+- La tira NO indexa arrays (invariante monthly ≡ hybrid): `grep -n "los mismos tramos con la serie mensual y con la decimada" apps/web/src/lib/phase-strip.test.ts`
+- El chart calcula la fila del eje X UNA vez: `grep -c "xTickBaselineY" apps/web/src/views/ProjectionNetWorthChart.tsx` (≥3: definición + años + «Hoy»)
+- La línea fina por miembro sigue pendiente del API: `grep -n "TODO(5.0.0, D32" apps/web/src/views/ProjectionNetWorthChart.tsx apps/web/src/lib/phase-strip.ts`
 - GastosView's documented exception to "hide, don't disable": `grep -n "disabled={!canEdit" apps/web/src/views/GastosView.tsx` (the two inline `<select>`s — categoría/tipo — stay `disabled`, not hidden)

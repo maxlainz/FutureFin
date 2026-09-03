@@ -427,6 +427,20 @@ export function RetirementView({
       ? projectionSeries.jubilacion_month_index
       : null;
   const mc = projectionSeries?.months ?? 0;
+  /**
+   * El CRUCE del objetivo, que desde 5.0.0 es una LECTURA y ya no el trigger (R8/D17): el mes en
+   * que el líquido habría bastado. Con `asap` coincide con `jubMi` por construcción, así que solo
+   * se enseña cuando manda la edad (`retirement_trigger === "target_age"`), donde los dos meses
+   * pueden separarse en cualquier dirección: te jubilas sin llegar (cruce después) o podrías
+   * haberte ido antes (cruce antes). `null` con razón declarada = la pregunta no aplica; `null`
+   * sin razón = hay objetivo y no se cruza en el horizonte, que es un resultado.
+   */
+  const crossingMi =
+    typeof projectionSeries?.liquid_crossing_month_index === "number"
+      ? projectionSeries.liquid_crossing_month_index
+      : null;
+  const crossingIsSeparateReading =
+    projectionSeries?.retirement_trigger === "target_age";
   const serverTargetToday =
     projectionSeries?.jubilacion_target_net_worth != null
       ? parseDisplayDecimal(projectionSeries.jubilacion_target_net_worth)
@@ -653,8 +667,15 @@ export function RetirementView({
                       : undefined
               }
             />
+            {/* 5.0.0 (R8): esta tarjeta ya NO es «el primer cruce». Es la jubilación EFECTIVA
+                —el mes en que el motor te jubila de verdad, sea por cruce o por edad—, que es
+                el mes que marcan el chart y el Resumen. El cruce del objetivo pasa a ser una
+                lectura y solo aparece debajo cuando manda la edad y los dos meses difieren:
+                con «Cuanto antes» son el mismo instante y rotularlo dos veces sugeriría dos
+                hechos donde hay uno. */}
             <MetricCard
-              label="Primer cruce"
+              label="Jubilación"
+              helpId="retirement.crossing_reading"
               value={
                 retirementMetricsReady && jubMi !== null && mc > 0
                   ? `~${projectionXTickLabel(jubMi, mc, {
@@ -670,9 +691,21 @@ export function RetirementView({
                   ? complementaryProjectionTickLabel(jubMi, mc, axisAgeMode, lblOpts)
                   : ""
               }
+              detail={
+                retirementMetricsReady && crossingIsSeparateReading && mc > 0
+                  ? crossingMi !== null
+                    ? `Cruce del objetivo: ${projectionXTickLabel(crossingMi, mc, {
+                        ageUiMode: axisAgeMode,
+                        birthDateIso: axisBirth,
+                        anchorDateYmd: axisAnchor,
+                        calendarTz,
+                      })}`
+                    : "Cruce del objetivo: no cruza en el horizonte"
+                  : undefined
+              }
             />
             <MetricCard
-              label="Años hasta el cruce"
+              label="Años hasta la jubilación"
               value={
                 retirementMetricsReady && jubMi !== null
                   ? formatYearsEsFromMonths(jubMi)
@@ -758,6 +791,9 @@ export function RetirementView({
                 height={240}
                 showFire={hasFire}
                 showJub={true}
+                /* D29 reducida: la banda de fases bajo el plot. Aquí sí (es la vista del plan);
+                   en el mini de 12 meses del Resumen no, porque en un año no cambia la fase. */
+                showPhases
                 showAreas={false}
                 zoomY
                 clampToMonth={clampToMonth}
@@ -791,7 +827,10 @@ export function RetirementView({
                     ? ([
                         {
                           key: "jub",
-                          label: `Primer cruce · ${jubLabel ?? ""}`.trim(),
+                          // R8: la línea marca la jubilación EFECTIVA (cruce o edad), no «el
+                          // primer cruce» — con una estrategia por edad puede no haber cruce
+                          // ninguno y la línea sigue estando donde el motor te jubila.
+                          label: `Jubilación · ${jubLabel ?? ""}`.trim(),
                           color: "var(--ff-accent)",
                           swatch: "line",
                         },
@@ -812,8 +851,8 @@ export function RetirementView({
                   className="muted tight"
                   style={{ marginTop: "0.6rem", fontSize: "0.78rem" }}
                 >
-                  Sin cruce en el horizonte ({horizon} a). Aumenta el horizonte
-                  o ajusta el aporte mensual.
+                  Sin jubilación dentro del horizonte ({horizon} a). Aumenta el
+                  horizonte o ajusta el aporte mensual.
                 </p>
               ) : null}
             </section>

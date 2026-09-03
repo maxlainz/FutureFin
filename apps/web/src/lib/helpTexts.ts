@@ -141,6 +141,18 @@ export const HELP_TEXTS = {
       "aunque sigue guardado en tu historial.",
   },
 
+  "summary.plan": {
+    title: "Tu plan",
+    body:
+      "Tu estrategia de jubilación y adónde te lleva: la fecha en la que la simulación te jubila " +
+      "de verdad y la edad que tendrás entonces. Con «Cuanto antes» esa fecha es el mes en que tu " +
+      "patrimonio líquido cubre el objetivo; con las estrategias por edad es la edad que elegiste, " +
+      "llegue o no el capital. El estado avisa cuando el plan corre con algo distinto de lo que " +
+      "configuraste: sin tu fecha de nacimiento las estrategias por edad se simulan como «Cuanto " +
+      "antes», y en rojo cuando tu ahorro actual no basta para llegar a esa edad. En la vista del " +
+      "hogar hay una tarjeta por persona: cada una lleva su propio plan.",
+  },
+
   // --- Jubilación -----------------------------------------------------------
   "retirement.target": {
     title: "Patrimonio objetivo",
@@ -154,7 +166,22 @@ export const HELP_TEXTS = {
       "cobras cada mes, nunca la cifra bruta — el cálculo ya lo asume así. Y solo cuenta tu " +
       "patrimonio LÍQUIDO para cruzarlo: una vivienda no produce retirada mensual, aunque siga " +
       "sumando en tu patrimonio total. La cifra grande está en euros de hoy; el paréntesis es " +
-      "ese mismo objetivo llevado al mes del cruce con la inflación configurada.",
+      "ese mismo objetivo llevado al mes del cruce con la inflación configurada. El objetivo se " +
+      "calcula y se dibuja siempre, pero solo DECIDE la fecha en «Cuanto antes» y en «Puente " +
+      "hasta la pensión»: en las estrategias por edad manda la edad y este número pasa a ser la " +
+      "referencia contra la que se lee si llegas o no.",
+  },
+  "retirement.crossing_reading": {
+    title: "Jubilación",
+    body:
+      "El mes en que la simulación te jubila DE VERDAD: es la fecha que marcan el chart y el " +
+      "Resumen, y el primer mes en que dejas de ingresar tu sueldo y empiezas a vivir de tu " +
+      "patrimonio. Con «Cuanto antes» y con «Puente hasta la pensión» ese mes es el del cruce con " +
+      "tu objetivo. Con las estrategias por edad manda la edad que elegiste, llegue o no el " +
+      "capital, y entonces aparece debajo una segunda fecha: el «cruce del objetivo», que es solo " +
+      "una LECTURA — cuándo tu patrimonio líquido habría bastado. Si cae después, te jubilas sin " +
+      "haber llegado; si cae antes, podrías haberte ido antes. Cuando las dos fechas coinciden se " +
+      "muestra una sola: es el mismo hecho.",
   },
   "retirement.strategy": {
     title: "Tu estrategia de jubilación",

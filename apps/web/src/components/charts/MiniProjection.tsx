@@ -16,6 +16,7 @@ import {
   lastPointIndexAtOrBeforeMonth,
   projectionXTickLabel,
 } from "../../lib/projection-chart";
+import { buildPhaseSegments } from "../../lib/phase-strip";
 
 export type MiniProjectionXAxisOpts = {
   ageUiMode: "dates" | "ages";
@@ -30,6 +31,7 @@ export function MiniProjection({
   height = 120,
   showFire = false,
   showJub = true,
+  showPhases = false,
   showAreas = true,
   zoomY = false,
   clampToMonth,
@@ -41,6 +43,13 @@ export function MiniProjection({
   height?: number;
   showFire?: boolean;
   showJub?: boolean;
+  /**
+   * Versión REDUCIDA de la tira de fases del chart grande (D29): una banda de 6px bajo el plot,
+   * sin rótulos ni marcas — a este ancho no cabe texto, y el detalle vive en Proyección. Sigue
+   * siendo la misma geometría (`buildPhaseSegments`, todo por `month_index`), así que el corte
+   * cae en el mismo mes en los dos charts. Opt-in: sin ella la geometría es idéntica a 4.15.x.
+   */
+  showPhases?: boolean;
   showAreas?: boolean;
   /**
    * Si es true, el eje Y se ajusta a `[min, max]` de las series visibles
@@ -146,8 +155,16 @@ export function MiniProjection({
     const padX = 4;
     const padY = 4;
     const axisH = xAxis ? 18 : 0;
+    const phaseSegments = showPhases
+      ? buildPhaseSegments(series.phase_transitions, {
+          startMonth: monthStart,
+          endMonth: monthEnd,
+        })
+      : [];
+    // La banda sale del alto del plot, como el eje: el SVG mide `height` exacto.
+    const phaseH = phaseSegments.length > 0 ? 8 : 0;
     const pw = W - padX * 2;
-    const ph = H - padY * 2 - axisH;
+    const ph = H - padY * 2 - axisH - phaseH;
 
     /** X de un MES concreto (no de una posición): el reparto es temporal, no posicional. */
     const xAtMonth = (m: number) =>
@@ -240,6 +257,8 @@ export function MiniProjection({
       cumulative,
       stackBase,
       jubPos,
+      phaseSegments,
+      phaseH,
     };
   }, [
     series,
@@ -247,6 +266,7 @@ export function MiniProjection({
     height,
     showFire,
     showJub,
+    showPhases,
     showAreas,
     zoomY,
     clampToMonth,
@@ -289,6 +309,8 @@ export function MiniProjection({
     cumulative,
     stackBase,
     jubPos,
+    phaseSegments,
+    phaseH,
   } = computed;
 
   return (
@@ -379,6 +401,33 @@ export function MiniProjection({
         </g>
       ) : null}
 
+      {/* Tira de fases reducida (D29): banda sin rótulos bajo el plot. Las posiciones salen de
+          `xAtMonth` (meses), nunca de `xAt` (posiciones del array): con `density=hybrid` los
+          puntos no son equidistantes y el corte caería en el año equivocado. */}
+      {phaseH > 0
+        ? phaseSegments.map((seg) => {
+            const left = xAtMonth(seg.startMonth);
+            const right = xAtMonth(
+              seg.endMonth >= monthStart + monthSpan
+                ? seg.endMonth
+                : seg.endMonth + 1,
+            );
+            const w = Math.max(0, right - left);
+            if (w <= 0) return null;
+            return (
+              <rect
+                key={`mini-phase-${seg.phase}-${seg.transitionMonth}`}
+                x={left}
+                y={padY + ph + 2}
+                width={w}
+                height={phaseH - 2}
+                rx={1.5}
+                className={`projection-phase-band projection-phase-band--${seg.phase}`}
+              />
+            );
+          })
+        : null}
+
       {/* Eje X: ~5 ticks equidistantes en MESES (no en posiciones del array: con `hybrid` la
           quinta posición es el mes 4 y la última el mes 840, y las etiquetas mentían). */}
       {xAxis ? (
@@ -389,7 +438,7 @@ export function MiniProjection({
             const frac = tickCount - 1 === 0 ? 0 : i / (tickCount - 1);
             ticks.push(Math.round(monthStart + frac * monthSpan));
           }
-          const yBase = padY + ph + 12;
+          const yBase = padY + ph + phaseH + 12;
           return (
             <g>
               {ticks.map((m, i) => (

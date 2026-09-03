@@ -45,6 +45,12 @@ import {
   legendOrderByPeakDesc,
   topAssetTooltipRows,
 } from "../lib/chart-legend";
+import {
+  buildHouseholdMemberLegendItems,
+  buildPhaseMarks,
+  buildPhaseSegments,
+  type PhaseMark,
+} from "../lib/phase-strip";
 import { ChartLegend } from "../components/charts/ChartLegend";
 import {
   formatAxisMoney,
@@ -401,14 +407,32 @@ export function ProjectionNetWorthChart({
 
   // ── Modelo de la leyenda (HTML, fuera del SVG) ──
   const legendStructural = useMemo(
-    () =>
-      buildStructuralLegendItems({
+    () => [
+      ...buildStructuralLegendItems({
         hasFire: hasFireTargetSeries,
         hasHistory: historyStartMonth < 0,
         historyIsAssetsOnly: merged.pastIsAssetsOnly,
         hasContributed: !ccRetired,
       }),
-    [hasFireTargetSeries, historyStartMonth, merged.pastIsAssetsOnly, ccRetired],
+      // D32 — Hogar: la curva es UNA (la Σ), así que lo que la leyenda nombra por miembro es su
+      // marca de jubilación en la tira de fases, con el mismo color. En «Yo» no hay `members[]`
+      // y esto no añade nada.
+      //
+      // TODO(5.0.0, D32 · línea fina por miembro): falta la mitad visual del acuerdo — una
+      // polyline fina por miembro sobre la Σ en grueso. NO se puede pintar hoy: el agregado
+      // publica `members[]` SIN series (`.claude/api-routes.md` §Projection: «Sin series por
+      // miembro»), y son las curvas lo que falta, no el modelo. Cuando el API publique
+      // `members[].series`, se dibujan aquí con el color que ya reparte
+      // `buildHouseholdMemberLegendItems` y su swatch pasa de `dashed` a `line`.
+      ...buildHouseholdMemberLegendItems(series.members),
+    ],
+    [
+      hasFireTargetSeries,
+      historyStartMonth,
+      merged.pastIsAssetsOnly,
+      ccRetired,
+      series.members,
+    ],
   );
 
   // Activos por peak DESC para la leyenda, conservando el color del orden de
@@ -575,7 +599,38 @@ export function ProjectionNetWorthChart({
     const viewHeight = layoutDims.H;
 
     const { W, H, ml, mr, mt, mb, pw } = layoutDims;
-    const ph = Math.max(60, layoutDims.ph - xAxisExtraBottom);
+
+    // ── Tira de fases (D29) ────────────────────────────────────────────────────────────
+    //
+    // La altura de la tira sale del PLOT, igual que los 38px de las etiquetas rotadas: el
+    // viewBox tiene que seguir casando exacto con la caja CSS medida o `meet` encogería el
+    // dibujo entero y lo centraría con bandas laterales. Sin fases que pintar la tira mide 0
+    // y la geometría queda idéntica a 4.15.x — el invariante de «desktop cero».
+    const phaseSegmentsAll = buildPhaseSegments(series.phase_transitions, {
+      startMonth: visibleMonthStart,
+      endMonth: visibleMonthEnd,
+    });
+    const phaseMarksAll = buildPhaseMarks({
+      pensionStartMonthIndex: series.pension_start_month_index,
+      liquidCrossingMonthIndex: series.liquid_crossing_month_index,
+      retirementTrigger: series.retirement_trigger,
+      retirementMonthIndex: series.retirement_month_index,
+      members: series.members,
+      window: { startMonth: visibleMonthStart, endMonth: visibleMonthEnd },
+    });
+    const hasPhaseStrip =
+      phaseSegmentsAll.length > 0 || phaseMarksAll.length > 0;
+    // 12px de banda + 3 de aire; con marcas, 12 más para su fila de rótulos.
+    const phaseStripBandH = hasPhaseStrip ? 12 : 0;
+    const phaseStripH = hasPhaseStrip
+      ? phaseStripBandH + 3 + (phaseMarksAll.length > 0 ? 12 : 0)
+      : 0;
+
+    const ph = Math.max(60, layoutDims.ph - xAxisExtraBottom - phaseStripH);
+    // Fila de etiquetas del eje X: baja lo que ocupe la tira. Una sola definición para los
+    // años y para «Hoy» — hasta 5.0.0 el mismo cálculo estaba escrito dos veces.
+    const xTickBaselineY =
+      mt + ph + phaseStripH + (layoutDims.narrow ? 12 : 14) + (rotateXLabels ? 8 : 0);
 
     // xScale toma un `monthIndex` real (mes desde el inicio del horizonte),
     // no un índice de array. Esto desacopla el render de la densidad de
@@ -658,6 +713,11 @@ export function ProjectionNetWorthChart({
       visibleMonthEnd,
       monthSpan,
       visibleIndices,
+      phaseSegments: phaseSegmentsAll,
+      phaseMarks: phaseMarksAll,
+      phaseStripH,
+      phaseStripBandH,
+      xTickBaselineY,
     };
   }, [
     baseSeries,
@@ -677,6 +737,12 @@ export function ProjectionNetWorthChart({
     planningFlows,
     viewWindow.monthSpan,
     viewWindow.startMonth,
+    series.phase_transitions,
+    series.pension_start_month_index,
+    series.liquid_crossing_month_index,
+    series.retirement_trigger,
+    series.retirement_month_index,
+    series.members,
   ]);
 
   // Captura el commit (post-render) y vuelca measures a consola. Solo cuando
@@ -817,6 +883,11 @@ export function ProjectionNetWorthChart({
     visibleMonthEnd,
     monthSpan,
     visibleIndices,
+    phaseSegments,
+    phaseMarks,
+    phaseStripH,
+    phaseStripBandH,
+    xTickBaselineY,
   } = model;
 
   /** Devuelve el valor del array `values` correspondiente al `month` dado.
@@ -1468,8 +1539,7 @@ export function ProjectionNetWorthChart({
 
         {xTicks.map(({ monthIndex, label }) => {
           const cx = xScale(monthIndex);
-          const tickY =
-            mt + ph + (layoutDims.narrow ? 12 : 14) + (rotateXLabels ? 8 : 0);
+          const tickY = xTickBaselineY;
           return (
             <text
               key={`gx-${monthIndex}`}
@@ -1528,8 +1598,7 @@ export function ProjectionNetWorthChart({
                 subtítulo. Es texto, no controla nada: la navegación no cambia. */}
             {(() => {
               const cx = xScale(0);
-              const tickY =
-                mt + ph + (layoutDims.narrow ? 12 : 14) + (rotateXLabels ? 8 : 0);
+              const tickY = xTickBaselineY;
               return (
                 <text
                   transform={
@@ -1865,6 +1934,104 @@ export function ProjectionNetWorthChart({
           ) : null}
         </g>
 
+        {/* ── Tira de fases bajo el eje X (D29) ─────────────────────────────────────────
+            Va FUERA del clip del plot (es cronología, no serie) y toda su geometría se
+            calcula por `month_index` con la misma `xScale` que las curvas: con
+            `density=hybrid` una transición del mes 271 no tiene punto propio, así que
+            cualquier aritmética sobre posiciones del array la colocaría años fuera de
+            sitio. Los marcadores VERTICALES siguen siendo solo los de la jubilación
+            efectiva (bloque de milestones, `isJubilacion`): la tira es aditiva. */}
+        {phaseStripH > 0 ? (
+          <g>
+            {phaseSegments.map((seg) => {
+              const rawLeft = xScale(seg.startMonth);
+              // Bandas contiguas: el borde derecho es el inicio del mes siguiente, salvo
+              // en la última, que muere en el fin de la ventana.
+              const rawRight =
+                seg.endMonth >= visibleMonthEnd
+                  ? xScale(seg.endMonth)
+                  : xScale(seg.endMonth + 1);
+              const left = Math.max(ml, Math.min(rawLeft, ml + pw));
+              const right = Math.max(ml, Math.min(rawRight, ml + pw));
+              const w = Math.max(0, right - left);
+              if (w <= 0) return null;
+              const label = isMobile ? seg.shortLabel : seg.label;
+              // Misma heurística de ancho que las etiquetas de milestone (5,5px/carácter).
+              const fits = w >= label.length * 5.5 + 8;
+              return (
+                <g key={`phase-${seg.phase}-${seg.transitionMonth}`}>
+                  <rect
+                    x={left}
+                    y={mt + ph + 3}
+                    width={w}
+                    height={phaseStripBandH}
+                    rx={2}
+                    className={`projection-phase-band projection-phase-band--${seg.phase}`}
+                  />
+                  {fits ? (
+                    <text
+                      x={left + w / 2}
+                      y={mt + ph + 3 + phaseStripBandH / 2}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      className="projection-phase-label"
+                    >
+                      {label}
+                    </text>
+                  ) : null}
+                </g>
+              );
+            })}
+            {(() => {
+              // Rótulos de las marcas en UNA fila: el que no cabe conserva su tick y pierde
+              // el texto (nunca se solapan dos rótulos). Igual que los milestones, pero sin
+              // carriles: la tira no tiene alto para apilar.
+              let occupiedRight = -Infinity;
+              return phaseMarks.map((mk: PhaseMark) => {
+                const cx = Math.max(ml, Math.min(xScale(mk.month), ml + pw));
+                const yTop = mt + ph + 3;
+                const yBot = yTop + phaseStripBandH;
+                const label = isMobile ? mk.shortLabel : mk.label;
+                const halfW = (label.length * 5.2) / 2 + 3;
+                const showLabel = cx - halfW > occupiedRight;
+                if (showLabel) occupiedRight = cx + halfW;
+                return (
+                  <g key={`phase-mark-${mk.key}`}>
+                    {mk.kind === "pension" ? (
+                      // Flecha: la pensión no parte una fase, ENTRA en la que haya.
+                      <polygon
+                        points={`${cx},${yTop - 1} ${cx - 4},${yTop - 7} ${cx + 4},${yTop - 7}`}
+                        fill={mk.color}
+                      />
+                    ) : (
+                      <line
+                        x1={cx}
+                        x2={cx}
+                        y1={yTop - 2}
+                        y2={yBot + 2}
+                        stroke={mk.color}
+                        strokeWidth={mk.kind === "member" ? 1.6 : 1.2}
+                        strokeDasharray={mk.kind === "crossing" ? "2 2" : undefined}
+                      />
+                    )}
+                    {showLabel ? (
+                      <text
+                        x={cx}
+                        y={yBot + 10}
+                        textAnchor="middle"
+                        className="projection-phase-mark-label"
+                        fill={mk.color}
+                      >
+                        {label}
+                      </text>
+                    ) : null}
+                  </g>
+                );
+              });
+            })()}
+          </g>
+        ) : null}
+
         {!isMobile ? (
           <text
             transform={`translate(${Math.min(30, ml * 0.32)}, ${mt + ph / 2}) rotate(-90)`}
@@ -1925,6 +2092,39 @@ export function ProjectionNetWorthChart({
               {formatCurrencyOrDashNumber(cc[hover], currencyIso)}
             </div>
           ) : null}
+          {/* Flujos de la RETIRADA (5.0.0, §B.8) — solo en los meses jubilados: antes de la
+              jubilación son cero por construcción y una fila de «0 €» en cada punto del
+              horizonte de acumulación es ruido, no información. Se deflactan con el MISMO
+              factor que el patrimonio de arriba, o el tooltip mezclaría euros de hoy con
+              euros nominales del mes en la misma caja. `withdrawal_shortfall` y
+              `withdrawal_excess` solo se pintan si no son cero: con la regla `fixed_real`
+              (el default) son cero SIEMPRE. */}
+          {(() => {
+            const p = pts[hover]!;
+            const retMi = series.retirement_month_index;
+            if (retMi == null || p.month_index < retMi) return null;
+            const f = deflationFactorAt(p.month_index, effectivePct);
+            const money = (v: number | undefined) =>
+              v === undefined || !Number.isFinite(v) ? null : v * f;
+            const w = money(p.withdrawal);
+            const short = money(p.withdrawal_shortfall);
+            const excess = money(p.withdrawal_excess);
+            return (
+              <>
+                {w !== null ? (
+                  <div>
+                    Retirada del mes — {formatCurrencyNumber(w, currencyIso)}
+                  </div>
+                ) : null}
+                {short !== null && Math.abs(short) >= 0.5 ? (
+                  <div>Recorte — {formatCurrencyNumber(short, currencyIso)}</div>
+                ) : null}
+                {excess !== null && Math.abs(excess) >= 0.5 ? (
+                  <div>Exceso — {formatCurrencyNumber(excess, currencyIso)}</div>
+                ) : null}
+              </>
+            );
+          })()}
           {(() => {
             // Top-N por |valor| en el mes hovered + agregado «Otros»: el tooltip no
             // escala listando N activos (misma disciplina que la leyenda).

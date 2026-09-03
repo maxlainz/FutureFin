@@ -450,6 +450,24 @@ export type ProjectionPointApi = {
    * pasivos. Es la base que decide el cruce FIRE (comparar contra fire_target_series).
    */
   net_worth_liquid?: number;
+  /**
+   * f64 (5.0.0, §B.8): **retirada NETA del mes** en euros NOMINALES — los euros que de verdad
+   * salieron de los activos para cubrir el déficit de caja. `0` en los meses de acumulación y en
+   * el mes 0. No es el gasto (el ingreso de la fase lo cubre primero) ni la venta BRUTA (el
+   * impuesto de la plusvalía se paga vendiendo de más y ese exceso sigue dentro del patrimonio).
+   * Es un flujo del MES, no un acumulado, y se decima por densidad igual que `net_worth`.
+   */
+  withdrawal?: number;
+  /**
+   * f64 (5.0.0): recorte de la regla de retirada, `max(0, necesidad − permitido)`. **Informativo**
+   * (D22/D24): no resta patrimonio, no cuenta como fracaso y NO es `uncovered_deficit_total`
+   * (eso mide lo que los activos no pudieron vender). Todo ceros mientras la regla sea
+   * `fixed_real`, que no tiene techo.
+   */
+  withdrawal_shortfall?: number;
+  /** f64 (5.0.0): exceso de la regla sobre la necesidad en modo `rule_is_spend` (se vende y se
+   *  gasta). Todo ceros con `fixed_real` / `ceiling`. */
+  withdrawal_excess?: number;
 };
 
 export type ProjectionMilestoneApi = {
@@ -463,6 +481,47 @@ export type AssetSeriesApi = {
   asset_name: string;
   /** f64[] (paralelo a points). */
   values: number[];
+};
+
+/** Qué disparó la jubilación de la simulación (5.0.0, D17). */
+export type RetirementTriggerApi = "liquid_crossing" | "target_age";
+
+/** Fase del motor por la que pasa la simulación (5.0.0, §B.1). Monótonas: la que no ocurre no
+ *  aparece en `phase_transitions`. */
+export type ProjectionPhaseApi = "accumulating" | "partial" | "retired";
+
+/** Inicio de una fase, en la rejilla de `points[].month_index` (NUNCA una posición de array). */
+export type PhaseTransitionApi = {
+  phase: ProjectionPhaseApi;
+  month_index: number;
+};
+
+/** Lecturas de UN miembro dentro del agregado del hogar (5.0.0, D9 / §D). Sin series: el hogar
+ *  publica UNA curva y esto dice de quién es cada marcador. */
+export type HouseholdMemberProjectionApi = {
+  user_id: string;
+  username: string;
+  strategy: RetirementStrategyApi;
+  /** Mes EFECTIVO de jubilación de este miembro, en la rejilla común del hogar. `null` = no se
+   *  jubila dentro del horizonte. */
+  jubilacion_month_index: number | null;
+  /** Años cumplidos de ESTE miembro en ese mes (con SU fecha de nacimiento). */
+  jubilacion_age: number | null;
+  /** Cruce del líquido con SU objetivo — lectura, aunque su estrategia se dispare por edad. */
+  liquid_crossing_month_index: number | null;
+  /** El mes efectivo otra vez, con el nombre del motor (= `jubilacion_month_index`, R8). */
+  retirement_month_index: number | null;
+  /** Mes «coast». **Siempre `null` hoy**: lo calcula la bisección de `solve.rs`, que no está en
+   *  esta ola; se publica ya para que el consumidor no cambie de forma cuando llegue. */
+  coast_fire_month_index: number | null;
+  /** Mes de inicio de la media jornada. `null` hasta WP3. */
+  partial_retirement_month_index: number | null;
+  /** Mes de inicio de la pensión con fecha. `null` hasta WP3. */
+  pension_start_month_index: number | null;
+  /** Mes en que la cartera de ESTE miembro se vacía (el agregado publica el MÍNIMO). */
+  assets_depleted_month_index: number | null;
+  /** Avisos de este miembro (p. ej. `birth_date_missing`). */
+  warnings: string[];
 };
 
 export type ProjectionSeriesApi = {
@@ -554,6 +613,52 @@ export type ProjectionSeriesApi = {
   savings_income_basis?: SavingsAvgBasisApi;
   /** Procedencia del lado GASTO del promedio. */
   savings_expense_basis?: SavingsAvgBasisApi;
+
+  // ── 5.0.0 — estrategia, fases y agregado del hogar (§B.8, §C, §D del plan de #207) ──────
+  /** Estrategia con la que se simuló. **`null` en `view=household`**: el agregado suma N
+   *  simulaciones y la de cada miembro viaja en `members[]`. Decide QUÉ significa
+   *  `jubilacion_month_index` (un objetivo alcanzado o una edad impuesta). */
+  strategy?: RetirementStrategyApi | null;
+  /** Qué DISPARÓ la jubilación: `liquid_crossing` (el capital llegó) o `target_age` (la edad
+   *  manda, llegue o no — D17). `null` en `household`. */
+  retirement_trigger?: RetirementTriggerApi | null;
+  /** Mes EFECTIVO de jubilación, en la rejilla de `points[].month_index`. **El mismo valor** que
+   *  `jubilacion_month_index` (R8): viaja con los dos nombres porque `jubilacion_*` es el
+   *  contrato publicado desde 1.x. `null` en `household`. */
+  retirement_month_index?: number | null;
+  /** Posición (índice de array) del mes de jubilación en `points`. Gemelo de
+   *  `jubilacion_series_position`, misma convención (último punto servido cuyo `month_index` no
+   *  pasa del mes de jubilación). */
+  retirement_series_position?: number | null;
+  /** Cruce del líquido con el objetivo FIRE — **LECTURA PURA** desde 5.0.0. Con `asap` coincide
+   *  con `retirement_month_index`; con una estrategia por edad puede caer después (te jubilas sin
+   *  llegar) o antes (podrías haberte ido antes). `null` **sin** razón = hay objetivo y no se
+   *  cruza dentro del horizonte. */
+  liquid_crossing_month_index?: number | null;
+  /** `household_aggregate` | `no_fire_target`. `null` ⟺ el cruce es una pregunta con sentido. */
+  liquid_crossing_absent_reason?: string | null;
+  /** Por qué los `jubilacion_*`/`retirement_*` están vacíos POR CONSTRUCCIÓN:
+   *  `household_aggregate` | `no_retirement_trigger`. `null` ⟺ hay trigger, y entonces un índice
+   *  nulo significa «no se alcanza dentro del horizonte», que es un resultado, no un hueco. */
+  jubilacion_absent_reason?: string | null;
+  /** Por qué falta el marcador «tu dinero trabaja más que tú» (`household_aggregate`). */
+  compound_outpaces_true_savings_absent_reason?: string | null;
+  /** Fases atravesadas y el mes de la rejilla en que empieza cada una. Siempre arranca con
+   *  `accumulating` en el mes 0. **Vacío en `household`**. El orden ES el dato: las fases son
+   *  monótonas y la que no ocurre no aparece. */
+  phase_transitions?: PhaseTransitionApi[];
+  /** Primer mes con pensión pública con fecha. `null` hasta WP3. */
+  pension_start_month_index?: number | null;
+  /** Primer mes de media jornada. `null` hasta WP3. */
+  partial_retirement_month_index?: number | null;
+  /** Avisos de esta simulación (literales cerrados: `birth_date_missing`,
+   *  `target_retirement_age_missing`). Vacío = nada que advertir. En `household` va vacío y los
+   *  avisos viajan por miembro. */
+  warnings?: string[];
+  /** Un elemento por miembro del hogar, **solo en `view=household`** (D9). Vacío en `mine`.
+   *  **Sin series por miembro** (llegarán como `members[].series` en una ola posterior del API):
+   *  esto explica de quién es cada marcador. */
+  members?: HouseholdMemberProjectionApi[];
 };
 
 export type FfbackupImportCounts = {

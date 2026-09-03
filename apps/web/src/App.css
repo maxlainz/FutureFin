@@ -4058,3 +4058,154 @@ fieldset.retirement-config-stack {
   border-left: 2px solid var(--ff-line-soft);
   padding-left: 10px;
 }
+
+/* ============================================================
+   TARJETA «PLAN» DEL RESUMEN (5.0.0, D27/D32, issue #207)
+   ------------------------------------------------------------
+   Una tarjeta en «Yo», N (una por miembro) en «Hogar». Reusa el
+   lenguaje visual de `.metric-card` (papel + filete suave + radio
+   de KPI) en vez de inventar una piel nueva: es una tarjeta de
+   estado, no un KPI, así que la cifra grande no es monoespaciada
+   —no es dinero— pero todo lo demás casa con la banda de arriba.
+   Cero hex: solo tokens y color-mix sobre ellos.
+   ============================================================ */
+.plan-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+  gap: 0.65rem;
+  padding-top: 0.85rem;
+}
+
+.plan-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+  padding: 0.7rem 0.85rem;
+  background: var(--ff-paper);
+  border: 1px solid var(--ff-line-soft);
+  border-radius: var(--ff-radius-kpi);
+  box-shadow: var(--ff-shadow-flat);
+}
+
+/* Estado rojo (D17/D28): el plan está completo y NO llega. Mismo tinte que
+   `.error-banner` — un solo vocabulario de «esto va mal» en toda la app. */
+.plan-card--danger {
+  background: color-mix(in oklch, var(--ff-neg) 8%, var(--ff-paper));
+  border-color: color-mix(in oklch, var(--ff-neg) 45%, var(--ff-line-soft));
+}
+
+.plan-card-name {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ff-ink-soft);
+  font-weight: 500;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan-card-strategy {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ff-ink);
+  line-height: 1.25;
+}
+
+.plan-card-milestone {
+  font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 1.05rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  color: var(--ff-ink);
+}
+
+/* Sin hito no hay cifra: es una explicación, y se pinta como tal (misma
+   tipografía del cuerpo, atenuada) para no leerse como un dato exacto. */
+.plan-card-milestone--absent {
+  font-family: inherit;
+  font-size: 0.86rem;
+  font-weight: 500;
+  letter-spacing: normal;
+  color: var(--ff-ink-soft);
+}
+
+/* Slot SIEMPRE reservado (`&nbsp;` cuando no hay edad): sin él, dos tarjetas
+   del hogar con y sin edad dejan la línea de estado a alturas distintas. */
+.plan-card-detail {
+  font-size: 0.78rem;
+  color: var(--ff-ink-soft);
+  line-height: 1.2;
+  min-height: 1.2em;
+}
+
+.plan-card-status {
+  margin-top: 0.3rem;
+  font-size: 0.78rem;
+  line-height: 1.3;
+  color: var(--ff-ink-soft);
+}
+
+.plan-card-status--warn {
+  color: var(--ff-ink);
+}
+
+.plan-card-status--danger {
+  color: var(--ff-neg);
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  /* bp:640 — una tarjeta por fila; el nombre del miembro puede partir. */
+  .plan-card-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================================
+   TIRA DE FASES DEL CHART DE PROYECCIÓN (5.0.0, D29, issue #207)
+   ------------------------------------------------------------
+   Bajo el eje X: qué fase vive cada tramo del horizonte, más las
+   marcas que no son fases (pensión, cruce, miembros del hogar).
+   Su alto sale del PLOT, nunca de lienzo extra (ver el comentario
+   del `xAxisExtraBottom` en ProjectionNetWorthChart.tsx).
+
+   Color: tinte PROGRESIVO del acento, el mismo recurso que las
+   variantes de `.metric-card` — no es color decorativo, es una
+   escala ordinal (trabajas → media jornada → jubilado). Solo
+   tokens, y el color-mix contra `--ff-paper` resuelve claro y
+   oscuro sin una segunda regla.
+   ============================================================ */
+.projection-phase-band {
+  stroke: var(--proj-grid);
+  stroke-width: 0.5;
+}
+
+.projection-phase-band--accumulating {
+  fill: color-mix(in oklch, var(--ff-accent) 7%, var(--ff-paper));
+}
+
+.projection-phase-band--partial {
+  fill: color-mix(in oklch, var(--ff-accent) 18%, var(--ff-paper));
+}
+
+.projection-phase-band--retired {
+  fill: color-mix(in oklch, var(--ff-accent) 32%, var(--ff-paper));
+}
+
+.projection-phase-label {
+  font-size: 8.5px;
+  letter-spacing: 0.02em;
+  fill: var(--proj-meta);
+  pointer-events: none;
+}
+
+.projection-phase-mark-label {
+  font-size: 8.5px;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
