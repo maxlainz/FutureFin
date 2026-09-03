@@ -27,8 +27,12 @@
 #[path = "common/cases.rs"]
 mod cases;
 
-use cases::projection_cases_all;
-use futurefin_engine::{project_net_worth_series, ProjectionInput};
+use cases::{projection_cases_5_0, projection_cases_all};
+use futurefin_engine::{
+    project_net_worth_series, required_contribution_monthly, PensionSchedule, ProjectionInput,
+    TargetBasis,
+};
+use rust_decimal::Decimal;
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -89,4 +93,82 @@ fn twenty_four_p9_projections_the_cost_of_a_bisection() {
 #[ignore = "mide, no afirma: correr con --ignored --nocapture"]
 fn one_hundred_p9_projections_for_extrapolation() {
     measure("100 proyecciones", 100, &p9());
+}
+
+fn case_5_0(name: &'static str) -> ProjectionInput {
+    projection_cases_5_0()
+        .into_iter()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("{name} debe existir en la batería de 5.0.0"))
+        .input
+}
+
+/// (d) **El coste del objetivo PUENTE** (WP3, §B.3). P18 tabula `P = 240` gross-ups y 241
+/// potencias UNA vez y luego consulta en `O(1)` por mes. Comparado con (a) —P9, que no tiene
+/// puente— dice cuánto cuesta esa tabla de verdad.
+///
+/// La alternativa que NO se implementó es la suma directa `O(P−i)` por evaluación: `O(P²)` con un
+/// `gross_up` y una potencia por término, es decir ~29.000 gross-ups solo para P18 (y ~350.000 con
+/// una pensión a 70 años). Este test es la medición que respalda haber precomputado.
+#[test]
+#[ignore = "mide, no afirma: correr con --ignored --nocapture"]
+fn one_p18_bridge_projection() {
+    measure("proyección con puente (P = 240)", 1, &case_5_0("P18_pension_bridge"));
+    measure("100 × puente (P = 240)", 100, &case_5_0("P18_pension_bridge"));
+}
+
+/// (e) **El puente más caro representable**: `P = 840`, el horizonte completo. Es la cota superior
+/// del coste de la tabla — más allá de `MAX_BRIDGE_MONTHS` el motor degrada a perpetuidad.
+#[test]
+#[ignore = "mide, no afirma: correr con --ignored --nocapture"]
+fn one_bridge_projection_with_the_pension_at_the_horizon() {
+    let mut input = case_5_0("P18_pension_bridge");
+    input.phase_plan.pension = Some(PensionSchedule {
+        start_index: 840,
+        ..input.phase_plan.pension.expect("P18 tiene pensión")
+    });
+    input.phase_plan.target_basis = TargetBasis::BridgeToPension;
+    measure("puente con P = 840", 100, &input);
+}
+
+/// (f) **El coste de un SOLVE** (§B.7), medido de verdad y no extrapolado: la bisección de
+/// `required_contribution_monthly` sobre P9 —el caso caro— con jubilación por edad.
+///
+/// Es la unidad que el handler pagará una vez por proyección y guardará en la cache (M4). El
+/// presupuesto es `MAX_SOLVE_ITERATIONS + 3` proyecciones (24 de bisección más las dos sondas de
+/// los extremos y el `first_month_allocation` del sobrante), así que (b) es su cota inferior.
+///
+/// **P9 con el SWR forzado al 20 %**, y hay que decirlo: con su SWR real P9 no alcanza su
+/// objetivo en NINGÚN mes del horizonte (líquido 725 k€ contra 3,07 M€ en el mes 600), así que el
+/// solve cortocircuita en la sonda del extremo alto y devuelve el sobrante sin biseccionar — 2
+/// proyecciones, no 26. Subir el SWR baja el listón sin tocar nada más (misma fiscalidad, misma
+/// cascada, mismos pasivos, mismo horizonte): es la forma honesta de medir las 24 iteraciones
+/// sobre el caso caro en vez de sobre un laboratorio de juguete.
+#[test]
+#[ignore = "mide, no afirma: correr con --ignored --nocapture"]
+fn one_required_contribution_solve_on_p9() {
+    let mut input = p9();
+    input.phase_plan.crossing_is_reading_only = true;
+    input.phase_plan.retirement_trigger = futurefin_engine::RetirementTrigger::AtMonth(600);
+    if let Some(ft) = input.fire_target.as_mut() {
+        ft.swr_pct = Decimal::from(20u32);
+    }
+
+    let warm = required_contribution_monthly(&input, 600).expect("el solve no falla");
+    let iterations = warm.as_ref().map(|r| r.iterations).unwrap_or(0);
+    let contribution = warm
+        .as_ref()
+        .map(|r| r.contribution)
+        .unwrap_or(Decimal::ZERO);
+
+    let t0 = Instant::now();
+    let out = required_contribution_monthly(black_box(&input), 600).expect("el solve no falla");
+    let elapsed = t0.elapsed();
+    black_box(out);
+    let profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+    println!(
+        "[timing/{profile}] solve required_contribution (P9, 840 meses, {iterations} iteraciones): \
+         {:.3} ms  ⇒ c = {contribution}",
+        elapsed.as_secs_f64() * 1000.0,
+    );
 }

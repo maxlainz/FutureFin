@@ -13,12 +13,14 @@
 //! **Los casos ya no viven aquí**: desde WP0 de 5.0.0 son [`cases`]
 //! (`tests/common/cases.rs`), compartidos con `golden_pins.rs` para que el pin de bit-identidad
 //! y este volcado hablen exactamente de las mismas entradas. Este fichero vuelca lo que
-//! `projection_cases_dumped()` declara (L1–L6, P1–P6, P13 y los P14–P17 de 5.0.0) **y solo eso**:
+//! `projection_cases_dumped()` declara (L1–L6, P1–P6, P13 y los P14–P23 de 5.0.0) **y solo eso**:
 //! su CSV es un contrato con el oráculo externo y no crece cuando el pin gana casos. Ha crecido
-//! dos veces, las dos declaradas: WP1a de 5.0.0 (P13 `P13_cash8k_denormal_g`, la regresión de
-//! #208 — gross-up mixto con una `g` denormal) y WP2 (P14 `P14_techo_numeric`, el desbordamiento
-//! de la base de coste de #209, y P15–P17, las tres reglas de retirada nuevas: semántica nueva
-//! merece oráculo externo, no solo un hash interno).
+//! tres veces, las tres declaradas: WP1a de 5.0.0 (P13 `P13_cash8k_denormal_g`, la regresión de
+//! #208 — gross-up mixto con una `g` denormal), WP2 (P14 `P14_techo_numeric`, el desbordamiento
+//! de la base de coste de #209, y P15–P17, las tres reglas de retirada nuevas) y WP3 (P18–P23:
+//! pensión con fecha, objetivo puente, media jornada, cruce como lectura, techo de aportación y
+//! pausa de ingresos). El criterio no cambia: semántica nueva merece oráculo externo, no solo un
+//! hash interno.
 
 #[path = "common/cases.rs"]
 mod cases;

@@ -40,8 +40,8 @@ use cases::{
 };
 use futurefin_engine::{
     first_month_allocation, liability_amortization_schedule, project_net_worth_series,
-    AllocationSkipReason, FirstMonthAllocation, LiabilityPayoffAbsence, LiabilitySchedule, Phase,
-    ProjectionInput, ProjectionOutput, SpendMode, WithdrawalRule,
+    AllocationSkipReason, EngineWarning, FirstMonthAllocation, LiabilityPayoffAbsence,
+    LiabilitySchedule, Phase, ProjectionInput, ProjectionOutput, SpendMode, WithdrawalRule,
 };
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
@@ -575,6 +575,14 @@ fn the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery() {
             "P15_percent_of_balance_ceiling",
             "P16_hybrid_rule_is_spend",
             "P17_guardrails_taxes_es",
+            // WP3 (§B.1/§B.3/§B.7): pensión con fecha, puente, media jornada, cruce como
+            // lectura, techo de aportación y pausa de ingresos.
+            "P18_pension_bridge",
+            "P19_pension_perpetuity_covering",
+            "P20_partial_media_jornada",
+            "P21_retire_at_age_reading_only",
+            "P22_solve_required_contribution",
+            "P23_income_pause",
         ],
         "los casos de 5.0.0 y su orden también son contrato del CSV"
     );
@@ -928,10 +936,14 @@ fn phase_tag(p: Phase) -> &'static str {
     }
 }
 
-/// Texto canónico de las salidas de 5.0.0 de una proyección. Las tres series van mes a mes con el
-/// `Decimal` COMPLETO (`Display`), igual que las de 4.15.0: si `withdrawal_shortfall` dejase de
-/// ser cero, o cambiase de longitud, el hash se entera.
-fn render_projection_outputs_5_0(name: &str, o: &ProjectionOutput) -> String {
+/// **Capa WP1b/WP2** del texto canónico: las lecturas de fase y las tres series de retirada, mes
+/// a mes con el `Decimal` COMPLETO (`Display`).
+///
+/// Se mantiene como función APARTE cuando WP3 amplió la canonicalización, y no por estética: es
+/// lo que permite demostrar que los campos VIEJOS no se movieron aunque el hash del fichero sí lo
+/// haya hecho (ver `the_5_0_canonicalization_grew_without_moving_the_old_fields`). Un pin que
+/// crece y se regenera sin ese control no distingue «añadí campos» de «cambié números».
+fn render_projection_outputs_wp2(name: &str, o: &ProjectionOutput) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "case {name}");
     let _ = writeln!(out, "kind projection_outputs_5_0");
@@ -974,6 +986,34 @@ fn render_projection_outputs_5_0(name: &str, o: &ProjectionOutput) -> String {
     out
 }
 
+/// El texto canónico COMPLETO: la capa WP1b/WP2 **seguida** de la de WP3 (§B.3/§B.7). El orden es
+/// contrato: la capa vieja es un PREFIJO exacto del texto nuevo, y de eso vive el control de
+/// «creció sin moverse».
+fn render_projection_outputs_5_0(name: &str, o: &ProjectionOutput) -> String {
+    let mut out = render_projection_outputs_wp2(name, o);
+    let _ = writeln!(
+        out,
+        "bridge_effective_withdrawal_pct {}",
+        opt(o.bridge_effective_withdrawal_pct)
+    );
+    let _ = writeln!(
+        out,
+        "pension_coverage_ratio {}",
+        opt(o.pension_coverage_ratio)
+    );
+    let _ = writeln!(out, "partial_gap_target {}", opt(o.partial_gap_target));
+    let _ = writeln!(
+        out,
+        "partial_phase_capital_growing {}",
+        o.partial_phase_capital_growing
+    );
+    let _ = writeln!(out, "disposable_total {}", o.disposable_cash_total);
+    for (k, v) in o.disposable_cash.iter().enumerate() {
+        let _ = writeln!(out, "dc {k} {v}");
+    }
+    out
+}
+
 /// Lo que el fixture de 5.0.0 guarda de un caso: el hash y los titulares legibles de un diff.
 struct Pin50 {
     name: String,
@@ -985,6 +1025,15 @@ struct Pin50 {
     withdrawal_total: Decimal,
     /// El texto de las fases, tal cual entra en el hash («accumulating@0|retired@37»).
     phases: String,
+    // ---- WP3 (§B.3/§B.7) ----------------------------------------------------------------
+    pension_start_month_index: Option<u32>,
+    partial_retirement_month_index: Option<u32>,
+    disposable_cash_total: Decimal,
+    /// Los literales públicos de los avisos, separados por `|` («retire_at_age_underfunded»).
+    warnings: String,
+    /// El hash de la capa WP1b/WP2 SOLA. No entra en el hash del caso: existe para que el diff
+    /// diga si lo que se movió son los campos viejos o solo los nuevos.
+    sha256_wp2: String,
 }
 
 /// La batería del pin de 5.0.0 es la de 4.15.0 **más** los casos que WP2 añadió
@@ -1015,6 +1064,16 @@ fn live_pins_5_0() -> Vec<Pin50> {
                     .map(|(p, k)| format!("{}@{k}", phase_tag(*p)))
                     .collect::<Vec<_>>()
                     .join("|"),
+                pension_start_month_index: out.pension_start_month_index,
+                partial_retirement_month_index: out.partial_retirement_month_index,
+                disposable_cash_total: out.disposable_cash_total,
+                warnings: out
+                    .warnings
+                    .iter()
+                    .map(|w| w.code())
+                    .collect::<Vec<_>>()
+                    .join("|"),
+                sha256_wp2: sha256_hex(&render_projection_outputs_wp2(c.name, &out)),
             }
         })
         .collect()
@@ -1036,9 +1095,15 @@ a mano. Regenerar SOLO si el cambio es intencionado: UPDATE_ENGINE_PINS_5_0=1 ca
 futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG \
 (futurefin-change-control). Cubre projection_cases_all() (los casos de 4.15.0) MAS \
 projection_cases_5_0() (P14-P17: el techo numerico de la issue #209 y las tres reglas de retirada \
-nuevas). En los casos con fixed_real withdrawal_shortfall y withdrawal_excess son cero por \
-construccion — el permitido ES la necesidad — y ahi es donde este pin demuestra que WP2 no movio \
-la semantica de 4.15.0.";
+nuevas; P18-P23: pension con fecha, objetivo puente, media jornada, cruce como lectura, techo de \
+aportacion y pausa de ingresos). En los casos con fixed_real withdrawal_shortfall y \
+withdrawal_excess son cero por construccion — el permitido ES la necesidad — y ahi es donde este \
+pin demuestra que WP2 no movio la semantica de 4.15.0. WP3 AMPLIO la canonicalizacion con \
+bridge_effective_withdrawal_pct, pension_coverage_ratio, partial_gap_target, \
+partial_phase_capital_growing y la serie disposable_cash mes a mes: por eso el sha256 de los 17 \
+casos anteriores cambio SIN que cambiara ningun numero suyo, y quien lo demuestra es el test \
+the_5_0_canonicalization_grew_without_moving_the_old_fields (rehashea la capa vieja sola contra \
+los SHA-256 de antes de WP3).";
 
 fn render_fixture_5_0(pins: &[Pin50]) -> String {
     let mut s = String::new();
@@ -1068,7 +1133,23 @@ fn render_fixture_5_0(pins: &[Pin50]) -> String {
             "      \"withdrawal_total\": {},",
             json_dec(Some(p.withdrawal_total))
         );
-        let _ = writeln!(s, "      \"phases\": \"{}\"", p.phases);
+        let _ = writeln!(s, "      \"phases\": \"{}\",", p.phases);
+        let _ = writeln!(
+            s,
+            "      \"pension_start_month_index\": {},",
+            json_u32(p.pension_start_month_index)
+        );
+        let _ = writeln!(
+            s,
+            "      \"partial_retirement_month_index\": {},",
+            json_u32(p.partial_retirement_month_index)
+        );
+        let _ = writeln!(
+            s,
+            "      \"disposable_cash_total\": {},",
+            json_dec(Some(p.disposable_cash_total))
+        );
+        let _ = writeln!(s, "      \"warnings\": \"{}\"", p.warnings);
         let _ = writeln!(s, "    }}{comma}");
     }
     s.push_str("  }\n");
@@ -1137,6 +1218,19 @@ fn golden_pins_5_0_outputs_match() {
             ),
             ("withdrawal_total", json_dec(Some(p.withdrawal_total))),
             ("phases", format!("\"{}\"", p.phases)),
+            (
+                "pension_start_month_index",
+                json_u32(p.pension_start_month_index),
+            ),
+            (
+                "partial_retirement_month_index",
+                json_u32(p.partial_retirement_month_index),
+            ),
+            (
+                "disposable_cash_total",
+                json_dec(Some(p.disposable_cash_total)),
+            ),
+            ("warnings", format!("\"{}\"", p.warnings)),
         ] {
             let before = &stored_case[field];
             let before_txt = match before {
@@ -1154,6 +1248,79 @@ fn golden_pins_5_0_outputs_match() {
          UPDATE_ENGINE_PINS_5_0=1 y documenta el delta en el CHANGELOG.\n\nCasos que se movieron \
          (guardado → vivo):\n{report}"
     );
+}
+
+/// **La canonicalización de 5.0.0 CRECIÓ en WP3, y este test demuestra que solo creció.**
+///
+/// `pins-5.0-outputs.json` se regeneró al añadir §B.3/§B.7 (pensión, puente, media jornada, caja
+/// disponible), así que su hash por caso cambió para los 17 casos que ya existían. Un pin
+/// regenerado no distingue por sí solo «añadí campos» de «moví números»: sin este control, el día
+/// que alguien rompa el drenaje y regenere el fichero, el diff dirá exactamente lo mismo que hoy.
+///
+/// La prueba es en DOS ETAPAS: el texto canónico nuevo tiene el viejo como **prefijo exacto**
+/// (`render_projection_outputs_5_0` = `render_projection_outputs_wp2` + la capa WP3), así que se
+/// vuelve a hashear la capa vieja sola y se compara contra los SHA-256 que el fichero guardaba
+/// **antes** de WP3, copiados aquí literalmente. Si los campos de WP1b/WP2 se hubieran movido un
+/// dígito, esta lista no cuadraría.
+///
+/// Los seis casos de WP3 (P18–P23) no aparecen: no existían antes, no tienen valor anterior, y
+/// ponerles uno inventado sería exactamente el número sin verificar que esta casa no publica.
+#[test]
+fn the_5_0_canonicalization_grew_without_moving_the_old_fields() {
+    // Copiado de `pins-5.0-outputs.json` en el commit anterior a WP3.
+    const BEFORE_WP3: &[(&str, &str)] = &[
+        ("P1_deficit_cronico", "cd6cf9782c9c3acd96ad570bb083329cac0b31423ca307766d78c4f8234de6ed"),
+        ("P2_fire_mes0", "d605c5913cbfae026ada0b8f2a091ecd1b872e034d430616cbc94baf75bafbdd"),
+        ("P3_superavit_jubilacion", "d503198bec6b501f9d51190088829998a181734865ed58cdd2d930b53999a3af"),
+        ("P4_ret_menos100", "00c7d139b6ebe6028e536877cff5eccdb043fd80070693243209b6ddcf43422d"),
+        ("P5_flat_nominal_30y", "9d7f4c00daa1631505ff9bb3ac17744e641fc1bf7d177a9482346a17a35a667f"),
+        ("P6_venc_saldo_vivo_proj", "20ca98734ba7e5046ebe66c27977b79a8e747ad929f3481f4b5c208502d54c9f"),
+        ("P13_cash8k_denormal_g", "8a0506535261b28d1def11871bf651ea7cbc4041ebd46949d85329f294939fad"),
+        ("P7_jubilado_pension_impuestos", "5976365c10d39b9c97d170c11282395f15132089b0928b9f8e49cdf744ed4a13"),
+        ("P8_drenaje_g_mixta", "aa13136c4690ae18f0db0f4141226ec71b82d5c63f82190f72533d1c6944c19a"),
+        ("P9_hogar_realista", "ece489a9a4d555464c2530c75df39768dc0b5bafdcceac2023634a2e87d7ceba"),
+        ("P10_jubilacion_forzada", "44ec6ec48a0e1911e3b264f103be52913f7c4ee2bc8ce923f8a83953d83974c8"),
+        ("P11_deflacion_negativa", "e279575d83d2a3265cf199fe5ac1acf279736d27a050fe54a73ad523f8a2a5ba"),
+        ("P12_topes_de_cascada", "876813e073579eb47b4cfa3f5592be2c0c2bf7d897ae3adfaac39b5d351a37d4"),
+        ("P14_techo_numeric", "0a8803038f38fc4ee531ad5c6845d8b19c642a1311e78b993ffa09bf10b6fa87"),
+        ("P15_percent_of_balance_ceiling", "9fe43f5bc701e3077961cd405de4b0deeefcc4886ace32df95f269b098113e74"),
+        ("P16_hybrid_rule_is_spend", "16e21d418e47d904ea6e5d20b50bbdf862697706d1ae431f1f4afee377a90c38"),
+        ("P17_guardrails_taxes_es", "12af97cd287d66ef58d3ea050f2ceca0667c3fcbf1caa481f37a22f545407b05"),
+    ];
+
+    let live = live_pins_5_0();
+    let mut moved = Vec::new();
+    for (name, before) in BEFORE_WP3 {
+        let p = live
+            .iter()
+            .find(|p| p.name == *name)
+            .unwrap_or_else(|| panic!("{name} debe seguir en la batería"));
+        if p.sha256_wp2 != *before {
+            moved.push(format!("  · {name}: {before} → {}", p.sha256_wp2));
+        }
+    }
+    assert!(
+        moved.is_empty(),
+        "WP3 movió campos de la canonicalización VIEJA (fases y series de retirada), no solo \
+         añadió los suyos. Eso no es «el pin creció»: es una regresión.\n{}",
+        moved.join("\n")
+    );
+
+    // Y el control de vida: la capa vieja tiene que ser de verdad un PREFIJO de la nueva. Sin
+    // esto, cambiar el orden de las secciones haría que este test comparase otra cosa y siguiera
+    // pasando — la deriva silenciosa del grep vacío, aplicada a un hash.
+    let case = cases_5_0()
+        .into_iter()
+        .find(|c| c.name == "P9_hogar_realista")
+        .expect("P9 en la batería");
+    let out = project_net_worth_series(&case.input).expect("P9 simula");
+    let wp2 = render_projection_outputs_wp2(case.name, &out);
+    let full = render_projection_outputs_5_0(case.name, &out);
+    assert!(
+        full.starts_with(&wp2),
+        "el texto de WP3 tiene que empezar por el de WP2, o este test no compara lo que dice"
+    );
+    assert!(full.len() > wp2.len(), "y tiene que haber crecido");
 }
 
 /// Control negativo del pin nuevo, gemelo de [`the_hash_actually_notices_a_single_moved_decimal`]:
@@ -1262,63 +1429,150 @@ fn the_phase_readings_agree_with_the_series_they_describe() {
             "{name}: una retirada negativa sería una aportación disfrazada"
         );
 
-        // 4) El descubierto total nunca puede ser negativo, y si hubo descubierto tuvo que
-        //    haber retirada o agotamiento — las tres magnitudes de B.1.5 no se contradicen.
-        assert!(out.uncovered_deficit_total >= Decimal::ZERO, "{name}");
+        // 4) El descubierto total no puede ser negativo **más allá de la cola de redondeo
+        //    declarada**. `MonthSale::account` conserva a propósito la expresión LITERAL de
+        //    4.15.0 —`need_net − obtained_net`, sin `max(0, ·)`— porque meter el clamp movería
+        //    casos pineados; y `after_tax(gross_up(n))` recupera `n` salvo el último dígito de
+        //    28, así que en una jubilación larga con impuestos esos dígitos se ACUMULAN y el
+        //    total puede quedar unas unidades de 1e-25 por debajo de cero.
+        //
+        //    Medido en esta batería: P18 (336 meses jubilado con la escala ES y `g` mixta) cae en
+        //    −5e-25 €, P21 sube a +1,6e-24 €. Son 0,0000000000000000000000005 euros: por debajo
+        //    de cualquier unidad monetaria representable, pero NO cero — y el umbral se escribe
+        //    aquí para que un descubierto negativo DE VERDAD (un euro, un céntimo) siga cazándose.
+        assert!(
+            out.uncovered_deficit_total >= -Decimal::new(1, 20),
+            "{name}: descubierto negativo más allá de la cola de redondeo: {}",
+            out.uncovered_deficit_total
+        );
 
-        // 5) Fases: siempre se arranca acumulando en el mes 0; la segunda (si existe) es
-        //    `Retired` y su mes ES `retirement_month_index`.
+        // 5) Fases (§B.1): siempre se arranca acumulando en el mes 0, la secuencia es
+        //    ESTRICTAMENTE creciente en el mes y monótona en la fase, y cada índice publicado
+        //    coincide con la entrada correspondiente de `phase_transitions`. WP3 metió `Partial`
+        //    entre las dos de WP1b, así que el invariante se escribe sobre la lista, no sobre
+        //    posiciones fijas.
         assert_eq!(
             out.phase_transitions.first().copied(),
             Some((Phase::Accumulating, 0)),
             "{name}: toda simulación arranca acumulando en el mes 0"
         );
-        match out.retirement_month_index {
-            Some(k) => {
-                assert_eq!(
-                    out.phase_transitions.get(1).copied(),
-                    Some((Phase::Retired, k)),
-                    "{name}: la fase jubilada tiene que empezar en el mes efectivo"
-                );
-                assert!(
-                    k >= 1 && k <= c.input.horizon_months,
-                    "{name}: mes fuera del horizonte"
-                );
-            }
-            None => assert_eq!(
-                out.phase_transitions.len(),
-                1,
-                "{name}: sin jubilación no hay segunda fase"
-            ),
-        }
-
-        // 6) El cruce es una LECTURA: nunca puede ser anterior al mes efectivo de jubilación
-        //    (el latch se cierra en `min(cruce, forzado)`), y con jubilación por cruce ambos
-        //    coinciden. Es el invariante que WP5 necesita para publicar los dos índices.
-        if let Some(x) = out.liquid_crossing_month_index {
-            let eff = out
-                .retirement_month_index
-                .expect("si hubo cruce, hubo jubilación");
+        let rank = |p: Phase| match p {
+            Phase::Accumulating => 0u8,
+            Phase::Partial => 1,
+            Phase::Retired => 2,
+        };
+        for w in out.phase_transitions.windows(2) {
             assert!(
-                eff <= x,
-                "{name}: la jubilación efectiva ({eff}) no puede ser posterior al cruce ({x})"
+                rank(w[1].0) > rank(w[0].0) && w[1].1 > w[0].1,
+                "{name}: las fases son monótonas y no se repiten: {:?}",
+                out.phase_transitions
             );
-            if c.input
-                .phase_plan
-                .retirement_trigger
-                .forced_month()
-                .is_none()
-            {
-                assert_eq!(
-                    eff, x,
-                    "{name}: sin trigger forzado, jubilación efectiva y cruce son el mismo mes"
+        }
+        let phase_month = |p: Phase| {
+            out.phase_transitions
+                .iter()
+                .find(|(q, _)| *q == p)
+                .map(|(_, k)| *k)
+        };
+        assert_eq!(
+            phase_month(Phase::Retired),
+            out.retirement_month_index,
+            "{name}: la fase jubilada empieza en el mes efectivo, y no existe si no hay"
+        );
+        assert_eq!(
+            phase_month(Phase::Partial),
+            out.partial_retirement_month_index,
+            "{name}: la media jornada solo se publica si se pisó de verdad"
+        );
+        for k in [out.retirement_month_index, out.partial_retirement_month_index]
+            .into_iter()
+            .flatten()
+        {
+            assert!(
+                k >= 1 && k <= c.input.horizon_months,
+                "{name}: mes {k} fuera del horizonte"
+            );
+        }
+
+        // 6) El cruce es una LECTURA. Dos regímenes, y la bandera de D17 los separa:
+        //    · `crossing_is_reading_only = false` (el de 4.15.0): el cruce jubila, así que la
+        //      jubilación efectiva es `min(cruce, forzado)` y nunca puede ir DESPUÉS del cruce;
+        //    · `crossing_is_reading_only = true`: el cruce no jubila nada y puede quedarse solo,
+        //      sin `retirement_month_index` detrás.
+        if let Some(x) = out.liquid_crossing_month_index {
+            if !c.input.phase_plan.crossing_is_reading_only {
+                let eff = out
+                    .retirement_month_index
+                    .expect("si el cruce jubila y hubo cruce, hubo jubilación");
+                assert!(
+                    eff <= x,
+                    "{name}: la jubilación efectiva ({eff}) no puede ser posterior al cruce ({x})"
                 );
+                if c.input
+                    .phase_plan
+                    .retirement_trigger
+                    .forced_month()
+                    .is_none()
+                {
+                    assert_eq!(
+                        eff, x,
+                        "{name}: sin trigger forzado, jubilación efectiva y cruce son el mismo mes"
+                    );
+                }
             }
         }
 
-        // 7) WP1b no simula pensión con fecha ni media jornada, y no emite avisos.
-        assert_eq!(out.pension_start_month_index, None, "{name}");
-        assert_eq!(out.partial_retirement_month_index, None, "{name}");
-        assert!(out.warnings.is_empty(), "{name}");
+        // 7) Pensión con fecha: el mes publicado es `start_index + 1` (rejilla 0-based → bucle
+        //    1-based) y solo existe si cae dentro del horizonte. Sin pensión, `None`.
+        let expected_pension = c.input.phase_plan.pension.and_then(|p| {
+            let m = p.start_index + 1;
+            (m <= c.input.horizon_months).then_some(m)
+        });
+        assert_eq!(out.pension_start_month_index, expected_pension, "{name}");
+
+        // 8) Las lecturas del puente solo existen con pensión con fecha; y la caja disponible
+        //    solo con techo de aportación. Un `None` aquí NO es un cero (norma de la casa).
+        if c.input.phase_plan.pension.is_none() {
+            assert_eq!(out.pension_coverage_ratio, None, "{name}");
+            assert_eq!(out.bridge_effective_withdrawal_pct, None, "{name}");
+        }
+        assert_eq!(
+            out.disposable_cash.len(),
+            out.net_worth.len(),
+            "{name}: disposable_cash no tiene la longitud de net_worth"
+        );
+        assert_eq!(out.disposable_cash[0], Decimal::ZERO, "{name}");
+        assert_eq!(
+            out.disposable_cash.iter().copied().sum::<Decimal>(),
+            out.disposable_cash_total,
+            "{name}: el total es la suma de la serie"
+        );
+        if c.input.phase_plan.contribution_cap_monthly.is_none()
+            && c.input.phase_plan.contributions_stop_month.is_none()
+        {
+            assert_eq!(
+                out.disposable_cash_total,
+                Decimal::ZERO,
+                "{name}: sin techo no puede sobrar caja"
+            );
+        }
+
+        // 9) `partial_phase_capital_growing` es `true` SOLO si hubo fase parcial, y el aviso de
+        //    capital menguante es exactamente su negación dentro de esa fase.
+        if out.partial_retirement_month_index.is_none() {
+            assert!(!out.partial_phase_capital_growing, "{name}");
+            assert!(
+                !out.warnings
+                    .contains(&EngineWarning::PartialPhaseCapitalShrinking),
+                "{name}: no se puede menguar en una fase que no ocurrió"
+            );
+        } else {
+            assert_eq!(
+                out.partial_phase_capital_growing,
+                !out.warnings
+                    .contains(&EngineWarning::PartialPhaseCapitalShrinking),
+                "{name}: crecer y el aviso de menguar son complementarios"
+            );
+        }
     }
 }

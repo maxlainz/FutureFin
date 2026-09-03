@@ -5,6 +5,8 @@ mod net_return;
 mod phases;
 mod projection;
 mod runway;
+mod solve;
+mod target;
 mod tax;
 mod withdrawal;
 
@@ -15,8 +17,8 @@ pub use history::{
 };
 pub use net_return::{net_return_percentages, NetReturn};
 pub use phases::{
-    EngineWarning, ExpenseBasis, PartialPhase, PensionSchedule, Phase, PhasePlan, RetirementTrigger,
-    SpendMode, WithdrawalRule,
+    EngineWarning, ExpenseBasis, IncomePause, PartialPhase, PensionSchedule, Phase, PhasePlan,
+    RetirementTrigger, SpendMode, TargetBasis, WithdrawalRule,
 };
 pub use projection::{
     debt_payments_remaining_series, fire_target_at_month_index, fire_target_base_at_month_index,
@@ -32,6 +34,11 @@ pub use projection::{
     MAX_LIABILITY_SCHEDULE_MONTHS,
 };
 pub use runway::{liquid_runway_months, RunwayOutcome, MAX_RUNWAY_MONTHS};
+pub use solve::{
+    coast_fire_month_index, max_extra_monthly_expense_keeping_date, required_contribution_monthly,
+    retirement_delay_months, CoastSolve, RetirementDelay, SolveResult, MAX_SOLVE_ITERATIONS,
+};
+pub use target::{fire_target_at_month_index_with_plan, PlanFireTarget, MAX_BRIDGE_MONTHS};
 pub use tax::{after_tax_monthly, gross_up_monthly, gross_up_net_annual_fire, tax_on_gross_capital_annual, TaxBracket};
 
 #[cfg(test)]

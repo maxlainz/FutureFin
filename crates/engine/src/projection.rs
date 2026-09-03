@@ -8,6 +8,7 @@
 //! para un activo destino hasta su tope opcional; lo que queda pasa a la siguiente regla.
 
 use crate::phases::{EngineWarning, Phase, PhasePlan, SpendMode};
+use crate::target::PlanFireTarget;
 use chrono::{Datelike, Months, NaiveDate};
 use rust_decimal::Decimal;
 use rust_decimal::MathematicalOps;
@@ -710,7 +711,10 @@ pub enum FireNeed {
 
 impl FireNeed {
     /// Necesidad neta ANUAL con el factor de inflación `f` ya evaluado.
-    fn annual_net_at(&self, f: Decimal) -> Decimal {
+    ///
+    /// `pub(crate)` desde WP3: [`crate::target`] la consume para no reescribir la necesidad con
+    /// otros paréntesis — la fórmula duplicada es la trampa que #170 ya pagó una vez.
+    pub(crate) fn annual_net_at(&self, f: Decimal) -> Decimal {
         match self {
             FireNeed::Indexed { annual_net_today } => *annual_net_today * f,
             FireNeed::ExpenseMinusPension { expense_monthly, pension_monthly } => {
@@ -845,8 +849,54 @@ pub struct ProjectionOutput {
     pub pension_start_month_index: Option<u32>,
     /// Primer mes de media jornada. `None` en WP1b (WP3).
     pub partial_retirement_month_index: Option<u32>,
-    /// Avisos del motor. Vacío en WP1b: el enum [`EngineWarning`] aún no tiene variantes.
+    /// Avisos del motor (§B.8). Desde WP3 el bucle sabe emitir dos —jubilación por edad
+    /// infra-financiada y capital menguante en media jornada—; el tercero
+    /// ([`EngineWarning::CoastNotReachable`]) lo emite el solve, que es quien lo puede saber.
+    /// Los de ensamblado (`birth_date_missing`) los añade el handler.
     pub warnings: Vec<EngineWarning>,
+    // -----------------------------------------------------------------------------------------
+    // 5.0.0 WP3 — LECTURAS de pensión, puente y media jornada (§B.3, §B.7). Todas APÉNDICE: el
+    // pin de 4.15.0 no las mira y el aditivo de 5.0.0 sí.
+    // -----------------------------------------------------------------------------------------
+    /// **Tasa de retirada efectiva del puente**, en % ANUAL:
+    /// `100 · 12·need_full_m(R−1) / L(R−1)` en el mes efectivo de jubilación.
+    ///
+    /// Responde a la pregunta que el puente plantea y la perpetuidad esconde: mientras la pensión
+    /// no llega hay que sacar de la cartera el gasto ENTERO, y eso es una tasa que puede estar muy
+    /// por encima del SWR — legítimamente, porque dura pocos años (D7: por eso el riesgo del
+    /// puente es lo que Monte Carlo tendrá que medir en WP6).
+    ///
+    /// `None` sin pensión con fecha, sin base puente, sin objetivo, sin jubilación dentro del
+    /// horizonte o con `L(R−1) ≤ 0`: en ninguno de esos casos hay una tasa que medir — **jamás un
+    /// cero inventado**.
+    pub bridge_effective_withdrawal_pct: Option<Decimal>,
+    /// **Qué fracción del gasto cubre la pensión** el mes en que empieza: `P_m(P)/(E·f(P))`, en
+    /// FRACCIÓN (0,6 = 60 %). Es la lectura que hace explícitos los dos escenarios de D15 sin
+    /// asumir ninguno. `None` sin pensión con fecha, sin objetivo o con gasto no positivo en `P`.
+    pub pension_coverage_ratio: Option<Decimal>,
+    /// Capital que sostendría a perpetuidad el HUECO de la media jornada:
+    /// `gross_up(12·gap_m(X))/SWR` (§B.3). Informativo: no dispara nada.
+    /// `None` sin fase parcial o sin objetivo; `Some(0)` = la media jornada se paga sola.
+    pub partial_gap_target: Option<Decimal>,
+    /// `true` ⟺ **hubo** fase parcial y el patrimonio LÍQUIDO no bajó ni un mes durante ella.
+    ///
+    /// Sin fase parcial es `false` — no hay fase que crezca. Para distinguir «no hubo» de «hubo y
+    /// menguó» está [`ProjectionOutput::partial_retirement_month_index`]; el caso malo además
+    /// emite [`EngineWarning::PartialPhaseCapitalShrinking`].
+    pub partial_phase_capital_growing: bool,
+    /// Caja del mes que un techo de aportación (`PhasePlan::contribution_cap_monthly` o el corte
+    /// de coast) dejó FUERA de la cascada. `len == horizon+1`, índice 0 = 0.
+    ///
+    /// **No es patrimonio**: no se invierte, no compone y no entra en `net_worth` — exactamente el
+    /// mismo trato que `unallocated_savings_total`, y por la misma razón (el modelo no simula un
+    /// euro sin destino declarado). Es el «margen disponible» de D16: lo que el hogar podría
+    /// gastarse sin mover su fecha de jubilación.
+    ///
+    /// Identidad del mes, con `sobrante > 0`: `sobrante = Σ aportado + no_asignado + disposable`.
+    /// Sin techo es cero mes a mes.
+    pub disposable_cash: Vec<Decimal>,
+    /// Σ de [`ProjectionOutput::disposable_cash`]. `0` son cero euros, no «no aplica».
+    pub disposable_cash_total: Decimal,
 }
 
 /// Primero-de-mes de una fecha (día 1 del mismo mes). Compartido con `history.rs`.
@@ -947,6 +997,20 @@ pub fn fire_target_base_at_month_index(ft: &FireTarget, month_index: u32) -> Opt
     Some(gross / (ft.swr_pct / Decimal::from(100u32)))
 }
 
+/// Término finito de deuda (#142) en el `month_index` indicado: cuotas restantes tras ese mes +
+/// cola residual, con la cola del vector como valor de saturación fuera de rango.
+///
+/// **Implementación única** (`pub(crate)` desde WP3): la consumen `fire_target_at_month_index` y
+/// el objetivo consciente del plan ([`crate::target`]). Dos copias divergirían en el primer
+/// cambio de saturación y el objetivo del puente dejaría de emparejar con el clásico.
+pub(crate) fn debt_term_at_month_index(ft: &FireTarget, month_index: u32) -> Decimal {
+    ft.debt_payments_remaining
+        .get(month_index as usize)
+        .or(ft.debt_payments_remaining.last())
+        .copied()
+        .unwrap_or(Decimal::ZERO)
+}
+
 pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> Option<Decimal> {
     let ft = ft?;
     let base = fire_target_base_at_month_index(ft, month_index)?;
@@ -955,13 +1019,11 @@ pub fn fire_target_at_month_index(ft: Option<&FireTarget>, month_index: u32) -> 
     // (#142) y, con pensión, base que crece MÁS rápido que f(k) (#170: el exceso relativo es
     // I·(f(k)−1)/(E−I)). Cualquier optimización que asuma monotonía (búsqueda binaria del
     // cruce, salida temprana) quedaría rota en silencio: escaneo lineal, siempre.
-    let debt_term = ft
-        .debt_payments_remaining
-        .get(month_index as usize)
-        .or(ft.debt_payments_remaining.last())
-        .copied()
-        .unwrap_or(Decimal::ZERO);
-    Some(base + debt_term)
+    //
+    // **Esta función es la de 4.15.0 y se queda así**: el objetivo por FASES (pensión con fecha,
+    // puente) vive en [`crate::target`] y, cuando el plan no trae pensión, la llama a ella. Que
+    // el camino común pase por aquí es lo que hace que el pin dorado no pueda moverse.
+    Some(base + debt_term_at_month_index(ft, month_index))
 }
 
 /// Drena `need` de los activos (líquidos primero, menor rentabilidad primero, empate por
@@ -1639,8 +1701,9 @@ fn distribute_contributions(
 /// día**. Ese desajuste se leyó como una sobreasignación de la cascada, que no lo era.
 ///
 /// Identidades garantizadas: `base_cash = recurring_net + planning_component` y
-/// `Σ per_asset + leftover = base_cash` cuando `base_cash > 0` (con `base_cash ≤ 0` no se reparte
-/// nada y `leftover` es 0).
+/// `Σ per_asset + leftover + disposable = base_cash` cuando `base_cash > 0` (con `base_cash ≤ 0`
+/// no se reparte nada y `leftover` y `disposable` son 0). Sin techo de aportación —el único caso
+/// que produce el camino de lectura— `disposable` es 0 y la identidad es la de 4.15.0.
 #[derive(Debug, Clone)]
 pub struct FirstMonthAllocation {
     /// Aporte nominal por activo, en el orden de `ProjectionInput::assets`.
@@ -1656,6 +1719,14 @@ pub struct FirstMonthAllocation {
     pub debt_service: Decimal,
     /// Lo que ninguna regla absorbió y acaba en `surplus_cash`.
     pub leftover: Decimal,
+    /// 5.0.0 WP3: la parte del sobrante que un **techo de aportación**
+    /// (`PhasePlan::contribution_cap_monthly`, o el corte de coast) dejó fuera de la cascada.
+    /// `0` sin techo, que es el único caso que la API de lectura produce hoy — el techo lo ponen
+    /// los solves, sobre entradas que ellos mismos clonan.
+    ///
+    /// Extiende la identidad documentada arriba: con `base_cash > 0`,
+    /// `Σ per_asset + leftover + disposable = base_cash`.
+    pub disposable: Decimal,
     /// Traza regla a regla, en el orden de `ProjectionInput::allocation_rules`.
     pub rules: Vec<RuleOutcome>,
 }
@@ -1745,24 +1816,62 @@ pub fn first_month_allocation(
         .filter(|(a, _)| a.is_liquid)
         .map(|(_, v)| *v)
         .sum();
-    let fire_reached = fire_target_at_month_index(input.fire_target.as_ref(), 0)
-        .is_some_and(|t| liquid_month_zero >= t);
     //
     // 5.0.0 WP1b: el estado de la fase sale del MISMO `PhasePlan` que consume el bucle — antes
     // eran dos lecturas independientes de los mismos cuatro campos, y una de las dos ya se había
-    // quedado atrás una vez (la que ignoraba `fire_target`).
+    // quedado atrás una vez (la que ignoraba `fire_target`). WP3 mantiene el paralelismo campo a
+    // campo: mismo objetivo consciente del plan, misma fase, misma pensión, mismo techo.
     let plan = &input.phase_plan;
-    let in_retirement =
-        fire_reached || plan.retirement_trigger.forced_month().is_some_and(|s| 1 >= s);
-    let income = if in_retirement {
-        plan.income_retirement_monthly
+    let fire_reached = crate::target::fire_target_at_month_index_with_plan(
+        input.fire_target.as_ref(),
+        plan,
+        0,
+    )
+    .is_some_and(|t| liquid_month_zero >= t);
+    let in_retirement = (fire_reached && !plan.crossing_is_reading_only)
+        || plan.retirement_trigger.forced_month().is_some_and(|s| 1 >= s);
+    let phase = if in_retirement {
+        Phase::Retired
+    } else if plan.partial.is_some_and(|p| 1 >= p.start_month) {
+        Phase::Partial
     } else {
-        input.income_regular_monthly
+        Phase::Accumulating
     };
-    let expense = if in_retirement {
-        plan.expense_retirement_monthly
+    let income = match phase {
+        Phase::Retired => plan.income_retirement_monthly,
+        Phase::Partial => plan
+            .partial
+            .map_or(input.income_regular_monthly, |p| p.income_monthly),
+        Phase::Accumulating => input.income_regular_monthly,
+    };
+    let income = match plan.income_pause.and_then(|p| p.factor_at(1)) {
+        Some(f) => income * f,
+        None => income,
+    };
+    // El mes 1 evalúa el índice 0 y `f(0) = 1` exacto, así que una pensión indexada que ya
+    // hubiera empezado se cobra por su importe de hoy — el mismo valor que el bucle calcula.
+    let pension_income = match plan.pension {
+        Some(pen) => {
+            let gross = pen.monthly_at(0, Decimal::ONE);
+            if matches!(phase, Phase::Partial) {
+                gross * pen.partial_fraction()
+            } else {
+                gross
+            }
+        }
+        None => Decimal::ZERO,
+    };
+    let income = if pension_income.is_zero() {
+        income
     } else {
-        input.expense_regular_monthly
+        income + pension_income
+    };
+    let expense = match phase {
+        Phase::Retired => plan.expense_retirement_monthly,
+        Phase::Partial => plan
+            .partial_expense_basis_monthly(input.expense_regular_monthly)
+            .unwrap_or(input.expense_regular_monthly),
+        Phase::Accumulating => input.expense_regular_monthly,
     };
     let retirement_withdrawal = if in_retirement {
         plan.extra_monthly_withdrawal
@@ -1779,9 +1888,19 @@ pub fn first_month_allocation(
     // `InRetirement` murió con `surplus_cash`. #171 sigue vivo en los escalares: los techos se
     // resuelven con la FASE del mes (`expense + debt_service`, `income` ya elegidos arriba), y
     // desde 4.12.1 esos techos GOBIERNAN euros de verdad, no solo la explicación.
+    // Mismo techo de aportación que el bucle (§B.7): si la cascada del mes 1 no lo respetara,
+    // `/v1/assets` volvería a explicar un reparto que la simulación no ejecuta — la divergencia
+    // exacta que WP1b cerró.
+    let (pool, disposable) = match plan.contribution_cap_at(1) {
+        Some(cap) if net_cash_month > Decimal::ZERO => {
+            let invested = net_cash_month.min(cap);
+            (invested, net_cash_month - invested)
+        }
+        _ => (net_cash_month, Decimal::ZERO),
+    };
     let (alloc, leftover) = {
         distribute_contributions(
-            net_cash_month,
+            pool,
             &input.allocation_rules,
             &values,
             expense + debt_service,
@@ -1805,6 +1924,7 @@ pub fn first_month_allocation(
         } else {
             Decimal::ZERO
         },
+        disposable,
         rules: rules_trace,
     })
 }
@@ -1876,6 +1996,21 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
     // el latch decide); `liquid_crossing_month_index` es el cruce puro y NO gobierna nada.
     let mut retirement_month_index: Option<u32> = None;
     let mut liquid_crossing_month_index: Option<u32> = None;
+    // 5.0.0 WP3 — la fase parcial es el segundo latch, y también monótono: se entra por
+    // `k ≥ partial.start_month` y solo se sale hacia `Retired`.
+    let mut partial_month_index: Option<u32> = None;
+    let mut partial_capital_shrank = false;
+    let mut warnings: Vec<EngineWarning> = Vec::new();
+    // 5.0.0 WP3 — el objetivo CONSCIENTE DEL PLAN (§B.3). Se construye UNA vez: con puente activo
+    // tabula `O(P)` gross-ups y potencias, y consultarlo mes a mes es `O(1)`. Sin pensión con
+    // fecha llama a `fire_target_at_month_index` tal cual, así que el camino de 4.15.0 sigue
+    // pasando por la misma función y el pin dorado no puede moverse.
+    let plan_target = PlanFireTarget::new(input.fire_target.as_ref(), plan);
+    // Caja que el techo de aportación deja fuera de la cascada (§B.7). Índice 0 = 0, como todas.
+    let mut disposable_series: Vec<Decimal> =
+        Vec::with_capacity(input.horizon_months as usize + 1);
+    disposable_series.push(Decimal::ZERO);
+    let mut disposable_total = Decimal::ZERO;
     // Retirada neta efectiva del mes (§B.8). El índice 0 es el estado inicial, no un mes
     // simulado: cero por definición, como el resto de series.
     let mut withdrawal_series: Vec<Decimal> = Vec::with_capacity(input.horizon_months as usize + 1);
@@ -2005,13 +2140,18 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         }
 
         let planning_adj = input.planning_monthly_cash_adjustment[(k - 1) as usize];
+        // La casilla del mes se reserva ANTES de la cascada para poder escribirla desde dentro del
+        // `if` del sobrante sin depender del orden de los `push` del final del mes.
+        disposable_series.push(Decimal::ZERO);
 
         // El cruce se decide contra el patrimonio LÍQUIDO al cierre del mes k-1 (#143): la
         // regla del SWR está calibrada sobre cartera vendible; una vivienda no produce
         // retirada. El total (`nw_fn`) sigue siendo lo que se publica y drena.
         let liquid_prev = liquid_fn(&values);
-        let fire_reached = fire_target_at_month_index(input.fire_target.as_ref(), k - 1)
-            .map_or(false, |t| liquid_prev >= t);
+        // 5.0.0 WP3: el objetivo lo evalúa el evaluador CONSCIENTE DEL PLAN. Sin pensión con
+        // fecha delega en `fire_target_at_month_index(…, k−1)` — misma llamada, mismos dígitos.
+        let target_prev = plan_target.at(k - 1);
+        let fire_reached = target_prev.map_or(false, |t| liquid_prev >= t);
         // Lectura pura (5.0.0 WP1b): el cruce se evalúa TODOS los meses —también después de que
         // el latch cierre, porque la línea de arriba no depende de `retired`— así que anotar su
         // primera vez no toca una sola decisión ni una sola cifra. Con las estrategias por edad
@@ -2028,17 +2168,53 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         // ESTRATEGIA, no del motor, y quien la hace cumplir es el HANDLER en WP3: para una
         // estrategia por edad pasará `fire_target: None`, con lo que el cruce no puede dispararse
         // porque no hay contra qué cruzar. El motor se queda tonto y pineado a propósito.
+        //
+        // **5.0.0 WP3 (D17)**: con `crossing_is_reading_only` el cruce deja de jubilar y solo se
+        // anota. Es la única forma de que una estrategia por edad conserve el objetivo para el
+        // chart y para medir el infra-financiado sin que ese mismo objetivo dispare la
+        // jubilación — pasarle `fire_target: None` al motor, la vía que WP1b anticipaba, tiraba
+        // también la lectura. El default es `false`, así que `P10_jubilacion_forzada` (mes
+        // forzado, sin objetivo) sigue pineado exactamente donde estaba.
         retired = retired
-            || fire_reached
+            || (fire_reached && !plan.crossing_is_reading_only)
             || plan.retirement_trigger.forced_month().map_or(false, |s| k >= s);
         if retired && retirement_month_index.is_none() {
             retirement_month_index = Some(k);
+            // D17, «aviso rojo grande»: se entra en la jubilación con el líquido POR DEBAJO del
+            // objetivo de ese mes. Se mira el OBJETIVO, no el trigger: si quien jubiló fue el
+            // cruce, `liquid_prev ≥ t` por definición y esta rama no puede darse.
+            if target_prev.is_some_and(|t| liquid_prev < t) {
+                warnings.push(EngineWarning::RetireAtAgeUnderfunded);
+            }
         }
         let in_retirement = retired;
-        let income = if in_retirement {
-            plan.income_retirement_monthly
+        // Fase del mes (§B.1), monótona: `Retired` manda sobre `Partial`, y la parcial solo se
+        // entra si el latch de jubilación aún no cerró.
+        let phase = if in_retirement {
+            Phase::Retired
+        } else if plan.partial.is_some_and(|p| k >= p.start_month) {
+            if partial_month_index.is_none() {
+                partial_month_index = Some(k);
+            }
+            Phase::Partial
         } else {
-            input.income_regular_monthly
+            Phase::Accumulating
+        };
+        let income = match phase {
+            Phase::Retired => plan.income_retirement_monthly,
+            // Ingreso de la media jornada: PLANO como todos los ingresos del motor (#139).
+            Phase::Partial => plan
+                .partial
+                .map_or(input.income_regular_monthly, |p| p.income_monthly),
+            Phase::Accumulating => input.income_regular_monthly,
+        };
+        // Pausa de ingresos (P8.c): multiplica el ingreso GANADO de la fase, y solo dentro de la
+        // ventana. Fuera de ella no se ejecuta ninguna multiplicación — por eso `factor_at`
+        // devuelve `Option` y no un 1: `x·1` en `Decimal` conserva el valor pero puede cambiar la
+        // escala, y la escala es justo lo que el pin dorado hashea.
+        let income = match plan.income_pause.and_then(|p| p.factor_at(k)) {
+            Some(f) => income * f,
+            None => income,
         };
         // #139 (Ola 5): el GASTO se indexa al IPC de la instalación con el factor único
         // (`inflation_factor_at_month_index`) sobre el MISMO eje que el trigger del target,
@@ -2051,11 +2227,39 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         // por contrato y el motor la cobra aparte sin inflar.
         let expense_factor = inflation_factor_at_month_index(input.annual_inflation_percent, k - 1);
         let expense = expense_factor
-            * if in_retirement {
-                plan.expense_retirement_monthly
-            } else {
-                input.expense_regular_monthly
+            * match phase {
+                Phase::Retired => plan.expense_retirement_monthly,
+                // D10: el gasto de la media jornada es CONFIGURABLE — el de jubilación por
+                // defecto, el regular si el perfil lo dice. Se indexa con el MISMO factor que
+                // los otros dos (#139): la fase cambia qué partida rige, no cómo se infla.
+                Phase::Partial => plan
+                    .partial_expense_basis_monthly(input.expense_regular_monthly)
+                    .unwrap_or(input.expense_regular_monthly),
+                Phase::Accumulating => input.expense_regular_monthly,
             };
+
+        // **Pensión con fecha** (§B.1 paso 3): es INGRESO en cualquier fase desde `start_index`,
+        // con la rejilla 0-based (`k−1`) y el MISMO factor de inflación que el gasto del bucle si
+        // está indexada. Durante la media jornada se cobra la fracción declarada (D8).
+        //
+        // Se suma SOLO si es positiva: sin pensión con fecha —el caso de 4.15.0— aquí no se
+        // ejecuta ni una suma, y `income` llega al flujo de caja tal cual.
+        let pension_income = match plan.pension {
+            Some(pen) => {
+                let gross = pen.monthly_at(k - 1, expense_factor);
+                if matches!(phase, Phase::Partial) {
+                    gross * pen.partial_fraction()
+                } else {
+                    gross
+                }
+            }
+            None => Decimal::ZERO,
+        };
+        let income = if pension_income.is_zero() {
+            income
+        } else {
+            income + pension_income
+        };
 
         let retirement_withdrawal = if in_retirement {
             plan.extra_monthly_withdrawal
@@ -2077,6 +2281,11 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         // `None` = sin techo. Lo es con `fixed_real` (el permitido ES la necesidad) y lo es
         // mientras el hogar no se ha jubilado: una regla de retirada gobierna la jubilación, no
         // el mes malo de quien sigue trabajando.
+        //
+        // **La media jornada NO pasa por la regla** (WP3): las reglas se anclan en `L(R−1)` y
+        // `f(R−1)` —el patrimonio con el que se ENTRA en la jubilación—, y en la fase parcial ese
+        // ancla todavía no existe. Un déficit de media jornada se vende como el déficit de quien
+        // trabaja: necesidad fija, bruta, sin techo.
         let allowed_gross = if in_retirement {
             planner.anchor_retirement(k, liquid_prev, expense_factor);
             planner.allowed_gross(k, liquid_prev, expense_factor)
@@ -2102,8 +2311,24 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         // Quien necesita ese orden es `rule_is_spend` (R7): con superávit, la cascada invierte la
         // caja del mes PRIMERO y la regla vende DESPUÉS, sobre el saldo ya reinvertido.
         if net_cash_month > Decimal::ZERO {
+            // **Techo de aportación** (§B.7): la cascada solo ve `min(sobrante, c)`; el resto es
+            // caja DISPONIBLE — no se invierte, no compone y no entra en el patrimonio (mismo
+            // trato que `unallocated_savings_total`, y por la misma razón). Sin techo el pool es
+            // el sobrante entero y no se ejecuta ni una operación de más: bit-identidad.
+            let pool = match plan.contribution_cap_at(k) {
+                Some(cap) => {
+                    let invested = net_cash_month.min(cap);
+                    let disposable = net_cash_month - invested;
+                    if disposable > Decimal::ZERO {
+                        disposable_series[k as usize] = disposable;
+                        disposable_total += disposable;
+                    }
+                    invested
+                }
+                None => net_cash_month,
+            };
             let (alloc, leftover) = distribute_contributions(
-                net_cash_month,
+                pool,
                 &input.allocation_rules,
                 &values,
                 expense + debt_service,
@@ -2175,21 +2400,75 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         withdrawal_series.push(sale.net_obtained);
         shortfall_series.push(sale.shortfall);
         excess_series.push(sale.excess);
-        liquid_series.push(liquid_fn(&values));
+        let liquid_close = liquid_fn(&values);
+        // §B.3: ¿la media jornada deja crecer el capital? Se compara el cierre del mes con el
+        // cierre del anterior —el mismo par que el cruce usa— y basta UN mes a la baja para que
+        // la respuesta sea que no.
+        if matches!(phase, Phase::Partial)
+            && liquid_close < liquid_series[(k - 1) as usize]
+        {
+            partial_capital_shrank = true;
+        }
+        liquid_series.push(liquid_close);
         contrib_series.push(contributed_fn(&basis));
         for (i, s) in per_asset_series.iter_mut().enumerate() {
             s.push(values[i]);
         }
     }
 
-    // Fases atravesadas (§B.8). En WP1b el motor solo conoce dos: se arranca acumulando en el mes
-    // 0 y, si el latch llegó a cerrarse, se pasa a jubilado en el mes que ya se anotó. `Partial`
-    // entra en WP3 y se insertará ENTRE las dos.
-    let mut phase_transitions: Vec<(Phase, u32)> = Vec::with_capacity(2);
+    // Fases atravesadas (§B.8), en orden y con el mes 1-based en que empieza cada una: se arranca
+    // acumulando en el mes 0, la media jornada se inserta ENTRE las dos si llegó a existir, y la
+    // jubilación cierra. `partial_month_index` solo se rellena si la fase se pisó de verdad —
+    // una media jornada declarada DESPUÉS del cruce nunca ocurre, y publicarla igualmente
+    // pintaría en el chart una fase que la simulación no vivió.
+    let mut phase_transitions: Vec<(Phase, u32)> = Vec::with_capacity(3);
     phase_transitions.push((Phase::Accumulating, 0));
+    if let Some(k) = partial_month_index {
+        phase_transitions.push((Phase::Partial, k));
+    }
     if let Some(k) = retirement_month_index {
         phase_transitions.push((Phase::Retired, k));
     }
+
+    // -----------------------------------------------------------------------------------------
+    // Lecturas de WP3 (§B.3). Ninguna toca la aritmética: todas se derivan de series ya cerradas.
+    // -----------------------------------------------------------------------------------------
+    if partial_month_index.is_some() && partial_capital_shrank {
+        warnings.push(EngineWarning::PartialPhaseCapitalShrinking);
+    }
+    let partial_phase_capital_growing = partial_month_index.is_some() && !partial_capital_shrank;
+
+    // Primer mes del BUCLE (1-based) en que la pensión con fecha entra en caja. El mes `k`
+    // evalúa el índice `k−1`, así que la pensión de `start_index` se cobra en `start_index + 1`.
+    // `None` si ese mes cae fuera del horizonte: la pensión existe en el plan pero esta
+    // simulación no llega a verla.
+    let pension_start_month_index = plan.pension.and_then(|pen| {
+        let month = pen.start_index.saturating_add(1);
+        (month <= input.horizon_months).then_some(month)
+    });
+
+    // Tasa de retirada efectiva del puente: `100 · 12·need_full_m(R−1) / L(R−1)`.
+    // `12·need_full_m(i)` ES `need_full_annual_at(i)` — no se multiplica y divide por 12 para
+    // volver al mismo sitio.
+    let bridge_effective_withdrawal_pct = (plan.pension.is_some()
+        && plan.target_basis == crate::phases::TargetBasis::BridgeToPension)
+        .then(|| {
+            let r = retirement_month_index?;
+            let liquid_at_r = *liquid_series.get((r - 1) as usize)?;
+            if liquid_at_r <= Decimal::ZERO {
+                return None;
+            }
+            let need_annual = plan_target.need_full_annual_at(r - 1)?;
+            need_annual
+                .checked_mul(Decimal::from(100u32))
+                .and_then(|x| x.checked_div(liquid_at_r))
+        })
+        .flatten();
+
+    let pension_coverage_ratio = plan_target.pension_coverage_ratio();
+    let partial_gap_target =
+        plan_target.partial_gap_target(plan, input.expense_regular_monthly);
+
     Ok(ProjectionOutput {
         net_worth: net_series,
         contributed_capital: contrib_series,
@@ -2207,9 +2486,15 @@ pub fn project_net_worth_series(input: &ProjectionInput) -> Result<ProjectionOut
         // general, no por un `vec![0]` que fingía calcularlas.
         withdrawal_shortfall: shortfall_series,
         withdrawal_excess: excess_series,
-        pension_start_month_index: None,
-        partial_retirement_month_index: None,
-        warnings: Vec::new(),
+        pension_start_month_index,
+        partial_retirement_month_index: partial_month_index,
+        warnings,
+        bridge_effective_withdrawal_pct,
+        pension_coverage_ratio,
+        partial_gap_target,
+        partial_phase_capital_growing,
+        disposable_cash: disposable_series,
+        disposable_cash_total: disposable_total,
     })
 }
 

@@ -28,9 +28,10 @@
 
 use chrono::NaiveDate;
 use futurefin_engine::{
-    debt_payments_remaining_series, AllocationCap, AllocationKind, AllocationRule, FireNeed,
-    FireTarget, PhasePlan, ProjectionInput, ProjectionLiabilityInput, RepaymentModel,
-    RetirementTrigger, SimAsset, SpendMode, TaxBracket, WithdrawalRule,
+    debt_payments_remaining_series, AllocationCap, AllocationKind, AllocationRule, ExpenseBasis,
+    FireNeed, FireTarget, IncomePause, PartialPhase, PensionSchedule, PhasePlan, ProjectionInput,
+    ProjectionLiabilityInput, RepaymentModel, RetirementTrigger, SimAsset, SpendMode, TargetBasis,
+    TaxBracket, WithdrawalRule,
 };
 use rust_decimal::Decimal;
 use uuid::Uuid;
@@ -822,6 +823,17 @@ pub fn projection_cases_all() -> Vec<ProjCase> {
 /// | P15 | `percent_of_balance` | ceiling | ES, `g` MIXTA | el techo BRUTO por el paseo directo mixto |
 /// | P16 | `hybrid` | rule_is_spend | sin impuestos | cascada + venta el MISMO mes, y el latch |
 /// | P17 | `guardrails` | ceiling | ES, `g` escalar | las revisiones anuales y el recorte indexado |
+///
+/// **WP3 añadió seis** (§B.1/§B.3/§B.7), uno por camino nuevo del bucle:
+///
+/// | caso | qué ejercita |
+/// |---|---|
+/// | P18 | pensión con fecha INDEXADA + objetivo **puente** al 5 %, con impuestos ES y `g` mixta |
+/// | P19 | pensión que **cubre el gasto entero** ⇒ objetivo = deuda desde `P`, cruce inmediato |
+/// | P20 | **media jornada** del ejemplo del issue (1.100 €/mes desde el mes 60, hueco 900) |
+/// | P21 | `retire_at_age`: **cruce como lectura** + jubilación por edad infra-financiada |
+/// | P22 | **techo de aportación** y la serie `disposable_cash` (el escenario del solve) |
+/// | P23 | **pausa de ingresos** (P8.c) y el retraso que provoca |
 pub fn projection_cases_5_0() -> Vec<ProjCase> {
     let mut out = Vec::new();
 
@@ -984,6 +996,286 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
     out.push(ProjCase {
         name: "P17_guardrails_taxes_es",
         input: p17,
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // P18: **el ejemplo del issue #207** — pensión con fecha y objetivo PUENTE.
+    //
+    // Gasto de jubilación 2.000 €/mes, SWR 4 %, pensión INDEXADA de 1.200 €/mes desde el índice
+    // 240 (20 años), puente descontado al 5 % anual, impuestos ES y `g` MIXTA (dos activos con
+    // base declarada), inflación 2 %, 40 años de horizonte.
+    //
+    // Lo que pinea y ningún otro caso toca: la tabla del puente (240 gross-ups y 241 potencias
+    // calculados UNA vez), el escalón del objetivo al llegar `P`, la pensión entrando como
+    // INGRESO en un mes ya jubilado, y las dos lecturas nuevas
+    // (`bridge_effective_withdrawal_pct`, `pension_coverage_ratio`).
+    // -----------------------------------------------------------------------------------------
+    let mut p18 = base_input(
+        480,
+        Decimal::from(3_500),
+        Decimal::from(2_000),
+        vec![
+            // 0 — cuenta al 0 % con coste = valor ⇒ g = 0: drena primero (drain_order).
+            mk_asset_with_basis(
+                1,
+                Decimal::from(10_000),
+                true,
+                Some(Decimal::ZERO),
+                Decimal::from(10_000),
+            ),
+            // 1 — fondo al 6 % con plusvalía latente ⇒ g = 0,2.
+            mk_asset_with_basis(
+                2,
+                Decimal::from(150_000),
+                true,
+                Some(Decimal::from(6)),
+                Decimal::from(120_000),
+            ),
+        ],
+        vec![rule_remainder(1)],
+    );
+    p18.annual_inflation_percent = Decimal::from(2);
+    p18.tax_brackets = es_tax_brackets_2025_26();
+    p18.taxes_enabled = true;
+    p18.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
+    p18.phase_plan.pension = Some(PensionSchedule {
+        start_index: 240,
+        monthly_today: Decimal::from(1_200),
+        indexed: true,
+        fraction_while_partial: Decimal::ZERO,
+    });
+    p18.phase_plan.target_basis = TargetBasis::BridgeToPension;
+    p18.phase_plan.bridge_discount_annual_pct = Decimal::from(5);
+    p18.fire_target = Some(FireTarget {
+        need: FireNeed::ExpenseMinusPension {
+            expense_monthly: Decimal::from(2_000),
+            pension_monthly: Decimal::ZERO,
+        },
+        swr_pct: Decimal::from(4),
+        tax_brackets: es_tax_brackets_2025_26(),
+        taxes_enabled: true,
+        taxable_gain_ratio: Decimal::ONE,
+        annual_inflation_percent: Decimal::from(2),
+        debt_payments_remaining: Vec::new(),
+    });
+    out.push(ProjCase {
+        name: "P18_pension_bridge",
+        input: p18,
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // P19: **la pensión cubre el gasto entero** (2.500 contra 2.000, las dos indexadas al 1,5 %)
+    // desde el índice 120, con base PERPETUIDAD y un pasivo vivo.
+    //
+    // Desde `P` la necesidad neta es 0 y el objetivo es SOLO el término de deuda (R6): con
+    // 90.000 € líquidos el cruce es inmediato en el mes 121, que es justo lo que el hallazgo B3
+    // de la revisión decía que no podía quedarse en `None`. Antes de `P` el objetivo son 600.000
+    // (la pensión no se cuenta) más la deuda, y no se cruza.
+    // -----------------------------------------------------------------------------------------
+    let p19_liab = mk_liab(
+        Decimal::from(60_000),
+        Decimal::from(500),
+        Some(Decimal::from(3)),
+        RepaymentModel::French,
+        Some(150),
+    );
+    let mut p19 = base_input(
+        360,
+        Decimal::from(2_500),
+        Decimal::from(2_000),
+        vec![mk_asset(
+            1,
+            Decimal::from(90_000),
+            true,
+            Some(Decimal::from(3)),
+        )],
+        vec![rule_remainder(0)],
+    );
+    p19.annual_inflation_percent = d(15, 1);
+    p19.liabilities = vec![p19_liab];
+    p19.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
+    p19.phase_plan.pension = Some(PensionSchedule {
+        start_index: 120,
+        monthly_today: Decimal::from(2_500),
+        indexed: true,
+        fraction_while_partial: Decimal::ZERO,
+    });
+    p19.fire_target = Some(FireTarget {
+        need: FireNeed::ExpenseMinusPension {
+            expense_monthly: Decimal::from(2_000),
+            pension_monthly: Decimal::ZERO,
+        },
+        swr_pct: Decimal::from(4),
+        tax_brackets: Vec::new(),
+        taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
+        annual_inflation_percent: d(15, 1),
+        debt_payments_remaining: debt_payments_remaining_series(&p19.liabilities, ref_date()),
+    });
+    out.push(ProjCase {
+        name: "P19_pension_perpetuity_covering",
+        input: p19,
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // P20: **la media jornada del ejemplo del issue** — 1.100 €/mes desde el mes 60, gasto de
+    // jubilación 2.000, hueco 900 ⇒ `partial_gap_target = 900·12/0,04` = **270.000 €**.
+    //
+    // Sin impuestos ni inflación a propósito: el hueco de este caso tiene que salir en el número
+    // redondo del issue. La fase come capital (900 €/mes contra ~330 de rentabilidad), así que
+    // pinea también el aviso `PartialPhaseCapitalShrinking` y la venta SIN techo de la fase
+    // parcial — la regla de retirada gobierna la jubilación, no la media jornada.
+    // -----------------------------------------------------------------------------------------
+    let mut p20 = base_input(
+        300,
+        Decimal::from(3_000),
+        Decimal::from(2_000),
+        vec![mk_asset(
+            1,
+            Decimal::from(20_000),
+            true,
+            Some(Decimal::from(5)),
+        )],
+        vec![rule_remainder(0)],
+    );
+    p20.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
+    p20.phase_plan.partial = Some(PartialPhase {
+        start_month: 60,
+        income_monthly: Decimal::from(1_100),
+        expense_basis: ExpenseBasis::Retirement,
+    });
+    p20.fire_target = Some(FireTarget {
+        need: FireNeed::ExpenseMinusPension {
+            expense_monthly: Decimal::from(2_000),
+            pension_monthly: Decimal::ZERO,
+        },
+        swr_pct: Decimal::from(4),
+        tax_brackets: Vec::new(),
+        taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
+        annual_inflation_percent: Decimal::ZERO,
+        debt_payments_remaining: Vec::new(),
+    });
+    out.push(ProjCase {
+        name: "P20_partial_media_jornada",
+        input: p20,
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // P21: **`retire_at_age` con el cruce como LECTURA** (D17).
+    //
+    // Jubilación forzada en el mes 120 con el objetivo TODAVÍA en el input: `crossing_is_reading_only`
+    // impide que el cruce dispare nada, pero `liquid_crossing_month_index` se sigue anotando. Con
+    // 400.000 € al 6 %, impuestos ES e inflación 2 %, el capital NO alcanza el objetivo en el mes
+    // 120, así que el caso pinea además el aviso `RetireAtAgeUnderfunded`.
+    // -----------------------------------------------------------------------------------------
+    let mut p21 = base_input(
+        360,
+        Decimal::from(4_000),
+        Decimal::from(2_000),
+        vec![mk_asset(
+            1,
+            Decimal::from(400_000),
+            true,
+            Some(Decimal::from(6)),
+        )],
+        vec![rule_remainder(0)],
+    );
+    p21.annual_inflation_percent = Decimal::from(2);
+    p21.tax_brackets = es_tax_brackets_2025_26();
+    p21.taxes_enabled = true;
+    p21.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(120);
+    p21.phase_plan.crossing_is_reading_only = true;
+    p21.phase_plan.expense_retirement_monthly = Decimal::from(2_500);
+    p21.fire_target = Some(FireTarget {
+        need: FireNeed::ExpenseMinusPension {
+            expense_monthly: Decimal::from(2_500),
+            pension_monthly: Decimal::ZERO,
+        },
+        swr_pct: d(35, 1),
+        tax_brackets: es_tax_brackets_2025_26(),
+        taxes_enabled: true,
+        taxable_gain_ratio: Decimal::ONE,
+        annual_inflation_percent: Decimal::from(2),
+        debt_payments_remaining: Vec::new(),
+    });
+    out.push(ProjCase {
+        name: "P21_retire_at_age_reading_only",
+        input: p21,
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // P22: **el escenario del solve**, congelado como caso.
+    //
+    // Es la ejecución que `required_contribution_monthly` devuelve para el laboratorio de
+    // `tests/phases_wp3.rs`: sobrante 2.000 €/mes, techo 1.000, 0 % de rentabilidad, objetivo
+    // 100.000 € plano y jubilación por edad en el mes 101. Aquí la aritmética es de una línea —
+    // `líquido(k) = 1.000k`, `disposable_cash(k) = 1.000` — y por eso el pin de este caso es el
+    // que caza cualquier deriva del techo de aportación o de la identidad
+    // `sobrante = invertido + disponible`.
+    // -----------------------------------------------------------------------------------------
+    let mut p22 = base_input(
+        120,
+        Decimal::from(5_000),
+        Decimal::from(3_000),
+        vec![mk_asset(1, Decimal::ZERO, true, Some(Decimal::ZERO))],
+        vec![rule_remainder(0)],
+    );
+    p22.phase_plan.expense_retirement_monthly = Decimal::from(3_000);
+    p22.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(101);
+    p22.phase_plan.crossing_is_reading_only = true;
+    p22.phase_plan.contribution_cap_monthly = Some(Decimal::from(1_000));
+    p22.fire_target = Some(FireTarget {
+        need: FireNeed::Indexed {
+            annual_net_today: Decimal::from(4_000),
+        },
+        swr_pct: Decimal::from(4),
+        tax_brackets: Vec::new(),
+        taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
+        annual_inflation_percent: Decimal::ZERO,
+        debt_payments_remaining: Vec::new(),
+    });
+    out.push(ProjCase {
+        name: "P22_solve_required_contribution",
+        input: p22,
+    });
+
+    // -----------------------------------------------------------------------------------------
+    // P23: **pausa de ingresos** (P8.c) — dos meses sin nómina desde el mes 2.
+    //
+    // 5.000 € de cartera al 0 %, +1.000 €/mes, objetivo 10.000: sin pausa se cruza en el mes 6;
+    // con ella, dos `+1.000` se convierten en dos `−2.000` y el cruce cae en el mes 12. El caso
+    // pinea el vuelco completo, incluidas las dos ventas que la pausa obliga a hacer ANTES de
+    // jubilarse (una pausa no es una jubilación: no hay regla de retirada que la tope).
+    // -----------------------------------------------------------------------------------------
+    let mut p23 = base_input(
+        24,
+        Decimal::from(3_000),
+        Decimal::from(2_000),
+        vec![mk_asset(1, Decimal::from(5_000), true, Some(Decimal::ZERO))],
+        vec![rule_remainder(0)],
+    );
+    p23.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
+    p23.phase_plan.income_pause = Some(IncomePause {
+        from_month: 2,
+        months: 2,
+        income_fraction: Decimal::ZERO,
+    });
+    p23.fire_target = Some(FireTarget {
+        need: FireNeed::Indexed {
+            annual_net_today: Decimal::from(400),
+        },
+        swr_pct: Decimal::from(4),
+        tax_brackets: Vec::new(),
+        taxes_enabled: false,
+        taxable_gain_ratio: Decimal::ONE,
+        annual_inflation_percent: Decimal::ZERO,
+        debt_payments_remaining: Vec::new(),
+    });
+    out.push(ProjCase {
+        name: "P23_income_pause",
+        input: p23,
     });
 
     out
