@@ -656,7 +656,7 @@ export function SettingsView({
                 placeholder="2,5"
                 autoComplete="off"
               />
-              <small className="muted">
+              <p className="muted tight">
                 Se aplica al target FIRE para preservar tu poder adquisitivo. Los
                 ingresos, gastos y aportaciones se mantienen constantes en euros
                 — refleja «hacer lo que haces ahora». Usa <code>0</code> para
@@ -664,7 +664,7 @@ export function SettingsView({
                 {!projectionDraftValid
                   ? " Número entre 0 y 50 — sin guardar."
                   : null}
-              </small>
+              </p>
             </label>
             <label className="field">
               <span>Modo edad en la interfaz</span>
@@ -715,23 +715,23 @@ export function SettingsView({
                 modos vive en el HelpPopover del selector (settings.savings_source). */}
             <div className="field" id="savings-source-help">
               {(fireTaxDraft.savings_source ?? "budget") === "budget" ? (
-                <small className="muted">
+                <p className="muted tight">
                   La simulación ahorra cada mes lo que fijas en tu presupuesto
                   (ingresos − gastos presupuestados). No depende de tus
                   movimientos.
-                </small>
+                </p>
               ) : fireTaxDraft.savings_source === "transactions_avg" ? (
-                <small className="muted">
+                <p className="muted tight">
                   El ahorro sale de tus movimientos: ingreso y gasto promediados
                   por separado con las ventanas de abajo. Sin datos, ese lado cae
                   al presupuesto.
-                </small>
+                </p>
               ) : (
-                <small className="muted">
+                <p className="muted tight">
                   Ingresos del presupuesto y gasto medio real (ventana de abajo).
                   Solo acierta mientras mantengas el presupuesto de ingresos al
                   día.
-                </small>
+                </p>
               )}
             </div>
 

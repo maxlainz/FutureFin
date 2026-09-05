@@ -169,6 +169,8 @@ Sistema responsive base introducido en v1.7.0 (Workstream A). Toda la doctrina v
 
 **La página solo scrollea en vertical.** Cero scroll horizontal a nivel de página en cualquier ancho. El único scroll lateral permitido es **dentro** de una tabla (`.table-scroll { overflow-x: auto }`), como válvula residual — nunca la página entera. Antes de mergear cualquier cambio visual, verifica en 360 / 390 / 430 / 639 / 641 / 719 / 721 px que `document.scrollingElement.scrollWidth <= innerWidth`.
 
+**A ESCRITORIO la válvula no debe dispararse tampoco (5.0.0, F3/P7).** `.app-main { max-width: 66rem }` fija el contenido a ~1.024–1.056 px en CUALQUIER viewport de escritorio — un breakpoint solo «arregla» una franja y reabre el bug en un monitor más ancho. Patrón reutilizable para una tabla con columnas de contenido intrínseco (nowrap, `<select>`s, chips) que no caben en ese ancho: `table-layout: fixed` en la tabla + `<colgroup>` con `<col className="col-…">` por columna (nunca `style=`; anchos en `rem` para columnas de contenido fijo — fecha, acciones — y en `%` para las proporcionales; como mucho una columna sin ancho, `.col-remainder`, que se lleva el resto). Aplicado en `.assets-table--budget-lines` (Presupuesto, ambas tablas) y `.exp-movements-table--fixed` (Movimientos, solo escritorio — móvil sigue en 3 columnas y `table-layout: auto`, sin colgroup). Texto largo en una celda de ancho fijo va en un `<span>` con ellipsis de una línea y `title={…}` para el texto completo (`.exp-concept-text`), nunca en la celda directamente — así los hermanos (chips, tags) siguen pudiendo saltar de línea.
+
 ### Breakpoints canónicos (solo dos)
 
 CSS no admite `var()` dentro de `@media`, así que la convención es un **comentario greppable `bp:`** etiquetando cada media query:
@@ -635,14 +637,15 @@ que mezclaba cuatro cabeceras. La norma resultante, que vale para toda la app:
 propósito —como «Detalle del cálculo», que es la puerta a lo que se puede no leer— ese tamaño está
 declarado en una clase con nombre y documentado aquí, no heredado del user-agent.
 
-> **`.subsection-title` sigue viva, y eso es deuda registrada.** P6 la daba por retirable con tres
-> consumidores migrados; el barrido real encontró **seis**: `RetirementView` ×2 (ya migrados a
-> `h4.panel-title`) más cuatro en `components/charts/summary.tsx` y dos en `views/GastosView.tsx`.
-> Mientras esos seis existan, la clase se queda — y con ella su override por contenedor
-> (`.summary-donut-card .subsection-title`, que la baja a 0,82 rem: **una clase de título que cambia
-> de talla según dónde caiga es justo lo que P6 prohíbe**). Para retirarla hacen falta dos pasos que
-> este pase no cubre: dar a las tarjetas donut una clase propia con nombre para su talla menor, y
-> migrar los dos títulos de Movimientos.
+> **`.subsection-title` se ha retirado (WP-G, mismo pase que esta nota).** Los seis consumidores que
+> quedaban tras `RetirementView` (ya migrado a `h4.panel-title` en WP-D) migraron también: los dos
+> `<h4>` de `SummaryBreakdownBlock` y los dos de `views/GastosView.tsx` («Gastos»/«Ingresos») a
+> `h4.panel-title` sin cambio visual (la base de `.subsection-title` era idéntica a `.panel-title`
+> salvo el margen inferior, que `.panel-title` sí lleva); los dos `<h4>` de `SummaryDonutChart` —el
+> único caso que de verdad necesitaba la talla menor— a una clase propia con nombre,
+> `.donut-card-title` (0,82 rem / 600 / `--ff-ink-soft`, la misma declaración que tenía
+> `.summary-donut-card .subsection-title`, ahora sin depender de dónde cae un título genérico).
+> Verificación: `grep -c "subsection-title" apps/web/src/App.css apps/web/src/components/charts/summary.tsx apps/web/src/views/GastosView.tsx` → **0** en los tres.
 
 ## Vista de solo lectura (Hogar) — norma de renderizado (5.0.0, D9/D32, issue #207)
 
@@ -663,7 +666,7 @@ ocultar.
 
 ## Reglas para añadir UI nueva
 
-1. **Usa los tokens**. Nunca hardcoded hex. Si necesitas un color que no está, primero pregúntate si puedes vivir con `color-mix(in oklch, var(--ff-accent) X%, var(--ff-paper))`. Si no, añade un token nuevo en `theme.css` con variantes claro/oscuro. El enforcement automático es el freezer [`styles/no-hex-outside-theme.test.ts`](../apps/web/src/styles/no-hex-outside-theme.test.ts): sus contadas excepciones sancionadas (p. ej. la sombra del tooltip de Proyección, issue #105) se registran en `RGBA_ZERO_EXCEPTIONS` por **`file:línea` exacta, no por patrón** — cualquier edición de `App.css` que inserte líneas por encima desplaza el anclaje y rompe el test aunque el CSS no haya cambiado de verdad. 5.0.0 lo movió dos veces: a 2425/2426 cuando el segmentado «Yo | Hogar» y los banners de ámbito/alta se insertaron más arriba, y **de vuelta a 2404/2405** en la tercera vuelta de UX, al retirar F5 el banner de alta de Jubilación y sus 21 líneas de CSS. Las anclas se mueven en los dos sentidos: un borrado por encima las desplaza igual que una inserción. Si el freezer falla así: `grep -n "rgba(0, 0, 0," apps/web/src/App.css` para encontrar las líneas reales de hoy y actualiza los literales de `RGBA_ZERO_EXCEPTIONS` a esos números — no borres la excepción, muévela.
+1. **Usa los tokens**. Nunca hardcoded hex. Si necesitas un color que no está, primero pregúntate si puedes vivir con `color-mix(in oklch, var(--ff-accent) X%, var(--ff-paper))`. Si no, añade un token nuevo en `theme.css` con variantes claro/oscuro. El enforcement automático es el freezer [`styles/no-hex-outside-theme.test.ts`](../apps/web/src/styles/no-hex-outside-theme.test.ts): sus contadas excepciones sancionadas (p. ej. la sombra del tooltip de Proyección, issue #105) se registran en `RGBA_ZERO_EXCEPTIONS` por **`file:línea` exacta, no por patrón** — cualquier edición de `App.css` que inserte líneas por encima desplaza el anclaje y rompe el test aunque el CSS no haya cambiado de verdad. 5.0.0 lo movió varias veces: a 2425/2426 cuando el segmentado «Yo | Hogar» y los banners de ámbito/alta se insertaron más arriba; a 2404/2405 en la tercera vuelta de UX, al retirar F5 el banner de alta de Jubilación y sus 21 líneas de CSS; y **a 2396/2397** en WP-C/WP-G (F3/F12), que borraron por encima `.subsection-title` y su override `.summary-donut-card .subsection-title` (retiradas, ver §Una sola escala de títulos) y reescribieron `.assets-table--budget-lines` a `table-layout: fixed` — un neto de 8 líneas menos. Las anclas se mueven en los dos sentidos: un borrado por encima las desplaza igual que una inserción. Si el freezer falla así: `grep -n "rgba(0, 0, 0," apps/web/src/App.css` para encontrar las líneas reales de hoy y actualiza los literales de `RGBA_ZERO_EXCEPTIONS` a esos números — no borres la excepción, muévela.
 2. **Verifica claro y oscuro antes de mergear**. Toggle desde Ajustes y revisa: KPIs, modales, tooltips, hover states, focus rings.
 3. **No mezcles tab-bar legacy con TopBar**. La nav es responsabilidad exclusiva de `TopBar`. Sub-tabs (como las de Ajustes) van como pills con clase `ff-nav-pill`.
 4. **No introduzcas color decorativo**. Pos/neg = cifras delta. Acento = destacar UN ítem (botón primario, KPI hero, marker de jubilación, slice principal de un donut). El resto vive en grayscale.

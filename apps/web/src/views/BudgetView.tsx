@@ -682,6 +682,11 @@ export function BudgetView({
             ) : (
               <div className="table-scroll table-scroll--budget-lines bordered-top">
                 <table className="assets-table assets-table--budget-lines">
+                  <colgroup>
+                    <col className="col-remainder" />
+                    <col className="col-budget-amount" />
+                    {!isMobile && canEdit ? <col className="col-actions" /> : null}
+                  </colgroup>
                   <thead>
                     <tr>
                       <th>Categoría</th>
@@ -800,6 +805,11 @@ export function BudgetView({
               ) : (
                 <div className="table-scroll table-scroll--budget-lines bordered-top">
                   <table className="assets-table assets-table--budget-lines">
+                    <colgroup>
+                      <col className="col-remainder" />
+                      <col className="col-budget-amount" />
+                      {!isMobile && canEdit ? <col className="col-actions" /> : null}
+                    </colgroup>
                     <thead>
                       <tr>
                         <th>Categoría</th>

@@ -646,7 +646,20 @@ export function GastosView({
         : significantDeltaTone(totalDeltaBudget, kind, threshold);
     return (
       <div className="table-scroll bordered-top">
-        <table className="assets-table exp-comparison-table">
+        <table
+          className={`assets-table exp-comparison-table${
+            isMobile ? "" : " exp-comparison-table--fixed"
+          }`}
+        >
+          {isMobile ? null : (
+            <colgroup>
+              <col className="col-remainder" />
+              <col className="col-comparison-amount" />
+              <col className="col-comparison-amount" />
+              <col className="col-comparison-amount" />
+              <col className="col-comparison-amount" />
+            </colgroup>
+          )}
           <thead>
             <tr>
               <th>Categoría</th>
@@ -804,7 +817,13 @@ export function GastosView({
       >
         <td>{isMobile ? formatDateDm(t.op_date) : formatDateDmy(t.op_date)}</td>
         <td className="exp-concept-cell">
-          {t.concept}
+          {isMobile ? (
+            t.concept
+          ) : (
+            <span className="exp-concept-text" title={t.concept}>
+              {t.concept}
+            </span>
+          )}
           {refund ? (
             <>
               {" "}
@@ -1184,7 +1203,7 @@ export function GastosView({
                     ) : null}
                     <div className="exp-comparison-grid">
                       <div className="exp-comparison-col">
-                        <h4 className="subsection-title">Gastos</h4>
+                        <h4 className="panel-title">Gastos</h4>
                         {renderRefundsNote(summary.totals)}
                         {renderComparisonTable(
                           summary.expense_categories,
@@ -1198,7 +1217,7 @@ export function GastosView({
                         )}
                       </div>
                       <div className="exp-comparison-col">
-                        <h4 className="subsection-title">Ingresos</h4>
+                        <h4 className="panel-title">Ingresos</h4>
                         {renderComparisonTable(
                           summary.income_categories,
                           "income",
@@ -1277,7 +1296,22 @@ export function GastosView({
                       <p className="muted exp-movements-empty">Sin resultados.</p>
                     ) : (
                       <div className="table-scroll">
-                        <table className="assets-table exp-movements-table">
+                        <table
+                          className={`assets-table exp-movements-table${
+                            isMobile ? "" : " exp-movements-table--fixed"
+                          }`}
+                        >
+                          {isMobile ? null : (
+                            <colgroup>
+                              <col className="col-exp-date" />
+                              <col className="col-remainder" />
+                              <col className="col-exp-category" />
+                              <col className="col-exp-kind" />
+                              <col className="col-exp-amount" />
+                              <col className="col-exp-link" />
+                              {canEdit ? <col className="col-actions" /> : null}
+                            </colgroup>
+                          )}
                           <thead>
                             <tr>
                               {renderSortHeader("Fecha", "date")}
