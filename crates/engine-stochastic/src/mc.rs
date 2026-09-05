@@ -43,7 +43,7 @@
 //!   `√H` limpia. La evidencia histórica apunta a algo de reversión a largo plazo, que ESTRECHARÍA
 //!   las bandas lejanas. Esta ausencia tiene una consecuencia MEDIDA y contraintuitiva: el colchón
 //!   de caja (P4) **empeora** el plan en este modelo (ver
-//!   `mc_cash_buffer_costs_return_without_buying_safety_in_this_model`). Sin autocorrelación, un
+//!   `mc_cash_buffer_protects_and_the_drag_is_what_costs`). Sin autocorrelación, un
 //!   mes malo no dice nada del siguiente, así que no hay «mala racha que esperar sentado»: el
 //!   colchón no compra información y su lastre —dinero fuera del mercado— se cobra entero.
 //! - **Correlación imperfecta entre activos.** Con un único `z` por mes, la correlación entre dos
@@ -63,12 +63,18 @@
 //!
 //! # El colchón de caja (P4, §B.6)
 //!
-//! Con [`McConfig::cash_buffer_months`] declarado, el activo líquido de menor rentabilidad hace
-//! de colchón: la retirada del mes ya sale de él sola (es el primero del orden de drenaje) y en
-//! los meses de **shock positivo** (`z_k > 0`) se rellena hasta `n` meses de gasto vendiendo del
-//! resto de la cartera. El relleno lo ejecuta el motor (`refill_cash_buffer_g`), así que es una
-//! venta de verdad: pasa por el gross-up, paga su plusvalía por tramos y baja la base de coste
-//! del activo vendido.
+//! Con [`McConfig::cash_buffer`] declarado, el activo líquido de menor rentabilidad hace de
+//! colchón: la retirada del mes ya sale de él sola (es el primero del orden de drenaje) y en los
+//! meses de **shock positivo** (`z_k > 0`) se rellena hasta su objetivo vendiendo del resto de la
+//! cartera. El relleno lo ejecuta el motor (`refill_cash_buffer_g`), así que es una venta de
+//! verdad: pasa por el gross-up, paga su plusvalía por tramos y baja la base de coste del activo
+//! vendido.
+//!
+//! El objetivo tiene DOS convenciones y elegir mal sobrevalora la protección
+//! ([`CashBufferSpec`]): [`Months(n)`](CashBufferSpec::Months) son `n` meses del gasto **ya
+//! indexado** —el objetivo crece con la inflación—, y [`Amount(a)`](CashBufferSpec::Amount) es un
+//! importe **nominal fijo** que no se indexa nunca, el mismo euro que persigue el tope `amount`
+//! de una regla de la cascada.
 //!
 //! **No se instala** —y [`McOutcome::buffer_active`] lo dice— si no hay activo líquido que lo
 //! albergue o si ningún activo declara volatilidad: sin volatilidad, `z_k` no mueve ningún
@@ -85,9 +91,11 @@
 use rand_chacha::rand_core::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
+use rust_decimal::Decimal;
+
 use futurefin_engine::{
-    monthly_growth_multiplier, safe_cash_buffer_index, simulate, CashBufferPlan, EngineError,
-    EngineWarning, ProjectionInput, RetirementTrigger, SimInput, SimOutput,
+    monthly_growth_multiplier, safe_cash_buffer_index, simulate, CashBufferPlan, CashBufferTarget,
+    EngineError, EngineWarning, MoneyOps, ProjectionInput, RetirementTrigger, SimInput, SimOutput,
 };
 
 use crate::F64Money;
@@ -130,18 +138,48 @@ pub struct McConfig {
     /// Percentiles a publicar, cada uno en `1..=99`. **Se respeta el orden dado** y se permite
     /// repetir: las bandas salen en las mismas posiciones que este vector.
     pub percentiles: Vec<u8>,
-    /// **El colchón de caja** (P4, §B.6): cuántos meses de gasto se intentan mantener en el
-    /// activo líquido de menor rentabilidad.
+    /// **El colchón de caja** (P4, §B.6): cuánto se intenta mantener en el activo líquido de
+    /// menor rentabilidad, y con qué convención ([`CashBufferSpec`]).
     ///
     /// La retirada sale de ese activo sola —es el primero del orden de drenaje— y el colchón se
     /// **rellena** vendiendo del resto de la cartera **solo en los meses de shock positivo**
     /// (`z_k > 0`): se vende después de que el mercado suba, no después de que baje. El relleno es
     /// una venta de verdad y paga su plusvalía (`refill_cash_buffer_g` en el motor).
     ///
-    /// `None` = sin colchón. Y `Some(n)` **no garantiza** que se simule: hace falta además un
-    /// activo líquido que lo albergue y volatilidad declarada de la que protegerse. Lo dice
-    /// [`McOutcome::buffer_active`].
-    pub cash_buffer_months: Option<u32>,
+    /// `None` = sin colchón. Y `Some(..)` **no garantiza** que se simule: hace falta además un
+    /// activo líquido SIN riesgo que lo albergue y volatilidad declarada de la que protegerse. Lo
+    /// dice [`McOutcome::buffer_active`].
+    pub cash_buffer: Option<CashBufferSpec>,
+}
+
+/// **Cuánto colchón se pide, y con qué convención** (P4). Gemelo en el tipo del API del
+/// [`CashBufferTarget`] del motor: aquí los euros son `Decimal` porque es la frontera de
+/// entrada; la conversión a coma flotante ocurre una sola vez, al construir el `PathEngine`.
+///
+/// - [`Months(n)`](CashBufferSpec::Months): `n` meses del gasto **ya indexado** de cada mes. El
+///   objetivo crece con la inflación, igual que el gasto que cubre. Es lo que declara quien
+///   escribe `cash_buffer_months` en su perfil.
+/// - [`Amount(a)`](CashBufferSpec::Amount): un importe **nominal fijo**, que no se indexa nunca.
+///   Es el euro que persigue el tope `amount` de una regla de la cascada, y por eso existe:
+///   cuando el colchón se DERIVA de ese tope, la misma regla gobierna acumulación y jubilación.
+///   Convertirlo a meses lo revalorizaría por el camino (~1,6× a veinte años con un 2,5 %).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CashBufferSpec {
+    /// `n` meses del gasto ya indexado.
+    Months(u32),
+    /// Un importe nominal fijo, en la divisa base, sin indexar.
+    Amount(Decimal),
+}
+
+impl CashBufferSpec {
+    /// La traducción al objetivo del motor. **Una sola conversión a coma flotante**, hecha en la
+    /// frontera y no dentro del bucle.
+    fn to_engine(self) -> CashBufferTarget<F64Money> {
+        match self {
+            CashBufferSpec::Months(n) => CashBufferTarget::Months(F64Money(f64::from(n))),
+            CashBufferSpec::Amount(a) => CashBufferTarget::Amount(F64Money::from_decimal(a)),
+        }
+    }
 }
 
 impl Default for McConfig {
@@ -150,7 +188,7 @@ impl Default for McConfig {
             seed: 0,
             paths: DEFAULT_PATHS,
             percentiles: DEFAULT_PERCENTILES.to_vec(),
-            cash_buffer_months: None,
+            cash_buffer: None,
         }
     }
 }
@@ -371,9 +409,9 @@ struct PathEngine {
     sigmas: Vec<f64>,
     seed: u64,
     buf: Option<Vec<Vec<F64Money>>>,
-    /// **P4**: `(índice del activo colchón, meses de gasto objetivo)`. `None` = no se simula
-    /// colchón, y entonces `sim.cash_buffer` nunca se rellena.
-    buffer: Option<(usize, F64Money)>,
+    /// **P4**: `(índice del activo colchón, objetivo ya en el tipo del motor)`. `None` = no se
+    /// simula colchón, y entonces `sim.cash_buffer` nunca se rellena.
+    buffer: Option<(usize, CashBufferTarget<F64Money>)>,
     /// Por qué NO se instaló el colchón. `None` ⟺ `buffer.is_some()`.
     buffer_inactive_reason: Option<BufferInactiveReason>,
     /// Autorizaciones de relleno del mes (`z_{k−1} > 0`, NO anticipativas), reutilizadas camino a
@@ -387,7 +425,7 @@ struct PathEngine {
 /// usuario pidió y no recibió, sin explicación.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferInactiveReason {
-    /// No se pidió (`McConfig::cash_buffer_months = None`).
+    /// No se pidió (`McConfig::cash_buffer = None`).
     NotRequested,
     /// Ningún activo declara volatilidad: no hay riesgo de secuencia del que protegerse, y
     /// rellenar «en los meses buenos» sería trasvasar valor y pagar plusvalía guiándose por un
@@ -440,7 +478,7 @@ impl PathEngine {
         let buf = Some(vec![vec![F64Money(0.0); sim.assets.len()]; months]);
         // **P4: cuándo se instala el colchón, y por qué las tres condiciones.**
         //
-        // 1. `cash_buffer_months` declarado — el usuario lo pidió.
+        // 1. `cash_buffer` declarado — el usuario lo pidió (o el API lo derivó de su regla).
         // 2. Existe un activo LÍQUIDO que pueda albergarlo (`cash_buffer_index`, el motor decide
         //    cuál: el líquido de menor rentabilidad, que es el primero del orden de drenaje). Sin
         //    activo líquido no hay colchón posible.
@@ -459,11 +497,11 @@ impl PathEngine {
         // colchón: un colchón con σ = 17 % no es un colchón, es la misma cartera con más
         // impuestos. Si no hay dónde ponerlo, no se instala y se dice POR QUÉ.
         let risk_free: Vec<bool> = sigmas.iter().map(|s| *s == 0.0).collect();
-        let (buffer, buffer_inactive_reason) = match config.cash_buffer_months {
+        let (buffer, buffer_inactive_reason) = match config.cash_buffer {
             None => (None, Some(BufferInactiveReason::NotRequested)),
             Some(_) if !any_volatility => (None, Some(BufferInactiveReason::NoVolatility)),
-            Some(n) => match safe_cash_buffer_index(&sim.assets, &risk_free) {
-                Some(i) => (Some((i, F64Money(f64::from(n)))), None),
+            Some(spec) => match safe_cash_buffer_index(&sim.assets, &risk_free) {
+                Some(i) => (Some((i, spec.to_engine())), None),
                 None => (None, Some(BufferInactiveReason::NoSafeLiquidAsset)),
             },
         };
@@ -534,10 +572,10 @@ impl PathEngine {
             }
         }
         self.sim.growth_overrides = Some(buf);
-        if let Some((buffer_index, target_months)) = self.buffer {
+        if let Some((buffer_index, target)) = self.buffer {
             self.sim.cash_buffer = Some(CashBufferPlan {
                 buffer_index,
-                target_months,
+                target,
                 refill_months: core::mem::take(&mut self.refill_buf),
             });
         }
@@ -644,9 +682,9 @@ pub struct McOutcome {
     pub withdrawal_to_need_ratio_p50: Option<f64>,
     /// **P4 (§B.6): ¿se SIMULÓ el colchón?**
     ///
-    /// `true` solo si se cumplieron las tres condiciones: [`McConfig::cash_buffer_months`]
+    /// `true` solo si se cumplieron las tres condiciones: [`McConfig::cash_buffer`]
     /// declarado, un activo líquido que pueda albergarlo y volatilidad declarada de la que
-    /// protegerse. Un `false` con `cash_buffer_months = Some(n)` no es un fallo: es que en esta
+    /// protegerse. Un `false` con `cash_buffer = Some(..)` no es un fallo: es que en esta
     /// cartera el colchón no significa nada, y el resultado es idéntico al de no pedirlo.
     ///
     /// Con `false`, [`Self::buffer_refills_p50`] y [`Self::buffer_refill_net_total_p50`] son

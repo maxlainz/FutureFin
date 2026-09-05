@@ -182,8 +182,8 @@ Forma (todas las claves opcionales en el wire):
 | `withdrawal_rule` | `{kind, pct?, start_pct?, end_pct?, band_pct?, adjust_pct?, spend_mode}` (+ `pct_source` **solo salida**) | Se sustituye ENTERA. **`pct` (`percent_of_balance`, `guardrails`) y `start_pct` (`hybrid`) son OPCIONALES desde 5.0.0/U4 y, ausentes, HEREDAN `swr_pct`** (ver abajo). Siguen siendo obligatorios `end_pct` en `hybrid` (< el `start_pct` **resuelto**) y `band_pct`+`adjust_pct` en `guardrails`. `pct` en `(0,20]`, banda/ajuste en `(0,50]`; el % EFECTIVO —heredado o no— es el que se acota |
 | `pension` | `{monthly_amount_today > 0, starts_at_age ∈ [50, horizon], indexed=true, fraction_while_partial ∈ [0,1]}` | |
 | `partial_retirement` | `{starts_at_age ∈ [18, horizon], income_monthly_today ≥ 0, expense_basis}` | Debe empezar ANTES de `target_retirement_age` (`partial_not_before_retirement`) |
-| `cash_buffer_months` | `[0, 60]` | Solo actúa en Monte Carlo |
-| `success_threshold_pct` | `[50, 99]`, default 95 | |
+| `cash_buffer_months` | `[0, 60]`, tri-estado | Solo actúa en Monte Carlo. **Desde 5.0.0 (V6) el default `null` NO es «sin colchón»: es «derívalo del tope de mi regla de ahorro»** (`GET /v1/projection/bands` → `buffer_source`). Un valor explícito gana —una elección no se deriva— y `null` es el camino de vuelta. La SPA ya no lo escribe; sigue escribible por HTTP y MCP |
+| ~~`success_threshold_pct`~~ | **retirado en 5.0.0** (decisión V7) | El veredicto tiene corte FIJO: verde solo con el 100 % de escenarios sin agotar la cartera. Se **acepta e ignora** en el PATCH (`#[schema(deprecated)]`, sin validación) para no romper a quien lo mande, y **no sale por ninguna respuesta**. Sin migración: el 95 ya persistido en `users.retirement_profile` se ignora al leer y desaparece en la siguiente escritura. El código `success_threshold_out_of_range` se retiró con él |
 
 **Respuesta de las dos rutas** (`RetirementProfileResponse`): `{profile, birth_date,
 target_basis_stored}`.
@@ -726,8 +726,9 @@ leyendo el JSONB crudo: una segunda interpretación del mismo dato es como diver
 **`plan` — la tarjeta «Tu plan» del Resumen (5.0.0 WP5-2b, D27).** Objeto con
 `{strategy, retirement_trigger, jubilacion_month_index, required_savings_monthly,
 disposable_monthly, underfunded, absent_reason}` **+ el KPI «Éxito del plan» de WP6b**
-(`success_probability`, `success_threshold_pct`, `success_verdict`, `never_retired_probability`,
-`success_given_retired`, `success_absent_reason`).
+(`success_probability`, `success_verdict`, `never_retired_probability`, `success_given_retired`,
+`success_absent_reason`). El `success_threshold_pct` que aquí se ecoaba **se retiró en 5.0.0**
+(V7): el corte del veredicto es fijo y no hay umbral que auditar.
 
 - **Sale del MISMO objeto que pinta el chart**: se lee de la entrada de cache de proyección del
   solicitante (las dos densidades; estas seis cifras son escalares del plan y no dependen de la
@@ -1119,9 +1120,10 @@ Response (`ProjectionBandsResponse`):
 - **`success_probability` = el plan OCURRE y AGUANTA** (fracción, string, 6 dp — la misma política
   que `savings_rate`): fracción de caminos en los que el hogar **se jubila dentro del horizonte**
   —o la estrategia es por EDAD, y entonces la jubilación es un dato del plan y no un suceso— **Y**
-  la cartera no se agota nunca. Al lado, `success_threshold_pct` (del perfil, %) y `success_verdict`
-  ∈ `green` | `amber` | `red` (D28: verde en el umbral EXACTO, ámbar hasta 10 puntos porcentuales
-  por debajo, rojo el resto).
+  la cartera no se agota nunca. Al lado, `success_verdict` ∈ `green` | `amber` | `red` (D28, corte
+  **FIJO desde 5.0.0** —decisión V7—: verde solo con `success_probability == 1`, ámbar en
+  `[0,90, 1)`, rojo por debajo de 0,90). **`success_threshold_pct` ya no viaja**: el umbral
+  configurable del perfil se retiró, así que no hay nada que ecoar para poder auditar el color.
 
   **La definición cambió en el pase de correcciones de la revisión adversarial del motor.** D22
   decía solo «la cartera no se agota nunca», y con un trigger por CRUCE eso premiaba al hogar que
@@ -1163,14 +1165,49 @@ Response (`ProjectionBandsResponse`):
   pasaba 366 de 400 meses sin cartera; ese mismo hogar publica hoy **0,086500**. El mes sin dinero
   no aparecía en ninguna cifra publicada.
 - `any_volatility_declared` (con `false` las tres bandas SON la línea determinista).
-- **P4, el colchón de caja**: `buffer_active` dice si se SIMULÓ —hacen falta las tres cosas a la
-  vez: `cash_buffer_months` en el perfil, un líquido **con σ = 0** que lo albergue y volatilidad de
-  la que protegerse—, **y `buffer_inactive_reason` dice CUÁL faltó**: `not_requested` |
-  `no_volatility` (sin riesgo de secuencia del que proteger: el resultado es BIT A BIT el de no
-  pedirlo) | `no_safe_liquid_asset` (no hay un líquido sin riesgo donde alojarlo; un colchón volátil
-  no protege de nada). **`null` ⟺ `buffer_active: true`**, y nunca `null` con `buffer_active: false`:
-  quien pidió un colchón y no lo tuvo merece el motivo, porque sin él «no pasó nada» se lee como «no
-  funcionó». Con él viajan `buffer_refills_p50` (un CONTADOR de meses con relleno) y
+- **P4/V6, el colchón de caja — DERIVADO del tope de la regla de ahorro desde 5.0.0.** El input
+  desapareció de la SPA: si tu cascada dice «la cuenta corriente hasta 6.000 €, el resto al fondo»,
+  ese 6.000 **es** tu colchón, y la respuesta dice de dónde sale. Cinco campos nuevos:
+
+  | Campo | Tipo | Qué es |
+  |---|---|---|
+  | `buffer_source` | `"explicit"` \| `"allocation_cap"` \| `"none"` | `explicit` = lo declara `cash_buffer_months` (perfil, o `profile_overrides` en el what-if); `allocation_cap` = derivado del tope; `none` = no hay, y `buffer_inactive_reason` dice por qué |
+  | `buffer_target_amount` | Decimal-string (4 dp), `null` | El objetivo en **euros NOMINALES**, que **no se indexan nunca** (P2). Solo con `allocation_cap`: con un colchón en meses el objetivo se re-dimensiona cada mes contra el gasto ya indexado, y publicar un escalar sería publicar una sola de sus caras |
+  | `buffer_months_effective` | `u32`, `null` | Con `explicit`, los meses que el usuario escribió (y los que el motor usa). Con `allocation_cap`, el equivalente **informativo** `floor(tope / gasto de jubilación mensual de hoy)`; `null` si el gasto no es positivo |
+  | `buffer_source_rule_id` | uuid, `null` | La regla cuyo tope fijó el objetivo (solo `allocation_cap`) — lo que deja a la UI enlazar «cámbialo en tu regla» en vez de describirlo |
+  | `buffer_source_asset_name` | string, `null` | El activo que HACE de colchón: el líquido σ = 0 de menor rentabilidad, el mismo que elige el motor (`safe_cash_buffer_index`). Se publica también con `explicit`; `null` solo cuando no hay ningún líquido sin riesgo |
+
+  **La regla de derivación**, en orden, con un motivo por cada salida (`handlers/cash_buffer.rs`,
+  llamada al final de `build_installation_projection_input` y guardada en `BuiltProjection`, no en
+  `resolve_retirement_profile` — esa función es ledger-free por contrato, D25):
+  1. `cash_buffer_months` explícito gana (patrón `pct_source`). `PATCH {"cash_buffer_months": null}`
+     vuelve a derivado.
+  2. El activo es el que usará el MOTOR: `safe_cash_buffer_index` con el **mismo** vector
+     `risk_free` que el crate estocástico construye desde `asset_volatility_percent` (ausente, 0,
+     negativa o no finita ⇒ σ = 0). Ninguno → `no_safe_liquid_asset`.
+  3. Reglas **habilitadas y con tope** que apuntan a ese activo. Ninguna → `no_capped_rule` (el
+     caso común de la pauta «todo al fondo», donde ese líquido es el sumidero sin tope, I1).
+  4. Techo = **MAX** de los techos (`futurefin_engine::resolve_cap_ceiling`, el mismo resolutor que
+     `/v1/assets` y `/goals`): la cascada evalúa `cap_room` contra un valor VIVO compartido, así que
+     el saldo alcanzable lo fija el techo mayor — sumar promete lo que la cascada nunca llena y el
+     mínimo infrapromete. Techo ≤ 0 → `cap_is_zero`.
+  5. `Amount(techo)` al motor (`CashBufferTarget::Amount`, nominal fijo).
+
+  **Advertencia asumida (P4)**: el colchón **cuesta** en este modelo. Medido con la cuenta al 0 %,
+  el éxito baja ~3,5 pp (lastre −7,9 pp, protección +3,9 pp). Derivarlo de un tope que ya existía
+  hace que ese coste aparezca sin que nadie lo haya pedido, y el owner lo aceptó explícitamente
+  (V6): la ayuda de la UI tiene que decirlo.
+
+  `buffer_active` dice si se SIMULÓ —hacen falta las tres cosas a la vez: colchón resuelto, un
+  líquido **con σ = 0** que lo albergue y volatilidad de la que protegerse—, **y
+  `buffer_inactive_reason` (UN solo campo, con motivos de DOS capas) dice CUÁL faltó**: del handler
+  `no_capped_rule` | `cap_is_zero` | `no_safe_liquid_asset`; del motor `no_volatility` (sin riesgo
+  de secuencia del que proteger: el resultado es BIT A BIT el de no pedirlo). **El `not_requested`
+  del motor ya no se publica**: desde que el colchón se deriva, «no se pidió» no es un motivo — el
+  motivo es cuál condición de la derivación falló. **`null` ⟺ `buffer_active: true`**, y nunca
+  `null` con `buffer_active: false`: quien tiene colchón y no llega a usarlo merece el motivo,
+  porque sin él «no pasó nada» se lee como «no funcionó». Con él viajan `buffer_refills_p50` (un CONTADOR
+  de meses con relleno) y
   `buffer_refill_net_total_p50` (mediana del total movido). Los dos son `null` con
   `buffer_active: false`: «no se midió», que no es «cero rellenos». El colchón **solo existe en
   Monte Carlo**: sin sorteo no hay mes bueno ni malo que distinguir y el trasvase no tendría
@@ -1192,7 +1229,7 @@ solo liberaría al llamante mientras la CPU sigue ardiendo. Corre bajo el semáf
 (`heavy::run_projection_sim`). Payload medido: **16,4 KB** a densidad hybrid con las seis series
 (66 puntos), ~9,9 KB sin las del líquido.
 
-Tests: `apps/api/tests/projection_bands.rs` (**15** el 2026-09-03: `grep -c '#\[tokio::test\]' apps/api/tests/projection_bands.rs`), más el eco de `view` en `context_fields.rs`.
+Tests: `apps/api/tests/projection_bands.rs` (recuéntalos: `grep -c '#\[tokio::test\]' apps/api/tests/projection_bands.rs`; la §9 «Colchón derivado» de 5.0.0 son seis), más el eco de `view` en `context_fields.rs` y, para la invalidación por regla de ahorro, `projection_cache.rs::an_allocation_rule_mutation_drops_the_projection_and_the_bands`.
 
 **Two-phase loading en el cliente**: `App.tsx` dispara `?density=hybrid` y `?density=monthly` en paralelo. El hybrid suele llegar primero (JSON más pequeño) → se renderiza el chart con menos puntos. Cuando llega el monthly, se reemplaza dentro de `startTransition()` (sin bloquear inputs). Si ambos son cache hit, ambos llegan en <10 ms → el hybrid no añade latencia perceptible.
 

@@ -4,6 +4,7 @@ pub mod assets;
 pub mod auth;
 pub mod backup_user;
 pub mod budget;
+pub mod cash_buffer;
 pub mod categories;
 pub mod changes;
 pub mod fallback;

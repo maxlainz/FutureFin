@@ -1024,9 +1024,10 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     y `deltas` gana `success_probability_delta`. **No lleva bandas** — son ~16 KB por lado y un
     what-if devuelve dos; el fan chart vive en su endpoint, que además lo cachea. Los dos lados
     sortean con la MISMA semilla, así que el delta mide el cambio del PLAN y no el ruido de dos
-    muestras. La respuesta ecoa `monte_carlo {paths, seed (string), any_volatility_declared,
-    success_threshold_pct}`: sin la semilla el resultado no es reproducible y por tanto no es un
-    resultado.
+    muestras. La respuesta ecoa `monte_carlo {paths, seed (string), any_volatility_declared}`: sin
+    la semilla el resultado no es reproducible y por tanto no es un resultado. (El
+    `success_threshold_pct` que este bloque ecoaba **se retiró en 5.0.0/V7**: el corte del
+    veredicto es fijo al 100 % y no hay umbral que auditar.)
   - **Es el único eje de `simulate_projection` SIN anti-no-op, y está declarado**: los demás
     (`income_growth`, `profile_overrides`, `solve`, los de pasivos) se rechazan cuando no pueden
     mover nada porque devolverían un escenario idéntico al baseline sin decir por qué. Éste no
@@ -1062,8 +1063,10 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     `uncovered_deficit_total = 0`. El campo sigue en la rejilla 0-based de #210.
   - **`get_projection_bands`** — la definición de éxito, sus dos caras, las dos lecturas de
     cobertura y el cierre en el horizonte de `depletion_probability_by_age` están en su bullet
-    propio, arriba; `buffer_inactive_reason` dice por qué NO se simuló el colchón (`not_requested` |
-    `no_volatility` | `no_safe_liquid_asset`), y es `null` ⟺ `buffer_active: true`.
+    propio, arriba; `buffer_inactive_reason` dice por qué NO se simuló el colchón, y es `null` ⟺
+    `buffer_active: true`. **Sus motivos cambiaron en 5.0.0/V6** (ver el bullet del colchón
+    derivado, abajo): hoy son `no_capped_rule` | `cap_is_zero` | `no_safe_liquid_asset` |
+    `no_volatility`, y `not_requested` ya no se emite.
   - **`simulate_projection`**: los dos lados ganan `never_retired_probability`,
     `success_given_retired` y `buffer_inactive_reason` junto a las cifras de Monte Carlo que ya
     tenían, y con `include_series` la `series` gana **`baseline_unmet_need` y
@@ -1119,6 +1122,35 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     `jq '[.tools[].description_len] | add' apps/api/tests/fixtures/mcp-catalog.json` → **23 906**
     (margen 94 el 2026-09-03; eran 23 828 antes de esta ola). **Mídelo, no lo copies**: el margen
     es de dos cifras y la próxima tool obliga a otra ronda de reequilibrio.
+- **5.0.0 / WP-F (decisiones V6 y V7 del owner) — cero tools nuevas, dos contratos que crecen y un
+  parámetro que se deprecia.** Evaluación de paridad: **tres tools actualizadas**
+  (`get_projection_bands`, `simulate_projection`, `update_retirement_profile`), ninguna omisión
+  nueva y **ningún contador se mueve** (recuéntalos, no los copies). Lo que un modelo lee distinto:
+  - **El colchón de caja se DERIVA del tope de la regla de ahorro** (V6) y la salida dice de dónde
+    sale. `get_projection_bands` y los dos lados de `simulate_projection` ganan
+    `buffer_source` (`explicit` | `allocation_cap` | `none`), `buffer_target_amount`
+    (Decimal-string, € **nominales**, solo con `allocation_cap`), `buffer_months_effective`
+    (los meses explícitos, o `floor(tope / gasto de jubilación)` como equivalente **informativo**),
+    `buffer_source_rule_id` y `buffer_source_asset_name`. `buffer_inactive_reason` sigue siendo UN
+    campo y sus motivos son ahora `no_capped_rule` | `cap_is_zero` | `no_safe_liquid_asset` (del
+    handler) y `no_volatility` (del motor); **`not_requested` ya no se emite** — desde que el
+    colchón se deriva, «no se pidió» no es un motivo.
+    En `simulate_projection` van **por lado y no en el bloque `monte_carlo`**: un
+    `profile_overrides.cash_buffer_months` fija el colchón solo del escenario, y un campo
+    compartido describiría el colchón equivocado en la mitad de las simulaciones.
+    `cash_buffer_months` (y `clear_cash_buffer_months`) **siguen siendo escribibles**: un valor
+    explícito gana sobre la derivación, y borrarlo vuelve a ella.
+  - **`success_threshold_pct` queda DEPRECADO e IGNORADO** (V7) en `update_retirement_profile` y en
+    el `profile_overrides` de `simulate_projection`. **No se borra del schema**: los dos params son
+    `deny_unknown_fields`, así que retirarlo convertiría en 400 lo que hoy funciona. Se acepta y se
+    descarta —sin validación, sin persistencia y **fuera de toda salida**—, su `#[schemars(range)]`
+    desaparece (ya no acota nada) y con él sale su fila de `schema_bounds_parity.rs`; el veredicto
+    tiene corte FIJO: verde solo con el 100 % de escenarios sin agotar la cartera. El código de
+    error `success_threshold_out_of_range` se retiró del catálogo.
+  - **Presupuesto de descripciones: intacto.** Ninguna descripción de tool cambia (los
+    `description_sha256_12` de las tres no se movieron); lo que cambia son doc-comments de campos,
+    que son schema y no entran en el tope de 600. Se regeneró el fixture y solo se movieron dos
+    `constraints_sha256_12` (los del `success_threshold_pct` que pierde sus cotas).
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
   mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,

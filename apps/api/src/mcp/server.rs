@@ -1224,9 +1224,9 @@ pub struct ProfileOverrideParam {
     /// true = simular sin colchón.
     #[serde(default)]
     pub clear_cash_buffer_months: Option<bool>,
-    /// Umbral de éxito de Monte Carlo en % (50–99).
+    /// DEPRECADO e IGNORADO desde 5.0.0: el veredicto exige el 100 % de escenarios sin agotar la
+    /// cartera. Se acepta y se descarta; no cambia nada del resultado.
     #[serde(default)]
-    #[schemars(range(min = 50, max = 99))]
     pub success_threshold_pct: Option<u32>,
 }
 
@@ -2378,12 +2378,12 @@ pub struct UpdateRetirementProfileParams {
     #[serde(default)]
     #[schemars(range(min = 0, max = 60))]
     pub cash_buffer_months: Option<u32>,
-    /// true = borrar el colchón.
+    /// true = borrar el colchón (vuelve a derivarse del tope de tu regla de ahorro).
     #[serde(default)]
     pub clear_cash_buffer_months: Option<bool>,
-    /// Umbral de éxito de Monte Carlo en % (50–99, default 95).
+    /// DEPRECADO e IGNORADO desde 5.0.0: el veredicto exige el 100 % de escenarios sin agotar la
+    /// cartera. Se acepta y se descarta; no se guarda ni sale por ninguna respuesta.
     #[serde(default)]
-    #[schemars(range(min = 50, max = 99))]
     pub success_threshold_pct: Option<u32>,
     /// Fecha de nacimiento "YYYY-MM-DD" del usuario del token: es lo que convierte cada edad del
     /// perfil en un mes de la serie. Sin ella, las estrategias por edad no pueden resolverse.
@@ -2514,7 +2514,10 @@ impl UpdateRetirementProfileParams {
                 self.clear_cash_buffer_months,
                 "cash_buffer_months",
             )?,
-            success_threshold_pct: self.success_threshold_pct,
+            // Deprecado e ignorado (V7): se acepta en el schema —los dos params son
+            // `deny_unknown_fields` y borrarlo convertiría en 400 lo que hoy funciona— y solo
+            // sirve para que un update que lo mande a él solo no sea `patch_empty`.
+            deprecated_success_threshold_pct: self.success_threshold_pct,
         })
     }
 

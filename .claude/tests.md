@@ -148,9 +148,11 @@ cargo test -p futurefin-engine-stochastic          # también en ci.yml (job `ru
 Dos binarios de test: `degeneration.rs` (abajo) y —desde WP6a, commit `ba6bdfe`— `monte_carlo.rs`,
 las puertas de Monte Carlo (reproducibilidad por semilla, degeneración con σ = 0, orden de las
 bandas, media del terminal contra la varianza log-normal derivada, y la tabla de la issue #207).
-**Estado el 2026-09-03, tras el pase de correcciones de la revisión D20: la suite está VERDE
-entera** — 13 unitarios + 3 de degeneración + 13 de `monte_carlo.rs` = **29 tests, 0 fallos**
-(más los 5 `#[ignore]` de `timing_mc.rs`, que miden y no afirman). El `mc_cash_buffer_…` que fallaba
+**Estado el 2026-09-05, tras el WP-F: la suite está VERDE entera** — 13 unitarios + 3 de
+degeneración + 14 de `monte_carlo.rs` = **30 tests, 0 fallos** (más los 5 `#[ignore]` de
+`timing_mc.rs`, que miden y no afirman). Eran **29** el 2026-09-03, tras el pase de correcciones de
+la revisión D20; el 30.º es `mc_cash_buffer_amount_holds_the_cap`, la puerta de la variante
+`CashBufferTarget::Amount` que el colchón derivado del tope necesita (5.0.0/V6). El `mc_cash_buffer_…` que fallaba
 —`mc_cash_buffer_changes_the_band_under_sequence_risk`, predicción «el colchón mejora la
 probabilidad de éxito» falsada por la medición (0,713 frente a 0,775)— era un *predict-then-run
 miss*, no un test flaky, y así se cerró: la predicción estaba bien y el modelo tenía dos bugs
@@ -665,7 +667,7 @@ grep -n "5433" apps/api/tests/common/mod.rs
 grep -c '#\[test\]' crates/engine/src/*.rs   # 199 en total el 2026-09-03 (139 con la lista vieja)
 grep -c '#\[test\]' crates/engine/tests/*.rs crates/engine-stochastic/tests/*.rs
 cargo test -p futurefin-engine 2>&1 | grep "test result"              # 199 + 2 + 10 + 24, y 7 ignored
-cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"   # 13 + 3 + 13 el 2026-09-03,
+cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"   # 13 + 3 + 14 el 2026-09-05,
                                                 # verde entero (ver §El crate estocástico)
 grep -c '^#\[ignore' crates/engine/tests/timing.rs                    # 7 el 2026-09-03 (sin el ancla
                                                 # ^ salen 8: el doc-comment del módulo cita el atributo)

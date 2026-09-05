@@ -145,7 +145,6 @@ async fn the_household_view_has_no_plan_and_says_why() {
         // 5.0.0 WP6b: el KPI «Éxito del plan» cae con el resto. El hogar es la suma de N planes
         // independientes y «la probabilidad de éxito del hogar» no es una cifra que exista.
         "success_probability",
-        "success_threshold_pct",
         "success_verdict",
         "never_retired_probability",
         "success_given_retired",
@@ -250,10 +249,10 @@ async fn the_success_kpi_is_the_same_run_the_risk_chart_draws() {
         "el KPI y el chart deben ser la MISMA cifra: plan={plan} bands={b}"
     );
     assert_eq!(plan["success_verdict"], b["success_verdict"], "{plan} / {b}");
-    assert_eq!(
-        plan["success_threshold_pct"], b["success_threshold_pct"],
-        "{plan} / {b}"
-    );
+    // 5.0.0 V7: el umbral se retiró de las DOS superficies. Que las dos digan `null` es lo que
+    // impide que vuelva por una sola de ellas.
+    assert_eq!(plan["success_threshold_pct"], serde_json::Value::Null, "{plan}");
+    assert_eq!(b["success_threshold_pct"], serde_json::Value::Null, "{b}");
     // **Las tres cifras del éxito viajan juntas y del MISMO sorteo.** La probabilidad sola no
     // distingue el plan que falla del plan que no llega a empezar: con la definición vieja del
     // éxito, un hogar con un tercio de caminos sin jubilarse publicaba 0,96.
@@ -269,10 +268,13 @@ async fn the_success_kpi_is_the_same_run_the_risk_chart_draws() {
         plan["never_retired_probability"].is_string(),
         "nunca ausente: un hueco aquí se leería como cero: {plan}"
     );
-    // Y el umbral es el del PERFIL, no una constante: al cambiarlo, las dos superficies lo siguen.
+    // Y un umbral mandado por PATCH se acepta e IGNORA (V7): ni aparece en la respuesta ni mueve
+    // el veredicto.
+    let verdict_before = plan["success_verdict"].clone();
     patch_profile(&app, &owner, json!({"success_threshold_pct": 80})).await;
     let plan = summary(&app, &owner.cookie, "?view=mine").await["plan"].clone();
-    assert_eq!(plan["success_threshold_pct"], 80, "{plan}");
+    assert_eq!(plan["success_threshold_pct"], serde_json::Value::Null, "{plan}");
+    assert_eq!(plan["success_verdict"], verdict_before, "{plan}");
 }
 
 /// Leer el Resumen deja **calientes las bandas**: el GET de `/v1/projection/bands` que la SPA

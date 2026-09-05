@@ -21,7 +21,7 @@ mod cases;
 use cases::projection_cases_all;
 use futurefin_engine::{project_net_worth_series, ProjectionInput};
 use futurefin_engine_stochastic::{
-    project_percentile_bands, run_path, simulate_f64, McConfig, DEFAULT_PATHS,
+    project_percentile_bands, run_path, simulate_f64, CashBufferSpec, McConfig, DEFAULT_PATHS,
 };
 use std::hint::black_box;
 use std::time::Instant;
@@ -213,7 +213,7 @@ fn retired_lab(horizon: u32) -> ProjectionInput {
 }
 
 /// (e) **Lo que cuesta el colchón (P4)**: la misma ejecución de 500 caminos con y sin
-/// `cash_buffer_months`, en dos casos.
+/// `cash_buffer`, en dos casos.
 ///
 /// El relleno añade, en los meses jubilados con shock positivo, un `gross_up` y un drenaje sobre
 /// el orden restringido. En P9 la mayoría de los caminos no llegan a jubilarse, así que el
@@ -239,7 +239,7 @@ fn the_cost_of_the_cash_buffer() {
             let config = McConfig {
                 seed: 20_260_903,
                 paths,
-                cash_buffer_months: months,
+                cash_buffer: months.map(CashBufferSpec::Months),
                 ..Default::default()
             };
             let t0 = Instant::now();

@@ -244,7 +244,6 @@ fn the_plan_and_the_strategy_solves_are_declared_in_the_document() {
         "absent_reason",
         // 5.0.0 WP6b — el KPI «Éxito del plan» (D28) y su razón de ausencia propia.
         "success_probability",
-        "success_threshold_pct",
         "success_verdict",
         "success_absent_reason",
         // Pase de correcciones de la revisión adversarial: las dos caras que la probabilidad
@@ -298,7 +297,6 @@ fn the_plan_and_the_strategy_solves_are_declared_in_the_document() {
         "success_probability",
         "never_retired_probability",
         "success_given_retired",
-        "success_threshold_pct",
         "success_verdict",
         "depletion_probability_by_age",
         "retirement_month_index_percentiles",
@@ -310,6 +308,13 @@ fn the_plan_and_the_strategy_solves_are_declared_in_the_document() {
         "buffer_inactive_reason",
         "buffer_refills_p50",
         "buffer_refill_net_total_p50",
+        // 5.0.0 V6 — el colchón se DERIVA del tope de la regla de ahorro y la respuesta dice de
+        // dónde sale. Sin estos cinco, un colchón que el usuario no pidió sería un número mudo.
+        "buffer_source",
+        "buffer_target_amount",
+        "buffer_months_effective",
+        "buffer_source_rule_id",
+        "buffer_source_asset_name",
         "strategy",
         "retirement_trigger",
         "computed_in_ms",

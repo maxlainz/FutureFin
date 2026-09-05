@@ -668,3 +668,122 @@ async fn a_retirement_profile_patch_invalidates_the_cached_projection_and_its_so
     assert!(after["required_contribution_monthly"].is_null(), "{after}");
     assert!(!after["coast_fire_month_index"].is_null(), "{after}");
 }
+
+/// **Una mutación de una REGLA DE AHORRO tira las DOS caches** (5.0.0, V6).
+///
+/// Hasta 5.0.0 este fichero no tenía ni un test de reglas de asignación: la invalidación existía
+/// (`allocation_rules.rs` llama a `invalidate_projection_by_installation` en create/patch/delete/
+/// reorder) pero nadie la sujetaba. Ahora es doblemente cara: además de mover la cascada, el tope
+/// de una regla ES el colchón de caja de las bandas (`buffer_target_amount`), así que una regla
+/// editada con la banda cacheada publicaría un colchón que ya no existe.
+#[tokio::test]
+async fn an_allocation_rule_mutation_drops_the_projection_and_the_bands() {
+    use futurefin_api::state::BandsCacheKey;
+
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let inc = app.create_category(&owner, "income", "Nómina").await;
+    let exp = app.create_category(&owner, "expense", "Vida").await;
+    let ast = app.create_category(&owner, "asset", "Fondos").await;
+    for (cat, amount) in [(&inc, "3000"), (&exp, "2000")] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/budget/entries",
+                serde_json::json!({"category_id": cat, "amount": amount, "ends_at_retirement": false}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+    // Cuenta corriente sin volatilidad (el colchón) + fondo volátil (el riesgo del que protege).
+    let mut assets = Vec::new();
+    for (name, value, vol) in [
+        ("Cuenta corriente", "1000", None),
+        ("Fondo indexado global", "200000", Some("20")),
+    ] {
+        let mut body = serde_json::json!({
+            "category_id": ast, "name": name, "current_value": value,
+            "is_liquid": true, "expected_annual_return_percent": "5",
+        });
+        if let Some(v) = vol {
+            body["annual_volatility_percent"] = serde_json::json!(v);
+        }
+        let r = app.post_json_with_cookie("/v1/assets", body, &owner.cookie).await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+        assets.push(r.json()["id"].as_str().expect("asset id").to_string());
+    }
+    // El sumidero sembrado apunta a la cuenta (#150): se retargetea al fondo para que la cuenta
+    // pueda llevar un tope.
+    let sink = app.sink_rule_id(&owner.cookie).await;
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{sink}"),
+            serde_json::json!({ "target_asset_id": assets[1] }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let rule_id = {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/allocation-rules",
+                serde_json::json!({ "target_asset_id": assets[0], "kind": "fixed", "amount": "200",
+                                    "cap_kind": "amount", "cap_value": "6000" }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+        r.json()["id"].as_str().expect("rule id").to_string()
+    };
+
+    let iid = installation_id_of(&app, &owner.cookie).await;
+    let uid = user_id_of(&app, &owner.cookie).await;
+    app.settle_login_warmup(iid).await;
+
+    // Poblar las dos caches.
+    let series_key = app.default_view_key(iid, uid);
+    let r = app.get_with_cookie("/v1/projection/series", &owner.cookie).await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert!(app.cache_contains(&series_key).await, "el GET de la serie dejó entrada");
+
+    let bands_key = BandsCacheKey {
+        installation_id: iid,
+        user_id: uid,
+        paths: 24,
+        seed: 11,
+    };
+    let b = app
+        .get_with_cookie("/v1/projection/bands?paths=24&seed=11", &owner.cookie)
+        .await;
+    assert_eq!(b.status, http::StatusCode::OK, "{b:?}");
+    let b = b.json();
+    assert_eq!(b["buffer_target_amount"], "6000.0000", "{b}");
+    assert!(
+        app.state.bands_cache.read().await.contains_key(&bands_key),
+        "el GET de bandas dejó entrada"
+    );
+
+    // Subir el tope: la cascada cambia Y el colchón cambia.
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{rule_id}"),
+            serde_json::json!({ "cap": {"kind": "amount", "value": "9000"} }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "PATCH de la regla: {r:?}");
+
+    app.assert_invalidated(&series_key, "PATCH de una regla de ahorro").await;
+    assert!(
+        !app.state.bands_cache.read().await.contains_key(&bands_key),
+        "la mutación de una regla tiene que tirar TAMBIÉN las bandas: el tope ES el colchón"
+    );
+
+    // Y el recálculo publica el tope nuevo.
+    let b = app
+        .get_with_cookie("/v1/projection/bands?paths=24&seed=11", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(b["buffer_target_amount"], "9000.0000", "{b}");
+    assert_eq!(b["buffer_source_rule_id"], rule_id, "{b}");
+}

@@ -37,8 +37,8 @@ use crate::projection::{
     EarlyRepaymentEffect, EngineError, RepaymentModel,
 };
 use crate::sim::{
-    AllocationCapG, AllocationRuleG, FireTargetView, FirstMonthAllocationG, PhasePlanG,
-    RuleOutcomeG, SimAssetG, SimInput, SimLiability, SimOutput, TaxBracketG,
+    AllocationCapG, AllocationRuleG, CashBufferTarget, FireTargetView, FirstMonthAllocationG,
+    PhasePlanG, RuleOutcomeG, SimAssetG, SimInput, SimLiability, SimOutput, TaxBracketG,
 };
 use crate::tax::MixedSegment;
 
@@ -1930,12 +1930,21 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
                     .copied()
                     .unwrap_or(false)
                 {
-                    // Objetivo del mes: `n` meses del gasto YA INDEXADO menos lo que el colchón
-                    // conserva. Es el gasto de la fase (`expense`), no el gasto con deuda que usa
-                    // el tope `MonthsExpense` de la cascada: el colchón cubre la RETIRADA, y el
-                    // servicio de deuda ya sale de la caja del mes antes de que exista déficit.
-                    let target_net =
-                        (cb.target_months * expense - values[cb.buffer_index]).max(M::zero());
+                    // Objetivo del mes menos lo que el colchón ya conserva, con la convención
+                    // que el llamante declaró (`CashBufferTarget`):
+                    //
+                    // - `Months(n)`: `n` meses del gasto YA INDEXADO. Es el gasto de la fase
+                    //   (`expense`), no el gasto con deuda que usa el tope `MonthsExpense` de la
+                    //   cascada: el colchón cubre la RETIRADA, y el servicio de deuda ya sale de
+                    //   la caja del mes antes de que exista déficit.
+                    // - `Amount(a)`: el importe NOMINAL, sin indexar. Es el mismo euro que el
+                    //   tope `amount` de una regla persigue en acumulación, así que **la misma
+                    //   regla gobierna las dos fases**.
+                    let target = match cb.target {
+                        CashBufferTarget::Months(n) => n * expense,
+                        CashBufferTarget::Amount(a) => a,
+                    };
+                    let target_net = (target - values[cb.buffer_index]).max(M::zero());
                     buffer_refill = refill_cash_buffer_g(
                         &mut values,
                         &mut basis,

@@ -1993,6 +1993,14 @@ pub(crate) struct BuiltProjection {
     /// del líquido, el propio SWR, o 0). `None` ⟺ el objetivo no es puente: ahí no hay tasa que
     /// publicar, y un `0` se leería como «puente sin descuento» en vez de «no hay puente».
     pub bridge_discount_annual_pct: Option<Decimal>,
+    /// **El colchón de caja resuelto** (5.0.0, V6/P2): lo que se le pide al Monte Carlo y de
+    /// dónde salió. Se resuelve AQUÍ y no en `resolve_retirement_profile` porque necesita
+    /// activos, reglas y gasto de jubilación, y aquel es ledger-free por contrato (D25).
+    ///
+    /// Sus dos consumidores —`GET /v1/projection/bands` y el eje `monte_carlo` del what-if— leen
+    /// este campo en vez de `retirement_profile.cash_buffer_months`: si cada uno derivara por su
+    /// cuenta, la banda y el what-if podrían simular colchones distintos sin que nada lo dijera.
+    pub cash_buffer: crate::handlers::cash_buffer::ResolvedCashBuffer,
 }
 
 /// Overrides what-if de `simulate_projection` que deben aplicarse DENTRO del ensamblado, en el
@@ -2582,6 +2590,22 @@ pub(crate) async fn build_installation_projection_input(
         fire_target: engine_fire_target,
     };
 
+    // **El colchón de caja** (V6/P2): se deriva del tope de la regla de ahorro salvo que el
+    // perfil declare uno explícito. Va DESPUÉS de `input` porque necesita los activos y las
+    // reglas ya resueltos a índices — o sea exactamente lo que la cascada ejecuta— y el gasto de
+    // jubilación con el que se calcula su equivalente informativo en meses.
+    let cash_buffer = crate::handlers::cash_buffer::resolve_cash_buffer(
+        retirement_profile.cash_buffer_months,
+        &input.assets,
+        &asset_volatility_percent,
+        &asset_id_name,
+        &input.allocation_rules,
+        &allocation_rule_ids,
+        input.income_regular_monthly,
+        input.expense_regular_monthly + debt_service_monthly,
+        expense_retirement,
+    );
+
     Ok(BuiltProjection {
         input,
         monthly_net_regular,
@@ -2601,6 +2625,7 @@ pub(crate) async fn build_installation_projection_input(
         warnings,
         forced_retirement_month,
         bridge_discount_annual_pct: bridge_active.then_some(bridge_discount_annual_pct),
+        cash_buffer,
     })
 }
 
@@ -4380,7 +4405,8 @@ pub(crate) struct SimKpis {
     /// lo cachea.
     #[serde(with = "rust_decimal::serde::str_option")]
     pub success_probability: Option<Decimal>,
-    /// `green` | `amber` | `red` con el umbral del PERFIL de este lado (D28).
+    /// `green` | `amber` | `red` con el semáforo de D28, **de corte fijo desde 5.0.0** (V7):
+    /// verde solo si NINGÚN camino agota la cartera.
     pub success_verdict: Option<&'static str>,
     /// **Fracción de caminos que NO se jubilan** dentro del horizonte. Con trigger por EDAD es
     /// `"0"` por construcción. Es el denominador escondido del éxito: un plan por cruce con una
@@ -4406,12 +4432,29 @@ pub(crate) struct SimKpis {
     /// techo no recorta nunca— incluso en los caminos que se quedaban sin cartera: el mes sin
     /// dinero no aparecía en ninguna cifra.
     pub months_below_need_p50: Option<u32>,
-    /// **Por qué NO se simuló el colchón de caja** en este lado: `not_requested` (el perfil no
-    /// declara `cash_buffer_months`) | `no_volatility` (ningún activo declara volatilidad: no hay
-    /// riesgo de secuencia del que proteger y el resultado es BIT A BIT el de no pedirlo) |
-    /// `no_safe_liquid_asset` (no hay un líquido con σ = 0 donde alojarlo). `null` = **sí se
-    /// simuló** — o no se pidió el eje `monte_carlo`, que lo dice `deltas.monte_carlo`.
+    /// **Por qué NO se simuló el colchón de caja** en este lado. UN solo campo con motivos de
+    /// dos capas, los mismos literales que `GET /v1/projection/bands`: del handler
+    /// (`no_capped_rule`, `cap_is_zero`, `no_safe_liquid_asset`) y del motor (`no_volatility`).
+    /// El `not_requested` del motor ya no se publica: desde que el colchón se DERIVA del tope de
+    /// la regla de ahorro (V6), «no se pidió» no es un motivo. `null` = **sí se simuló** — o no
+    /// se pidió el eje `monte_carlo`, que lo dice `deltas.monte_carlo`.
     pub buffer_inactive_reason: Option<&'static str>,
+    /// **De dónde sale el colchón de ESTE lado**: `explicit` | `allocation_cap` | `none`. Va por
+    /// lado y no en `MonteCarloKpis` porque `profile_overrides.cash_buffer_months` puede fijarlo
+    /// solo en el escenario: publicar uno compartido describiría el colchón equivocado en la
+    /// mitad de las simulaciones. `null` ⟺ no se pidió el eje `monte_carlo`.
+    pub buffer_source: Option<&'static str>,
+    /// El objetivo del colchón en euros **nominales**, sin indexar (P2). `null` salvo con
+    /// `buffer_source: "allocation_cap"`.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub buffer_target_amount: Option<Decimal>,
+    /// Meses de gasto que cubre el colchón: los explícitos, o el equivalente **informativo**
+    /// `floor(tope / gasto de jubilación)` cuando se deriva del tope.
+    pub buffer_months_effective: Option<u32>,
+    /// La regla de asignación cuyo tope fijó el objetivo. `null` salvo con `allocation_cap`.
+    pub buffer_source_rule_id: Option<Uuid>,
+    /// El activo que hace de colchón (el líquido σ = 0 de menor rentabilidad).
+    pub buffer_source_asset_name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -4615,10 +4658,6 @@ pub(crate) struct MonteCarloKpis {
     /// `success_probability: "1"` se leería como «tu plan es seguro» cuando significa «no has
     /// declarado ninguna volatilidad».
     pub any_volatility_declared: bool,
-    /// Umbral del PERFIL DEL BASELINE en porcentaje, para poder auditar los dos veredictos. El
-    /// del escenario puede diferir si `profile_overrides` lo cambió: entonces cada lado se
-    /// colorea con el suyo, que es lo correcto, y esta cifra dice contra qué se midió el baseline.
-    pub success_threshold_pct: u32,
 }
 
 fn require_non_negative(name: &str, v: Option<Decimal>) -> Result<Decimal, ApiError> {
@@ -4892,6 +4931,11 @@ fn sim_kpis(
         underfunded_probability: None,
         months_below_need_p50: None,
         buffer_inactive_reason: None,
+        buffer_source: None,
+        buffer_target_amount: None,
+        buffer_months_effective: None,
+        buffer_source_rule_id: None,
+        buffer_source_asset_name: None,
     }
 }
 
@@ -5690,11 +5734,15 @@ pub(crate) async fn simulate_projection_core(
             };
             let paths = resolve_paths(Some(mc.paths), MCP_MAX_PATHS)?;
             let seed = resolve_seed(iid, user_id, mc.seed);
-            let config = |profile: &RetirementProfile| futurefin_engine_stochastic::McConfig {
+            // El colchón lo resolvió el ENSAMBLADO de cada lado (`resolve_cash_buffer`, V6/P2):
+            // derivado del tope de la regla de ahorro, o explícito si el perfil —o el
+            // `profile_overrides` de este lado— lo declara. Se lee de `built` y no del perfil
+            // para que el what-if y la banda simulen exactamente el mismo colchón.
+            let config = |built: &BuiltProjection| futurefin_engine_stochastic::McConfig {
                 seed,
                 paths,
                 percentiles: crate::handlers::projection_bands::BANDS_PERCENTILES.to_vec(),
-                cash_buffer_months: profile.cash_buffer_months,
+                cash_buffer: built.cash_buffer.spec,
             };
             // Las volatilidades salen del ensamblado de CADA lado, alineadas con sus activos:
             // el escenario puede haber movido tasas por activo, pero nunca el ORDEN, y aun así
@@ -5703,8 +5751,8 @@ pub(crate) async fn simulate_projection_core(
             let s_vols = volatilities_f64(&scenario_built);
             let b_input = baseline_built.input.clone();
             let s_input = scenario_input.clone();
-            let b_cfg = config(&ctx.retirement_profile);
-            let s_cfg = config(&profile_eff);
+            let b_cfg = config(&baseline_built);
+            let s_cfg = config(&scenario_built);
             let (b_join, s_join) = tokio::join!(
                 crate::heavy::run_projection_sim("monte carlo baseline", move || {
                     futurefin_engine_stochastic::project_percentile_bands(&b_input, &b_vols, &b_cfg)
@@ -5715,32 +5763,37 @@ pub(crate) async fn simulate_projection_core(
             );
             let b_out = b_join?.map_err(map_mc_err)?;
             let s_out = s_join?.map_err(map_mc_err)?;
-            let apply = |k: &mut SimKpis, out: &futurefin_engine_stochastic::McOutcome, threshold: u32| {
+            let apply = |k: &mut SimKpis,
+                         out: &futurefin_engine_stochastic::McOutcome,
+                         built: &BuiltProjection| {
                 k.success_probability = probability_out(out.success_probability);
-                k.success_verdict = Some(success_verdict(out.success_probability, threshold));
+                k.success_verdict = Some(success_verdict(out.success_probability));
                 k.never_retired_probability = probability_out(out.never_retired_probability);
                 k.success_given_retired = out.success_given_retired.and_then(probability_out);
                 k.underfunded_probability =
                     out.underfunded_probability.and_then(probability_out);
                 k.months_below_need_p50 = Some(out.months_below_need_p50);
-                // El literal público lo pone el propio crate (`BufferInactiveReason::code`), no
-                // un `match` aquí: un mapeo duplicado se queda atrás en cuanto el enum crece.
+                // El mismo merge que las bandas, y por el mismo motivo: UN campo, el
+                // `not_requested` del motor sustituido por el motivo REAL de la derivación.
                 k.buffer_inactive_reason =
-                    out.buffer_inactive_reason.map(|r| r.code());
+                    crate::handlers::projection_bands::merge_buffer_inactive_reason(
+                        out.buffer_inactive_reason,
+                        &built.cash_buffer,
+                    );
+                k.buffer_source = Some(built.cash_buffer.source);
+                k.buffer_target_amount = built.cash_buffer.target_amount.map(crate::money::money_out);
+                k.buffer_months_effective = built.cash_buffer.months_effective;
+                k.buffer_source_rule_id = built.cash_buffer.source_rule_id;
+                k.buffer_source_asset_name = built.cash_buffer.source_asset_name.clone();
             };
-            apply(
-                &mut baseline,
-                &b_out,
-                ctx.retirement_profile.success_threshold_pct,
-            );
-            apply(&mut scenario, &s_out, profile_eff.success_threshold_pct);
+            apply(&mut baseline, &b_out, &baseline_built);
+            apply(&mut scenario, &s_out, &scenario_built);
             Some(MonteCarloKpis {
                 paths,
                 seed: seed.to_string(),
                 // Los dos lados comparten activos, así que comparten la respuesta; se toma la del
                 // baseline porque es el lado sin overrides.
                 any_volatility_declared: b_out.any_volatility_declared,
-                success_threshold_pct: ctx.retirement_profile.success_threshold_pct,
             })
         }
     };

@@ -164,15 +164,35 @@ rebalanceo— está escrito en el doc del módulo `mc`, no en un comentario suel
 `SimInput::cash_buffer: Option<CashBufferPlan<M>>` es el segundo gancho del núcleo, y como
 `growth_overrides` es `None` en todo el camino determinista (los dos pines dorados no se mueven).
 Con él, en cada mes **jubilado y autorizado** el motor llama a `refill_cash_buffer_g` DESPUÉS de la
-venta del mes y ANTES del crecimiento: repone el activo colchón hasta `target_months · gasto
-indexado del mes` vendiendo del orden de drenaje **restringido a `i ≠ buffer_index` y a los
-LÍQUIDOS**, con la misma
+venta del mes y ANTES del crecimiento: repone el activo colchón hasta su OBJETIVO
+(`CashBufferPlan::target`, ver abajo) vendiendo del orden de drenaje **restringido a
+`i ≠ buffer_index` y a los LÍQUIDOS**, con la misma
 maquinaria fiscal que la venta del mes (g por activo, cortocircuito escalar o paseo mixto,
 `shrink_basis_g`); el neto entra en el colchón como VALOR y como BASE (ya tributó al salir). Si la
 cartera no llega, se mueve lo que haya: un relleno es discrecional, no produce descubierto ni marca
 agotamiento. El filtro de liquidez lo puso la segunda revisión adversarial: sin él, un hogar cuyo
 único activo no-colchón era la vivienda **liquidaba el piso** para engordar una cuenta (61 de 65
 rellenos de un camino vendían la vivienda EN CAÍDA, y llegaba a 0 en el mes 420).
+
+**`CashBufferTarget<M>`: dos convenciones para el objetivo, y elegir mal sobrevalora la protección**
+(5.0.0, V6/P2). `CashBufferPlan::target` ya no es un escalar de meses (`target_months`) sino un
+enum:
+
+- **`Months(n)`** — `n × gasto YA INDEXADO del mes` (el que el bucle acaba de gastar, no el
+  declarado). Es el gasto de la FASE, no el gasto con deuda que usa el tope `MonthsExpense` de la
+  cascada: el colchón cubre la RETIRADA, y el servicio de deuda ya sale de la caja del mes antes de
+  que exista déficit. El objetivo CRECE con la inflación.
+- **`Amount(a)`** — un importe **nominal fijo que no se indexa nunca**, el mismo euro que persigue
+  el tope `amount` de una regla de la cascada (`resolve_cap_ceiling`). Existe porque desde 5.0.0 el
+  API DERIVA el colchón de ese tope (`handlers/cash_buffer.rs`): así **la misma regla gobierna las
+  dos fases** —acumular hasta X y, ya jubilado, mantener X—. Convertir el tope a meses a mes 0 y
+  dejarlo indexarse lo revalorizaría ~2,4× a 35 años con un 2,5 %.
+
+Es genérico en `M`, así que el freezer `no_f64` de `crates/engine` y la puerta de degeneración no
+se tocan: el camino determinista sigue sin colchón. Puerta:
+`crates/engine-stochastic/tests/monte_carlo.rs::mc_cash_buffer_amount_holds_the_cap` — con
+`Amount(48 000)` el colchón se queda en 48.000 € en todo el horizonte y con `Months(24)` llega a
+113.680 €; **con inflación 0 las dos variantes son bit a bit el mismo plan**.
 
 El activo colchón lo elige **`safe_cash_buffer_index(assets, risk_free)`** = el primer LÍQUIDO del
 orden de drenaje que además está marcado sin riesgo. El motor no sabe qué es «volátil» (σ vive en
@@ -181,11 +201,15 @@ menor rentabilidad, sin mirar σ— sigue existiendo y **ya no decide el colchó
 «RV líquida + vivienda» elegía la renta variable, y un colchón con σ = 17 % no es un colchón, es la
 misma cartera con más impuestos.
 
-Quien instala el colchón es Monte Carlo, y solo con las tres puertas abiertas: se pidió, hay
-volatilidad de la que protegerse y hay un líquido a σ = 0 donde alojarlo. Si falta alguna,
+Quien instala el colchón es Monte Carlo (`McConfig::cash_buffer: Option<CashBufferSpec>`, gemelo en
+`Decimal` de `CashBufferTarget`), y solo con las tres puertas abiertas: se pidió, hay volatilidad de
+la que protegerse y hay un líquido a σ = 0 donde alojarlo. Si falta alguna,
 `McOutcome::buffer_active` es `false` y **`buffer_inactive_reason` dice cuál**
 (`not_requested` | `no_volatility` | `no_safe_liquid_asset`); las dos lecturas
-(`buffer_refills_p50`, `buffer_refill_net_total_p50`) son `None`, que no es «cero».
+(`buffer_refills_p50`, `buffer_refill_net_total_p50`) son `None`, que no es «cero». **El
+`not_requested` no llega al cable**: desde 5.0.0 el handler lo sustituye por el motivo real de la
+derivación (`no_capped_rule` | `cap_is_zero` | `no_safe_liquid_asset`) — ver `api-routes.md`
+§bands.
 
 **El relleno es NO ANTICIPATIVO**: el mes `k` se autoriza con el shock que ya ocurrió, `z_{k−1}`, y
 el mes 1 no rellena nunca. Antes se usaba el `z` del propio mes y el relleno corre ANTES del
@@ -845,8 +869,9 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
    **La fase parcial NO pasa por la regla de retirada**: las reglas se anclan en `L(R−1)`/`f(R−1)` —el patrimonio con el que se ENTRA en la jubilación— y en `Partial` ese ancla no existe todavía, así que un déficit de media jornada se vende como el de quien trabaja: necesidad fija, bruta, sin techo.
 7 bis. **Relleno del colchón de caja** (P4, WP6b), solo si `SimInput::cash_buffer` viene declarado,
    el hogar está JUBILADO y el mes está autorizado (`refill_months[k−1]`; en Monte Carlo, `z_k > 0`):
-   `refill_cash_buffer_g` vende del orden de drenaje **sin el activo colchón** hasta reponerlo a
-   `target_months · gasto indexado del mes`, con la misma maquinaria fiscal del paso 7, y abona el
+   `refill_cash_buffer_g` vende del orden de drenaje **sin el activo colchón** hasta reponerlo a su
+   objetivo —`Months(n)` ⇒ `n · gasto indexado del mes`; `Amount(a)` ⇒ `a`, nominal y sin
+   indexar—, con la misma maquinaria fiscal del paso 7, y abona el
    NETO en el colchón como valor y como base. Sin objetivo, sin capacidad o sin colchón declarado no
    se ejecuta nada — y `None` es lo único que produce la conversión desde `ProjectionInput`, así que
    el camino determinista no lo pisa. Ver §El colchón de caja para el porqué y el hallazgo medido.

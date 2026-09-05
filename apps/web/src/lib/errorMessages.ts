@@ -511,8 +511,6 @@ export const ERROR_MESSAGES: Record<string, string> = {
   hybrid_end_pct_not_below_start:
     "En la regla híbrida, el porcentaje final tiene que ser menor que el inicial.",
   cash_buffer_out_of_range: "El colchón de caja debe estar entre 0 y 60 meses.",
-  success_threshold_out_of_range:
-    "El umbral de éxito debe estar entre el 50 % y el 99 %.",
   partial_retirement_required:
     "«Media jornada» necesita que declares la fase parcial: a qué edad empieza y con qué ingreso.",
   field_set_and_clear:

@@ -29,7 +29,8 @@ use futurefin_engine::{
     ProjectionInput, SimAsset, SpendMode, WithdrawalRule,
 };
 use futurefin_engine_stochastic::{
-    project_percentile_bands, run_path, seed_for, simulate_f64, McConfig, McOutcome,
+    project_percentile_bands, run_path, seed_for, simulate_f64, CashBufferSpec, McConfig,
+    McOutcome,
 };
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -287,7 +288,7 @@ fn mc_zero_volatility_degenerates_to_deterministic() {
         seed: 0xDEAD_BEEF,
         paths: 8,
         percentiles: vec![10, 50, 90],
-        cash_buffer_months: None,
+        cash_buffer: None,
     };
 
     let mut checked = 0usize;
@@ -430,7 +431,7 @@ fn mc_bands_are_ordered() {
         seed: 99,
         paths: 200,
         percentiles: vec![1, 5, 10, 25, 50, 75, 90, 95, 99],
-        cash_buffer_months: None,
+        cash_buffer: None,
     };
     let out = project_percentile_bands(&input, &vols, &config).expect("no falla");
     assert!(out.any_volatility_declared);
@@ -572,7 +573,7 @@ fn ruin_probability(withdrawal_pct: f64, paths: u32) -> (f64, McOutcome) {
         // Un solo percentil: lo que se mide es una probabilidad, no una banda, y ordenar tres
         // veces 421 vectores de 2.000 no aporta nada.
         percentiles: vec![50],
-        cash_buffer_months: None,
+        cash_buffer: None,
     };
     let out = project_percentile_bands(&input, &[Some(17.0)], &config).expect("no falla");
     (1.0 - out.success_probability, out)
@@ -707,7 +708,7 @@ fn mc_percent_of_balance_never_ruins_but_cuts_the_spending() {
         seed: 207,
         paths: 1_000,
         percentiles: vec![10, 50, 90],
-        cash_buffer_months: None,
+        cash_buffer: None,
     };
     let out = project_percentile_bands(&input, &[Some(17.0)], &config).expect("no falla");
 
@@ -793,10 +794,10 @@ fn mc_cash_buffer_is_installed_only_when_it_can_mean_something() {
         seed: 5,
         paths: 32,
         percentiles: vec![10, 50, 90],
-        cash_buffer_months: None,
+        cash_buffer: None,
     };
     let with = McConfig {
-        cash_buffer_months: Some(24),
+        cash_buffer: Some(CashBufferSpec::Months(24)),
         ..without.clone()
     };
 
@@ -916,10 +917,10 @@ fn mc_cash_buffer_protects_and_the_drag_is_what_costs() {
         seed: 207,
         paths: 1_000,
         percentiles: vec![10, 50, 90],
-        cash_buffer_months: None,
+        cash_buffer: None,
     };
     let with = McConfig {
-        cash_buffer_months: Some(24),
+        cash_buffer: Some(CashBufferSpec::Months(24)),
         ..without.clone()
     };
     let run = |cash_return: Decimal| {
@@ -998,6 +999,134 @@ fn mc_cash_buffer_protects_and_the_drag_is_what_costs() {
         drag.abs() > protection,
         "y el lastre ({drag:+.4}) tiene que dominar a la protección ({protection:+.4}), que es lo \
          que explica el signo del escenario realista"
+    );
+}
+
+/// **El colchón `Amount` mantiene el TOPE, en nominal, y no se indexa** (5.0.0, V6/P2).
+///
+/// Es la puerta de la variante que el colchón derivado del tope de una regla de ahorro necesita.
+/// El tope `amount` de una regla es un importe **nominal fijo** que la cascada persigue sin
+/// indexar nunca (`resolve_cap_ceiling_g`); el colchón en MESES, en cambio, se dimensiona contra
+/// el gasto **ya indexado** del mes. Derivar «≈ 24 meses» de un tope de 48.000 € y dejar que se
+/// indexe convertiría la regla del usuario en otra cosa: a 35 años con un 2,5 % el objetivo
+/// acabaría en ~113.000 € nominales, **2,4× lo que escribió**.
+///
+/// Lo que se fija aquí, y por qué cada aserción:
+///
+/// 1. **Con `Amount(48 000)` el colchón nunca pasa del tope.** La cuenta no renta (0 %) y la
+///    retirada sale de ella primero, así que el único mecanismo que la sube es el relleno — y el
+///    relleno apunta a `max(0, tope − valor)`. Un techo que se respetara «casi» sería un techo
+///    indexado.
+/// 2. **Y lo alcanza**: si no llegara al tope, el techo no probaría nada (un colchón que no se
+///    rellena también «no lo pasa»).
+/// 3. **Con `Months(24)` el objetivo SÍ se indexa** — la variante histórica no cambia — y el
+///    colchón supera el tope con holgura en la segunda mitad del horizonte.
+/// 4. **Con inflación 0 las dos convenciones son la MISMA**, bit a bit: `Months(24)` sobre un
+///    gasto de 2.000 € es exactamente `Amount(48 000)`. Es la prueba de que la variante nueva no
+///    cambia la aritmética, solo la base contra la que se mide.
+/// 5. **El relleno sigue siendo condicional**: se rellena tras un shock positivo, no todos los
+///    meses. Sin la puerta, el colchón subiría en ~todos los meses posteriores a una retirada.
+#[test]
+fn mc_cash_buffer_amount_holds_the_cap() {
+    let horizon = 420u32;
+    let monthly = Decimal::from(2_000);
+    // 24 meses del gasto del mes 0. Las dos configuraciones piden LO MISMO a mes 0 y divergen
+    // solo por la indexación.
+    let cap = Decimal::from(48_000);
+    let vols = vec![None, Some(17.0)];
+    let build = |inflation_pct: Decimal| {
+        let mut input = buffered_retiree_at(
+            Decimal::from(20_000),
+            Decimal::from(980_000),
+            monthly,
+            Decimal::try_from(6.5).unwrap(),
+            // La cuenta no renta: es el colchón, y es también su lastre.
+            Decimal::ZERO,
+            horizon,
+        );
+        input.annual_inflation_percent = inflation_pct;
+        input
+    };
+    let base = McConfig {
+        seed: 20_260_905,
+        paths: 64,
+        percentiles: vec![10, 50, 90],
+        cash_buffer: None,
+    };
+    let amount_cfg = McConfig {
+        cash_buffer: Some(CashBufferSpec::Amount(cap)),
+        ..base.clone()
+    };
+    let months_cfg = McConfig {
+        cash_buffer: Some(CashBufferSpec::Months(24)),
+        ..base.clone()
+    };
+
+    let inflated = build(Decimal::try_from(2.5).unwrap());
+    let cap_f = 48_000.0_f64;
+    // El activo 0 ES el colchón: líquido, σ = 0 y el de menor rentabilidad, o sea el primero del
+    // orden de drenaje (`safe_cash_buffer_index`).
+    let buffer_series = |cfg: &McConfig| -> Vec<f64> {
+        run_path(&inflated, &vols, cfg, 0).expect("un camino no falla").per_asset_series[0]
+            .iter()
+            .map(|v| v.0)
+            .collect()
+    };
+    let by_amount = buffer_series(&amount_cfg);
+    let by_months = buffer_series(&months_cfg);
+    let peak = |v: &[f64]| v.iter().copied().fold(f64::MIN, f64::max);
+    let tail_peak = |v: &[f64]| peak(&v[v.len() / 2..]);
+    println!(
+        "\n[colchón/tope] 2,5 % de inflación · 35 años · tope {cap_f:.0} €\n\
+         [colchón/tope]   Amount : máximo {:>10.0} €   máximo en la 2.ª mitad {:>10.0} €\n\
+         [colchón/tope]   Months : máximo {:>10.0} €   máximo en la 2.ª mitad {:>10.0} €",
+        peak(&by_amount),
+        tail_peak(&by_amount),
+        peak(&by_months),
+        tail_peak(&by_months),
+    );
+
+    // (1) El tope se respeta en TODO el horizonte: nominal, sin indexar.
+    for (k, v) in by_amount.iter().enumerate() {
+        assert!(
+            *v <= cap_f + 1.0,
+            "el colchón `Amount` no puede pasar del tope: mes {k} vale {v:.2} € > {cap_f:.0} €"
+        );
+    }
+    // (2) …y se alcanza: el techo prueba algo porque el colchón llega a él.
+    assert!(
+        peak(&by_amount) >= cap_f - 1.0,
+        "el colchón `Amount` tiene que llegar al tope: máximo {:.2} €",
+        peak(&by_amount)
+    );
+
+    // (3) La variante en MESES sigue indexándose (no cambia con este WP): supera el tope con
+    //     holgura en la segunda mitad del horizonte, que es donde la inflación ya pesa.
+    assert!(
+        tail_peak(&by_months) > cap_f * 1.4,
+        "el colchón en meses se indexa con el gasto: máximo en la 2.ª mitad {:.2} € ≤ {:.0} €",
+        tail_peak(&by_months),
+        cap_f * 1.4
+    );
+
+    // (4) Sin inflación las dos convenciones son la MISMA plan: `Months(24)` × 2.000 € = 48.000 €.
+    let flat = build(Decimal::ZERO);
+    let flat_amount =
+        project_percentile_bands(&flat, &vols, &amount_cfg).expect("no falla");
+    let flat_months =
+        project_percentile_bands(&flat, &vols, &months_cfg).expect("no falla");
+    assert!(flat_amount.buffer_active && flat_months.buffer_active);
+    assert_eq!(
+        flat_amount, flat_months,
+        "con inflación 0, `Amount(24 × gasto)` y `Months(24)` son el mismo plan"
+    );
+
+    // (5) El relleno sigue siendo condicional al shock positivo del mes anterior: si se rellenara
+    //     siempre, el colchón subiría en casi todos los meses posteriores a una retirada.
+    let refills = by_amount.windows(2).filter(|w| w[1] > w[0] + 1e-9).count();
+    assert!(
+        refills > horizon as usize / 8 && refills < horizon as usize * 3 / 4,
+        "los rellenos se autorizan solo tras un mes al alza: {refills} de {horizon}"
     );
 }
 
@@ -1087,7 +1216,7 @@ fn mc_coverage_counts_the_need_the_portfolio_could_not_fund() {
         seed: 207,
         paths: 1_000,
         percentiles: vec![10, 50, 90],
-        cash_buffer_months: None,
+        cash_buffer: None,
     };
     let out = project_percentile_bands(&input, &[Some(15.0)], &config).expect("no falla");
     let ratio = out
@@ -1136,7 +1265,7 @@ fn mc_never_retiring_is_not_a_success() {
         seed: 207,
         paths: 1_000,
         percentiles: vec![10, 50, 90],
-        cash_buffer_months: None,
+        cash_buffer: None,
     };
     let out = project_percentile_bands(&input, &[Some(17.0)], &config).expect("no falla");
     let conditional = out.success_given_retired.expect("algún camino se jubila");

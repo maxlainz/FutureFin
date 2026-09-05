@@ -32,8 +32,7 @@ use crate::handlers::history::MAX_HISTORY_WINDOW_MONTHS;
 use crate::handlers::installation::{MAX_HORIZON_LIFESPAN_AGE, MIN_HORIZON_LIFESPAN_AGE};
 use crate::handlers::liabilities::{MAX_SCHEDULE_WINDOW_MONTHS, SCHEDULE_HORIZON_MONTHS};
 use crate::handlers::retirement_profile::{
-    MAX_CASH_BUFFER_MONTHS, MAX_SUCCESS_THRESHOLD_PCT, MIN_PENSION_AGE, MIN_PROFILE_AGE,
-    MIN_SUCCESS_THRESHOLD_PCT,
+    MAX_CASH_BUFFER_MONTHS, MIN_PENSION_AGE, MIN_PROFILE_AGE,
 };
 
 const CATALOG_JSON: &str =
@@ -155,18 +154,10 @@ const PINNED_BOUNDS: &[PinnedBound] = &[
         also_update: "(1) la const; (2) el literal `#[schemars(range(min = 0, max = 60))]` sobre \
                       `UpdateRetirementProfileParams::cash_buffer_months`; (3) regenera el fixture",
     },
-    PinnedBound {
-        tool: "update_retirement_profile",
-        pointer: "$.success_threshold_pct",
-        expected_min: Some(MIN_SUCCESS_THRESHOLD_PCT as i64),
-        expected_max: MAX_SUCCESS_THRESHOLD_PCT as i64,
-        runtime_const: "apps/api/src/handlers/retirement_profile.rs: \
-                        MIN/MAX_SUCCESS_THRESHOLD_PCT",
-        also_update: "(1) las dos consts; (2) el literal \
-                      `#[schemars(range(min = 50, max = 99))]` sobre \
-                      `UpdateRetirementProfileParams::success_threshold_pct`; (3) regenera el \
-                      fixture",
-    },
+    // `$.success_threshold_pct` **ya no tiene fila** (5.0.0, V7): el parámetro sigue en el schema
+    // de las dos tools —son `deny_unknown_fields` y borrarlo convertiría en 400 lo que hoy
+    // funciona— pero está DEPRECADO e ignorado, y ya no tiene cotas que sujetar. Pinear una
+    // cota de un parámetro que no se lee sería congelar una promesa que el runtime no cumple.
 ];
 
 /// Lee `constraints["<pointer>"]` de la tool y extrae `minimum` / `maximum`.

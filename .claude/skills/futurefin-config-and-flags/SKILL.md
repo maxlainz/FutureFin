@@ -377,11 +377,13 @@ Las bandas de Monte Carlo. **No hereda los parámetros de la serie**: ni `densit
 | `density` | — | — | **No existe** (arqueología §2.18, veto 22). Siempre `hybrid`, cableado. El struct no lleva `deny_unknown_fields`, así que `?density=monthly` se **ignora en silencio**, no da 400 |
 | `months` | — | — | Tampoco existe: `horizon_basis` nunca puede ser `months_override` aquí |
 
-Cotas y umbral, todos constantes del mismo fichero — re-derívalos con
-`grep -nE 'const (DEFAULT_BANDS_PATHS|HTTP_MAX_PATHS|MCP_MAX_PATHS|VERDICT_AMBER_MARGIN_PP|BANDS_PERCENTILES)' apps/api/src/handlers/projection_bands.rs`:
-percentiles fijos `[10, 50, 90]`, ámbar a **10 puntos porcentuales** por debajo del umbral del
-perfil. **Cache propia**, por `(instalación, usuario, paths, semilla)`, con el TTL de la proyección
-y invalidada por **las mismas** mutaciones que la serie.
+Cotas y cortes, todos constantes del mismo fichero — re-derívalos con
+`grep -nE 'const (DEFAULT_BANDS_PATHS|HTTP_MAX_PATHS|MCP_MAX_PATHS|VERDICT_GREEN_FLOOR_PCT|VERDICT_AMBER_MARGIN_PP|BANDS_PERCENTILES)' apps/api/src/handlers/projection_bands.rs`:
+percentiles fijos `[10, 50, 90]`; **el veredicto ya no tiene umbral configurable** (5.0.0/V7):
+`VERDICT_GREEN_FLOOR_PCT = 100` (verde solo sin ningún camino agotado) y ámbar a **10 puntos
+porcentuales** por debajo. **Cache propia**, por `(instalación, usuario, paths, semilla)`, con el
+TTL de la proyección y invalidada por **las mismas** mutaciones que la serie — incluidas las de
+**reglas de ahorro**, que desde 5.0.0 mueven también el colchón derivado.
 
 **Opt-in por TAMAÑO, no por omisión** (los dos son axes de respuesta, no de configuración):
 `include_liquid_bands` en la tool `get_projection_bands` (la respuesta completa pesa 16,4 KB y la
@@ -624,9 +626,24 @@ ausente es su default, nunca un error de deserialización.
 | `withdrawal_rule` | objeto | ver abajo | ver abajo | ver abajo | No — se sustituye **entero**, nunca campo a campo |
 | `pension` | objeto? | ausente | ver abajo | ver abajo | **Sí** |
 | `partial_retirement` | objeto? | ausente | ver abajo | ver abajo | **Sí** |
-| `cash_buffer_months` | `u32?` | ausente | `[0, 60]` | `cash_buffer_out_of_range` | **Sí** |
-| `success_threshold_pct` | `u32` | `95` | `[50, 99]` | `success_threshold_out_of_range` | No |
+| `cash_buffer_months` | `u32?` | **derivado del tope de la regla de ahorro** (5.0.0/V6) | `[0, 60]` | `cash_buffer_out_of_range` | **Sí** (`null` = volver a derivarlo) |
+| ~~`success_threshold_pct`~~ | — | **retirado en 5.0.0** (V7) | — | — | — |
 | `birth_date` (no es del perfil) | `YYYY-MM-DD` | — | misma columna `users.birth_date` y **el mismo parser** que `PATCH /v1/auth/me` | los de `auth::validate_birth_date` | **Sí** |
+
+**`cash_buffer_months` ausente NO es «sin colchón» desde 5.0.0** (decisión V6 del owner): es
+«derívalo del tope de mi regla de ahorro». `handlers/cash_buffer.rs::resolve_cash_buffer` toma el
+MAYOR de los techos de las reglas habilitadas con tope que apuntan al líquido con σ = 0 y se lo pasa
+al motor como importe **nominal** (`CashBufferTarget::Amount`), no como meses; la SPA ya no escribe
+el campo, y HTTP/MCP lo conservan como override explícito. De dónde salió se publica en
+`GET /v1/projection/bands` (`buffer_source`, `buffer_target_amount`, `buffer_months_effective`,
+`buffer_source_rule_id`, `buffer_source_asset_name`).
+
+**`success_threshold_pct` se retiró en 5.0.0** (decisión V7): el veredicto de éxito tiene corte
+**fijo** —verde solo con el 100 % de escenarios sin agotar la cartera, ámbar `[0,90, 1)`, rojo por
+debajo—, así que no hay eje que configurar. Se **acepta e ignora** en el PATCH HTTP y en las dos
+tools MCP (`deny_unknown_fields` impide borrarlo del schema), no se persiste, no sale por ninguna
+respuesta y su código de error `success_threshold_out_of_range` desapareció. Sin migración: el 95 ya
+almacenado se ignora al leer y se pierde en la siguiente escritura.
 
 `withdrawal_rule` (objeto anidado, `retirement_profile.rs:293-332`): `kind` (`fixed_real` default \|
 `percent_of_balance` \| `hybrid` \| `guardrails`), `spend_mode` (`ceiling` default \| `rule_is_spend`),
@@ -666,10 +683,11 @@ grep -nE 'const (MIN|MAX)_[A-Z_]+' apps/api/src/handlers/retirement_profile.rs \
                                    apps/api/src/handlers/installation.rs
 ```
 
-Salida el 2026-09-03 (12 líneas): `MIN_PROFILE_AGE 18` · `MIN_PENSION_AGE 50` ·
-`MAX_WITHDRAWAL_PCT 20` · `MAX_GUARDRAIL_PCT 50` · `MAX_CASH_BUFFER_MONTHS 60` ·
-`MIN/MAX_SUCCESS_THRESHOLD_PCT 50/99` · `MAX_SWR_PCT 4` (todas en `retirement_profile.rs:59-78`), más
-`MIN/MAX_HORIZON_LIFESPAN_AGE 85/105` y `MIN/MAX_AVG_WINDOW_MONTHS 1/60` de `installation.rs`.
+Salida el 2026-09-05 (**10** líneas; eran 12 antes de que 5.0.0/V7 retirase
+`MIN/MAX_SUCCESS_THRESHOLD_PCT`): `MIN_PROFILE_AGE 18` · `MIN_PENSION_AGE 50` ·
+`MAX_WITHDRAWAL_PCT 20` · `MAX_GUARDRAIL_PCT 50` · `MAX_CASH_BUFFER_MONTHS 60` · `MAX_SWR_PCT 4`
+(todas en `retirement_profile.rs`), más `MIN/MAX_HORIZON_LIFESPAN_AGE 85/105` y
+`MIN/MAX_AVG_WINDOW_MONTHS 1/60` de `installation.rs`.
 
 **En MCP el tri-estado se escribe distinto**: un schema de tool no puede expresar «omitir vs `null`»,
 así que viaja como `campo` + `clear_campo: bool`, y mandar los dos es 400 `field_set_and_clear`
@@ -851,7 +869,7 @@ auditing for drift (all confirmed working on 2026-08-28):
   `fire_settings` ya no lleva los cuatro ejes
   `grep -c "fire_number_mode\|fire_number_manual_amount\|swr_pct\|horizon_lifespan_age" apps/api/src/handlers/installation.rs`
   (**2**, las dos doc-comments); espejo en el cliente `grep -nE 'const (MIN|MAX)_[A-Z_]+' apps/web/src/lib/retirementProfile.ts`
-- **Bandas (§4)**: `grep -nE 'const (DEFAULT_BANDS_PATHS|HTTP_MAX_PATHS|MCP_MAX_PATHS|VERDICT_AMBER_MARGIN_PP|BANDS_PERCENTILES)' apps/api/src/handlers/projection_bands.rs`
+- **Bandas (§4)**: `grep -nE 'const (DEFAULT_BANDS_PATHS|HTTP_MAX_PATHS|MCP_MAX_PATHS|VERDICT_GREEN_FLOOR_PCT|VERDICT_AMBER_MARGIN_PP|BANDS_PERCENTILES)' apps/api/src/handlers/projection_bands.rs`
   y `grep -n 'household_bands_unavailable\|fn parse_seed\|fn resolve_paths' apps/api/src/handlers/projection_bands.rs`
 - **Volatilidad del activo (§5.2)**: `grep -n 'annual_volatility_percent' apps/api/migrations/20260902200200_assets_annual_volatility.sql`
   y `grep -n 'fn assert_volatility_percent' -A 10 apps/api/src/handlers/assets.rs`

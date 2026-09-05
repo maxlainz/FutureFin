@@ -670,9 +670,23 @@ activo). De aquí salen tres lecturas que hay que leer con cuidado:
   antiguo (`Σ(w + recorte)`), un hogar con `fixed_real` —donde el recorte es CERO por
   construcción— podía dar cobertura 1,0 en los 1.000 caminos aunque solo cubriera el 8,7 % real de
   su gasto. `months_below_need_p50` cuenta meses con `recorte + descubierto > 0` por la misma razón.
-- **El colchón de caja (P4)** solo se instala con las tres puertas abiertas —se pidió, hay
-  volatilidad de la que protegerse, hay un LÍQUIDO a σ = 0 donde alojarlo—; si falta alguna,
-  `buffer_active = false` y `buffer_inactive_reason` dice cuál. El relleno es **NO ANTICIPATIVO**
+- **El colchón de caja (P4) se DERIVA del tope de la regla de ahorro desde 5.0.0** (decisión V6 del
+  owner): el input desapareció de la SPA y `handlers/cash_buffer.rs::resolve_cash_buffer` lo resuelve
+  al final del ensamblado de la proyección —no en `resolve_retirement_profile`, que es ledger-free
+  por contrato (D25)—. La regla, en orden: **explícito gana** (`cash_buffer_months` del perfil o del
+  `profile_overrides`, patrón `pct_source`; `PATCH null` vuelve a derivado) → el activo es el que
+  usará el MOTOR (`safe_cash_buffer_index` con el mismo vector `risk_free`; ninguno →
+  `no_safe_liquid_asset`) → reglas **habilitadas y con tope** que apunten a ese activo (ninguna →
+  `no_capped_rule`, que es el caso común de la pauta «todo al fondo», donde ese líquido es el
+  sumidero sin tope) → techo = **MAX** de sus techos, nunca la suma (la cascada evalúa `cap_room`
+  contra un valor VIVO compartido, así que el saldo alcanzable lo fija el techo mayor; ≤ 0 →
+  `cap_is_zero`) → `CashBufferTarget::Amount(techo)`, **nominal y sin indexar** (P2: convertirlo a
+  meses lo revalorizaría ~2,4× a 35 años con un 2,5 %; los meses solo se publican como equivalente
+  informativo). Sigue haciendo falta, además, que el motor pueda simularlo: volatilidad de la que
+  protegerse y un LÍQUIDO a σ = 0 donde alojarlo. Si falta alguna, `buffer_active = false` y
+  `buffer_inactive_reason` dice cuál — **UN solo campo** con motivos de dos capas (handler:
+  `no_capped_rule`, `cap_is_zero`, `no_safe_liquid_asset`; motor: `no_volatility`), y el
+  `not_requested` del motor ya no se publica. El relleno es **NO ANTICIPATIVO**
   (se autoriza con el shock YA OCURRIDO, `z_{k−1}`, nunca el del propio mes) y solo vende
   LÍQUIDOS — antes, sin el filtro, un hogar cuyo único activo no-colchón era la vivienda la
   liquidaba para engordar la cuenta. Medido (1.000.000 € = 80.000 en cuenta + 920.000 en RV
@@ -682,7 +696,14 @@ activo). De aquí salen tres lecturas que hay que leer con cuidado:
   lastre −7,9 pp, protección +3,9 pp. **La ayuda de la UI tiene que decir esto tal cual**: el
   colchón protege, pero lo paga la rentabilidad a la que renuncias por tener 24 meses de gasto
   fuera del mercado — no es gratis, y con una cuenta remunerada al 0 % (el caso realista) el coste
-  neto es real.
+  neto es real. **Y desde 5.0.0 ese coste aparece sin que nadie lo pida**, porque el colchón se
+  deriva de un tope que ya existía: el owner lo aceptó explícitamente (V6) a cambio de que la UI lo
+  diga.
+- **El veredicto del éxito tiene corte FIJO al 100 %** (5.0.0, decisión V7): verde ⟺ `p == 1`, o
+  sea ni un camino agotado; ámbar `[0,90, 1)`; rojo `< 0,90`. El borde es exacto sin épsilon (`n/n`
+  es `1.0` en IEEE 754 para cualquier `n`). El `success_threshold_pct` del perfil se retiró: se
+  acepta y se ignora en la entrada, y **no sale por ninguna respuesta**. Con 500 caminos, un solo
+  fallo ya es ámbar — consecuencia asumida.
 
 ## 5. The monthly simulation loop, step by step
 
@@ -802,6 +823,10 @@ Per rule, in order, over the `remaining` surplus:
 - Whatever no rule absorbs is returned as leftover → `unallocated_savings_total` (4.12.1, #175) —
   it does NOT enter net worth; `unallocated_savings_reason` (`null` | `"no_assets"` | `"no_sink"`)
   explains why (unreachable in production with live assets, indestructible sink #176).
+- **El tope tiene un SEGUNDO consumidor desde 5.0.0 (V6)**: el colchón de caja de Monte Carlo se
+  DERIVA de él (`handlers/cash_buffer.rs`, §4b «Monte Carlo»), y **como importe nominal**, con el
+  MISMO `resolve_cap_ceiling` que resuelve la cascada. Consecuencia práctica al tocar aquí: cambiar
+  cómo se resuelve un techo mueve también la probabilidad de éxito, no solo el reparto del mes.
 
 **The uncapped-remainder sink invariant** (enforced by the API handler, not the engine —
 `apps/api/src/handlers/allocation_rules.rs:387-402,563-581,652-658,722-733`): every scope must
@@ -968,8 +993,10 @@ mismo error repetido en otros cinco documentos y corregido en la misma pasada.
 - **Reglas de retirada y sus dos modos**: `grep -n "enum WithdrawalRule\|enum SpendMode" crates/engine/src/phases.rs` y `grep -n "fn allowed_gross\|fn review_guardrails\|fn validate_rule" crates/engine/src/withdrawal.rs` (3 hits)
 - **Solves y su techo de búsqueda**: `grep -n "pub const MAX_SOLVE_ITERATIONS\|fn search_ceiling\|pub fn coast_fire_month_index" crates/engine/src/solve.rs` (3 hits); la medición de P9 (91.444 € vs 725.197 €) está en el doc-comment de `search_ceiling`
 - **Reparto Decimal/f64**: `grep -n "pub trait MoneyOps" crates/engine/src/money.rs`, `grep -c "impl MoneyOps for F64Money" crates/engine-stochastic/src/lib.rs` (1), el freezer intacto `grep -n "fn crates_engine_src_has_no_f64_outside_comments" crates/engine/src/lib.rs` y la puerta `grep -n "const EUR_TOLERANCE" crates/engine-stochastic/tests/degeneration.rs`
-- **Estado de Monte Carlo antes de afirmar nada**: `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"` (**29 tests, 0 fallos** el 2026-09-03, tras el pase de correcciones — nunca fíes de esta ficha sin correrlo)
-- **Éxito, cobertura y colchón (Monte Carlo)**: `grep -n "never_retired_probability\|success_given_retired" crates/engine-stochastic/src/mc.rs` (6 hits) y `grep -n "fn mc_never_retiring_is_not_a_success\|fn mc_coverage_counts_the_need_the_portfolio_could_not_fund\|fn mc_cash_buffer_protects_and_the_drag_is_what_costs" crates/engine-stochastic/tests/monte_carlo.rs` (3 hits)
+- **Estado de Monte Carlo antes de afirmar nada**: `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"` (**30 tests, 0 fallos** el 2026-09-05, tras el WP-F; eran 29 el 2026-09-03 — nunca fíes de esta ficha sin correrlo)
+- **Éxito, cobertura y colchón (Monte Carlo)**: `grep -n "never_retired_probability\|success_given_retired" crates/engine-stochastic/src/mc.rs` (6 hits) y `grep -n "fn mc_never_retiring_is_not_a_success\|fn mc_coverage_counts_the_need_the_portfolio_could_not_fund\|fn mc_cash_buffer_protects_and_the_drag_is_what_costs\|fn mc_cash_buffer_amount_holds_the_cap" crates/engine-stochastic/tests/monte_carlo.rs` (4 hits)
+- **Colchón DERIVADO del tope (V6) y sus dos convenciones (P2)**: `grep -n "pub enum CashBufferTarget" -A4 crates/engine/src/sim.rs`, `grep -n "pub enum CashBufferSpec" -A6 crates/engine-stochastic/src/mc.rs` y la derivación entera en `grep -n "pub(crate) fn resolve_cash_buffer" apps/api/src/handlers/cash_buffer.rs`; los motivos publicados, `grep -n "BUFFER_INACTIVE_\|BUFFER_SOURCE_" apps/api/src/handlers/cash_buffer.rs` (**recuéntalos, no los copies**)
+- **Veredicto de corte FIJO al 100 % (V7)**: `grep -n "VERDICT_GREEN_FLOOR_PCT\|fn success_verdict\|fn el_verde_exige_todos_los_caminos" apps/api/src/handlers/projection_bands.rs` (4 hits) y, del lado de lo que YA NO existe, `awk '/^pub struct RetirementProfile \{/,/^\}/' apps/api/src/handlers/retirement_profile.rs | grep -c success_threshold` → **0** (el campo salió del perfil; lo que queda en el fichero es el parámetro deprecado del cuerpo HTTP y el `deprecated_success_threshold_pct` del patchset, que solo evita el `patch_empty`)
 - **`assets_depleted_month_index` de dos condiciones y la vía mixta**: `grep -n "fn an_exact_landing_that_covers_every_later_need_is_not_a_depletion\|fn the_binding_allowance_is_a_cut_on_the_mixed_path_too\|fn rule_is_spend_funds_the_month_surplus_first" crates/engine/tests/review_fixes.rs` (3 hits)
 - **`BridgeDiscountOverflow`**: `grep -n "BridgeDiscountOverflow" crates/engine/src/{projection,sim_core,target}.rs` (5 hits)
 - Trigger uses k−1 / liquid_prev + absorbing latch (4.8.0): `grep -n "plan_target.at(ft_view\|liquid_prev\|retired = retired" crates/engine/src/sim_core.rs` (el bucle vive en el núcleo genérico desde 5.0.0 WP5.5)

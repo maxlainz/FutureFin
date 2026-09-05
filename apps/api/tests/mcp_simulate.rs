@@ -1874,6 +1874,13 @@ async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_th
             "underfunded_probability",
             "months_below_need_p50",
             "buffer_inactive_reason",
+            // 5.0.0 V6 — el eco del colchón derivado tampoco existe sin el eje: sin sorteo no hay
+            // colchón que describir.
+            "buffer_source",
+            "buffer_target_amount",
+            "buffer_months_effective",
+            "buffer_source_rule_id",
+            "buffer_source_asset_name",
         ] {
             assert!(sin[lado][k].is_null(), "{lado}.{k} sin el eje: {sin}");
         }
@@ -1898,7 +1905,11 @@ async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_th
         con["monte_carlo"]["seed"], "7",
         "la semilla se ecoa como STRING: {con}"
     );
-    assert_eq!(con["monte_carlo"]["success_threshold_pct"], 95, "{con}");
+    // 5.0.0 V7: el bloque ya no ecoa umbral — el corte del veredicto es fijo al 100 %.
+    assert!(
+        con["monte_carlo"]["success_threshold_pct"].is_null(),
+        "el umbral se retiró y no puede volver por el eco: {con}"
+    );
     for lado in ["baseline", "scenario"] {
         assert!(
             con[lado]["success_probability"].is_string(),
@@ -1930,12 +1941,16 @@ async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_th
             Some(_) => assert!(never < 1.0, "{lado}: {con}"),
             None => assert_eq!(never, 1.0, "{lado}: solo es null si NADIE se jubila: {con}"),
         }
-        // El colchón: sin `cash_buffer_months` en el perfil, el motivo es `not_requested` — un
-        // `null` aquí significaría «se simuló», que es otra cosa.
+        // El colchón (V6): el perfil no declara `cash_buffer_months` y el único activo es el
+        // SUMIDERO sin tope, así que no hay tope del que derivarlo → `no_capped_rule`. Un `null`
+        // aquí significaría «se simuló», que es otra cosa; y `not_requested` ya no existe: desde
+        // que el colchón se deriva, «no se pidió» no es un motivo.
         assert_eq!(
-            con[lado]["buffer_inactive_reason"], "not_requested",
+            con[lado]["buffer_inactive_reason"], "no_capped_rule",
             "{lado}: {con}"
         );
+        assert_eq!(con[lado]["buffer_source"], "none", "{lado}: {con}");
+        assert!(con[lado]["buffer_target_amount"].is_null(), "{lado}: {con}");
     }
     // Sin ningún otro override los dos lados son el MISMO plan y la MISMA semilla ⇒ delta 0 exacto.
     assert_eq!(
@@ -1957,6 +1972,126 @@ async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_th
     for lado in ["baseline", "scenario"] {
         assert!(con[lado]["points"].is_null(), "{lado} no lleva bandas: {con}");
     }
+}
+
+/// **El colchón DERIVADO viaja por lado, y `profile_overrides.cash_buffer_months` sigue
+/// mandando** (5.0.0, decisión V6 del owner).
+///
+/// Va por lado y no en el bloque `monte_carlo` compartido a propósito: el override del what-if
+/// puede fijar el colchón SOLO en el escenario, y un campo compartido describiría el colchón
+/// equivocado en la mitad de las simulaciones. Aquí se ve exactamente eso: el baseline lo deriva
+/// del tope de la regla (6.000 € nominales) y el escenario lo tiene explícito (6 meses).
+#[tokio::test]
+async fn the_monte_carlo_axis_echoes_the_derived_buffer_and_the_override_still_wins() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat_inc = app.create_category(&owner, "income", "Nómina").await;
+    let cat_exp = app.create_category(&owner, "expense", "Vida").await;
+    let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+    for (cat, amount) in [(&cat_inc, "3000"), (&cat_exp, "2000")] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/budget/entries",
+                json!({"category_id": cat, "amount": amount}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+    let mut assets = Vec::new();
+    for (name, value, vol) in [
+        ("Cuenta corriente", "1000", None),
+        ("Fondo indexado global", "200000", Some("20")),
+    ] {
+        let mut body = json!({
+            "category_id": cat_ast, "name": name, "current_value": value,
+            "is_liquid": true, "expected_annual_return_percent": "5",
+        });
+        if let Some(v) = vol {
+            body["annual_volatility_percent"] = json!(v);
+        }
+        let r = app.post_json_with_cookie("/v1/assets", body, &owner.cookie).await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+        assets.push(r.json()["id"].as_str().expect("asset id").to_string());
+    }
+    // El sumidero sembrado (#150) apunta a la cuenta: se retargetea al fondo para que la cuenta
+    // pueda llevar un tope — la pauta «cuenta hasta X, resto al fondo».
+    let sink = app.sink_rule_id(&owner.cookie).await;
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{sink}"),
+            json!({ "target_asset_id": assets[1] }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let rule_id = {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/allocation-rules",
+                json!({ "target_asset_id": assets[0], "kind": "fixed", "amount": "200",
+                        "cap_kind": "amount", "cap_value": "6000" }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+        r.json()["id"].as_str().expect("rule id").to_string()
+    };
+    let token = create_token(&app, &owner).await;
+
+    // (1) Sin overrides: los DOS lados derivan del tope, en euros nominales.
+    let con = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"monte_carlo": {"paths": 24, "seed": "7"}}),
+            ),
+        )
+        .await,
+    );
+    for lado in ["baseline", "scenario"] {
+        assert_eq!(con[lado]["buffer_source"], "allocation_cap", "{lado}: {con}");
+        assert_eq!(con[lado]["buffer_target_amount"], "6000.0000", "{lado}: {con}");
+        assert_eq!(con[lado]["buffer_months_effective"], 3, "{lado}: {con}");
+        assert_eq!(con[lado]["buffer_source_rule_id"], rule_id, "{lado}: {con}");
+        assert_eq!(
+            con[lado]["buffer_source_asset_name"], "Cuenta corriente",
+            "{lado}: {con}"
+        );
+        assert!(
+            con[lado]["buffer_inactive_reason"].is_null(),
+            "el colchón se simuló: {lado}: {con}"
+        );
+    }
+
+    // (2) Con `profile_overrides.cash_buffer_months`: el ESCENARIO pasa a explícito y el baseline
+    //     sigue derivando. Es el patrón `pct_source`: una elección no se deriva.
+    let ov = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({
+                    "monte_carlo": {"paths": 24, "seed": "7"},
+                    "profile_overrides": {"cash_buffer_months": 6},
+                }),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(ov["scenario"]["buffer_source"], "explicit", "{ov}");
+    assert_eq!(ov["scenario"]["buffer_months_effective"], 6, "{ov}");
+    assert!(ov["scenario"]["buffer_target_amount"].is_null(), "{ov}");
+    assert!(ov["scenario"]["buffer_source_rule_id"].is_null(), "{ov}");
+    assert_eq!(
+        ov["scenario"]["buffer_source_asset_name"], "Cuenta corriente",
+        "dónde se aloja el colchón se dice también con el explícito: {ov}"
+    );
+    assert_eq!(ov["baseline"]["buffer_source"], "allocation_cap", "{ov}");
+    assert_eq!(ov["baseline"]["buffer_target_amount"], "6000.0000", "{ov}");
 }
 
 /// Con una estrategia por EDAD aparece `underfunded_probability`, y un plan que no llega la

@@ -37,7 +37,16 @@ async fn a_fresh_user_gets_the_4_15_defaults() {
     assert_eq!(p["swr_pct"], "3.5", "{b}");
     assert_eq!(p["horizon_lifespan_age"], 90, "{b}");
     assert_eq!(p["fire_number_mode"], "annual_expense", "{b}");
-    assert_eq!(p["success_threshold_pct"], 95, "{b}");
+    // 5.0.0 V7: el umbral de éxito se retiró del perfil. La clave no existe — ni con un valor de
+    // cortesía, que sería una promesa que ninguna superficie cumple.
+    assert!(
+        p["success_threshold_pct"].is_null(),
+        "el umbral se retiró en 5.0.0: {b}"
+    );
+    // 5.0.0 V6: sin colchón declarado el campo es `null`, y `null` significa «derívalo del tope
+    // de mi regla de ahorro» — la derivación se publica en las bandas, no aquí (D25: este GET
+    // sigue sin tocar el ledger).
+    assert!(p["cash_buffer_months"].is_null(), "{b}");
     assert_eq!(p["withdrawal_rule"]["kind"], "fixed_real", "{b}");
     assert_eq!(p["withdrawal_rule"]["spend_mode"], "ceiling", "{b}");
     // Sin pensión declarada el objetivo es perpetuo (R6). El campo NUNCA sale `null`: la
@@ -102,7 +111,9 @@ async fn patch_roundtrips_and_only_touches_what_it_names() {
     assert_eq!(p["withdrawal_rule"]["kind"], "guardrails");
     assert_eq!(p["withdrawal_rule"]["spend_mode"], "rule_is_spend");
     assert_eq!(p["cash_buffer_months"], 24);
-    assert_eq!(p["success_threshold_pct"], 90);
+    // El umbral se ACEPTA (no rompe a quien lo siga mandando) y se DESCARTA (V7): ni se guarda ni
+    // sale por la respuesta.
+    assert!(p["success_threshold_pct"].is_null(), "{p}");
     // Con pensión declarada y sin base explícita, el objetivo pasa a ser el PUENTE (R6).
     assert_eq!(p["target_basis"], "bridge_to_pension", "{p}");
 
@@ -266,14 +277,11 @@ async fn every_validation_rule_has_its_own_stable_code() {
             serde_json::json!({"fire_number_mode": "manual"}),
             "fire_manual_amount_required",
         ),
-        // Colchón y umbral.
+        // Colchón. (El umbral ya no valida nada: se acepta y se ignora — V7, y lo prueba
+        // `a_deprecated_success_threshold_is_accepted_and_discarded`.)
         (
             serde_json::json!({"cash_buffer_months": 999}),
             "cash_buffer_out_of_range",
-        ),
-        (
-            serde_json::json!({"success_threshold_pct": 10}),
-            "success_threshold_out_of_range",
         ),
     ];
 
@@ -744,4 +752,39 @@ async fn removing_the_pension_releases_the_stored_target_basis() {
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
     assert_eq!(r.json()["target_basis_stored"], "perpetuity", "{r:?}");
+}
+
+/// **El umbral de éxito deprecado se acepta y se descarta** (5.0.0, decisión V7 del owner).
+///
+/// La compatibilidad es de ENTRADA, no de comportamiento: rechazarlo rompería a todo cliente que
+/// lo siguiera mandando —y las dos tools MCP son `deny_unknown_fields`, así que ni siquiera se
+/// puede borrar del schema—, pero no se valida, no se persiste y no sale por ninguna respuesta.
+/// Un valor fuera del rango histórico `[50, 99]` tampoco es ya un 400: no hay rango que violar.
+#[tokio::test]
+async fn a_deprecated_success_threshold_is_accepted_and_discarded() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    for value in [10u32, 90, 100, 4_000] {
+        let r = app
+            .patch_json_with_cookie(
+                PROFILE,
+                serde_json::json!({"success_threshold_pct": value}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(
+            r.status,
+            http::StatusCode::OK,
+            "success_threshold_pct = {value} debe aceptarse: {r:?}"
+        );
+        assert!(
+            r.json()["profile"]["success_threshold_pct"].is_null(),
+            "…y no volver por la respuesta: {r:?}"
+        );
+    }
+
+    // Y no se ha persistido nada: el GET tampoco lo trae.
+    let b = app.get_with_cookie(PROFILE, &owner.cookie).await.json();
+    assert!(b["profile"]["success_threshold_pct"].is_null(), "{b}");
 }

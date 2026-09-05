@@ -328,6 +328,32 @@ pub struct AllocationRuleG<M> {
 /// `crates/engine-stochastic`) y no debe tenerla. Quien decide QUÉ meses autorizan relleno —en
 /// Monte Carlo, los de shock positivo— y **si el colchón se instala siquiera** es el llamante. En
 /// el camino determinista este campo es `None` y todo esto es código que no se ejecuta.
+/// **Qué tamaño intenta mantener el colchón** (P4), y con qué convención se indexa.
+///
+/// Son dos magnitudes de naturaleza distinta y confundirlas sobrevalora la protección en
+/// silencio:
+///
+/// - [`Months(n)`](CashBufferTarget::Months) — `n` meses del gasto **YA INDEXADO** del mes (el
+///   mismo que el bucle acaba de gastar, no el declarado). El objetivo CRECE con la inflación,
+///   igual que el gasto que cubre.
+/// - [`Amount(a)`](CashBufferTarget::Amount) — un importe **NOMINAL FIJO**, que **no se indexa
+///   nunca**. Es exactamente el euro que persigue el tope `amount` de una regla de la cascada
+///   (`resolve_cap_ceiling_g`), y por eso existe: cuando el colchón se DERIVA del tope de una
+///   regla de ahorro (5.0.0), **la misma regla gobierna las dos fases** —acumular hasta X y, ya
+///   jubilado, mantener X—. Convertir ese tope a meses a mes 0 y dejar que se indexe sería otra
+///   cosa: un tope de 10.000 € leído como «≈ 8 meses» valdría ~16.400 € nominales veinte años
+///   después, 1,6× lo que el usuario escribió.
+///
+/// El motor no elige la variante: la elige el llamante, igual que elige el índice del colchón y
+/// los meses autorizados.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CashBufferTarget<M> {
+    /// `n` meses del gasto ya indexado del mes.
+    Months(M),
+    /// Un importe nominal fijo, sin indexar.
+    Amount(M),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CashBufferPlan<M> {
     /// El activo que HACE de colchón: el líquido de menor rentabilidad esperada, que por
@@ -337,10 +363,10 @@ pub struct CashBufferPlan<M> {
     /// Fuera de rango ⇒ el colchón no actúa (el motor es una función pura y no panica por una
     /// entrada mal dimensionada, misma política que `growth_overrides`).
     pub buffer_index: usize,
-    /// Meses de gasto que el colchón intenta mantener. El objetivo del mes es
-    /// `max(0, target_months · gasto_del_mes − valor_del_colchón)`, con el gasto **ya indexado**
-    /// del mes (el mismo que el bucle acaba de gastar), no el declarado.
-    pub target_months: M,
+    /// Cuánto intenta mantener el colchón. El objetivo del mes es
+    /// `max(0, objetivo − valor_del_colchón)`, con el objetivo resuelto según la variante de
+    /// [`CashBufferTarget`].
+    pub target: CashBufferTarget<M>,
     /// `[k−1]` = ¿está autorizado el relleno en el mes `k` (1-based)?
     ///
     /// En Monte Carlo es `z_k > 0`: se rellena vendiendo **después** de que el mercado suba, no

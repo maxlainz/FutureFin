@@ -527,17 +527,10 @@ pub struct SummaryPlan {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub success_probability: Option<Decimal>,
-    /// Umbral del perfil en PORCENTAJE (`success_threshold_pct`, default 95): contra qué se
-    /// coloreó el veredicto.
-    ///
-    /// **Viaja con el resto del bloque del éxito, y cae con él.** Es configuración del usuario y
-    /// no una salida del modelo, pero se lee de la respuesta de bandas —la misma de la que sale
-    /// la probabilidad— para que las dos cifras no puedan describir dos ejecuciones distintas:
-    /// con `success_absent_reason` puesto, este campo es `null` como los demás. Un umbral suelto
-    /// sin nada que colorear no responde a ninguna pregunta y sugeriría que el sorteo sí se hizo.
-    pub success_threshold_pct: Option<u32>,
-    /// `green` | `amber` | `red` con el semáforo de D28 (verde en el umbral, ámbar hasta 10
-    /// puntos porcentuales por debajo). `null` ⟺ no hay probabilidad que colorear.
+    /// `green` | `amber` | `red` con el semáforo de D28, **de corte fijo desde 5.0.0** (V7):
+    /// verde solo con el 100 % de caminos sin agotar la cartera, ámbar en `[0,90, 1)`, rojo por
+    /// debajo. `null` ⟺ no hay probabilidad que colorear. El `success_threshold_pct` que aquí se
+    /// ecoaba se retiró con el ajuste: no hay umbral que auditar.
     #[schema(value_type = Option<String>)]
     pub success_verdict: Option<&'static str>,
     /// **Fracción de caminos que NO se jubilan** dentro del horizonte, del MISMO sorteo que
@@ -573,7 +566,6 @@ impl SummaryPlan {
             underfunded: None,
             absent_reason: Some(reason),
             success_probability: None,
-            success_threshold_pct: None,
             success_verdict: None,
             never_retired_probability: None,
             success_given_retired: None,
@@ -663,7 +655,6 @@ async fn attach_success(state: &AppState, iid: Uuid, user_id: Uuid, mut plan: Su
     {
         Ok(bands) => {
             plan.success_probability = bands.success_probability;
-            plan.success_threshold_pct = Some(bands.success_threshold_pct);
             plan.success_verdict = Some(bands.success_verdict);
             plan.never_retired_probability = bands.never_retired_probability;
             plan.success_given_retired = bands.success_given_retired;
@@ -692,7 +683,6 @@ fn plan_from_series(
         // Los rellena `attach_success` con la entrada del cache de bandas: aquí no se calcula
         // nada, igual que el resto de esta función.
         success_probability: None,
-        success_threshold_pct: None,
         success_verdict: None,
         never_retired_probability: None,
         success_given_retired: None,

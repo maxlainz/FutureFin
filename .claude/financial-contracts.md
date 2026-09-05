@@ -138,6 +138,18 @@ realidad** o entre superficies, no error de aritmética.
 - Modos de ahorro: A (presupuesto), B (promedio real ambos lados), C (ingreso plan + gasto real);
   fallback por lado. En B/C la cuota vive dentro del promedio (decisión explícita del owner) y el
   principal se congela — la parte «para siempre» es divergencia (§4: D17, decidida).
+- **El colchón de caja es un IMPORTE NOMINAL cuando se deriva del tope de una regla** (5.0.0, V6 y
+  P2). Dos convenciones, y confundirlas sobrevalora la protección en silencio:
+  `CashBufferTarget::Months(n)` es `n × gasto del mes YA INDEXADO` —el objetivo crece con la
+  inflación—, mientras que `CashBufferTarget::Amount(a)` es un euro **nominal fijo que no se indexa
+  nunca**, exactamente el mismo que persigue el tope `amount` de la cascada (`resolve_cap_ceiling`).
+  El colchón derivado usa `Amount`: **la misma regla gobierna las dos fases** —acumular hasta X y,
+  ya jubilado, mantener X—. Convertir el tope a meses a mes 0 y dejarlo indexarse lo revalorizaría
+  ~2,4× a 35 años con un 2,5 %; los meses solo se publican como equivalente informativo
+  (`buffer_months_effective = floor(tope / gasto de jubilación)`). Puerta:
+  `crates/engine-stochastic/tests/monte_carlo.rs::mc_cash_buffer_amount_holds_the_cap` (medido: con
+  `Amount(48 000)` el colchón se queda en 48.000 € en todo el horizonte; con `Months(24)` llega a
+  113.680 € = 48.000 × 1,025³⁵).
 
 ### 2.4 FIRE y fiscalidad
 - target del mes k = `gross_up(need(k), tramos, g)/(swr/100) + término_deuda(k)` (4.10.0/#170:
@@ -490,6 +502,13 @@ cero mes a mes y no se ejecuta ni una operación de más (bit-identidad).
 - `runway`: retirada-antes-de-crecimiento, multiplicador ponderado por valor (aprox. conservadora
   del drenaje real), «indefinido» ⟺ umbral SWR sobre el saldo líquido; 1200 meses es SUELO.
   Incoherencias con la simulación en §4 (D29).
+- **`success_verdict`: el corte es FIJO al 100 %** (5.0.0, decisión V7 del owner). Verde ⟺
+  `success_probability == 1`, o sea **ni un camino agota la cartera**; ámbar en `[0,90, 1)`; rojo
+  por debajo de 0,90. El borde es EXACTO y no necesita épsilon: la probabilidad es `n/n` con `n`
+  caminos enteros y en IEEE 754 esa división da `1.0` para cualquier `n`. El
+  `success_threshold_pct` configurable del perfil se retiró de la entrada útil (se acepta y se
+  ignora) y de **toda** la salida: un umbral por persona hacía incomparables dos veredictos del
+  mismo número. Consecuencia asumida: con 500 caminos, **un solo fallo ya es ámbar**.
 - El contrato en prosa de cada métrica vive en `apps/web/src/lib/helpTexts.ts`
   (skill `futurefin-metric-definitions`).
 
@@ -730,6 +749,16 @@ drenaje post-cruce ya solo tributa la ganancia real de la base que la cascada co
 - Cuenta corriente hogares: ~0,15 % TEDR (BdE tabla 19.7, 2024-26).
 
 ## 6. Provenance and maintenance
+
+**Ampliado el 2026-09-05 (WP-F del tren 5.0.0, decisiones V6/V7)**: §2.3 gana el contrato del
+colchón derivado (`CashBufferTarget::Amount` es NOMINAL y no se indexa; los meses solo se publican
+como equivalente informativo) y §2.7 el veredicto de corte fijo al 100 %. Re-verificación:
+`grep -n "pub enum CashBufferTarget" -A4 crates/engine/src/sim.rs`,
+`grep -n "CashBufferTarget::Months(n) => n \* expense" crates/engine/src/sim_core.rs` (1 hit),
+`grep -n "pub(crate) fn resolve_cash_buffer" apps/api/src/handlers/cash_buffer.rs`,
+`grep -n "VERDICT_GREEN_FLOOR_PCT" apps/api/src/handlers/projection_bands.rs` (2 hits) y las dos
+puertas: `cargo test -p futurefin-engine-stochastic --test monte_carlo -- mc_cash_buffer_amount_holds_the_cap`
+y `cargo test -p futurefin-api --lib projection_bands::tests::el_verde_exige_todos_los_caminos`.
 
 Escrito 2026-08-30 (auditoría del modelo financiero; rama `audit/modelo-financiero`).
 **Ampliado y re-verificado el 2026-09-03 para 5.0.0** (rama `release/5.0.0`, issue #207): §2.2/§2.3

@@ -45,8 +45,8 @@
 mod mc;
 
 pub use mc::{
-    project_percentile_bands, run_path, seed_for, BufferInactiveReason, McConfig, McError,
-    McOutcome, DEFAULT_PATHS, DEFAULT_PERCENTILES, DEPLETION_STEP_MONTHS, MAX_PATHS,
+    project_percentile_bands, run_path, seed_for, BufferInactiveReason, CashBufferSpec, McConfig,
+    McError, McOutcome, DEFAULT_PATHS, DEFAULT_PERCENTILES, DEPLETION_STEP_MONTHS, MAX_PATHS,
 };
 
 use rust_decimal::prelude::ToPrimitive;

@@ -85,10 +85,6 @@ pub(crate) const MAX_GUARDRAIL_PCT: Decimal = Decimal::from_parts(50, 0, 0, fals
 /// Colchón de caja máximo, en meses de gasto. Cinco años es el límite útil: más allá, «colchón»
 /// y «cartera» son la misma cosa.
 pub(crate) const MAX_CASH_BUFFER_MONTHS: u32 = 60;
-/// Cotas del umbral de éxito de Monte Carlo (%). Por debajo de 50 el veredicto verde no
-/// significaría nada; 100 es inalcanzable con retornos estocásticos y sería un rojo perpetuo.
-pub(crate) const MIN_SUCCESS_THRESHOLD_PCT: u32 = 50;
-pub(crate) const MAX_SUCCESS_THRESHOLD_PCT: u32 = 99;
 /// Techo del SWR (%). Mismo que tenía en `FireSettings`: el eje se movió, la cota no.
 pub(crate) const MAX_SWR_PCT: Decimal = Decimal::from_parts(4, 0, 0, false, 0);
 
@@ -459,9 +455,11 @@ pub struct RetirementProfile {
     pub partial_retirement: Option<PartialRetirement>,
     /// Colchón de caja en meses de gasto (P4). Solo actúa en Monte Carlo; en el camino
     /// determinista es un no-op declarado.
+    ///
+    /// **`None` no es «sin colchón» desde 5.0.0 (V6)**: es «derívalo del tope de mi regla de
+    /// ahorro» (`handlers::cash_buffer::resolve_cash_buffer`). Un valor explícito sigue ganando
+    /// —una elección no se deriva— y `PATCH {"cash_buffer_months": null}` es el camino de vuelta.
     pub cash_buffer_months: Option<u32>,
-    /// Umbral de éxito de Monte Carlo en % (D25).
-    pub success_threshold_pct: u32,
 }
 
 impl Default for RetirementProfile {
@@ -486,7 +484,6 @@ pub(crate) fn default_retirement_profile() -> RetirementProfile {
         pension: None,
         partial_retirement: None,
         cash_buffer_months: None,
-        success_threshold_pct: 95,
     }
 }
 
@@ -564,9 +561,6 @@ pub(crate) fn resolve_retirement_profile(stored: Option<RetirementProfile>) -> R
         .horizon_lifespan_age
         .clamp(MIN_HORIZON_LIFESPAN_AGE, MAX_HORIZON_LIFESPAN_AGE);
     p.swr_pct = p.swr_pct.clamp(Decimal::ZERO, MAX_SWR_PCT);
-    p.success_threshold_pct = p
-        .success_threshold_pct
-        .clamp(MIN_SUCCESS_THRESHOLD_PCT, MAX_SUCCESS_THRESHOLD_PCT);
     p.cash_buffer_months = p.cash_buffer_months.map(|m| m.min(MAX_CASH_BUFFER_MONTHS));
     p.target_retirement_age = p
         .target_retirement_age
@@ -707,18 +701,13 @@ pub(crate) fn validate_retirement_profile(p: &RetirementProfile) -> Result<(), A
         }
     }
 
-    // ---- Colchón y umbral ------------------------------------------------------------------
+    // ---- Colchón ---------------------------------------------------------------------------
     if let Some(m) = p.cash_buffer_months {
         if m > MAX_CASH_BUFFER_MONTHS {
             return Err(ApiError::BadRequest(format!(
                 "cash_buffer_out_of_range: cash_buffer_months must be between 0 and {MAX_CASH_BUFFER_MONTHS}"
             )));
         }
-    }
-    if !(MIN_SUCCESS_THRESHOLD_PCT..=MAX_SUCCESS_THRESHOLD_PCT).contains(&p.success_threshold_pct) {
-        return Err(ApiError::BadRequest(format!(
-            "success_threshold_out_of_range: success_threshold_pct must be between {MIN_SUCCESS_THRESHOLD_PCT} and {MAX_SUCCESS_THRESHOLD_PCT}"
-        )));
     }
 
     // U4 — se valida el porcentaje EFECTIVO, no el escrito: `pct`/`start_pct` ausentes heredan
@@ -811,7 +800,18 @@ pub(crate) struct RetirementProfilePatch {
     pub pension: Option<Option<PensionPlan>>,
     pub partial_retirement: Option<Option<PartialRetirement>>,
     pub cash_buffer_months: Option<Option<u32>>,
-    pub success_threshold_pct: Option<u32>,
+    /// **`success_threshold_pct`, deprecado e IGNORADO desde 5.0.0** (decisión V7 del owner).
+    ///
+    /// Viaja hasta aquí y **no se aplica a nada**: no está en `RetirementProfile`, `apply_to` no
+    /// lo mira y ninguna respuesta lo publica. Existe por una sola razón: que un PATCH que lo
+    /// mande **solo a él** no se conteste con `patch_empty`. La compatibilidad prometida es «se
+    /// acepta y se ignora», y un 400 no es aceptarlo — y el cliente que lo manda no puede dejar
+    /// de mandarlo (las dos tools MCP son `deny_unknown_fields`, así que borrarlo del schema
+    /// convertiría en 400 lo que hoy funciona).
+    ///
+    /// El prefijo del nombre es deliberado: si alguien lo vuelve a cablear, tiene que renombrarlo
+    /// primero.
+    pub deprecated_success_threshold_pct: Option<u32>,
 }
 
 impl RetirementProfilePatch {
@@ -875,9 +875,6 @@ impl RetirementProfilePatch {
         if let Some(v) = self.cash_buffer_months {
             after.cash_buffer_months = v;
         }
-        if let Some(v) = self.success_threshold_pct {
-            after.success_threshold_pct = v;
-        }
         after
     }
 
@@ -897,7 +894,7 @@ impl RetirementProfilePatch {
             pension,
             partial_retirement,
             cash_buffer_months,
-            success_threshold_pct,
+            deprecated_success_threshold_pct,
         } = self;
         strategy.is_none()
             && target_retirement_age.is_none()
@@ -911,7 +908,8 @@ impl RetirementProfilePatch {
             && pension.is_none()
             && partial_retirement.is_none()
             && cash_buffer_months.is_none()
-            && success_threshold_pct.is_none()
+            // Cuenta como «algo que el cliente pidió» aunque no cambie nada: ver su doc.
+            && deprecated_success_threshold_pct.is_none()
     }
 }
 
@@ -1017,10 +1015,20 @@ pub struct PatchRetirementProfileBody {
     #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
     #[schema(value_type = Option<PartialRetirement>, nullable = true)]
     pub partial_retirement: Option<Option<PartialRetirement>>,
+    /// Colchón de caja en meses. **Desde 5.0.0 (V6) la SPA ya no lo escribe**: el colchón se
+    /// DERIVA del tope de tu regla de ahorro. Sigue siendo escribible por API y MCP como
+    /// override explícito, y `null` es el camino de vuelta a la derivación.
     #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
     #[schema(value_type = Option<u32>, nullable = true)]
     pub cash_buffer_months: Option<Option<u32>>,
+    /// **Ignorado desde 5.0.0** (decisión V7 del owner): el veredicto verde exige el 100 % de
+    /// escenarios sin agotar la cartera y ya no hay umbral que configurar. Se sigue ACEPTANDO en
+    /// el cuerpo —rechazarlo rompería a todo cliente que lo mandara— y no se lee: ni se valida,
+    /// ni se persiste, ni sale por ninguna respuesta. El valor ya almacenado en
+    /// `users.retirement_profile` se ignora al leer y desaparece en la siguiente escritura, sin
+    /// migración.
     #[serde(default)]
+    #[schema(deprecated)]
     pub success_threshold_pct: Option<u32>,
     /// Misma columna que `PATCH /v1/auth/me` (`users.birth_date`): `null` la borra,
     /// `"YYYY-MM-DD"` la fija, omitirla no la toca. Vive también aquí porque la fecha de
@@ -1058,7 +1066,8 @@ impl PatchRetirementProfileBody {
             pension: self.pension.clone(),
             partial_retirement: self.partial_retirement.clone(),
             cash_buffer_months: self.cash_buffer_months,
-            success_threshold_pct: self.success_threshold_pct,
+            // Se lee del cuerpo y se DESCARTA (V7): solo evita el `patch_empty`.
+            deprecated_success_threshold_pct: self.success_threshold_pct,
         })
     }
 }
@@ -1263,7 +1272,9 @@ mod tests {
         assert_eq!(p.withdrawal_rule.kind, WithdrawalRuleKind::FixedReal);
         assert_eq!(p.withdrawal_rule.spend_mode, SpendMode::Ceiling);
         assert_eq!(p.target_basis, Some(TargetBasis::Perpetuity));
-        assert_eq!(p.success_threshold_pct, 95);
+        // Sin colchón declarado: `None` significa «derívalo del tope de la regla» (V6), y esa
+        // derivación vive en el ensamblado de la proyección, no aquí (D25: esto es ledger-free).
+        assert_eq!(p.cash_buffer_months, None);
     }
 
     #[test]
@@ -1328,13 +1339,11 @@ mod tests {
         let mut p = default_retirement_profile();
         p.swr_pct = Decimal::from(99u32);
         p.horizon_lifespan_age = 200;
-        p.success_threshold_pct = 5;
         p.cash_buffer_months = Some(999);
         p.target_retirement_age = Some(3);
         let r = resolve_retirement_profile(Some(p));
         assert_eq!(r.swr_pct, MAX_SWR_PCT);
         assert_eq!(r.horizon_lifespan_age, MAX_HORIZON_LIFESPAN_AGE);
-        assert_eq!(r.success_threshold_pct, MIN_SUCCESS_THRESHOLD_PCT);
         assert_eq!(r.cash_buffer_months, Some(MAX_CASH_BUFFER_MONTHS));
         assert_eq!(r.target_retirement_age, Some(MIN_PROFILE_AGE));
     }

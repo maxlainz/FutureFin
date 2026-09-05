@@ -171,13 +171,23 @@ async fn bands_exist_for_mine_and_the_household_is_a_declared_400() {
     assert_eq!(b["percentiles"], json!([10, 50, 90]), "{b}");
     assert_eq!(b["strategy"], "asap", "{b}");
     assert_eq!(b["retirement_trigger"], "liquid_crossing", "{b}");
-    assert_eq!(b["success_threshold_pct"], 95, "el default de D25: {b}");
-    assert_eq!(b["any_volatility_declared"], true, "{b}");
-    // P4: sin `cash_buffer_months` en el perfil no hay colchón que simular, y los dos
-    // contadores van a `null` — «no se midió», que no es «cero rellenos».
-    assert_eq!(b["buffer_active"], false, "{b}");
+    // 5.0.0 V7: el umbral configurable se retiró del perfil Y de la respuesta. El veredicto tiene
+    // corte fijo, así que no hay nada que ecoar para poder auditarlo.
     assert_eq!(
-        b["buffer_inactive_reason"], "not_requested",
+        b["success_threshold_pct"],
+        Value::Null,
+        "el umbral se retiró en 5.0.0 y no puede volver por la puerta de atrás: {b}"
+    );
+    assert_eq!(b["any_volatility_declared"], true, "{b}");
+    // P4/V6: el único activo es un fondo con σ = 15 %, así que no hay LÍQUIDO SIN RIESGO donde
+    // alojar el colchón — y ése es el motivo que se publica. Desde que el colchón se DERIVA del
+    // tope de la regla de ahorro, `not_requested` ya no existe: si no hay colchón es porque falló
+    // una condición de la derivación, y ésa es la que hay que poder leer. Los dos contadores van
+    // a `null` — «no se midió», que no es «cero rellenos».
+    assert_eq!(b["buffer_active"], false, "{b}");
+    assert_eq!(b["buffer_source"], "none", "{b}");
+    assert_eq!(
+        b["buffer_inactive_reason"], "no_safe_liquid_asset",
         "un colchón apagado sin motivo se lee como un fallo: {b}"
     );
     assert!(b["buffer_refills_p50"].is_null(), "{b}");
@@ -605,24 +615,24 @@ async fn logout_drops_the_bands_of_that_user() {
 // 7. Veredicto y umbral
 // ---------------------------------------------------------------------------------------------
 
-/// El veredicto se mide contra el umbral **del perfil**, y el umbral se ecoa para poder
-/// auditarlo. Con σ = 0 el éxito es exactamente 1, así que cualquier umbral de `[50, 99]` da
-/// verde — lo que se pinea aquí es que el umbral VIAJA y que es el del usuario, no una constante.
+/// **El corte del veredicto es FIJO al 100 %** (5.0.0, V7) y el umbral del perfil ya no existe:
+/// un `PATCH` que lo mande se acepta y se descarta, sin error y sin efecto.
 ///
-/// Los tres bordes del semáforo (exactamente el umbral, el umbral − 10, y por debajo) los fija el
-/// test unitario `el_veredicto_es_verde_en_el_umbral_exacto_y_ambar_diez_puntos_abajo` de
-/// `handlers/projection_bands.rs`: allí la probabilidad se puede elegir, aquí sale de un sorteo.
+/// Con σ = 0 el éxito es exactamente 1, así que el verde de aquí es el verde estricto. Los tres
+/// bordes del semáforo los fija el test unitario `el_verde_exige_todos_los_caminos` de
+/// `handlers/projection_bands.rs`: allí la probabilidad se elige, aquí sale de un sorteo.
 #[tokio::test]
-async fn the_verdict_is_measured_against_the_profile_threshold() {
+async fn the_verdict_has_a_fixed_cut_and_the_threshold_is_accepted_and_ignored() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     seed(&app, &owner, "3000", "2000", &[("Indexado", "20000", None)]).await;
 
-    patch_profile(&app, &owner, json!({"success_threshold_pct": 99})).await;
+    // Se acepta (no rompe a ningún cliente que lo siga mandando) y no cambia nada.
+    patch_profile(&app, &owner, json!({"success_threshold_pct": 60})).await;
     let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}")).await;
-    assert_eq!(b["success_threshold_pct"], 99, "{b}");
+    assert_eq!(b["success_threshold_pct"], Value::Null, "{b}");
     assert_eq!(b["success_probability"], "1", "{b}");
-    assert_eq!(b["success_verdict"], "green", "1 ≥ 0,99: {b}");
+    assert_eq!(b["success_verdict"], "green", "sin ningún camino agotado: {b}");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -956,4 +966,224 @@ async fn with_dispersion_the_three_success_readings_stay_consistent() {
         }
         None => assert_eq!(never, 1.0, "solo es null si NADIE se jubila: {b}"),
     }
+}
+
+// =================================================================================================
+// §9 · Colchón derivado del tope de la regla de ahorro (5.0.0, decisión V6 del owner)
+// =================================================================================================
+
+/// La cartera de la pauta «cuenta hasta X, resto al fondo»: una cuenta corriente **sin
+/// volatilidad declarada** (σ = 0 ⇒ puede hacer de colchón) y un fondo volátil (σ ⇒ hay riesgo de
+/// secuencia del que protegerse). Devuelve `(cuenta_id, fondo_id)` y deja el sumidero apuntando
+/// al fondo — el `create_asset` del primer activo lo sembró sobre la cuenta (#150), y con el
+/// sumidero SIN tope sobre la cuenta el colchón no se derivaría nunca (invariante I1).
+async fn seed_buffer_portfolio(app: &TestApp, u: &LoggedInOwner) -> (String, String) {
+    let ids = seed(
+        app,
+        u,
+        "3000",
+        "2000",
+        &[
+            ("Cuenta corriente", "1000", None),
+            ("Fondo indexado global", "200000", Some("20")),
+        ],
+    )
+    .await;
+    let sink = app.sink_rule_id(&u.cookie).await;
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{sink}"),
+            json!({ "target_asset_id": ids[1] }),
+            &u.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "retarget del sumidero: {r:?}");
+    (ids[0].clone(), ids[1].clone())
+}
+
+async fn capped_rule(app: &TestApp, u: &LoggedInOwner, asset: &str, kind: &str, value: &str) -> String {
+    let r = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            json!({ "target_asset_id": asset, "kind": "fixed", "amount": "200",
+                    "cap_kind": kind, "cap_value": value }),
+            &u.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "regla con tope: {r:?}");
+    r.json()["id"].as_str().expect("rule id").to_string()
+}
+
+/// **El colchón sale del tope de la regla, en euros y sin indexar** (V6/P2).
+///
+/// PREDICCIÓN antes de correr: perfil vacío (sin `cash_buffer_months`), tope `amount = 6000` sobre
+/// la cuenta corriente, gasto de jubilación 2.000 €/mes ⇒ `buffer_source: allocation_cap`,
+/// `buffer_target_amount: "6000"`, `buffer_months_effective: 3` (= floor(6000/2000), informativo)
+/// y el colchón ACTIVO, porque hay volatilidad declarada en el fondo y la cuenta es un líquido
+/// σ = 0 donde alojarlo.
+#[tokio::test]
+async fn the_buffer_is_derived_from_the_rule_cap() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (cuenta, _fondo) = seed_buffer_portfolio(&app, &owner).await;
+    let rule_id = capped_rule(&app, &owner, &cuenta, "amount", "6000").await;
+
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}&seed=3")).await;
+    assert_eq!(b["buffer_source"], "allocation_cap", "{b}");
+    assert_eq!(b["buffer_target_amount"], "6000.0000", "{b}");
+    assert_eq!(b["buffer_months_effective"], 3, "6000/2000 = 3: {b}");
+    assert_eq!(b["buffer_source_rule_id"], rule_id, "{b}");
+    assert_eq!(b["buffer_source_asset_name"], "Cuenta corriente", "{b}");
+    assert_eq!(b["buffer_active"], true, "{b}");
+    assert_eq!(b["buffer_inactive_reason"], Value::Null, "{b}");
+    // Y el motor lo ejerció: sin actividad, «derivado» sería una etiqueta sin consecuencia.
+    assert!(!b["buffer_refills_p50"].is_null(), "{b}");
+}
+
+/// **Explícito gana, y `PATCH null` vuelve a derivado.** El tri-estado del PATCH es el camino de
+/// vuelta que la SPA deja de escribir pero el API y el MCP conservan.
+#[tokio::test]
+async fn an_explicit_buffer_wins_and_patch_null_returns_to_the_derived_one() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (cuenta, _fondo) = seed_buffer_portfolio(&app, &owner).await;
+    let rule_id = capped_rule(&app, &owner, &cuenta, "amount", "6000").await;
+
+    patch_profile(&app, &owner, json!({"cash_buffer_months": 9})).await;
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}&seed=3")).await;
+    assert_eq!(b["buffer_source"], "explicit", "{b}");
+    assert_eq!(b["buffer_months_effective"], 9, "{b}");
+    assert_eq!(
+        b["buffer_target_amount"],
+        Value::Null,
+        "un colchón en meses se re-dimensiona cada mes: no hay escalar honesto que publicar: {b}"
+    );
+    assert_eq!(b["buffer_source_rule_id"], Value::Null, "{b}");
+    // El activo SÍ se dice: dónde se aloja el colchón es la mitad de entenderlo.
+    assert_eq!(b["buffer_source_asset_name"], "Cuenta corriente", "{b}");
+    assert_eq!(b["buffer_active"], true, "{b}");
+
+    patch_profile(&app, &owner, json!({"cash_buffer_months": null})).await;
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}&seed=3")).await;
+    assert_eq!(b["buffer_source"], "allocation_cap", "{b}");
+    assert_eq!(b["buffer_target_amount"], "6000.0000", "{b}");
+    assert_eq!(b["buffer_source_rule_id"], rule_id, "{b}");
+}
+
+/// **El caso común de hoy**: el líquido σ = 0 es el sumidero SIN tope (invariante I1) y no hay
+/// importe que perseguir. `no_capped_rule` no es un error — es «pon un tope a tu cuenta», y el
+/// copy de la SPA lo dice así.
+#[tokio::test]
+async fn without_a_capped_rule_the_buffer_says_so() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    // Sin retargetear el sumidero: la cuenta corriente ES el sumidero, y no tiene tope.
+    seed(
+        &app,
+        &owner,
+        "3000",
+        "2000",
+        &[
+            ("Cuenta corriente", "1000", None),
+            ("Fondo indexado global", "200000", Some("20")),
+        ],
+    )
+    .await;
+
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}&seed=3")).await;
+    assert_eq!(b["buffer_source"], "none", "{b}");
+    assert_eq!(b["buffer_active"], false, "{b}");
+    assert_eq!(b["buffer_inactive_reason"], "no_capped_rule", "{b}");
+    assert_eq!(b["buffer_source_asset_name"], "Cuenta corriente", "{b}");
+    assert_eq!(b["buffer_target_amount"], Value::Null, "{b}");
+    assert_eq!(b["buffer_months_effective"], Value::Null, "{b}");
+}
+
+/// Un techo de 0 € no es un colchón, y ese motivo es distinto de «no hay regla»: uno se arregla
+/// poniendo un tope, el otro subiéndolo.
+#[tokio::test]
+async fn a_zero_cap_is_not_a_buffer() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let (cuenta, _fondo) = seed_buffer_portfolio(&app, &owner).await;
+    capped_rule(&app, &owner, &cuenta, "amount", "0").await;
+
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}&seed=3")).await;
+    assert_eq!(b["buffer_source"], "none", "{b}");
+    assert_eq!(b["buffer_inactive_reason"], "cap_is_zero", "{b}");
+    assert_eq!(b["buffer_source_asset_name"], "Cuenta corriente", "{b}");
+}
+
+/// **Sin un líquido σ = 0 no hay dónde alojarlo** — el mismo literal que el motor emite, porque
+/// es el mismo hecho: el handler solo llega antes. Aquí los dos activos declaran volatilidad.
+#[tokio::test]
+async fn without_a_risk_free_liquid_asset_the_buffer_says_so() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let ids = seed(
+        &app,
+        &owner,
+        "3000",
+        "2000",
+        &[
+            ("Monetario", "1000", Some("2")),
+            ("Fondo indexado global", "200000", Some("20")),
+        ],
+    )
+    .await;
+    let sink = app.sink_rule_id(&owner.cookie).await;
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{sink}"),
+            json!({ "target_asset_id": ids[1] }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    capped_rule(&app, &owner, &ids[0], "amount", "6000").await;
+
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}&seed=3")).await;
+    assert_eq!(b["buffer_source"], "none", "{b}");
+    assert_eq!(b["buffer_inactive_reason"], "no_safe_liquid_asset", "{b}");
+    assert_eq!(
+        b["buffer_source_asset_name"],
+        Value::Null,
+        "no hay activo que nombrar: ninguno es líquido y sin riesgo a la vez: {b}"
+    );
+}
+
+/// `no_volatility` es del MOTOR y pasa tal cual: hay colchón derivado (tope y activo), pero sin
+/// riesgo de secuencia del que protegerse el resultado es bit a bit el de no pedirlo. El campo es
+/// UNO solo, y aquí gana la capa que de verdad impidió la simulación.
+#[tokio::test]
+async fn the_engine_reason_passes_through_when_nothing_is_volatile() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let ids = seed(
+        &app,
+        &owner,
+        "3000",
+        "2000",
+        &[("Cuenta corriente", "1000", None), ("Fondo indexado global", "200000", None)],
+    )
+    .await;
+    let sink = app.sink_rule_id(&owner.cookie).await;
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{sink}"),
+            json!({ "target_asset_id": ids[1] }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let rule_id = capped_rule(&app, &owner, &ids[0], "amount", "6000").await;
+
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}&seed=3")).await;
+    assert_eq!(b["buffer_active"], false, "{b}");
+    assert_eq!(b["buffer_inactive_reason"], "no_volatility", "{b}");
+    // La derivación SÍ ocurrió: el colchón existe, lo que falta es la volatilidad.
+    assert_eq!(b["buffer_source"], "allocation_cap", "{b}");
+    assert_eq!(b["buffer_target_amount"], "6000.0000", "{b}");
+    assert_eq!(b["buffer_source_rule_id"], rule_id, "{b}");
+    assert_eq!(b["any_volatility_declared"], false, "{b}");
 }

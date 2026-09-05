@@ -51,6 +51,7 @@
 //! es lo que acota el pico agregado.
 
 use crate::error::ApiError;
+use crate::handlers::cash_buffer::ResolvedCashBuffer;
 use crate::handlers::installation::require_installation_member;
 use crate::handlers::person_view::LedgerView;
 use crate::handlers::projection::{
@@ -64,7 +65,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use axum_extra::extract::cookie::CookieJar;
 use futurefin_engine_stochastic::{
-    project_percentile_bands, seed_for, McConfig, McError, McOutcome, DEFAULT_PATHS, MAX_PATHS,
+    project_percentile_bands, seed_for, BufferInactiveReason, McConfig, McError, McOutcome,
+    DEFAULT_PATHS, MAX_PATHS,
 };
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -93,8 +95,17 @@ pub(crate) const HTTP_MAX_PATHS: u32 = 2_000;
 /// de la propia banda.
 pub(crate) const MCP_MAX_PATHS: u32 = 1_000;
 
-/// Distancia en PUNTOS PORCENTUALES por debajo del umbral en que el semáforo pasa de verde a
-/// ámbar (D28). Con el default de 95 %, ámbar es `[85, 95)` y rojo `< 85`.
+/// **El suelo del VERDE, en puntos porcentuales** (5.0.0, decisión V7 del owner): 100. Verde
+/// significa **cero caminos que agotan la cartera**, y nada menos.
+///
+/// Hasta 5.0.0 era el `success_threshold_pct` del perfil (default 95). Se retiró: era un ajuste
+/// que casi nadie tocaba y que, cuando se tocaba, movía el color sin mover el plan — un mando
+/// para cambiar de opinión sobre el mismo resultado. Con el corte fijo, el color dice siempre lo
+/// mismo y se puede comparar entre personas.
+pub(crate) const VERDICT_GREEN_FLOOR_PCT: u32 = 100;
+
+/// Distancia en PUNTOS PORCENTUALES por debajo del suelo verde en que el semáforo pasa de ámbar
+/// a rojo (D28). Con el suelo en 100, ámbar es `[90, 100)` y rojo `< 90`.
 pub(crate) const VERDICT_AMBER_MARGIN_PP: u32 = 10;
 
 pub(crate) const VERDICT_GREEN: &str = "green";
@@ -298,11 +309,10 @@ pub struct ProjectionBandsResponse {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub success_given_retired: Option<Decimal>,
-    /// Umbral configurado en el perfil (`success_threshold_pct`, 50..=99, default 95), en
-    /// PORCENTAJE. Se ecoa porque el veredicto de abajo no se puede auditar sin él.
-    pub success_threshold_pct: u32,
-    /// `green` | `amber` | `red` (D28): verde con `success_probability·100 ≥ umbral`, ámbar hasta
-    /// 10 puntos porcentuales por debajo, rojo el resto.
+    /// `green` | `amber` | `red` (D28, corte FIJO desde 5.0.0 — V7): **verde solo con
+    /// `success_probability == 1`** (ni un camino agota la cartera), ámbar en `[0,90, 1)`, rojo
+    /// por debajo de 0,90. El umbral configurable del perfil se retiró: el corte ya no depende de
+    /// nada que el cliente tenga que leer, así que no hay nada que ecoar.
     pub success_verdict: &'static str,
     /// Probabilidad acumulada de agotamiento cada cinco años desde la jubilación efectiva.
     /// **Vacío** cuando ningún camino se jubila dentro del horizonte: sin jubilación no existe
@@ -357,14 +367,50 @@ pub struct ProjectionBandsResponse {
     /// tiene colchón: sin sorteo no hay mes bueno ni malo que distinguir, así que el trasvase no
     /// tendría criterio.
     pub buffer_active: bool,
-    /// **Por qué NO se simuló el colchón**: `not_requested` (el perfil no declara
-    /// `cash_buffer_months`) | `no_volatility` (ningún activo declara volatilidad: no hay riesgo
-    /// de secuencia del que protegerse, y el resultado es BIT A BIT el de no pedirlo) |
-    /// `no_safe_liquid_asset` (no hay ningún activo líquido con σ = 0 donde alojarlo; un colchón
-    /// volátil no protege de nada). `null` ⟺ `buffer_active: true`.
+    /// **De dónde sale el colchón** (5.0.0, V6): `explicit` (el perfil —o el `profile_overrides`
+    /// del what-if— declara `cash_buffer_months`; una elección no se deriva) | `allocation_cap`
+    /// (se DERIVA del tope de tu regla de ahorro: el importe que la cascada persigue mientras
+    /// ahorras es el que el colchón mantiene jubilado) | `none` (no hay colchón;
+    /// `buffer_inactive_reason` dice por qué).
     ///
-    /// Nunca es `null` con `buffer_active: false`: quien pidió un colchón y no lo tuvo merece el
-    /// motivo, y sin él «no pasó nada» se lee como «no funcionó».
+    /// Se publica porque un colchón derivado que no dijera de dónde sale sería un número que el
+    /// usuario no pidió y no puede cambiar.
+    pub buffer_source: &'static str,
+    /// **El objetivo del colchón en euros NOMINALES**, y nominales de verdad: no se indexa nunca,
+    /// igual que el tope de la regla del que sale (P2). `null` salvo con
+    /// `buffer_source: "allocation_cap"` — con un colchón en meses el objetivo se re-dimensiona
+    /// cada mes contra el gasto ya indexado, y publicar un escalar sería publicar una sola de sus
+    /// caras. Se publica con la escala de la casa (`money_out`, 4 decimales), como todo importe
+    /// escalar del API.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub buffer_target_amount: Option<Decimal>,
+    /// **Meses de gasto que cubre el colchón.** Con `explicit`, los que el usuario escribió (y
+    /// son los que el motor usa). Con `allocation_cap`, el equivalente **informativo**
+    /// `floor(tope / gasto de jubilación mensual de hoy)`: el motor persigue el IMPORTE, no estos
+    /// meses. `null` sin colchón, y también cuando el gasto de jubilación no es positivo.
+    pub buffer_months_effective: Option<u32>,
+    /// La regla de asignación cuyo tope fijó el objetivo. `null` salvo con `allocation_cap`. Es
+    /// lo que permite a la UI enlazar «cámbialo en tu regla de ahorro» en vez de describirlo.
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub buffer_source_rule_id: Option<Uuid>,
+    /// El activo que HACE de colchón: el líquido con σ = 0 de menor rentabilidad, el mismo que
+    /// elige el motor (`safe_cash_buffer_index`). Se publica también con `explicit` y también con
+    /// `cap_is_zero`/`no_capped_rule` —ahí el activo existe, lo que falta es el importe—; `null`
+    /// solo cuando no hay ningún líquido sin riesgo.
+    pub buffer_source_asset_name: Option<String>,
+    /// **Por qué NO se simuló el colchón.** UN solo campo con motivos de dos capas:
+    ///
+    /// - Del **handler** (5.0.0): `no_capped_rule` (ninguna regla habilitada y con tope apunta al
+    ///   líquido sin riesgo — el caso de la pauta «todo al fondo», donde ese líquido es el
+    ///   sumidero sin tope) | `cap_is_zero` (la hay, pero su techo resuelto es 0 €) |
+    ///   `no_safe_liquid_asset` (no hay ningún activo líquido con σ = 0 donde alojarlo).
+    /// - Del **motor**: `no_volatility` (ningún activo declara volatilidad: no hay riesgo de
+    ///   secuencia del que protegerse, y el resultado es BIT A BIT el de no pedirlo).
+    ///
+    /// El `not_requested` del motor **ya no se publica**: desde que el colchón se deriva, «no se
+    /// pidió» no es un motivo — el motivo es cuál de las condiciones de la derivación falló.
+    /// `null` ⟺ `buffer_active: true`, y nunca es `null` con `buffer_active: false`.
     #[schema(value_type = Option<String>)]
     pub buffer_inactive_reason: Option<&'static str>,
     /// Mediana entre caminos del NÚMERO de meses con relleno efectivo. **`null` ⟺
@@ -548,10 +594,13 @@ async fn compute_projection_bands(
         seed,
         paths,
         percentiles: BANDS_PERCENTILES.to_vec(),
-        // P4: el colchón sale del PERFIL del usuario y **solo actúa aquí**. Que se simule de
-        // verdad depende además de la cartera (un líquido que lo albergue y volatilidad de la que
-        // protegerse), y eso lo responde `buffer_active` en la salida.
-        cash_buffer_months: ctx.retirement_profile.cash_buffer_months,
+        // P4/V6: el colchón lo resolvió el ENSAMBLADO (`resolve_cash_buffer`), no este handler:
+        // sale del tope de la regla de ahorro salvo que el perfil declare uno explícito, y el
+        // what-if lee exactamente el mismo campo para que banda y simulación no describan dos
+        // colchones distintos. Que se simule de verdad depende además de la cartera (un líquido
+        // sin riesgo que lo albergue y volatilidad de la que protegerse): lo responde
+        // `buffer_active` en la salida.
+        cash_buffer: built.cash_buffer.spec,
     };
 
     // Bajo el MISMO semáforo que las proyecciones (`heavy::run_projection_sim`): el recurso
@@ -572,9 +621,9 @@ async fn compute_projection_bands(
         ctx.horizon_basis,
         ctx.today,
         ctx.session_birth_date,
-        ctx.retirement_profile.success_threshold_pct,
         strategy_label(ctx.retirement_profile.strategy),
         built.retirement_trigger,
+        &built.cash_buffer,
         computed_in_ms,
     ))
 }
@@ -589,9 +638,9 @@ fn assemble_bands_response(
     horizon_basis: String,
     today: chrono::NaiveDate,
     birth_date: Option<chrono::NaiveDate>,
-    success_threshold_pct: u32,
     strategy: String,
     retirement_trigger: &'static str,
+    cash_buffer: &ResolvedCashBuffer,
     computed_in_ms: u64,
 ) -> ProjectionBandsResponse {
     let len = outcome
@@ -668,8 +717,7 @@ fn assemble_bands_response(
         success_probability: probability_out(outcome.success_probability),
         never_retired_probability: probability_out(outcome.never_retired_probability),
         success_given_retired: outcome.success_given_retired.and_then(probability_out),
-        success_threshold_pct,
-        success_verdict: success_verdict(outcome.success_probability, success_threshold_pct),
+        success_verdict: success_verdict(outcome.success_probability),
         depletion_probability_by_age,
         retirement_month_index_percentiles,
         underfunded_probability: outcome.underfunded_probability.and_then(probability_out),
@@ -679,10 +727,15 @@ fn assemble_bands_response(
             .and_then(probability_out),
         any_volatility_declared: outcome.any_volatility_declared,
         buffer_active: outcome.buffer_active,
-        // El literal público lo pone el propio crate (`BufferInactiveReason::code`), no un
-        // `match` aquí: un mapeo duplicado se queda atrás en cuanto el enum crece, y un motivo
-        // con dos nombres es un motivo que nadie puede buscar.
-        buffer_inactive_reason: outcome.buffer_inactive_reason.map(|r| r.code()),
+        buffer_source: cash_buffer.source,
+        buffer_target_amount: cash_buffer.target_amount.map(crate::money::money_out),
+        buffer_months_effective: cash_buffer.months_effective,
+        buffer_source_rule_id: cash_buffer.source_rule_id,
+        buffer_source_asset_name: cash_buffer.source_asset_name.clone(),
+        buffer_inactive_reason: merge_buffer_inactive_reason(
+            outcome.buffer_inactive_reason,
+            cash_buffer,
+        ),
         buffer_refills_p50: outcome.buffer_refills_p50,
         buffer_refill_net_total_p50: outcome
             .buffer_refill_net_total_p50
@@ -695,16 +748,53 @@ fn assemble_bands_response(
     }
 }
 
-/// **El semáforo de D28**, con la comparación hecha en PUNTOS PORCENTUALES enteros y no en
-/// fracciones: el umbral es un `u32` en `[50, 99]` y la probabilidad un `f64`, así que se
-/// convierte la probabilidad a porcentaje (`·100`) en vez de el umbral a fracción — dividir el
-/// umbral entre 100 introduciría un binario no representable justo en el borde («exactamente el
-/// umbral» debe salir VERDE, y lo comprueba `projection_bands.rs`).
-pub(crate) fn success_verdict(success_probability: f64, threshold_pct: u32) -> &'static str {
+/// **UN solo `buffer_inactive_reason`, con motivos de dos capas** (5.0.0, V6).
+///
+/// El motor solo sabe tres cosas: no se pidió, no hay volatilidad, no hay líquido sin riesgo. Con
+/// el colchón DERIVADO, «no se pidió» dejó de ser un motivo publicable: si no hay colchón es
+/// porque falló una condición de la derivación, y ésa es la que el usuario necesita leer
+/// (`no_capped_rule`, `cap_is_zero`, `no_safe_liquid_asset`). Así que el `not_requested` del
+/// motor se sustituye por el motivo del handler; el resto pasa TAL CUAL, con el literal que pone
+/// el propio crate (`BufferInactiveReason::code`) y no un `match` duplicado aquí.
+///
+/// El `unwrap_or` final es inalcanzable por construcción —`spec: None` ⟺ el handler puso motivo—
+/// y existe para que un futuro camino nuevo degrade a un motivo honesto en vez de a `null`, que
+/// se leería como «el colchón sí se simuló».
+pub(crate) fn merge_buffer_inactive_reason(
+    engine_reason: Option<BufferInactiveReason>,
+    cash_buffer: &ResolvedCashBuffer,
+) -> Option<&'static str> {
+    match engine_reason {
+        Some(BufferInactiveReason::NotRequested) => Some(
+            cash_buffer
+                .inactive_reason
+                .unwrap_or(crate::handlers::cash_buffer::BUFFER_INACTIVE_NO_CAPPED_RULE),
+        ),
+        Some(r) => Some(r.code()),
+        None => None,
+    }
+}
+
+/// **El semáforo de D28 con el corte FIJO al 100 %** (5.0.0, V7).
+///
+/// La comparación se hace en PUNTOS PORCENTUALES enteros y no en fracciones —la probabilidad se
+/// multiplica por 100, no el suelo se divide entre él— por la misma razón que cuando el umbral
+/// era configurable: dividir entre 100 introduce un binario no representable justo en el borde.
+///
+/// **El verde es exacto y se puede confiar en él**: la probabilidad es `n/n` con `n` caminos
+/// enteros, y en IEEE 754 esa división da `1.0` exactamente para cualquier `n` (numerador y
+/// denominador son el mismo entero, y el cociente es representable). Por eso `p == 1.0` no
+/// necesita épsilon, y por eso `p·100 >= 100` es la misma condición. Lo pinea
+/// `el_verde_exige_todos_los_caminos`.
+///
+/// Consecuencia asumida (V7): con 500 caminos, **un solo fallo es ámbar**. Es deliberado — el
+/// copy del tile verde dice «0 de 500 escenarios agotan el capital» y eso solo puede afirmarse
+/// cuando es verdad.
+pub(crate) fn success_verdict(success_probability: f64) -> &'static str {
     let pct = success_probability * 100.0;
-    let threshold = f64::from(threshold_pct);
-    let amber_floor = threshold - f64::from(VERDICT_AMBER_MARGIN_PP);
-    if pct >= threshold {
+    let green_floor = f64::from(VERDICT_GREEN_FLOOR_PCT);
+    let amber_floor = green_floor - f64::from(VERDICT_AMBER_MARGIN_PP);
+    if pct >= green_floor {
         VERDICT_GREEN
     } else if pct >= amber_floor {
         VERDICT_AMBER
@@ -755,21 +845,38 @@ pub fn projection_bands_router() -> Router {
 mod tests {
     use super::*;
 
-    /// El semáforo, en sus tres bordes. «Exactamente el umbral» es VERDE — con el umbral
-    /// convertido a fracción, `0.95_f64` no es representable y este caso salía ámbar.
+    /// **El verde exige TODOS los caminos** (V7), y el borde es exacto sin épsilon.
+    ///
+    /// La aserción que importa es la última: `n/n` en `f64` es `1.0` exactamente para cualquier
+    /// número de caminos, así que «verde ⟺ ni un camino agota la cartera» no es una aproximación
+    /// que el redondeo pueda romper con 499 o 2 000 caminos. Lo contrario —un `0.9999…` que se
+    /// colara como verde— sería el único fallo silencioso posible aquí.
     #[test]
-    fn el_veredicto_es_verde_en_el_umbral_exacto_y_ambar_diez_puntos_abajo() {
-        assert_eq!(success_verdict(0.95, 95), VERDICT_GREEN);
-        assert_eq!(success_verdict(0.96, 95), VERDICT_GREEN);
-        assert_eq!(success_verdict(1.0, 95), VERDICT_GREEN);
-        assert_eq!(success_verdict(0.949, 95), VERDICT_AMBER);
-        assert_eq!(success_verdict(0.85, 95), VERDICT_AMBER);
-        assert_eq!(success_verdict(0.8499, 95), VERDICT_RED);
-        assert_eq!(success_verdict(0.0, 95), VERDICT_RED);
-        // Con otro umbral la ventana ámbar se mueve entera.
-        assert_eq!(success_verdict(0.50, 50), VERDICT_GREEN);
-        assert_eq!(success_verdict(0.40, 50), VERDICT_AMBER);
-        assert_eq!(success_verdict(0.39, 50), VERDICT_RED);
+    fn el_verde_exige_todos_los_caminos() {
+        assert_eq!(success_verdict(1.0), VERDICT_GREEN);
+        // Un solo fallo entre 500 ya NO es verde: es la consecuencia asumida de V7.
+        assert_eq!(success_verdict(499.0 / 500.0), VERDICT_AMBER);
+        assert_eq!(success_verdict(0.999), VERDICT_AMBER);
+        assert_eq!(success_verdict(0.95), VERDICT_AMBER);
+        assert_eq!(success_verdict(0.90), VERDICT_AMBER);
+        assert_eq!(success_verdict(0.8999), VERDICT_RED);
+        assert_eq!(success_verdict(0.0), VERDICT_RED);
+
+        // El borde exacto, camino a camino: `n/n == 1.0` en IEEE 754 para todo `n` razonable, así
+        // que el verde no necesita tolerancia y `(n−1)/n` nunca se cuela.
+        for n in [1u32, 7, 24, 499, 500, 1_000, 2_000] {
+            let all = f64::from(n) / f64::from(n);
+            assert_eq!(all, 1.0, "n/n debe ser exactamente 1 con n = {n}");
+            assert_eq!(success_verdict(all), VERDICT_GREEN, "n = {n}");
+            if n > 1 {
+                let one_short = f64::from(n - 1) / f64::from(n);
+                assert_ne!(
+                    success_verdict(one_short),
+                    VERDICT_GREEN,
+                    "un camino fallido no puede ser verde con n = {n}"
+                );
+            }
+        }
     }
 
     /// `paths` se rechaza fuera de rango, nunca se clampa, y cada superficie trae su techo.

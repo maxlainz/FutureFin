@@ -25,7 +25,8 @@ pub use phases::{
     RetirementTrigger, SpendMode, TargetBasis, WithdrawalRule,
 };
 pub use sim::{
-    AllocationCapG, AllocationRuleG, CashBufferPlan, FireNeedG, FireTargetG, FireTargetView,
+    AllocationCapG, AllocationRuleG, CashBufferPlan, CashBufferTarget, FireNeedG, FireTargetG,
+    FireTargetView,
     FirstMonthAllocationG, IncomePauseG, PartialPhaseG, PensionScheduleG, PhasePlanG,
     RuleOutcomeG, SimAssetG, SimInput, SimLiability, SimOutput, TaxBracketG, WithdrawalRuleG,
 };

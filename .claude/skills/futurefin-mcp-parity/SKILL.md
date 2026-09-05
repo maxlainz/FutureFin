@@ -228,7 +228,8 @@ dilo así.
 ### 3.5 Evaluación del tren 5.0.0 (issue #207) — 68 → 71 tools
 
 La evaluación de §1 corrida sobre toda la superficie HTTP que la release movió. **Ninguna fila queda
-sin clasificar**; las tres tools nuevas y los cinco cambios de contrato están abajo.
+sin clasificar**; las tres tools nuevas y los cambios de contrato están abajo (las dos últimas filas
+son del WP-F: colchón derivado y umbral retirado, **cero tools nuevas**).
 
 | Superficie HTTP nueva o cambiada (5.0.0) | Resultado de paridad |
 |---|---|
@@ -248,6 +249,8 @@ sin clasificar**; las tres tools nuevas y los cinco cambios de contrato están a
 | **S4** — `PATCH {"pension": null}` suelta el `target_basis` almacenado | **Heredado, y esa es la prueba de que está en el sitio correcto**: la regla vive en `RetirementProfilePatch::apply_to`, que `update_retirement_profile` y `simulate_projection.profile_overrides` comparten con el PATCH HTTP. La tool lo enseña gratis en su preview (`target_basis_stored_after: null`) y el what-if simula lo que pasaría al guardarlo. Cero código en `server.rs` salvo la mención en el `instructions` |
 | `POST /v1/backup/user-export`: la contraseña deja de ser la de la cuenta en cuentas sin contraseña (issue #213) | **n/a**. `/v1/backup/*` es una **omisión deliberada ya registrada** en §3.1 (categoría «Encrypted blob transport»): ninguna tool toca el backup, y el cambio no crea razón para que la haya — al contrario, un flujo cuyo secreto lo **crea la persona** al descargar el archivo es todavía menos conversable. `grep -c 'backup' apps/api/src/mcp/server.rs` → **0**, y debe seguir siéndolo. El código nuevo `backup_password_empty` viaja por la misma `ApiError` y vive en `error-codes.json` + `errorMessages.ts`, como el resto |
 | `UserResponse` gana `has_password` (aditivo, issue #213) | **n/a**. `UserResponse` es la respuesta de `login`/`register`/`/v1/auth/sso`/`GET /v1/auth/me`, y **las cuatro rutas están excluidas** en §3.1 (categorías «Session lifecycle» y «OAuth protocol»): un cliente MCP llega ya autenticado por Bearer, no hay tarro de cookies que llenar. El campo no aparece en ninguna respuesta de tool — `grep -c 'has_password' apps/api/src/mcp/server.rs` → **0** |
+| **V6** — el colchón de caja se DERIVA del tope de la regla de ahorro; `GET /v1/projection/bands` gana cinco campos | **Dos tools actualizadas, sin código propio en ninguna.** `get_projection_bands` y `simulate_projection` publican `buffer_source`, `buffer_target_amount`, `buffer_months_effective`, `buffer_source_rule_id` y `buffer_source_asset_name` porque comparten las cores; `buffer_inactive_reason` sigue siendo UN campo y sus motivos pasan a `no_capped_rule` \| `cap_is_zero` \| `no_safe_liquid_asset` \| `no_volatility` (**`not_requested` ya no se emite**). En `simulate_projection` van **por lado**, no en el bloque `monte_carlo`: `profile_overrides.cash_buffer_months` fija el colchón solo del escenario, y un campo compartido describiría el colchón equivocado en la mitad de las simulaciones. **Todo es SOLO SALIDA**: ningún `inputSchema` gana nada por esto, y `cash_buffer_months` + `clear_cash_buffer_months` siguen intactos como override explícito |
+| **V7** — `success_threshold_pct` deprecado e ignorado; sale de toda respuesta | **Un parámetro deprecado en DOS tools, y no se puede borrar.** `UpdateRetirementProfileParams` y `ProfileOverrideParam` son `deny_unknown_fields`, así que retirarlo del schema convertiría en **400** lo que hoy funciona: se queda, marcado deprecado en su `///`, se acepta y se descarta —sin validación, sin persistencia, fuera de toda salida—, y **pierde su `#[schemars(range)]`** porque ya no acota nada (con él, su fila de `schema_bounds_parity.rs` — pinear la cota de un parámetro que nadie lee sería congelar una promesa que el runtime no cumple). Del lado de la salida, `get_projection_bands`, `simulate_projection` (bloque `monte_carlo`), `get_summary` (`plan`) y `get_retirement_profile` dejan de publicarlo. **El fixture congelado se regeneró**: solo se mueven los dos `constraints_sha256_12` de esas tools; ninguna `description_sha256_12`, así que el presupuesto de descripciones **no cambia** |
 
 ### 3.4 View echo — object responses vs `list_*` envelopes (Fase 5, issue #86)
 
@@ -514,9 +517,18 @@ it now and check what else that PR missed.
 
 ## Provenance and maintenance
 
+**Ampliada 2026-09-05 (WP-F del tren 5.0.0, decisiones V6 y V7 del owner)**: §3.5 gana dos filas —el
+colchón derivado del tope de la regla (cinco campos de SALIDA en `get_projection_bands` y
+`simulate_projection`, cero cambios de `inputSchema`) y el `success_threshold_pct` deprecado e
+ignorado en las dos tools `deny_unknown_fields`, con la retirada de su `#[schemars(range)]` y de su
+fila en `mcp/schema_bounds_parity.rs`—. **Ningún contador se mueve y el presupuesto de descripciones
+tampoco**: `python3 -c "import json;d=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'));L=[t['description_len'] for t in d['tools']];print(len(L),sum(L),max(L))"`
+→ `71 23906 545` (idéntico antes y después; solo se movieron dos `constraints_sha256_12`).
+
 **Refrescada 2026-09-03 para el tren 5.0.0 (issue #207, rama `release/5.0.0`)**: §5 (los ocho
 contadores recontados —**71/30/41/41/18/8/41/19**— y el presupuesto de descripciones convertido en un
-comando sobre `description_len` del fixture, `71 23793 545`), **§3.5 nueva** (la evaluación de
+comando sobre `description_len` del fixture, `71 23793 545` — **remedido a `71 23906 545` el
+2026-09-05**), **§3.5 nueva** (la evaluación de
 paridad del tren entero: tres tools nuevas, seis ejes de `simulate_projection`, los dos `include_*`
 opt-in por tamaño, `update_fire_settings` recortada y D21 heredado) y el cierre de la fila diferida
 `PATCH /v1/auth/me` de §3.1. Fuentes: `apps/api/src/mcp/server.rs`,

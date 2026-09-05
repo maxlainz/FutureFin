@@ -133,9 +133,30 @@ api PATCH /v1/auth/me/retirement-profile '{
 say "activos"
 A_CUENTA="$(api POST /v1/assets "{\"category_id\":\"$CAT_CUENTA\",\"name\":\"Cuenta corriente\",\"current_value\":\"4200\",\"is_liquid\":true,\"expected_annual_return_percent\":\"0\"}" | json_id)"
 api POST /v1/assets "{\"category_id\":\"$CAT_AHORRO\",\"name\":\"Cuenta remunerada\",\"current_value\":\"11500\",\"is_liquid\":true,\"expected_annual_return_percent\":\"2.25\"}" >/dev/null
-api POST /v1/assets "{\"category_id\":\"$CAT_INVERSION\",\"name\":\"Fondo indexado global\",\"current_value\":\"38600\",\"purchase_price\":\"31000\",\"is_liquid\":true,\"expected_annual_return_percent\":\"7\",\"annual_volatility_percent\":\"17\"}" >/dev/null
+A_FONDO="$(api POST /v1/assets "{\"category_id\":\"$CAT_INVERSION\",\"name\":\"Fondo indexado global\",\"current_value\":\"38600\",\"purchase_price\":\"31000\",\"is_liquid\":true,\"expected_annual_return_percent\":\"7\",\"annual_volatility_percent\":\"17\"}" | json_id)"
 api POST /v1/assets "{\"category_id\":\"$CAT_INVERSION\",\"name\":\"Plan de pensiones\",\"current_value\":\"9800\",\"purchase_price\":\"9000\",\"is_liquid\":false,\"expected_annual_return_percent\":\"5.5\",\"annual_volatility_percent\":\"10\"}" >/dev/null
 api POST /v1/assets "{\"category_id\":\"$CAT_INMUEBLE\",\"name\":\"Vivienda habitual\",\"current_value\":\"210000\",\"purchase_price\":\"185000\",\"is_liquid\":false,\"expected_annual_return_percent\":\"2\"}" >/dev/null
+
+# ── Reglas de ahorro ──────────────────────────────────────────────────────────
+# La pauta más común y la que la demo tiene que enseñar: «la cuenta corriente hasta 6.000 €, el
+# resto al fondo». No son dos altas: el POST del PRIMER activo ya sembró el sumidero `remainder`
+# apuntando a la cuenta corriente (#150) y solo puede haber UNO sin tope por scope (invariante
+# I1), así que el sumidero se REDIRIGE al fondo y encima se crea la regla con tope.
+#
+# Desde 5.0.0 este tope tiene un segundo consumidor: el **colchón de caja** de Monte Carlo se
+# deriva de él (decisión V6). Sin estas dos reglas, la demo publica
+# `buffer_inactive_reason: "no_capped_rule"` y la línea del colchón no se ve.
+say "reglas de ahorro (la cuenta hasta 6.000 €, el resto al fondo)"
+R_SUMIDERO="$(api GET /v1/allocation-rules | python3 -c '
+import json, sys
+for r in json.load(sys.stdin):
+    if r.get("kind") == "remainder" and r.get("cap_kind") is None:
+        print(r["id"]); break
+else:
+    sys.exit("no encuentro el sumidero sembrado")
+')"
+api PATCH "/v1/allocation-rules/$R_SUMIDERO" "{\"target_asset_id\":\"$A_FONDO\"}" >/dev/null
+api POST /v1/allocation-rules "{\"target_asset_id\":\"$A_CUENTA\",\"kind\":\"fixed\",\"amount\":\"300\",\"cap_kind\":\"amount\",\"cap_value\":\"6000\",\"notes\":\"Colchón de caja\"}" >/dev/null
 
 # ── Pasivos ───────────────────────────────────────────────────────────────────
 say "pasivos"
