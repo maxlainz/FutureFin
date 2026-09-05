@@ -193,6 +193,8 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "get_history_cashflow",
             "get_liability_schedule",
             "get_projection",
+            "get_projection_bands",
+            "get_retirement_profile",
             "get_settings",
             "get_summary",
             "get_transactions_summary",
@@ -224,6 +226,7 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "update_installation_settings",
             "update_liability",
             "update_planning_flow",
+            "update_retirement_profile",
             "update_snapshot",
             "update_transaction",
             "update_transactions",
@@ -340,6 +343,207 @@ async fn get_projection_is_hybrid_without_asset_series_and_caches() {
     );
 }
 
+/// **`members[].series` es opt-in en la tool, y la respuesta del hogar cabe en el contexto.**
+///
+/// Mismo criterio y mismo default que `asset_series`, tomado con la medida delante: por HTTP el
+/// agregado de dos miembros a densidad `hybrid` pesa ~34 KB y **11,7 KB son las series por
+/// miembro** (~5,9 KB cada una, lineal con el tamaño del hogar). Un modelo no dibuja: los hitos
+/// de cada persona ya viajan en `members[]` como enteros. Se deja pedible —y no retirada— porque
+/// el token de un miembro NO puede pedir el `view=mine` de otro, así que esta es la única vía
+/// para ver su curva.
+/// **`get_projection_bands`** (5.0.0 WP6b): paridad con el endpoint HTTP salvo por el opt-in de
+/// las bandas del líquido, y el hogar rechazado con el mismo código.
+///
+/// El `include_liquid_bands` no es un capricho: la respuesta entera mide ~16 KB a densidad
+/// hybrid, y **la mitad de los puntos son las tres series del líquido**. Un modelo que pregunta
+/// «¿qué probabilidad de éxito tengo?» no dibuja nada, así que por defecto se le ahorran — el
+/// mismo criterio (y la misma medida delante) que `include_asset_series` e
+/// `include_member_series`. La clave desaparece entera: nadie recibe un `0` que leer como «sin
+/// líquido».
+#[tokio::test]
+async fn get_projection_bands_matches_http_and_hides_the_liquid_bands_by_default() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "asset", "Inversión").await;
+    let create = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({
+                "category_id": cat,
+                "name": "Fondo global",
+                "current_value": "50000",
+                "is_liquid": true,
+                "expected_annual_return_percent": "5",
+                "annual_volatility_percent": "15",
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(create.status, http::StatusCode::CREATED, "{create:?}");
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "get_projection_bands",
+            serde_json::json!({"paths": 24, "seed": "3"}),
+        ),
+    )
+    .await;
+    let bands = tool_text_json(&envelope);
+    assert_eq!(bands["view"], "mine", "{bands}");
+    assert_eq!(bands["paths"], 24, "{bands}");
+    assert_eq!(bands["seed"], "3", "la semilla viaja como string: {bands}");
+    let points = bands["points"].as_array().expect("puntos");
+    assert!(points.len() < 150, "densidad hybrid: {} puntos", points.len());
+    for p in points {
+        assert!(p["net_worth_p50"].is_number(), "{p}");
+        assert!(
+            p.get("net_worth_liquid_p50").is_none(),
+            "sin `include_liquid_bands` la clave no existe (no es null): {p}"
+        );
+    }
+
+    // Paridad con HTTP: misma entrada de cache, así que las cifras del plan coinciden.
+    let http = app
+        .get_with_cookie(
+            "/v1/projection/bands?paths=24&seed=3",
+            &owner.cookie,
+        )
+        .await
+        .json();
+    assert_eq!(
+        bands["success_probability"], http["success_probability"],
+        "MCP y HTTP citan la misma ejecución: {bands} / {http}"
+    );
+    assert_eq!(bands["success_verdict"], http["success_verdict"]);
+    assert_eq!(
+        points.len(),
+        http["points"].as_array().unwrap().len(),
+        "misma rejilla"
+    );
+
+    // Con el opt-in, las seis series viajan y son las mismas que por HTTP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "get_projection_bands",
+            serde_json::json!({"paths": 24, "seed": "3", "include_liquid_bands": true}),
+        ),
+    )
+    .await;
+    let full = tool_text_json(&envelope);
+    assert_eq!(full["points"], http["points"], "con el opt-in, paridad total");
+
+    // El hogar: mismo código que por HTTP, como error de tool (no un 500 ni una banda inventada).
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("get_projection_bands", serde_json::json!({"view": "household"})),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+    let text = envelope["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("household_bands_unavailable"),
+        "debe nombrar el código: {text}"
+    );
+
+    // Y el techo del MCP es la MITAD del de HTTP: 2.000 caminos son válidos por HTTP y 400 aquí.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("get_projection_bands", serde_json::json!({"paths": 2000})),
+    )
+    .await;
+    assert_eq!(envelope["result"]["isError"], true, "{envelope}");
+}
+
+#[tokio::test]
+async fn get_projection_household_omits_member_series_unless_asked() {
+    /// Tope del payload de UNA lectura de proyección del hogar en la tool. No persigue el byte:
+    /// caza el crecimiento lineal (un campo nuevo por punto se multiplica por ~78 puntos y por el
+    /// número de miembros). Si se pone rojo, recorta lo que se publica, no subas la constante.
+    const TOOL_HOUSEHOLD_MAX_BYTES: usize = 32_000;
+
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let bob = app.register_and_approve_member(&owner, "bob", "member").await;
+    let token = create_token(&app, &owner).await;
+
+    for (u, tag) in [(&owner, "A"), (&bob, "B")] {
+        let cat = app.create_category(u, "asset", &format!("Fondos {tag}")).await;
+        let r = app
+            .post_json_with_cookie(
+                "/v1/assets",
+                serde_json::json!({"category_id": cat, "name": format!("Indexado {tag}"),
+                                   "current_value": "20000"}),
+                &u.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("get_projection", serde_json::json!({"view": "household"})),
+    )
+    .await;
+    let text = envelope["result"]["content"][0]["text"]
+        .as_str()
+        .expect("texto de la tool")
+        .to_string();
+    let proj: serde_json::Value = serde_json::from_str(&text).expect("json");
+    let members = proj["members"].as_array().expect("members");
+    assert_eq!(members.len(), 2, "{members:?}");
+    for m in members {
+        assert_eq!(
+            m["series"].as_array().map(|a| a.len()),
+            Some(0),
+            "series por miembro vacía por defecto: {m}"
+        );
+        // …pero los hitos y el horizonte propio SÍ viajan: es lo que sustituye a la curva.
+        assert!(m["horizon_months"].as_u64().is_some_and(|v| v > 0), "{m}");
+        assert!(m["username"].is_string(), "{m}");
+    }
+    println!("get_projection household/hybrid sin series por miembro: {} B", text.len());
+    assert!(
+        text.len() <= TOOL_HOUSEHOLD_MAX_BYTES,
+        "la lectura del hogar por MCP pesa {} B y el tope es {TOOL_HOUSEHOLD_MAX_BYTES}",
+        text.len()
+    );
+
+    // Con el flag sí llegan, en la misma rejilla que `points`.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body(
+            "get_projection",
+            serde_json::json!({"view": "household", "include_member_series": true}),
+        ),
+    )
+    .await;
+    let with = tool_text_json(&envelope);
+    let grid: Vec<serde_json::Value> = with["points"]
+        .as_array()
+        .expect("points")
+        .iter()
+        .map(|p| p["month_index"].clone())
+        .collect();
+    for m in with["members"].as_array().expect("members") {
+        let own: Vec<serde_json::Value> = m["series"]
+            .as_array()
+            .expect("series")
+            .iter()
+            .map(|p| p["month_index"].clone())
+            .collect();
+        assert_eq!(own, grid, "misma rejilla que points: {m}");
+    }
+}
+
 #[tokio::test]
 async fn validation_error_is_tool_error_with_http_error_body() {
     let app = TestApp::spawn().await;
@@ -396,14 +600,27 @@ async fn view_mine_filters_to_token_user() {
         created.json()["token"].as_str().unwrap().to_string()
     };
 
-    // household (default) ve ambos; mine solo el del dueño del token (mario). Desde la Fase 5 la
-    // tool envuelve el array en `{view, assets}` — y el eco de `view` es justo lo que hacía falta
-    // aquí: con un solo activo por usuario los dos arrays podían coincidir sin que nada dijera
-    // qué scope se aplicó.
-    let envelope = mcp_post(&app, &token, tool_call_body("list_assets", serde_json::json!({}))).await;
+    // `household` EXPLÍCITO (desde 5.0.0 ya no es el default, R2) ve ambos; `mine` solo el del
+    // dueño del token (mario). Desde la Fase 5 la tool envuelve el array en `{view, assets}` — y
+    // el eco de `view` es justo lo que hacía falta aquí: con un solo activo por usuario los dos
+    // arrays podían coincidir sin que nada dijera qué scope se aplicó.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call_body("list_assets", serde_json::json!({"view": "household"})),
+    )
+    .await;
     let all = tool_text_json(&envelope);
     assert_eq!(all["view"], "household", "{all}");
     assert_eq!(all["assets"].as_array().unwrap().len(), 2, "{all}");
+
+    // Y omitir el parámetro es `mine`: el default cambió, y con él la población sobre la que
+    // responde un agente que no pide scope.
+    let omitido = tool_text_json(
+        &mcp_post(&app, &token, tool_call_body("list_assets", serde_json::json!({}))).await,
+    );
+    assert_eq!(omitido["view"], "mine", "5.0.0: sin `view` la tool filtra a lo del token: {omitido}");
+    assert_eq!(omitido["assets"].as_array().unwrap().len(), 1, "{omitido}");
 
     let envelope = mcp_post(
         &app,
@@ -472,7 +689,13 @@ async fn get_settings_returns_installation_and_role() {
     let settings = tool_text_json(&envelope);
     assert_eq!(settings["role"], "owner");
     assert!(settings["installation"]["base_currency"].is_string());
-    assert!(settings["installation"]["fire_settings"]["swr_pct"].is_string());
+    // 5.0.0: `fire_settings` es lo COMPARTIDO del hogar; el SWR y los otros tres ejes movidos
+    // viven en `get_retirement_profile` (D13).
+    assert!(settings["installation"]["fire_settings"]["taxable_gain_ratio"].is_string());
+    assert!(
+        settings["installation"]["fire_settings"]["swr_pct"].is_null(),
+        "el SWR ya no es del hogar: {settings}"
+    );
 }
 
 /// Shell mínimo de la SPA, para montar el `ServeDir` del binario publicado.
@@ -2060,7 +2283,11 @@ async fn list_transaction_imports_paginates_and_echoes_the_view() {
         &mcp_post(
             &app,
             &token,
-            tool_call_body("list_transaction_imports", serde_json::json!({"limit": 2})),
+            tool_call_body(
+                "list_transaction_imports",
+                // `household` explícito desde 5.0.0 (R2): las 3 importaciones son de dos personas.
+                serde_json::json!({"limit": 2, "view": "household"}),
+            ),
         )
         .await,
     );
@@ -2383,7 +2610,10 @@ fn catalog_fixture_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp-catalog.json")
 }
 
-/// Congela el **contrato de entrada** de las 52 tools, no sólo sus nombres.
+/// Congela el **contrato de entrada** de TODAS las tools, no sólo sus nombres.
+/// (Sin contar cuántas son: el número quedó obsoleto dos veces — `52` describía la Fase 5 y el
+/// catálogo lleva 71 desde 5.0.0. Cuéntalas con
+/// `jq '.tools | length' apps/api/tests/fixtures/mcp-catalog.json`.)
 ///
 /// `tools_list_returns_exactly_the_v1_catalog` (arriba) compara un `Vec<String>` de nombres y
 /// nada más: con él en verde se puede vaciar una descripción, invertir su sentido, quitar un
@@ -2535,7 +2765,7 @@ async fn tools_list_freezes_the_input_contract_of_every_tool() {
 
 /// **`#[ignore]` A PROPÓSITO — diana de la Fase 2 (issue #83).**
 ///
-/// Hoy falla, y eso es lo esperado. Medido al escribirlo (2026-08-28): **51 de las 52 tools**
+/// Hoy falla, y eso es lo esperado. Medido al escribirlo (2026-08-28): **51 de las 52 tools de entonces**
 /// aceptan propiedades desconocidas. `#[serde(deny_unknown_fields)]` aparece dos veces en
 /// `src/mcp/server.rs`, pero una de ellas es `FireSettingsOverrideParam`, un struct ANIDADO
 /// dentro de `SimulateParams` — no es el struct de params de ninguna tool. La única tool cuyo
@@ -2546,7 +2776,7 @@ async fn tools_list_freezes_the_input_contract_of_every_tool() {
 /// llamada devuelve 200 sin haber hecho lo que se le pidió.
 ///
 /// El test se escribió ignorado para que ese trabajo tuviera diana. **Cerrado en la Fase 2**
-/// (2026-08-28): las 52 tools publican `additionalProperties: false`, incluidas las cuatro que
+/// (2026-08-28, sobre las 52 de entonces): todas publican `additionalProperties: false`, incluidas las cuatro que
 /// no tenían struct de params (`get_settings`, `list_recurring_rules`, `materialize_recurring`,
 /// `reconcile_transfers`) — sin struct, rmcp emite un schema vacío que acepta cualquier campo,
 /// así que se les dio `NoParams`. El `#[ignore]` se retira aquí: a partir de ahora, añadir una
@@ -2576,7 +2806,7 @@ async fn every_input_schema_forbids_unknown_properties() {
 /// Fase 5 (issue #86) — **el catálogo cabe en el contexto**.
 ///
 /// Las descripciones de `tools/list` viajan ENTERAS en cada conversación, se use el MCP o no.
-/// Antes de esta fase sumaban 37.214 caracteres (~36 KB) en 52 tools, con cinco por encima de
+/// Antes de esta fase sumaban 37.214 caracteres (~36 KB) en las 52 tools de entonces, con cinco por encima de
 /// 1.200 y una de 3.821 — y la estrategia fallaba justo donde importa: en la auditoría en vivo
 /// la descripción de `get_summary` (2.278) llegó al cliente **truncada**, cortada en mitad de
 /// una advertencia sobre inconsistencia entre tools. Una advertencia que no llega no protege de
@@ -2592,7 +2822,7 @@ async fn every_input_schema_forbids_unknown_properties() {
 /// Si este test falla, NO subas la constante: mueve la prosa a uno de esos dos sitios.
 #[tokio::test]
 async fn tool_descriptions_stay_within_the_context_budget() {
-    /// Tope por descripción. 600 nace de la medida, no de la estética: con las 52 tools por
+    /// Tope por descripción. 600 nace de la medida, no de la estética: con todas las tools por
     /// debajo, el catálogo entero cabe holgadamente en `TOTAL_BUDGET`.
     const PER_TOOL_MAX: usize = 600;
     /// Tope del catálogo entero. Deja margen para tools nuevas sin volver a los ~36 KB.
@@ -2681,10 +2911,16 @@ async fn enumerated_params_publish_a_real_enum_in_the_json_schema() {
             "savings_source",
             &["budget", "transactions_avg", "budget_income_real_expense"],
         ),
+        // 5.0.0: `fire_number_mode` se mudó al perfil de jubilación por usuario (D13).
         (
-            "update_fire_settings",
+            "update_retirement_profile",
             "fire_number_mode",
             &["manual", "annual_expense", "current_income"],
+        ),
+        (
+            "update_retirement_profile",
+            "strategy",
+            &["asap", "retire_at_age", "coast", "partial", "pension_bridge"],
         ),
         ("update_fire_settings", "expense_avg_window_mode", &["data", "calendar"]),
         ("simulate_projection", "view", &["mine", "household"]),

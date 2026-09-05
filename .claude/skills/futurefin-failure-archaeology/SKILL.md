@@ -43,7 +43,7 @@ Vocabulary used below (defined once):
 
 | # | Rejected / removed | Why | Documented |
 |---|---|---|---|
-| 1 | `projection_target_age` (age-based retirement trigger) | Caused visual gap: contributions stopped years before the Jubilación marker; FIRE crossover is the sole trigger | 542ecfa, v1.0.6; migration `20260516120000_drop_projection_target_age.sql` |
+| 1 | `projection_target_age` (age-based retirement trigger) | Caused visual gap: contributions stopped years before the Jubilación marker; FIRE crossover was the sole trigger for nine versions | 542ecfa, v1.0.6; migration `20260516120000_drop_projection_target_age.sql`. **READMITIDO CON ALCANCE en 5.0.0 — lee la scope note de §2.2 antes de tocarlo**: la edad vuelve como trigger de DOS estrategias, no como campo suelto |
 | 2 | Per-asset contribution config (`monthly_contribution_fixed`, weights, caps on `assets`) | Overlapped badly with reality: fixed sums > surplus, weights >100 %, no explicit priority order | cc23186, v1.1.0 / v1.0.13; `20260519120100_drop_asset_contribution_columns.sql` |
 | 3 | Inflation model v1 "real pure" (deflate returns, simulate in today-€) | Half-real/half-nominal mix produced incoherent output (assets drained *before* retirement with inflation on) | v1.0.12 introduced, v1.2.0 (3396725) replaced. **Reafirmado en 4.4.0 (Fase 6, issue #87)**: servir `points[].net_worth_real` y `GET /v1/projection/deflate` **no** reabre esto — el motor sigue simulando 100 % en nominal y el deflactado es capa de presentación. La forma testable de esa frase: `net_worth_real == net_worth / (1+i)^(month_index/12)`, o sea cero información que el motor no haya producido ya (`apps/api/tests/projection_deflation.rs`) |
 | 4 | Flat FIRE target (fixed scalar) | Toggling inflation barely moved retirement age; target must grow with inflation | v1.2.0, `20260520120000_inflation_always_on.sql` |
@@ -55,7 +55,7 @@ Vocabulary used below (defined once):
 | 10 | Projection-cache warm-up after mutation | Race: two concurrent warm-ups could leave the cache stale; warm-up runs after login only, mutations only invalidate | b65acf6, v1.4.0 (CHANGELOG §Warm-up post-login) |
 | 11 | Chart deflation by array index | Wrong with `?density=hybrid` (non-equidistant points); must use `month_index` | 669307d, v1.4.2 |
 | 12 | OAuth **login** (FutureFin as *client* of an external IdP), `fire.rs`/`persons.rs` handler suite, engine `fire.rs` | Legacy pre-1.0 scope cut; username+password (Argon2id) is the auth model. **Distinct from v3.1.0's OAuth**: there FutureFin is the *authorization server* delegating MCP access after password login — that is adopted (architecture-contract D15), the login-with-IdP idea stays rejected — **except the narrow HA-only readmission of v4.3.1** («Entrar con Home Assistant», see §2.10 second scope note + architecture-contract D19: HA as identity source only, token revoked at once, add-on-only; generic IdP login remains rejected) | d123105 (2026-05-03), `20260506120000_installation_drop_fire_settings.sql` |
-| 13 | Public pension API (`users.pension_*` columns) | Superseded by "persists after retirement" income toggle (v1.0.3) | 4a8e2af, ee24867; `20260515120000_drop_users_pension_columns.sql` |
+| 13 | Public pension API (`users.pension_*` columns) | Superseded by "persists after retirement" income toggle (v1.0.3) | 4a8e2af, ee24867; `20260515120000_drop_users_pension_columns.sql`. **READMITIDA CON ALCANCE en 5.0.0**: la pensión vuelve al usuario, pero como bloque del perfil de jubilación **con FECHA** — y la fecha cambia el objetivo, que es justo lo que la columna muerta nunca hizo. Scope note en §2.10 |
 | 14 | ZIP/CSV export (`GET /v1/backup/export.zip`) | Replaced by encrypted per-user `.ffbackup` (AES-256-GCM, Argon2id-derived key) | 660a8ec, v1.0.9; routes in `apps/api/src/routes/mod.rs` |
 | 15 | Caddy TLS overlay + compose-watch dev flow | Deploy simplified to a single `docker-compose.yml`; only `POSTGRES_PASSWORD` required | 5cc0914, 71a877d, v1.0.1 |
 | 16 | `households`/`persons` as product concepts | Renamed/collapsed into the `installation` singleton; `persons` later dropped with legacy FIRE | migrations `20260203…households.sql` → `20260207…installation_remove_household.sql`; d123105 |
@@ -91,8 +91,33 @@ Vocabulary used below (defined once):
   else the first `persons` row ordered `is_primary DESC, sort_index ASC` — NOT the oldest member
   (clamped 5–70 years, 30-year fallback without any birth date).
 - **Alternative rejected**: keeping both triggers and reconciling — inherently ambiguous.
-- **Status**: settled. (The docs that still described the old field — data-model.md, engine.md,
-  api-routes.md — were fixed on 2026-07-02; `apps/api/src/handlers/projection.rs` is ground truth.)
+- **Status**: settled **hasta 5.0.0**, cuando la edad se readmite deliberadamente. Ver la scope note.
+  (The docs that still described the old field — data-model.md, engine.md, api-routes.md — were
+  fixed on 2026-07-02; `apps/api/src/handlers/projection.rs` is ground truth.)
+- **Scope note (añadida 2026-09-03, 5.0.0 · issue #207, decisiones D2/D17 del owner)** — la edad
+  vuelve, y hay que decir EXACTAMENTE qué vuelve y qué sigue muerto:
+  - **Qué vuelve**: `target_retirement_age` en `users.retirement_profile`, y es el **trigger de dos
+    estrategias** (`retire_at_age`, `coast`) — más el fin opcional de la fase parcial. No es un
+    ajuste independiente que conviva con el cruce: es la elección de estrategia del usuario.
+  - **Qué sigue muerto, y es lo que v1.0.6 mató de verdad**: **la coexistencia ambigua de dos
+    disparadores**. El invariante es **un solo trigger por simulación**, y lo hace cumplir el
+    handler pasando `PhasePlan::crossing_is_reading_only = true`: con una estrategia por edad el
+    cruce se sigue evaluando, se sigue publicando (`liquid_crossing_month_index`) y **no jubila**.
+  - **Por qué un flag y no `fire_target: None`** (la vía que WP1b anticipaba): las estrategias por
+    edad SIGUEN necesitando el objetivo — el chart lo pinta y el rojo de infra-financiado se mide
+    contra él. Quitar el objetivo habría desactivado el trigger tirando también la lectura, que es
+    el error simétrico del de 2026-05.
+  - **El bug visual de entonces no puede volver por construcción**: aquel «hueco» era el marcador
+    (cruce) discrepando de dónde paraban las aportaciones (edad). Hoy el marcador ES
+    `retirement_month_index`, el mes efectivo, y el invariante testable —el mes en que el ingreso
+    cambia a jubilación == `jubilacion_month_index` == el marcador == el primer mes de `Retired`—
+    se comprueba **sobre la serie, no sobre el enum**
+    (`crates/engine/tests/golden_pins.rs::the_phase_readings_agree_with_the_series_they_describe`).
+  - **Salvaguarda de datos**: sin `users.birth_date` las estrategias por edad **degradan a `asap`**
+    con `warnings: ["birth_date_missing"]`. Nunca un 500, nunca una edad inventada.
+  - Si vas a proponer un trigger por edad **fuera** de una estrategia (un ajuste global, un segundo
+    disparador que conviva con el cruce), estás proponiendo lo que v1.0.6 mató: vuelve a leer esta
+    entrada entera.
 
 ### 2.3 The table-CSS saga — three wrong fixes before the root cause (v1.0.18 → v1.0.20)
 - **Symptom**: edit/delete action buttons visually overlapped the previous column's content
@@ -152,7 +177,7 @@ Vocabulary used below (defined once):
 - **Settled design**: mutations call `refresh_projection_after_mutation` which only **deletes**
   entries (8 handler files call it — assets, liabilities, budget, planning, allocation_rules,
   installation, auth, projection); next GET recomputes once. Warm-up
-  (`warm_up_household_projection`) runs ONLY after login (`handlers/auth.rs`), where concurrency
+  (`warm_up_mine_projection` desde 5.0.0 — hasta 4.15 `warm_up_household_projection`) runs ONLY after login (`handlers/auth.rs`), where concurrency
   is per-user and harmless. **Guard**: `apps/api/tests/projection_cache.rs` +
   `scripts/smoke-projection-cache.sh`. Do not "optimize" by re-adding post-mutation warm-up.
 
@@ -184,6 +209,35 @@ Vocabulary used below (defined once):
   only at serialization.
 - **Status**: settled. Do not "fix the inconsistency" in either direction: neither convert the
   arrays back to strings, nor extend f64 to scalars/KPIs or to any engine/DB code.
+- **Scope note (añadida 2026-09-03, 5.0.0 · issue #207, decisiones D11/D12 del owner)** — hay una
+  **segunda** excepción sancionada, y llega con más salvaguardas que la primera:
+  - **Dónde**: el crate nuevo `crates/engine-stochastic`, y solo ahí. Implementa `MoneyOps` sobre un
+    newtype `F64Money` y con él **instancia el bucle de `futurefin-engine`** — no lo reimplementa.
+    Un segundo bucle en coma flotante era la alternativa obvia y es exactamente la familia de fallos
+    que esta casa tiene fichada: dos bucles divergen en silencio al primer cambio de modelo.
+  - **La regla, y es dura: de ese crate NO sale un euro.** Lo que publica son magnitudes
+    ESTADÍSTICAS (probabilidad de éxito, percentiles de una banda, probabilidad de agotamiento por
+    edad), donde un error relativo de 1e-15 no cambia ninguna decisión. Todo importe en euros —
+    patrimonio, objetivo FIRE, aportación necesaria— sale del camino `Decimal`.
+  - **El freezer NO se ha tocado.** `crates_engine_src_has_no_f64_outside_comments`
+    (`crates/engine/src/lib.rs`) sigue sin una sola excepción; lo que hizo posible el crate aparte
+    es la **regla del huérfano**: el trait es público, así que otro crate puede implementarlo sobre
+    su propio tipo sin que `crates/engine` conozca la coma flotante. `crates/engine` sigue además
+    **sin RNG**: `rand_chacha` vive en el crate estocástico.
+  - **La puerta que lo sostiene**: `crates/engine-stochastic/tests/degeneration.rs` compara los dos
+    caminos sobre **todos** los casos de la batería —`net_worth` y `liquid_worth` mes a mes en todo
+    el horizonte, y exactas las decisiones DISCRETAS (mes de jubilación, cruce, agotamiento,
+    transiciones de fase)— con una cota de contrato de **1 € por mes** (máximo medido: 1,47e-7 € en
+    P9 a 840 meses). Ningún caso se excluye; la única cota relativa es para los casos sintéticos por
+    encima de `2^53 €`, donde el propio espaciado de los `f64` ya supera el euro, **y esos casos van
+    marcados en la tabla que el test imprime**.
+  - **Cada política del tipo va DECLARADA** en el doc-comment de `F64Money`: qué devuelve `total_cmp`
+    con `NaN`, cuándo se rinden los `checked_*` (⟺ el resultado no es finito), cuánta precisión
+    pierde `from_decimal`, y la única igualdad con tolerancia del núcleo (`gains_equal`, 1e-12) —
+    aparte a propósito, porque `PartialEq` para `F64Money` sigue siendo la igualdad exacta.
+  - Lo que **sigue prohibido**: `f64` en `crates/engine`, en `crates/domain`, en la BD, o en
+    cualquier KPI en euros. Si te encuentras queriendo pasar un `f64` de vuelta al camino exacto,
+    para y lee `futurefin-proof-and-analysis-toolkit` Recipe 5.
 
 ### 2.10 Legacy purges: OAuth, FIRE v0, persons, public pension (May 2026, pre-1.0 → 1.0.x)
 - d123105 removed in one sweep: `auth/oauth.rs` (OAuth login), `handlers/fire.rs` (317 LOC) +
@@ -207,6 +261,20 @@ Vocabulary used below (defined once):
   (claude.ai) after a normal password login + consent (read-only at birth; desde los issues #2/#3
   también escriben, gobernadas por el rol vivo + `installation.mcp_write_enabled`). Adopting it
   does not reopen this entry.
+- **Scope note de la PENSIÓN (añadida 2026-09-03, 5.0.0 · issue #207, decisión D3 del owner)** —
+  la fila 13 de §1 y el `4a8e2af` de esta entrada mataron `users.pension_*`, unas columnas **sin
+  handler** que nadie podía escribir ni leer y cuyo trabajo hacía mejor el toggle
+  `persists_after_retirement`. 5.0.0 devuelve la pensión al usuario, y la diferencia es la que
+  justifica la readmisión: **el bloque `pension` del perfil tiene FECHA**
+  (`starts_at_age` → `PensionSchedule { start_index, monthly_today, indexed, fraction_while_partial }`),
+  y esa fecha **cambia el objetivo**: mientras la pensión no existe hay que financiar el gasto
+  ENTERO (base `bridge_to_pension`, `futurefin-fire-domain-reference` §4b), y desde ella solo el
+  hueco que no cubra. Eso es precisamente lo que una columna plana no podía expresar y lo que el
+  toggle `persists_after_retirement` —que **sigue vivo y sin cambios** para rentas y pensiones sin
+  calendario— restaba desde el cruce aunque llegara veinte años después. No se resucita ninguna
+  columna: es JSONB en el perfil, con handler, cotas y tools MCP. Lo que sigue rechazado es
+  **derivar** la pensión de cotizaciones (falsa precisión: `financial-contracts.md` §3.11).
+
 - **Second scope note (added 2026-08-27, v4.3.1)**: 4.3.1 ships «Entrar con Home Assistant»
   (`/v1/auth/ha/start|callback`, `apps/api/src/ha_idp/`), which **is** FutureFin acting as OAuth
   client of an external IdP — the shape this entry rejected. It is reopened **deliberately and
@@ -546,21 +614,112 @@ Vocabulary used below (defined once):
   de fiscalidad que ha entrado en este repo ha salido con un incidente (la bisección TS publicó
   un objetivo ~20 % bajo por saturación).
 
+### 2.24 `x > 0` no es una guarda de división — la `g` denormal que el propio motor fabricaba (issue #208, 5.0.0 WP1a)
+
+- **Síntoma**: `GET /v1/projection/series` devolvía un **400 `task_panic` opaco y permanente** para
+  un hogar concreto. Función pura, entrada que la API acepta, y el pool blocking convirtiendo el
+  pánico en un error ininteligible.
+- **Causa raíz**: `tax::gross_up_mixed_monthly` remataba cada tramo con `x.min((ceiling − base)/g)`,
+  guardado solo por `if g > Decimal::ZERO`. Una `g` **positiva pero denormal** desborda `Decimal`
+  (~7,9e28) al dividir: medido, `g = 1e-20` pasa y `g = 1e-27` panica (`200000/1e-27 = 2e32`).
+- **Y la fabricaba el propio motor**: una cuenta al 0 % alimentada por la cascada lleva la base
+  pegada al valor (cada euro asignado sube ambos), el drenaje conserva `b/v` (teorema de #178) y un
+  retorno del 0 % nunca reabre el hueco. Tras un gasto puntual grande, `g = 1 − b/v ≈ 1e-27`.
+- **Fix**: `checked_div` en las dos divisiones con divisor fabricado por el motor; desbordar ⇒ el
+  tope es efectivamente infinito y `x` se conserva (la capacidad real ya la limita el propio tramo).
+  Cero cambio donde no desbordaba — el golden de 4.15.0 no movió un hash.
+- **Lección transferible**: **`x > 0` no es una guarda de división.** Lo que hay que preguntarse no
+  es si el divisor es positivo, sino si el COCIENTE cabe. Y el caso no era de laboratorio: cuenta
+  corriente al 0 % + sumidero + un Próximo grande es un hogar normal.
+- **Status**: cerrado en WP1a con reproductor convertido en regresión
+  (`golden_pins.rs::mixed_drawdown_must_not_panic_on_a_denormal_gain_ratio`) y caso golden nuevo
+  `P13_cash8k_denormal_g`.
+
+### 2.25 El mismo fallo con la otra operación: `basis · values` sin `checked_mul` (issue #209, 5.0.0 WP2)
+
+- **Síntoma**: idéntico —`Multiplication overflowed` → 400 `task_panic`—, pero por `*`, no por `/`.
+- **Causa raíz**: la base de coste se actualiza con `basis[i] · values[i] / v_pre` (#120). Con un
+  activo cerca del techo de la columna (`NUMERIC(18,4)`) y rentabilidad alta, el crecimiento empuja
+  `values` por encima de ~7,9e14 y el **producto intermedio** sale del rango de `Decimal`.
+- **Por qué no se arregló con #208**: el arreglo natural (`basis · (values/v_pre)`) **no es
+  bit-idéntico**, y WP1a era bit-identidad estricta. Se aplazó con la decisión declarada.
+- **Fix**: `checked_mul` y, **solo si no cabe**, la forma reordenada. El orden natural multiplica
+  antes de dividir porque drenar el activo entero deja la base en **0 EXACTO**, y ese orden es el
+  que 4.15.0 pineó: ninguna entrada que hoy funciona cambia un dígito.
+- **Lección transferible**: cuando un arreglo cambia dígitos, **la salida honesta es aplicarlo solo
+  en la rama que hoy panica**, no reescribir el camino común y regenerar el pin. Y un desbordamiento
+  arreglado en una operación deja hermanos vivos en las otras: audita `*`, `/` y `+` juntos.
+- **Status**: cerrado en WP2 con caso golden aditivo `P14_techo_numeric`.
+
+### 2.26 Un filo de navaja que solo la puerta de `f64` podía ver: `cap_exhausted` (5.0.0 WP5.5)
+
+- **Síntoma**: la puerta de degeneración del crate estocástico marcó **8.138 € de diferencia** entre
+  el camino `Decimal` y el `f64` en el caso P15, muy por encima de la cota de 1 €/mes — con los dos
+  goldens `Decimal` **intactos**, o sea sin ninguna regresión que un test existente pudiera ver.
+- **Causa raíz**: el llamante del paseo mixto deducía «¿se vendió el techo entero?» comparando
+  `w.gross_monthly >= gross_cap`. Es exacto en `Decimal` y **un filo de navaja en aritmética
+  aproximada**: `(a·12)/12` puede caer un ulp por debajo de `a`. Y de esa rama cuelga el reparto
+  de magnitudes: recorte **informativo** vs descubierto que **RESTA patrimonio**.
+- **Fix**: el paseo **publica el booleano** (`MixedGrossDrawdown::cap_exhausted`, `remaining ≤ 0` al
+  terminar) en vez de que el llamante lo re-derive de una comparación de flotantes.
+- **Lección transferible, y es la general de este tren**: **publica el booleano que el algoritmo ya
+  sabe, en vez de re-derivarlo de una comparación numérica aguas abajo.** Una comparación
+  reconstruida es una segunda definición del mismo hecho, y las dos definiciones divergen en cuanto
+  cambia el tipo, la escala o el redondeo.
+- **Segunda lección**: el bug era **preexistente y ninguna suite lo veía**. Lo cazó una puerta nueva
+  que compara dos implementaciones del mismo modelo — el valor de un gate de paridad no es solo
+  proteger lo nuevo, es **iluminar lo viejo**.
+- **Status**: cerrado en WP5.5; la puerta es
+  `crates/engine-stochastic/tests/degeneration.rs::every_case_degenerates_from_decimal_to_floating_point`.
+
+### 2.27 Un golden de 19 casos no demuestra bit-identidad — el fuzz diferencial sí (revisión adversarial, issue #207, 5.0.0)
+
+- **Síntoma**: los pines dorados de 4.15.0 pasaban enteros tras el refactor del bucle por fases, y
+  aun así había dos divergencias reales de bit-identidad sin cazar.
+- **Causa raíz, dos mecanismos**: (1) `undrained_cumulative` se re-derivaba como `need − (need − s)`
+  en vez de acumularse con el operando LITERAL del paseo — algebraicamente igual, pero cambia la
+  ESCALA de `Decimal` (`"0"` vs `"0.00"`), y el `Display` es lo que el pin hashea. (2)
+  `debt_service += cash + extra + fee` se reagrupó de `acc + ((cash+extra)+fee)` a
+  `((acc+cash)+extra)+fee` — la asociatividad de `+=` no es libre: con dos pasivos redondea distinto
+  en el dígito 28.
+- **Por qué el golden no lo vio**: 19 casos fijados por adelantado no cubren cada combinación de
+  escala/redondeo que un refactor toca; el fuzz diferencial (`fuzz_invariants.rs`, hogares
+  aleatorios) compara la MISMA entrada contra el motor de `main` y encuentra la divergencia sin
+  haberla previsto — bajó de 536/496/496 a 24/21/27 divergencias por 3.000 entradas.
+- **Lección transferible**: un golden pineado prueba que lo que ya conoces no se movió; solo un
+  fuzz diferencial contra la versión anterior prueba que nada nuevo se movió tampoco.
+- **Status**: cerrado; pines `P24_undrained_scale`/`P25_debt_service_assoc`.
+
 ## 3. Designs that were tried and replaced
 
 | Old design | Specific failure mode | Replacement (current) |
 |---|---|---|
-| **Inflation model v1 "real pure"** (v1.0.12): deflate each asset's return (`r_real = (1+r_nom)/(1+inf) − 1`), simulate everything in today-€ | Predecessor mixed deflation/inflation inconsistently; v1 itself, combined with a FLAT target, made inflation toggling nearly a no-op on retirement age, and pre-v1 produced asset drain before retirement | **v2 nominal + moving target** (v1.2.0, current): everything simulated in nominal €; ONLY the FIRE target grows: `target(month_index) = base × (1+inf/100)^(month_index/12)` via `fire_target_at_month_index` (the engine evaluates month k against the target at index k−1 — see futurefin-fire-domain-reference §4). Deflation is a display-layer concern (`milestones_real`, chart toggle) |
+| **Inflation model v1 "real pure"** (v1.0.12): deflate each asset's return (`r_real = (1+r_nom)/(1+inf) − 1`), simulate everything in today-€ | Predecessor mixed deflation/inflation inconsistently; v1 itself, combined with a FLAT target, made inflation toggling nearly a no-op on retirement age, and pre-v1 produced asset drain before retirement | **v2 nominal + moving target** (v1.2.0, current): everything simulated in nominal €; ONLY the FIRE target and the loop's EXPENSE grow with inflation (#139), via `fire_target_at_month_index` (the engine evaluates month k against the target at index k−1 — see futurefin-fire-domain-reference §4). **La fórmula que aquí vivía —`target(m) = base × (1+inf/100)^(m/12)`— es la PRE-#170**: `FireTarget.base_amount` se retiró en 4.10.0 y el objetivo se evalúa mes a mes sobre la necesidad real (`gross_up(need(i)·12)/SWR + debt_term(i)`). Lo que la fila afirma —que el modelo es nominal y solo el objetivo se mueve— sigue siendo cierto; lo que caducó es la fórmula citada. Deflation is a display-layer concern (`milestones_real`, chart toggle) |
 | **Per-asset contributions** (`monthly_contribution_fixed` + `contribution_remainder_weight` + per-asset cap, v1.0.11) | Sum of fixed contributions could exceed surplus; weights confusing when >100 %; no explicit priority; cap-overflow redistribution needed ad-hoc fallback rules (v1.0.11's "highest-return liquid asset" patch was a symptom) | **Allocation cascade** (v1.1.0): ordered rules `fixed`/`percent`/`remainder` with optional caps (`amount`, `months_expense`, `income_multiple`); exactly one uncapped `remainder` sink, always last (server-enforced: `remainder_required`, `uncapped_remainder_exists`, `sink_must_be_last`). Clean column drop, NO data migration — owner signed off losing config; backup schema_version bumped to 3 |
 | **Migration auto-repair** (12-round checksum repair loop) | Masked genuine drift between shipped migration files and applied checksums; a silently "repaired" DB can diverge from what migrations say | Fail-loud `sqlx::migrate!().run()` (`apps/api/src/db.rs`); manual `DELETE FROM _sqlx_migrations WHERE version = X` only when the change is genuinely idempotent |
 | **GET-side purges** (`purge_expired_liabilities` called from 6 GET handlers) | GETs issued DELETEs: violates HTTP semantics, breaks caching (v1.4.0's cache would have been impossible), destroys audit data | `WHERE (payment_end_date IS NULL OR payment_end_date >= $today)` filter in liabilities/summary/budget/assets/projection reads; rows persist |
 | **Binary-search gross-up** (90 iterations to invert after-tax) | 90× slower than needed and convergence-threshold noise; obscured that the function is piecewise-linear | Closed-form per-bracket inversion `gross_up_net_annual_fire` (`handlers/projection.rs`); old binary search preserved as the test oracle `gross_up_binary_reference` |
+| **5.0.0-rc UX de Jubilación** (WP7 1–3, la primera vuelta del rediseño): resultados ANTES que inputs (la fila de tarjetas de resultado se pintaba por encima del formulario que las produce), 8 tiles con dos cifras cada uno (rejilla `.retirement-solve-grid` + la de arriba, sin jerarquía entre ellas), dos charts con ejes distintos (el grande de Proyección y el abanico de Riesgo no compartían ni escala ni ventana), seis pies «Guardado automático» repetidos por panel, y el tile del puente medía los meses desde HOY en vez de pensión − jubilación (bug S8, 35 años y 10 meses en la demo en vez de 12) | Tras subir la imagen en local, veredicto del owner: **«jerarquía sin sentido, orden mal, campos redundantes, mínimo input»**. Confirmado por una revisión adversarial con capturas, API y un inventario de 67 inputs (issue #207) | Segunda revisión de UX, doce decisiones (U1–U12): U1 config arriba → resultado → «Avanzado» plegado; U2 el formulario enseña solo los campos de la estrategia elegida; U3 el gasto en jubilación admite 3 modos; U4 el porcentaje de retirada es único; U5 un solo chart + «Riesgo» compacto; U6 la pensión vive solo en Jubilación (el flag del presupuesto es para rentas); U7 frase-hito + como mucho 3 tiles (corrige S8 de paso: `buildRetirementTilesV2`); U8 el asistente pide nacimiento + estrategia + el dato esencial de esa estrategia; U9 tarjeta única en Resumen; U10 Hogar enseña sumas + una frase por miembro; U11 todo el rediseño va dentro de 5.0.0, no en una versión aparte; U12 nada se fuerza sin verse (línea «Supuestos»). Ver CHANGELOG `## [5.0.0]` §«Segunda revisión de UX» |
+| **5.0.0-rc UX de Jubilación, SEGUNDA vuelta** (U1b): el acordeón «Avanzado» con la línea «Supuestos: …» de cabecera, y el aviso de alta «Elige tu estrategia» descartable por navegador. El acordeón repartía **13 de 21 campos** en seis secciones plegadas —tres mandos de la pensión a dos pantallas de la casilla «Cuento con una pensión», la base del gasto parcial lejos de la media jornada—, y su línea «Supuestos» existía como contrapeso U12: si escondes un campo, enuncia su valor o lo estás forzando en silencio | Veredicto del owner sobre la demo (F10): **«Avanzado es un cajón de sastre mal explicado. Idealmente desaparece si la información se organiza y jerarquiza bien»**; y sobre el banner (F5): **«"Elige tu estrategia" es innecesario cuando ya hay una seleccionada»** — su descarte vivía en un flag de `localStorage` que **nunca miraba el perfil**, así que reaparecía en cada navegador nuevo por muy configurado que estuviera el plan. La línea «Supuestos» era la prueba de que el acordeón sobraba: hacía falta enunciar por fuera lo que el acordeón escondía por dentro | **Tarjetas por tema, todo a la vista** (V3): Estrategia · Edades · Pensión · Gasto en jubilación · Retirada · Horizonte, cada una con su frase de qué hace y qué implica cambiarla, y sin ninguna vacía. Sin acordeón no hay nada escondido que enunciar, así que la línea y su módulo (`lib/assumptions-line.ts`) se retiraron con él; el banner y `lib/retirement-intro.ts`, también. **Regla que queda**: un aviso de onboarding se apaga con el ESTADO que lo hace innecesario, no con un flag por navegador |
+| **Tile «Objetivo al jubilarte» de Proyección alimentado por `jubilacion_target_net_worth`** (v1.3.0 → 5.0.0): el escalar es la base del objetivo evaluada en el mes 0 —inmóvil por contrato (`api-routes.md` §projection)— y la tarjeta lo rotulaba «al jubilarte» con la fecha del cruce al lado, sin depender del toggle «En dinero de hoy». Mientras el objetivo fue ~una perpetuidad, base(0) era buen proxy del objetivo en euros de hoy y nadie lo notó | Con el objetivo puente de 5.0.0 el objetivo DECRECE hasta 0 en el mes de la pensión: en la demo el tile decía 1.609.855 € frente a 1.148.467 € nominales del mes 243 = 696.563 € de hoy (**2,31×**). El owner lo vio como «la gráfica no cambia el objetivo en dinero de hoy» (F11); la línea del chart sí se deflactaba — el tile no estaba en el camino del toggle | `jubilacionTargetTileValue` (`lib/projection-chart.ts`): parte de `jubilacion_target_net_worth_nominal`, lo deflacta con el mismo factor y tasa que la línea, y **devuelve la base junto al importe** («en euros de hoy» / «en euros de ese mes»), que la tarjeta declara. Sin campo `_real` nuevo en el API (§1: la deflación es capa de publicación). **Regla que queda**: una cifra de dinero no se publica sin su base declarada al lado, y un escalar «a mes 0» no se rotula con la fecha de otro mes |
+| **5.0.0-rc riesgo de Jubilación** (U1b): la tabla «Probabilidad de agotar el capital» por edad (una celda cada cinco años) junto al KPI de éxito, con la banda 10–90 % pintada de un azul plano sin significado; y un **umbral de éxito configurable** (50–99 %, de serie 95) contra el que se coloreaba el KPI | Veredicto del owner (F6/F7/F8): **«el gráfico de riesgo no deja nada claro qué representa cada cosa»**, **«los tiles de riesgo son inútiles: no muestran nada que la gráfica no muestre — si la gráfica estuviera bien hecha no harían falta»**, «añadir riesgo en color rojo/verde». Sobre el umbral: «lo lógico sería poner un umbral de éxito del 100 %» — un listón configurable no hacía el plan más seguro, solo más indulgente consigo mismo | **La banda dice el riesgo por sí misma** (V2/V5): se tiñe por edad con la probabilidad acumulada de agotar el capital (verde 0 % → ámbar 5 % → rojo ≥ 10 %, `lib/risk-gradient.ts`), con eje Y de importes, etiquetas p10/p90 en los bordes y el porcentaje exacto en el hover. La tabla desaparece; el total acumulado baja a «Detalle del cálculo». El umbral se retira y el corte queda **fijo**: verde solo al 100 %, ámbar hasta el 90 %, rojo por debajo — el mismo semáforo que colorea la banda, leído del lado de la ruina |
 
 ## 4. "If you are tempted to X, read Y first"
 
 | Temptation | Read first |
 |---|---|
 | Add a retirement age / target-age setting | §2.2 |
+| Añadir un trigger de jubilación por EDAD **fuera de una estrategia** (un ajuste global, un segundo disparador que conviva con el cruce) | §2.2 + su scope note de 5.0.0 — la edad se readmitió como trigger de `retire_at_age`/`coast` y de nada más; el invariante es **un solo trigger por simulación** (`crossing_is_reading_only`), y lo que v1.0.6 mató fue justo la coexistencia ambigua |
+| Meter `f64` en `crates/engine` (o «añadir una excepción» al freezer para un método numérico) | §2.9 + su scope note de 5.0.0 — la coma flotante vive en `crates/engine-stochastic`, sobre el MISMO bucle vía `MoneyOps`, y de ahí no sale un euro. Si de verdad hace falta, la conversación es de diseño: `futurefin-architecture-contract` + `futurefin-proof-and-analysis-toolkit` Recipe 5 |
+| **Duplicar** el bucle en coma flotante «porque el genérico se resiste» | §2.26 y `futurefin-proof-and-analysis-toolkit` Recipe 7 — dos bucles divergen en silencio al primer cambio de modelo; era la salida de emergencia declarada del plan y no hizo falta |
+| Relajar un fixture golden (o regenerarlo) para que pase tu cambio | §2.25 — regenerar `pins-4.15.json` es declarar que la aritmética cambió, y eso **exige entrada de CHANGELOG con el delta medido**. Si el arreglo mueve dígitos, aplícalo solo en la rama que hoy falla. Regenerar `pins-5.0-outputs.json` porque la canonicalización CRECIÓ sí es legítimo, y tiene su propio control (`the_5_0_canonicalization_grew_without_moving_the_old_fields`) |
+| Guardar una división con `if x > 0` | §2.24 — la pregunta no es si el divisor es positivo, sino si el COCIENTE cabe |
+| Re-derivar aguas abajo un hecho que el algoritmo ya conoce (comparando dos números) | §2.26 — publica el booleano; dos definiciones del mismo hecho divergen en cuanto cambia el tipo o la escala |
+| Alimentar un tile «al jubilarte» (o cualquier cifra fechada) con `jubilacion_target_net_worth`, o publicar un importe sin decir en qué euros está | §3, fila del tile de Proyección — `jubilacion_target_net_worth` es la base a mes 0; el objetivo del mes del cruce es `jubilacion_target_net_worth_nominal`, y la base viaja con el importe (`jubilacionTargetTileValue`) |
+| Volver a meter la configuración de Jubilación en un acordeón «Avanzado» (o en cualquier plegado que esconda supuestos «para simplificar») | §3, fila del acordeón U1b — la línea «Supuestos» que hacía falta por fuera ERA la prueba de que el acordeón sobraba. Si un campo mueve tus números, va a la vista y con la frase que dice qué mueve |
+| Volver a TABULAR el agotamiento por edad, o añadir un tile que repita lo que el gráfico ya dice | §3, fila del riesgo — la pregunta que hay que contestar primero es qué dice esa tabla que el color de la banda y su hover no digan ya |
+| Devolver al usuario un umbral de éxito configurable (o cualquier listón que decida el color de un veredicto) | §3, fila del riesgo — el corte lo decide el SERVIDOR (`success_verdict`) y es fijo desde V7; un listón propio no hace el plan más seguro, solo más indulgente |
+| Apagar un aviso de onboarding con un flag de `localStorage` | §3, fila del acordeón U1b — el banner de alta de Jubilación reaparecía en cada navegador nuevo por muy configurado que estuviera el plan. Se apaga con el ESTADO que lo hace innecesario |
 | Put contribution config back on assets, or "simplify" the cascade | §3 row 2; engine cascade tests in `crates/engine/src/projection.rs` |
 | Deflate returns / simulate in real terms inside the engine | §3 row 1 y §1 fila 3 — deflactado solo de presentación; servirlo (4.4.0) no es simularlo |
 | «Simplificar» la invariante del sumidero, o comprobarla en cada camino de escritura | §2.20 — post-condición con un solo punto de commit, no pre-condición repartida |
@@ -591,6 +750,8 @@ Vocabulary used below (defined once):
 | Bind an MCP `Mcp-Session-Id` to its credential "just in case" | §2.17 — no defender exists until the server emits something on its own initiative; wait for that trigger |
 | Add `density` (or any resolution knob) as an MCP-tool parameter to explain a curve jump | §2.18 — a finer grid says WHERE, never WHY; add a named-event field instead |
 | Rename a field to disambiguate it from a same-named field elsewhere | §2.19 — declaring the field's `basis`/mode costs less than a rename and fixes legibility better |
+| Pintar resultados/tiles por ENCIMA del formulario que los produce, apilar tarjetas de resultado sin jerarquía entre ellas, o dar a cada chart su propio eje/ventana | §3 fila 6 — orden fijado por U1/U5/U7 y revisado en la tercera vuelta (V3): config en tarjetas por tema, todo a la vista → resultado, como mucho 3 tiles con una frase-hito, un solo chart |
+| Medir un tramo (puente, plazo) como «meses desde hoy» en vez de la resta entre los dos `month_index` reales | §3 fila 6 (bug S8) — `lib/duration.ts` separa la CUENTA ATRÁS (`formatYearsEsFromMonths`) del TRAMO (`formatMonthSpanEs`); no reuses la primera para lo segundo |
 
 ## 5. When NOT to use this skill
 
@@ -627,7 +788,48 @@ and direct code inspection. §1 row 19 and §2.11 (embedded PostgreSQL) added 20
 - §2.17 (session not bound to credential, reasoned in the module doc-comment):
   `grep -n 'Mcp-Session-Id\|LocalSessionManager' apps/api/src/mcp/mod.rs`.
 - Counters unmoved by this phase (transport-only, no tool/route surface change):
-  `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (**68** desde la Fase 6 del tren 4.4.0; eran 52 cuando se escribió esta línea — no lo congeles, recuéntalo).
+  `grep -c '#\[tool(' apps/api/src/mcp/server.rs` (**71** el 2026-09-03 por la tarde — y **70 esa misma mañana**, con la rama 5.0.0 viva; 68 desde la Fase 6 del tren 4.4.0, y 52 cuando se escribió esta línea. Tercera vez que este contador se queda corto en la biblioteca: no lo congeles, recuéntalo).
+
+**§1 filas 1 y 13 (scope notes), §2.2, §2.9, §2.10 (pensión), §2.24–§2.26 y las seis filas nuevas
+de §4 se añadieron el 2026-09-03 para 5.0.0** (rama `release/5.0.0`, issue #207), leyendo
+`crates/engine/src/{phases,target,withdrawal,solve,money,sim_core}.rs`,
+`crates/engine-stochastic/{src/lib.rs,tests/degeneration.rs}`, `crates/engine/tests/golden_pins.rs`
+y los issues #208/#209. **Dos readmisiones declaradas** (edad como trigger de estrategia, pensión
+por usuario con fecha) y **una excepción `f64` nueva y acotada**; ninguna borra la entrada que
+readmite — las tres se leen con su scope note al lado. Re-verificar:
+- Trigger único, no dos: `grep -n "crossing_is_reading_only" crates/engine/src/sim_core.rs apps/api/src/handlers/projection.rs` (3 y 3 hits el 2026-09-03) y el invariante sobre la SERIE `grep -n "fn the_phase_readings_agree_with_the_series_they_describe" crates/engine/tests/golden_pins.rs`
+- El freezer sigue sin excepciones: `grep -n "fn crates_engine_src_has_no_f64_outside_comments" crates/engine/src/lib.rs` y `grep -rn "f6"$'4' crates/engine/src/ | grep -v "^crates/engine/src/lib.rs"` (solo comentarios; el token va partido a propósito, igual que en el propio freezer, para no cazarse a sí mismo)
+- La coma flotante vive en un crate aparte y sin RNG en el motor: `grep -c "impl MoneyOps for F64Money" crates/engine-stochastic/src/lib.rs` (1) y `grep -c "rand" crates/engine/Cargo.toml` (0)
+- La puerta que la sostiene: `grep -n "const EUR_TOLERANCE\|fn every_case_degenerates_from_decimal_to_floating_point" crates/engine-stochastic/tests/degeneration.rs` (2 hits)
+- Los tres bugs de §2.24–§2.26, cerrados en el código: `grep -n "issue \*\*#209\*\*\|#209" crates/engine/src/sim_core.rs | head -3`, `grep -n "checked_div" crates/engine/src/tax.rs | head -3` y `grep -n "pub cap_exhausted" crates/engine/src/tax.rs`
+- La pensión con fecha es JSONB del perfil, no una columna resucitada: `grep -n "PensionSchedule" crates/engine/src/phases.rs | head -3` y `grep -rn "users.pension_" apps/api/src` (**debe salir vacío**: las columnas siguen muertas)
+
+**§2.27 added 2026-09-03 tras el pase de correcciones de la revisión adversarial** (commit
+`0668f37`, issue #207 cerrado), leyendo `crates/engine/tests/{golden_pins.rs,fuzz_invariants.rs}`.
+Re-verificar: `grep -n "fn p24_publishes_the_undrained_operand_with_the_scale_of_4_15_0\|fn p25_keeps_the_debt_service_grouping_of_4_15_0" crates/engine/tests/golden_pins.rs` (2 hits) y
+`grep -n "fn random_households_satisfy_the_accounting_identities" crates/engine/tests/fuzz_invariants.rs`.
+
+**§3 fila 6 y sus dos filas de §4 se añadieron el 2026-09-03**, tras subir la imagen de 5.0.0 en
+local y recibir el veredicto del owner sobre la pantalla de Jubilación (issue #207, segunda
+revisión de UX — U0–U12, doc completa en `CHANGELOG.md` `## [5.0.0]` §«Segunda revisión de UX»).
+Documenta la primera vuelta del rediseño (WP7) como forma RECHAZADA, no la pantalla que la
+sustituye — `RetirementView.tsx` está siendo reescrita en un cambio aparte (U1b) y su
+documentación es un pase posterior. Re-verificar:
+- El bug S8 ya tiene su fix en una lib separada de la cuenta atrás: `grep -n "formatMonthSpanEs\|formatYearsEsFromMonths" apps/web/src/lib/duration.ts apps/web/src/lib/projection-chart.ts`
+- Las doce decisiones están escritas una sola vez y el CHANGELOG las enlaza: `grep -n "^| U[0-9]* |" CHANGELOG.md` (12 filas)
+- `buildRetirementTilesV2` corrige la medida del puente: `grep -n "pension_start\|RETIREMENT_TILES_V2_CAP" apps/web/src/lib/retirement-tiles.ts`
+
+**§3 filas 7–8 y sus cuatro filas de §4 se añadieron el 2026-09-05**, tras la TERCERA vuelta de UX de
+Jubilación (V1–V7; feedback F2 y F5–F10 del owner sobre la demo local de `release/5.0.0`, mismo
+issue #207). Documentan como formas RECHAZADAS el acordeón «Avanzado» + su línea «Supuestos», el
+banner de alta con flag de `localStorage`, la tabla de agotamiento por edad y el umbral de éxito
+configurable. Re-verificar:
+- Los dos módulos retirados ya no existen: `ls apps/web/src/lib/assumptions-line.ts apps/web/src/lib/retirement-intro.ts` (los dos FALLAN)
+- El acordeón no tiene ni regla ni consumidor: `grep -c "^\.retirement-advanced" apps/web/src/App.css` (**0**) y `grep -c "^export const ADVANCED_SECTION_LABEL" apps/web/src/lib/retirement-form.ts` (**0**)
+- Las tarjetas que lo sustituyen: `grep -n "PLAN_CARD_ORDER" -A 8 apps/web/src/lib/plan-fields.ts` (seis ids)
+- La tabla de agotamiento no tiene ni CSS ni consumidor: `grep -c "risk-depletion" apps/web/src/App.css apps/web/src/views/RetirementView.tsx` (**0** en los dos)
+- El color de la banda vive en un módulo puro con sus cortes absolutos: `grep -n "RISK_AMBER_AT\|RISK_RED_AT" apps/web/src/lib/risk-gradient.ts`
+- El umbral desapareció del perfil de cliente: `grep -c "success_threshold_pct" apps/web/src/lib/retirementProfile.ts` (**0**)
 
 **§1 rows 22–23 and §2.18–§2.19 added 2026-08-28 for v4.4.0** (MCP Fase 5, issue #86), by reading
 `apps/api/src/handlers/projection.rs` (`ProjectionEvent` doc-comment) and

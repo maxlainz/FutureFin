@@ -12,7 +12,11 @@ import {
   parseYmdComponents,
   todayYmdInTimeZone,
 } from "./dates";
-import { DISPLAY_NUMBER_LOCALE, METRIC_DASH } from "./format";
+import {
+  DISPLAY_NUMBER_LOCALE,
+  METRIC_DASH,
+  parseDisplayDecimal,
+} from "./format";
 
 export const PROJECTION_FOCUS_STORAGE_KEY = "futurefin-projection-focus";
 export const PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY =
@@ -121,6 +125,100 @@ export function deflationFactorAt(monthIndex: number, annualPct: number): number
 }
 
 /**
+ * Tasa anual del deflactor del chart. Sale de la RESPUESTA
+ * (`deflation_annual_inflation_percent`, la misma con la que el servidor construyó
+ * `net_worth_real` y `milestones_real`) y solo cae a la de la instalación con un backend
+ * antiguo (< 4.6.0) que no publica el campo: re-obtenerla por otro canal era una vía de
+ * divergencia silenciosa (#136-4a).
+ *
+ * Extraída del memo inline del chart para que el tile de «Objetivo al jubilarte» use
+ * EXACTAMENTE la misma tasa que la línea que dibuja el objetivo — dos deflactores distintos
+ * en la misma pantalla son dos cifras que se contradicen sin que nada falle.
+ */
+export function resolveDeflationAnnualPct(
+  seriesPct: string | undefined,
+  installationInflationPct: number,
+): number {
+  const parsed = seriesPct !== undefined ? Number(seriesPct) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : installationInflationPct;
+}
+
+/**
+ * Base en la que está expresado un importe que se publica: euros de HOY o euros NOMINALES del
+ * mes al que se refiere. Viaja SIEMPRE pegada al importe (arqueología §2.26: una base que el
+ * consumidor re-deriva de una segunda comparación acaba discrepando del número que rotula).
+ */
+export type MoneyBasis = "today" | "nominal";
+
+export type JubilacionTargetTileValue = {
+  amount: number | null;
+  basis: MoneyBasis;
+};
+
+/** Lo ÚNICO que el tile lee de la serie. Un `Pick` y no `ProjectionSeriesApi` entero para que
+ *  el test fije un fixture de cuatro campos en vez de una respuesta completa: lo que no se lee
+ *  no puede cambiar el resultado, y así el test lo demuestra en vez de prometerlo. */
+export type JubilacionTargetTileSeries = Pick<
+  ProjectionSeriesApi,
+  | "jubilacion_target_net_worth"
+  | "jubilacion_target_net_worth_nominal"
+  | "jubilacion_month_index"
+  | "deflation_annual_inflation_percent"
+>;
+
+/**
+ * Valor del tile «Objetivo al jubilarte» de Proyección (F11).
+ *
+ * Hasta 5.0.0 el tile enseñaba `jubilacion_target_net_worth`, que es el objetivo evaluado en el
+ * **mes 0** — la base a k=0, inmóvil por contrato — y por eso NO se movía al activar «En dinero
+ * de hoy». Con el objetivo puente (5.0.0) esa base y el objetivo del mes en que de verdad te
+ * jubilas dejaron de ser la misma magnitud: en la demo, 1.609.855 € contra 696.563 €, un 2,31×.
+ *
+ * La cifra correcta es el objetivo del MES DEL CRUCE —`jubilacion_target_net_worth_nominal`,
+ * evaluado exacto sobre ese mes por el servidor, nunca interpolado— deflactado con el mismo
+ * factor y la misma tasa que el chart. Sin campo `_real` nuevo en el API (veto de arqueología
+ * §1/§3): el deflactado de publicación se hace aquí, como el de la línea del objetivo.
+ *
+ * Reglas:
+ *  - Sin nominal (no hay cruce, o backend anterior al campo) → se cae a
+ *    `jubilacion_target_net_worth`, que YA está en euros de hoy → `basis: "today"`. Nunca se
+ *    inventa un mes: sin mes no hay deflactor que aplicar.
+ *  - Con nominal → `nominal × deflationFactorAt(mes, pct)`, con `pct` = la tasa del chart solo
+ *    si el toggle está activo Y la tasa no es 0. `basis` sale del `pct` EFECTIVO, así que
+ *    «toggle activo con inflación 0» se rotula honestamente como euros de ese mes: el factor
+ *    vale 1 y las dos bases coinciden, pero la que describe la cifra es la nominal.
+ */
+export function jubilacionTargetTileValue(
+  series: JubilacionTargetTileSeries | null | undefined,
+  inflationAdjusted: boolean,
+  installationInflationPct: number,
+): JubilacionTargetTileValue {
+  const nominalRaw = series?.jubilacion_target_net_worth_nominal;
+  const nominal = nominalRaw != null ? parseDisplayDecimal(nominalRaw) : null;
+  const monthIndex = series?.jubilacion_month_index;
+  if (
+    nominal === null ||
+    monthIndex == null ||
+    !Number.isFinite(monthIndex)
+  ) {
+    const baseRaw = series?.jubilacion_target_net_worth;
+    return {
+      amount: baseRaw != null ? parseDisplayDecimal(baseRaw) : null,
+      basis: "today",
+    };
+  }
+  const deflation = resolveDeflationAnnualPct(
+    series?.deflation_annual_inflation_percent,
+    installationInflationPct,
+  );
+  const pct = inflationAdjusted && deflation !== 0 ? deflation : 0;
+  return {
+    amount: nominal * deflationFactorAt(monthIndex, pct),
+    basis: pct !== 0 ? "today" : "nominal",
+  };
+}
+
+/**
  * Última POSICIÓN del array cuyo `month_index` no pasa de `maxMonth`.
  *
  * Existe porque con `density=hybrid` el servidor DIEZMA la serie (meses 0..12, 24, 36…): la
@@ -141,6 +239,68 @@ export function lastPointIndexAtOrBeforeMonth(
     last = i;
   }
   return last;
+}
+
+/** Una fila de flujos de retirada del tooltip. El importe ya viene DEFLACTADO: el tooltip pinta
+ *  euros de hoy o nominales según el toggle, y mezclar las dos bases en la misma caja sería la
+ *  forma más barata de contar una mentira. */
+export type WithdrawalTooltipRow = {
+  key: "withdrawal" | "shortfall" | "unmet" | "excess";
+  label: string;
+  amount: number;
+};
+
+/**
+ * Flujos de la retirada del mes hovered (5.0.0 §B.8 + pase de correcciones §F).
+ *
+ * Cuatro reglas, todas ellas cosas que se rompen sin que nada falle:
+ *
+ *  1. **Solo desde el mes de jubilación.** Antes son cero por construcción, y una fila de «0 €»
+ *     en cada punto del horizonte de acumulación es ruido, no información.
+ *  2. **Un mismo factor de deflactación para las cuatro**, el del patrimonio de arriba.
+ *  3. **«Recorte» y «No financiado» son cosas DISTINTAS y las dos pueden estar a la vez**:
+ *     `withdrawal_shortfall` es lo que la REGLA se negó a sacar (hay dinero, el techo no deja) y
+ *     `unmet_need` lo que la CARTERA no dio (no había de dónde vender). Fundirlas en una sola
+ *     fila —o enseñar solo la primera, como hasta el pase— convierte quedarse sin capital en un
+ *     problema de configuración de la regla.
+ *  4. **Un cero no se pinta** (umbral de medio euro, el redondeo de la divisa): «Recorte — 0 €»
+ *     afirma que se midió un recorte. La retirada sí se pinta aunque sea cero: ahí el cero es el
+ *     dato (ese mes no vendiste nada).
+ */
+export function buildWithdrawalTooltipRows(
+  point: {
+    month_index: number;
+    withdrawal?: number;
+    withdrawal_shortfall?: number;
+    unmet_need?: number;
+    withdrawal_excess?: number;
+  },
+  retirementMonthIndex: number | null | undefined,
+  deflationFactor: number,
+): WithdrawalTooltipRow[] {
+  if (retirementMonthIndex == null || !Number.isFinite(retirementMonthIndex)) return [];
+  if (point.month_index < retirementMonthIndex) return [];
+  const rows: WithdrawalTooltipRow[] = [];
+  const money = (v: number | undefined) =>
+    v === undefined || !Number.isFinite(v) ? null : v * deflationFactor;
+
+  const w = money(point.withdrawal);
+  if (w !== null) rows.push({ key: "withdrawal", label: "Retirada del mes", amount: w });
+  const short = money(point.withdrawal_shortfall);
+  if (short !== null && Math.abs(short) >= 0.5) {
+    rows.push({ key: "shortfall", label: "Recorte", amount: short });
+  }
+  // `unmet_need` es `≥ 0` por contrato: solo se pinta en positivo, y su ausencia (backend
+  // anterior al pase) no pinta nada — nunca un 0 que afirmaría «se financió todo».
+  const unmet = money(point.unmet_need);
+  if (unmet !== null && unmet >= 0.5) {
+    rows.push({ key: "unmet", label: "No financiado", amount: unmet });
+  }
+  const excess = money(point.withdrawal_excess);
+  if (excess !== null && Math.abs(excess) >= 0.5) {
+    rows.push({ key: "excess", label: "Exceso", amount: excess });
+  }
+  return rows;
 }
 
 export function buildProjectionMonthTickIndices(

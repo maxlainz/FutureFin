@@ -182,7 +182,9 @@ async fn monthly_aggregates_exact_household_and_mine() {
 
     // Household (predicción mes -1): expense -100 + -50 = -150.00; income 2000.00; savings -300.00;
     // net = -150 + 2000 - 300 = 1550.00 (invariante: net = suma de los tres, sobre los strings).
-    let (hh, _, _) = get_cashflow(&app, &owner.cookie, "?window_months=6").await;
+    // `household` explícito desde 5.0.0 (R2).
+    let (hh, _, _) =
+        get_cashflow(&app, &owner.cookie, "?view=household&window_months=6").await;
     assert_eq!(hh["view"], "household");
     // 7 meses contiguos -6..=0.
     let months = hh["months"].as_array().unwrap();
@@ -430,7 +432,8 @@ async fn resolution_daily_bounds_and_weekly_default() {
     assert!(ok.json().get("fine").is_none());
 
     // weekly por defecto → 200.
-    let (wk, _, _) = get_cashflow(&app, &owner.cookie, "?window_months=12").await;
+    let (wk, _, _) =
+        get_cashflow(&app, &owner.cookie, "?view=household&window_months=12").await;
     assert_eq!(wk["view"], "household");
     assert_eq!(wk["months"].as_array().unwrap().len(), 13); // -12..=0
 

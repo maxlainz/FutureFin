@@ -15,6 +15,12 @@ export type UserResponse = {
   username: string;
   /** YYYY-MM-DD desde la API; ausente en clientes antiguos. */
   birth_date?: string | null;
+  /**
+   * ¿Tiene la cuenta contraseña propia? `false` = identidad delegada (el add-on de Home
+   * Assistant crea la cuenta sin contraseña y no debe tener ninguna). Decide qué pide el modal
+   * de exportar `.ffbackup`: la contraseña de la cuenta, o una contraseña propia del archivo.
+   */
+  has_password: boolean;
 };
 
 export type FireNumberModeApi = "manual" | "annual_expense" | "current_income";
@@ -35,10 +41,13 @@ export type TaxBracketApi = {
   pct: string;
 };
 
+/**
+ * Supuestos FIRE **del hogar**. En 5.0.0 perdió cuatro ejes —`fire_number_mode`,
+ * `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age`—, que pasaron a ser
+ * personales y viven en `RetirementProfileApi` (decisión D13): con proyecciones independientes
+ * por miembro no podían seguir siendo del hogar. Aquí quedan solo los supuestos compartidos.
+ */
 export type FireSettingsApi = {
-  fire_number_mode: FireNumberModeApi;
-  fire_number_manual_amount: string | null;
-  swr_pct: string;
   taxes_enabled: boolean;
   tax_brackets: TaxBracketApi[];
   /** Ausente en clientes/backups antiguos → tratar como `budget`. */
@@ -52,14 +61,153 @@ export type FireSettingsApi = {
   expense_avg_window_mode?: AvgWindowModeApi;
   /** Fracción de plusvalía gravable de la retirada (0..=1, string; default "1") — 4.10.0, #140. */
   taxable_gain_ratio?: string;
-  /** Edad límite del horizonte derivado (85..=105, default 90) — 4.9.0, #149. */
-  horizon_lifespan_age?: number;
 };
 
 /** Cómo se cuentan los meses de una ventana del promedio real.
  *  `calendar` = los meses con datos dentro de los últimos N civiles.
  *  `data` = los N meses CON DATOS más recientes, saltando los vacíos. */
 export type AvgWindowModeApi = "data" | "calendar";
+
+// ---------------------------------------------------------------------------
+// Perfil de jubilación POR USUARIO — `GET|PATCH /v1/auth/me/retirement-profile`
+// (5.0.0, issue #207, decisión D13). Espejo EXACTO de `RetirementProfile`
+// (`apps/api/src/handlers/retirement_profile.rs`): todo Decimal viaja como string y cada
+// enumerado es la misma lista de literales que acepta el servidor.
+// ---------------------------------------------------------------------------
+
+/** Las cinco estrategias (D15). Decide el trigger, la base del objetivo y qué lecturas existen. */
+export type RetirementStrategyApi =
+  | "asap"
+  | "retire_at_age"
+  | "coast"
+  | "partial"
+  | "pension_bridge";
+
+/** Sobre qué se dimensiona el objetivo. `pension_bridge` fuerza `bridge_to_pension`. */
+export type TargetBasisApi = "perpetuity" | "bridge_to_pension";
+
+/** Con qué tasa se descuentan los flujos del puente hasta la pensión (D7). */
+export type BridgeDiscountBasisApi = "expected_return" | "swr" | "none";
+
+/** Catálogo de reglas de retirada (D6). */
+export type WithdrawalRuleKindApi =
+  | "fixed_real"
+  | "percent_of_balance"
+  | "hybrid"
+  | "guardrails";
+
+/** Qué relación tiene la regla con el gasto declarado (D5). */
+export type SpendModeApi = "ceiling" | "rule_is_spend";
+
+/** Base de gasto de la fase de media jornada (D10). */
+export type PartialExpenseBasisApi = "retirement" | "regular";
+
+/**
+ * Regla de retirada + su modo de gasto. Los `pct` son BRUTOS de impuestos (como el SWR).
+ * En el PATCH viaja ENTERA, nunca campo a campo: qué `pct` son obligatorios depende de `kind`.
+ */
+export type WithdrawalRuleApi = {
+  kind: WithdrawalRuleKindApi;
+  /** `percent_of_balance` y `guardrails`: % anual del líquido. */
+  pct: string | null;
+  /** `hybrid`: % de partida. */
+  start_pct: string | null;
+  /** `hybrid`: % al que se baja tras el latch (estrictamente menor que `start_pct`). */
+  end_pct: string | null;
+  /** `guardrails`: banda alrededor de la tasa inicial que dispara el ajuste. */
+  band_pct: string | null;
+  /** `guardrails`: cuánto se recorta/sube la retirada al tocar una banda. */
+  adjust_pct: string | null;
+  spend_mode: SpendModeApi;
+};
+
+/** Pensión pública (u otra renta vitalicia) CON FECHA (D3/D8): su inicio cambia el objetivo. */
+export type PensionPlanApi = {
+  /** Importe MENSUAL en euros de HOY (> 0). */
+  monthly_amount_today: string;
+  starts_at_age: number;
+  /** `true` (default) = se indexa a la inflación del hogar; `false` = importe plano. */
+  indexed: boolean;
+  /** Fracción del importe que se cobra DURANTE la media jornada, en [0, 1]. Default `"0"`. */
+  fraction_while_partial: string;
+};
+
+/** Fase de media jornada (P7). Sin fin propio: termina en la jubilación total. */
+export type PartialRetirementApi = {
+  starts_at_age: number;
+  /** Ingreso MENSUAL en euros de HOY durante la fase (>= 0; `0` = año sabático). */
+  income_monthly_today: string;
+  expense_basis: PartialExpenseBasisApi;
+};
+
+/**
+ * Perfil de jubilación de UN usuario, tal y como lo devuelve el servidor: YA resuelto
+ * (defaults y clamps aplicados). `target_basis` se publica derivado (R6) y en la práctica
+ * nunca llega `null`; el tipo lo admite porque el campo ALMACENADO sí es opcional y ese es
+ * el valor que el PATCH puede volver a poner («derívalo tú»).
+ */
+export type RetirementProfileApi = {
+  strategy: RetirementStrategyApi;
+  /** OBLIGATORIA en `retire_at_age` y `coast`; opcional en `partial`; ignorada por el resto. */
+  target_retirement_age: number | null;
+  /** Los cuatro ejes que en 4.15.x vivían en `fire_settings` (mismos defaults y cotas). */
+  fire_number_mode: FireNumberModeApi;
+  fire_number_manual_amount: string | null;
+  swr_pct: string;
+  horizon_lifespan_age: number;
+  target_basis: TargetBasisApi | null;
+  bridge_discount_basis: BridgeDiscountBasisApi;
+  withdrawal_rule: WithdrawalRuleApi;
+  pension: PensionPlanApi | null;
+  partial_retirement: PartialRetirementApi | null;
+  /**
+   * Colchón de caja en meses de gasto (P4). Solo actúa en Monte Carlo.
+   *
+   * **`null` ya NO significa «sin colchón» desde V6** (5.0.0, tercera vuelta de UX): significa
+   * «no lo has fijado tú», y entonces el servidor lo DERIVA del tope de tu regla de ahorro y
+   * publica de dónde sale en la respuesta de bandas (`buffer_source`). La SPA no escribe este
+   * campo nunca salvo para SOLTARLO (`PATCH {"cash_buffer_months": null}`, la acción «volver al
+   * tope de tu regla»): el input desapareció del formulario.
+   */
+  cash_buffer_months: number | null;
+};
+
+/** Respuesta de las dos rutas: el perfil resuelto + la fecha de nacimiento (misma pantalla). */
+export type RetirementProfileResponseApi = {
+  profile: RetirementProfileApi;
+  birth_date: string | null;
+  /** **La elección ALMACENADA de `target_basis`, sin resolver** (5.0.0 WP5-2). `null` = nadie la
+   *  ha elegido y el servidor la DERIVA (R6: puente si hay pensión declarada, perpetuidad si no);
+   *  un valor = está fijada a mano y manda sobre la derivación.
+   *
+   *  `profile.target_basis` viene siempre RESUELTO, así que sin este campo el cliente no puede
+   *  distinguir «no lo he elegido» de «he elegido esto» — y un formulario que reenvía lo que leyó
+   *  CONGELA la derivación: declarar una pensión después ya no movería la base del objetivo.
+   *  Ausente (`undefined`) = backend anterior a WP5-2, donde la distinción no existe. */
+  target_basis_stored?: TargetBasisApi | null;
+};
+
+/**
+ * Cuerpo del PATCH. **Tri-estado**: una clave ausente NO cambia nada; `null` borra lo opcional.
+ * Nunca se manda el perfil entero — un PATCH «solo el SWR» borraría la pensión declarada.
+ */
+export type RetirementProfilePatchApi = {
+  strategy?: RetirementStrategyApi;
+  target_retirement_age?: number | null;
+  fire_number_mode?: FireNumberModeApi;
+  fire_number_manual_amount?: string | null;
+  swr_pct?: string;
+  horizon_lifespan_age?: number;
+  target_basis?: TargetBasisApi | null;
+  bridge_discount_basis?: BridgeDiscountBasisApi;
+  withdrawal_rule?: WithdrawalRuleApi;
+  pension?: PensionPlanApi | null;
+  partial_retirement?: PartialRetirementApi | null;
+  /** Tri-estado: `null` suelta el colchón explícito y devuelve la derivación del tope (V6). */
+  cash_buffer_months?: number | null;
+  /** Misma columna que `PATCH /v1/auth/me`: `null` la borra, `"YYYY-MM-DD"` la fija. */
+  birth_date?: string | null;
+};
 
 export type InstallationSnapshot = {
   id: string;
@@ -129,6 +277,10 @@ export type AssetApiRow = {
    *  modal de snapshot en vista household. Ausente en clientes antiguos. */
   owner_user_id?: string;
   expected_annual_return_percent?: string | null;
+  /** Desviación típica anual de los retornos del activo, en % ([0, 100]) — 5.0.0, §A.2.
+   *  `null`/ausente o `0` = activo determinista. Solo alimenta las bandas de Monte Carlo; el
+   *  camino determinista la ignora. */
+  annual_volatility_percent?: string | null;
   /** Aporte del PRIMER MES resuelto por la cascada. Incluye el tramo de los planning flows sin
    *  fecha del mes en curso, así que baja cada día y salta el día 1. El servidor lo envía
    *  siempre; era opcional aquí por deriva del tipo. */
@@ -139,6 +291,28 @@ export type AssetApiRow = {
   contribution_target_amount?: string | null;
   notes: string | null;
   sort_index: number;
+};
+
+/**
+ * Cuerpo de `POST /v1/assets` y `PATCH /v1/assets/{id}` tal y como lo arma el formulario
+ * (`lib/asset-form.ts`).
+ *
+ * **Tri-estado en los tres campos opcionales de importe** (`purchase_price`,
+ * `expected_annual_return_percent`, `annual_volatility_percent`) desde 5.0.0: clave AUSENTE = no
+ * cambia, `null` = BORRA el valor guardado, un decimal-string lo fija. Hasta 4.15.x los dos
+ * últimos eran opción simple en el servidor y un `null` era indistinguible de omitir: vaciar el
+ * campo no devolvía el activo a determinista. Por eso `undefined` y `null` significan cosas
+ * distintas aquí y el builder los emite a propósito.
+ */
+export type AssetWriteBodyApi = {
+  category_id?: string;
+  name?: string;
+  current_value?: string;
+  is_liquid?: boolean;
+  purchase_price?: string | null;
+  expected_annual_return_percent?: string | null;
+  annual_volatility_percent?: string | null;
+  notes?: string;
 };
 
 export type AllocationRuleKind = "fixed" | "percent" | "remainder";
@@ -227,6 +401,57 @@ export type CategoryBreakdownLineApi = {
   total: string;
 };
 
+/**
+ * El plan de jubilación del usuario tal y como lo publica `GET /v1/summary` (5.0.0 WP5-2b, D27).
+ *
+ * **No es un cálculo del Resumen**: sale del MISMO objeto que pinta el chart (la entrada de cache
+ * de la proyección del solicitante), copiando campos. `required_savings_monthly` ES
+ * `required_contribution_monthly` de `/v1/projection/series` con el nombre que se lee en un
+ * Resumen, y `disposable_monthly`/`underfunded` viajan con sus mismas bases y sus mismos `null`.
+ *
+ * Los seis campos van a `null` **A LA VEZ** cuando hay `absent_reason`: publicar uno suelto sería
+ * peor que no publicar ninguno.
+ */
+export type SummaryPlanApi = {
+  strategy: RetirementStrategyApi | null;
+  retirement_trigger: RetirementTriggerApi | null;
+  /** Mes EFECTIVO de jubilación en la rejilla de `points[].month_index` (0 = hoy). `null` con
+   *  `absent_reason` y también —sin él— cuando el plan no se jubila dentro del horizonte: eso es
+   *  un resultado, no un hueco. */
+  jubilacion_month_index: number | null;
+  /** €/mes (Decimal-string). `null` con las estrategias por cruce: no hay edad contra la que
+   *  resolver nada. */
+  required_savings_monthly: string | null;
+  /** €/mes (Decimal-string), con la base declarada por estrategia en el campo homónimo de la
+   *  serie. `null` cuando la estrategia no publica margen. */
+  disposable_monthly: string | null;
+  /** El rojo de D17. **`null` = la pregunta no aplica**, nunca `false` para decir «no aplica». */
+  underfunded: boolean | null;
+  /** `household_aggregate` | `projection_unavailable`. `null` ⟺ el plan es el del usuario. */
+  absent_reason: string | null;
+
+  // ── 5.0.0 WP6b — el KPI «Éxito del plan» (D25/D28) ────────────────────────────────────────
+  /**
+   * FRACCIÓN (Decimal-string, 6 dp): caminos que **se jubilan dentro del horizonte** (o los
+   * jubila la edad) **y** además nunca agotan la cartera (D22 + pase de correcciones §G).
+   *
+   * **Es EXACTAMENTE el número del fan chart** de `GET /v1/projection/bands` — el mismo cache,
+   * los mismos caminos, la misma semilla. Nunca se recalcula aquí: dos muestras distintas
+   * enseñarían dos éxitos del mismo plan en la misma pantalla.
+   */
+  success_probability?: string | null;
+  /** FRACCIÓN (Decimal-string, 6 dp): caminos que NO llegan a jubilarse. Mismo campo y mismo
+   *  sorteo que el de las bandas; el Resumen lo usa para el subtítulo de la tarjeta. */
+  never_retired_probability?: string | null;
+  /** FRACCIÓN (Decimal-string, 6 dp): éxito entre los caminos que sí se jubilan. `null` = no hay
+   *  denominador (nadie se jubila), nunca cero. */
+  success_given_retired?: string | null;
+  success_verdict?: SuccessVerdictApi | null;
+  /** `bands_unavailable` — el sorteo falló y el resto del plan SÍ viaja. Distinto de
+   *  `absent_reason`: «no sabemos tu probabilidad» ≠ «no sabemos tu plan». */
+  success_absent_reason?: string | null;
+};
+
 export type SummaryResponse = {
   total_assets: string;
   total_liabilities: string;
@@ -235,6 +460,8 @@ export type SummaryResponse = {
   financial_health: FinancialHealthMetrics;
   assets_by_category: CategoryBreakdownLineApi[];
   liabilities_by_category: CategoryBreakdownLineApi[];
+  /** Tarjeta «Tu plan» (5.0.0, D27). Ausente en backends anteriores a WP5-2b. */
+  plan?: SummaryPlanApi;
 };
 
 export type BudgetTotalsApi = {
@@ -319,6 +546,41 @@ export type ProjectionPointApi = {
    * pasivos. Es la base que decide el cruce FIRE (comparar contra fire_target_series).
    */
   net_worth_liquid?: number;
+  /**
+   * f64 (5.0.0, §B.8): **retirada NETA del mes** en euros NOMINALES — los euros que de verdad
+   * salieron de los activos para cubrir el déficit de caja. `0` en los meses de acumulación y en
+   * el mes 0. No es el gasto (el ingreso de la fase lo cubre primero) ni la venta BRUTA (el
+   * impuesto de la plusvalía se paga vendiendo de más y ese exceso sigue dentro del patrimonio).
+   * Es un flujo del MES, no un acumulado, y se decima por densidad igual que `net_worth`.
+   *
+   * **5.0.0, pase de correcciones §D**: en modo `rule_is_spend` la regla financia su gasto
+   * PRIMERO con el superávit del mes, y ese trozo cuenta aquí — antes se vendía cartera para
+   * gastar un dinero que ya estaba en la cuenta y el churn fiscal aparecía de la nada.
+   */
+  withdrawal?: number;
+  /**
+   * f64 (5.0.0): recorte de la regla de retirada, `max(0, necesidad − permitido)`. **Informativo**
+   * (D22/D24): no resta patrimonio, no cuenta como fracaso y NO es `uncovered_deficit_total`
+   * (eso mide lo que los activos no pudieron vender). Todo ceros mientras la regla sea
+   * `fixed_real`, que no tiene techo.
+   */
+  withdrawal_shortfall?: number;
+  /** f64 (5.0.0): exceso de la regla sobre la necesidad en modo `rule_is_spend` (se vende y se
+   *  gasta). Todo ceros con `fixed_real` / `ceiling`. */
+  withdrawal_excess?: number;
+  /**
+   * f64 (5.0.0, pase de correcciones §F): **gasto del mes que los activos NO pudieron
+   * financiar**, neto y `≥ 0`.
+   *
+   * Es la OTRA mitad de quedarse corto, y no se puede confundir con su vecina:
+   * `withdrawal_shortfall` es lo que la REGLA rechazó sacar (hay dinero, el techo no deja);
+   * `unmet_need` es lo que la CARTERA no dio (no había de dónde vender). Un mes puede tener las
+   * dos, una, o ninguna. Sumar las dos NO da «lo que faltó»: son cortes distintos del mismo mes.
+   *
+   * Ausente en backends anteriores al pase — la fila del tooltip simplemente no se pinta, que es
+   * lo correcto: un `0 €` afirmaría que se financió todo.
+   */
+  unmet_need?: number;
 };
 
 export type ProjectionMilestoneApi = {
@@ -334,6 +596,84 @@ export type AssetSeriesApi = {
   values: number[];
 };
 
+/** Qué disparó la jubilación de la simulación (5.0.0, D17). */
+export type RetirementTriggerApi = "liquid_crossing" | "target_age";
+
+/** Fase del motor por la que pasa la simulación (5.0.0, §B.1). Monótonas: la que no ocurre no
+ *  aparece en `phase_transitions`. */
+export type ProjectionPhaseApi = "accumulating" | "partial" | "retired";
+
+/** Inicio de una fase, en la rejilla de `points[].month_index` (NUNCA una posición de array). */
+export type PhaseTransitionApi = {
+  phase: ProjectionPhaseApi;
+  month_index: number;
+};
+
+/** Lecturas de UN miembro dentro del agregado del hogar (5.0.0, D9 / §D): de quién es cada
+ *  marcador de la curva agregada y —desde WP5-2— su propia serie, que el chart dibuja como línea
+ *  fina bajo la Σ en grueso (D32). */
+export type HouseholdMemberProjectionApi = {
+  user_id: string;
+  username: string;
+  strategy: RetirementStrategyApi;
+  /** Mes EFECTIVO de jubilación de este miembro, en la rejilla común del hogar. `null` = no se
+   *  jubila dentro del horizonte. */
+  jubilacion_month_index: number | null;
+  /** Años cumplidos de ESTE miembro en ese mes (con SU fecha de nacimiento). */
+  jubilacion_age: number | null;
+  /** Cruce del líquido con SU objetivo — lectura, aunque su estrategia se dispare por edad. */
+  liquid_crossing_month_index: number | null;
+  /** El mes efectivo otra vez, con el nombre del motor (= `jubilacion_month_index`, R8). */
+  retirement_month_index: number | null;
+  /** Mes «coast» de ESTE miembro, en la rejilla común (5.0.0 WP5-2b). `null` con cualquier
+   *  estrategia que no sea `coast`, y también con `coast` cuando su plan no llega ni aportando
+   *  siempre (entonces lleva `coast_not_reachable` en sus `warnings`). */
+  coast_fire_month_index: number | null;
+  /** `true` ⟺ ni invirtiendo cada euro de sobrante llega a su edad objetivo (D17). **`null` = la
+   *  pregunta no aplica a su estrategia**, nunca `false` para decir «no aplica». */
+  underfunded?: boolean | null;
+  /** €/mes (Decimal-string): su aportación mínima para llegar a su edad objetivo. `null` con las
+   *  estrategias por cruce. */
+  required_contribution_monthly?: string | null;
+  /** €/mes (Decimal-string): su margen, con la base de SU estrategia. `null` cuando no publica
+   *  margen. */
+  disposable_monthly?: string | null;
+  /** Mes de inicio de la media jornada. `null` si esa fase no ocurre. */
+  partial_retirement_month_index: number | null;
+  /** Mes de inicio de la pensión con fecha. `null` sin pensión declarada. */
+  pension_start_month_index: number | null;
+  /** Mes en que la cartera de ESTE miembro se vacía (el agregado publica el MÍNIMO). */
+  assets_depleted_month_index: number | null;
+  /** Avisos de este miembro (p. ej. `birth_date_missing`). */
+  warnings: string[];
+  /** **Horizonte PROPIO de este miembro en meses**, derivado de SU fecha de nacimiento y de SU
+   *  `horizon_lifespan_age`. El agregado se corre al horizonte COMÚN `max(horizontes)`, así que
+   *  este número puede ser MENOR que `months`: desde ahí, la curva de esta persona describiría
+   *  años que ella no declaró vivir, y la línea fina TERMINA (nunca se extrapola). Ausente en
+   *  backends anteriores a WP5-2 ⇒ la línea se dibuja entera. */
+  horizon_months?: number;
+  /** **Serie de ESTE miembro** (D32), paralela a `points[]`: los mismos `month_index`, la misma
+   *  decimación y los mismos `number` (excepción chart-only D4). Es lo que dibuja la «línea fina
+   *  por miembro» bajo la suma en grueso. Lleva `month_index` propio —y no dos arrays alineados
+   *  por posición— porque se lee POR SEPARADO de `points`. Ausente en backends antiguos. */
+  series?: MemberSeriesPointApi[];
+};
+
+/** Un punto de la serie de un miembro del hogar (5.0.0, D32). Deliberadamente **dos importes y no
+ *  siete**: el chart del hogar dibuja patrimonio (y compara líquido en las lecturas), y publicar
+ *  el resto de columnas por persona multiplicaría el payload para responder algo que nadie
+ *  pregunta. Números, no decimal-strings: es la excepción chart-only del contrato del dinero. */
+export type MemberSeriesPointApi = {
+  /** Mismo número de MES que `points[].month_index` (misma rejilla, misma decimación). NUNCA una
+   *  posición de array: con `density=hybrid` la posición 13 es el mes 24. */
+  month_index: number;
+  /** Patrimonio neto de este miembro en euros NOMINALES de ese mes. */
+  net_worth: number;
+  /** Su patrimonio LÍQUIDO nominal — la línea que hay que comparar con SU objetivo, no con el del
+   *  hogar (que no existe). **El chart NO la dibuja** (D32: una línea fina por miembro, no dos). */
+  net_worth_liquid: number;
+};
+
 export type ProjectionSeriesApi = {
   points: ProjectionPointApi[];
   /** Hitos en euros nominales (toggle inflación apagado). */
@@ -345,7 +685,13 @@ export type ProjectionSeriesApi = {
   /** Primer mes cuya venta bruta necesaria iguala o supera TODO lo drenable (todos los
    *  activos): la cartera se vacía ese mes y desde el siguiente el descubierto se acumula restando
    *  del patrimonio para siempre. Número de MES (misma base que `points[].month_index`), nunca una
-   *  posición de array. `null` explícito = no se agota dentro del horizonte, no «no calculado». (#119) */
+   *  posición de array. `null` explícito = no se agota dentro del horizonte, no «no calculado». (#119)
+   *
+   *  **5.0.0, pase de correcciones §B**: lo decide la VENTA, y solo se publica si alguna venta
+   *  posterior se quedó sin financiar. Un aterrizaje exacto —la cartera llega a cero justo
+   *  cuando una pensión pasa a cubrir todo el gasto— sale `null`: no se agotó nada, se acabó de
+   *  usar. Antes ese caso se publicaba como agotamiento y la app avisaba de una ruina que no
+   *  ocurría. */
   assets_depleted_month_index: number | null;
   /** Déficit acumulado NO cubierto al final del horizonte, en euros. `"0.0000"` = cero euros
    *  descubiertos, no «no aplica». Ya se restaba de `net_worth`; aquí se declara. (#119) */
@@ -423,6 +769,306 @@ export type ProjectionSeriesApi = {
   savings_income_basis?: SavingsAvgBasisApi;
   /** Procedencia del lado GASTO del promedio. */
   savings_expense_basis?: SavingsAvgBasisApi;
+
+  // ── 5.0.0 — estrategia, fases y agregado del hogar (§B.8, §C, §D del plan de #207) ──────
+  /** Estrategia con la que se simuló. **`null` en `view=household`**: el agregado suma N
+   *  simulaciones y la de cada miembro viaja en `members[]`. Decide QUÉ significa
+   *  `jubilacion_month_index` (un objetivo alcanzado o una edad impuesta). */
+  strategy?: RetirementStrategyApi | null;
+  /** Qué DISPARÓ la jubilación: `liquid_crossing` (el capital llegó) o `target_age` (la edad
+   *  manda, llegue o no — D17). `null` en `household`. */
+  retirement_trigger?: RetirementTriggerApi | null;
+  /** Mes EFECTIVO de jubilación, en la rejilla de `points[].month_index`. **El mismo valor** que
+   *  `jubilacion_month_index` (R8): viaja con los dos nombres porque `jubilacion_*` es el
+   *  contrato publicado desde 1.x. `null` en `household`. */
+  retirement_month_index?: number | null;
+  /** Posición (índice de array) del mes de jubilación en `points`. Gemelo de
+   *  `jubilacion_series_position`, misma convención (último punto servido cuyo `month_index` no
+   *  pasa del mes de jubilación). */
+  retirement_series_position?: number | null;
+  /** Cruce del líquido con el objetivo FIRE — **LECTURA PURA** desde 5.0.0. Con `asap` coincide
+   *  con `retirement_month_index`; con una estrategia por edad puede caer después (te jubilas sin
+   *  llegar) o antes (podrías haberte ido antes). `null` **sin** razón = hay objetivo y no se
+   *  cruza dentro del horizonte. */
+  liquid_crossing_month_index?: number | null;
+  /** `household_aggregate` | `no_fire_target`. `null` ⟺ el cruce es una pregunta con sentido. */
+  liquid_crossing_absent_reason?: string | null;
+  /** Por qué los `jubilacion_*`/`retirement_*` están vacíos POR CONSTRUCCIÓN:
+   *  `household_aggregate` | `no_retirement_trigger`. `null` ⟺ hay trigger, y entonces un índice
+   *  nulo significa «no se alcanza dentro del horizonte», que es un resultado, no un hueco. */
+  jubilacion_absent_reason?: string | null;
+  /** Por qué falta el marcador «tu dinero trabaja más que tú» (`household_aggregate`). */
+  compound_outpaces_true_savings_absent_reason?: string | null;
+  /** Fases atravesadas y el mes de la rejilla en que empieza cada una. Siempre arranca con
+   *  `accumulating` en el mes 0. **Vacío en `household`**. El orden ES el dato: las fases son
+   *  monótonas y la que no ocurre no aparece. */
+  phase_transitions?: PhaseTransitionApi[];
+  /** Primer mes con pensión pública con fecha. `null` hasta WP3. */
+  pension_start_month_index?: number | null;
+  /** Primer mes de media jornada. `null` hasta WP3. */
+  partial_retirement_month_index?: number | null;
+  /** Avisos de esta simulación (literales cerrados: `birth_date_missing`,
+   *  `target_retirement_age_missing`). Vacío = nada que advertir. En `household` va vacío y los
+   *  avisos viajan por miembro. */
+  warnings?: string[];
+  /** Un elemento por miembro del hogar, **solo en `view=household`** (D9). Vacío en `mine`.
+   *  Cada fila trae sus marcadores, su horizonte propio y —desde WP5-2— **su serie**
+   *  (`members[].series`), que es lo que el chart pinta como línea fina bajo la Σ. */
+  members?: HouseholdMemberProjectionApi[];
+
+  // ── 5.0.0 WP5-2b — pensión con fecha, puente, media jornada y SOLVES (§B.3/§B.7 de #207) ──
+  //
+  // TODO este bloque va a `null`/vacío en `view=household`: el agregado suma N planes y ninguno
+  // de estos números tiene versión «del hogar» (¿el margen de quién?). Lo que sí existe por
+  // persona viaja en `members[]`.
+  /** **% ANUAL** (Decimal-string, `"5.0000"` = 5 %): la tasa con la que el puente descontó sus
+   *  flujos, ya resuelta desde `bridge_discount_basis`. **`null` ⟺ el objetivo no es puente** —
+   *  un `0` ahí se leería como «puente sin descontar» en vez de «no hay puente». Con
+   *  `bridge_discount_no_liquid_assets` en `warnings`, cayó a 0 por no haber activos líquidos. */
+  bridge_discount_annual_pct?: string | null;
+  /** **% ANUAL** (Decimal-string): `100·12·gasto_pleno(R−1)/líquido(R−1)` en el mes efectivo de
+   *  jubilación — lo que hay que sacar de la cartera mientras la pensión no llega. Puede estar
+   *  legítimamente por encima del SWR: dura pocos años. `null` sin pensión con fecha, sin base
+   *  puente, sin objetivo, sin jubilación en el horizonte o con líquido no positivo ese mes. */
+  bridge_effective_withdrawal_pct?: string | null;
+  /** **FRACCIÓN** (Decimal-string, `"0.6000"` = 60 %): qué parte del gasto cubre la pensión el
+   *  mes en que empieza. `≥ 1` ⇒ la pensión cubre el gasto entero. Ojo con el sufijo: esta es
+   *  una fracción y su vecina `bridge_effective_withdrawal_pct` un porcentaje. */
+  pension_coverage_ratio?: string | null;
+  /** Euros (Decimal-string): capital que sostendría a perpetuidad el HUECO de la media jornada.
+   *  Informativo, no dispara nada. `"0.0000"` = la media jornada se paga sola; `null` = no hay
+   *  fase parcial o no hay objetivo. **5.0.0, pase de correcciones §H**: se publica solo si la
+   *  fase parcial OCURRIÓ de verdad en la simulación — una edad parcial configurada que la
+   *  jubilación total se come antes de llegar ya no produce cifra. */
+  partial_gap_target?: string | null;
+  /** `true` ⟺ hubo fase parcial y el líquido no bajó ni un mes; `false` = hubo y menguó (+
+   *  `partial_phase_capital_shrinking` en `warnings`); **`null` = no hubo fase parcial**. */
+  partial_phase_capital_growing?: boolean | null;
+  /** €/mes (Decimal-string): aportación mínima que hace `líquido(R−1) ≥ objetivo(R−1)`. Es un
+   *  TECHO sobre lo que la cascada invierte cada mes, no un importe que se aporte pase lo que
+   *  pase. `null` con `asap`/`pension_bridge` y con una estrategia por edad degradada sin fecha
+   *  de nacimiento — **no es cero**: esas estrategias no tienen `R` contra el que resolver. */
+  required_contribution_monthly?: string | null;
+  /** €/mes (Decimal-string): el techo de la búsqueda — el máximo sobrante mensual del horizonte.
+   *  Es el DENOMINADOR de la cifra de arriba («cuánto de mi margen se lleva el plan»). */
+  required_contribution_search_ceiling?: string | null;
+  /** El rojo de D17: `true` ⟺ ni invirtiendo cada euro de sobrante se llega, y entonces
+   *  `required_contribution_monthly === required_contribution_search_ceiling`. Viaja además como
+   *  `retire_at_age_underfunded` en `warnings`. **`null` = la pregunta no aplica**, nunca
+   *  `false`. */
+  underfunded?: boolean | null;
+  /** f64[] paralelo a `points[]` y con su misma decimación: la serie líquida **SIMULADA** de la
+   *  ejecución que aporta exactamente `required_contribution_monthly`. No es el objetivo
+   *  descontado a una tasa escalar (hallazgo M8). Vacío/ausente sin solve. */
+  required_capital_path?: number[];
+  /** €/mes (Decimal-string) con **dos bases según la estrategia**: `retire_at_age`/`partial` ⇒
+   *  `techo − aportación` (≥ 0); `coast` ⇒ el sobrante del mes 1 **desde el mes coast** y
+   *  `"0.0000"` antes. `null` = la estrategia no publica margen. */
+  disposable_monthly?: string | null;
+  /** f64[] paralelo a `points[]`: `líquido(k) − capital_necesario(k)` (o `− coast_path(k)` desde
+   *  el mes coast). **No se clampa a ≥ 0**: con la cascada dirigiendo el sobrante a un activo no
+   *  líquido puede caer por debajo, y esconderlo publicaría un colchón que no existe. D31 lo deja
+   *  FUERA del chart: es tile, no serie dibujada. */
+  disposable_capital?: number[];
+  /** Euros NOMINALES del mes de jubilación (Decimal-string). `null` sin solve o sin jubilación
+   *  dentro del horizonte. */
+  disposable_capital_at_retirement?: string | null;
+  /** Los mismos euros llevados a HOY con el mismo deflactor que `points[].net_worth_real`. Es la
+   *  mitad legible del tile: el nominal de dentro de 25 años impresiona y no dice nada. */
+  disposable_capital_today?: string | null;
+  /** Número de MES de la rejilla: el primero a partir del cual se puede dejar de aportar y
+   *  alcanzar igual el objetivo en la edad elegida. `null` con cualquier estrategia que no sea
+   *  `coast`; con `coast`, `null` = no se llega ni aportando siempre (+ `coast_not_reachable`). */
+  coast_fire_month_index?: number | null;
+  /** Euros (Decimal-string): el patrimonio LÍQUIDO con el que se **ENTRA** en el mes coast (el
+   *  cierre del mes anterior). Valor de la serie simulada, no un descuento cerrado. */
+  coast_number?: string | null;
+  /** f64[] paralelo a `points[]`: la serie «si dejas de aportar en el mes coast» (la discontinua
+   *  de D29). Con el coast no alcanzable es la serie de aportar TODOS los meses: la mejor que el
+   *  plan da. Vacío/ausente sin estrategia `coast`. */
+  coast_path?: number[];
+};
+
+/**
+ * Un punto del abanico de percentiles (5.0.0 WP6b, D28) — espejo de `ProjectionBandPoint`
+ * (`apps/api/src/handlers/projection_bands.rs`).
+ *
+ * **`month_index` es la MISMA rejilla que `points[]` de `/v1/projection/series`** (las bandas
+ * viajan siempre a densidad `hybrid`, sin `?density`), así que las dos se dibujan en el mismo eje
+ * sin traducir nada — y sin indexar arrays: la posición 13 es el mes 24 en las dos.
+ *
+ * Los seis valores son `number` (f64 a 2 decimales), no Decimal-string: son valores de CHART, la
+ * excepción declarada D4/I3, igual que `points[].net_worth`.
+ */
+export type ProjectionBandPointApi = {
+  month_index: number;
+  net_worth_p10: number;
+  net_worth_p50: number;
+  net_worth_p90: number;
+  /** Bandas del LÍQUIDO. Por HTTP viajan siempre; ausentes ⇒ el backend no las mandó, **nunca
+   *  cero**. La SPA no las dibuja hoy (el abanico es de patrimonio, como la línea determinista). */
+  net_worth_liquid_p10?: number;
+  net_worth_liquid_p50?: number;
+  net_worth_liquid_p90?: number;
+};
+
+/** Probabilidad ACUMULADA de haber agotado la cartera, cada cinco años desde la jubilación
+ *  efectiva. `age: null` ⟺ el usuario no tiene fecha de nacimiento (la fila sigue existiendo:
+ *  la cifra es real aunque no se pueda rotular con una edad).
+ *
+ *  **5.0.0, pase de correcciones §H**: la rejilla avanza de 60 en 60 desde el ancla y **cierra
+ *  SIEMPRE en el horizonte**, así que la ÚLTIMA fila es la ruina total del plan y no una edad
+ *  más. Antes se paraba en el último múltiplo que cabía y dejaba meses fuera sin decirlo. El
+ *  cliente la reconoce por su mes (`month_index + 1 >= months`), no por su posición: con un
+ *  backend anterior al pase esa comprobación falla y la fila conserva su rótulo por edad. */
+export type DepletionProbabilityPointApi = {
+  month_index: number;
+  age: number | null;
+  /** FRACCIÓN (Decimal-string): `"0.1200"` = 12 de cada 100 escenarios. */
+  probability: string | null;
+};
+
+/** Percentiles del MES de jubilación — solo con trigger por cruce. Un `null` DENTRO del objeto
+ *  no es «no calculado»: es un percentil que cae sobre un camino que no se jubila nunca. */
+export type RetirementMonthPercentilesApi = {
+  p10: number | null;
+  p50: number | null;
+  p90: number | null;
+};
+
+/** `green` | `amber` | `red` (D28): verde en el umbral EXACTO, ámbar hasta 10 puntos
+ *  porcentuales por debajo, rojo el resto. Lo decide el SERVIDOR — el cliente no lo recalcula. */
+/** Procedencia del colchón de caja simulado (5.0.0, V6). Ver `ProjectionBandsApi.buffer_source`. */
+export type BufferSourceApi = "explicit" | "allocation_cap" | "none";
+
+export type SuccessVerdictApi = "green" | "amber" | "red";
+
+/**
+ * `GET /v1/projection/bands?paths&seed` (5.0.0 WP6b) — espejo de `ProjectionBandsResponse`.
+ *
+ * **Solo existe en `view=mine`**: los percentiles no suman entre miembros y el servidor devuelve
+ * 400 `household_bands_unavailable` en Hogar (por eso `view` es siempre `"mine"`).
+ */
+export type ProjectionBandsApi = {
+  /** Siempre `"mine"`. Se ecoa como en el resto de respuestas con scope. */
+  view: string;
+  months: number;
+  horizon_basis: string;
+  anchor_date_ymd: string;
+  paths: number;
+  /**
+   * **STRING de dígitos, no número**: es un `u64` y `JSON.parse` lo redondea por encima de 2^53.
+   * Reenviarlo como número devolvería OTRO sorteo sin que nada fallara.
+   */
+  seed: string;
+  /** Fijo `[10, 50, 90]`, en el orden de los campos de `points[]`. */
+  percentiles: number[];
+  points: ProjectionBandPointApi[];
+  /**
+   * FRACCIÓN (Decimal-string, 6 dp): caminos con éxito.
+   *
+   * **5.0.0, pase de correcciones §G — la definición CAMBIÓ**: éxito ⟺ el plan **se jubila**
+   * dentro del horizonte (o lo dispara la edad) **Y** la cartera no se agota nunca. Antes bastaba
+   * con no agotarse, así que un plan que no llegaba a jubilar a nadie salía con un éxito
+   * altísimo por no gastar. Con la definición nueva ese mismo caso se parte en dos cifras
+   * (`never_retired_probability` y `success_given_retired`) y ninguna miente por omisión.
+   *
+   * El recorte de una regla sigue **sin ser fracaso** aquí: la cobertura viaja aparte, abajo.
+   */
+  success_probability: string | null;
+  /** FRACCIÓN (Decimal-string, 6 dp): caminos que **no llegan a jubilarse** dentro del
+   *  horizonte. `> 0` es la mitad que `success_probability` ya no puede contar sola. Ausente en
+   *  backends anteriores al pase de correcciones ⇒ las filas no se pintan. */
+  never_retired_probability?: string | null;
+  /** FRACCIÓN (Decimal-string, 6 dp): éxito CONDICIONADO a jubilarse — de los caminos que sí se
+   *  jubilan, los que además no agotan la cartera. `null` ⟺ ningún camino se jubila (no hay
+   *  denominador), que **no es cero**. */
+  success_given_retired?: string | null;
+  /**
+   * Veredicto del semáforo, **decidido por el servidor** (5.0.0, V7): verde SOLO con `p == 1`
+   * exacto, ámbar entre 0,90 y 1, rojo por debajo. El umbral configurable (`success_threshold_pct`)
+   * desapareció de esta respuesta con V7: el corte ya no es del usuario, así que no había nada
+   * que ecoar. La SPA nunca lo recalcula — ver `successVerdictTone`.
+   */
+  success_verdict: SuccessVerdictApi;
+  /** Vacío ⟺ ningún camino se jubila dentro del horizonte. */
+  depletion_probability_by_age: DepletionProbabilityPointApi[];
+  /** `null` con trigger por EDAD (ahí el mes es un dato del plan, no una distribución). */
+  retirement_month_index_percentiles: RetirementMonthPercentilesApi | null;
+  /** FRACCIÓN (Decimal-string): D17 en versión probabilística. `null` con trigger por cruce —
+   *  es el excluyente del anterior, y `retirement_trigger` dice cuál toca. */
+  underfunded_probability: string | null;
+  /** Mediana de MESES jubilados en que **se gastó menos de lo necesario**. **5.0.0, pase de
+   *  correcciones §F**: cuenta las dos formas de quedarse corto —el techo de la regla y lo que
+   *  la cartera no pudo pagar—, así que ya **no** es 0 por construcción con `fixed_real`: esa
+   *  regla no tiene techo, pero su cartera sí se puede quedar sin nada. */
+  months_below_need_p50: number;
+  /** FRACCIÓN (Decimal-string): qué parte de la necesidad se pagó DE VERDAD. `1` = entera.
+   *  `null` cuando ningún camino tiene meses jubilados con necesidad positiva. Misma corrección
+   *  §F: incluye el descubierto, no solo el recorte de la regla (un caso medido pasó de `1,0` a
+   *  `0,0865` al dejar de ignorar lo que la cartera no financió). */
+  withdrawal_to_need_ratio_p50: string | null;
+  /** `false` ⟺ **ningún activo declara volatilidad**: las tres bandas SON la línea determinista,
+   *  y la UI tiene que decirlo en vez de dibujar un abanico plano que se lee como certeza. */
+  any_volatility_declared: boolean;
+  /** P4: ¿se SIMULÓ el colchón? Hacen falta las tres cosas — colchón en el perfil, líquido que
+   *  lo albergue y volatilidad de la que protegerse. `false` con colchón configurado NO es un
+   *  fallo: es que aquí no significa nada. */
+  buffer_active: boolean;
+  /**
+   * POR QUÉ no se simuló, cuando `buffer_active` es `false` (5.0.0, pase de correcciones §E,
+   * ampliado por V6). Literales cerrados y `null` cuando sí se simuló:
+   *
+   *  - `no_volatility` — ningún activo declara σ, así que no hay de qué protegerse.
+   *  - `no_safe_liquid_asset` — no hay un activo líquido SIN volatilidad donde guardarlo (un
+   *    colchón que también baja con el mercado no es un colchón).
+   *  - `no_capped_rule` (V6) — hay líquido sin volatilidad, pero **ninguna regla de ahorro con
+   *    tope apunta a él**, así que no hay importe del que derivar el colchón. Es el caso común
+   *    cuando el líquido σ=0 es el sumidero sin tope de la cascada.
+   *  - `cap_is_zero` (V6) — la regla tiene tope y resuelve a 0 € o menos.
+   *  - `not_requested` — reliquia anterior a V6, cuando el colchón solo podía ser explícito.
+   *    **No se enseña**: no falta nada.
+   *
+   * Ausente en backends anteriores al pase ⇒ la línea no se pinta, como hasta ahora.
+   */
+  buffer_inactive_reason?: string | null;
+  /**
+   * DE DÓNDE sale el colchón (5.0.0, V6/P3):
+   *
+   *  - `allocation_cap` — derivado del tope («hasta X €») de una regla de ahorro que apunta al
+   *    líquido sin volatilidad. Es el default desde V6: el usuario ya declaró cuánto quiere en
+   *    caja al escribir esa regla, y volver a preguntárselo en meses era pedir el mismo dato dos
+   *    veces con otra unidad.
+   *  - `explicit` — alguien lo fijó por API o MCP (`cash_buffer_months`). Manda sobre la
+   *    derivación (patrón `pct_source`), y la SPA ofrece soltarlo con un `PATCH null`.
+   *  - `none` — no hay colchón; `buffer_inactive_reason` dice por qué.
+   *
+   * Ausente ⇒ backend anterior a V6: la línea informativa se cae a la fila de detalle de siempre.
+   */
+  buffer_source?: BufferSourceApi | null;
+  /** Euros NOMINALES (Decimal-string): el importe que el motor mantiene en caja. **Es el tope de
+   *  la regla, no una conversión de meses** (P2: el tope es nominal fijo y un colchón en meses se
+   *  indexaría, sobrevalorando la protección ~1,6× a 20 años). Solo con `allocation_cap`. */
+  buffer_target_amount?: string | null;
+  /** Meses de gasto EQUIVALENTES: los explícitos con `explicit`, o `floor(tope / gasto mensual)`
+   *  con `allocation_cap` — ahí es INFORMATIVO (euros de hoy), no lo que se simula. `null` = no
+   *  hay base de gasto positiva con la que dividir, que no es cero meses. */
+  buffer_months_effective?: number | null;
+  /** Id de la regla de ahorro cuyo tope se usó (`allocation_cap`). Para poder enlazar a ella. */
+  buffer_source_rule_id?: string | null;
+  /** Nombre del activo líquido sin volatilidad donde vive el colchón. Es lo que hace la línea
+   *  informativa auditable: sin él, «10.000 €» no dice de qué cuenta habla. */
+  buffer_source_asset_name?: string | null;
+  /** Mediana del NÚMERO de meses con relleno. `null` ⟺ `buffer_active: false` («no se midió»,
+   *  que no es «cero rellenos»). */
+  buffer_refills_p50: number | null;
+  /** Euros (Decimal-string): mediana del TOTAL movido al colchón. Es un estadístico de una
+   *  muestra sorteada, **no un saldo** — la copia tiene que decirlo. `null` sin colchón activo. */
+  buffer_refill_net_total_p50: string | null;
+  strategy: RetirementStrategyApi;
+  retirement_trigger: RetirementTriggerApi;
+  computed_in_ms: number;
+  model_note: string;
 };
 
 export type FfbackupImportCounts = {

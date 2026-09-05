@@ -513,13 +513,17 @@ async fn summary_null_expense_category_is_status_quo() {
             .fetch_one(&app.state.pool)
             .await
             .unwrap();
+    // El dueño va explícito: desde 5.0.0 `owner_user_id` es NOT NULL (D14), así que ni siquiera
+    // un INSERT crudo puede dejar una fila del ledger sin dueño. Lo que este test simula es la
+    // fila legacy SIN categoría de gasto, que es otra cosa.
     sqlx::query(
         r#"INSERT INTO liabilities (installation_id, category_id, label, principal,
-               payment_amount, payment_frequency, principal_derived_from_plan)
-           VALUES ($1, $2, 'Legacy', 50000, 400, 'monthly', false)"#,
+               payment_amount, payment_frequency, principal_derived_from_plan, owner_user_id)
+           VALUES ($1, $2, 'Legacy', 50000, 400, 'monthly', false, $3)"#,
     )
     .bind(iid)
     .bind(liab_cat_id)
+    .bind(owner.user_id)
     .execute(&app.state.pool)
     .await
     .unwrap();

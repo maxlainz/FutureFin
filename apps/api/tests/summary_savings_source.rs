@@ -353,7 +353,8 @@ async fn mode_b_summary_household_vs_mine_scoping() {
     set_mode_b(&app, &owner.cookie).await;
 
     // household: income 3000, expense 1200 → net 1800.
-    let hh = health(&app, &owner.cookie, "/v1/summary").await;
+    // `household` va EXPLÍCITO desde 5.0.0 (R2): omitirlo devuelve `mine`.
+    let hh = health(&app, &owner.cookie, "/v1/summary?view=household").await;
     approx(parse_dec(&hh["income_monthly_equivalent"]), 3000.0);
     approx(parse_dec(&hh["expense_regular_monthly_equivalent"]), 1200.0);
     approx(parse_dec(&hh["net_monthly_equivalent"]), 1800.0);

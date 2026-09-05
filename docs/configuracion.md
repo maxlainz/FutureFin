@@ -140,11 +140,33 @@ instalación. Los toca el propietario.
 | **Zona horaria** | `Ajustes → General` | Define qué es "hoy" para los cálculos con fecha. El asistente propone la del navegador. |
 | **Inflación anual asumida** | `Ajustes → Plan` | Entre 0 y 50 %. Hace crecer el objetivo FIRE y permite ver las cifras en euros de hoy. |
 | **Modo de edad** | `Ajustes → Plan` | Enseñar fechas o edades en la proyección. |
-| **Supuestos FIRE** | `Ajustes → Plan` | Tasa de retirada segura (SWR), tramos de IRPF del ahorro para el *gross-up*, y de dónde sale el ahorro mensual de la simulación (presupuesto, promedio real de movimientos, o mezcla de ambos). |
+| **Supuestos fiscales y fuente del ahorro** | `Ajustes → Plan` | Tramos de IRPF del ahorro para el *gross-up*, si los impuestos están activados, y de dónde sale el ahorro mensual de la simulación (presupuesto, promedio real de movimientos, o mezcla de ambos). **Desde la 5.0.0 la tasa de retirada segura (SWR), el modo del objetivo y la edad límite del horizonte YA NO están aquí**: son de cada persona y viven en la pestaña Jubilación. |
 | **Permitir escritura vía MCP** | `Ajustes → Integraciones` | Interruptor vivo: al apagarlo, las herramientas de escritura de Claude se cortan al instante. Solo el propietario. Ver [mcp.md](mcp.md). |
 | **Asistente de primera vez** | `Ajustes → General` | Se puede reabrir cuando quieras. No borra nada. |
 
-### La fuente del ahorro: el ajuste que redefine tu proyección
+#### Lo que ya no es del hogar: tu plan de jubilación (5.0.0)
+
+Hay un segundo plano de configuración, y no está en esta tabla porque **no es de la instalación**:
+es de cada persona. Vive en la pestaña **Jubilación** y lo edita cada cual para sí mismo — incluidos
+los usuarios con rol de solo lectura, que sin poder fijar su edad de jubilación no podrían ver su
+propia proyección.
+
+Guarda tu **estrategia** (cuanto antes · a una edad fija · coast · media jornada · puente hasta la
+pensión), tu edad objetivo, tu **tasa de retirada segura (SWR)**, el modo del objetivo anual y su
+importe manual, la **edad límite del horizonte**, la base del objetivo y su descuento, la **regla de
+retirada** y cómo se aplica, la **pensión pública con su fecha**, la fase de **media jornada**, el
+colchón de caja y el umbral de éxito de los escenarios.
+
+Hay además un ajuste que vive en **cada activo**, no en los ajustes: la **volatilidad anual (%)**,
+junto a la rentabilidad esperada. Dejarla vacía o a `0` significa «este activo crece sin
+sobresaltos». La proyección de siempre la ignora; solo alimenta las bandas de escenarios.
+
+Todo esto está explicado, campo a campo, en **[Tu plan de jubilación](jubilacion.md)**.
+
+**El reparto, en una frase**: el hogar guarda los supuestos compartidos (inflación, impuestos,
+fuente del ahorro, divisa, zona horaria); cada persona guarda su plan.
+
+## La fuente del ahorro: el ajuste que redefine tu proyección
 
 En `Ajustes → Plan → Fuente del ahorro de la simulación` eliges de dónde salen el ingreso y el
 gasto con los que FutureFin simula tu futuro — y con ellos, qué significan la curva de proyección,
@@ -167,6 +189,7 @@ responder a otra pregunta (¿llego con lo que **planeo** o con lo que **de verda
 ## Ver también
 
 - [Instalación](instalacion.md) · [Actualizar](actualizar.md) · [Copias de seguridad](backups.md)
+- [Tu plan de jubilación](jubilacion.md) — la configuración que es de cada persona, no del hogar
 - [Home Assistant](home-assistant.md) — las opciones del add-on y a qué variable de esta página
   traduce cada una
 - [Conectar Claude](mcp.md) — `FUTUREFIN_MCP_ENABLED` y `FUTUREFIN_PUBLIC_URL` en contexto

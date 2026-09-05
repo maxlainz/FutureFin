@@ -182,9 +182,12 @@ mínimo que la app no puede adivinar y que, si se queda mal, hace que todas las 
    contabilidad, y también decide qué filas acepta el importador de CSV. La zona horaria viene
    rellenada con la de tu navegador; con la zona mal, "el gasto de hoy" puede caer en el día
    equivocado.
-2. **Tu plan** — la **inflación anual** que asumes (hace crecer tu objetivo con el tiempo) y la
-   **tasa de retirada segura**, el porcentaje de tu patrimonio que podrías gastar al año sin
-   agotarlo. Los dos se cambian luego en `Ajustes → Plan`.
+2. **Tu plan** — tu **fecha de nacimiento** y con qué **estrategia** quieres jubilarte (cuanto
+   antes, a una edad fija, Coast FIRE, media jornada o puente hasta la pensión), más el único dato
+   que esa estrategia necesita (la edad objetivo; el ingreso de la media jornada; o el importe y
+   la edad de tu pensión). La inflación anual y la tasa de retirada segura se quedan en su valor
+   por defecto (2,5 % / 3,5 %) y se afinan luego, junto al resto de tu plan, en la pestaña
+   **Jubilación** ([Tu plan de jubilación](jubilacion.md)).
 3. **Primer activo** — opcional. Si lo dejas en blanco, no se crea nada.
 4. **Listo.**
 
@@ -217,8 +220,11 @@ Los tres roles:
 | `member` (miembro) | Leer y escribir datos del hogar. |
 | `viewer` (visor) | Solo leer. Tampoco escribe a través de [Claude](mcp.md). |
 
-Cada persona ve por defecto el agregado del hogar y puede filtrar a **lo suyo** con el selector de
-vista de la app.
+Cada persona ve por defecto **lo suyo**, y puede cambiar al hogar entero con el control
+**«Yo | Hogar»** de la barra superior. La vista del hogar es un **agregado de solo lectura**: se ve
+todo, pero solo el dueño de una fila puede editarla — el propietario de la instalación tampoco.
+Y cada persona tiene **su propio plan de jubilación**: estrategia, edad objetivo, pensión y tasa de
+retirada son de cada cual ([Tu plan de jubilación](jubilacion.md)).
 
 ## Ponerlo detrás de HTTPS
 
@@ -352,6 +358,7 @@ algo así, lee [backups.md](backups.md).
 
 ## Siguientes pasos
 
+- [Tu plan de jubilación](jubilacion.md) — elegir estrategia, declarar la pensión y leer el riesgo
 - [Actualizar y volver atrás](actualizar.md)
 - [Copias de seguridad](backups.md)
 - [Variables de entorno y ajustes](configuracion.md)

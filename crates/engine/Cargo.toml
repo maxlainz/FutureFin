@@ -18,3 +18,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [features]
 openapi = ["dep:utoipa"]
+
+[dev-dependencies]
+# Solo para el pin dorado (`tests/golden_pins.rs`): SHA-256 del texto canónico de cada caso y
+# lectura del fixture JSON. Ninguno entra en el binario ni en la API pública del motor.
+# `sha2` va pineado a la MISMA versión que `apps/api` (0.10): dos versiones del mismo hash en el
+# árbol es exactamente la clase de deriva que este pin existe para no tener.
+serde_json = "1"
+sha2 = "0.10"

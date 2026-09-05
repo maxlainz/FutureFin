@@ -75,10 +75,32 @@ contrario: la promesa existía, la implementación no.
 |------|------------|
 | `owner` | Full CRUD + approve/reject pending users + **gestionar membresías** (`PATCH`/`DELETE /v1/installation/members/{user_id}`) + backup export |
 | `member` | Full CRUD financial data |
-| `viewer` | Read-only (GET endpoints) |
+| `viewer` | Read-only (GET endpoints) + **su propio perfil de jubilación** (ver abajo) |
 
 `role_can_write(role)` → true for `owner` and `member`.
 `role_can_read(role)` → true for all three.
+
+### El rol no es lo único que decide una escritura (5.0.0)
+
+Desde 5.0.0 hay **dos ejes** sobre la tabla de arriba, y ninguno la sustituye:
+
+- **Dueño de la fila (D21)**. Toda mutación del ledger —`assets`, `liabilities`, `budget_entries`,
+  `planning_flows`, `allocation_rules`— exige además que `owner_user_id` sea el usuario de la
+  sesión: la fila de otro miembro devuelve **403 `not_row_owner`**, y **el rol `owner` tampoco la
+  salta**. Ser dueño de la instalación no es ser dueño de la fila; con proyecciones independientes
+  por miembro (D9) cada fila pertenece a la simulación de UNA persona. La LECTURA no cambia:
+  `?view=household` sigue enseñando el hogar entero. Detalle y códigos:
+  [`api-routes.md`](api-routes.md) §Dueño de la fila en las mutaciones.
+- **Dato personal: cualquier rol edita el SUYO.** `PATCH /v1/auth/me/retirement-profile` (y la tool
+  MCP `update_retirement_profile`) es la **única escritura del API que un `viewer` puede hacer**, y
+  no es una excepción arbitraria: el perfil de jubilación no es configuración del hogar sino de esa
+  persona, y sin poder fijar su edad de jubilación un viewer no podría ver su propia proyección —
+  que es exactamente lo que un viewer sí puede hacer. Nadie puede editar el de otro: no hay
+  parámetro para pedirlo, ni por HTTP ni por MCP.
+
+La configuración COMPARTIDA del hogar sigue siendo owner-only (`PATCH /v1/installation`,
+`update_fire_settings`, `update_installation_settings`) — desde 5.0.0 sin los cuatro ejes FIRE
+personales, que se mudaron al perfil.
 
 ## Cookie
 - Name: `ff_session`
@@ -312,8 +334,11 @@ idéntico:
 5. Carrera con otra petición sobre la MISMA identidad externa (`users_external_user_id_key`): no es
    un error — se devuelve el usuario que ganó, que es lo que quien llama pedía.
 
-Tras el 200, `sso_login` hace el **mismo warm-up en background** de la proyección del hogar que
-`login` (D7: no se espera al recompute); usuario pending ⇒ no hay nada que calentar y se salta. El
+Tras el 200, `sso_login` hace el **mismo warm-up en background** que `login` — y desde 5.0.0 lo que
+calienta es la proyección **del propio usuario** (`warm_up_mine_projection`, `view=mine`, las dos
+densidades), no la del hogar: con el default de `?view` invertido, el hogar sería una entrada que
+nadie consulta, y además cuesta N simulaciones en vez de una (D7: no se espera al recompute);
+usuario pending ⇒ no hay nada que calentar y se salta. El
 camino HA-IdP lo hereda: `ha_callback` termina en el mismo `establish_session`.
 
 **Un matiz del camino HA-IdP**: el 409 `sso_username_unavailable` del punto 3 no puede salir como
@@ -324,7 +349,7 @@ indistinguible «tu base de datos está caída» de «vuelve a intentarlo».
 
 ### Cuentas sin contraseña — vale para los dos caminos
 
-`password_hash` es NULL y no hay ninguna contraseña que probar. Los tres flujos que la exigen
+`password_hash` es NULL y no hay ninguna contraseña que probar. Los **dos** flujos que la exigen
 devuelven **401 `sso_account_no_password`** (`handlers/auth.rs::sso_account_no_password`, un único
 constructor compartido):
 
@@ -332,7 +357,21 @@ constructor compartido):
 |---|---|
 | `POST /v1/auth/login` | No hay hash contra el que verificar. |
 | `POST /v1/auth/password` | **Fijar** una contraseña desde aquí crearía una segunda vía de acceso a una cuenta cuya autenticación pertenece al proveedor. Fuera de alcance en esta release. |
-| `POST /v1/backup/user-export` | La clave del `.ffbackup` se deriva de la contraseña de cuenta con Argon2id — sin contraseña no hay clave. |
+
+**`POST /v1/backup/user-export` era el tercero y dejó de serlo en 5.0.0** (issue #213). Rechazarlo
+no protegía nada: dejaba al único usuario del add-on de Home Assistant sin poder sacar sus propios
+datos, y la única salida era fijarle una contraseña de cuenta que la fila de arriba prohíbe a
+propósito. El desacople es que **la contraseña del `.ffbackup` no es una credencial de la cuenta**:
+
+| Cuenta | Qué contraseña pide el export | Qué hace el servidor con ella |
+|---|---|---|
+| `password_hash` NOT NULL | La **de la cuenta** | La verifica contra el hash (401 si no casa) **y** la usa de entrada del KDF. Sin cambios respecto a 4.x. |
+| `password_hash IS NULL` | Una **propia del archivo**, que el usuario crea al descargarlo | Solo entrada del KDF. Única regla: **no vacía** → 422 `backup_password_empty`. Quien pide ya está autenticado por `require_session_user` + `require_installation_member`. |
+
+El **import no distingue** —la contraseña siempre fue solo entrada del KDF—, así que los ficheros
+generados antes se siguen abriendo con la contraseña de cuenta de entonces. La SPA sabe cuál pedir
+por `UserResponse.has_password` (aditivo, 5.0.0), que viaja en `login`, `register`, `/v1/auth/sso`
+y `GET /v1/auth/me`.
 
 - **Es un 401 hablado a propósito** (`ApiError::UnauthorizedWith`, no el `Unauthorized` mudo).
   Decirlo revela que ese nombre existe como cuenta SSO, y es un intercambio buscado: sin el

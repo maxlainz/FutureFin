@@ -188,3 +188,199 @@ fn no_dangling_schema_references() {
     }
     assert!(colgantes.is_empty(), "$ref sin componente: {colgantes:?}");
 }
+
+/// `PatchRetirementProfileBody.target_basis` debe anunciar el ENUM, no un string libre.
+///
+/// El fallo que cierra: el campo llevaba `#[schema(value_type = Option<String>)]` heredado del
+/// molde de los otros tri-estado, así que el documento decía «cualquier string» sobre un
+/// `Deserialize` que solo acepta dos literales. Un cliente generado a partir de él nace pudiendo
+/// mandar `"perpetuidad"` y descubre la lista con un 400 — y el `$ref` al componente `TargetBasis`
+/// existía, publicado y sin que nada apuntara a él.
+#[test]
+fn the_retirement_profile_patch_advertises_the_target_basis_enum() {
+    let doc = doc();
+    let field = &doc["components"]["schemas"]["PatchRetirementProfileBody"]["properties"]
+        ["target_basis"];
+    assert!(!field.is_null(), "el campo existe en el componente: {doc}");
+    // utoipa envuelve el `Option<T>` nullable; la prueba es que en algún punto del subárbol del
+    // campo se nombre el componente `TargetBasis` y en ninguno se declare `type: string` suelto.
+    let rendered = field.to_string();
+    assert!(
+        rendered.contains("TargetBasis"),
+        "target_basis debe referirse al enum TargetBasis, no a un string libre: {rendered}"
+    );
+
+    // …y el componente referido enumera exactamente las dos variantes que el Deserialize acepta.
+    let variants = doc["components"]["schemas"]["TargetBasis"]["enum"]
+        .as_array()
+        .expect("TargetBasis publica su lista de variantes");
+    let mut got: Vec<&str> = variants.iter().filter_map(|v| v.as_str()).collect();
+    got.sort_unstable();
+    assert_eq!(got, vec!["bridge_to_pension", "perpetuity"], "{variants:?}");
+}
+
+/// **El bloque `plan` del Resumen y los solves de la proyección están DECLARADOS** (5.0.0
+/// WP5-2b). Un campo que la API sirve y el documento no describe es un cliente generado que no
+/// lo tiene, y aquí la mitad son cifras de dinero: `null` y `0` significan cosas distintas y el
+/// contrato tiene que poder decirlo.
+#[test]
+fn the_plan_and_the_strategy_solves_are_declared_in_the_document() {
+    let doc = doc();
+
+    // `/v1/summary` → `plan`, con su razón de ausencia.
+    let plan_ref = doc["components"]["schemas"]["SummaryResponse"]["properties"]["plan"].to_string();
+    assert!(
+        plan_ref.contains("SummaryPlan"),
+        "SummaryResponse.plan debe referirse al componente SummaryPlan: {plan_ref}"
+    );
+    let plan = &doc["components"]["schemas"]["SummaryPlan"]["properties"];
+    for k in [
+        "strategy",
+        "retirement_trigger",
+        "jubilacion_month_index",
+        "required_savings_monthly",
+        "disposable_monthly",
+        "underfunded",
+        "absent_reason",
+        // 5.0.0 WP6b — el KPI «Éxito del plan» (D28) y su razón de ausencia propia.
+        "success_probability",
+        "success_verdict",
+        "success_absent_reason",
+        // Pase de correcciones de la revisión adversarial: las dos caras que la probabilidad
+        // sola escondía. Sin ellas, un «Éxito del plan» no distingue el plan que falla del que
+        // no llega a empezar.
+        "never_retired_probability",
+        "success_given_retired",
+    ] {
+        assert!(!plan[k].is_null(), "SummaryPlan.{k} no está declarado: {plan}");
+    }
+
+    // `/v1/projection/series` → los solves y las lecturas de pensión/puente/media jornada.
+    let serie = &doc["components"]["schemas"]["ProjectionSeriesResponse"]["properties"];
+    for k in [
+        "bridge_discount_annual_pct",
+        "bridge_effective_withdrawal_pct",
+        "pension_coverage_ratio",
+        "partial_gap_target",
+        "partial_phase_capital_growing",
+        "required_contribution_monthly",
+        "required_contribution_search_ceiling",
+        "underfunded",
+        "required_capital_path",
+        "disposable_monthly",
+        "disposable_capital",
+        "disposable_capital_at_retirement",
+        "disposable_capital_today",
+        "coast_fire_month_index",
+        "coast_number",
+        "coast_path",
+    ] {
+        assert!(
+            !serie[k].is_null(),
+            "ProjectionSeriesResponse.{k} no está declarado"
+        );
+    }
+
+    // `/v1/projection/bands` → el contrato entero de Monte Carlo. Se declara aquí y no solo en el
+    // handler porque es la superficie que un cliente lee ANTES de llamar: un campo que existe en
+    // el JSON y no en la spec es un campo que nadie consume.
+    let bandas = &doc["components"]["schemas"]["ProjectionBandsResponse"]["properties"];
+    for k in [
+        "view",
+        "months",
+        "horizon_basis",
+        "anchor_date_ymd",
+        "paths",
+        "seed",
+        "percentiles",
+        "points",
+        "success_probability",
+        "never_retired_probability",
+        "success_given_retired",
+        "success_verdict",
+        "depletion_probability_by_age",
+        "retirement_month_index_percentiles",
+        "underfunded_probability",
+        "months_below_need_p50",
+        "withdrawal_to_need_ratio_p50",
+        "any_volatility_declared",
+        "buffer_active",
+        "buffer_inactive_reason",
+        "buffer_refills_p50",
+        "buffer_refill_net_total_p50",
+        // 5.0.0 V6 — el colchón se DERIVA del tope de la regla de ahorro y la respuesta dice de
+        // dónde sale. Sin estos cinco, un colchón que el usuario no pidió sería un número mudo.
+        "buffer_source",
+        "buffer_target_amount",
+        "buffer_months_effective",
+        "buffer_source_rule_id",
+        "buffer_source_asset_name",
+        "strategy",
+        "retirement_trigger",
+        "computed_in_ms",
+        "model_note",
+    ] {
+        assert!(
+            !bandas[k].is_null(),
+            "ProjectionBandsResponse.{k} no está declarado"
+        );
+    }
+    // La semilla es un **string** en la spec: un `u64` como número JSON pierde precisión por
+    // encima de 2^53, y una semilla que cambia al ida-y-vuelta no reproduce nada.
+    assert_eq!(
+        bandas["seed"]["type"], "string",
+        "la semilla debe declararse como string: {bandas}"
+    );
+    let punto = &doc["components"]["schemas"]["ProjectionBandPoint"]["properties"];
+    for k in [
+        "month_index",
+        "net_worth_p10",
+        "net_worth_p50",
+        "net_worth_p90",
+        "net_worth_liquid_p10",
+        "net_worth_liquid_p50",
+        "net_worth_liquid_p90",
+    ] {
+        assert!(
+            !punto[k].is_null(),
+            "ProjectionBandPoint.{k} no está declarado"
+        );
+    }
+
+    // `points[]` de la serie: la TERCERA magnitud del mes. `withdrawal` es lo que se obtuvo,
+    // `withdrawal_shortfall` lo que la REGLA rechazó y `unmet_need` lo que la CARTERA no dio —
+    // un cliente que no sepa que existe la tercera lee un plan agotado como un plan cubierto.
+    let punto_serie = &doc["components"]["schemas"]["ProjectionPoint"]["properties"];
+    for k in [
+        "withdrawal",
+        "withdrawal_shortfall",
+        "withdrawal_excess",
+        "unmet_need",
+    ] {
+        assert!(
+            !punto_serie[k].is_null(),
+            "ProjectionPoint.{k} no está declarado"
+        );
+    }
+    // Es un NÚMERO, como el resto de importes del punto (excepción chart-only D4/I3), no un
+    // string decimal: la serie es geometría de chart y el escalar hermano
+    // (`uncovered_deficit_total`) sigue siendo el string que se cita como dinero.
+    assert_eq!(
+        punto_serie["unmet_need"]["type"], "number",
+        "ProjectionPoint.unmet_need debe declararse como número: {punto_serie}"
+    );
+
+    // Y por miembro del hogar, las cuatro que explican de quién es cada marcador.
+    let miembro = &doc["components"]["schemas"]["HouseholdMemberProjection"]["properties"];
+    for k in [
+        "coast_fire_month_index",
+        "underfunded",
+        "required_contribution_monthly",
+        "disposable_monthly",
+    ] {
+        assert!(
+            !miembro[k].is_null(),
+            "HouseholdMemberProjection.{k} no está declarado"
+        );
+    }
+}

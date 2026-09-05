@@ -16,9 +16,28 @@
 
 import { useState } from "react";
 import { apiPatch, apiPost } from "../api/client";
-import type { CategoryRow, FireSettingsApi, InstallationSnapshot } from "../api/types";
+import type {
+  CategoryRow,
+  InstallationSnapshot,
+  RetirementProfileApi,
+  RetirementProfilePatchApi,
+} from "../api/types";
 import { Modal, ModalFormError } from "../components/Modal";
 import { toApiDecimalString } from "../lib/format";
+import {
+  buildOnboardingPlanPatch,
+  emptyOnboardingPlanState,
+  onboardingPlanFields,
+  strategyNeedsBirthDate,
+  validateOnboardingPlan,
+  type OnboardingPlanFieldKey,
+  type OnboardingPlanState,
+} from "../lib/onboarding-plan";
+import {
+  RETIREMENT_STRATEGIES,
+  RETIREMENT_STRATEGY_BLURB,
+  RETIREMENT_STRATEGY_LABEL,
+} from "../lib/retirementProfile";
 
 /** Divisas que acepta el backend (`normalize_currency`). Una sola por instalación: FutureFin no
  *  convierte ni mezcla divisas, así que esto se elige una vez y define toda la contabilidad. */
@@ -44,12 +63,24 @@ export function OnboardingWizard({
   open,
   installation,
   assetCategories,
+  userBirthDate,
+  onSaveRetirementProfile,
   onFinished,
   onSkip,
 }: {
   open: boolean;
   installation: InstallationSnapshot;
   assetCategories: CategoryRow[];
+  /** `user.birth_date` de la sesión (`App.tsx`): si ya existe, el paso «Tu plan» la trae
+   *  precargada en vez de pedirla otra vez. */
+  userBirthDate: string | null;
+  /** Mismo helper que usa Jubilación (`saveRetirementProfilePatch` en `App.tsx`): un PATCH
+   *  mínimo a `/v1/auth/me/retirement-profile` que además actualiza el `retirementProfile` en
+   *  memoria y recarga la proyección — así Resumen/Jubilación no se quedan enseñando el plan
+   *  por defecto hasta el siguiente login. */
+  onSaveRetirementProfile: (
+    patch: RetirementProfilePatchApi,
+  ) => Promise<RetirementProfileApi | null>;
   /** Se llama tras marcar el hogar como configurado: App recarga instalación y ledger. */
   onFinished: () => void;
   /** Cierra sin marcar nada. El asistente volverá a salir en la próxima carga. */
@@ -66,8 +97,19 @@ export function OnboardingWizard({
       : browserTimeZone(),
   );
 
-  const [inflation, setInflation] = useState("2,5");
-  const [swrPct, setSwrPct] = useState("3,5");
+  // U8: el paso «Tu plan» ya no pregunta inflación ni SWR — se quedan en su default (2,5 % / 3,5 %)
+  // y se cambian luego desde Ajustes → Plan / Jubilación. Lo que pide es lo esencial para tener un
+  // plan: fecha de nacimiento, estrategia y los campos que esa estrategia exige (`onboarding-plan.ts`).
+  const [planState, setPlanState] = useState<OnboardingPlanState>(() => ({
+    ...emptyOnboardingPlanState(),
+    birthDate: userBirthDate ?? "",
+  }));
+  const planEssentials = onboardingPlanFields(planState.strategy);
+  const planIssues = validateOnboardingPlan(planState);
+  const planIssueFor = (field: OnboardingPlanFieldKey): string | null =>
+    planIssues.find((i) => i.field === field)?.message ?? null;
+  const planLabelFor = (id: (typeof planEssentials)[number]["id"]): string =>
+    planEssentials.find((f) => f.id === id)?.label ?? "";
 
   const [assetCategoryId, setAssetCategoryId] = useState(assetCategories[0]?.id ?? "");
   const [assetName, setAssetName] = useState("");
@@ -104,14 +146,11 @@ export function OnboardingWizard({
 
   const savePlan = () =>
     run(async () => {
-      const fire: FireSettingsApi = {
-        ...(installation.fire_settings as FireSettingsApi),
-        swr_pct: toApiDecimalString(swrPct),
-      };
-      await apiPatch("/v1/installation", {
-        annual_inflation_assumption_percent: toApiDecimalString(inflation),
-        fire_settings: fire,
-      });
+      // Un único PATCH mínimo (S12): fecha de nacimiento + estrategia + solo los esenciales que
+      // esa estrategia exige (`buildOnboardingPlanPatch`). El SWR, la inflación, la regla de
+      // retirada y el resto de supuestos se quedan en su default — se afinan luego desde
+      // Ajustes → Plan / Jubilación, no aquí.
+      await onSaveRetirementProfile(buildOnboardingPlanPatch(planState));
     }, 3);
 
   const saveFirstAsset = () =>
@@ -193,42 +232,151 @@ export function OnboardingWizard({
         {step === 2 ? (
           <section>
             <p>
-              FutureFin proyecta tu patrimonio a futuro y calcula cuándo podrías dejar de depender
-              de tu sueldo. Para eso necesita dos supuestos. Los dos se cambian cuando quieras.
+              Con tu fecha de nacimiento y cómo quieres jubilarte, FutureFin ya puede calcular tu
+              plan. Todo lo demás —tasa de retirada, regla de retirada, pensión indexada…— se
+              afina luego desde Jubilación; aquí basta con lo esencial.
             </p>
             <label className="field">
-              <span>Inflación anual estimada (%)</span>
+              <span>
+                Fecha de nacimiento
+                {strategyNeedsBirthDate(planState.strategy) ? "" : " (opcional)"}
+              </span>
               <input
-                value={inflation}
-                onChange={(e) => setInflation(e.target.value)}
-                inputMode="decimal"
-                placeholder="2,5"
-                autoComplete="off"
+                type="date"
+                value={planState.birthDate}
+                onChange={(e) =>
+                  setPlanState((s) => ({ ...s, birthDate: e.target.value }))
+                }
               />
               <small className="muted">
-                Hace que tu objetivo crezca con el tiempo, para que refleje lo que costará vivir
-                entonces y no lo que cuesta hoy. Con 0 el objetivo se queda plano.
+                {planIssueFor("birthDate") ??
+                  (strategyNeedsBirthDate(planState.strategy)
+                    ? "Esta estrategia se dispara por edad: sin fecha de nacimiento no se puede simular tal y como la has elegido."
+                    : "Se usa para mostrar tu edad en vez del mes en Jubilación. Puedes añadirla más tarde desde «Tu cuenta».")}
               </small>
             </label>
-            <label className="field">
-              <span>Tasa de retirada segura (%)</span>
-              <input
-                value={swrPct}
-                onChange={(e) => setSwrPct(e.target.value)}
-                inputMode="decimal"
-                placeholder="3,5"
-                autoComplete="off"
-              />
-              <small className="muted">
-                Qué porcentaje de tu patrimonio podrías gastar al año sin agotarlo. 3,5 % es un
-                punto de partida prudente.
-              </small>
-            </label>
+
+            <div
+              className="retirement-mode-grid retirement-strategy-grid"
+              role="radiogroup"
+              aria-label="Estrategia de jubilación"
+            >
+              {RETIREMENT_STRATEGIES.map((s) => (
+                <label
+                  key={s}
+                  className={`retirement-mode-card ${planState.strategy === s ? "is-active" : ""}`}
+                >
+                  <input
+                    type="radio"
+                    name="onboarding_retirement_strategy"
+                    className="sr-only"
+                    checked={planState.strategy === s}
+                    onChange={() => setPlanState((prev) => ({ ...prev, strategy: s }))}
+                  />
+                  <span className="retirement-mode-name">{RETIREMENT_STRATEGY_LABEL[s]}</span>
+                  <span className="retirement-mode-sub">{RETIREMENT_STRATEGY_BLURB[s]}</span>
+                </label>
+              ))}
+            </div>
+
+            {planState.strategy === "retire_at_age" || planState.strategy === "coast" ? (
+              <label className="field">
+                <span>{planLabelFor("target_retirement_age")}</span>
+                <input
+                  inputMode="numeric"
+                  value={planState.targetRetirementAge}
+                  placeholder="p. ej. 60"
+                  autoComplete="off"
+                  onChange={(e) =>
+                    setPlanState((s) => ({ ...s, targetRetirementAge: e.target.value }))
+                  }
+                />
+                {planIssueFor("targetRetirementAge") ? (
+                  <small className="muted">{planIssueFor("targetRetirementAge")}</small>
+                ) : null}
+              </label>
+            ) : null}
+
+            {planState.strategy === "partial" ? (
+              <div className="field-row">
+                <label className="field">
+                  <span>{planLabelFor("partial_start_age")}</span>
+                  <input
+                    inputMode="numeric"
+                    value={planState.partialStartAge}
+                    placeholder="p. ej. 55"
+                    autoComplete="off"
+                    onChange={(e) =>
+                      setPlanState((s) => ({ ...s, partialStartAge: e.target.value }))
+                    }
+                  />
+                  {planIssueFor("partialStartAge") ? (
+                    <small className="muted">{planIssueFor("partialStartAge")}</small>
+                  ) : null}
+                </label>
+                <label className="field">
+                  <span>{planLabelFor("partial_income")}</span>
+                  <input
+                    inputMode="decimal"
+                    value={planState.partialIncome}
+                    placeholder="p. ej. 800"
+                    autoComplete="off"
+                    onChange={(e) =>
+                      setPlanState((s) => ({ ...s, partialIncome: e.target.value }))
+                    }
+                  />
+                  {planIssueFor("partialIncome") ? (
+                    <small className="muted">{planIssueFor("partialIncome")}</small>
+                  ) : null}
+                </label>
+              </div>
+            ) : null}
+
+            {planState.strategy === "pension_bridge" ? (
+              <div className="field-row">
+                <label className="field">
+                  <span>{planLabelFor("pension_amount")}</span>
+                  <input
+                    inputMode="decimal"
+                    value={planState.pensionAmount}
+                    placeholder="p. ej. 1200"
+                    autoComplete="off"
+                    onChange={(e) =>
+                      setPlanState((s) => ({ ...s, pensionAmount: e.target.value }))
+                    }
+                  />
+                  {planIssueFor("pensionAmount") ? (
+                    <small className="muted">{planIssueFor("pensionAmount")}</small>
+                  ) : null}
+                </label>
+                <label className="field">
+                  <span>{planLabelFor("pension_start_age")}</span>
+                  <input
+                    inputMode="numeric"
+                    value={planState.pensionStartAge}
+                    placeholder="p. ej. 67"
+                    autoComplete="off"
+                    onChange={(e) =>
+                      setPlanState((s) => ({ ...s, pensionStartAge: e.target.value }))
+                    }
+                  />
+                  {planIssueFor("pensionStartAge") ? (
+                    <small className="muted">{planIssueFor("pensionStartAge")}</small>
+                  ) : null}
+                </label>
+              </div>
+            ) : null}
+
             <div className="asset-form-actions">
               <button type="button" className="btn ghost" onClick={() => setStep(1)} disabled={busy}>
                 Atrás
               </button>
-              <button type="button" className="btn primary" onClick={() => void savePlan()} disabled={busy}>
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => void savePlan()}
+                disabled={busy || planIssues.length > 0}
+              >
                 Continuar
               </button>
             </div>
@@ -317,10 +465,15 @@ export function OnboardingWizard({
                 tu banco.
               </li>
               <li>
-                <strong>Jubilación</strong> y <strong>Proyección</strong>: cuándo llegas a tu
-                objetivo con los datos de arriba.
+                <strong>Proyección</strong>: cómo evoluciona tu patrimonio con los datos de
+                arriba.
               </li>
             </ul>
+            <p>
+              Tu plan vive en Jubilación: <strong>{RETIREMENT_STRATEGY_LABEL[planState.strategy]}</strong>.
+              Cambia la estrategia, la tasa de retirada o cualquier otro supuesto cuando quieras
+              desde ahí.
+            </p>
             <p className="muted">
               Tu hogar ya tiene un juego de categorías para empezar. Cámbialas, bórralas o añade
               las tuyas en Ajustes → Categorías.

@@ -28,6 +28,16 @@
   --ff-pos: oklch(0.50 0.14 165);
   --ff-neg: oklch(0.55 0.18 25);
 
+  /* Ámbar de ESTADO (5.0.0, D28; corte fijado por V7): el peldaño intermedio del semáforo
+     «Éxito del plan» — verde SOLO al 100 %, ámbar hasta el 90 %, rojo el resto. Existe porque el
+     estado tiene TRES valores y con dos tokens el intermedio se pintaba de rojo (alarma
+     donde no la hay) o de nada (indistinguible de «bien»). Mismo croma y misma luminancia
+     que `--ff-neg` en cada rama, hue 75: es su hermano en la escala de estado, no un
+     acento nuevo. Restricción idéntica a pos/neg: nunca decora, solo marca estado. Desde V5
+     tiene un segundo consumidor con la MISMA escala: el degradado de la banda de riesgo
+     (`lib/risk-gradient.ts`), que mezcla pos→warn→neg por probabilidad de agotar el capital. */
+  --ff-warn: oklch(0.60 0.14 75);
+
   /* ---------- Radii ---------- */
   --ff-radius-frame: 12px;
   --ff-radius-panel: 14px;
@@ -82,6 +92,15 @@
   --proj-meta: #404040;
   --proj-axis: #737373;
   --proj-milestone: #a3a3a3;
+
+  /* Series auxiliares del plan (5.0.0, D29): «capital necesario» y «si dejas de
+     aportar en el mes coast». Familia del ACENTO —son lo que el plan exige, igual
+     que el objetivo FIRE— y se separan entre sí por luminancia (mezcla distinta con
+     la tinta de la curva de patrimonio) y por patrón de guion, nunca por hue nuevo.
+     Derivadas con `color-mix` de dos tokens que ya tienen rama clara y oscura, así
+     que se redefinen igual en las dos: el mismo texto resuelve distinto. */
+  --proj-required: color-mix(in oklch, var(--ff-accent) 80%, var(--proj-nw));
+  --proj-coast: color-mix(in oklch, var(--ff-accent) 45%, var(--proj-nw));
 
   /* Perspectiva histórica (pasado): línea NW histórica, fondo de la región
      pasada, divisor «Hoy» y marcadores de snapshot. */
@@ -141,6 +160,7 @@
 
   --ff-pos: oklch(0.78 0.12 165);
   --ff-neg: oklch(0.78 0.15 25);
+  --ff-warn: oklch(0.80 0.13 75);
 
   --ff-shadow-elev:
     0 4px 6px -1px rgba(0, 0, 0, 0.4),
@@ -162,6 +182,15 @@
   --proj-meta: #d4d4d8;
   --proj-axis: #a1a1aa;
   --proj-milestone: #525252;
+
+  /* Series auxiliares del plan (5.0.0, D29): «capital necesario» y «si dejas de
+     aportar en el mes coast». Familia del ACENTO —son lo que el plan exige, igual
+     que el objetivo FIRE— y se separan entre sí por luminancia (mezcla distinta con
+     la tinta de la curva de patrimonio) y por patrón de guion, nunca por hue nuevo.
+     Derivadas con `color-mix` de dos tokens que ya tienen rama clara y oscura, así
+     que se redefinen igual en las dos: el mismo texto resuelve distinto. */
+  --proj-required: color-mix(in oklch, var(--ff-accent) 80%, var(--proj-nw));
+  --proj-coast: color-mix(in oklch, var(--ff-accent) 45%, var(--proj-nw));
 
   /* Perspectiva histórica (pasado) — aclarada para conservar contraste
      sobre el fondo zinc-900. */

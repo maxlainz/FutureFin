@@ -211,8 +211,13 @@ async fn a_new_rule_is_inserted_before_the_sink() {
 // El reorder en household: la guardia que no miraba nada
 // ---------------------------------------------------------------------------
 
+/// **5.0.0**: el `reorder` ya no acepta la vista household (D21 — renumeraba las cascadas de
+/// TODOS los miembros de una vez), así que la guardia se comprueba en `?view=mine`, que es donde
+/// vive ahora. La propiedad no cambia: un orden que deja el sumidero fuera del último puesto se
+/// rechaza con `sink_must_be_last` y **la transacción entera se revierte**. Lo que este test
+/// añade ahora es la puerta nueva: `household` se rechaza antes, con `household_read_only`.
 #[tokio::test]
-async fn reorder_in_household_view_still_refuses_to_unseat_the_sink() {
+async fn reorder_refuses_to_unseat_the_sink_and_is_per_member() {
     let app = TestApp::spawn().await;
     let (owner, _a1, a2) = setup(&app).await;
 
@@ -229,11 +234,22 @@ async fn reorder_in_household_view_still_refuses_to_unseat_the_sink() {
         .unwrap()
         .to_string();
 
-    // Orden ilegal: el sumidero delante. Sin `?view=mine`, o sea la vista household — la que hasta
-    // 4.4.0 no comprobaba nada.
+    // La vista household ya no reordena: se rechaza antes de mirar el orden. Va EXPLÍCITA
+    // desde 5.0.0 (R2) — omitir `?view` ahora es `mine`, que sí reordena.
+    let household = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules/reorder?view=household",
+            serde_json::json!({"ids": [normal_id, sink_id]}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(household.status, http::StatusCode::BAD_REQUEST, "{household:?}");
+    assert_eq!(household.json()["code"], "household_read_only");
+
+    // Orden ilegal en `mine`: el sumidero delante.
     let bad = app
         .post_json_with_cookie(
-            "/v1/allocation-rules/reorder",
+            "/v1/allocation-rules/reorder?view=mine",
             serde_json::json!({"ids": [sink_id, normal_id]}),
             &owner.cookie,
         )
@@ -248,7 +264,7 @@ async fn reorder_in_household_view_still_refuses_to_unseat_the_sink() {
     // El orden legal sí pasa.
     let ok = app
         .post_json_with_cookie(
-            "/v1/allocation-rules/reorder",
+            "/v1/allocation-rules/reorder?view=mine",
             serde_json::json!({"ids": [normal_id, sink_id]}),
             &owner.cookie,
         )
@@ -265,10 +281,10 @@ async fn creating_and_deleting_a_rule_invalidates_the_projection_cache() {
     let app = TestApp::spawn().await;
     let (owner, a1, a2) = setup(&app).await;
     let iid: Uuid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
     app.settle_login_warmup(iid).await;
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     // #150: "Fondo" (a1) ya tiene el sumidero sembrado (remainder sin tope) desde `setup()`; un
     // segundo remainder chocaría con `uncapped_remainder_exists`. Usamos un `fixed` — lo que este
     // bloque prueba es que CREAR invalida la caché, no de qué kind es la regla.
@@ -289,7 +305,7 @@ async fn creating_and_deleting_a_rule_invalidates_the_projection_cache() {
     .await;
     let extra_id = extra.json()["id"].as_str().unwrap().to_string();
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let del = app
         .delete_with_cookie(&format!("/v1/allocation-rules/{extra_id}"), &owner.cookie)
         .await;

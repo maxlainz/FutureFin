@@ -1,0 +1,282 @@
+{
+  "_doc": "Pin ADITIVO de las salidas nuevas del motor 5.0.0 (WP1b, seccion B.8 del plan de la issue #207): SHA-256 del texto canonico de retirement_month_index, liquid_crossing_month_index, pension_start_month_index, partial_retirement_month_index, phase_transitions y las tres series withdrawal / withdrawal_shortfall / withdrawal_excess mes a mes con el Decimal completo via Display, mas el recuento de warnings. Cubre los casos de PROYECCION de tests/common/cases.rs (los L* son calendarios de amortizacion y no tienen fases). Vive APARTE de pins-4.15.json a proposito: aquel demuestra que las salidas de 4.15.0 no se movieron y dejaria de poder demostrarlo si creciera con cada lectura nueva. GENERADO: no editar a mano. Regenerar SOLO si el cambio es intencionado: UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG (futurefin-change-control). Cubre projection_cases_all() (los casos de 4.15.0) MAS projection_cases_5_0() (P14-P17: el techo numerico de la issue #209 y las tres reglas de retirada nuevas; P18-P23: pension con fecha, objetivo puente, media jornada, cruce como lectura, techo de aportacion y pausa de ingresos; P24-P25: los dos reproductores minimos de bit-identidad con 4.15.0 del pase de correcciones — la ESCALA del descubierto en la via mixta y la AGRUPACION del servicio de deuda). En los casos con fixed_real withdrawal_shortfall y withdrawal_excess son cero por construccion — el permitido ES la necesidad — y ahi es donde este pin demuestra que WP2 no movio la semantica de 4.15.0. WP3 AMPLIO la canonicalizacion con bridge_effective_withdrawal_pct, pension_coverage_ratio, partial_gap_target, partial_phase_capital_growing y la serie disposable_cash mes a mes: por eso el sha256 de los 17 casos anteriores cambio SIN que cambiara ningun numero suyo, y quien lo demuestra es el test the_5_0_canonicalization_grew_without_moving_the_old_fields (rehashea la capa vieja sola contra los SHA-256 de antes de WP3).",
+  "engine_version": "5.0.0",
+  "hash_algo": "sha256 over the canonical text described in golden_pins.rs",
+  "cases": {
+    "P1_deficit_cronico": {
+      "sha256": "d7f9289845d984344dd9d2bebab13c72783a00c7b2428996bce5c28b5f3765f7",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "30000",
+      "phases": "accumulating@0",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P2_fire_mes0": {
+      "sha256": "0dd480159b457d579006db999d351a9c23dada92db5b9c943dd140e009150972",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": 1,
+      "withdrawal_total": "48000",
+      "phases": "accumulating@0|retired@1",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P3_superavit_jubilacion": {
+      "sha256": "f78abc3cf3b73f1f2a3f102ee2ec57ce416d871d511eb87f1ce099b06f088052",
+      "retirement_month_index": 22,
+      "liquid_crossing_month_index": 22,
+      "withdrawal_total": "0",
+      "phases": "accumulating@0|retired@22",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P4_ret_menos100": {
+      "sha256": "7f58b831a52a7013b056e3f0fa1842ea8d6089b6b638986ddb57bc1480adc05a",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "0",
+      "phases": "accumulating@0",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P5_flat_nominal_30y": {
+      "sha256": "b97742a75dea17830d79e6e0155b828b75cfc0e0fb71bddbd280b06296c3df3d",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "0",
+      "phases": "accumulating@0",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P6_venc_saldo_vivo_proj": {
+      "sha256": "169814a95c65e7820d84e9610f4edf355bd005175de21a27e140c430b6d3e24f",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "0",
+      "phases": "accumulating@0",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P13_cash8k_denormal_g": {
+      "sha256": "15dc6a4dcd7f8a1ed08d105354b9ec817b645a1a76a8cbd835a0f432f0527032",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "1897961.6517787380958402623068",
+      "phases": "accumulating@0",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P7_jubilado_pension_impuestos": {
+      "sha256": "70baa92ce7fc5937040eaab0d2eaa3622396d27292086c6aa9fb62cc1cb9718a",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": 1,
+      "withdrawal_total": "777684.29263120468941668899783",
+      "phases": "accumulating@0|retired@1",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P8_drenaje_g_mixta": {
+      "sha256": "1fde3446fea8c1c8f02a063d5af3c7b4c94a455c767381bbbcfbd58e893e0b04",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "42759.056176843132995569259128",
+      "phases": "accumulating@0",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P9_hogar_realista": {
+      "sha256": "d2252b5e076d40943b18a1df1d600ad28faa4b5bf6d413eee3c96d5361ce7069",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "2622169.3627191690891580998079",
+      "phases": "accumulating@0",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P10_jubilacion_forzada": {
+      "sha256": "5fe9c093152b7ba983ce263ad53e1ab338be18461b7e72137494976e120e5b13",
+      "retirement_month_index": 37,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "105407.39701715813061378924819",
+      "phases": "accumulating@0|retired@37",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P11_deflacion_negativa": {
+      "sha256": "1156a6ca749100d0bbfed93cd8d3c4c54e51807129178987f2c77bb88cc74cc1",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": 1,
+      "withdrawal_total": "15901.262000256247482304287519",
+      "phases": "accumulating@0|retired@1",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P12_topes_de_cascada": {
+      "sha256": "a8ebf017d7bbab758cf06f3f1316a8c1521a1b532a0afa229e56f37f710b5292",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "0",
+      "phases": "accumulating@0",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P14_techo_numeric": {
+      "sha256": "fff9ec77591de94aac3205fd324d829e8bdb4d4d277b6e6c27c91b65d4ee8de9",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "840000",
+      "phases": "accumulating@0",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P15_percent_of_balance_ceiling": {
+      "sha256": "5f7d7f646bb2b82241fa6b8aa11136d4e0cd6a91bf961c7ee76aed337801dc22",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "518684.06099389898756237092108",
+      "phases": "accumulating@0|retired@1",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P16_hybrid_rule_is_spend": {
+      "sha256": "cbfe6a42023d751a65eea1720ade82086cb094c368c289bc199e4d6b94b87841",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "733393.33558285015878468468257",
+      "phases": "accumulating@0|retired@1",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P17_guardrails_taxes_es": {
+      "sha256": "1dae8d82171675fde5e1b20211d009cce388ec7c852f98acfeabc2dcd1a0f105",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "986541.8052190908357567812119",
+      "phases": "accumulating@0|retired@1",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P18_pension_bridge": {
+      "sha256": "1d63b8ed2f1c0b13225626ce47175fe02301dc2186bfd706447926931d9e6a22",
+      "retirement_month_index": 145,
+      "liquid_crossing_month_index": 145,
+      "withdrawal_total": "613403.05546143882966999238845",
+      "phases": "accumulating@0|retired@145",
+      "pension_start_month_index": 241,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P19_pension_perpetuity_covering": {
+      "sha256": "407d31fcbc07707e24d445876dc6a61b764e958afef492184f877cc5190685f1",
+      "retirement_month_index": 121,
+      "liquid_crossing_month_index": 121,
+      "withdrawal_total": "18626.521870551609228683812408",
+      "phases": "accumulating@0|retired@121",
+      "pension_start_month_index": 121,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P20_partial_media_jornada": {
+      "sha256": "88fb8dc569882fbb124b18148c9887722ace1249e53d53d51f0a811a6585ed85",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "118996.70044104667815050055780",
+      "phases": "accumulating@0|partial@60",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": 60,
+      "disposable_cash_total": "0",
+      "warnings": "partial_phase_capital_shrinking"
+    },
+    "P21_retire_at_age_reading_only": {
+      "sha256": "b460bfac4a3023755221e41a025b05980ab34f2c7465ddf9e1d5af3e9739507c",
+      "retirement_month_index": 120,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "899709.1336268368079013420407",
+      "phases": "accumulating@0|retired@120",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": "retire_at_age_underfunded"
+    },
+    "P22_solve_required_contribution": {
+      "sha256": "a47d8cff26d1eaf2b17739055c545e9cde11ec762347d03589cebf78cb89664d",
+      "retirement_month_index": 101,
+      "liquid_crossing_month_index": 101,
+      "withdrawal_total": "60000",
+      "phases": "accumulating@0|retired@101",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "100000",
+      "warnings": ""
+    },
+    "P23_income_pause": {
+      "sha256": "6aa57c4f791bbe75cffe5ec815ce8304abd0d5ad486aec30d8795959e82286f1",
+      "retirement_month_index": 12,
+      "liquid_crossing_month_index": 12,
+      "withdrawal_total": "14000",
+      "phases": "accumulating@0|retired@12",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P24_undrained_scale": {
+      "sha256": "a99e852c2c35300a79c56a1d577134b8d0a94ead118d7ff01901defebb0e9bfd",
+      "retirement_month_index": 1,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "28417.03",
+      "phases": "accumulating@0|retired@1",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    },
+    "P25_debt_service_assoc": {
+      "sha256": "b529c3adec62f49d74e8173352cedb1ed426f2336575bf4785d9a30687c2d575",
+      "retirement_month_index": null,
+      "liquid_crossing_month_index": null,
+      "withdrawal_total": "73127.942952792669262196908588",
+      "phases": "accumulating@0",
+      "pension_start_month_index": null,
+      "partial_retirement_month_index": null,
+      "disposable_cash_total": "0",
+      "warnings": ""
+    }
+  }
+}

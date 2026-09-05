@@ -15,7 +15,19 @@ description: >
 
 # FutureFin Change Control
 
-How changes are classified, gated and reviewed in this repo. Counts refreshed **2026-09-02 (4.15.0,
+How changes are classified, gated and reviewed in this repo.
+
+**Counts refreshed 2026-09-03 (5.0.0, rama `release/5.0.0`, issue #207) — recuéntalos, no los
+copies**: `ls apps/api/migrations | wc -l` → **59** (tres nuevas: `20260902200000_users_retirement_profile`,
+`20260902200100_ledger_owner_not_null` —**DATA-CHANGING firmada, D14**— y
+`20260902200200_assets_annual_volatility`); `ls apps/api/tests/*.rs | wc -l` → **77**;
+`grep -c '#\[tool(' apps/api/src/mcp/server.rs` → **71** con el presupuesto de descripciones en
+**23 793 / 24 000** (`python3 -c "import json;d=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'));L=[t['description_len'] for t in d['tools']];print(len(L),sum(L),max(L))"`);
+`.ffbackup` **schema_version 13**; **cuatro** crates en el workspace (nuevo
+`crates/engine-stochastic`) y **dos** ficheros golden en `crates/engine/tests/fixtures/`. Es una
+**major**: la lista de breaking va en §5.1.
+
+Counts anteriores refreshed **2026-09-02 (4.15.0,
 rama `feat/4.15.0-inversion-devoluciones-categoria`)**: **56** migraciones (la 56ª,
 `20260902120000_categories_fallback_and_transaction_category_required`, es DATA-CHANGING firmada:
 rellena los ingresos/gastos sin categoría con la categoría por defecto de su scope y añade los CHECK), **70**
@@ -113,7 +125,8 @@ version/CHANGELOG gates for this release are satisfied.
 
 Vocabulary (defined once): **installation** = the singleton row all financial data belongs to
 (one per deployment). **scope / view** = `?view=mine` filters ledger queries by
-`owner_user_id = current_user`; default `household` is the full installation. **FIRE target /
+`owner_user_id = current_user` **and is the DEFAULT since 5.0.0**; `household` (the full
+installation) has to be asked for explicitly, and any other literal is a 400 `invalid_view`. **FIRE target /
 gross-up / SWR** = the retirement net-worth target: annual net need is grossed-up through
 capital-gains tax brackets, then divided by the Safe Withdrawal Rate — see
 `.claude/skills/futurefin-fire-domain-reference/SKILL.md`. **nominal vs real** = the engine
@@ -139,7 +152,7 @@ locally FIRST — the feedback loop is minutes shorter and CI is not a debugger.
 
 | Class | Examples | Mandatory gates |
 |---|---|---|
-| **Engine math** | `crates/engine/src/projection.rs`, FIRE target, cascade, retirement drain, inflation | `cargo test -p futurefin-engine`; integration tests (esp. `projection_marker.rs`, `fire_parity.rs`, `projection_cache.rs`); if tax brackets / gross-up / target formula changed → regenerate `apps/api/tests/fixtures/fire-parity.json` expected values and BOTH suites green (Section 2.5); update `.claude/engine.md`; CHANGELOG entry with before/after numeric example. Errors here are **silent** (plausible-but-wrong numbers) — this is the owner's stated hardest problem; show worked numbers as review evidence, not just green tests. |
+| **Engine math** | `crates/engine/src/*`, FIRE target, cascade, retirement drain, inflation, fases, reglas de retirada, solves | `cargo test -p futurefin-engine` **incluido `--test golden_pins`** (§2.9a: `pins-4.15.json` NO se regenera) y, si tocas el bucle o `MoneyOps`, `cargo test -p futurefin-engine-stochastic --test degeneration` (§2.9b); integration tests (esp. `projection_marker.rs`, `fire_parity.rs`, `projection_cache.rs`); if tax brackets / gross-up / target formula changed → regenerate `apps/api/tests/fixtures/fire-parity.json` expected values and BOTH suites green (Section 2.5); update `.claude/engine.md`; CHANGELOG entry with before/after numeric example. Errors here are **silent** (plausible-but-wrong numbers) — this is the owner's stated hardest problem; show worked numbers as review evidence, not just green tests. |
 | **API contract** | Handler request/response fields, status codes, routes, MCP tools | Breaking-change policy check (Section 5); update `#[utoipa::path]` annotations (OpenAPI is generated); update `.claude/api-routes.md`; **MCP parity evaluation** (`.claude/skills/futurefin-mcp-parity/SKILL.md` §1 — the change must end in tool added/updated, deliberate omission recorded in that skill's register, or n/a; never silent); integration tests covering the new/changed shape (for a tool: the mcp_write quartet + frozen catalog); CHANGELOG (with a "breaking" note if applicable). |
 | **DB migration** | New file in `apps/api/migrations/` | Section 3 in full (never edit shipped; data-loss sign-off; grep for query drift); integration tests — every test applies ALL migrations to a fresh schema, so a broken migration fails everything; update `.claude/data-model.md`; if exported tables change shape → check `apps/api/src/handlers/backup_user/` (Section 5) and the export SQL. |
 | **UI-visual** | Anything in `apps/web/src/` that renders | `npm run typecheck:web && npm run lint:web && npm run build:web && npm test --workspace futurefin-web`; verify **light AND dark theme** before merging (owner-mandated); tokens only, no hex (Section 2.4); icons only in `components/icons.tsx`; small charts via `MiniProjection`; update `.claude/design-system.md` / `.claude/frontend-structure.md` if conventions moved; CHANGELOG. |
@@ -193,7 +206,7 @@ GATE: `./scripts/scan-sensitive.sh` (CI job `secrets-scan`, blocking). Full rule
 recipe for building a fixture that still proves what it must:
 [`futurefin-data-hygiene`](../futurefin-data-hygiene/SKILL.md).
 
-### 2.1 Money is `Decimal`, never `f64` — with ONE deliberate wire exception
+### 2.1 Money is `Decimal`, never `f64` — with TWO deliberate exceptions (wire, and the stochastic crate)
 All monetary values in domain, engine, handlers and schema are `rust_decimal::Decimal`; the API
 serializes amounts as decimal **strings**; the frontend never parses them to float for
 arithmetic. RATIONALE: float rounding compounds over an ~840-month simulation and across tax
@@ -204,6 +217,16 @@ boundary documented in `.claude/api-routes.md`):** the large arrays in
 less JSON, ~5,000 fewer client parses; measured precision <1 € over 70 years). Scalars and KPIs
 (`starting_net_worth`, `jubilacion_target_net_worth`, milestones) stay Decimal-as-string. Do
 not extend the f64 exception to any scalar or any value used in arithmetic.
+
+**Segunda excepción (5.0.0): `crates/engine-stochastic`**, y es de otra naturaleza — la primera es
+de **publicación**, esta es de **cómputo**. El Monte Carlo evalúa el bucle del motor en `f64` porque
+500 caminos en `Decimal` serían seis segundos por petición. Se acepta bajo cuatro condiciones que un
+revisor debe comprobar (normativa completa en `futurefin-architecture-contract` D4): **(1)** de ese
+crate no sale ni un euro publicado — solo probabilidades y percentiles; **(2)** el freezer
+`crates_engine_src_has_no_f64_outside_comments` de `crates/engine` **no se toca ni gana excepciones**;
+**(3)** no hay un segundo bucle: el crate instancia el genérico (`MoneyOps`) con otro tipo; **(4)** la
+**puerta de degeneración** pasa. Un PR que introduzca `f64` en `crates/engine/src`, o que publique un
+euro salido del crate estocástico, se rechaza sin discusión.
 
 ### 2.2 Reads never mutate
 GET handlers must not write. Expired liabilities (`payment_end_date < today`) are **filtered**
@@ -294,6 +317,43 @@ D13/W8):
 Corollary for reviewers: a diff that touches any of these three files is Infra-release class even
 if it "only changes a comment" — re-run the `docker-stack` job.
 
+### 2.9 Los tres gates numéricos de 5.0.0: golden, degeneración y presupuesto de descripciones
+
+Tres redes que un PR puede poner en verde **borrándolas**, y por eso son no negociables.
+
+**a) El golden del motor — dos ficheros con reglas distintas.**
+`crates/engine/tests/fixtures/pins-4.15.json` canonicaliza a texto **todas** las salidas del motor
+(series, `per_asset_series`, `first_month_allocation` con su traza regla a regla, calendarios de
+amortización) y las resume en un SHA-256 por caso. Existe **para no moverse**: es la prueba de que
+el refactor de 5.0.0 —hoist, `PhasePlan`, trait genérico— es bit a bit el motor de 4.15.0 en los
+escenarios que ya existían.
+
+- **`pins-4.15.json` NO se regenera.** Si `UPDATE_ENGINE_PINS=1` cambia un hash, el motor cambió un
+  dígito en un escenario histórico: o es un bug, o es un cambio de números que hay que **declarar en
+  el CHANGELOG con su tabla antes/después** y firmar como tal. Regenerarlo «para que pase» es
+  exactamente el fallo que el fichero existe para impedir.
+- **`pins-5.0-outputs.json` sí crece, pero solo ADITIVAMENTE**: tiene su propia variable
+  (`UPDATE_ENGINE_PINS_5_0`) precisamente para que ampliar las salidas nuevas no obligue a tocar el
+  otro. Un caso nuevo en `projection_cases_all()` obliga a regenerar el de 4.15 — y eso es un aviso,
+  no un trámite: los casos nuevos van en `projection_cases_5_0()`.
+- Gate: `cargo test -p futurefin-engine --test golden_pins`. Los dos ficheros y su porqué viven en el
+  doc-comment de `crates/engine/tests/golden_pins.rs`.
+
+**b) La puerta de degeneración.** `cargo test -p futurefin-engine-stochastic --test degeneration`:
+para **todos** los casos de la batería (`cases.len() >= 23`, asertado) compara el camino `Decimal` y
+el `f64` mes a mes en todo el horizonte y en las cuatro decisiones discretas. **Cota de contrato:
+1 € por mes**; relativa `1e-12` solo por encima de 2⁵³ €, donde el espaciado de un `f64` ya supera el
+euro — y el caso se marca en la tabla impresa. **Ninguna cota se relaja porque falle**, y ningún caso
+se excluye. Corre sin base de datos y `./scripts/test-all.sh` lo ejecuta fuera del bloque de
+integración, para que lo vea también un `SKIP_DB=1`.
+
+**c) El presupuesto de descripciones MCP.** `tool_descriptions_stay_within_the_context_budget`
+(`apps/api/tests/mcp_http.rs`): `PER_TOOL_MAX = 600`, `TOTAL_BUDGET = 24 000`. **Cuando no cabe, se
+mueve prosa al `instructions` del servidor o a un campo de procedencia de la respuesta; NO se sube la
+constante** — el propio mensaje de fallo lo prescribe, y la constante no se ha tocado nunca. 5.0.0
+metió tres tools y pagó dentro: `71 / 23 793` con 207 caracteres de margen. Presupuesta el
+rebalanceo **al planificar** la siguiente tool, no al final.
+
 ## 3. Migration discipline
 
 Owner-confirmed rules, previously unwritten — now they ARE written:
@@ -311,6 +371,27 @@ Owner-confirmed rules, previously unwritten — now they ARE written:
    CHANGELOG documents the loss and the recovery path, and the backup `schema_version` was
    bumped to 3 with a migrate chain. If you cannot get sign-off in-session, do not merge —
    leave the migration on a branch with the CHANGELOG draft.
+3.b **Precedente firmado de 5.0.0 — el patrón de una DATA-CHANGING que NO pierde datos**:
+   `20260902200100_ledger_owner_not_null.sql` (decisión D14 del plan de #207). Asigna las filas
+   `owner_user_id IS NULL` de las **cinco** tablas del ledger al **owner más antiguo** de la
+   instalación —no hay unicidad de `owner`, así que «el owner» hay que definirlo— y deja la columna
+   `NOT NULL`, con la FK pasando de `ON DELETE SET NULL` a `ON DELETE RESTRICT`. Qué lo hace
+   firmable, y qué copiar de él:
+   - **No se pierde ni una fila**: se les asigna dueño, no se borran. Lo que cambia es **quién las
+     ve y quién puede editarlas**, y eso se declara en el CHANGELOG como consecuencia visible —
+     aparecen en el `mine` de ese miembro, entran en su histórico, y solo él puede tocarlas (D23).
+   - **La tabla con invariante entre filas se trata aparte**: en `allocation_rules` un sumidero
+     compartido redundante se borra y el resto se recoloca detrás de las reglas del owner
+     conservando su orden relativo. Un `UPDATE` a secas habría dejado dos sumideros en un scope,
+     que es una instalación rota.
+   - **El origen se acota en la propia nota**: son filas legadas de antes de 2026-02-16 o de imports
+     de backups muy viejos; ningún camino vivo de la API escribía `NULL` desde entonces. Una
+     DATA-CHANGING que no puede decir de dónde salen las filas que toca no está lista para firmarse.
+   - La hermana `20260902200000_users_retirement_profile.sql` es el otro patrón que conviene copiar:
+     **copia los cuatro ejes de `installation.fire_settings` al perfil de cada usuario ANTES de
+     retirarlos** del JSONB, así que el upgrade **no mueve un número**. Un movimiento de sitio sin
+     esa copia previa habría reseteado la jubilación de todo el mundo a los defaults.
+
 4. **Test against real-shaped data**, not an empty schema. Minimum: run the integration suite
    (each test applies all migrations to a fresh schema), then load realistic rows (import a
    `.ffbackup`, or seed via the API as `fire_parity.rs` does) and exercise the affected
@@ -488,7 +569,15 @@ No breaking change ships without a version bump + a CHANGELOG entry explicitly m
   documented even the removal of a consumer-less field (`fire_number_expense_adjustment_pct`)
   and the new strict 422 as the only non-bit-exact changes.
 - **`.ffbackup` schema**: any shape change to exported user data requires bumping
-  `CURRENT_SCHEMA_VERSION` in `apps/api/src/handlers/backup_user/schema.rs` (currently **8**: v4
+  `CURRENT_SCHEMA_VERSION` in `apps/api/src/handlers/backup_user/schema.rs` — **hoy 13**
+  (`grep -n 'CURRENT_SCHEMA_VERSION' apps/api/src/handlers/backup_user/schema.rs`; **el «8» que esta
+  línea decía llevaba cinco versiones caducado**). **v13 (5.0.0)** añade el perfil de jubilación del
+  usuario y la volatilidad por activo, y su migración de entrada tiene una regla propia que merece
+  copiarse: al importar un fichero **≤ 12**, los cuatro ejes que aquel `fire_settings` llevaba dentro
+  **siembran** el perfil — **pero solo si quien importa no tiene ya uno**. Restaurar un backup viejo
+  no puede pisar la estrategia que esa persona configuró después de actualizar. Un servidor 4.x no
+  puede leer un v13: se niega con `backup_schema_version_unsupported` en vez de importarlo a medias.
+  Historia de los saltos anteriores (currently was **8**: v4
   added `snapshots` via `payload_v3_to_v4` (v1.5.0), v5 added transactions/imports/rules (v1.6.0),
   v6 added `recurring_transaction_rules` + `BackupTransaction.recurring_rule_index` via
   `payload_v5_to_v6` (v1.8.0), v7 — the first NON-additive bump — dropped `day_of_month` from
@@ -505,6 +594,36 @@ No breaking change ships without a version bump + a CHANGELOG entry explicitly m
 
 Non-breaking by convention: additive optional response fields (e.g. `milestones_real` in
 v1.4.2, `fire_target_series` in v1.2.0), new endpoints, new optional request fields.
+
+### 5.1 Cuando el breaking es una MAJOR: la lista, y qué hay que poder contestar de cada fila
+
+Una major no es «se puede romper»: es «se puede romper **una vez, todo junto, y contado entero**».
+5.0.0 es el precedente y su §Breaking del CHANGELOG es la plantilla. Por **cada** fila hay que poder
+contestar cuatro preguntas antes de mergear, y si alguna no tiene respuesta, la fila no está lista:
+
+1. **¿Qué se rompe exactamente?** Campo, ruta, código de estado o convención — con nombre.
+2. **¿Cómo recupera un cliente de 4.x su conducta anterior?** Si la respuesta es «no puede», dilo;
+   si es «añade `?view=household`», dilo también, que es lo que convierte un breaking en un cambio
+   de una línea.
+3. **¿Se mueve algún NÚMERO?** Es la pregunta que más veces se olvida. Para 5.0.0 la respuesta
+   honesta es: **una instalación de un solo miembro no se mueve; un hogar de dos SÍ, por diseño**
+   (antes se simulaba una cartera conjunta con una sola estrategia; ahora son N planes que se suman).
+   Eso hay que decirlo en el CHANGELOG **antes de que nadie lo descubra en el chart**.
+4. **¿Qué pin se movió y por qué?** Un pin que se mueve sin entrada de CHANGELOG es un cambio de
+   números que nadie declaró (§2.9a). 5.0.0 movió uno solo y lo nombra: el escenario de #119 en
+   `projection_failure_states.rs`, mes 100 → 99, por el paso de `assets_depleted_month_index` a la
+   rejilla 0-based.
+
+Las ocho familias de breaking de 5.0.0, como índice de lo que una major suele tocar: **(a)** el
+default de un query param (`?view` → `mine`); **(b)** el significado de una vista (`household` pasa a
+agregado informativo, con `absent_reason`); **(c)** la convención de un índice
+(`assets_depleted_month_index` a 0-based); **(d)** el significado de un campo que no cambia de nombre
+(`jubilacion_month_index` pasa a ser el mes EFECTIVO; `jubilacion_target_net_worth` pasa a ser la
+base del objetivo del PLAN); **(e)** campos retirados y sustituidos (`fire_crossover_month` →
+`liquid_crossing_month_index`, ahora publicado por el motor); **(f)** claves que cambian de
+contenedor (los cuatro ejes de `fire_settings` → perfil por usuario); **(g)** una operación que
+empieza a devolver 403/400 donde antes devolvía 200 (D23 `not_row_owner`, `household_read_only`);
+**(h)** el `schema_version` del backup.
 
 ## 6. Pre-merge checklist (execute literally, from repo root)
 
@@ -619,6 +738,13 @@ trusting:
 - Publish trigger + registries: `cat .github/workflows/publish-image.yml`
 - Coherencia CHANGELOG/tags/Releases: `./scripts/audit-releases.sh` (**el 2026-08-29: 64 secciones, 51 tags, 13 sin tag, 0 tags sin Release, «Sin deriva bloqueante»**; eran 38 tags = 38 Releases y 12 secciones sin tag el 2026-08-21). Lo que el gate vigila es la lista de «Tags SIN sección en el CHANGELOG», que debe estar **vacía** — los totales son informativos y envejecen solos
 - Backup schema version + chain: `grep -n 'CURRENT_SCHEMA_VERSION\|migrate_to_current' apps/api/src/handlers/backup_user/schema.rs`
+  (**13** el 2026-09-03)
+- **Gates numéricos de §2.9** (los cuatro topes, en dos ficheros y en una línea):
+  `grep -nE 'const (EUR_TOLERANCE|REL_TOLERANCE|PER_TOOL_MAX|TOTAL_BUDGET)' crates/engine-stochastic/tests/degeneration.rs apps/api/tests/mcp_http.rs`
+  → `1.0` · `1e-12` · `600` · `24_000`. Y los dos ficheros golden: `ls crates/engine/tests/fixtures/`
+  (**pins-4.15.json** y **pins-5.0-outputs.json**; si aparece un tercero, §2.9a necesita una regla más)
+- Las dos variables de regeneración del golden, cada una con su fichero:
+  `grep -n 'UPDATE_ENGINE_PINS\b\|UPDATE_ENGINE_PINS_5_0' crates/engine/tests/golden_pins.rs`
 - Scope helpers exist: `grep -n 'pub fn scope_where\|bind_scope' apps/api/src/handlers/person_view.rs`
 - f64 wire exception boundary: `grep -n 'f64' .claude/api-routes.md`
 - Fixture + both consumers: `ls apps/api/tests/fixtures/fire-parity.json apps/api/tests/fire_parity.rs apps/web/src/lib/fire.test.ts`
@@ -629,7 +755,14 @@ trusting:
   resucitó el modelo de dos ramas
 - Una sola rama viva: `git ls-remote --heads origin | grep -c 'refs/heads/dev$'` debe dar **0**, y
   `ls scripts/release-to-main.sh` debe fallar
-- Workflows completos y su gate: `ls .github/workflows/` (**7** el 2026-08-29 — eran 6 el 2026-08-24; el séptimo es `routine-lock-janitor.yml`, que borra la rama `ops/routine-lock` al ver su punta `LIBERADO`) y `grep -n actionlint .github/workflows/ci.yml` (debe imprimir)
+- **Refrescada 2026-09-03 para 5.0.0** (issue #207, rama `release/5.0.0`): contadores de cabecera
+  (59 migraciones · 77 ficheros de test · 71 tools · `.ffbackup` 13 · cuatro crates), §1 (los gates
+  de «Engine math» incluyen el golden y la degeneración), §2.1 (segunda excepción `f64`),
+  **§2.9 nueva** (golden · degeneración · presupuesto de descripciones), §3 punto 3.b (el precedente
+  firmado D14 y el patrón «copiar antes de retirar»), §5 (`.ffbackup` **13**, no 8 — la línea
+  llevaba cinco versiones caducada) y **§5.1 nueva** (breaking en una major).
+- Workflows completos y su gate: `ls .github/workflows/` (**8** el 2026-09-03 — el octavo es
+  `dev-image.yml`, el canal `:dev` de 5.0.0; eran 7 el 2026-08-29 — eran 6 el 2026-08-24; el séptimo es `routine-lock-janitor.yml`, que borra la rama `ops/routine-lock` al ver su punta `LIBERADO`) y `grep -n actionlint .github/workflows/ci.yml` (debe imprimir)
 - Ramas protegidas y ajustes de seguridad de GitHub (viven fuera del repo, no en git):
   `gh api repos/maxlainz/FutureFin/rulesets --jq '.[].name'` (**Proteger main**) y
   `gh api repos/maxlainz/FutureFin --jq '.security_and_analysis'` (secret scanning + push

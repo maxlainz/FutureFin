@@ -3,12 +3,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  buildWithdrawalTooltipRows,
   deflationFactorAt,
   formatYearsEsFromMonths,
+  jubilacionTargetTileValue,
   lastPointIndexAtOrBeforeMonth,
   projectionMaxXTicks,
   projectionXTicks,
+  resolveDeflationAnnualPct,
   thinTicksFromEnd,
+  type JubilacionTargetTileSeries,
 } from "./projection-chart";
 
 describe("deflationFactorAt", () => {
@@ -226,5 +230,237 @@ describe("thinTicksFromEnd — diezmado de los ticks visibles", () => {
 
   it("cap < 1 se trata como 1: sobrevive solo el último", () => {
     expect(thinTicksFromEnd(years, 0)).toEqual([years[years.length - 1]]);
+  });
+});
+
+/**
+ * Filas de flujos de retirada del tooltip (5.0.0 §B.8 + pase de correcciones §F).
+ *
+ * Lo que estos tests fijan no es el formato: es que **«Recorte» y «No financiado» son cosas
+ * distintas y pueden estar las dos a la vez**. Hasta el pase el tooltip solo enseñaba el
+ * recorte de la REGLA, así que un mes en que la cartera no dio para pagar el gasto se veía
+ * idéntico a un mes normal — quedarse sin capital parecía un problema de configuración.
+ */
+describe("buildWithdrawalTooltipRows — flujos del mes jubilado", () => {
+  const point = {
+    month_index: 300,
+    withdrawal: 2000,
+    withdrawal_shortfall: 150,
+    unmet_need: 400,
+    withdrawal_excess: 0,
+  };
+
+  it("antes de la jubilación no pinta ninguna fila", () => {
+    expect(buildWithdrawalTooltipRows({ ...point, month_index: 299 }, 300, 1)).toEqual([]);
+    // Sin jubilación en el horizonte tampoco: no hay meses jubilados que describir.
+    expect(buildWithdrawalTooltipRows(point, null, 1)).toEqual([]);
+    expect(buildWithdrawalTooltipRows(point, undefined, 1)).toEqual([]);
+  });
+
+  it("«No financiado» va DESPUÉS de «Recorte» y no lo sustituye", () => {
+    const rows = buildWithdrawalTooltipRows(point, 300, 1);
+    expect(rows.map((r) => r.key)).toEqual(["withdrawal", "shortfall", "unmet"]);
+    expect(rows.map((r) => r.label)).toEqual([
+      "Retirada del mes",
+      "Recorte",
+      "No financiado",
+    ]);
+    expect(rows.find((r) => r.key === "unmet")!.amount).toBe(400);
+  });
+
+  it("un descubierto sin recorte se enseña igual (es la mitad que faltaba)", () => {
+    const rows = buildWithdrawalTooltipRows(
+      { month_index: 300, withdrawal: 1000, withdrawal_shortfall: 0, unmet_need: 900 },
+      300,
+      1,
+    );
+    expect(rows.map((r) => r.key)).toEqual(["withdrawal", "unmet"]);
+  });
+
+  it("un cero no se pinta: afirmaría que se midió un descubierto", () => {
+    const rows = buildWithdrawalTooltipRows(
+      { month_index: 300, withdrawal: 0, withdrawal_shortfall: 0, unmet_need: 0 },
+      300,
+      1,
+    );
+    // La retirada SÍ, aunque sea cero: ahí el cero es el dato (ese mes no vendiste nada).
+    expect(rows.map((r) => r.key)).toEqual(["withdrawal"]);
+  });
+
+  it("un backend sin `unmet_need` no pinta la fila (nunca un 0 tranquilizador)", () => {
+    const rows = buildWithdrawalTooltipRows(
+      { month_index: 300, withdrawal: 1000, withdrawal_shortfall: 200 },
+      300,
+      1,
+    );
+    expect(rows.map((r) => r.key)).toEqual(["withdrawal", "shortfall"]);
+  });
+
+  it("las cuatro filas comparten el MISMO deflactor del patrimonio de arriba", () => {
+    const f = deflationFactorAt(300, 2.5);
+    const rows = buildWithdrawalTooltipRows(
+      { ...point, withdrawal_excess: 90 },
+      300,
+      f,
+    );
+    expect(rows.map((r) => r.key)).toEqual([
+      "withdrawal",
+      "shortfall",
+      "unmet",
+      "excess",
+    ]);
+    for (const [key, nominal] of [
+      ["withdrawal", 2000],
+      ["shortfall", 150],
+      ["unmet", 400],
+      ["excess", 90],
+    ] as const) {
+      expect(rows.find((r) => r.key === key)!.amount).toBeCloseTo(nominal * f, 9);
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+/**
+ * F11 — el tile «Objetivo al jubilarte» de Proyección.
+ *
+ * Lo que este bloque impide que vuelva: el tile enseñaba `jubilacion_target_net_worth` (el
+ * objetivo evaluado en el MES 0, inmóvil por contrato) y por eso no se movía al activar «En
+ * dinero de hoy». Con el objetivo puente de 5.0.0 esa base dejó de ser un proxy del objetivo del
+ * mes en que de verdad te jubilas: en la demo son 1.609.855 € contra 696.563 €, un 2,31×. Un
+ * error de esta forma es SILENCIOSO — la cifra es plausible y nada falla.
+ *
+ * Y la base viaja pegada al importe: ningún consumidor puede re-derivarla mirando el toggle,
+ * porque «toggle activo con inflación 0» y «toggle apagado» dan el MISMO número con la MISMA
+ * base y solo el campo `basis` lo dice.
+ */
+describe("jubilacionTargetTileValue (tile «Objetivo al jubilarte», F11)", () => {
+  const series = (
+    over: Partial<JubilacionTargetTileSeries> = {},
+  ): JubilacionTargetTileSeries => ({
+    jubilacion_target_net_worth: "1609855.0000",
+    jubilacion_target_net_worth_nominal: "1148467.0000",
+    jubilacion_month_index: 243,
+    deflation_annual_inflation_percent: "2.5",
+    ...over,
+  });
+
+  it("con nominal, toggle activo y 2,5 % → nominal deflactado al mes del cruce, base «today»", () => {
+    const got = jubilacionTargetTileValue(series(), true, 0);
+    expect(got.basis).toBe("today");
+    expect(got.amount).toBeCloseTo(1148467 * deflationFactorAt(243, 2.5), 9);
+  });
+
+  it("toggle apagado → el nominal tal cual, base «nominal»", () => {
+    const got = jubilacionTargetTileValue(series(), false, 0);
+    expect(got.basis).toBe("nominal");
+    expect(got.amount).toBeCloseTo(1148467, 9);
+  });
+
+  // El caso que obliga a que la base viaje con el importe: mismo número que el de arriba, y sin
+  // el campo `basis` sería indistinguible de «deflactado».
+  it("toggle activo con inflación 0 → el nominal tal cual, base «nominal» (el 0 no deflacta)", () => {
+    const got = jubilacionTargetTileValue(
+      series({ deflation_annual_inflation_percent: "0" }),
+      true,
+      0,
+    );
+    expect(got.basis).toBe("nominal");
+    expect(got.amount).toBeCloseTo(1148467, 9);
+  });
+
+  it("sin nominal (no hay cruce) → fallback a la base de hoy, con el toggle en cualquier posición", () => {
+    for (const adjusted of [true, false]) {
+      const got = jubilacionTargetTileValue(
+        series({ jubilacion_target_net_worth_nominal: null }),
+        adjusted,
+        0,
+      );
+      expect(got.basis).toBe("today");
+      expect(got.amount).toBeCloseTo(1609855, 9);
+    }
+  });
+
+  // Sin mes no hay deflactor que aplicar: el fallback es la única cifra honesta, nunca el
+  // nominal rotulado como euros de hoy.
+  it("sin mes de jubilación → fallback a la base de hoy aunque haya nominal", () => {
+    const got = jubilacionTargetTileValue(
+      series({ jubilacion_month_index: null }),
+      true,
+      2.5,
+    );
+    expect(got.basis).toBe("today");
+    expect(got.amount).toBeCloseTo(1609855, 9);
+  });
+
+  it("las dos cifras ausentes → importe null (nunca 0) y base «today»", () => {
+    expect(
+      jubilacionTargetTileValue(
+        series({
+          jubilacion_target_net_worth: null,
+          jubilacion_target_net_worth_nominal: null,
+        }),
+        true,
+        2.5,
+      ),
+    ).toEqual({ amount: null, basis: "today" });
+    expect(jubilacionTargetTileValue(null, true, 2.5)).toEqual({
+      amount: null,
+      basis: "today",
+    });
+  });
+
+  it("sin `deflation_annual_inflation_percent` cae a la tasa de la instalación (backend < 4.6.0)", () => {
+    const got = jubilacionTargetTileValue(
+      series({ deflation_annual_inflation_percent: undefined }),
+      true,
+      3,
+    );
+    expect(got.basis).toBe("today");
+    expect(got.amount).toBeCloseTo(1148467 * deflationFactorAt(243, 3), 9);
+  });
+
+  // La tasa de la RESPUESTA gana a la de la instalación: son la misma cifra salvo cuando no lo
+  // son, y entonces la que dibujó el chart es la del servidor.
+  it("con las dos tasas, manda la de la respuesta", () => {
+    const got = jubilacionTargetTileValue(series(), true, 9);
+    expect(got.amount).toBeCloseTo(1148467 * deflationFactorAt(243, 2.5), 9);
+  });
+
+  /**
+   * PIN de la demo local (2026-09-05, usuario `demo`, estrategia `asap` con objetivo puente):
+   * objetivo nominal del mes 243 = 1.148.467 €, inflación 2,5 % → 696.563 € de hoy. El tile
+   * enseñaba 1.609.855 €. Tolerancia de 1 € porque el número medido está redondeado al euro.
+   */
+  it("PIN demo: 1.148.467 € nominales en el mes 243 al 2,5 % → ≈ 696.563 € de hoy", () => {
+    const got = jubilacionTargetTileValue(series(), true, 0);
+    expect(got.amount).not.toBeNull();
+    expect(Math.abs(got.amount! - 696563)).toBeLessThanOrEqual(1);
+    // Y el tile viejo enseñaba otra magnitud: 2,31× la correcta.
+    expect(1609855 / got.amount!).toBeCloseTo(2.31, 2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe("resolveDeflationAnnualPct", () => {
+  it("la tasa de la respuesta manda cuando es un número finito", () => {
+    expect(resolveDeflationAnnualPct("2.5", 9)).toBe(2.5);
+    expect(resolveDeflationAnnualPct("0", 9)).toBe(0);
+    expect(resolveDeflationAnnualPct("-1.25", 9)).toBe(-1.25);
+  });
+
+  it("sin campo (backend < 4.6.0) cae a la tasa de la instalación", () => {
+    expect(resolveDeflationAnnualPct(undefined, 3.1)).toBe(3.1);
+  });
+
+  it("un valor no numérico cae a la tasa de la instalación en vez de propagar NaN", () => {
+    expect(resolveDeflationAnnualPct("no-soy-un-numero", 3.1)).toBe(3.1);
+  });
+
+  // Fija el borde heredado del memo que esta función deduplica (`Number("") === 0`): la cadena
+  // vacía se lee como «0 %», no como «campo ausente». No es lo que el backend emite, pero es lo
+  // que el chart hacía y este extract NO cambia comportamiento.
+  it("la cadena vacía se lee como 0 (borde heredado del memo del chart)", () => {
+    expect(resolveDeflationAnnualPct("", 3.1)).toBe(0);
   });
 });

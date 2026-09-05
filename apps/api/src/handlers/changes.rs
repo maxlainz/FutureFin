@@ -94,6 +94,9 @@ pub struct RecentChange {
     pub change: &'static str,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Dueño de la fila. Desde 5.0.0 las OCHO tablas del feed lo tienen `NOT NULL` (D14), así
+    /// que el campo viaja siempre; el `Option` se conserva por compatibilidad del contrato ya
+    /// publicado. Es además quien puede editarla (D21).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, format = "uuid")]
     pub owner_user_id: Option<Uuid>,
@@ -165,7 +168,7 @@ fn parse_since(raw: Option<&str>) -> Result<DateTime<Utc>, ApiError> {
     path = "/v1/changes",
     tag = "changes",
     params(
-        ("view" = Option<String>, Query, description = "`mine` | household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
         ("since" = String, Query, description = "Obligatorio. RFC 3339 o YYYY-MM-DD."),
         ("limit" = Option<i64>, Query, description = "1..=500; por defecto 100."),
     ),

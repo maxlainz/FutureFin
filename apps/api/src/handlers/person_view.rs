@@ -1,6 +1,6 @@
-//! Optional query `view=mine` scopes ledger reads to rows attributed to the signed-in user.
-//! Omitting `view` (o `view=household`) means **household** (full installation); cualquier otro
-//! valor es un error — ver [`LedgerViewQuery::resolve`].
+//! Optional query `view` scopes ledger reads. **Desde 5.0.0 el default es `mine`** (R2): omitir
+//! `view` —o mandarlo vacío— filtra a las filas del usuario de la sesión; `household` hay que
+//! pedirlo EXPLÍCITAMENTE, y cualquier otro valor es un error — ver [`LedgerViewQuery::resolve`].
 
 use crate::error::ApiError;
 use serde::Deserialize;
@@ -8,6 +8,37 @@ use sqlx::postgres::PgArguments;
 use sqlx::query::{Query, QueryAs, QueryScalar};
 use sqlx::{Postgres, Type};
 use uuid::Uuid;
+
+/// **D21 (5.0.0)** — toda mutación del ledger exige que la fila sea del usuario de la sesión.
+///
+/// `?view` NUNCA fue una frontera de autorización (D2) y sigue sin serlo: es un filtro de
+/// LECTURA. Lo que cambia en 5.0.0 es la ESCRITURA. Con proyecciones independientes por miembro
+/// (D9) cada fila del ledger pertenece a la simulación de UNA persona, así que editar la de otro
+/// miembro no es «colaborar»: es mover su plan sin que se entere. El rol `owner` **tampoco**
+/// salta la regla — ser dueño de la instalación no es ser dueño de la fila.
+///
+/// Es 403 y no 404 a propósito: la fila existe, el hogar la ve en su listado (`view=household`)
+/// y ocultarla al editar produciría un «no existe» que el usuario puede desmentir en la pantalla
+/// de al lado. El 404 se reserva para lo que de verdad no está.
+pub fn not_row_owner() -> ApiError {
+    ApiError::ForbiddenWith(
+        "not_row_owner: this row belongs to another household member; only its owner can change it"
+            .into(),
+    )
+}
+
+/// Puerta de D21: compara el dueño de la fila con el usuario de la sesión.
+///
+/// Punto ÚNICO — los cinco módulos del ledger la llaman en vez de escribir el `if`, que es lo
+/// que evita que uno de ellos se quede atrás en la próxima refactorización (el patrón del
+/// dual-branch drift que ya mordió dos veces en el MCP).
+pub fn require_row_owner(row_owner: Uuid, session_user_id: Uuid) -> Result<(), ApiError> {
+    if row_owner == session_user_id {
+        Ok(())
+    } else {
+        Err(not_row_owner())
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct LedgerViewQuery {
@@ -22,8 +53,16 @@ pub enum LedgerView {
 }
 
 impl LedgerViewQuery {
-    /// `mine` → Mine; ausente, vacío o `household` → Household. **Cualquier otro valor es un
+    /// `household` → Household; ausente, vacío o `mine` → **Mine**. **Cualquier otro valor es un
     /// error**, no un household silencioso.
+    ///
+    /// **BREAKING 5.0.0 (R2): el default cambió de `household` a `mine`.** Con la jubilación
+    /// convertida en una estrategia POR USUARIO (D9/D13), la simulación por defecto es la del
+    /// solicitante: su perfil, su fecha de nacimiento, sus filas. Servir el hogar entero por
+    /// omisión mezclaba las filas de dos personas bajo el perfil de una sola —un patrimonio
+    /// plausible con la estrategia equivocada—, y `household` pasa a ser un AGREGADO explícito
+    /// de N simulaciones independientes (§D del plan de #207). Pedirlo sigue siendo una línea:
+    /// `?view=household`.
     ///
     /// Hasta 4.0.0 el brazo comodín se comía el valor desconocido y devolvía el hogar entero. Con
     /// la SPA como único cliente eso nunca se notó — nunca manda otra cosa que `mine` o nada —,
@@ -31,11 +70,12 @@ impl LedgerViewQuery {
     /// creyendo haber pedido solo los suyos, y respondería sobre ellos sin ninguna señal de que
     /// se le ignoró el filtro (auditoría MCP). No es una frontera de autorización — el mismo token
     /// podía pedir `household` a la cara (D2) —, pero sí una respuesta sobre otra población que
-    /// la pedida, que es peor que un error.
+    /// la pedida, que es peor que un error. Ese brazo no se toca: lo único que cambia es a dónde
+    /// cae la AUSENCIA del parámetro.
     pub fn resolve(&self) -> Result<LedgerView, ApiError> {
         match self.view.as_deref().map(str::trim) {
-            None | Some("") | Some("household") => Ok(LedgerView::Household),
-            Some("mine") => Ok(LedgerView::Mine),
+            None | Some("") | Some("mine") => Ok(LedgerView::Mine),
+            Some("household") => Ok(LedgerView::Household),
             Some(_) => Err(ApiError::BadRequest(
                 "invalid_view: view must be 'mine' or 'household'".into(),
             )),
@@ -155,13 +195,16 @@ mod tests {
 
     /// Los tres valores aceptados y el rechazo del resto. El brazo `Some(_)` es el que cierra la
     /// clase entera: antes de 4.0.0 cualquier cadena desconocida caía a Household en silencio.
+    ///
+    /// **El default vive AQUÍ** (5.0.0, R2): ausente y vacío son `mine`. Si algún día alguien lo
+    /// mueve, este test es lo que se lo dice.
     #[test]
     fn resolve_accepts_only_mine_household_and_absence() {
         let v = |s: Option<&str>| LedgerViewQuery { view: s.map(str::to_string) }.resolve();
 
-        assert_eq!(v(None).unwrap(), LedgerView::Household);
-        assert_eq!(v(Some("")).unwrap(), LedgerView::Household);
-        assert_eq!(v(Some("  ")).unwrap(), LedgerView::Household);
+        assert_eq!(v(None).unwrap(), LedgerView::Mine, "5.0.0: el default es mine");
+        assert_eq!(v(Some("")).unwrap(), LedgerView::Mine);
+        assert_eq!(v(Some("  ")).unwrap(), LedgerView::Mine);
         assert_eq!(v(Some("household")).unwrap(), LedgerView::Household);
         assert_eq!(v(Some(" mine ")).unwrap(), LedgerView::Mine);
 

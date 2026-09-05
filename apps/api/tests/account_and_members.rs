@@ -314,8 +314,12 @@ async fn revoking_a_membership_cuts_access_immediately_and_keeps_the_data() {
         "sin membresía no ve los datos del hogar"
     );
 
-    // Y sus datos siguen ahí: revocar el acceso NO borra el patrimonio del hogar.
-    let assets = app.get_with_cookie("/v1/assets", &owner.cookie).await;
+    // Y sus datos siguen ahí: revocar el acceso NO borra el patrimonio del hogar. Se mira con
+    // `?view=household` EXPLÍCITO (5.0.0, R2): el default es `mine`, donde las filas del
+    // expulsado nunca salieron — y ausencia por scope no prueba que la fila siga viva.
+    let assets = app
+        .get_with_cookie("/v1/assets?view=household", &owner.cookie)
+        .await;
     assert_eq!(assets.status, http::StatusCode::OK);
     let assets_json = assets.json();
     assert!(

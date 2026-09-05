@@ -3,7 +3,7 @@ use crate::error::ApiError;
 use crate::handlers::installation::{
     bootstrap_installation_as_owner_if_empty, require_installation_member,
 };
-use crate::handlers::projection::warm_up_household_projection;
+use crate::handlers::projection::warm_up_mine_projection;
 use crate::handlers::session::require_session_user;
 use crate::prefix::PeerIp;
 use crate::state::AppState;
@@ -97,6 +97,14 @@ pub struct UserResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, format = "date")]
     pub birth_date: Option<NaiveDate>,
+    /// ¿Tiene la cuenta contraseña propia? `false` = identidad delegada (el add-on de Home
+    /// Assistant crea la cuenta con `password_hash IS NULL` y **no debe** tener contraseña).
+    ///
+    /// Aditivo desde 5.0.0 (issue #213). Existe porque hay UI que solo se puede escribir bien
+    /// sabiéndolo: el modal de exportar `.ffbackup` pide «tu contraseña» a una cuenta que la
+    /// tiene, y «crea una contraseña para este backup» a una que no. Sin este campo la SPA
+    /// tendría que adivinarlo por el error del servidor, es decir, después de fallar.
+    pub has_password: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -158,7 +166,7 @@ pub(crate) fn validate_username(username: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn parse_me_birth_patch(v: &Value) -> Result<Option<NaiveDate>, ApiError> {
+pub(crate) fn parse_me_birth_patch(v: &Value) -> Result<Option<NaiveDate>, ApiError> {
     match v {
         Value::Null => Ok(None),
         Value::String(s) => NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
@@ -170,7 +178,7 @@ fn parse_me_birth_patch(v: &Value) -> Result<Option<NaiveDate>, ApiError> {
     }
 }
 
-fn validate_birth_date(d: NaiveDate) -> Result<(), ApiError> {
+pub(crate) fn validate_birth_date(d: NaiveDate) -> Result<(), ApiError> {
     let today = Utc::now().date_naive();
     if d > today {
         return Err(ApiError::BadRequest(
@@ -215,19 +223,33 @@ pub(crate) async fn establish_session(
     if let Ok((iid, _)) = require_installation_member(&state.pool, user_id).await {
         let state_clone = state.clone();
         tokio::spawn(async move {
-            warm_up_household_projection(state_clone, iid, user_id).await;
+            warm_up_mine_projection(state_clone, iid, user_id).await;
         });
     }
 
-    Ok((jar, Json(user_row_to_response(user))))
+    let has_password = user_has_password(&state.pool, user.id).await?;
+    Ok((jar, Json(user_row_to_response(user, has_password))))
 }
 
-pub(crate) fn user_row_to_response(row: UserRow) -> UserResponse {
+pub(crate) fn user_row_to_response(row: UserRow, has_password: bool) -> UserResponse {
     UserResponse {
         id: UserId(row.id),
         username: row.username,
         birth_date: row.birth_date,
+        has_password,
     }
+}
+
+/// ¿Tiene la cuenta contraseña propia? Consulta aparte a propósito: `UserRow` la comparten el
+/// registro por contraseña y el alta por identidad delegada (`handlers/sso.rs`), cada uno con su
+/// propio `INSERT … RETURNING`, y meterle una columna más obligaría a mantener el mismo `SELECT`
+/// en cuatro sitios. Es un lookup por clave primaria en endpoints que no son calientes.
+pub(crate) async fn user_has_password(pool: &sqlx::PgPool, user_id: Uuid) -> Result<bool, ApiError> {
+    let has: bool = sqlx::query_scalar(r#"SELECT password_hash IS NOT NULL FROM users WHERE id = $1"#)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(has)
 }
 
 #[utoipa::path(
@@ -299,7 +321,9 @@ pub async fn register(
 
     Ok((
         axum::http::StatusCode::CREATED,
-        Json(user_row_to_response(row)),
+        // `register` SIEMPRE fija contraseña (la hasheó arriba): el flag es `true` por
+        // construcción, sin volver a la base de datos a preguntarlo.
+        Json(user_row_to_response(row, true)),
     ))
 }
 
@@ -413,7 +437,8 @@ pub async fn me(
     .bind(user.id.0)
     .fetch_one(&state.pool)
     .await?;
-    Ok(Json(user_row_to_response(row)))
+    let has_password = user_has_password(&state.pool, user.id.0).await?;
+    Ok(Json(user_row_to_response(row, has_password)))
 }
 
 #[utoipa::path(
@@ -469,7 +494,8 @@ pub async fn patch_me(
         }
     }
 
-    Ok(Json(user_row_to_response(row)))
+    let has_password = user_has_password(&state.pool, user.id.0).await?;
+    Ok(Json(user_row_to_response(row, has_password)))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -492,8 +518,12 @@ pub struct ChangePasswordBody {
 /// cambio decorativo. La sesión desde la que se llama sobrevive, para no echar al usuario de la
 /// app al terminar.
 ///
-/// AVISO documentado en `SECURITY.md`: los `.ffbackup` ya exportados siguen atados a la
-/// contraseña con la que se generaron. No se recifran.
+/// AVISO documentado en `SECURITY.md`: los `.ffbackup` exportados **por una cuenta con
+/// contraseña** siguen atados a la que se usó al generarlos. No se recifran. Los de una cuenta
+/// SIN contraseña (identidad delegada del add-on de Home Assistant) no están atados a ninguna
+/// credencial de la cuenta —llevan una contraseña propia del archivo desde 5.0.0, issue #213—,
+/// así que este endpoint no puede afectarlos: tampoco tiene a quién cambiársela, porque una
+/// cuenta sin contraseña no llega hasta aquí (`sso_account_no_password`, abajo).
 #[utoipa::path(
     post,
     path = "/v1/auth/password",

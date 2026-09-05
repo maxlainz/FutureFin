@@ -79,6 +79,7 @@ Vocabulary you need (one line each; full domain detail in
 | API refuses to start: migration `VersionMismatch` / checksum error | Read the version number in the error | Edited already-applied migration; auto-repair removed v1.3.0 | Trap 4 |
 | Edited an asset/budget line, projection chart unchanged | Grep the mutating handler for `refresh_projection_after_mutation` | Missing cache invalidation | Trap 5 |
 | Chart wrong only with `density=hybrid` (deflation, X positions, milestones) | Diff hybrid vs monthly responses | Array-index math on non-equidistant points | Trap 6 |
+| **5.0.0** — la línea fina de un miembro, `required_capital_path`/`coast_path` o la banda p10/p50/p90 se descuadra respecto de la línea gruesa | Comprueba si el cálculo indexa por posición del array | Misma clase que Trap 6, ahora en **cinco** series más: todas viajan decimadas con la MISMA rejilla y **`/v1/projection/bands` no acepta `density`** (fuerza `hybrid`), así que ahí no hay «densidad monthly» donde el bug se esconda | Trap 6 |
 | Visual bug only in dark mode | Toggle theme, inspect computed CSS | Hardcoded hex instead of `var(--ff-*)`/`var(--proj-*)` token | Trap 7 |
 | Table columns overlap / content hidden under action buttons | Inspect the `<td>`'s computed `display` | `display` other than `table-cell` set on a `<td>` | Trap 8 |
 | `docker ps` shows container `unhealthy` | `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/v1/ready` | `/v1/ready` 503 = embedded Postgres really down (3.0.0 dropped the `/dev/tcp` fallback that used to mask it); or `FUTUREFIN_MODE=db-only` | Trap 9 |
@@ -244,6 +245,22 @@ requests; compare rendering right after the hybrid response vs after the monthly
 check your suspect computation by hand at `month_index = 24` (the first non-monthly point).
 Server-side note: milestones and FIRE crossover are computed on the **full** 840-month series
 before decimation, so if milestones are wrong at hybrid only, suspect *client* math, not the API.
+
+**5.0.0 amplía la superficie de esta trampa, no la cierra.** Ya no es una serie decimada: son
+seis. `points[]`, `members[].series` (la línea fina por miembro), `required_capital_path`,
+`coast_path`, `disposable_capital` y las tres bandas de `/v1/projection/bands` viajan **todas** por
+la misma rejilla `hybrid`, y el invariante que las ata es de `month_index`, no de posición: Σ
+`members[].series` == `points[]` **mes a mes** (pinned en
+`apps/api/tests/projection_household_aggregate.rs`). Dos consecuencias al depurar:
+
+- El experimento discriminante de arriba —comparar `monthly` contra `hybrid`— **no existe para las
+  bandas**: `GET /v1/projection/bands` no acepta `density` a propósito (arqueología §2.18, veto 22:
+  ver el doc-comment de `apps/api/src/handlers/projection_bands.rs`). Si sospechas de la rejilla ahí,
+  compara `bands.points[].month_index` contra `series.points[].month_index` — deben coincidir uno a
+  uno.
+- Una banda que se descuadra **solo en la mitad derecha** del chart es la firma clásica: la
+  decimación empieza a saltar meses a partir del mes 24, y una p50 dibujada por índice se «adelanta»
+  exactamente en la misma proporción en la que la 1.4.2 deflactaba de menos.
 
 ### 7. Dark-mode-only visual bugs
 

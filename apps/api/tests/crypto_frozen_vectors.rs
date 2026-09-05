@@ -164,13 +164,28 @@ fn el_ffbackup_dorado_sigue_descifrandose_y_parseando() {
     assert_eq!(payload.assets[0].current_value.to_string(), "12345.67");
     assert_eq!(payload.budget_entries.len(), 1);
     assert_eq!(payload.budget_entries[0].amount.to_string(), "850.00");
+    // El vector dorado es un fichero **v11**, escrito cuando el SWR vivía DENTRO de
+    // `fire_settings`. Desde 5.0.0 el eje es del perfil de jubilación (D13) y la capa de backup
+    // lo lee como «eje legado» — que es exactamente lo que hace posible sembrar el perfil al
+    // importar un backup viejo. Que siga saliendo 3,5 es la prueba de que ese camino no se ha
+    // roto: si el flatten/parseo de los ejes legados dejara de funcionar, un backup de 4.15.x
+    // devolvería a su dueño al SWR por defecto sin decir nada.
     assert_eq!(
         payload
             .installation_snapshot_informative
             .fire_settings
+            .legacy
             .swr_pct
-            .to_string(),
-        "3.5"
+            .map(|v| v.to_string()),
+        Some("3.5".to_string())
+    );
+    // Y lo compartido sigue en su sitio.
+    assert!(
+        payload
+            .installation_snapshot_informative
+            .fire_settings
+            .settings
+            .taxes_enabled
     );
 }
 

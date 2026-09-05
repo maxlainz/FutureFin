@@ -334,8 +334,10 @@ async fn fire_settings_overrides_reuse_the_validation_of_the_real_patch() {
     let token = create_token(&app, &owner).await;
 
     for (overrides, needle) in [
-        // Modo manual sin importe: lo caza `validate_fire_settings`, no un `if` nuevo.
-        (json!({"fire_number_mode": "manual"}), "fire_manual_amount"),
+        // 5.0.0: `fire_number_mode` y `fire_number_manual_amount` salieron de este override —
+        // son del perfil de jubilación por usuario (D13) y volverán como `profile_overrides` en
+        // WP5. Los tres casos que quedan siguen probando lo mismo: la validación es la del PATCH
+        // real, no una segunda lista de cotas.
         (json!({"savings_source": "no_existe"}), "savings_source"),
         (json!({"income_avg_window_mode": "semanal"}), "income_avg_window_mode"),
         (json!({"expense_avg_window_months": 0}), "expense_avg_window_months"),
@@ -855,6 +857,21 @@ async fn one_off_by_date_equals_month_index_and_series_are_opt_in() {
     assert!(n > 10);
     assert_eq!(series["baseline_net_worth"].as_array().unwrap().len(), n);
     assert_eq!(series["scenario_net_worth"].as_array().unwrap().len(), n);
+    // **El descubierto por mes, por lado** (5.0.0, pase de correcciones de la revisión
+    // adversarial): es la única columna que dice DÓNDE deja de cubrirse el plan —
+    // `assets_depleted_month_index` da un mes y `uncovered_deficit_total` un total, y entre los
+    // dos no se ve el perfil del hueco—. Este hogar ahorra, así que son ceros: un cero de verdad,
+    // publicado, no una columna ausente.
+    for k in ["baseline_unmet_need", "scenario_unmet_need"] {
+        let v = series[k]
+            .as_array()
+            .unwrap_or_else(|| panic!("falta {k}: {by_date}"));
+        assert_eq!(v.len(), n, "{k} comparte rejilla con month_indices: {by_date}");
+        assert!(
+            v.iter().all(|x| x.as_f64() == Some(0.0)),
+            "este hogar no tiene descubierto: {k} = {v:?}"
+        );
+    }
     assert!(by_index.get("series").is_none());
 }
 
@@ -1282,5 +1299,860 @@ async fn retirement_fields_are_explicit_null_and_fire_series_is_parallel_to_poin
                 "{label}: los valores por activo también van paralelos a points"
             );
         }
+    }
+}
+
+/// 5.0.0 (§D) — **`view: "household"` es 400 `household_not_simulable`.**
+///
+/// El hogar dejó de ser «las mismas cuentas con más filas»: es la SUMA de N simulaciones, una por
+/// miembro y con la estrategia de cada uno. Un what-if sobre eso no tiene un plan único que mover
+/// —¿el SWR de quién?, ¿el gasto extra de quién?—, así que devolver «algo» sería publicar un
+/// escenario que no describe el plan de nadie. Se rechaza en el CORE (no en la capa MCP) para que
+/// HTTP y MCP no puedan discrepar el día que haya ruta.
+#[tokio::test]
+async fn household_view_is_refused_with_a_typed_error() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    let resp = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "simulate_projection",
+            json!({"view": "household", "extra_monthly_savings": "100"}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "el hogar no se simula: {resp}"
+    );
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    assert!(
+        text.contains("household_not_simulable"),
+        "el error debe nombrar su código para que el agente pueda reaccionar: {text}"
+    );
+
+    // Y el default (`mine` desde R2) sigue simulando: lo que se rechaza es el hogar, no la tool.
+    let ok = mcp_post(
+        &app,
+        &token,
+        tool_call("simulate_projection", json!({"extra_monthly_savings": "100"})),
+    )
+    .await;
+    let body = tool_json(&ok);
+    assert_eq!(body["view"], "mine", "el default es mine: {body}");
+    assert_eq!(body["baseline"]["strategy"], "asap", "eco de estrategia: {body}");
+    assert_eq!(
+        body["scenario"]["retirement_trigger"], "liquid_crossing",
+        "eco del trigger: {body}"
+    );
+    // R8 en el what-if: con `asap` el mes efectivo ES el cruce, así que los dos campos coinciden.
+    assert_eq!(
+        body["baseline"]["jubilacion_month_index"], body["baseline"]["liquid_crossing_month_index"],
+        "con asap el cruce es el trigger: {body}"
+    );
+}
+
+/// **P11 — el crecimiento del ingreso y los escalones son ejes de CAJA, y se recortan (o no) en
+/// la jubilación** (5.0.0, D30; solo MCP).
+///
+/// Lo que este test clava, en el orden en que se puede equivocar:
+///
+/// 1. **Es caja, no ingreso**: `income_monthly`, `net_recurring_monthly` y `savings_rate` salen
+///    con delta 0 EXACTO. Si el eje entrara por `income_regular_monthly`, movería a la vez el
+///    capital y el OBJETIVO (modo `current_income`) y el delta no significaría nada.
+/// 2. **Mueve el resultado**: patrimonio final arriba y jubilación no más tarde.
+/// 3. **El corte en la jubilación se publica** (`income_growth_stops_at_month_index`) — es el
+///    número que hace medible la aproximación de la doble pasada.
+/// 4. **Los escalones NO se recortan**: un escalón negativo lejano llega igual.
+/// 5. **Anti-no-op**: un `0` en cualquiera de los dos es un 400, no un escenario mudo idéntico
+///    al baseline (precedente `liability_override_empty`).
+#[tokio::test]
+async fn income_growth_and_steps_are_cash_axes_with_a_published_cut() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    seed(&app, &owner).await;
+
+    let base = tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+    assert!(
+        base["scenario"]["income_growth_stops_at_month_index"].is_null(),
+        "sin el eje no hay corte que publicar: {base}"
+    );
+
+    let grown = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"income_growth_real_pct_annual": "2"}),
+            ),
+        )
+        .await,
+    );
+
+    // 1. Es caja: el trío ingreso/neto recurrente/tasa de ahorro NO se mueve.
+    assert_eq!(dec(&grown["deltas"]["income_monthly_delta"]), 0.0, "{grown}");
+    assert_eq!(dec(&grown["deltas"]["net_recurring_monthly_delta"]), 0.0, "{grown}");
+    assert_eq!(
+        grown["scenario"]["savings_rate"], grown["baseline"]["savings_rate"],
+        "la tasa de ahorro es sobre el neto RECURRENTE: {grown}"
+    );
+    // …pero el objetivo tampoco se mueve: el eje no reescribe la meta por la puerta de atrás.
+    assert_eq!(
+        grown["scenario"]["fire_target_base"], grown["baseline"]["fire_target_base"],
+        "{grown}"
+    );
+
+    // 2. Y sin embargo el resultado sí cambia: más caja compuesta durante décadas.
+    assert!(
+        dec(&grown["deltas"]["final_net_worth_delta"]) > 0.0,
+        "un 2 % real anual durante el horizonte tiene que dejar más patrimonio: {grown}"
+    );
+    let b = grown["baseline"]["jubilacion_month_index"].as_u64();
+    let sc = grown["scenario"]["jubilacion_month_index"].as_u64();
+    if let (Some(b), Some(sc)) = (b, sc) {
+        assert!(sc <= b, "más ingreso no puede retrasar la jubilación: {sc} vs {b}");
+    }
+
+    // 3. El corte se publica, y solo en el escenario.
+    assert!(
+        grown["baseline"]["income_growth_stops_at_month_index"].is_null(),
+        "el baseline no lleva el eje: {grown}"
+    );
+    let stop = grown["scenario"]["income_growth_stops_at_month_index"]
+        .as_u64()
+        .expect("el escenario publica dónde para el crecimiento");
+    let horizon = grown["horizon_months"].as_u64().unwrap();
+    assert!(stop <= horizon, "el corte cae dentro del horizonte: {stop} vs {horizon}");
+
+    // 4. Un escalón cae donde se le dice, y `date` y `month_index` son el MISMO eje que el
+    //    one-off (mes 1 = el mes civil del ancla).
+    let anchor = base["anchor_date_ymd"].as_str().unwrap();
+    let (y, m) = (
+        anchor[0..4].parse::<i32>().unwrap(),
+        anchor[5..7].parse::<u32>().unwrap(),
+    );
+    let (ty, tm) = if m + 3 > 12 { (y + 1, m + 3 - 12) } else { (y, m + 3) };
+    let by_date = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"income_steps": [{"date": format!("{ty:04}-{tm:02}-15"), "delta_monthly": "500"}]}),
+            ),
+        )
+        .await,
+    );
+    let by_index = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"income_steps": [{"month_index": 4, "delta_monthly": "500"}]}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(by_date["deltas"], by_index["deltas"], "date ≡ month_index");
+    assert!(
+        dec(&by_date["deltas"]["final_net_worth_delta"]) > 0.0,
+        "+500 €/mes desde el mes 4 tiene que dejar más patrimonio: {by_date}"
+    );
+    assert!(
+        by_date["scenario"]["income_growth_stops_at_month_index"].is_null(),
+        "los escalones no llevan corte: no se recortan en la jubilación: {by_date}"
+    );
+    // Un escalón NEGATIVO resta, y los escalones se acumulan entre sí.
+    let down = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"income_steps": [
+                    {"month_index": 4, "delta_monthly": "500"},
+                    {"month_index": 60, "delta_monthly": "-500"}
+                ]}),
+            ),
+        )
+        .await,
+    );
+    assert!(
+        dec(&down["deltas"]["final_net_worth_delta"])
+            < dec(&by_date["deltas"]["final_net_worth_delta"]),
+        "quitar el escalón a los 5 años deja MENOS que mantenerlo: {down}"
+    );
+
+    // 5. Anti-no-op y cotas: cada uno con su código estable.
+    for (body, needle) in [
+        (json!({"income_growth_real_pct_annual": "0"}), "income_growth_no_op"),
+        (json!({"income_growth_real_pct_annual": "25"}), "income_growth_out_of_range"),
+        (json!({"income_growth_real_pct_annual": "-11"}), "income_growth_out_of_range"),
+        (
+            json!({"income_steps": [{"month_index": 4, "delta_monthly": "0"}]}),
+            "income_step_delta_zero",
+        ),
+        (
+            json!({"income_steps": [{"delta_monthly": "100"}]}),
+            "income_step_timing_ambiguous",
+        ),
+        (
+            json!({"income_steps": [{"month_index": 4, "date": "2030-01-01", "delta_monthly": "100"}]}),
+            "income_step_timing_ambiguous",
+        ),
+        (
+            json!({"months": 120, "income_steps": [{"month_index": 500, "delta_monthly": "100"}]}),
+            "income_step_month_out_of_range",
+        ),
+    ] {
+        let envelope = mcp_post(&app, &token, tool_call("simulate_projection", body.clone())).await;
+        let result = &envelope["result"];
+        assert_eq!(result["isError"], true, "debía fallar con {body}: {envelope}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(needle), "{body} debe nombrar «{needle}» y dice: {text}");
+    }
+}
+
+
+// ---------------------------------------------------------------------------------------------
+// 5.0.0 WP5-2b — el PLAN como eje what-if (§E: P5, P8.b, P8.c)
+// ---------------------------------------------------------------------------------------------
+
+/// **P5 — «¿y si me jubilo a los 55?»**: `profile_overrides` cambia la estrategia entera sobre un
+/// CLON del perfil, y la respuesta trae por lado lo que ese plan cuesta.
+///
+/// El baseline es `asap` (el default): se jubila por CRUCE y no tiene edad contra la que resolver
+/// nada, así que sus KPIs de plan salen `null` — que NO es cero: es «esta estrategia no responde
+/// a esa pregunta», y por eso los deltas también son `null` en vez de restar contra un hueco.
+/// El escenario es `retire_at_age` a los 55: dispara por edad y publica el ahorro necesario, su
+/// techo y el margen.
+///
+/// Predicho a mano con el hogar del `seed` (ingreso 3.000, gasto 1.000, 50.000 € al 5 %): el
+/// sobrante mensual es **2.000 €** y no cambia en todo el horizonte, así que el techo de búsqueda
+/// del escenario es exactamente `"2000.0000"`.
+#[tokio::test]
+async fn profile_overrides_simulate_the_whole_plan_and_publish_what_it_costs() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await; // nace 1990-01-01
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"profile_overrides": {"strategy": "retire_at_age",
+                                             "target_retirement_age": 55}}),
+            ),
+        )
+        .await,
+    );
+
+    // El eco por lado: sin él, un `jubilacion_months_delta` no distingue «el eje no movió nada»
+    // de «la fecha la fija la edad, no el capital».
+    assert_eq!(out["baseline"]["strategy"], "asap", "{out}");
+    assert_eq!(out["baseline"]["retirement_trigger"], "liquid_crossing", "{out}");
+    assert_eq!(out["scenario"]["strategy"], "retire_at_age", "{out}");
+    assert_eq!(out["scenario"]["retirement_trigger"], "target_age", "{out}");
+
+    // El baseline se dispara por cruce: no hay `R` contra el que resolver, y eso es `null`.
+    for k in [
+        "required_contribution_monthly",
+        "required_contribution_search_ceiling",
+        "underfunded",
+        "disposable_monthly",
+    ] {
+        assert!(
+            out["baseline"][k].is_null(),
+            "`asap` no responde a {k}, y `null` no es cero: {out}"
+        );
+        assert!(
+            !out["scenario"][k].is_null(),
+            "`retire_at_age` sí lo responde: {k} en {out}"
+        );
+    }
+    assert_eq!(
+        out["scenario"]["required_contribution_search_ceiling"], "2000.0000",
+        "3.000 − 1.000 = 2.000 €/mes de sobrante, constante: {out}"
+    );
+    // Un delta contra un «no aplica» sería un número inventado.
+    assert!(out["deltas"]["required_contribution_monthly_delta"].is_null(), "{out}");
+    assert!(out["deltas"]["disposable_monthly_delta"].is_null(), "{out}");
+    // El margen es exactamente lo que sobra del techo.
+    let techo = dec(&out["scenario"]["required_contribution_search_ceiling"]);
+    let c = dec(&out["scenario"]["required_contribution_monthly"]);
+    let margen = dec(&out["scenario"]["disposable_monthly"]);
+    assert!((margen - (techo - c)).abs() < 0.0001, "{out}");
+}
+
+/// **`fire_number_mode` y `fire_number_manual_amount` vuelven a ser simulables** por
+/// `profile_overrides`. WP4 los sacó de `fire_settings_overrides` al mudarlos al perfil (D13) y
+/// se quedaron una ola sin eje what-if; esto es la regresión que impide que vuelva a pasar.
+///
+/// De paso pinea lo que el nombre del campo NO dice: `fire_number_manual_amount` es la
+/// **necesidad ANUAL neta** en euros de hoy, no el capital objetivo — el mismo papel que
+/// `12·gasto` en `annual_expense` (`netAnnualNeed` de `apps/web/src/lib/fire.ts` y
+/// `FireNeed::Indexed` del motor coinciden en eso). Con impuestos fuera y el SWR por defecto:
+///
+/// ```text
+/// objetivo = gross_up(40.000) / (3,5/100) = 40.000 / 0,035 = 1.142.857,1429 €
+/// ```
+#[tokio::test]
+async fn the_fire_number_mode_axis_comes_back_through_profile_overrides() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            json!({"fire_settings": {"taxes_enabled": false}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "taxes off: {r:?}");
+    let token = create_token(&app, &owner).await;
+
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"profile_overrides": {"fire_number_mode": "manual",
+                                             "fire_number_manual_amount": "40000"}}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["baseline"]["fire_number_mode"], "annual_expense", "{out}");
+    assert_eq!(out["scenario"]["fire_number_mode"], "manual", "{out}");
+    let base = dec(&out["scenario"]["fire_target_base"]);
+    assert!(
+        (base - 1_142_857.1429).abs() < 0.01,
+        "40.000 €/año declarados / 3,5 % = 1.142.857,14 €, llegó {base}: {out}"
+    );
+    // El baseline sale del gasto (12 × 1.000 / 3,5 %), así que el delta existe y es explicable.
+    let baseline_base = dec(&out["baseline"]["fire_target_base"]);
+    assert!(
+        (baseline_base - 342_857.1429).abs() < 0.01,
+        "12·1.000 / 3,5 % = 342.857,14 €, llegó {baseline_base}: {out}"
+    );
+    assert!(
+        !out["deltas"]["fire_target_base_delta"].is_null(),
+        "los dos lados tienen objetivo, así que el delta existe: {out}"
+    );
+}
+
+/// **P8.c — la excedencia**: `income_pause` multiplica el ingreso GANADO durante su ventana, y la
+/// respuesta publica los dos meses de jubilación y su diferencia.
+///
+/// Que el retraso sea `>= 0` no es una tautología: la pausa quita caja que la cascada habría
+/// invertido, así que el cruce solo puede llegar igual o más tarde. Y el mes con pausa que
+/// publica `income_pause` tiene que ser EL MISMO que el del escenario, porque el escenario lleva
+/// la pausa aplicada — si divergieran, el KPI describiría una simulación que no se sirvió.
+#[tokio::test]
+async fn an_income_pause_delays_retirement_and_publishes_both_months() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"income_pause": {"from_month_index": 13, "months": 12,
+                                        "income_fraction": "0"}}),
+            ),
+        )
+        .await,
+    );
+    let pause = &out["income_pause"];
+    assert!(!pause.is_null(), "se pidió el eje: {out}");
+    let base = pause["baseline_month_index"].as_u64().expect("mes base");
+    let paused = pause["paused_month_index"].as_u64().expect("mes con pausa");
+    let delay = pause["retirement_delay_months"].as_i64().expect("retraso");
+    assert_eq!(delay, paused as i64 - base as i64, "{out}");
+    assert!(delay > 0, "un año sin cobrar retrasa la jubilación: {out}");
+    assert_eq!(
+        out["scenario"]["jubilacion_month_index"].as_u64(),
+        Some(paused),
+        "el escenario servido ES el que lleva la pausa: {out}"
+    );
+    assert_eq!(
+        out["baseline"]["jubilacion_month_index"].as_u64(),
+        Some(base),
+        "sin otros overrides, el lado sin pausa coincide con el baseline: {out}"
+    );
+
+    // La ventana es SEMIABIERTA y media paga retrasa menos que no cobrar nada.
+    let half = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"income_pause": {"from_month_index": 13, "months": 12,
+                                        "income_fraction": "0.5"}}),
+            ),
+        )
+        .await,
+    );
+    assert!(
+        half["income_pause"]["retirement_delay_months"].as_i64().unwrap() <= delay,
+        "media paga no puede retrasar MÁS que no cobrar: {half}"
+    );
+
+    // Sin el eje, el bloque no aparece: «no se preguntó» no puede leerse como «no hay retraso».
+    let sin = tool_json(
+        &mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await,
+    );
+    assert!(sin.get("income_pause").is_none(), "{sin}");
+}
+
+/// **P8.b — «¿cuánto más puedo gastar sin mover la fecha?»**, opt-in porque cuesta una bisección
+/// entera sobre el motor.
+///
+/// Con el trigger por CRUCE (el `asap` del baseline) la respuesta es un margen real y acotado:
+/// gastar más retrasa el cruce, así que el solve encuentra un punto por debajo del sobrante
+/// entero (2.000 €/mes). Es lo contrario del trigger por EDAD, donde la fecha no depende del
+/// gasto y la respuesta es el sobrante entero como SUELO honesto — el otro caso, comprobado
+/// abajo con el mismo hogar.
+#[tokio::test]
+async fn the_extra_expense_solve_answers_how_much_more_fits_without_moving_the_date() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    let cruce = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"solve": {"extra_monthly_expense_keeping_date": true}}),
+            ),
+        )
+        .await,
+    );
+    let margen = dec(&cruce["max_extra_monthly_expense_keeping_date"]);
+    assert!(
+        (0.0..=2000.0).contains(&margen),
+        "con trigger por cruce el margen cabe dentro del sobrante (2.000 €/mes), llegó {margen}: {cruce}"
+    );
+
+    // Con la EDAD mandando, el gasto no mueve la fecha: la respuesta es el sobrante entero, un
+    // suelo («al menos esto»), no un infinito inventado.
+    let edad = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"profile_overrides": {"strategy": "retire_at_age",
+                                             "target_retirement_age": 55},
+                       "solve": {"extra_monthly_expense_keeping_date": true}}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        edad["max_extra_monthly_expense_keeping_date"], "2000.0000",
+        "la edad no depende del gasto: el solve devuelve el techo entero como suelo: {edad}"
+    );
+
+    // Sin pedirlo, el campo no aparece.
+    let sin = tool_json(
+        &mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await,
+    );
+    assert!(
+        sin.get("max_extra_monthly_expense_keeping_date").is_none(),
+        "{sin}"
+    );
+}
+
+/// **Anti-no-op de los ejes nuevos**: cada llamada que no puede mover nada devuelve un 400 con su
+/// código estable, nunca un escenario idéntico al baseline sin explicación.
+#[tokio::test]
+async fn the_new_what_if_axes_refuse_calls_that_cannot_move_anything() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    for (body, needle) in [
+        (json!({"profile_overrides": {}}), "profile_overrides_empty"),
+        // Un patch que resuelve al perfil que ya tienes: el escenario saldría idéntico.
+        (
+            json!({"profile_overrides": {"strategy": "asap"}}),
+            "profile_overrides_no_op",
+        ),
+        // El mismo eje por dos caminos a la vez es una intención contradictoria.
+        (
+            json!({"swr_pct": "3", "profile_overrides": {"swr_pct": "3"}}),
+            "swr_pct_set_twice",
+        ),
+        // Las cotas del perfil son las MISMAS que al guardarlo: `retire_at_age` exige la edad.
+        (
+            json!({"profile_overrides": {"strategy": "retire_at_age"}}),
+            "target_retirement_age_required",
+        ),
+        (
+            json!({"income_pause": {"months": 12, "income_fraction": "0"}}),
+            "income_pause_timing_ambiguous",
+        ),
+        (
+            json!({"income_pause": {"from_month_index": 3, "from_date": "2030-01-01",
+                                    "months": 12, "income_fraction": "0"}}),
+            "income_pause_timing_ambiguous",
+        ),
+        (
+            json!({"income_pause": {"from_month_index": 3, "months": 12,
+                                    "income_fraction": "1"}}),
+            "income_pause_fraction_out_of_range",
+        ),
+        (
+            json!({"months": 120,
+                   "income_pause": {"from_month_index": 500, "months": 12,
+                                    "income_fraction": "0"}}),
+            "income_pause_month_out_of_range",
+        ),
+        (
+            json!({"solve": {"extra_monthly_expense_keeping_date": false}}),
+            "solve_no_op",
+        ),
+    ] {
+        let envelope = mcp_post(&app, &token, tool_call("simulate_projection", body.clone())).await;
+        let result = &envelope["result"];
+        assert_eq!(result["isError"], true, "debía fallar con {body}: {envelope}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(needle), "{body} debe nombrar «{needle}» y dice: {text}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// El eje `monte_carlo` (5.0.0 WP6b, P3)
+// ---------------------------------------------------------------------------------------------
+
+/// **Un eje que AÑADE información en vez de mover el escenario.**
+///
+/// Tres cosas se pinean aquí:
+///
+/// 1. `monte_carlo` **solo**, con el cuerpo por lo demás vacío, es una petición VÁLIDA. Todos los
+///    demás ejes tienen anti-no-op porque devolverían un escenario idéntico al baseline sin decir
+///    por qué; éste no cambia el escenario, lo describe, y «¿qué probabilidad tiene mi plan tal
+///    cual está?» es una pregunta legítima.
+/// 2. El bloque del éxito aparece **en los dos lados** y `success_probability_delta` en `deltas`.
+/// 3. Sin el eje, todos son `null` — no 0. Un cero se leería como «ningún escenario aguanta».
+#[tokio::test]
+async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_the_scenario() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    // Sin el eje: los cuatro campos van a `null` y no hay bloque `monte_carlo`.
+    let sin = tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+    for lado in ["baseline", "scenario"] {
+        for k in [
+            "success_probability",
+            "success_verdict",
+            "never_retired_probability",
+            "success_given_retired",
+            "underfunded_probability",
+            "months_below_need_p50",
+            "buffer_inactive_reason",
+            // 5.0.0 V6 — el eco del colchón derivado tampoco existe sin el eje: sin sorteo no hay
+            // colchón que describir.
+            "buffer_source",
+            "buffer_target_amount",
+            "buffer_months_effective",
+            "buffer_source_rule_id",
+            "buffer_source_asset_name",
+        ] {
+            assert!(sin[lado][k].is_null(), "{lado}.{k} sin el eje: {sin}");
+        }
+    }
+    assert!(sin["deltas"]["success_probability_delta"].is_null(), "{sin}");
+    assert!(sin["monte_carlo"].is_null(), "sin el eje no hay bloque: {sin}");
+
+    // Con el eje SOLO (sin ningún otro override): válido, y con las cuatro cifras en ambos lados.
+    let con = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"monte_carlo": {"paths": 24, "seed": "7"}}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(con["monte_carlo"]["paths"], 24, "{con}");
+    assert_eq!(
+        con["monte_carlo"]["seed"], "7",
+        "la semilla se ecoa como STRING: {con}"
+    );
+    // 5.0.0 V7: el bloque ya no ecoa umbral — el corte del veredicto es fijo al 100 %.
+    assert!(
+        con["monte_carlo"]["success_threshold_pct"].is_null(),
+        "el umbral se retiró y no puede volver por el eco: {con}"
+    );
+    for lado in ["baseline", "scenario"] {
+        assert!(
+            con[lado]["success_probability"].is_string(),
+            "{lado} debe traer la probabilidad: {con}"
+        );
+        assert!(con[lado]["success_verdict"].is_string(), "{lado}: {con}");
+        assert!(con[lado]["months_below_need_p50"].is_u64(), "{lado}: {con}");
+        // Sin trigger por edad, la infra-financiación no aplica ni con el eje pedido.
+        assert!(con[lado]["underfunded_probability"].is_null(), "{lado}: {con}");
+        // **Las dos caras nuevas del éxito** (pase de correcciones de la revisión adversarial):
+        // sin ellas, un `success_probability` no distingue el plan que falla del que no llega a
+        // empezar. `never_retired_probability` viaja SIEMPRE con el eje pedido; el condicional
+        // puede ser `null` si ningún camino se jubila, y entonces el otro vale 1.
+        let never = con[lado]["never_retired_probability"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{lado} debe traer never_retired_probability: {con}"))
+            .parse::<f64>()
+            .expect("probabilidad");
+        let success = con[lado]["success_probability"]
+            .as_str()
+            .expect("probabilidad")
+            .parse::<f64>()
+            .expect("probabilidad");
+        assert!(
+            success <= 1.0 - never + 1e-6,
+            "{lado}: un camino que no se jubila no puede ser un éxito ({success} vs 1 − {never}): {con}"
+        );
+        match con[lado]["success_given_retired"].as_str() {
+            Some(_) => assert!(never < 1.0, "{lado}: {con}"),
+            None => assert_eq!(never, 1.0, "{lado}: solo es null si NADIE se jubila: {con}"),
+        }
+        // El colchón (V6): el perfil no declara `cash_buffer_months` y el único activo es el
+        // SUMIDERO sin tope, así que no hay tope del que derivarlo → `no_capped_rule`. Un `null`
+        // aquí significaría «se simuló», que es otra cosa; y `not_requested` ya no existe: desde
+        // que el colchón se deriva, «no se pidió» no es un motivo.
+        assert_eq!(
+            con[lado]["buffer_inactive_reason"], "no_capped_rule",
+            "{lado}: {con}"
+        );
+        assert_eq!(con[lado]["buffer_source"], "none", "{lado}: {con}");
+        assert!(con[lado]["buffer_target_amount"].is_null(), "{lado}: {con}");
+    }
+    // Sin ningún otro override los dos lados son el MISMO plan y la MISMA semilla ⇒ delta 0 exacto.
+    assert_eq!(
+        con["baseline"]["success_probability"], con["scenario"]["success_probability"],
+        "misma semilla y mismo plan: las dos columnas deben coincidir: {con}"
+    );
+    assert_eq!(
+        dec(&con["deltas"]["success_probability_delta"]),
+        0.0,
+        "{con}"
+    );
+    // Y el escenario sigue siendo el baseline: el eje no mueve NADA del plan.
+    assert_eq!(
+        con["deltas"]["jubilacion_months_delta"], 0,
+        "el eje describe, no simula otra cosa: {con}"
+    );
+
+    // **No hay bandas en simulate**: son ~16 KB por lado y el fan chart vive en su endpoint.
+    for lado in ["baseline", "scenario"] {
+        assert!(con[lado]["points"].is_null(), "{lado} no lleva bandas: {con}");
+    }
+}
+
+/// **El colchón DERIVADO viaja por lado, y `profile_overrides.cash_buffer_months` sigue
+/// mandando** (5.0.0, decisión V6 del owner).
+///
+/// Va por lado y no en el bloque `monte_carlo` compartido a propósito: el override del what-if
+/// puede fijar el colchón SOLO en el escenario, y un campo compartido describiría el colchón
+/// equivocado en la mitad de las simulaciones. Aquí se ve exactamente eso: el baseline lo deriva
+/// del tope de la regla (6.000 € nominales) y el escenario lo tiene explícito (6 meses).
+#[tokio::test]
+async fn the_monte_carlo_axis_echoes_the_derived_buffer_and_the_override_still_wins() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat_inc = app.create_category(&owner, "income", "Nómina").await;
+    let cat_exp = app.create_category(&owner, "expense", "Vida").await;
+    let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
+    for (cat, amount) in [(&cat_inc, "3000"), (&cat_exp, "2000")] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/budget/entries",
+                json!({"category_id": cat, "amount": amount}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+    let mut assets = Vec::new();
+    for (name, value, vol) in [
+        ("Cuenta corriente", "1000", None),
+        ("Fondo indexado global", "200000", Some("20")),
+    ] {
+        let mut body = json!({
+            "category_id": cat_ast, "name": name, "current_value": value,
+            "is_liquid": true, "expected_annual_return_percent": "5",
+        });
+        if let Some(v) = vol {
+            body["annual_volatility_percent"] = json!(v);
+        }
+        let r = app.post_json_with_cookie("/v1/assets", body, &owner.cookie).await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+        assets.push(r.json()["id"].as_str().expect("asset id").to_string());
+    }
+    // El sumidero sembrado (#150) apunta a la cuenta: se retargetea al fondo para que la cuenta
+    // pueda llevar un tope — la pauta «cuenta hasta X, resto al fondo».
+    let sink = app.sink_rule_id(&owner.cookie).await;
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/allocation-rules/{sink}"),
+            json!({ "target_asset_id": assets[1] }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let rule_id = {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/allocation-rules",
+                json!({ "target_asset_id": assets[0], "kind": "fixed", "amount": "200",
+                        "cap_kind": "amount", "cap_value": "6000" }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+        r.json()["id"].as_str().expect("rule id").to_string()
+    };
+    let token = create_token(&app, &owner).await;
+
+    // (1) Sin overrides: los DOS lados derivan del tope, en euros nominales.
+    let con = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({"monte_carlo": {"paths": 24, "seed": "7"}}),
+            ),
+        )
+        .await,
+    );
+    for lado in ["baseline", "scenario"] {
+        assert_eq!(con[lado]["buffer_source"], "allocation_cap", "{lado}: {con}");
+        assert_eq!(con[lado]["buffer_target_amount"], "6000.0000", "{lado}: {con}");
+        assert_eq!(con[lado]["buffer_months_effective"], 3, "{lado}: {con}");
+        assert_eq!(con[lado]["buffer_source_rule_id"], rule_id, "{lado}: {con}");
+        assert_eq!(
+            con[lado]["buffer_source_asset_name"], "Cuenta corriente",
+            "{lado}: {con}"
+        );
+        assert!(
+            con[lado]["buffer_inactive_reason"].is_null(),
+            "el colchón se simuló: {lado}: {con}"
+        );
+    }
+
+    // (2) Con `profile_overrides.cash_buffer_months`: el ESCENARIO pasa a explícito y el baseline
+    //     sigue derivando. Es el patrón `pct_source`: una elección no se deriva.
+    let ov = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({
+                    "monte_carlo": {"paths": 24, "seed": "7"},
+                    "profile_overrides": {"cash_buffer_months": 6},
+                }),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(ov["scenario"]["buffer_source"], "explicit", "{ov}");
+    assert_eq!(ov["scenario"]["buffer_months_effective"], 6, "{ov}");
+    assert!(ov["scenario"]["buffer_target_amount"].is_null(), "{ov}");
+    assert!(ov["scenario"]["buffer_source_rule_id"].is_null(), "{ov}");
+    assert_eq!(
+        ov["scenario"]["buffer_source_asset_name"], "Cuenta corriente",
+        "dónde se aloja el colchón se dice también con el explícito: {ov}"
+    );
+    assert_eq!(ov["baseline"]["buffer_source"], "allocation_cap", "{ov}");
+    assert_eq!(ov["baseline"]["buffer_target_amount"], "6000.0000", "{ov}");
+}
+
+/// Con una estrategia por EDAD aparece `underfunded_probability`, y un plan que no llega la
+/// publica > 0. Es el rojo de D17 en versión probabilística: «cuántos de estos mercados te dejan
+/// llegar a los 55 sin el capital que necesitas».
+#[tokio::test]
+async fn an_age_strategy_publishes_the_underfunded_probability() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    let out = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "simulate_projection",
+                json!({
+                    "monte_carlo": {"paths": 24},
+                    "profile_overrides": {"strategy": "retire_at_age", "target_retirement_age": 45},
+                }),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["scenario"]["retirement_trigger"], "target_age", "{out}");
+    assert!(
+        out["scenario"]["underfunded_probability"].is_string(),
+        "con trigger por edad la pregunta existe: {out}"
+    );
+    // El baseline sigue siendo `asap` (por cruce), así que allí NO aplica — y por eso el campo es
+    // `null` en una columna y un número en la otra sin que eso sea una incoherencia.
+    assert!(
+        out["baseline"]["underfunded_probability"].is_null(),
+        "{out}"
+    );
+}
+
+/// Las cotas del eje: `paths` fuera de `1..=1000` y una semilla que no es un `u64` son 400 con su
+/// código. El techo del MCP es la MITAD del de HTTP a propósito (esta tool no cachea nada y un
+/// agente en bucle es el llamante que más satura el semáforo).
+#[tokio::test]
+async fn the_monte_carlo_axis_enforces_its_bounds() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner).await;
+    let token = create_token(&app, &owner).await;
+
+    for (body, needle) in [
+        (json!({"monte_carlo": {"paths": 0}}), "paths_out_of_range"),
+        (json!({"monte_carlo": {"paths": 1001}}), "paths_out_of_range"),
+        (
+            json!({"monte_carlo": {"paths": 8, "seed": "no-soy-un-numero"}}),
+            "invalid",
+        ),
+    ] {
+        let envelope = mcp_post(&app, &token, tool_call("simulate_projection", body.clone())).await;
+        let result = &envelope["result"];
+        assert_eq!(result["isError"], true, "debía fallar con {body}: {envelope}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains(needle), "{body} debe nombrar «{needle}» y dice: {text}");
     }
 }

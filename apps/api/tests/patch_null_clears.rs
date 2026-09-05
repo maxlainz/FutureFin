@@ -215,10 +215,13 @@ async fn fire_settings_null_resets_to_defaults() {
         ["installation"]["fire_settings"]
         .clone();
 
+    // 5.0.0: el SWR salió de `fire_settings` (D13), así que el eje que aleja el objeto de sus
+    // defaults es otro — `taxable_gain_ratio`, que sigue siendo del hogar. Lo que se prueba no
+    // cambia: que `"fire_settings": null` BORRA el JSONB y la lectura vuelve a los defaults.
     let r = app
         .patch_json_with_cookie(
             "/v1/installation",
-            json!({"fire_settings": {"swr_pct": "3"}}),
+            json!({"fire_settings": {"taxable_gain_ratio": "0.4"}}),
             &owner.cookie,
         )
         .await;
@@ -226,7 +229,7 @@ async fn fire_settings_null_resets_to_defaults() {
     let fs = app.get_with_cookie("/v1/installation", &owner.cookie).await.json()
         ["installation"]["fire_settings"]
         .clone();
-    assert_eq!(fs["swr_pct"], "3", "{fs}");
+    assert_eq!(fs["taxable_gain_ratio"], "0.4", "{fs}");
     assert_ne!(fs, defaults, "el patch debe alejarlo de los defaults para que el reset pruebe algo");
 
     // null → borra el JSONB guardado; la lectura vuelve a los defaults (rama `Some(None)` viva)
@@ -280,4 +283,112 @@ async fn apr_percent_above_100_is_rejected_on_create_and_patch() {
         .patch_json_with_cookie(&format!("/v1/liabilities/{id}"), json!({"apr_percent": "101"}), &owner.cookie)
         .await;
     assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+}
+
+/// **Los otros dos decimales opcionales del activo también son tri-estado** (5.0.0, WP5-2).
+///
+/// El fallo que cierra lo encontró la SPA: `expected_annual_return_percent` y
+/// `annual_volatility_percent` eran `Option<Decimal>` con `str_option`, así que `null` y clave
+/// ausente eran EL MISMO caso y no había forma de volver a «rentabilidad no declarada» ni de
+/// devolver un activo al determinismo. Escribir una volatilidad por error era irreversible por
+/// API — el único camino de vuelta era borrar el activo y recrearlo, perdiendo su histórico.
+#[tokio::test]
+async fn asset_return_and_volatility_are_tri_state() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("cris").await;
+    let cat = app.create_category(&owner, "asset", "Fondos").await;
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat, "name": "RV global", "current_value": "10000",
+                   "is_liquid": true, "expected_annual_return_percent": "6",
+                   "annual_volatility_percent": "16"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let id = r.json()["id"].as_str().unwrap().to_string();
+
+    // La lectura se hace contra el GET —no contra el cuerpo del PATCH— para que el test mire lo
+    // que quedó EN LA COLUMNA y no lo que el handler creyó escribir. `GET /v1/assets` devuelve un
+    // array suelto (no un sobre), así que se busca por id.
+    async fn get(app: &TestApp, cookie: &str, id: &str) -> Value {
+        let list = app.get_with_cookie("/v1/assets?view=mine", cookie).await.json();
+        list.as_array()
+            .expect("GET /v1/assets devuelve un array")
+            .iter()
+            .find(|a| a["id"] == id)
+            .cloned()
+            .expect("el activo sigue ahí")
+    }
+
+    // ausente → intacto (un PATCH de nombre no puede borrar dos supuestos del motor)
+    let r = app
+        .patch_json_with_cookie(&format!("/v1/assets/{id}"), json!({"name": "RV mundial"}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let a = get(&app, &owner.cookie, &id).await;
+    assert_eq!(a["expected_annual_return_percent"], "6.000000", "{a}");
+    assert_eq!(a["annual_volatility_percent"], "16.0000", "{a}");
+
+    // valor → aplica (y el signo negativo sigue siendo legal en la rentabilidad)
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{id}"),
+            json!({"expected_annual_return_percent": "-2.5", "annual_volatility_percent": "18"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let a = get(&app, &owner.cookie, &id).await;
+    assert_eq!(a["expected_annual_return_percent"], "-2.500000", "{a}");
+    assert_eq!(a["annual_volatility_percent"], "18.0000", "{a}");
+
+    // null → borra LOS DOS (antes: 200 sin efecto)
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{id}"),
+            json!({"expected_annual_return_percent": null, "annual_volatility_percent": null}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let a = get(&app, &owner.cookie, &id).await;
+    assert!(a["expected_annual_return_percent"].is_null(), "{a}");
+    assert!(a["annual_volatility_percent"].is_null(), "{a}");
+
+    // Las cotas siguen vivas con el nuevo camino: se validan sobre el valor que va a la columna.
+    for (body, code) in [
+        (json!({"expected_annual_return_percent": "-100"}), "return_percent_too_low"),
+        (json!({"annual_volatility_percent": "101"}), "volatility_out_of_range"),
+        (json!({"annual_volatility_percent": "-1"}), "volatility_out_of_range"),
+        (json!({"annual_volatility_percent": "no-soy-un-decimal"}), "decimal_invalid"),
+    ] {
+        let r = app
+            .patch_json_with_cookie(&format!("/v1/assets/{id}"), body.clone(), &owner.cookie)
+            .await;
+        assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{body} → {r:?}");
+        assert_eq!(r.json()["code"], code, "{body} → {r:?}");
+    }
+
+    // Y un PATCH que solo nombra uno de los dos con `null` no toca al otro.
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{id}"),
+            json!({"expected_annual_return_percent": "5", "annual_volatility_percent": "15"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{id}"),
+            json!({"annual_volatility_percent": null}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let a = get(&app, &owner.cookie, &id).await;
+    assert_eq!(a["expected_annual_return_percent"], "5.000000", "{a}");
+    assert!(a["annual_volatility_percent"].is_null(), "{a}");
 }

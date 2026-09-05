@@ -19,6 +19,11 @@ use http::StatusCode;
 /// (`LedgerViewQuery::resolve`), así que lo que se prueba es que **todas** lo usen — no que cada
 /// una reimplemente la validación. `projection/series` está en la lista precisamente porque tenía
 /// su propia copia del `match` y por eso se le pasó por alto.
+///
+/// No es la lista completa de rutas GET con `view`: `/v1/transactions/category-series` también lo
+/// acepta pero exige además `kind` (obligatorio), así que no encaja en el bucle genérico de abajo
+/// sin parámetros extra por ruta; queda fuera a propósito. Fuente de verdad de qué handler declara
+/// el parámetro: `grep -rn '("view" = Option<String>, Query' apps/api/src/handlers/`.
 const VIEW_ROUTES: &[&str] = &[
     "/v1/summary",
     "/v1/assets",
@@ -27,7 +32,9 @@ const VIEW_ROUTES: &[&str] = &[
     "/v1/planning/flows",
     "/v1/allocation-rules",
     "/v1/allocation-rules/resolution",
+    "/v1/allocation-rules/goals",
     "/v1/projection/series",
+    "/v1/projection/bands",
     "/v1/history/series",
     "/v1/history/cashflow",
     "/v1/transactions",
@@ -36,6 +43,7 @@ const VIEW_ROUTES: &[&str] = &[
     "/v1/transactions/summary",
     "/v1/transactions/months",
     "/v1/transactions/imports",
+    "/v1/changes",
 ];
 
 /// `{error, code, message}` de una respuesta de error; falla con el cuerpo entero si no cuadra.
@@ -74,13 +82,30 @@ async fn known_views_and_absence_still_work_on_every_ledger_route() {
     // del contrato y tiene que seguir funcionando ahora que el comodín ya no lo cubre.
     for qs in ["", "?view=mine", "?view=household", "?view=%20mine%20"] {
         for route in VIEW_ROUTES {
-            let resp = app
-                .get_with_cookie(&format!("{route}{qs}"), &owner.cookie)
-                .await;
+            // `/v1/changes` exige `since` (obligatorio, aparte de `view`); sin él el handler
+            // devuelve 400 `date_required` antes incluso de llegar al resto — así que el bucle
+            // genérico necesita añadírselo solo a esta ruta.
+            let uri = if *route == "/v1/changes" {
+                let sep = if qs.is_empty() { '?' } else { '&' };
+                format!("{route}{qs}{sep}since=2020-01-01")
+            } else {
+                format!("{route}{qs}")
+            };
+            let resp = app.get_with_cookie(&uri, &owner.cookie).await;
+
+            // `/v1/projection/bands` es la única ruta cuya vista `household` está documentada
+            // como error propio (`household_bands_unavailable`): los percentiles p10/p50/p90 no
+            // se suman entre miembros, así que `household` no es «sin implementar todavía», es
+            // rechazado a propósito. El resto de rutas siguen sirviendo 200 con `household`.
+            if *route == "/v1/projection/bands" && qs == "?view=household" {
+                assert_bad_request(&resp, "household_bands_unavailable", &uri);
+                continue;
+            }
+
             assert_eq!(
                 resp.status,
                 StatusCode::OK,
-                "{route}{qs} debería seguir sirviendo: {resp:?}"
+                "{uri} debería seguir sirviendo: {resp:?}"
             );
         }
     }

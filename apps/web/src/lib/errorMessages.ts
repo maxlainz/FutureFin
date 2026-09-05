@@ -90,6 +90,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   // ── Copia de seguridad (.ffbackup) ────────────────────────────────────────────────────
   backup_wrong_password:
     "La contraseña del archivo no es correcta. Es la que elegiste al exportarlo, no la de tu cuenta.",
+  backup_password_empty:
+    "Escribe una contraseña para este backup. Sin ella el archivo no se puede cifrar.",
   backup_not_a_ffbackup_file:
     "Ese archivo no es una copia de seguridad de FutureFin. Elige un archivo .ffbackup.",
   backup_file_corrupt:
@@ -339,6 +341,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Esa cantidad no se entiende como número. Escríbela solo con cifras y, si hace falta, un decimal.",
   return_percent_too_low:
     "La rentabilidad anual no puede ser del -100 % o menos.",
+  volatility_out_of_range:
+    "La volatilidad anual debe estar entre 0 y 100 %. Como referencia: renta variable global ~15-18 %, renta fija ~4-6 %, efectivo 0.",
   patch_empty: "No has cambiado nada. Modifica algún dato antes de guardar.",
   category_wrong_scope:
     "Esa categoría no sirve para este apartado. Elige una del tipo correcto.",
@@ -474,6 +478,50 @@ export const ERROR_MESSAGES: Record<string, string> = {
   ids_do_not_match_scope:
     "El nuevo orden no coincide con las reglas que hay ahora. Recarga la página e inténtalo otra vez.",
 
+  // ── Plan de jubilación por usuario (5.0.0) ────────────────────────────────────────────
+  strategy: "Esa estrategia de jubilación no existe.",
+  target_retirement_age_required:
+    "Esa estrategia necesita que digas a qué edad quieres jubilarte.",
+  retirement_age_out_of_range:
+    "La edad de jubilación tiene que estar entre los 18 años y tu edad límite del horizonte.",
+  pension_required_for_bridge:
+    "«Puente hasta la pensión» necesita que declares tu pensión: importe y edad a la que empieza.",
+  pension_age_out_of_range:
+    "La edad a la que empieza la pensión tiene que estar entre los 50 años y tu edad límite del horizonte.",
+  pension_amount_not_positive: "El importe de la pensión debe ser mayor que cero.",
+  pension_fraction_out_of_range:
+    "La parte de la pensión que se cobra en media jornada debe estar entre 0 y 1.",
+  partial_age_out_of_range:
+    "La edad a la que empieza la media jornada tiene que estar entre los 18 años y tu edad límite del horizonte.",
+  partial_not_before_retirement:
+    "La media jornada tiene que empezar antes de la jubilación total.",
+  partial_income_negative: "El ingreso de la media jornada no puede ser negativo.",
+  target_basis: "Esa base del objetivo de jubilación no es válida.",
+  bridge_discount_basis: "Esa forma de descontar el puente hasta la pensión no es válida.",
+  bridge_discount_out_of_range:
+    "La tasa con la que se descuenta el puente hasta la pensión se sale de lo que se puede calcular. Revisa la rentabilidad esperada de tus activos líquidos, o acorta el puente retrasando la jubilación o adelantando la pensión.",
+  withdrawal_rule_kind: "Esa regla de retirada no existe.",
+  spend_mode: "Esa forma de relacionar la regla de retirada con tu gasto no es válida.",
+  expense_basis: "Esa base de gasto para la media jornada no es válida.",
+  withdrawal_pct_required: "A esa regla de retirada le falta alguno de sus porcentajes.",
+  withdrawal_pct_out_of_range:
+    "El porcentaje de la regla de retirada debe ser mayor que 0 y como mucho 20 %.",
+  withdrawal_band_out_of_range:
+    "La banda y el ajuste de la regla de bandas deben ser mayores que 0 y como mucho 50 %.",
+  hybrid_end_pct_not_below_start:
+    "En la regla híbrida, el porcentaje final tiene que ser menor que el inicial.",
+  cash_buffer_out_of_range: "El colchón de caja debe estar entre 0 y 60 meses.",
+  partial_retirement_required:
+    "«Media jornada» necesita que declares la fase parcial: a qué edad empieza y con qué ingreso.",
+  field_set_and_clear:
+    "Has pedido a la vez fijar y borrar el mismo campo. Elige una de las dos cosas.",
+
+  // ── Filas del hogar: quién puede editarlas ────────────────────────────────────────────
+  not_row_owner:
+    "Esto es de otra persona del hogar. Puedes verlo, pero solo quien lo creó puede cambiarlo.",
+  household_read_only:
+    "La vista del hogar es solo de lectura para esta acción. Cambia a «Yo» y vuelve a intentarlo.",
+
   // ── Ajustes del hogar y del plan ──────────────────────────────────────────────────────
   swr_out_of_range: "La tasa de retirada segura debe estar entre 0 y 4 %.",
   fire_number_mode: "Esa forma de fijar el número FIRE no es válida.",
@@ -515,6 +563,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "El TIN anual debe estar entre 0 y 100 %. Si has escrito 350 queriendo decir 3,50, usa la coma decimal.",
   backup_asset_return_invalid:
     "El backup trae un activo con una rentabilidad esperada imposible (≤ −100 %); corrígela en la instalación de origen y vuelve a exportar.",
+  backup_asset_volatility_invalid:
+    "El backup trae un activo con una volatilidad fuera de rango (debe estar entre 0 y 100 %); corrígela en la instalación de origen y vuelve a exportar.",
   inflation_not_a_number:
     "La inflación no se entiende como número. Escríbela solo con cifras y, si hace falta, un decimal.",
   currency_format_invalid: "El código de moneda debe tener tres letras.",
@@ -565,10 +615,28 @@ export const ERROR_MESSAGES: Record<string, string> = {
   // ── Simulación y proyección ───────────────────────────────────────────────────────────
   engine_rejected_input:
     "Con los datos actuales no se puede calcular la proyección. Revisa activos, reglas de reparto y presupuesto.",
+  household_not_simulable:
+    "La vista del hogar no se puede simular: elige tu vista (Yo).",
+  engine_feature_unavailable:
+    "Esta configuración de jubilación aún no está disponible en el motor.",
   task_panic:
     "El cálculo de la proyección se ha interrumpido. Vuelve a intentarlo en unos segundos.",
   months_out_of_range:
     "El horizonte de la proyección debe estar entre 12 y 840 meses.",
+  income_growth_no_op:
+    "Un crecimiento del ingreso del 0 % es justo tu escenario actual: pon otra cifra o quita el supuesto.",
+  income_growth_out_of_range:
+    "El crecimiento real del ingreso debe estar entre −10 % y 20 % al año.",
+  income_steps_too_many:
+    "Son demasiados cambios de ingreso en un mismo escenario: como mucho 24.",
+  income_step_delta_zero:
+    "Un cambio de ingreso de 0 € no cambia nada. Indica cuánto sube o baja, o quítalo.",
+  income_step_timing_ambiguous:
+    "Indica cuándo ocurre cada cambio de ingreso de una sola forma: el mes o la fecha, no las dos.",
+  income_step_month_out_of_range:
+    "Ese cambio de ingreso cae fuera del horizonte que estás proyectando.",
+  income_step_date_out_of_horizon:
+    "Esa fecha de cambio de ingreso queda fuera del horizonte que estás proyectando.",
   retirement_expense_not_positive:
     "El gasto anual en jubilación debe ser mayor que cero.",
   one_off_amount_not_positive:
@@ -583,6 +651,41 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Esa fecha queda fuera del horizonte simulado. Elige otra más cercana.",
   asset_not_in_scope:
     "Uno de los activos de la simulación no existe o no se ve en esta vista. Recarga la página.",
+
+  // Escenarios con volatilidad (bandas de percentil, 5.0.0). El techo de caminos DEPENDE de la
+  // superficie (2.000 por HTTP, 1.000 por MCP), así que la frase no cita ninguna cifra: un
+  // número escrito aquí sería falso en la mitad de los casos.
+  household_bands_unavailable:
+    "Los escenarios con volatilidad son de una sola persona: los percentiles no se suman entre miembros. Cambia a tu vista (Yo).",
+  paths_out_of_range:
+    "Ese número de escenarios está fuera del rango permitido. Pide menos.",
+  invalid_percentiles:
+    "Los percentiles deben estar entre 1 y 99.",
+  invalid_seed:
+    "Esa semilla no es válida: tiene que ser un número entero sin signo.",
+
+  // Escenarios «¿y si…?» del perfil de jubilación (5.0.0, §E). Solo llegan por MCP: la SPA
+  // explora GUARDANDO la configuración (D30), así que estas frases las lee quien pilota
+  // FutureFin desde Claude o desde la API a mano — pero se traducen igual, porque el catálogo
+  // es el único sitio donde vive lo que ve una persona.
+  profile_overrides_empty:
+    "El escenario no cambia ni un dato de tu plan de jubilación. Indica al menos un valor distinto o quita el supuesto.",
+  profile_overrides_no_op:
+    "Los valores del escenario son los que ya tienes guardados, así que la simulación saldría idéntica. Cambia alguno.",
+  swr_pct_set_twice:
+    "Has indicado la tasa de retirada segura dos veces en el mismo escenario. Déjala en un solo sitio.",
+  income_pause_timing_ambiguous:
+    "Indica cuándo empieza la pausa de ingresos de una sola forma: el mes o la fecha, no las dos.",
+  income_pause_months_zero:
+    "Una pausa de cero meses es justo tu escenario actual. Indica cuántos meses dura, al menos uno.",
+  income_pause_fraction_out_of_range:
+    "Durante la pausa puedes conservar desde el 0 % hasta menos del 100 % de tu ingreso: con el 100 % no cambia nada.",
+  income_pause_month_out_of_range:
+    "Ese mes de inicio de la pausa queda fuera del horizonte que estás proyectando.",
+  income_pause_date_out_of_horizon:
+    "Esa fecha de inicio de la pausa queda fuera del horizonte que estás proyectando.",
+  solve_no_op:
+    "Has pedido calcular cuánto gasto extra aguanta tu fecha de jubilación y a la vez lo has desactivado. Pídelo o quítalo del escenario.",
 
   // ── Parámetros de consulta ────────────────────────────────────────────────────────────
   // La app nunca los provoca: manda siempre valores válidos. Existen porque desde 4.0.0 la API

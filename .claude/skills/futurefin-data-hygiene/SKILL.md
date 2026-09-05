@@ -82,6 +82,29 @@ que un cambio de números es el que se quería. Eso se conserva. Lo que cambia e
 Las capturas de pantalla salen **siempre** de una instalación sembrada con `scripts/seed-demo.sh`,
 jamás de la tuya. Una captura del Resumen es tu patrimonio neto en un README público.
 
+## 4.b Semillas y bandas de Monte Carlo (5.0.0)
+
+`GET /v1/projection/bands` publica una **semilla** (`seed`, cadena de dígitos) y las bandas
+p10/p50/p90 de tu patrimonio. Las dos cosas se tratan distinto:
+
+- **La semilla NO es un dato personal**, pero **sí es un identificador estable de la pareja
+  (instalación, usuario)**: `seed_for` (`crates/engine-stochastic/src/mc.rs:242`) es FNV-1a sobre
+  los 32 bytes de los dos UUID, rematado con el finalizador de `splitmix64`. Es de una sola
+  dirección —de la semilla no se sacan los UUID— pero es **determinista y estable en el tiempo**,
+  así que dos issues que la peguen quedan atados a la misma persona y a la misma instalación.
+  **Regla**: en un issue, un doc o un CHANGELOG usa una semilla **explícita e inventada**
+  (`?seed=1`, `?seed=42`), que reproduce el sorteo exactamente igual; **nunca** pegues la que te
+  sirvió tu instalación. Si necesitas contar que la semilla por defecto es estable, cuéntalo con el
+  test que lo prueba (`mc_seed_for_is_stable`), no con tu número.
+- **Las bandas, la probabilidad de éxito y la tabla de agotamiento SÍ son datos tuyos**: salen de
+  tu ledger. Un p50 a 40 años es tu patrimonio proyectado; «éxito 61 %» dice cuánto dinero tienes
+  frente a lo que gastas. Van a §4: se ilustran con cifras **sintéticas y coherentes** y se
+  etiquetan como tales — el precedente está en la entrada de 5.0.0 del CHANGELOG, cuya tabla de
+  agotamiento por edad dice literalmente «cifras SINTÉTICAS, de un plan de laboratorio […];
+  ninguna instalación real».
+- Lo mismo vale para el **perfil de jubilación**: tu edad objetivo, tu pensión y su fecha, y tu
+  gasto de jubilación son datos personales aunque no lleven ni un IBAN ni un nombre.
+
 ## 5. El gate
 
 `scripts/scan-sensitive.sh` recorre los ficheros trackeados buscando IBAN, tarjetas, claves
@@ -121,3 +144,6 @@ Borrarlo del último commit **no basta**: sigue en el historial y en cada clon.
 - El gate de CI: `grep -n "secrets-scan" -A 8 .github/workflows/ci.yml`
 - Los fixtures actuales: `ls apps/api/tests/fixtures/` — los tres CSV son fabricados; comprueba
   que siguen siéndolo con `./scripts/scan-sensitive.sh`.
+- §4.b, la derivación de la semilla: `grep -n 'fn seed_for' -A 12 crates/engine-stochastic/src/mc.rs`
+  (FNV-1a sobre los dos UUID + finalizador de `splitmix64`; verificado 2026-09-03, rama
+  `release/5.0.0`).

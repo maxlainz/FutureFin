@@ -1,20 +1,42 @@
 //! Monthly net-worth projection.
 
 mod history;
+mod money;
 mod net_return;
+mod phases;
 mod projection;
 mod runway;
+mod sim;
+mod sim_core;
+mod solve;
+mod target;
 mod tax;
+mod withdrawal;
 
 pub use history::{
     add_months_signed, amortized_segment_value, anchored_cashflow_segment_value, evaluate_timeline,
     month_index_of, CashFlowEntry, HistoryItem, HistoryItemKind, HistoryObservation,
     HistoryTimeline, LoanTerms,
 };
+pub use money::MoneyOps;
 pub use net_return::{net_return_percentages, NetReturn};
+pub use phases::{
+    EngineWarning, ExpenseBasis, IncomePause, PartialPhase, PensionSchedule, Phase, PhasePlan,
+    RetirementTrigger, SpendMode, TargetBasis, WithdrawalRule,
+};
+pub use sim::{
+    AllocationCapG, AllocationRuleG, CashBufferPlan, CashBufferTarget, FireNeedG, FireTargetG,
+    FireTargetView,
+    FirstMonthAllocationG, IncomePauseG, PartialPhaseG, PensionScheduleG, PhasePlanG,
+    RuleOutcomeG, SimAssetG, SimInput, SimLiability, SimOutput, TaxBracketG, WithdrawalRuleG,
+};
+pub use sim_core::{
+    cash_buffer_index, monthly_multiplier_g as monthly_growth_multiplier, safe_cash_buffer_index,
+    simulate,
+};
 pub use projection::{
     debt_payments_remaining_series, fire_target_at_month_index, fire_target_base_at_month_index,
-    first_month_allocation,
+    first_month_allocation, inflation_factor_at_month_index,
     first_month_per_asset_contribution_nominals, liability_amortization_schedule,
     liability_interest_accrues,
     present_value_of_payments, project_net_worth_series, resolve_cap_ceiling, AllocationCap,
@@ -26,6 +48,11 @@ pub use projection::{
     MAX_LIABILITY_SCHEDULE_MONTHS,
 };
 pub use runway::{liquid_runway_months, RunwayOutcome, MAX_RUNWAY_MONTHS};
+pub use solve::{
+    coast_fire_month_index, max_extra_monthly_expense_keeping_date, required_contribution_monthly,
+    retirement_delay_months, CoastSolve, RetirementDelay, SolveResult, MAX_SOLVE_ITERATIONS,
+};
+pub use target::{fire_target_at_month_index_with_plan, PlanFireTarget, MAX_BRIDGE_MONTHS};
 pub use tax::{after_tax_monthly, gross_up_monthly, gross_up_net_annual_fire, tax_on_gross_capital_annual, TaxBracket};
 
 #[cfg(test)]

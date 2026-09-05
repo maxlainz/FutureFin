@@ -113,14 +113,14 @@ export function SummaryDonutChart({
   if (!g || filtered.length === 0) {
     return (
       <div className="summary-donut-card">
-        <h4 className="subsection-title">{title}</h4>
+        <h4 className="donut-card-title">{title}</h4>
         <p className="muted tight">Sin datos.</p>
       </div>
     );
   }
   return (
     <div className="summary-donut-card">
-      <h4 className="subsection-title">{title}</h4>
+      <h4 className="donut-card-title">{title}</h4>
       <div className="summary-donut-inner">
         <div
           className="summary-donut-ring"
@@ -173,14 +173,14 @@ export function SummaryBreakdownBlock({
   if (rows.length === 0) {
     return (
       <div className="breakdown-block">
-        <h4 className="subsection-title">{title}</h4>
+        <h4 className="panel-title">{title}</h4>
         <p className="muted tight">Sin datos.</p>
       </div>
     );
   }
   return (
     <div className="breakdown-block">
-      <h4 className="subsection-title">{title}</h4>
+      <h4 className="panel-title">{title}</h4>
       <div className="breakdown-table-wrap bordered-top">
         <table className="breakdown-table">
           <thead>

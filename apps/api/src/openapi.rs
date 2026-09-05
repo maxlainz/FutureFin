@@ -43,6 +43,10 @@ use crate::handlers::ha_sso::{__path_ha_callback, __path_ha_start};
 #[allow(unused_imports)]
 use crate::handlers::sso::__path_sso_login;
 #[allow(unused_imports)]
+use crate::handlers::retirement_profile::{
+    __path_get_retirement_profile, __path_patch_retirement_profile,
+};
+#[allow(unused_imports)]
 use crate::handlers::summary::__path_get_summary;
 #[allow(unused_imports)]
 use crate::handlers::assets::{
@@ -78,6 +82,7 @@ use crate::handlers::categories::{
 };
 #[allow(unused_imports)]
 use crate::handlers::projection::{__path_get_projection_deflate, __path_get_projection_series};
+use crate::handlers::projection_bands::__path_get_projection_bands;
 #[allow(unused_imports)]
 use crate::handlers::transactions::crud::{
     __path_create_batch, __path_create_transaction, __path_delete_import, __path_patch_batch,
@@ -161,6 +166,8 @@ impl utoipa::Modify for SecurityAddon {
         ha_callback,
         me,
         patch_me,
+        get_retirement_profile,
+        patch_retirement_profile,
         get_installation_session_context,
         get_my_installation,
         patch_my_installation,
@@ -202,6 +209,7 @@ impl utoipa::Modify for SecurityAddon {
         delete_planning_flow,
         get_projection_series,
         get_projection_deflate,
+        get_projection_bands,
         capture_snapshots,
         list_snapshots,
         create_snapshot,
@@ -268,6 +276,19 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::installation::InstallationSessionContext,
         crate::handlers::installation::SetupInstallationBody,
         crate::handlers::installation::PatchInstallationBody,
+        crate::handlers::retirement_profile::RetirementProfile,
+        crate::handlers::retirement_profile::RetirementProfileResponse,
+        crate::handlers::retirement_profile::PatchRetirementProfileBody,
+        crate::handlers::retirement_profile::RetirementStrategy,
+        crate::handlers::retirement_profile::TargetBasis,
+        crate::handlers::retirement_profile::BridgeDiscountBasis,
+        crate::handlers::retirement_profile::WithdrawalRule,
+        crate::handlers::retirement_profile::WithdrawalRuleKind,
+        crate::handlers::retirement_profile::PctSource,
+        crate::handlers::retirement_profile::SpendMode,
+        crate::handlers::retirement_profile::PensionPlan,
+        crate::handlers::retirement_profile::PartialRetirement,
+        crate::handlers::retirement_profile::PartialExpenseBasis,
         crate::handlers::membership::MembershipRole,
         crate::handlers::api_tokens::ApiTokenResponse,
         crate::handlers::api_tokens::CreateApiTokenBody,
@@ -308,6 +329,7 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::liabilities::PaymentFrequency,
         crate::handlers::liabilities::RepaymentModel,
         crate::handlers::summary::SummaryResponse,
+        crate::handlers::summary::SummaryPlan,
         crate::handlers::summary::FinancialHealthMetrics,
         crate::handlers::summary::CategoryBreakdownLine,
         crate::handlers::summary::TypeTagBreakdownLine,
@@ -325,6 +347,10 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::projection::ProjectionSeriesResponse,
         crate::handlers::projection::DeflateResponse,
         crate::handlers::projection::ProjectionPoint,
+        crate::handlers::projection_bands::ProjectionBandsResponse,
+        crate::handlers::projection_bands::ProjectionBandPoint,
+        crate::handlers::projection_bands::DepletionProbabilityPoint,
+        crate::handlers::projection_bands::RetirementMonthPercentiles,
         crate::handlers::projection::LiabilityNegativeAmortization,
         crate::handlers::history::SnapshotResponse,
         crate::handlers::history::SnapshotItemResponse,
@@ -448,7 +474,7 @@ impl utoipa::Modify for SecurityAddon {
         ),
         (
             name = "backup",
-            description = "Backup `.ffbackup` por usuario: formato propio cifrado (AES-256-GCM, KDF Argon2id derivado de la contraseña de cuenta). Solo datos del usuario actual; portable entre instalaciones."
+            description = "Backup `.ffbackup` por usuario: formato propio cifrado (AES-256-GCM, KDF Argon2id derivado de la contraseña que llega en el cuerpo). En una cuenta CON contraseña esa es la de la cuenta y el servidor la verifica antes de cifrar; en una cuenta SIN contraseña (identidad delegada del add-on de Home Assistant) es una contraseña propia del archivo, que solo alimenta el KDF y solo tiene que no ir vacía. Solo datos del usuario actual; portable entre instalaciones."
         ),
         (
             name = "history",

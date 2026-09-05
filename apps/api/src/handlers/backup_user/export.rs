@@ -24,7 +24,7 @@ use super::schema::{
     BackupAllocationRule, BackupAsset, BackupBudgetEntry, BackupCategorizationRule, BackupCategory,
     BackupLiability, BackupPayload, BackupPlanningFlow, BackupRecurringRule, BackupSnapshot,
     BackupSnapshotItem, BackupTransaction, BackupTransactionImport, BackupTransferMatchRejection,
-    BackupUser, CategoryRef, InstallationSnapshotInformative, UiPreferences,
+    BackupFireSettings, BackupUser, CategoryRef, InstallationSnapshotInformative, UiPreferences,
     CURRENT_SCHEMA_VERSION,
 };
 
@@ -35,6 +35,23 @@ pub struct ExportRequest {
     pub ui_preferences: Option<UiPreferences>,
 }
 
+/// Exporta el `.ffbackup` del usuario de la sesión. **Dos caminos, uno por tipo de cuenta**:
+///
+/// - **Cuenta con contraseña** (`users.password_hash` NOT NULL): igual que siempre. La
+///   contraseña del cuerpo se verifica contra el hash de la cuenta (401 si no casa) y además
+///   alimenta el KDF. El fichero queda atado a la contraseña que la cuenta tenía al exportar.
+/// - **Cuenta sin contraseña** (identidad delegada del add-on de Home Assistant,
+///   `password_hash IS NULL`): no hay hash contra el que verificar, y la sesión
+///   (`require_session_user` + `require_installation_member`) ya autenticó a quien pide. La
+///   contraseña del cuerpo es entonces **una contraseña propia del archivo**: solo entra al KDF.
+///   Única regla, la que el cifrado necesita: **no puede estar vacía** (422
+///   `backup_password_empty`).
+///
+/// Hasta la 5.0.0 este handler exigía `password_hash` y devolvía `sso_account_no_password`: en el
+/// add-on de HA, donde la cuenta NO tiene contraseña ni debe tenerla, eso dejaba a la persona sin
+/// poder exportar sus propios datos (issue #213). El import no distingue: la contraseña siempre
+/// fue solo entrada del KDF (ver `import.rs`), así que los ficheros antiguos siguen restaurándose
+/// con la contraseña de cuenta de entonces.
 #[utoipa::path(
     post,
     path = "/v1/backup/user-export",
@@ -43,8 +60,9 @@ pub struct ExportRequest {
     responses(
         (status = 200, description = "Binary .ffbackup file", content_type = "application/octet-stream"),
         (status = 400, description = "Validation error"),
-        (status = 401, description = "Session or password invalid"),
+        (status = 401, description = "Session invalid, or — on accounts WITH a password — the account password does not match"),
         (status = 403, description = "Not an installation member"),
+        (status = 422, description = "backup_password_empty: on accounts without a password, the backup password cannot be empty"),
         (status = 503, description = "Internal error"),
     )
 )]
@@ -57,7 +75,23 @@ pub async fn export_user_backup(
     let (iid, _role) = require_installation_member(&state.pool, user.id.0).await?;
 
     let (username, birth_date, password_hash) = fetch_user_for_export(&state.pool, user.id.0).await?;
-    verify_password_blocking(&body.password, Some(password_hash)).await?;
+    match password_hash {
+        // Cuenta con contraseña: se verifica contra el hash, como siempre. El 401 sale de
+        // `verify_password_blocking`.
+        Some(hash) => verify_password_blocking(&body.password, Some(hash)).await?,
+        // Cuenta sin contraseña (SSO del add-on de HA): no hay nada contra lo que verificar y la
+        // sesión ya autenticó. La contraseña recibida es la del ARCHIVO y solo alimenta el KDF.
+        // La única regla es que exista: derivar una clave de la cadena vacía produciría un
+        // fichero que cualquiera abre, y el usuario creería que está cifrado.
+        None => {
+            if body.password.is_empty() {
+                return Err(ApiError::Unprocessable(
+                    "backup_password_empty: this account has no password, so the backup needs one of its own"
+                        .into(),
+                ));
+            }
+        }
+    }
 
     let payload = build_payload(
         &state.pool,
@@ -136,22 +170,20 @@ fn sanitize_filename(raw: &str) -> String {
     }
 }
 
+/// `password_hash` viaja **como `Option`**: su ausencia ya no es un error, es el otro camino.
+/// El `SELECT` tipado como `Option<String>` es además lo que impide que una cuenta sin
+/// contraseña reviente con «unexpected null» y llegue al usuario como un 500 sin explicación.
 async fn fetch_user_for_export(
     pool: &PgPool,
     user_id: Uuid,
-) -> Result<(String, Option<NaiveDate>, String), ApiError> {
+) -> Result<(String, Option<NaiveDate>, Option<String>), ApiError> {
     let row: Option<(String, Option<NaiveDate>, Option<String>)> = sqlx::query_as(
         r#"SELECT username, birth_date, password_hash FROM users WHERE id = $1"#,
     )
     .bind(user_id)
     .fetch_optional(pool)
     .await?;
-    let (username, birth_date, password_hash) = row.ok_or(ApiError::Unauthorized)?;
-    // La clave del `.ffbackup` se deriva de la contraseña de la cuenta, y una cuenta SSO no
-    // tiene ninguna: no hay secreto del usuario con el que cifrar. Antes de decirlo, el `SELECT`
-    // reventaba con «unexpected null» y el usuario veía un 500 sin explicación.
-    let password_hash = password_hash.ok_or_else(crate::handlers::auth::sso_account_no_password)?;
-    Ok((username, birth_date, password_hash))
+    row.ok_or(ApiError::Unauthorized)
 }
 
 async fn build_payload(
@@ -199,6 +231,11 @@ async fn build_payload(
     )
     .await?;
     let categorization_rules = fetch_categorization_rules(pool, iid, user_id).await?;
+    // El perfil se exporta **sin resolver**: `None` significa «este usuario nunca lo configuró»,
+    // y restaurar eso como `NULL` deja exactamente el mismo estado. Guardar el resuelto
+    // convertiría un default en una elección.
+    let retirement_profile =
+        crate::handlers::retirement_profile::stored_retirement_profile(pool, user_id).await?;
     let transfer_match_rejections =
         fetch_transfer_match_rejections(pool, iid, user_id, &txn_id_to_index).await?;
 
@@ -212,6 +249,7 @@ async fn build_payload(
         planning_flows,
         ui_preferences,
         installation_snapshot_informative: snapshot,
+        retirement_profile,
         snapshots,
         transaction_imports,
         transactions,
@@ -511,11 +549,12 @@ async fn fetch_assets(
         Option<Decimal>,
         bool,
         Option<Decimal>,
+        Option<Decimal>,
         Option<String>,
         i32,
     )> = sqlx::query_as(
         r#"SELECT a.id, c.scope, c.name AS cat_name, a.name, a.current_value, a.purchase_price,
-                  a.is_liquid, a.expected_annual_return_percent,
+                  a.is_liquid, a.expected_annual_return_percent, a.annual_volatility_percent,
                   a.notes, a.sort_index
            FROM assets a
            JOIN categories c ON c.id = a.category_id
@@ -540,8 +579,9 @@ async fn fetch_assets(
                 purchase_price: r.5,
                 is_liquid: r.6,
                 expected_annual_return_percent: r.7,
-                notes: r.8,
-                sort_index: r.9,
+                annual_volatility_percent: r.8,
+                notes: r.9,
+                sort_index: r.10,
             }
         })
         .collect();
@@ -901,6 +941,11 @@ async fn fetch_installation_snapshot(
         calendar_tz: row.1,
         annual_inflation_assumption_percent: Some(row.2),
         show_age_mode: row.3,
-        fire_settings: resolve_fire_settings(row.4.map(|j| j.0)),
+        // Los cuatro ejes legados salen a `None`: desde 5.0.0 viven en el perfil del usuario y
+        // el fichero no debe llevar dos copias de la misma cifra.
+        fire_settings: BackupFireSettings {
+            settings: resolve_fire_settings(row.4.map(|j| j.0)),
+            legacy: Default::default(),
+        },
     })
 }

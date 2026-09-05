@@ -4,7 +4,6 @@ import {
   startTransition,
   useCallback,
   useEffect,
-  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -46,8 +45,20 @@ import {
   HA_LOGIN_AVAILABLE,
   haLoginHref,
 } from "./lib/basePath";
-import { ledgerViewQs } from "./lib/ledger";
+import {
+  LEDGER_PERSON_SCOPE_STORAGE_KEY,
+  isScopeReadOnly,
+  ledgerViewAmp,
+  ledgerViewQs,
+  resolveLedgerPersonScope,
+} from "./lib/ledger";
 import { savingsSourceUsesTransactions } from "./lib/fire";
+import {
+  isEmptyRetirementProfilePatch,
+  normalizeRetirementProfile,
+  withStoredTargetBasis,
+} from "./lib/retirementProfile";
+import { buildAssetWriteBody } from "./lib/asset-form";
 import { readFileAsBase64 } from "./lib/files";
 import { chartPerf } from "./lib/perf";
 import { PROJECTION_FOCUS_STORAGE_KEY } from "./lib/projection-chart";
@@ -57,6 +68,7 @@ import {
   TAB_PATH,
   type SettingsSubTabId,
   type TabId,
+  isTabAvailableForScope,
   normalizeAppPath,
   settingsSubTabFromPathname,
   settingsSubTabPath,
@@ -83,10 +95,11 @@ import {
  */
 function projectionSeriesUrl(scope: LedgerPersonScope, density?: "hybrid"): string {
   const params = new URLSearchParams();
-  if (scope === "mine") params.set("view", "mine");
+  // Los dos ámbitos viajan explícitos (ver `ledgerViewQs`): con el default del API en `mine`
+  // (5.0.0), omitir el parámetro en Hogar devolvería la proyección de una sola persona.
+  params.set("view", scope === "mine" ? "mine" : "household");
   if (density) params.set("density", density);
-  const q = params.toString();
-  return q ? `/v1/projection/series?${q}` : "/v1/projection/series";
+  return `/v1/projection/series?${params.toString()}`;
 }
 
 async function fetchProjectionTwoPhase(
@@ -187,7 +200,11 @@ import type {
   MemberApiRow,
   PlanningAmountBasisApi,
   PlanningFlowApiRow,
+  ProjectionBandsApi,
   ProjectionSeriesApi,
+  RetirementProfileApi,
+  RetirementProfilePatchApi,
+  RetirementProfileResponseApi,
   SummaryResponse,
   UserResponse,
 } from "./api/types";
@@ -226,8 +243,6 @@ function useAppPathNavigation(): [
 
   return [pathname, navigate];
 }
-
-const LEDGER_PERSON_SCOPE_STORAGE_KEY = "futurefin-ledger-person-scope";
 
 type FfbackupImportCounts = {
   assets: number;
@@ -299,7 +314,6 @@ function markSsoSignedOut(signedOut: boolean) {
 }
 
 export default function App() {
-  const ledgerScopeSelectId = useId();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
 
@@ -307,16 +321,17 @@ export default function App() {
   const [user, setUser] = useState<UserResponse | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
 
+  // Default `mine` (D9 de 5.0.0): sin valor guardado —o con uno desconocido— la app arranca en la
+  // vista del miembro que ha entrado. La elección del usuario se sigue persistiendo.
   const [ledgerPersonScope, setLedgerPersonScopeInner] =
     useState<LedgerPersonScope>(() => {
-      if (typeof window === "undefined") return "household";
+      if (typeof window === "undefined") return "mine";
       try {
-        return window.localStorage.getItem(LEDGER_PERSON_SCOPE_STORAGE_KEY) ===
-          "mine"
-          ? "mine"
-          : "household";
+        return resolveLedgerPersonScope(
+          window.localStorage.getItem(LEDGER_PERSON_SCOPE_STORAGE_KEY),
+        );
       } catch {
-        return "household";
+        return "mine";
       }
     });
 
@@ -347,6 +362,16 @@ export default function App() {
   const [installationBusy, setInstallationBusy] = useState(false);
   const [installationGate, setInstallationGate] =
     useState<InstallationGate>("loading");
+
+  /**
+   * Vista Hogar = agregado informativo de **solo lectura** (D9/D32). Se decide UNA vez aquí y
+   * viaja a las vistas por el `canEdit` que ya tenían: ninguna vista repite la regla, así que no
+   * puede quedarse una atrás. El servidor rechaza además toda escritura de una fila ajena con
+   * 403 `not_row_owner` (D21) — esto es la UX de esa regla, no la regla.
+   */
+  const scopeReadOnly = isScopeReadOnly(ledgerPersonScope);
+  const canEditLedger = installation?.role !== "viewer" && !scopeReadOnly;
+
   const [setupCurrency, setSetupCurrency] = useState<"EUR" | "USD" | "GBP">(
     "EUR",
   );
@@ -361,6 +386,21 @@ export default function App() {
   );
   const [installationProjectionSaving, setInstallationProjectionSaving] =
     useState(false);
+
+  /**
+   * Perfil de jubilación del usuario de la sesión (5.0.0, D13). Vive AQUÍ y no en
+   * `RetirementView` porque es un input del motor: lo consume también el Resumen (el SWR de la
+   * tarjeta de Autonomía) y toda escritura obliga a recargar la serie de proyección. `null`
+   * mientras no ha llegado — nunca se sustituye por el default para pintar, o la vista
+   * enseñaría un plan que no es el del usuario.
+   */
+  const [retirementProfile, setRetirementProfile] =
+    useState<RetirementProfileApi | null>(null);
+  const [retirementProfileBusy, setRetirementProfileBusy] = useState(false);
+  const [retirementProfileError, setRetirementProfileError] = useState<
+    string | null
+  >(null);
+  const [retirementProfileSaving, setRetirementProfileSaving] = useState(false);
 
   const [pendingUsers, setPendingUsers] = useState<UserResponse[]>([]);
   const [pendingUsersBusy, setPendingUsersBusy] = useState(false);
@@ -422,6 +462,7 @@ export default function App() {
   const [assetFormPurchase, setAssetFormPurchase] = useState("");
   const [assetFormLiquid, setAssetFormLiquid] = useState(true);
   const [assetFormExpectedReturn, setAssetFormExpectedReturn] = useState("");
+  const [assetFormVolatility, setAssetFormVolatility] = useState("");
   const [assetFormNotes, setAssetFormNotes] = useState("");
   const [editingAssetId, setEditingAssetId] = useState<string | null>(null);
   const [assetSaving, setAssetSaving] = useState(false);
@@ -528,6 +569,33 @@ export default function App() {
     useState<ProjectionSeriesApi | null>(null);
   const [projectionBusy, setProjectionBusy] = useState(false);
   const [projectionError, setProjectionError] = useState<string | null>(null);
+
+  /**
+   * Bandas de Monte Carlo (5.0.0 WP6b, D28) — la sección «Riesgo» de Jubilación.
+   *
+   * Es una SEGUNDA petición, más cara que la serie (un MISS mide ~55 ms en release contra el
+   * sub-ms de un HIT de proyección), así que:
+   *
+   *  - se pide **después** de la serie, nunca en paralelo: la línea determinista es lo que el
+   *    usuario ve primero y el abanico es su contexto, no al revés;
+   *  - se pide **solo en la pestaña Jubilación**, que es la única que la dibuja. El KPI «Éxito
+   *    del plan» del Resumen NO la necesita: sus tres campos llegan dentro de `summary.plan`,
+   *    del MISMO cache de bandas del servidor (así el tile y el fan chart citan la misma
+   *    ejecución de Monte Carlo, nunca dos sorteos distintos del mismo plan);
+   *  - **no se pide en Hogar**: el servidor devuelve 400 `household_bands_unavailable` porque
+   *    los percentiles no suman entre miembros. La vista lo dice en vez de pedirlo y fallar.
+   *
+   * Refresco: se recarga con la serie. Toda mutación que invalida la proyección en el servidor
+   * invalida también las bandas (los dos mapas se borran juntos), así que una banda vieja al
+   * lado de una línea nueva —dos cifras que se contradicen en la misma pantalla— no puede
+   * ocurrir mientras el cliente refetchee las dos a la vez.
+   */
+  const [projectionBands, setProjectionBands] =
+    useState<ProjectionBandsApi | null>(null);
+  const [projectionBandsBusy, setProjectionBandsBusy] = useState(false);
+  const [projectionBandsError, setProjectionBandsError] = useState<string | null>(
+    null,
+  );
 
   // Serie histórica (snapshots pasados). Es un enhancement del chart: cualquier
   // fallo cae a `null` en silencio (sin busy/error state) y el chart degrada a
@@ -665,11 +733,23 @@ export default function App() {
       navigate("/resumen", true);
       return;
     }
-    if (activeTab === "settings") {
+    // Las sub-pestañas visibles dependen de `installation` (membresía, rol). Hasta que esa carga
+    // resuelva solo existen «general» y «data», así que un deep-link o una recarga en
+    // /ajustes/plan se reconducía a /ajustes/general ANTES de saber si el usuario podía verla, y
+    // el `navigate(…, true)` no se deshacía después. Se espera al gate.
+    if (activeTab === "settings" && installationGate !== "loading") {
       const sub = settingsSubTabFromPathname(pathname);
       if (!sub || !visibleSettingsSubTabs.includes(sub)) {
         navigate(settingsSubTabPath(defaultSettingsSubTab), true);
       }
+    }
+    // Ámbito Hogar solo enseña Resumen · Proyección · Ajustes (F1): un deep-link a una pestaña
+    // oculta —al montar, o al cambiar de scope en caliente desde el segmentado «Yo | Hogar»—
+    // redirige a Resumen. Presentación, no la frontera de seguridad (D23): el servidor sigue
+    // siendo quien de verdad bloquea la escritura ajena.
+    if (activeTab && !isTabAvailableForScope(activeTab, ledgerPersonScope)) {
+      navigate("/resumen", true);
+      return;
     }
   }, [
     user,
@@ -678,6 +758,8 @@ export default function App() {
     activeTab,
     visibleSettingsSubTabs,
     defaultSettingsSubTab,
+    ledgerPersonScope,
+    installationGate,
   ]);
 
   const refreshSession = useCallback(async () => {
@@ -754,6 +836,35 @@ export default function App() {
       setInstallationGate("fetch_failed");
     } finally {
       setInstallationBusy(false);
+    }
+  }, []);
+
+  /**
+   * Perfil de jubilación del usuario (5.0.0). Se carga con la instalación, en el mismo momento:
+   * la ruta devuelve los DEFAULTS cuando no hay nada guardado, así que no hay estado «sin
+   * perfil» que gestionar — solo «todavía no ha llegado».
+   */
+  const loadRetirementProfile = useCallback(async () => {
+    setRetirementProfileBusy(true);
+    setRetirementProfileError(null);
+    try {
+      const body = await apiGet<RetirementProfileResponseApi>(
+        "/v1/auth/me/retirement-profile",
+      );
+      // `target_basis` se guarda con la elección ALMACENADA, no con la resuelta que publica el
+      // servidor: es la única forma de que el formulario distinga «no lo he elegido» de «he
+      // elegido esto» y no congele la derivación (R6) al guardar cualquier otro campo. Lo que se
+      // PINTA sigue derivándose igual (`effectiveTargetBasis`), así que el usuario ve lo mismo.
+      setRetirementProfile(
+        normalizeRetirementProfile(
+          withStoredTargetBasis(body.profile, body.target_basis_stored),
+        ),
+      );
+    } catch (e: unknown) {
+      setRetirementProfile(null);
+      setRetirementProfileError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRetirementProfileBusy(false);
     }
   }, []);
 
@@ -1132,6 +1243,40 @@ export default function App() {
     }
   }, [ledgerPersonScope]);
 
+  /**
+   * `GET /v1/projection/bands` — el abanico de percentiles de la sección «Riesgo».
+   *
+   * **Solo en la vista «Yo»**: en Hogar el servidor contesta 400 `household_bands_unavailable`
+   * (los percentiles no suman entre miembros), así que ni se pide — se limpia el estado y la
+   * vista pinta «Solo en tu vista (Yo)». Pedirlo para enseñar el error sería gastar un request
+   * en descubrir algo que el cliente ya sabe.
+   *
+   * Sin `paths` ni `seed`: los defaults del servidor (500 caminos, semilla estable por usuario)
+   * son EXACTAMENTE la petición cuyo resultado alimenta también el KPI del Resumen, así que las
+   * dos superficies caen en la misma entrada de cache y citan el mismo sorteo.
+   */
+  const loadProjectionBands = useCallback(async () => {
+    if (ledgerPersonScope !== "mine") {
+      setProjectionBands(null);
+      setProjectionBandsError(null);
+      return;
+    }
+    setProjectionBandsBusy(true);
+    setProjectionBandsError(null);
+    try {
+      const data = await apiGet<ProjectionBandsApi>(
+        "/v1/projection/bands?view=mine",
+      );
+      setProjectionBands(data);
+    } catch (e: unknown) {
+      // El abanico es contexto, no el plan: su fallo no puede tumbar la vista de Jubilación.
+      setProjectionBands(null);
+      setProjectionBandsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setProjectionBandsBusy(false);
+    }
+  }, [ledgerPersonScope]);
+
   const loadHistorySeries = useCallback(async () => {
     // Purga síncrona antes del await: en un toggle Hogar↔Mío la serie del scope anterior no debe
     // sobrevivir la ventana de fetch (se fusionaría con la proyección del nuevo scope → empalme
@@ -1143,9 +1288,7 @@ export default function App() {
       // serie como texto; el chart quiere la serie entera, así que lo pide explícitamente. Sin
       // esta línea el eje pasado se cortaría en 10 años sin ningún aviso.
       const data = await apiGet<HistorySeriesApi>(
-        `/v1/history/series?window_months=1200${
-          ledgerPersonScope === "mine" ? "&view=mine" : ""
-        }`,
+        `/v1/history/series?window_months=1200${ledgerViewAmp(ledgerPersonScope)}`,
       );
       setHistorySeries(data);
     } catch {
@@ -1164,7 +1307,7 @@ export default function App() {
     try {
       const qs = ledgerViewQs(ledgerPersonScope);
       const data = await apiGet<HistoryCashflowApi>(
-        `/v1/history/cashflow${qs}${qs ? "&" : "?"}window_months=24`,
+        `/v1/history/cashflow${qs}&window_months=24`,
       );
       setCashflowSeries(data);
     } catch {
@@ -1181,7 +1324,7 @@ export default function App() {
     try {
       const qs = ledgerViewQs(ledgerPersonScope);
       const data = await apiGet<HistoryCashflowApi>(
-        `/v1/history/cashflow${qs}${qs ? "&" : "?"}window_months=6&resolution=daily`,
+        `/v1/history/cashflow${qs}&window_months=6&resolution=daily`,
       );
       setCashflowDaily(data);
     } catch {
@@ -1224,8 +1367,7 @@ export default function App() {
         setProjectionError(null);
       }
       try {
-        const qs =
-          ledgerPersonScope === "mine" ? "?view=mine" : "";
+        const qs = ledgerViewQs(ledgerPersonScope);
         const budPromise = fetch(apiUrl(`/v1/budget${qs}`), defaultFetchInit);
         const projPromise = skipProjection
           ? Promise.resolve(null as Response | null)
@@ -1274,6 +1416,12 @@ export default function App() {
             setProjectionSeries((await projRes.json()) as ProjectionSeriesApi);
           }
         }
+        // Las bandas van DESPUÉS y sin `await` (§Riesgo, D28): son la segunda petición, la cara,
+        // y la sección que las dibuja está más abajo en la página. Bloquear aquí retrasaría los
+        // KPIs y el chart determinista, que es lo primero que se mira. Dentro del `try` a
+        // propósito: si el presupuesto o la serie fallaron, la vista ya está enseñando un error
+        // y un abanico encima no aporta nada.
+        void loadProjectionBands();
       } catch (e: unknown) {
         if (!silent) {
           setRetirementBudgetSnapshot(null);
@@ -1286,7 +1434,7 @@ export default function App() {
         }
       }
     },
-    [ledgerPersonScope, installation],
+    [ledgerPersonScope, installation, loadProjectionBands],
   );
 
   const loadCategories = useCallback(async () => {
@@ -1561,6 +1709,9 @@ export default function App() {
   useEffect(() => {
     if (user) {
       void loadInstallation();
+      // El perfil no depende de la membresía: es dato del usuario del token y lo edita
+      // cualquier rol, `viewer` incluido (`patch_retirement_profile_core`).
+      void loadRetirementProfile();
     } else {
       setInstallation(null);
       setInstallationGate("loading");
@@ -1569,8 +1720,10 @@ export default function App() {
       setPendingUsersError(null);
       setSummary(null);
       setSummaryError(null);
+      setRetirementProfile(null);
+      setRetirementProfileError(null);
     }
-  }, [user, loadInstallation]);
+  }, [user, loadInstallation, loadRetirementProfile]);
 
   // Los drafts de zona horaria e inflación/modo edad se re-inicializan SOLO al cambiar de
   // instalación, no en cada refresh del objeto `installation`: desde que ambos formularios
@@ -1924,6 +2077,9 @@ export default function App() {
   const showOnboarding =
     installationGate === "member" &&
     installation?.role === "owner" &&
+    // El asistente crea activos y líneas de presupuesto: en la vista Hogar no se ofrece (el
+    // banner de ámbito ya explica dónde se edita).
+    !scopeReadOnly &&
     (onboardingForced ||
       (!onboardingSkipped && installation.installation.onboarding_completed === false));
 
@@ -2177,6 +2333,58 @@ export default function App() {
     }
   }
 
+  /**
+   * Guarda un PATCH **mínimo** del perfil de jubilación y devuelve el perfil resuelto que
+   * responde el servidor (lo necesita la vista para resincronizar `target_basis`, que el
+   * servidor DERIVA — ver `buildRetirementProfilePatch`).
+   *
+   * El perfil es un input del motor (SWR, modo del objetivo, edad límite y, desde WP5, la fase
+   * entera): tras guardarlo se recarga la serie de proyección igual que hace
+   * `saveFireSettingsPatch`, para que el chart de Jubilación / Resumen / Proyección no se quede
+   * enseñando el plan anterior hasta el siguiente cambio de pestaña.
+   *
+   * A diferencia de `fire_settings`, esto NO es owner-only: es el dato personal del usuario de
+   * la sesión, y el servidor lo acepta de cualquier rol.
+   */
+  async function saveRetirementProfilePatch(
+    patch: RetirementProfilePatchApi,
+  ): Promise<RetirementProfileApi | null> {
+    if (isEmptyRetirementProfilePatch(patch)) return retirementProfile;
+    setRetirementProfileError(null);
+    setRetirementProfileSaving(true);
+    try {
+      const res = await fetch(apiUrl("/v1/auth/me/retirement-profile"), {
+        ...defaultFetchInit,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      if (!res.ok) {
+        throw await apiErrorFromResponse(res);
+      }
+      const body = (await res.json()) as RetirementProfileResponseApi;
+      const saved = normalizeRetirementProfile(
+        withStoredTargetBasis(body.profile, body.target_basis_stored),
+      );
+      setRetirementProfile(saved);
+      // S1 (5.0.0 U1b) — este PATCH acepta también `birth_date`, y Jubilación lo usa para que la
+      // estrategia por edad no obligue a ir a «Tu cuenta» a mitad de la elección. Sin
+      // resincronizar aquí, `user` seguiría diciendo que falta la fecha que se acaba de guardar:
+      // el campo volvería a pedirla y el resto de la app la seguiría dando por ausente.
+      setUser((u) => (u && u.birth_date !== body.birth_date ? { ...u, birth_date: body.birth_date } : u));
+      void loadProjectionSeriesPage();
+      // El perfil ES el input del sorteo (estrategia, regla, colchón derivado del tope): sin esto la
+      // sección «Riesgo» seguiría enseñando el abanico del plan anterior junto a la línea nueva.
+      void loadProjectionBands();
+      return saved;
+    } catch (e: unknown) {
+      setRetirementProfileError(e instanceof Error ? e.message : String(e));
+      throw e;
+    } finally {
+      setRetirementProfileSaving(false);
+    }
+  }
+
   const [mcpWriteSaving, setMcpWriteSaving] = useState(false);
   async function saveInstallationMcpWrite(enabled: boolean) {
     if (installation?.role !== "owner") return;
@@ -2418,6 +2626,7 @@ export default function App() {
     setAssetFormPurchase("");
     setAssetFormLiquid(true);
     setAssetFormExpectedReturn("");
+    setAssetFormVolatility("");
     setAssetFormNotes("");
   }
 
@@ -2440,28 +2649,26 @@ export default function App() {
     setAssetSaving(true);
     setAssetsError(null);
     try {
-      const base: Record<string, unknown> = {
-        category_id: assetFormCategoryId,
-        name: assetFormName.trim(),
-        current_value: toApiDecimalString(assetFormValue),
-        is_liquid: assetFormLiquid,
-      };
-      const er = toApiDecimalString(assetFormExpectedReturn);
-      if (er) {
-        base.expected_annual_return_percent = er;
-      }
-
-      const ppTrim = toApiDecimalString(assetFormPurchase);
-      if (editingAssetId) {
-        // PATCH: siempre enviar precio de compra — omisión antes podía dejar ambigüedad con el servidor.
-        base.purchase_price = ppTrim === "" ? null : ppTrim;
-      } else if (ppTrim !== "") {
-        base.purchase_price = ppTrim;
-      }
-      const nt = assetFormNotes.trim();
-      if (nt) {
-        base.notes = nt;
-      }
+      // Tri-estado de los tres importes opcionales (5.0.0): vaciar un campo que TENÍA valor manda
+      // `null` y lo borra —así se vuelve a un activo sin rentabilidad declarada o determinista—;
+      // vaciar uno que ya estaba vacío no nombra la clave. La regla vive entera en
+      // `lib/asset-form.ts`, con sus tests: aquí se decidía con tres `if` y no se podía probar.
+      const base = buildAssetWriteBody(
+        {
+          categoryId: assetFormCategoryId,
+          name: assetFormName,
+          currentValue: assetFormValue,
+          purchase: assetFormPurchase,
+          isLiquid: assetFormLiquid,
+          expectedReturn: assetFormExpectedReturn,
+          volatility: assetFormVolatility,
+          notes: assetFormNotes,
+        },
+        // `null` = alta. Una edición cuya fila no esté cargada (imposible desde la lista, pero
+        // el tipo lo admite) entra como edición SIN valores previos conocidos: nunca emite un
+        // borrado que nadie pidió.
+        editingId ? (previousRow ?? {}) : null,
+      );
 
       let createdAsset: AssetApiRow | null = null;
       if (editingAssetId) {
@@ -2550,6 +2757,9 @@ export default function App() {
     setAssetFormLiquid(a.is_liquid);
     setAssetFormExpectedReturn(
       formatEditableDecimalString(a.expected_annual_return_percent ?? ""),
+    );
+    setAssetFormVolatility(
+      formatEditableDecimalString(a.annual_volatility_percent ?? ""),
     );
     setAssetFormNotes(a.notes ?? "");
   }
@@ -3421,23 +3631,41 @@ export default function App() {
         healthError={healthError}
         onMobileMenuOpen={() => setMobileNavOpen(true)}
         showNav={installationGate === "member"}
+        scope={ledgerPersonScope}
         extras={
           installationGate === "member" && hasMembership ? (
-            <select
-              id={ledgerScopeSelectId}
-              className="ledger-view-select"
-              value={ledgerPersonScope}
-              onChange={(e) =>
-                setLedgerPersonScope(
-                  e.target.value === "mine" ? "mine" : "household",
-                )
-              }
-              aria-label="Ámbito de datos: hogar o solo tus registros"
-              title="Hogar: todos los datos. Tu usuario: solo filas donde eres titular."
+            /* Segmentado «Yo | Hogar» (D32). Sustituye al `<select>` de vista: con la vista
+               propia como default y el hogar en solo lectura, el ámbito deja de ser un filtro
+               escondido en un desplegable y pasa a leerse de un vistazo. */
+            <div
+              className="ff-theme-toggle ff-topbar-scope"
+              role="group"
+              aria-label="Ámbito de datos"
             >
-              <option value="household">Todo el hogar</option>
-              <option value="mine">{user.username}</option>
-            </select>
+              <button
+                type="button"
+                className={ledgerPersonScope === "mine" ? "is-active" : ""}
+                aria-pressed={ledgerPersonScope === "mine"}
+                title={`Solo tus datos (${user.username}).`}
+                onClick={() => {
+                  if (ledgerPersonScope !== "mine") setLedgerPersonScope("mine");
+                }}
+              >
+                Yo
+              </button>
+              <button
+                type="button"
+                className={ledgerPersonScope === "household" ? "is-active" : ""}
+                aria-pressed={ledgerPersonScope === "household"}
+                title="Todo el hogar, agregado y en solo lectura."
+                onClick={() => {
+                  if (ledgerPersonScope !== "household")
+                    setLedgerPersonScope("household");
+                }}
+              >
+                Hogar
+              </button>
+            </div>
           ) : null
         }
       />
@@ -3446,6 +3674,7 @@ export default function App() {
         onClose={() => setMobileNavOpen(false)}
         activeTab={activeTab}
         navigate={navigate}
+        scope={ledgerPersonScope}
       />
 
       <Modal
@@ -3601,6 +3830,18 @@ export default function App() {
                 : "app-main"
             }
           >
+        {/* Aviso de ámbito (D9/D32): el Hogar es un agregado informativo. Va en TODAS las
+            pestañas —no solo en las del ledger— porque el ámbito es global: quien llega a
+            Jubilación o a Resumen desde el drawer no ha pasado por ninguna otra pantalla. */}
+        {scopeReadOnly ? (
+          <div className="banner info-banner app-scope-banner" role="status">
+            <strong>Vista agregada del hogar · solo lectura</strong>
+            <small>
+              Resumen, Proyección y Ajustes; cambia a tu vista (Yo) para editar y ver el resto.
+            </small>
+          </div>
+        ) : null}
+
         <div
           className="app-global-errors"
           role="region"
@@ -3678,6 +3919,8 @@ export default function App() {
             open
             installation={installation.installation}
             assetCategories={assetCategories}
+            userBirthDate={user?.birth_date ?? null}
+            onSaveRetirementProfile={saveRetirementProfilePatch}
             onFinished={() => {
               setOnboardingForced(false);
               setOnboardingSkipped(false);
@@ -3695,17 +3938,30 @@ export default function App() {
         <Suspense fallback={<p className="muted tight">Cargando…</p>}>
         {activeTab === "summary" ? (
           <SummaryView
-            onAddFirstAsset={() => {
-              resetAssetForm();
-              setAssetModalOpen(true);
-              navigate(TAB_PATH.assets);
-            }}
-            onAddFirstBudgetEntry={() => {
-              resetBudgetForm("income");
-              setBudgetModalOpen(true);
-              navigate(TAB_PATH.budget);
-            }}
+            navigate={navigate}
+            // Los CTA de estado vacío abren un modal de alta: sin `canEditLedger` el modal no
+            // se monta (la vista destino lo gatea), así que el botón llevaría a una pantalla
+            // donde no pasa nada. Sin `onAction`, `EmptyState` se queda en texto.
+            onAddFirstAsset={
+              canEditLedger
+                ? () => {
+                    resetAssetForm();
+                    setAssetModalOpen(true);
+                    navigate(TAB_PATH.assets);
+                  }
+                : undefined
+            }
+            onAddFirstBudgetEntry={
+              canEditLedger
+                ? () => {
+                    resetBudgetForm("income");
+                    setBudgetModalOpen(true);
+                    navigate(TAB_PATH.budget);
+                  }
+                : undefined
+            }
             installation={installation}
+            retirementProfile={retirementProfile}
             loading={installationBusy}
             hasMembership={hasMembership}
             ledgerPersonScope={ledgerPersonScope}
@@ -3718,8 +3974,7 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
-            canEdit={installation?.role !== "viewer"}
+            canEdit={canEditLedger}
             formError={assetsError}
             projectionSeries={projectionSeries}
             anchorDateYmd={projectionSeries?.anchor_date_ymd ?? null}
@@ -3748,6 +4003,8 @@ export default function App() {
             assetFormLiquid={assetFormLiquid}
             setAssetFormLiquid={setAssetFormLiquid}
             assetFormExpectedReturn={assetFormExpectedReturn}
+            assetFormVolatility={assetFormVolatility}
+            setAssetFormVolatility={setAssetFormVolatility}
             setAssetFormExpectedReturn={setAssetFormExpectedReturn}
             assetFormNotes={assetFormNotes}
             setAssetFormNotes={setAssetFormNotes}
@@ -3773,8 +4030,7 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
-            canEdit={installation?.role !== "viewer"}
+            canEdit={canEditLedger}
             formError={liabilitiesError}
             liabilityModalOpen={liabilityModalOpen}
             closeLiabilityModal={() => {
@@ -3845,8 +4101,7 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
-            canEdit={installation?.role !== "viewer"}
+            canEdit={canEditLedger}
             formError={budgetError}
             budgetModalOpen={budgetModalOpen}
             closeBudgetModal={() => {
@@ -3925,7 +4180,7 @@ export default function App() {
             installation={installation}
             hasMembership={hasMembership}
             ledgerPersonScope={ledgerPersonScope}
-            canEdit={installation?.role !== "viewer"}
+            canEdit={canEditLedger}
             user={user}
             onCashflowMutated={() => void loadCashflowSeries()}
           />
@@ -3934,8 +4189,7 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
-            canEdit={installation?.role !== "viewer"}
+            canEdit={canEditLedger}
             formError={planningError}
             planningModalOpen={planningModalOpen}
             closePlanningModal={() => {
@@ -3988,14 +4242,22 @@ export default function App() {
             ledgerPersonScope={ledgerPersonScope}
             projectionSeries={projectionSeries}
             projectionBusy={projectionBusy}
+            projectionBands={projectionBands}
+            projectionBandsBusy={projectionBandsBusy}
+            projectionBandsError={projectionBandsError}
             retirementBudgetSnapshot={retirementBudgetSnapshot}
             summary={summary}
             retirementBusy={retirementBusy}
             retirementError={retirementError}
+            retirementProfile={retirementProfile}
+            retirementProfileBusy={retirementProfileBusy}
+            retirementProfileError={retirementProfileError}
+            retirementProfileSaving={retirementProfileSaving}
             user={user}
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
-            canEditFire={installation?.role === "owner"}
-            onSaveFire={saveFireSettingsPatch}
+            scopeReadOnly={scopeReadOnly}
+            onSaveRetirementProfile={saveRetirementProfilePatch}
+            onSelectMineScope={() => setLedgerPersonScope("mine")}
             navigate={navigate}
           />
         ) : activeTab === "projection" ? (
@@ -4076,7 +4338,8 @@ export default function App() {
             categoriesError={categoriesError}
             hasMembership={hasMembership}
             canEditCategories={installation?.role !== "viewer"}
-            canEditHistory={installation?.role !== "viewer"}
+            canEditHistory={canEditLedger}
+            scopeReadOnly={scopeReadOnly}
             currencyIso={installation?.installation.base_currency ?? ""}
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
             onHistoryMutated={() => {
@@ -4090,6 +4353,7 @@ export default function App() {
             onToggleMcpWrite={(enabled) => void saveInstallationMcpWrite(enabled)}
             settingsSubTab={settingsSubTab}
             navigateSettingsSubTab={navigateSettingsSubTab}
+            navigate={navigate}
             visibleSettingsSubTabs={visibleSettingsSubTabs}
             pendingUsers={pendingUsers}
             pendingUsersBusy={pendingUsersBusy}

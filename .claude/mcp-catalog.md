@@ -43,19 +43,22 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `http::request::Parts` hasta el `RequestContext` de cada tool. Fallo → 401/403 JSON
   `{error, code, message}` (el `ErrorBody` del API, con su código estable); **solo el 401** añade
   `WWW-Authenticate` (ver la nota del challenge en la sección OAuth).
-- **Tools de lectura — 27**, más `simulate_projection`, que tiene bullet propio: **28 con
-  `read_only_hint = true`** de las 68 del catálogo. Diecinueve se enumeran aquí (las 10 iniciales en
+- **Tools de lectura — 29**, más `simulate_projection`, que tiene bullet propio: **30 con
+  `read_only_hint = true`** de las 71 del catálogo. Diecinueve se enumeran aquí (las 10 iniciales en
   este bullet, las 9 del issue #2 en el siguiente), la vigésima es `get_allocation_resolution` (bullet
   de la cascada, más abajo) y las **siete de la Fase 6** tienen bloque propio al final de la sección.
   **Los contadores no se cuentan a mano**: los congela
   `mcp_write.rs::every_write_tool_in_the_source_calls_require_mcp_write` (un `#[test]` sin BD que
-  trocea `server.rs`), y son los mismos de `futurefin-mcp-parity` §5 — **68 tools / 28 lectura /
-  40 escritura / 17 con preview-confirm / 8 con `confirm_token` / 18 con `impact`**. Verificación de
+  trocea `server.rs`), y son los mismos de `futurefin-mcp-parity` §5 — **71 tools / 30 lectura /
+  41 escritura / 18 con preview-confirm / 8 con `confirm_token` / 19 con `impact`** (5.0.0/WP4:
+  `get_retirement_profile` y `update_retirement_profile`; WP6b: `get_projection_bands`). Verificación de
   un vistazo:
   `grep -c '#\[tool(' apps/api/src/mcp/server.rs` y
   `grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs`.
   Las 10 iniciales: `get_summary`, `get_projection` (density **hybrid fija**,
-  `asset_series` opt-in con `include_asset_series`, comparte la cache de proyección del handler;
+  `asset_series` opt-in con `include_asset_series` y `members[].series` opt-in con
+  `include_member_series` —los dos default `false`, ver el bullet de WP5-2 y sus bytes medidos—,
+  comparte la cache de proyección del handler;
   `months` declara su rango real 12..840 en el schema y solo la variante sin `months` sale de
   cache), `get_budget`, `get_transactions_summary` (denominador = `avg_months`, meses reales **y
   clasificados**, ventana **anclada a hoy** — la misma media que la proyección, 4.8.0/#125;
@@ -70,6 +73,78 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `list_assets`, `list_liabilities`, `list_planning_flows`, `get_settings` (incluye bloque
   `user {id, username, birth_date}` del usuario del token — el endpoint HTTP NO lo lleva). Todas
   menos `get_settings` aceptan `view: "household"|"mine"` (misma semántica que `?view=`).
+
+  > **El default de `view` es `"mine"` desde 5.0.0** (R2, breaking): omitirlo devuelve los datos del
+  > usuario del token, y el hogar entero hay que pedirlo con `view: "household"`. Hasta 4.15.x era
+  > al revés. El bloque **SCOPE** del `instructions` lo dice con esas palabras, y las descripciones
+  > de los parámetros `view` de las tools también (`ViewParams`, `ProjectionParams`,
+  > `LiabilityScheduleParams`, `RecentChangesParams`, `FindDuplicateTransactionsParams`).
+  >
+  > Dos tools se salen del patrón:
+  > - **`get_projection`**: con `view: "household"` la respuesta es un **AGREGADO** —la SUMA de una
+  >   simulación por miembro, cada una con su estrategia— así que **no trae `jubilacion_*` ni
+  >   `fire_target_series`** (viajan con `absent_reason: "household_aggregate"`) y el hito de cada
+  >   persona va en `members[]`, con su `horizon_months` propio. Está en la descripción de la tool y
+  >   en el `instructions`. La CURVA de cada miembro existe (`members[].series`) pero es opt-in por
+  >   tamaño: `include_member_series: true`.
+  > - **`simulate_projection`**: `view: "household"` es **error `household_not_simulable`**. Un
+  >   what-if mueve UN plan y el hogar tiene N; su schema declara el rechazo en la descripción del
+  >   parámetro para que el modelo no lo intente. Test: `mcp_simulate.rs::household_view_is_refused_with_a_typed_error`.
+  > - **`get_projection_bands`** (5.0.0/WP6b): `view: "household"` es **error
+  >   `household_bands_unavailable`**. Los percentiles NO suman entre miembros, y con el shock de
+  >   mercado común de D11 los dos ni siquiera son independientes: sumar dos bandas daría una
+  >   demasiado ancha en el centro y demasiado estrecha en las colas, sin que ningún campo lo
+  >   dijera.
+- **`get_projection_bands` — el RIESGO del plan (5.0.0/WP6b, P3 del issue #207).** Monte Carlo
+  sobre el mismo motor que dibuja la línea determinista: bandas puntuales p10/p50/p90 del
+  patrimonio y del líquido, `success_probability` con su veredicto **y sus dos caras**
+  (`never_retired_probability`, `success_given_retired`), agotamiento por edad,
+  percentiles del mes de jubilación, las dos lecturas de COBERTURA y las del COLCHÓN de caja (P4:
+  `buffer_active` + `buffer_inactive_reason` + `buffer_refills_p50` + `buffer_refill_net_total_p50`,
+  los dos últimos `null` cuando no se simuló — que no es «cero rellenos»). Params: `view` (solo `mine`),
+  `paths` (1–**1 000**, default 500), `seed` (string de dígitos) e `include_liquid_bands`.
+  Cuatro decisiones que hay que leer juntas:
+  - **Sin `density`** — fuerza `hybrid`, igual que `get_projection` y por el mismo veto
+    (arqueología §2.18/veto 22).
+  - **`paths` topa en 1 000 por MCP y en 2 000 por HTTP.** La mitad a propósito: un agente en bucle
+    es el llamante que más satura el semáforo de simulaciones, y la diferencia estadística entre
+    1 000 y 2 000 caminos es menor que el ancho de la propia banda. Medido en release: 204 ms vs
+    391 ms a 840 meses.
+  - **`seed` viaja como STRING** (aquí y en `simulate_projection.monte_carlo.seed`): es un `u64` y
+    `JSON.parse` lo redondea por encima de 2^53 — una semilla que cambia en el ida y vuelta no
+    reproduce nada, que es el fallo silencioso exacto que la reproducibilidad existe para evitar.
+    Omitida = la ESTABLE del usuario (D23), la misma con la que la SPA dibuja su fan chart.
+  - **`include_liquid_bands` (default `false`)** — el gemelo de `include_asset_series` /
+    `include_member_series`, con la medida delante: la respuesta HTTP completa pesa **16,4 KB** a
+    densidad hybrid (66 puntos, seis series) y **~9,9 KB sin las tres del líquido**, o sea que la
+    mitad de los puntos responden a una sola pregunta («cómo se vacía la hucha») que casi nunca es
+    la que trae al modelo aquí. Con el flag apagado las tres claves **desaparecen**; no se sirve un
+    `0` que se leería como «sin líquido». Por HTTP viajan siempre.
+
+  **ÉXITO = el plan OCURRE y AGUANTA** (pase de correcciones de la revisión adversarial del motor):
+  el hogar **se jubila dentro del horizonte** —o la estrategia es por EDAD, y entonces la jubilación
+  es un dato y no un suceso— **Y** la cartera no se agota nunca. D22 decía solo «no se agota», y con
+  un trigger por CRUCE eso premiaba al hogar que **no se jubila jamás**: quien nunca llega al
+  objetivo nunca drena. Por eso la respuesta —y el `instructions`— obligan a leer las tres juntas:
+  `never_retired_probability` (cuántos caminos no se jubilan; `"0"` por construcción con trigger por
+  edad) y `success_given_retired` (éxito entre los que sí; **`null` ⟺ ninguno se jubila**, que no es
+  un cero). Identidad: `success_probability ≤ 1 − never_retired_probability`. Un 0,63 con un tercio
+  de caminos sin jubilarse no describe el mismo plan que un 0,63 con todos jubilándose, y ese es
+  exactamente el diagnóstico falso que un modelo daría citando la cifra sola.
+
+  El RECORTE de la regla sigue **sin ser fracaso** (D24) y sigue viajando aparte, pero
+  `months_below_need_p50` y `withdrawal_to_need_ratio_p50` cuentan ahora **el recorte Y el gasto que
+  la cartera no pudo financiar**: con `fixed_real` el recorte es cero por construcción, así que un
+  cociente que solo lo mirara valdría 1,0 también en los caminos que se quedan sin cartera. Y la
+  **última fila de `depletion_probability_by_age` es SIEMPRE el horizonte** —la ruina total del
+  plan—, así que el paso hasta ella puede ser de menos de cinco años.
+
+  El **contexto de las cifras** está en `model_note` (el modelo entero: shock común, corrección de
+  Itô, bandas PUNTUALES, y la lista de lo que NO se modela) y en el bloque **MONTE CARLO** del
+  `instructions`, que es donde vive lo transversal: la definición de éxito de arriba, el recorte que
+  no es fracaso, y `any_volatility_declared: false` significa «la banda es la línea» y
+  no «tu plan es seguro». Tests: `mcp_http.rs::get_projection_bands_matches_http_and_hides_the_liquid_bands_by_default`.
+
 - **Tools de lectura añadidas en el issue #2 (9)**: `list_allocation_rules` (la cascada como
   reglas, no solo su resultado resuelto), `list_categories` (catálogo id/scope/nombre, filtro
   `scope`, prerrequisito para escribir), `get_category_monthly_series` (serie mensual cero-rellena
@@ -188,9 +263,12 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   4.12.0 (#178)**: el escalar gobierna el OBJETIVO, el umbral de Autonomía y los activos SIN
   `purchase_price`; un activo con coste declarado deriva su `g` de la base real mes a mes en el
   drenaje (también en el what-if), y `get_projection` declara qué rigió (`drawdown_gain_basis`)
-  con la `g₀` informativa (`taxable_gain_ratio_today`). Ahora se pueden simular `savings_source`,
-  `fire_number_mode` + `fire_number_manual_amount`, `taxes_enabled`, `tax_brackets` y las cuatro
-  ventanas del promedio. **Punto de aplicación: entre el clon de `fire_settings` y
+  con la `g₀` informativa (`taxable_gain_ratio_today`). Ahora se pueden simular `savings_source`, `taxes_enabled`,
+  `tax_brackets` y las cuatro ventanas del promedio. **5.0.0 (WP4)**: `fire_number_mode` y
+  `fire_number_manual_amount` SALEN de este override — son del perfil de jubilación por usuario
+  (D13) y `fire_settings` es lo compartido por el hogar; vuelven en WP5 como `profile_overrides`.
+  El eje `swr_pct` de primer nivel de `simulate_projection` **sigue vivo** y se aplica sobre un
+  CLON del perfil del solicitante (se simula, no se persiste). **Punto de aplicación: entre el clon de `fire_settings` y
   `validate_fire_settings`, NUNCA post-build** — `savings_source` y las ventanas las lee el
   ensamblado para decidir si lanza siquiera la query de `transactions_avg`, así que aplicadas
   después el override no haría nada, en silencio. Se aplican con
@@ -267,8 +345,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   rmcp): `title` legible, `open_world_hint = false` (el servidor solo toca su propia DB) y
   `read_only_hint = true` en las lecturas. Sin ellas un cliente conforme al spec asume el peor
   caso (escritura destructiva). Test: `tools_list_exposes_annotations_on_every_tool`. Recuentos
-  reproducibles: `grep -c 'read_only_hint = true'` → **28**, `grep -c 'destructive_hint = true'`
-  → **27** (`apps/api/src/mcp/server.rs`, 4.4.0 tras la Fase 6; eran 21 y 22 en 4.0.0).
+  reproducibles: `grep -c 'read_only_hint = true'` → **30**, `grep -c 'destructive_hint = true'`
+  → **28** (`apps/api/src/mcp/server.rs`, medido el 2026-09-03 con 5.0.0; eran 28 y 27 tras la
+  Fase 6 de 4.4.0, y 21 y 22 en 4.0.0).
   **Dos reclasificaciones a `destructive_hint = true` en 4.0.0** — `destructive_hint` es lo que un
   cliente MCP conforme usa para decidir si pide permiso al humano, así que declararlo mal no es un
   matiz de documentación:
@@ -376,8 +455,25 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     `create_categorization_rule` (549→499) y `get_history` (574→491), y llevando la regla
     transversal de categoría (obligatoria en income/expense; `clear_category` = volver a la por
     defecto; `uncategorized` = solo filas sin `kind`) al `instructions` en vez de a 68 descripciones.
-    Estado tras 4.15.0: **`68 23949 598`** — quedan **51 caracteres**. La próxima tool sigue
-    obligando a otra ronda de reequilibrio; presupuéstala al planificarla, no al final.
+    Estado tras 4.15.0: **`68 23949 598`** — quedaban **51 caracteres**. **5.0.0/WP4** metió DOS
+    tools (`get_retirement_profile`, `update_retirement_profile`) y volvió a pagar con la receta de
+    la guardia, no subiendo la constante: se movió al `instructions` la prosa que ya vivía allí
+    duplicada (índices de mes en `get_projection`, homónimos entre tools en `get_summary` y
+    `get_budget`, la equivalencia `net_actual` ↔ `income_minus_expense` que `get_history_cashflow`
+    ya declara desde su lado, la regla de reintentos/`idempotency_key`) y se añadió el párrafo
+    **DOS PLANOS DE CONFIGURACIÓN** (hogar vs. persona, y el dueño de cada fila del ledger).
+    Estado tras WP4: **`70 23757 588`** — quedaban **243 caracteres**. **5.0.0/WP5-2** no añadió
+    tools pero sí tocó dos descripciones y las pagó dentro: `update_asset` sube (376→416) para
+    declarar el tri-estado de sus tres decimales, y las DOS descripciones de activos dejan de
+    mentir con «Sin owner-check: cualquier member edita cualquier activo del hogar» —una frase que
+    D21 volvió falsa en WP4 y que nadie había recontado—, lo que devuelve `update_asset_value` de
+    404 a 382. Estado tras WP5-2: **`70 23834 575`** — quedaban **166 caracteres**. **WP6b metió
+    `get_projection_bands`** (490 caracteres) y volvió a pagar dentro, moviendo ~550 al
+    `instructions`: estado **HOY `71 23793 545`**, con **207** de margen y la tool más larga
+    (`simulate_projection`) en 545. La terna sale de un comando y no de la memoria —
+    `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`.
+    Sigue siendo un margen de una tool corta: presupuesta el reequilibrio al planificar la
+    siguiente, no al final.
   - **Hallazgo que reordena lo que queda**: medido DESPUÉS del recorte, el `inputSchema` del
     catálogo son ~55 KB, **~2,7× las descripciones** (medida puntual de la auditoría de la Fase 5, no
     una constante congelada: re-derívala con un `tools/list` contra un servidor vivo pesando
@@ -390,7 +486,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     la posición que la respuesta publica al lado, `jubilacion_series_position`, y si no hay ninguna
     es que la cifra no se lee de la serie); el **eco de `view`** dentro de SCOPE (toda respuesta
     cuyo contenido dependa del scope ecoa la vista aplicada: si dice `household`, la cifra es del
-    hogar aunque hayas pedido `mine`); y **FORMA DE LOS LISTADOS** (ver el bullet siguiente).
+    hogar aunque hayas pedido `mine`); y **FORMA DE LOS LISTADOS** (ver el bullet siguiente). En
+    5.0.0 el bloque SCOPE se reescribió para declarar el nuevo default (`mine`), el agregado del
+    hogar de `get_projection` y el rechazo de `simulate_projection`.
 
 - **Paridad de los listados: el sobre lo pone la tool, y por eso 7 salen del bucle byte a byte.**
   Bloque `NOTA-VIEW-ENVELOPE` en `mcp/server.rs`. Las respuestas de **objeto** ecoan `view` desde su
@@ -629,7 +727,8 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   escrituras COND (transacciones) NO llevan `impact`: es la escritura más frecuente del catálogo y
   solo mueve el motor a través de un promedio 12m, no vale la pena la lectura doble en el camino
   caliente. Recuento reproducible, nunca la lista de arriba a ojo:
-  `grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs` → **18** (eran quince hasta la
+  `grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs` → **19** el 2026-09-03 (18 tras la
+  Fase 6 de 4.4.0; eran quince hasta la
   Fase 6; hasta el barrido de la Fase 7 la enumeración de esta misma frase se había quedado en
   las quince mientras el párrafo ya decía 18 — copiar la lista daba tres nombres de menos). Las dos tools de snapshot **tampoco** lo llevan, y ahí la ausencia es contrato: publican
   `"affects_projection": false` en su lugar, porque los snapshots no son input del engine (D12) y un
@@ -718,8 +817,12 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   #4 del registro de paridad: desde 3.8.0 se podía crear una regla y aplicarla a cientos de
   movimientos pero no corregirla, y las reglas contradictorias se acumulaban (auditoría MCP §10). Las dos
   guardias del PATCH viven en la **core** (`rule_patch_empty`, `rule_patch_conflict`): el `clear_*`
-  ya no gana en silencio sobre el campo puesto. Catálogo total tras el tren 4.4.0 completo: **68 tools** (28 con `read_only_hint = true` + 40 de
-  escritura; recuento reproducible: `grep -c '#\[tool(' apps/api/src/mcp/server.rs`), congelado
+  ya no gana en silencio sobre el campo puesto. Catálogo total tras el tren 4.4.0 completo: **68 tools de entonces** (28 con
+  `read_only_hint = true` + 40 de escritura) — cifra **histórica**, no un recuento vivo: hoy son
+  **71 (30 + 41)**. El comando que lo recuenta
+  (`grep -c '#\[tool(' apps/api/src/mcp/server.rs`) vive en §catálogo, junto a su valor actual —
+  aquí solo estorbaría, porque una medición fechada con un comando vivo al lado se lee como si el
+  comando devolviera ese número. Congelado
   en `tools_list_returns_exactly_the_v1_catalog`. Eran **52** hasta la Fase 5 incluida. **La Fase 3 (issue #84) no toca el catálogo**
   (sigue en 52/21/31) — reescribe el andamiaje de las escrituras (auditoría, scope, dos fases,
   `impact`), no añade ni retira ninguna tool. Regresión: `apps/api/tests/mcp_write.rs` (tramos
@@ -757,6 +860,297 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   histórica), y `list_liabilities` publica `plan_expired_with_balance` + la regla de visibilidad
   nueva (#145: el vencido con saldo vivo se sirve marcado). Todo por las cores compartidas; el
   catálogo congelado (`mcp-catalog.json`) se regeneró conscientemente.
+- **5.0.0 / WP4 (issue #207) — 68 → 70 tools: el plan de jubilación es de cada persona.** Dos tools
+  nuevas, ambas sobre el usuario DEL TOKEN y sin parámetro de scope (no hay forma de pedir el de
+  otro):
+  - **`get_retirement_profile`** (lectura, `NoParams`): el perfil ya resuelto —defaults y clamps
+    aplicados— más `birth_date`, que es lo que convierte cada edad del perfil en un mes de la serie.
+  - **`update_retirement_profile`** (escritura, preview/confirm): merge campo a campo, `clear_*`
+    para los borrados (el tri-estado no es expresable en JSON Schema — doctrina de la Fase 2), y
+    `clear_x` + `x` a la vez es 400 `field_set_and_clear`, no un ganador implícito. **Auth por ROL
+    (`require_mcp_write`), NO owner-only**: es dato personal del usuario del token, y un `viewer`
+    que no pudiera fijar su edad de jubilación no podría ver su propia proyección. **Sin
+    `confirm_token`**, mismo criterio explícito que `update_fire_settings`: el preview devuelve el
+    before/after ÍNTEGRO, así que deshacerlo es volver a llamar con los valores de `before` (el
+    criterio completo vive en el doc de `two_phase`). Su `side_effects` dice `scope: "user"` —
+    frente al `scope: "installation", affects_every_member: true` de `update_fire_settings`.
+
+  Cambios en tools existentes: **`update_fire_settings` pierde `swr_pct`, `horizon_lifespan_age`,
+  `fire_number_mode` y `fire_number_manual_amount`** (tiene `deny_unknown_fields`, así que un
+  cliente que los mande recibe un error que nombra el campo, no un silencio); `get_settings` ya no
+  los publica; `create_asset`/`update_asset` ganan `annual_volatility_percent` y `list_assets` lo
+  devuelve (sale gratis: reusa `list_assets_core`). `update_asset_value` **no** lo gana a propósito
+  — es el subset de VALORACIÓN, y la volatilidad es un supuesto del activo, no su valor de hoy.
+
+- **5.0.0 / WP5-2 (issue #207) — cero tools nuevas, cuatro contratos que sí cambian.** Evaluación de
+  paridad: **tool actualizada** en los cuatro casos; ninguna omisión nueva.
+  - **`get_projection` gana `include_member_series` (default `false`)** — el gemelo exacto de
+    `include_asset_series`, y la decisión está **medida**, no supuesta. Con `view: "household"` la
+    respuesta HTTP publica desde WP5-2 la serie completa de cada miembro (`members[].series`, D32:
+    la línea fina bajo la suma en grueso). Bytes sin gzip, 2026-09-03, dos miembros con un activo +
+    nómina + gasto cada uno y horizonte derivado ~780 meses (78 puntos hybrid): `mine/hybrid`
+    **21.009** · `household/hybrid` **34.161**, de los cuales `members[].series` son **11.748**
+    (~5,9 KB por miembro, **lineal con el tamaño del hogar**) y `points[]` 15.457 ·
+    `household/monthly` 300.724. La tool fuerza `hybrid` justo porque el contexto es caro, así que
+    ahí las series por miembro son **opt-in**: un modelo no dibuja, y todo lo que puede preguntar de
+    una persona —cuándo se jubila, cuándo cruza, cuándo se le agota la cartera, su horizonte propio,
+    sus avisos— ya viaja en `members[]` como enteros. **No se retiran** de la tool porque el token de
+    un miembro NO puede pedir el `view=mine` de otro: esta es la única vía para ver su curva, y
+    cerrarla sería quitar una pregunta legítima en vez de abaratarla. Guardas:
+    `mcp_http.rs::get_projection_household_omits_member_series_unless_asked` (tope 32 KB para la
+    respuesta de la tool) y
+    `projection_household_aggregate.rs::the_household_payload_stays_within_its_budget_at_hybrid_density`
+    (tope 68 KB para la HTTP, el doble de lo medido — caza el crecimiento lineal, no el byte).
+  - **`simulate_projection` gana los dos ejes de P11** (D30, what-if solo MCP):
+    `income_growth_real_pct_annual` (crecimiento REAL del sueldo, `[−10, 20]` % anual; `"0"` es 400
+    `income_growth_no_op`) e `income_steps` (≤ 24 entradas `{month_index | date, delta_monthly}`,
+    delta con signo y ≠ 0). **Los dos son ejes de CAJA**: entran por
+    `planning_monthly_cash_adjustment` como un Próximo, así que `income_monthly`,
+    `net_recurring_monthly` y `savings_rate` salen con delta 0 EXACTO y el objetivo FIRE en modo
+    `current_income` **no** se mueve — meterlos por `income_regular_monthly` habría movido a la vez
+    el capital y la meta, y el delta no significaría nada. El crecimiento se aplica **solo mientras
+    el escenario no está jubilado**, con una PRIMERA pasada del escenario sin el eje para saber
+    dónde cortar; como esa pasada no conoce el adelanto que el propio sueldo produce, el corte se
+    **publica** en `scenario.income_growth_stops_at_month_index` y la ventana de error es
+    exactamente su diferencia con `scenario.jubilacion_month_index`. Los `income_steps` **no** se
+    recortan: el mes lo nombra el llamante. El eje de mes de los pasos es el de `one_off_expense`
+    (**1 = el mes civil del ancla**), no la rejilla 0-based de `points[]`. Test:
+    `mcp_simulate.rs::income_growth_and_steps_are_cash_axes_with_a_published_cut`.
+  - **`update_asset` gana `clear_expected_annual_return_percent` y
+    `clear_annual_volatility_percent`** — el PATCH HTTP hizo tri-estado esos dos decimales (hasta
+    4.15.x `null` y clave ausente eran el mismo caso, así que **no había forma de volver a
+    «rentabilidad no declarada» ni de devolver un activo al determinismo**), y el JSON Schema no
+    puede expresar el tri-estado: mismo molde `clear_*` que `clear_purchase_price`, mismo 400
+    `field_set_and_clear` cuando llegan valor y `clear_*` a la vez. `update_asset_value` sigue sin
+    ellos: es el subset de VALORACIÓN y borrar es editar, no valorar. Test:
+    `mcp_write.rs::update_asset_clears_the_return_and_the_volatility`.
+  - **`get_retirement_profile` / `update_retirement_profile` publican `target_basis_stored`** — la
+    elección ALMACENADA de la base del objetivo (`null` = no elegida, se DERIVA de si hay pensión).
+    `profile.target_basis` sale siempre resuelto, así que un cliente que leyera y reescribiera el
+    perfil entero persistía la derivación como elección y congelaba el objetivo en la perpetuidad
+    conservadora. En el outcome del PATCH viajan los dos lados
+    (`target_basis_stored_before`/`_after`), que es lo que enseña el preview.
+  - **`assets_depleted_month_index` cambia de convención (#210, breaking)**: pasa de meses del BUCLE
+    (1-based) a la rejilla 0-based de `points[].month_index`, en `get_projection` (raíz y
+    `members[]`) y en los DOS lados de `simulate_projection`. Era el único índice de esas respuestas
+    desplazado un mes: compararlo con `jubilacion_month_index` daba un mes de más. El delta
+    `assets_depleted_months_delta` no se mueve (los dos lados se desplazan igual).
+
+- **5.0.0 / WP5-2b (issue #207) — cero tools nuevas, un contrato que crece: `simulate_projection`.**
+  Evaluación de paridad: **tool actualizada**; ninguna omisión nueva y la fila «tool sin endpoint»
+  del registro **no cambia** — `simulate_projection` sigue sin ruta HTTP (D30: el what-if inverso
+  vive solo en MCP, y en la SPA el usuario explora GUARDANDO su configuración).
+  - **`profile_overrides` — el PLAN entero como eje (P5).** Mismos campos, mismos valores, mismas
+    cotas y los mismos `clear_*` que `update_retirement_profile` (`ProfileOverrideParam::to_patch`
+    **delega** en el de la tool de escritura: una sola interpretación del tri-estado y un solo juego
+    de códigos de error). Se aplica con el `RetirementProfilePatch::apply_to` real sobre un CLON del
+    perfil RESUELTO, se valida y se vuelve a resolver — lo que se simula es exactamente lo que
+    pasaría al guardarlo, y **no persiste nada** (por eso la tool sigue sin `require_mcp_write`).
+    Excluye dos campos a propósito: `confirm` (no hay nada que confirmar) y `birth_date` (es
+    identidad y vive en su propia columna, no en el plan).
+    **Por aquí vuelven `fire_number_mode` y `fire_number_manual_amount`**, que WP4 sacó de
+    `fire_settings_overrides` al mudarlos al perfil (D13) y que se quedaron una ola sin eje what-if.
+    Anti-no-op: patch vacío ⇒ `profile_overrides_empty`; patch que resuelve al perfil que ya tienes
+    ⇒ `profile_overrides_no_op`; `swr_pct` a la vez arriba y dentro ⇒ `swr_pct_set_twice` (el eje
+    suelto sobrevive porque lleva publicado desde 1.x, pero elegir uno por el llamante sería
+    adivinar).
+  - **`income_pause` (P8.c)** — `{from_month_index | from_date, months, income_fraction}`. Multiplica
+    el ingreso GANADO durante una ventana SEMIABIERTA; **la pensión con fecha NO se pausa** (una
+    excedencia interrumpe el trabajo, no la pensión pública). Hace DOS cosas: aplica la pausa al
+    escenario —las KPIs y la serie que se publican son las del hogar en excedencia— y publica el
+    retraso en el bloque `income_pause` de la respuesta (`baseline_month_index`,
+    `paused_month_index`, `retirement_delay_months`), medido contra **el mismo escenario sin la
+    pausa**, no contra el baseline de la instalación: mezclarlo con los demás overrides haría el
+    número ilegible. Con «no se jubila dentro del horizonte» en cualquiera de los dos lados el
+    retraso es `null`, nunca un número enorme inventado. Cotas: `months ≥ 1`
+    (`income_pause_months_zero`), `income_fraction ∈ [0, 1)` (`income_pause_fraction_out_of_range`
+    — `1` sería el baseline), exactamente uno de los dos anclajes
+    (`income_pause_timing_ambiguous`), mes dentro del horizonte
+    (`income_pause_month_out_of_range`). El eje de mes es el de `one_off_expense`: **1 = el mes
+    civil del ancla**.
+  - **`solve: {extra_monthly_expense_keeping_date: true}` (P8.b)** — devuelve
+    `max_extra_monthly_expense_keeping_date`: el mayor gasto mensual extra constante (euros de hoy)
+    que deja la fecha de jubilación donde está (±1 mes). **Opt-in** porque cuesta una bisección
+    entera sobre el motor (hasta 26 proyecciones), y `false` es un 400 `solve_no_op` — pedir el
+    bloque y declinarlo no puede devolver nada. Sube solo el gasto REGULAR: la pregunta es «¿cuánto
+    margen tengo AHORA?», no «¿cuánto puedo subir mi nivel de vida para siempre?». Con un trigger
+    por EDAD —que no depende del gasto— la respuesta es el máximo sobrante mensual, un **SUELO**
+    honesto («al menos esto»), no un infinito.
+  - **Los KPIs del PLAN viajan por LADO y con sus deltas.** `SimKpis` gana
+    `required_contribution_monthly`, `required_contribution_search_ceiling`, `underfunded`,
+    `disposable_monthly`, `coast_fire_month_index`, `coast_number`, `partial_gap_target`,
+    `partial_phase_capital_growing`, `partial_retirement_month_index`, `pension_start_month_index`,
+    `pension_coverage_ratio` (**FRACCIÓN**), `bridge_effective_withdrawal_pct` (**PORCENTAJE**
+    anual), `bridge_discount_annual_pct` y `warnings[]`. Van por lado porque `profile_overrides`
+    puede cambiar la estrategia entera, y entonces las dos columnas no describen el mismo plan.
+    `SimDeltas` gana los cinco numéricos correspondientes; **los `bool` NO tienen delta** (se leen
+    comparando las dos columnas, y un «delta booleano» sería un tercer valor que interpretar), y
+    cualquier delta contra un lado que no publica la cifra es **`null`**, no una resta contra un
+    hueco — la misma regla de `jubilacion_months_delta`.
+  - **`liquid_crossing_month_index` de los dos lados lo publica ahora el MOTOR** (evaluado sobre el
+    objetivo consciente del plan, puente incluido) en vez del escaneo del handler, que miraba la
+    perpetuidad de 4.15.x. Con `pension_bridge` eran dos cruces distintos para la misma línea.
+  - **Presupuesto**: la descripción de `simulate_projection` sube de 574 a **594** caracteres (tope
+    600) para nombrar `profile_overrides`, a costa de comprimir la frase de `liability_overrides`;
+    el catálogo queda en **23.854 / 24.000** (margen 146). Los nuevos parámetros **no** cuentan: el
+    presupuesto mide descripciones de TOOL, no de campo.
+  - **Códigos nuevos** (los 9 del fixture): `profile_overrides_empty`, `profile_overrides_no_op`,
+    `swr_pct_set_twice`, `income_pause_timing_ambiguous`, `income_pause_months_zero`,
+    `income_pause_fraction_out_of_range`, `income_pause_month_out_of_range`,
+    `income_pause_date_out_of_horizon`, `solve_no_op`.
+  - **Errata corregida de paso**: la descripción de `fire_number_manual_amount` decía «Objetivo
+    manual» en las dos tools, y el campo es la **necesidad ANUAL neta** en euros de hoy — el
+    objetivo es esa cifra grosseada y dividida por el SWR (coinciden `FireNeed::Indexed` del motor y
+    `netAnnualNeed` de `apps/web/src/lib/fire.ts`; la UI ya lo rotula «Modo objetivo anual»). Un
+    modelo que leyera «objetivo» escribiría el capital y pediría 285 veces menos del que quiere.
+    Pin: `mcp_simulate.rs::the_fire_number_mode_axis_comes_back_through_profile_overrides`.
+
+  **D21 llega gratis a las escrituras** porque las tools reusan las cores: una mutación sobre la
+  fila de otro miembro devuelve 403 `not_row_owner` por MCP igual que por HTTP, y el preview de
+  `delete_asset`/`delete_liability` falla igual de pronto — enseñaba el contenido de la fila ajena
+  **y emitía el `confirm_token`** que la ejecuta. Regresión:
+  `mcp_write.rs::mcp_writes_cannot_touch_another_members_rows` y
+  `mcp_confirm_and_impact.rs::el_preview_de_un_borrado_ajeno_no_emite_token`.
+
+- **5.0.0 / WP6b (issue #207) — 70 → 71 tools: Monte Carlo.** Una tool nueva de LECTURA,
+  `get_projection_bands` (contadores: 71 / 30 / 41), y un eje nuevo en `simulate_projection`.
+  Evaluación de paridad: **tool añadida** para `GET /v1/projection/bands`; **tool actualizada**
+  para el eje. Ninguna omisión nueva.
+  - **`get_projection_bands`** — su bullet propio está arriba, en la lista de lecturas.
+  - **`simulate_projection` gana `monte_carlo: {paths ≤ 1000, seed?}`**: los dos lados publican
+    `success_probability`, `success_verdict`, `underfunded_probability` y `months_below_need_p50`
+    —y, desde el pase de correcciones de abajo, `never_retired_probability`,
+    `success_given_retired` y `buffer_inactive_reason`—,
+    y `deltas` gana `success_probability_delta`. **No lleva bandas** — son ~16 KB por lado y un
+    what-if devuelve dos; el fan chart vive en su endpoint, que además lo cachea. Los dos lados
+    sortean con la MISMA semilla, así que el delta mide el cambio del PLAN y no el ruido de dos
+    muestras. La respuesta ecoa `monte_carlo {paths, seed (string), any_volatility_declared}`: sin
+    la semilla el resultado no es reproducible y por tanto no es un resultado. (El
+    `success_threshold_pct` que este bloque ecoaba **se retiró en 5.0.0/V7**: el corte del
+    veredicto es fijo al 100 % y no hay umbral que auditar.)
+  - **Es el único eje de `simulate_projection` SIN anti-no-op, y está declarado**: los demás
+    (`income_growth`, `profile_overrides`, `solve`, los de pasivos) se rechazan cuando no pueden
+    mover nada porque devolverían un escenario idéntico al baseline sin decir por qué. Éste no
+    cambia el escenario: le AÑADE información. `{"monte_carlo": {"paths": 500}}` con el resto del
+    cuerpo vacío es la pregunta legítima «¿qué probabilidad de éxito tiene mi plan tal cual está?».
+    Test: `mcp_simulate.rs::the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_the_scenario`.
+  - **Presupuesto de descripciones, rebalanceado de verdad.** La tool nueva son 490 caracteres y el
+    margen antes de WP6b eran **146** (23 854 / 24 000). Se movieron ~550 caracteres de siete
+    descripciones al `instructions` —donde el cliente los lee una vez por sesión y no una vez por
+    tool—: el párrafo **MONTE CARLO** entero es nuevo, y a CATEGORÍAS y ESCRITURA se les añadió lo
+    que salió de `update_categorization_rule`, `materialize_recurring`, `list_assets` y
+    `update_liability`; de `get_projection` se retiró la frase del hogar, que el bloque SCOPE ya
+    decía con más detalle. Total tras el cambio: **23 793 / 24 000** (margen 207). La constante
+    **no** se tocó — la salida cuando no cabe es mover prosa, no subir el techo.
+
+- **5.0.0 / pase de correcciones tras la revisión adversarial del motor (issue #207) — cero tools
+  nuevas, tres contratos que crecen.** Evaluación de paridad: **tres tools actualizadas**
+  (`get_projection`, `get_projection_bands`, `simulate_projection`); ninguna omisión nueva y
+  **ningún contador se mueve** (recuéntalos con los dos `grep` del bullet de lecturas, no de
+  memoria). Lo que un modelo lee distinto a partir de aquí:
+  - **`get_projection` gana `points[].unmet_need`** — el gasto del MES que los activos no pudieron
+    financiar, neto y `≥ 0` (f64 y misma decimación `hybrid` que sus vecinos; `0` en el índice 0).
+    **Son TRES magnitudes por mes y no dos**: `withdrawal` es lo que se OBTUVO,
+    `withdrawal_shortfall` lo que la REGLA rechazó y `unmet_need` lo que la CARTERA no pudo dar —
+    su suma es la necesidad neta del mes. Confundir las dos últimas es el error caro, porque con
+    `fixed_real` el recorte es **cero por construcción** y un modelo que solo lo mirara concluiría
+    «cubre todo su gasto» de un hogar sin cartera. **No viaja en `members[].series`**, que sigue
+    siendo mínima (patrimonio + líquido).
+  - **`assets_depleted_month_index` exige ahora DOS condiciones** —cartera a cero tras la VENTA **y**
+    alguna venta posterior sin fundar—, en `get_projection` (raíz y `members[]`) y en los dos lados
+    de `simulate_projection`. Un aterrizaje exacto sobre una pensión que cubre todo el gasto
+    posterior es **`null`**, no «cartera agotada»: antes se publicaba como ruina con
+    `uncovered_deficit_total = 0`. El campo sigue en la rejilla 0-based de #210.
+  - **`get_projection_bands`** — la definición de éxito, sus dos caras, las dos lecturas de
+    cobertura y el cierre en el horizonte de `depletion_probability_by_age` están en su bullet
+    propio, arriba; `buffer_inactive_reason` dice por qué NO se simuló el colchón, y es `null` ⟺
+    `buffer_active: true`. **Sus motivos cambiaron en 5.0.0/V6** (ver el bullet del colchón
+    derivado, abajo): hoy son `no_capped_rule` | `cap_is_zero` | `no_safe_liquid_asset` |
+    `no_volatility`, y `not_requested` ya no se emite.
+  - **`simulate_projection`**: los dos lados ganan `never_retired_probability`,
+    `success_given_retired` y `buffer_inactive_reason` junto a las cifras de Monte Carlo que ya
+    tenían, y con `include_series` la `series` gana **`baseline_unmet_need` y
+    `scenario_unmet_need`** (f64 sobre la misma rejilla que `month_indices`, así que restarlas punto
+    a punto es legítimo). Viajan porque son la única columna que dice **DÓNDE** deja de cubrirse el
+    plan: `assets_depleted_month_index` da un mes y `uncovered_deficit_total` un total, y entre los
+    dos no se ve el perfil del hueco.
+  - **`partial_gap_target` se gatea sobre la fase VIVIDA** (`partial_retirement_month_index != null`)
+    y no sobre la declarada — en `get_projection` y en los dos lados de `simulate_projection`. Un
+    hogar que se jubila ANTES de la media jornada que tenía apuntada publicaba el capital de una
+    fase que nunca ocurrió; su gemelo `partial_phase_capital_growing` ya se gateaba así.
+  - **Código de error nuevo, compartido con HTTP**: `bridge_discount_out_of_range` (**422**), del
+    `map_engine_err` que las tools reusan — el objetivo puente descontado desborda `Decimal` porque
+    la tasa derivada es demasiado negativa. Aguas arriba hay un clamp a 0 con el aviso
+    `bridge_discount_clamped` en `warnings`, así que por esta superficie la rama es inalcanzable;
+    el código existe para que el fallo tenga nombre en vez de ser un 500 opaco. Está en el fixture
+    `tests/fixtures/error-codes.json` con su copia en español, como el resto.
+  - **Presupuesto de descripciones**: la única que crece es la de `get_projection_bands`
+    (**490 → 525**), que gana la definición corregida de éxito y el nombre de sus dos caras; el
+    resto de la prosa nueva fue al párrafo **MONTE CARLO** del `instructions`, que el cliente lee
+    una vez por sesión y no una vez por tool. Los dos topes —600 por tool y 24 000 el catálogo—
+    **no se tocaron**. El total se cuenta, nunca se recuerda:
+    `jq '[.tools[].description_len] | add' apps/api/tests/fixtures/mcp-catalog.json` (**23 828** el
+    2026-09-03, margen 172; el «23 793» de tres párrafos más arriba describe el momento de WP6b y
+    no el de hoy).
+- **5.0.0 / U4 + S4 (issue #207) — cero tools nuevas, una tool con descripción nueva y un campo de
+  salida más.** Evaluación de paridad: **`update_retirement_profile` actualizada** (descripción +
+  dos doc-comments de `WithdrawalRuleParam`, que `simulate_projection.profile_overrides` **hereda**
+  por compartir ese mismo tipo de parámetro); `get_retirement_profile` y `simulate_projection`
+  cambian **sin código propio** porque comparten cores. Ninguna omisión nueva; **ningún contador se
+  mueve** (siguen 71/30/41/41/18/8/41/19 — recuéntalos, no los copies).
+  - **U4 — el porcentaje de retirada es ÚNICO.** `withdrawal_rule.pct` (`percent_of_balance`,
+    `guardrails`) y `withdrawal_rule.start_pct` (`hybrid`) pasan a ser **opcionales** y, omitidos,
+    heredan el `swr_pct` del perfil. La herencia se resuelve en LECTURA (`resolve_withdrawal_rule`,
+    resolvedor único compartido con HTTP), así que mover el SWR mueve el % de la regla y **el
+    what-if también**: un `profile_overrides` que solo toca `swr_pct` mueve la retirada del
+    escenario, que es exactamente lo que un modelo espera al preguntar «¿y si bajo mi SWR?».
+  - **`withdrawal_rule.pct_source`** (`swr` | `explicit`) viaja en el perfil que devuelven
+    `get_retirement_profile` y el preview/apply de `update_retirement_profile` — **aditivo y solo de
+    salida** (no es un parámetro, no está en `WithdrawalRuleParam`, no aparece en el
+    `inputSchema`). En `fixed_real` **no viaja**: ausencia, no `null`, porque esa regla no tiene
+    porcentaje. Es la pieza que impide el diagnóstico falso «tu regla retira el 3,5 % que
+    elegiste» cuando en realidad nadie eligió nada.
+  - **S4 — `pension: null` (`clear_pension: true` por MCP) suelta también el `target_basis`
+    fijado**, para que se vuelva a derivar. Mandar `target_basis` en la misma llamada gana. Se ve en
+    el preview sin adivinar nada: `target_basis_stored_before`/`_after` ya viajaban desde WP5-2, y
+    ahora el `_after` sale `null`.
+  - **Presupuesto de descripciones**: la única que crece es `update_retirement_profile`
+    (**288 → 366**, +78); todo lo demás —la regla de la herencia y la soltura de la base— fue al
+    bloque **DOS PLANOS DE CONFIGURACIÓN** del `instructions` y a los doc-comments de los campos
+    (que son schema, no descripción de tool, y por tanto no entran en el tope de 600). Los dos
+    topes **no se tocaron**. Total tras el cambio:
+    `jq '[.tools[].description_len] | add' apps/api/tests/fixtures/mcp-catalog.json` → **23 906**
+    (margen 94 el 2026-09-03; eran 23 828 antes de esta ola). **Mídelo, no lo copies**: el margen
+    es de dos cifras y la próxima tool obliga a otra ronda de reequilibrio.
+- **5.0.0 / WP-F (decisiones V6 y V7 del owner) — cero tools nuevas, dos contratos que crecen y un
+  parámetro que se deprecia.** Evaluación de paridad: **tres tools actualizadas**
+  (`get_projection_bands`, `simulate_projection`, `update_retirement_profile`), ninguna omisión
+  nueva y **ningún contador se mueve** (recuéntalos, no los copies). Lo que un modelo lee distinto:
+  - **El colchón de caja se DERIVA del tope de la regla de ahorro** (V6) y la salida dice de dónde
+    sale. `get_projection_bands` y los dos lados de `simulate_projection` ganan
+    `buffer_source` (`explicit` | `allocation_cap` | `none`), `buffer_target_amount`
+    (Decimal-string, € **nominales**, solo con `allocation_cap`), `buffer_months_effective`
+    (los meses explícitos, o `floor(tope / gasto de jubilación)` como equivalente **informativo**),
+    `buffer_source_rule_id` y `buffer_source_asset_name`. `buffer_inactive_reason` sigue siendo UN
+    campo y sus motivos son ahora `no_capped_rule` | `cap_is_zero` | `no_safe_liquid_asset` (del
+    handler) y `no_volatility` (del motor); **`not_requested` ya no se emite** — desde que el
+    colchón se deriva, «no se pidió» no es un motivo.
+    En `simulate_projection` van **por lado y no en el bloque `monte_carlo`**: un
+    `profile_overrides.cash_buffer_months` fija el colchón solo del escenario, y un campo
+    compartido describiría el colchón equivocado en la mitad de las simulaciones.
+    `cash_buffer_months` (y `clear_cash_buffer_months`) **siguen siendo escribibles**: un valor
+    explícito gana sobre la derivación, y borrarlo vuelve a ella.
+  - **`success_threshold_pct` queda DEPRECADO e IGNORADO** (V7) en `update_retirement_profile` y en
+    el `profile_overrides` de `simulate_projection`. **No se borra del schema**: los dos params son
+    `deny_unknown_fields`, así que retirarlo convertiría en 400 lo que hoy funciona. Se acepta y se
+    descarta —sin validación, sin persistencia y **fuera de toda salida**—, su `#[schemars(range)]`
+    desaparece (ya no acota nada) y con él sale su fila de `schema_bounds_parity.rs`; el veredicto
+    tiene corte FIJO: verde solo con el 100 % de escenarios sin agotar la cartera. El código de
+    error `success_threshold_out_of_range` se retiró del catálogo.
+  - **Presupuesto de descripciones: intacto.** Ninguna descripción de tool cambia (los
+    `description_sha256_12` de las tres no se movieron); lo que cambia son doc-comments de campos,
+    que son schema y no entran en el tope de 600. Se regeneró el fixture y solo se movieron dos
+    `constraints_sha256_12` (los del `success_threshold_pct` que pierde sus cotas).
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
   mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,

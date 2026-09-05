@@ -29,7 +29,7 @@ use std::sync::Arc;
 /// `upcoming_coverage_ratio`, `debt_to_assets_ratio`…). 6 decimales de fracción = 4 decimales de
 /// porcentaje (`0,0001 %` de resolución), muy por encima del único decimal que pinta la UI.
 /// `rust_decimal` produce hasta 28 dígitos por división y `serde::str` los serializaba todos.
-const RATIO_DP: u32 = 6;
+pub(crate) const RATIO_DP: u32 = 6;
 
 /// Decimales de `runway_months`. Alineado con `sim_kpis` (`handlers/projection.rs`), que ya
 /// redondeaba a 1: el mismo número no puede tener dos precisiones según la superficie.
@@ -458,6 +458,236 @@ pub struct SummaryResponse {
     /// `POST`/`PATCH /v1/liabilities` (`type_tag`), no por categoría: el desglose por categoría es
     /// `liabilities_by_category`, y los dos suman lo mismo.
     pub liabilities_by_type_tag: Vec<TypeTagBreakdownLine>,
+    /// **El PLAN de jubilación de quien pregunta** (5.0.0, D27): estrategia, disparador, mes
+    /// efectivo, ahorro necesario, margen y el rojo de D17. Es lo que alimenta la tarjeta «Tu
+    /// plan» del Resumen sin obligar a la SPA a pedir además la serie de proyección entera.
+    ///
+    /// **Todo `null` con `absent_reason: household_aggregate` en `view=household`**: el hogar es
+    /// la suma de N planes independientes (uno por miembro, con su estrategia y su edad) y no
+    /// tiene uno propio — «el ahorro necesario del hogar» no es una cifra que exista.
+    pub plan: SummaryPlan,
+}
+
+/// El plan de jubilación resumido. Sale **del mismo objeto que pinta el chart**: se lee de la
+/// entrada de cache de proyección del usuario y, si no hay ninguna, se calcula por el camino
+/// cacheado (`projection_series_cached`) — que además la deja caliente, así que el GET de la
+/// serie que viene detrás es un HIT. Nunca hay una segunda fórmula: si estas cifras y las de
+/// `/v1/projection/series` pudieran divergir, no valdrían para nada.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct SummaryPlan {
+    /// `asap` | `retire_at_age` | `coast` | `partial` | `pension_bridge`.
+    pub strategy: Option<String>,
+    /// Qué DISPARA la jubilación: `liquid_crossing` (el capital alcanzó el objetivo) o
+    /// `target_age` (la edad manda, llegue o no el capital — D17).
+    pub retirement_trigger: Option<String>,
+    /// Mes EFECTIVO de jubilación, en la rejilla de `points[].month_index` de
+    /// `/v1/projection/series` (0 = hoy). `null` con `absent_reason`, y también —con
+    /// `absent_reason` nulo— cuando el plan no se jubila dentro del horizonte: eso es un
+    /// resultado, no un hueco.
+    pub jubilacion_month_index: Option<u32>,
+    /// **Ahorro mensual necesario** para llegar al objetivo en la edad elegida, en euros. Es
+    /// exactamente `required_contribution_monthly` de `/v1/projection/series` — el mismo número
+    /// del mismo solve, con el nombre que se lee en un Resumen. `null` con las estrategias por
+    /// cruce: ahí no hay edad contra la que resolver nada.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub required_savings_monthly: Option<Decimal>,
+    /// **Margen mensual disponible** (D16/D31), con la base que corresponde a cada estrategia
+    /// —declarada en el campo homónimo de `/v1/projection/series`, que es de donde sale—.
+    /// `null` cuando la estrategia no publica margen.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub disposable_monthly: Option<Decimal>,
+    /// **El rojo de D17**: `true` ⟺ ni invirtiendo cada euro de sobrante se llega al objetivo en
+    /// la edad elegida. `null` = la pregunta no aplica a esta estrategia — nunca `false` para
+    /// decir «no aplica».
+    pub underfunded: Option<bool>,
+    /// Por qué el plan viene vacío: `household_aggregate` (la vista suma N planes y no tiene uno)
+    /// | `projection_unavailable` (la simulación no se pudo calcular; el Resumen es una lectura y
+    /// no se cae por eso). `null` ⟺ el plan de arriba es el del usuario.
+    #[schema(value_type = Option<String>)]
+    pub absent_reason: Option<&'static str>,
+
+    // ---- 5.0.0 WP6b — el KPI «Éxito del plan» (D25/D28) --------------------------------------
+    /// **Probabilidad de éxito de Monte Carlo**: fracción de caminos en los que el plan OCURRE y
+    /// AGUANTA — el hogar se jubila dentro del horizonte (o la estrategia es por EDAD, y entonces
+    /// la jubilación es un dato) **y** la cartera no se agota nunca. `0.87` = 87 de cada 100
+    /// escenarios.
+    ///
+    /// La definición cambió en el pase de correcciones de la revisión adversarial del motor: la
+    /// vieja —solo «no se agota»— premiaba al hogar que no se jubila jamás. Los dos campos que
+    /// van justo debajo, `never_retired_probability` y `success_given_retired`, son las otras dos
+    /// caras de la misma cifra y **se leen juntas**: un 0,63 con un tercio de caminos que no se
+    /// jubilan no describe el mismo plan que un 0,63 con todos jubilándose.
+    ///
+    /// **Es EXACTAMENTE el número que dibuja el fan chart** de `GET /v1/projection/bands`: sale
+    /// del mismo cache, con los caminos y la semilla por defecto. Si el Resumen lo recalculara
+    /// por su cuenta con otra muestra, el KPI y el gráfico enseñarían dos éxitos distintos del
+    /// mismo plan en la misma pantalla.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub success_probability: Option<Decimal>,
+    /// `green` | `amber` | `red` con el semáforo de D28, **de corte fijo desde 5.0.0** (V7):
+    /// verde solo con el 100 % de caminos sin agotar la cartera, ámbar en `[0,90, 1)`, rojo por
+    /// debajo. `null` ⟺ no hay probabilidad que colorear. El `success_threshold_pct` que aquí se
+    /// ecoaba se retiró con el ajuste: no hay umbral que auditar.
+    #[schema(value_type = Option<String>)]
+    pub success_verdict: Option<&'static str>,
+    /// **Fracción de caminos que NO se jubilan** dentro del horizonte, del MISMO sorteo que
+    /// `success_probability`. `"0"` por construcción con una estrategia por edad. Sin ella, un
+    /// «Éxito del plan: 63 %» no distingue el plan que falla del plan que no llega a empezar.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub never_retired_probability: Option<Decimal>,
+    /// **Éxito entre los caminos que sí se jubilan.** `null` cuando ninguno lo hace: ahí la
+    /// pregunta «¿aguanta?» no tiene sobre qué formularse, y un `0` la respondería en falso.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub success_given_retired: Option<Decimal>,
+    /// Por qué faltan las cifras del éxito (`success_probability`, `success_verdict`,
+    /// `never_retired_probability`, `success_given_retired`) cuando el resto del plan SÍ está:
+    /// `bands_unavailable` (el sorteo falló; el Resumen es una lectura y no se cae por eso).
+    /// `null` ⟺ la probabilidad viaja, o el plan entero está ausente y lo dice `absent_reason`.
+    #[schema(value_type = Option<String>)]
+    pub success_absent_reason: Option<&'static str>,
+}
+
+impl SummaryPlan {
+    /// El plan ausente, con su razón. **Todos** los campos van a `null` a la vez —los del plan
+    /// y los del éxito—: publicar uno suelto sería peor que no publicar ninguno. (Sin contarlos:
+    /// el número se quedó obsoleto en cuanto el bloque del éxito creció.)
+    fn absent(reason: &'static str) -> Self {
+        SummaryPlan {
+            strategy: None,
+            retirement_trigger: None,
+            jubilacion_month_index: None,
+            required_savings_monthly: None,
+            disposable_monthly: None,
+            underfunded: None,
+            absent_reason: Some(reason),
+            success_probability: None,
+            success_verdict: None,
+            never_retired_probability: None,
+            success_given_retired: None,
+            // El hueco ya lo explica `absent_reason`; una segunda razón para lo mismo se leería
+            // como si hubieran fallado dos cosas distintas.
+            success_absent_reason: None,
+        }
+    }
+}
+
+/// El agregado del hogar no tiene plan: es la suma de N simulaciones independientes.
+pub(crate) const PLAN_ABSENT_HOUSEHOLD: &str = "household_aggregate";
+/// La proyección no se pudo calcular. El Resumen es una LECTURA y no se cae por ello — pero lo
+/// dice, en vez de servir seis `null` indistinguibles de «no tienes plan».
+pub(crate) const PLAN_ABSENT_PROJECTION_UNAVAILABLE: &str = "projection_unavailable";
+/// El sorteo de Monte Carlo falló pero el plan determinista sí está. Se distingue del anterior a
+/// propósito: «no sabemos tu probabilidad de éxito» y «no sabemos tu plan» son dos situaciones
+/// muy distintas para quien lee el Resumen.
+pub(crate) const PLAN_ABSENT_BANDS_UNAVAILABLE: &str = "bands_unavailable";
+
+/// Lee el plan de jubilación del usuario **del objeto que sirve el chart**.
+///
+/// Orden deliberado: primero las dos densidades de la cache (estas seis cifras no dependen de la
+/// densidad — son escalares del plan, no puntos de la serie), y solo si no hay ninguna se calcula
+/// por `projection_series_cached` con `hybrid`, que es la densidad que la SPA pide primero.
+///
+/// **Coste**: un MISS aquí paga una proyección entera más los solves de la estrategia (§B.7:
+/// hasta 26 proyecciones). No es coste nuevo del Resumen, es el MISMO que iba a pagar el GET de
+/// la serie un instante después — y como se inserta en la cache, ese GET pasa a ser un HIT. Tras
+/// un login o una mutación con warm-up, esto es siempre un HIT.
+async fn summary_plan(state: &AppState, iid: Uuid, user_id: Uuid) -> SummaryPlan {
+    use crate::state::{Density, ProjectionCacheKey};
+    for density in [crate::state::Density::Hybrid, Density::Monthly] {
+        let key = ProjectionCacheKey {
+            installation_id: iid,
+            view: LedgerView::Mine,
+            owner_user_id: Some(user_id),
+            density,
+        };
+        if let Some(cached) = state.projection_cache_get(&key).await {
+            return plan_from_series(&cached);
+        }
+    }
+    match crate::handlers::projection::projection_series_cached(
+        state,
+        user_id,
+        iid,
+        LedgerView::Mine,
+        None,
+        Density::Hybrid,
+    )
+    .await
+    {
+        Ok(series) => plan_from_series(&series),
+        Err(e) => {
+            tracing::warn!(error = %e, "no se pudo resolver el plan de jubilación para /v1/summary");
+            SummaryPlan::absent(PLAN_ABSENT_PROJECTION_UNAVAILABLE)
+        }
+    }
+}
+
+/// **El KPI «Éxito del plan» del Resumen** (D28), leído del MISMO sitio que el fan chart.
+///
+/// Va por `projection_bands_cached` con los caminos y la semilla por defecto, que es exactamente
+/// la petición que hace la sección «Riesgo»: en el caso normal esto es un HIT y no cuesta nada, y
+/// en un MISS deja la entrada caliente para el GET que viene detrás. **Nunca hay una segunda
+/// muestra**: dos ejecuciones de Monte Carlo con semillas distintas darían dos probabilidades
+/// distintas del mismo plan, y el usuario vería el KPI del Resumen discrepar del gráfico de
+/// Jubilación sin ninguna explicación posible.
+///
+/// Un fallo aquí **no tumba el Resumen**: se publican a `null` todos los campos del éxito con
+/// `success_absent_reason`, y el resto del plan sigue viajando.
+async fn attach_success(state: &AppState, iid: Uuid, user_id: Uuid, mut plan: SummaryPlan) -> SummaryPlan {
+    use crate::handlers::projection_bands::{projection_bands_cached, DEFAULT_BANDS_PATHS};
+    if plan.absent_reason.is_some() {
+        return plan;
+    }
+    match projection_bands_cached(
+        state,
+        user_id,
+        iid,
+        LedgerView::Mine,
+        DEFAULT_BANDS_PATHS,
+        None,
+    )
+    .await
+    {
+        Ok(bands) => {
+            plan.success_probability = bands.success_probability;
+            plan.success_verdict = Some(bands.success_verdict);
+            plan.never_retired_probability = bands.never_retired_probability;
+            plan.success_given_retired = bands.success_given_retired;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "no se pudieron calcular las bandas para el KPI de éxito");
+            plan.success_absent_reason = Some(PLAN_ABSENT_BANDS_UNAVAILABLE);
+        }
+    }
+    plan
+}
+
+/// Proyección → plan. Copia de campos, sin una sola cuenta: cualquier aritmética aquí sería la
+/// segunda implementación de algo que la proyección ya resolvió.
+fn plan_from_series(
+    s: &crate::handlers::projection::ProjectionSeriesResponse,
+) -> SummaryPlan {
+    SummaryPlan {
+        strategy: s.strategy.clone(),
+        retirement_trigger: s.retirement_trigger.map(str::to_string),
+        jubilacion_month_index: s.jubilacion_month_index,
+        required_savings_monthly: s.required_contribution_monthly,
+        disposable_monthly: s.disposable_monthly,
+        underfunded: s.underfunded,
+        absent_reason: None,
+        // Los rellena `attach_success` con la entrada del cache de bandas: aquí no se calcula
+        // nada, igual que el resto de esta función.
+        success_probability: None,
+        success_verdict: None,
+        never_retired_probability: None,
+        success_given_retired: None,
+        success_absent_reason: None,
+    }
 }
 
 #[utoipa::path(
@@ -465,7 +695,7 @@ pub struct SummaryResponse {
     path = "/v1/summary",
     tag = "summary",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = sums for rows attributed to the signed-in user; omit = household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
     ),
     responses(
         (status = 200, description = "Installation aggregates + financial_health (monthly equivalents según `fire_settings.savings_source`, runway de líquidos con retorno e inflación, rendimiento neto anual esperado del patrimonio —nominal y real—, sumas de Próximos). Los pasivos con `payment_end_date` pasada se **filtran** de las lecturas; nunca se borran (reads never mutate).", body = SummaryResponse),
@@ -481,20 +711,70 @@ pub async fn get_summary(
 ) -> Result<Json<SummaryResponse>, ApiError> {
     let user = require_session_user(&jar, &state.pool).await?;
     let (iid, _) = require_installation_member(&state.pool, user.id.0).await?;
-    let out = summary_core(&state.pool, iid, user.id.0, q.resolve()?).await?;
+    let out = summary_core(&state, iid, user.id.0, q.resolve()?).await?;
     Ok(Json(out))
+}
+
+/// **SWR mínimo del hogar** (5.0.0, §D): el menor `swr_pct` entre los perfiles de los miembros
+/// con fila en `installation_memberships`. `None` = el hogar no tiene miembros con perfil legible
+/// (inalcanzable con una instalación sana: el solicitante siempre es uno).
+///
+/// Se resuelve por el MISMO camino que cualquier otro perfil (`resolve_retirement_profile`), así
+/// que los defaults y los clamps son idénticos a los que ve el usuario en su formulario: leer el
+/// JSONB crudo aquí abriría una segunda interpretación del mismo dato.
+async fn household_min_swr_pct(
+    pool: &sqlx::PgPool,
+    iid: Uuid,
+) -> Result<Option<Decimal>, ApiError> {
+    let rows: Vec<Option<sqlx::types::Json<crate::handlers::retirement_profile::RetirementProfile>>> =
+        sqlx::query_scalar(
+            r#"SELECT u.retirement_profile
+               FROM installation_memberships m
+               JOIN users u ON u.id = m.user_id
+               WHERE m.installation_id = $1"#,
+        )
+        .bind(iid)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|j| {
+            crate::handlers::retirement_profile::resolve_retirement_profile(j.map(|x| x.0)).swr_pct
+        })
+        .min())
 }
 
 /// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_summary`.
 pub(crate) async fn summary_core(
-    pool: &sqlx::PgPool,
+    state: &AppState,
     iid: Uuid,
     user_id: Uuid,
     view: LedgerView,
 ) -> Result<SummaryResponse, ApiError> {
+    // Un solo alias para no reescribir las ~20 queries de abajo: lo que cambió en 5.0.0 es que
+    // esta core necesita además el ESTADO (la cache de proyección), no solo el pool.
+    let pool = &state.pool;
     // Una sola query para los escalares de instalación que necesita este handler: fecha civil,
     // inflación (base del runway) y los fire_settings (fuente del ahorro + SWR/tramos del runway).
     let (today, inflation_pct, fire) = installation_calendar_inflation_fire(pool, iid).await?;
+    // El SWR salió de `fire_settings` en 5.0.0 (D13): el umbral «runway indefinido» lo fija el
+    // perfil del usuario. En `mine` es el del solicitante y ya está.
+    //
+    // En `household` (WP5, §D) es el **MÍNIMO** de los perfiles de los miembros, y el mínimo no
+    // es una preferencia estética: el runway agregado se sirve sobre las filas de TODO el hogar,
+    // y «indefinido» significa «esta cartera aguanta para siempre». Basta con que UN miembro
+    // considere insostenible esa tasa de retirada para que el hogar no pueda declararse
+    // indefinido — usar el máximo (o el del solicitante) permitiría que el más optimista del
+    // hogar firmara por todos, que es exactamente el número plausible y falso que aquí no se
+    // publica. Con un solo miembro coincide con el suyo, así que nada se mueve.
+    let retirement_profile =
+        crate::handlers::retirement_profile::load_retirement_profile(pool, user_id).await?;
+    let swr_for_runway = match view {
+        LedgerView::Mine => retirement_profile.swr_pct,
+        LedgerView::Household => {
+            household_min_swr_pct(pool, iid).await?.unwrap_or(retirement_profile.swr_pct)
+        }
+    };
     let source = fire.savings_source;
 
     let asset_scope = view.scope_where("");
@@ -653,7 +933,7 @@ pub(crate) async fn summary_core(
         &liquid_rows,
         expense_tot,
         inflation_pct,
-        fire.swr_pct,
+        swr_for_runway,
         annual_expense_gross,
         &fire.tax_brackets,
         fire.taxes_enabled,
@@ -743,6 +1023,12 @@ pub(crate) async fn summary_core(
         assets_by_category,
         liabilities_by_category,
         liabilities_by_type_tag,
+        plan: match view {
+            LedgerView::Mine => {
+                attach_success(state, iid, user_id, summary_plan(state, iid, user_id).await).await
+            }
+            LedgerView::Household => SummaryPlan::absent(PLAN_ABSENT_HOUSEHOLD),
+        },
     })
 }
 

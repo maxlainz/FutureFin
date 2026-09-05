@@ -88,10 +88,12 @@ fn tool_json(envelope: &Value) -> Value {
 
 /// T1 · A mano: 200.000 € líquidos al 0 %; gasto 2.000 €/mes en AMBAS fases (la retirada no es
 /// pegajosa: sin gasto regular el hogar «volvería a trabajar» en el mes 2); target manual
-/// 8.000/0,04 = 200.000 ⇒ jubilado desde el mes 0. La cartera se VACÍA en el mes
-/// 200.000/2.000 = 100 (caso exacto, predicado >=); el descubierto empieza en el 101 y acumula
-/// (360−100)×2.000 = 520.000 ⇒ NW(360) = −520.000. Control: con 96 meses no se agota
-/// (200.000 − 192.000 = 8.000 > 0) ⇒ null = «no en el horizonte», no «no calculado».
+/// 8.000/0,04 = 200.000 ⇒ jubilado desde el mes 0. La cartera se VACÍA en el mes 100 del BUCLE
+/// (200.000/2.000, caso exacto, predicado >=) = **mes 99 de la rejilla publicada** desde 5.0.0
+/// (#210); el descubierto empieza al siguiente y acumula (360−100)×2.000 = 520.000 ⇒
+/// NW(360) = −520.000 — la aritmética del descubierto es la del BUCLE y no se mueve. Control:
+/// con 96 meses no se agota (200.000 − 192.000 = 8.000 > 0) ⇒ null = «no en el horizonte», no
+/// «no calculado».
 #[tokio::test]
 async fn portfolio_depletion_month_is_published_and_exact() {
     let app = TestApp::spawn().await;
@@ -114,11 +116,20 @@ async fn portfolio_depletion_month_is_published_and_exact() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    // 5.0.0 (D13): el modo del objetivo, el importe manual y el SWR son del PERFIL del usuario;
+    // los impuestos siguen siendo del hogar. Dos PATCHes, los mismos cuatro números.
     let r = app
         .patch_json_with_cookie(
             "/v1/installation",
-            json!({"fire_settings": {"fire_number_mode": "manual", "fire_number_manual_amount": "8000",
-                    "taxes_enabled": false, "swr_pct": "4"}}),
+            json!({"fire_settings": {"taxes_enabled": false}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "manual", "fire_number_manual_amount": "8000", "swr_pct": "4"}),
             &owner.cookie,
         )
         .await;
@@ -129,7 +140,12 @@ async fn portfolio_depletion_month_is_published_and_exact() {
         .await
         .json();
     assert_eq!(series["jubilacion_month_index"], 0, "{series}");
-    assert_eq!(series["assets_depleted_month_index"], 100, "{series}");
+    // #210 — **99, no 100**: el motor agota la cartera en su mes 100 (1-based del bucle) y desde
+    // 5.0.0 el handler publica ese hecho en la MISMA rejilla 0-based que `points[].month_index` y
+    // que `jubilacion_month_index`, con `engine_month_to_grid` (k − 1). El mes civil no se ha
+    // movido ni un día: es el mismo mes, nombrado con la convención del resto de la respuesta.
+    // Hasta 4.15.x este pin era 100 y era el único índice de la respuesta desplazado.
+    assert_eq!(series["assets_depleted_month_index"], 99, "{series}");
     assert_eq!(dec(&series["uncovered_deficit_total"]), 520_000.0, "{series}");
     let last_nw = series["points"].as_array().unwrap().last().unwrap()["net_worth"]
         .as_f64()
@@ -229,8 +245,8 @@ async fn fire_target_absent_reason_reaches_http_with_swr_zero() {
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
     let r = app
         .patch_json_with_cookie(
-            "/v1/installation",
-            json!({"fire_settings": {"swr_pct": "0"}}),
+            "/v1/auth/me/retirement-profile",
+            json!({"swr_pct": "0"}),
             &owner.cookie,
         )
         .await;
@@ -256,13 +272,14 @@ async fn fire_target_absent_reason_covers_the_other_two_causes() {
     let cat_i = app.create_category(&owner, "income", "Pension").await;
     let cat_e = app.create_category(&owner, "expense", "Vida").await;
 
-    // (a) `manual_amount_missing` NO tiene camino vivo por la API: validate_fire_settings
-    // rechaza «manual sin importe» EN LA ESCRITURA (fire_manual_amount_required) — el literal es
-    // la guardia defensiva del lado de cálculo. Se pinea el rechazo en la puerta:
+    // (a) `manual_amount_missing` NO tiene camino vivo por la API:
+    // `validate_retirement_profile` rechaza «manual sin importe» EN LA ESCRITURA
+    // (fire_manual_amount_required) — el literal es la guardia defensiva del lado de cálculo. Se
+    // pinea el rechazo en la puerta, que desde 5.0.0 es la del perfil.
     let r = app
         .patch_json_with_cookie(
-            "/v1/installation",
-            json!({"fire_settings": {"fire_number_mode": "manual"}}),
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "manual"}),
             &owner.cookie,
         )
         .await;
@@ -281,8 +298,8 @@ async fn fire_target_absent_reason_covers_the_other_two_causes() {
     }
     let r = app
         .patch_json_with_cookie(
-            "/v1/installation",
-            json!({"fire_settings": {"fire_number_mode": "annual_expense"}}),
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "annual_expense"}),
             &owner.cookie,
         )
         .await;
@@ -294,8 +311,15 @@ async fn fire_target_absent_reason_covers_the_other_two_causes() {
     let r = app
         .patch_json_with_cookie(
             "/v1/installation",
-            json!({"fire_settings": {"fire_number_mode": "manual", "fire_number_manual_amount": "500000",
-                    "taxes_enabled": false, "swr_pct": "3.5"}}),
+            json!({"fire_settings": {"taxes_enabled": false}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "manual", "fire_number_manual_amount": "500000", "swr_pct": "3.5"}),
             &owner.cookie,
         )
         .await;

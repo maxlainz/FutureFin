@@ -22,6 +22,7 @@ import {
 import {
   PROJECTION_FOCUS_STORAGE_KEY,
   PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY,
+  jubilacionTargetTileValue,
   projectionXTickLabel,
   resolveProjectionAxisAgeMode,
 } from "../lib/projection-chart";
@@ -90,10 +91,6 @@ export function ProjectionView({
   })();
   const axisAnchor = projectionSeries?.anchor_date_ymd?.trim() || null;
   const jubilacionMiNo = projectionSeries?.jubilacion_month_index ?? null;
-  const jubilacionTargetNoPen =
-    projectionSeries?.jubilacion_target_net_worth != null
-      ? parseDisplayDecimal(projectionSeries.jubilacion_target_net_worth)
-      : null;
 
   // Preferencia PERSISTIDA de «Vista cercana» (la memoria de escritorio)…
   const [focusModeStored, setFocusModeStored] = useState<boolean>(() => {
@@ -165,6 +162,22 @@ export function ProjectionView({
     // chart debe amplificar (> 1) en vez de fingir «sin ajuste».
     return n != null && Number.isFinite(n) ? n : 0;
   }, [installation?.installation.annual_inflation_assumption_percent]);
+
+  // F11: el tile «Objetivo al jubilarte» tiene que MOVERSE con «En dinero de hoy». Hasta aquí
+  // enseñaba `jubilacion_target_net_worth` —el objetivo evaluado en el mes 0, inmóvil por
+  // contrato—, que con el objetivo puente de 5.0.0 ya no es el objetivo del mes en que te
+  // jubilas: en la demo, 1.609.855 € contra 696.563 € reales, un 2,31×. Va DESPUÉS de
+  // `projectionInflationPct` porque necesita el toggle y la tasa. La base viaja pegada al
+  // importe: el `detail` la declara, aquí no se re-deriva de una segunda comparación.
+  const jubilacionTarget = useMemo(
+    () =>
+      jubilacionTargetTileValue(
+        projectionSeries,
+        inflationAdjusted,
+        projectionInflationPct,
+      ),
+    [projectionSeries, inflationAdjusted, projectionInflationPct],
+  );
 
   // Con el toggle de inflación activo (y inflación > 0), los hitos se expresan en euros de hoy: el
   // backend ya cruza los mismos umbrales (1M, 2.5M…) sobre el patrimonio deflactado, así que el
@@ -252,16 +265,27 @@ export function ProjectionView({
                 return (
                   <MetricCard
                     key={`${m.target}-${m.reached_month_index}`}
-                    label={isJubilacion ? "Jubilación" : "Hito"}
+                    label={isJubilacion ? "Objetivo al jubilarte" : "Hito"}
                     value={
                       isJubilacion
-                        ? jubilacionTargetNoPen !== null
+                        ? jubilacionTarget.amount !== null
                           ? formatCurrencyNumber(
-                              jubilacionTargetNoPen,
+                              jubilacionTarget.amount,
                               currencyIso,
                             )
                           : METRIC_DASH
                         : formatProjectionMilestoneCompactLabel(m.target)
+                    }
+                    helpId={isJubilacion ? "retirement.target" : undefined}
+                    // Mismo vocabulario que la fila «Objetivo al cruce (euros de ese mes)» de
+                    // Jubilación: la tarjeta DECLARA su base en vez de dejar que el lector la
+                    // adivine del estado del interruptor. Sin importe no se declara base.
+                    detail={
+                      isJubilacion && jubilacionTarget.amount !== null
+                        ? jubilacionTarget.basis === "today"
+                          ? "en euros de hoy"
+                          : "en euros de ese mes"
+                        : undefined
                     }
                     parenthetical={`~${projectionXTickLabel(
                       m.reached_month_index,

@@ -109,9 +109,25 @@ impl TestApp {
             .expect("installation id")
     }
 
-    /// Clave de cache de la vista household en densidad `monthly` (la que sirve `GET
-    /// /v1/projection/series` sin parámetros). `user_id` es el SOLICITANTE: la clave
-    /// lo incluye también en household porque la respuesta lleva su demografía.
+    /// Clave de cache de la vista **por defecto** en densidad `monthly` — la que puebla `GET
+    /// /v1/projection/series` sin parámetros.
+    ///
+    /// **Desde 5.0.0 esa vista es `mine`** (R2), no `household`: el helper se renombró en vez de
+    /// cambiarle el contenido al viejo `household_key`, porque una clave que dice «household» y
+    /// construye otra cosa es exactamente el tipo de mentira que estos tests existen para cazar.
+    /// Quien necesite de verdad la entrada del hogar tiene [`TestApp::household_key`] al lado.
+    pub fn default_view_key(&self, installation_id: Uuid, user_id: Uuid) -> ProjectionCacheKey {
+        ProjectionCacheKey {
+            installation_id,
+            view: LedgerView::Mine,
+            owner_user_id: Some(user_id),
+            density: Density::Monthly,
+        }
+    }
+
+    /// Clave de cache de la vista `household` (densidad `monthly`), que desde 5.0.0 hay que pedir
+    /// EXPLÍCITAMENTE con `?view=household`. `user_id` es el SOLICITANTE: la clave lo incluye
+    /// también en household porque la respuesta lleva su demografía.
     pub fn household_key(&self, installation_id: Uuid, user_id: Uuid) -> ProjectionCacheKey {
         ProjectionCacheKey {
             installation_id,
@@ -126,14 +142,15 @@ impl TestApp {
         self.state.projection_cache.read().await.contains_key(key)
     }
 
-    /// Calienta la entrada con un GET y comprueba que quedó cacheada.
+    /// Calienta la entrada de la vista POR DEFECTO con un GET sin parámetros y comprueba que
+    /// quedó cacheada. Desde 5.0.0 esa vista es `mine` — pásale [`TestApp::default_view_key`].
     ///
     /// **Sin sleep a propósito**: `projection_series_cached` inserta y DESPUÉS responde, y el
     /// cliente de test es in-process, así que al volver el GET la entrada ya está. El sleep que
     /// había aquí no daba margen — se lo daba a una invalidación pendiente para colarse justo
     /// antes del assert (en `current_thread` la tarea spawneada solo corre cuando el test cede, y
     /// el sleep era el único punto donde cedía). Era la causa del flake, no su remedio.
-    pub async fn warm_household(&self, cookie: &str, key: &ProjectionCacheKey) {
+    pub async fn warm_default_view(&self, cookie: &str, key: &ProjectionCacheKey) {
         let r = self.get_with_cookie("/v1/projection/series", cookie).await;
         assert_eq!(r.status, http::StatusCode::OK);
         assert!(

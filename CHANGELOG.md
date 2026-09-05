@@ -4,6 +4,957 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [5.0.0] - 2026-09-03
+
+### La jubilación deja de ser un cruce del hogar y pasa a ser la ESTRATEGIA de cada persona
+
+Es el cambio más grande que ha tenido FutureFin. Hasta 4.15.x la jubilación era **un cruce**
+(`líquido(k−1) ≥ objetivo(k−1)`) gobernado por **un ajuste de la instalación** —un SWR, un modo de
+objetivo y una edad límite para todo el mundo—, y desde ese mes el motor drenaba el gasto declarado
+sin volver a mirar el saldo. Desde 5.0.0 la jubilación es una **estrategia por usuario** que decide
+cómo corre el motor entero: el disparador, el objetivo, las fases, la regla de retirada y las
+lecturas (issue #207).
+
+Las cinco estrategias, con el nombre que la UI usa (D33):
+
+| Estrategia | Nombre en la UI | Qué decide |
+|---|---|---|
+| `asap` | «Cuanto antes (FIRE clásico)» | El cruce dispara la jubilación — exactamente la conducta de 4.15.x |
+| `retire_at_age` | «A una edad fija» | Manda la EDAD: te jubilas en ella llegue o no el capital, y el cruce pasa a ser una lectura |
+| `coast` | «Ahorrar ahora y dejar crecer (Coast FIRE)» | Igual por edad, más el mes desde el que se puede dejar de aportar y llegar igual |
+| `partial` | «Media jornada» | Una fase intermedia con ingreso reducido antes de la jubilación plena |
+| `pension_bridge` | «Puente hasta la pensión» | El objetivo deja de ser una perpetuidad: es llegar hasta la pensión, más lo que la pensión no cubra |
+
+Las dos prioridades declaradas del trabajo fueron **fidelidad de simulación** y **buena UX**, y en
+ese orden se decidieron los empates. Hubo **tres revisiones adversariales**: la del PLAN, antes de
+escribir una línea (4 bloqueantes y 10 mayores, todos resueltos en el plan: el puente doblemente
+anualizado, el recorte contado como fracaso, la perpetuidad con pensión futura y
+`jubilacion_month_index` derivado por el handler); la del MOTOR ya escrito, en solo lectura, que
+encontró **doce** hallazgos —todos silenciosos, ninguno con un test en rojo— y se cerró en un único
+pase de correcciones (sección propia más abajo); y la del CONJUNTO antes del bump. Ninguna dejó un
+bloqueante abierto al publicar. Cierra el alcance del issue **#207** y, por el camino, **#208**
+(pánico con `g` denormal), **#209** (desbordamiento de `basis·values`) y **#210**
+(`assets_depleted_month_index` en la rejilla equivocada).
+
+### El motor por fases: un solo disparador por simulación, y el cruce como lectura
+
+- **`PhasePlan` sustituye a los escalares de jubilación** (`crates/engine/src/phases.rs`).
+  `ProjectionInput` pierde `retirement_start_month`, `income/expense_retirement_monthly` y
+  `retirement_monthly_withdrawal`, y gana `phase_plan`: `RetirementTrigger`
+  (`LiquidCrossing` | `AtMonth`), `SpendMode`, `WithdrawalRule`, `ExpenseBasis`, `Phase`,
+  `PartialPhase`, `PensionSchedule` y `TargetBasis`. El refactor entró **bit-idéntico**: el golden de
+  4.15.0 no movió un dígito (ver §«Cómo se demuestra»).
+- **Un solo disparador por simulación** (D17). Con `retire_at_age` y `coast` el motor recibe el mes
+  en que el usuario cumple `target_retirement_age` como trigger forzado y
+  `crossing_is_reading_only`: el objetivo sigue entrando al bucle y dibujándose
+  (`fire_target_series`), pero **no jubila a nadie**. Dos disparadores vivos en la misma simulación
+  y la edad no mandaría de verdad. El mes se deriva con la misma aritmética civil que publica
+  `jubilacion_age`, así que la respuesta cumple `jubilacion_age == target_retirement_age` exacto.
+  **Sin fecha de nacimiento la estrategia degrada a `asap`** con `warnings: ["birth_date_missing"]`
+  — nunca un 500 en una lectura. Tests: `a_reading_only_crossing_does_not_retire_anyone`,
+  `retiring_by_age_below_the_target_warns` (`crates/engine/tests/phases_wp3.rs`).
+- **El cruce pasa a ser una LECTURA**: `liquid_crossing_month_index` dice cuándo el capital habría
+  bastado, que con una estrategia por edad puede ser después (te vas sin llegar) o antes (podrías
+  haberte ido antes). Con `asap` coincide exactamente con el mes efectivo.
+- **Salidas nuevas del motor**: `retirement_month_index`, `phase_transitions`,
+  `pension_start_month_index`, `partial_retirement_month_index`, `withdrawal` /
+  `withdrawal_shortfall` / `withdrawal_excess`, y `warnings` (`EngineWarning` con `code()`, para que
+  el API no tenga que reconocer frases).
+
+### La pensión con fecha, el objetivo puente y la media jornada
+
+- **La pensión tiene fecha y se indexa por defecto** (D3/D8). Entra como ingreso en cualquier fase
+  desde su índice —indexada con el mismo factor de inflación del bucle, o plana si se declara así, y
+  multiplicada por la fracción de jornada durante la fase parcial—, en vez de restarse desde el
+  cruce aunque llegue veinte años después. Tests
+  `a_dated_pension_is_income_while_still_accumulating`,
+  `an_indexed_pension_uses_the_loops_inflation_factor`,
+  `the_partial_phase_collects_its_share_of_the_pension`.
+- **La pensión con fecha cambia el OBJETIVO, no solo la caja.** Hay dos bases:
+  `TargetBasis::Perpetuity` (la de 4.15.x) y `BridgeToPension`, que es «capital para llegar hasta la
+  pensión, más la perpetuidad sobre lo que la pensión no cubra». Con pensión declarada el default de
+  `target_basis` es **`bridge_to_pension` en las cinco estrategias** (R6); `perpetuity` es la opción
+  explícita «ignorar la pensión», conservadora. Si `need_net(P) ≤ 0` (la pensión cubre todo el
+  gasto), `target(k) = deuda(k)` desde `P` y el cruce es inmediato — nunca `None`. Con el ejemplo
+  sintético del issue —gasto 2.000 €/mes, SWR 4 %, sin impuestos, pensión de 1.200 €/mes a los 67,
+  cartera líquida al 5 %— el objetivo de hoy baja de **600.000 €** (perpetuidad, que ignora la
+  pensión) a **≈435.300 €**: 380.700 € de puente descontado más 54.600 € de perpetuidad sobre los
+  800 €/mes que la pensión no cubre. Se publican además `pension_coverage_ratio` (FRACCIÓN: `0.6` =
+  la pensión cubre el 60 % del gasto) y `bridge_effective_withdrawal_pct` (PORCENTAJE anual), que es
+  lo que la perpetuidad esconde: mientras la pensión no llega hay que sacar el gasto ENTERO de la
+  cartera, y eso puede estar por encima del SWR — legítimamente, porque dura pocos años.
+- **El puente se calcula UNA vez, en forma de suma sufijo.** `Σ gross_up_monthly(need_full)·descuento
+  + perpetuidad neta en P` se tabula en `O(P)` al construir el plan y se consulta en `O(1)` por mes,
+  y es bit-igual a la suma directa en `i = 0`. Por encima de `MAX_BRIDGE_MONTHS = 1200` el evaluador
+  **degrada a la perpetuidad** sobre la necesidad íntegra, y la degradación está declarada en el
+  código en vez de prometerse lo contrario (exige una pensión a más de 100 años vista: con las cotas
+  del API —edad de pensión en `[50, 105]`— solo la alcanzaría un miembro de menos de 5 años).
+- **La tasa a la que se descuenta el puente es tuya y se publica.** `bridge_discount_basis` elige
+  entre la rentabilidad esperada ponderada de tus activos LÍQUIDOS (default, D7), tu propio SWR, o
+  ninguna; la tasa efectiva viaja en `bridge_discount_annual_pct`. Con el ejemplo de arriba, sin
+  descontar el mismo puente costaría **968.000 €** — por eso, si no hay ni un euro líquido del que
+  sacar la tasa, cae a 0 y lo dice (`bridge_discount_no_liquid_assets`) en vez de encarecer el
+  objetivo en silencio.
+- **La media jornada se simula, y su hueco tiene precio.** La fase `Partial` sustituye el ingreso
+  por el declarado y usa la base de gasto configurable (D10: gasto de jubilación por defecto); su
+  déficit se cubre sin regla de retirada. `partial_gap_target` = `gross_up(12·hueco)/SWR` con
+  `hueco = gasto − ingreso de media jornada − pensión·fracción`; con el ejemplo del issue (gasto
+  2.000, media jornada de 1.100, SWR 4 %, sin impuestos) son exactamente **270.000 €**. Al lado,
+  `partial_phase_capital_growing` dice si el patrimonio aguantó la fase: `true` creció, `false`
+  menguó (con aviso), y **`null` = no hubo media jornada** — publicar `false` ahí diría «tu media
+  jornada se come el capital» de un hogar que no ha declarado ninguna. Tests
+  `the_partial_phase_switches_income_and_expense_on_its_month`,
+  `a_partial_phase_that_eats_capital_warns_and_sells_without_a_ceiling`.
+
+### Cuatro reglas de retirada × dos modos de gasto, y tres magnitudes que no se suman
+
+- **`WithdrawalPlanner`** (`crates/engine/src/withdrawal.rs`) implementa `fixed_real` (la necesidad
+  declarada, indexada y **sin techo** — el drenaje de 4.15.x), `percent_of_balance`, `hybrid` (con
+  latch que no reabre) y `guardrails`. Los porcentajes son **BRUTOS de impuestos**, igual que el SWR
+  (R9), y la base es `L(k−1)`, la misma del cruce.
+- **Dos modos de gasto** (D5): `ceiling` vende `min(need_gross, allowed)` y solo actúa en meses con
+  déficit; `rule_is_spend` retira `allowed` **todos** los meses jubilados — la regla ES el gasto del
+  patrimonio, y pensión y rentas son gasto aparte. Con `fixed_real` los dos modos son la misma
+  simulación (`under_fixed_real_both_spend_modes_are_the_same_simulation`).
+- **Guardrails de Guyton-Klinger, declarado incompleto a propósito**: sin la *portfolio management
+  rule* (ventana de 15 años) y sin la *inflation rule* (saltarse la subida por IPC del año siguiente
+  a un recorte). Las dos omitidas SUAVIZAN la regla, así que el modelo recorta antes y más veces que
+  el artículo de 2006: la dirección prudente. Declarado en `review_guardrails` y en el texto de ayuda
+  para que nadie lo descubra comparando.
+- **El techo bruto se pasea EXACTO, sin bisección.** `tax::mixed_drawdown_for_gross_cap` es el
+  inverso del mapa lineal a trozos de `gross_up_mixed_monthly`, recorrido tramo a tramo
+  (`the_gross_cap_is_walked_exactly_across_mixed_gain_ratios`).
+- **Tres magnitudes por mes, y nunca dos**: `withdrawal_shortfall` = lo que la REGLA rechazó (no
+  resta patrimonio y **no es fracaso**: un hogar que gasta menos porque su regla se lo dice está
+  siguiendo su plan); `unmet_need` = lo que la CARTERA no pudo financiar; `withdrawal_excess` = lo
+  vendido y gastado por encima del gasto. Su suma es la necesidad neta. Viajan separadas en la serie
+  precisamente para que nadie las vuelva a sumar
+  (`the_three_magnitudes_do_not_contaminate_each_other`).
+
+### Las preguntas inversas: cuánto ahorrar, cuándo dejar de aportar, cuánto más gastar
+
+Ninguna versión anterior sabía contestar «¿cuánto tengo que ahorrar para jubilarme a los 60?».
+`crates/engine/src/solve.rs` las resuelve **biseccionando sobre el motor entero** (≤ 24 iteraciones):
+cada evaluación es una proyección de verdad, con su cascada, sus topes, su servicio de deuda y su
+fiscalidad — no un descuento escalar que produce un número plausible que ninguna simulación genera.
+
+- **`required_contribution_monthly`**, la aportación mensual mínima que alcanza el objetivo en la
+  edad elegida, con su techo de búsqueda `required_contribution_search_ceiling` = el **máximo
+  sobrante mensual** (no el del mes 1: eso daba un rojo falso en el hogar realista del arnés,
+  `the_solve_ceiling_is_the_max_monthly_surplus_not_the_first_months_headroom`) y con
+  `required_capital_path`, la serie líquida SIMULADA de esa aportación.
+- **El rojo de D17**: `underfunded: true` cuando ni invirtiendo cada euro de sobrante se llega. No es
+  un error —la simulación existe, se jubila igual y se publica entera—: dice que se jubila POR
+  DEBAJO del objetivo, y entonces `required_contribution_monthly` ES el techo de búsqueda: «todo lo
+  que tienes, y aun así no llega».
+- **Coast FIRE**: `coast_fire_month_index` por bisección sobre `k` (el primer mes desde el que se
+  puede dejar de aportar y llegar igual), `coast_number` (el líquido con el que se ENTRA en ese mes,
+  simulado) y `coast_path` (la serie discontinua «si dejas de aportar aquí»). Si no se llega ni
+  aportando siempre, el mes es `null` y viaja `coast_not_reachable`.
+- **`max_extra_monthly_expense_keeping_date`** («¿cuánto más puedo gastar sin mover la fecha?») y
+  **`retirement_delay_months`** (lo que retrasa una pausa de ingresos).
+- **El margen disponible** (D16/D31): `disposable_monthly` y la serie `disposable_capital`, más sus
+  dos escalares en el mes de jubilación (`disposable_capital_at_retirement` nominal y
+  `disposable_capital_today` en euros de hoy). Es lo que sobra por encima de lo que el plan exige.
+- **Los solves se calculan UNA vez, con la serie, y se guardan en la misma entrada de cache**, así
+  que un cache hit no paga nada. Medido en release sobre un hogar rico (4 activos, hipoteca francesa
+  al 3 %, dos Próximos, horizonte 840 meses): el primer GET pasa de 5 ms (`asap`, sin solve) a 19 ms
+  (`coast`), 41 ms (`retire_at_age`) y 100 ms (`partial` con pensión y edad); los hits, 1–3 ms.
+
+### Un núcleo numérico genérico, y un gemelo en f64 para el azar
+
+- **`MoneyOps`** (`crates/engine/src/money.rs`) abstrae la aritmética del bucle, y `sim_core.rs`
+  entero pasa a ser genérico —déficit, drenaje, cascada, pasivos, `tax.rs`, `WithdrawalPlanner` y la
+  tabla del puente—; la API pública en `Decimal` queda como wrappers finos (`FireTargetView` evita
+  clonar 11 MB por petición) y `runway`/`net_return`/`history`/`solve` siguen siendo `Decimal`.
+- **Tres trampas de bit-identidad que el genérico destapó**, las tres invisibles para un test de
+  valores: (1) `min`/`max`/`clamp` deben conservar la forma INHERENTE de `Decimal` —en empate
+  devuelve `self`, no `other`: la escala del cero cambia el `Display`, que es lo que el golden
+  hashea—; (2) `undrained` tiene que ACUMULARSE con el operando literal del paseo de venta y no
+  re-derivarse como `need − (need − s)`, algebraicamente igual pero con otra escala (`"0"` vs
+  `"0.00"`) y otro dígito 28; (3) `debt_service` conserva la agrupación de 4.15.0
+  (`acc + ((cash + extra) + fee)`): reagrupar redondea distinto en el dígito 28 con dos pasivos y la
+  diferencia se propaga mes a mes en el drenaje. Pines `P24_undrained_scale` y `P25_debt_service_assoc`.
+- **Crate nuevo `crates/engine-stochastic`** con `F64Money` y sus políticas declaradas (`total_cmp`,
+  `None` en no finito, tolerancia `1e-12` SOLO en `gains_equal`, `powf`, saturación en
+  `to_decimal`). Vive aparte por la orphan rule y para que el freezer `no_f64` de `crates/engine`
+  **no se toque**: el motor exacto sigue sin `f64` y sin RNG.
+- **Puerta de degeneración** (`every_case_degenerates_from_decimal_to_floating_point`): los **25**
+  casos de la batería, todo el horizonte, las dos series y los cuatro índices. Máximo |Δ| **1,5e-7 €**
+  (P9, líquido, mes 807 de 840); jubilación, cruce, agotamiento y fases **exactos en todos**; el caso
+  del techo `NUMERIC` (3,5e19 €) con regla relativa `1e-12` declarada. La puerta cazó un filo de
+  cuchillo real: `cap_exhausted` lo publica ahora el paseo en vez de deducirse de `gross >= cap`
+  (P15 divergía 8.138 € en `f64`; los goldens `Decimal` no se movieron).
+
+### Monte Carlo: la probabilidad de que el plan aguante
+
+Hasta 4.15.x la proyección contestaba «con estos supuestos, esto es lo que pasa» — **un solo
+futuro**, dibujado con una precisión que no tiene. El riesgo de secuencia de retornos (dos carteras
+con la misma rentabilidad media y años malos en distinto orden acaban en sitios muy distintos) no
+existía en el modelo. Desde 5.0.0 existe.
+
+- **`GET /v1/projection/bands?paths&seed`** corre cientos de caminos del **mismo motor** que dibuja
+  la línea determinista, con los factores de crecimiento sorteados, y publica bandas puntuales
+  **p10/p50/p90** del patrimonio y del líquido, la probabilidad de éxito con su veredicto, el
+  agotamiento por edad y los percentiles del mes de jubilación. No es un segundo modelo financiero:
+  es el de siempre, evaluado muchas veces.
+- **El modelo, dicho entero.** Un **shock de mercado COMÚN** por mes (un solo `z ~ N(0,1)` que viven
+  todos los activos a la vez), escalado por la volatilidad de cada uno:
+  `factor = m·exp(σz − σ²/2)` con `σ = annual_volatility_percent/100/√12`. La corrección de Itô es
+  exacta, así que **la media del factor mensual ES el factor determinista** y la rentabilidad
+  esperada que el usuario escribió se respeta; la GEOMÉTRICA —la que el hogar cobra— sale más baja, y
+  esa diferencia no es un error: es el coste de la volatilidad, y se ve en que la banda p50 queda por
+  DEBAJO de la línea determinista (`mc_mean_growth_matches_expected`). **Con σ = 0 en toda la cartera
+  la banda ES la línea** (`mc_zero_volatility_degenerates_to_deterministic`), y la respuesta lo dice
+  (`any_volatility_declared: false`) para que un «éxito 100 %» no se lea como «tu plan es seguro».
+  La volatilidad **no viaja en `SimAsset`**: se pasa como slice alineado con `assets[]`, así que el
+  camino `Decimal` no puede verla por construcción.
+- **ÉXITO es que el plan OCURRA y AGUANTE**: el hogar se jubila dentro del horizonte —o la estrategia
+  es por EDAD, y entonces la jubilación es un dato— **y** la cartera no se agota nunca, con las
+  pensiones y las fases ya dentro de la simulación (`mc_never_retiring_is_not_a_success`). D22 decía
+  solo la segunda mitad y **se corrigió antes de publicar**: la medida del sesgo y las dos cifras que
+  hoy viajan al lado están en «Corrección tras la revisión adversarial del motor». El **recorte** de
+  una regla con techo **no es fracaso** y viaja aparte (`months_below_need_p50`,
+  `withdrawal_to_need_ratio_p50`): son dos preguntas distintas y mezclarlas da un diagnóstico falso.
+  `success_verdict` colorea contra el umbral del perfil (`success_threshold_pct`, default 95 %):
+  **verde** en el umbral exacto, **ámbar** hasta 10 puntos porcentuales por debajo, **rojo** el resto.
+- **La semilla es estable por usuario** (`hash(installation_id, user_id)`, D23,
+  `mc_seed_for_is_stable`): sin eso la probabilidad bailaría a cada refresco, y la misma pregunta
+  tiene que dar la misma cifra hoy y dentro de un año. Se puede pedir otro mercado con `?seed=`, y la
+  semilla **viaja de vuelta como cadena de dígitos** — es un entero de 64 bits y `JSON.parse` lo
+  redondea por encima de 2⁵³, así que un número JSON habría hecho que «repetir el mismo sorteo»
+  devolviera otro en silencio. Un camino es el mismo se pidan 500 o 2.000 (un stream de ChaCha8 por
+  `(seed, path)`).
+- **Predicho antes de correr, y comprobado**: la tabla de ruina del issue #207 sale **10,6 %** al 3 %
+  de retirada y **22,3 %** al 4 % (esperado 7–10 % y 18–23 %), en
+  `mc_success_probability_of_the_issue_table`.
+- **Lo que este modelo NO representa, dicho en la propia respuesta** (`model_note`) en vez de en una
+  nota al pie: colas gruesas (el shock es log-normal, así que la probabilidad de ruina es
+  **optimista en la cola**), autocorrelación o reversión a la media (los meses son independientes: no
+  hay ciclos), correlación imperfecta entre activos (con un shock común la correlación es exactamente
+  1, así que una cartera diversificada **no se beneficia aquí** de su diversificación: conservador en
+  ese eje), bootstrap histórico (el sorteo es paramétrico: nada de esto es «lo que pasó entre 1929 y
+  1964»), volatilidad de la inflación, de los ingresos, del gasto o del tipo de la deuda, y
+  rebalanceo. Un modelo estocástico sin sus supuestos declarados es un generador de números que
+  parecen ciertos.
+- **Un ejemplo de lo que la tabla de agotamiento enseña** (cifras SINTÉTICAS, de un plan de
+  laboratorio con 2.000 €/mes de gasto y SWR 4 %; ninguna instalación real): 1 % a los 70, 4 % a los
+  75, 11 % a los 80, 19 % a los 85 y 26 % a los 90. La lectura que importa no es ninguna fila suelta:
+  es que la ruina **se acumula con los años**, y que un plan «con el 4 % de siempre» puede tener una
+  de cada cuatro trayectorias sin dinero al final del horizonte sin que la línea determinista lo
+  insinúe.
+- **El colchón de caja (P4) se simula, y solo aquí.** `cash_buffer_months` del perfil se rellena
+  vendiendo del resto de la cartera **solo tras un shock positivo YA ocurrido**, y esa venta paga su
+  plusvalía como cualquier otra. El API publica `buffer_active` (hacen falta el colchón declarado, un
+  líquido **sin riesgo** que lo albergue y volatilidad de la que protegerse) con su
+  `buffer_inactive_reason`, `buffer_refills_p50` y `buffer_refill_net_total_p50`; los dos últimos son
+  `null` cuando no se simuló, que no es «cero rellenos». En el camino determinista **no hay colchón**
+  por diseño: sin sorteo no hay mes bueno ni malo que distinguir, así que el trasvase no tendría
+  criterio. La medición honesta —y las dos correcciones que la hicieron posible— está en la sección de
+  la revisión adversarial.
+- **Solo `view=mine`.** El hogar devuelve **400 `household_bands_unavailable`**: los percentiles no
+  suman entre miembros y, con el shock común, los dos ni siquiera son independientes — sumar dos
+  bandas daría una demasiado ancha en el centro y demasiado estrecha en las colas sin que ninguna
+  cifra lo dijera. Misma razón por la que `simulate_projection` rechaza el hogar.
+- **Coste, medido** (release, 840 meses): 0,27 ms por camino; por el endpoint, 500 caminos 104 ms ·
+  1.000 caminos 204 ms · 2.000 caminos 391 ms. El colchón añade un 30–40 % en el caso jubilado. Las
+  bandas cachean por `(instalación, usuario, caminos, semilla)` con el TTL de la proyección y **se
+  invalidan con las mismas mutaciones que la serie** — una banda sobre unos activos que ya no existen,
+  junto a una línea ya actualizada, son dos cifras que se contradicen en la misma pantalla.
+
+### El perfil de jubilación por usuario, el dueño de la fila y la volatilidad del activo
+
+Con proyecciones independientes por miembro (D9), un solo SWR y una sola edad límite para todo el
+hogar dejan de tener sentido: dos personas pueden querer jubilarse a edades distintas, con reglas de
+retirada distintas y con pensiones que empiezan en años distintos.
+
+- **Perfil de jubilación por usuario** (`GET|PATCH /v1/auth/me/retirement-profile`, columna
+  `users.retirement_profile jsonb`). Además de los cuatro ejes que se mudan desde `fire_settings`,
+  el perfil declara la estrategia, la edad objetivo, la base del objetivo y su descuento, la regla de
+  retirada con su modo, la pensión con fecha, la fase de media jornada, el colchón de caja y el
+  umbral de éxito de Monte Carlo. El PATCH acepta también `birth_date` —misma columna que
+  `PATCH /v1/auth/me`—, porque es lo que convierte cada edad del perfil en un mes de la serie y
+  pedirla en otra pantalla es garantizar que la mitad de los perfiles por edad se queden sin ella.
+  El upgrade es lo primero que se prueba
+  (`retirement_profile.rs::an_installation_upgraded_from_4_15_keeps_its_fire_target`).
+- **Cualquier rol edita el SUYO, y nadie el de otro.** Es la única escritura del API que un `viewer`
+  puede hacer, y no es una excepción arbitraria: sin poder fijar su edad de jubilación no podría ver
+  su propia proyección, que es exactamente lo que un viewer sí puede hacer.
+- **Volatilidad anual por activo** (`assets.annual_volatility_percent`, `[0, 100]`, `null` o `0` =
+  determinista). Es la desviación típica ANUAL de los retornos, no un rango ni un peor caso, y **el
+  camino determinista del motor la ignora**: declararla no mueve ni un euro de la proyección de hoy.
+- **Toda mutación del ledger exige ser el dueño de la fila** (D21): activos, pasivos, presupuesto,
+  Próximos y reglas de asignación. Editar o borrar la fila de otro miembro devuelve **403
+  `not_row_owner`**, por HTTP y por MCP, y **el rol `owner` tampoco salta la regla** — ser dueño de la
+  instalación no es ser dueño de la fila. La LECTURA no cambia: `?view=household` sigue enseñando el
+  hogar entero (`view` nunca fue una frontera de autorización y sigue sin serlo). El preview de
+  `delete_asset` / `delete_liability` falla igual de pronto: enseñaba el contenido de la fila ajena
+  **y entregaba el `confirm_token` para ejecutarla**.
+
+### El pase de contrato del API: fases, índices, tri-estados y what-if
+
+- **`GET /v1/projection/series` publica las lecturas de fase**: `strategy`, `retirement_trigger`,
+  `retirement_month_index` + `retirement_series_position`, `liquid_crossing_month_index`,
+  `phase_transitions[]`, `pension_start_month_index`, `partial_retirement_month_index`, `warnings[]`
+  y, por punto, `withdrawal` / `withdrawal_shortfall` / `unmet_need` / `withdrawal_excess` (flujos del
+  mes, no acumulados). Los huecos estructurales llevan su razón: `jubilacion_absent_reason`,
+  `liquid_crossing_absent_reason`, `compound_outpaces_true_savings_absent_reason`.
+  `simulate_projection` ecoa `strategy`, `retirement_trigger` y `liquid_crossing_month_index` por
+  lado.
+- **`members[]` publica la SERIE de cada miembro** (D32): `series: [{month_index, net_worth,
+  net_worth_liquid}]`, en la misma rejilla y con la misma decimación que `points[]`, más
+  `horizon_months` (el horizonte PROPIO de esa persona, que puede ser menor que el común del hogar).
+  Es lo que dibuja la línea fina por miembro bajo la suma en grueso, y **no se puede derivar en
+  cliente**: una suma no se desagrega. Invariante testeado: Σ `members[].series` == `points[]`, mes a
+  mes. Medido antes de decidir (dos miembros, densidad `hybrid`, sin gzip): la respuesta pasa de
+  21,0 KB en `mine` a **34,2 KB** en `household`, de los cuales **11,7 KB** son las series por miembro
+  (~5,9 KB cada una, lineal con el tamaño del hogar). Por eso la tool MCP `get_projection` —que fuerza
+  `hybrid` porque el contexto de un modelo es caro— las deja **opt-in** (`include_member_series`,
+  default `false`), igual que `asset_series`; por HTTP viajan siempre.
+- **La tarjeta «Tu plan» en `/v1/summary`** (D27): `plan.{strategy, retirement_trigger,
+  jubilacion_month_index, required_savings_monthly, disposable_monthly, underfunded}`, más
+  `success_probability`, `success_threshold_pct`, `success_verdict`,
+  `never_retired_probability` y `success_given_retired`. Sale del **mismo objeto que pinta el chart**
+  —la entrada de cache de la proyección, y la MISMA ejecución de Monte Carlo que el fan chart—, así
+  que las dos superficies no pueden divergir. En `?view=household` va entero a `null` con
+  `absent_reason: "household_aggregate"`: el hogar es la suma de N planes y «el ahorro necesario del
+  hogar» no es una cifra que exista.
+- **`GET|PATCH /v1/auth/me/retirement-profile` publican `target_basis_stored`**: la elección
+  ALMACENADA de la base del objetivo, `null` = «no elegida, se deriva». `profile.target_basis` sale
+  siempre resuelto, así que un formulario que leía el perfil y lo reescribía entero persistía la
+  derivación como si fuera una elección — y al declarar la pensión después, el objetivo se quedaba en
+  la perpetuidad conservadora que nadie pidió.
+- **`strategy: "partial"` exige `partial_retirement`** (400 `partial_retirement_required`), la tercera
+  pata de la familia de `target_retirement_age_required` y `pension_required_for_bridge`. Sin ella la
+  estrategia se comportaba como `asap` en silencio mientras la UI enseñaba «Media jornada» sobre una
+  proyección que no la tenía.
+- **`simulate_projection` gana el plan entero como eje** (solo MCP, D30): `profile_overrides` acepta
+  **cualquier campo del perfil** con las mismas cotas que guardarlo («¿y si me jubilo a los 55?» =
+  `{"strategy": "retire_at_age", "target_retirement_age": 55}`) sin persistir nada, y con él
+  **vuelven `fire_number_mode` y `fire_number_manual_amount`**. Además `income_pause` («¿y si me cojo
+  una excedencia de un año?» → los dos meses de jubilación y su diferencia, con la pensión con fecha
+  SIN pausar), `solve: {extra_monthly_expense_keeping_date: true}` y el eje
+  `monte_carlo: {paths, seed}` (probabilidad de éxito a los **dos** lados y su delta, con la misma
+  semilla en ambos para que el delta mida el cambio del plan y no el ruido de dos muestras). Los KPIs
+  del plan viajan por LADO con sus deltas; un `null` ahí no es un cero, es «esa estrategia no responde
+  a esa pregunta», y por eso su delta también es `null`.
+- **Los dos ejes de ingreso de P11** (solo MCP): `income_growth_real_pct_annual` (crecimiento REAL
+  del sueldo, `[−10, 20]` % anual) e `income_steps` (hasta 24 escalones
+  `{month_index | date, delta_monthly}`, con signo). Son ejes de **caja**: entran como un Próximo, así
+  que `income_monthly`, `net_recurring_monthly` y `savings_rate` salen con delta 0 exacto y el
+  objetivo FIRE no se mueve por la puerta de atrás. El crecimiento se aplica **solo mientras el
+  escenario no está jubilado** —una primera pasada sin el eje decide dónde cortar— y el corte se
+  publica en `income_growth_stops_at_month_index` porque es aproximado: si el sueldo extra adelanta la
+  jubilación, los meses entre ese número y `jubilacion_month_index` llevan una nómina que un jubilado
+  no cobraría, y esa diferencia es la ventana. Los escalones NO se recortan: el mes lo nombra quien
+  llama. Un `0` en cualquiera de los dos es un 400, no un escenario mudo idéntico al baseline.
+- **`model_note` reescrito en las dos superficies** (P6): dicen quién decide qué. La ESTRATEGIA elige
+  el disparador (cruce o edad) y la base del objetivo; el **SWR solo dimensiona** ese objetivo, no
+  gobierna lo que se retira; ya jubilado manda la **regla de retirada**; `withdrawal_shortfall` es
+  informativo y **no es** `uncovered_deficit_total`; y el agregado del hogar es una lectura
+  informativa, no el plan de nadie.
+- **`uncovered_deficit_total` se clampa a ≥ 0 al publicarlo.** El motor lo acumula como residuo de
+  ventas brutas y podía salir con una cola de redondeo de orden −5·10⁻²⁵. Eso no es un descubierto
+  negativo, es cero. El motor no cambia (su aritmética la congela el golden); redondea quien
+  serializa.
+
+### La SPA: cinco tarjetas, tira de fases, «Tu plan» y la sección «Riesgo»
+
+- **Jubilación es ahora la pantalla del plan** (D26): cinco tarjetas de estrategia con los nombres de
+  D33 y un formulario **contextual** que enseña solo los campos de la estrategia elegida —edad
+  objetivo, pensión con edad e indexación, media jornada, regla de retirada y modo, base del objetivo
+  y descuento del puente, colchón, umbral—, más los cuatro ejes que llegan desde `Ajustes → Plan`.
+  Autosave de 420 ms con espejo de las cotas del servidor. Un aviso descartable una vez invita a
+  elegir estrategia, o a poner la fecha de nacimiento si falta.
+- **Tira de fases bajo el eje X** (D29, `lib/phase-strip.ts`): «Trabajo | Media jornada | Jubilado»
+  razonando **solo en `month_index`**, con la pensión como marca y el cruce solo cuando difiere del
+  mes efectivo; el invariante `monthly ↔ hybrid` está pineado (una transición en el mes 235 nunca se
+  pega a 228 o 240) y sin fases la geometría del chart es byte-idéntica. El tooltip añade la retirada
+  del mes, el recorte, **lo no financiado** y el exceso, deflactados con el mismo deflactor.
+- **Resumen**: tarjeta fija «Tu plan» (estrategia · hito · estado, en rojo si `underfunded`) y
+  «Planes del hogar» por miembro, más el KPI **«Éxito del plan»** con su semáforo.
+- **Sección «Riesgo» en Jubilación** (D28): fan chart p10–p90 con la mediana discontinua y la línea
+  determinista encima, tile «Éxito: N de cada 100 escenarios **se jubilan y no agotan el capital**»,
+  filas «No llegan a jubilarse en el horizonte» y «Éxito entre los que se jubilan», tabla de
+  agotamiento por edad (cuya última fila es el horizonte), cobertura para **todas** las reglas
+  —incluye lo no financiado—, colchón con su razón cuando no se simuló, y pie con caminos · semilla ·
+  ms. En Hogar no se pide nada: «Solo en tu vista (Yo)».
+- **Series auxiliares discontinuas** `required_capital_path` y `coast_path` con tokens derivados por
+  luminancia, y líneas finas por miembro en el chart del hogar con color, tick y leyenda compartidos.
+- **Ajustes → Plan** pierde SWR, modo del objetivo con su importe manual y edad límite (enlaza a
+  Jubilación) y conserva inflación, modo de edad, tramos de IRPF y fuente del ahorro, que son del
+  hogar. De paso: la plusvalía gravable se ve en todos los modos (estaba anidada bajo el modo de
+  movimientos).
+- **El catálogo de ayuda pasa de 29 a 53 entradas** (24 nuevas) y reescribe la del colchón de caja:
+  ya no promete «no verte obligado a vender», dice la descomposición medida.
+
+### Corrección tras la revisión adversarial del motor
+
+Antes de publicar 5.0.0 se sometió el motor entero a una segunda revisión adversarial (issue #207):
+no «¿pasan los tests?», sino «¿qué cifra plausible está mal?». Lo que salió está abajo, hallazgo a
+hallazgo: todos **silenciosos** —números creíbles, ninguna excepción, ningún test en rojo— y todos
+con su corrección medida. **Todas las cifras de abajo salen de hogares SINTÉTICOS del arnés de
+pruebas; ninguna procede de una instalación real.**
+
+- **Un descubierto de un ULP se publicaba junto a «nunca agotado» (bug de 4.15.0).** Síntoma: una
+  respuesta afirmaba a la vez `assets_depleted_month_index: null` y `uncovered_deficit_total > 0`, o
+  sea «tu cartera nunca se vacía» y «hubo gasto sin pagar». Causa raíz: el mes de agotamiento lo
+  decidía el predicado «venta bruta ≥ drenable», que compara dos cantidades **calculadas por caminos
+  distintos**, así que en el aterrizaje exacto `Decimal` y `f64` lo resolvían al revés. Ahora lo
+  decide **la VENTA**, medida sobre los saldos DESPUÉS de vender. Medido sobre 3.000 entradas del
+  fuzz: **184 → 47 casos** con la contradicción, y los 47 que quedan traen un descubierto
+  **≤ 5,6e-23 €** — la cola de redondeo del acumulador, no euros. En `f64`, **cero volteos de
+  depleción; antes 60**.
+- **Un plan perfecto se publicaba como ruina.** `assets_depleted_month_index` exige desde ahora **DOS
+  condiciones**: que la venta dejara la cartera a cero **y** que alguna venta posterior se quedara sin
+  fundar. Sin la segunda, un puente que se vacía EXACTAMENTE el mes en que entra una pensión que cubre
+  todo el gasto posterior —el aterrizaje que un plan bien hecho busca— salía como «cartera agotada»
+  con `uncovered_deficit_total = 0`. Ese caso es hoy **`null`**
+  (`an_exact_landing_that_covers_every_later_need_is_not_a_depletion`).
+- **La vía mixta bajo techo contabilizaba el recorte de la regla como impago.** Con una regla con
+  techo y varios tramos fiscales, el rechazo de la regla es `withdrawal_shortfall` —gasto que no se
+  hace—, no descubierto —gasto que no se pudo pagar—; el motor los mezclaba, y el neto de un techo que
+  la cartera no puede fundar se tasa ahora con la `g` **marginal**. Caso b1: el descubierto cae de
+  **1.095 € a 158 €**. Caso b1e (`guardrails`): el recorte pasa de **0 a 1.567,62 €**, que es donde
+  tenía que estar desde el principio.
+- **`rule_is_spend` vendía cartera para pagar un gasto que la caja del mes ya cubría.** El modo «lo
+  que la regla permite, se gasta» financia ahora ese gasto **primero con el superávit del mes** y solo
+  vende lo que falte. Antes vendía siempre, pagaba la plusvalía y volvía a aportar el sobrante: puro
+  churn fiscal, **3.991,72 €/año** en el caso b4, hoy **0**. El pin P16 se regeneró con el capital
+  aportado en **8.263,80 € → 0** — el euro que daba la vuelta ya no cuenta como aportación.
+- **El colchón de caja, descompuesto y honesto.** Dos correcciones y una medición. (1) El relleno es
+  **no anticipativo**: el mes `k` se autoriza con el shock que YA ocurrió (`z_{k−1}`), no con el del
+  propio mes — como el relleno corre antes del crecimiento, la versión anterior vendía renta variable
+  **al precio de antes de una subida que ya sabía que venía**. (2) Solo se instala si hay un activo
+  **líquido con σ = 0** donde alojarlo: sin ese filtro, un hogar cuyo único activo no-colchón era la
+  vivienda **liquidaba el piso** para engordar una cuenta corriente. Con el experimento rehecho, el
+  colchón deja de ser «bueno» o «malo» y se descompone: con una cuenta al **0 %** cuesta **−3,5 pp**
+  de éxito (**−7,9 pp** de lastre por tener el dinero parado, **+3,9 pp** de protección real);
+  alojado a la rentabilidad del fondo, **+3,9 pp**. Y donde de verdad se ve es en la cola: sin el
+  lastre, el líquido p10 del mes 240 pasa de **99.409 € a 197.767 €**, casi el doble. La lectura no es
+  «el colchón es bueno» ni «es malo»: **compra suelo, y lo paga la rentabilidad a la que renuncias**
+  (`mc_cash_buffer_protects_and_the_drag_is_what_costs`). Cuando no se simula, la respuesta dice por
+  qué: **`buffer_inactive_reason`** ∈ `not_requested` | `no_volatility` | `no_safe_liquid_asset`, y
+  `null` ⟺ sí se simuló.
+- **El cociente de cobertura valía 1,0 incluso sin cartera.** `withdrawal_to_need_ratio_p50` y
+  `months_below_need_p50` miraban solo el recorte de la REGLA, que con `fixed_real` es **cero por
+  construcción** (el permitido ES la necesidad). Resultado: un hogar que se quedaba sin cartera
+  publicaba «cubrió todo su gasto», porque nadie le había recortado nada — simplemente no había de
+  dónde sacarlo. Ahora el denominador incluye el descubierto —`Σ retirada / Σ (retirada + recorte +
+  descubierto)`— y el contador cuenta los meses con recorte **o** descubierto: el caso d4 pasa de
+  **1,0 a 0,0865**, es decir de «lo cubrió entero» a «cubrió menos de una décima parte».
+- **El éxito premiaba al hogar que no se jubila jamás.** La definición anterior era solo «la cartera
+  no se agota nunca», y con un disparador por CRUCE quien nunca llega al objetivo nunca drena, así que
+  nunca se agota: contaba como éxito. Desde ahora **ÉXITO = el plan OCURRE y AGUANTA**. El hogar
+  sintético que cruza en el mes 655 de 840 publicaba **0,96** con un **33,1 %** de caminos que no se
+  jubilaban; hoy publica **0,629**, con `never_retired_probability` **0,331** y
+  `success_given_retired` **0,940** al lado. **Las tres se leen juntas** y hay identidad comprobable:
+  `success_probability ≤ 1 − never_retired_probability`.
+- **Lo que gana el wire**, para que ninguna de las cifras de arriba haya que deducirla:
+  - `GET /v1/projection/series` → **`points[].unmet_need`**: el gasto del mes que los activos no
+    pudieron financiar, neto y ≥ 0 (número JSON y misma decimación que sus vecinos). Son **tres**
+    magnitudes por mes y no dos, y su suma es la necesidad neta. No viaja en `members[].series`, que
+    sigue siendo mínima.
+  - `GET /v1/projection/bands` → **`never_retired_probability`**, **`success_given_retired`** y
+    **`buffer_inactive_reason`**; `months_below_need_p50` y `withdrawal_to_need_ratio_p50` con la
+    semántica corregida de arriba, y la **última fila de `depletion_probability_by_age` es siempre el
+    horizonte** —la ruina total del plan—, así que el paso hasta ella puede ser de menos de cinco
+    años. Antes se paraba en el último múltiplo de 60 que cabía y dejaba meses fuera sin decirlo.
+  - `GET /v1/summary` → **`plan.never_retired_probability`** y **`plan.success_given_retired`**,
+    leídos de la MISMA entrada de cache que `success_probability`.
+  - MCP `simulate_projection` → los dos lados ganan las tres lecturas nuevas, y con `include_series`
+    la respuesta trae **`baseline_unmet_need`** y **`scenario_unmet_need`**: son la única columna que
+    dice DÓNDE deja de cubrirse el plan, porque un mes de agotamiento y un total acumulado no enseñan
+    el perfil del hueco.
+- **Un descuento de puente negativo encarece el puente, y suficientemente negativo lo hace explotar.**
+  Con `bridge_discount_basis: expected_return` y una cartera líquida con rentabilidad esperada
+  NEGATIVA, la tasa derivada se **acota a 0** antes de entrar al motor y se avisa con
+  `bridge_discount_clamped` en `warnings` (solo cuando la tasa se iba a usar: base puente + pensión
+  con fecha resuelta). El motivo no es cosmético: descontar responde «cuánto capital necesito HOY para
+  pagar un flujo futuro», y con `d < 0` cada euro futuro cuesta **más** de un euro hoy — el objetivo
+  crece sin límite conforme se aleja la pensión. Pasado un umbral que depende de los meses de puente,
+  la tabla **desborda `Decimal`**: eso era un `panic` dentro de `powd` que salía como un **500 opaco**
+  y hoy es un **422 `bridge_discount_out_of_range`** tipado, con su copia en español
+  (`a_bridge_discount_too_negative_is_a_typed_error_not_a_panic`). Las otras dos bases no pueden
+  producirlo (`none` es 0 por definición y `swr` está acotada por el PATCH).
+- **`partial_gap_target` se gatea sobre la fase VIVIDA, no sobre la declarada.** Un hogar que cruza su
+  número FIRE en el mes 2 y se jubila 58 meses antes de la media jornada que tenía apuntada publicaba
+  el capital que sostendría el hueco de una fase que **nunca ocurrió**. Ahora es `null` salvo que haya
+  `partial_retirement_month_index` — el mismo criterio que su gemelo `partial_phase_capital_growing`,
+  que ya lo aplicaba: eran dos campos de la misma fase con dos reglas distintas.
+
+### Cómo se demuestra que el motor no se movió: golden, fuzz diferencial y tiempos
+
+- **Golden bit a bit de 4.15.0**: `crates/engine/tests/fixtures/pins-4.15.json` hashea (SHA-256)
+  TODAS las salidas del motor de **19 casos** —patrimonio, aportado, por activo, líquido,
+  agotamiento, descubierto, varado, `first_month_allocation`, calendarios—, con auto-test de que una
+  mutación mueve el hash y anclas derivadas a mano. **Ese fichero no se ha movido en todo el
+  release.** La semántica nueva de 5.0.0 se pinea aparte, de forma ADITIVA, en
+  `pins-5.0-outputs.json` (**25 casos**, uno por camino nuevo: las cuatro reglas, el techo `NUMERIC`,
+  puente, pensión que cubre todo, media jornada, cruce como lectura, techo de aportación, pausa de
+  ingresos y las dos trampas de escala).
+- **Un golden de 19 casos NO demuestra bit-identidad.** La regresión de escala de `undrained` solo se
+  veía en **438 de 3.000** entradas de un fuzz DIFERENCIAL contra el motor de `main` (hogares
+  aleatorios, la misma entrada por los dos caminos). La campaña completa bajó las divergencias de
+  **536/496/496 a 24/21/27 por 3.000 entradas** en las tres semillas, y las 24 que quedan son todas
+  «el motor viejo entraba en pánico» (desbordamientos que 4.15.0 no tipaba), no desacuerdos
+  numéricos. El arnés queda en el repo: `fuzz_invariants.rs` (1.500 hogares, 7 identidades contables
+  y un control negativo que comprueba que el arnés nota una identidad rota).
+- **Rendimiento**: el bucle precalcula el multiplicador mensual por activo una vez (es invariante del
+  bucle) — **31,5 → 12,6 ms** por proyección de 840 meses en release, **−60 %**, con el golden
+  intacto. Precalcular inflación y objetivo por mes se midió y **no aporta** (mismas llamadas a
+  `powd`), y está documentado en el código para que nadie lo reintente a ciegas. El núcleo genérico no
+  regresionó (12,2 ms; conversión de entrada 1,2 µs) y la tabla del puente con `P = 840` cuesta 14 ms.
+- **El puente costaba 1,9 segundos y ahora cuesta 13 ms.** La serie del objetivo consultaba el
+  evaluador del plan una vez por punto, y esa forma de conveniencia **rehacía la tabla del puente
+  entera** en cada llamada: con densidad mensual y una pensión a 30 años, ~300.000 gross-ups por
+  respuesta. Se construye una sola vez.
+
+### Segunda revisión de UX (U0–U12): jerarquía, orden y mínimo input
+
+Tras subir la imagen de 5.0.0 en local, el veredicto del owner sobre la pantalla de Jubilación fue
+**«jerarquía sin sentido, orden mal, campos redundantes, mínimo input»**. Le siguió una revisión
+adversarial —capturas, API y un inventario de **67 inputs**— y el rediseño resultante se publica
+DENTRO de 5.0.0, no como una versión aparte. Doce decisiones lo gobiernan:
+
+| Decisión | Qué fija |
+|---|---|
+| U1 | Config arriba → resultado (el «Avanzado» plegado que U1 preveía se retiró en la tercera vuelta: ver §Tercera vuelta de UX) |
+| U2 | El formulario enseña solo los campos de la estrategia elegida |
+| U3 | El gasto en jubilación admite 3 modos |
+| U4 | El porcentaje de retirada es único |
+| U5 | Un solo chart + «Riesgo» compacto (el chart gana eje Y y banda coloreada en la tercera vuelta) |
+| U6 | La pensión vive solo en Jubilación; el flag del presupuesto es para rentas |
+| U7 | Frase-hito + como mucho 3 tiles |
+| U8 | El asistente pide nacimiento + estrategia + el dato esencial de esa estrategia |
+| U9 | Tarjeta única en Resumen |
+| U10 | Hogar enseña sumas + una frase por miembro |
+| U11 | Todo el rediseño va dentro de 5.0.0 |
+| U12 | Nada se fuerza sin verse — la línea «Supuestos» de U12 se retiró en la tercera vuelta: sin acordeón no hay nada escondido que enunciar, todo campo en vigor está en su tarjeta |
+
+Esta entrega documenta lo ya aterrizado fuera de la pantalla de Jubilación en sí (API, asistente,
+Resumen, barrido de copys y las libs puras que la alimentan). `RetirementView.tsx` y
+`components/charts/*` aterrizaron después, en `debc52d` (U1b) y en la tercera vuelta de UX
+(V1–V7) — las dos documentadas más abajo.
+
+- **El porcentaje de retirada es ÚNICO (U0)**: `swr_pct` dimensiona el objetivo y es también el
+  porcentaje de las reglas por saldo. `withdrawal_rule.pct` (`percent_of_balance`, `guardrails`) y
+  `start_pct` (`hybrid`) pasan a **opcionales**: ausentes, se resuelven contra `swr_pct` en un único
+  sitio (`resolve_withdrawal_rule`), por el que pasan el perfil, la proyección, las bandas y el
+  what-if de `simulate_projection`. Antes el mismo número se declaraba dos veces y mover el SWR
+  dejaba la regla retirando el porcentaje viejo. Un `pct` explícito se sigue honrando; se suelta
+  reenviando `withdrawal_rule` sin esa clave (el objeto se sustituye entero, semántica ya
+  existente). **Añadido**: `withdrawal_rule.pct_source` (solo salida: `swr` | `explicit`; ausente
+  en `fixed_real`, que no tiene porcentaje) — dice de dónde sale el número. **Corregido**: `PATCH
+  /v1/auth/me/retirement-profile` con `pension: null` suelta también el `target_basis` almacenado
+  — medido en vivo antes del fix: el perfil seguía diciendo `bridge_to_pension` mientras la serie ya
+  publicaba la perpetuidad. **MCP**: `update_retirement_profile` documenta lo anterior; catálogo
+  regenerado — **71 tools, cero altas**, presupuesto de descripciones en **23.906 / 24.000**.
+- **Corregido (bug de dinero) — el histórico apilaba timelines de la misma cuenta (U4-api)**:
+  `GET /v1/history/series` devolvía 25 `asset_series` para 5 activos, y `assets_total` saltaba
+  **264.869,60 → 532.046,80 → 801.531,60 → 0 → 274.100 €** en la demo. Causa raíz: `source_item_id`
+  es la identidad ENTRE snapshots, pero `POST /v1/history/snapshots` acuña uno nuevo cuando el
+  cuerpo no trae `item_id` (y la tool MCP `create_snapshot` ni lo expone), así que N fotos de la
+  misma cuenta eran N timelines que el LOCF de #130 apilaba y daba por borrados de golpe en el
+  punto vivo. Fix: la lectura resuelve la identidad (`resolve_item_identity`) — agrupa por
+  etiqueta dentro de cada `(owner, kind)`, canoniza al id del activo/pasivo vivo homónimo cuando es
+  inequívoco, y deja una serie solo-histórica por nombre para los borrados; la ambigüedad no
+  fusiona nada (perder una observación es perder dinero). Con datos bien formados —la SPA ya
+  reenvía el `item_id` del prefill— el cambio es un no-op bit a bit. Arregla también
+  `points[].assets_total` / `liabilities_total` / `net_worth` y la curva fina de `GET
+  /v1/history/cashflow`. **El lado de escritura queda abierto en el issue #215.**
+- **Corregido (issue #213) — el `.ffbackup` de una cuenta sin contraseña no se podía exportar
+  (U7)**: las cuentas del add-on de Home Assistant (SSO por cabeceras, `password_hash` NULL a
+  propósito) recibían 401 `sso_account_no_password` al pedir `POST /v1/backup/user-export`. Ahora
+  hay dos caminos: cuenta CON contraseña → como antes (se verifica y es la clave del KDF); cuenta
+  SIN contraseña → contraseña propia del archivo, solo entrada del KDF, única regla: no vacía (422
+  `backup_password_empty`). Los `.ffbackup` antiguos no se ven afectados: el import nunca verificó
+  contra la cuenta. **Añadido**: `UserResponse.has_password` (login, registro, SSO, `GET
+  /v1/auth/me`), para que el modal pida la contraseña correcta antes de fallar. SPA: el modal de
+  exportar dice «Crea una contraseña para este backup» + confirmación a quien no tiene contraseña
+  de cuenta, y «Tu contraseña» a quien sí la tiene; el de importar dice «Contraseña de este
+  backup».
+- **Cambiado — barrido de copys en la SPA (U4-spa)**: la cabecera de Proyección pasa de
+  «Jubilación» (con el importe del objetivo FIRE) a **«Objetivo al jubilarte»** — los demás hitos
+  siguen etiquetados «Hito». Fuera el subtítulo «Moneda EUR» / «Mensual · EUR» / «Importes · EUR»
+  de Activos, Pasivos, Presupuesto, Movimientos y Próximos (la divisa vive en Ajustes y en cada
+  cifra) y el chip «Mío · sin titular en Hogar» de cuatro de ellas —Activos, Pasivos, Presupuesto y
+  Próximos; el de Movimientos tenía otra redacción y sobrevivió hasta la tercera vuelta— (el
+  segmentado «Yo | Hogar» ya lo dice). «(opc.)» → «(opcional)» en las 17 etiquetas de esos formularios.
+- **Cambiado — Resumen: «Tu plan» en una tarjeta única (U2/U9/U10)**: las dos tarjetas rojas
+  apiladas (con hueco a la derecha) se sustituyen por **una tarjeta ancha en una fila** — la
+  frase-hito como título, coloreada por el estado; estrategia + hito secundario como subtítulo; el
+  KPI «Éxito del plan» a la derecha; el aviso, si lo hay, debajo (en ≤ 640 px el KPI cae bajo el
+  título). De paso corrige el hito equivocado con «Media jornada»: la tarjeta anterior titulaba la
+  ESTRATEGIA y fechaba la jubilación TOTAL en vez de la media jornada. En Hogar, «Planes del hogar»
+  pasa a ser una lista de frases —una por miembro, con el punto de color de su línea del chart— sin
+  cifras por persona (el hogar no tiene plan propio). Fuera el subtítulo «Moneda EUR» y el chip
+  «Mío · sin titular en Hogar» de Resumen. `lib/plan-card.ts` retira `ownPlanCard`/`planMilestone`
+  (sin consumidores).
+- **Cambiado — el asistente de bienvenida pide el plan mínimo (U3/U8)**: el paso «Tu plan» pedía
+  inflación y SWR (que se volvían a pedir en Ajustes y en Jubilación) y no sabía que existen
+  estrategias ni fecha de nacimiento. Ahora pide fecha de nacimiento, las 5 tarjetas de estrategia
+  y solo el dato esencial de la elegida (edad objetivo; media jornada — edad + ingreso; pensión —
+  importe + edad), en un único `PATCH` al perfil. Inflación y SWR se quedan en sus valores por
+  defecto (2,5 % / 3,5 %) y se ajustan luego en Jubilación.
+- **Añadido (técnico) — libs puras del rediseño (U1a)**: `plan-fields.ts` (matriz de visibilidad
+  de campos por estrategia — fuente única de qué se enseña y qué no), `plan-sentence.ts`
+  (frase-hito por estrategia, con tono y partes calculadas), tiles v2 (`buildRetirementTilesV2` +
+  `retirementDetailRows` en `retirement-tiles.ts`, como mucho 3 tarjetas — corrige de paso el tile
+  del puente, que medía los meses desde HOY —35 años y 10 meses en la demo— en vez de
+  pensión − jubilación —12 años—), `assumptions-line.ts` (línea «Supuestos»),
+  `household-plan-lines.ts` (frases del hogar) y `duration.ts` (tramos, nunca «y 0 meses»). De 816
+  a 992 tests (+ 61 del asistente de U3 = 1.053; ver `npm test --workspace futurefin-web`).
+- **Corregido (documentación) — marcadores falsos desde WP3/WP5-2b**: se retiran de
+  `api-routes.md` y de los doc-comments del handler los marcadores «`pension_start_month_index` /
+  `partial_retirement_month_index` son `null` hasta WP3» y «`partial`/`pension_bridge` se
+  comportan como `asap`»: `projection_strategies.rs` los contradice y la demo publica 430/46.
+- **Cambiado — la pantalla de Jubilación pasa de once bloques a tres (U1–U12)**: la primera vuelta
+  del rediseño (WP7) pintaba los RESULTADOS antes que el formulario que los produce, 8 tiles de dos
+  cifras con subtítulos recortados, dos charts con ejes X distintos (el determinista arriba y el
+  abanico de «Riesgo» abajo) y seis pies «Guardado automático.» — el owner la rechazó en redondo
+  («jerarquía sin sentido, orden mal, campos redundantes, mínimo input») tras subirla en local, y
+  esa forma queda registrada como RECHAZADA en `futurefin-failure-archaeology` §3, no como la
+  pantalla vigente. La sustituye:
+  - **«Tu plan»**: las 5 tarjetas de estrategia (5 columnas en escritorio, 3+2 en tableta, lista
+    en móvil — nunca 4+1) y SOLO los campos que la estrategia elegida usa (`lib/plan-fields.ts`,
+    U2): fecha de nacimiento en línea cuando falta (no se repite si ya la tienes), edad objetivo,
+    media jornada, pensión (casilla + importe + edad) y «Gasto en jubilación» con sus TRES modos
+    (gasto actual del presupuesto, ingresos actuales, o una cifra manual) más la cifra
+    mensual/anual derivada con su procedencia pegada («1.250 €/mes · 15.000 €/año · de tus
+    partidas de jubilación del presupuesto»). El banner de alta que U1b ponía encima y la
+    disposición en lista se sustituyeron por tarjetas por tema en la tercera vuelta (ver más
+    abajo).
+  - **«Resultado»**: la frase-hito (`lib/plan-sentence.ts`) tonada por el estado del plan —un
+    filete lateral de 3 px, nunca el color del texto—, el aviso rojo SOLO cuando el plan no llega
+    (D17), como mucho 3 tarjetas con el subtítulo COMPLETO sin recortar (U7,
+    `buildRetirementTilesV2`), UN chart —patrimonio + objetivo FIRE + banda 10–90 % conmutable +
+    marcadores de jubilación/coast/media jornada/pensión, todo hasta el horizonte— y un «Riesgo»
+    compacto; todo lo demás —objetivo nominal al cruce, cobertura de la pensión, descuento del
+    puente, los avisos que no son rojos— baja a «Detalle del cálculo», plegado. La tabla de
+    agotamiento por edad que U1b dejaba en «Riesgo» se retiró en la tercera vuelta: la dice el
+    color de la banda (ver más abajo).
+  - **«Avanzado»**, plegado, cuyo `<summary>` ERA la línea «Supuestos: retirada 3,5 % · gasto fijo
+    en euros de hoy · horizonte 90 años · sin colchón · umbral 95,0 %» (U12). **Retirado en la
+    tercera vuelta de UX** (F10): la línea existía para enunciar lo que el acordeón escondía, y con
+    las tarjetas por tema no queda nada escondido. Registrado como forma RECHAZADA en
+    `futurefin-failure-archaeology` §3.
+  - **Hogar**: solo el aviso de solo lectura + una frase por miembro (`lib/household-plan-lines.ts`)
+    + el enlace «Cambia a “Yo” para editar tu plan» — sin tarjetas ni cifras por persona, porque el
+    hogar no tiene plan propio.
+
+  Un único indicador de guardado en la cabecera (S6, `.retirement-save-state`) sustituye a los
+  seis pies «Guardado automático.» repartidos por panel, con precedencia fija error > guardando >
+  bloqueado > guardado. **El porcentaje de retirada es ÚNICO en la pantalla** (U4): el slider es
+  `swr_pct` y la regla lo hereda; si alguien lo fijó explícito por HTTP o MCP, la nota bajo el
+  selector lo dice («Regla al 4,0 %, fijado por API») en vez de dejar que el usuario mueva un
+  control que su plan ignora. La fracción de pensión que se cobra durante la media jornada se edita
+  ahora en PORCENTAJE (0 a 100, S3) — el campo anterior rotulaba «Parte que cobras en media
+  jornada (0 a 1)» y un `40` tecleado ahí declaraba cobrar 40 veces la pensión, que el servidor
+  recortaba a 1 sin decirlo.
+- **Cambiado (técnico) — `RiskFanChart` se retira; `MiniProjection` absorbe el abanico**: su única
+  consumidora (la sección «Riesgo» de WP7) desaparece con el rediseño. `MiniProjection` gana tres
+  props opcionales y no-op cuando no se pasan (el Resumen no las usa y su chart no cambia byte a
+  byte): `band` (banda 10–90 % en euros nominales, `{month, p10, p90}[]`, emparejada por MES —la
+  banda viaja siempre a densidad `hybrid` mientras `points[]` puede ser `monthly`—, pintada como UN
+  `path` cerrado sin trazo de mediana), `markers` (hasta cuatro hitos del plan con su rótulo cedido
+  por prioridad cuando no cabe, la jubilación nunca cede el suyo) y `deflator` (un único factor
+  aplicado a patrimonio, objetivo y banda a la vez). Libs nuevas con test: `retirement-form.ts`
+  (conversión fracción↔porcentaje, el indicador de guardado único, la guarda de campos obligatorios
+  que apaga el autosave, la nota del porcentaje de la regla) y `retirement-chart.ts` (los cuatro
+  marcadores del chart y la colisión de sus etiquetas). `helpTexts.ts`: +`retirement.assumptions`
+  (la línea «Supuestos», retirada en la tercera vuelta), +`retirement.plan_sentence` (la frase-hito),
+  y `retirement.withdrawal_rule` reescrita para el porcentaje único. 1.104 tests tras la tercera
+  vuelta (`npm test --workspace futurefin-web`).
+- **Corregido — desbordamiento horizontal preexistente de 7 px a 639–641 px**: el rótulo «AL FINAL
+  DEL HORIZONTE» de la celda de agotamiento (161 px medidos) no cabía en una columna de dos con
+  `white-space: nowrap` y empujaba la PÁGINA entera 7 px — violación de la regla de oro del sistema
+  responsive (cero scroll horizontal fuera de una tabla), presente desde antes del rediseño y
+  arreglada de paso. `.risk-depletion-age` volvió a envolver (`white-space: normal`); la celda
+  desapareció después con la tabla entera (tercera vuelta).
+- **Cambiado — «(opc.)» → «(opcional)»** en Jubilación (la coletilla del campo «Edad de jubilación
+  objetivo» cuando la estrategia no lo exige).
+
+- **Una media jornada que el usuario ya no usaba seguía simulándose** (cazado al verificar la imagen
+  local del rediseño). Síntoma, medido sobre la demo: un perfil con `strategy: "asap"` devolvía
+  `warnings: ["partial_phase_capital_shrinking"]`, un `partial_retirement_month_index` y una curva que
+  no cruzaba nunca el objetivo — de una fase de media jornada que la Jubilación rediseñada ni siquiera
+  enseña para esa estrategia (U2), actuando sola sobre los números (U12). Causa: el perfil conserva a
+  propósito **todos** los bloques que el usuario llegó a rellenar (cambiar de estrategia y volver no
+  pierde nada), pero el ensamblado del plan mapeaba `partial_retirement` al `PhasePlan` **sin mirar la
+  estrategia**. Con ingreso 3.000 y gasto 2.000, la fase fantasma daba −1.000 €/mes desde el mes ~40 y
+  el cruce pasaba del mes ~285 a **nunca**. Ahora la fase parcial entra al motor **solo con
+  `strategy: partial`**, en una única puerta (`plan_uses_partial_phase`) que heredan
+  `/v1/projection/series`, `/v1/projection/bands`, el bucle por miembro de `?view=household` y el
+  `profile_overrides` de `simulate_projection`. El perfil almacenado no se toca. `target_retirement_age`
+  no filtraba —ya tenía su puerta— y queda pineado; `pension` sigue entrando con cualquier estrategia
+  por diseño (D15/R6). Tests: `projection_strategies.rs` (serie byte-idéntica con y sin bloque bajo
+  `asap` y `retire_at_age`).
+
+### Tercera vuelta de UX (V1–V7 y F1–F12): tarjetas por tema, éxito en porcentaje, la banda dice el riesgo
+
+El owner probó la imagen local con U1–U12 aterrizados y devolvió doce puntos (F1–F12, 2026-09-05):
+la jerarquía ya era la buena, pero «Avanzado» seguía siendo un cajón de sastre, el gráfico de riesgo
+no decía qué era cada cosa, «Éxito del plan» no cabía en su caja, Hogar ofrecía pestañas que no le
+correspondían, dos tablas hacían scroll lateral y un tile de Proyección no se movía con «En dinero
+de hoy». Revisan U1, U5 y U12; el resto sigue en pie.
+
+- **«Éxito del plan» es un porcentaje, no una oración (V1, F2)**: el valor del KPI pasa de «87 de
+  cada 100 escenarios se jubilan y no agotan el capital» —once palabras en una tipografía mono de
+  1,25 rem pensada para «87,0 %»— a **«87,0 %»**, con la condición en el subtítulo, que sí envuelve.
+  El mismo par de formateadores (`formatSuccessPercent` + `successParenthetical`) sirve a Jubilación
+  y al Resumen: una sola cifra del mismo sorteo en las dos pantallas.
+- **El umbral de éxito desaparece; el corte es fijo (V7)**: verde SOLO al 100,0 % (cero escenarios
+  agotados), ámbar hasta el 90 %, rojo por debajo. Quien tuviera un umbral propio guardado lo
+  pierde: el campo se ignora. Con 500 caminos un solo fallo ya es ámbar, y por eso el subtítulo del
+  verde dice el recuento exacto («0 de 500 escenarios agotan el capital»).
+  Del lado del API el corte es `VERDICT_GREEN_FLOOR_PCT = 100` con el margen ámbar de 10 puntos
+  de D28 (verde solo con `p == 1.0`, exacto en IEEE 754: n/n no necesita epsilon, pineado para
+  n ∈ {1 … 2000}). La entrada se **acepta y se ignora** (PATCH HTTP y las dos tools MCP, marcada
+  deprecada y sin rango) pero no se valida, no se guarda y **no sale por ninguna respuesta**
+  (`ProjectionBandsResponse`, `SummaryPlan`, `MonteCarloKpis`, `RetirementProfile`). Sin
+  migración: el 95 ya almacenado se ignora al leer y se pierde en la siguiente escritura. El código
+  de error `success_threshold_out_of_range` se retira.
+- **Añadido — el colchón de caja se deriva de tu regla de ahorro (V6)**: si tu cascada dice «la
+  cuenta corriente hasta 6.000 €, el resto al fondo», ese tope **es** el colchón que Monte Carlo
+  mantiene una vez jubilado — el mismo euro, en nominal y sin indexar (el motor gana
+  `CashBufferTarget::Amount` junto a `Months`; leer el tope como «≈ 3 meses» lo revalorizaría
+  2,4× a 35 años con un 2,5 %: medido, 48.000 € planos frente a 113.680 €). El input «Colchón de
+  caja» desaparece de la pantalla; sigue escribible por API y MCP como override explícito, y `PATCH
+  {"cash_buffer_months": null}` vuelve a la derivación. La derivación vive en el ensamblado de la
+  proyección (`handlers/cash_buffer.rs`), no en la resolución del perfil, que sigue sin ledger
+  (D25): elige **el mismo activo que usará el motor** (`safe_cash_buffer_index`, líquido sin
+  volatilidad), toma el **máximo** de los techos de las reglas con tope que apuntan a él (la
+  cascada comparte un valor vivo: sumar promete lo que no se funde) y publica de dónde sale en
+  `GET /v1/projection/bands` y en cada lado de `simulate_projection`: `buffer_source`
+  (`explicit` | `allocation_cap` | `none`), `buffer_target_amount`, `buffer_months_effective`
+  (informativo), `buffer_source_rule_id`, `buffer_source_asset_name`. `buffer_inactive_reason`
+  sigue siendo un solo campo con motivos nuevos —`no_capped_rule`, `cap_is_zero`— junto a
+  `no_safe_liquid_asset` y `no_volatility`; `not_requested` ya no se emite. **Y no es gratis**: en
+  este modelo i.i.d. el colchón cuesta ~3,5 puntos de éxito (lastre −7,9 pp, protección +3,9 pp),
+  así que quien tenga un tope verá bajar su probabilidad sin haber tocado su plan — la línea de
+  Jubilación lo dice y enlaza a Reglas de ahorro. La demo (`scripts/seed-demo.sh`) siembra la
+  regla con tope que hacía falta para verlo.
+- **La banda del gráfico dice el riesgo (V2/V5, F6–F8)**: se tiñe por edad con la probabilidad
+  acumulada de agotar el capital —verde 0 %, ámbar 5 %, rojo desde el 10 %, `lib/risk-gradient.ts`
+  con test—, y el chart gana eje Y con importes, etiquetas «optimista (p90)»/«pesimista (p10)» en
+  los bordes y el porcentaje exacto al pasar el ratón. **La tabla «Probabilidad de agotar el
+  capital» por edad se retira**: decía lo mismo con menos resolución; el total acumulado baja a
+  «Detalle del cálculo». Las cuatro props del chart son opt-in y el del Resumen no mueve un píxel.
+- **«Tu plan» es una tarjeta por tema (V3, F9/F10)**: Estrategia · Edades · Pensión · Gasto en
+  jubilación · Retirada · Horizonte, cada una con su frase de qué hace y qué implica cambiarla, y
+  ninguna vacía (con «Cuanto antes» y fecha de nacimiento conocida, «Edades» no se pinta). **Fuera
+  el acordeón «Avanzado» y su línea «Supuestos»**, y fuera el banner de alta (F5), cuyo descarte
+  vivía en un flag de `localStorage` que nunca miraba el perfil.
+- **Una sola escala de títulos (P6, F12)**: título de panel `h3.panel-title`, título de tarjeta o
+  sub-sección `h4.panel-title`, disparador de `<details>` `.details-trigger` con su tamaño
+  declarado. Ningún `<summary>` ni `<h4>` sin clase decide ya su propio tamaño.
+- **Corregido (bug de dinero, F11) — el tile «Objetivo al jubilarte» de Proyección no se movía con
+  «En dinero de hoy»**: enseñaba `jubilacion_target_net_worth`, que es el objetivo evaluado en el
+  **mes 0** y por contrato no depende del interruptor. Antes de 5.0.0 esa base era buen proxy del
+  objetivo en euros de hoy; con el objetivo puente el objetivo **decrece** hasta 0 en el mes de la
+  pensión y las dos magnitudes se separaron. En la demo el tile decía **1.609.855 €** cuando el
+  objetivo del mes en que te jubilas (mes 243) es **1.148.467 € nominales** = **696.563 € de hoy**
+  al 2,5 %: un **2,31×**. Ahora el tile parte de `jubilacion_target_net_worth_nominal` y lo
+  deflacta con el **mismo** factor y la misma tasa que la línea del objetivo del chart
+  (`deflation_annual_inflation_percent` de la respuesta, con la de la instalación solo como
+  fallback de backend antiguo); sin cruce cae a la base de hoy. **Sin campo nuevo en el API**: el
+  deflactado de publicación se hace en la SPA (`jubilacionTargetTileValue`, `lib/projection-chart.ts`,
+  que devuelve importe Y base). La tarjeta declara su base —«en euros de hoy» / «en euros de ese
+  mes»— y gana el interrogante de ayuda (`retirement.target`), cuyo texto se corrige: describía un
+  paréntesis que ya no existe.
+- **Corregido — el ámbito Hogar solo enseña Resumen, Proyección y Ajustes en la navegación (F1)**:
+  antes las nueve pestañas se pintaban igual en Hogar y llevaban a pantallas del ledger de solo
+  lectura con filas de todos los miembros mezcladas sin dueño visible — leía como roto aunque no
+  hubiera error. `tabsForScope(scope)` (`lib/navigation.ts`) filtra la TopBar y el drawer móvil; un
+  deep-link a una pestaña oculta (al montar o al cambiar de scope en caliente) redirige a Resumen
+  (`isTabAvailableForScope`, mismo `useLayoutEffect` de guardia de rutas). Presentación, no la
+  frontera de seguridad: el servidor sigue siendo quien bloquea la escritura ajena (403
+  `not_row_owner`, D23). El aviso de ámbito ahora dice qué queda disponible.
+- **Corregido — chip «Mío · solo tus movimientos» retirado de Movimientos (F4)**: el barrido
+  `458ea4f` había quitado el chip «Mío» de Activos/Pasivos/Presupuesto/Próximos pero Movimientos
+  (`GastosView`) conservaba uno con otra redacción que sobrevivió sin que el CHANGELOG lo reflejara.
+  De paso, fuera la prop de tipo `ledgerPersonScope` que quedaba muerta (nunca desestructurada) en
+  `AssetsView`, `LiabilitiesView`, `BudgetView` y `UpcomingView` desde ese mismo barrido.
+- **Corregido — Presupuesto y Movimientos sin scroll horizontal en escritorio (F3)**: las dos
+  tablas de líneas de Presupuesto, la de Movimientos y su comparativa mensual Gastos/Ingresos pasan
+  a `table-layout: fixed` con `<colgroup>` por clases (móvil sin tocar). No era un breakpoint:
+  `.app-main` tapa el contenido a 66 rem en cualquier monitor, así que la columna de Presupuesto
+  medía ~500 px a 1024, 1280 y 1440 por igual y solo el algoritmo de tabla fija garantiza que el
+  contenido quepa. Medido con Playwright a 1024/1280/1440 en claro y oscuro: página y cada
+  `.table-scroll` con `scrollWidth == clientWidth`. De paso, un doble margen entre los botones de
+  acción que el layout `auto` enmascaraba creciendo la columna.
+- **Corregido — una sola escala de títulos en Ajustes (F12)**: los 15 paneles ya usaban
+  `h3.panel-title`; lo desigual era el panel «Proyección y modo de edad» con `<small>` para su
+  ayuda (ahora `p.muted.tight` como los demás), `.modal-title` (1 rem / 650) frente a
+  `.panel-title` (0,95 rem / 600) en todos los modales, `.ff-account-name` a 700, y el vocabulario
+  de cuatro cabeceras que `debc52d` había metido en Jubilación (`h4.subsection-title`, `<summary>`
+  sin clase, `.retirement-advanced-summary`). `.subsection-title` se retira: sus seis consumidores
+  pasan a `.panel-title` y la tarjeta donut del Resumen gana su clase con nombre
+  (`.donut-card-title`).
+- **Corregido — un deep-link o una recarga en `/ajustes/plan` volvía a `/ajustes/general`**
+  (preexistente, cazado al verificar F3/F12): las sub-pestañas visibles dependen de la membresía y
+  el rol, y la guardia de rutas redirigía con `installationGate` aún en «loading», cuando solo
+  existían «general» y «data». Ahora espera al gate.
+- **Cambiado (técnico)**: `lib/assumptions-line.ts` y `lib/retirement-intro.ts` retirados con sus
+  tests; `buildDepletionRows`, `formatSuccessScenarios` y `formatSuccessThreshold` retirados de
+  `lib/risk-bands.ts`; `helpTexts.ts` baja de 55 a 53 entradas (−`retirement.assumptions`,
+  −`retirement.success_threshold`) con `retirement.cash_buffer`, `retirement.depletion_by_age`,
+  `retirement.bands`, `retirement.success` y `retirement.target` reescritas.
+
+### Breaking
+
+- **`success_threshold_pct` sale del wire (tercera vuelta, V7)**: retirado de
+  `ProjectionBandsResponse`, `SummaryPlan` (`/v1/summary` → `plan`), `MonteCarloKpis` del what-if y
+  `RetirementProfile` (`GET/PATCH /v1/auth/me/retirement-profile`, la clave simplemente no viene).
+  El parámetro `success_threshold_pct` de `update_retirement_profile` y de
+  `simulate_projection.profile_overrides` queda **inerte** y pierde su rango `[50, 99]` (se acepta
+  por compatibilidad —las dos tools son `deny_unknown_fields`— y se ignora). `buffer_inactive_reason`
+  ya no emite `not_requested`; aparecen `no_capped_rule` y `cap_is_zero`.
+- **`installation.fire_settings` pierde cuatro claves**: `fire_number_mode`,
+  `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age`. `GET /v1/installation` ya no las
+  devuelve y `PATCH /v1/installation` ya no las acepta (se ignoran en silencio, como cualquier clave
+  desconocida del JSONB); viven en `GET|PATCH /v1/auth/me/retirement-profile`. La tool MCP
+  `update_fire_settings` las rechaza con `unknown field` (tiene `deny_unknown_fields`) y
+  `simulate_projection.fire_settings_overrides` pierde los dos del modo del objetivo — el eje
+  `swr_pct` de primer nivel de esa tool sigue funcionando y se aplica sobre un clon del perfil.
+  **La migración `20260902200000_users_retirement_profile.sql` copia los cuatro valores de la
+  instalación al perfil de cada usuario antes de retirarlos**, así que el upgrade no mueve un número:
+  cada miembro arranca en la estrategia `asap` —la conducta de 4.15.x— con exactamente lo que había.
+- **El default de `?view` pasa de `household` a `mine`** (R2), en HTTP y en MCP. Omitir el parámetro
+  —o mandarlo vacío— devuelve ahora **los datos del usuario que pregunta**; el hogar entero hay que
+  pedirlo con `?view=household` / `view: "household"`. Afecta a las ocho respuestas que ecoan `view`
+  y a todas las tools con scope. El porqué: con la jubilación convertida en estrategia por persona,
+  servir el hogar por omisión mezclaba filas de dos personas bajo el perfil de una sola. El eco de
+  `view` que existe desde 4.4.0 es exactamente lo que permite a un cliente darse cuenta. Un cliente
+  que quiera la conducta de 4.15.x añade `?view=household` y no cambia nada más.
+- **`GET /v1/projection/series?view=household` deja de ser una simulación y pasa a ser un AGREGADO**
+  (D9): el servidor corre **una simulación por miembro** —con su perfil, su fecha de nacimiento y sus
+  filas— al horizonte común `max(horizontes)` (`horizon_basis: "household_max_lifespan"`) y suma las
+  series. En consecuencia el hogar **ya no publica jubilación propia**: `jubilacion_*`,
+  `retirement_*`, `strategy`, `phase_transitions` y `fire_target_series` viajan vacíos con
+  `absent_reason: "household_aggregate"`, y el hito de cada persona va en el nuevo `members[]`.
+  `assets_depleted_month_index` pasa a ser el **mínimo** del hogar. **Un hogar de dos miembros cambia
+  de números por diseño** (R2 + D9 + D14): antes se simulaba una sola cartera conjunta con una sola
+  estrategia; ahora son N planes independientes que se suman. Una instalación de un solo miembro no
+  se mueve.
+- **`simulate_projection` rechaza `view: "household"`** con 400 `household_not_simulable`. Un what-if
+  mueve UN plan y el hogar tiene N.
+- **403 `not_row_owner` en toda mutación del ledger**, HTTP y MCP, **sin excepción para el rol
+  `owner`**. Un cliente que editara filas de otro miembro deja de poder hacerlo. Y **`POST
+  /v1/allocation-rules/reorder` deja de aceptar la vista del hogar**: devuelve 400
+  `household_read_only` y hay que llamarlo con `?view=mine`. Era la única mutación que tocaba filas
+  ajenas por diseño — renumeraba de una vez las cascadas de todos los miembros.
+- **Migración DATA-CHANGING (firmada por el owner, D14)**:
+  `20260902200100_ledger_owner_not_null.sql` asigna las filas `owner_user_id IS NULL` de las cinco
+  tablas del ledger al **owner más antiguo de la instalación** y deja la columna `NOT NULL` (la FK
+  pasa de `ON DELETE SET NULL` a `ON DELETE RESTRICT`). Son filas legadas de antes de 2026-02-16 o de
+  imports de backups muy viejos; ningún camino vivo de la API escribía `NULL` desde entonces.
+  **Consecuencia visible**: esas filas compartidas aparecen ahora en el `mine` de ese miembro, entran
+  en su histórico y solo él puede editarlas. En `allocation_rules` —la única tabla con un invariante
+  entre filas— un sumidero compartido redundante se borra y el resto se recoloca detrás de las reglas
+  del owner conservando su orden relativo.
+- **`jubilacion_month_index` es ahora el mes EFECTIVO de jubilación** (R8), no el cruce derivado por
+  el handler: con `asap` las dos definiciones coinciden exactamente y ningún pin se movió (escenario
+  A de `projection_pins.rs`: mes 235 antes y después), pero con una estrategia por edad la cifra
+  cambia de significado — es la edad, y el cruce viaja aparte.
+- **`liquid_crossing_month_index` lo publica ahora el MOTOR, y con el objetivo del PLAN**;
+  `fire_crossover_month`, el escaneo que lo derivaba en el handler contra la perpetuidad de 4.15.x,
+  **se retira**. Con el objetivo dentro del bucle y el cruce marcado como lectura, la cifra la da el
+  motor evaluando el objetivo consciente del plan — **con `pension_bridge` eran dos cruces distintos
+  para la misma línea del chart**. Sin pensión con fecha el número no se mueve.
+- **`jubilacion_target_net_worth` (y `fire_target_base` de `simulate_projection`) pasan a ser la base
+  del objetivo del PLAN**, no la de la perpetuidad. Sin pensión con fecha son la misma cifra por
+  construcción; con base puente, la de antes contradecía el primer punto de `fire_target_series`, que
+  es la línea que el chart pinta.
+- **`assets_depleted_month_index` cambia DOS veces**: (a) pasa a la rejilla **0-based** (issue #210),
+  en `GET /v1/projection/series` (raíz y `members[]`) y en los dos lados de `simulate_projection`. Se
+  publicaba en la convención 1-based del bucle desde 4.6.0 y era el **único** índice de esas
+  respuestas desplazado un mes respecto de `points[].month_index` y los demás `*_month_index`: el mes
+  civil no se mueve, cambia el nombre del mes, y un cliente de 4.x que restara 1 para compensar debe
+  dejar de hacerlo (`assets_depleted_months_delta` no se mueve, los dos lados se desplazan igual; pin
+  movido: escenario de #119 en `projection_failure_states.rs`, mes 100 → 99). Y (b) pasa a exigir
+  **dos condiciones** —cartera a cero por la venta **y** alguna venta posterior sin fundar—, lo que
+  además corrige el bug de 4.15.0 que publicaba `uncovered_deficit_total > 0` junto a «nunca agotado»
+  (ver §«Corrección tras la revisión adversarial del motor»).
+- **La probabilidad de éxito cambia de definición**: éxito = el plan OCURRE y AGUANTA. Un plan que
+  cruza tarde en su horizonte publica una cifra MENOR que la que habría publicado con la definición
+  anterior (0,96 → 0,629 en el hogar sintético del arnés), con `never_retired_probability` y
+  `success_given_retired` al lado para separar «¿ocurre?» de «¿aguanta?».
+- **`rule_is_spend` financia el gasto de la regla primero con el superávit del mes.** Quien use ese
+  modo verá moverse la proyección: antes vendía cartera aunque la caja del mes cubriera el gasto, y
+  pagaba la plusvalía de una venta que volvía a aportarse acto seguido.
+- **`GET /v1/summary?view=household` usa el SWR MÍNIMO del hogar** para el umbral «runway
+  indefinido». Basta con que un miembro considere insostenible esa tasa de retirada para que el hogar
+  no pueda declararse indefinido; con el máximo, el más optimista firmaría por todos.
+- **`PATCH /v1/assets/{id}`: `expected_annual_return_percent` y `annual_volatility_percent` pasan a
+  tri-estado** (omitir no toca · `null` BORRA · un valor sustituye), como `purchase_price`. Hasta
+  4.15.x `null` y clave ausente eran el mismo caso, así que **no había forma de volver a
+  «rentabilidad no declarada» ni de devolver un activo al determinismo**: una volatilidad escrita por
+  error solo se deshacía borrando y recreando el activo, con su histórico dentro. En MCP,
+  `update_asset` gana `clear_expected_annual_return_percent` y `clear_annual_volatility_percent`.
+- **El trigger por edad NO tiene fallback demográfico.** La edad de jubilación sale de la
+  `birth_date` del usuario de la sesión; la fecha de la tabla `persons` sigue alimentando **solo** el
+  horizonte. Un usuario sin fecha propia degrada a `asap` con `birth_date_missing` en vez de heredar
+  la edad de otra persona del hogar y publicar un plan que no es el suyo.
+- **MCP: el catálogo pasa de 68 a 71 tools** (30 de lectura, 41 de escritura). Nuevas:
+  `get_retirement_profile`, `update_retirement_profile` (preview/confirm, merge campo a campo,
+  `clear_*` para borrar) y `get_projection_bands` (solo lectura; `paths` topa en 1.000 frente a los
+  2.000 de HTTP, y las bandas del líquido son opt-in con `include_liquid_bands` — la respuesta pesa
+  16,4 KB y la mitad son esas tres series). `create_asset` / `update_asset` / `list_assets` ganan
+  `annual_volatility_percent`; `get_projection` deja `include_member_series` en opt-in. El
+  presupuesto de descripciones **no sube y su constante no se toca**: se rebalanceó moviendo prosa
+  duplicada al `instructions` del servidor (~550 caracteres solo en la última tanda). La semilla de
+  Monte Carlo viaja **como cadena de dígitos** en todas las superficies.
+- **`.ffbackup` sube a `schema_version` 13**: el fichero incorpora el perfil de jubilación del usuario
+  y la volatilidad por activo. Los ficheros v1..v12 **siguen importando** (cadena completa, regla §5
+  de change-control) y, al importar uno ≤ 12, los cuatro ejes que aquel `fire_settings` llevaba dentro
+  **siembran** el perfil — pero **solo si quien importa no tiene ya uno**: restaurar un backup viejo
+  no puede pisar la estrategia que esa persona configuró después de actualizar. Un servidor 4.x **no**
+  puede leer un fichero v13 (se niega con `backup_schema_version_unsupported`, no lo importa a
+  medias).
+
+### Pendiente de decisión del owner
+
+Dos preguntas de MODELO, no de código, que la revisión adversarial dejó abiertas. Las dos están
+implementadas con el default del plan y documentadas; cambiarlas es una decisión, no un arreglo.
+
+- **El default del descuento del puente es `expected_return`** (D7), la rentabilidad esperada
+  ponderada de los activos líquidos — la media ARITMÉTICA. Descontar a esa tasa un puente que hay que
+  atravesar de verdad deja un plan financiado *exactamente* al objetivo con una probabilidad de éxito
+  de Monte Carlo de **~39 %**: el descuento supone que el capital rinde su media mientras se consume,
+  y la secuencia de retornos no coopera. La alternativa conservadora es que el default pase a `swr`.
+- **Bajo `percent_of_balance` la cartera no se agota nunca por construcción** (siempre queda un
+  porcentaje de un saldo positivo), así que el éxito sale ~100 % aunque el plan acabe retirando
+  céntimos (`mc_percent_of_balance_never_ruins_but_cuts_the_spending`). La UI ya enseña la
+  **cobertura** al lado —meses por debajo del gasto y retirada/gasto— para que la cifra no se lea
+  sola, pero la definición de éxito sigue siendo la misma para las cuatro reglas.
+
+### Verificación
+
+- Suite completa en local, **verde el 2026-09-03**: **2.293 tests de Rust** y **816 de Vitest**.
+  ```bash
+  ./scripts/test-all.sh
+  cargo test -p futurefin-engine && cargo test -p futurefin-engine-stochastic
+  npm test --workspace futurefin-web
+  ```
+- Gates numéricos específicos del release, todos en `crates/engine*/tests/`: el golden bit a bit de
+  4.15.0 (`golden_pins.rs`), la puerta de degeneración `Decimal ↔ f64`
+  (`every_case_degenerates_from_decimal_to_floating_point`), el fuzz de identidades contables
+  (`fuzz_invariants.rs`) y los seis casos de la revisión adversarial (`review_fixes.rs`).
+- **CI del release en el PR #211.** El job `docker-stack` falló la primera vez: la imagen no
+  compilaba porque el `Dockerfile` enumera los crates a mano y 5.0.0 añade uno. Corregido en el propio
+  PR (`COPY crates/engine-stochastic`) y verde desde entonces; la trampa queda anotada en
+  `futurefin-build-and-env` §7 para el siguiente miembro nuevo del workspace.
+- **Canal `:dev`** (D19, `.github/workflows/dev-image.yml`): publica solo `dev` / `dev-<sufijo>` en
+  GHCR y Docker Hub por `workflow_dispatch`, **nunca `latest` ni semver**, sin tag de git, sin Release
+  y sin bump del add-on. Es la imagen de laboratorio con la que se prueba 5.0.0 en compose, en el
+  add-on de Home Assistant y con MCP desde claude.ai antes de taguear nada.
+- **Pendiente del owner antes del merge**: la verificación visual **claro/oscuro** de todas las
+  superficies nuevas (tarjetas de estrategia y formulario contextual, tira de fases, tarjeta «Tu
+  plan», tiles por estrategia, sección «Riesgo» con el fan chart y el semáforo, líneas por miembro y
+  banner del hogar) a 1280 / 390 / 360 px, y las pruebas multiplataforma sobre la imagen `:dev`.
+
 ## [4.15.0] - 2026-09-02
 
 ### Ahorro es ingresos − gastos, las devoluciones netean en su categoría y todo movimiento tiene categoría

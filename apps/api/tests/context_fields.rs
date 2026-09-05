@@ -109,10 +109,14 @@ async fn every_view_aware_response_echoes_the_view_it_applied() {
     for ep in endpoints {
         let sep = if ep.contains('?') { '&' } else { '?' };
 
-        let household = get(&app, &owner.cookie, ep).await;
+        // **5.0.0 (R2): el default es `mine`.** Este bucle es el sitio donde ese cambio se pinea
+        // para las OCHO superficies a la vez — omitir `view` y recibir el hogar entero era la
+        // conducta hasta 4.15.x, y con la jubilación por usuario (D9/D13) devolvía las filas de
+        // dos personas bajo el perfil de una sola.
+        let omitido = get(&app, &owner.cookie, ep).await;
         assert_eq!(
-            household["view"], "household",
-            "{ep} sin ?view debe declarar household: {household}"
+            omitido["view"], "mine",
+            "{ep} sin ?view debe declarar mine desde 5.0.0: {omitido}"
         );
 
         let explicit = get(&app, &owner.cookie, &format!("{ep}{sep}view=household")).await;
@@ -121,15 +125,59 @@ async fn every_view_aware_response_echoes_the_view_it_applied() {
         let mine = get(&app, &owner.cookie, &format!("{ep}{sep}view=mine")).await;
         assert_eq!(mine["view"], "mine", "{ep}?view=mine: {mine}");
 
+        // Omitirlo y pedirlo explícitamente tienen que dar EXACTAMENTE lo mismo: si algún día
+        // divergen, es que un handler se quedó con su propio default.
+        assert_eq!(
+            omitido, mine,
+            "{ep}: omitir `view` debe ser idéntico a pedir `view=mine`"
+        );
+
         // La prueba de que el campo sirve para algo: con un solo usuario el resto del payload es
         // idéntico, y aun así las dos respuestas se distinguen.
+        //
+        // `/v1/projection/series` es la excepción DECLARADA desde 5.0.0 (§D): su `household` ya
+        // no es «las mismas cuentas con más filas» sino el AGREGADO de una simulación por
+        // miembro, así que cambia de forma —`members[]`, `jubilacion_*` nulos con
+        // `household_aggregate`— aunque el hogar tenga una sola persona. Eso se comprueba abajo,
+        // en `projection_household_aggregate.rs`.
+        if ep == "/v1/projection/series" {
+            assert_eq!(explicit["fire_target_absent_reason"], "household_aggregate", "{explicit}");
+            assert!(mine["members"].as_array().is_some_and(|m| m.is_empty()), "{mine}");
+            continue;
+        }
+        // `/v1/summary` es la SEGUNDA excepción declarada (5.0.0 WP5-2b, D27): su bloque `plan`
+        // —estrategia, disparador, ahorro necesario, margen y el rojo de D17— es el plan de UNA
+        // persona, y el agregado del hogar no tiene uno. Sale entero a `null` con
+        // `absent_reason: household_aggregate`, igual que los `jubilacion_*` de la serie. El
+        // resto del payload sí sigue siendo idéntico con un solo usuario, y eso es lo que se
+        // comprueba: la excepción está ACOTADA a `plan`.
         let mut sin_view = mine.clone();
-        sin_view["view"] = household["view"].clone();
+        if ep == "/v1/summary" {
+            let plan_household = &explicit["plan"];
+            assert_eq!(plan_household["absent_reason"], "household_aggregate", "{explicit}");
+            for k in [
+                "strategy",
+                "retirement_trigger",
+                "jubilacion_month_index",
+                "required_savings_monthly",
+                "disposable_monthly",
+                "underfunded",
+            ] {
+                assert!(
+                    plan_household[k].is_null(),
+                    "en household el plan va entero a null, y {k} no lo está: {explicit}"
+                );
+            }
+            assert!(mine["plan"]["absent_reason"].is_null(), "{mine}");
+            assert_eq!(mine["plan"]["strategy"], "asap", "{mine}");
+            sin_view["plan"] = explicit["plan"].clone();
+        }
+        sin_view["view"] = explicit["view"].clone();
         assert_eq!(
-            sin_view, household,
+            sin_view, explicit,
             "{ep}: con un solo usuario mine y household solo deberían diferir en `view`"
         );
-        assert_ne!(mine["view"], household["view"], "{ep}");
+        assert_ne!(mine["view"], explicit["view"], "{ep}");
     }
 }
 
@@ -142,6 +190,38 @@ async fn every_view_aware_response_echoes_the_view_it_applied() {
 /// `/v1/budget.totals` y en `/v1/summary.financial_health`, y valen cosas distintas en cuanto el
 /// modo deja de ser `budget`. Ninguno se renombra (rompería la SPA); lo que hacen los dos `basis`
 /// es que la diferencia sea legible sin conocer el modo.
+/// **`/v1/projection/bands` también declara su vista** — y es el único endpoint con scope cuya
+/// respuesta `household` NO existe.
+///
+/// Va aparte del bucle de arriba a propósito: allí la prueba es que `mine` y `household`
+/// devuelven lo mismo salvo el eco; aquí lo que hay que fijar es lo contrario, que el hogar se
+/// RECHAZA con un código propio en vez de servir una suma de percentiles que no significa nada.
+/// Sin el eco de `view`, una banda de un hogar de un solo miembro sería indistinguible de la
+/// suya, que es exactamente el síntoma que motivó el campo.
+#[tokio::test]
+async fn projection_bands_echo_mine_and_refuse_the_household() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Cash").await;
+    app.post_json_with_cookie(
+        "/v1/assets",
+        serde_json::json!({"category_id": cat, "name": "Bolsa", "current_value": "10000"}),
+        &owner.cookie,
+    )
+    .await;
+
+    let omitido = get(&app, &owner.cookie, "/v1/projection/bands?paths=8").await;
+    assert_eq!(omitido["view"], "mine", "omitir `view` es `mine`: {omitido}");
+    let explicito = get(&app, &owner.cookie, "/v1/projection/bands?paths=8&view=mine").await;
+    assert_eq!(explicito["view"], "mine", "{explicito}");
+
+    let r = app
+        .get_with_cookie("/v1/projection/bands?view=household", &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "household_bands_unavailable", "{r:?}");
+}
+
 #[tokio::test]
 async fn budget_and_summary_declare_whether_their_totals_are_plan_or_actual() {
     let app = TestApp::spawn().await;

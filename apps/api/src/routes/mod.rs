@@ -21,6 +21,7 @@ use crate::handlers::members::members_router;
 use crate::handlers::pending_users::pending_users_router;
 use crate::handlers::planning::planning_router;
 use crate::handlers::projection::projection_router;
+use crate::handlers::retirement_profile::retirement_profile_router;
 use crate::handlers::sso::sso_login;
 use crate::handlers::summary::summary_router;
 use crate::handlers::transactions::transactions_router;
@@ -59,7 +60,13 @@ pub fn app_router(state: &Arc<AppState>) -> Router {
                 // 401 `ha_sso_disabled`.
                 .route("/ha/start", get(ha_start))
                 .route("/ha/callback", get(ha_callback))
-                .route("/me", get(me).patch(patch_me)),
+                .route("/me", get(me).patch(patch_me))
+                // Perfil de jubilación del usuario de la sesión (5.0.0, D13). Cuelga de
+                // `/auth/me` y no de un `/v1/me` propio porque `me` ya vive aquí: el perfil
+                // es del MISMO recurso (el usuario del token), no de la instalación. Se
+                // `merge`a en vez de anidarse: `nest("/me", …)` sobre un router que ya tiene
+                // la ruta `/me` es una colisión en el matcher de axum.
+                .merge(retirement_profile_router()),
         )
         .route(
             "/installation/session-context",

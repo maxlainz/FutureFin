@@ -583,7 +583,7 @@ fn parse_month(raw: &str) -> Result<(NaiveDate, NaiveDate), ApiError> {
     path = "/v1/transactions",
     tag = "transactions",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = solo mías; omitido → household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
         ("month" = Option<String>, Query, description = "`YYYY-MM`; filtra por `op_date` en ese mes."),
         ("kind" = Option<String>, Query, description = "`expense` | `income` | `savings`."),
         ("category_id" = Option<Uuid>, Query, description = "Filtra por categoría."),
@@ -1253,7 +1253,7 @@ pub(crate) async fn patch_transactions_batch_core(
     get,
     path = "/v1/transactions/months",
     tag = "transactions",
-    params(("view" = Option<String>, Query, description = "`mine` | household.")),
+    params(("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`.")),
     responses(
         (status = 200, description = "Meses con datos (orden DESC). El mes civil en curso viaja siempre, con `txn_count: 0` si está vacío.", body = [MonthEntry]),
         (status = 401, description = "No valid session"),
@@ -1723,7 +1723,7 @@ struct ImportRow {
     get,
     path = "/v1/transactions/imports",
     tag = "transactions",
-    params(("view" = Option<String>, Query, description = "`mine` | household.")),
+    params(("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`.")),
     responses(
         (status = 200, description = "Lotes de import (orden created_at DESC)", body = [ImportBatchResponse]),
         (status = 401, description = "No valid session"),

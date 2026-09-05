@@ -463,12 +463,20 @@ async fn mode_b_target_annual_expense_uses_expense_avg() {
         .patch_json_with_cookie(
             "/v1/installation",
             json!({ "fire_settings": {
-                "fire_number_mode": "annual_expense",
-                "swr_pct": "4",
                 "taxes_enabled": false,
                 "tax_brackets": [],
                 "savings_source": "transactions_avg"
             } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    // 5.0.0 (D13): el modo del objetivo y el SWR son del PERFIL del usuario; la fuente del
+    // ahorro y la fiscalidad siguen siendo del hogar. Mismos números, dos superficies.
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "annual_expense", "swr_pct": "4"}),
             &owner.cookie,
         )
         .await;
@@ -498,7 +506,13 @@ async fn mode_b_household_vs_mine_scoping() {
     set_mode_b(&app, &owner.cookie).await;
 
     // household: income 3000, expense 1200 → delta 1800.
-    let hh = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    // `household` explícito desde 5.0.0 (R2): sin él, el GET devuelve la vista `mine`.
+    let hh = projection_delta(
+        &app,
+        &owner.cookie,
+        "/v1/projection/series?view=household&months=240",
+    )
+    .await;
     approx(hh, 1800.0);
     // mine (owner): income 2000, expense 800 → delta 1200.
     let mine = projection_delta(&app, &owner.cookie, "/v1/projection/series?view=mine&months=240").await;
@@ -910,12 +924,20 @@ async fn mode_c_target_annual_expense_uses_expense_avg() {
         .patch_json_with_cookie(
             "/v1/installation",
             json!({ "fire_settings": {
-                "fire_number_mode": "annual_expense",
-                "swr_pct": "4",
                 "taxes_enabled": false,
                 "tax_brackets": [],
                 "savings_source": "budget_income_real_expense"
             } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    // 5.0.0 (D13): el modo del objetivo y el SWR son del PERFIL del usuario; la fuente del
+    // ahorro y la fiscalidad siguen siendo del hogar. Mismos números, dos superficies.
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "annual_expense", "swr_pct": "4"}),
             &owner.cookie,
         )
         .await;
@@ -945,12 +967,20 @@ async fn mode_c_target_current_income_uses_budget_income() {
         .patch_json_with_cookie(
             "/v1/installation",
             json!({ "fire_settings": {
-                "fire_number_mode": "current_income",
-                "swr_pct": "4",
                 "taxes_enabled": false,
                 "tax_brackets": [],
                 "savings_source": "budget_income_real_expense"
             } }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    // 5.0.0 (D13): el modo del objetivo y el SWR son del PERFIL del usuario; la fuente del
+    // ahorro y la fiscalidad siguen siendo del hogar. Mismos números, dos superficies.
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "current_income", "swr_pct": "4"}),
             &owner.cookie,
         )
         .await;

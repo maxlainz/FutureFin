@@ -664,8 +664,15 @@ async fn si_los_efectos_cambian_entre_el_preview_y_el_confirm_el_token_deja_de_v
     assert_eq!(ok_json(&envelope)["deleted"], true, "{envelope}");
 }
 
-/// El token es del usuario que previsualizó. El de otro miembro no confirma tu borrado — con
+/// El token es del usuario que previsualizó. El de otro miembro no confirma tu operación — con
 /// ámbito de instalación sería una vía para que una sesión ajena consumiera tu salvaguarda.
+///
+/// **Se prueba sobre `materialize_recurring` y ya no sobre `delete_asset`** (5.0.0). No es un
+/// cambio de propiedad, es que la propiedad ya no se puede montar con un borrado de fila: desde
+/// D21 una fila del ledger solo la toca su dueño, así que dos usuarios distintos no pueden
+/// previsualizar y confirmar el MISMO activo — el segundo se estrella antes, en `not_row_owner`.
+/// `materialize_recurring` sí es de ámbito instalación (los dos miembros pueden llamarla con los
+/// mismos argumentos), que es justo el caso que este test existe para cerrar.
 #[tokio::test]
 async fn el_token_de_otro_miembro_no_confirma_lo_tuyo() {
     let app = TestApp::spawn().await;
@@ -674,6 +681,40 @@ async fn el_token_de_otro_miembro_no_confirma_lo_tuyo() {
         .register_and_approve_member(&owner, "bob", "member")
         .await;
     let owner_token = create_token(&app, &owner.cookie).await;
+    let member_token = create_token(&app, &member.cookie).await;
+
+    let preview = ok_json(
+        &mcp_post(
+            &app,
+            &member_token,
+            tool_call("materialize_recurring", json!({})),
+        )
+        .await,
+    );
+    let ct = preview["confirm_token"].as_str().unwrap().to_string();
+
+    let envelope = mcp_post(
+        &app,
+        &owner_token,
+        tool_call(
+            "materialize_recurring",
+            json!({"confirm": true, "confirm_token": ct}),
+        ),
+    )
+    .await;
+    assert_eq!(error_code(&envelope), "confirm_token_invalid", "{envelope}");
+}
+
+/// La otra mitad de D21 sobre el preview: el token NI SIQUIERA se emite para una fila ajena. El
+/// preview de `delete_asset` enseña nombre y valor, cuenta la cascada Y entrega la credencial
+/// para ejecutarla; sobre el activo de otro miembro las tres cosas sobran.
+#[tokio::test]
+async fn el_preview_de_un_borrado_ajeno_no_emite_token() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let member = app
+        .register_and_approve_member(&owner, "bob", "member")
+        .await;
     let member_token = create_token(&app, &member.cookie).await;
     let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
     let asset_id = app
@@ -688,21 +729,13 @@ async fn el_token_de_otro_miembro_no_confirma_lo_tuyo() {
         .unwrap()
         .to_string();
 
-    let preview = ok_json(
-        &mcp_post(&app, &member_token, tool_call("delete_asset", json!({"id": asset_id}))).await,
-    );
-    let ct = preview["confirm_token"].as_str().unwrap().to_string();
-
     let envelope = mcp_post(
         &app,
-        &owner_token,
-        tool_call(
-            "delete_asset",
-            json!({"id": asset_id, "confirm": true, "confirm_token": ct}),
-        ),
+        &member_token,
+        tool_call("delete_asset", json!({"id": asset_id})),
     )
     .await;
-    assert_eq!(error_code(&envelope), "confirm_token_invalid", "{envelope}");
+    assert_eq!(error_code(&envelope), "not_row_owner", "{envelope}");
     assert_eq!(app.count_rows("assets").await, 1);
 }
 

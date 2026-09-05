@@ -1,0 +1,34 @@
+[package]
+name = "futurefin-engine-stochastic"
+version = "1.0.0"
+edition = "2021"
+publish = false
+license = "AGPL-3.0-only"
+repository = "https://github.com/maxlainz/FutureFin"
+authors = ["Max Lainz"]
+description = "Stochastic (Monte Carlo) evaluation of the FutureFin projection engine — statistical outputs only, never a money KPI"
+
+[dependencies]
+# El motor entero: este crate NO reimplementa el bucle, lo INSTANCIA con otro tipo numérico.
+futurefin-engine = { path = "../engine" }
+# Solo para la frontera de conversión (`MoneyOps::from_decimal` / `to_decimal`): aquí NO vive
+# dinero en `Decimal`, vive la traducción hacia y desde él.
+rust_decimal = { version = "1.41", features = ["maths"] }
+
+# El RNG de Monte Carlo (WP6, D11/D23). Vive AQUÍ y solo aquí: `crates/engine` sigue sin RNG y
+# sin coma flotante.
+#
+# **La reproducibilidad NO depende de esta versión**, y es a propósito: (1) ChaCha8 es un cifrado
+# de flujo especificado, así que la secuencia de bytes que sale de una clave de 32 bytes es la
+# misma en cualquier implementación correcta y en cualquier plataforma; (2) este crate construye
+# esos 32 bytes él mismo (`path_rng`, splitmix64) y **nunca llama a `SeedableRng::seed_from_u64`**,
+# cuya expansión sí es un detalle de la caja. El guardián de esa afirmación es el test
+# `the_chacha_stream_is_pinned`, que fija los tres primeros normales de una semilla conocida: si
+# una actualización moviera el flujo, falla ahí y no en silencio dentro de una banda.
+rand_chacha = "0.10"
+
+[dev-dependencies]
+# La batería de casos del motor se REUTILIZA por `#[path]` (`tests/common/cases.rs`): una sola
+# definición de los casos, dos crates que la corren. Estas tres son sus dependencias.
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+uuid = { version = "1", features = ["v4", "serde"] }

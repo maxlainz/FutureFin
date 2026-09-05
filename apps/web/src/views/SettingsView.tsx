@@ -37,8 +37,10 @@ import {
 } from "../lib/fire";
 import {
   SETTINGS_SUBTAB_LABEL,
+  TAB_PATH,
   type SettingsSubTabId,
 } from "../lib/navigation";
+import { appUrl } from "../lib/basePath";
 
 const CATEGORY_SCOPES: CategoryScope[] = ["asset", "liability", "income", "expense"];
 
@@ -84,6 +86,7 @@ export function SettingsView({
   hasMembership,
   canEditCategories,
   canEditHistory,
+  scopeReadOnly,
   currencyIso,
   calendarTz,
   onHistoryMutated,
@@ -93,6 +96,7 @@ export function SettingsView({
   onToggleMcpWrite,
   settingsSubTab,
   navigateSettingsSubTab,
+  navigate,
   visibleSettingsSubTabs,
   pendingUsers,
   pendingUsersBusy,
@@ -180,6 +184,8 @@ export function SettingsView({
   hasMembership: boolean;
   canEditCategories: boolean;
   canEditHistory: boolean;
+  /** Vista Hogar (D9/D32): agregado de solo lectura — el plan se edita desde la vista «Yo». */
+  scopeReadOnly: boolean;
   currencyIso: string;
   /** Zona horaria (IANA) de la instalación; el panel de histórico deriva «hoy» de ella. */
   calendarTz: string;
@@ -191,6 +197,8 @@ export function SettingsView({
   onToggleMcpWrite: (enabled: boolean) => void;
   settingsSubTab: SettingsSubTabId;
   navigateSettingsSubTab: (id: SettingsSubTabId) => void;
+  /** Navegación de la app (la usa el puntero a Jubilación del panel «Plan»). */
+  navigate: (path: string, replace?: boolean) => void;
   visibleSettingsSubTabs: SettingsSubTabId[];
   pendingUsers: UserResponse[];
   pendingUsersBusy: boolean;
@@ -253,6 +261,30 @@ export function SettingsView({
       ? undefined
       : categories.find((x) => x.id === editingCategoryId);
 
+  // ── Copia de seguridad personal: qué contraseña pide el modal de exportar ────────────────
+  //
+  // Una cuenta con contraseña sigue usando la suya (el servidor la verifica antes de cifrar).
+  // Una cuenta de identidad delegada —la que crea el add-on de Home Assistant— no tiene ninguna
+  // y **no debe** tenerla, así que crea aquí una contraseña propia del archivo, con confirmación
+  // porque una errata en un secreto que nadie más conoce deja el backup irrecuperable.
+  const backupNeedsOwnPassword = !user.has_password;
+  const [ffbackupExportPasswordRepeat, setFfbackupExportPasswordRepeat] =
+    useState("");
+  // La confirmación se borra cuando el modal se cierra, venga el cierre de donde venga: el
+  // botón Cancelar, la tecla Escape o el propio App.tsx al terminar la descarga. Colgarla del
+  // estado de apertura y no del handler es lo que cubre ese último camino.
+  useEffect(() => {
+    if (!ffbackupExportModalOpen) setFfbackupExportPasswordRepeat("");
+  }, [ffbackupExportModalOpen]);
+  const backupPasswordsDiffer =
+    backupNeedsOwnPassword &&
+    ffbackupExportPasswordRepeat.length > 0 &&
+    ffbackupExportPassword !== ffbackupExportPasswordRepeat;
+  const backupExportPasswordReady = backupNeedsOwnPassword
+    ? ffbackupExportPassword.length > 0 &&
+      ffbackupExportPassword === ffbackupExportPasswordRepeat
+    : true;
+
   const filteredCategories =
     categoryScopeFilter === "all"
       ? categories
@@ -286,8 +318,19 @@ export function SettingsView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [installation?.installation.id]);
 
+  /**
+   * El sub-tab «Plan» edita supuestos que alimentan la proyección; en la vista Hogar (agregado
+   * de N miembros) no hay una sola persona a la que atribuir el cambio, así que el panel se
+   * enseña en solo lectura y remite a la vista «Yo». Gatea también los autoguardados: dejarlos
+   * vivos con el formulario oculto guardaría a espaldas del usuario.
+   */
+  const planEditable = isOwner && !scopeReadOnly;
+  const planReadOnlyNote = scopeReadOnly
+    ? "Solo lectura. Tu plan se edita desde la vista «Yo»."
+    : "Solo lectura.";
+
   useEffect(() => {
-    if (!hasMembership || !isOwner) return;
+    if (!hasMembership || !planEditable) return;
     if (skipFireTaxAutosaveRef.current) {
       skipFireTaxAutosaveRef.current = false;
       return;
@@ -318,7 +361,7 @@ export function SettingsView({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [fireTaxDraft, hasMembership, isOwner, onSaveFire]);
+  }, [fireTaxDraft, hasMembership, planEditable, onSaveFire]);
 
   // ── Autoguardado de zona horaria (4.0.6: en Ajustes todo guarda solo) ──
   // Solo se lanza el PATCH cuando el draft es una IANA VÁLIDA y difiere del servidor:
@@ -365,7 +408,7 @@ export function SettingsView({
     draftInflationPct >= -2 &&
     draftInflationPct <= 50;
   useEffect(() => {
-    if (!hasMembership || !isOwner) return;
+    if (!hasMembership || !planEditable) return;
     if (!projectionDraftValid) return;
     if (
       draftInflationPct === serverInflationPct &&
@@ -382,7 +425,7 @@ export function SettingsView({
     serverInflationPct,
     serverShowAgeMode,
     hasMembership,
-    isOwner,
+    planEditable,
     saveInstallationProjection,
   ]);
 
@@ -574,9 +617,27 @@ export function SettingsView({
       ) : null}
 
       {settingsSubTab === "plan" && hasMembership ? (
-        isOwner ? (
+        planEditable ? (
         <section className="panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
+          {/* 5.0.0 (D13/D26): estrategia, edad objetivo, SWR y edad límite del horizonte dejaron
+              de ser del hogar y son de cada persona. Aquí solo queda el puntero — un ajuste que
+              se editaba en dos sitios acaba divergiendo en uno de ellos. */}
+          <p className="muted">
+            Tu estrategia, tu edad objetivo y tu SWR se editan en{" "}
+            <a
+              href={appUrl(TAB_PATH.retirement)}
+              onClick={(e) => {
+                if (e.button !== 0 || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey)
+                  return;
+                e.preventDefault();
+                navigate(TAB_PATH.retirement);
+              }}
+            >
+              Jubilación
+            </a>
+            .
+          </p>
           <div className="stack bordered-top">
             <label className="field">
               <span className="label-with-help">
@@ -595,7 +656,7 @@ export function SettingsView({
                 placeholder="2,5"
                 autoComplete="off"
               />
-              <small className="muted">
+              <p className="muted tight">
                 Se aplica al target FIRE para preservar tu poder adquisitivo. Los
                 ingresos, gastos y aportaciones se mantienen constantes en euros
                 — refleja «hacer lo que haces ahora». Usa <code>0</code> para
@@ -603,7 +664,7 @@ export function SettingsView({
                 {!projectionDraftValid
                   ? " Número entre 0 y 50 — sin guardar."
                   : null}
-              </small>
+              </p>
             </label>
             <label className="field">
               <span>Modo edad en la interfaz</span>
@@ -654,23 +715,23 @@ export function SettingsView({
                 modos vive en el HelpPopover del selector (settings.savings_source). */}
             <div className="field" id="savings-source-help">
               {(fireTaxDraft.savings_source ?? "budget") === "budget" ? (
-                <small className="muted">
+                <p className="muted tight">
                   La simulación ahorra cada mes lo que fijas en tu presupuesto
                   (ingresos − gastos presupuestados). No depende de tus
                   movimientos.
-                </small>
+                </p>
               ) : fireTaxDraft.savings_source === "transactions_avg" ? (
-                <small className="muted">
+                <p className="muted tight">
                   El ahorro sale de tus movimientos: ingreso y gasto promediados
                   por separado con las ventanas de abajo. Sin datos, ese lado cae
                   al presupuesto.
-                </small>
+                </p>
               ) : (
-                <small className="muted">
+                <p className="muted tight">
                   Ingresos del presupuesto y gasto medio real (ventana de abajo).
                   Solo acierta mientras mantengas el presupuesto de ingresos al
                   día.
-                </small>
+                </p>
               )}
             </div>
 
@@ -762,54 +823,35 @@ export function SettingsView({
                       </label>
                     </div>
                   ))}
-                  <label className="field">
-                    <span className="label-with-help">
-                      Horizonte: edad límite
-                      <HelpPopover
-                        title={HELP_TEXTS["settings.horizon_age"].title}
-                        body={HELP_TEXTS["settings.horizon_age"].body}
-                      />
-                    </span>
-                    <select
-                      value={String(fireTaxDraft.horizon_lifespan_age ?? 90)}
-                      onChange={(e) => {
-                        const n = Number(e.target.value);
-                        if (!Number.isInteger(n)) return;
-                        setFireTaxDraft((p) => ({
-                          ...p,
-                          horizon_lifespan_age: n,
-                        }));
-                      }}
-                    >
-                      {[85, 90, 95, 100, 105].map((edad) => (
-                        <option key={edad} value={String(edad)}>
-                          {edad} años
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="field">
-                    <span className="label-with-help">
-                      Plusvalía gravable de la retirada
-                      <HelpPopover
-                        title={HELP_TEXTS["settings.taxable_gain"].title}
-                        body={HELP_TEXTS["settings.taxable_gain"].body}
-                      />
-                    </span>
-                    <input
-                      inputMode="decimal"
-                      value={String(fireTaxDraft.taxable_gain_ratio ?? "1")}
-                      onChange={(e) => {
-                        const raw = e.target.value.trim().replace(",", ".");
-                        setFireTaxDraft((prev) => ({
-                          ...prev,
-                          taxable_gain_ratio: raw,
-                        }));
-                      }}
-                    />
-                  </label>
               </div>
             ) : null}
+
+            {/* La plusvalía gravable estaba ANIDADA dentro del bloque de las ventanas del
+                promedio, así que en el modo «Presupuesto» —el de serie— era invisible. Y no
+                depende del modo: gobierna el objetivo, el drenaje simulado y los dos umbrales
+                de Autonomía siempre. Un ajuste que la ayuda describe como vivo y la pantalla no
+                deja tocar es peor que no tenerlo. (El selector de edad límite compartía el
+                mismo anidamiento; se fue al perfil de jubilación en 5.0.0.) */}
+            <label className="field">
+              <span className="label-with-help">
+                Plusvalía gravable de la retirada
+                <HelpPopover
+                  title={HELP_TEXTS["settings.taxable_gain"].title}
+                  body={HELP_TEXTS["settings.taxable_gain"].body}
+                />
+              </span>
+              <input
+                inputMode="decimal"
+                value={String(fireTaxDraft.taxable_gain_ratio ?? "1")}
+                onChange={(e) => {
+                  const raw = e.target.value.trim().replace(",", ".");
+                  setFireTaxDraft((prev) => ({
+                    ...prev,
+                    taxable_gain_ratio: raw,
+                  }));
+                }}
+              />
+            </label>
             <p className="muted tight">
               {fireTaxSaving || installationProjectionSaving
                 ? "Guardando…"
@@ -820,13 +862,13 @@ export function SettingsView({
         ) : (
         <section className="panel muted-panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
-          <p className="muted tight">Solo lectura.</p>
+          <p className="muted tight">{planReadOnlyNote}</p>
         </section>
         )
       ) : null}
 
       {settingsSubTab === "plan" && hasMembership ? (
-        isOwner ? (
+        planEditable ? (
           <section className="panel">
             <h3 className="panel-title">Fiscalidad (IRPF ahorro)</h3>
             <div className="stack bordered-top">
@@ -938,7 +980,7 @@ export function SettingsView({
         ) : (
           <section className="panel muted-panel">
             <h3 className="panel-title">Fiscalidad (IRPF ahorro)</h3>
-            <p className="muted tight">Solo lectura.</p>
+            <p className="muted tight">{planReadOnlyNote}</p>
           </section>
         )
       ) : null}
@@ -1143,8 +1185,8 @@ export function SettingsView({
             <section className="panel">
               <h3 className="panel-title">Copia de seguridad personal</h3>
               <p className="muted">
-                Exporta o restaura un archivo <code>.ffbackup</code> cifrado con
-                tu contraseña que contiene solo tus datos: activos, pasivos,
+                Exporta o restaura un archivo <code>.ffbackup</code> cifrado
+                con una contraseña que contiene solo tus datos: activos, pasivos,
                 presupuesto, planificación, categorías usadas, fecha de
                 nacimiento y preferencias UI. Portable entre instalaciones.
               </p>
@@ -1359,27 +1401,65 @@ export function SettingsView({
       >
         <form className="stack" onSubmit={runFfbackupExport}>
           <ModalFormError message={ffbackupExportError} />
-          <p className="muted tight">
-            El archivo .ffbackup quedará cifrado con tu contraseña actual.
-            Guárdalo en un sitio seguro y recuerda la contraseña — sin ella
-            no se puede restaurar.
-          </p>
-          <label className="field">
-            <span>Tu contraseña</span>
-            <input
-              type="password"
-              autoComplete="current-password"
-              value={ffbackupExportPassword}
-              onChange={(e) => setFfbackupExportPassword(e.target.value)}
-              disabled={ffbackupExportBusy}
-              required
-            />
-          </label>
+          {backupNeedsOwnPassword ? (
+            <>
+              <p className="muted tight">
+                Solo protege este archivo: sin ella no se puede restaurar. No es
+                la contraseña de tu cuenta.
+              </p>
+              <label className="field">
+                <span>Crea una contraseña para este backup</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={ffbackupExportPassword}
+                  onChange={(e) => setFfbackupExportPassword(e.target.value)}
+                  disabled={ffbackupExportBusy}
+                  required
+                />
+              </label>
+              <label className="field">
+                <span>Repite la contraseña</span>
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={ffbackupExportPasswordRepeat}
+                  onChange={(e) =>
+                    setFfbackupExportPasswordRepeat(e.target.value)
+                  }
+                  disabled={ffbackupExportBusy}
+                  required
+                />
+                {backupPasswordsDiffer ? (
+                  <small className="muted">Las dos contraseñas no coinciden.</small>
+                ) : null}
+              </label>
+            </>
+          ) : (
+            <>
+              <p className="muted tight">
+                El archivo .ffbackup quedará cifrado con tu contraseña actual.
+                Guárdalo en un sitio seguro y recuerda la contraseña — sin ella
+                no se puede restaurar.
+              </p>
+              <label className="field">
+                <span>Tu contraseña</span>
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  value={ffbackupExportPassword}
+                  onChange={(e) => setFfbackupExportPassword(e.target.value)}
+                  disabled={ffbackupExportBusy}
+                  required
+                />
+              </label>
+            </>
+          )}
           <div className="asset-form-actions">
             <button
               type="submit"
               className="btn primary"
-              disabled={ffbackupExportBusy}
+              disabled={ffbackupExportBusy || !backupExportPasswordReady}
             >
               {ffbackupExportBusy ? "Generando…" : "Descargar .ffbackup"}
             </button>
@@ -1421,7 +1501,7 @@ export function SettingsView({
                 />
               </label>
               <label className="field">
-                <span>Contraseña del backup</span>
+                <span>Contraseña de este backup</span>
                 <input
                   type="password"
                   autoComplete="off"
@@ -1432,6 +1512,10 @@ export function SettingsView({
                   disabled={ffbackupImportBusy}
                   required
                 />
+                <small className="muted">
+                  La de tu cuenta cuando lo exportaste, o la que creaste al
+                  descargarlo si entras con Home Assistant.
+                </small>
               </label>
               <div className="asset-form-actions">
                 <button

@@ -78,17 +78,54 @@ Nunca en silencio. Es el mismo mecanismo probado de `futurefin-mcp-parity` §1.
 
 Si retiras una métrica, **retira su texto**; no lo dejes «por si vuelve». El test lo caza.
 
-## 6. Estado del catálogo (2026-08-25)
+**Cómo encuentra a los consumidores — y por qué son TRES patrones desde 5.0.0**: el test escanea
+`helpId="…"` (prop JSX), `HELP_TEXTS[…]` (incluidos los ternarios multilínea) y, nuevo,
+`helpId: "…"` en **forma de objeto**. Ese tercero se añadió porque los KPIs por estrategia se
+declaran como datos en `apps/web/src/lib/retirement-tiles.ts`, no como JSX: sin él, la mitad
+«ningún texto huérfano» habría empujado a **borrar seis textos vivos**. Lección general: cuando
+muevas la declaración de un tile de la vista a una tabla de datos, comprueba que el escáner sigue
+viéndola antes de creerte el verde.
+## 6. Estado del catálogo
 
-**22 entradas el 2026-08-31 (Ola 2: +6 —activos, ratio deuda/activos y los 4 KPIs de Pasivos— y 3 editadas)** repartidas en cinco zonas de la app. `grep -c '^  "' apps/web/src/lib/helpTexts.ts` para el recuento — no congeles este número;
-`grep -n '^  "' …` para la lista. Por si necesitas orientarte sin abrir el fichero:
+**El recuento no se congela aquí: se cuenta.** `grep -c '^  "' apps/web/src/lib/helpTexts.ts` da
+**53** el 2026-09-05 (rama `release/5.0.0`, tras la TERCERA vuelta de UX de Jubilación —
+`retirement.assumptions` se fue con el acordeón «Avanzado» y `retirement.success_threshold` con el
+umbral configurable; 55 tras U1b, 53 antes de ese commit, 52 antes del pase de correcciones de la
+revisión adversarial, 29 en `main`). El catálogo ha vuelto al mismo número por dos caminos
+distintos: **el recuento no identifica un estado**, solo delata que algo se movió, y por eso la
+lista importa más que la cifra. `grep -n '^  "' …` da esa lista, y
+`grep -n '^  "' …` da la lista. Contraste cruzado, por si la indentación del fichero se moviera:
+`grep -cE '^    title: "' …` y `grep -cE '^    body:$' …` tienen que dar el mismo número.
 
 | Vista | Ids |
 |---|---|
-| Resumen · salud financiera | `summary.savings`, `summary.liquid_assets`, `summary.runway`, `summary.net_worth`, `summary.net_return` **(nueva)** |
-| Jubilación | `retirement.target` **(nueva en 4.0.0)** |
+| Resumen · salud financiera | `summary.savings`, `summary.liquid_assets`, `summary.runway`, `summary.net_worth`, `summary.net_return`, `summary.plan` **(5.0.0)**, `summary.success` **(5.0.0)** |
+| Jubilación · plan y perfil | `retirement.target`, `retirement.crossing_reading` · `retirement.strategy` (desde V3 cuelga del `<h4>` de la tarjeta «Estrategia», no del `<h3>` del panel) · `retirement.target_age` · `retirement.pension` · `retirement.partial` · `retirement.withdrawal_rule` · `retirement.spend_mode` · `retirement.target_basis` · `retirement.bridge_discount` · `retirement.cash_buffer` (desde V6 **no** cuelga de un campo: cuelga de la línea informativa del colchón derivado) **(las diez, 5.0.0)** — `retirement.success_threshold` se **retiró** en V7 con el umbral configurable |
+| Jubilación · frase-hito (`RetirementView.tsx`, U1b) | `retirement.plan_sentence` (cabecera de «Resultado» — HelpPopover del panel, no de una tarjeta) **(5.0.0, U1b, #207)** — `retirement.assumptions` se **retiró** en V3 con el acordeón «Avanzado» |
+| Jubilación · KPIs por estrategia (`lib/retirement-tiles.ts`) | `retirement.required_contribution` · `retirement.disposable` · `retirement.coast_month` · `retirement.coast_number` · `retirement.partial_gap` · `retirement.bridge` **(5.0.0)** — desde U1b viven exclusivamente en `buildRetirementTilesV2`/`retirementDetailRows` (§6.3) |
+| Jubilación · Riesgo | `retirement.bands` · `retirement.success` · `retirement.depletion_by_age` · `retirement.coverage` **(5.0.0; `coverage` añadido tras el pase de correcciones)** |
 | Ajustes → Plan | `settings.savings_source`, `settings.income_window`, `settings.expense_window`, `settings.window_mode`, `settings.swr`, `settings.inflation` |
+| Activos | `assets.volatility` **(5.0.0)** |
 | Movimientos | `expenses.expense_avg`, `expenses.income_avg`, `expenses.savings` **(4.15.0)**, `expenses.savings_rate` **(4.15.0)**, `expenses.refunds` **(4.15.0)** — `expenses.savings_transferred` y `expenses.transferred_rate` se **retiraron** en 4.15.0 |
+
+(El estado anterior era de **22** entradas el 2026-08-31 —Ola 2: +6 de activos, ratio deuda/activos
+y los 4 KPIs de Pasivos— repartidas en cinco zonas.)
+
+**`retirement.plan_sentence` (5.0.0, U1b, #207) — la frase-hito es también una superficie de
+métrica**, no solo copy de layout. «Tu hito de jubilación» describe una lectura DERIVADA —qué
+dispara el mes que se enseña, y que depende de la estrategia (capital para `asap`/`pension_bridge`,
+edad para las tres restantes)—, no un campo crudo de la respuesta; su HelpPopover cuelga del título
+del panel «Resultado», no de una tarjeta, que es la primera entrada del catálogo en ese sitio.
+
+**`retirement.assumptions` — la única entrada que describía una LISTA, y por qué se retiró
+(V3, 2026-09-05).** «Supuestos del plan» documentaba de golpe retirada, regla, horizonte, colchón y
+umbral: no una cifra, sino la lectura de conjunto de la línea «Supuestos: …» que encabezaba el
+acordeón «Avanzado». Retirado el acordeón (los campos están hoy en su tarjeta, a la vista), la línea
+se quedó sin sujeto y el texto sin superficie — el test de cobertura bidireccional lo habría cazado
+como huérfano. **La lección para el catálogo**: una entrada que describe un CONTENEDOR y no una
+cifra vive exactamente lo que viva ese contenedor. Las entradas que describían esas mismas cifras
+por separado (`retirement.withdrawal_rule`, `retirement.cash_buffer`…) siguen todas vivas, que es
+justo por lo que su retirada no dejó ningún hueco.
 
 **4.15.0 — el «Ahorro» de Movimientos cambia de base, y es el caso de libro del §3.** Hasta 4.14.x la
 tarjeta rotulada «Ahorro»/«Traspasado a ahorro» era `−Σ(kind = savings)` — lo movido a productos de
@@ -104,13 +141,7 @@ ni categoría aparte ni ingreso; `totals.refunds_actual/_avg`). Retiradas `expen
 y `expenses.transferred_rate` (sus consumidores desaparecen con las tarjetas; el test de cobertura lo
 exige en las dos direcciones).
 
-**`retirement.target` — «Patrimonio objetivo»** (4.0.0). La métrica más cara de la app no tenía
-texto. Lo que dice, y por qué cada trozo: el objetivo es el gasto anual en jubilación **grosseado
-por impuestos si están activados** dividido entre el SWR; **la cifra grande está en euros de hoy** y
-**el paréntesis es ese mismo objetivo llevado al mes del cruce con la inflación configurada**. Ese
-último matiz es el que existía mal en la interfaz: el rótulo «Patrimonio objetivo (con inflación)»
-etiquetaba justo la cifra que NO la lleva. Si tocas la base del target, el gross-up o el SWR, esta
-entrada es la que hay que revisar (y ver `futurefin-fire-domain-reference`).
+**`retirement.target` — «Patrimonio objetivo»** (4.0.0; base declarada en 5.0.0). La métrica más cara de la app: gasto anual en jubilación **grosseado por impuestos si están activados** dividido entre el SWR, **más** el término finito de deuda. Desde 5.0.0 el texto **ya no promete una base fija**: la cifra grande está siempre en **la base que declara el subtítulo de su tarjeta**, y el id lo consumen **dos tarjetas que no miden lo mismo**: en **Jubilación** (`lib/retirement-tiles.ts`, «Objetivo (euros de hoy)») es `jubilacion_target_net_worth` —el objetivo evaluado en el mes 0, como si te jubilaras HOY—, con el nominal del mes del cruce en la fila «Objetivo al cruce (euros de ese mes)» de «Detalle del cálculo»; en **Proyección** (`views/ProjectionView.tsx`, «Objetivo al jubilarte») es `jubilacion_target_net_worth_nominal` —el objetivo del mes en que de verdad te jubilas— deflactado a euros de hoy mientras «En dinero de hoy» esté activo (`jubilacionTargetTileValue`, `lib/projection-chart.ts`). Dos campos distintos bajo el mismo texto: lo que los desambigua es el `detail` de la tarjeta, **no** el lector. El párrafo anterior era falso en Proyección desde el objetivo puente y sostenía el bug de 2,31× (F11, 5.0.0). Si tocas la base del target, el gross-up, el SWR **o la base en que se publica una de las dos tarjetas**, esta entrada es la que hay que revisar (y `futurefin-fire-domain-reference` §7).
 
 **`summary.net_return` — «Rendimiento neto»** (2026-08-25). Rendimiento anual **esperado** del
 patrimonio neto: `Σ valor·rentabilidad − Σ principal·TAE` sobre el patrimonio neto, con los
@@ -154,6 +185,129 @@ teoría («lo que se excluye cambia», «pasa a depender del modo»); lo que fal
 cuando el cambio no se siente como «tocar una métrica». Regla práctica: si tu cambio altera **qué
 filas entran en un agregado** o **cómo se llama algo que un texto cita**, `grep` el id en
 `helpTexts.ts` antes de cerrar.
+
+### 6.2 — 5.0.0: veintitrés entradas nuevas y una regla que se convierte en norma
+
+La jubilación por estrategias añadió **23 entradas de golpe** —el catálogo pasa de 29 a 52— y una
+sola edición: `retirement.target` («Patrimonio objetivo») conserva su texto de 4.x y le **añade** la
+cláusula que lo subordina a la estrategia. Ese matiz es el cambio de semántica de la ola: el
+objetivo se sigue calculando y dibujando siempre, pero **solo DECIDE la fecha en «Cuanto antes» y
+«Puente hasta la pensión»**; en las estrategias por edad manda la edad y el objetivo baja a ser la
+referencia contra la que se lee si llegas o no. Un texto que hubiera seguido diciendo «cuando tu
+patrimonio alcanza esta cifra, te jubilas» habría sido falso en tres de las cinco estrategias.
+
+Contrato de una línea por entrada (el texto completo vive en `helpTexts.ts`; esto es el índice):
+
+| Id | Qué mide, en una línea |
+|---|---|
+| `retirement.strategy` | Qué **dispara** la jubilación y cómo se dimensiona el objetivo. Es por usuario, no del hogar |
+| `retirement.target_age` | Edad a la que dejas de trabajar **en la simulación**: manda sobre el capital en «A una edad fija» y «Coast FIRE», es el fin de la fase parcial en «Media jornada», y exige fecha de nacimiento |
+| `retirement.crossing_reading` | El mes en que la simulación te jubila **de verdad** (el que marcan chart y Resumen); con las estrategias por edad el «cruce del objetivo» pasa a ser **solo una lectura** |
+| `retirement.pension` | Renta vitalicia **con fecha**: importe mensual en euros de hoy + edad de inicio. Su fecha cambia el **objetivo**, no solo el flujo de caja |
+| `retirement.partial` | Fase de media jornada desde una edad, con un ingreso declarado en euros de hoy (0 = año sabático); el hueco hasta el gasto lo cubre el capital y termina en la jubilación total |
+| `retirement.withdrawal_rule` | Cuánto sacas del patrimonio cada mes ya jubilado. **Los porcentajes son BRUTOS: el impuesto de la venta va dentro** |
+| `retirement.spend_mode` | Dos lecturas de la misma regla: como **techo** (retiras lo necesario, nunca más de lo permitido) o como **gasto** (retiras lo que dice la regla haya o no necesidad). No cambia el objetivo |
+| `retirement.target_basis` | Sobre qué se dimensiona el objetivo: renta perpetua (ignora la pensión) o puente hasta la pensión. **Si no eliges**, puente cuando hay pensión declarada y perpetua cuando no |
+| `retirement.bridge_discount` | Tasa con la que se descuentan los años de puente (rentabilidad de tus líquidos · tu SWR · sin descuento). Solo afecta al objetivo si la base es el puente |
+| `retirement.cash_buffer` | Dinero siempre en efectivo durante la jubilación, en un líquido sin volatilidad. Desde V6 **no lo pide el usuario: se DERIVA del tope de su regla de ahorro** y la SPA lo informa (procedencia, equivalente en meses, dónde se cambia). Es el TOPE en euros, no una conversión a meses. **Solo existe en los escenarios con volatilidad**, y CUESTA puntos de éxito — ver abajo |
+| `retirement.required_contribution` | Aportación mensual **mínima** que llega al objetivo en la edad elegida, hallada **simulando el plan entero**. Es un **techo** sobre lo que el reparto invierte, no un importe garantizado |
+| `retirement.disposable` | Lo que **sobra** por encima de lo que exige la estrategia. **Dos bases declaradas** — ver la norma de abajo |
+| `retirement.coast_month` | Primer mes desde el que puedes dejar de aportar y llegar igual. «No alcanzable» ≠ dato ausente |
+| `retirement.coast_number` | Patrimonio **líquido** con el que se ENTRA en el mes coast. No es el objetivo de jubilación ni el patrimonio total |
+| `retirement.partial_gap` | Capital a perpetuidad para lo que la media jornada NO paga (gasto − ingreso parcial − parte de pensión, con impuestos por delante, ÷ SWR). Informativo: no dispara nada |
+| `retirement.bridge` | Años entre jubilación y pensión, pagados enteros por el patrimonio; el paréntesis es la tasa de retirada **efectiva** de esos años y **puede superar el SWR sin ser un error** |
+| `retirement.bands` | Miles de futuros del mismo plan sorteando cada mes; la franja va del escenario 10 al 90. **La mediana es el valor central de cada mes por separado: NO es un futuro concreto** |
+| `retirement.success` | % de escenarios en que pasan DOS cosas a la vez: te jubilas dentro del horizonte (o en tu edad objetivo) **y** la cartera no se agota nunca. **Corte del color FIJO desde V7** (verde solo al 100 %, ámbar hasta el 90 %, rojo por debajo): el umbral configurable se retiró. Un plan que nunca se jubila NO cuenta como éxito aunque el dinero siga entero — cuando hay escenarios así, se publican aparte cuántos son (`never_retired_probability`) y qué parte de los que sí se jubilan aguanta (`success_given_retired`). Un **recorte** de la regla de retirada tampoco cuenta como fracaso aquí: se mide en `retirement.coverage` |
+| `retirement.depletion_by_age` | Fracción **acumulada** de escenarios que agotaron la cartera a esa edad **o antes**; solo puede crecer con la edad. **Desde V5 su superficie principal es el COLOR de la banda del gráfico** (verde 0 % · ámbar 5 % · rojo ≥ 10 %) con el porcentaje exacto en el hover, más la fila `depletion_total` de «Detalle del cálculo» — el total al final del horizonte, que es lo único que el color no puede rotular |
+| `retirement.coverage` | Dos lecturas de la cobertura real de tu gasto de jubilación, **en TODAS las reglas de retirada, incluida `fixed_real`**: meses por debajo del gasto (mediana) y qué fracción de la necesidad se pagó de verdad — contando tanto lo que la regla se negó a sacar como lo que la cartera no pudo financiar. 100 % = cada euro de necesidad, cero meses por debajo. Antes se ocultaban con `fixed_real` porque solo medían el recorte de la regla (que ahí es 0 por construcción, dando 1,0 siempre); al incluir también el descubierto de la cartera, un fixture medido pasó de mostrar 1,0 a mostrar 0,0865 — justo el caso en que la cobertura tiene una sola causa y es la peor |
+| `summary.plan` | Estrategia + fecha y edad en que la simulación jubila de verdad. Las dos cifras del margen son **las mismas** del panel de Jubilación, copiadas, nunca recalculadas |
+| `summary.success` | El KPI coloreado del Resumen; es el **MISMO sorteo** que dibuja la sección Riesgo |
+| `assets.volatility` | Desviación típica **anual** del retorno del activo (no una pérdida esperada). **Solo alimenta las bandas**: la línea de proyección no la usa |
+
+**La norma que esta ola convierte en obligación: si una cifra tiene DOS bases, el texto declara las
+dos.** El precedente ya no es una anécdota, es la forma canónica —`retirement.disposable`, el mismo
+campo `disposable_monthly` significando cosas distintas—:
+
+> «La base cambia con la estrategia y por eso conviene mirarla: **con una edad objetivo es tu
+> sobrante mensual máximo menos el ahorro necesario; con Coast FIRE es TODO tu sobrante, pero solo a
+> partir del mes coast** — antes vale cero de verdad […]. No existe en «Cuanto antes»: ahí todo el
+> ahorro va al objetivo por definición.»
+
+Tres cosas en un párrafo: las dos bases, un **cero de verdad** distinguido de una ausencia, y el
+modo en el que la métrica **no existe**. Es exactamente lo que el incidente de 3.9.0 pedía (§1) y lo
+contrario de lo que la arqueología prohíbe: **declarar la base, jamás renombrar el campo** para
+desambiguarlo de otro con el mismo nombre. La misma forma la usan `retirement.target_basis` (dos
+bases + default implícito), `retirement.spend_mode` («dos lecturas de la misma regla») y
+`retirement.bridge_discount` (tres tasas para la misma cifra).
+
+**Una entrada cambia de SUJETO sin cambiar de nombre, y por eso se reescribió entera (V6).**
+`retirement.cash_buffer` describía un ajuste que el usuario declaraba en meses. Desde V6 describe un
+valor que el servidor **DERIVA del tope de su regla de ahorro**, y las tres cosas que un texto de
+métrica tiene que decir cuando eso pasa son: **de dónde sale** («lo inferimos del tope de tu regla»,
+no «lo has pedido»), **dónde se cambia** (en Reglas de ahorro, no en esta pantalla) y **qué unidad
+es de verdad** (el tope en euros, nominal y fijo; los meses son una equivalencia informativa,
+porque un colchón indexado valdría casi el doble a veinte años). Sin la primera, un valor que
+aparece solo se lee como un ajuste que alguien hizo.
+
+Y el **signo del efecto va sin matizar**: el dinero fuera del mercado **resta** puntos de
+probabilidad de éxito. La versión anterior contaba las dos caras («protege +3,9 pp si renta como tu
+cartera, cuesta −3,5 pp netos con una cuenta al 0 %») porque el usuario ELEGÍA el colchón y merecía
+el balance completo para decidir. Ahora no lo elige: le llega derivado de otra decisión suya, y lo
+único accionable es el precio. El owner aceptó ese precio al elegir V6, y el texto lo dice en vez de
+esconderlo detrás de un condicional que casi nadie cumple.
+
+**Y una que declara su propia inutilidad cuando falta el dato**: `retirement.success` dice que
+**sin volatilidad declarada en los activos el número no significa nada** (la respuesta lo publica
+como `any_volatility_declared: false`). Un «éxito 100 %» sobre una cartera sin σ es aritméticamente
+cierto y semánticamente vacío: es la clase de cifra que este catálogo existe para no dejar suelta.
+`retirement.success_threshold` decía lo mismo y **se retiró en V7**: el listón dejó de ser del
+usuario, así que ya no había ajuste que describir.
+
+### 6.3 — U1b: la cabecera de resultados es un TOPE, no un catálogo distinto (5.0.0, U7/#207)
+
+El rediseño UX (`RetirementView.tsx`, commit `debc52d`) no cambió el TEXTO de ninguna de las seis
+entradas de §6.2 que alimentan las tarjetas de estrategia — **sigue siendo el mismo modelo, solo
+cambia cuántas tarjetas se enseñan a la vez y dónde va lo que no cabe**. La regla de esta sección:
+si tocas la base de una de estas cifras, revisa su entrada de §6.2; si tocas CUÁNTAS se enseñan o
+en qué orden se caen, esta es la que hay que revisar.
+
+- **El tope es 3** (`RETIREMENT_TILES_V2_CAP`, `lib/retirement-tiles.ts`): «Objetivo» (`retirement.target`,
+  siempre primera, nunca se cae) → las de la estrategia (ahorro necesario + margen
+  —`retirement.required_contribution`/`retirement.disposable`— en `retire_at_age`/`partial` con
+  solve; mes coast + número coast —`retirement.coast_month`/`retirement.coast_number`— en `coast`;
+  hueco de media jornada —`retirement.partial_gap`— en `partial`) → el puente
+  (`retirement.bridge`), **siempre el último candidato**, con cualquier estrategia que declare una
+  pensión con fecha. Al pasarse del tope se trunca **por el final**: `partial` con solve de edad
+  enseña objetivo + ahorro + margen y pierde el hueco y el puente; `coast` nunca enseña margen (sus
+  dos tarjetas propias ocupan los dos huecos, a diferencia de la v1 — el margen de `coast` sigue
+  publicándose por el servidor y se lee en el Resumen); `asap` enseña objetivo (+ puente si hay
+  pensión), la estrategia que menos preguntas hace.
+- **Lo que no cabe NO desaparece, baja a «Detalle del cálculo»** (`retirementDetailRows`): objetivo
+  al cruce (nominal), cruce del objetivo (solo si difiere de la jubilación efectiva), margen
+  acumulado en dinero de hoy, descuento del puente, cobertura de la pensión, y los avisos no-danger
+  de `buildRetirementNotices`. Ninguna de estas filas es una entrada nueva del catálogo: son las
+  MISMAS cifras que ya describían `retirement.target`/`retirement.disposable`/
+  `retirement.bridge_discount`, solo que fuera de la tarjeta.
+- **El puente se mide correctamente desde U1b (fix S8)**: `pension_start_month_index −
+  jubilacion_month_index`, los dos en la MISMA rejilla 0-based (mes 0 = hoy), nunca «meses desde
+  hoy hasta la pensión» (el bug de la v1: un puente real de 12 años se leía como 22 porque incluía
+  los años que faltan para jubilarse — 35 años y 10 meses en la demo en vez de 12). El rótulo de la
+  tarjeta es «Puente 60→72» cuando hay edades de los dos extremos (jubilación → inicio de la
+  pensión), o «Puente hasta la pensión» sin ellas.
+- **`retirement.plan_sentence` es ahora la primera lectura, no las tarjetas** (§6, fila nueva):
+  antes de U1b el resultado se leía en tres tarjetas («Jubilación», «Años», «Edad») que había que
+  volver a juntar; ahora es una oración (`lib/plan-sentence.ts`) y las tarjetas son el detalle.
+- **`pct_source` (U0/U4, campo del contrato, no una entrada del catálogo)**: `withdrawal_rule.pct`
+  y `hybrid.start_pct` pasan a opcionales — ausentes, se resuelven contra `swr_pct` en
+  `resolve_withdrawal_rule` (servidor) / `effectiveWithdrawalPct` (cliente, `lib/retirementProfile.ts`)
+  y la respuesta publica `pct_source: "swr" | "explicit"` (ausente en `fixed_real`, que no retira
+  un porcentaje). No es un campo declarativo del mismo tipo que `basis`/`totals.basis` (§7): no
+  describe la PROCEDENCIA de un agregado, describe si un valor concreto fue TECLEADO o HEREDADO, y
+  su lectura vive en la UI como texto derivado (`withdrawalPctNote`, `lib/retirement-form.ts`:
+  «Retira el X %: tu tasa de retirada» si `inherited`, «Regla al X %, fijado por API» si alguien
+  puso un `pct` explícito por HTTP/MCP) — no entra en `helpTexts.ts` por la misma razón que §7 da
+  para `basis`: hoy solo tiene un consumidor (esa nota bajo el selector de regla), y si algún día
+  gana una tarjeta propia, ese es el momento de darle entrada aquí.
 
 ## 7. Campos declarativos que no son texto de ayuda: `basis` y las marcas de unidad (4.4.0)
 
@@ -223,7 +377,40 @@ usan el chart, no tarjetas con popover).
 
 ## 8. Provenance and maintenance
 
-Introducido en 3.9.0 junto al popover de ayuda. **Re-verificado y ampliado el 2026-08-22 (4.0.0)**:
+**Re-sincronizado el 2026-09-05 tras la TERCERA vuelta de UX de Jubilación (V1–V7, feedback F2 y
+F5–F10 del owner, mismo issue #207)**: el catálogo BAJA de 55 a **53** con dos retiradas —
+`retirement.assumptions` (V3: se fue con el acordeón «Avanzado» que resumía) y
+`retirement.success_threshold` (V7: el umbral configurable dejó de existir; el corte es fijo, verde
+solo al 100 %)—; `retirement.cash_buffer` **reescrita entera** (V6: el colchón se DERIVA del tope de
+la regla de ahorro, y el texto declara procedencia, salida y el signo del efecto sin matizar);
+`retirement.depletion_by_age` reescrita (su superficie principal es ahora el COLOR de la banda, más
+la fila `depletion_total` del detalle); `retirement.bands` gana una frase sobre ese color;
+`retirement.success` y `summary.success` pasan del umbral configurable al corte fijo; y
+`retirement.target` reescrita por WP-E (dos tarjetas, dos campos, base declarada en el subtítulo).
+Las dos filas del mapa de vistas se actualizan en §6.
+
+Introducido en 3.9.0 junto al popover de ayuda. **Ampliado el 2026-09-03 (5.0.0, issue #207)**:
+§5 (el tercer patrón del escáner de cobertura, la forma `helpId:` de objeto), §6 (recuento por
+comando: 52; el mapa de vistas gana Jubilación·plan, Jubilación·KPIs, Jubilación·Riesgo y Activos) y
+§6.2 (las 23 entradas nuevas, la única edición —`retirement.target` subordinado a la estrategia—, la
+norma de las dos bases y las dos entradas que documentan un resultado incómodo).
+
+**Ampliado el 2026-09-03 en el pase de documentación U5b** (tras aterrizar `debc52d`, rediseño UX
+U1b de Jubilación, issue #207): el catálogo sube de 53 a 55 con `retirement.plan_sentence` y
+`retirement.assumptions` (§6, fila nueva «Jubilación · frase-hito y supuestos»); nueva §6.3 —la
+cabecera de resultados es un TOPE de 3 tarjetas con orden de prioridad fijo, no un catálogo nuevo:
+las seis entradas de §6.2 que alimentan tiles no cambiaron de texto, solo de cuántas se enseñan a
+la vez y adónde va lo que no cabe (`retirementDetailRows`)—; y `pct_source` documentado como campo
+declarativo (no entrada del catálogo, mismo criterio que §7 aplica a `basis`).
+
+**Re-sincronizado el 2026-09-03 tras el pase de correcciones de la revisión adversarial** (commit
+`0668f37` del motor + su seguimiento en `apps/web`, issue #207 cerrado): el catálogo sube de 52 a
+**53** con la entrada nueva `retirement.coverage` (añadida a Jubilación·Riesgo); `retirement.success`
+y `summary.success` pasan a exigir las DOS condiciones (jubilarse dentro del horizonte y no agotar,
+nunca solo «no agotar»); `retirement.cash_buffer` gana el hallazgo corregido (protege +3,9 pp con el
+colchón a la rentabilidad de la cartera, cuesta neto −3,5 pp con una cuenta al 0 %); y los dos
+marcadores `<!-- MC: revisar tras el pase de correcciones -->` se resuelven y se retiran. **Re-verificado y
+ampliado el 2026-08-22 (4.0.0)**:
 §6 (estado del catálogo, `retirement.target`) y §6.1 (las cuatro derivas de la auditoría previa a la
 publicación, ya corregidas en `helpTexts.ts`). **Ampliado el 2026-08-28 (Fase 5 del tren 4.4.0,
 issue #86)**: §7 — decisión razonada de NO dar entrada a `financial_health.basis`/`totals.basis`
@@ -233,8 +420,21 @@ issue #86)**: §7 — decisión razonada de NO dar entrada a `financial_health.b
 
 ```bash
 # Entradas del catálogo y consumidores
-grep -c '^  "' apps/web/src/lib/helpTexts.ts        # 16 a 2026-08-25 (15 el 2026-08-22)
-grep -rn 'helpId=' apps/web/src --include='*.tsx' | wc -l
+grep -c '^  "' apps/web/src/lib/helpTexts.ts        # 53 el 2026-09-05 tras la 3.ª vuelta de UX (55 tras U1b;
+  # 53 antes; 52 tras el pase de correcciones; 29 en main; 16 a 2026-08-25). OJO: el catálogo ha
+  # pasado por 53 DOS veces con listas distintas — el número no identifica un estado, solo delata
+  # que algo se movió. La lista (`grep -n`) es la que hay que mirar.
+grep -cE '^    title: "' apps/web/src/lib/helpTexts.ts   # mismo número: contraste de indentación
+grep -rn 'helpId=' apps/web/src --include='*.tsx' | wc -l   # 23 el 2026-09-05 — consumidores en JSX
+grep -rn 'helpId:' apps/web/src --include='*.ts' | wc -l    # 38 el 2026-09-05 (40 tras U1b). El «12» que
+  # este comando citaba ya estaba obsoleto ANTES de U1b: en el commit padre (`055a185`) daba 20
+  # (`retirement-tiles.ts` 15 + `risk-bands.ts` 3 + `helpTexts.test.ts` 2), no 12 — nadie lo
+  # re-verificó al escribirlo. U1b sube a 40 al añadir `lib/retirement-form.ts` con su tabla
+  # PLAN_FIELD_HELP (20 hits, incluida la anotación de tipo). Consumidores en forma de OBJETO
+  # (5.0.0). Repártelo por fichero si necesitas auditar uno:
+  # `for f in helpTexts.test.ts retirement-form.ts retirement-tiles.ts risk-bands.ts; do grep -c 'helpId:' apps/web/src/lib/$f; done`
+# Los nombres de producto de las 5 estrategias viven una sola vez (D33):
+grep -n 'RETIREMENT_STRATEGY_LABEL' -A 6 apps/web/src/lib/retirementProfile.ts
 # Los dos hechos que §6.1 afirma sobre el código, sin compilar:
 grep -n 'in_window\|window_start_ym' apps/api/src/handlers/transactions/summary.rs  # tramo medio-abierto
 grep -n 'plan:' apps/web/src/lib/navigation.ts                                      # la sub-pestaña se llama «Plan»

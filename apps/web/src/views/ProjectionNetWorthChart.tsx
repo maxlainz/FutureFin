@@ -29,6 +29,7 @@ import {
 import {
   ASSET_LINE_COLORS,
   buildProjectionChartLayout,
+  buildWithdrawalTooltipRows,
   deflationFactorAt,
   formatProjectionChartHorizonLine,
   niceYTicks,
@@ -36,6 +37,7 @@ import {
   projectionMaxXTicks,
   projectionXTickLabel,
   projectionXTicks,
+  resolveDeflationAnnualPct,
   thinTicksFromEnd,
 } from "../lib/projection-chart";
 import {
@@ -45,6 +47,14 @@ import {
   legendOrderByPeakDesc,
   topAssetTooltipRows,
 } from "../lib/chart-legend";
+import {
+  buildHouseholdMemberLegendItems,
+  buildPhaseMarks,
+  buildPhaseSegments,
+  type PhaseMark,
+} from "../lib/phase-strip";
+import { buildHouseholdMemberLines, memberValueAtMonth } from "../lib/member-lines";
+import { buildPlanAuxSeries } from "../lib/plan-series";
 import { ChartLegend } from "../components/charts/ChartLegend";
 import {
   formatAxisMoney,
@@ -284,11 +294,14 @@ export function ProjectionNetWorthChart({
   // la misma con la que el servidor construyó `net_worth_real` y `milestones_real`) y solo cae a
   // la de la instalación con un backend antiguo — re-obtenerla por otro canal era una vía de
   // divergencia silenciosa.
-  const deflationPct = useMemo(() => {
-    const s = series.deflation_annual_inflation_percent;
-    const parsed = s !== undefined ? Number(s) : Number.NaN;
-    return Number.isFinite(parsed) ? parsed : installationInflationPct;
-  }, [series.deflation_annual_inflation_percent, installationInflationPct]);
+  const deflationPct = useMemo(
+    () =>
+      resolveDeflationAnnualPct(
+        series.deflation_annual_inflation_percent,
+        installationInflationPct,
+      ),
+    [series.deflation_annual_inflation_percent, installationInflationPct],
+  );
   const effectivePct = inflationAdjusted && deflationPct !== 0 ? deflationPct : 0;
   // #136-5a: la serie «aportado en euros de hoy» correcta exige deflactar CADA aportación por su
   // propio mes, y con densidad hybrid un delta entre puntos abarca hasta 12 meses: la cifra no es
@@ -381,18 +394,51 @@ export function ProjectionNetWorthChart({
         assetStacks[i].tops[k] = cursor;
       }
     }
+    // ── Líneas finas por miembro (D32, vista Hogar) ────────────────────────────────────
+    // La Σ en grueso ya está arriba; esto es de quién es cada parte. Deflactadas con el MISMO
+    // `deflator` por `month_index` real que las áreas de activo (el servidor no publica una
+    // variante «en euros de hoy» por miembro) y recortadas al horizonte propio de cada uno:
+    // más allá, esa persona no declaró vivir y la línea TERMINA. En «Yo» no hay `members[]` y
+    // esto es un array vacío que no cuesta nada.
+    const memberLines = buildHouseholdMemberLines(series.members, deflator);
+    // ── Series auxiliares discontinuas del plan (D29) ──────────────────────────────────
+    // «Capital necesario» y «si dejas de aportar en el mes coast»: dos ejecuciones MÁS del
+    // motor, no un descuento escalar. Vienen paralelas a `series.points` (solo futuro), así que
+    // se re-mapean con el MISMO `futureOffset` que el objetivo FIRE y se deflactan con el mismo
+    // `deflator` por `month_index` real. Con `asap`/`pension_bridge` no hay solve y la lista
+    // sale vacía: el chart queda idéntico a 4.15.x. `disposable_capital` NO se dibuja (D31).
+    const planAux = buildPlanAuxSeries({
+      requiredCapitalPath: series.required_capital_path,
+      coastPath: series.coast_path,
+      responsePointCount: series.points.length,
+      points: pts,
+      futureOffset: merged.futureOffset,
+      deflator,
+    });
     const startNwParsed = parseDisplayDecimal(series.starting_net_worth);
     const startNw = startNwParsed !== null ? startNwParsed : nw[0] ?? 0;
     // El histórico puede bajar el NW por debajo de 0 en el pasado: el eje debe permitir negativos
     // aunque el patrimonio de partida (mes 0) sea positivo.
     const allowNegativeAxis = startNw < 0 || merged.minNetWorth < 0;
     chartPerf.mark("baseSeries-end");
-    return { nw, cc, fireTarget, assetSeries, assetStacks, allowNegativeAxis };
+    return {
+      nw,
+      cc,
+      fireTarget,
+      assetSeries,
+      assetStacks,
+      allowNegativeAxis,
+      memberLines,
+      planAux,
+    };
   }, [
     pts,
     series.starting_net_worth,
     series.points.length,
     series.fire_target_series,
+    series.required_capital_path,
+    series.coast_path,
+    series.members,
     merged.assetSeries,
     merged.futureOffset,
     merged.minNetWorth,
@@ -401,14 +447,35 @@ export function ProjectionNetWorthChart({
 
   // ── Modelo de la leyenda (HTML, fuera del SVG) ──
   const legendStructural = useMemo(
-    () =>
-      buildStructuralLegendItems({
+    () => [
+      ...buildStructuralLegendItems({
         hasFire: hasFireTargetSeries,
         hasHistory: historyStartMonth < 0,
         historyIsAssetsOnly: merged.pastIsAssetsOnly,
         hasContributed: !ccRetired,
       }),
-    [hasFireTargetSeries, historyStartMonth, merged.pastIsAssetsOnly, ccRetired],
+      // D29 — auxiliares del plan. Salen de las MISMAS líneas que se dibujan (label y color
+      // incluidos), no de una lista paralela: una leyenda que se escribe aparte es una leyenda
+      // que un día rotula una curva que ya no está.
+      ...(baseSeries?.planAux ?? []).map((l) => ({
+        key: l.key,
+        label: l.label,
+        color: l.color,
+        swatch: "dashed" as const,
+      })),
+      // D32 — Hogar: la curva gruesa es la Σ y bajo ella va una línea fina por miembro
+      // (`lib/member-lines.ts`). Estas entradas rotulan ESA línea y, con el mismo color, su tick
+      // de jubilación en la tira de fases. En «Yo» no hay `members[]` y esto no añade nada.
+      ...buildHouseholdMemberLegendItems(series.members),
+    ],
+    [
+      hasFireTargetSeries,
+      historyStartMonth,
+      merged.pastIsAssetsOnly,
+      ccRetired,
+      baseSeries,
+      series.members,
+    ],
   );
 
   // Activos por peak DESC para la leyenda, conservando el color del orden de
@@ -463,8 +530,16 @@ export function ProjectionNetWorthChart({
       chartPerf.mark("model-end");
       return null;
     }
-    const { nw, cc, fireTarget, assetSeries, assetStacks, allowNegativeAxis } =
-      baseSeries;
+    const {
+      nw,
+      cc,
+      fireTarget,
+      assetSeries,
+      assetStacks,
+      allowNegativeAxis,
+      memberLines,
+      planAux,
+    } = baseSeries;
     const totalMonths = series.months;
     // Dominio panorámico: incluye el pasado histórico (historyStartMonth ≤ 0). Sin histórico,
     // domainMonths === totalMonths → comportamiento idéntico al actual.
@@ -506,12 +581,52 @@ export function ProjectionNetWorthChart({
     const assetVisibleValues = assetSeries.flatMap((as) =>
       visibleIndices.map((i) => as.values[i] ?? 0),
     );
+    // Las líneas de miembro se recortan por MES (sus vértices ya vienen en meses, no por
+    // posición: la serie de un miembro puede acabar antes que `points` si su horizonte es más
+    // corto, y filtrar por índice de array los descuadraría).
+    const memberVisible = memberLines.map((line) => ({
+      ...line,
+      points: line.points.filter(
+        (p) =>
+          p.month_index >= visibleMonthStart && p.month_index <= visibleMonthEnd,
+      ),
+    }));
+    // Entran en el dominio Y: un miembro con deuda neta cae por debajo de la Σ y otro puede
+    // superarla si un tercero está en negativo. Dejarlos fuera del rango los recortaría contra
+    // el clipPath, y una línea recortada se lee como una línea que se ACABA — que es justo lo
+    // que aquí significa otra cosa (el horizonte propio).
+    const memberVisibleValues = memberVisible.flatMap((l) =>
+      l.points.map((p) => p.value),
+    );
+    // Las auxiliares del plan SÍ entran en el dominio Y (a diferencia del objetivo FIRE, que
+    // puede crecer un orden de magnitud por encima del patrimonio y aplastaría la curva): son
+    // series LÍQUIDAS de la misma simulación, viven en el mismo rango, y recortarlas contra el
+    // clipPath las haría parecer curvas que se ACABAN — que aquí significaría otra cosa.
+    const planAuxVisible = planAux.map((line) => ({
+      ...line,
+      values: visibleIndices.map((i) => line.values[i] ?? null),
+    }));
+    const planAuxVisibleValues = planAuxVisible.flatMap((l) =>
+      l.values.filter((v): v is number => v != null && Number.isFinite(v)),
+    );
 
     // El target FIRE inflado puede crecer muy por encima del patrimonio en horizontes largos;
     // dejarlo fuera del rango del eje Y para no aplastar la curva del patrimonio. La línea se
     // recorta visualmente por el clipPath del plot si excede.
-    const dataMin = Math.min(...nwVisible, ...ccVisible, ...assetVisibleValues);
-    const dataMax = Math.max(...nwVisible, ...ccVisible, ...assetVisibleValues);
+    const dataMin = Math.min(
+      ...nwVisible,
+      ...ccVisible,
+      ...assetVisibleValues,
+      ...memberVisibleValues,
+      ...planAuxVisibleValues,
+    );
+    const dataMax = Math.max(
+      ...nwVisible,
+      ...ccVisible,
+      ...assetVisibleValues,
+      ...memberVisibleValues,
+      ...planAuxVisibleValues,
+    );
     const rawSpan = dataMax - dataMin;
     const padY =
       rawSpan > 0 ? rawSpan * 0.07 : Math.max(Math.abs(dataMax) * 0.06, 1);
@@ -575,7 +690,38 @@ export function ProjectionNetWorthChart({
     const viewHeight = layoutDims.H;
 
     const { W, H, ml, mr, mt, mb, pw } = layoutDims;
-    const ph = Math.max(60, layoutDims.ph - xAxisExtraBottom);
+
+    // ── Tira de fases (D29) ────────────────────────────────────────────────────────────
+    //
+    // La altura de la tira sale del PLOT, igual que los 38px de las etiquetas rotadas: el
+    // viewBox tiene que seguir casando exacto con la caja CSS medida o `meet` encogería el
+    // dibujo entero y lo centraría con bandas laterales. Sin fases que pintar la tira mide 0
+    // y la geometría queda idéntica a 4.15.x — el invariante de «desktop cero».
+    const phaseSegmentsAll = buildPhaseSegments(series.phase_transitions, {
+      startMonth: visibleMonthStart,
+      endMonth: visibleMonthEnd,
+    });
+    const phaseMarksAll = buildPhaseMarks({
+      pensionStartMonthIndex: series.pension_start_month_index,
+      liquidCrossingMonthIndex: series.liquid_crossing_month_index,
+      retirementTrigger: series.retirement_trigger,
+      retirementMonthIndex: series.retirement_month_index,
+      members: series.members,
+      window: { startMonth: visibleMonthStart, endMonth: visibleMonthEnd },
+    });
+    const hasPhaseStrip =
+      phaseSegmentsAll.length > 0 || phaseMarksAll.length > 0;
+    // 12px de banda + 3 de aire; con marcas, 12 más para su fila de rótulos.
+    const phaseStripBandH = hasPhaseStrip ? 12 : 0;
+    const phaseStripH = hasPhaseStrip
+      ? phaseStripBandH + 3 + (phaseMarksAll.length > 0 ? 12 : 0)
+      : 0;
+
+    const ph = Math.max(60, layoutDims.ph - xAxisExtraBottom - phaseStripH);
+    // Fila de etiquetas del eje X: baja lo que ocupe la tira. Una sola definición para los
+    // años y para «Hoy» — hasta 5.0.0 el mismo cálculo estaba escrito dos veces.
+    const xTickBaselineY =
+      mt + ph + phaseStripH + (layoutDims.narrow ? 12 : 14) + (rotateXLabels ? 8 : 0);
 
     // xScale toma un `monthIndex` real (mes desde el inicio del horizonte),
     // no un índice de array. Esto desacopla el render de la densidad de
@@ -658,6 +804,15 @@ export function ProjectionNetWorthChart({
       visibleMonthEnd,
       monthSpan,
       visibleIndices,
+      memberLines,
+      memberVisible,
+      planAux,
+      planAuxVisible,
+      phaseSegments: phaseSegmentsAll,
+      phaseMarks: phaseMarksAll,
+      phaseStripH,
+      phaseStripBandH,
+      xTickBaselineY,
     };
   }, [
     baseSeries,
@@ -677,6 +832,12 @@ export function ProjectionNetWorthChart({
     planningFlows,
     viewWindow.monthSpan,
     viewWindow.startMonth,
+    series.phase_transitions,
+    series.pension_start_month_index,
+    series.liquid_crossing_month_index,
+    series.retirement_trigger,
+    series.retirement_month_index,
+    series.members,
   ]);
 
   // Captura el commit (post-render) y vuelca measures a consola. Solo cuando
@@ -817,6 +978,15 @@ export function ProjectionNetWorthChart({
     visibleMonthEnd,
     monthSpan,
     visibleIndices,
+    memberLines,
+    memberVisible,
+    planAux,
+    planAuxVisible,
+    phaseSegments,
+    phaseMarks,
+    phaseStripH,
+    phaseStripBandH,
+    xTickBaselineY,
   } = model;
 
   /** Devuelve el valor del array `values` correspondiente al `month` dado.
@@ -954,6 +1124,21 @@ export function ProjectionNetWorthChart({
         .filter((s): s is string => s !== null)
         .join(" ")
     : null;
+  // D29 · auxiliares del plan. Mismo patrón que la línea FIRE: los `null` (el tramo histórico)
+  // se DESCARTAN en vez de dibujarse en el suelo del eje, así que la curva arranca en el mes 0.
+  const planAuxPolylines = planAuxVisible.map((line) => ({
+    key: line.key,
+    color: line.color,
+    dash: line.dash,
+    points: line.values
+      .map((v, j) =>
+        v == null || !Number.isFinite(v)
+          ? null
+          : `${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`,
+      )
+      .filter((t): t is string => t !== null)
+      .join(" "),
+  }));
   let areaD = "";
   if (nwVisible.length > 0) {
     const parts: string[] = [];
@@ -1468,8 +1653,7 @@ export function ProjectionNetWorthChart({
 
         {xTicks.map(({ monthIndex, label }) => {
           const cx = xScale(monthIndex);
-          const tickY =
-            mt + ph + (layoutDims.narrow ? 12 : 14) + (rotateXLabels ? 8 : 0);
+          const tickY = xTickBaselineY;
           return (
             <text
               key={`gx-${monthIndex}`}
@@ -1528,8 +1712,7 @@ export function ProjectionNetWorthChart({
                 subtítulo. Es texto, no controla nada: la navegación no cambia. */}
             {(() => {
               const cx = xScale(0);
-              const tickY =
-                mt + ph + (layoutDims.narrow ? 12 : 14) + (rotateXLabels ? 8 : 0);
+              const tickY = xTickBaselineY;
               return (
                 <text
                   transform={
@@ -1581,6 +1764,27 @@ export function ProjectionNetWorthChart({
                 />
               );
             })
+          )}
+          {/* D32 · líneas finas por miembro (solo vista Hogar): se pintan DEBAJO de la Σ, que
+              sigue siendo la curva gruesa. Cada una lleva el color que `householdMemberColor`
+              reparte por posición en `members[]` — el mismo de su tick en la tira de fases y de
+              su entrada de leyenda. Una línea que acaba antes del borde derecho es un horizonte
+              propio más corto, no un dato que falte. */}
+          {memberVisible.map((line) =>
+            line.points.length < 2 ? null : (
+              <polyline
+                key={line.key}
+                points={line.points
+                  .map((p) => `${xScale(p.month_index)},${yScale(p.value)}`)
+                  .join(" ")}
+                fill="none"
+                stroke={line.color}
+                strokeWidth={1.3}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={0.8}
+              />
+            ),
           )}
           {historyStartMonth < 0 ? (
             <>
@@ -1645,6 +1849,26 @@ export function ProjectionNetWorthChart({
               opacity={0.225}
             />
           ) : null}
+          {/* D29 · «Capital necesario» y «si dejas de aportar en el mes coast»: DISCONTINUAS,
+              porque no son tu patrimonio — son la trayectoria que el plan exige y la que
+              tendrías si dejaras de aportar. Se pintan por encima del objetivo FIRE (que va al
+              22 % de opacidad, de fondo) y por debajo de la curva de patrimonio, que sigue
+              siendo la protagonista. Sin solve la lista está vacía y aquí no se dibuja nada. */}
+          {planAuxPolylines.map((line) =>
+            line.points === "" ? null : (
+              <polyline
+                key={line.key}
+                points={line.points}
+                fill="none"
+                stroke={line.color}
+                strokeWidth={1.5}
+                strokeDasharray={line.dash}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                opacity={0.85}
+              />
+            ),
+          )}
           {historyStartMonth < 0
             ? snapshotMarkers.map((mk, idx) => {
                 const val = valueAtMonth(mk.month_index, nw);
@@ -1865,6 +2089,104 @@ export function ProjectionNetWorthChart({
           ) : null}
         </g>
 
+        {/* ── Tira de fases bajo el eje X (D29) ─────────────────────────────────────────
+            Va FUERA del clip del plot (es cronología, no serie) y toda su geometría se
+            calcula por `month_index` con la misma `xScale` que las curvas: con
+            `density=hybrid` una transición del mes 271 no tiene punto propio, así que
+            cualquier aritmética sobre posiciones del array la colocaría años fuera de
+            sitio. Los marcadores VERTICALES siguen siendo solo los de la jubilación
+            efectiva (bloque de milestones, `isJubilacion`): la tira es aditiva. */}
+        {phaseStripH > 0 ? (
+          <g>
+            {phaseSegments.map((seg) => {
+              const rawLeft = xScale(seg.startMonth);
+              // Bandas contiguas: el borde derecho es el inicio del mes siguiente, salvo
+              // en la última, que muere en el fin de la ventana.
+              const rawRight =
+                seg.endMonth >= visibleMonthEnd
+                  ? xScale(seg.endMonth)
+                  : xScale(seg.endMonth + 1);
+              const left = Math.max(ml, Math.min(rawLeft, ml + pw));
+              const right = Math.max(ml, Math.min(rawRight, ml + pw));
+              const w = Math.max(0, right - left);
+              if (w <= 0) return null;
+              const label = isMobile ? seg.shortLabel : seg.label;
+              // Misma heurística de ancho que las etiquetas de milestone (5,5px/carácter).
+              const fits = w >= label.length * 5.5 + 8;
+              return (
+                <g key={`phase-${seg.phase}-${seg.transitionMonth}`}>
+                  <rect
+                    x={left}
+                    y={mt + ph + 3}
+                    width={w}
+                    height={phaseStripBandH}
+                    rx={2}
+                    className={`projection-phase-band projection-phase-band--${seg.phase}`}
+                  />
+                  {fits ? (
+                    <text
+                      x={left + w / 2}
+                      y={mt + ph + 3 + phaseStripBandH / 2}
+                      textAnchor="middle"
+                      dominantBaseline="middle"
+                      className="projection-phase-label"
+                    >
+                      {label}
+                    </text>
+                  ) : null}
+                </g>
+              );
+            })}
+            {(() => {
+              // Rótulos de las marcas en UNA fila: el que no cabe conserva su tick y pierde
+              // el texto (nunca se solapan dos rótulos). Igual que los milestones, pero sin
+              // carriles: la tira no tiene alto para apilar.
+              let occupiedRight = -Infinity;
+              return phaseMarks.map((mk: PhaseMark) => {
+                const cx = Math.max(ml, Math.min(xScale(mk.month), ml + pw));
+                const yTop = mt + ph + 3;
+                const yBot = yTop + phaseStripBandH;
+                const label = isMobile ? mk.shortLabel : mk.label;
+                const halfW = (label.length * 5.2) / 2 + 3;
+                const showLabel = cx - halfW > occupiedRight;
+                if (showLabel) occupiedRight = cx + halfW;
+                return (
+                  <g key={`phase-mark-${mk.key}`}>
+                    {mk.kind === "pension" ? (
+                      // Flecha: la pensión no parte una fase, ENTRA en la que haya.
+                      <polygon
+                        points={`${cx},${yTop - 1} ${cx - 4},${yTop - 7} ${cx + 4},${yTop - 7}`}
+                        fill={mk.color}
+                      />
+                    ) : (
+                      <line
+                        x1={cx}
+                        x2={cx}
+                        y1={yTop - 2}
+                        y2={yBot + 2}
+                        stroke={mk.color}
+                        strokeWidth={mk.kind === "member" ? 1.6 : 1.2}
+                        strokeDasharray={mk.kind === "crossing" ? "2 2" : undefined}
+                      />
+                    )}
+                    {showLabel ? (
+                      <text
+                        x={cx}
+                        y={yBot + 10}
+                        textAnchor="middle"
+                        className="projection-phase-mark-label"
+                        fill={mk.color}
+                      >
+                        {label}
+                      </text>
+                    ) : null}
+                  </g>
+                );
+              });
+            })()}
+          </g>
+        ) : null}
+
         {!isMobile ? (
           <text
             transform={`translate(${Math.min(30, ml * 0.32)}, ${mt + ph / 2}) rotate(-90)`}
@@ -1925,6 +2247,48 @@ export function ProjectionNetWorthChart({
               {formatCurrencyOrDashNumber(cc[hover], currencyIso)}
             </div>
           ) : null}
+          {/* Flujos de la RETIRADA (5.0.0, §B.8 + pase de correcciones §F). El modelo —qué filas
+              existen, con qué umbral y con qué rótulo— vive PURO y testeado en
+              `buildWithdrawalTooltipRows`; aquí solo se formatea. «Recorte» (lo que la REGLA
+              rechazó) y «No financiado» (lo que la CARTERA no dio) son filas distintas a
+              propósito: fundirlas convertiría quedarse sin capital en un problema de la regla. */}
+          {buildWithdrawalTooltipRows(
+            pts[hover]!,
+            series.retirement_month_index,
+            deflationFactorAt(pts[hover]!.month_index, effectivePct),
+          ).map((r) => (
+            <div key={r.key}>
+              {r.label} — {formatCurrencyNumber(r.amount, currencyIso)}
+            </div>
+          ))}
+          {/* D32 — Hogar: el valor de cada miembro en el mes hovered, en el orden y con los
+              nombres de la leyenda. Se lee el ÚLTIMO vértice servido en ese mes o antes
+              (`memberValueAtMonth`): con `density=hybrid` la mayoría de los meses no tiene punto
+              propio, y el vértice siguiente sería el patrimonio de hasta un año DESPUÉS. Un
+              miembro cuya línea ya terminó (horizonte propio más corto) no aparece: su ausencia
+              es el dato, y un 0 diría que se quedó sin nada. */}
+          {/* D29 — auxiliares del plan en el mes hovered. Se indexan por POSICIÓN del array
+              (`hover` ya es la posición del punto, igual que `nw[hover]`) porque estas dos
+              series son paralelas a los puntos dibujados, no series propias con sus meses. Ya
+              vienen deflactadas con el mismo factor que el patrimonio de arriba. */}
+          {planAux.map((line) => {
+            const v = line.values[hover!];
+            if (v == null || !Number.isFinite(v)) return null;
+            return (
+              <div key={line.key}>
+                {line.label} — {formatCurrencyNumber(v, currencyIso)}
+              </div>
+            );
+          })}
+          {memberLines.map((line) => {
+            const v = memberValueAtMonth(line, pts[hover]!.month_index);
+            if (v === null) return null;
+            return (
+              <div key={line.key}>
+                {line.label} — {formatCurrencyNumber(v, currencyIso)}
+              </div>
+            );
+          })}
           {(() => {
             // Top-N por |valor| en el mes hovered + agregado «Otros»: el tooltip no
             // escala listando N activos (misma disciplina que la leyenda).

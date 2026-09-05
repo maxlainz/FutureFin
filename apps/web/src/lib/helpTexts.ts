@@ -79,6 +79,16 @@ export const HELP_TEXTS = {
       "descontada de inflación) en vez de la nominal, tu fecha de cruce con el objetivo FIRE se " +
       "retrasa sin que sepas por qué.",
   },
+  "assets.volatility": {
+    title: "Volatilidad anual",
+    body:
+      "Cuánto se mueve este activo arriba y abajo en un año: la desviación típica de su " +
+      "rentabilidad, no una pérdida esperada. Como orientación, la renta variable global ronda " +
+      "el 15–18 %, la renta fija el 4–6 % y el efectivo es 0. Son cifras de referencia, no un " +
+      "dato de tu cartera: pon la de tu fondo si la conoces. Solo alimenta las bandas de " +
+      "escenarios; la proyección de siempre —la línea— no la usa. Dejarla vacía significa " +
+      "«este activo crece sin sobresaltos».",
+  },
   "summary.debt_to_assets_ratio": {
     title: "Ratio deuda / activos",
     body:
@@ -131,6 +141,33 @@ export const HELP_TEXTS = {
       "aunque sigue guardado en tu historial.",
   },
 
+  "summary.plan": {
+    title: "Tu plan",
+    body:
+      "Tu estrategia de jubilación y adónde te lleva: la fecha en la que la simulación te jubila " +
+      "de verdad y la edad que tendrás entonces. Con «Cuanto antes» esa fecha es el mes en que tu " +
+      "patrimonio líquido cubre el objetivo; con las estrategias por edad es la edad que elegiste, " +
+      "llegue o no el capital. El estado avisa cuando el plan corre con algo distinto de lo que " +
+      "configuraste: sin tu fecha de nacimiento las estrategias por edad se simulan como «Cuanto " +
+      "antes», y en rojo cuando tu ahorro actual no basta para llegar a esa edad. Con una edad " +
+      "objetivo la tarjeta añade dos cifras al mes: el ahorro necesario para llegar y el margen " +
+      "que te queda por encima — las MISMAS del panel de Jubilación, copiadas del mismo cálculo, " +
+      "nunca recalculadas aquí. En la vista del hogar hay una tarjeta por persona: cada una lleva " +
+      "su propio plan.",
+  },
+
+  "summary.success": {
+    title: "Éxito del plan",
+    body:
+      "En cuántos de los escenarios con volatilidad pasan DOS cosas a la vez: que llegues a " +
+      "jubilarte dentro del horizonte —o en tu edad objetivo— y que la cartera no se agote " +
+      "nunca. Un plan que no llega a jubilarte no cuenta como éxito aunque el dinero siga " +
+      "entero, y si eso pasa en algún escenario la tarjeta te dice cuántos son. El color no se " +
+      "compara con ningún listón tuyo: verde SOLO si no falla ni un escenario, ámbar hasta diez " +
+      "puntos por debajo del 100 %, rojo más abajo. Es el MISMO sorteo que dibuja la sección " +
+      "Riesgo de Jubilación —no se recalcula aquí—, y allí está el detalle.",
+  },
+
   // --- Jubilación -----------------------------------------------------------
   "retirement.target": {
     title: "Patrimonio objetivo",
@@ -143,8 +180,238 @@ export const HELP_TEXTS = {
       "moverse cuando el préstamo muere). Esas partidas van en NETO: lo que de verdad gastas o " +
       "cobras cada mes, nunca la cifra bruta — el cálculo ya lo asume así. Y solo cuenta tu " +
       "patrimonio LÍQUIDO para cruzarlo: una vivienda no produce retirada mensual, aunque siga " +
-      "sumando en tu patrimonio total. La cifra grande está en euros de hoy; el paréntesis es " +
-      "ese mismo objetivo llevado al mes del cruce con la inflación configurada.",
+      "sumando en tu patrimonio total. La cifra grande está SIEMPRE en la base que declara el " +
+      "subtítulo de su tarjeta, y las dos tarjetas que llevan este texto no miden lo mismo: en " +
+      "Jubilación es el objetivo evaluado como si te jubilaras HOY —el nominal del mes exacto " +
+      "del cruce vive en «Detalle del cálculo»—, y en Proyección es el objetivo del mes en que " +
+      "de verdad te jubilas, deflactado a euros de hoy mientras «En dinero de hoy» esté activo " +
+      "y en euros de ese mes cuando no. El objetivo se " +
+      "calcula y se dibuja siempre, pero solo DECIDE la fecha en «Cuanto antes» y en «Puente " +
+      "hasta la pensión»: en las estrategias por edad manda la edad y este número pasa a ser la " +
+      "referencia contra la que se lee si llegas o no.",
+  },
+  "retirement.crossing_reading": {
+    title: "Jubilación",
+    body:
+      "El mes en que la simulación te jubila DE VERDAD: es la fecha que marcan el chart y el " +
+      "Resumen, y el primer mes en que dejas de ingresar tu sueldo y empiezas a vivir de tu " +
+      "patrimonio. Con «Cuanto antes» y con «Puente hasta la pensión» ese mes es el del cruce con " +
+      "tu objetivo. Con las estrategias por edad manda la edad que elegiste, llegue o no el " +
+      "capital, y entonces aparece debajo una segunda fecha: el «cruce del objetivo», que es solo " +
+      "una LECTURA — cuándo tu patrimonio líquido habría bastado. Si cae después, te jubilas sin " +
+      "haber llegado; si cae antes, podrías haberte ido antes. Cuando las dos fechas coinciden se " +
+      "muestra una sola: es el mismo hecho.",
+  },
+  "retirement.plan_sentence": {
+    title: "Tu hito de jubilación",
+    body:
+      "El mes en que la simulación te jubila de verdad, con tu edad y el plazo desde hoy. Qué lo " +
+      "dispara depende de tu estrategia: en «Cuanto antes» y «Puente hasta la pensión» manda el " +
+      "capital; en las de edad, la edad — te jubilas ese mes llegues o no al objetivo.",
+  },
+  "retirement.strategy": {
+    title: "Tu estrategia de jubilación",
+    body:
+      "Decide QUÉ dispara tu jubilación en la simulación y, con ello, cómo se dimensiona el " +
+      "objetivo. «Cuanto antes» se jubila el mes del cruce con el objetivo; las estrategias por " +
+      "edad se jubilan en la edad que elijas, llegue o no el capital; «Media jornada» mete una " +
+      "fase intermedia; «Puente hasta la pensión» dimensiona el objetivo contando con la " +
+      "pensión que declares. Es tuya, no del hogar: cada persona tiene la suya.",
+  },
+  "retirement.target_age": {
+    title: "Edad de jubilación objetivo",
+    body:
+      "La edad en la que dejas de trabajar en la simulación. En «A una edad fija» y en «Coast " +
+      "FIRE» manda la edad: te jubilas ahí aunque el capital no haya llegado, y entonces el " +
+      "plan te lo dice en rojo en vez de moverte la fecha. En «Media jornada» es el fin de la " +
+      "fase parcial, y es opcional: sin ella, la jubilación total llega por cruce. Necesita tu " +
+      "fecha de nacimiento para convertirse en un mes concreto.",
+  },
+  "retirement.pension": {
+    title: "Pensión pública",
+    body:
+      "Una renta vitalicia con FECHA: importe mensual en euros de hoy y edad a la que empieza a " +
+      "cobrarse. No es una partida más del presupuesto — su fecha cambia el objetivo, no solo " +
+      "el flujo de caja: los años anteriores hay que cubrirlos entero con capital. Indexada " +
+      "sube cada año con tu inflación; sin indexar se queda plana y pierde poder adquisitivo. " +
+      "Puede cubrir todo tu gasto o solo una parte: eso lo decide el importe que declares.",
+  },
+  "retirement.partial": {
+    title: "Media jornada",
+    body:
+      "Una fase intermedia: a partir de la edad que elijas cobras el ingreso mensual que " +
+      "declares (en euros de hoy; 0 es un año sabático) en lugar de tu ingreso actual, y el " +
+      "hueco hasta tu gasto lo cubre el capital. No tiene fin propio: termina cuando llega la " +
+      "jubilación total. El gasto de la fase es el de jubilación salvo que elijas el gasto " +
+      "regular de hoy.",
+  },
+  "retirement.withdrawal_rule": {
+    title: "Regla de retirada",
+    body:
+      "Cuánto sacas de tu patrimonio cada mes una vez jubilado. «Gasto fijo» retira lo que " +
+      "necesitas, indexado, sin techo — es lo que hacía FutureFin hasta ahora. «Un % del saldo» " +
+      "retira ese porcentaje de tu líquido del mes anterior: nunca se agota, pero tu nivel de " +
+      "vida sube y baja con el mercado. «Híbrida» empieza alta y baja al llegar a un saldo. " +
+      "«Con bandas» recorta o sube la retirada al salirse de su banda. El porcentaje que retiran " +
+      "es UNO SOLO y es tu retirada anual: el mismo con el que se dimensiona tu objetivo, así " +
+      "que moverlo mueve las dos cosas a la vez y nunca hay dos cifras que no cuadren. Cada " +
+      "regla añade lo suyo y nada más: la híbrida, a cuánto BAJA; las bandas, su banda y su " +
+      "ajuste. Los porcentajes son BRUTOS: el impuesto de la venta va dentro.",
+  },
+  "retirement.spend_mode": {
+    title: "Cómo se aplica la regla",
+    body:
+      "Dos lecturas de la misma regla. Como TECHO, retiras lo que necesitas y nunca más de lo " +
+      "que la regla permite: si tu gasto cabe, no vendes de más. Como GASTO, retiras lo que dice " +
+      "la regla haya o no necesidad, y ese es tu nivel de vida — con un buen año sacas más y " +
+      "con uno malo, menos. No cambia el objetivo: cambia lo que la simulación saca cada mes.",
+  },
+  "retirement.target_basis": {
+    title: "Base del objetivo",
+    body:
+      "Sobre qué se dimensiona el patrimonio objetivo. «Renta perpetua» pide capital para vivir " +
+      "de él para siempre y NO cuenta con tu pensión: es la opción conservadora. «Puente hasta " +
+      "la pensión» pide capital para cubrir los años que faltan hasta cobrarla, más lo que haga " +
+      "falta a perpetuidad para el gasto que la pensión no cubra. Si no eliges, se usa el " +
+      "puente cuando hay pensión declarada y la renta perpetua cuando no.",
+  },
+  "retirement.bridge_discount": {
+    title: "Descuento del puente",
+    body:
+      "Los años de puente no cuestan su suma nominal: ese dinero sigue invertido mientras lo " +
+      "gastas. Esto elige con qué tasa se descuenta. Con la rentabilidad esperada de tus " +
+      "líquidos (lo habitual) el objetivo baja; con tu tasa segura de retirada baja menos; sin " +
+      "descuento el puente cuesta la suma entera, que es lo más prudente. Solo afecta al " +
+      "objetivo cuando la base es el puente.",
+  },
+  "retirement.cash_buffer": {
+    title: "Colchón de caja",
+    body:
+      "El dinero que la simulación mantiene SIEMPRE en efectivo durante la jubilación, en vez de " +
+      "invertido. No lo pides tú: lo inferimos del tope («hasta X €») de tu regla de ahorro que " +
+      "apunta a un activo líquido sin volatilidad, así que se cambia ahí, en Reglas de ahorro, y " +
+      "no en esta pantalla. Sin una regla con tope que apunte a un líquido así, no hay colchón, " +
+      "y la línea te dice cuál de las dos cosas falta. Es el TOPE en euros, no una conversión a " +
+      "meses: el tope es nominal y fijo, y un colchón «de ocho meses» se indexaría con la " +
+      "inflación hasta valer casi el doble a veinte años. Los meses que ves al lado son una " +
+      "equivalencia informativa contra tu gasto de hoy. Y CUESTA: medido en este modelo, el " +
+      "dinero que dejas fuera del mercado resta unos puntos de probabilidad de éxito frente a " +
+      "tenerlo invertido. Solo actúa en los escenarios con volatilidad; sin volatilidad " +
+      "declarada no hay nada de lo que proteger y no se simula.",
+  },
+  "retirement.required_contribution": {
+    title: "Ahorro necesario",
+    body:
+      "La aportación mensual MÍNIMA que te hace llegar a tu objetivo justo en la edad que has " +
+      "elegido: se busca simulando tu plan entero una y otra vez, no despejando una fórmula. Es " +
+      "un TECHO sobre lo que tu reparto invierte cada mes, no un importe que se aporte pase lo " +
+      "que pase — un mes con menos sobrante aporta el sobrante y ya está. El paréntesis es tu " +
+      "sobrante mensual máximo, para que la cifra tenga denominador: cuánto de tu margen se " +
+      "lleva el plan. En rojo significa que ni invirtiendo cada euro de sobrante llegas, y " +
+      "entonces la cifra ES tu sobrante entero. No existe en las estrategias que se disparan por " +
+      "cruce: ahí no hay una edad contra la que resolver nada.",
+  },
+  "retirement.disposable": {
+    title: "Margen disponible",
+    body:
+      "Lo que te SOBRA respecto a lo que tu estrategia exige, al mes y en capital acumulado. No " +
+      "es tu patrimonio ni tu ahorro: es la diferencia entre lo que tienes y lo que el plan " +
+      "necesita. La base cambia con la estrategia y por eso conviene mirarla: con una edad " +
+      "objetivo es tu sobrante mensual máximo menos el ahorro necesario; con Coast FIRE es TODO " +
+      "tu sobrante, pero solo a partir del mes coast — antes vale cero de verdad, porque cada " +
+      "euro que dejes de aportar retrasa la fecha. El capital acumulado va en euros del mes en " +
+      "que te jubilas, y debajo, esos mismos euros traídos a hoy. No existe en «Cuanto antes»: " +
+      "ahí todo el ahorro va al objetivo por definición.",
+  },
+  "retirement.coast_month": {
+    title: "Mes coast",
+    body:
+      "El primer mes a partir del cual puedes dejar de aportar y aun así llegar a tu objetivo en " +
+      "la edad que elegiste: desde ahí lo que ya tienes invertido hace el resto solo. Sale de " +
+      "simular el plan cortando la aportación en cada mes candidato, no de una regla de tres. " +
+      "«No alcanzable» significa que ni aportando todos los meses llegas — no que falte el dato — " +
+      "y entonces la línea discontinua del gráfico es lo mejor que da tu plan tal y como está.",
+  },
+  "retirement.coast_number": {
+    title: "Número coast",
+    body:
+      "El patrimonio LÍQUIDO con el que entras en el mes coast: el cierre del mes anterior en la " +
+      "simulación. Es el capital a partir del cual podrías dejar de aportar. No es tu objetivo de " +
+      "jubilación —que es bastante mayor— ni tu patrimonio total: la vivienda no entra, porque no " +
+      "produce retirada mensual. Es un valor leído de la simulación, no una fórmula cerrada.",
+  },
+  "retirement.partial_gap": {
+    title: "Hueco de media jornada",
+    body:
+      "El capital que haría falta para cubrir a perpetuidad lo que tu media jornada NO paga: tu " +
+      "gasto de esa fase menos el ingreso parcial que declaras y menos la parte de pensión que " +
+      "cobres entonces, con los impuestos por delante y dividido entre tu tasa segura de " +
+      "retirada. Es informativo: no dispara tu jubilación ni sustituye al objetivo. Cero " +
+      "significa que la media jornada se paga sola. La línea de abajo dice si, durante esa fase, " +
+      "tu capital sigue creciendo o lo estás consumiendo.",
+  },
+  "retirement.bridge": {
+    title: "Puente hasta la pensión",
+    body:
+      "Los años que van desde que te jubilas hasta que cobras la pensión que has declarado: ese " +
+      "tramo lo paga entero tu patrimonio. La cifra del paréntesis es la tasa de retirada " +
+      "efectiva de esos años —cuánto sacas de tu capital cada año— y puede estar por encima de " +
+      "tu tasa segura sin que sea un error: dura pocos años, no toda la vida. Debajo, qué parte " +
+      "de tu gasto cubrirá la pensión cuando llegue (puede ser todo o una parte: lo decide el " +
+      "importe que declaras) y a qué tasa anual se han descontado los años de puente, porque ese " +
+      "dinero sigue invertido mientras lo gastas.",
+  },
+
+  // --- Jubilación · Riesgo (5.0.0, D28) -------------------------------------
+  "retirement.bands": {
+    title: "Escenarios con volatilidad",
+    body:
+      "Miles de futuros posibles de tu mismo plan: cada mes el mercado sube o baja según la " +
+      "volatilidad que hayas declarado en tus activos, y el sorteo se repite cientos de veces. " +
+      "La franja recoge del escenario 10 al 90 —uno de cada diez queda por encima y uno de cada " +
+      "diez por debajo— y la línea sólida es la proyección de siempre, la que el resto de la app " +
+      "enseña como dinero. Ojo con la franja: sus bordes son el valor de cada mes por separado, " +
+      "así que NO son futuros concretos y no cuadran con ninguna simulación. El color de la " +
+      "franja no es decorativo: dice, a cada edad, qué parte de esos escenarios ya se ha quedado " +
+      "sin capital — verde ninguno, rojo uno de cada diez o más. El sorteo usa la misma semilla " +
+      "cada vez, así que las cifras no bailan entre visitas.",
+  },
+  "retirement.success": {
+    title: "Éxito del plan",
+    body:
+      "En cuántos de esos escenarios pasan DOS cosas a la vez: que llegues a jubilarte dentro " +
+      "del horizonte —o en tu edad objetivo— y que la cartera no se agote nunca, con tus " +
+      "pensiones y tus fases ya dentro. Un plan que nunca te jubila no cuenta como éxito aunque " +
+      "el dinero siga entero: por eso, cuando algún escenario se queda sin jubilar, debajo " +
+      "aparecen cuántos son y qué parte de los que SÍ se jubilan aguanta el capital. Que la " +
+      "regla te recorte el gasto no es fracaso aquí: eso se mide en la cobertura, más abajo. El " +
+      "corte del color es FIJO y no lo eliges tú: verde solo con el 100,0 %, o sea con cero " +
+      "escenarios agotados; ámbar entre el 90 % y el 100 %; rojo por debajo del 90 %. Con " +
+      "quinientos caminos, un solo fallo ya es ámbar — y por eso el subtítulo del verde dice " +
+      "cuántos se sortearon. Sin volatilidad declarada en tus activos no hay escenarios que " +
+      "contar y el número no significa nada.",
+  },
+  "retirement.depletion_by_age": {
+    title: "Probabilidad de agotar el capital",
+    body:
+      "Qué parte de los escenarios ha agotado la cartera A ESA EDAD O ANTES, contando desde el " +
+      "mes en que te jubilas. Es acumulada, así que solo puede crecer con la edad: el 8 % a los " +
+      "80 incluye a todos los que se quedaron sin capital a los 75. Es lo que COLOREA la franja " +
+      "del gráfico —verde donde no falla ninguno, ámbar donde empiezan a fallar, rojo desde uno " +
+      "de cada diez— y el porcentaje exacto de cada edad sale al pasar el ratón por encima. En " +
+      "«Detalle del cálculo» tienes la cifra que el color no puede rotular: el total al final " +
+      "del horizonte, o sea todos los escenarios que se quedaron sin capital en algún momento " +
+      "del plan. Sale del mismo sorteo que la probabilidad de éxito.",
+  },
+  "retirement.coverage": {
+    title: "Cobertura de tu gasto",
+    body:
+      "Qué parte de tu gasto de jubilación se pagó DE VERDAD, y en cuántos meses te quedaste por " +
+      "debajo. Cuentan las dos formas de quedarse corto: lo que la regla de retirada se negó a " +
+      "sacar y lo que la cartera no pudo pagar porque ya no había de dónde. Un 100 % significa " +
+      "que cada euro de necesidad se pagó, y cero meses por debajo. Son medianas entre " +
+      "escenarios, así que describen el caso central y no el peor. Con «Gasto fijo» la regla no " +
+      "recorta nunca: lo que veas ahí es todo cartera.",
   },
 
   // --- Ajustes · Proyección -------------------------------------------------

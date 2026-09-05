@@ -43,7 +43,7 @@ recibió la 3.x automáticamente — esa es justo la vía conservadora.
 > `FUTUREFIN_IMAGE=ghcr.io/maxlainz/futurefin` junto al `FUTUREFIN_TAG`. Desde la siguiente
 > versión, ambos registries vuelven a llevar todos los tags.
 
-## Actualizar dentro de la 3.x
+## Actualizar de rutina (3.x, 4.x, 5.x)
 
 ```bash
 # 1. (Opcional pero barato) copia manual antes de tocar nada:
@@ -63,6 +63,86 @@ de que el contenedor haya escrito su backup automático.
 Después de una actualización, la prueba que de verdad vale no es `/v1/health`: **entra, abre la
 pestaña Jubilación y exporta un `.ffbackup`**. Una vez, un cambio de esquema dejó la exportación
 rota mientras el health seguía en verde.
+
+## Actualizar a la 5.0.0
+
+La 5.0.0 es un salto **mayor**: la jubilación deja de ser un ajuste del hogar y pasa a ser el plan
+de cada persona. La actualización en sí es la de siempre (`docker compose pull && docker compose up
+-d`, o **Update** en el add-on de Home Assistant), pero conviene saber cuatro cosas antes de darle.
+
+### 1. Haz una copia primero — esta vez sí
+
+El contenedor escribe su backup automático antes de migrar, como siempre. Además, y **esta vez de
+verdad**: pide a cada persona que exporte su `.ffbackup` desde `Ajustes → Copias de seguridad`
+**estando todavía en la 4.15.x**. Hay una migración que reescribe filas, y un `.ffbackup` hecho con
+la versión anterior es la única copia que una 4.x podría volver a leer (ver el punto 4).
+
+### 2. Tus números no se mueven… si vives solo
+
+- **Instalación de una sola persona**: nada cambia. Arrancas con la estrategia «Cuanto antes», que
+  es exactamente cómo funcionaba FutureFin hasta ahora, y con tu SWR, tu modo de objetivo y tu edad
+  límite tal cual los tenías: la migración los **copia** de los ajustes del hogar a tu plan personal
+  antes de retirarlos de ahí.
+- **Hogar de dos o más personas**: **los números del gráfico del hogar cambian, y es a propósito.**
+  Hasta la 4.15 el hogar se simulaba como una sola cartera con una sola estrategia. Ahora el
+  servidor simula **un plan por persona** y suma las curvas. Es una descripción más honesta de lo que
+  pasa —dos personas pueden querer jubilarse a edades distintas—, pero la línea del hogar no será la
+  misma que ayer.
+- **Dos excepciones más a «nada cambia», de un pase de correcciones del motor dentro de la propia
+  5.0.0**: si usas la regla de retirada en modo «Gasto» (`rule_is_spend`), la proyección puede
+  moverse porque se corrigió una venta de más que no debía ocurrir; y si en la sección Riesgo miras
+  la probabilidad de éxito de un plan que se jubila muy tarde en tu horizonte, esa cifra también
+  cambia — antes contaba como éxito a quien nunca llegaba a jubilarse, y ya no.
+
+### 3. Filas «de nadie»: el reasignado de propietario
+
+Si tu instalación es antigua puede tener filas sin dueño: activos, deudas, líneas de presupuesto,
+Próximos o reglas de reparto creados antes de febrero de 2026, o importados de un backup muy viejo.
+La migración se las asigna al **propietario más antiguo de la instalación** y deja el campo
+obligatorio para siempre.
+
+**Qué verá un hogar con filas así**: esas filas aparecen ahora en el «Yo» de esa persona, entran en
+su histórico y **solo ella puede editarlas**; a los demás les saldrá un error de permisos. Si alguna
+de esas reglas de reparto era un «sumidero» compartido redundante, se elimina y el resto se recoloca
+detrás de las de esa persona conservando su orden.
+
+Si el reparto no te encaja, cámbialo después desde la app: son filas normales, no hay nada bloqueado.
+
+### 4. Lo que cambia sin migración
+
+- **La vista por defecto pasa a ser «Yo»**, no «Hogar». Al entrar verás tus cifras, no las del hogar;
+  el hogar sigue a un clic, con el control «Yo | Hogar» de la barra superior. Y el hogar es ahora
+  **de solo lectura**: los botones de crear y editar desaparecen ahí (el servidor también lo
+  impide). Todo esto está explicado en [Tu plan de jubilación](jubilacion.md#antes-de-nada-el-control-yo--hogar).
+- **`Ajustes → Plan` pierde tres ajustes**: la tasa de retirada segura (SWR), el modo del objetivo
+  con su importe manual, y la edad límite del horizonte. No se pierden — **se mudan a la pestaña
+  Jubilación**, ahora que son de cada persona. En `Ajustes → Plan` siguen la inflación, el modo de
+  edad, los tramos de IRPF y la fuente del ahorro, que son del hogar.
+- **El `.ffbackup` sube a la versión 13.** Los ficheros antiguos (v1 a v12) **siguen importándose**
+  sin problema; al importar uno de la 4.x, tus ajustes de jubilación de entonces siembran tu plan
+  nuevo — pero **solo si todavía no tienes uno**, para que restaurar un backup viejo no te pise la
+  estrategia que hayas configurado después.
+  **Una 4.x NO puede leer un fichero de la 5.0.0**: se niega en limpio y te dice que actualices, en
+  vez de importarlo a medias.
+- **Si usas la API o el servidor MCP**, hay más cambios de contrato: están todos en la sección
+  «Breaking» del `CHANGELOG.md` de la 5.0.0.
+
+### 5. Volver atrás
+
+Vale la regla general de esta página: **una vez migrada la base de datos, una imagen anterior no
+arranca** y te lo dice con un mensaje claro (ver [Volver a una versión
+anterior](#volver-a-una-versión-anterior)). La salida es restaurar el `pre-migration-*.sql.gz` que
+el propio arranque escribió, no forzar nada.
+
+### 6. Dónde mirar cuando ya esté arriba
+
+```bash
+curl -sf http://127.0.0.1:8080/v1/health    # "version" debe decir 5.0.0
+docker compose logs futurefin | grep -E "pre-migration backup written|migrations applied|ERROR"
+```
+
+Y dentro de la app: entra en **Jubilación** y comprueba que tu plan dice «Cuanto antes» y que las
+cifras son las mismas que ayer. A partir de ahí, [elige tu estrategia](jubilacion.md).
 
 ## El backup automático pre-migración
 
