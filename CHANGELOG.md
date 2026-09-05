@@ -519,23 +519,23 @@ DENTRO de 5.0.0, no como una versión aparte. Doce decisiones lo gobiernan:
 
 | Decisión | Qué fija |
 |---|---|
-| U1 | Config arriba → resultado → «Avanzado» plegado |
+| U1 | Config arriba → resultado (el «Avanzado» plegado que U1 preveía se retiró en la tercera vuelta: ver §Tercera vuelta de UX) |
 | U2 | El formulario enseña solo los campos de la estrategia elegida |
 | U3 | El gasto en jubilación admite 3 modos |
 | U4 | El porcentaje de retirada es único |
-| U5 | Un solo chart + «Riesgo» compacto |
+| U5 | Un solo chart + «Riesgo» compacto (el chart gana eje Y y banda coloreada en la tercera vuelta) |
 | U6 | La pensión vive solo en Jubilación; el flag del presupuesto es para rentas |
 | U7 | Frase-hito + como mucho 3 tiles |
 | U8 | El asistente pide nacimiento + estrategia + el dato esencial de esa estrategia |
 | U9 | Tarjeta única en Resumen |
 | U10 | Hogar enseña sumas + una frase por miembro |
 | U11 | Todo el rediseño va dentro de 5.0.0 |
-| U12 | Nada se fuerza sin verse: línea «Supuestos» |
+| U12 | Nada se fuerza sin verse — la línea «Supuestos» de U12 se retiró en la tercera vuelta: sin acordeón no hay nada escondido que enunciar, todo campo en vigor está en su tarjeta |
 
 Esta entrega documenta lo ya aterrizado fuera de la pantalla de Jubilación en sí (API, asistente,
 Resumen, barrido de copys y las libs puras que la alimentan). `RetirementView.tsx` y
-`components/charts/*` — donde viven U1, U5, U6, U7 y U12 de verdad — siguen en curso en un cambio
-aparte; su documentación es un pase posterior, cuando aterricen.
+`components/charts/*` aterrizaron después, en `debc52d` (U1b) y en la tercera vuelta de UX
+(V1–V7) — las dos documentadas más abajo.
 
 - **El porcentaje de retirada es ÚNICO (U0)**: `swr_pct` dimensiona el objetivo y es también el
   porcentaje de las reglas por saldo. `withdrawal_rule.pct` (`percent_of_balance`, `guardrails`) y
@@ -578,8 +578,9 @@ aparte; su documentación es un pase posterior, cuando aterricen.
   «Jubilación» (con el importe del objetivo FIRE) a **«Objetivo al jubilarte»** — los demás hitos
   siguen etiquetados «Hito». Fuera el subtítulo «Moneda EUR» / «Mensual · EUR» / «Importes · EUR»
   de Activos, Pasivos, Presupuesto, Movimientos y Próximos (la divisa vive en Ajustes y en cada
-  cifra) y el chip «Mío · sin titular en Hogar» de esas mismas cinco pantallas (el segmentado «Yo |
-  Hogar» ya lo dice). «(opc.)» → «(opcional)» en las 17 etiquetas de esos formularios.
+  cifra) y el chip «Mío · sin titular en Hogar» de cuatro de ellas —Activos, Pasivos, Presupuesto y
+  Próximos; el de Movimientos tenía otra redacción y sobrevivió hasta la tercera vuelta— (el
+  segmentado «Yo | Hogar» ya lo dice). «(opc.)» → «(opcional)» en las 17 etiquetas de esos formularios.
 - **Cambiado — Resumen: «Tu plan» en una tarjeta única (U2/U9/U10)**: las dos tarjetas rojas
   apiladas (con hueco a la derecha) se sustituyen por **una tarjeta ancha en una fila** — la
   frase-hito como título, coloreada por el estado; estrategia + hito secundario como subtítulo; el
@@ -615,26 +616,29 @@ aparte; su documentación es un pase posterior, cuando aterricen.
   («jerarquía sin sentido, orden mal, campos redundantes, mínimo input») tras subirla en local, y
   esa forma queda registrada como RECHAZADA en `futurefin-failure-archaeology` §3, no como la
   pantalla vigente. La sustituye:
-  - **«Tu plan»**: banner de alta sobre las 5 tarjetas de estrategia (5 columnas en escritorio,
-    3+2 en tableta, lista en móvil — nunca 4+1) y SOLO los campos que la estrategia elegida usa
-    (`lib/plan-fields.ts`, U2): fecha de nacimiento en línea cuando falta (no se repite si ya la
-    tienes), edad objetivo, media jornada, pensión (casilla + importe + edad) y «Gasto en
-    jubilación» con sus TRES modos (gasto actual del presupuesto, ingresos actuales, o una cifra
-    manual) más la cifra mensual/anual derivada con su procedencia pegada («1.250 €/mes ·
-    15.000 €/año · de tus partidas de jubilación del presupuesto»).
+  - **«Tu plan»**: las 5 tarjetas de estrategia (5 columnas en escritorio, 3+2 en tableta, lista
+    en móvil — nunca 4+1) y SOLO los campos que la estrategia elegida usa (`lib/plan-fields.ts`,
+    U2): fecha de nacimiento en línea cuando falta (no se repite si ya la tienes), edad objetivo,
+    media jornada, pensión (casilla + importe + edad) y «Gasto en jubilación» con sus TRES modos
+    (gasto actual del presupuesto, ingresos actuales, o una cifra manual) más la cifra
+    mensual/anual derivada con su procedencia pegada («1.250 €/mes · 15.000 €/año · de tus
+    partidas de jubilación del presupuesto»). El banner de alta que U1b ponía encima y la
+    disposición en lista se sustituyeron por tarjetas por tema en la tercera vuelta (ver más
+    abajo).
   - **«Resultado»**: la frase-hito (`lib/plan-sentence.ts`) tonada por el estado del plan —un
     filete lateral de 3 px, nunca el color del texto—, el aviso rojo SOLO cuando el plan no llega
     (D17), como mucho 3 tarjetas con el subtítulo COMPLETO sin recortar (U7,
     `buildRetirementTilesV2`), UN chart —patrimonio + objetivo FIRE + banda 10–90 % conmutable +
     marcadores de jubilación/coast/media jornada/pensión, todo hasta el horizonte— y un «Riesgo»
-    compacto (Éxito del plan + agotamiento por edad, nada más); todo lo demás —objetivo nominal al
-    cruce, cobertura de la pensión, descuento del puente, los avisos que no son rojos— baja a
-    «Detalle del cálculo», plegado.
-  - **«Avanzado»**, plegado, cuyo `<summary>` ES la línea «Supuestos: retirada 3,5 % · gasto fijo
-    en euros de hoy · horizonte 90 años · sin colchón · umbral 95,0 %» (U12): esconder un campo
-    (U2) sin enunciar su valor sería forzarlo en silencio, así que la línea está SIEMPRE visible,
-    plegado o no. Agrupado por sección — Retirada, Objetivo, Media jornada, Pensión, Horizonte,
-    Riesgo, ya no «Horizonte y riesgo» combinadas.
+    compacto; todo lo demás —objetivo nominal al cruce, cobertura de la pensión, descuento del
+    puente, los avisos que no son rojos— baja a «Detalle del cálculo», plegado. La tabla de
+    agotamiento por edad que U1b dejaba en «Riesgo» se retiró en la tercera vuelta: la dice el
+    color de la banda (ver más abajo).
+  - **«Avanzado»**, plegado, cuyo `<summary>` ERA la línea «Supuestos: retirada 3,5 % · gasto fijo
+    en euros de hoy · horizonte 90 años · sin colchón · umbral 95,0 %» (U12). **Retirado en la
+    tercera vuelta de UX** (F10): la línea existía para enunciar lo que el acordeón escondía, y con
+    las tarjetas por tema no queda nada escondido. Registrado como forma RECHAZADA en
+    `futurefin-failure-archaeology` §3.
   - **Hogar**: solo el aviso de solo lectura + una frase por miembro (`lib/household-plan-lines.ts`)
     + el enlace «Cambia a “Yo” para editar tu plan» — sin tarjetas ni cifras por persona, porque el
     hogar no tiene plan propio.
@@ -659,14 +663,15 @@ aparte; su documentación es un pase posterior, cuando aterricen.
   (conversión fracción↔porcentaje, el indicador de guardado único, la guarda de campos obligatorios
   que apaga el autosave, la nota del porcentaje de la regla) y `retirement-chart.ts` (los cuatro
   marcadores del chart y la colisión de sus etiquetas). `helpTexts.ts`: +`retirement.assumptions`
-  (la línea «Supuestos»), +`retirement.plan_sentence` (la frase-hito), y `retirement.withdrawal_rule`
-  reescrita para el porcentaje único. 1.081 tests (`npm test --workspace futurefin-web`).
+  (la línea «Supuestos», retirada en la tercera vuelta), +`retirement.plan_sentence` (la frase-hito),
+  y `retirement.withdrawal_rule` reescrita para el porcentaje único. 1.104 tests tras la tercera
+  vuelta (`npm test --workspace futurefin-web`).
 - **Corregido — desbordamiento horizontal preexistente de 7 px a 639–641 px**: el rótulo «AL FINAL
   DEL HORIZONTE» de la celda de agotamiento (161 px medidos) no cabía en una columna de dos con
   `white-space: nowrap` y empujaba la PÁGINA entera 7 px — violación de la regla de oro del sistema
   responsive (cero scroll horizontal fuera de una tabla), presente desde antes del rediseño y
-  arreglada de paso. `.risk-depletion-age` vuelve a envolver (`white-space: normal`); una celda dos
-  renglones más alta no desalinea nada porque la rejilla ya iguala las alturas de la fila.
+  arreglada de paso. `.risk-depletion-age` volvió a envolver (`white-space: normal`); la celda
+  desapareció después con la tabla entera (tercera vuelta).
 - **Cambiado — «(opc.)» → «(opcional)»** en Jubilación (la coletilla del campo «Edad de jubilación
   objetivo» cuando la estrategia no lo exige).
 
@@ -686,8 +691,126 @@ aparte; su documentación es un pase posterior, cuando aterricen.
   por diseño (D15/R6). Tests: `projection_strategies.rs` (serie byte-idéntica con y sin bloque bajo
   `asap` y `retire_at_age`).
 
+### Tercera vuelta de UX (V1–V7 y F1–F12): tarjetas por tema, éxito en porcentaje, la banda dice el riesgo
+
+El owner probó la imagen local con U1–U12 aterrizados y devolvió doce puntos (F1–F12, 2026-09-05):
+la jerarquía ya era la buena, pero «Avanzado» seguía siendo un cajón de sastre, el gráfico de riesgo
+no decía qué era cada cosa, «Éxito del plan» no cabía en su caja, Hogar ofrecía pestañas que no le
+correspondían, dos tablas hacían scroll lateral y un tile de Proyección no se movía con «En dinero
+de hoy». Revisan U1, U5 y U12; el resto sigue en pie.
+
+- **«Éxito del plan» es un porcentaje, no una oración (V1, F2)**: el valor del KPI pasa de «87 de
+  cada 100 escenarios se jubilan y no agotan el capital» —once palabras en una tipografía mono de
+  1,25 rem pensada para «87,0 %»— a **«87,0 %»**, con la condición en el subtítulo, que sí envuelve.
+  El mismo par de formateadores (`formatSuccessPercent` + `successParenthetical`) sirve a Jubilación
+  y al Resumen: una sola cifra del mismo sorteo en las dos pantallas.
+- **El umbral de éxito desaparece; el corte es fijo (V7)**: verde SOLO al 100,0 % (cero escenarios
+  agotados), ámbar hasta el 90 %, rojo por debajo. Quien tuviera un umbral propio guardado lo
+  pierde: el campo se ignora. Con 500 caminos un solo fallo ya es ámbar, y por eso el subtítulo del
+  verde dice el recuento exacto («0 de 500 escenarios agotan el capital»).
+  Del lado del API el corte es `VERDICT_GREEN_FLOOR_PCT = 100` con el margen ámbar de 10 puntos
+  de D28 (verde solo con `p == 1.0`, exacto en IEEE 754: n/n no necesita epsilon, pineado para
+  n ∈ {1 … 2000}). La entrada se **acepta y se ignora** (PATCH HTTP y las dos tools MCP, marcada
+  deprecada y sin rango) pero no se valida, no se guarda y **no sale por ninguna respuesta**
+  (`ProjectionBandsResponse`, `SummaryPlan`, `MonteCarloKpis`, `RetirementProfile`). Sin
+  migración: el 95 ya almacenado se ignora al leer y se pierde en la siguiente escritura. El código
+  de error `success_threshold_out_of_range` se retira.
+- **Añadido — el colchón de caja se deriva de tu regla de ahorro (V6)**: si tu cascada dice «la
+  cuenta corriente hasta 6.000 €, el resto al fondo», ese tope **es** el colchón que Monte Carlo
+  mantiene una vez jubilado — el mismo euro, en nominal y sin indexar (el motor gana
+  `CashBufferTarget::Amount` junto a `Months`; leer el tope como «≈ 3 meses» lo revalorizaría
+  2,4× a 35 años con un 2,5 %: medido, 48.000 € planos frente a 113.680 €). El input «Colchón de
+  caja» desaparece de la pantalla; sigue escribible por API y MCP como override explícito, y `PATCH
+  {"cash_buffer_months": null}` vuelve a la derivación. La derivación vive en el ensamblado de la
+  proyección (`handlers/cash_buffer.rs`), no en la resolución del perfil, que sigue sin ledger
+  (D25): elige **el mismo activo que usará el motor** (`safe_cash_buffer_index`, líquido sin
+  volatilidad), toma el **máximo** de los techos de las reglas con tope que apuntan a él (la
+  cascada comparte un valor vivo: sumar promete lo que no se funde) y publica de dónde sale en
+  `GET /v1/projection/bands` y en cada lado de `simulate_projection`: `buffer_source`
+  (`explicit` | `allocation_cap` | `none`), `buffer_target_amount`, `buffer_months_effective`
+  (informativo), `buffer_source_rule_id`, `buffer_source_asset_name`. `buffer_inactive_reason`
+  sigue siendo un solo campo con motivos nuevos —`no_capped_rule`, `cap_is_zero`— junto a
+  `no_safe_liquid_asset` y `no_volatility`; `not_requested` ya no se emite. **Y no es gratis**: en
+  este modelo i.i.d. el colchón cuesta ~3,5 puntos de éxito (lastre −7,9 pp, protección +3,9 pp),
+  así que quien tenga un tope verá bajar su probabilidad sin haber tocado su plan — la línea de
+  Jubilación lo dice y enlaza a Reglas de ahorro. La demo (`scripts/seed-demo.sh`) siembra la
+  regla con tope que hacía falta para verlo.
+- **La banda del gráfico dice el riesgo (V2/V5, F6–F8)**: se tiñe por edad con la probabilidad
+  acumulada de agotar el capital —verde 0 %, ámbar 5 %, rojo desde el 10 %, `lib/risk-gradient.ts`
+  con test—, y el chart gana eje Y con importes, etiquetas «optimista (p90)»/«pesimista (p10)» en
+  los bordes y el porcentaje exacto al pasar el ratón. **La tabla «Probabilidad de agotar el
+  capital» por edad se retira**: decía lo mismo con menos resolución; el total acumulado baja a
+  «Detalle del cálculo». Las cuatro props del chart son opt-in y el del Resumen no mueve un píxel.
+- **«Tu plan» es una tarjeta por tema (V3, F9/F10)**: Estrategia · Edades · Pensión · Gasto en
+  jubilación · Retirada · Horizonte, cada una con su frase de qué hace y qué implica cambiarla, y
+  ninguna vacía (con «Cuanto antes» y fecha de nacimiento conocida, «Edades» no se pinta). **Fuera
+  el acordeón «Avanzado» y su línea «Supuestos»**, y fuera el banner de alta (F5), cuyo descarte
+  vivía en un flag de `localStorage` que nunca miraba el perfil.
+- **Una sola escala de títulos (P6, F12)**: título de panel `h3.panel-title`, título de tarjeta o
+  sub-sección `h4.panel-title`, disparador de `<details>` `.details-trigger` con su tamaño
+  declarado. Ningún `<summary>` ni `<h4>` sin clase decide ya su propio tamaño.
+- **Corregido (bug de dinero, F11) — el tile «Objetivo al jubilarte» de Proyección no se movía con
+  «En dinero de hoy»**: enseñaba `jubilacion_target_net_worth`, que es el objetivo evaluado en el
+  **mes 0** y por contrato no depende del interruptor. Antes de 5.0.0 esa base era buen proxy del
+  objetivo en euros de hoy; con el objetivo puente el objetivo **decrece** hasta 0 en el mes de la
+  pensión y las dos magnitudes se separaron. En la demo el tile decía **1.609.855 €** cuando el
+  objetivo del mes en que te jubilas (mes 243) es **1.148.467 € nominales** = **696.563 € de hoy**
+  al 2,5 %: un **2,31×**. Ahora el tile parte de `jubilacion_target_net_worth_nominal` y lo
+  deflacta con el **mismo** factor y la misma tasa que la línea del objetivo del chart
+  (`deflation_annual_inflation_percent` de la respuesta, con la de la instalación solo como
+  fallback de backend antiguo); sin cruce cae a la base de hoy. **Sin campo nuevo en el API**: el
+  deflactado de publicación se hace en la SPA (`jubilacionTargetTileValue`, `lib/projection-chart.ts`,
+  que devuelve importe Y base). La tarjeta declara su base —«en euros de hoy» / «en euros de ese
+  mes»— y gana el interrogante de ayuda (`retirement.target`), cuyo texto se corrige: describía un
+  paréntesis que ya no existe.
+- **Corregido — el ámbito Hogar solo enseña Resumen, Proyección y Ajustes en la navegación (F1)**:
+  antes las nueve pestañas se pintaban igual en Hogar y llevaban a pantallas del ledger de solo
+  lectura con filas de todos los miembros mezcladas sin dueño visible — leía como roto aunque no
+  hubiera error. `tabsForScope(scope)` (`lib/navigation.ts`) filtra la TopBar y el drawer móvil; un
+  deep-link a una pestaña oculta (al montar o al cambiar de scope en caliente) redirige a Resumen
+  (`isTabAvailableForScope`, mismo `useLayoutEffect` de guardia de rutas). Presentación, no la
+  frontera de seguridad: el servidor sigue siendo quien bloquea la escritura ajena (403
+  `not_row_owner`, D23). El aviso de ámbito ahora dice qué queda disponible.
+- **Corregido — chip «Mío · solo tus movimientos» retirado de Movimientos (F4)**: el barrido
+  `458ea4f` había quitado el chip «Mío» de Activos/Pasivos/Presupuesto/Próximos pero Movimientos
+  (`GastosView`) conservaba uno con otra redacción que sobrevivió sin que el CHANGELOG lo reflejara.
+  De paso, fuera la prop de tipo `ledgerPersonScope` que quedaba muerta (nunca desestructurada) en
+  `AssetsView`, `LiabilitiesView`, `BudgetView` y `UpcomingView` desde ese mismo barrido.
+- **Corregido — Presupuesto y Movimientos sin scroll horizontal en escritorio (F3)**: las dos
+  tablas de líneas de Presupuesto, la de Movimientos y su comparativa mensual Gastos/Ingresos pasan
+  a `table-layout: fixed` con `<colgroup>` por clases (móvil sin tocar). No era un breakpoint:
+  `.app-main` tapa el contenido a 66 rem en cualquier monitor, así que la columna de Presupuesto
+  medía ~500 px a 1024, 1280 y 1440 por igual y solo el algoritmo de tabla fija garantiza que el
+  contenido quepa. Medido con Playwright a 1024/1280/1440 en claro y oscuro: página y cada
+  `.table-scroll` con `scrollWidth == clientWidth`. De paso, un doble margen entre los botones de
+  acción que el layout `auto` enmascaraba creciendo la columna.
+- **Corregido — una sola escala de títulos en Ajustes (F12)**: los 15 paneles ya usaban
+  `h3.panel-title`; lo desigual era el panel «Proyección y modo de edad» con `<small>` para su
+  ayuda (ahora `p.muted.tight` como los demás), `.modal-title` (1 rem / 650) frente a
+  `.panel-title` (0,95 rem / 600) en todos los modales, `.ff-account-name` a 700, y el vocabulario
+  de cuatro cabeceras que `debc52d` había metido en Jubilación (`h4.subsection-title`, `<summary>`
+  sin clase, `.retirement-advanced-summary`). `.subsection-title` se retira: sus seis consumidores
+  pasan a `.panel-title` y la tarjeta donut del Resumen gana su clase con nombre
+  (`.donut-card-title`).
+- **Corregido — un deep-link o una recarga en `/ajustes/plan` volvía a `/ajustes/general`**
+  (preexistente, cazado al verificar F3/F12): las sub-pestañas visibles dependen de la membresía y
+  el rol, y la guardia de rutas redirigía con `installationGate` aún en «loading», cuando solo
+  existían «general» y «data». Ahora espera al gate.
+- **Cambiado (técnico)**: `lib/assumptions-line.ts` y `lib/retirement-intro.ts` retirados con sus
+  tests; `buildDepletionRows`, `formatSuccessScenarios` y `formatSuccessThreshold` retirados de
+  `lib/risk-bands.ts`; `helpTexts.ts` baja de 55 a 53 entradas (−`retirement.assumptions`,
+  −`retirement.success_threshold`) con `retirement.cash_buffer`, `retirement.depletion_by_age`,
+  `retirement.bands`, `retirement.success` y `retirement.target` reescritas.
+
 ### Breaking
 
+- **`success_threshold_pct` sale del wire (tercera vuelta, V7)**: retirado de
+  `ProjectionBandsResponse`, `SummaryPlan` (`/v1/summary` → `plan`), `MonteCarloKpis` del what-if y
+  `RetirementProfile` (`GET/PATCH /v1/auth/me/retirement-profile`, la clave simplemente no viene).
+  El parámetro `success_threshold_pct` de `update_retirement_profile` y de
+  `simulate_projection.profile_overrides` queda **inerte** y pierde su rango `[50, 99]` (se acepta
+  por compatibilidad —las dos tools son `deny_unknown_fields`— y se ignora). `buffer_inactive_reason`
+  ya no emite `not_requested`; aparecen `no_capped_rule` y `cap_is_zero`.
 - **`installation.fire_settings` pierde cuatro claves**: `fire_number_mode`,
   `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age`. `GET /v1/installation` ya no las
   devuelve y `PATCH /v1/installation` ya no las acepta (se ignoran en silencio, como cualquier clave
