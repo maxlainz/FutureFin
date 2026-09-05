@@ -22,22 +22,28 @@ todo lo demás, incluido afinar esos dos valores, se hace aquí, en Jubilación.
 
 ## Cómo está organizada la pestaña
 
-La pantalla tiene tres bloques y un acordeón, siempre en este orden:
+La pantalla tiene **dos bloques y ningún acordeón**, siempre en este orden:
 
 1. **Cabecera** — el título y un único aviso de guardado («Guardando…» / «Guardado» / «Sin guardar
    · falta un dato» / «No se pudo guardar»). Antes había un pie «Guardado automático.» por panel;
    ahora hay uno solo, y manda el peor estado vivo.
-2. **«Tu plan»** — dónde configuras: las cinco tarjetas de estrategia y, debajo, **solo los campos
-   que esa estrategia necesita**. Un campo que no ves es un campo que la simulación no está mirando.
+2. **«Tu plan»** — dónde configuras, en **una tarjeta por tema**: Estrategia · Edades · Pensión ·
+   Gasto en jubilación · Retirada · Horizonte. Cada tarjeta abre con una frase de qué hace y qué
+   implica cambiarla, y trae **solo los campos que tu estrategia necesita** — un campo que no ves es
+   un campo que la simulación no está mirando. Una tarjeta que se quedaría vacía tampoco se pinta:
+   con «Cuanto antes» y tu fecha de nacimiento ya puesta, «Edades» no aparece.
 3. **«Resultado»** — dónde lees lo que da tu plan: una frase con tu hito, como mucho tres cifras, un
-   único gráfico y un bloque de riesgo compacto. Lo que no cabe en esas tres cifras no desaparece:
-   baja a «Detalle del cálculo», plegado al final del panel.
-4. **«Avanzado»**, plegado — los supuestos que tu plan da por hecho aunque no los veas arriba (tasa
-   de retirada, regla de retirada, horizonte, colchón de caja, umbral de éxito…). Su propio resumen,
-   visible aunque esté plegado, es una línea que empieza por «Supuestos: …» — ver
-   [«Nada se fuerza sin que lo veas»](#nada-se-fuerza-sin-que-lo-veas-la-línea-supuestos) más abajo.
+   único gráfico —con su eje de importes y la banda de escenarios coloreada por riesgo— y un bloque
+   de riesgo compacto. Lo que no cabe en esas tres cifras no desaparece: baja a «Detalle del
+   cálculo», plegado al final del panel.
 
-En **Hogar** los cuatro bloques anteriores desaparecen: solo ves el aviso de solo lectura y una
+**Ya no hay un acordeón «Avanzado».** Lo hubo, y era un cajón de sastre: repartía trece campos en
+seis secciones plegadas, con tres mandos de la pensión a dos pantallas de la casilla «Cuento con una
+pensión». Con las tarjetas por tema, todo lo que tu plan asume está **a la vista, junto a lo que
+significa** — que es lo que aquel acordeón intentaba compensar con su línea «Supuestos: …», hoy
+retirada por innecesaria.
+
+En **Hogar** los bloques anteriores desaparecen: solo ves el aviso de solo lectura y una
 frase por persona — ver [El hogar](#el-hogar).
 
 ---
@@ -60,12 +66,12 @@ de dos personas bajo el plan de una sola.
 
 ## Las cinco estrategias
 
-Dentro de **«Tu plan»** hay **cinco tarjetas**. Eliges una y el formulario de debajo se queda solo
-con los campos que esa estrategia necesita: no hay que rellenar lo que no aplica, y lo que no ves
-no lo está mirando la simulación (el resumen «Avanzado» lo confirma — ver
-[más abajo](#nada-se-fuerza-sin-que-lo-veas-la-línea-supuestos)).
+La primera tarjeta de **«Tu plan»** es **«Estrategia»**, con cinco opciones. Eliges una y las demás
+tarjetas se quedan solo con los campos que esa estrategia necesita: no hay que rellenar lo que no
+aplica, y lo que no ves no lo está mirando la simulación (ver
+[más abajo](#nada-se-fuerza-sin-que-lo-veas-todo-campo-en-vigor-está-en-su-tarjeta)).
 
-Debajo de las tarjetas vive siempre **«Gasto en jubilación»**, con tres formas de fijar cuánto vas
+En su propia tarjeta vive siempre **«Gasto en jubilación»**, con tres formas de fijar cuánto vas
 a necesitar cada año: **el gasto actual** (tus partidas de jubilación del presupuesto), **tus
 ingresos actuales** (para mantener tu nivel de vida) o **una cifra manual**. Elijas la que elijas,
 debajo aparece la cifra mensual/anual derivada con su procedencia («1.250 €/mes · 15.000 €/año · de
@@ -196,7 +202,7 @@ declarado, indexado, sin techo. Sigue siendo la de serie, pero ahora hay cuatro:
 al bolsillo es algo menos. Es la misma convención que ya usaba el SWR, y por eso las dos cifras se
 pueden comparar.
 
-**En pantalla solo hay UN porcentaje de retirada**: el que fijas en «Avanzado → Retirada» (tu tasa
+**En pantalla solo hay UN porcentaje de retirada**: el que fijas en la tarjeta «Retirada» (tu tasa
 de retirada segura, la misma que dimensiona el objetivo). «Un % del saldo» y la primera mitad de
 «Híbrida» retiran exactamente ese porcentaje — no hay un segundo campo que puedas desincronizar del
 primero. Mover el deslizador mueve las dos cosas a la vez: el objetivo y lo que la regla retira.
@@ -263,8 +269,8 @@ Al lado del objetivo verás dos cifras que la cuenta clásica esconde:
 
 El riesgo —*¿y si los mercados no se portan como la media?*— ya no es un panel aparte con su propio
 gráfico: es la **banda** que puedes encender sobre el mismo chart de «Resultado», más un bloque
-**«Riesgo» compacto** justo debajo (solo «Éxito del plan» + la tabla de agotamiento por edad), con
-todo lo demás en «Detalle del cálculo», plegado.
+**«Riesgo» compacto** justo debajo («Éxito del plan» y la línea de tu colchón de caja), con todo lo
+demás en «Detalle del cálculo», plegado.
 
 ### Qué es la banda
 
@@ -275,6 +281,33 @@ diez futuros caen dentro—, sobre la misma línea sólida de siempre (tu patrim
 objetivo discontinuo. Está encendida por defecto cuando hay escenarios que mostrar: el plan
 determinista es una lectura posible, no la única, y esconder la dispersión tras un clic la convierte
 en una curiosidad opcional.
+
+### Qué dice el color de la banda
+
+La franja **no es de un solo color**: se tiñe por edad según **qué parte de los escenarios ya se ha
+quedado sin capital a esa altura del plan**. Verde donde no falla ninguno, ámbar en cuanto empiezan
+a fallar, rojo desde uno de cada diez. Los cortes son fijos y no dependen de nada que tú configures:
+
+| Escenarios agotados a esa edad | Color |
+|---|---|
+| ninguno (0 %) | verde |
+| hasta el 5 % | verde → ámbar, degradando |
+| del 5 % al 10 % | ámbar → rojo, degradando |
+| 10 % o más | rojo |
+
+Ese último corte no es arbitrario: **el 10 % de escenarios agotados es exactamente el 90 % de
+éxito**, el listón por debajo del cual FutureFin pinta tu plan en rojo. La escala se lee del otro
+lado, pero es el mismo semáforo.
+
+Pasa el ratón por encima y verás **el porcentaje exacto de esa edad**, no una aproximación del
+color: sale del mismo dato que lo tiñe. Y la cifra que el color no puede rotular —el total, cuántos
+escenarios se quedaron sin capital **en algún momento** del plan— está en «Detalle del cálculo».
+
+Sin volatilidad declarada en tus activos la banda no se colorea: no hay escenarios que contar, y
+pintarla de verde diría que ninguno falla cuando lo que pasa es que no se ha sorteado ninguno.
+
+Los dos bordes de la franja llevan su nombre a la derecha: **optimista (p90)** arriba y **pesimista
+(p10)** abajo.
 
 **La banda NO dibuja la mediana como una línea propia.** El valor central de cada mes —el que
 usan otras lecturas de esta sección, como los meses por debajo del gasto— sigue viviendo en los
@@ -291,8 +324,15 @@ dentro de la simulación. Un plan que nunca te jubila no cuenta como éxito aunq
 entero: quedarte para siempre en la fase de ahorro no es lograr tu plan, es no haberlo intentado.
 Por eso, cuando algún escenario se queda sin jubilar, debajo aparecen dos cifras más: cuántos son
 los que no llegan a jubilarse, y qué parte de los que **sí** se jubilan aguanta el capital hasta el
-final. El KPI principal se colorea contra tu umbral (de serie, 95 %): verde en el umbral, ámbar
-hasta diez puntos por debajo, rojo el resto.
+final. El KPI principal es un porcentaje —«87,0 %»— con debajo, en pequeño, de qué es: «de los
+escenarios no agotan el capital».
+
+**El corte del color es fijo y ya no lo eliges tú.** Hubo un ajuste «umbral de éxito» (de serie,
+95 %) y se retiró: un listón configurable no hacía tu plan más seguro, solo más indulgente contigo
+mismo. Ahora es **verde solo con el 100,0 %** —cero escenarios agotados—, ámbar entre el 90 % y el
+100 %, rojo por debajo del 90 %. Con quinientos caminos sorteados, un solo fallo ya es ámbar; por
+eso, cuando el tile está verde, el subtítulo dice el recuento exacto («0 de 500 escenarios agotan el
+capital»), que es lo que hace auditable ese 100 %.
 
 **Que una regla de retirada te recorte el gasto en un año malo NO cuenta como fracaso.** Eso se mide
 aparte, en la **cobertura de tu gasto**: dos cifras que ahora se calculan igual con cualquier regla,
@@ -307,9 +347,11 @@ La misma cifra de éxito aparece en el Resumen, como KPI «Éxito del plan», y 
 sorteo**: no se recalcula en dos sitios, porque entonces la misma pantalla enseñaría dos
 probabilidades del mismo plan.
 
-Debajo, la tabla de **probabilidad de agotar el capital** por edad. Es **acumulada**: el porcentaje a
-los 80 incluye a todos los que se quedaron sin dinero a los 75. Solo puede crecer con la edad, y su
-última fila y el «éxito» cuentan lo mismo desde los dos lados.
+La **probabilidad de agotar el capital** por edad ya no se tabula: **la dice el color de la banda**
+(arriba), con más detalle del que cabía en una tabla y con el porcentaje exacto en el hover. Es
+**acumulada**: el porcentaje a los 80 incluye a todos los que se quedaron sin dinero a los 75, así
+que solo puede crecer con la edad. El total —todos los escenarios que se agotaron en algún momento—
+está en «Detalle del cálculo», y esa cifra y el «éxito» cuentan lo mismo desde los dos lados.
 
 ### La semilla
 
@@ -335,14 +377,29 @@ Dos cosas importan:
 
 ### El colchón de caja, contado honestamente
 
-En «Avanzado → Riesgo» puedes declarar un **colchón de caja**: unos meses de gasto siempre en
-efectivo, para no tener que vender en un año malo. Solo existe en los escenarios con volatilidad —
-en la línea determinista no hay meses buenos ni malos que distinguir, así que no tendría criterio.
+El **colchón de caja** es dinero que la simulación mantiene siempre en efectivo durante la
+jubilación, para no tener que vender en un año malo. **Ya no se lo pides tú**: sale del **tope de tu
+regla de ahorro**. Si tienes una regla del tipo «hasta 6.000 € en la Cuenta corriente, el resto al
+fondo indexado», esos 6.000 € SON tu colchón — ya declaraste cuánto querías en caja al escribir la
+regla, y volver a preguntártelo en meses era pedirte el mismo dato dos veces con otra unidad.
+
+El bloque «Riesgo» te dice de dónde sale, cuánto es y a cuántos meses de tu gasto de hoy equivale, y
+enlaza a Reglas de ahorro, que es donde se cambia. **Es el importe, no los meses**: el tope de tu
+regla es una cifra fija en euros, mientras que «ocho meses de gasto» crecería con la inflación hasta
+valer casi el doble a veinte años — dos cosas distintas, y la que tú declaraste es la primera. Los
+meses que ves al lado son solo una equivalencia informativa.
+
+Si no tienes ninguna regla con tope apuntando a un activo líquido **sin volatilidad** declarada, no
+hay colchón, y la línea te dice cuál de las dos cosas falta en vez de callarlo. (Un colchón que
+también baja con el mercado no es un colchón.) Solo existe en los escenarios con volatilidad — en la
+línea determinista no hay meses buenos ni malos que distinguir, así que no tendría criterio.
 
 Se rellena vendiendo del resto de la cartera **solo con el shock del mes YA ocurrido**, nunca
 adelantándose al mercado, y **solo entre tus activos líquidos** — nunca vendiendo la vivienda para
-llenarlo. Y necesita un activo líquido **sin volatilidad** declarada donde vivir: sin uno así, el
-colchón no se simula, y aquí se te dice por qué en vez de fingir que sí.
+llenarlo.
+
+Se puede fijar a mano por API o por MCP (en meses), y entonces manda sobre la derivación; la línea
+lo dice y te ofrece «Volver al tope de tu regla» para soltarlo.
 
 **Y aquí va lo honesto, con las dos caras**: el colchón **SÍ protege** — medido, sube 3,9 puntos la
 probabilidad de éxito y casi dobla tu liquidez en el peor 10 % de los futuros —, pero **esa
@@ -356,24 +413,23 @@ con tus datos, antes de decidir.
 
 ---
 
-## Nada se fuerza sin que lo veas: la línea «Supuestos»
+## Nada se fuerza sin que lo veas: todo campo en vigor está en su tarjeta
 
 «Tu plan» te enseña solo los campos de tu estrategia — nada de fecha de nacimiento sin usarla, nada
 de bloque de pensión si no la has activado. Pero esconder un campo no es lo mismo que borrarlo: tu
-plan sigue asumiendo una tasa de retirada, una regla concreta, un horizonte, si hay colchón o no y
-un umbral de éxito, aunque no te los esté preguntando en ese momento.
+plan sigue asumiendo una tasa de retirada, una regla concreta y un horizonte aunque no te los esté
+preguntando en ese momento.
 
-Por eso el panel **«Avanzado»**, plegado al final de la pestaña, tiene una particularidad: su
-propio resumen —la línea que ves ANTES de abrirlo, siempre— es una frase que enumera todos esos
-supuestos en vigor:
+La respuesta a eso **son las tarjetas**. Todos esos supuestos viven en una —«Retirada»,
+«Horizonte»— junto a la frase que explica qué mueven, a la vista y sin desplegar nada. La regla es
+simple: **si tu plan lo asume, está en una tarjeta; si no está en ninguna tarjeta, tu plan no lo
+usa.**
 
-> Supuestos: retirada 3,5 % · gasto fijo en euros de hoy · horizonte 90 años · sin colchón ·
-> umbral 95,0 %
-
-Ábrelo y encontrarás los mismos campos agrupados por tema — **Retirada**, **Objetivo**, **Media
-jornada**, **Pensión**, **Horizonte**, **Riesgo** — cada uno con su default ya explicado en las
-secciones de arriba. Cambiar algo aquí no reordena nada de «Tu plan»: solo ajusta el supuesto que
-ese campo representa.
+> **Antes había un acordeón «Avanzado» y una línea «Supuestos: retirada 3,5 % · gasto fijo en euros
+> de hoy · horizonte 90 años · sin colchón · umbral 95,0 %».** Los dos se retiraron a la vez, y no
+> por separado: la línea existía **para enunciar lo que el acordeón escondía**. Sin acordeón no hay
+> nada escondido que enunciar. Dos de los campos que vivían ahí ya ni existen: el colchón de caja se
+> deriva de tu regla de ahorro y el umbral de éxito es fijo.
 
 ---
 
@@ -408,7 +464,7 @@ Tres cosas que conviene entender:
 La **banda de escenarios y el bloque «Riesgo»** no están disponibles en Hogar: los percentiles no se
 suman entre personas (el escenario 90 del hogar no es la suma de los escenarios 90 de cada uno), así
 que FutureFin no lo intenta en vez de enseñar una banda que nadie podría interpretar. Pero en Hogar
-tampoco hay «Tu plan»/«Resultado»/«Avanzado» que enseñar — ver arriba.
+tampoco hay «Tu plan»/«Resultado» que enseñar — ver arriba.
 
 ---
 

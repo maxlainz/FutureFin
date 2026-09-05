@@ -1,18 +1,23 @@
 /**
- * **La única fuente de verdad de qué campos del plan de jubilación se ven** (5.0.0, rediseño UX
- * U1a; decisiones U2 y U12 de #207).
+ * **La única fuente de verdad de qué campos del plan de jubilación se ven, y en qué tarjeta**
+ * (5.0.0; decisiones U2 y U12 de #207, reorganizada por V3 de la tercera vuelta de UX).
  *
  * U2 en una frase: **solo se enseñan los campos que importan para la estrategia elegida; los que
  * no, no se enseñan en absoluto** — ni en gris, ni «por defecto», ni plegados. Un campo visible
  * anuncia que la simulación lo va a mirar, y en cuatro de las cinco estrategias eso es mentira
  * para la mitad del formulario.
  *
- * U12 es su contrapeso, y por eso la tabla vive AQUÍ y no dentro de la vista: **nada se fuerza en
- * silencio**. Los supuestos que la estrategia impone (o hereda del default) siguen existiendo y se
- * enuncian en la línea «Supuestos» (`lib/assumptions-line.ts`), que se construye **a partir de
- * esta misma tabla**. Si la visibilidad viviera en un `if` de `RetirementView.tsx`, la línea de
- * supuestos y el formulario podrían discrepar sobre qué está en juego, que es exactamente el
- * fallo que U12 existe para impedir.
+ * **Qué cambió en V3 (F9/F10)**: el eje de agrupación. Hasta aquí la tabla repartía los campos en
+ * dos GRUPOS —«plan» (lo que se pregunta) y «avanzado» (los supuestos)— y el segundo vivía dentro
+ * de un acordeón «Avanzado» con seis secciones. El owner lo leyó como «un cajón de sastre mal
+ * explicado»: tres mandos de pensión quedaban a dos pantallas de la casilla «Cuento con una
+ * pensión», y `partial_expense_basis` lejos de la media jornada. El eje nuevo es **el TEMA**
+ * (`PlanCardId`), todo a la vista, cada tarjeta con su frase de qué hace. No cambia ni una
+ * condición de visibilidad: es exactamente la misma tabla, ordenada por otro criterio.
+ *
+ * Con el acordeón se fue su contrapeso U12, la línea «Supuestos» (`lib/assumptions-line.ts`,
+ * retirada): existía para enunciar lo que el acordeón escondía. Sin acordeón no hay nada
+ * escondido que enunciar — todo supuesto en vigor está en su tarjeta, a la vista.
  *
  * Tres cosas que este módulo NO hace:
  *
@@ -21,8 +26,8 @@
  *     estrategia no se puede simular tal y como el usuario la ha pedido», que es lo que el
  *     asistente de alta necesita saber para no dejarle avanzar.
  *  2. **No conoce el `<input>`.** Devuelve descriptores; la vista decide el control.
- *  3. **No decide el orden visual por sección.** El orden del array ES el orden de lectura, y las
- *     secciones salen contiguas por construcción; agrupar es cosa de quien pinta.
+ *  3. **No decide el orden visual dentro de la tarjeta.** El orden del array ES el orden de
+ *     lectura, y las tarjetas salen contiguas por construcción; agrupar es cosa de quien pinta.
  */
 
 import type {
@@ -35,70 +40,82 @@ import type {
 import { effectiveTargetBasis } from "./retirementProfile";
 
 /** Todo campo del plan que la vista puede pintar. Cerrado a propósito: un id nuevo obliga a
- *  colocarlo en la tabla, y por tanto a decidir en qué estrategias existe. */
+ *  colocarlo en la tabla, y por tanto a decidir en qué estrategias existe y en qué tarjeta cae.
+ *
+ *  **Dos ids se retiraron en la tercera vuelta de UX** y no vuelven sin deshacer una decisión del
+ *  owner: `cash_buffer_months` (V6 — el colchón se DERIVA del tope de tu regla de ahorro y la SPA
+ *  solo lo informa) y `success_threshold_pct` (V7 — el corte del semáforo es fijo al 100 % y ya no
+ *  es del usuario). Los dos siguen existiendo en el perfil por API y por MCP; lo que desapareció
+ *  es su campo de formulario. */
 export type PlanFieldId =
-  // --- grupo «plan»: lo que la estrategia PREGUNTA ---
   | "birth_date"
   | "target_retirement_age"
   | "partial_start_age"
   | "partial_income"
+  | "partial_expense_basis"
   | "pension_amount"
   | "pension_start_age"
+  | "pension_indexed"
+  | "pension_fraction_while_partial"
+  | "target_basis"
+  | "bridge_discount_basis"
   | "fire_number_mode"
   | "fire_number_manual_amount"
-  // --- grupo «avanzado»: los supuestos ---
   | "swr_pct"
   | "withdrawal_rule_kind"
   | "hybrid_end_pct"
   | "guardrails_band_pct"
   | "guardrails_adjust_pct"
   | "spend_mode"
-  | "target_basis"
-  | "bridge_discount_basis"
-  | "pension_indexed"
-  | "pension_fraction_while_partial"
-  | "partial_expense_basis"
-  | "horizon_lifespan_age"
-  | "cash_buffer_months"
-  | "success_threshold_pct";
-
-/** `plan` = lo que hay que contestar para tener plan. `advanced` = supuestos con default. */
-export type PlanFieldGroup = "plan" | "advanced";
-
-/** Secciones del bloque avanzado. Solo las llevan los campos `advanced`. */
-export type PlanFieldSection =
-  | "retirada"
-  | "objetivo"
-  | "media_jornada"
-  | "pension"
-  | "horizonte"
-  | "riesgo";
+  | "horizon_lifespan_age";
 
 /**
- * Un campo visible. La unión discriminada por `group` no es decoración: **un campo del grupo
- * `plan` no tiene sección y uno `advanced` la tiene siempre**, y dejarlo en un `section?` haría
- * que un descriptor avanzado sin sección compilara y se pintara fuera de todo bloque.
+ * Las tarjetas por tema (V3). **Seis, no siete**: la lista del owner incluía «Riesgo», pero tras
+ * V6 y V7 esa tarjeta se quedó SIN un solo campo editable —el colchón se deriva, el umbral no
+ * existe— y una tarjeta vacía no se pinta. Lo que el owner quería leer bajo ese nombre sigue en la
+ * página: es el bloque «Riesgo» del panel «Resultado», con el éxito, la banda coloreada y la línea
+ * informativa del colchón. Un id aquí que nadie pudiera producir sería un token huérfano que
+ * «parece vivo» y acaba usándose para otra cosa (el precedente de la casa es `--proj-jub`).
+ *
+ * `strategy` es la excepción a «una tarjeta son sus campos»: su contenido no sale de esta tabla,
+ * es el radiogroup de las cinco estrategias, así que siempre se pinta aunque no tenga campos.
  */
-export type PlanFieldDescriptorPlan = {
+export type PlanCardId =
+  | "strategy"
+  | "ages"
+  | "pension"
+  | "spending"
+  | "withdrawal"
+  | "horizon";
+
+/** Orden de lectura de las tarjetas: primero QUÉ dispara la jubilación, luego CUÁNDO, con QUÉ
+ *  rentas, CUÁNTO se gasta, CÓMO se saca y HASTA cuándo tiene que durar. */
+export const PLAN_CARD_ORDER: readonly PlanCardId[] = [
+  "strategy",
+  "ages",
+  "pension",
+  "spending",
+  "withdrawal",
+  "horizon",
+];
+
+/**
+ * Un campo visible y la tarjeta donde vive.
+ *
+ * `card` es TOTAL (no `card?`) a propósito: el descriptor anterior usaba una unión discriminada
+ * por `group` para que un campo «avanzado» no pudiera compilar sin sección. La misma protección,
+ * más barata: sin tarjeta un campo no se pintaría en ningún sitio, y el compilador lo caza al
+ * añadirlo a la tabla.
+ */
+export type PlanFieldDescriptor = {
   id: PlanFieldId;
-  group: "plan";
-  section: null;
-  /** `true` ⟺ la estrategia elegida no se puede simular como se ha pedido sin este dato. */
+  card: PlanCardId;
+  /** `true` ⟺ la estrategia elegida no se puede simular como se ha pedido sin este dato. Los
+   *  supuestos con default resuelto por el servidor son siempre `false`. */
   required: boolean;
   /** Rótulo canónico. Varía con la estrategia en `target_retirement_age` (ver la tabla). */
   label: string;
 };
-
-export type PlanFieldDescriptorAdvanced = {
-  id: PlanFieldId;
-  group: "advanced";
-  section: PlanFieldSection;
-  /** Siempre `false`: todo supuesto tiene default resuelto por el servidor. */
-  required: false;
-  label: string;
-};
-
-export type PlanFieldDescriptor = PlanFieldDescriptorPlan | PlanFieldDescriptorAdvanced;
 
 /**
  * Lo que hace falta para resolver la tabla. Son HECHOS ya derivados, no el perfil crudo: el
@@ -142,35 +159,33 @@ function targetAgeLabel(s: RetirementStrategyApi): string {
 }
 
 /**
- * La tabla U2, en orden de lectura.
+ * La tabla U2, en orden de lectura y agrupada por TARJETA (V3).
  *
- * Grupo `plan` (lo que la estrategia pregunta):
+ * | Campo | Tarjeta | ¿Cuándo se ve? | ¿Obligatorio? |
+ * |---|---|---|---|
+ * | `birth_date` | edades | **solo si falta** | sí en `retire_at_age`/`coast`/`partial` |
+ * | `target_retirement_age` | edades | `retire_at_age`, `coast`, `partial` | sí salvo en `partial` |
+ * | `partial_start_age`, `partial_income` | edades | `partial` | sí |
+ * | `partial_expense_basis` | edades | `partial` | no |
+ * | `pension_amount`, `pension_start_age` | pensión | siempre (la casilla vive ahí) | solo en `pension_bridge` |
+ * | `pension_indexed` | pensión | hay pensión | no |
+ * | `pension_fraction_while_partial` | pensión | `partial` **y** hay pensión | no |
+ * | `target_basis` | pensión | hay pensión **y** la estrategia no impone la base | no |
+ * | `bridge_discount_basis` | pensión | la base efectiva ES el puente | no |
+ * | `fire_number_mode` | gasto | siempre | no |
+ * | `fire_number_manual_amount` | gasto | modo `manual` | sí |
+ * | `swr_pct`, `withdrawal_rule_kind` | retirada | siempre | no |
+ * | `hybrid_end_pct` | retirada | regla `hybrid` | no |
+ * | `guardrails_band_pct`, `guardrails_adjust_pct` | retirada | regla `guardrails` | no |
+ * | `spend_mode` | retirada | regla ≠ `fixed_real` | no |
+ * | `horizon_lifespan_age` | horizonte | siempre | no |
  *
- * | Campo | ¿Cuándo se ve? | ¿Obligatorio? |
- * |---|---|---|
- * | `birth_date` | **solo si falta** | sí en `retire_at_age`/`coast`/`partial`; no en `asap`/`pension_bridge` |
- * | `target_retirement_age` | `retire_at_age`, `coast`, `partial` | sí salvo en `partial` (ahí es opcional y se rotula «edad de jubilación total») |
- * | `partial_start_age`, `partial_income` | `partial` | sí |
- * | `pension_amount`, `pension_start_age` | siempre (la casilla vive en el grupo) | solo en `pension_bridge` |
- * | `fire_number_mode` | siempre | no |
- * | `fire_number_manual_amount` | modo `manual` | sí |
- *
- * Grupo `advanced` (supuestos, todos con default y por tanto nunca obligatorios):
- *
- * | Campo | Sección | ¿Cuándo se ve? |
- * |---|---|---|
- * | `swr_pct` | retirada | siempre — es **el único porcentaje de retirada** (U4) |
- * | `withdrawal_rule_kind` | retirada | siempre |
- * | `hybrid_end_pct` | retirada | regla `hybrid` |
- * | `guardrails_band_pct`, `guardrails_adjust_pct` | retirada | regla `guardrails` |
- * | `spend_mode` | retirada | regla ≠ `fixed_real` (con gasto fijo no hay techo del que hablar) |
- * | `target_basis` | objetivo | hay pensión **y** la estrategia no impone la base |
- * | `bridge_discount_basis` | objetivo | la base efectiva ES el puente |
- * | `pension_indexed` | pension | hay pensión |
- * | `pension_fraction_while_partial` | pension | `partial` **y** hay pensión |
- * | `partial_expense_basis` | media_jornada | `partial` |
- * | `horizon_lifespan_age` | horizonte | siempre |
- * | `cash_buffer_months`, `success_threshold_pct` | riesgo | siempre |
+ * **Por qué las dos mudanzas de V3.** Las tres piezas finas de la pensión (`pension_indexed`,
+ * `pension_fraction_while_partial`) y las dos del objetivo (`target_basis`,
+ * `bridge_discount_basis`) viven ahora en la MISMA tarjeta que la casilla «Cuento con una
+ * pensión»: las cinco solo existen cuando hay pensión declarada, y separarlas obligaba a leer la
+ * pensión dos veces en dos sitios de la página. `partial_expense_basis` baja a «Edades» por lo
+ * mismo: es el gasto DURANTE la fase parcial, y su sitio es junto a la fase.
  *
  * **U4 en la tabla**: no existe `withdrawal_pct` ni `hybrid_start_pct`. El porcentaje de la
  * regla es `swr_pct`, el mismo que dimensiona el objetivo; la híbrida solo añade el «baja al
@@ -179,82 +194,85 @@ function targetAgeLabel(s: RetirementStrategyApi): string {
  */
 export function planFields(ctx: PlanFieldsContext): PlanFieldDescriptor[] {
   const out: PlanFieldDescriptor[] = [];
-  const plan = (id: PlanFieldId, required: boolean, label: string) =>
-    out.push({ id, group: "plan", section: null, required, label });
-  const adv = (id: PlanFieldId, section: PlanFieldSection, label: string) =>
-    out.push({ id, group: "advanced", section, required: false, label });
+  const f = (
+    id: PlanFieldId,
+    card: PlanCardId,
+    required: boolean,
+    label: string,
+  ) => out.push({ id, card, required, label });
 
-  // ── Grupo «plan» ─────────────────────────────────────────────────────────────────────────
+  // ── Edades ───────────────────────────────────────────────────────────────────────────────
   // La fecha de nacimiento solo aparece cuando FALTA: pedirla otra vez a quien ya la tiene es
   // ruido, y su sitio natural es «Tu cuenta».
   if (!ctx.hasBirthDate) {
-    plan("birth_date", strategyNeedsBirthDate(ctx.strategy), "Fecha de nacimiento");
+    f("birth_date", "ages", strategyNeedsBirthDate(ctx.strategy), "Fecha de nacimiento");
   }
   if (
     ctx.strategy === "retire_at_age" ||
     ctx.strategy === "coast" ||
     ctx.strategy === "partial"
   ) {
-    plan(
+    f(
       "target_retirement_age",
+      "ages",
       ctx.strategy !== "partial",
       targetAgeLabel(ctx.strategy),
     );
   }
   if (ctx.strategy === "partial") {
-    plan("partial_start_age", true, "Edad de inicio de la media jornada");
-    plan("partial_income", true, "Ingreso mensual en media jornada");
+    f("partial_start_age", "ages", true, "Edad de inicio de la media jornada");
+    f("partial_income", "ages", true, "Ingreso mensual en media jornada");
+    f("partial_expense_basis", "ages", false, "Gasto durante la media jornada");
   }
-  // La pensión se ofrece SIEMPRE (la casilla es parte del grupo), pero solo el puente la exige:
+
+  // ── Pensión ──────────────────────────────────────────────────────────────────────────────
+  // Se ofrece SIEMPRE (la casilla es parte de la tarjeta), pero solo el puente la exige:
   // esconderla en las demás estrategias haría invisible el dato que más mueve el objetivo.
-  plan("pension_amount", ctx.strategy === "pension_bridge", "Pensión mensual");
-  plan("pension_start_age", ctx.strategy === "pension_bridge", "Edad de inicio de la pensión");
-  plan("fire_number_mode", false, "Cómo se calcula el objetivo");
-  if (ctx.fireNumberMode === "manual") {
-    plan("fire_number_manual_amount", true, "Objetivo manual");
-  }
-
-  // ── Grupo «avanzado» · retirada ──────────────────────────────────────────────────────────
-  adv("swr_pct", "retirada", "Tasa de retirada");
-  adv("withdrawal_rule_kind", "retirada", "Regla de retirada");
-  if (ctx.ruleKind === "hybrid") adv("hybrid_end_pct", "retirada", "Baja al");
-  if (ctx.ruleKind === "guardrails") {
-    adv("guardrails_band_pct", "retirada", "Banda");
-    adv("guardrails_adjust_pct", "retirada", "Ajuste");
-  }
-  if (ctx.ruleKind !== "fixed_real") {
-    adv("spend_mode", "retirada", "Cómo se aplica la regla");
-  }
-
-  // ── objetivo ─────────────────────────────────────────────────────────────────────────────
-  if (ctx.hasPension && !ctx.strategyForcesBasis) {
-    adv("target_basis", "objetivo", "Base del objetivo");
-  }
-  if (ctx.effectiveBasis === "bridge_to_pension") {
-    adv("bridge_discount_basis", "objetivo", "Descuento del puente");
-  }
-
-  // ── pensión ──────────────────────────────────────────────────────────────────────────────
+  f("pension_amount", "pension", ctx.strategy === "pension_bridge", "Pensión mensual");
+  f(
+    "pension_start_age",
+    "pension",
+    ctx.strategy === "pension_bridge",
+    "Edad de inicio de la pensión",
+  );
   if (ctx.hasPension) {
-    adv("pension_indexed", "pension", "Pensión indexada a la inflación");
+    f("pension_indexed", "pension", false, "Pensión indexada a la inflación");
     if (ctx.strategy === "partial") {
-      adv(
+      f(
         "pension_fraction_while_partial",
         "pension",
+        false,
         "Pensión cobrada durante la media jornada",
       );
     }
+    if (!ctx.strategyForcesBasis) {
+      f("target_basis", "pension", false, "Base del objetivo");
+    }
+  }
+  if (ctx.effectiveBasis === "bridge_to_pension") {
+    f("bridge_discount_basis", "pension", false, "Descuento del puente");
   }
 
-  // ── media jornada ────────────────────────────────────────────────────────────────────────
-  if (ctx.strategy === "partial") {
-    adv("partial_expense_basis", "media_jornada", "Gasto durante la media jornada");
+  // ── Gasto en jubilación ──────────────────────────────────────────────────────────────────
+  f("fire_number_mode", "spending", false, "Cómo se calcula el objetivo");
+  if (ctx.fireNumberMode === "manual") {
+    f("fire_number_manual_amount", "spending", true, "Objetivo manual");
   }
 
-  // ── horizonte y riesgo ───────────────────────────────────────────────────────────────────
-  adv("horizon_lifespan_age", "horizonte", "Edad límite del horizonte");
-  adv("cash_buffer_months", "riesgo", "Colchón de caja");
-  adv("success_threshold_pct", "riesgo", "Umbral de éxito");
+  // ── Retirada ─────────────────────────────────────────────────────────────────────────────
+  f("swr_pct", "withdrawal", false, "Tasa de retirada");
+  f("withdrawal_rule_kind", "withdrawal", false, "Regla de retirada");
+  if (ctx.ruleKind === "hybrid") f("hybrid_end_pct", "withdrawal", false, "Baja al");
+  if (ctx.ruleKind === "guardrails") {
+    f("guardrails_band_pct", "withdrawal", false, "Banda");
+    f("guardrails_adjust_pct", "withdrawal", false, "Ajuste");
+  }
+  if (ctx.ruleKind !== "fixed_real") {
+    f("spend_mode", "withdrawal", false, "Cómo se aplica la regla");
+  }
+
+  // ── Horizonte ────────────────────────────────────────────────────────────────────────────
+  f("horizon_lifespan_age", "horizon", false, "Edad límite del horizonte");
 
   return out;
 }
@@ -281,14 +299,31 @@ export function requiredPlanFields(
     .map((f) => f.id);
 }
 
-/** Solo el grupo `plan`, en orden. */
-export function planGroupFields(ctx: PlanFieldsContext): PlanFieldDescriptorPlan[] {
-  return planFields(ctx).filter((f): f is PlanFieldDescriptorPlan => f.group === "plan");
-}
+/** Una tarjeta a pintar, con sus campos en orden de lectura. */
+export type PlanCardGroup = {
+  card: PlanCardId;
+  fields: PlanFieldDescriptor[];
+};
 
-/** Solo el grupo `advanced`, en orden (las secciones salen contiguas). */
-export function advancedGroupFields(ctx: PlanFieldsContext): PlanFieldDescriptorAdvanced[] {
-  return planFields(ctx).filter((f): f is PlanFieldDescriptorAdvanced => f.group === "advanced");
+/**
+ * Las tarjetas que de verdad se pintan, en `PLAN_CARD_ORDER`.
+ *
+ * **Ninguna tarjeta vacía**: una tarjeta con su título, su frase y ningún control anuncia una
+ * decisión que el usuario no puede tomar. Con `asap` y fecha de nacimiento conocida, «Edades»
+ * desaparece entera — que es exactamente lo que U2 pide.
+ *
+ * **`strategy` es la única excepción y está siempre**: su contenido no son campos de esta tabla
+ * sino el radiogroup de las cinco estrategias, así que «vacía» ahí no significa «sin contenido».
+ * La vista lo sabe y la pinta aparte.
+ */
+export function planCardGroups(ctx: PlanFieldsContext): PlanCardGroup[] {
+  const fields = planFields(ctx);
+  const out: PlanCardGroup[] = [];
+  for (const card of PLAN_CARD_ORDER) {
+    const mine = fields.filter((f) => f.card === card);
+    if (card === "strategy" || mine.length > 0) out.push({ card, fields: mine });
+  }
+  return out;
 }
 
 /**
@@ -296,8 +331,7 @@ export function advancedGroupFields(ctx: PlanFieldsContext): PlanFieldDescriptor
  * servidor) más el único dato que no vive en él: si el usuario tiene fecha de nacimiento.
  *
  * La base efectiva sale de `effectiveTargetBasis` (R6, misma regla que Rust) y `strategyForcesBasis`
- * de la propia estrategia — una sola derivación para el formulario, la línea de supuestos y
- * cualquier otro consumidor.
+ * de la propia estrategia — una sola derivación para el formulario y cualquier otro consumidor.
  */
 export function planFieldsContextFromProfile(
   profile: RetirementProfileApi,

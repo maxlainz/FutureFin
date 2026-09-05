@@ -52,10 +52,9 @@ export const MIN_PENSION_AGE = 50;
 export const MAX_WITHDRAWAL_PCT = 20;
 /** Techo de la banda y del ajuste de `guardrails` (%). */
 export const MAX_GUARDRAIL_PCT = 50;
-/** Colchón de caja máximo, en meses de gasto. */
+/** Colchón de caja máximo, en meses de gasto. Sigue siendo la cota del override explícito por
+ *  API/MCP; la SPA ya no ofrece el campo (V6: el colchón se deriva del tope de la regla). */
 export const MAX_CASH_BUFFER_MONTHS = 60;
-export const MIN_SUCCESS_THRESHOLD_PCT = 50;
-export const MAX_SUCCESS_THRESHOLD_PCT = 99;
 /** Techo del SWR (%). El eje se movió al perfil; la cota no cambió. */
 export const MAX_SWR_PCT = 4;
 /** Cotas de la edad límite del horizonte (siguen viviendo en `installation.rs`, reusadas aquí). */
@@ -224,7 +223,6 @@ export function defaultRetirementProfileApi(): RetirementProfileApi {
     pension: null,
     partial_retirement: null,
     cash_buffer_months: null,
-    success_threshold_pct: 95,
   };
 }
 
@@ -420,12 +418,6 @@ export function normalizeRetirementProfile(
       raw.cash_buffer_months == null
         ? null
         : clampInt(raw.cash_buffer_months, 0, MAX_CASH_BUFFER_MONTHS, 0),
-    success_threshold_pct: clampInt(
-      raw.success_threshold_pct,
-      MIN_SUCCESS_THRESHOLD_PCT,
-      MAX_SUCCESS_THRESHOLD_PCT,
-      base.success_threshold_pct,
-    ),
   };
 }
 
@@ -594,19 +586,16 @@ export function retirementProfileIssue(p: RetirementProfileApi): string | null {
     }
   }
 
-  // --- Colchón y umbral ------------------------------------------------------------------
+  // --- Colchón ---------------------------------------------------------------------------
+  //
+  // El UMBRAL de éxito ya no se valida aquí porque ya no existe (V7): el corte es fijo al 100 %
+  // y lo decide el servidor. El PATCH sigue tolerando el campo por compatibilidad, pero la SPA
+  // no lo escribe, así que no hay nada que este espejo pueda rechazar.
   if (p.cash_buffer_months != null) {
     if (!Number.isInteger(p.cash_buffer_months) || p.cash_buffer_months < 0) {
       return "cash_buffer_out_of_range";
     }
     if (p.cash_buffer_months > MAX_CASH_BUFFER_MONTHS) return "cash_buffer_out_of_range";
-  }
-  if (
-    !Number.isInteger(p.success_threshold_pct) ||
-    p.success_threshold_pct < MIN_SUCCESS_THRESHOLD_PCT ||
-    p.success_threshold_pct > MAX_SUCCESS_THRESHOLD_PCT
-  ) {
-    return "success_threshold_out_of_range";
   }
 
   // U4 — se juzga el porcentaje EFECTIVO, no el escrito: `pct`/`start_pct` ausentes heredan
@@ -776,9 +765,6 @@ export function buildRetirementProfilePatch(
   }
   if (before.cash_buffer_months !== after.cash_buffer_months) {
     patch.cash_buffer_months = after.cash_buffer_months;
-  }
-  if (before.success_threshold_pct !== after.success_threshold_pct) {
-    patch.success_threshold_pct = after.success_threshold_pct;
   }
 
   return patch;

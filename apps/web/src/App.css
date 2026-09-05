@@ -1730,27 +1730,6 @@
   color: var(--ff-muted);
 }
 
-/* Aviso de alta de Jubilación (D33): texto + botón de descarte en la misma línea, apilados
-   cuando no caben. Mismo `.banner.info-banner` de siempre, cero colores propios. */
-.retirement-intro-banner {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-}
-
-.retirement-intro-banner-text {
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-  min-width: 0;
-}
-
-.retirement-intro-banner-text small {
-  color: var(--ff-muted);
-}
-
 /* Popover de ayuda (3.10.0). El icono reutiliza `.inline-hint-icon`, ya tokenizado; aquí solo se
    convierte en botón y se ancla el panel. Diálogo NO modal: sin backdrop y sin atrapar el foco. */
 /* Etiqueta de campo con su interrogante al lado. `baseline` y no `center` para que el icono se
@@ -4254,45 +4233,6 @@ fieldset.retirement-config-stack {
   font-weight: 600;
 }
 
-/* Tabla «Probabilidad de agotar el capital». `auto-fit` y no un `<table>`:
-   son pares etiqueta/valor sin relación entre filas, y en móvil el
-   requisito (D28) son DOS columnas — que aquí sale del propio `minmax`
-   sin una media query nueva. */
-.risk-depletion-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(50%, 7rem), 1fr));
-  gap: 0.4rem 0.75rem;
-  margin-top: 0.35rem;
-}
-
-.risk-depletion-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 0.1rem;
-  padding: 0.4rem 0.55rem;
-  background: var(--ff-paper);
-  border: 1px solid var(--ff-line-soft);
-  border-radius: var(--ff-radius-kpi);
-  min-width: 0;
-}
-
-.risk-depletion-age {
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ff-muted);
-  white-space: nowrap;
-}
-
-.risk-depletion-value {
-  font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 0.95rem;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
-  color: var(--ff-ink);
-}
-
 /* Filas extra (jubilación probable, recorte, colchón): pares
    etiqueta/valor apilados, con la base debajo en muted. Slot de detalle
    NO reservado a propósito — no hay baseline compartida que alinear:
@@ -4428,11 +4368,12 @@ fieldset.retirement-config-stack {
   color: var(--ff-ink);
 }
 
-/* Enlaces de texto que no son acciones destructivas ni primarias:
-   el salto a «Avanzado» y la vuelta a la vista «Yo». Alineados a la
-   izquierda y sin ocupar todo el ancho del `.stack`, que los haría
-   parecer el botón principal del panel. */
-.retirement-advanced-link,
+/* Enlace de texto que no es una acción destructiva ni primaria: la
+   vuelta a la vista «Yo» desde el agregado del hogar. Alineado a la
+   izquierda y sin ocupar todo el ancho del `.stack`, que lo haría
+   parecer el botón principal del panel. (El hermano que tenía, el
+   salto a «Avanzado», se fue con el acordeón en la tercera vuelta
+   de UX.) */
 .retirement-scope-link {
   align-self: flex-start;
   margin-left: -0.55rem;
@@ -4563,65 +4504,6 @@ fieldset.retirement-config-stack {
   margin-bottom: 0.6rem;
 }
 
-/* ---- 4 · «Avanzado» ----
-   Su cabecera ES la línea de supuestos (U12): plegado o abierto,
-   el acordeón enuncia SIEMPRE lo que el plan da por hecho. Sin
-   esto, esconder un campo (U2) sería forzar su valor en silencio.
-   El marcador nativo se retira porque la línea es larga y el
-   triángulo la partía en dos renglones desalineados; la afordancia
-   la da el chip «Avanzado» de la derecha. */
-.retirement-advanced > summary {
-  cursor: pointer;
-  list-style: none;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.35rem 0.75rem;
-}
-
-.retirement-advanced > summary::-webkit-details-marker {
-  display: none;
-}
-
-.retirement-advanced-summary-text {
-  flex: 1 1 16rem;
-  min-width: 0;
-  font-size: 0.78rem;
-  line-height: 1.4;
-  color: var(--ff-ink-soft);
-}
-
-.retirement-advanced-summary-cta {
-  font-size: 0.72rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ff-accent);
-  white-space: nowrap;
-}
-
-.retirement-advanced > summary:focus-visible {
-  outline: 2px solid var(--ff-accent);
-  outline-offset: 2px;
-  border-radius: var(--ff-radius-input);
-}
-
-.retirement-advanced-body {
-  margin-top: 1rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--ff-line-soft);
-  display: flex;
-  flex-direction: column;
-  gap: 1.1rem;
-}
-
-.retirement-advanced-section {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-}
-
 /* ---- Hogar (U10) ----
    Una frase por persona y nada más: el hogar no tiene plan propio,
    así que una rejilla de tarjetas invitaría a comparar cifras con
@@ -4638,13 +4520,146 @@ fieldset.retirement-config-stack {
   color: var(--ff-ink);
 }
 
-/* El rótulo de la celda de agotamiento vuelve a poder ENVOLVER. Con `nowrap`, «AL FINAL DEL
-   HORIZONTE» (161 px medidos) no cabía en una columna de dos a 639 px y empujaba la PÁGINA
-   entera 7 px — la regla de oro del sistema responsive, que solo permite scroll lateral DENTRO
-   de una tabla. Los rótulos por edad («a los 75») caben en una línea igual; el único que
-   envuelve es el largo, y una celda dos renglones más alta no desalinea nada: la rejilla ya
-   iguala las alturas de la fila. */
-.risk-depletion-age {
+/* ============================================================
+   JUBILACIÓN — tercera vuelta de UX (5.0.0, V1–V7, issue #207)
+   ------------------------------------------------------------
+   Aditivo y al FINAL del archivo a propósito: así ninguna línea
+   anterior se desplaza y las anclas por `file:línea` del freezer
+   `no-hex-outside-theme.test.ts` no se mueven por esto.
+   Cero hex: solo tokens `--ff-*` / `--proj-*` y `color-mix`.
+   ============================================================ */
+
+/* El subtítulo del KPI «Éxito del plan» ENVUELVE. Desde V1 el valor
+   es «87,0 %» y el sujeto de la cifra («de los escenarios no agotan
+   el capital» / «0 de 500 escenarios agotan el capital») vive en el
+   paréntesis: recortado con ellipsis diría «de los escenarios no
+   ag…», que es media base — y media base es peor que ninguna.
+   Precedente sancionado: `.retirement-tiles-grid`. */
+.summary-success-grid .metric-value-parenthetical,
+.plan-card-wide-kpi .metric-value-parenthetical {
   white-space: normal;
-  overflow-wrap: anywhere;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.3;
+}
+
+/* ---- V3 · tarjetas de configuración de «Tu plan» ----
+   `auto-fit` con un mínimo de 21rem da 2 columnas en escritorio sin
+   un breakpoint nuevo. Dos y no una: seis tarjetas en columna única
+   dejarían «Resultado» a dos pantallas de scroll, y U1 dice que el
+   resultado va DEBAJO del plan — debajo, no lejos. */
+.retirement-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 21rem), 1fr));
+  gap: 1rem;
+}
+
+.retirement-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem 0.9rem;
+  border: 1px solid var(--ff-line-soft);
+  border-radius: var(--ff-radius-kpi);
+  background: color-mix(in oklch, var(--ff-paper) 60%, var(--ff-bg));
+  min-width: 0;
+}
+
+/* Las dos tarjetas cuyo contenido es una rejilla de radio-cards
+   (las cinco estrategias, los tres modos del objetivo): en una
+   columna de 21rem sus tarjetas caerían a ~7rem y el nombre no
+   cabría en una línea. */
+.retirement-card--wide {
+  grid-column: 1 / -1;
+}
+
+/* La tarjeta es un flex-column con `gap`, así que el margen inferior
+   del `.panel-title` sumaría un segundo hueco bajo el título. */
+.retirement-card > .panel-title {
+  margin-bottom: 0;
+}
+
+.retirement-card-blurb {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--ff-ink-soft);
+}
+
+/* Disparador de un `<details>` de SEGUNDO orden («Detalle del
+   cálculo»). Deliberadamente menor que un `.panel-title`: no es el
+   título de una sección, es la puerta a lo que se puede no leer.
+   Tiene clase propia —y no un `<summary>` pelado— porque la norma
+   de títulos (P6) prohíbe que un elemento sin clase decida su
+   tamaño: así el tamaño está declarado en un sitio y se ve. */
+.details-trigger {
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ff-ink-soft);
+}
+
+/* ---- V2/V5 · el gráfico de riesgo dice el riesgo ----
+   Rótulos DENTRO del plot (los dos bordes de la banda y el del
+   hover): halo del color del fondo con `paint-order: stroke`, que
+   es lo que los deja legibles sobre la banda teñida sin abrirles
+   un hueco blanco. El color lo pone el `fill` del propio `<text>`;
+   aquí solo la tipografía, que en SVG no se hereda del CSS del
+   padre. */
+.proj-mini-band-label,
+.proj-mini-hover-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  paint-order: stroke;
+  stroke: var(--proj-plot-bg);
+  stroke-width: 2.5px;
+  stroke-linejoin: round;
+}
+
+/* La ESCALA del color de la banda. No es una leyenda —no nombra
+   series, describe una escala continua— y por eso vive fuera de
+   `ChartLegend`, en una línea de texto normal bajo el chart. */
+.retirement-risk-scale {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--ff-muted);
+}
+
+.retirement-risk-scale-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.65rem;
+  white-space: nowrap;
+}
+
+/* El color llega por custom property (mismo patrón que
+   `--ff-legend-color` de `ChartLegend`): el valor es un token, o un
+   `color-mix` de dos, y tiene que resolver por tema. */
+.retirement-risk-scale-swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: var(--ff-radius-pill);
+  background: var(--ff-risk-swatch, var(--ff-accent));
+  flex: 0 0 auto;
+}
+
+/* La línea informativa del colchón de caja (V6): procedencia y, si
+   alguien lo fijó por API, su salida. El botón se alinea con el
+   texto en vez de saltar de línea. */
+.retirement-buffer-line {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--ff-ink-soft);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.6rem;
+}
+
+.retirement-buffer-line .btn {
+  margin-left: -0.35rem;
 }

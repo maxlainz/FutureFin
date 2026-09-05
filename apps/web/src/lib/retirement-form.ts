@@ -14,7 +14,7 @@
  */
 
 import type { RetirementProfileApi, WithdrawalRuleApi } from "../api/types";
-import type { PlanFieldId } from "./plan-fields";
+import type { PlanCardId, PlanFieldId } from "./plan-fields";
 import type { HelpTextId } from "./helpTexts";
 import { DISPLAY_NUMBER_LOCALE, formatPercentAmount, parseDisplayDecimal } from "./format";
 import { effectiveWithdrawalPct, type PctSourceApi } from "./retirementProfile";
@@ -225,7 +225,7 @@ export function withdrawalPctNote(input: WithdrawalPctNoteInput): string | null 
  * Qué entrada del catálogo de descripciones acompaña a cada campo del plan.
  *
  * Es una tabla y no una prop de ayuda repartida por el JSX para que el cableado se pueda leer —y
- * probar— de una vez: con veintitrés campos renderizados por id, un ternario perdido deja un
+ * probar— de una vez: con veinte campos renderizados por id, un ternario perdido deja un
  * campo sin ayuda y nadie lo nota. Los campos que no aparecen aquí **no llevan icono a
  * propósito**: su rótulo se explica solo, y un interrogante que lo repite es ruido.
  *
@@ -257,16 +257,59 @@ export const PLAN_FIELD_HELP: Partial<Record<PlanFieldId, { helpId: HelpTextId }
   pension_fraction_while_partial: { helpId: "retirement.pension" },
   partial_expense_basis: { helpId: "retirement.partial" },
   horizon_lifespan_age: { helpId: "settings.horizon_age" },
-  cash_buffer_months: { helpId: "retirement.cash_buffer" },
-  success_threshold_pct: { helpId: "retirement.success_threshold" },
 };
 
-/** Rótulos de las secciones del bloque «Avanzado», en el orden en que salen de `planFields`. */
-export const ADVANCED_SECTION_LABEL = {
-  retirada: "Retirada",
-  objetivo: "Objetivo",
-  media_jornada: "Media jornada",
-  pension: "Pensión",
-  horizonte: "Horizonte",
-  riesgo: "Riesgo",
-} as const;
+/**
+ * Título y FRASE de cada tarjeta de configuración (V3 de la tercera vuelta de UX, F9/F10).
+ *
+ * Sustituye a `ADVANCED_SECTION_LABEL`, que solo tenía rótulos porque el acordeón «Avanzado» los
+ * usaba como separadores. El owner pidió lo contrario de un separador: «cada cuadro abre con una
+ * frase de qué hace». Por eso ninguna frase describe el CONTROL —eso ya lo dice el rótulo del
+ * campo— sino **qué cambia y qué implica cambiarlo**: una tarjeta que solo dijera «aquí van las
+ * edades» habría dejado el formulario exactamente igual de mudo, con un título más.
+ *
+ * Las frases son el contrato de esta pantalla y `retirement-form.test.ts` las fija: título corto,
+ * frase de más de 40 caracteres acabada en punto, una entrada por tarjeta. Ese test no juzga
+ * prosa: caza la entrada que alguien añade sin frase al meter una tarjeta nueva.
+ *
+ * `PLAN_FIELD_HELP` no se toca: la ayuda POR CAMPO sigue colgando de su rótulo, y una frase de
+ * tarjeta no la sustituye — explican cosas de tamaño distinto.
+ */
+export const PLAN_CARD_COPY: Record<PlanCardId, { title: string; blurb: string }> = {
+  strategy: {
+    title: "Estrategia",
+    blurb:
+      "Elige qué dispara tu jubilación. Cambiarla cambia lo que te preguntamos aquí abajo y cómo " +
+      "se dimensiona tu objetivo.",
+  },
+  ages: {
+    title: "Edades",
+    blurb:
+      "Las edades que fijan tu calendario. Se convierten en meses con tu fecha de nacimiento: sin " +
+      "ella, la simulación te jubila por capital y no por edad.",
+  },
+  pension: {
+    title: "Pensión",
+    blurb:
+      "Una renta con fecha de inicio. Los años anteriores los paga tu capital entero, así que la " +
+      "edad a la que empieza mueve el objetivo, no solo el flujo de caja.",
+  },
+  spending: {
+    title: "Gasto en jubilación",
+    blurb:
+      "De dónde sale el gasto anual que tu plan tiene que cubrir. Es el número que multiplica tu " +
+      "objetivo: cambiarlo lo mueve todo.",
+  },
+  withdrawal: {
+    title: "Retirada",
+    blurb:
+      "Cuánto sacas cada año una vez jubilado. El mismo porcentaje dimensiona el objetivo y " +
+      "alimenta la regla: subirlo adelanta la fecha y sube el riesgo de quedarte sin capital.",
+  },
+  horizon: {
+    title: "Horizonte",
+    blurb:
+      "Hasta qué edad tiene que durar el dinero. Alargarlo no mueve tu fecha de jubilación: mueve " +
+      "cuántos escenarios llegan al final con capital.",
+  },
+};

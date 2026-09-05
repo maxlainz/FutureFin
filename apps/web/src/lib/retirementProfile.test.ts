@@ -32,12 +32,10 @@ import { computeFireAnnualNeedNetEur, grossUpNetAnnualFire } from "./fire";
 import {
   MAX_CASH_BUFFER_MONTHS,
   MAX_GUARDRAIL_PCT,
-  MAX_SUCCESS_THRESHOLD_PCT,
   MAX_SWR_PCT,
   MAX_WITHDRAWAL_PCT,
   MIN_PENSION_AGE,
   MIN_PROFILE_AGE,
-  MIN_SUCCESS_THRESHOLD_PCT,
   buildRetirementProfilePatch,
   defaultRetirementProfileApi,
   effectiveTargetBasis,
@@ -66,7 +64,10 @@ describe("defaults del perfil", () => {
     expect(p.fire_number_mode).toBe("annual_expense");
     expect(p.withdrawal_rule.kind).toBe("fixed_real");
     expect(p.withdrawal_rule.spend_mode).toBe("ceiling");
-    expect(p.success_threshold_pct).toBe(95);
+    // Ni umbral de éxito (V7: el corte es fijo al 100 %) ni colchón explícito (V6: se deriva
+    // del tope de tu regla de ahorro). `null` aquí ya no es «sin colchón», es «no lo he fijado».
+    expect(p).not.toHaveProperty("success_threshold_pct");
+    expect(p.cash_buffer_months).toBeNull();
     // `null` = «derívalo tú», que NO es lo mismo que perpetuidad elegida.
     expect(p.target_basis).toBeNull();
   });
@@ -87,13 +88,11 @@ describe("normalizeRetirementProfile", () => {
       ...defaultRetirementProfileApi(),
       swr_pct: "99",
       horizon_lifespan_age: 200,
-      success_threshold_pct: 5,
       cash_buffer_months: 999,
       target_retirement_age: 3,
     });
     expect(p.swr_pct).toBe(String(MAX_SWR_PCT));
     expect(p.horizon_lifespan_age).toBe(105);
-    expect(p.success_threshold_pct).toBe(MIN_SUCCESS_THRESHOLD_PCT);
     expect(p.cash_buffer_months).toBe(MAX_CASH_BUFFER_MONTHS);
     expect(p.target_retirement_age).toBe(MIN_PROFILE_AGE);
   });
@@ -537,16 +536,6 @@ describe("retirementProfileIssue — espejo de validate_retirement_profile", () 
       "cash_buffer_out_of_range",
     ],
     ["colchón en la cota", base({ cash_buffer_months: MAX_CASH_BUFFER_MONTHS }), null],
-    [
-      "umbral por debajo del mínimo",
-      base({ success_threshold_pct: MIN_SUCCESS_THRESHOLD_PCT - 1 }),
-      "success_threshold_out_of_range",
-    ],
-    [
-      "umbral por encima del máximo",
-      base({ success_threshold_pct: MAX_SUCCESS_THRESHOLD_PCT + 1 }),
-      "success_threshold_out_of_range",
-    ],
 
     // --- Reglas de retirada: cada `kind` exige SUS campos --------------------------------
     ["fixed_real no pide nada", base({ withdrawal_rule: { ...rule } }), null],

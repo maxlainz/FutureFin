@@ -2368,7 +2368,7 @@ export default function App() {
       // el campo volvería a pedirla y el resto de la app la seguiría dando por ausente.
       setUser((u) => (u && u.birth_date !== body.birth_date ? { ...u, birth_date: body.birth_date } : u));
       void loadProjectionSeriesPage();
-      // El perfil ES el input del sorteo (estrategia, regla, colchón, umbral): sin esto la
+      // El perfil ES el input del sorteo (estrategia, regla, colchón derivado del tope): sin esto la
       // sección «Riesgo» seguiría enseñando el abanico del plan anterior junto a la línea nueva.
       void loadProjectionBands();
       return saved;

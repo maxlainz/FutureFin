@@ -91,7 +91,9 @@ describe("onboardingPlanFields — envoltorio de requiredPlanFields (U2/U12)", (
   it("cada descriptor trae su rótulo canónico, no un id pelado", () => {
     for (const f of onboardingPlanFields("pension_bridge")) {
       expect(f.label.length).toBeGreaterThan(0);
-      expect(f.group).toBe("plan");
+      // Los esenciales viven en las tarjetas que se pueden dejar a medias; un supuesto con
+      // default del servidor nunca es obligatorio y por tanto nunca llega aquí (V3).
+      expect(["ages", "pension", "spending"]).toContain(f.card);
       expect(f.required).toBe(true);
     }
   });

@@ -169,7 +169,8 @@ export type PlanCardSuccessV2 = {
   label: string;
   value: string;
   tone: "default" | "warn" | "danger";
-  /** El umbral — el denominador del semáforo, sin el que «87 de cada 100» no se puede auditar. */
+  /** El SUJETO de la cifra («de los escenarios no agotan el capital»), sin el que un «87,0 %»
+   *  pelado no dice de qué. Hasta V7 aquí iba el umbral; ese ajuste ya no existe. */
   parenthetical?: string;
   /** Los escenarios que no llegan a jubilarse, o la razón de que no haya cifra. */
   detail?: string;

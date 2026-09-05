@@ -211,20 +211,19 @@ describe("«Éxito del plan» — se rotula, jamás se recalcula", () => {
     expect(card({ series: series() }).success).toBeNull();
   });
 
-  it("con probabilidad, el KPI es una FRASE y lleva el umbral en el paréntesis", () => {
+  it("con probabilidad, el KPI es un PORCENTAJE y su paréntesis dice de qué (V1/V7)", () => {
     const c = card({
       plan: plan({
         success_probability: "0.870000",
-        success_threshold_pct: 95,
         success_verdict: "amber",
       }),
       series: series(),
     });
     expect(c.success).toEqual({
       label: "Éxito del plan",
-      value: "87 de cada 100 escenarios se jubilan y no agotan el capital",
+      value: "87,0 %",
       tone: "warn",
-      parenthetical: "umbral 95 %",
+      parenthetical: "de los escenarios no agotan el capital",
       detail: undefined,
     });
   });
@@ -254,7 +253,7 @@ describe("«Éxito del plan» — se rotula, jamás se recalcula", () => {
 
   it("sin sorteo pero CON razón, el KPI existe y explica el hueco", () => {
     const c = card({
-      plan: plan({ success_absent_reason: "bands_unavailable", success_threshold_pct: 95 }),
+      plan: plan({ success_absent_reason: "bands_unavailable" }),
       series: series(),
     });
     expect(c.success?.value).toBe("—");

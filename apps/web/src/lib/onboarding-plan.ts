@@ -9,12 +9,12 @@
  * el SWR se quedan en sus valores por defecto (2,5 % / 3,5 %) y ya no se tocan desde aquí — quien
  * quiera cambiarlos lo hace luego en Ajustes → Plan / Jubilación.
  *
- * Qué campo hace falta por estrategia lo decide `requiredPlanFields`/`planGroupFields`
+ * Qué campo hace falta por estrategia lo decide `requiredPlanFields`/`planFields`
  * (`lib/plan-fields.ts`, U2/U12) — la ÚNICA fuente de verdad de la casa sobre visibilidad y
  * obligatoriedad. `onboardingPlanFields` es un envoltorio fino sobre ella, con el contexto de
  * quien todavía no tiene NADA configurado (sin pensión, regla de retirada por defecto, modo del
  * objetivo por defecto). Duplicar esa tabla aquí sería exactamente el fallo que U12 existe para
- * impedir: este asistente y la línea de supuestos de Jubilación discreparían sobre qué pide cada
+ * impedir: este asistente y el formulario de Jubilación discreparían sobre qué pide cada
  * estrategia.
  *
  * La fecha de nacimiento vive FUERA de esa tabla a propósito: en `plan-fields.ts` el campo
@@ -50,8 +50,8 @@ import type {
 import { utcTodayYmd } from "./dates";
 import { toApiDecimalString } from "./format";
 import {
-  planGroupFields,
-  type PlanFieldDescriptorPlan,
+  planFields,
+  type PlanFieldDescriptor,
   type PlanFieldsContext,
 } from "./plan-fields";
 import {
@@ -124,13 +124,13 @@ const ONBOARDING_FIELDS_BASE_CONTEXT: Omit<
  */
 export function onboardingPlanFields(
   strategy: RetirementStrategyApi,
-): PlanFieldDescriptorPlan[] {
+): PlanFieldDescriptor[] {
   const ctx: PlanFieldsContext = {
     ...ONBOARDING_FIELDS_BASE_CONTEXT,
     strategy,
     strategyForcesBasis: strategy === "pension_bridge",
   };
-  return planGroupFields(ctx).filter((f) => f.required);
+  return planFields(ctx).filter((f) => f.required);
 }
 
 /**

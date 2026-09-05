@@ -28,12 +28,14 @@
   --ff-pos: oklch(0.50 0.14 165);
   --ff-neg: oklch(0.55 0.18 25);
 
-  /* Ámbar de ESTADO (5.0.0, D28): el peldaño intermedio del semáforo «Éxito del plan» —
-     verde ≥ umbral, ámbar hasta 10 puntos por debajo, rojo el resto. Existe porque el
+  /* Ámbar de ESTADO (5.0.0, D28; corte fijado por V7): el peldaño intermedio del semáforo
+     «Éxito del plan» — verde SOLO al 100 %, ámbar hasta el 90 %, rojo el resto. Existe porque el
      estado tiene TRES valores y con dos tokens el intermedio se pintaba de rojo (alarma
      donde no la hay) o de nada (indistinguible de «bien»). Mismo croma y misma luminancia
      que `--ff-neg` en cada rama, hue 75: es su hermano en la escala de estado, no un
-     acento nuevo. Restricción idéntica a pos/neg: nunca decora, solo marca estado. */
+     acento nuevo. Restricción idéntica a pos/neg: nunca decora, solo marca estado. Desde V5
+     tiene un segundo consumidor con la MISMA escala: el degradado de la banda de riesgo
+     (`lib/risk-gradient.ts`), que mezcla pos→warn→neg por probabilidad de agotar el capital. */
   --ff-warn: oklch(0.60 0.14 75);
 
   /* ---------- Radii ---------- */

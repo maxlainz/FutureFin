@@ -1,20 +1,28 @@
 /**
  * Jubilación — **rediseño UX U1b** (5.0.0, issue #207, decisiones U1–U12 y S1–S11).
  *
- * La página tiene ahora TRES bloques y un acordeón, en este orden y sin excepciones:
+ * **Tercera vuelta de UX (V1–V7, feedback F2 y F5–F10 del owner)**: la página tiene ahora DOS
+ * bloques y ningún acordeón, en este orden y sin excepciones:
  *
  *  1. **Cabecera**: el título y UN solo indicador de guardado (S6). Antes había seis pies
  *     «Guardado automático.», uno por panel, que podían contradecirse entre sí.
- *  2. **«Tu plan»** (configuración): el aviso de alta, las cinco tarjetas de estrategia y **solo
- *     los campos que la estrategia elegida usa** — la tabla U2 vive en `lib/plan-fields.ts` y
- *     aquí no se re-decide nada. Un campo visible anuncia que la simulación lo va a mirar; en
- *     cuatro de las cinco estrategias eso era mentira para media pantalla.
+ *  2. **«Tu plan»** (configuración): una TARJETA POR TEMA —Estrategia · Edades · Pensión · Gasto
+ *     en jubilación · Retirada · Horizonte—, cada una con su frase de qué hace, y **solo los
+ *     campos que la estrategia elegida usa**. La tabla U2 vive en `lib/plan-fields.ts` y aquí no
+ *     se re-decide nada; lo que V3 cambió es su eje de agrupación, no una sola condición.
  *  3. **«Resultado»**: la FRASE del plan (`lib/plan-sentence.ts`), el rojo cuando lo hay, como
- *     mucho tres tarjetas (`buildRetirementTilesV2`), **un solo gráfico** con el objetivo, la
- *     banda de escenarios y los hitos (U5), el riesgo en compacto y un «Detalle del cálculo»
- *     plegado con todo lo de segundo orden.
- *  4. **«Avanzado»**, plegado, cuya cabecera ES la línea de supuestos (U12): nada se fuerza en
- *     silencio. Esconder un campo (U2) sin enunciar su valor sería justo eso.
+ *     mucho tres tarjetas (`buildRetirementTilesV2`), **un solo gráfico** —con eje Y, etiquetas
+ *     de borde y la banda COLOREADA por la probabilidad de agotar el capital (V2/V5)—, el riesgo
+ *     en compacto y un «Detalle del cálculo» plegado con todo lo de segundo orden.
+ *
+ * Lo que se fue en esta vuelta, y por qué no vuelve sin deshacer una decisión del owner: el
+ * **banner de alta** (F5 — con estrategia elegida, «Elige tu estrategia» es un cartel que sobra,
+ * y su flag de `localStorage` nunca miró el perfil), el **acordeón «Avanzado»** con la línea
+ * «Supuestos» de cabecera (F10 — la línea existía para enunciar lo que el acordeón escondía; sin
+ * acordeón no hay nada escondido), la **tabla «agotar a los 65/70/…»** (F7/V5 — el color de la
+ * banda lo dice con más resolución, y el total acumulado bajó a «Detalle del cálculo») y los dos
+ * campos de la tarjeta «Riesgo» (V6/V7 — el colchón se deriva del tope de tu regla de ahorro y el
+ * umbral de éxito es fijo al 100 %).
  *
  * Cuatro invariantes que este archivo no puede romper:
  *
@@ -35,6 +43,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import type {
@@ -59,13 +68,13 @@ import { ChartLegend } from "../components/charts/ChartLegend";
 import {
   formatCurrencyNumber,
   formatPercentAmount,
+  formatPercentDisplay,
   parseDisplayDecimal,
 } from "../lib/format";
 import { savingsSourceUsesTransactions } from "../lib/fire";
 import {
   BRIDGE_DISCOUNT_BASIS_LABEL,
   HORIZON_LIFESPAN_AGE_OPTIONS,
-  MAX_CASH_BUFFER_MONTHS,
   RETIREMENT_STRATEGIES,
   RETIREMENT_STRATEGY_BLURB,
   RETIREMENT_STRATEGY_LABEL,
@@ -89,19 +98,15 @@ import {
 } from "../lib/retirement-tiles";
 import { planSentence } from "../lib/plan-sentence";
 import { householdPlanLines } from "../lib/household-plan-lines";
-import { assumptionsLine } from "../lib/assumptions-line";
 import {
-  advancedGroupFields,
+  planCardGroups,
   planFieldsContextFromProfile,
-  planGroupFields,
   requiredPlanFields,
-  type PlanFieldDescriptorAdvanced,
-  type PlanFieldDescriptorPlan,
+  type PlanFieldDescriptor,
   type PlanFieldId,
-  type PlanFieldSection,
 } from "../lib/plan-fields";
 import {
-  ADVANCED_SECTION_LABEL,
+  PLAN_CARD_COPY,
   PLAN_FIELD_HELP,
   fractionFromPercent,
   missingRequiredPlanFields,
@@ -111,19 +116,22 @@ import {
 } from "../lib/retirement-form";
 import { buildRetirementChartMarkers } from "../lib/retirement-chart";
 import {
-  buildDepletionRows,
   buildRiskExtraRows,
-  formatSuccessScenarios,
-  formatSuccessThreshold,
+  cashBufferLine,
+  formatSuccessPercent,
   riskFootnote,
   showsNoVolatilityNotice,
+  successParenthetical,
   successVerdictTone,
 } from "../lib/risk-bands";
-import { type LedgerPersonScope } from "../lib/ledger";
 import {
-  persistRetirementIntroDismissed,
-  readRetirementIntroDismissed,
-} from "../lib/retirement-intro";
+  RISK_AMBER_AT,
+  RISK_RED_AT,
+  depletionProbabilityAtMonth,
+  riskColorForProbability,
+  riskGradientStops,
+} from "../lib/risk-gradient";
+import { type LedgerPersonScope } from "../lib/ledger";
 import { TAB_PATH, settingsSubTabPath } from "../lib/navigation";
 import { appUrl } from "../lib/basePath";
 import {
@@ -221,14 +229,6 @@ export function RetirementView({
   navigate: (path: string, replace?: boolean) => void;
 }) {
   const currencyIso = installation?.installation.base_currency ?? "";
-
-  /**
-   * Aviso de alta (D33), una sola vez por navegador. Vive en estado local además de en
-   * `localStorage` para que el descarte sea inmediato aunque el almacenamiento esté bloqueado.
-   */
-  const [introDismissed, setIntroDismissed] = useState<boolean>(() =>
-    readRetirementIntroDismissed(),
-  );
 
   /**
    * El plan de jubilación es dato PERSONAL: lo edita cualquier rol, `viewer` incluido. Lo único
@@ -611,15 +611,45 @@ export function RetirementView({
     });
   }, [projectionSeries]);
 
-  // ── Riesgo compacto ───────────────────────────────────────────────────────────────────────
-  const depletionRows = useMemo(
-    () =>
-      buildDepletionRows(
-        projectionBands?.depletion_probability_by_age,
-        projectionBands?.months,
-      ),
-    [projectionBands?.depletion_probability_by_age, projectionBands?.months],
+  /**
+   * El color de la banda (V2/V5). Los extremos son los MISMOS que los de `chartMarkers` —el
+   * primer y el último mes de la serie cargada— porque son los que el chart usa para repartir su
+   * eje X: el `<linearGradient>` va en `userSpaceOnUse` entre esos dos meses, y con otros el
+   * mapeo mes→color se desplazaría sin que nada fallara.
+   *
+   * Sin volatilidad declarada NO se colorea: las tres bandas son la línea determinista y teñir de
+   * verde una banda de ancho cero diría «ningún escenario falla» sobre un sorteo que no existe.
+   */
+  const gradientStops = useMemo(() => {
+    const pts = projectionSeries?.points;
+    if (!showBand || !pts || pts.length === 0) return [];
+    if (!projectionBands || projectionBands.any_volatility_declared === false) return [];
+    return riskGradientStops({
+      points: projectionBands.depletion_probability_by_age,
+      monthStart: pts[0]!.month_index,
+      monthEnd: pts[pts.length - 1]!.month_index,
+    });
+  }, [showBand, projectionSeries, projectionBands]);
+
+  /** Rótulo del hover. Sale de `depletionProbabilityAtMonth`, **la misma función que colorea**:
+   *  un tooltip alimentado por otro cálculo podría contradecir al tinte y nadie lo notaría. */
+  const chartHoverLabel = useMemo(() => {
+    if (gradientStops.length < 2 || !projectionBands) return null;
+    const points = projectionBands.depletion_probability_by_age;
+    return (mi: number): string | null => {
+      const p = depletionProbabilityAtMonth(points, mi);
+      if (p == null) return null;
+      return `${monthLabel(mi)} · ${formatPercentDisplay(p * 100)} de los escenarios ya se han quedado sin capital`;
+    };
+  }, [gradientStops, projectionBands, monthLabel]);
+
+  /** Qué decir del colchón de caja, que desde V6 se DERIVA del tope de tu regla de ahorro. */
+  const bufferLine = useMemo(
+    () => cashBufferLine(projectionBands, currencyIso),
+    [projectionBands, currencyIso],
   );
+
+  // ── Riesgo compacto ───────────────────────────────────────────────────────────────────────
   const riskExtraRows = useMemo(
     () => buildRiskExtraRows({ bands: projectionBands, currencyIso, monthLabel }),
     [projectionBands, currencyIso, monthLabel],
@@ -629,27 +659,6 @@ export function RetirementView({
   const memberLines = useMemo(
     () => householdPlanLines(projectionSeries?.members, monthLabel),
     [projectionSeries?.members, monthLabel],
-  );
-
-  // ── «Avanzado» ────────────────────────────────────────────────────────────────────────────
-  const [advancedOpen, setAdvancedOpen] = useState(false);
-  const advancedRef = useRef<HTMLDetailsElement>(null);
-  const openAdvanced = useCallback(() => {
-    setAdvancedOpen(true);
-    // El `scrollIntoView` va en el siguiente frame: con el `<details>` todavía cerrado, el
-    // navegador mediría la altura plegada y dejaría la sección a media pantalla.
-    window.requestAnimationFrame(() =>
-      advancedRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
-    );
-  }, []);
-
-  const assumptions = useMemo(
-    () =>
-      assumptionsLine(profileDraft, {
-        hasBirthDate,
-        targetBasisSource: basisSource,
-      }),
-    [profileDraft, hasBirthDate, basisSource],
   );
 
   // ── Editores compartidos ──────────────────────────────────────────────────────────────────
@@ -695,9 +704,14 @@ export function RetirementView({
   };
 
   // ═══════════════════════════════════════════════════════════════════════════════════════════
-  // Campos del grupo «plan» — renderizados POR ID, en el orden que dicta `planGroupFields`
+  // UN solo renderer de campo, por ID, en el orden que dicta `planFields`
+  // ------------------------------------------------------------------------------------------
+  // Hasta V3 había dos —`renderPlanField` y `renderAdvancedField`— porque había dos GRUPOS y dos
+  // sitios donde pintarlos. Con las tarjetas por tema el grupo desapareció y con él la razón de
+  // los dos switches: un mismo id no puede tener dos editores, y tener dos funciones que podían
+  // divergir era una invitación a que un campo se pintara distinto según dónde cayera.
   // ═══════════════════════════════════════════════════════════════════════════════════════════
-  const renderPlanField = (f: PlanFieldDescriptorPlan): ReactNode => {
+  const renderField = (f: PlanFieldDescriptor): ReactNode => {
     const missing = missingSet.has(f.id);
     switch (f.id) {
       case "birth_date":
@@ -871,7 +885,9 @@ export function RetirementView({
       case "fire_number_mode":
         return (
           <div className="field" key={f.id}>
-            <span className="field-label-text">Gasto en jubilación</span>
+            {/* Sin rótulo propio: el `<h4>` de la tarjeta ya dice «Gasto en jubilación», y
+                repetirlo dos líneas más abajo es el ruido que V3 vino a quitar. El
+                `aria-label` del radiogroup se queda: ahí sí hace falta el nombre. */}
             <div
               className="retirement-mode-grid"
               role="radiogroup"
@@ -928,37 +944,10 @@ export function RetirementView({
           </label>
         );
 
-      default:
-        return null;
-    }
-  };
-
-  /** «1.250 €/mes · 15.000 €/año · del presupuesto» — la cifra que el modo elegido DERIVA, con
-   *  su procedencia pegada. Sin la procedencia, dos hogares con el mismo número creen estar
-   *  mirando lo mismo cuando uno lee su presupuesto y el otro su histórico real. */
-  function derivedSpendLine(): string {
-    if (!spendBaseReady) return "Calculando la base…";
-    const usingIncome = profileDraft.fire_number_mode === "current_income";
-    const monthly = parseDisplayDecimal(String((usingIncome ? fireIncomeM : fireExpenseM) ?? ""));
-    if (monthly == null || !Number.isFinite(monthly)) return "Sin base declarada todavía.";
-    const source = usingIncome
-      ? savingsAvgActive
-        ? "promedio de tus ingresos reales"
-        : "de tus ingresos del presupuesto"
-      : savingsAvgActive
-        ? "promedio de tus gastos reales"
-        : "de tus partidas de jubilación del presupuesto";
-    return `${formatCurrencyNumber(monthly, currencyIso)}/mes · ${formatCurrencyNumber(
-      monthly * 12,
-      currencyIso,
-    )}/año · ${source}`;
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════════════════════
-  // Campos del grupo «avanzado»
-  // ═══════════════════════════════════════════════════════════════════════════════════════════
-  const renderAdvancedField = (f: PlanFieldDescriptorAdvanced): ReactNode => {
-    switch (f.id) {
+      // ── Supuestos con default: retirada, base del objetivo, pensión fina y horizonte ────
+      //
+      // Antes vivían en el acordeón «Avanzado»; desde V3 caen en la tarjeta de su tema
+      // (`lib/plan-fields.ts`) y comparten switch con el resto. Ni uno solo cambió de editor.
       case "swr_pct":
         return (
           <label className="field" key={f.id}>
@@ -982,8 +971,7 @@ export function RetirementView({
               {formatPercentAmount(profileDraft.swr_pct)}
             </span>
             <small className="muted">
-              Es el ÚNICO porcentaje de retirada: dimensiona tu objetivo y es el que retira la
-              regla de abajo.
+              Dimensiona tu objetivo y es el que retira la regla de abajo.
             </small>
           </label>
         );
@@ -1291,78 +1279,40 @@ export function RetirementView({
           </label>
         );
 
-      case "cash_buffer_months":
-        return (
-          <label className="field" key={f.id}>
-            <span className="label-with-help">
-              {f.label} (meses)
-              {fieldHelp(f.id)}
-            </span>
-            <input
-              inputMode="numeric"
-              placeholder="—"
-              value={intFieldValue(profileDraft.cash_buffer_months)}
-              onChange={(e) => {
-                const v = readIntField(e.target.value);
-                if (v === undefined) return;
-                if (v !== null && v > MAX_CASH_BUFFER_MONTHS) return;
-                patchDraft((p) => ({ ...p, cash_buffer_months: v }));
-              }}
-              onBlur={() => queueProfileSave(0)}
-            />
-            {/* Un colchón guardado que la simulación IGNORA es la peor combinación posible: el
-                usuario cree estar protegido por algo que no corrió. La razón la publica el
-                servidor con las bandas, así que se dice aquí, junto al campo que la provoca. */}
-            {projectionBands &&
-            !projectionBands.buffer_active &&
-            projectionBands.buffer_inactive_reason === "no_safe_liquid_asset" ? (
-              <small className="muted">
-                No se está simulando: no tienes un activo líquido sin volatilidad donde vivir.
-              </small>
-            ) : null}
-          </label>
-        );
-
-      case "success_threshold_pct":
-        return (
-          <label className="field" key={f.id}>
-            <span className="label-with-help">
-              {f.label} (%)
-              {fieldHelp(f.id)}
-            </span>
-            <input
-              inputMode="numeric"
-              value={String(profileDraft.success_threshold_pct)}
-              onChange={(e) => {
-                const v = readIntField(e.target.value);
-                if (v === undefined || v === null) return;
-                patchDraft((p) => ({ ...p, success_threshold_pct: v }));
-              }}
-              onBlur={() => queueProfileSave(0)}
-            />
-          </label>
-        );
-
       default:
         return null;
     }
   };
 
-  const editingPlan = canEditProfile && retirementProfile != null;
-  const planFieldList = editingPlan ? planGroupFields(fieldCtx) : [];
-  /** Las secciones salen contiguas de `planFields`, así que agrupar es solo recorrer. */
-  const advancedSections = useMemo(() => {
-    const out: { section: PlanFieldSection; fields: PlanFieldDescriptorAdvanced[] }[] = [];
-    if (!editingPlan) return out;
-    for (const f of advancedGroupFields(fieldCtx)) {
-      const last = out[out.length - 1];
-      if (last && last.section === f.section) last.fields.push(f);
-      else out.push({ section: f.section, fields: [f] });
-    }
-    return out;
-  }, [editingPlan, fieldCtx]);
+  /** «1.250 €/mes · 15.000 €/año · del presupuesto» — la cifra que el modo elegido DERIVA, con
+   *  su procedencia pegada. Sin la procedencia, dos hogares con el mismo número creen estar
+   *  mirando lo mismo cuando uno lee su presupuesto y el otro su histórico real. */
+  function derivedSpendLine(): string {
+    if (!spendBaseReady) return "Calculando la base…";
+    const usingIncome = profileDraft.fire_number_mode === "current_income";
+    const monthly = parseDisplayDecimal(String((usingIncome ? fireIncomeM : fireExpenseM) ?? ""));
+    if (monthly == null || !Number.isFinite(monthly)) return "Sin base declarada todavía.";
+    const source = usingIncome
+      ? savingsAvgActive
+        ? "promedio de tus ingresos reales"
+        : "de tus ingresos del presupuesto"
+      : savingsAvgActive
+        ? "promedio de tus gastos reales"
+        : "de tus partidas de jubilación del presupuesto";
+    return `${formatCurrencyNumber(monthly, currencyIso)}/mes · ${formatCurrencyNumber(
+      monthly * 12,
+      currencyIso,
+    )}/año · ${source}`;
+  }
 
-  const showIntroBanner = canEditProfile && !introDismissed;
+  const editingPlan = canEditProfile && retirementProfile != null;
+  /** Las tarjetas a pintar, ya sin vacías y en `PLAN_CARD_ORDER` (V3). Una sola lista: el
+   *  formulario dejó de tener dos mitades el día que dejó de tener un acordeón. */
+  const cardGroups = useMemo(
+    () => (editingPlan ? planCardGroups(fieldCtx) : []),
+    [editingPlan, fieldCtx],
+  );
+
   const chartReady =
     hasMembership && projectionSeries != null && projectionSeries.points.length > 0;
 
@@ -1439,85 +1389,82 @@ export function RetirementView({
         </section>
       ) : (
         <>
-          {/* ── 2 · «Tu plan» ─────────────────────────────────────────────────────────────── */}
+          {/* ── 2 · «Tu plan»: una tarjeta por tema, todo a la vista (V3) ───────────────────
+              Sin banner de alta (F5: con una estrategia ya elegida, «Elige tu estrategia» es un
+              cartel que sobra — y el flag de `localStorage` que lo descartaba nunca miraba el
+              perfil, así que reaparecía en cada navegador nuevo) y sin acordeón «Avanzado» (F10:
+              «un cajón de sastre mal explicado»). Cada tarjeta abre con una frase de QUÉ hace y
+              qué implica tocarla; los campos son exactamente los mismos de la tabla U2. */}
           <section className="panel">
-            <div className="panel-head-row">
-              <h3 className="panel-title">Tu plan</h3>
-              <HelpPopover
-                title={HELP_TEXTS["retirement.strategy"].title}
-                body={HELP_TEXTS["retirement.strategy"].body}
-              />
-            </div>
-
-            {/* El aviso de alta (D33) vive AQUÍ, justo encima de las tarjetas que nombra: antes
-                estaba en lo alto de la página y apuntaba a un formulario dos pantallas abajo. */}
-            {showIntroBanner ? (
-              <div className="banner info-banner retirement-intro-banner" role="status">
-                <div className="retirement-intro-banner-text">
-                  <strong>Elige tu estrategia de jubilación</strong>
-                  <small>
-                    Cada una decide QUÉ dispara tu jubilación, y con ello qué te preguntamos
-                    debajo.
-                  </small>
-                </div>
-                <button
-                  type="button"
-                  className="btn ghost"
-                  onClick={() => {
-                    setIntroDismissed(true);
-                    persistRetirementIntroDismissed();
-                  }}
-                >
-                  Entendido
-                </button>
-              </div>
-            ) : null}
+            <h3 className="panel-title">Tu plan</h3>
 
             {retirementProfile == null ? (
               <p className="muted tight bordered-top">
                 {retirementProfileBusy ? "Cargando…" : "Sin datos."}
               </p>
             ) : (
-              <div className="stack bordered-top retirement-config-stack">
-                <div
-                  className="retirement-mode-grid retirement-strategy-grid"
-                  role="radiogroup"
-                  aria-label="Estrategia de jubilación"
-                >
-                  {RETIREMENT_STRATEGIES.map((s) => (
-                    <label
-                      key={s}
-                      className={`retirement-mode-card ${
-                        profileDraft.strategy === s ? "is-active" : ""
+              <div className="retirement-card-grid bordered-top">
+                {cardGroups.map(({ card, fields }) => (
+                  <section
+                    key={card}
+                    className={`retirement-card${
+                      card === "strategy" || card === "spending"
+                        ? " retirement-card--wide"
+                        : ""
+                    }`}
+                  >
+                    <h4
+                      className={`panel-title${
+                        card === "strategy" ? " label-with-help" : ""
                       }`}
                     >
-                      <input
-                        type="radio"
-                        name="retirement_strategy"
-                        className="sr-only"
-                        checked={profileDraft.strategy === s}
-                        onChange={() => selectStrategy(s)}
-                      />
-                      <span className="retirement-mode-name">
-                        {RETIREMENT_STRATEGY_LABEL[s]}
-                      </span>
-                      <span className="retirement-mode-sub">
-                        {RETIREMENT_STRATEGY_BLURB[s]}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-
-                {/* U2: SOLO los campos que la estrategia elegida usa, en el orden de la tabla. */}
-                {planFieldList.map((f) => renderPlanField(f))}
-
-                <button
-                  type="button"
-                  className="btn ghost text retirement-advanced-link"
-                  onClick={openAdvanced}
-                >
-                  Supuestos y ajustes avanzados ↓
-                </button>
+                      {PLAN_CARD_COPY[card].title}
+                      {/* La ayuda de la estrategia colgaba del `<h3>` del panel; su sitio es el
+                          título de la tarjeta que gobierna. Misma clave, mismo texto. */}
+                      {card === "strategy" ? (
+                        <HelpPopover
+                          title={HELP_TEXTS["retirement.strategy"].title}
+                          body={HELP_TEXTS["retirement.strategy"].body}
+                        />
+                      ) : null}
+                    </h4>
+                    <p className="retirement-card-blurb">{PLAN_CARD_COPY[card].blurb}</p>
+                    <div className="stack retirement-config-stack">
+                      {card === "strategy" ? (
+                        <div
+                          className="retirement-mode-grid retirement-strategy-grid"
+                          role="radiogroup"
+                          aria-label="Estrategia de jubilación"
+                        >
+                          {RETIREMENT_STRATEGIES.map((st) => (
+                            <label
+                              key={st}
+                              className={`retirement-mode-card ${
+                                profileDraft.strategy === st ? "is-active" : ""
+                              }`}
+                            >
+                              <input
+                                type="radio"
+                                name="retirement_strategy"
+                                className="sr-only"
+                                checked={profileDraft.strategy === st}
+                                onChange={() => selectStrategy(st)}
+                              />
+                              <span className="retirement-mode-name">
+                                {RETIREMENT_STRATEGY_LABEL[st]}
+                              </span>
+                              <span className="retirement-mode-sub">
+                                {RETIREMENT_STRATEGY_BLURB[st]}
+                              </span>
+                            </label>
+                          ))}
+                        </div>
+                      ) : (
+                        fields.map((f) => renderField(f))
+                      )}
+                    </div>
+                  </section>
+                ))}
               </div>
             )}
           </section>
@@ -1640,6 +1587,13 @@ export function RetirementView({
                     anchorDateYmd: axisAnchor,
                     calendarTz,
                   }}
+                  /* V2 — el eje Y con importes: sin él no había forma de saber si la banda
+                     valía 200.000 € o dos millones. Los valores ya vienen deflactados, así que
+                     «En dinero de hoy» mueve el eje entero. */
+                  yAxis={{ currencyIso }}
+                  bandGradient={gradientStops}
+                  bandEdgeLabels={{ p10: "pesimista (p10)", p90: "optimista (p90)" }}
+                  hoverLabel={chartHoverLabel}
                 />
                 <ChartLegend
                   size="sm"
@@ -1661,7 +1615,14 @@ export function RetirementView({
                           },
                         ] as const)
                       : []),
-                    ...(showBand && bandPoints && bandPoints.length > 1
+                    /* Con degradado, la banda sale de la leyenda: su entrada tendría que
+                       enseñar UN color y la banda ya no tiene uno. Lo que la explica es la
+                       ESCALA de debajo, que no es una serie y por eso no es un ítem de
+                       `ChartLegend`. */
+                    ...(showBand &&
+                    bandPoints &&
+                    bandPoints.length > 1 &&
+                    gradientStops.length < 2
                       ? ([
                           {
                             key: "band",
@@ -1683,6 +1644,46 @@ export function RetirementView({
                       : []),
                   ]}
                 />
+                {/* La ESCALA del color (V5). No es un ítem de `ChartLegend` a propósito: una
+                    leyenda nombra SERIES, y esto es una escala continua — meterla ahí la haría
+                    parecer una cuarta línea del gráfico. */}
+                {gradientStops.length > 1 ? (
+                  <p className="retirement-risk-scale">
+                    <span className="label-with-help">
+                      <strong>Banda 10–90 %</strong>
+                      <HelpPopover
+                        title={HELP_TEXTS["retirement.depletion_by_age"].title}
+                        body={HELP_TEXTS["retirement.depletion_by_age"].body}
+                      />
+                    </span>{" "}
+                    · el color dice qué parte de los escenarios se ha quedado ya sin capital a esa
+                    edad:{" "}
+                    {(
+                      [
+                        [0, "ninguno"],
+                        [RISK_AMBER_AT, "5 %"],
+                        [RISK_RED_AT, "10 % o más"],
+                      ] as const
+                    ).map(([p, label]) => (
+                      <span key={label} className="retirement-risk-scale-step">
+                        <span
+                          className="retirement-risk-scale-swatch"
+                          /* Color por custom property, el mismo patrón que `ChartLegend` usa
+                             para su `--ff-legend-color`: el valor es un token (o una mezcla de
+                             dos) y tiene que resolver por tema, así que no puede vivir en una
+                             clase fija. */
+                          style={
+                            {
+                              "--ff-risk-swatch": riskColorForProbability(p),
+                            } as CSSProperties
+                          }
+                          aria-hidden
+                        />
+                        {label}
+                      </span>
+                    ))}
+                  </p>
+                ) : null}
               </div>
             ) : hasMembership ? (
               <div
@@ -1694,7 +1695,7 @@ export function RetirementView({
 
             {/* ── Riesgo, en compacto ───────────────────────────────────────────────────── */}
             <div className="retirement-risk-block bordered-top">
-              <h4 className="subsection-title">Riesgo</h4>
+              <h4 className="panel-title">Riesgo</h4>
               {projectionBandsError ? (
                 <div className="banner error-banner">{projectionBandsError}</div>
               ) : !projectionBands ? (
@@ -1728,38 +1729,61 @@ export function RetirementView({
                     <MetricCard
                       label="Éxito del plan"
                       helpId="retirement.success"
-                      value={formatSuccessScenarios(projectionBands.success_probability)}
-                      parenthetical={formatSuccessThreshold(
-                        projectionBands.success_threshold_pct,
+                      value={formatSuccessPercent(projectionBands.success_probability)}
+                      parenthetical={successParenthetical(
+                        projectionBands.success_probability,
+                        projectionBands.paths,
                       )}
-                      /* El veredicto lo decide el SERVIDOR (umbral exacto y diez puntos de
-                         margen, D28): aquí solo se traduce a la piel que la app ya habla. */
+                      /* El veredicto lo decide el SERVIDOR (verde SOLO al 100 %, ámbar hasta
+                         diez puntos por debajo, V7): aquí solo se traduce a la piel que la app
+                         ya habla. Recalcularlo aquí es cómo el tile y el chart acaban contando
+                         dos éxitos distintos del mismo plan. */
                       tone={(() => {
                         const t = successVerdictTone(projectionBands.success_verdict);
                         return t === "danger" ? "danger" : t === "warn" ? "warn" : "default";
                       })()}
                     />
                   </div>
-                  {depletionRows.length > 0 ? (
-                    <div className="risk-extra-rows">
-                      <div className="risk-extra-row">
-                        <span className="label-with-help risk-extra-label">
-                          Probabilidad de agotar el capital
-                          <HelpPopover
-                            title={HELP_TEXTS["retirement.depletion_by_age"].title}
-                            body={HELP_TEXTS["retirement.depletion_by_age"].body}
-                          />
-                        </span>
-                        <div className="risk-depletion-grid">
-                          {depletionRows.map((r) => (
-                            <div key={r.key} className="risk-depletion-cell">
-                              <span className="risk-depletion-age">{r.label}</span>
-                              <span className="risk-depletion-value">{r.value}</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </div>
+                  {/* V6 — el colchón de caja ya no se PREGUNTA: se deriva del tope de tu regla
+                      de ahorro y aquí se informa de dónde sale. Un valor derivado se rotula
+                      como derivado, y con su salida cuando alguien lo ha fijado por API. */}
+                  {bufferLine ? (
+                    <p className="retirement-buffer-line">
+                      <span className="label-with-help">
+                        {bufferLine.text}
+                        <HelpPopover
+                          title={HELP_TEXTS["retirement.cash_buffer"].title}
+                          body={HELP_TEXTS["retirement.cash_buffer"].body}
+                        />
+                      </span>
+                      {bufferLine.linksToAllocationRules ? (
+                        <a
+                          href={appUrl(TAB_PATH.assets)}
+                          onClick={(e) => {
+                            if (e.button !== 0 || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey)
+                              return;
+                            e.preventDefault();
+                            navigate(TAB_PATH.assets);
+                          }}
+                        >
+                          Cambiar en Reglas de ahorro
+                        </a>
+                      ) : null}
+                      {bufferLine.canResetToDerived && canEditProfile ? (
+                        // Tri-estado del PATCH: `null` SUELTA el override y devuelve la
+                        // derivación. Sin esta salida, un colchón puesto por API sería
+                        // irreversible desde la pantalla.
+                        <button
+                          type="button"
+                          className="btn ghost text"
+                          onClick={() =>
+                            void onSaveRetirementProfile({ cash_buffer_months: null })
+                          }
+                        >
+                          Volver al tope de tu regla
+                        </button>
+                      ) : null}
+                    </p>
                   ) : null}
                 </>
               )}
@@ -1772,7 +1796,7 @@ export function RetirementView({
                 permite leer la cabecera de un vistazo. */}
             {detailRows.length > 0 || riskExtraRows.length > 0 || projectionBands ? (
               <details className="retirement-detail bordered-top">
-                <summary>Detalle del cálculo</summary>
+                <summary className="details-trigger">Detalle del cálculo</summary>
                 <div className="risk-extra-rows">
                   {detailRows
                     .filter((r) => r.tone !== "danger")
@@ -1849,42 +1873,6 @@ export function RetirementView({
             ) : null}
           </section>
 
-          {/* ── 4 · «Avanzado» ────────────────────────────────────────────────────────────────
-              U12 — su cabecera ES la línea de supuestos, y está SIEMPRE visible aunque el
-              acordeón esté plegado. U2 esconde los campos que la estrategia no usa; sin esto,
-              esconder un campo sería forzar su valor en silencio. */}
-          {retirementProfile != null ? (
-            <details
-              className="panel retirement-advanced"
-              ref={advancedRef}
-              open={advancedOpen}
-              onToggle={(e) => setAdvancedOpen(e.currentTarget.open)}
-            >
-              <summary className="retirement-advanced-summary">
-                <span className="retirement-advanced-summary-text">{assumptions}</span>
-                <span className="retirement-advanced-summary-cta">Avanzado</span>
-              </summary>
-              <div className="retirement-advanced-body">
-                <p className="muted tight">
-                  <span className="label-with-help">
-                    Todo esto ya está en tu plan, lo veas o no.
-                    <HelpPopover
-                      title={HELP_TEXTS["retirement.assumptions"].title}
-                      body={HELP_TEXTS["retirement.assumptions"].body}
-                    />
-                  </span>
-                </p>
-                {advancedSections.map(({ section, fields }) => (
-                  <section key={section} className="retirement-advanced-section">
-                    <h4 className="subsection-title">{ADVANCED_SECTION_LABEL[section]}</h4>
-                    <div className="stack retirement-config-stack">
-                      {fields.map((f) => renderAdvancedField(f))}
-                    </div>
-                  </section>
-                ))}
-              </div>
-            </details>
-          ) : null}
         </>
       )}
 

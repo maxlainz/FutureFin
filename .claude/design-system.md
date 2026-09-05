@@ -32,14 +32,22 @@ Definidos en [`apps/web/src/styles/theme.css`](../apps/web/src/styles/theme.css)
 | `--ff-warn` | `oklch(0.60 0.14 75)` | `oklch(0.80 0.13 75)` | **Ámbar de ESTADO** (5.0.0, D28) — el peldaño intermedio del semáforo. Mismas restricciones que pos/neg |
 
 > **`--ff-warn` — por qué hay un tercer color de estado (5.0.0, D28, issue #207).** El KPI «Éxito
-> del plan» tiene TRES valores, no dos: verde en el umbral o por encima, ámbar hasta diez puntos
-> porcentuales por debajo, rojo el resto. Con solo `--ff-pos`/`--ff-neg` el peldaño intermedio se
-> pintaba de rojo (alarma donde no la hay) o de nada (indistinguible de «va bien»), y el semáforo
-> dejaba de ser un semáforo. El token es el **hermano de `--ff-neg` en la escala de estado**: mismo
-> croma y misma luminancia en cada rama, hue 75. No es un acento nuevo y **no decora**: la
-> restricción es la de pos/neg — solo marca estado (hoy: la piel de `.metric-card--warn`), nunca
+> del plan» tiene TRES valores, no dos: **verde SOLO al 100 %** (cero escenarios agotados), ámbar
+> hasta diez puntos porcentuales por debajo, rojo el resto. El corte lo fijó V7 de la tercera
+> vuelta de UX y **ya no es configurable**: el umbral de éxito del perfil desapareció. Con solo
+> `--ff-pos`/`--ff-neg` el peldaño intermedio se pintaba de rojo (alarma donde no la hay) o de nada
+> (indistinguible de «va bien»), y el semáforo dejaba de ser un semáforo. El token es el **hermano
+> de `--ff-neg` en la escala de estado**: mismo croma y misma luminancia en cada rama, hue 75. No es
+> un acento nuevo y **no decora**: la restricción es la de pos/neg — solo marca estado, nunca
 > chrome, iconos ni texto decorativo. El veredicto lo decide el SERVIDOR (`success_verdict`); la SPA
 > solo lo traduce a tono.
+>
+> **Segundo consumidor desde V5: el degradado de la banda de riesgo.** `lib/risk-gradient.ts` mezcla
+> `--ff-pos` → `--ff-warn` → `--ff-neg` por probabilidad de agotar el capital, con cortes ABSOLUTOS
+> (0 % · 5 % · 10 %) que son el mismo semáforo leído del lado de la ruina: el 10 % de escenarios
+> agotados ES el 90 % de éxito, el corte por debajo del cual el servidor da el plan por rojo. Es
+> color de DATO dentro de un chart (excepción de gráficas), no chrome. Si alguien mueve un extremo
+> del veredicto tiene que mover el otro: los dos salen de la misma tabla.
 
 Radii: `--ff-radius-{frame=12, panel=14, kpi=12, pill=999, input=10}px`.
 
@@ -138,7 +146,7 @@ Reglas de presentación de toda cifra y texto del UI (los helpers viven en
 - **TopBar única** ([`components/TopBar.tsx`](../apps/web/src/components/TopBar.tsx)): marca `FF · FutureFin` izquierda, pills de navegación derecha, slot `extras` anclado en esquina superior derecha, botón hamburguesa solo `≤720px`.
 - **Slot `extras` — control segmentado «Yo | Hogar»** (5.0.0, D9/D32, issue #207): sustituye al `<select>` de vista mío/hogar. Reusa la piel de `.ff-theme-toggle` (mismo lenguaje visual que el toggle de tema, ver §Componentes) con la clase modificadora `.ff-topbar-scope` — solo compacta padding/tipografía (`button { padding: 0.3rem 0.72rem; font-size: 0.78rem }`) para que quepa junto al título, el indicador de salud y la hamburguesa sin romper la regla de oro (cero scroll horizontal a 360px). `role="group"` + `aria-pressed` por botón (no `role="radiogroup"`: son dos botones independientes con `is-active`, patrón idéntico a `ThemeToggle`), **más estrecho que el `<select>` anterior en todos los breakpoints** (verificable: `git show b413471 --stat -- apps/web/src/App.css` — el bloque `.ledger-view-select` se borra entero, incluida su variante `≤720px`).
 - **Banner de ámbito `.app-scope-banner`** (5.0.0, D9/D32): cuando la vista es Hogar (`scopeReadOnly`), «Vista agregada del hogar · solo lectura» se pinta como **primer hijo de `<main>`, en TODAS las pestañas** — no solo las del ledger, porque el ámbito es global y quien navega directo a Jubilación desde el drawer no ha visto ningún otro banner. Reusa `.banner.info-banner` (cero color propio, resuelve claro/oscuro solo); la clase propia (`display:flex; flex-direction:column`) solo existe porque en Proyección `.app-main` es un flex-column con `overflow:hidden` y sin `flex: 0 0 auto` el banner cedería altura al chart.
-- **Banner de alta `.retirement-intro-banner`** (5.0.0, D33, issue #207, solo en `RetirementView.tsx`): «Elige tu estrategia de jubilación» (+ «Añade tu fecha de nacimiento», enlace a «Tu cuenta», si falta), descartable UNA vez por navegador (`lib/retirement-intro.ts`). También `.banner.info-banner` por debajo — cero color propio — con dos clases de layout: `.retirement-intro-banner` (`flex; justify-content: space-between; flex-wrap: wrap`, texto y botón de descarte en la misma línea, apilados si no caben) y `.retirement-intro-banner-text` (columna, `min-width: 0` para que el texto largo no reviente el flex). Nunca se muestra junto al de Hogar: solo aparece cuando `!scopeReadOnly`.
+- **Banner de alta de Jubilación — RETIRADO** (nació en 5.0.0 D33 como `.retirement-intro-banner`, muere en la tercera vuelta de UX, F5): «Elige tu estrategia de jubilación» sobre una pantalla que YA tiene una estrategia elegida es un cartel que sobra, y su descarte vivía en un flag de `localStorage` (`lib/retirement-intro.ts`) que **nunca miraba el perfil**, así que reaparecía en cada navegador nuevo por muy configurado que estuviera el plan. Con él se fueron el módulo, su test y su bloque CSS. La lección, si alguien propone otro banner de alta: **un aviso de onboarding se apaga con el ESTADO que lo hace innecesario, no con un flag por navegador.**
 - **Sin tab-bar separada**: la `.tab-bar` legacy está `display:none`. Toda la navegación vive en TopBar.
 - **Móvil**: hamburguesa abre `MobileNavDrawer` ([`components/MobileNavDrawer.tsx`](../apps/web/src/components/MobileNavDrawer.tsx)) — drawer lateral derecho con todas las secciones. Sin bottom-nav.
 - **Cuenta**: el chip de usuario + Salir vivían en la cabecera; ahora la cuenta vive en `Ajustes` como `AccountCard` ([`components/AccountCard.tsx`](../apps/web/src/components/AccountCard.tsx)) con avatar, badge de rol, botones Editar cuenta + Cerrar sesión. La cabecera queda limpia.
@@ -245,6 +253,40 @@ de 4.15.x):
   una serie separaría el abanico de la línea que dice contener, y el chart seguiría pareciendo
   correcto.
 
+#### Props opcionales `yAxis` / `bandGradient` / `bandEdgeLabels` / `hoverLabel` (5.0.0, V2/V5)
+
+La tercera vuelta de UX arrancó del veredicto del owner sobre el chart de riesgo: «no deja nada
+claro qué representa cada cosa» (F6), «los tiles no muestran nada que la gráfica no muestre» (F7),
+«añadir riesgo en color rojo/verde» (F8). Las cuatro props responden a eso y **todas son opt-in**:
+
+- **`yAxis?: { currencyIso }`** — importes en el eje. Reserva una canaleta a la izquierda
+  (`padLeft = W < 420 ? 34 : 46`, los dos anchos del chart grande) y pinta ~4 líneas de rejilla
+  (`niceYTicks` filtrado a `[vmin, vmax]`, `--proj-grid`) rotuladas con `formatAxisMoney`, que es
+  una de las **dos excepciones sancionadas** a los helpers canónicos (ver §Formateo de importes en
+  charts). Los valores ya vienen deflactados, así que «En dinero de hoy» mueve el eje entero.
+- **`bandGradient?: RiskGradientStop[]`** — el relleno de la banda por probabilidad de agotar el
+  capital ([`lib/risk-gradient.ts`](../apps/web/src/lib/risk-gradient.ts)). `<linearGradient>` con
+  **`gradientUnits="userSpaceOnUse"` obligatorio**: con el default (`objectBoundingBox`) el
+  degradado se estiraría a la caja del `path` —que no empieza en `monthStart` ni acaba en
+  `monthEnd`— y el mapeo mes→color se desplazaría sin que nada fallara. Los `<stop>` llevan
+  `style={{ stopColor }}` porque el valor es un `color-mix()` y el atributo de presentación de
+  SVG 1.1 no lo acepta: **es la única excepción sancionada a «cero estilos inline»**, y el `id`
+  va prefijado `ff-risk-` para que un `#` en `url(#…)` nunca se confunda con un hex. Opacidades
+  0,28 / 0,55 con degradado; 0,16 / 0,30 sin él (el acento plano de siempre).
+- **`bandEdgeLabels?: { p10, p90 }`** — qué es cada borde, en el extremo derecho y dentro del
+  plot, con halo (`.proj-mini-band-label`, `paint-order: stroke`). Se omiten **los dos** si los
+  bordes distan < 14 px: media etiqueta rotularía el borde equivocado.
+- **`hoverLabel?: (month) => string | null`** — el porcentaje exacto por edad. Rect captor
+  `fill="none" pointerEvents="all"` el ÚLTIMO del SVG, crosshair `--proj-crosshair` y texto con
+  halo. Lo construye el llamante desde `depletionProbabilityAtMonth`, **la misma función que
+  colorea**: un tooltip alimentado por otro cálculo podría contradecir al tinte y nadie lo notaría.
+
+> **Invariante: sin estas props, la geometría es BYTE A BYTE la de antes.** El Resumen usa este
+> mismo componente y su chart no puede moverse un píxel por un cambio que solo pedía Jubilación.
+> Lo que la sostiene son dos cosas: `padLeft` degrada a `padX` (4) cuando no hay `yAxis`, y cada
+> bloque nuevo vive dentro de un `prop ? … : null` — sin prop no se emite ni un nodo. Si tocas la
+> geometría, la verificación es una captura a 1280 px del Resumen antes y después.
+
 **`RiskFanChart.tsx` se retiró en el mismo commit** (su única consumidora desaparece): dos fuentes
 con rejillas distintas —la objeción que justificaba un componente aparte— siguen siendo dos
 fuentes distintas, pero ya no exigen un componente propio: `band` entra ya emparejado por mes y el
@@ -275,41 +317,72 @@ HTML normal —nunca dentro de un `<svg>`— con `flex-wrap` real.
   owner en duplicados, colapso, top-N del tooltip) vive PURA en
   [`lib/chart-legend.ts`](../apps/web/src/lib/chart-legend.ts) y está testeada en Vitest.
 
-### Riesgo compacto y «Detalle del cálculo» (Jubilación) — sin chart propio (5.0.0, D28, issue #207)
+### Riesgo compacto y «Detalle del cálculo» (Jubilación) — sin chart propio (5.0.0, D28; reescrito por V1/V5/V6/V7)
 
 Desde U1b la sección «Riesgo» de Jubilación ya no es un panel con su propio chart: es un bloque
-**compacto** —solo «Éxito del plan» + la tabla de agotamiento por edad— dentro del panel
-«Resultado», con todo lo demás plegado en «Detalle del cálculo» (el abanico vive en el chart único,
-ver §`MiniProjection` arriba). Los patrones de copy y CSS que gobernaban `RiskFanChart` (retirado)
-siguen vigentes para ese bloque compacto:
+**compacto** dentro del panel «Resultado», con todo lo de segundo orden plegado en «Detalle del
+cálculo» (el abanico vive en el chart único, ver §`MiniProjection` arriba). La tercera vuelta de UX
+lo dejó en TRES cosas y ni una más:
+
+1. **El KPI «Éxito del plan»**, cuyo valor es «87,0 %» —un porcentaje con un decimal, como todo
+   porcentaje de la casa— y cuyo subtítulo dice el SUJETO de la cifra, no un umbral: «de los
+   escenarios no agotan el capital», o «0 de 500 escenarios agotan el capital» cuando es verde.
+2. **La línea informativa del colchón de caja** (`.retirement-buffer-line`, V6): de dónde sale, su
+   equivalente en meses y su coste en puntos de éxito, con el enlace a Reglas de ahorro o —si
+   alguien lo fijó por API— la salida «Volver al tope de tu regla» (`PATCH null`, tri-estado).
+3. **El aviso «sin volatilidad declarada»**, intacto.
+
+**Lo que se fue, y por qué no vuelve:**
+
+- **La tabla «Probabilidad de agotar el capital»** (`.risk-depletion-grid` y familia, retiradas de
+  `App.css`). El owner: «los tiles de riesgo son inútiles: no muestran nada que la gráfica no
+  muestre. Si la gráfica estuviera bien hecha no harían falta» (F7). Se cumplió la condición: el
+  degradado de la banda dice lo mismo edad a edad y con más resolución, y el hover da el número
+  exacto. Lo único que el color NO puede rotular —el total acumulado al final del horizonte, porque
+  su última parada cae en el borde del plot— bajó a «Detalle del cálculo» como la fila
+  `depletion_total`. **Si alguien propone volver a tabular el agotamiento, la pregunta es qué dice
+  esa tabla que el color y el hover no digan ya.**
+- **Los dos campos de la tarjeta «Riesgo»** del formulario: el colchón se DERIVA (V6) y el umbral
+  de éxito dejó de existir (V7). Por eso no hay tarjeta «Riesgo» en `PLAN_CARD_ORDER`.
+
+**El valor del KPI ya NO es una oración.** Entre U1b y esta vuelta, «Éxito del plan» fue el único
+KPI de la app cuyo valor era una frase entera («87 de cada 100 escenarios se jubilan y no agotan el
+capital»), envolviendo a dos o tres renglones dentro de `.metric-value-row`. El owner lo leyó como
+«demasiado texto para caber en una caja» (F2) y tenía razón: `.metric-value` es mono, 1,25 rem y
+`tabular-nums` — tipografía para «87,0 %», no para once palabras. La condición **no se perdió**:
+bajó al subtítulo, que es el slot que sí envuelve (`.summary-success-grid
+.metric-value-parenthetical` y `.plan-card-wide-kpi .metric-value-parenthetical`, `white-space:
+normal`, mismo precedente que `.retirement-tiles-grid`). La lección general: **si una cifra necesita
+once palabras para no mentir, las palabras van en el subtítulo; el valor sigue siendo un valor.**
+
+Otras reglas del bloque que siguen vigentes:
 
 - **La ayuda de las filas cuelga del RÓTULO de cada fila** (`.risk-extra-head`), no del panel:
   `RiskExtraRow` lleva un `helpId?` opcional y la vista envuelve el rótulo en
-  `label-with-help risk-extra-label` — el mismo patrón que ya usaba la tabla de agotamiento. Una
-  sola ayuda en el título explicaría la fila que el usuario no está mirando. Sin `helpId` la fila
-  conserva su `<span class="risk-extra-label">` pelado y no gasta el icono.
-- **La cifra de «Éxito del plan» es una FRASE, no un número corto** (5.0.0, pase de correcciones
-  §G): «87 de cada 100 escenarios se jubilan y no agotan el capital». `.metric-value` es mono a
-  1.25rem dentro de un `.metric-value-row` con `flex-wrap: wrap`, así que envuelve a dos o tres
-  renglones y la tarjeta crece — **es deliberado y no se recorta**: el rótulo corto anterior
-  describía la definición vieja del éxito y sobrevivió a ella. El primer slot sigue siendo el
-  umbral y el segundo, en el Resumen, los escenarios que no llegan a jubilarse (`nowrap` +
-  ellipsis, como todo `.metric-value-detail`). Es el único KPI de la app cuyo valor es una
-  oración; si algún día hay dos, ese es el momento de darle una variante propia a `.metric-value`,
-  no de acortar la frase.
+  `label-with-help risk-extra-label`. Una sola ayuda en el título explicaría la fila que el usuario
+  no está mirando. Sin `helpId` la fila conserva su `<span class="risk-extra-label">` pelado.
+- **La escala de color va bajo el chart, no en la leyenda** (`.retirement-risk-scale` / `-step` /
+  `-swatch`): `ChartLegend` nombra SERIES, y esto es una escala continua — meterla ahí la haría
+  parecer una cuarta línea del gráfico. El color de cada muestra entra por la custom property
+  `--ff-risk-swatch`, el mismo patrón que `--ff-legend-color`. Cuando hay degradado, la entrada
+  «Banda 10–90 %» **sale** de `ChartLegend`: su swatch tendría que enseñar UN color y la banda ya
+  no tiene uno.
 
-Clases que sobreviven al retiro del chart (todas en `App.css`, cero color propio salvo
-`--ff-warn`): `.metric-card--warn` (tono ámbar del KPI, misma construcción que `--danger`;
-consumidor dinámico vía `successVerdictTone`, no un literal `tone="warn"` en el JSX — no lo busques
-así), `.risk-depletion-grid` + `.risk-depletion-cell`/`-age`/`-value` (la tabla «Probabilidad de
-agotar el capital» — `auto-fit` con `minmax(min(50%, 7rem), 1fr)`, que da **dos columnas en móvil
-sin una media query nueva**; `.risk-depletion-age` envuelve desde U5b — ver §Regla de oro más
-abajo, el desbordamiento de 639–641 px), `.risk-extra-rows`/`.risk-extra-row`/`-head`/`-label`/
-`-value`/`-detail` y `.risk-footnote` (procedencia: ms, caminos y semilla; `overflow-wrap: anywhere`
-porque la semilla es un entero de 20 dígitos que no cabe a 360px). **`.risk-fan-note` se retiró**
-junto con `RiskFanChart.tsx` — la nota «Bandas puntuales» que colgaba de ella vive ahora como fila
-de `retirementDetailRows` dentro de «Detalle del cálculo», con el mismo `HelpPopover` de
+Clases que sobreviven (todas en `App.css`, cero color propio salvo `--ff-warn`):
+`.metric-card--warn` (tono ámbar del KPI, misma construcción que `--danger`; consumidor dinámico vía
+`successVerdictTone`, no un literal `tone="warn"` en el JSX — no lo busques así),
+`.risk-extra-rows`/`.risk-extra-row`/`-head`/`-label`/`-value`/`-detail` y `.risk-footnote`
+(procedencia: ms, caminos y semilla; `overflow-wrap: anywhere` porque la semilla es un entero de 20
+dígitos que no cabe a 360px). **`.risk-fan-note` se retiró** con `RiskFanChart.tsx` — la nota
+«Bandas puntuales» vive ahora como fila de `retirementDetailRows`, con el `HelpPopover` de
 `retirement.bands`.
+
+> **Variante DESCARTADA del color de riesgo (V5, documentada para no volver a proponerla)**: una
+> tira de 6 px bajo el eje X, coloreada por probabilidad de agotar el capital, en vez de teñir la
+> banda. Se descartó por dos razones: competiría con la tira de fases (D29), que ya vive exactamente
+> ahí y usa el tinte progresivo del acento, y dejaría la banda azul **sin significado** — el
+> problema que F6 denunciaba. Es el plan B si el contraste del degradado al 28 % no aguantara en
+> oscuro; en ese caso, la tira de fases tendría que moverse o desaparecer, no compartir carril.
 
 ### `PlanningDirectionChart` — [`components/charts/PlanningDirectionChart.tsx`](../apps/web/src/components/charts/PlanningDirectionChart.tsx)
 
@@ -346,6 +419,38 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 > **Segmented control (`.ff-theme-toggle`)**: dos consumidores desde 5.0.0 — el toggle de tema Auto/Claro/Oscuro (`ThemeToggle`, clase base `.ff-theme-toggle`) y el segmentado «Yo | Hogar» de la TopBar (`.ff-theme-toggle.ff-topbar-scope`, ver §Shell), que reusa la misma piel con una modificadora que solo compacta padding/tipografía — cero declaraciones nuevas de color. **Ya no es cierto que sea el único que queda**; si actualizas este párrafo por un tercer consumidor, dilo aquí y no lo dejes desactualizado otra vez. La antigua clase compartida **`.ff-segmented` se eliminó** tras 2.0.0: la «fuente del ahorro» de la entonces `Ajustes → Proyección` (hoy `Ajustes → Plan`) pasó a un `<select>` nativo estándar (con `<small>` de ayuda asociada por `aria-describedby`, fuera del `<label>`). Si necesitas un nuevo control inline de 2–3 opciones, valora primero un `<select>`; si de verdad hace falta un segmented con botones, extiende `.ff-theme-toggle` con una modificadora (precedente: `.ff-topbar-scope`), no reintroduzcas `.ff-segmented`. Verifica claro **y** oscuro.
 
 > **Radio-cards de configuración (`.retirement-mode-card`/`.retirement-mode-grid`)**: NO son un segmented — son `<label>` con un `<input type="radio" className="sr-only">` dentro, estilados como tarjeta (borde + `is-active` con tinte de acento). Nacieron para el modo del objetivo anual de Jubilación y 5.0.0 (D26, issue #207) los reusa tal cual para las **5 tarjetas de estrategia** (`RetirementView.tsx`, modificadora `.retirement-strategy-grid`: mismo `grid-template-columns` pero `repeat(auto-fit, minmax(min(100%, 15rem), 1fr))` porque cinco no caben en la rejilla fija de 3 del modo del objetivo — no-op en escritorio, colapsa solo en móvil, sin breakpoint nuevo).
+>
+> **Las dos rejillas de radio-cards viven en tarjetas ANCHAS.** Desde V3 las dos (estrategia y modo
+> del objetivo) caen dentro de una `.retirement-card`, y la columna de la rejilla de tarjetas mide
+> 21 rem: una radio-card de ~7 rem no cabe con su nombre en una línea. Por eso «Estrategia» y
+> «Gasto en jubilación» llevan `.retirement-card--wide` (`grid-column: 1 / -1`). Si añades una
+> tercera rejilla de radio-cards, su tarjeta va ancha también.
+
+### Tarjetas de configuración (`.retirement-card*`) — 5.0.0, V3 de la tercera vuelta de UX
+
+Sustituyen al acordeón «Avanzado» de U12, que el owner leyó como «un cajón de sastre mal explicado»
+(F10) y al que pidió «no tener miedo a hacer cuadros para cada cosa (pensión, gasto tras
+jubilación…) en vez de macrobloques confusos» (F9). El formulario de Jubilación es ahora **una
+tarjeta por TEMA, todo a la vista**: Estrategia · Edades · Pensión · Gasto en jubilación · Retirada ·
+Horizonte.
+
+- `.retirement-card-grid`: `repeat(auto-fit, minmax(min(100%, 21rem), 1fr))`, `gap: 1rem`. **Dos
+  columnas en escritorio y no una**: seis tarjetas apiladas dejarían el panel «Resultado» a dos
+  pantallas de scroll, y U1 dice que el resultado va DEBAJO del plan — debajo, no lejos. Sin
+  breakpoint nuevo.
+- `.retirement-card`: borde `--ff-line-soft`, radio `--ff-radius-kpi`, fondo
+  `color-mix(in oklch, var(--ff-paper) 60%, var(--ff-bg))` — un escalón por debajo del panel que las
+  contiene, para que se lean como subdivisiones y no como paneles hermanos.
+- `.retirement-card--wide`: `grid-column: 1 / -1` (las dos rejillas de radio-cards, ver arriba).
+- `.retirement-card-blurb`: la frase de qué hace la tarjeta, 0,78 rem `--ff-ink-soft`. **No es
+  decoración**: el copy de cada una (`PLAN_CARD_COPY`, `lib/retirement-form.ts`) dice qué cambia y
+  qué implica cambiarlo, nunca «aquí van las edades» — un título más no habría arreglado nada.
+
+**Qué desapareció con el acordeón** y por qué no vuelve: la línea «Supuestos: retirada 3,5 % · … ·
+umbral 95,0 %» (`.retirement-advanced-summary-text`, `lib/assumptions-line.ts`) existía como
+contrapeso U12 —enunciar lo que el acordeón escondía— y **sin acordeón no hay nada escondido que
+enunciar**: todo supuesto en vigor está en su tarjeta, a la vista. Era además prosa compuesta desde
+una tabla viva: sin consumidor solo podía envejecer. Registrado en `futurefin-failure-archaeology`.
 >
 > **Tarjeta ancha «Tu plan» (`.plan-card-wide*`)** (5.0.0, D27/D32 → U9, issue #207, `SummaryView.tsx`):
 > sustituye a la rejilla de tarjetas D27 original (`.plan-card-grid`/`.plan-card`/`.plan-card-figures`,
@@ -411,16 +516,17 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 > (D17, `underfunded`) sube a un `.error-banner` sobre las tarjetas; el resto baja a
 > «Detalle del cálculo» como filas de `retirementDetailRows`.
 >
-> **Acordeón «Avanzado» cuyo resumen ES la línea «Supuestos» (`.retirement-advanced`)** (5.0.0,
-> U1b → U12, issue #207, `RetirementView.tsx`): un `<details class="panel retirement-advanced">`
-> cuyo `<summary>` (`.retirement-advanced-summary-text` + `.retirement-advanced-summary-cta`) pinta
-> `assumptionsLine(profile, ctx)` (`lib/assumptions-line.ts`) **SIEMPRE**, plegado o abierto —
-> «Supuestos: retirada 3,5 % · gasto fijo en euros de hoy · horizonte 90 años · sin colchón · umbral
-> 95,0 %». El marcador nativo del `<details>` se retira (`::-webkit-details-marker: none`) porque la
-> línea es larga y el triángulo la partía en dos renglones desalineados; la afordancia de que se
-> puede abrir la da el chip `.retirement-advanced-summary-cta` («Avanzado», mayúsculas pequeñas,
-> `--ff-accent`) a la derecha. Es el contrapeso exacto de U2 (esconder un campo por estrategia): sin
-> esta línea SIEMPRE visible, esconder un campo sería forzar su valor en silencio.
+> **Acordeón «Avanzado» y su línea «Supuestos» (`.retirement-advanced*`) — RETIRADOS** (nacieron en
+> 5.0.0 U1b → U12, mueren en la tercera vuelta de UX, F10). Eran un `<details class="panel
+> retirement-advanced">` cuyo `<summary>` pintaba `assumptionsLine(profile, ctx)` siempre, plegado o
+> abierto, como contrapeso de U2: si escondes un campo por estrategia, tienes que enunciar su valor
+> o lo estás forzando en silencio. **La solución era correcta para el problema equivocado**: el
+> owner no quería que le enunciaran lo escondido, quería que no se escondiera nada («idealmente
+> Avanzado desaparece si la información se organiza y jerarquiza bien»). Con las tarjetas por tema
+> (§Tarjetas de configuración) los 13 campos están a la vista, así que no hay nada que enunciar y la
+> línea se quedó sin sujeto. Se fueron el `<details>`, `.retirement-advanced*`,
+> `.retirement-advanced-link` y el módulo `lib/assumptions-line.ts` con su test. **Antes de proponer
+> otro acordeón de configuración, lee `futurefin-failure-archaeology` §3.**
 >
 > **Indicador de guardado único (`.retirement-save-state`)** (5.0.0, U1b → S6, issue #207,
 > `RetirementView.tsx`): sustituye a los seis pies «Guardado automático.» de WP7, uno por panel, que
@@ -512,6 +618,32 @@ sobra»). TODO panel de Ajustes sigue esta plantilla; si añades uno nuevo, cóp
    `muted tight` y `settings-meta-dl` los sustituyen). Listas en modales: `.muted-list`, sin
    estilos inline.
 
+### Una sola escala de títulos (5.0.0, P6 — F12 del owner)
+
+El owner volvió a ver «títulos y tamaños de fuente distintos entre paneles». La auditoría encontró
+que Ajustes estaba homogéneo y que la desigualdad vivía **una pantalla más allá**, en Jubilación,
+que mezclaba cuatro cabeceras. La norma resultante, que vale para toda la app:
+
+| Qué | Clase |
+|---|---|
+| Título de PANEL | `h3.panel-title` |
+| Título de sub-sección o de TARJETA | `h4.panel-title` — misma clase; la jerarquía la da el contenedor, no el tamaño |
+| Texto de ayuda de un campo | `p.muted.tight` (nunca `<small>`: `.muted` solo fija color, y `<small>` cae a ~11 px) |
+| Disparador de un `<details>` de segundo orden | `.details-trigger` (0,82 rem / 600 / `--ff-ink-soft`) |
+
+**Ningún `<summary>` ni `<h4>` sin clase decide su propio tamaño**: si un elemento va más pequeño a
+propósito —como «Detalle del cálculo», que es la puerta a lo que se puede no leer— ese tamaño está
+declarado en una clase con nombre y documentado aquí, no heredado del user-agent.
+
+> **`.subsection-title` sigue viva, y eso es deuda registrada.** P6 la daba por retirable con tres
+> consumidores migrados; el barrido real encontró **seis**: `RetirementView` ×2 (ya migrados a
+> `h4.panel-title`) más cuatro en `components/charts/summary.tsx` y dos en `views/GastosView.tsx`.
+> Mientras esos seis existan, la clase se queda — y con ella su override por contenedor
+> (`.summary-donut-card .subsection-title`, que la baja a 0,82 rem: **una clase de título que cambia
+> de talla según dónde caiga es justo lo que P6 prohíbe**). Para retirarla hacen falta dos pasos que
+> este pase no cubre: dar a las tarjetas donut una clase propia con nombre para su talla menor, y
+> migrar los dos títulos de Movimientos.
+
 ## Vista de solo lectura (Hogar) — norma de renderizado (5.0.0, D9/D32, issue #207)
 
 La vista Hogar es un agregado informativo y de **solo lectura** (para la tabla completa de qué
@@ -531,7 +663,7 @@ ocultar.
 
 ## Reglas para añadir UI nueva
 
-1. **Usa los tokens**. Nunca hardcoded hex. Si necesitas un color que no está, primero pregúntate si puedes vivir con `color-mix(in oklch, var(--ff-accent) X%, var(--ff-paper))`. Si no, añade un token nuevo en `theme.css` con variantes claro/oscuro. El enforcement automático es el freezer [`styles/no-hex-outside-theme.test.ts`](../apps/web/src/styles/no-hex-outside-theme.test.ts): sus contadas excepciones sancionadas (p. ej. la sombra del tooltip de Proyección, issue #105) se registran en `RGBA_ZERO_EXCEPTIONS` por **`file:línea` exacta, no por patrón** — cualquier edición de `App.css` que inserte líneas por encima desplaza el anclaje y rompe el test aunque el CSS no haya cambiado de verdad. 5.0.0 lo movió (2399/2400 → 2425/2426, cuando el segmentado «Yo | Hogar» y los banners de ámbito/alta se insertaron más arriba en el archivo). Si el freezer falla así: `grep -n "rgba(0, 0, 0," apps/web/src/App.css` para encontrar las líneas reales de hoy y actualiza los literales de `RGBA_ZERO_EXCEPTIONS` a esos números — no borres la excepción, muévela.
+1. **Usa los tokens**. Nunca hardcoded hex. Si necesitas un color que no está, primero pregúntate si puedes vivir con `color-mix(in oklch, var(--ff-accent) X%, var(--ff-paper))`. Si no, añade un token nuevo en `theme.css` con variantes claro/oscuro. El enforcement automático es el freezer [`styles/no-hex-outside-theme.test.ts`](../apps/web/src/styles/no-hex-outside-theme.test.ts): sus contadas excepciones sancionadas (p. ej. la sombra del tooltip de Proyección, issue #105) se registran en `RGBA_ZERO_EXCEPTIONS` por **`file:línea` exacta, no por patrón** — cualquier edición de `App.css` que inserte líneas por encima desplaza el anclaje y rompe el test aunque el CSS no haya cambiado de verdad. 5.0.0 lo movió dos veces: a 2425/2426 cuando el segmentado «Yo | Hogar» y los banners de ámbito/alta se insertaron más arriba, y **de vuelta a 2404/2405** en la tercera vuelta de UX, al retirar F5 el banner de alta de Jubilación y sus 21 líneas de CSS. Las anclas se mueven en los dos sentidos: un borrado por encima las desplaza igual que una inserción. Si el freezer falla así: `grep -n "rgba(0, 0, 0," apps/web/src/App.css` para encontrar las líneas reales de hoy y actualiza los literales de `RGBA_ZERO_EXCEPTIONS` a esos números — no borres la excepción, muévela.
 2. **Verifica claro y oscuro antes de mergear**. Toggle desde Ajustes y revisa: KPIs, modales, tooltips, hover states, focus rings.
 3. **No mezcles tab-bar legacy con TopBar**. La nav es responsabilidad exclusiva de `TopBar`. Sub-tabs (como las de Ajustes) van como pills con clase `ff-nav-pill`.
 4. **No introduzcas color decorativo**. Pos/neg = cifras delta. Acento = destacar UN ítem (botón primario, KPI hero, marker de jubilación, slice principal de un donut). El resto vive en grayscale.
@@ -567,7 +699,7 @@ cifras del plan en el Resumen), de la rama `release/5.0.0`, issue #207. Re-verif
 
 - Segmentado de la TopBar: `grep -n "ff-topbar-scope" apps/web/src/App.css apps/web/src/App.tsx`
 - Banner de ámbito, primer hijo de `<main>`: `grep -n "app-scope-banner" apps/web/src/App.css apps/web/src/App.tsx`
-- Banner de alta de Jubilación: `grep -n "retirement-intro-banner" apps/web/src/App.css apps/web/src/views/RetirementView.tsx`
+- Banner de alta de Jubilación **retirado** (F5): `grep -c "retirement-intro-banner" apps/web/src/App.css apps/web/src/views/RetirementView.tsx` (**0** en los dos) y `ls apps/web/src/lib/retirement-intro.ts` debe FALLAR
 - `.retirement-radio-stack` tiene consumidores (cero antes de `9ae5c24`): `grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` (≥1)
 - Excepción de solo lectura en Movimientos: `grep -n "disabled={!canEdit" apps/web/src/views/GastosView.tsx`
 - Anclas actuales del freezer: `grep -n 'App.css:' apps/web/src/styles/no-hex-outside-theme.test.ts` — deben casar con `grep -n "rgba(0, 0, 0," apps/web/src/App.css`
@@ -614,4 +746,19 @@ D27 original (`.plan-card-grid`/`.plan-card`/`.plan-card-figures`) **se retiró 
 - El trío D27 y `.risk-fan-note` fuera de `App.css` (regla, no solo consumidor): `grep -c "^\.plan-card {\|^\.plan-card-grid {\|^\.plan-card-figures {\|^\.risk-fan-note {" apps/web/src/App.css` (**0**)
 - La frase-hito usa filete, no color de texto: `grep -n -A 4 "^\.retirement-sentence {" apps/web/src/App.css` (sin `color` propio en el bloque base; el tono está en `border-left-color`, tres reglas después)
 - El acordeón «Avanzado» pinta `assumptions` en el `<summary>`: `grep -n "retirement-advanced-summary-text" apps/web/src/App.css apps/web/src/views/RetirementView.tsx`
-- Las secciones de «Avanzado» son SEIS, `Horizonte` y `Riesgo` YA NO están combinadas: `grep -n "ADVANCED_SECTION_LABEL" -A 8 apps/web/src/lib/retirement-form.ts`
+- El acordeón «Avanzado» y su línea «Supuestos» **ya no existen**: `grep -c "^export const ADVANCED_SECTION_LABEL" apps/web/src/lib/retirement-form.ts` (**0**) y `grep -c "^\.retirement-advanced" apps/web/src/App.css` (**0**) — anclados a la DECLARACIÓN, porque los dos nombres siguen citados en los comentarios que explican su retirada; y `ls apps/web/src/lib/assumptions-line.ts` debe FALLAR
+
+**Añadido en la tercera vuelta de UX de Jubilación (V1–V7; feedback F2 y F5–F10 del owner,
+2026-09-05, rama `release/5.0.0`)**: §Tarjetas de configuración, las cuatro props nuevas de
+`MiniProjection`, la §Riesgo compacto reescrita, la norma de títulos P6 y la variante descartada del
+color. Re-verify with:
+
+- Las seis tarjetas y su copy: `grep -n "PLAN_CARD_ORDER" -A 8 apps/web/src/lib/plan-fields.ts` (seis ids, `risk` NO está) y `grep -c "^    blurb:" apps/web/src/lib/retirement-form.ts` (**6** — anclado a la indentación de las entradas, para no contar también la declaración del tipo)
+- Las cuatro props nuevas del chart: `grep -n "yAxis?:\|bandGradient?:\|bandEdgeLabels?:\|hoverLabel?:" apps/web/src/components/charts/MiniProjection.tsx` (4 aciertos)
+- La invariante «sin ellas, byte a byte»: `grep -n "const padLeft = yAxis" apps/web/src/components/charts/MiniProjection.tsx` (degrada a `padX`)
+- El degradado usa `userSpaceOnUse` y el id prefijado: `grep -n "gradientUnits=\"userSpaceOnUse\"\|ff-risk-" apps/web/src/components/charts/MiniProjection.tsx`
+- Cortes absolutos del color, en un módulo puro y testeado: `grep -n "RISK_AMBER_AT\|RISK_RED_AT" apps/web/src/lib/risk-gradient.ts` y `grep -c "it(" apps/web/src/lib/risk-gradient.test.ts`
+- La tabla de agotamiento por edad **ya no existe**: `grep -c "risk-depletion" apps/web/src/App.css apps/web/src/views/RetirementView.tsx` (**0** en los dos)
+- El valor del KPI de éxito es un porcentaje, no una oración: `grep -n "formatSuccessPercent\|successParenthetical" apps/web/src/lib/risk-bands.ts` y `grep -c "export function formatSuccessScenarios\|export function formatSuccessThreshold" apps/web/src/lib/risk-bands.ts` (**0**; el literal de la oración vieja NO sirve como grep: sobrevive citado en el docblock que explica por qué se retiró, y un comando que se cuenta a sí mismo es deriva silenciosa)
+- La escala del color NO es un ítem de leyenda: `grep -n "retirement-risk-scale" apps/web/src/App.css apps/web/src/views/RetirementView.tsx`
+- `.subsection-title` sigue teniendo consumidores (deuda declarada arriba): `grep -rl "subsection-title" apps/web/src/views apps/web/src/components` (hoy `charts/summary.tsx` y `GastosView.tsx`; el día que imprima vacío, retira la clase de `App.css`)

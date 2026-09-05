@@ -162,10 +162,10 @@ export const HELP_TEXTS = {
       "En cuántos de los escenarios con volatilidad pasan DOS cosas a la vez: que llegues a " +
       "jubilarte dentro del horizonte —o en tu edad objetivo— y que la cartera no se agote " +
       "nunca. Un plan que no llega a jubilarte no cuenta como éxito aunque el dinero siga " +
-      "entero, y si eso pasa en algún escenario la tarjeta te dice cuántos son. El color la " +
-      "compara con tu umbral: verde si lo alcanza, ámbar hasta diez puntos por debajo, rojo más " +
-      "abajo. Es el MISMO sorteo que dibuja la sección Riesgo de Jubilación —no se recalcula " +
-      "aquí—, y allí está el detalle.",
+      "entero, y si eso pasa en algún escenario la tarjeta te dice cuántos son. El color no se " +
+      "compara con ningún listón tuyo: verde SOLO si no falla ni un escenario, ámbar hasta diez " +
+      "puntos por debajo del 100 %, rojo más abajo. Es el MISMO sorteo que dibuja la sección " +
+      "Riesgo de Jubilación —no se recalcula aquí—, y allí está el detalle.",
   },
 
   // --- Jubilación -----------------------------------------------------------
@@ -208,14 +208,6 @@ export const HELP_TEXTS = {
       "El mes en que la simulación te jubila de verdad, con tu edad y el plazo desde hoy. Qué lo " +
       "dispara depende de tu estrategia: en «Cuanto antes» y «Puente hasta la pensión» manda el " +
       "capital; en las de edad, la edad — te jubilas ese mes llegues o no al objetivo.",
-  },
-  "retirement.assumptions": {
-    title: "Supuestos del plan",
-    body:
-      "Todo lo que tu plan da por hecho sin preguntártelo: la tasa de retirada, la regla con la " +
-      "que sacas el dinero, el horizonte, el colchón y tu umbral de éxito. Aparece siempre, " +
-      "aunque la estrategia elegida no te enseñe esos campos — un supuesto que no se ve sigue " +
-      "moviendo tus números. Cámbialos en «Avanzado».",
   },
   "retirement.strategy": {
     title: "Tu estrategia de jubilación",
@@ -295,20 +287,17 @@ export const HELP_TEXTS = {
   "retirement.cash_buffer": {
     title: "Colchón de caja",
     body:
-      "Meses de gasto que quieres tener siempre en efectivo. Solo se simula en los escenarios " +
-      "con volatilidad de la sección Riesgo, y necesita un activo líquido SIN volatilidad donde " +
-      "vivir: sin él no se simula, y allí se te dice. PROTEGE —medidos 3,9 puntos más de éxito " +
-      "y casi el doble de liquidez en el peor decil, si el colchón renta como tu cartera—, pero " +
-      "se PAGA con la rentabilidad del dinero que sacas del mercado: con una cuenta al 0 % el " +
-      "saldo neto fue de −3,5 puntos. Vacío significa sin colchón declarado.",
-  },
-  "retirement.success_threshold": {
-    title: "Umbral de éxito",
-    body:
-      "A partir de qué porcentaje de escenarios sin agotar la cartera das el plan por bueno. De " +
-      "serie, 95 %. Es tu listón, no una predicción: subirlo no hace tu plan más seguro, solo " +
-      "más exigente contigo. Se compara con la probabilidad de éxito de los escenarios con " +
-      "volatilidad; sin volatilidad declarada en tus activos no hay nada que comparar.",
+      "El dinero que la simulación mantiene SIEMPRE en efectivo durante la jubilación, en vez de " +
+      "invertido. No lo pides tú: lo inferimos del tope («hasta X €») de tu regla de ahorro que " +
+      "apunta a un activo líquido sin volatilidad, así que se cambia ahí, en Reglas de ahorro, y " +
+      "no en esta pantalla. Sin una regla con tope que apunte a un líquido así, no hay colchón, " +
+      "y la línea te dice cuál de las dos cosas falta. Es el TOPE en euros, no una conversión a " +
+      "meses: el tope es nominal y fijo, y un colchón «de ocho meses» se indexaría con la " +
+      "inflación hasta valer casi el doble a veinte años. Los meses que ves al lado son una " +
+      "equivalencia informativa contra tu gasto de hoy. Y CUESTA: medido en este modelo, el " +
+      "dinero que dejas fuera del mercado resta unos puntos de probabilidad de éxito frente a " +
+      "tenerlo invertido. Solo actúa en los escenarios con volatilidad; sin volatilidad " +
+      "declarada no hay nada de lo que proteger y no se simula.",
   },
   "retirement.required_contribution": {
     title: "Ahorro necesario",
@@ -382,8 +371,10 @@ export const HELP_TEXTS = {
       "La franja recoge del escenario 10 al 90 —uno de cada diez queda por encima y uno de cada " +
       "diez por debajo— y la línea sólida es la proyección de siempre, la que el resto de la app " +
       "enseña como dinero. Ojo con la franja: sus bordes son el valor de cada mes por separado, " +
-      "así que NO son futuros concretos y no cuadran con ninguna simulación. El sorteo usa la " +
-      "misma semilla cada vez, así que las cifras no bailan entre visitas.",
+      "así que NO son futuros concretos y no cuadran con ninguna simulación. El color de la " +
+      "franja no es decorativo: dice, a cada edad, qué parte de esos escenarios ya se ha quedado " +
+      "sin capital — verde ninguno, rojo uno de cada diez o más. El sorteo usa la misma semilla " +
+      "cada vez, así que las cifras no bailan entre visitas.",
   },
   "retirement.success": {
     title: "Éxito del plan",
@@ -394,8 +385,10 @@ export const HELP_TEXTS = {
       "el dinero siga entero: por eso, cuando algún escenario se queda sin jubilar, debajo " +
       "aparecen cuántos son y qué parte de los que SÍ se jubilan aguanta el capital. Que la " +
       "regla te recorte el gasto no es fracaso aquí: eso se mide en la cobertura, más abajo. El " +
-      "color compara la cifra con tu umbral: verde si lo alcanza, ámbar hasta diez puntos por " +
-      "debajo, rojo más abajo. Sin volatilidad declarada en tus activos no hay escenarios que " +
+      "corte del color es FIJO y no lo eliges tú: verde solo con el 100,0 %, o sea con cero " +
+      "escenarios agotados; ámbar entre el 90 % y el 100 %; rojo por debajo del 90 %. Con " +
+      "quinientos caminos, un solo fallo ya es ámbar — y por eso el subtítulo del verde dice " +
+      "cuántos se sortearon. Sin volatilidad declarada en tus activos no hay escenarios que " +
       "contar y el número no significa nada.",
   },
   "retirement.depletion_by_age": {
@@ -403,9 +396,12 @@ export const HELP_TEXTS = {
     body:
       "Qué parte de los escenarios ha agotado la cartera A ESA EDAD O ANTES, contando desde el " +
       "mes en que te jubilas. Es acumulada, así que solo puede crecer con la edad: el 8 % a los " +
-      "80 incluye a todos los que se quedaron sin capital a los 75. La ÚLTIMA fila no es una " +
-      "edad más: es el final del horizonte, y cuenta todos los escenarios que se quedaron sin " +
-      "capital en algún momento del plan. Sale del mismo sorteo que la probabilidad de éxito.",
+      "80 incluye a todos los que se quedaron sin capital a los 75. Es lo que COLOREA la franja " +
+      "del gráfico —verde donde no falla ninguno, ámbar donde empiezan a fallar, rojo desde uno " +
+      "de cada diez— y el porcentaje exacto de cada edad sale al pasar el ratón por encima. En " +
+      "«Detalle del cálculo» tienes la cifra que el color no puede rotular: el total al final " +
+      "del horizonte, o sea todos los escenarios que se quedaron sin capital en algún momento " +
+      "del plan. Sale del mismo sorteo que la probabilidad de éxito.",
   },
   "retirement.coverage": {
     title: "Cobertura de tu gasto",

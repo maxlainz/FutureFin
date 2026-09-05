@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  ADVANCED_SECTION_LABEL,
+  PLAN_CARD_COPY,
   PLAN_FIELD_HELP,
   fractionFromPercent,
   missingRequiredPlanFields,
@@ -188,7 +188,7 @@ describe("U2 — qué obligatorio falta", () => {
     expect(
       missingRequiredPlanFields({
         profile: base(),
-        required: ["swr_pct", "horizon_lifespan_age", "cash_buffer_months"],
+        required: ["swr_pct", "horizon_lifespan_age", "spend_mode"],
         birthDate: null,
       }),
     ).toEqual([]);
@@ -202,14 +202,25 @@ describe("cableado campo → ayuda", () => {
     }
   });
 
-  it("las seis secciones de «Avanzado» tienen rótulo", () => {
-    expect(Object.keys(ADVANCED_SECTION_LABEL).sort()).toEqual([
-      "horizonte",
-      "media_jornada",
-      "objetivo",
+  it("todas las tarjetas tienen título corto y una frase con sustancia acabada en punto", () => {
+    // No juzga prosa: caza la tarjeta que alguien añade sin frase. Una tarjeta con título y sin
+    // frase deja el formulario igual de mudo que antes de V3, con un separador más.
+    for (const [card, copy] of Object.entries(PLAN_CARD_COPY)) {
+      expect(copy.title.length, `${card}: título vacío`).toBeGreaterThan(2);
+      expect(copy.title.length, `${card}: título demasiado largo`).toBeLessThanOrEqual(28);
+      expect(copy.blurb.length, `${card}: frase demasiado corta`).toBeGreaterThan(40);
+      expect(copy.blurb.endsWith("."), `${card}: la frase no acaba en punto`).toBe(true);
+    }
+  });
+
+  it("son SEIS tarjetas: «Riesgo» se quedó sin campos con V6/V7 y no se pinta", () => {
+    expect(Object.keys(PLAN_CARD_COPY).sort()).toEqual([
+      "ages",
+      "horizon",
       "pension",
-      "retirada",
-      "riesgo",
+      "spending",
+      "strategy",
+      "withdrawal",
     ]);
   });
 });

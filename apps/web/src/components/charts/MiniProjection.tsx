@@ -26,20 +26,40 @@
  * pasan por el mismo factor mes a mes. Si la banda llegara ya deflactada y la curva no, el
  * abanico dejaría de contener a la línea que dice contener — y el chart seguiría pareciendo
  * correcto.
+ *
+ * **5.0.0 · tercera vuelta de UX (V2/V5) — cuatro props más, todas opt-in.** El owner leyó el
+ * chart de riesgo y dijo que «no deja nada claro qué representa cada cosa» (F6). Las cuatro
+ * atacan esa frase y ninguna cambia nada si no se pasa:
+ *
+ *  - **`yAxis`** — importes en el eje. Sin él no había forma de saber si la banda vale 200.000 €
+ *    o dos millones. Reserva una canaleta a la izquierda (`padLeft`) y dibuja la rejilla; el
+ *    resto de la geometría sale de ella, así que el chart sin eje es idéntico al de 4.15.x.
+ *  - **`bandGradient`** — el relleno de la banda dice la probabilidad de haber agotado el capital
+ *    a esa edad (`lib/risk-gradient.ts`). Es lo que jubila la tabla «agotar a los 65/70/…».
+ *  - **`bandEdgeLabels`** — qué es cada borde («optimista (p90)» / «pesimista (p10)»).
+ *  - **`hoverLabel`** — el porcentaje exacto por edad, que un degradado solo puede aproximar.
+ *
+ * **La invariante que las gobierna: sin ellas, la geometría es byte a byte la de antes.** El
+ * Resumen usa este mismo componente y su chart no puede moverse un píxel por un cambio que solo
+ * pedía Jubilación. Lo que la sostiene es que `padLeft` degrada a `padX` y que cada bloque nuevo
+ * está dentro de un `prop ? … : null`: sin prop no se emite ni un nodo.
  */
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ProjectionSeriesApi } from "../../api/types";
 import {
   ASSET_LINE_COLORS,
   lastPointIndexAtOrBeforeMonth,
+  niceYTicks,
   projectionXTickLabel,
 } from "../../lib/projection-chart";
+import { formatAxisMoney } from "../../lib/ledger";
 import { buildPhaseSegments } from "../../lib/phase-strip";
 import {
   placeMarkerLabels,
   type RetirementChartMarker,
 } from "../../lib/retirement-chart";
+import type { RiskGradientStop } from "../../lib/risk-gradient";
 
 export type MiniProjectionXAxisOpts = {
   ageUiMode: "dates" | "ages";
@@ -67,7 +87,11 @@ export function MiniProjection({
   zoomY = false,
   clampToMonth,
   xAxis,
+  yAxis,
   band,
+  bandGradient,
+  bandEdgeLabels,
+  hoverLabel,
   markers,
   deflator,
 }: {
@@ -103,6 +127,15 @@ export function MiniProjection({
    */
   xAxis?: MiniProjectionXAxisOpts | null;
   /**
+   * Eje Y con importes (5.0.0, V2). Cuando se pasa, el plot reserva una canaleta a la izquierda y
+   * dibuja ~4 líneas de rejilla rotuladas con `formatAxisMoney` — el mismo formateador compacto
+   * del chart grande, que es una de las dos excepciones sancionadas a los helpers canónicos.
+   *
+   * Los valores que se rotulan son los que el chart ya tiene, o sea **ya deflactados**: el toggle
+   * «En dinero de hoy» mueve el eje entero, como debe.
+   */
+  yAxis?: { currencyIso: string } | null;
+  /**
    * Banda p10–p90 de los escenarios con volatilidad (U5). En euros NOMINALES y **por MES**: la
    * rejilla de la banda (siempre `hybrid`) no tiene por qué coincidir con la de `points[]`, así
    * que emparejarlas por posición desplazaría el abanico décadas sin que nada fallara.
@@ -111,6 +144,24 @@ export function MiniProjection({
   band?: readonly MiniProjectionBandPoint[] | null;
   /** Hitos del plan (jubilación, coast, media jornada, pensión). Sus rótulos se ceden por
    *  prioridad cuando no caben — `lib/retirement-chart.ts`, con test. */
+  /**
+   * Paradas del degradado que tiñe la banda por probabilidad de agotar el capital (V2/V5,
+   * `lib/risk-gradient.ts`). **Sus `offset` tienen que estar calculados sobre los MISMOS
+   * `monthStart`/`monthEnd` que la ventana visible de este chart**: el `<linearGradient>` se
+   * declara con `gradientUnits="userSpaceOnUse"` entre esos dos meses, así que un llamante que
+   * usara otros extremos desplazaría el color sin que nada fallara. Hoy el único consumidor no
+   * recorta ventana (`months`/`clampToMonth` ausentes), y por eso los extremos coinciden.
+   *
+   * Menos de dos paradas ⇒ la banda vuelve al acento plano de siempre.
+   */
+  bandGradient?: readonly RiskGradientStop[] | null;
+  /** Rótulos de los dos bordes de la banda en su extremo derecho («optimista (p90)» arriba,
+   *  «pesimista (p10)» abajo). Se omiten si los dos bordes quedan a menos de 14 px: dos textos
+   *  pisándose dicen menos que ninguno. */
+  bandEdgeLabels?: { p10: string; p90: string } | null;
+  /** Rótulo del hover, construido por el llamante a partir del MES bajo el cursor. Devolver
+   *  `null` para un mes sin nada que decir. Ausente ⇒ el chart no captura el puntero. */
+  hoverLabel?: ((monthIndex: number) => string | null) | null;
   markers?: readonly RetirementChartMarker[] | null;
   /**
    * Factor por el que se multiplica cada importe NOMINAL del mes: `deflationFactorAt(mi, pct)`
@@ -238,6 +289,10 @@ export function MiniProjection({
     const H = height;
     const padX = 4;
     const padY = 4;
+    // Canaleta del eje Y. **Sin `yAxis` vale `padX`**, así que `padLeft`, `pw` y `xAtMonth` dan
+    // exactamente los mismos números que antes de V2: la geometría del Resumen no se mueve un
+    // píxel. Los dos anchos son los del chart grande en su modo estrecho.
+    const padLeft = yAxis ? (W < 420 ? 34 : 46) : padX;
     const axisH = xAxis ? 18 : 0;
     const phaseSegments = showPhases
       ? buildPhaseSegments(series.phase_transitions, {
@@ -247,12 +302,12 @@ export function MiniProjection({
       : [];
     // La banda sale del alto del plot, como el eje: el SVG mide `height` exacto.
     const phaseH = phaseSegments.length > 0 ? 8 : 0;
-    const pw = W - padX * 2;
+    const pw = W - padLeft - padX;
     const ph = H - padY * 2 - axisH - phaseH;
 
     /** X de un MES concreto (no de una posición): el reparto es temporal, no posicional. */
     const xAtMonth = (m: number) =>
-      padX + (monthSpan <= 0 ? pw / 2 : ((m - monthStart) / monthSpan) * pw);
+      padLeft + (monthSpan <= 0 ? pw / 2 : ((m - monthStart) / monthSpan) * pw);
     const xAt = (i: number) => xAtMonth(monthAt(i));
     const yAt = (v: number) => {
       const range = vmax - vmin || 1;
@@ -332,6 +387,26 @@ export function MiniProjection({
           .join(" L ")} Z`
       : null;
 
+    // Ticks del eje Y, recortados al rango REALMENTE pintado: `niceYTicks` redondea hacia fuera
+    // y una etiqueta por encima de `vmax` caería fuera del plot, rotulando una línea que no está.
+    const yTicks = yAxis
+      ? niceYTicks(vmin, vmax, 4).filter((v) => v >= vmin && v <= vmax)
+      : [];
+
+    // Los dos bordes de la banda en su extremo DERECHO: es donde la dispersión es máxima y donde
+    // hay sitio, porque la curva ya no sube por ahí.
+    const bandEdge =
+      bandVisible && bandEdgeLabels
+        ? (() => {
+            const last = bandPoints[bandPoints.length - 1]!;
+            return {
+              x: xAtMonth(last.month),
+              yTop: yAt(last.p90),
+              yBottom: yAt(last.p10),
+            };
+          })()
+        : null;
+
     const placedMarkers =
       markers && markers.length > 0
         ? placeMarkerLabels({
@@ -346,15 +421,18 @@ export function MiniProjection({
     return {
       total,
       monthStart,
+      monthEnd,
       monthSpan,
       visibleMonths,
       nw,
       fire,
       bandPath,
+      bandEdge,
+      yTicks,
       placedMarkers,
       W,
       H,
-      padX,
+      padLeft,
       padY,
       pw,
       ph,
@@ -380,11 +458,21 @@ export function MiniProjection({
     zoomY,
     clampToMonth,
     xAxis,
+    yAxis,
     band,
+    bandEdgeLabels,
     markers,
     deflator,
     containerW,
   ]);
+
+  /** Mes bajo el cursor, o `null`. Solo se arma cuando el llamante pide `hoverLabel`: sin él, el
+   *  chart no captura el puntero y su árbol de nodos es el de siempre. */
+  const [hoverMonth, setHoverMonth] = useState<number | null>(null);
+  /** Id único del degradado. `useId` trae dos puntos en su valor, que no valen en un selector
+   *  CSS pero sí en `url(#…)`; el prefijo `ff-risk-` deja claro de quién es y —regla de la
+   *  casa— que un `#` en el código no es un color hardcoded. */
+  const gradientId = `ff-risk-${useId().replace(/:/g, "")}`;
 
   if (!computed) {
     return (
@@ -403,15 +491,18 @@ export function MiniProjection({
   const {
     total,
     monthStart,
+    monthEnd,
     monthSpan,
     visibleMonths,
     nw,
     fire,
     bandPath,
+    bandEdge,
+    yTicks,
     placedMarkers,
     W,
     H,
-    padX,
+    padLeft,
     padY,
     pw,
     ph,
@@ -427,6 +518,25 @@ export function MiniProjection({
     phaseH,
   } = computed;
 
+  /** Con menos de dos paradas no hay degradado que pintar y la banda vuelve al acento plano:
+   *  media escala de color se leería como una escala entera mal calculada. */
+  const useGradient = bandGradient != null && bandGradient.length >= 2;
+  const hoverProbe = hoverLabel ?? null;
+  const hoverText = hoverProbe && hoverMonth != null ? hoverProbe(hoverMonth) : null;
+  /** X del cursor, ya cuantizada al mes: la línea cae donde cae el número, no donde el ratón. */
+  const hoverX = hoverMonth != null ? xAtMonth(hoverMonth) : null;
+
+  /** Punto del puntero → MES de la rejilla. El `viewBox` mide en píxeles reales, pero el SVG se
+   *  estira al 100 % del contenedor: sin reescalar por el ancho medido, el mes saldría corrido en
+   *  cuanto el `ResizeObserver` fuera un frame por detrás. */
+  const monthAtPointer = (clientX: number, rect: DOMRect): number | null => {
+    if (rect.width <= 0 || pw <= 0) return null;
+    const x = ((clientX - rect.left) * W) / rect.width;
+    const frac = (x - padLeft) / pw;
+    if (frac < 0 || frac > 1) return null;
+    return Math.round(monthStart + frac * monthSpan);
+  };
+
   return (
    <div ref={wrapperRef} style={{ width: "100%", height }}>
     <svg
@@ -438,7 +548,7 @@ export function MiniProjection({
       aria-label="Proyección"
     >
       <rect
-        x={padX}
+        x={padLeft}
         y={padY}
         width={pw}
         height={ph}
@@ -448,6 +558,34 @@ export function MiniProjection({
         stroke="var(--proj-grid)"
         strokeWidth={1}
       />
+
+      {/* Eje Y (V2): rejilla + importes. Va DEBAJO de todo lo demás — es la referencia sobre la
+          que se leen las series, no una serie. Sin `yAxis` no se emite ni un nodo. */}
+      {yAxis && yTicks.length > 0
+        ? yTicks.map((v) => (
+            <g key={`mini-y-${v}`}>
+              <line
+                x1={padLeft}
+                x2={padLeft + pw}
+                y1={yAt(v)}
+                y2={yAt(v)}
+                stroke="var(--proj-grid)"
+                strokeWidth={1}
+              />
+              <text
+                x={padLeft - 6}
+                y={yAt(v)}
+                textAnchor="end"
+                dominantBaseline="middle"
+                className="proj-mini-tick"
+                fill="var(--proj-tick)"
+                fontSize="9.5"
+              >
+                {formatAxisMoney(v, yAxis.currencyIso)}
+              </text>
+            </g>
+          ))
+        : null}
 
       {/* Áreas apiladas por activo — paleta policroma compartida con
           ProjectionNetWorthChart para que ambos charts se sientan del
@@ -477,14 +615,52 @@ export function MiniProjection({
           dentro del color, para que el mismo token resuelva en claro y en oscuro. Va DEBAJO de
           todo: es el contexto sobre el que se leen la curva y el objetivo, no una serie más. */}
       {bandPath ? (
-        <path
-          d={bandPath}
-          fill="var(--ff-accent)"
-          fillOpacity={0.16}
-          stroke="var(--ff-accent)"
-          strokeOpacity={0.3}
-          strokeWidth={0.8}
-        />
+        useGradient ? (
+          <>
+            {/* `gradientUnits="userSpaceOnUse"` es OBLIGATORIO: con el default
+                (`objectBoundingBox`) el degradado se estiraría a la caja del `path`, que no
+                empieza en `monthStart` ni acaba en `monthEnd`, y el mapeo mes→color se
+                desplazaría en silencio — el fallo que ni se ve ni falla. */}
+            <defs>
+              <linearGradient
+                id={gradientId}
+                gradientUnits="userSpaceOnUse"
+                x1={xAtMonth(monthStart)}
+                x2={xAtMonth(monthEnd)}
+                y1={0}
+                y2={0}
+              >
+                {bandGradient!.map((stop, i) => (
+                  // `style` y no el atributo `stop-color`: el valor es un `color-mix()` y el
+                  // atributo de presentación de SVG 1.1 no lo acepta. Es la única excepción
+                  // sancionada a «cero estilos inline» de la casa, y vive aquí.
+                  <stop
+                    key={`${gradientId}-${i}`}
+                    offset={stop.offset}
+                    style={{ stopColor: stop.color }}
+                  />
+                ))}
+              </linearGradient>
+            </defs>
+            <path
+              d={bandPath}
+              fill={`url(#${gradientId})`}
+              fillOpacity={0.28}
+              stroke={`url(#${gradientId})`}
+              strokeOpacity={0.55}
+              strokeWidth={0.8}
+            />
+          </>
+        ) : (
+          <path
+            d={bandPath}
+            fill="var(--ff-accent)"
+            fillOpacity={0.16}
+            stroke="var(--ff-accent)"
+            strokeOpacity={0.3}
+            strokeWidth={0.8}
+          />
+        )
       ) : null}
 
       {/* Target FIRE (acento, dash) */}
@@ -621,6 +797,85 @@ export function MiniProjection({
             </g>
           );
         })()
+      ) : null}
+
+      {/* Rótulos de los dos bordes de la banda (V2). Dentro del plot y con halo del color del
+          fondo (`.proj-mini-band-label`, `paint-order: stroke`) para que se lean sobre la banda
+          teñida sin abrirles un hueco. Si los dos bordes están a menos de 14 px, no caben dos
+          renglones y se omiten LOS DOS: media etiqueta rotularía el borde equivocado. */}
+      {bandEdge && bandEdgeLabels && Math.abs(bandEdge.yBottom - bandEdge.yTop) >= 14 ? (
+        <g>
+          <text
+            x={bandEdge.x - 4}
+            y={bandEdge.yTop + 9}
+            textAnchor="end"
+            className="proj-mini-band-label"
+            fill="var(--proj-meta)"
+            fontSize="9.5"
+          >
+            {bandEdgeLabels.p90}
+          </text>
+          <text
+            x={bandEdge.x - 4}
+            y={bandEdge.yBottom - 3}
+            textAnchor="end"
+            className="proj-mini-band-label"
+            fill="var(--proj-meta)"
+            fontSize="9.5"
+          >
+            {bandEdgeLabels.p10}
+          </text>
+        </g>
+      ) : null}
+
+      {/* Hover (V5): el porcentaje exacto por edad, que es lo que el color solo puede aproximar.
+          El rect captor va el ÚLTIMO para quedar por encima de todo lo dibujado, y es
+          `pointer-events: all` con `fill="none"` — sin relleno no taparía nada aunque quisiera. */}
+      {hoverProbe ? (
+        <g>
+          {hoverX != null && hoverText ? (
+            <>
+              <line
+                x1={hoverX}
+                x2={hoverX}
+                y1={padY}
+                y2={padY + ph}
+                stroke="var(--proj-crosshair)"
+                strokeWidth={1}
+              />
+              <text
+                x={Math.min(Math.max(hoverX, padLeft + 4), padLeft + pw - 4)}
+                y={padY + ph - 6}
+                textAnchor={
+                  hoverX > padLeft + pw * 0.66
+                    ? "end"
+                    : hoverX < padLeft + pw * 0.33
+                      ? "start"
+                      : "middle"
+                }
+                className="proj-mini-hover-label"
+                fill="var(--ff-ink)"
+                fontSize="9.5"
+              >
+                {hoverText}
+              </text>
+            </>
+          ) : null}
+          <rect
+            x={padLeft}
+            y={padY}
+            width={pw}
+            height={ph}
+            fill="none"
+            pointerEvents="all"
+            onMouseMove={(e) =>
+              setHoverMonth(
+                monthAtPointer(e.clientX, e.currentTarget.getBoundingClientRect()),
+              )
+            }
+            onMouseLeave={() => setHoverMonth(null)}
+          />
+        </g>
       ) : null}
     </svg>
    </div>

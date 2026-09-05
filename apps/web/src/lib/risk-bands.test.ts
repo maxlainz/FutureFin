@@ -13,14 +13,14 @@ import type {
   ProjectionBandsApi,
 } from "../api/types";
 import {
-  buildDepletionRows,
   buildRiskExtraRows,
+  cashBufferLine,
   buildRiskFan,
   formatScenariosPerHundred,
-  formatSuccessScenarios,
-  formatSuccessThreshold,
+  formatSuccessPercent,
   riskFootnote,
   scenariosPerHundred,
+  successParenthetical,
   showsNoVolatilityNotice,
   successVerdictTone,
   summarySuccessTile,
@@ -70,7 +70,6 @@ function bandsFixture(over: Partial<ProjectionBandsApi> = {}): ProjectionBandsAp
     percentiles: [10, 50, 90],
     points: HYBRID_BAND,
     success_probability: "0.870000",
-    success_threshold_pct: 95,
     success_verdict: "amber",
     depletion_probability_by_age: [],
     retirement_month_index_percentiles: null,
@@ -238,24 +237,22 @@ describe("semáforo de éxito", () => {
     expect(successVerdictTone("teal")).toBe("ok");
   });
 
-  // La copy lleva las DOS condiciones del éxito nuevo (§G): jubilarse Y no agotar. El rótulo
-  // corto de antes («87 de cada 100 escenarios») describía la definición vieja y sobrevivió a
-  // ella — exactamente el fallo que este test fija para que no vuelva.
-  it("la cifra dice las dos condiciones del éxito, no solo «escenarios»", () => {
-    expect(formatSuccessScenarios("0.870000")).toBe(
-      "87 de cada 100 escenarios se jubilan y no agotan el capital",
-    );
-    expect(formatSuccessScenarios("1")).toBe(
-      "100 de cada 100 escenarios se jubilan y no agotan el capital",
-    );
-    expect(formatSuccessScenarios("0")).toBe(
-      "0 de cada 100 escenarios se jubilan y no agotan el capital",
-    );
+  // V1 — el valor del tile es un PORCENTAJE con un decimal, no una oración. La frase entera
+  // («87 de cada 100 escenarios se jubilan y no agotan el capital») era correcta pero no cabía
+  // en la tipografía del valor; la condición bajó al subtítulo, que sí envuelve.
+  it("la cifra es «87,0 %»: un decimal, como todo porcentaje de la casa", () => {
+    expect(formatSuccessPercent("0.870000")).toBe("87,0 %");
+    expect(formatSuccessPercent("1")).toBe("100,0 %");
+    expect(formatSuccessPercent("0")).toBe("0,0 %");
   });
 
+  // El tope vive en `scenariosPerHundred`, y por eso el formateador pasa por ahí en vez de
+  // llamar a `formatFractionAsPercent`: con el atajo, «0,9999» imprimiría «100,0 %» y —desde V7,
+  // con el verde exclusivo del 100 %— pintaría de verde un plan que el servidor da por ámbar.
   it("no redondea a 100 un plan que falla, ni a 0 uno que a veces sale", () => {
-    expect(formatSuccessScenarios("0.999000")).toMatch(/^99 de cada 100 /);
-    expect(formatSuccessScenarios("0.001000")).toMatch(/^1 de cada 100 /);
+    expect(formatSuccessPercent("0.999000")).toBe("99,0 %");
+    expect(formatSuccessPercent("0.999900")).toBe("99,0 %");
+    expect(formatSuccessPercent("0.001000")).toBe("1,0 %");
     expect(scenariosPerHundred("0.999000")).toBe(99);
     expect(scenariosPerHundred("0.001000")).toBe(1);
   });
@@ -268,101 +265,44 @@ describe("semáforo de éxito", () => {
   });
 
   it("sin probabilidad es un guion, nunca un cero", () => {
-    expect(formatSuccessScenarios(null)).toBe("—");
-    expect(formatSuccessScenarios(undefined)).toBe("—");
+    expect(formatSuccessPercent(null)).toBe("—");
+    expect(formatSuccessPercent(undefined)).toBe("—");
     expect(scenariosPerHundred(null)).toBeNull();
     expect(scenariosPerHundred("no-es-un-numero")).toBeNull();
   });
 
-  it("el umbral se ecoa porque sin él el color no se puede auditar", () => {
-    expect(formatSuccessThreshold(95)).toBe("umbral 95 %");
-    expect(formatSuccessThreshold(null)).toBeUndefined();
-  });
-});
-
-describe("tabla de agotamiento por edad", () => {
-  const rows: DepletionProbabilityPointApi[] = [
-    { month_index: 240, age: 70, probability: "0.0000" },
-    { month_index: 300, age: 75, probability: "0.1060" },
-    { month_index: 360, age: 80, probability: "0.2230" },
-  ];
-
-  it("rotula por edad y formatea la fracción como porcentaje", () => {
-    const out = buildDepletionRows(rows);
-    expect(out.map((r) => r.label)).toEqual(["a los 70", "a los 75", "a los 80"]);
-    expect(out.map((r) => r.value)).toEqual(["0,0 %", "10,6 %", "22,3 %"]);
-    expect(out.map((r) => r.key)).toEqual(["dep-240", "dep-300", "dep-360"]);
-  });
-
-  it("sin fecha de nacimiento la fila NO se esconde: se rotula por mes", () => {
-    const out = buildDepletionRows([
-      { month_index: 240, age: null, probability: "0.0500" },
-    ]);
-    expect(out).toEqual([{ key: "dep-240", label: "mes 240", value: "5,0 %" }]);
-  });
-
-  it("una probabilidad ausente es un guion, no un cero", () => {
-    const out = buildDepletionRows([
-      { month_index: 240, age: 70, probability: null },
-    ]);
-    expect(out[0]!.value).toBe("—");
-  });
-
-  it("sin jubilación en el horizonte la tabla va vacía", () => {
-    expect(buildDepletionRows([])).toEqual([]);
-    expect(buildDepletionRows(null)).toEqual([]);
-    expect(buildDepletionRows(undefined)).toEqual([]);
-  });
-
-  // §H del pase de correcciones: la rejilla cierra en el horizonte y esa última celda es la
-  // RUINA TOTAL. Rotularla «a los 80» la haría parecer un peldaño más de la escalera y el peor
-  // número de la tabla se leería como si quedara horizonte por delante.
-  it("la última fila se rotula «al final del horizonte» cuando ES el horizonte", () => {
-    const out = buildDepletionRows(
-      [
-        { month_index: 240, age: 70, probability: "0.0000" },
-        { month_index: 300, age: 75, probability: "0.1060" },
-        { month_index: 359, age: 80, probability: "0.2230" },
-      ],
-      360,
+  // V7 — el subtítulo ya no dice «umbral»: el corte dejó de ser del usuario. Lo que dice es el
+  // SUJETO de la cifra, que sin él queda abierto.
+  it("el subtítulo dice de QUÉ es ese porcentaje, sin hablar de umbrales", () => {
+    expect(successParenthetical("0.870000")).toBe(
+      "de los escenarios no agotan el capital",
     );
-    expect(out.map((r) => r.label)).toEqual([
-      "a los 70",
-      "a los 75",
-      "al final del horizonte",
-    ]);
-    // La cifra no cambia: lo que cambia es el rótulo que la sitúa.
-    expect(out[2]!.value).toBe("22,3 %");
+    expect(successParenthetical("0.870000")).not.toContain("umbral");
   });
 
-  // Tolerancia al backend anterior al pase: allí la tabla se paraba en el último múltiplo que
-  // cabía, así que la última fila NO es el horizonte. La comprobación falla cerrada y conserva
-  // la edad en vez de inventar una ruina total que ese backend no calculó.
-  it("sin horizonte, o con una última fila que no llega a él, conserva el rótulo por edad", () => {
-    const rowsIn: DepletionProbabilityPointApi[] = [
-      { month_index: 240, age: 70, probability: "0.0000" },
-      { month_index: 300, age: 75, probability: "0.1060" },
-    ];
-    expect(buildDepletionRows(rowsIn).map((r) => r.label)).toEqual([
-      "a los 70",
-      "a los 75",
-    ]);
-    expect(buildDepletionRows(rowsIn, 360).map((r) => r.label)).toEqual([
-      "a los 70",
-      "a los 75",
-    ]);
-    expect(buildDepletionRows(rowsIn, null).map((r) => r.label)).toEqual([
-      "a los 70",
-      "a los 75",
-    ]);
+  it("en verde el subtítulo es el recuento exacto, que es lo que hace auditable el 100 %", () => {
+    expect(successParenthetical("1", 500)).toBe("0 de 500 escenarios agotan el capital");
+    // Recuento con la tipografía española de la casa: `es-ES` no agrupa a cuatro dígitos
+    // («2000») y sí a cinco («20.000»). Es un recuento, no un importe: nada de símbolo.
+    expect(successParenthetical("1", 2000)).toBe("0 de 2000 escenarios agotan el capital");
+    expect(successParenthetical("1", 20000)).toBe("0 de 20.000 escenarios agotan el capital");
   });
 
-  it("la fila del horizonte se rotula igual sin fecha de nacimiento", () => {
-    const out = buildDepletionRows(
-      [{ month_index: 239, age: null, probability: "0.4000" }],
-      240,
+  it("sin tamaño de muestra (el Resumen no lo publica) cae a la frase genérica", () => {
+    expect(successParenthetical("1")).toBe("de los escenarios no agotan el capital");
+    expect(successParenthetical("1", null)).toBe("de los escenarios no agotan el capital");
+    expect(successParenthetical("1", 0)).toBe("de los escenarios no agotan el capital");
+  });
+
+  it("un 99,99 % NO es verde y por tanto no presume de cero fallos", () => {
+    expect(successParenthetical("0.999900", 500)).toBe(
+      "de los escenarios no agotan el capital",
     );
-    expect(out[0]!.label).toBe("al final del horizonte");
+  });
+
+  it("sin probabilidad no hay subtítulo que inventar", () => {
+    expect(successParenthetical(null, 500)).toBeUndefined();
+    expect(successParenthetical(undefined)).toBeUndefined();
   });
 });
 
@@ -499,32 +439,144 @@ describe("filas extra por estrategia", () => {
     expect(row.helpId).toBe("retirement.cash_buffer");
   });
 
-  // §E: un colchón pedido y no simulado es un ajuste guardado que la simulación ignora. Callarlo
-  // deja al usuario creyendo que le protege algo que no corrió.
-  it("el colchón NO simulado dice por qué, salvo cuando no se pidió", () => {
-    const bufferRow = (buffer_inactive_reason: string | null | undefined) =>
+  // V6: el colchón que NO corrió ya no es una fila de detalle, es la línea informativa del
+  // bloque «Riesgo» (`cashBufferLine`, más abajo). Aquí solo queda lo que el sorteo MIDIÓ.
+  it("un colchón inactivo no deja fila de detalle: no hay nada que el sorteo midiera", () => {
+    for (const reason of [
+      "not_requested",
+      "no_volatility",
+      "no_safe_liquid_asset",
+      "no_capped_rule",
+      null,
+      undefined,
+    ]) {
+      expect(
+        buildRiskExtraRows({
+          ...common,
+          bands: bandsFixture({ buffer_active: false, buffer_inactive_reason: reason }),
+        }).find((r) => r.key === "buffer"),
+        String(reason),
+      ).toBeUndefined();
+    }
+  });
+
+  // V5: la tabla «agotar a los 65/70/…» se fue con el degradado de la banda, que dice lo mismo
+  // con más resolución. Lo que el color NO puede decir es el TOTAL, porque su última parada cae
+  // en el borde del plot y ahí no hay etiqueta — por eso esta fila.
+  it("publica la ruina TOTAL: el último punto de la rejilla acumulada", () => {
+    const rows = buildRiskExtraRows({
+      ...common,
+      bands: bandsFixture({
+        depletion_probability_by_age: [
+          { month_index: 240, age: 70, probability: "0.0000" },
+          { month_index: 300, age: 75, probability: "0.1060" },
+          { month_index: 360, age: 80, probability: "0.2230" },
+        ],
+      }),
+    });
+    const row = rows.find((r) => r.key === "depletion_total")!;
+    expect(row.value).toBe("22,3 %");
+    expect(row.helpId).toBe("retirement.depletion_by_age");
+  });
+
+  it("sin rejilla, o con el último punto sin probabilidad, no inventa un 0 %", () => {
+    const total = (depletion_probability_by_age: DepletionProbabilityPointApi[]) =>
       buildRiskExtraRows({
         ...common,
-        bands: bandsFixture({ buffer_active: false, buffer_inactive_reason }),
-      }).find((r) => r.key === "buffer");
+        bands: bandsFixture({ depletion_probability_by_age }),
+      }).find((r) => r.key === "depletion_total");
 
-    expect(bufferRow("not_requested")).toBeUndefined();
-    expect(bufferRow(null)).toBeUndefined();
-    expect(bufferRow(undefined)).toBeUndefined();
-    // Literal futuro: tampoco se inventa una razón.
-    expect(bufferRow("something_new")).toBeUndefined();
-
-    const noVol = bufferRow("no_volatility")!;
-    expect(noVol.value).toBe("No simulado");
-    expect(noVol.detail).toBe("sin volatilidad declarada");
-
-    const noAsset = bufferRow("no_safe_liquid_asset")!;
-    expect(noAsset.value).toBe("No simulado");
-    expect(noAsset.detail).toBe("sin un activo líquido sin volatilidad donde guardarlo");
+    expect(total([])).toBeUndefined();
+    expect(total([{ month_index: 240, age: 70, probability: null }])).toBeUndefined();
+    // Con probabilidad sí sale, aunque sea 0: un cero medido no es un hueco.
+    expect(total([{ month_index: 240, age: 70, probability: "0.0000" }])!.value).toBe("0,0 %");
   });
 
   it("sin bandas no hay filas", () => {
     expect(buildRiskExtraRows({ ...common, bands: null })).toEqual([]);
+  });
+});
+
+describe("línea informativa del colchón de caja (V6)", () => {
+  const line = (over: Parameters<typeof bandsFixture>[0]) =>
+    cashBufferLine(bandsFixture(over), "EUR");
+
+  it("derivado del tope: dice el importe, de qué regla sale, el equivalente y el COSTE", () => {
+    const l = line({
+      buffer_active: true,
+      buffer_source: "allocation_cap",
+      buffer_target_amount: "6000.0000",
+      buffer_months_effective: 4,
+      buffer_source_asset_name: "Cuenta corriente",
+    })!;
+    // `es-ES` no agrupa a cuatro dígitos y separa el símbolo con un espacio DURO: «6000 €».
+    expect(l.text).toMatch(/6000\s€/u);
+    expect(l.text).toContain("«Cuenta corriente»");
+    expect(l.text).toContain("≈ 4 meses");
+    // El hallazgo P4 va DENTRO de la línea: un colchón que aparece solo y no dice su precio se
+    // lee como seguridad gratis.
+    expect(l.text).toContain("cuesta unos puntos de éxito");
+    expect(l.linksToAllocationRules).toBe(true);
+    expect(l.canResetToDerived).toBe(false);
+  });
+
+  it("sin equivalente en meses (gasto no positivo) la frase se aguanta sin inventarlo", () => {
+    const l = line({
+      buffer_active: true,
+      buffer_source: "allocation_cap",
+      buffer_target_amount: "6000.0000",
+      buffer_months_effective: null,
+      buffer_source_asset_name: "Cuenta corriente",
+    })!;
+    expect(l.text).not.toContain("meses de tu gasto");
+    expect(l.text).toMatch(/6000\s€/u);
+  });
+
+  it("explícito: lo dice y ofrece SOLTARLO, que si no sería irreversible desde la pantalla", () => {
+    const l = line({
+      buffer_active: true,
+      buffer_source: "explicit",
+      buffer_months_effective: 6,
+    })!;
+    expect(l.text).toContain("6 meses");
+    expect(l.text).toContain("fijados por API");
+    expect(l.canResetToDerived).toBe(true);
+    expect(l.linksToAllocationRules).toBe(false);
+  });
+
+  it("sin colchón, la razón dice qué habría que tocar para tenerlo", () => {
+    const text = (buffer_inactive_reason: string) =>
+      line({
+        buffer_active: false,
+        buffer_source: "none",
+        buffer_inactive_reason,
+      })?.text;
+    expect(text("no_capped_rule")).toContain("ninguna regla de ahorro con tope");
+    expect(text("cap_is_zero")).toContain("0 €");
+    expect(text("no_safe_liquid_asset")).toContain("líquido sin volatilidad");
+    expect(text("no_volatility")).toContain("no hay de qué protegerse");
+  });
+
+  it("una razón desconocida no se traduce a una frase inventada", () => {
+    expect(
+      line({ buffer_active: false, buffer_source: "none", buffer_inactive_reason: "nueva" }),
+    ).toBeNull();
+  });
+
+  it("backend anterior a V6: solo habla cuando el colchón NO corrió", () => {
+    expect(line({ buffer_active: true, buffer_source: undefined })).toBeNull();
+    expect(
+      line({
+        buffer_active: false,
+        buffer_source: undefined,
+        buffer_inactive_reason: "no_volatility",
+      })!.text,
+    ).toContain("no hay de qué protegerse");
+  });
+
+  it("sin bandas no hay línea", () => {
+    expect(cashBufferLine(null, "EUR")).toBeNull();
+    expect(cashBufferLine(undefined, "EUR")).toBeNull();
   });
 });
 
@@ -546,18 +598,15 @@ describe("pie del panel", () => {
 });
 
 describe("KPI «Éxito del plan» del Resumen", () => {
-  it("copia probabilidad, umbral y veredicto del plan", () => {
+  it("copia probabilidad y veredicto del plan, y el valor es el mismo «96,0 %» de Jubilación", () => {
     const tile = summarySuccessTile({
       success_probability: "0.960000",
-      success_threshold_pct: 95,
       success_verdict: "green",
       success_absent_reason: null,
       absent_reason: null,
     })!;
-    expect(tile.value).toBe(
-      "96 de cada 100 escenarios se jubilan y no agotan el capital",
-    );
-    expect(tile.parenthetical).toBe("umbral 95 %");
+    expect(tile.value).toBe("96,0 %");
+    expect(tile.parenthetical).toBe("de los escenarios no agotan el capital");
     expect(tile.tone).toBe("default");
     // Sin escenarios sin jubilar no hay subtítulo: «0 de cada 100 no llegan» no añade nada.
     expect(tile.detail).toBeUndefined();
@@ -566,7 +615,6 @@ describe("KPI «Éxito del plan» del Resumen", () => {
   it("el subtítulo enseña los que no llegan a jubilarse, y solo cuando los hay", () => {
     const withNever = summarySuccessTile({
       success_probability: "0.629000",
-      success_threshold_pct: 95,
       success_verdict: "red",
       never_retired_probability: "0.331000",
     })!;
@@ -576,7 +624,6 @@ describe("KPI «Éxito del plan» del Resumen", () => {
       expect(
         summarySuccessTile({
           success_probability: "0.960000",
-          success_threshold_pct: 95,
           success_verdict: "green",
           never_retired_probability: p,
         })!.detail,
@@ -588,7 +635,6 @@ describe("KPI «Éxito del plan» del Resumen", () => {
     const tone = (v: string) =>
       summarySuccessTile({
         success_probability: "0.500000",
-        success_threshold_pct: 95,
         success_verdict: v,
       })!.tone;
     expect(tone("green")).toBe("default");
@@ -599,7 +645,6 @@ describe("KPI «Éxito del plan» del Resumen", () => {
   it("en Hogar es un guion CON su razón, no un hueco mudo", () => {
     const tile = summarySuccessTile({
       success_probability: null,
-      success_threshold_pct: null,
       success_verdict: null,
       success_absent_reason: null,
       absent_reason: "household_aggregate",
@@ -612,7 +657,6 @@ describe("KPI «Éxito del plan» del Resumen", () => {
   it("distingue «no sabemos tu probabilidad» de «no sabemos tu plan»", () => {
     const bands = summarySuccessTile({
       success_probability: null,
-      success_threshold_pct: 95,
       success_absent_reason: "bands_unavailable",
       absent_reason: null,
     })!;
@@ -622,7 +666,9 @@ describe("KPI «Éxito del plan» del Resumen", () => {
       absent_reason: "projection_unavailable",
     })!;
     expect(bands.detail).not.toBe(plan.detail);
-    expect(bands.parenthetical).toBe("umbral 95 %");
+    // Sin cifra no hay sujeto que subtitular: el slot queda vacío en vez de repetir una frase
+    // sobre unos escenarios que no se sortearon.
+    expect(bands.parenthetical).toBeUndefined();
   });
 
   it("sin bloque de éxito (backend antiguo) no se pinta tarjeta", () => {

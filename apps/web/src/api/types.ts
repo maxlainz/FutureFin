@@ -160,10 +160,16 @@ export type RetirementProfileApi = {
   withdrawal_rule: WithdrawalRuleApi;
   pension: PensionPlanApi | null;
   partial_retirement: PartialRetirementApi | null;
-  /** Colchón de caja en meses de gasto (P4). Solo actúa en Monte Carlo. */
+  /**
+   * Colchón de caja en meses de gasto (P4). Solo actúa en Monte Carlo.
+   *
+   * **`null` ya NO significa «sin colchón» desde V6** (5.0.0, tercera vuelta de UX): significa
+   * «no lo has fijado tú», y entonces el servidor lo DERIVA del tope de tu regla de ahorro y
+   * publica de dónde sale en la respuesta de bandas (`buffer_source`). La SPA no escribe este
+   * campo nunca salvo para SOLTARLO (`PATCH {"cash_buffer_months": null}`, la acción «volver al
+   * tope de tu regla»): el input desapareció del formulario.
+   */
   cash_buffer_months: number | null;
-  /** Umbral de éxito de Monte Carlo en % (D25, default 95). */
-  success_threshold_pct: number;
 };
 
 /** Respuesta de las dos rutas: el perfil resuelto + la fecha de nacimiento (misma pantalla). */
@@ -197,8 +203,8 @@ export type RetirementProfilePatchApi = {
   withdrawal_rule?: WithdrawalRuleApi;
   pension?: PensionPlanApi | null;
   partial_retirement?: PartialRetirementApi | null;
+  /** Tri-estado: `null` suelta el colchón explícito y devuelve la derivación del tope (V6). */
   cash_buffer_months?: number | null;
-  success_threshold_pct?: number;
   /** Misma columna que `PATCH /v1/auth/me`: `null` la borra, `"YYYY-MM-DD"` la fija. */
   birth_date?: string | null;
 };
@@ -440,9 +446,6 @@ export type SummaryPlanApi = {
   /** FRACCIÓN (Decimal-string, 6 dp): éxito entre los caminos que sí se jubilan. `null` = no hay
    *  denominador (nadie se jubila), nunca cero. */
   success_given_retired?: string | null;
-  /** PORCENTAJE del perfil (50..=99, default 95). Se ecoa aunque no haya sorteo: es
-   *  configuración del usuario, no una salida del modelo. */
-  success_threshold_pct?: number | null;
   success_verdict?: SuccessVerdictApi | null;
   /** `bands_unavailable` — el sorteo falló y el resto del plan SÍ viaja. Distinto de
    *  `absent_reason`: «no sabemos tu probabilidad» ≠ «no sabemos tu plan». */
@@ -935,6 +938,9 @@ export type RetirementMonthPercentilesApi = {
 
 /** `green` | `amber` | `red` (D28): verde en el umbral EXACTO, ámbar hasta 10 puntos
  *  porcentuales por debajo, rojo el resto. Lo decide el SERVIDOR — el cliente no lo recalcula. */
+/** Procedencia del colchón de caja simulado (5.0.0, V6). Ver `ProjectionBandsApi.buffer_source`. */
+export type BufferSourceApi = "explicit" | "allocation_cap" | "none";
+
 export type SuccessVerdictApi = "green" | "amber" | "red";
 
 /**
@@ -978,8 +984,12 @@ export type ProjectionBandsApi = {
    *  jubilan, los que además no agotan la cartera. `null` ⟺ ningún camino se jubila (no hay
    *  denominador), que **no es cero**. */
   success_given_retired?: string | null;
-  /** PORCENTAJE (50..=99, default 95) del perfil. Se ecoa aunque no haya sorteo. */
-  success_threshold_pct: number;
+  /**
+   * Veredicto del semáforo, **decidido por el servidor** (5.0.0, V7): verde SOLO con `p == 1`
+   * exacto, ámbar entre 0,90 y 1, rojo por debajo. El umbral configurable (`success_threshold_pct`)
+   * desapareció de esta respuesta con V7: el corte ya no es del usuario, así que no había nada
+   * que ecoar. La SPA nunca lo recalcula — ver `successVerdictTone`.
+   */
   success_verdict: SuccessVerdictApi;
   /** Vacío ⟺ ningún camino se jubila dentro del horizonte. */
   depletion_probability_by_age: DepletionProbabilityPointApi[];
@@ -1006,17 +1016,49 @@ export type ProjectionBandsApi = {
    *  fallo: es que aquí no significa nada. */
   buffer_active: boolean;
   /**
-   * POR QUÉ no se simuló, cuando `buffer_active` es `false` (5.0.0, pase de correcciones §E).
-   * Tres literales cerrados y `null` cuando sí se simuló:
+   * POR QUÉ no se simuló, cuando `buffer_active` es `false` (5.0.0, pase de correcciones §E,
+   * ampliado por V6). Literales cerrados y `null` cuando sí se simuló:
    *
-   *  - `not_requested` — no hay colchón en el perfil. **No se enseña**: no falta nada.
    *  - `no_volatility` — ningún activo declara σ, así que no hay de qué protegerse.
    *  - `no_safe_liquid_asset` — no hay un activo líquido SIN volatilidad donde guardarlo (un
    *    colchón que también baja con el mercado no es un colchón).
+   *  - `no_capped_rule` (V6) — hay líquido sin volatilidad, pero **ninguna regla de ahorro con
+   *    tope apunta a él**, así que no hay importe del que derivar el colchón. Es el caso común
+   *    cuando el líquido σ=0 es el sumidero sin tope de la cascada.
+   *  - `cap_is_zero` (V6) — la regla tiene tope y resuelve a 0 € o menos.
+   *  - `not_requested` — reliquia anterior a V6, cuando el colchón solo podía ser explícito.
+   *    **No se enseña**: no falta nada.
    *
-   * Ausente en backends anteriores al pase ⇒ la fila no se pinta, como hasta ahora.
+   * Ausente en backends anteriores al pase ⇒ la línea no se pinta, como hasta ahora.
    */
   buffer_inactive_reason?: string | null;
+  /**
+   * DE DÓNDE sale el colchón (5.0.0, V6/P3):
+   *
+   *  - `allocation_cap` — derivado del tope («hasta X €») de una regla de ahorro que apunta al
+   *    líquido sin volatilidad. Es el default desde V6: el usuario ya declaró cuánto quiere en
+   *    caja al escribir esa regla, y volver a preguntárselo en meses era pedir el mismo dato dos
+   *    veces con otra unidad.
+   *  - `explicit` — alguien lo fijó por API o MCP (`cash_buffer_months`). Manda sobre la
+   *    derivación (patrón `pct_source`), y la SPA ofrece soltarlo con un `PATCH null`.
+   *  - `none` — no hay colchón; `buffer_inactive_reason` dice por qué.
+   *
+   * Ausente ⇒ backend anterior a V6: la línea informativa se cae a la fila de detalle de siempre.
+   */
+  buffer_source?: BufferSourceApi | null;
+  /** Euros NOMINALES (Decimal-string): el importe que el motor mantiene en caja. **Es el tope de
+   *  la regla, no una conversión de meses** (P2: el tope es nominal fijo y un colchón en meses se
+   *  indexaría, sobrevalorando la protección ~1,6× a 20 años). Solo con `allocation_cap`. */
+  buffer_target_amount?: string | null;
+  /** Meses de gasto EQUIVALENTES: los explícitos con `explicit`, o `floor(tope / gasto mensual)`
+   *  con `allocation_cap` — ahí es INFORMATIVO (euros de hoy), no lo que se simula. `null` = no
+   *  hay base de gasto positiva con la que dividir, que no es cero meses. */
+  buffer_months_effective?: number | null;
+  /** Id de la regla de ahorro cuyo tope se usó (`allocation_cap`). Para poder enlazar a ella. */
+  buffer_source_rule_id?: string | null;
+  /** Nombre del activo líquido sin volatilidad donde vive el colchón. Es lo que hace la línea
+   *  informativa auditable: sin él, «10.000 €» no dice de qué cuenta habla. */
+  buffer_source_asset_name?: string | null;
   /** Mediana del NÚMERO de meses con relleno. `null` ⟺ `buffer_active: false` («no se midió»,
    *  que no es «cero rellenos»). */
   buffer_refills_p50: number | null;
