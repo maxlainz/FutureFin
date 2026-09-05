@@ -12,7 +12,11 @@ import {
   parseYmdComponents,
   todayYmdInTimeZone,
 } from "./dates";
-import { DISPLAY_NUMBER_LOCALE, METRIC_DASH } from "./format";
+import {
+  DISPLAY_NUMBER_LOCALE,
+  METRIC_DASH,
+  parseDisplayDecimal,
+} from "./format";
 
 export const PROJECTION_FOCUS_STORAGE_KEY = "futurefin-projection-focus";
 export const PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY =
@@ -118,6 +122,100 @@ export function deflationFactorAt(monthIndex: number, annualPct: number): number
   return annualPct !== 0
     ? 1 / Math.pow(1 + annualPct / 100, monthIndex / 12)
     : 1;
+}
+
+/**
+ * Tasa anual del deflactor del chart. Sale de la RESPUESTA
+ * (`deflation_annual_inflation_percent`, la misma con la que el servidor construyó
+ * `net_worth_real` y `milestones_real`) y solo cae a la de la instalación con un backend
+ * antiguo (< 4.6.0) que no publica el campo: re-obtenerla por otro canal era una vía de
+ * divergencia silenciosa (#136-4a).
+ *
+ * Extraída del memo inline del chart para que el tile de «Objetivo al jubilarte» use
+ * EXACTAMENTE la misma tasa que la línea que dibuja el objetivo — dos deflactores distintos
+ * en la misma pantalla son dos cifras que se contradicen sin que nada falle.
+ */
+export function resolveDeflationAnnualPct(
+  seriesPct: string | undefined,
+  installationInflationPct: number,
+): number {
+  const parsed = seriesPct !== undefined ? Number(seriesPct) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : installationInflationPct;
+}
+
+/**
+ * Base en la que está expresado un importe que se publica: euros de HOY o euros NOMINALES del
+ * mes al que se refiere. Viaja SIEMPRE pegada al importe (arqueología §2.26: una base que el
+ * consumidor re-deriva de una segunda comparación acaba discrepando del número que rotula).
+ */
+export type MoneyBasis = "today" | "nominal";
+
+export type JubilacionTargetTileValue = {
+  amount: number | null;
+  basis: MoneyBasis;
+};
+
+/** Lo ÚNICO que el tile lee de la serie. Un `Pick` y no `ProjectionSeriesApi` entero para que
+ *  el test fije un fixture de cuatro campos en vez de una respuesta completa: lo que no se lee
+ *  no puede cambiar el resultado, y así el test lo demuestra en vez de prometerlo. */
+export type JubilacionTargetTileSeries = Pick<
+  ProjectionSeriesApi,
+  | "jubilacion_target_net_worth"
+  | "jubilacion_target_net_worth_nominal"
+  | "jubilacion_month_index"
+  | "deflation_annual_inflation_percent"
+>;
+
+/**
+ * Valor del tile «Objetivo al jubilarte» de Proyección (F11).
+ *
+ * Hasta 5.0.0 el tile enseñaba `jubilacion_target_net_worth`, que es el objetivo evaluado en el
+ * **mes 0** — la base a k=0, inmóvil por contrato — y por eso NO se movía al activar «En dinero
+ * de hoy». Con el objetivo puente (5.0.0) esa base y el objetivo del mes en que de verdad te
+ * jubilas dejaron de ser la misma magnitud: en la demo, 1.609.855 € contra 696.563 €, un 2,31×.
+ *
+ * La cifra correcta es el objetivo del MES DEL CRUCE —`jubilacion_target_net_worth_nominal`,
+ * evaluado exacto sobre ese mes por el servidor, nunca interpolado— deflactado con el mismo
+ * factor y la misma tasa que el chart. Sin campo `_real` nuevo en el API (veto de arqueología
+ * §1/§3): el deflactado de publicación se hace aquí, como el de la línea del objetivo.
+ *
+ * Reglas:
+ *  - Sin nominal (no hay cruce, o backend anterior al campo) → se cae a
+ *    `jubilacion_target_net_worth`, que YA está en euros de hoy → `basis: "today"`. Nunca se
+ *    inventa un mes: sin mes no hay deflactor que aplicar.
+ *  - Con nominal → `nominal × deflationFactorAt(mes, pct)`, con `pct` = la tasa del chart solo
+ *    si el toggle está activo Y la tasa no es 0. `basis` sale del `pct` EFECTIVO, así que
+ *    «toggle activo con inflación 0» se rotula honestamente como euros de ese mes: el factor
+ *    vale 1 y las dos bases coinciden, pero la que describe la cifra es la nominal.
+ */
+export function jubilacionTargetTileValue(
+  series: JubilacionTargetTileSeries | null | undefined,
+  inflationAdjusted: boolean,
+  installationInflationPct: number,
+): JubilacionTargetTileValue {
+  const nominalRaw = series?.jubilacion_target_net_worth_nominal;
+  const nominal = nominalRaw != null ? parseDisplayDecimal(nominalRaw) : null;
+  const monthIndex = series?.jubilacion_month_index;
+  if (
+    nominal === null ||
+    monthIndex == null ||
+    !Number.isFinite(monthIndex)
+  ) {
+    const baseRaw = series?.jubilacion_target_net_worth;
+    return {
+      amount: baseRaw != null ? parseDisplayDecimal(baseRaw) : null,
+      basis: "today",
+    };
+  }
+  const deflation = resolveDeflationAnnualPct(
+    series?.deflation_annual_inflation_percent,
+    installationInflationPct,
+  );
+  const pct = inflationAdjusted && deflation !== 0 ? deflation : 0;
+  return {
+    amount: nominal * deflationFactorAt(monthIndex, pct),
+    basis: pct !== 0 ? "today" : "nominal",
+  };
 }
 
 /**

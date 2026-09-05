@@ -180,8 +180,12 @@ export const HELP_TEXTS = {
       "moverse cuando el préstamo muere). Esas partidas van en NETO: lo que de verdad gastas o " +
       "cobras cada mes, nunca la cifra bruta — el cálculo ya lo asume así. Y solo cuenta tu " +
       "patrimonio LÍQUIDO para cruzarlo: una vivienda no produce retirada mensual, aunque siga " +
-      "sumando en tu patrimonio total. La cifra grande está en euros de hoy; el paréntesis es " +
-      "ese mismo objetivo llevado al mes del cruce con la inflación configurada. El objetivo se " +
+      "sumando en tu patrimonio total. La cifra grande está SIEMPRE en la base que declara el " +
+      "subtítulo de su tarjeta, y las dos tarjetas que llevan este texto no miden lo mismo: en " +
+      "Jubilación es el objetivo evaluado como si te jubilaras HOY —el nominal del mes exacto " +
+      "del cruce vive en «Detalle del cálculo»—, y en Proyección es el objetivo del mes en que " +
+      "de verdad te jubilas, deflactado a euros de hoy mientras «En dinero de hoy» esté activo " +
+      "y en euros de ese mes cuando no. El objetivo se " +
       "calcula y se dibuja siempre, pero solo DECIDE la fecha en «Cuanto antes» y en «Puente " +
       "hasta la pensión»: en las estrategias por edad manda la edad y este número pasa a ser la " +
       "referencia contra la que se lee si llegas o no.",

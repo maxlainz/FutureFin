@@ -37,6 +37,7 @@ import {
   projectionMaxXTicks,
   projectionXTickLabel,
   projectionXTicks,
+  resolveDeflationAnnualPct,
   thinTicksFromEnd,
 } from "../lib/projection-chart";
 import {
@@ -293,11 +294,14 @@ export function ProjectionNetWorthChart({
   // la misma con la que el servidor construyó `net_worth_real` y `milestones_real`) y solo cae a
   // la de la instalación con un backend antiguo — re-obtenerla por otro canal era una vía de
   // divergencia silenciosa.
-  const deflationPct = useMemo(() => {
-    const s = series.deflation_annual_inflation_percent;
-    const parsed = s !== undefined ? Number(s) : Number.NaN;
-    return Number.isFinite(parsed) ? parsed : installationInflationPct;
-  }, [series.deflation_annual_inflation_percent, installationInflationPct]);
+  const deflationPct = useMemo(
+    () =>
+      resolveDeflationAnnualPct(
+        series.deflation_annual_inflation_percent,
+        installationInflationPct,
+      ),
+    [series.deflation_annual_inflation_percent, installationInflationPct],
+  );
   const effectivePct = inflationAdjusted && deflationPct !== 0 ? deflationPct : 0;
   // #136-5a: la serie «aportado en euros de hoy» correcta exige deflactar CADA aportación por su
   // propio mes, y con densidad hybrid un delta entre puntos abarca hasta 12 meses: la cifra no es
