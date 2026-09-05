@@ -23,7 +23,6 @@ import {
   PAYMENT_FREQ_LABEL,
   REPAYMENT_MODEL_LABEL,
   REPAYMENT_MODEL_ORDER,
-  type LedgerPersonScope,
   type LiabilityPaymentFreq,
   groupRowsByCategoryOrdered,
   liabilitiesApproxMonthlyInterestSum,
@@ -85,7 +84,6 @@ export function LiabilitiesView({
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
-  ledgerPersonScope: LedgerPersonScope;
   canEdit: boolean;
   formError: string | null;
   liabilityModalOpen: boolean;

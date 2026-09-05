@@ -561,6 +561,14 @@ Hogar es un agregado informativo y de **solo lectura** (D9/D32): el servidor es 
 impone (403 `not_row_owner` en toda mutación de una fila ajena, D21) — lo de aquí es UX, no la
 frontera de seguridad.
 
+La navegación de la TopBar y del `MobileNavDrawer` también se filtra por scope (F1, issue #207):
+`tabsForScope(scope)` (`lib/navigation.ts`) devuelve las nueve pestañas en `mine` y solo Resumen ·
+Proyección · Ajustes (`HOUSEHOLD_TAB_IDS`) en `household` — el resto se pinta de solo lectura y sin
+dueño visible por fila, así que ni se ofrece como destino. Un deep-link a una pestaña oculta (al
+montar, o al cambiar de scope en caliente) redirige a Resumen vía `isTabAvailableForScope`, en el
+mismo `useLayoutEffect` de guardia de rutas que ya reconducía rutas desconocidas y sub-pestañas de
+Ajustes. Es, otra vez, presentación y no la frontera de seguridad.
+
 | Vista | Boolean consumido | Qué desaparece en solo lectura |
 |---|---|---|
 | Activos, Pasivos, Presupuesto, reglas de asignación, Próximos | prop `canEdit={canEditLedger}` | Alta, edición, borrado, reordenación |

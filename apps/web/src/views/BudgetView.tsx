@@ -22,7 +22,6 @@ import {
 } from "../lib/format";
 import {
   budgetCategoryMap,
-  type LedgerPersonScope,
   sortBudgetEntriesMacStyle,
 } from "../lib/ledger";
 import { useIsMobile } from "../lib/responsive";
@@ -108,7 +107,6 @@ export function BudgetView({
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
-  ledgerPersonScope: LedgerPersonScope;
   canEdit: boolean;
   formError: string | null;
   budgetModalOpen: boolean;

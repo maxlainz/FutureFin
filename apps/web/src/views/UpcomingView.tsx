@@ -18,7 +18,7 @@ import {
   formatCurrencyNumber,
   parseDisplayDecimal,
 } from "../lib/format";
-import { budgetCategoryMap, type LedgerPersonScope } from "../lib/ledger";
+import { budgetCategoryMap } from "../lib/ledger";
 import { useIsMobile } from "../lib/responsive";
 import type { BudgetScopeToggle } from "./BudgetView";
 
@@ -70,7 +70,6 @@ export function UpcomingView({
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
-  ledgerPersonScope: LedgerPersonScope;
   canEdit: boolean;
   formError: string | null;
   planningModalOpen: boolean;

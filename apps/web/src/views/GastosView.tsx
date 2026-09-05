@@ -964,12 +964,6 @@ export function GastosView({
         </p>
       </div>
 
-      {hasMembership && ledgerPersonScope === "mine" ? (
-        <div className="banner info-banner tight-banner">
-          <strong>Mío</strong> · solo tus movimientos
-        </div>
-      ) : null}
-
       {!hasMembership ? (
         <div className="banner info-banner">Sin acceso al hogar.</div>
       ) : null}

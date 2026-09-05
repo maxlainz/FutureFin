@@ -32,7 +32,6 @@ import {
   formatAssetContributionNominalCell,
   formatProjectionMilestoneCompactLabel,
   groupRowsByCategoryOrdered,
-  type LedgerPersonScope,
   roundUpToHundred,
 } from "../lib/ledger";
 
@@ -78,7 +77,6 @@ export function AssetsView({
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
-  ledgerPersonScope: LedgerPersonScope;
   canEdit: boolean;
   formError: string | null;
   projectionSeries: ProjectionSeriesApi | null;

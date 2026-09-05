@@ -68,6 +68,7 @@ import {
   TAB_PATH,
   type SettingsSubTabId,
   type TabId,
+  isTabAvailableForScope,
   normalizeAppPath,
   settingsSubTabFromPathname,
   settingsSubTabPath,
@@ -738,6 +739,14 @@ export default function App() {
         navigate(settingsSubTabPath(defaultSettingsSubTab), true);
       }
     }
+    // Ámbito Hogar solo enseña Resumen · Proyección · Ajustes (F1): un deep-link a una pestaña
+    // oculta —al montar, o al cambiar de scope en caliente desde el segmentado «Yo | Hogar»—
+    // redirige a Resumen. Presentación, no la frontera de seguridad (D23): el servidor sigue
+    // siendo quien de verdad bloquea la escritura ajena.
+    if (activeTab && !isTabAvailableForScope(activeTab, ledgerPersonScope)) {
+      navigate("/resumen", true);
+      return;
+    }
   }, [
     user,
     pathname,
@@ -745,6 +754,7 @@ export default function App() {
     activeTab,
     visibleSettingsSubTabs,
     defaultSettingsSubTab,
+    ledgerPersonScope,
   ]);
 
   const refreshSession = useCallback(async () => {
@@ -3616,6 +3626,7 @@ export default function App() {
         healthError={healthError}
         onMobileMenuOpen={() => setMobileNavOpen(true)}
         showNav={installationGate === "member"}
+        scope={ledgerPersonScope}
         extras={
           installationGate === "member" && hasMembership ? (
             /* Segmentado «Yo | Hogar» (D32). Sustituye al `<select>` de vista: con la vista
@@ -3658,6 +3669,7 @@ export default function App() {
         onClose={() => setMobileNavOpen(false)}
         activeTab={activeTab}
         navigate={navigate}
+        scope={ledgerPersonScope}
       />
 
       <Modal
@@ -3819,7 +3831,9 @@ export default function App() {
         {scopeReadOnly ? (
           <div className="banner info-banner app-scope-banner" role="status">
             <strong>Vista agregada del hogar · solo lectura</strong>
-            <small>Los datos se editan desde tu vista (Yo).</small>
+            <small>
+              Resumen, Proyección y Ajustes; cambia a tu vista (Yo) para editar y ver el resto.
+            </small>
           </div>
         ) : null}
 
@@ -3955,7 +3969,6 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
             canEdit={canEditLedger}
             formError={assetsError}
             projectionSeries={projectionSeries}
@@ -4012,7 +4025,6 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
             canEdit={canEditLedger}
             formError={liabilitiesError}
             liabilityModalOpen={liabilityModalOpen}
@@ -4084,7 +4096,6 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
             canEdit={canEditLedger}
             formError={budgetError}
             budgetModalOpen={budgetModalOpen}
@@ -4173,7 +4184,6 @@ export default function App() {
             installation={installation}
             installationBusy={installationBusy}
             hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
             canEdit={canEditLedger}
             formError={planningError}
             planningModalOpen={planningModalOpen}
