@@ -733,7 +733,11 @@ export default function App() {
       navigate("/resumen", true);
       return;
     }
-    if (activeTab === "settings") {
+    // Las sub-pestañas visibles dependen de `installation` (membresía, rol). Hasta que esa carga
+    // resuelva solo existen «general» y «data», así que un deep-link o una recarga en
+    // /ajustes/plan se reconducía a /ajustes/general ANTES de saber si el usuario podía verla, y
+    // el `navigate(…, true)` no se deshacía después. Se espera al gate.
+    if (activeTab === "settings" && installationGate !== "loading") {
       const sub = settingsSubTabFromPathname(pathname);
       if (!sub || !visibleSettingsSubTabs.includes(sub)) {
         navigate(settingsSubTabPath(defaultSettingsSubTab), true);
@@ -755,6 +759,7 @@ export default function App() {
     visibleSettingsSubTabs,
     defaultSettingsSubTab,
     ledgerPersonScope,
+    installationGate,
   ]);
 
   const refreshSession = useCallback(async () => {
