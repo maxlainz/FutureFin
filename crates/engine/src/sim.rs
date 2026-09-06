@@ -311,70 +311,6 @@ pub struct AllocationRuleG<M> {
     pub cap: Option<AllocationCapG<M>>,
 }
 
-/// **El colchón de caja** (P4, §B.6 del plan de #207): el activo que absorbe la retirada y se
-/// rellena vendiendo del resto de la cartera en los meses autorizados.
-///
-/// # Por qué vive en el núcleo y no en la capa de Monte Carlo
-///
-/// El relleno **es una venta**: realiza plusvalía, paga su impuesto por tramos y baja la base de
-/// coste del activo vendido. Recolocar valor entre series DESPUÉS de simular —la única
-/// alternativa sin tocar el motor— sería un colchón que se rellena sin pagar plusvalías, es
-/// decir, un número mejor que la realidad. Por eso el gancho está aquí, dentro del mes, junto a
-/// la venta que ya sabe hacer esa aritmética.
-///
-/// # Qué NO sabe el motor
-///
-/// Este plan **no menciona la volatilidad**: el motor no tiene noción de `σ` (vive en
-/// `crates/engine-stochastic`) y no debe tenerla. Quien decide QUÉ meses autorizan relleno —en
-/// Monte Carlo, los de shock positivo— y **si el colchón se instala siquiera** es el llamante. En
-/// el camino determinista este campo es `None` y todo esto es código que no se ejecuta.
-/// **Qué tamaño intenta mantener el colchón** (P4), y con qué convención se indexa.
-///
-/// Son dos magnitudes de naturaleza distinta y confundirlas sobrevalora la protección en
-/// silencio:
-///
-/// - [`Months(n)`](CashBufferTarget::Months) — `n` meses del gasto **YA INDEXADO** del mes (el
-///   mismo que el bucle acaba de gastar, no el declarado). El objetivo CRECE con la inflación,
-///   igual que el gasto que cubre.
-/// - [`Amount(a)`](CashBufferTarget::Amount) — un importe **NOMINAL FIJO**, que **no se indexa
-///   nunca**. Es exactamente el euro que persigue el tope `amount` de una regla de la cascada
-///   (`resolve_cap_ceiling_g`), y por eso existe: cuando el colchón se DERIVA del tope de una
-///   regla de ahorro (5.0.0), **la misma regla gobierna las dos fases** —acumular hasta X y, ya
-///   jubilado, mantener X—. Convertir ese tope a meses a mes 0 y dejar que se indexe sería otra
-///   cosa: un tope de 10.000 € leído como «≈ 8 meses» valdría ~16.400 € nominales veinte años
-///   después, 1,6× lo que el usuario escribió.
-///
-/// El motor no elige la variante: la elige el llamante, igual que elige el índice del colchón y
-/// los meses autorizados.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum CashBufferTarget<M> {
-    /// `n` meses del gasto ya indexado del mes.
-    Months(M),
-    /// Un importe nominal fijo, sin indexar.
-    Amount(M),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CashBufferPlan<M> {
-    /// El activo que HACE de colchón: el líquido de menor rentabilidad esperada, que por
-    /// construcción es el primero del orden de drenaje ([`crate::cash_buffer_index`]) y por tanto
-    /// el que la retirada del mes vacía primero, sin que haga falta ninguna regla nueva.
-    ///
-    /// Fuera de rango ⇒ el colchón no actúa (el motor es una función pura y no panica por una
-    /// entrada mal dimensionada, misma política que `growth_overrides`).
-    pub buffer_index: usize,
-    /// Cuánto intenta mantener el colchón. El objetivo del mes es
-    /// `max(0, objetivo − valor_del_colchón)`, con el objetivo resuelto según la variante de
-    /// [`CashBufferTarget`].
-    pub target: CashBufferTarget<M>,
-    /// `[k−1]` = ¿está autorizado el relleno en el mes `k` (1-based)?
-    ///
-    /// En Monte Carlo es `z_k > 0`: se rellena vendiendo **después** de que el mercado suba, no
-    /// después de que baje — que es todo lo que el colchón pretende. Un índice fuera del vector
-    /// cuenta como «no autorizado»: menos relleno, nunca más.
-    pub refill_months: Vec<bool>,
-}
-
 /// **La entrada del núcleo de simulación.** Gemelo de [`ProjectionInput`] más el gancho de
 /// Monte Carlo.
 #[derive(Debug, Clone, PartialEq)]
@@ -402,9 +338,6 @@ pub struct SimInput<M> {
     /// elementos como activos**: una fila mal dimensionada se ignora en vez de panicar, porque el
     /// motor es una función pura.
     pub growth_overrides: Option<Vec<Vec<M>>>,
-    /// **El colchón de caja** (P4). `None` —lo único que produce la conversión desde
-    /// [`ProjectionInput`]— deja el mes exactamente donde estaba: el bucle ni evalúa el objetivo.
-    pub cash_buffer: Option<CashBufferPlan<M>>,
 }
 
 // =============================================================================================
@@ -464,16 +397,6 @@ pub struct SimOutput<M> {
     pub partial_phase_capital_growing: bool,
     pub disposable_cash: Vec<M>,
     pub disposable_cash_total: M,
-    /// **Neto movido al colchón cada mes** (P4), `[k]` con el mismo eje que las demás series
-    /// (índice 0 = estado inicial = 0). Todo ceros sin colchón.
-    ///
-    /// Es un TRASVASE, no un ingreso: el euro sale de otro activo. Lo único que el trasvase
-    /// destruye es el impuesto de la venta, y eso ya lo cuenta el patrimonio.
-    pub buffer_refill_net: Vec<M>,
-    /// Cuántos meses hubo relleno EFECTIVO (neto > 0). `0` sin colchón, y también con colchón que
-    /// nunca tuvo de dónde vender: las dos cosas son «no pasó nada», y quien distingue si el
-    /// colchón siquiera se simuló es el llamante (en Monte Carlo, `buffer_active`).
-    pub buffer_refill_months: u32,
 }
 
 // =============================================================================================
@@ -616,7 +539,6 @@ impl<M: MoneyOps> From<&ProjectionInput> for SimInput<M> {
             phase_plan: PhasePlanG::from(&input.phase_plan),
             fire_target: input.fire_target.as_ref().map(FireTargetG::from),
             growth_overrides: None,
-            cash_buffer: None,
         }
     }
 }
@@ -649,11 +571,6 @@ impl From<SimOutput<Decimal>> for ProjectionOutput {
             partial_phase_capital_growing: o.partial_phase_capital_growing,
             disposable_cash: o.disposable_cash,
             disposable_cash_total: o.disposable_cash_total,
-            // `buffer_refill_net` y `buffer_refill_months` se QUEDAN AQUÍ a propósito: el colchón
-            // (P4) solo actúa en Monte Carlo y en el camino determinista es todo ceros. Publicarlo
-            // en `ProjectionOutput` sería añadir a la superficie pública una serie de 841 ceros
-            // que ningún cliente puede interpretar. Quien lo lee es `crates/engine-stochastic`,
-            // que consume `SimOutput` directamente.
         }
     }
 }

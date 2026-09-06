@@ -138,18 +138,8 @@ realidad** o entre superficies, no error de aritmética.
 - Modos de ahorro: A (presupuesto), B (promedio real ambos lados), C (ingreso plan + gasto real);
   fallback por lado. En B/C la cuota vive dentro del promedio (decisión explícita del owner) y el
   principal se congela — la parte «para siempre» es divergencia (§4: D17, decidida).
-- **El colchón de caja es un IMPORTE NOMINAL cuando se deriva del tope de una regla** (5.0.0, V6 y
-  P2). Dos convenciones, y confundirlas sobrevalora la protección en silencio:
-  `CashBufferTarget::Months(n)` es `n × gasto del mes YA INDEXADO` —el objetivo crece con la
-  inflación—, mientras que `CashBufferTarget::Amount(a)` es un euro **nominal fijo que no se indexa
-  nunca**, exactamente el mismo que persigue el tope `amount` de la cascada (`resolve_cap_ceiling`).
-  El colchón derivado usa `Amount`: **la misma regla gobierna las dos fases** —acumular hasta X y,
-  ya jubilado, mantener X—. Convertir el tope a meses a mes 0 y dejarlo indexarse lo revalorizaría
-  ~2,4× a 35 años con un 2,5 %; los meses solo se publican como equivalente informativo
-  (`buffer_months_effective = floor(tope / gasto de jubilación)`). Puerta:
-  `crates/engine-stochastic/tests/monte_carlo.rs::mc_cash_buffer_amount_holds_the_cap` (medido: con
-  `Amount(48 000)` el colchón se queda en 48.000 € en todo el horizonte; con `Months(24)` llega a
-  113.680 € = 48.000 × 1,025³⁵).
+- **El colchón de caja se retiró en 5.0.0 antes de publicarse**: la caja es un activo más y las
+  reglas de ahorro fijan cuánto se guarda.
 
 ### 2.4 FIRE y fiscalidad
 - target del mes k = `gross_up(need(k), tramos, g)/(swr/100) + término_deuda(k)` (4.10.0/#170:
@@ -717,9 +707,8 @@ drenaje post-cruce ya solo tributa la ganancia real de la base que la cascada co
 |---|---|---|
 | **El recorte de una regla de retirada NO es fracaso ni descubierto** (D22/D24): `withdrawal_shortfall` puede crecer todo un horizonte sin que el patrimonio lo note | 0 € de patrimonio; sí cambia la lectura de «¿me va bien?» | Un hogar que gasta menos porque su regla se lo dice **está siguiendo su plan**, no arruinándose. Meterlo en `uncovered_deficit_total` mezclaría una decisión con una imposibilidad — hallazgo B2 de la revisión adversarial |
 | **Éxito de Monte Carlo = el plan OCURRE y AGUANTA** (D22 corregida por la revisión D20): jubilarse dentro del horizonte —o tener un trigger por edad— **y** no agotar la cartera | Baja la probabilidad publicada donde el cruce es tardío: medido 0,960 → 0,629 en un hogar que cruza en el mes 655 de 840 | La definición anterior («la cartera no se agota nunca») premiaba al hogar que **no se jubila jamás**: quien nunca drena nunca se agota. El 33,1 % de los caminos de ese hogar no llegaba a jubilarse y los 1.000 contaban como éxito; el sesgo llegaba a **+6,8 pp** con SWR 6 %. `never_retired_probability` y `success_given_retired` se publican al lado para separar «¿ocurre?» de «¿aguanta?» |
-| **El colchón de caja (P4) se rellena con el shock del mes ANTERIOR y exige un líquido a σ = 0** | Con el colchón a la rentabilidad de la cartera el éxito SUBE +3,9 pp; con la cuenta al 0 % sigue costando −3,5 pp | Autorizar el relleno con el `z` del propio mes —y ejecutarlo antes del crecimiento— vendía renta variable al precio de antes de una subida que ya se conocía: información del futuro, y cara (−2,5 pp, con 249 caminos arruinados solo bajo esa regla y ninguno bajo la retardada). Y elegir el colchón por el orden de drenaje sin mirar σ ponía el «colchón» en la renta variable, o vendía la vivienda para llenarlo. Lo que cuesta es el **lastre** de tener 24 meses de gasto fuera del mercado, no la política: la ayuda de la UI tiene que decirlo así |
 | **Guyton-Klinger sin la *portfolio management rule* (ventana de 15 años) ni la *inflation rule*** (saltarse la subida por IPC del año siguiente a un recorte) | Modelo **más reactivo**: recorta antes y más veces que el artículo de 2006 | Las dos omitidas SUAVIZAN la regla; omitirlas va en la dirección prudente. Declarado en `withdrawal.rs::review_guardrails` y en el `helpTexts` de la regla, para que nadie lo descubra comparando con el artículo |
-| **Un solo shock de mercado común por mes, escalado por la sd de cada activo** (D11), en vez de una matriz de correlaciones | Subestima la diversificación entre clases: las bandas salen **más anchas** de lo que daría una correlación < 1 | Una matriz de correlación exige datos que la instalación no tiene (el usuario declara μ y σ por activo, no covarianzas); inventarlas sería falsa precisión, y el sesgo es conservador. **Simulado desde WP6a** (commit `ba6bdfe`, 2026-09-03): `engine_stochastic::project_percentile_bands` inyecta por mes `f_ik = m_i·exp(σ_i·z_k − σ_i²/2)` (un solo `z_k` por mes para toda la cartera; `E[f] = m_i` exacto; `σ = 0` ⇒ `m_i` por rama explícita) sobre el MISMO bucle genérico. **La sd NO viaja en `SimAsset`**: se pasa como slice alineado a `assets[]`, así que el camino `Decimal` la ignora por construcción y su bit-identidad no depende de nadie. (La suite del crate está en VERDE desde el pase de correcciones de la revisión D20; el test que fallaba se rehízo como `mc_cash_buffer_protects_and_the_drag_is_what_costs`.) |
+| **Un solo shock de mercado común por mes, escalado por la sd de cada activo** (D11), en vez de una matriz de correlaciones | Subestima la diversificación entre clases: las bandas salen **más anchas** de lo que daría una correlación < 1 | Una matriz de correlación exige datos que la instalación no tiene (el usuario declara μ y σ por activo, no covarianzas); inventarlas sería falsa precisión, y el sesgo es conservador. **Simulado desde WP6a** (commit `ba6bdfe`, 2026-09-03): `engine_stochastic::project_percentile_bands` inyecta por mes `f_ik = m_i·exp(σ_i·z_k − σ_i²/2)` (un solo `z_k` por mes para toda la cartera; `E[f] = m_i` exacto; `σ = 0` ⇒ `m_i` por rama explícita) sobre el MISMO bucle genérico. **La sd NO viaja en `SimAsset`**: se pasa como slice alineado a `assets[]`, así que el camino `Decimal` la ignora por construcción y su bit-identidad no depende de nadie. (La suite del crate está en VERDE desde el pase de correcciones de la revisión D20.) |
 | **`partial_phase_capital_growing`: `bool` en el motor, `Option<bool>` en la API** | 0 € | El motor es una función pura y debe definir el estado (sin fase parcial ⇒ `false`); el wire no puede darle el mismo valor a «no hubo media jornada» y a «hubo y menguó», así que la capa que serializa lo convierte en `null` mirando `partial_retirement_month_index`. Verificado en `apps/api/src/handlers/projection.rs` |
 | **Cola de redondeo negativa de `uncovered_deficit_total` clampada al PUBLICAR, no en el motor** | medido hasta ≈ −1,7·10⁻²⁴ € (y hasta +5,6·10⁻²³ en el corpus diferencial) | El descubierto se acumula como residuo de ventas brutas y puede salir con una cola negativa que no es «−0,0000000000000000000000005 € descubiertos», es cero. El motor debe seguir publicando su aritmética tal cual —el golden la hashea—; quien redondea para un humano es la capa que serializa (`money_out(… .max(ZERO))`) |
 | **La sd del activo no llega al motor determinista** | 0 € en el camino `Decimal` | Por diseño: la volatilidad **no es un campo de `SimAsset`** — viaja como argumento del evaluador estocástico, así que el camino exacto no puede verla y su bit-identidad con 4.15.0 no depende de una rama que alguien pueda tocar. De ese camino no sale un euro (§1) |
@@ -750,15 +739,23 @@ drenaje post-cruce ya solo tributa la ganancia real de la base que la cascada co
 
 ## 6. Provenance and maintenance
 
-**Ampliado el 2026-09-05 (WP-F del tren 5.0.0, decisiones V6/V7)**: §2.3 gana el contrato del
-colchón derivado (`CashBufferTarget::Amount` es NOMINAL y no se indexa; los meses solo se publican
-como equivalente informativo) y §2.7 el veredicto de corte fijo al 100 %. Re-verificación:
-`grep -n "pub enum CashBufferTarget" -A4 crates/engine/src/sim.rs`,
-`grep -n "CashBufferTarget::Months(n) => n \* expense" crates/engine/src/sim_core.rs` (1 hit),
-`grep -n "pub(crate) fn resolve_cash_buffer" apps/api/src/handlers/cash_buffer.rs`,
-`grep -n "VERDICT_GREEN_FLOOR_PCT" apps/api/src/handlers/projection_bands.rs` (2 hits) y las dos
-puertas: `cargo test -p futurefin-engine-stochastic --test monte_carlo -- mc_cash_buffer_amount_holds_the_cap`
-y `cargo test -p futurefin-api --lib projection_bands::tests::el_verde_exige_todos_los_caminos`.
+**Retirado el 2026-09-06 (WP E3 del plan «Modelo de jubilación v2», decisión del propietario)**: el
+colchón de caja se elimina ENTERO de `crates/engine` y `crates/engine-stochastic` antes de que
+5.0.0 se publique — la caja es un activo más y las reglas de ahorro fijan cuánto se guarda; no hay
+un mecanismo de relleno aparte. §2.3 y la fila de la tabla de §4 sobre el colchón se sustituyen por
+una sola frase. Esto vuelve OBSOLETOS los comandos de re-verificación de la entrada anterior
+(2026-09-05): `CashBufferTarget`, `CashBufferPlan`, `CashBufferSpec`, `BufferInactiveReason`,
+`cash_buffer_index`/`safe_cash_buffer_index` y `refill_cash_buffer_g` ya no existen en ningún
+crate — un grep de cualquiera de ellos en `crates/` debe salir VACÍO, y eso es lo esperado, no
+deriva. `apps/api/src/handlers/cash_buffer.rs` queda huérfano (referencia tipos retirados) hasta
+que un WP posterior lo retire también: el binario `futurefin-api` NO compila entre este commit y
+ese WP, por diseño.
+
+**Ampliado el 2026-09-05 (WP-F del tren 5.0.0, decisiones V6/V7)**: §2.3 ganó el contrato del
+colchón derivado y §2.7 el veredicto de corte fijo al 100 %. La parte del colchón queda descrita
+arriba como retirada; §2.7 (veredicto al 100 %) sigue vigente y su re-verificación no cambia:
+`grep -n "VERDICT_GREEN_FLOOR_PCT" apps/api/src/handlers/projection_bands.rs` (2 hits) y
+`cargo test -p futurefin-api --lib projection_bands::tests::el_verde_exige_todos_los_caminos`.
 
 Escrito 2026-08-30 (auditoría del modelo financiero; rama `audit/modelo-financiero`).
 **Ampliado y re-verificado el 2026-09-03 para 5.0.0** (rama `release/5.0.0`, issue #207): §2.2/§2.3

@@ -41,11 +41,7 @@
 //! - **Autocorrelación / reversión a la media.** Los `z_k` son independientes mes a mes. Ni hay
 //!   momentum ni hay reversión, y por tanto **no hay ciclos**: la dispersión a 35 años crece con
 //!   `√H` limpia. La evidencia histórica apunta a algo de reversión a largo plazo, que ESTRECHARÍA
-//!   las bandas lejanas. Esta ausencia tiene una consecuencia MEDIDA y contraintuitiva: el colchón
-//!   de caja (P4) **empeora** el plan en este modelo (ver
-//!   `mc_cash_buffer_protects_and_the_drag_is_what_costs`). Sin autocorrelación, un
-//!   mes malo no dice nada del siguiente, así que no hay «mala racha que esperar sentado»: el
-//!   colchón no compra información y su lastre —dinero fuera del mercado— se cobra entero.
+//!   las bandas lejanas.
 //! - **Correlación imperfecta entre activos.** Con un único `z` por mes, la correlación entre dos
 //!   activos con `σ > 0` es **exactamente 1** (sus log-retornos son múltiplos del mismo número).
 //!   Es la decisión D11, y su consecuencia hay que decirla: una cartera «diversificada» de RV
@@ -58,28 +54,17 @@
 //!   Solo el crecimiento de los activos es estocástico. El IPC, la nómina, el presupuesto y el
 //!   TIN de la hipoteca siguen siendo exactamente los del camino determinista.
 //! - **Rebalanceo.** No lo hay: cada activo compone por su cuenta y la cascada reparte el
-//!   superávit con las reglas declaradas, igual que en el camino determinista. La ÚNICA
-//!   recolocación entre activos es el relleno del colchón (P4), y solo cuando se pide.
+//!   superávit con las reglas declaradas, igual que en el camino determinista. No hay ninguna
+//!   recolocación entre activos.
 //!
-//! # El colchón de caja (P4, §B.6)
+//! # El colchón de caja — retirado antes de publicarse
 //!
-//! Con [`McConfig::cash_buffer`] declarado, el activo líquido de menor rentabilidad hace de
-//! colchón: la retirada del mes ya sale de él sola (es el primero del orden de drenaje) y en los
-//! meses de **shock positivo** (`z_k > 0`) se rellena hasta su objetivo vendiendo del resto de la
-//! cartera. El relleno lo ejecuta el motor (`refill_cash_buffer_g`), así que es una venta de
-//! verdad: pasa por el gross-up, paga su plusvalía por tramos y baja la base de coste del activo
-//! vendido.
-//!
-//! El objetivo tiene DOS convenciones y elegir mal sobrevalora la protección
-//! ([`CashBufferSpec`]): [`Months(n)`](CashBufferSpec::Months) son `n` meses del gasto **ya
-//! indexado** —el objetivo crece con la inflación—, y [`Amount(a)`](CashBufferSpec::Amount) es un
-//! importe **nominal fijo** que no se indexa nunca, el mismo euro que persigue el tope `amount`
-//! de una regla de la cascada.
-//!
-//! **No se instala** —y [`McOutcome::buffer_active`] lo dice— si no hay activo líquido que lo
-//! albergue o si ningún activo declara volatilidad: sin volatilidad, `z_k` no mueve ningún
-//! retorno y rellenar «en los meses buenos» sería trasvasar valor guiándose por un shock que no
-//! afecta a nada.
+//! Esta capa llevó, durante el WP6 de 5.0.0 (P4, §B.6 del plan de #207), un mecanismo de colchón
+//! de caja: un activo líquido absorbía la retirada y se rellenaba vendiendo del resto de la
+//! cartera en los meses de shock positivo. La decisión del propietario (2026-09-06) lo retiró
+//! ENTERO antes de que 5.0.0 se publicara: la caja es un activo más, y son las reglas de ahorro
+//! —no un mecanismo aparte— las que deciden cuánto se guarda. No queda ni un tipo, ni un campo, ni
+//! un test suyo en este crate ni en `crates/engine`.
 //!
 //! # De aquí no sale un euro
 //!
@@ -91,11 +76,9 @@
 use rand_chacha::rand_core::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use rust_decimal::Decimal;
-
 use futurefin_engine::{
-    monthly_growth_multiplier, safe_cash_buffer_index, simulate, CashBufferPlan, CashBufferTarget,
-    EngineError, EngineWarning, MoneyOps, ProjectionInput, RetirementTrigger, SimInput, SimOutput,
+    monthly_growth_multiplier, simulate, EngineError, EngineWarning, ProjectionInput,
+    RetirementTrigger, SimInput, SimOutput,
 };
 
 use crate::F64Money;
@@ -138,48 +121,6 @@ pub struct McConfig {
     /// Percentiles a publicar, cada uno en `1..=99`. **Se respeta el orden dado** y se permite
     /// repetir: las bandas salen en las mismas posiciones que este vector.
     pub percentiles: Vec<u8>,
-    /// **El colchón de caja** (P4, §B.6): cuánto se intenta mantener en el activo líquido de
-    /// menor rentabilidad, y con qué convención ([`CashBufferSpec`]).
-    ///
-    /// La retirada sale de ese activo sola —es el primero del orden de drenaje— y el colchón se
-    /// **rellena** vendiendo del resto de la cartera **solo en los meses de shock positivo**
-    /// (`z_k > 0`): se vende después de que el mercado suba, no después de que baje. El relleno es
-    /// una venta de verdad y paga su plusvalía (`refill_cash_buffer_g` en el motor).
-    ///
-    /// `None` = sin colchón. Y `Some(..)` **no garantiza** que se simule: hace falta además un
-    /// activo líquido SIN riesgo que lo albergue y volatilidad declarada de la que protegerse. Lo
-    /// dice [`McOutcome::buffer_active`].
-    pub cash_buffer: Option<CashBufferSpec>,
-}
-
-/// **Cuánto colchón se pide, y con qué convención** (P4). Gemelo en el tipo del API del
-/// [`CashBufferTarget`] del motor: aquí los euros son `Decimal` porque es la frontera de
-/// entrada; la conversión a coma flotante ocurre una sola vez, al construir el `PathEngine`.
-///
-/// - [`Months(n)`](CashBufferSpec::Months): `n` meses del gasto **ya indexado** de cada mes. El
-///   objetivo crece con la inflación, igual que el gasto que cubre. Es lo que declara quien
-///   escribe `cash_buffer_months` en su perfil.
-/// - [`Amount(a)`](CashBufferSpec::Amount): un importe **nominal fijo**, que no se indexa nunca.
-///   Es el euro que persigue el tope `amount` de una regla de la cascada, y por eso existe:
-///   cuando el colchón se DERIVA de ese tope, la misma regla gobierna acumulación y jubilación.
-///   Convertirlo a meses lo revalorizaría por el camino (~1,6× a veinte años con un 2,5 %).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CashBufferSpec {
-    /// `n` meses del gasto ya indexado.
-    Months(u32),
-    /// Un importe nominal fijo, en la divisa base, sin indexar.
-    Amount(Decimal),
-}
-
-impl CashBufferSpec {
-    /// La traducción al objetivo del motor. **Una sola conversión a coma flotante**, hecha en la
-    /// frontera y no dentro del bucle.
-    fn to_engine(self) -> CashBufferTarget<F64Money> {
-        match self {
-            CashBufferSpec::Months(n) => CashBufferTarget::Months(F64Money(f64::from(n))),
-            CashBufferSpec::Amount(a) => CashBufferTarget::Amount(F64Money::from_decimal(a)),
-        }
-    }
 }
 
 impl Default for McConfig {
@@ -188,7 +129,6 @@ impl Default for McConfig {
             seed: 0,
             paths: DEFAULT_PATHS,
             percentiles: DEFAULT_PERCENTILES.to_vec(),
-            cash_buffer: None,
         }
     }
 }
@@ -409,43 +349,6 @@ struct PathEngine {
     sigmas: Vec<f64>,
     seed: u64,
     buf: Option<Vec<Vec<F64Money>>>,
-    /// **P4**: `(índice del activo colchón, objetivo ya en el tipo del motor)`. `None` = no se
-    /// simula colchón, y entonces `sim.cash_buffer` nunca se rellena.
-    buffer: Option<(usize, CashBufferTarget<F64Money>)>,
-    /// Por qué NO se instaló el colchón. `None` ⟺ `buffer.is_some()`.
-    buffer_inactive_reason: Option<BufferInactiveReason>,
-    /// Autorizaciones de relleno del mes (`z_{k−1} > 0`, NO anticipativas), reutilizadas camino a
-    /// camino: viajan al motor con `mem::take` y vuelven después de simular, igual que el buffer
-    /// de factores. Vacío cuando no hay colchón.
-    refill_buf: Vec<bool>,
-}
-
-/// **Por qué el colchón de caja (P4) no se está simulando.** Nunca es `None` cuando
-/// [`McOutcome::buffer_active`] es `false`: un colchón inactivo sin motivo es un número que el
-/// usuario pidió y no recibió, sin explicación.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BufferInactiveReason {
-    /// No se pidió (`McConfig::cash_buffer = None`).
-    NotRequested,
-    /// Ningún activo declara volatilidad: no hay riesgo de secuencia del que protegerse, y
-    /// rellenar «en los meses buenos» sería trasvasar valor y pagar plusvalía guiándose por un
-    /// shock que no mueve nada. El resultado es BIT A BIT el de no pedirlo.
-    NoVolatility,
-    /// No hay ningún activo **líquido con σ = 0** donde alojarlo. Un colchón volátil no protege
-    /// de nada, y vender un activo ilíquido para financiarlo es exactamente el desastre que el
-    /// colchón dice evitar: antes que eso, no se instala.
-    NoSafeLiquidAsset,
-}
-
-impl BufferInactiveReason {
-    /// El literal público, estable, que la API y la ayuda de la UI citan.
-    pub fn code(self) -> &'static str {
-        match self {
-            Self::NotRequested => "not_requested",
-            Self::NoVolatility => "no_volatility",
-            Self::NoSafeLiquidAsset => "no_safe_liquid_asset",
-        }
-    }
 }
 
 impl PathEngine {
@@ -476,49 +379,12 @@ impl PathEngine {
         let sigmas: Vec<f64> = volatilities.iter().copied().map(monthly_sigma).collect();
         let months = input.horizon_months as usize;
         let buf = Some(vec![vec![F64Money(0.0); sim.assets.len()]; months]);
-        // **P4: cuándo se instala el colchón, y por qué las tres condiciones.**
-        //
-        // 1. `cash_buffer` declarado — el usuario lo pidió (o el API lo derivó de su regla).
-        // 2. Existe un activo LÍQUIDO que pueda albergarlo (`cash_buffer_index`, el motor decide
-        //    cuál: el líquido de menor rentabilidad, que es el primero del orden de drenaje). Sin
-        //    activo líquido no hay colchón posible.
-        // 3. **Hay volatilidad declarada.** Sin ella, `z_k` se sigue sorteando (el flujo del RNG
-        //    no depende de los datos) pero no mueve ningún retorno: rellenar «en los meses buenos»
-        //    sería trasvasar valor y pagar plusvalías guiándose por un shock que no afecta a nada.
-        //    Con σ=0 en toda la cartera no hay riesgo de secuencia del que protegerse, así que no
-        //    se instala colchón y el resultado es BIT A BIT el de no pedirlo.
-        //
-        // La condición 3 es también lo que mantiene la puerta de degeneración: `σ=0 ⇒ la banda es
-        // la línea determinista`, colchón pedido o no.
-        let any_volatility = sigmas.iter().any(|s| *s > 0.0);
-        // **El colchón exige un activo LÍQUIDO Y SIN RIESGO** (corrección de la revisión
-        // adversarial). `cash_buffer_index` sale del orden de drenaje, que no sabe de
-        // volatilidad, y en una cartera «RV líquida + vivienda» elegía la RENTA VARIABLE como
-        // colchón: un colchón con σ = 17 % no es un colchón, es la misma cartera con más
-        // impuestos. Si no hay dónde ponerlo, no se instala y se dice POR QUÉ.
-        let risk_free: Vec<bool> = sigmas.iter().map(|s| *s == 0.0).collect();
-        let (buffer, buffer_inactive_reason) = match config.cash_buffer {
-            None => (None, Some(BufferInactiveReason::NotRequested)),
-            Some(_) if !any_volatility => (None, Some(BufferInactiveReason::NoVolatility)),
-            Some(spec) => match safe_cash_buffer_index(&sim.assets, &risk_free) {
-                Some(i) => (Some((i, spec.to_engine())), None),
-                None => (None, Some(BufferInactiveReason::NoSafeLiquidAsset)),
-            },
-        };
-        let refill_buf = if buffer.is_some() {
-            vec![false; months]
-        } else {
-            Vec::new()
-        };
         Ok(PathEngine {
             sim,
             base,
             sigmas,
             seed: config.seed,
             buf,
-            buffer,
-            buffer_inactive_reason,
-            refill_buf,
         })
     }
 
@@ -536,30 +402,11 @@ impl PathEngine {
             .take()
             .expect("el buffer siempre vuelve al final de `run`");
         let mut rng = path_rng(self.seed, path_index);
-        // El shock del mes ANTERIOR, que es el único que el hogar ha podido observar cuando
-        // decide rellenar. Arranca en `false`: el mes 1 no tiene pasado.
-        let mut prev_z_positive = false;
-        for (k, row) in buf.iter_mut().enumerate() {
+        for row in buf.iter_mut() {
             // UN shock por mes, sorteado SIEMPRE — también con la cartera entera a σ=0. Que el
             // flujo del RNG no dependa de los datos es lo que hace comparables dos ejecuciones
             // sobre carteras distintas con la misma semilla.
             let z = standard_normal(&mut rng);
-            // **P4, relleno NO ANTICIPATIVO** (corrección de la revisión adversarial). El mes `k`
-            // se autoriza con el shock que YA OCURRIÓ, `z_{k−1}`; el mes 1 no rellena nunca
-            // porque no hay mes anterior.
-            //
-            // Antes se usaba el `z` del propio mes, y el relleno se ejecuta ANTES del
-            // crecimiento (`sim_core.rs`, bloque del colchón justo delante del paso de
-            // crecimiento): eso vendía renta variable **al precio de antes de la subida, en el
-            // mes en que iba a subir**. Es información del futuro, y se pagaba: con la cartera
-            // volátil al 6,5 % y 10.000 caminos, el éxito bajaba de 0,8077 (regla `z_{k−1}`) a
-            // 0,7828 (regla `z_k`), −2,5 pp; y en un McNemar pareado sobre las MISMAS sendas,
-            // 249 caminos se arruinaban solo bajo la regla anticipativa y **ninguno** solo bajo
-            // la retardada.
-            if let Some(flag) = self.refill_buf.get_mut(k) {
-                *flag = prev_z_positive;
-            }
-            prev_z_positive = z > 0.0;
             for (i, cell) in row.iter_mut().enumerate() {
                 let s = self.sigmas[i];
                 *cell = if s == 0.0 {
@@ -572,20 +419,9 @@ impl PathEngine {
             }
         }
         self.sim.growth_overrides = Some(buf);
-        if let Some((buffer_index, target)) = self.buffer {
-            self.sim.cash_buffer = Some(CashBufferPlan {
-                buffer_index,
-                target,
-                refill_months: core::mem::take(&mut self.refill_buf),
-            });
-        }
         let out = simulate(&self.sim);
-        // Los dos buffers vuelven TAMBIÉN si la simulación falló: el `expect` de arriba y el
-        // `get_mut` del sorteo dependen de ello.
+        // El buffer vuelve TAMBIÉN si la simulación falló: el `expect` de arriba depende de ello.
         self.buf = self.sim.growth_overrides.take();
-        if let Some(cb) = self.sim.cash_buffer.take() {
-            self.refill_buf = cb.refill_months;
-        }
         out
     }
 }
@@ -680,32 +516,6 @@ pub struct McOutcome {
     /// sobre los meses jubilados: **qué fracción de la necesidad cubrió la regla**. `1.0` = la
     /// cubrió entera. `None` si ningún camino tiene meses jubilados con denominador positivo.
     pub withdrawal_to_need_ratio_p50: Option<f64>,
-    /// **P4 (§B.6): ¿se SIMULÓ el colchón?**
-    ///
-    /// `true` solo si se cumplieron las tres condiciones: [`McConfig::cash_buffer`]
-    /// declarado, un activo líquido que pueda albergarlo y volatilidad declarada de la que
-    /// protegerse. Un `false` con `cash_buffer = Some(..)` no es un fallo: es que en esta
-    /// cartera el colchón no significa nada, y el resultado es idéntico al de no pedirlo.
-    ///
-    /// Con `false`, [`Self::buffer_refills_p50`] y [`Self::buffer_refill_net_total_p50`] son
-    /// `None` — «no se midió», que no es lo mismo que «cero rellenos».
-    pub buffer_active: bool,
-    /// Por qué NO se simuló el colchón. `None` ⟺ [`Self::buffer_active`]. Nunca es `None` con
-    /// `buffer_active = false`: el usuario que pidió un colchón y no lo tuvo merece el motivo.
-    pub buffer_inactive_reason: Option<BufferInactiveReason>,
-    /// Mediana, entre los caminos, del NÚMERO de meses con relleno efectivo del colchón.
-    /// `None` ⟺ `!buffer_active`.
-    ///
-    /// Es un contador, no euros: cuántas veces el plan tuvo que reponer la caja.
-    pub buffer_refills_p50: Option<u32>,
-    /// Mediana, entre los caminos, del **total movido al colchón** en todo el horizonte
-    /// (`Σ_k buffer_refill_net[k]`). `None` ⟺ `!buffer_active`.
-    ///
-    /// La regla del crate («de aquí no sale un euro») sigue en pie: esto es la MEDIANA DE UN
-    /// TOTAL sobre una muestra sorteada, es decir un estadístico de la dispersión, no una cifra
-    /// contable del hogar. Ningún KPI monetario de la app puede salir de aquí: el trasvase real
-    /// del camino que la app dibuja lo da el motor `Decimal`.
-    pub buffer_refill_net_total_p50: Option<f64>,
     /// ¿Algún activo declaró volatilidad? Con `false` todas las bandas coinciden con la línea
     /// determinista y la UI debe decirlo («sin volatilidad declarada: la banda es la línea»).
     pub any_volatility_declared: bool,
@@ -786,10 +596,6 @@ pub fn project_percentile_bands(
     let mut underfunded_paths = 0usize;
     let mut months_below: Vec<f64> = Vec::with_capacity(n);
     let mut coverage_ratios: Vec<f64> = Vec::with_capacity(n);
-    // P4: cuántas veces se rellenó el colchón y cuánto se movió, por camino.
-    let buffer_active = engine.buffer.is_some();
-    let mut refill_counts: Vec<f64> = Vec::with_capacity(if buffer_active { n } else { 0 });
-    let mut refill_totals: Vec<f64> = Vec::with_capacity(if buffer_active { n } else { 0 });
 
     for p in 0..n {
         let out = engine.run(p as u32)?;
@@ -831,10 +637,6 @@ pub fn project_percentile_bands(
         months_below.push(f64::from(below));
         if sum_need > 0.0 {
             coverage_ratios.push(sum_w / sum_need);
-        }
-        if buffer_active {
-            refill_counts.push(f64::from(out.buffer_refill_months));
-            refill_totals.push(out.buffer_refill_net.iter().map(|v| v.0).sum());
         }
     }
 
@@ -959,14 +761,6 @@ pub fn project_percentile_bands(
     let withdrawal_to_need_ratio_p50 =
         (!coverage_ratios.is_empty()).then(|| percentile_of_sorted(&coverage_ratios, 50));
 
-    // P4: las dos lecturas del colchón, `None` cuando no se simuló (un cero diría «se simuló y
-    // nunca se rellenó», que es otra cosa).
-    sort_total(&mut refill_counts);
-    sort_total(&mut refill_totals);
-    let buffer_refills_p50 = buffer_active.then(|| percentile_of_sorted(&refill_counts, 50) as u32);
-    let buffer_refill_net_total_p50 =
-        buffer_active.then(|| percentile_of_sorted(&refill_totals, 50));
-
     Ok(McOutcome {
         seed: config.seed,
         paths: config.paths,
@@ -982,10 +776,6 @@ pub fn project_percentile_bands(
         underfunded_probability,
         months_below_need_p50,
         withdrawal_to_need_ratio_p50,
-        buffer_active,
-        buffer_inactive_reason: engine.buffer_inactive_reason,
-        buffer_refills_p50,
-        buffer_refill_net_total_p50,
         any_volatility_declared,
     })
 }
