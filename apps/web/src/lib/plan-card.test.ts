@@ -31,10 +31,10 @@ describe("planStatusFromWarnings", () => {
     expect(planStatusFromWarnings(null).tone).toBe("ok");
   });
 
-  it("falta la fecha de nacimiento ⇒ aviso con enlace a Tu cuenta", () => {
+  it("falta la fecha de nacimiento ⇒ ROJO con enlace a Tu cuenta (C5: sin ella no hay plan)", () => {
     const s = planStatusFromWarnings(["birth_date_missing"]);
     expect(s.warning).toBe("birth_date_missing");
-    expect(s.tone).toBe("warn");
+    expect(s.tone).toBe("danger");
     expect(s.label).toBe("Falta tu fecha de nacimiento");
     expect(s.action).toEqual({ label: "Tu cuenta", target: "account" });
   });
@@ -45,17 +45,37 @@ describe("planStatusFromWarnings", () => {
     expect(s.action?.target).toBe("retirement");
   });
 
-  it("infra-financiado gana a todo y va en ROJO (D17)", () => {
-    // El motor aún no emite este literal (llega con los solves): el mapeo existe hoy para que
-    // el día que llegue no se pinte como nada.
+  it("infra-financiado gana a todo y va en ROJO", () => {
+    // El literal del modelo v2 es `contribution_underfunded` (el motor retiró
+    // `retire_at_age_underfunded`): la pregunta es la aportación, no la estrategia entera.
     const s = planStatusFromWarnings([
       "birth_date_missing",
-      "retire_at_age_underfunded",
+      "contribution_underfunded",
       "target_retirement_age_missing",
     ]);
-    expect(s.warning).toBe("retire_at_age_underfunded");
+    expect(s.warning).toBe("contribution_underfunded");
     expect(s.tone).toBe("danger");
     expect(s.action?.target).toBe("retirement");
+  });
+
+  it("los tres fallos de solve del modelo v2 son rojos y llevan a Jubilación", () => {
+    for (const w of [
+      "coast_not_reachable",
+      "partial_never_starts",
+      "partial_never_fully_retires",
+    ]) {
+      const s = planStatusFromWarnings([w]);
+      expect(s.warning, w).toBe(w);
+      expect(s.tone, w).toBe("danger");
+      expect(s.action?.target, w).toBe("retirement");
+    }
+  });
+
+  it("los avisos INFORMATIVOS no suben aquí: llenarían de ámbar el Resumen de casi todos", () => {
+    // `no_volatility_declared` (C5) y `strategy_pension_bridge_migrated` (C7) tienen su sitio en
+    // «Riesgo» y en la tarjeta de Pensión, no en el estado del plan.
+    expect(planStatusFromWarnings(["no_volatility_declared"]).tone).toBe("ok");
+    expect(planStatusFromWarnings(["strategy_pension_bridge_migrated"]).tone).toBe("ok");
   });
 
   it("entre los dos avisos de dato ausente manda la fecha de nacimiento", () => {
@@ -77,7 +97,32 @@ describe("planStatusFromPlan", () => {
   it("`underfunded: true` es el rojo aunque no llegue ningún aviso", () => {
     const s = planStatusFromPlan({ underfunded: true });
     expect(s.tone).toBe("danger");
-    expect(s.warning).toBe("retire_at_age_underfunded");
+    expect(s.warning).toBe("contribution_underfunded");
+  });
+
+  it("`plan_state: pending` es una ESPERA, no un hueco ni un verde", () => {
+    const s = planStatusFromPlan({ planState: "pending" });
+    expect(s.tone).toBe("warn");
+    expect(s.label).toBe("Calculando tu plan…");
+    expect(s.action).toBeNull();
+  });
+
+  it("cada `absent_reason` dice lo suyo; uno desconocido no se pinta de verde", () => {
+    expect(planStatusFromPlan({ absentReason: "household_aggregate" }).label).toBe(
+      "El hogar no tiene un plan propio",
+    );
+    expect(planStatusFromPlan({ absentReason: "no_liquid_assets" }).tone).toBe("warn");
+    expect(planStatusFromPlan({ absentReason: "algo_nuevo" }).label).toBe(
+      "Tu plan no está disponible",
+    );
+  });
+
+  it("un aviso explícito gana a la razón de ausencia: dice QUÉ falta, no solo que falta algo", () => {
+    const s = planStatusFromPlan({
+      absentReason: "birth_date_missing",
+      warnings: ["target_retirement_age_missing"],
+    });
+    expect(s.warning).toBe("target_retirement_age_missing");
   });
 
   it("`underfunded: null` NO es «va bien» ni «va mal»: la pregunta no aplica", () => {

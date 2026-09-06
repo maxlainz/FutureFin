@@ -1,14 +1,18 @@
 /**
- * La tabla de frases (U7/U9/U10) fijada, con especial insistencia en dos cosas:
+ * La tabla de frases del modelo v2 (§4 del documento del modelo), con insistencia en tres cosas:
  *
- *  * **S8** — la longitud del puente es `pension_start − jubilación`, no «meses desde hoy». El
- *    caso del test es el que se veía mal en pantalla: jubilación a los 60 (mes 120) y pensión a
- *    los 72 (mes 264) son **12 años** de puente, no 22.
- *  * **Cada `null` tiene su frase.** Ninguna ausencia se rellena con un guion ni se cuela como
- *    «0»: «no cruzas el objetivo en el horizonte» es un resultado del plan y hay que leerlo así.
+ *  * **Una por estrategia × estado.** `ready` / `pending` / `not_reachable` / bloque ausente son
+ *    cuatro respuestas DISTINTAS del servidor y las cuatro tienen que leerse distintas; un plan
+ *    que se está calculando no puede parecerse a uno que no llega.
+ *  * **B5 — nunca se rotula una edad que el motor no leyó.** Sin fecha de nacimiento no hay plan
+ *    (C5) y la frase lo dice; la edad GUARDADA del perfil solo aparece como «lo que pediste»,
+ *    jamás pegada a un mes.
+ *  * **Cada `null` tiene su frase.** Una fecha al 100 % que no llega es «nunca», no un hueco; y
+ *    `not_reachable` publica lo más cerca que se estuvo en vez de callarse.
  */
 
 import { describe, expect, it } from "vitest";
+import { formatCurrencyAmount } from "./format";
 import {
   memberPlanSentence,
   planSentence,
@@ -18,259 +22,506 @@ import {
 
 /** Rotulador inyectado: el módulo no sabe si el eje va en fechas o en edades. */
 const monthLabel = (mi: number) => `M${mi}`;
+/** Resolutor de edades inyectado (el de la vista usa el calendario del eje). */
+const ageAt = (mi: number) => 25 + Math.floor(mi / 12);
 
 function series(over: Partial<PlanSentenceSeries> = {}): PlanSentenceSeries {
   return {
     strategy: "asap",
     jubilacion_month_index: null,
     jubilacion_age: null,
-    coast_fire_month_index: null,
     partial_retirement_month_index: null,
     pension_start_month_index: null,
-    underfunded: null,
+    retirement_date_basis: "success_threshold",
+    success_threshold_pct: 95,
+    safe_date_month_index: null,
+    safe_date_age: null,
+    safe_date_at_100_month_index: null,
+    safe_date_at_90_month_index: null,
+    success_of_plan: null,
+    success_wilson_low: null,
+    contribution_required_monthly: null,
+    contribution_underfunded: null,
+    coast_stop_month_index: null,
+    partial_start_month_index: null,
+    success_by_retirement_year: null,
+    plan_absent_reason: null,
+    horizon_lifespan_age: 90,
+    warnings: [],
     ...over,
   };
 }
 
 function sentence(
   over: Partial<PlanSentenceSeries> = {},
-  targetRetirementAge: number | null = null,
-  ageMode: "dates" | "ages" = "dates",
+  extra: Partial<Parameters<typeof planSentence>[0]> = {},
 ) {
   return planSentence({
     series: series(over),
-    targetRetirementAge,
+    targetRetirementAge: null,
     monthLabel,
-    ageMode,
+    currencyIso: "EUR",
+    ...extra,
   });
 }
 
+/** Un plan que cumple su umbral: éxito 0,95 y Wilson por encima del 95 %. */
+const meeting = {
+  success_of_plan: 0.95,
+  success_wilson_low: 0.951,
+  success_threshold_pct: 95,
+} satisfies Partial<PlanSentenceSeries>;
+
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-describe("«Cuanto antes» — manda el cruce", () => {
-  it("frase completa: mes, edad y plazo", () => {
-    const s = sentence({ strategy: "asap", jubilacion_month_index: 199, jubilacion_age: 52 });
-    expect(s.text).toBe("Te jubilas en M199, a los 52 · dentro de 16 años y 7 meses");
-    expect(s.tone).toBe("ok");
+describe("«N de cada 100» — los topes anti-mentira los pone `risk-bands`, no esta frase", () => {
+  it("un 0,999 no se redondea a 100: el plan falla en uno de cada mil", () => {
+    const s = sentence({
+      success_of_plan: 0.999,
+      success_wilson_low: 0.99,
+      success_threshold_pct: 95,
+      jubilacion_month_index: 100,
+      safe_date_month_index: 100,
+    });
+    expect(s.text).toContain("aguantan 99 de cada 100 escenarios");
+    expect(s.parts.successOutOfHundred).toBe(99);
   });
 
-  it("sin fecha de nacimiento la edad se OMITE, no se inventa", () => {
-    const s = sentence({ strategy: "asap", jubilacion_month_index: 144 });
-    expect(s.text).toBe("Te jubilas en M144 · dentro de 12 años");
+  it("solo el 1 EXACTO llega a «100 de cada 100»", () => {
+    const s = sentence({
+      success_of_plan: 1,
+      success_wilson_low: 0.998,
+      success_threshold_pct: 100,
+      jubilacion_month_index: 100,
+      safe_date_month_index: 100,
+    });
+    expect(s.text).toContain("aguantan 100 de cada 100 escenarios");
+  });
+
+  it("sin sorteo la frase no inventa un recuento: dice la fecha y calla el éxito", () => {
+    const s = sentence({ jubilacion_month_index: 144, safe_date_month_index: 144 });
+    expect(s.text).toBe("Con tu plan te jubilas en M144. Al 100 %, nunca; al 90 %, nunca.");
+    expect(s.parts.successOutOfHundred).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe("«Cuanto antes» — la fecha válida y sus dos alternativas", () => {
+  it("la frase de §4, tal cual: fecha, edad, éxito y las fechas al 100 y al 90", () => {
+    const s = sentence({
+      ...meeting,
+      strategy: "asap",
+      jubilacion_month_index: 199,
+      jubilacion_age: 55,
+      safe_date_month_index: 199,
+      safe_date_age: 55,
+      safe_date_at_100_month_index: 295,
+      safe_date_at_90_month_index: 163,
+    });
+    expect(s.text).toBe(
+      "Con tu plan te jubilas en M199 (a los 55): aguantan 95 de cada 100 escenarios. " +
+        "Al 100 % sería M295; al 90 %, M163.",
+    );
+    expect(s.tone).toBe("ok");
+    expect(s.parts.successOutOfHundred).toBe(95);
+  });
+
+  it("una fecha al 100 % que no se alcanza es «nunca», no un hueco", () => {
+    const s = sentence({
+      ...meeting,
+      jubilacion_month_index: 199,
+      safe_date_month_index: 199,
+      safe_date_at_100_month_index: null,
+      safe_date_at_90_month_index: 163,
+    });
+    expect(s.text).toContain("Al 100 %, nunca; al 90 %, M163.");
+  });
+
+  it("sin fecha de nacimiento la edad se OMITE, no se inventa (B5)", () => {
+    const s = sentence(
+      {
+        ...meeting,
+        jubilacion_month_index: 144,
+        safe_date_month_index: 144,
+        safe_date_at_100_month_index: 200,
+        safe_date_at_90_month_index: 120,
+      },
+      { targetRetirementAge: 50 },
+    );
+    expect(s.text).toBe(
+      "Con tu plan te jubilas en M144: aguantan 95 de cada 100 escenarios. " +
+        "Al 100 % sería M200; al 90 %, M120.",
+    );
+    expect(s.text).not.toContain("a los 50");
     expect(s.parts.retirementAge).toBeNull();
   });
 
-  it("sin cruce en el horizonte lo dice, en rojo", () => {
-    const s = sentence({ strategy: "asap" });
-    expect(s.text).toBe("No cruzas el objetivo en el horizonte");
-    expect(s.tone).toBe("danger");
-    expect(s.parts.retirementMonthIndex).toBeNull();
-  });
-
   it("el mes 0 (o anterior) es «ya», no «dentro de 0 meses»", () => {
-    expect(sentence({ strategy: "asap", jubilacion_month_index: 0 }).text).toBe(
-      "Ya puedes jubilarte: tu patrimonio ya cubre el objetivo",
-    );
+    const s = sentence({
+      ...meeting,
+      jubilacion_month_index: 0,
+      safe_date_month_index: 0,
+    });
+    expect(s.text).toContain("Con tu plan ya puedes jubilarte: aguantan 95 de cada 100 escenarios.");
   });
 
   it("una estrategia nula (el agregado del hogar) usa la misma lectura", () => {
-    const s = sentence({ strategy: null, jubilacion_month_index: 12 });
-    expect(s.text).toBe("Te jubilas en M12 · dentro de 1 año");
+    const s = sentence({ ...meeting, strategy: null, jubilacion_month_index: 12 });
+    expect(s.text).toContain("Con tu plan te jubilas en M12");
+  });
+
+  it("por debajo del umbral la frase no alarma pero avisa: ámbar", () => {
+    const s = sentence({
+      strategy: "asap",
+      success_of_plan: 0.82,
+      success_wilson_low: 0.8,
+      success_threshold_pct: 95,
+      jubilacion_month_index: 199,
+      safe_date_month_index: 199,
+    });
+    expect(s.tone).toBe("warn");
+    expect(s.parts.meetsThreshold).toBe(false);
+  });
+
+  it("con umbral 100 solo el éxito EXACTAMENTE 1 cumple (C3)", () => {
+    const casi = sentence({
+      success_of_plan: 0.999,
+      success_wilson_low: 0.99,
+      success_threshold_pct: 100,
+      jubilacion_month_index: 100,
+      safe_date_month_index: 100,
+    });
+    expect(casi.parts.meetsThreshold).toBe(false);
+    const cero = sentence({
+      success_of_plan: 1,
+      success_wilson_low: 0.998,
+      success_threshold_pct: 100,
+      jubilacion_month_index: 100,
+      safe_date_month_index: 100,
+    });
+    expect(cero.parts.meetsThreshold).toBe(true);
   });
 });
 
-describe("«A una edad fija» — manda la edad", () => {
-  it("dice la fecha y la edad", () => {
-    const s = sentence(
-      { strategy: "retire_at_age", jubilacion_month_index: 240, jubilacion_age: 55 },
-      55,
-    );
-    expect(s.text).toBe("Te jubilas en M240, a los 55");
-    expect(s.tone).toBe("ok");
+describe("estados que ganan a la estrategia", () => {
+  it("`pending`: el solve sigue corriendo y la frase lo dice", () => {
+    const s = sentence({ retirement_date_basis: "pending" });
+    expect(s.text).toBe("Calculando tu fecha…");
+    expect(s.tone).toBe("warn");
   });
 
-  it("`underfunded` pinta la frase de rojo sin cambiar el hecho: te jubilas igual", () => {
-    const s = sentence(
-      {
-        strategy: "retire_at_age",
-        jubilacion_month_index: 240,
-        jubilacion_age: 55,
-        underfunded: true,
-      },
-      55,
+  it("`not_reachable`: ninguna fecha cumple, y se publica lo más cerca que se estuvo", () => {
+    const s = sentence({
+      retirement_date_basis: "not_reachable",
+      success_threshold_pct: 95,
+      horizon_lifespan_age: 90,
+      success_by_retirement_year: [
+        { month_index: 240, success: 0.6 },
+        { month_index: 540, success: 0.78 },
+        { month_index: 600, success: 0.71 },
+      ],
+    });
+    expect(s.text).toBe(
+      "Con tu plan no hay ninguna fecha en la que aguanten 95 de cada 100 escenarios hasta " +
+        "los 90 años. Lo más cerca: M540 con 78 de cada 100.",
     );
-    expect(s.text).toBe("Te jubilas en M240, a los 55");
     expect(s.tone).toBe("danger");
   });
 
-  it("`underfunded: false` NO es lo mismo que `null`, pero ninguno de los dos alarma", () => {
-    expect(
-      sentence({ strategy: "retire_at_age", jubilacion_month_index: 1, underfunded: false }, 55)
-        .tone,
-    ).toBe("ok");
-    expect(
-      sentence({ strategy: "retire_at_age", jubilacion_month_index: 1, underfunded: null }, 55)
-        .tone,
-    ).toBe("ok");
+  it("`not_reachable` sin la tira del nivel 2: la primera oración sola, sin inventar un «lo más cerca»", () => {
+    const s = sentence({
+      retirement_date_basis: "not_reachable",
+      success_by_retirement_year: null,
+    });
+    expect(s.text).toBe(
+      "Con tu plan no hay ninguna fecha en la que aguanten 95 de cada 100 escenarios hasta los 90 años.",
+    );
+    expect(s.text).not.toContain("Lo más cerca");
+  });
+
+  it("`birth_date_missing`: sin fecha de nacimiento NO hay plan, y se dice en rojo (C5/B5)", () => {
+    const s = sentence(
+      { plan_absent_reason: "birth_date_missing", retirement_date_basis: "pending" },
+      { targetRetirementAge: 55 },
+    );
+    expect(s.text).toBe(
+      "Falta tu fecha de nacimiento para situar la pensión y el horizonte: sin ella no hay fecha válida.",
+    );
+    expect(s.tone).toBe("danger");
+    expect(s.text).not.toContain("55");
+  });
+
+  it("las otras tres ausencias del bloque «plan» se dicen distintas entre sí", () => {
+    expect(sentence({ plan_absent_reason: "household_not_solved" }).text).toContain(
+      "El hogar no resuelve una fecha",
+    );
+    expect(sentence({ plan_absent_reason: "months_override" }).text).toContain(
+      "horizonte forzado",
+    );
+    const sinLiquido = sentence({ plan_absent_reason: "no_liquid_assets" });
+    expect(sinLiquido.text).toContain("Sin activos líquidos");
+    expect(sinLiquido.tone).toBe("danger");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe("«Jubilarme a una edad» — la edad manda y el sorteo la juzga", () => {
+  const atAge = {
+    strategy: "retire_at_age",
+    retirement_date_basis: "target_age",
+    jubilacion_month_index: 240,
+    jubilacion_age: 55,
+    success_threshold_pct: 95,
+  } satisfies Partial<PlanSentenceSeries>;
+
+  it("la frase de §4: éxito, umbral entre paréntesis y la aportación que falta", () => {
+    const s = sentence(
+      {
+        ...atAge,
+        success_of_plan: 0.82,
+        success_wilson_low: 0.8,
+        contribution_required_monthly: "300",
+      },
+      { targetRetirementAge: 55 },
+    );
+    expect(s.text).toBe(
+      "A los 55, como pediste: aguantan 82 de cada 100 escenarios (tu umbral es 95). " +
+        `Para llegar harían falta ${formatCurrencyAmount("300", "EUR")} más al mes.`,
+    );
+    expect(s.tone).toBe("warn");
+  });
+
+  it("cuando ya llega, la fecha válida al lado dice cuánto margen hay", () => {
+    const s = sentence(
+      {
+        ...atAge,
+        success_of_plan: 0.97,
+        success_wilson_low: 0.96,
+        safe_date_month_index: 144,
+        safe_date_age: 47,
+      },
+      { targetRetirementAge: 55 },
+    );
+    expect(s.text).toBe(
+      "A los 55, como pediste: aguantan 97 de cada 100 escenarios (tu umbral es 95). " +
+        "Ya llegas: podrías incluso a los 47.",
+    );
+    expect(s.tone).toBe("ok");
+  });
+
+  it("`contribution_underfunded` es rojo y no promete un importe que no existe", () => {
+    const s = sentence(
+      {
+        ...atAge,
+        success_of_plan: 0.4,
+        success_wilson_low: 0.38,
+        contribution_required_monthly: "9000",
+        contribution_underfunded: true,
+      },
+      { targetRetirementAge: 55 },
+    );
+    expect(s.text).toBe(
+      "A los 55, como pediste: aguantan 40 de cada 100 escenarios (tu umbral es 95). " +
+        "Ni ahorrando todo tu sobrante llegas a los 55.",
+    );
+    expect(s.tone).toBe("danger");
+    expect(s.text).not.toContain("9.000");
   });
 
   it("sin edad objetivo la frase es el hueco de configuración, en ámbar", () => {
-    const s = sentence({ strategy: "retire_at_age", jubilacion_month_index: 240 }, null);
-    expect(s.text).toBe("Falta tu edad de jubilación objetivo");
+    const s = sentence({
+      strategy: "retire_at_age",
+      retirement_date_basis: "target_age",
+    });
+    expect(s.text).toBe("Falta tu edad de jubilación objetivo.");
     expect(s.tone).toBe("warn");
   });
 
-  it("la edad GUARDADA respalda a la calculada cuando no hay fecha de nacimiento", () => {
-    const s = sentence({ strategy: "retire_at_age", jubilacion_month_index: 240 }, 58);
-    expect(s.text).toBe("Te jubilas en M240, a los 58");
-  });
-
-  it("sin mes de jubilación queda la edad, que sigue siendo el plan pedido", () => {
-    expect(sentence({ strategy: "retire_at_age" }, 55).text).toBe("Te jubilas a los 55");
-  });
-});
-
-describe("«Coast FIRE» — manda el mes coast", () => {
-  it("dice cuándo puedes dejar de aportar y a qué edad te jubilas", () => {
+  it("la edad la pone el SERVIDOR; la guardada solo respalda cuando el motor no publicó ninguna", () => {
     const s = sentence(
-      { strategy: "coast", coast_fire_month_index: 84, jubilacion_month_index: 300 },
-      60,
+      {
+        strategy: "retire_at_age",
+        retirement_date_basis: "target_age",
+        success_of_plan: 0.96,
+        success_wilson_low: 0.955,
+      },
+      { targetRetirementAge: 58 },
     );
-    expect(s.text).toBe("Puedes dejar de aportar en M84 y jubilarte a los 60");
+    expect(s.text).toContain("A los 58, como pediste");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe("«Coast FIRE» — dos modos, dos frases", () => {
+  it("modo A (fijo la edad de jubilación): el hito es cuándo puedes dejar de aportar", () => {
+    const s = sentence(
+      {
+        ...meeting,
+        strategy: "coast",
+        retirement_date_basis: "target_age",
+        coast_stop_month_index: 192,
+        jubilacion_month_index: 360,
+        jubilacion_age: 55,
+      },
+      { targetRetirementAge: 55, ageAt },
+    );
+    expect(s.text).toBe(
+      "Puedes dejar de aportar en M192 (a los 41) y jubilarte a los 55 con 95 de cada 100.",
+    );
     expect(s.tone).toBe("ok");
   });
 
-  it("sin mes coast NO falta un dato: no se llega ni aportando siempre (ámbar)", () => {
-    const s = sentence({ strategy: "coast", jubilacion_month_index: 300 }, 60);
-    expect(s.text).toBe(
-      "No hay mes coast: ni aportando todos los meses llegas al objetivo en tu edad",
+  it("modo B (fijo la edad de parada): la fecha de jubilación sale del sorteo", () => {
+    const s = sentence(
+      {
+        ...meeting,
+        strategy: "coast",
+        retirement_date_basis: "success_threshold",
+        coast_stop_month_index: 192,
+        jubilacion_month_index: 384,
+        jubilacion_age: 57,
+        safe_date_month_index: 384,
+        safe_date_age: 57,
+      },
+      { ageAt },
     );
+    expect(s.text).toBe(
+      "Dejando de aportar a los 41, te jubilas en M384 (a los 57) con 95 de cada 100.",
+    );
+  });
+
+  it("sin resolutor de edades no se estima ninguna: solo la fecha (B5)", () => {
+    const s = sentence({
+      ...meeting,
+      strategy: "coast",
+      retirement_date_basis: "success_threshold",
+      coast_stop_month_index: 192,
+      jubilacion_month_index: 384,
+    });
+    expect(s.text).toBe("Dejando de aportar en M192, te jubilas en M384 con 95 de cada 100.");
+  });
+
+  it("`coast_not_reachable`: no se llega ni aportando siempre, y eso es rojo", () => {
+    const s = sentence(
+      {
+        strategy: "coast",
+        retirement_date_basis: "target_age",
+        jubilacion_age: 55,
+        warnings: ["coast_not_reachable"],
+      },
+      { targetRetirementAge: 55 },
+    );
+    expect(s.text).toBe("Ni aportando hasta el final llegas a los 55 con tu umbral.");
+    expect(s.tone).toBe("danger");
+  });
+
+  it("todavía sin mes coast resuelto: ámbar, y no se finge un «ya puedes»", () => {
+    const s = sentence({ strategy: "coast", retirement_date_basis: "target_age" }, {
+      targetRetirementAge: 55,
+    });
+    expect(s.text).toBe("Todavía no hay ningún mes en el que puedas dejar de aportar.");
     expect(s.tone).toBe("warn");
   });
 
-  it("mes coast 0 o anterior: ya puedes", () => {
-    expect(
-      sentence({ strategy: "coast", coast_fire_month_index: 0, jubilacion_month_index: 200 }, 60)
-        .text,
-    ).toBe("Ya puedes dejar de aportar y jubilarte a los 60");
-  });
-
-  it("sin edad objetivo cae a la fecha de jubilación", () => {
-    expect(
-      sentence({ strategy: "coast", coast_fire_month_index: 84, jubilacion_month_index: 300 })
-        .text,
-    ).toBe("Puedes dejar de aportar en M84 y jubilarte en M300");
+  it("el modo del perfil gana a la deducción por `retirement_date_basis`", () => {
+    const s = sentence(
+      {
+        ...meeting,
+        strategy: "coast",
+        retirement_date_basis: "target_age",
+        coast_stop_month_index: 192,
+        jubilacion_month_index: 384,
+      },
+      { coastMode: "fixed_stop_age", ageAt },
+    );
+    expect(s.text).toContain("Dejando de aportar a los 41");
   });
 });
 
-describe("«Media jornada» — dos hitos en una frase", () => {
-  it("fase parcial y jubilación total", () => {
-    const s = sentence({
-      strategy: "partial",
-      partial_retirement_month_index: 120,
-      jubilacion_month_index: 264,
-    });
-    expect(s.text).toBe("Media jornada desde M120; jubilación total en M264");
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe("«Jornada reducida» — dos hitos en una frase", () => {
+  it("la frase de §4: cuándo empieza la fase y cuándo te jubilas del todo", () => {
+    const s = sentence(
+      {
+        ...meeting,
+        strategy: "partial",
+        partial_start_month_index: 192,
+        jubilacion_month_index: 360,
+        jubilacion_age: 55,
+        safe_date_month_index: 360,
+        safe_date_age: 55,
+      },
+      { ageAt },
+    );
+    expect(s.text).toBe(
+      "Puedes pasar a jornada reducida en M192 (a los 41) y jubilarte del todo en M360 (a los 55) con 95 de cada 100.",
+    );
     expect(s.tone).toBe("ok");
   });
 
-  it("`underfunded` la pone en rojo", () => {
+  it("`partial_never_starts`: el plan no puede permitírsela, en rojo", () => {
     const s = sentence({
       strategy: "partial",
-      partial_retirement_month_index: 120,
-      jubilacion_month_index: 264,
-      underfunded: true,
-    });
-    expect(s.tone).toBe("danger");
-  });
-
-  it("sin jubilación total dentro del horizonte, rojo y dicho con todas las letras", () => {
-    const s = sentence({ strategy: "partial", partial_retirement_month_index: 120 });
-    expect(s.text).toBe("Media jornada desde M120; sin jubilación total en el horizonte");
-    expect(s.tone).toBe("danger");
-  });
-
-  it("sin fase parcial (la jubilación total se la come) lo dice y no la finge", () => {
-    const s = sentence({ strategy: "partial", jubilacion_month_index: 90 });
-    expect(s.text).toBe("Sin fase de media jornada; te jubilas en M90");
-  });
-
-  it("sin ninguno de los dos, la frase de ausencia", () => {
-    const s = sentence({ strategy: "partial" });
-    expect(s.text).toBe("No cruzas el objetivo en el horizonte");
-    expect(s.tone).toBe("danger");
-  });
-});
-
-describe("«Puente hasta la pensión» — S8", () => {
-  it("la longitud del puente es jubilación→pensión, NO meses desde hoy", () => {
-    // Jubilación en el mes 120 (a los 60) y pensión en el 264 (a los 72): 144 meses = 12 años.
-    const s = sentence({
-      strategy: "pension_bridge",
-      jubilacion_month_index: 120,
-      jubilacion_age: 60,
-      pension_start_month_index: 264,
+      warnings: ["partial_never_starts"],
     });
     expect(s.text).toBe(
-      "Te jubilas en M120, a los 60 y vives del capital 12 años hasta la pensión (M264)",
+      "Tu plan no puede permitirse la jornada reducida en ningún mes del horizonte.",
     );
-    expect(s.parts.bridgeMonths).toBe(144);
-    // El bug: contar desde hoy daría 22 años, y la frase habría sonado igual de creíble.
-    expect(s.text).not.toContain("22 años");
-  });
-
-  it("con la pensión ya en marcha al jubilarse no hay puente que contar", () => {
-    const s = sentence({
-      strategy: "pension_bridge",
-      jubilacion_month_index: 200,
-      pension_start_month_index: 150,
-    });
-    expect(s.text).toBe("Te jubilas en M200 con la pensión ya en marcha (M150)");
-    expect(s.parts.bridgeMonths).toBe(-50);
-  });
-
-  it("sin pensión declarada, la estrategia lo pide", () => {
-    const s = sentence({ strategy: "pension_bridge", jubilacion_month_index: 120 });
-    expect(s.text).toBe("Te jubilas en M120; falta declarar tu pensión");
-    expect(s.tone).toBe("warn");
-  });
-
-  it("sin cruce en el horizonte, rojo", () => {
-    const s = sentence({ strategy: "pension_bridge", pension_start_month_index: 264 });
-    expect(s.text).toBe("No cruzas el objetivo en el horizonte");
     expect(s.tone).toBe("danger");
-    expect(s.parts.bridgeMonths).toBeNull();
+  });
+
+  it("`partial_never_fully_retires`: empieza la fase y no termina, y se dice con todas las letras", () => {
+    const s = sentence(
+      {
+        strategy: "partial",
+        partial_start_month_index: 192,
+        warnings: ["partial_never_fully_retires"],
+      },
+      { ageAt },
+    );
+    expect(s.text).toBe(
+      "Pasas a jornada reducida en M192 (a los 41), pero no llegas a jubilarte del todo dentro del horizonte.",
+    );
+    expect(s.tone).toBe("danger");
+  });
+
+  it("sin fase (la jubilación total se la come) lo dice y no la finge", () => {
+    const s = sentence({
+      ...meeting,
+      strategy: "partial",
+      jubilacion_month_index: 90,
+      safe_date_month_index: 90,
+    });
+    expect(s.text).toBe("Sin fase de jornada reducida: te jubilas en M90 con 95 de cada 100.");
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 describe("modo de eje «edades» — la edad no se dice dos veces", () => {
-  it("con el rótulo ya en edades, la coletilla «, a los N» desaparece", () => {
+  it("con el rótulo ya en edades, el paréntesis «(a los N)» desaparece", () => {
     const s = sentence(
-      { strategy: "asap", jubilacion_month_index: 144, jubilacion_age: 52 },
-      null,
-      "ages",
+      {
+        ...meeting,
+        jubilacion_month_index: 144,
+        jubilacion_age: 52,
+        safe_date_month_index: 144,
+        safe_date_age: 52,
+      },
+      { ageMode: "ages" },
     );
-    expect(s.text).toBe("Te jubilas en M144 · dentro de 12 años");
+    expect(s.text).toContain("Con tu plan te jubilas en M144: aguantan 95 de cada 100");
+    expect(s.text).not.toContain("(a los 52)");
     // La edad sigue publicada en `parts` para quien la quiera.
     expect(s.parts.retirementAge).toBe(52);
-  });
-
-  it("en «A una edad fija» la edad SÍ se mantiene: es el disparador, no una etiqueta del eje", () => {
-    const s = sentence(
-      { strategy: "retire_at_age", jubilacion_month_index: 240, jubilacion_age: 55 },
-      55,
-      "ages",
-    );
-    expect(s.text).toBe("Te jubilas en M240, a los 55");
   });
 });
 
 describe("`parts` — las piezas se publican para no recalcularlas en la vista", () => {
   it("el hito secundario de cada estrategia va etiquetado con su tipo", () => {
     expect(
-      sentence({ strategy: "coast", coast_fire_month_index: 84 }).parts.secondaryKind,
+      sentence({ strategy: "coast", coast_stop_month_index: 84 }).parts.secondaryKind,
     ).toBe("coast");
     expect(
-      sentence({ strategy: "partial", partial_retirement_month_index: 120 }).parts.secondaryKind,
+      sentence({ strategy: "partial", partial_start_month_index: 120 }).parts.secondaryKind,
     ).toBe("partial");
     expect(
       sentence({ strategy: "asap", pension_start_month_index: 264 }).parts.secondaryKind,
@@ -279,9 +530,19 @@ describe("`parts` — las piezas se publican para no recalcularlas en la vista",
   });
 
   it("el hito secundario trae su mes Y su rótulo ya resuelto", () => {
-    const p = sentence({ strategy: "coast", coast_fire_month_index: 84 }).parts;
+    const p = sentence({ strategy: "coast", coast_stop_month_index: 84 }).parts;
     expect(p.secondaryMonthIndex).toBe(84);
     expect(p.secondaryLabel).toBe("M84");
+  });
+
+  it("S8: el puente es jubilación→pensión, NO meses desde hoy", () => {
+    // Jubilación en el mes 120 y pensión en el 264: 144 meses = 12 años, no 22.
+    const p = sentence({
+      jubilacion_month_index: 120,
+      safe_date_month_index: 120,
+      pension_start_month_index: 264,
+    }).parts;
+    expect(p.bridgeMonths).toBe(144);
   });
 
   it("el plazo hasta la jubilación nunca es negativo", () => {
@@ -293,6 +554,7 @@ describe("`parts` — las piezas se publican para no recalcularlas en la vista",
       series: null,
       targetRetirementAge: null,
       monthLabel,
+      currencyIso: "EUR",
     });
     expect(s.text).toBe("Sin plan que mostrar");
     expect(s.tone).toBe("warn");
@@ -301,59 +563,115 @@ describe("`parts` — las piezas se publican para no recalcularlas en la vista",
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-describe("memberPlanSentence — tercera persona para el hogar (U10)", () => {
+describe("memberPlanSentence — tercera persona, con estado (U10 + B7)", () => {
   function member(over: Partial<MemberPlanSentenceMember> = {}): MemberPlanSentenceMember {
     return {
       username: "Max",
+      strategy: "asap",
       jubilacion_month_index: null,
+      jubilacion_age: null,
+      coast_fire_month_index: null,
       partial_retirement_month_index: null,
+      underfunded: null,
+      warnings: [],
+      plan_state: "household_not_solved",
       ...over,
     };
   }
 
-  it("el caso de U10: un plazo en años, sin fecha", () => {
-    expect(memberPlanSentence(member({ jubilacion_month_index: 144 }), monthLabel)).toBe(
-      "Max se quiere jubilar en 12 años.",
+  it("estrategia por edad: la fecha está FIJADA, y se dice que lo está", () => {
+    const s = memberPlanSentence(
+      member({ strategy: "retire_at_age", jubilacion_month_index: 420, jubilacion_age: 60 }),
+      monthLabel,
+    );
+    expect(s.text).toBe("Max se jubila a los 60 (fecha fijada).");
+    expect(s.tone).toBe("ok");
+  });
+
+  it("estrategia por cruce: el hogar NO resuelve su fecha, y manda a su vista «Yo»", () => {
+    const s = memberPlanSentence(member({ username: "Ada" }), monthLabel);
+    expect(s.text).toBe(
+      "Ada: sin fecha calculada en la vista Hogar — mírala en su vista «Yo».",
+    );
+    expect(s.tone).toBe("ok");
+  });
+
+  it("sin fecha de nacimiento, el sufijo lo dice y la línea va en rojo (B7)", () => {
+    const s = memberPlanSentence(
+      member({ username: "Ada", warnings: ["birth_date_missing"] }),
+      monthLabel,
+    );
+    expect(s.text).toBe(
+      "Ada: sin fecha calculada en la vista Hogar — mírala en su vista «Yo» — falta su fecha de nacimiento.",
+    );
+    expect(s.tone).toBe("danger");
+  });
+
+  it("`underfunded` gana a cualquier hueco de configuración y pinta de rojo", () => {
+    const s = memberPlanSentence(
+      member({
+        strategy: "retire_at_age",
+        jubilacion_month_index: 420,
+        jubilacion_age: 60,
+        underfunded: true,
+        warnings: ["target_retirement_age_missing"],
+      }),
+      monthLabel,
+    );
+    expect(s.text).toBe("Max se jubila a los 60 (fecha fijada) — con su ahorro actual no llega.");
+    expect(s.tone).toBe("danger");
+  });
+
+  it("coast y jornada reducida añaden su hito, sin inventar cifras", () => {
+    const s = memberPlanSentence(
+      member({
+        username: "Mariona",
+        strategy: "coast",
+        jubilacion_month_index: 216,
+        jubilacion_age: 58,
+        coast_fire_month_index: 96,
+        partial_retirement_month_index: 120,
+      }),
+      monthLabel,
+    );
+    expect(s.text).toBe(
+      "Mariona se jubila a los 58 (fecha fijada) y deja de aportar en M96 y hace jornada reducida desde M120.",
     );
   });
 
-  it("con media jornada, la segunda mitad de la frase", () => {
-    expect(
-      memberPlanSentence(
-        member({
-          username: "Mariona",
-          jubilacion_month_index: 216,
-          partial_retirement_month_index: 120,
-        }),
-        monthLabel,
-      ),
-    ).toBe("Mariona se quiere jubilar en 18 años y hacer media jornada a partir de M120.");
-  });
-
-  it("sin cruce en el horizonte lo dice, y no lo disfraza de plazo", () => {
-    expect(memberPlanSentence(member({ username: "Ada" }), monthLabel)).toBe(
-      "Ada no cruza el objetivo en el horizonte.",
+  it("sin fecha efectiva pero con jornada reducida, la fase sí es un hecho suyo", () => {
+    const s = memberPlanSentence(
+      member({ username: "Ada", strategy: "partial", partial_retirement_month_index: 60 }),
+      monthLabel,
+    );
+    expect(s.text).toBe(
+      "Ada: sin fecha calculada en la vista Hogar — mírala en su vista «Yo» (hace jornada reducida desde M60).",
     );
   });
 
-  it("sin cruce pero con media jornada, las dos mitades y su relación", () => {
-    expect(
-      memberPlanSentence(
-        member({ username: "Ada", partial_retirement_month_index: 60 }),
-        monthLabel,
-      ),
-    ).toBe("Ada no cruza el objetivo en el horizonte, pero hará media jornada a partir de M60.");
+  it("sin edad publicada se rotula el MES, nunca una edad inventada (B5)", () => {
+    const s = memberPlanSentence(
+      member({ strategy: "retire_at_age", jubilacion_month_index: 420 }),
+      monthLabel,
+    );
+    expect(s.text).toBe("Max se jubila en M420 (fecha fijada).");
   });
 
   it("quien ya puede jubilarse no espera «0 meses»", () => {
-    expect(memberPlanSentence(member({ jubilacion_month_index: 0 }), monthLabel)).toBe(
-      "Max ya se puede jubilar.",
-    );
+    expect(
+      memberPlanSentence(
+        member({ strategy: "retire_at_age", jubilacion_month_index: 0 }),
+        monthLabel,
+      ).text,
+    ).toBe("Max ya se puede jubilar (fecha fijada).");
   });
 
   it("un nombre vacío no deja la frase sin sujeto", () => {
     expect(
-      memberPlanSentence(member({ username: "  ", jubilacion_month_index: 12 }), monthLabel),
-    ).toBe("Esta persona se quiere jubilar en 1 año.");
+      memberPlanSentence(
+        member({ username: "  ", strategy: "retire_at_age", jubilacion_month_index: 12, jubilacion_age: 40 }),
+        monthLabel,
+      ).text,
+    ).toBe("Esta persona se jubila a los 40 (fecha fijada).");
   });
 });
