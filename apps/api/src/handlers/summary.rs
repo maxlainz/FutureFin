@@ -458,9 +458,10 @@ pub struct SummaryResponse {
     /// `POST`/`PATCH /v1/liabilities` (`type_tag`), no por categoría: el desglose por categoría es
     /// `liabilities_by_category`, y los dos suman lo mismo.
     pub liabilities_by_type_tag: Vec<TypeTagBreakdownLine>,
-    /// **El PLAN de jubilación de quien pregunta** (5.0.0, D27): estrategia, disparador, mes
-    /// efectivo, ahorro necesario, margen y el rojo de D17. Es lo que alimenta la tarjeta «Tu
-    /// plan» del Resumen sin obligar a la SPA a pedir además la serie de proyección entera.
+    /// **El PLAN de jubilación de quien pregunta** (5.0.0, modelo v2 — «el éxito define la
+    /// fecha»): estrategia, fecha, ahorro necesario, éxito con su umbral y capital necesario hoy.
+    /// Es lo que alimenta la tarjeta «Tu plan» del Resumen sin obligar a la SPA a pedir además la
+    /// serie de proyección entera.
     ///
     /// **Todo `null` con `absent_reason: household_aggregate` en `view=household`**: el hogar es
     /// la suma de N planes independientes (uno por miembro, con su estrategia y su edad) y no
@@ -468,109 +469,159 @@ pub struct SummaryResponse {
     pub plan: SummaryPlan,
 }
 
-/// El plan de jubilación resumido. Sale **del mismo objeto que pinta el chart**: se lee de la
-/// entrada de cache de proyección del usuario y, si no hay ninguna, se calcula por el camino
-/// cacheado (`projection_series_cached`) — que además la deja caliente, así que el GET de la
-/// serie que viene detrás es un HIT. Nunca hay una segunda fórmula: si estas cifras y las de
-/// `/v1/projection/series` pudieran divergir, no valdrían para nada.
+/// El plan de jubilación resumido — **modelo v2** («el éxito define la fecha», WP A7 de 5.0.0).
+/// Sale **del mismo objeto que pinta el chart**: se lee de la entrada de cache de proyección del
+/// usuario y, si no hay ninguna, se calcula por el camino cacheado (`projection_series_cached`)
+/// — que además la deja caliente, así que el GET de la serie que viene detrás es un HIT. Nunca
+/// hay una segunda fórmula: si estas cifras y las de `/v1/projection/series` pudieran divergir,
+/// no valdrían para nada. El bloque del ÉXITO (WP6b, ahora modelo v2) tampoco es una segunda
+/// fórmula ni una segunda petición: `success_of_plan`/`success_wilson_low`/`safe_date_month_index`
+/// /`needed_capital_today` son NIVEL 1 del solve — se resuelven SÍNCRONOS, dentro del mismo miss
+/// que resuelve la fecha, y viajan en el MISMO objeto que copia el resto de este bloque. Hasta
+/// 5.0.0/WP6b esto exigía una segunda lectura (`projection_bands_cached`, con su propia cache):
+/// ya no existe tal lectura — `attach_success` (que la hacía) se retiró entero.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SummaryPlan {
-    /// `asap` | `retire_at_age` | `coast` | `partial` | `pension_bridge`.
+    /// `asap` | `retire_at_age` | `coast` | `partial`. `pension_bridge` ya no es una estrategia
+    /// propia (C7 del modelo v2): un perfil guardado con ese literal se lee como `asap` con el
+    /// puente encendido, igual que en `/v1/projection/series`.
     pub strategy: Option<String>,
-    /// Qué DISPARA la jubilación: `liquid_crossing` (el capital alcanzó el objetivo) o
-    /// `target_age` (la edad manda, llegue o no el capital — D17).
-    pub retirement_trigger: Option<String>,
     /// Mes EFECTIVO de jubilación, en la rejilla de `points[].month_index` de
-    /// `/v1/projection/series` (0 = hoy). `null` con `absent_reason`, y también —con
-    /// `absent_reason` nulo— cuando el plan no se jubila dentro del horizonte: eso es un
-    /// resultado, no un hueco.
+    /// `/v1/projection/series` (0 = hoy). Es el mismo valor que `safe_date_month_index` bajo el
+    /// nombre publicado desde 1.x. `null` con `absent_reason`, y también —con `absent_reason`
+    /// nulo— cuando ningún mes del horizonte cumple el umbral (`retirement_date_basis:
+    /// "not_reachable"` en la serie): eso es un RESULTADO, no un hueco.
     pub jubilacion_month_index: Option<u32>,
-    /// **Ahorro mensual necesario** para llegar al objetivo en la edad elegida, en euros. Es
-    /// exactamente `required_contribution_monthly` de `/v1/projection/series` — el mismo número
-    /// del mismo solve, con el nombre que se lee en un Resumen. `null` con las estrategias por
-    /// cruce: ahí no hay edad contra la que resolver nada.
+    /// **Ahorro mensual necesario** para que la fecha elegida sea válida, en euros. Es
+    /// exactamente `contribution_required_monthly` de `/v1/projection/series` — el mismo número
+    /// del mismo solve, con el nombre que se lee en un Resumen. `null` cuando la fecha la decide
+    /// el UMBRAL y no una edad (`retirement_date_basis != "target_age"`): ahí no hay edad contra
+    /// la que resolver nada.
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub required_savings_monthly: Option<Decimal>,
-    /// **Margen mensual disponible** (D16/D31), con la base que corresponde a cada estrategia
-    /// —declarada en el campo homónimo de `/v1/projection/series`, que es de donde sale—.
-    /// `null` cuando la estrategia no publica margen.
+    /// **Retirado del modelo v2**: el margen (`disposable_monthly`) era una lectura de los solves
+    /// DETERMINISTAS de 4.15.x y no tiene equivalente en el modelo v2 —`/v1/projection/series` ya
+    /// no publica ese campo—. Se conserva aquí, **siempre `null`**, únicamente porque
+    /// `SummaryPlanApi` (la SPA) todavía lo declara como campo obligatorio; el día que la SPA lo
+    /// retire, este campo se retira con él.
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub disposable_monthly: Option<Decimal>,
-    /// **El rojo de D17**: `true` ⟺ ni invirtiendo cada euro de sobrante se llega al objetivo en
-    /// la edad elegida. `null` = la pregunta no aplica a esta estrategia — nunca `false` para
-    /// decir «no aplica».
+    /// `true` ⟺ **ni el techo de búsqueda** (`contribution_required_search_ceiling` de la serie)
+    /// cumple el umbral con la fecha pedida. Es exactamente `contribution_underfunded` de
+    /// `/v1/projection/series`, con el nombre que se lee en un Resumen. `null` = la pregunta no
+    /// se hizo (fecha decidida por el umbral, no por una edad) — **nunca `false`** para decir
+    /// «no aplica», que se leería como «va bien».
     pub underfunded: Option<bool>,
     /// Por qué el plan viene vacío: `household_aggregate` (la vista suma N planes y no tiene uno)
-    /// | `projection_unavailable` (la simulación no se pudo calcular; el Resumen es una lectura y
-    /// no se cae por eso). `null` ⟺ el plan de arriba es el del usuario.
+    /// | `projection_unavailable` (no hay serie que leer — la simulación falló; el Resumen es una
+    /// lectura y no se cae por eso) | el `plan_absent_reason` tal cual lo publica la serie
+    /// (`birth_date_missing`: sin fecha de nacimiento no hay edad que convertir en mes). `null` ⟺
+    /// el plan de arriba es el del usuario, con `plan_state: "ready"`.
     #[schema(value_type = Option<String>)]
     pub absent_reason: Option<&'static str>,
 
-    // ---- 5.0.0 WP6b — el KPI «Éxito del plan» (D25/D28) --------------------------------------
-    /// **Probabilidad de éxito de Monte Carlo**: fracción de caminos en los que el plan OCURRE y
-    /// AGUANTA — el hogar se jubila dentro del horizonte (o la estrategia es por EDAD, y entonces
-    /// la jubilación es un dato) **y** la cartera no se agota nunca. `0.87` = 87 de cada 100
-    /// escenarios.
+    // ---- Modelo v2 — «el éxito define la fecha» (sustituye al KPI D25/D28 de WP6b) ------------
+    /// **FRACCIÓN** [0,1] (`0.96` = 96 %): éxito del plan EN SU FECHA — caminos que no fallan
+    /// (F1/F2/F3, ver `financial-contracts.md` §2.5) de los `paths_used` de la serie. Estimador
+    /// puntual, no la cota de Wilson (`success_wilson_low`, al lado).
     ///
-    /// La definición cambió en el pase de correcciones de la revisión adversarial del motor: la
-    /// vieja —solo «no se agota»— premiaba al hogar que no se jubila jamás. Los dos campos que
-    /// van justo debajo, `never_retired_probability` y `success_given_retired`, son las otras dos
-    /// caras de la misma cifra y **se leen juntas**: un 0,63 con un tercio de caminos que no se
-    /// jubilan no describe el mismo plan que un 0,63 con todos jubilándose.
-    ///
-    /// **Es EXACTAMENTE el número que dibuja el fan chart** de `GET /v1/projection/bands`: sale
-    /// del mismo cache, con los caminos y la semilla por defecto. Si el Resumen lo recalculara
-    /// por su cuenta con otra muestra, el KPI y el gráfico enseñarían dos éxitos distintos del
-    /// mismo plan en la misma pantalla.
+    /// **Es EXACTAMENTE el número del fan chart** de `GET /v1/projection/bands` con el sorteo por
+    /// defecto: sale del NIVEL 1 del mismo solve, copiado del mismo objeto que `jubilacion_month_index`
+    /// de arriba — nunca un segundo sorteo con otra semilla, que enseñaría dos éxitos distintos
+    /// del mismo plan en la misma pantalla. `null` sin plan (`absent_reason`) o, rarísimo, cuando
+    /// la serie no pudo representar la fracción (ver `success_absent_reason`).
+    pub success_of_plan: Option<f64>,
+    /// **El umbral del perfil**, ecoado (80..=100, default 95): la restricción que decidió la
+    /// fecha, así que una fecha sin su umbral no se puede comparar con otra. `null` a la vez que
+    /// `success_of_plan`.
+    pub success_threshold_pct: Option<u32>,
+    /// **FRACCIÓN**, la cota INFERIOR del intervalo de Wilson al 95 % de `success_of_plan` — el
+    /// número contra el que se compara el umbral por debajo de 100 (estable frente a la semilla y
+    /// a `N`, que es justo lo que el estimador puntual no es). No viaja en `SummaryPlanApi`
+    /// todavía; se publica igual porque es el mismo objeto y omitirlo sería una tercera fórmula
+    /// (recortar campos de una copia).
+    pub success_wilson_low: Option<f64>,
+    /// **La fecha válida**, el mismo valor que `jubilacion_month_index` bajo el nombre del modelo
+    /// v2 (gemelo de `safe_date_month_index` en `/v1/projection/series`). Viaja con los dos
+    /// nombres por la misma razón que el resto de la app: uno es el contrato publicado desde
+    /// 1.x, el otro el vocabulario del modelo.
+    pub safe_date_month_index: Option<u32>,
+    /// **Capital necesario HOY**, en euros de HOY, redondeado a cientos hacia arriba: el líquido
+    /// con el que la cartera del usuario cumpliría el umbral jubilándose YA. Exactamente
+    /// `needed_capital_today` de `/v1/projection/series` — la MISMA cifra en Jubilación, Resumen y
+    /// Proyección. `null` ⟺ hay `needed_capital_absent_reason` en la serie (sin líquidos, umbral
+    /// inalcanzable…) o no hay plan — **nunca un 0 €**, que se leería como «no necesitas nada».
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
-    pub success_probability: Option<Decimal>,
-    /// `green` | `amber` | `red` con el semáforo de D28, **de corte fijo desde 5.0.0** (V7):
-    /// verde solo con el 100 % de caminos sin agotar la cartera, ámbar en `[0,90, 1)`, rojo por
-    /// debajo. `null` ⟺ no hay probabilidad que colorear. El `success_threshold_pct` que aquí se
-    /// ecoaba se retiró con el ajuste: no hay umbral que auditar.
+    pub needed_capital_today: Option<Decimal>,
+    /// `ready` = el bloque de arriba (fecha, éxito, capital) viaja resuelto; `pending` = la
+    /// proyección está momentáneamente no disponible por una condición TRANSITORIA del servidor
+    /// (semáforo de simulaciones cerrado — solo ocurre durante un apagado ordenado) y conviene
+    /// reintentar la lectura, no asumir que el usuario no tiene plan; `absent` = no se pudo
+    /// resolver, ver `absent_reason`. **`pending` NO cubre un fallo del cálculo** (input corrupto,
+    /// pánico de la tarea): esos siguen siendo `absent` con `projection_unavailable`, porque
+    /// reintentar no los arregla y decir «pending» ahí sería prometer una recuperación que no va a
+    /// llegar.
+    #[schema(value_type = String)]
+    pub plan_state: &'static str,
+    /// `green` | `amber` | `red`, con la MISMA regla que `/v1/projection/bands` (`success_verdict`,
+    /// reutilizada — no reimplementada) sobre `success_of_plan`/`success_wilson_low`/
+    /// `success_threshold_pct` de arriba: verde ⟺ `success_wilson_low` cumple el umbral (o 100 %
+    /// con cero fallos), ámbar ⟺ el estimador puntual llega y el intervalo no, rojo el resto.
+    /// `null` ⟺ no hay las tres cifras que el veredicto necesita.
     #[schema(value_type = Option<String>)]
     pub success_verdict: Option<&'static str>,
-    /// **Fracción de caminos que NO se jubilan** dentro del horizonte, del MISMO sorteo que
-    /// `success_probability`. `"0"` por construcción con una estrategia por edad. Sin ella, un
-    /// «Éxito del plan: 63 %» no distingue el plan que falla del plan que no llega a empezar.
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub never_retired_probability: Option<Decimal>,
-    /// **Éxito entre los caminos que sí se jubilan.** `null` cuando ninguno lo hace: ahí la
-    /// pregunta «¿aguanta?» no tiene sobre qué formularse, y un `0` la respondería en falso.
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub success_given_retired: Option<Decimal>,
-    /// Por qué faltan las cifras del éxito (`success_probability`, `success_verdict`,
-    /// `never_retired_probability`, `success_given_retired`) cuando el resto del plan SÍ está:
-    /// `bands_unavailable` (el sorteo falló; el Resumen es una lectura y no se cae por eso).
-    /// `null` ⟺ la probabilidad viaja, o el plan entero está ausente y lo dice `absent_reason`.
+    /// Por qué falta específicamente la probabilidad (`success_of_plan`, `success_wilson_low`,
+    /// `success_verdict`) cuando el resto del plan SÍ está: `bands_unavailable` — caso patológico
+    /// (la serie no pudo representar la fracción como `f64`), no un sorteo que fallara aparte,
+    /// porque desde el modelo v2 ya no hay un sorteo aparte que falle. `null` ⟺ la probabilidad
+    /// viaja, o el plan entero está ausente y lo dice `absent_reason`.
     #[schema(value_type = Option<String>)]
     pub success_absent_reason: Option<&'static str>,
 }
 
 impl SummaryPlan {
     /// El plan ausente, con su razón. **Todos** los campos van a `null` a la vez —los del plan
-    /// y los del éxito—: publicar uno suelto sería peor que no publicar ninguno. (Sin contarlos:
-    /// el número se quedó obsoleto en cuanto el bloque del éxito creció.)
+    /// y los del éxito—: publicar uno suelto sería peor que no publicar ninguno.
     fn absent(reason: &'static str) -> Self {
         SummaryPlan {
             strategy: None,
-            retirement_trigger: None,
             jubilacion_month_index: None,
             required_savings_monthly: None,
             disposable_monthly: None,
             underfunded: None,
             absent_reason: Some(reason),
-            success_probability: None,
+            success_of_plan: None,
+            success_threshold_pct: None,
+            success_wilson_low: None,
+            safe_date_month_index: None,
+            needed_capital_today: None,
+            plan_state: PLAN_STATE_ABSENT,
             success_verdict: None,
-            never_retired_probability: None,
-            success_given_retired: None,
-            // El hueco ya lo explica `absent_reason`; una segunda razón para lo mismo se leería
-            // como si hubieran fallado dos cosas distintas.
+            success_absent_reason: None,
+        }
+    }
+
+    /// El plan MOMENTÁNEAMENTE no disponible: distinto de `absent` porque aquí SÍ conviene
+    /// reintentar (ver el doc de `plan_state`). Sin `absent_reason`: no es que el plan no exista,
+    /// es que esta lectura no pudo confirmarlo.
+    fn pending() -> Self {
+        SummaryPlan {
+            strategy: None,
+            jubilacion_month_index: None,
+            required_savings_monthly: None,
+            disposable_monthly: None,
+            underfunded: None,
+            absent_reason: None,
+            success_of_plan: None,
+            success_threshold_pct: None,
+            success_wilson_low: None,
+            safe_date_month_index: None,
+            needed_capital_today: None,
+            plan_state: PLAN_STATE_PENDING,
+            success_verdict: None,
             success_absent_reason: None,
         }
     }
@@ -578,17 +629,32 @@ impl SummaryPlan {
 
 /// El agregado del hogar no tiene plan: es la suma de N simulaciones independientes.
 pub(crate) const PLAN_ABSENT_HOUSEHOLD: &str = "household_aggregate";
-/// La proyección no se pudo calcular. El Resumen es una LECTURA y no se cae por ello — pero lo
-/// dice, en vez de servir seis `null` indistinguibles de «no tienes plan».
+/// No hay serie que leer: la simulación no se pudo calcular (input corrupto, pánico de la tarea…).
+/// El Resumen es una LECTURA y no se cae por ello — pero lo dice, en vez de servir varios `null`
+/// indistinguibles de «no tienes plan». Distinto de `plan_state: "pending"` (ver su doc):
+/// reintentar esta lectura no lo arregla.
 pub(crate) const PLAN_ABSENT_PROJECTION_UNAVAILABLE: &str = "projection_unavailable";
-/// El sorteo de Monte Carlo falló pero el plan determinista sí está. Se distingue del anterior a
-/// propósito: «no sabemos tu probabilidad de éxito» y «no sabemos tu plan» son dos situaciones
-/// muy distintas para quien lee el Resumen.
+/// La serie no pudo representar la fracción de éxito (caso patológico — no hay ya un sorteo
+/// aparte que falle: el éxito es NIVEL 1, del mismo objeto que la fecha). Se distingue de
+/// `absent_reason` a propósito: «no sabemos tu probabilidad de éxito» y «no sabemos tu plan» son
+/// dos situaciones muy distintas para quien lee el Resumen.
 pub(crate) const PLAN_ABSENT_BANDS_UNAVAILABLE: &str = "bands_unavailable";
+/// El bloque de arriba viaja resuelto.
+const PLAN_STATE_READY: &str = "ready";
+/// Condición transitoria del servidor (ver el doc de `SummaryPlan::plan_state`); reintentar.
+const PLAN_STATE_PENDING: &str = "pending";
+/// No se pudo resolver; ver `absent_reason`.
+const PLAN_STATE_ABSENT: &str = "absent";
 
-/// Lee el plan de jubilación del usuario **del objeto que sirve el chart**.
+/// Lee el plan de jubilación del usuario **del objeto que sirve el chart**. Modelo v2: el bloque
+/// del éxito (`success_of_plan`, `success_wilson_low`, `safe_date_month_index`,
+/// `needed_capital_today`) YA no es una segunda lectura — es NIVEL 1 del mismo solve, copiado por
+/// `plan_from_series` del MISMO objeto que el resto del bloque. `attach_success` (WP6b) se retiró
+/// entero con la lectura aparte que hacía (`projection_bands_cached`): dos ejecuciones de Monte
+/// Carlo con semillas distintas daban dos probabilidades del mismo plan, y ya no hace falta
+/// arriesgarse a eso porque el número está aquí desde el principio.
 ///
-/// Orden deliberado: primero las dos densidades de la cache (estas seis cifras no dependen de la
+/// Orden deliberado: primero las dos densidades de la cache (estas cifras no dependen de la
 /// densidad — son escalares del plan, no puntos de la serie), y solo si no hay ninguna se calcula
 /// por `projection_series_cached` con `hybrid`, que es la densidad que la SPA pide primero.
 ///
@@ -596,6 +662,13 @@ pub(crate) const PLAN_ABSENT_BANDS_UNAVAILABLE: &str = "bands_unavailable";
 /// hasta 26 proyecciones). No es coste nuevo del Resumen, es el MISMO que iba a pagar el GET de
 /// la serie un instante después — y como se inserta en la cache, ese GET pasa a ser un HIT. Tras
 /// un login o una mutación con warm-up, esto es siempre un HIT.
+///
+/// **`Err(ApiError::Unavailable)` se distingue de cualquier otro error** (ver el doc de
+/// `SummaryPlan::plan_state`): es la única variante que `heavy::run_projection_sim` produce por
+/// una condición del SERVIDOR (semáforo de simulaciones cerrado, solo en apagado ordenado) y no
+/// por el cálculo en sí — un pánico de la tarea de simulación se mapea a `BadRequest("task_panic:
+/// …")`, con su propio código estable publicado, y sigue siendo `absent`. Confundir los dos le
+/// diría al usuario «reintenta» ante un fallo que no se va a arreglar solo.
 async fn summary_plan(state: &Arc<AppState>, iid: Uuid, user_id: Uuid) -> SummaryPlan {
     use crate::state::{Density, ProjectionCacheKey};
     for density in [crate::state::Density::Hybrid, Density::Monthly] {
@@ -620,6 +693,13 @@ async fn summary_plan(state: &Arc<AppState>, iid: Uuid, user_id: Uuid) -> Summar
     .await
     {
         Ok(series) => plan_from_series(&series),
+        Err(ApiError::Unavailable) => {
+            tracing::warn!(
+                installation_id = %iid,
+                "proyección momentáneamente no disponible (semáforo cerrado) para /v1/summary: se publica pending"
+            );
+            SummaryPlan::pending()
+        }
         Err(e) => {
             tracing::warn!(error = %e, "no se pudo resolver el plan de jubilación para /v1/summary");
             SummaryPlan::absent(PLAN_ABSENT_PROJECTION_UNAVAILABLE)
@@ -627,73 +707,54 @@ async fn summary_plan(state: &Arc<AppState>, iid: Uuid, user_id: Uuid) -> Summar
     }
 }
 
-/// **El KPI «Éxito del plan» del Resumen** (D28), leído del MISMO sitio que el fan chart.
-///
-/// Va por `projection_bands_cached` con los caminos y la semilla por defecto, que es exactamente
-/// la petición que hace la sección «Riesgo»: en el caso normal esto es un HIT y no cuesta nada, y
-/// en un MISS deja la entrada caliente para el GET que viene detrás. **Nunca hay una segunda
-/// muestra**: dos ejecuciones de Monte Carlo con semillas distintas darían dos probabilidades
-/// distintas del mismo plan, y el usuario vería el KPI del Resumen discrepar del gráfico de
-/// Jubilación sin ninguna explicación posible.
-///
-/// Un fallo aquí **no tumba el Resumen**: se publican a `null` todos los campos del éxito con
-/// `success_absent_reason`, y el resto del plan sigue viajando.
-async fn attach_success(state: &Arc<AppState>, iid: Uuid, user_id: Uuid, mut plan: SummaryPlan) -> SummaryPlan {
-    use crate::handlers::projection_bands::{projection_bands_cached, DEFAULT_BANDS_PATHS};
-    if plan.absent_reason.is_some() {
-        return plan;
-    }
-    match projection_bands_cached(
-        state,
-        user_id,
-        iid,
-        LedgerView::Mine,
-        DEFAULT_BANDS_PATHS,
-        None,
-    )
-    .await
-    {
-        Ok(bands) => {
-            // **A7 pendiente (5.0.0)**: el KPI de éxito pasa a leerse del PLAN (nivel 1), no de
-            // las bandas — la misma muestra que decidió la fecha. Hasta entonces se copia lo que
-            // las bandas v2 sí publican; `never_retired_probability` y `success_given_retired`
-            // desaparecieron con la pregunta que respondían («¿ocurre el plan?»), porque en v2 la
-            // fecha es un DATO del plan y no algo que pueda no ocurrir.
-            plan.success_probability = bands.success_of_plan;
-            plan.success_verdict = Some(bands.success_verdict);
-            plan.never_retired_probability = None;
-            plan.success_given_retired = None;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "no se pudieron calcular las bandas para el KPI de éxito");
-            plan.success_absent_reason = Some(PLAN_ABSENT_BANDS_UNAVAILABLE);
-        }
-    }
-    plan
-}
-
-/// Proyección → plan. Copia de campos, sin una sola cuenta: cualquier aritmética aquí sería la
-/// segunda implementación de algo que la proyección ya resolvió.
+/// Proyección → plan. Copia de campos, sin una sola cuenta —con UNA excepción declarada,
+/// `success_verdict`, que no es una cuenta nueva sino la MISMA función que usa
+/// `GET /v1/projection/bands` (`projection_bands::success_verdict`), reutilizada sobre las tres
+/// cifras que la serie ya publica. Cualquier otra aritmética aquí sería la segunda implementación
+/// de algo que la proyección ya resolvió.
 fn plan_from_series(
     s: &crate::handlers::projection::ProjectionSeriesResponse,
 ) -> SummaryPlan {
+    use rust_decimal::prelude::ToPrimitive;
+
+    if let Some(reason) = s.plan_absent_reason {
+        return SummaryPlan::absent(reason);
+    }
+
+    // Nivel 1 al completo: cuando `plan_absent_reason` es `None` el solve corrió y estas cifras
+    // están resueltas. `success_of_plan`/`success_wilson_low` viajan como `f64` (fracción, no
+    // dinero) porque así los declara `SummaryPlanApi`; la serie las publica en `Decimal` para su
+    // propio contrato de string, y la conversión es la única aritmética de esta función que no es
+    // una copia directa.
+    let success_of_plan = s.success_of_plan.and_then(|d| d.to_f64());
+    let success_wilson_low = s.success_wilson_low.and_then(|d| d.to_f64());
+    let success_verdict = match (success_of_plan, success_wilson_low, s.success_threshold_pct) {
+        (Some(success), Some(wilson_low), Some(threshold)) => Some(
+            crate::handlers::projection_bands::success_verdict(success, wilson_low, threshold),
+        ),
+        _ => None,
+    };
+    // Caso patológico: hay plan (fecha, capital…) pero la fracción de éxito no se pudo
+    // representar como `f64` (sin equivalente real: `Decimal::to_f64` solo falla con overflow, y
+    // una probabilidad está en `[0,1]`). Se documenta en vez de fingir que no puede pasar.
+    let success_absent_reason = (success_of_plan.is_none()).then_some(PLAN_ABSENT_BANDS_UNAVAILABLE);
+
     SummaryPlan {
         strategy: s.strategy.clone(),
-        // A7: `retirement_trigger` se sustituye por `retirement_date_basis` y `disposable_monthly`
-        // desaparece con el margen; aquí se mapea lo mínimo para que el Resumen siga compilando.
-        retirement_trigger: s.retirement_date_basis.map(str::to_string),
         jubilacion_month_index: s.jubilacion_month_index,
         required_savings_monthly: s.contribution_required_monthly,
+        // Retirado del modelo v2 — ver el doc del campo en `SummaryPlan`.
         disposable_monthly: None,
         underfunded: s.contribution_underfunded,
         absent_reason: None,
-        // Los rellena `attach_success` con la entrada del cache de bandas: aquí no se calcula
-        // nada, igual que el resto de esta función.
-        success_probability: None,
-        success_verdict: None,
-        never_retired_probability: None,
-        success_given_retired: None,
-        success_absent_reason: None,
+        success_of_plan,
+        success_threshold_pct: s.success_threshold_pct,
+        success_wilson_low,
+        safe_date_month_index: s.safe_date_month_index,
+        needed_capital_today: s.needed_capital_today,
+        plan_state: PLAN_STATE_READY,
+        success_verdict,
+        success_absent_reason,
     }
 }
 
@@ -1031,9 +1092,7 @@ pub(crate) async fn summary_core(
         liabilities_by_category,
         liabilities_by_type_tag,
         plan: match view {
-            LedgerView::Mine => {
-                attach_success(state, iid, user_id, summary_plan(state, iid, user_id).await).await
-            }
+            LedgerView::Mine => summary_plan(state, iid, user_id).await,
             LedgerView::Household => SummaryPlan::absent(PLAN_ABSENT_HOUSEHOLD),
         },
     })

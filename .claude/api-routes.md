@@ -190,7 +190,7 @@ Forma (todas las claves opcionales en el wire):
 | `pension` | `{monthly_amount_today > 0, starts_at_age ∈ [50, horizon], indexed=true, fraction_while_partial ∈ [0,1], bridge_enabled=false, bridge_max_pct?, bridge_max_years?}` | Se sustituye ENTERA. **Es un flujo de caja** (M4): no descuenta ningún objetivo. `fraction_while_partial` sigue en `0` por defecto porque **por defecto no se supone que cobres pensión mientras trabajas a jornada reducida** — súbelo si tu régimen te la paga (no es una regla legal: es el supuesto conservador, B9) |
 | `pension.bridge_*` | `bridge_enabled` (default `false`), `bridge_max_pct ∈ (swr_pct, 20]`, `bridge_max_years ∈ [1, 20]` | **El puente (C2/C7): un ajuste, no una estrategia**, disponible con cualquiera. Encendido, el tope de la tasa inicial en el mes de jubilación es `bridge_max_pct` en vez del SWR mientras la pensión llegue dentro de `bridge_max_years`, y la fecha nunca es anterior a `pensión − años máximos`. **Al encenderlo sin números se rellenan `max(5, swr + 1)` % y 7 años** —derivados en LECTURA, así que mover el SWR mueve el tope—. Códigos: `bridge_max_pct_out_of_range`, `bridge_max_pct_not_above_swr`, `bridge_max_years_out_of_range` |
 | `partial_retirement` | `{starts_at_age? ∈ [18, horizon], income_monthly_today ≥ 0, expense_basis, mode}` | Se sustituye ENTERA. `mode`: `at_age` (default) · `asap` (M11). **`starts_at_age` es opcional desde v2**: con `asap` la calcula el solver; con `at_age` falta ⇒ `partial_start_age_required`. Debe empezar ANTES de `target_retirement_age` cuando las dos existen (`partial_not_before_retirement`) |
-| ~~`target_basis`~~, ~~`bridge_discount_basis`~~, ~~`cash_buffer_months`~~ | **retirados en v2** (M4/M6) | No se publican (ni como `null`) y no se aceptan como elección. **Un JSONB viejo que los conserve sigue cargando**: `RetirementProfile` no lleva `deny_unknown_fields`, así que las tres claves se ignoran solas y desaparecen en la primera escritura. La migración `20260906091500_drop_stored_success_threshold.sql` las borra del almacén. Códigos retirados: `cash_buffer_out_of_range`, `bridge_discount_out_of_range`, `pension_required_for_bridge` |
+| ~~`target_basis`~~, ~~`bridge_discount_basis`~~, ~~`cash_buffer_months`~~ | **retirados en v2** (M4/M6) | No se publican (ni como `null`) y no se aceptan como elección. **Un JSONB viejo que los conserve sigue cargando**: `RetirementProfile` no lleva `deny_unknown_fields`, así que las tres claves se ignoran solas y desaparecen en la primera escritura. La migración `20260906091500_drop_stored_success_threshold.sql` las borra del almacén. **Los cinco códigos que retira v2** (los dos que comparten nombre con un campo de arriba, más los tres que no tenían campo homónimo): `target_basis`, `bridge_discount_basis`, `bridge_discount_out_of_range`, `cash_buffer_out_of_range`, `pension_required_for_bridge` — ninguno debe seguir en `tests/fixtures/error-codes.json` (`error_codes_parity.rs::no_retired_code_survives_in_the_fixture`) |
 
 **Respuesta de las dos rutas** (`RetirementProfileResponse`): `{profile, birth_date}`.
 `target_basis_stored` murió con la base del objetivo (M4).
@@ -735,43 +735,53 @@ Los perfiles se resuelven por el MISMO camino que cualquier otro (`resolve_retir
 leyendo el JSONB crudo: una segunda interpretación del mismo dato es como divergen los defaults.
  `total_liabilities` and breakdowns use the 4.7.0 visibility predicate (plan vivo o saldo vivo — see Liabilities note above); el `net_return` solo resta el TIN de lo que DEVENGA (#121).
 
-**`plan` — la tarjeta «Tu plan» del Resumen (5.0.0 WP5-2b, D27).** Objeto con
-`{strategy, retirement_trigger, jubilacion_month_index, required_savings_monthly,
-disposable_monthly, underfunded, absent_reason}` **+ el KPI «Éxito del plan» de WP6b**
-(`success_probability`, `success_verdict`, `never_retired_probability`, `success_given_retired`,
-`success_absent_reason`). El `success_threshold_pct` que aquí se ecoaba **se retiró en 5.0.0**
-(V7): el corte del veredicto es fijo y no hay umbral que auditar.
+**`plan` — la tarjeta «Tu plan» del Resumen (5.0.0, modelo v2 «el éxito define la fecha», WP A7).**
+Objeto con `{strategy, jubilacion_month_index, required_savings_monthly, disposable_monthly,
+underfunded, absent_reason}` **+ el bloque del éxito** (`success_of_plan`, `success_threshold_pct`,
+`success_wilson_low`, `safe_date_month_index`, `needed_capital_today`, `plan_state`,
+`success_verdict`, `success_absent_reason`). `retirement_trigger` (la pareja disparador/D17 de
+4.15.x) se retiró: no tiene equivalente en el modelo v2, donde la fecha la decide siempre el
+umbral de éxito o es un dato de edad, nunca un cruce contra un objetivo.
 
-- **Sale del MISMO objeto que pinta el chart**: se lee de la entrada de cache de proyección del
-  solicitante (las dos densidades; estas seis cifras son escalares del plan y no dependen de la
-  densidad) y, si no hay ninguna, se calcula por `projection_series_cached` con `hybrid` — que es
-  la densidad que la SPA pide primero, así que el MISS **deja la cache caliente** y el GET de la
-  serie que viene detrás es un HIT. Cero aritmética propia: `plan_from_series` copia campos. Si
-  hubiera una segunda fórmula, las dos superficies podrían contestar distinto a la misma pregunta.
-- **El KPI de éxito sale del cache de BANDAS por el mismo camino** (`projection_bands_cached` con
-  los caminos y la semilla por defecto — exactamente la petición que hace la sección «Riesgo»), así
-  que el tile del Resumen y el fan chart de Jubilación citan **la misma ejecución** de Monte Carlo.
-  Dos ejecuciones con semillas distintas darían dos probabilidades del mismo plan y el usuario las
-  vería discrepar en la misma pantalla. Un MISS aquí también deja las bandas calientes. **Con la
-  misma entrada de cache viajan `never_retired_probability` y `success_given_retired`** (mismos
-  strings de 6 decimales, misma semántica y mismos `null` que en `/v1/projection/bands`): la
-  probabilidad de éxito redefinida no se puede leer sola, y un «Éxito del plan: 63 %» sin ellas no
-  distingue el plan que falla del plan que no llega a empezar. **`buffer_inactive_reason` NO viaja
-  aquí**: es una lectura del sorteo, no del plan. Si el sorteo falla, el Resumen **no se cae**: los
-  campos del éxito van a `null` a la vez con
-  `success_absent_reason: "bands_unavailable"`, distinto de `absent_reason:
-  "projection_unavailable"` — «no sabemos tu probabilidad» y «no sabemos tu plan» son dos
-  situaciones muy distintas. Regresión: `summary_plan.rs::the_success_kpi_is_the_same_run_the_risk_chart_draws`.
-- **`required_savings_monthly` ES `required_contribution_monthly`** de `/v1/projection/series` —
-  el mismo número del mismo solve, con el nombre que se lee en un Resumen. `disposable_monthly` y
-  `underfunded` viajan tal cual, con sus mismas bases y sus mismos `null` (que no son ceros: son
-  «esta estrategia no responde a esa pregunta»).
-- **`absent_reason`**: `household_aggregate` en `view=household` —el hogar es la suma de N planes
-  independientes y «el ahorro necesario del hogar» no es una cifra que exista, así que **TODOS** los
-  campos del bloque van a `null` A LA VEZ (los del plan y los del éxito; sin contarlos, que el
-  número caducó en cuanto el bloque creció)— o `projection_unavailable` si la simulación no se pudo
-  calcular (el Resumen es una LECTURA y no se cae por eso, pero lo dice en vez de servir un puñado
-  de `null` indistinguibles de «no tienes plan»). `null` ⟺ el plan de arriba es el del usuario.
+- **Ya NO hay dos lecturas.** Hasta WP6b el bloque del éxito llegaba por `attach_success`, una
+  llamada APARTE a `projection_bands_cached` (su propia cache, su propio HIT/MISS). Desde WP A7
+  `attach_success` **se retiró entero**: `success_of_plan`/`success_wilson_low`/
+  `safe_date_month_index`/`needed_capital_today` son NIVEL 1 del solve —se resuelven SÍNCRONOS,
+  dentro del mismo miss que resuelve la fecha (`retirement_solver::solve_plan_level1`)— y viajan
+  YA en el mismo objeto que pinta el chart: el mismo que sirve `/v1/projection/series`. Sale de la
+  entrada de cache de proyección del solicitante (las dos densidades; estas cifras son escalares
+  del plan y no dependen de la densidad) y, si no hay ninguna, se calcula por
+  `projection_series_cached` con `hybrid` — que es la densidad que la SPA pide primero, así que el
+  MISS **deja la cache caliente** y el GET de la serie que viene detrás es un HIT. Cero aritmética
+  propia en `plan_from_series` salvo una: `success_verdict` se computa llamando a la MISMA función
+  que usa `GET /v1/projection/bands` (`projection_bands::success_verdict`, reutilizada, no
+  reimplementada) sobre las tres cifras que la serie ya publica. Regresión:
+  `summary_plan.rs::the_success_kpi_comes_from_the_plan_not_from_a_second_draw` y
+  `::reading_the_summary_does_not_draw_bands` (el Resumen ya no deja ninguna entrada en
+  `bands_cache`: antes de WP A7 dejaba una).
+- **`required_savings_monthly` ES `contribution_required_monthly`** de `/v1/projection/series` —
+  el mismo número del mismo solve, con el nombre que se lee en un Resumen; `underfunded` es
+  `contribution_underfunded`. Los dos son `null` cuando la fecha la decide el UMBRAL y no una edad
+  (`retirement_date_basis != "target_age"`: `asap`, `coast` modo B, `partial`) — ahí no hay edad
+  contra la que resolver nada, y `null` no es `false`/`0`. `disposable_monthly` (el margen de los
+  solves deterministas de 4.15.x) **no tiene equivalente en el modelo v2** y `/v1/projection/series`
+  ya no lo publica; el campo se conserva en `SummaryPlan`, **siempre `null`**, únicamente porque la
+  SPA (`SummaryPlanApi`) todavía lo declara obligatorio.
+- **`plan_state`**: `"ready"` cuando el bloque de arriba viaja resuelto; `"absent"` cuando
+  `plan_absent_reason` de la serie está puesto (`birth_date_missing` — en el modelo v2 NINGUNA
+  estrategia resuelve plan sin fecha de nacimiento, ni `asap` — C5) o no hay serie que leer
+  (`absent_reason: "projection_unavailable"`), o en `view=household` (`absent_reason:
+  "household_aggregate"`: el hogar es la suma de N planes independientes y «el ahorro necesario
+  del hogar» no es una cifra que exista); `"pending"` es una condición TRANSITORIA del propio
+  servidor (`ApiError::Unavailable` de `heavy::run_projection_sim` — el semáforo de simulaciones
+  cerrado, que solo ocurre en un apagado ordenado) y **no** cubre un fallo del cálculo (un pánico
+  de la tarea sigue publicando `absent`/`projection_unavailable`: reintentar no lo arregla). En
+  `"absent"` **TODOS** los campos del bloque van a `null` A LA VEZ (los del plan y los del éxito;
+  sin contarlos, que el número caducó en cuanto el bloque creció).
+- **`success_absent_reason: "bands_unavailable"`** ya no significa «el sorteo aparte falló» (no
+  existe tal sorteo): es el caso patológico en que la serie resolvió plan pero la fracción de
+  éxito no se pudo representar. Distinto de `absent_reason` a propósito: «no sabemos tu
+  probabilidad» y «no sabemos tu plan» son dos situaciones muy distintas para quien lee el Resumen.
 - **Coste**: tras un login o cualquier warm-up es siempre un HIT (medido: 5–9 ms en release sobre
   un hogar rico). Un MISS paga una proyección más los solves de la estrategia, que es exactamente
   lo que el GET de la serie iba a pagar un instante después.
@@ -1584,9 +1594,11 @@ Every non-2xx response carries three fields, not two:
   the console / a folded «Detalles técnicos».
 
 Adding a coded error = prefix the message. `ApiError::BadRequest("swr_out_of_range: swr_pct must
-be between 0 and 4".into())`. Two variants exist purely to carry a code where the plain one could
-not: `NotFoundWith` (404 with body) and `ConflictWith` (409 with body — the bare `Conflict` comes
-from the automatic 23505 mapping and cannot know *what* collided).
+be between 0 and 6".into())` (the bound is `[0, 6]` since the v2 retirement profile, M5 — the
+message states the real bound rather than a number frozen in a doc, B8). Two variants exist purely
+to carry a code where the plain one could not: `NotFoundWith` (404 with body) and `ConflictWith`
+(409 with body — the bare `Conflict` comes from the automatic 23505 mapping and cannot know *what*
+collided).
 
 **Gate**: `apps/api/tests/error_codes_parity.rs` extracts every code from the source into
 `tests/fixtures/error-codes.json`, and `apps/web/src/lib/errorMessages.test.ts` fails if any lacks
