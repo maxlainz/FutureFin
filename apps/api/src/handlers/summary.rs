@@ -500,14 +500,13 @@ pub struct SummaryPlan {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub required_savings_monthly: Option<Decimal>,
-    /// **Retirado del modelo v2**: el margen (`disposable_monthly`) era una lectura de los solves
-    /// DETERMINISTAS de 4.15.x y no tiene equivalente en el modelo v2 —`/v1/projection/series` ya
-    /// no publica ese campo—. Se conserva aquí, **siempre `null`**, únicamente porque
-    /// `SummaryPlanApi` (la SPA) todavía lo declara como campo obligatorio; el día que la SPA lo
-    /// retire, este campo se retira con él.
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub disposable_monthly: Option<Decimal>,
+    // **`disposable_monthly` se retiró aquí en 5.0.0 (WP A12).** Era el margen de los solves
+    // DETERMINISTAS de 4.15.x; el modelo v2 no lo tiene —`/v1/projection/series` dejó de publicar
+    // los `disposable_*` con la retirada del colchón, porque el ahorro que el coast libera es
+    // «disponible» por DECISIÓN y no una cifra que el motor calcule—. Sobrevivió una versión
+    // publicando SIEMPRE `null`, solo porque `SummaryPlanApi` lo declaraba obligatorio; ahora que
+    // la SPA lo ha retirado también, un campo que solo puede valer `null` es un hueco que se lee
+    // como «tu margen es desconocido» cuando la verdad es «esa pregunta ya no se hace».
     /// `true` ⟺ **ni el techo de búsqueda** (`contribution_required_search_ceiling` de la serie)
     /// cumple el umbral con la fecha pedida. Es exactamente `contribution_underfunded` de
     /// `/v1/projection/series`, con el nombre que se lee en un Resumen. `null` = la pregunta no
@@ -530,8 +529,14 @@ pub struct SummaryPlan {
     /// **Es EXACTAMENTE el número del fan chart** de `GET /v1/projection/bands` con el sorteo por
     /// defecto: sale del NIVEL 1 del mismo solve, copiado del mismo objeto que `jubilacion_month_index`
     /// de arriba — nunca un segundo sorteo con otra semilla, que enseñaría dos éxitos distintos
-    /// del mismo plan en la misma pantalla. `null` sin plan (`absent_reason`) o, rarísimo, cuando
-    /// la serie no pudo representar la fracción (ver `success_absent_reason`).
+    /// del mismo plan en la misma pantalla. `null` sin plan (`absent_reason`), **sin fecha
+    /// válida** (`retirement_date_basis: "not_reachable"` en la serie) o, rarísimo, cuando la
+    /// serie no pudo representar la fracción — los tres casos con su `success_absent_reason`.
+    ///
+    /// **Ojo con el caso sin fecha**: la serie SÍ publica ahí un `success_of_plan`, pero significa
+    /// otra cosa —la mejor observación del solve, el mes que más cerca se quedó— y este campo
+    /// promete «el éxito de tu plan EN SU FECHA». Copiarlo tal cual rotulaba un porcentaje junto a
+    /// un plan que no ocurre (WP A12).
     pub success_of_plan: Option<f64>,
     /// **El umbral del perfil**, ecoado (80..=100, default 95): la restricción que decidió la
     /// fecha, así que una fecha sin su umbral no se puede comparar con otra. `null` a la vez que
@@ -570,14 +575,21 @@ pub struct SummaryPlan {
     /// reutilizada — no reimplementada) sobre `success_of_plan`/`success_wilson_low`/
     /// `success_threshold_pct` de arriba: verde ⟺ `success_wilson_low` cumple el umbral (o 100 %
     /// con cero fallos), ámbar ⟺ el estimador puntual llega y el intervalo no, rojo el resto.
-    /// `null` ⟺ no hay las tres cifras que el veredicto necesita.
+    /// `null` ⟺ no hay las tres cifras que el veredicto necesita — incluido el caso **sin fecha
+    /// válida**, donde el color se pintaba sobre un plan que no ocurre (WP A12).
     #[schema(value_type = Option<String>)]
     pub success_verdict: Option<&'static str>,
     /// Por qué falta específicamente la probabilidad (`success_of_plan`, `success_wilson_low`,
-    /// `success_verdict`) cuando el resto del plan SÍ está: `bands_unavailable` — caso patológico
-    /// (la serie no pudo representar la fracción como `f64`), no un sorteo que fallara aparte,
-    /// porque desde el modelo v2 ya no hay un sorteo aparte que falle. `null` ⟺ la probabilidad
-    /// viaja, o el plan entero está ausente y lo dice `absent_reason`.
+    /// `success_threshold_pct`, `success_verdict`) cuando el resto del plan SÍ está. Dos literales:
+    ///
+    /// - `not_reachable` — **ningún mes del horizonte cumple el umbral**, así que no hay fecha y
+    ///   por tanto no hay éxito «en su fecha» que medir. Mismo literal que `retirement_date_basis`
+    ///   en la serie y que `success_absent_reason` en `/v1/projection/bands`.
+    /// - `bands_unavailable` — caso patológico (la serie no pudo representar la fracción como
+    ///   `f64`), no un sorteo que fallara aparte, porque desde el modelo v2 ya no hay un sorteo
+    ///   aparte que falle.
+    ///
+    /// `null` ⟺ la probabilidad viaja, o el plan entero está ausente y lo dice `absent_reason`.
     #[schema(value_type = Option<String>)]
     pub success_absent_reason: Option<&'static str>,
 }
@@ -590,7 +602,6 @@ impl SummaryPlan {
             strategy: None,
             jubilacion_month_index: None,
             required_savings_monthly: None,
-            disposable_monthly: None,
             underfunded: None,
             absent_reason: Some(reason),
             success_of_plan: None,
@@ -612,7 +623,6 @@ impl SummaryPlan {
             strategy: None,
             jubilacion_month_index: None,
             required_savings_monthly: None,
-            disposable_monthly: None,
             underfunded: None,
             absent_reason: None,
             success_of_plan: None,
@@ -639,6 +649,13 @@ pub(crate) const PLAN_ABSENT_PROJECTION_UNAVAILABLE: &str = "projection_unavaila
 /// `absent_reason` a propósito: «no sabemos tu probabilidad de éxito» y «no sabemos tu plan» son
 /// dos situaciones muy distintas para quien lee el Resumen.
 pub(crate) const PLAN_ABSENT_BANDS_UNAVAILABLE: &str = "bands_unavailable";
+/// `success_absent_reason`: **hay plan y no tiene fecha** — ningún mes del horizonte cumple el
+/// umbral (5.0.0, WP A12). Es el MISMO literal que `retirement_date_basis` de la serie y que
+/// `success_absent_reason` de `/v1/projection/bands`, y se importa de su definición en vez de
+/// escribirse otra vez: tres superficies que nombran la misma situación tienen que nombrarla
+/// igual, o la SPA acaba con tres ramas para un solo hecho.
+pub(crate) const PLAN_SUCCESS_ABSENT_NOT_REACHABLE: &str =
+    crate::handlers::retirement_solver::DATE_BASIS_NOT_REACHABLE;
 /// El bloque de arriba viaja resuelto.
 const PLAN_STATE_READY: &str = "ready";
 /// Condición transitoria del servidor (ver el doc de `SummaryPlan::plan_state`); reintentar.
@@ -721,34 +738,53 @@ fn plan_from_series(
         return SummaryPlan::absent(reason);
     }
 
+    // **Sin fecha válida no hay éxito DEL PLAN que publicar** (5.0.0, WP A12). La serie sí publica
+    // ahí un `success_of_plan`, pero significa otra cosa: es la MEJOR observación del solve —el
+    // mes que más cerca se quedó—, no «el éxito de tu plan en su fecha», que es lo que este campo
+    // promete y lo que la SPA rotula. Copiarla tal cual enseñaba «42 de cada 100» junto a un plan
+    // sin fecha, y su veredicto pintaba un color sobre algo que no ocurre. El hueco se publica
+    // como hueco, con el MISMO literal que `retirement_date_basis` para no inventar un segundo
+    // vocabulario.
+    let not_reachable = s.retirement_date_basis == Some(PLAN_SUCCESS_ABSENT_NOT_REACHABLE);
     // Nivel 1 al completo: cuando `plan_absent_reason` es `None` el solve corrió y estas cifras
     // están resueltas. `success_of_plan`/`success_wilson_low` viajan como `f64` (fracción, no
     // dinero) porque así los declara `SummaryPlanApi`; la serie las publica en `Decimal` para su
     // propio contrato de string, y la conversión es la única aritmética de esta función que no es
     // una copia directa.
-    let success_of_plan = s.success_of_plan.and_then(|d| d.to_f64());
-    let success_wilson_low = s.success_wilson_low.and_then(|d| d.to_f64());
-    let success_verdict = match (success_of_plan, success_wilson_low, s.success_threshold_pct) {
+    let success_of_plan = (!not_reachable)
+        .then(|| s.success_of_plan.and_then(|d| d.to_f64()))
+        .flatten();
+    let success_wilson_low = (!not_reachable)
+        .then(|| s.success_wilson_low.and_then(|d| d.to_f64()))
+        .flatten();
+    let success_threshold_pct = (!not_reachable).then_some(s.success_threshold_pct).flatten();
+    let success_verdict = match (success_of_plan, success_wilson_low, success_threshold_pct) {
         (Some(success), Some(wilson_low), Some(threshold)) => Some(
             crate::handlers::projection_bands::success_verdict(success, wilson_low, threshold),
         ),
         _ => None,
     };
-    // Caso patológico: hay plan (fecha, capital…) pero la fracción de éxito no se pudo
-    // representar como `f64` (sin equivalente real: `Decimal::to_f64` solo falla con overflow, y
-    // una probabilidad está en `[0,1]`). Se documenta en vez de fingir que no puede pasar.
-    let success_absent_reason = (success_of_plan.is_none()).then_some(PLAN_ABSENT_BANDS_UNAVAILABLE);
+    // Dos razones y no una. `not_reachable` es un RESULTADO del solve —se preguntó y no hay mes
+    // que cumpla—; `bands_unavailable` es el caso patológico en que hay plan (fecha, capital…)
+    // pero la fracción no se pudo representar como `f64` (sin equivalente real: `Decimal::to_f64`
+    // solo falla con overflow, y una probabilidad está en `[0,1]`). Se documenta en vez de fingir
+    // que no puede pasar.
+    let success_absent_reason = if not_reachable {
+        Some(PLAN_SUCCESS_ABSENT_NOT_REACHABLE)
+    } else {
+        success_of_plan
+            .is_none()
+            .then_some(PLAN_ABSENT_BANDS_UNAVAILABLE)
+    };
 
     SummaryPlan {
         strategy: s.strategy.clone(),
         jubilacion_month_index: s.jubilacion_month_index,
         required_savings_monthly: s.contribution_required_monthly,
-        // Retirado del modelo v2 — ver el doc del campo en `SummaryPlan`.
-        disposable_monthly: None,
         underfunded: s.contribution_underfunded,
         absent_reason: None,
         success_of_plan,
-        success_threshold_pct: s.success_threshold_pct,
+        success_threshold_pct,
         success_wilson_low,
         safe_date_month_index: s.safe_date_month_index,
         needed_capital_today: s.needed_capital_today,

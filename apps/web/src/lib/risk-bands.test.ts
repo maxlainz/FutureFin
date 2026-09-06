@@ -26,6 +26,7 @@ import {
   scenariosPerHundred,
   successParenthetical,
   showsNoVolatilityNotice,
+  showsRiskGradient,
   successVerdictTone,
   summarySuccessTile,
 } from "./risk-bands";
@@ -78,12 +79,12 @@ function bandsFixture(over: Partial<ProjectionBandsApi> = {}): ProjectionBandsAp
     success_sampling_error_pp: "1.2000",
     failures_by_kind: [0, 0, 0],
     success_verdict: "amber",
+    success_absent_reason: null,
     failure_probability_by_age: [],
     months_below_need_p50: 0,
     withdrawal_to_need_ratio_p50: null,
     any_volatility_declared: true,
     strategy: "asap",
-    retirement_trigger: "liquid_crossing",
     computed_in_ms: 55,
     model_note: "…",
     ...over,
@@ -349,6 +350,46 @@ describe("aviso «sin volatilidad declarada»", () => {
   });
 });
 
+// A12 — los dos vetos al degradado. Los dos existen porque su caso tiñe la banda de VERDE ENTERO
+// (`failure_probability_by_age` en ceros) sobre un sorteo que no midió riesgo, y el verde es
+// justamente el color que nadie va a cuestionar.
+describe("permiso para teñir la banda de riesgo", () => {
+  it("con volatilidad declarada y éxito medido, la banda se colorea", () => {
+    expect(showsRiskGradient(bandsFixture())).toBe(true);
+  });
+
+  it("sin volatilidad declarada no se colorea: un abanico de ancho cero no mide riesgo", () => {
+    expect(showsRiskGradient(bandsFixture({ any_volatility_declared: false }))).toBe(false);
+  });
+
+  it("sin fecha de jubilación no se colorea: sus ceros no son «riesgo cero»", () => {
+    expect(
+      showsRiskGradient(
+        bandsFixture({
+          success_absent_reason: "not_reachable",
+          success_of_plan: null,
+          success_wilson_low: null,
+          success_sampling_error_pp: null,
+          success_verdict: null,
+          failures_by_kind: [0, 0, 0],
+          failure_probability_by_age: [
+            { month_index: 599, age: 85, probability: 0, by_kind: [0, 0, 0] },
+          ],
+        }),
+      ),
+    ).toBe(false);
+    // La otra razón alcanzable por esta ruta veta igual: sin plan tampoco hay riesgo que teñir.
+    expect(
+      showsRiskGradient(bandsFixture({ success_absent_reason: "birth_date_missing" })),
+    ).toBe(false);
+  });
+
+  it("sin bandas no se colorea nada", () => {
+    expect(showsRiskGradient(null)).toBe(false);
+    expect(showsRiskGradient(undefined)).toBe(false);
+  });
+});
+
 describe("filas que hacen auditable el éxito", () => {
   const rowsOf = (over: Partial<ProjectionBandsApi> = {}) =>
     buildRiskExtraRows({ bands: bandsFixture(over) });
@@ -458,6 +499,74 @@ describe("filas que hacen auditable el éxito", () => {
   it("sin bandas no hay filas", () => {
     expect(buildRiskExtraRows({ bands: null })).toEqual([]);
     expect(buildRiskExtraRows({ bands: undefined })).toEqual([]);
+  });
+
+  // A12 — el caso que este bloque existe para no contar mal. El servidor sigue publicando
+  // `failures_by_kind`, la rejilla acumulada y las dos de cobertura (describen la trayectoria SIN
+  // jubilarse), pero valen 0: pintadas como siempre dirían «cero fallos, cobertura entera, 0 %
+  // fallan», o sea un plan impecable que no existe.
+  describe("sin fecha de jubilación no hay éxito que auditar", () => {
+    const noDate = (over: Partial<ProjectionBandsApi> = {}) =>
+      buildRiskExtraRows({
+        bands: bandsFixture({
+          success_absent_reason: "not_reachable",
+          success_of_plan: null,
+          success_wilson_low: null,
+          success_sampling_error_pp: null,
+          success_verdict: null,
+          // Exactamente lo que llega por el cable en ese caso: ceros de un sorteo que no pudo
+          // clasificar ni un fallo, más una rejilla de una sola fila valiendo 0.
+          failures_by_kind: [0, 0, 0],
+          failure_probability_by_age: [
+            { month_index: 599, age: 85, probability: 0, by_kind: [0, 0, 0] },
+          ],
+          months_below_need_p50: 0,
+          withdrawal_to_need_ratio_p50: "1",
+          ...over,
+        }),
+      });
+
+    it("devuelve UNA sola fila, la del motivo, y ninguna cifra de riesgo", () => {
+      const rows = noDate();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.key).toBe("success_absent");
+      expect(rows[0]!.label).toBe("Sin éxito que auditar");
+      expect(rows[0]!.detail).toContain("no hay ninguna fecha que llegue a tu umbral");
+      // Ni un porcentaje, ni un recuento: el valor es un guion CON su motivo al lado.
+      expect(rows[0]!.value).toBe("—");
+      expect(rows.some((r) => /%/.test(r.value))).toBe(false);
+    });
+
+    it("ninguna de las filas de riesgo se cuela con sus ceros", () => {
+      const keys = noDate().map((r) => r.key);
+      for (const gone of [
+        "failure_kind_1",
+        "failure_kind_2",
+        "failure_kind_3",
+        "months_below_need",
+        "withdrawal_to_need",
+        "failure_total",
+        "success_wilson_low",
+      ]) {
+        expect(keys, gone).not.toContain(gone);
+      }
+    });
+
+    it("con fallos contados de un plan sin fecha tampoco los desglosa: son de otra pregunta", () => {
+      // Defensivo: aunque el sorteo trajera contadores, sin fecha no clasifican el plan del
+      // usuario y desglosarlos daría una causa a un fracaso que no es el suyo.
+      expect(noDate({ failures_by_kind: [120, 30, 5] })).toHaveLength(1);
+    });
+
+    it("la otra razón alcanzable (sin fecha de nacimiento) tiene su propia frase", () => {
+      const rows = noDate({ success_absent_reason: "birth_date_missing" });
+      expect(rows[0]!.detail).toBe("falta tu fecha de nacimiento");
+    });
+
+    it("una razón futura no se traduce a una frase inventada", () => {
+      const rows = noDate({ success_absent_reason: "algo_nuevo" as never });
+      expect(rows[0]!.detail).toBe("no disponible");
+    });
   });
 
   it("todas las claves son únicas (son keys de React)", () => {
@@ -589,6 +698,43 @@ describe("KPI «Éxito del plan» del Resumen", () => {
       absent_reason: "algo_nuevo",
     })!;
     expect(tile.detail).toBe("no disponible");
+  });
+
+  // A12 — el plan SÍ está resuelto (`plan_state: "ready"`: hay estrategia, hay capital necesario);
+  // lo que no hay es fecha, y por tanto no hay «éxito en su fecha». La serie publica ahí un
+  // `success_of_plan` que mide otra cosa —la mejor observación del solve—, así que el Resumen lo
+  // recibe a `null` y esta tarjeta tiene que quedarse sin cifra Y sin color.
+  it("`not_reachable`: sin porcentaje, sin color y con el motivo escrito", () => {
+    const tile = summarySuccessTile({
+      plan_state: "ready",
+      success_of_plan: null,
+      success_threshold_pct: null,
+      success_verdict: null,
+      success_absent_reason: "not_reachable",
+      absent_reason: null,
+    })!;
+    expect(tile.value).toBe("—");
+    expect(tile.value).not.toMatch(/%/);
+    expect(tile.detail).toBe(
+      "no hay ninguna fecha que llegue a tu umbral, así que no hay éxito que medir",
+    );
+    // Ni alarma ni calma: nada se ha roto (no ha llegado a empezar) y nada aguanta.
+    expect(tile.tone).toBe("default");
+    // Sin cifra no hay sujeto que subtitular en el paréntesis.
+    expect(tile.parenthetical).toBeUndefined();
+  });
+
+  // La conflación que originó el bug: `no_liquid_assets` nunca fue una razón de la ausencia del
+  // ÉXITO —vive en `needed_capital_absent_reason`, que dice por qué falta una CIFRA—, así que
+  // traducirlo aquí prometía una frase que ningún backend podía disparar.
+  it("`no_liquid_assets` ya no se traduce: no es una razón de este campo", () => {
+    const tile = summarySuccessTile({
+      plan_state: "absent",
+      success_of_plan: null,
+      absent_reason: "no_liquid_assets",
+    })!;
+    expect(tile.detail).toBe("no disponible");
+    expect(tile.detail).not.toContain("líquidos");
   });
 
   it("sin bloque de plan (backend antiguo) no se pinta tarjeta", () => {

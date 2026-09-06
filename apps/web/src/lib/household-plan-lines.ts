@@ -5,7 +5,7 @@
  * U10 en una frase: **en Hogar se enseñan números agregados y UNA ORACIÓN por persona**, no una
  * tarjeta de plan por miembro con sus cifras. El motivo es de contrato, no de layout: el hogar
  * no tiene plan propio (`strategy` viaja `null`, el bloque «plan» entero va vacío con
- * `plan_absent_reason: "household_not_solved"` y cada fila llega con
+ * `plan_absent_reason: "household_aggregate"` y cada fila llega con
  * `plan_state: "household_not_solved"`), así que lo único que se puede decir de cada persona sin
  * mezclar bases es su hito determinista. Una rejilla de tarjetas invitaba justo a lo contrario —
  * comparar el «ahorro necesario» de dos personas con edades objetivo distintas, que no es una

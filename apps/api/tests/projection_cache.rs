@@ -66,8 +66,17 @@ async fn projection_series_serves_the_second_get_from_the_cache() {
     // La clave del plan se conserva: envenenar el cuerpo no puede desconectar la entrada de su
     // nivel 2, o el HIT publicaría `unavailable` y el centinela se leería como un fallo de cache.
     let plan_key = app.state.projection_cache_plan_key(&key).await;
+    // La generación se lee JUSTO antes de insertar (5.0.0, WP A12): aquí no hay cómputo lento en
+    // medio, así que es la vigente y la entrada entra. Un test que la inventara estaría probando
+    // la guardia en vez del cache.
+    let generation = app.state.projection_generation(iid).await;
     app.state
-        .projection_cache_insert(key.clone(), std::sync::Arc::new(poisoned), plan_key)
+        .projection_cache_insert_if_current(
+            key.clone(),
+            generation,
+            std::sync::Arc::new(poisoned),
+            plan_key,
+        )
         .await;
 
     // 3. HIT: si el body trae el centinela, salió de la cache y no de un recompute.
@@ -809,5 +818,314 @@ async fn an_allocation_rule_mutation_drops_the_projection_and_the_bands() {
     assert!(
         app.state.bands_cache.read().await.contains_key(&bands_key),
         "el recálculo debe dejar una entrada nueva"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 5.0.0 WP A12 — la mutación gana la carrera contra un cómputo lento
+// ---------------------------------------------------------------------------------------------
+
+/// **La carrera, forzada exactamente, sin hook y sin reloj.**
+///
+/// El fallo: un miss (o un warm-up) captura los datos, computa durante segundos y DESPUÉS inserta.
+/// Si una mutación invalida en medio, esa inserción llega tarde y **repuebla la cache con la foto
+/// de antes** — el usuario edita un activo y la cifra no cambia hasta que expira el TTL. En 4.x la
+/// ventana era de ~500 ms; desde 5.0.0 el nivel 1 del plan vive DENTRO del mismo permiso y son
+/// segundos.
+///
+/// No hace falta un hook para reproducirlo: `AppState` expone las dos mitades del cómputo —capturar
+/// la generación e insertar—, así que el test **es** el interleaving que se quiere probar, escrito
+/// en el orden exacto en que ocurre y sin depender de que dos tareas se crucen. Lo que ejecuta la
+/// prueba de verdad es el par de aserciones: con la generación vieja se descarta, con la de ahora
+/// se guarda. El segundo caso es el control: sin él, un método que devolviera `false` siempre
+/// pasaría el test y habría roto la cache entera.
+#[tokio::test]
+async fn a_mutation_during_a_compute_wins_over_the_stale_insert() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_retire_at_age(&app, &owner).await;
+    let iid = installation_id_of(&app, &owner.cookie).await;
+    let user_id = user_id_of(&app, &owner.cookie).await;
+
+    // Un GET normal para tener una respuesta REAL que insertar (nada de un objeto inventado: lo
+    // que se prueba es el camino de escritura, no la serialización).
+    let r = app
+        .get_with_cookie("/v1/projection/series?density=hybrid", &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let key = ProjectionCacheKey {
+        installation_id: iid,
+        view: LedgerView::Mine,
+        owner_user_id: Some(user_id),
+        density: Density::Hybrid,
+    };
+    let (response, plan_key) = {
+        let cache = app.state.projection_cache.read().await;
+        let e = cache.get(&key).expect("el GET debe dejar la entrada");
+        (e.response.clone(), e.plan_key)
+    };
+
+    // 1. El cómputo captura la generación de ANTES…
+    let captured = app.state.projection_generation(iid).await;
+    // 2. …la mutación llega mientras computa (una invalidación es lo que toda mutación dispara)…
+    app.state.invalidate_projection_by_installation(iid).await;
+    assert!(
+        !app.cache_contains(&key).await,
+        "la invalidación debe haber dejado la cache sin la entrada"
+    );
+    // 3. …y el cómputo termina e intenta insertar su foto vieja.
+    let stored = app
+        .state
+        .projection_cache_insert_if_current(key.clone(), captured, response.clone(), plan_key)
+        .await;
+    assert!(
+        !stored,
+        "la inserción con una generación obsoleta tiene que descartarse"
+    );
+    assert!(
+        !app.cache_contains(&key).await,
+        "y la cache tiene que seguir vacía: si se repuebla, el usuario ve la cifra de antes de su \
+         edición hasta que expire el TTL"
+    );
+
+    // Control: con la generación de AHORA la entrada entra. Sin esta mitad, un método que
+    // descartara siempre pasaría el test de arriba y habría roto la cache entera.
+    let current = app.state.projection_generation(iid).await;
+    assert_ne!(
+        current, captured,
+        "la invalidación tiene que haber movido la generación"
+    );
+    let stored = app
+        .state
+        .projection_cache_insert_if_current(key.clone(), current, response, plan_key)
+        .await;
+    assert!(stored, "con la generación vigente la entrada se guarda");
+    assert!(app.cache_contains(&key).await, "y queda en la cache");
+}
+
+/// **La misma carrera, pero de verdad**: un GET real computando mientras entra una mutación.
+///
+/// El de arriba fuerza el interleaving escribiéndolo; este lo provoca. La ventana es enorme y por
+/// eso no es flaky: el cómputo dura **segundos** (bisección estocástica del nivel 1 dentro del
+/// mismo permiso) y la generación se captura en el primer milisegundo, justo después del fallo de
+/// cache. La espera de 250 ms está para caer con holgura DENTRO de esa ventana — antes de ella la
+/// invalidación llegaría demasiado pronto (el GET capturaría ya la generación nueva y su inserción
+/// sería legítima), y ese caso no probaría nada.
+///
+/// Se comprueba además que el GET responde 200: la guardia descarta la ENTRADA de cache, nunca la
+/// respuesta — era correcta cuando se calculó y el llamante está esperándola.
+#[tokio::test]
+async fn a_get_racing_a_real_mutation_does_not_repopulate_the_cache() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_retire_at_age(&app, &owner).await;
+    let iid = installation_id_of(&app, &owner.cookie).await;
+    let user_id = user_id_of(&app, &owner.cookie).await;
+    let key = ProjectionCacheKey {
+        installation_id: iid,
+        view: LedgerView::Mine,
+        owner_user_id: Some(user_id),
+        density: Density::Hybrid,
+    };
+    app.state.invalidate_projection_by_installation(iid).await;
+    assert!(!app.cache_contains(&key).await, "se parte de cache vacía");
+
+    // El router de Axum es `Clone` y se despacha con `oneshot`, igual que `TestApp::request`: es
+    // la forma de tener un GET REAL corriendo en otra tarea mientras esta invalida.
+    let router = app.router.clone();
+    let cookie = owner.cookie.clone();
+    let getter = tokio::spawn(async move {
+        use tower::ServiceExt;
+        let req = http::Request::builder()
+            .uri("/v1/projection/series?density=hybrid")
+            .header(http::header::COOKIE, cookie)
+            .header(http::header::HOST, "futurefin.test")
+            .body(axum::body::Body::empty())
+            .expect("build GET request");
+        router.oneshot(req).await.expect("router oneshot").status()
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    app.state.invalidate_projection_by_installation(iid).await;
+
+    let status = getter.await.expect("la tarea del GET no debe panicar");
+    assert_eq!(status, http::StatusCode::OK, "el GET responde igual");
+    assert!(
+        !app.cache_contains(&key).await,
+        "el cómputo que empezó antes de la mutación no puede dejar su foto en la cache"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 5.0.0 WP A12 — MEDICIONES (`#[ignore]`: cuestan segundos y no son puertas de CI)
+// ---------------------------------------------------------------------------------------------
+
+/// Hogar con estrategia `asap`: la que de verdad BISECCIONA la fecha, y por tanto la que mide el
+/// coste real del nivel 1. Con `retire_at_age` la fecha es un dato y el solve solo confirma.
+async fn seed_asap(app: &TestApp, owner: &common::LoggedInOwner) {
+    let inc = app.create_category(owner, "income", "Nómina").await;
+    let exp = app.create_category(owner, "expense", "Vida").await;
+    let ast = app.create_category(owner, "asset", "Fondos").await;
+    for (cat, amount) in [(&inc, "3200"), (&exp, "1400")] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/budget/entries",
+                serde_json::json!({"category_id": cat, "amount": amount,
+                                   "ends_at_retirement": false}),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({"category_id": ast, "name": "Indexado", "current_value": "90000",
+                               "is_liquid": true, "expected_annual_return_percent": "5",
+                               "annual_volatility_percent": "14"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({"strategy": "asap", "swr_pct": "4", "birth_date": "1986-04-01"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+}
+
+/// **Cuánto se ahorra reutilizando el nivel 1 en las bandas** (WP A12, punto 2).
+///
+/// `build_installation_projection_input` no resuelve plan, así que `/v1/projection/bands` llegaba
+/// SIEMPRE con `plan_level1` vacío y corría `solve_plan_level1` entero para obtener el mismo
+/// resultado que la serie acababa de calcular. Se mide con `computed_in_ms`, que es el reloj de
+/// dentro del permiso de CPU (solve + sorteo) y no el del request entero:
+///
+/// - **frío**: una instalación donde NADIE ha pedido la serie ⇒ el nivel 1 se resuelve aquí;
+/// - **caliente**: la misma instalación después de un GET de la serie ⇒ `level1_cache` HIT, y lo
+///   único que queda es el sorteo.
+///
+/// Son dos `TestApp` porque la cache del nivel 1 es `pub(crate)` y no se puede vaciar desde un test
+/// de integración — y no debería poder: lo que se mide es el camino real, no un mapa manipulado.
+/// El `?paths=` distinto en el lado caliente fuerza un MISS del cache de BANDAS sin tocar el plan
+/// (el solve usa siempre 500/2.500 y la semilla estable, pase lo que pase con ese parámetro).
+#[tokio::test]
+#[ignore = "medición: cuesta varios segundos"]
+async fn measure_bands_reusing_the_series_solve() {
+    const PATHS: u32 = 120;
+
+    let cold_app = TestApp::spawn().await;
+    let cold_owner = cold_app.register_and_login_owner("alice").await;
+    seed_asap(&cold_app, &cold_owner).await;
+    let cold = cold_app
+        .get_with_cookie(
+            &format!("/v1/projection/bands?paths={PATHS}"),
+            &cold_owner.cookie,
+        )
+        .await;
+    assert_eq!(cold.status, http::StatusCode::OK, "{cold:?}");
+    let cold_ms = cold.json()["computed_in_ms"].as_u64().expect("computed_in_ms");
+
+    let warm_app = TestApp::spawn().await;
+    let warm_owner = warm_app.register_and_login_owner("alice").await;
+    seed_asap(&warm_app, &warm_owner).await;
+    let series = warm_app
+        .get_with_cookie("/v1/projection/series?density=hybrid", &warm_owner.cookie)
+        .await;
+    assert_eq!(series.status, http::StatusCode::OK, "{series:?}");
+    let warm = warm_app
+        .get_with_cookie(
+            &format!("/v1/projection/bands?paths={}", PATHS + 1),
+            &warm_owner.cookie,
+        )
+        .await;
+    assert_eq!(warm.status, http::StatusCode::OK, "{warm:?}");
+    let warm_ms = warm.json()["computed_in_ms"].as_u64().expect("computed_in_ms");
+
+    println!("[A12·2] bandas con el nivel 1 FRÍO: {cold_ms} ms");
+    println!("[A12·2] bandas con el nivel 1 CALIENTE (HIT de level1_cache): {warm_ms} ms");
+    println!("[A12·2] ahorro: {} ms", cold_ms.saturating_sub(warm_ms));
+
+    // Las dos respuestas describen el MISMO plan: si el hit sirviera otro nivel 1, la fecha se
+    // movería. Esta es la mitad que hace que la medición signifique algo.
+    assert_eq!(
+        cold.json()["strategy"],
+        warm.json()["strategy"],
+        "los dos lados tienen que describir el mismo plan"
+    );
+}
+
+/// **El presupuesto de tiempo del plan, medido** (WP A12, punto 6).
+///
+/// Dos cifras y las dos importan por separado:
+///
+/// 1. el primer `GET /v1/projection/series?view=mine` **después de un PATCH del perfil** —o sea, un
+///    miss con el nivel 1 dentro del permiso—, que es lo que el usuario espera mirando la pantalla;
+/// 2. cuánto tarda `needed_capital_curve_state` en llegar a `ready`, que es el NIVEL 2 en segundo
+///    plano: la curva de capital por edad, unas ocho biseccciones por nodo de la rejilla.
+///
+/// Se mide en `debug`, que es como corre el arnés; en release el motor va varias veces más rápido.
+/// Si alguna se sale de su presupuesto, lo que hay que hacer es **decirlo con el número**, no
+/// ajustar la constante hasta que pase.
+#[tokio::test]
+#[ignore = "medición: cuesta decenas de segundos"]
+async fn measure_the_plan_time_budget() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed_asap(&app, &owner).await;
+
+    // Un GET previo para que lo que se mida sea el miss de DESPUÉS del PATCH y no el de estrenar
+    // la instalación (que además arrastra el warm-up del login).
+    let _ = app
+        .get_with_cookie("/v1/projection/series?view=mine", &owner.cookie)
+        .await;
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({"swr_pct": "3.5"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    let t0 = std::time::Instant::now();
+    let first = app
+        .get_with_cookie("/v1/projection/series?view=mine", &owner.cookie)
+        .await;
+    let first_ms = t0.elapsed().as_millis();
+    assert_eq!(first.status, http::StatusCode::OK, "{first:?}");
+    println!("[A12·6] primer GET series tras el PATCH: {first_ms} ms");
+    println!(
+        "[A12·6]   estado inicial de la curva: {}",
+        first.json()["needed_capital_curve_state"]
+    );
+
+    // El nivel 2 llega en segundo plano; se sondea el MISMO endpoint, que es lo que hace la SPA.
+    let t1 = std::time::Instant::now();
+    let mut state = String::new();
+    while t1.elapsed() < std::time::Duration::from_secs(120) {
+        let body = app
+            .get_with_cookie("/v1/projection/series?view=mine", &owner.cookie)
+            .await
+            .json();
+        state = body["needed_capital_curve_state"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if state != "computing" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    println!(
+        "[A12·6] `needed_capital_curve_state: {state}` a los {} ms del primer GET",
+        t1.elapsed().as_millis()
+    );
+    assert_eq!(
+        state, "ready",
+        "el nivel 2 tiene que aterrizar; `unavailable` aquí sería un fallo del sorteo"
     );
 }

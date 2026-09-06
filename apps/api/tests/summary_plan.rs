@@ -123,7 +123,6 @@ async fn the_summary_plan_is_the_same_object_the_chart_shows() {
         "{plan} vs {s}"
     );
     // Retirado del modelo v2: la SPA todavía lo declara, así que viaja, pero siempre a `null`.
-    assert!(plan["disposable_monthly"].is_null(), "{plan}");
     assert_eq!(plan["underfunded"], s["contribution_underfunded"], "{plan}");
     assert_eq!(
         plan["needed_capital_today"], s["needed_capital_today"],
@@ -173,7 +172,6 @@ async fn a_pending_or_absent_plan_leaves_the_fields_null_not_zero() {
     assert_eq!(plan["plan_state"], "ready", "{plan}");
     assert_eq!(plan["strategy"], "asap", "{plan}");
     assert!(plan["required_savings_monthly"].is_null(), "{plan}");
-    assert!(plan["disposable_monthly"].is_null(), "{plan}");
     assert!(plan["underfunded"].is_null(), "{plan}");
     // Lo que sí existe siempre con un plan `ready`: cuándo se jubila, el éxito de esa fecha y el
     // capital que la sostendría hoy.
@@ -190,7 +188,6 @@ async fn a_pending_or_absent_plan_leaves_the_fields_null_not_zero() {
         "strategy",
         "jubilacion_month_index",
         "required_savings_monthly",
-        "disposable_monthly",
         "underfunded",
         "success_of_plan",
         "success_threshold_pct",
@@ -227,7 +224,6 @@ async fn the_household_view_has_no_plan_and_says_why() {
         "strategy",
         "jubilacion_month_index",
         "required_savings_monthly",
-        "disposable_monthly",
         "underfunded",
         "success_of_plan",
         "success_threshold_pct",

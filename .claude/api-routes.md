@@ -736,8 +736,8 @@ leyendo el JSONB crudo: una segunda interpretación del mismo dato es como diver
  `total_liabilities` and breakdowns use the 4.7.0 visibility predicate (plan vivo o saldo vivo — see Liabilities note above); el `net_return` solo resta el TIN de lo que DEVENGA (#121).
 
 **`plan` — la tarjeta «Tu plan» del Resumen (5.0.0, modelo v2 «el éxito define la fecha», WP A7).**
-Objeto con `{strategy, jubilacion_month_index, required_savings_monthly, disposable_monthly,
-underfunded, absent_reason}` **+ el bloque del éxito** (`success_of_plan`, `success_threshold_pct`,
+Objeto con `{strategy, jubilacion_month_index, required_savings_monthly, underfunded,
+absent_reason}` **+ el bloque del éxito** (`success_of_plan`, `success_threshold_pct`,
 `success_wilson_low`, `safe_date_month_index`, `needed_capital_today`, `plan_state`,
 `success_verdict`, `success_absent_reason`). `retirement_trigger` (la pareja disparador/D17 de
 4.15.x) se retiró: no tiene equivalente en el modelo v2, donde la fecha la decide siempre el
@@ -763,10 +763,20 @@ umbral de éxito o es un dato de edad, nunca un cruce contra un objetivo.
   el mismo número del mismo solve, con el nombre que se lee en un Resumen; `underfunded` es
   `contribution_underfunded`. Los dos son `null` cuando la fecha la decide el UMBRAL y no una edad
   (`retirement_date_basis != "target_age"`: `asap`, `coast` modo B, `partial`) — ahí no hay edad
-  contra la que resolver nada, y `null` no es `false`/`0`. `disposable_monthly` (el margen de los
-  solves deterministas de 4.15.x) **no tiene equivalente en el modelo v2** y `/v1/projection/series`
-  ya no lo publica; el campo se conserva en `SummaryPlan`, **siempre `null`**, únicamente porque la
-  SPA (`SummaryPlanApi`) todavía lo declara obligatorio.
+  contra la que resolver nada, y `null` no es `false`/`0`. **`disposable_monthly` se RETIRÓ en WP
+  A12**: era el margen de los solves deterministas de 4.15.x, no tiene equivalente en el modelo v2
+  —`/v1/projection/series` dejó de publicar los `disposable_*`, porque el ahorro que el coast libera
+  es «disponible» por DECISIÓN y no una cifra que el motor calcule— y sobrevivió una versión
+  valiendo SIEMPRE `null` solo porque la SPA lo declaraba obligatorio. Un campo que no puede tomar
+  ningún valor se lee como «no lo sabemos» cuando lo cierto es que esa pregunta ya no se hace.
+  Pinea su ausencia `openapi_contract.rs::the_plan_block_is_declared_in_the_document`.
+- **Sin fecha válida no hay éxito que publicar** (WP A12). Con `retirement_date_basis:
+  "not_reachable"` en la serie, `success_of_plan`, `success_wilson_low`, `success_threshold_pct` y
+  `success_verdict` van a `null` y `success_absent_reason` vale `not_reachable` — el mismo literal
+  que la serie y que `/v1/projection/bands`. La serie SÍ publica ahí un `success_of_plan`, pero
+  significa otra cosa (la mejor observación del solve, el mes que más cerca se quedó) y copiarlo
+  rotulaba un porcentaje junto a un plan que no ocurre. `plan_state` sigue siendo `"ready"`: el
+  plan está resuelto; lo que falta es su éxito.
 - **`plan_state`**: `"ready"` cuando el bloque de arriba viaja resuelto; `"absent"` cuando
   `plan_absent_reason` de la serie está puesto (`birth_date_missing` — en el modelo v2 NINGUNA
   estrategia resuelve plan sin fecha de nacimiento, ni `asap` — C5) o no hay serie que leer
@@ -1261,11 +1271,12 @@ Response (`ProjectionBandsResponse`):
   regla por saldo no llega a la necesidad ordinaria.
   **Un camino solo puede fallar estando JUBILADO o en media jornada** (`sim_core.rs`: «un mes
   acumulando con déficit puede vaciar la cartera, pero eso no es un plan de jubilación que falla»).
-  Consecuencia que hay que leer de frente: **un plan sin fecha alcanzable se simula «sin jubilarse»
-  y publica `success_of_plan = 1` con veredicto verde**, que significa «este plan sin jubilación no
-  se rompe» y NO «llegas». Quien pinte el semáforo mira antes `retirement_date_basis` de la serie;
-  `BANDS_MODEL_NOTE` lo dice para el consumidor que solo ve el JSON. Pin:
-  `a_plan_with_no_reachable_date_draws_the_line_that_never_retires`.
+  Consecuencia, y desde WP A12 **se declara aquí en vez de mandar a otro endpoint**: un escenario
+  sin mes de jubilación no puede fallar, así que estos cuatro campos van a `null` con
+  `success_absent_reason` (abajo) en vez de publicar el `success_of_plan = 1` y el veredicto verde
+  que publicaban hasta entonces. `BANDS_MODEL_NOTE` lo dice también para el consumidor que solo ve
+  el JSON. Pins: `a_plan_with_no_reachable_date_draws_the_line_that_never_retires` (la trayectoria)
+  y `a_plan_without_a_reachable_date_publishes_null_success_with_its_reason` (el hueco).
 - `success_threshold_pct` (`80..=100`) — **el umbral del perfil, ecoado**, porque es la restricción
   que decidió la fecha y el listón del veredicto. Un color sin su umbral no se puede auditar. (En la
   primera vuelta de 5.0.0 —V7— el corte era fijo al 100 % y este campo no viajaba; el modelo v2 lo
@@ -1279,8 +1290,8 @@ Response (`ProjectionBandsResponse`):
   cota vale 0 exacto porque una probabilidad no baja de cero. **La serie publica esta misma medición
   con CUATRO decimales** (`retirement_solver::SAMPLING_ERROR_DP`): allí es una cifra auditable del
   solve, aquí la barra de un gráfico. Misma medición, distinta precisión de publicación.
-- `success_verdict` ∈ `green` | `amber` | `red` — el semáforo, con **la misma regla con la que el
-  solver decidió la fecha** (`SuccessAt::meets`):
+- `success_verdict` ∈ `green` | `amber` | `red` (o `null`, ver `success_absent_reason`) — el
+  semáforo, con **la misma regla con la que el solver decidió la fecha** (`SuccessAt::meets`):
   `verde ⟺ (umbral < 100 ⇒ wilson_low ≥ umbral/100; umbral = 100 ⇒ cero fallos)`;
   `ámbar ⟺ no verde pero success_of_plan ≥ umbral/100` (el estimador puntual llega, el intervalo
   no); `rojo` el resto. **Con umbral 100 no hay ámbar** (cumplir es «cero fallos», que es
@@ -1288,6 +1299,26 @@ Response (`ProjectionBandsResponse`):
   topa en `n/(n+1,96²)`, así que un umbral del 95 % exige al menos **73 caminos** y el del 99 %,
   **381**. El plan no se resiente —se resuelve siempre con 500/2.500—, solo el color de un sorteo
   pedido con pocos caminos.
+- `success_absent_reason` (string o `null`, **5.0.0 WP A12**) — **por qué no hay éxito que
+  publicar**, y con él las CUATRO cifras de arriba (`success_of_plan`, `success_wilson_low`,
+  `success_sampling_error_pp`, `success_verdict`) van a `null`. Dos literales alcanzables:
+  `not_reachable` (hay plan y ningún mes del horizonte cumple el umbral — el MISMO literal que
+  `retirement_date_basis` en la serie) y `birth_date_missing` (el `plan_absent_reason` del
+  ensamblado, propagado tal cual). Los otros dos `plan_absent_reason` **no llegan aquí**:
+  `months_override` necesita un `?months=` que este endpoint no acepta y `household_not_solved` un
+  `view=household` que es 400.
+
+  **El bug que cierra**: el motor solo clasifica fallos estando jubilado o en media jornada, así que
+  el escenario sin fecha —que se jubila en `horizonte + 1`— no puede fallar ni una vez, y la
+  respuesta publicaba `success_of_plan: "1"` con `success_verdict: "green"` sobre un plan que no
+  existe, más una nota pidiendo que se fuera a mirar `retirement_date_basis` a OTRO endpoint. Se
+  decide **antes del sorteo** (`PlanLevel1::forced_month` / `BuiltProjection::plan_absent_reason`),
+  no por el resultado: un plan perfecto y un plan que no ocurre dan el mismo `1`. Lo que **sí se
+  sigue publicando** son las bandas, `failures_by_kind`, `failure_probability_by_age`,
+  `months_below_need_p50` y `withdrawal_to_need_ratio_p50` — la trayectoria SIN jubilarse, donde un
+  0 significa «sin jubilación no hay fallo que contar», no «riesgo cero». Pins:
+  `projection_bands.rs::a_plan_without_a_reachable_date_publishes_null_success_with_its_reason` y
+  `::without_a_birth_date_the_bands_publish_the_same_reason_as_the_series`.
 - `failures_by_kind: [u32; 3]` — contadores del primer fallo de cada camino, en el orden
   `[F1, F2, F3]` (los mismos índices que `KIND_*` del crate). Suma `paths − paths·success_of_plan`.
   Se publican **crudos** porque F1, F2 y F3 tienen arreglos OPUESTOS (más capital / retrasar la
@@ -1336,6 +1367,28 @@ cache, porque el umbral está en la clave. Las DOS invalidaciones de la proyecci
 del mismo `ProjectionInput`, y una banda vieja junto a una línea nueva son dos cifras que se
 contradicen en la misma pantalla. (El tercer mapa, `plan_cache`, **no** entra en esas invalidaciones
 — ver §Cache del PLAN.)
+
+**El nivel 1 ya no se re-resuelve aquí (5.0.0, WP A12).** `build_installation_projection_input` no
+resuelve plan —solo lo hace `run_member_projection`, dentro del miss de la serie—, así que este
+endpoint llegaba SIEMPRE con `plan_level1` vacío y corría `solve_plan_level1` entero (2–5 s) para
+obtener exactamente el mismo resultado que la serie acababa de calcular con la misma entrada, el
+mismo perfil y la misma semilla estable; y la SPA pide las dos superficies al abrir Jubilación, así
+que era el caso normal. Ahora las dos consultan `AppState::level1_cache` (clave `Level1Key`, huella
+de los CINCO argumentos del solve: entrada **pre-solve**, volatilidades, semilla, `PlanSolveProfile`
+y `PlanBudget`), y la primera que llega paga por las dos. Es un tipo distinto de `PlanKey` a
+propósito: aquella se calcula sobre el escenario **post-solve** y por eso no sirve para preguntar
+antes de resolver — compartir tipo permitiría preguntarle a un mapa con la clave del otro. Como
+`plan_cache`, es direccionada por contenido y **no se invalida**: TTL + LRU.
+
+**Guardia de generación (5.0.0, WP A12)**: `AppState::projection_generation` lleva un contador por
+instalación; todo camino que inserte en `projection_cache` o en `bands_cache` captura la generación
+**antes** de computar y la presenta al insertar (`projection_cache_insert_if_current`,
+`bands_cache_insert_if_current`, los únicos métodos de inserción que existen), y las dos
+invalidaciones la incrementan. Cierra la carrera «computo lento → mutación invalida → mi inserción
+repuebla la cache con la foto vieja»: en 4.x la ventana era de ~500 ms, y desde que el nivel 1 vive
+dentro del mismo permiso es de segundos. El orden de locks —generación, luego el mapa, sostenidos
+los dos a la vez en ambos lados— es lo que hace que no exista el intervalo intermedio. Pin:
+`projection_cache.rs::a_mutation_during_a_compute_wins_over_the_stale_insert`.
 
 **Presupuesto de tiempo** (`crates/engine-stochastic/tests/timing_mc.rs`, release, caso P9 de
 840 meses): 100 caminos 20,5 ms · 500 caminos 104,2 ms · 1 000 caminos 204,1 ms · 2 000 caminos

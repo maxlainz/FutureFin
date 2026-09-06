@@ -138,7 +138,13 @@ export function planStatusFromWarnings(
 
 /** Copy de cada razón por la que el bloque «plan» no viaja. `absent_reason` del Resumen y
  *  `plan_absent_reason` de la serie son listas DISTINTAS y las dos se traducen aquí: la tarjeta
- *  puede alimentarse de cualquiera de las dos fuentes. */
+ *  puede alimentarse de cualquiera de las dos fuentes.
+ *
+ *  Distintas, pero no infinitas: la unión de las dos son los cinco literales de abajo. El sexto
+ *  que esta tabla llevaba hasta A12 —`no_liquid_assets`— **no lo emite ninguna de las dos**; es un
+ *  valor de `needed_capital_absent_reason`, que dice por qué falta una CIFRA del plan y no por qué
+ *  falta el plan. Una fila que ningún backend puede disparar solo sirve para hacer creer que el
+ *  caso está cubierto. */
 const ABSENT_STATUS: Record<string, Omit<PlanStatus, "warning">> = {
   birth_date_missing: {
     tone: "danger",
@@ -165,11 +171,6 @@ const ABSENT_STATUS: Record<string, Omit<PlanStatus, "warning">> = {
     label: "Esta simulación usa un horizonte forzado",
     action: null,
   },
-  no_liquid_assets: {
-    tone: "warn",
-    label: "Sin activos líquidos no hay plan que sostener",
-    action: null,
-  },
 };
 
 /**
@@ -187,12 +188,35 @@ export function planStatusFromPlan(input: {
   absentReason?: string | null;
   underfunded?: boolean | null;
   warnings?: readonly string[] | null;
+  /**
+   * **A12** — `true` ⟺ el plan está RESUELTO y aun así **ninguna fecha del horizonte llega al
+   * umbral** (`success_absent_reason: "not_reachable"` del Resumen, o
+   * `retirement_date_basis: "not_reachable"` de la serie).
+   *
+   * Sin esta señal la tarjeta salía **verde con la etiqueta «En plan»**: `plan_state` es `ready`,
+   * no hay `absent_reason` y `warnings[]` viene vacío —el servidor no emite ninguno para este
+   * caso, porque no es un fallo de configuración sino el RESULTADO del solve—, así que la única
+   * rama que quedaba era la de «sin avisos». El título de la propia tarjeta decía «no hay ninguna
+   * fecha que aguante tu umbral» sobre un tono de plan que va bien.
+   */
+  noValidDate?: boolean | null;
 }): PlanStatus {
   if (input.planState === "pending") {
     return { warning: null, tone: "warn", label: "Calculando tu plan…", action: null };
   }
   if (input.underfunded === true) {
     return planStatusFromWarnings(["contribution_underfunded"]);
+  }
+  // Va con los rojos de «el plan configurado no existe» y ANTES de `warnings[]`/`absentReason`:
+  // que no haya fecha es el resultado del solve, no un dato que falte, y es lo más específico que
+  // se puede decir de este plan.
+  if (input.noValidDate === true) {
+    return {
+      warning: null,
+      tone: "danger",
+      label: "Ninguna fecha de tu horizonte llega a tu umbral",
+      action: { label: "Revisar tu plan", target: "retirement" },
+    };
   }
   // Un aviso explícito gana a la razón de ausencia: dice QUÉ falta, no solo que falta algo.
   const fromWarnings = planStatusFromWarnings(input.warnings);
@@ -390,6 +414,12 @@ export function planCardV2(input: PlanCardV2Input): PlanCardV2 {
     absentReason: plan?.absent_reason ?? series?.plan_absent_reason ?? null,
     underfunded: series?.contribution_underfunded ?? (usePlan ? plan.underfunded : null),
     warnings: series?.warnings ?? null,
+    // A12 — las DOS fuentes nombran el mismo hecho con el mismo literal, y la tarjeta se alimenta
+    // de cualquiera de ellas: mirar solo una dejaría el caso en verde según qué respuesta hubiera
+    // llegado antes.
+    noValidDate:
+      plan?.success_absent_reason === "not_reachable" ||
+      series?.retirement_date_basis === "not_reachable",
   });
 
   const strategy = (usePlan ? plan.strategy : null) ?? sentence?.parts.strategy ?? null;

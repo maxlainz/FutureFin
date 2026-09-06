@@ -48,7 +48,6 @@ function member(
     strategy: "asap",
     jubilacion_month_index: null,
     jubilacion_age: null,
-    liquid_crossing_month_index: null,
     retirement_month_index: null,
     coast_fire_month_index: null,
     partial_retirement_month_index: null,

@@ -111,10 +111,44 @@ describe("planStatusFromPlan", () => {
     expect(planStatusFromPlan({ absentReason: "household_aggregate" }).label).toBe(
       "El hogar no tiene un plan propio",
     );
-    expect(planStatusFromPlan({ absentReason: "no_liquid_assets" }).tone).toBe("warn");
+    expect(planStatusFromPlan({ absentReason: "months_override" }).tone).toBe("warn");
     expect(planStatusFromPlan({ absentReason: "algo_nuevo" }).label).toBe(
       "Tu plan no está disponible",
     );
+  });
+
+  // A12 — la tabla llevaba una fila para `no_liquid_assets` que ninguna de las dos fuentes emite
+  // (`absent_reason` del Resumen ni `plan_absent_reason` de la serie): es un valor de
+  // `needed_capital_absent_reason`. Retirada, cae a la genérica como cualquier literal ajeno.
+  it("un literal de OTRO campo (`no_liquid_assets`) no tiene fila propia: cae a la genérica", () => {
+    const s = planStatusFromPlan({ absentReason: "no_liquid_assets" });
+    expect(s.label).toBe("Tu plan no está disponible");
+    expect(s.label).not.toContain("líquidos");
+  });
+
+  // A12 — el caso que salía VERDE con la etiqueta «En plan» mientras el título de la tarjeta decía
+  // «no hay ninguna fecha que aguante tu umbral». `plan_state` es `ready`, no hay `absent_reason` y
+  // el servidor no emite ningún aviso para esto (no es un dato que falte: es el resultado del
+  // solve), así que sin una señal propia la única rama que quedaba era la de «sin avisos».
+  it("`noValidDate`: el plan resuelto que no llega a ninguna fecha es ROJO, no «En plan»", () => {
+    const s = planStatusFromPlan({ planState: "ready", noValidDate: true });
+    expect(s.tone).toBe("danger");
+    expect(s.label).toBe("Ninguna fecha de tu horizonte llega a tu umbral");
+    expect(s.action).toEqual({ label: "Revisar tu plan", target: "retirement" });
+  });
+
+  it("`noValidDate` NO gana a `contribution_underfunded`: ese dice además por qué no llega", () => {
+    const s = planStatusFromPlan({ underfunded: true, noValidDate: true });
+    expect(s.warning).toBe("contribution_underfunded");
+  });
+
+  it("`noValidDate` gana a un hueco de configuración: un resultado es más específico", () => {
+    const s = planStatusFromPlan({
+      noValidDate: true,
+      warnings: ["target_retirement_age_missing"],
+    });
+    expect(s.tone).toBe("danger");
+    expect(s.warning).toBeNull();
   });
 
   it("un aviso explícito gana a la razón de ausencia: dice QUÉ falta, no solo que falta algo", () => {

@@ -143,6 +143,8 @@ import {
   riskFootnote,
   scenariosPerHundred,
   showsNoVolatilityNotice,
+  showsRiskGradient,
+  successAbsentReasonEs,
 } from "../lib/risk-bands";
 import {
   failureKindsAtMonth,
@@ -825,13 +827,16 @@ export function RetirementView({
    * eje X: el `<linearGradient>` va en `userSpaceOnUse` entre esos dos meses, y con otros el
    * mapeo mes→color se desplazaría sin que nada fallara.
    *
-   * Sin volatilidad declarada NO se colorea: las tres bandas son la línea determinista y teñir de
-   * verde una banda de ancho cero diría «ningún escenario falla» sobre un sorteo que no existe.
+   * Quién AUTORIZA a teñir lo decide `showsRiskGradient` (`lib/risk-bands.ts`), no esta vista:
+   * sus dos vetos —sin volatilidad declarada y sin éxito que medir (A12)— son de contrato, y los
+   * dos acaban pintando la banda de VERDE ENTERO sobre un sorteo que no midió riesgo. Con `[]` la
+   * banda vuelve al acento plano (`MiniProjection` solo usa el degradado con ≥ 2 paradas), que es
+   * la lectura honesta: una trayectoria de patrimonio, sin un juicio de riesgo encima.
    */
   const gradientStops = useMemo(() => {
     const pts = projectionSeries?.points;
     if (!showBand || !pts || pts.length === 0) return [];
-    if (!projectionBands || projectionBands.any_volatility_declared === false) return [];
+    if (!projectionBands || !showsRiskGradient(projectionBands)) return [];
     return riskGradientStops({
       points: projectionBands.failure_probability_by_age,
       monthStart: pts[0]!.month_index,
@@ -1769,14 +1774,11 @@ export function RetirementView({
   const chartReady =
     hasMembership && projectionSeries != null && projectionSeries.points.length > 0;
 
-  /**
-   * El nivel 1 del solve sigue corriendo (típicamente el primer GET tras una mutación): no hay
-   * fecha, ni éxito, ni capital necesario **todavía**. No es una carencia y no se dice con un
-   * guion: la frase y las tarjetas ya traen su copy de «calculando…» (W5/W6) y el panel entero
-   * se marca `aria-busy` para que un lector de pantalla no lea cifras a medio resolver.
-   */
-  const planPending =
-    retirementMetricsReady && projectionSeries?.retirement_date_basis === "pending";
+  // `planPending` (el spinner y el `aria-busy` del panel «Resultado») se retiró en A12: colgaba de
+  // `retirement_date_basis === "pending"`, un literal que **el servidor nunca emite** — el nivel 1
+  // del solve se resuelve EN LÍNEA, dentro del permiso de la serie, así que cuando esta respuesta
+  // llega la fecha ya está decidida. El único cálculo que de verdad llega tarde es el nivel 2, y
+  // tiene su propia señal justo debajo (`neededCurveComputing`), que sí se puede leer.
 
   /** El nivel 2 (segundo plano) todavía está resolviendo la curva de capital necesario por edad:
    *  la línea del chart llegará sola en un GET posterior. */
@@ -1969,16 +1971,9 @@ export function RetirementView({
           </section>
 
           {/* ── 3 · «Resultado» ───────────────────────────────────────────────────────────── */}
-          <section className="panel" aria-busy={planPending || undefined}>
+          <section className="panel">
             <div className="panel-head-row">
               <h3 className="panel-title">Resultado</h3>
-              {planPending ? (
-                <span
-                  className="spinner retirement-pending-spinner"
-                  role="status"
-                  aria-label="Resolviendo tu fecha válida"
-                />
-              ) : null}
               <HelpPopover
                 title={HELP_TEXTS["retirement.plan_sentence"].title}
                 body={HELP_TEXTS["retirement.plan_sentence"].body}
@@ -1986,8 +1981,8 @@ export function RetirementView({
             </div>
 
             {/* U7 — la cabecera de resultados es una FRASE, no tres tarjetas que el usuario
-                tenga que volver a juntar en su cabeza. Los tres estados que no son un plan
-                —bloque ausente, `pending` y `not_reachable`— los dice la propia frase
+                tenga que volver a juntar en su cabeza. Los dos estados que no son un plan
+                —bloque ausente y `not_reachable`— los dice la propia frase
                 (`lib/plan-sentence.ts`): aquí no se re-decide ninguno. */}
             <p className={`retirement-sentence retirement-sentence--${sentence.tone}`}>
               {retirementMetricsReady ? sentence.text : "Calculando tu plan…"}
@@ -2270,13 +2265,29 @@ export function RetirementView({
                       aritmética de cliente: el semiancho de Wilson y el tamaño de la muestra.
                       Sin ella, un 95,0 % se lee como exacto cuando lo que hay es un intervalo —
                       y con 0 fallos ni siquiera hay intervalo, sino la cota de la regla de tres
-                      que la propia tarjeta ya cita en su subtítulo. */}
-                  <p className="muted tight">
-                    Precisión del sorteo:{" "}
-                    {formatSamplingErrorPp(projectionBands.success_sampling_error_pp)} sobre{" "}
-                    {projectionBands.paths} caminos (intervalo de Wilson al 95 %; con cero
-                    fallos, la cota de la regla de tres).
-                  </p>
+                      que la propia tarjeta ya cita en su subtítulo.
+
+                      Con `success_absent_reason` (A12) no hay cifra que acotar: el sorteo publica
+                      `success_sampling_error_pp: null` y la línea de siempre imprimiría «Precisión
+                      del sorteo: — sobre 2500 caminos», un guion mudo que se lee como «el dato no
+                      ha llegado» cuando lo cierto es que la pregunta no tiene respuesta. Se
+                      sustituye por el MOTIVO, que es lo único que se puede afirmar. */}
+                  {projectionBands.success_absent_reason != null ? (
+                    <p className="muted tight">
+                      Sin éxito que medir:{" "}
+                      {successAbsentReasonEs(projectionBands.success_absent_reason)}. Los{" "}
+                      {projectionBands.paths} caminos sorteados describen tu patrimonio sin
+                      jubilarte: la banda sigue siendo tuya, pero no hay ningún plan al que
+                      ponerle una probabilidad.
+                    </p>
+                  ) : (
+                    <p className="muted tight">
+                      Precisión del sorteo:{" "}
+                      {formatSamplingErrorPp(projectionBands.success_sampling_error_pp)} sobre{" "}
+                      {projectionBands.paths} caminos (intervalo de Wilson al 95 %; con cero
+                      fallos, la cota de la regla de tres).
+                    </p>
+                  )}
                   {/* Lo que hace AUDITABLE el número grande: por qué falla el que falla, cuánto
                       se apretó el cinturón el que aguantó. Antes vivían en el «Detalle»
                       plegado, que es donde nadie mira cuando la cifra de arriba no le cuadra. */}

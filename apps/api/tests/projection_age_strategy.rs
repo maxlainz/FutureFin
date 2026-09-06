@@ -147,8 +147,12 @@ async fn retire_at_age_puts_the_retirement_on_the_birthday_month_and_keeps_the_c
     );
     // **El objetivo determinista se retiró en 5.0.0**: el motor recibe `fire_target: None` y el
     // cruce ya no se publica, porque no decide nada. Lo que sobrevive es el escalar informativo.
-    assert!(s["fire_target_series"].is_null(), "{s}");
-    assert!(s["liquid_crossing_month_index"].is_null(), "{s}");
+    // `.get(...).is_none()` y no `is_null()` (WP A12): sobre un objeto JSON, indexar una clave
+    // que NO EXISTE devuelve `Value::Null`, así que un `is_null()` sobre un campo retirado pasa
+    // haga lo que haga el servidor — incluido volver a publicarlo. Lo que hay que comprobar es que
+    // la CLAVE no está.
+    assert!(s.get("fire_target_series").is_none(), "{s}");
+    assert!(s.get("liquid_crossing_month_index").is_none(), "{s}");
     assert!(!s["fire_number_classic_today"].is_null(), "el escalar sigue: {s}");
 
     // La fase «jubilado» empieza en el mismo mes que el marcador — invariante de comportamiento

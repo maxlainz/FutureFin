@@ -446,8 +446,12 @@ async fn negative_inflation_deflates_upward_and_shrinks_the_target() {
     // patrimonio, así que su comportamiento bajo deflación es el del bucle de arriba y no una
     // segunda regla. La curva tiene su propio pin en `projection_number_semantics.rs`
     // (`the_plan_block_indexes_the_grid_and_the_curve_is_parallel_to_points`).
+    // `.get(...).is_none()` y no `is_null()` (WP A12): sobre un objeto JSON, indexar una clave
+    // que NO EXISTE devuelve `Value::Null`, así que un `is_null()` sobre un campo retirado pasa
+    // haga lo que haga el servidor — incluido volver a publicarlo. Lo que hay que comprobar es que
+    // la CLAVE no está.
     assert!(
-        s["fire_target_series"].is_null(),
+        s.get("fire_target_series").is_none(),
         "el objetivo determinista se retiró en 5.0.0: {s}"
     );
 

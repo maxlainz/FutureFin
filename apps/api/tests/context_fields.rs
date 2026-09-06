@@ -141,12 +141,20 @@ async fn every_view_aware_response_echoes_the_view_it_applied() {
         // `household_aggregate`— aunque el hogar tenga una sola persona. Eso se comprueba abajo,
         // en `projection_household_aggregate.rs`.
         if ep == "/v1/projection/series" {
-            assert_eq!(explicit["fire_target_absent_reason"], "household_aggregate", "{explicit}");
+            // **`fire_number_classic_absent_reason`, no `fire_target_absent_reason`**: el objetivo
+            // FIRE descontado murió con el modelo v2 (WP E4/A4) y lo que queda es el número FIRE
+            // CLÁSICO, informativo. El nombre viejo quedó aquí tras el renombrado y la aserción
+            // pasó a comparar `null` contra un literal — o sea, a fallar; peor habría sido lo
+            // contrario (`is_null()` sobre una clave inexistente pasa siempre).
+            assert_eq!(
+                explicit["fire_number_classic_absent_reason"], "household_aggregate",
+                "{explicit}"
+            );
             assert!(mine["members"].as_array().is_some_and(|m| m.is_empty()), "{mine}");
             continue;
         }
         // `/v1/summary` es la SEGUNDA excepción declarada (5.0.0 WP5-2b, D27): su bloque `plan`
-        // —estrategia, disparador, ahorro necesario, margen y el rojo de D17— es el plan de UNA
+        // —estrategia, fecha, ahorro necesario, éxito y capital necesario— es el plan de UNA
         // persona, y el agregado del hogar no tiene uno. Sale entero a `null` con
         // `absent_reason: household_aggregate`, igual que los `jubilacion_*` de la serie. El
         // resto del payload sí sigue siendo idéntico con un solo usuario, y eso es lo que se
@@ -155,13 +163,21 @@ async fn every_view_aware_response_echoes_the_view_it_applied() {
         if ep == "/v1/summary" {
             let plan_household = &explicit["plan"];
             assert_eq!(plan_household["absent_reason"], "household_aggregate", "{explicit}");
+            // **Solo campos que EXISTEN.** `is_null()` sobre una clave que el servidor no publica
+            // devuelve `true`, así que un nombre muerto en esta lista no protege nada y encima
+            // parece que sí: `retirement_trigger` (v1) estaba aquí y llevaba desde el modelo v2
+            // sin comprobar una sola cosa. La lista es ahora la del bloque v2.
             for k in [
                 "strategy",
-                "retirement_trigger",
                 "jubilacion_month_index",
                 "required_savings_monthly",
-                "disposable_monthly",
                 "underfunded",
+                "safe_date_month_index",
+                "success_of_plan",
+                "success_threshold_pct",
+                "success_wilson_low",
+                "success_verdict",
+                "needed_capital_today",
             ] {
                 assert!(
                     plan_household[k].is_null(),

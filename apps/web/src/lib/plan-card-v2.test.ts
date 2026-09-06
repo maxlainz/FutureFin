@@ -21,7 +21,6 @@ function plan(over: Partial<SummaryPlanApi> = {}): SummaryPlanApi {
     strategy: "asap",
     jubilacion_month_index: 144,
     required_savings_monthly: null,
-    disposable_monthly: null,
     underfunded: null,
     absent_reason: null,
     success_of_plan: null,
@@ -315,6 +314,51 @@ describe("«Éxito del plan» — se rotula, jamás se recalcula", () => {
     expect(c.success?.value).toBe("—");
     expect(c.success?.detail).toBe("no se pudieron sortear los escenarios");
     expect(c.success?.tone).toBe("default");
+  });
+
+  // A12 — el plan está resuelto (`ready`) y lo que falta es la FECHA. El Resumen recibe el éxito
+  // a `null` con su razón, y ni el KPI ni la frase corta pueden inventar un recuento: un «0 de
+  // cada 100» aquí sería una probabilidad de un plan que no ocurre.
+  it("`not_reachable`: ni el KPI ni la frase corta se inventan un «de cada 100»", () => {
+    const c = card({
+      plan: plan({
+        plan_state: "ready",
+        jubilacion_month_index: null,
+        safe_date_month_index: null,
+        success_of_plan: null,
+        success_threshold_pct: 95,
+        success_verdict: null,
+        success_absent_reason: "not_reachable",
+      }),
+    });
+    expect(c.success?.value).toBe("—");
+    expect(c.success?.detail).toBe(
+      "no hay ninguna fecha que llegue a tu umbral, así que no hay éxito que medir",
+    );
+    expect(c.success?.tone).toBe("default");
+    expect(c.title).toBe(
+      "Con tu plan no hay ninguna fecha en la que aguanten 95 de cada 100 escenarios.",
+    );
+    expect(c.title).not.toContain("0 de cada 100");
+    // El TONO es el del estado, y el estado de un plan sin fecha no es «En plan» (verde).
+    expect(c.tone).toBe("danger");
+    // La fila de aviso NO se pinta: `planStatusFromPlan` devuelve este estado sin `warning`
+    // literal, y el título ya dice exactamente lo mismo. Duplicarlo sería ruido, no información.
+    expect(c.warning).toBeNull();
+  });
+
+  it("con la SERIE en `not_reachable` el tono es el mismo: las dos fuentes dicen lo mismo", () => {
+    const c = card({
+      plan: plan({ plan_state: "ready", success_of_plan: null, safe_date_month_index: null }),
+      series: series({
+        retirement_date_basis: "not_reachable",
+        jubilacion_month_index: null,
+        safe_date_month_index: null,
+        success_of_plan: null,
+      }),
+    });
+    expect(c.tone).toBe("danger");
+    expect(c.title).toContain("no hay ninguna fecha");
   });
 });
 

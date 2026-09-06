@@ -62,23 +62,48 @@
 //! se mueve es la fecha del plan, porque el solve no ve ninguno de los dos parámetros. Lo dice
 //! también [`BANDS_MODEL_NOTE`], porque quien lee el JSON no lee esto.
 //!
-//! # El caso sin fecha alcanzable, que es una trampa y hay que decirlo
+//! **Y hay un caso en que los dos campos, llamándose igual, dicen cosas distintas a propósito**:
+//! sin fecha alcanzable la SERIE publica su `success_of_plan` —la mejor observación del solve, el
+//! mes que más cerca se quedó— y aquí va `null` con [`ProjectionBandsResponse::success_absent_reason`].
+//! No es una divergencia del sorteo: son dos preguntas. La serie contesta «¿cuánto te faltó?»; esta
+//! respuesta contesta «¿se rompe tu plan?», y sin plan con fecha esa pregunta no tiene respuesta.
+//! La identidad bit a bit de arriba aplica a los planes CON fecha, que son todos los demás.
+//!
+//! # El caso sin fecha alcanzable: `null` con su motivo, jamás un verde
 //!
 //! Cuando el nivel 1 no encuentra ningún mes que cumpla el umbral
 //! (`retirement_date_basis = not_reachable`), `plan_scenario` construye el escenario que la serie
-//! publica: **no jubilarse dentro del horizonte** (`AtMonth(horizonte + 1)`).
+//! publica: **no jubilarse dentro del horizonte** (`AtMonth(horizonte + 1)`). Y lo mismo pasa
+//! cuando no hay plan que resolver (`plan_absent_reason`): se sortea la entrada del ensamblado
+//! tal cual, que también se jubila en `horizonte + 1`.
 //!
-//! Y el motor **solo clasifica fallos estando jubilado o en media jornada**
+//! El motor **solo clasifica fallos estando jubilado o en media jornada**
 //! (`sim_core.rs`: «un mes ACUMULANDO con déficit puede vaciar la cartera, pero eso no es un plan
-//! de jubilación que falla»). Luego un plan que nunca se jubila **no puede fallar**, y estas
-//! cifras salen `success_of_plan = 1`, `success_verdict = green` y una tabla de fallo con una sola
-//! fila —la del horizonte— valiendo 0.
+//! de jubilación que falla»). Luego un escenario que nunca se jubila **no puede fallar**, y el
+//! sorteo devuelve mecánicamente `success_probability = 1` con cero fallos de los tres tipos.
 //!
-//! **Ese verde dice «este plan sin jubilación no se rompe», no «llegas».** La respuesta de bandas
-//! no tiene ningún campo para declararlo —su contrato no lleva `retirement_date_basis`—, así que
-//! **quien pinte un semáforo con `success_verdict` tiene que mirar antes la serie**, y
-//! [`BANDS_MODEL_NOTE`] lo dice con todas las letras para el consumidor que solo ve el JSON.
-//! Pinea el comportamiento `a_plan_with_no_reachable_date_draws_the_line_that_never_retires`.
+//! Hasta 5.0.0 eso se publicaba tal cual —`success_of_plan: "1"`, `success_verdict: "green"`— con
+//! una nota pidiendo que se leyera la serie al lado. **Era un verde falso**: la regla de oro de
+//! esta API dice que un hueco se publica como `null` CON el campo que dice por qué falta, nunca
+//! como una cifra tranquilizadora que hay que ir a desmentir a otro endpoint. Y la SPA, que pinta
+//! el semáforo con este campo, pintaba de verde un plan que no existe.
+//!
+//! Desde 5.0.0 (WP A12) las **cuatro** cifras del éxito —[`ProjectionBandsResponse::success_of_plan`],
+//! [`ProjectionBandsResponse::success_wilson_low`],
+//! [`ProjectionBandsResponse::success_sampling_error_pp`] y
+//! [`ProjectionBandsResponse::success_verdict`]— van a `null` y viaja
+//! [`ProjectionBandsResponse::success_absent_reason`] con el motivo. **Se decide ANTES del
+//! sorteo**, mirando `PlanLevel1::forced_month` / `BuiltProjection::plan_absent_reason`, y no
+//! adivinando por el resultado: un plan real con éxito 1 y un plan que no ocurre son
+//! indistinguibles mirando solo la salida del sorteo.
+//!
+//! Lo que **se sigue publicando** son las bandas de percentiles, `failures_by_kind`,
+//! `failure_probability_by_age`, `months_below_need_p50` y `withdrawal_to_need_ratio_p50`: son la
+//! trayectoria del patrimonio **sin jubilación**, que es una respuesta legítima a «¿qué pasa si no
+//! me jubilo?». Sus ceros hay que leerlos con esa etiqueta puesta —«sin jubilación no hay fallo
+//! que contar», no «riesgo cero»—, y por eso `success_absent_reason` viaja en la misma respuesta.
+//! Pinea el comportamiento `a_plan_with_no_reachable_date_draws_the_line_that_never_retires` y
+//! `a_plan_without_a_reachable_date_publishes_null_success_with_its_reason`.
 //!
 //! # El presupuesto de tiempo, dicho con números
 //!
@@ -118,7 +143,9 @@ use crate::handlers::projection::{
     jubilacion_civil, resolve_projection_context, serialize_decimal_as_f64, strategy_label,
     ProjectionContext,
 };
-use crate::handlers::retirement_solver::{plan_scenario, solve_plan_level1};
+use crate::handlers::retirement_solver::{
+    level1_fingerprint, plan_scenario, solve_plan_level1, PlanBudget, DATE_BASIS_NOT_REACHABLE,
+};
 use crate::handlers::session::require_session_user;
 use crate::state::{AppState, BandsCacheKey, Density};
 use axum::extract::{Extension, Query};
@@ -411,10 +438,11 @@ pub struct ProjectionBandsResponse {
     /// los `paths` caminos, forzada por el solver— y no un suceso que cada camino pueda o no
     /// alcanzar. Si esa fecha existe o no lo dice `retirement_date_basis` en la serie.
     ///
-    /// **Y por eso hay que leerlo CON la serie al lado**: el motor solo clasifica fallos estando
-    /// jubilado o en media jornada, así que un plan sin fecha alcanzable —que se simula «sin
-    /// jubilarse»— publica aquí un `1` que significa «este plan sin jubilación no se rompe». Ver
-    /// el doc del módulo.
+    /// **`null` cuando el escenario sorteado no lleva mes de jubilación**, y entonces
+    /// [`Self::success_absent_reason`] dice por qué (5.0.0, WP A12). Es el caso en que el motor no
+    /// puede clasificar ningún fallo —solo los clasifica estando jubilado o en media jornada—, así
+    /// que el sorteo devolvería mecánicamente un `1` que significa «este plan sin jubilación no se
+    /// rompe» y se leería como «llegas». Un hueco se publica como hueco. Ver el doc del módulo.
     ///
     /// **Identidad con la serie**: con el sorteo por defecto ([`DEFAULT_BANDS_PATHS`] caminos y la
     /// semilla estable del usuario) esta cifra ES, bit a bit, el `success_of_plan` del bloque
@@ -435,6 +463,8 @@ pub struct ProjectionBandsResponse {
     /// de 1 la normal da una barra de error exactamente cero y declararía «100 % seguro» con 2.500
     /// caminos. Aquí, con cero fallos de 2.500, la cota vale 0,998466 — estrictamente menor que 1,
     /// que es lo honesto.
+    ///
+    /// `null` con [`Self::success_absent_reason`], por la misma razón que [`Self::success_of_plan`].
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub success_wilson_low: Option<Decimal>,
@@ -453,9 +483,13 @@ pub struct ProjectionBandsResponse {
     ///
     /// La serie publica esta misma medición con cuatro decimales (es una cifra auditable del
     /// solve, no una barra de un gráfico); ver [`SAMPLING_ERROR_DP`].
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub success_sampling_error_pp: Decimal,
+    ///
+    /// `null` con [`Self::success_absent_reason`]: sin éxito que medir no hay barra que dibujar, y
+    /// un `"0"` ahí se leería como «medición sin error», justo lo contrario de lo que este campo
+    /// existe para decir.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub success_sampling_error_pp: Option<Decimal>,
     /// `green` | `amber` | `red` — **el semáforo, medido contra el umbral DEL PERFIL** y con la
     /// MISMA regla con la que el solver decidió la fecha (`SuccessAt::meets`, C3):
     ///
@@ -474,7 +508,40 @@ pub struct ProjectionBandsResponse {
     /// **Con `umbral = 100` no existe el ámbar** y es correcto: ahí «cumple» es «cero fallos», y
     /// cero fallos es exactamente `success_of_plan == 1`, que es también la condición del ámbar.
     /// O ningún camino se rompe, o es rojo.
-    pub success_verdict: &'static str,
+    ///
+    /// **`null` cuando no hay plan con fecha que colorear** ([`Self::success_absent_reason`]).
+    /// Hasta 5.0.0 ese caso salía `"green"` —el escenario sin jubilación no puede fallar— y la SPA
+    /// pintaba de verde un plan que no existe; el semáforo de un plan ausente es la ausencia de
+    /// semáforo, no un color.
+    #[schema(value_type = Option<String>)]
+    pub success_verdict: Option<&'static str>,
+    /// **Por qué no hay éxito que publicar** (5.0.0, WP A12). `null` ⟺ las cuatro cifras de
+    /// arriba viajan resueltas.
+    ///
+    /// Se decide **antes del sorteo**, mirando el nivel 1 del plan, y toma uno de estos literales:
+    ///
+    /// - `not_reachable` — hay plan y **ningún mes del horizonte cumple el umbral**
+    ///   ([`crate::handlers::retirement_solver::DATE_BASIS_NOT_REACHABLE`], el mismo literal que
+    ///   `retirement_date_basis` en `GET /v1/projection/series`, para que las dos superficies no
+    ///   nombren la misma situación de dos maneras);
+    /// - el mismo literal que `plan_absent_reason` de la serie cuando **no hay plan**:
+    ///   `birth_date_missing` es el único alcanzable por esta ruta (`months_override` necesita un
+    ///   `?months=` que este endpoint no acepta, y `household_not_solved` un `view=household` que
+    ///   aquí es 400 `household_bands_unavailable`) — se propaga el que traiga el ensamblado en vez
+    ///   de reescribirlo, porque la causa es la misma y un literal propio sería un segundo
+    ///   vocabulario para el mismo hecho.
+    ///
+    /// **Lo demás de la respuesta sigue viajando**: las bandas de percentiles,
+    /// [`Self::failures_by_kind`], [`Self::failure_probability_by_age`],
+    /// [`Self::months_below_need_p50`] y [`Self::withdrawal_to_need_ratio_p50`] describen la
+    /// trayectoria del patrimonio **sin jubilarse**, que es una respuesta legítima. Sus ceros se
+    /// leen con esa etiqueta: «sin jubilación no hay fallo que contar», no «riesgo cero».
+    ///
+    /// **Viaja siempre, también como `null`** (nada de `skip_serializing_if`): es el campo que
+    /// convierte un hueco en una respuesta, y una clave que desaparece obliga al consumidor a
+    /// distinguir «no falta nada» de «este servidor no publica el motivo».
+    #[schema(value_type = Option<String>)]
+    pub success_absent_reason: Option<&'static str>,
     /// **Fallos por motivo, contando el PRIMER fallo de cada camino**, en el orden fijo
     /// `[F1 cartera agotada, F2 tasa inicial excedida, F3 la regla no llega a la necesidad]` —
     /// los mismos índices que `KIND_PORTFOLIO_DEPLETED`/`KIND_INITIAL_RATE_EXCEEDED`/
@@ -490,9 +557,10 @@ pub struct ProjectionBandsResponse {
     ///
     /// **Con un plan sin fecha alcanzable la tabla trae UNA sola fila**, la del horizonte
     /// (`months − 1` en la rejilla), y vale `0`: el ancla es el mes forzado (`horizonte + 1`), no
-    /// cabe ningún nodo dentro, y el cierre en el horizonte se emite igual. **Ese 0 no dice «plan seguro», dice «plan que no
-    /// ocurre»** — quien lo lea sin mirar `retirement_date_basis` en la serie leerá lo contrario
-    /// de lo que pasa. Ver el doc del módulo.
+    /// cabe ningún nodo dentro, y el cierre en el horizonte se emite igual. **Ese 0 no dice «plan
+    /// seguro», dice «sin jubilación no hay fallo que contar»** — y quién no tiene fecha lo dice
+    /// [`ProjectionBandsResponse::success_absent_reason`] en esta misma respuesta, sin tener que
+    /// ir a buscarlo a la serie. Ver el doc del módulo.
     ///
     /// **Vacía** solo si el llamante trae un `ProjectionInput` legacy por CRUCE en el que ningún
     /// camino se jubila: ahí no hay ancla que valga, y una tabla inventada sería peor que un hueco.
@@ -537,7 +605,7 @@ pub struct ProjectionBandsResponse {
 /// Vive en la respuesta y no solo en la documentación por la misma razón que
 /// `PROJECTION_MODEL_NOTE`: un consumidor conversacional lee el JSON, no el repositorio, y una
 /// probabilidad de ruina sin sus supuestos es un número que parece cierto.
-pub(crate) const BANDS_MODEL_NOTE: &str = "Monte Carlo sobre el MISMO bucle que la línea determinista, con los factores de crecimiento sorteados. QUÉ SE SORTEA: EL PLAN, no el hogar en crudo — el escenario lleva ya el MES DE JUBILACIÓN que el solver fijó, el mismo en los `paths` caminos, así que la fecha es un DATO y lo único que se mide aquí es si ese plan se ROMPE. MODELO: un shock de mercado COMÚN por mes (un solo z~N(0,1) que viven todos los activos a la vez), escalado por la volatilidad de cada uno: factor = m·exp(σz) con σ = annual_volatility_percent/100/√12 y m el multiplicador mensual determinista. La rentabilidad que declaraste es COMPUESTA (CAGR), así que m es la MEDIANA del factor sorteado y la línea determinista es la CENTRAL de la banda, ni techo ni suelo; la media aritmética queda por encima, y esa diferencia no es un error, es el coste de la volatilidad. σ = 0 ⇒ el camino determinista exacto. PUNTUAL QUIERE DECIR PUNTUAL: cada percentil se calcula mes a mes sobre los caminos de ESE mes, así que la curva p50 NO es una simulación real y no cumple ninguna identidad contable — no la cites como «tu patrimonio probable» punto a punto. ÉXITO = la fracción de caminos SIN NINGÚN FALLO, y hay tres motivos y solo tres, que viajan contados aparte en `failures_by_kind`: F1 la cartera se agota, F2 la tasa inicial de retirada excede el tope del perfil, F3 la regla por saldo no llega a la necesidad ordinaria. Distinguirlos importa porque tienen arreglos OPUESTOS: F1 pide más capital o menos gasto, F2 pide retrasar la fecha, F3 pide cambiar la regla. UN CAMINO SOLO PUEDE FALLAR ESTANDO JUBILADO (o en media jornada): antes de la fecha, quedarse sin cartera es un problema de caja de hoy y no un plan de jubilación que se rompe. Consecuencia que hay que mirar de frente: si tu plan NO tiene fecha alcanzable, se simula «sin jubilarse» y aquí verás un éxito del 100 % que significa «este plan sin jubilación no se rompe», NO «llegas» — quién llega lo dice `retirement_date_basis` en `/v1/projection/series`, y sin ese campo delante este veredicto no se puede pintar. EL UMBRAL ES UNA RESTRICCIÓN, no un adorno del color: `success_threshold_pct` (80–100, tu perfil) es lo que decidió la FECHA, y el veredicto se mide contra él con la MISMA regla — por debajo de 100 se compara la cota inferior del intervalo de WILSON al 95 % (`success_wilson_low`), no el estimador puntual; en 100 se exige cero fallos de N. Verde = cumple; ámbar = el estimador puntual llega y el intervalo no; rojo = ni el puntual. Con umbral 100 no hay ámbar: o no se rompe ni un camino, o es rojo. N IMPORTA: `paths` viaja al lado porque una probabilidad sin su tamaño de muestra no se compara con nada, y `success_sampling_error_pp` es la barra hacia abajo — NUNCA cero, tampoco con cero fallos (0 de 2.500 son 0,15 pp). Y «100 %» no significa «seguro»: significa «ningún fallo en N caminos DE ESTE MODELO». SEMILLA estable por usuario: las mismas cifras hoy y dentro de un año, salvo que cambies los datos. Con el sorteo por defecto estas cifras son EXACTAMENTE las del plan que publica `/v1/projection/series`; si pasas `seed` o `paths` estás mirando otro mercado u otro tamaño de muestra, y entonces la fecha del plan NO se mueve — solo cambia la medición de su riesgo. `failure_probability_by_age` dice CUÁNDO se rompe: acumulada, cada cinco años desde la jubilación, y cierra SIEMPRE en el horizonte (esa última fila es 1 − éxito, y el paso hasta ella puede ser menor de cinco años). Su `by_kind` es el reparto de la ejecución ENTERA, exacto solo en esa última fila. El RECORTE de una regla de retirada no es por sí solo un fracaso y viaja aparte, en `months_below_need_p50` y `withdrawal_to_need_ratio_p50`, que cuentan el recorte de la regla Y el gasto que la cartera no pudo financiar. LO QUE NO SE MODELA, dicho para que nadie lo suponga: colas gruesas (el shock es log-normal, así que la probabilidad de ruina es OPTIMISTA en la cola), autocorrelación o reversión a la media (los meses son independientes: sin ciclos), correlación imperfecta entre activos (con un shock común la correlación es exactamente 1 y una cartera diversificada NO se beneficia aquí de su diversificación: el modelo es conservador en ese eje), bootstrap histórico (el sorteo es paramétrico: nada de esto es «lo que pasó entre 1929 y 1964»), volatilidad de la inflación, de los ingresos, del gasto o del tipo de la deuda (solo los activos sortean), y rebalanceo (cada activo compone por su cuenta). Los importes de las bandas son NOMINALES, como la serie. El patrimonio, el capital necesario y la aportación en EUROS siguen saliendo del camino exacto en Decimal: de aquí solo salen probabilidades, contadores y percentiles.";
+pub(crate) const BANDS_MODEL_NOTE: &str = "Monte Carlo sobre el MISMO bucle que la línea determinista, con los factores de crecimiento sorteados. QUÉ SE SORTEA: EL PLAN, no el hogar en crudo — el escenario lleva ya el MES DE JUBILACIÓN que el solver fijó, el mismo en los `paths` caminos, así que la fecha es un DATO y lo único que se mide aquí es si ese plan se ROMPE. MODELO: un shock de mercado COMÚN por mes (un solo z~N(0,1) que viven todos los activos a la vez), escalado por la volatilidad de cada uno: factor = m·exp(σz) con σ = annual_volatility_percent/100/√12 y m el multiplicador mensual determinista. La rentabilidad que declaraste es COMPUESTA (CAGR), así que m es la MEDIANA del factor sorteado y la línea determinista es la CENTRAL de la banda, ni techo ni suelo; la media aritmética queda por encima, y esa diferencia no es un error, es el coste de la volatilidad. σ = 0 ⇒ el camino determinista exacto. PUNTUAL QUIERE DECIR PUNTUAL: cada percentil se calcula mes a mes sobre los caminos de ESE mes, así que la curva p50 NO es una simulación real y no cumple ninguna identidad contable — no la cites como «tu patrimonio probable» punto a punto. ÉXITO = la fracción de caminos SIN NINGÚN FALLO, y hay tres motivos y solo tres, que viajan contados aparte en `failures_by_kind`: F1 la cartera se agota, F2 la tasa inicial de retirada excede el tope del perfil, F3 la regla por saldo no llega a la necesidad ordinaria. Distinguirlos importa porque tienen arreglos OPUESTOS: F1 pide más capital o menos gasto, F2 pide retrasar la fecha, F3 pide cambiar la regla. UN CAMINO SOLO PUEDE FALLAR ESTANDO JUBILADO (o en media jornada): antes de la fecha, quedarse sin cartera es un problema de caja de hoy y no un plan de jubilación que se rompe. Consecuencia que se declara AQUÍ y no hay que ir a buscar a otro endpoint: si el escenario sorteado no lleva mes de jubilación —porque ningún mes cumple el umbral, o porque no hay plan que resolver— el sorteo no puede contar ni un fallo, así que `success_of_plan`, `success_wilson_low`, `success_sampling_error_pp` y `success_verdict` viajan a NULL y `success_absent_reason` dice por qué (`not_reachable`, o el mismo literal que `plan_absent_reason` de la serie). No hay un 100 % que desmentir: un hueco se publica como hueco. Lo que sí se sigue publicando son las bandas, `failures_by_kind` y `failure_probability_by_age`, porque describen la trayectoria SIN jubilarse — y ahí un 0 significa «sin jubilación no hay fallo que contar», no «riesgo cero». EL UMBRAL ES UNA RESTRICCIÓN, no un adorno del color: `success_threshold_pct` (80–100, tu perfil) es lo que decidió la FECHA, y el veredicto se mide contra él con la MISMA regla — por debajo de 100 se compara la cota inferior del intervalo de WILSON al 95 % (`success_wilson_low`), no el estimador puntual; en 100 se exige cero fallos de N. Verde = cumple; ámbar = el estimador puntual llega y el intervalo no; rojo = ni el puntual. Con umbral 100 no hay ámbar: o no se rompe ni un camino, o es rojo. N IMPORTA: `paths` viaja al lado porque una probabilidad sin su tamaño de muestra no se compara con nada, y `success_sampling_error_pp` es la barra hacia abajo — NUNCA cero, tampoco con cero fallos (0 de 2.500 son 0,15 pp). Y «100 %» no significa «seguro»: significa «ningún fallo en N caminos DE ESTE MODELO». SEMILLA estable por usuario: las mismas cifras hoy y dentro de un año, salvo que cambies los datos. Con el sorteo por defecto estas cifras son EXACTAMENTE las del plan que publica `/v1/projection/series`; si pasas `seed` o `paths` estás mirando otro mercado u otro tamaño de muestra, y entonces la fecha del plan NO se mueve — solo cambia la medición de su riesgo. `failure_probability_by_age` dice CUÁNDO se rompe: acumulada, cada cinco años desde la jubilación, y cierra SIEMPRE en el horizonte (esa última fila es 1 − éxito, y el paso hasta ella puede ser menor de cinco años; sin fecha de jubilación trae una sola fila valiendo 0, que es el caso de `success_absent_reason`). Su `by_kind` es el reparto de la ejecución ENTERA, exacto solo en esa última fila. El RECORTE de una regla de retirada no es por sí solo un fracaso y viaja aparte, en `months_below_need_p50` y `withdrawal_to_need_ratio_p50`, que cuentan el recorte de la regla Y el gasto que la cartera no pudo financiar. LO QUE NO SE MODELA, dicho para que nadie lo suponga: colas gruesas (el shock es log-normal, así que la probabilidad de ruina es OPTIMISTA en la cola), autocorrelación o reversión a la media (los meses son independientes: sin ciclos), correlación imperfecta entre activos (con un shock común la correlación es exactamente 1 y una cartera diversificada NO se beneficia aquí de su diversificación: el modelo es conservador en ese eje), bootstrap histórico (el sorteo es paramétrico: nada de esto es «lo que pasó entre 1929 y 1964»), volatilidad de la inflación, de los ingresos, del gasto o del tipo de la deuda (solo los activos sortean), y rebalanceo (cada activo compone por su cuenta). Los importes de las bandas son NOMINALES, como la serie. El patrimonio, el capital necesario y la aportación en EUROS siguen saliendo del camino exacto en Decimal: de aquí solo salen probabilidades, contadores y percentiles.";
 
 /// Traduce un [`McError`] a la respuesta HTTP. Las tres variantes de configuración son 400 con
 /// código estable; el fallo del motor reusa `map_engine_err`, que ya publica los códigos que el
@@ -663,8 +731,14 @@ pub(crate) async fn projection_bands_cached(
         installation_id = %iid, paths, seed, threshold_pct,
         "projection bands cache MISS, computing"
     );
+    // Generación capturada ANTES del sorteo (WP A12): una banda insertada después de una
+    // invalidación describiría unos activos que ya no existen, y lo haría al lado de una línea
+    // determinista ya actualizada. Ver `AppState::projection_generation`.
+    let generation = state.projection_generation(iid).await;
     let response = Arc::new(compute_projection_bands(state, user_id, iid, ctx, paths, seed).await?);
-    state.bands_cache_insert(key, response.clone()).await;
+    state
+        .bands_cache_insert_if_current(key, generation, response.clone())
+        .await;
     Ok(response)
 }
 
@@ -739,27 +813,82 @@ async fn compute_projection_bands(
     let input = built.input.clone();
     let level1 = built.plan_level1.clone();
     let plan_profile = built.plan_profile.clone();
-    let has_plan = built.plan_absent_reason.is_none();
+    let plan_absent_reason = built.plan_absent_reason;
+    let has_plan = plan_absent_reason.is_none();
     // La semilla del PLAN es la estable del usuario, pase lo que pase con `?seed=`.
     let plan_seed = resolve_seed(iid, user_id, None);
+
+    // **El nivel 1 se busca en la cache ANTES de gastar dos a cinco segundos en volverlo a
+    // resolver** (5.0.0, WP A12). `build_installation_projection_input` no resuelve plan —solo lo
+    // hace `run_member_projection`, dentro del miss de la serie—, así que `built.plan_level1` llega
+    // siempre vacío aquí y este endpoint estaba re-resolviendo un solve que la serie ya había
+    // hecho, con la MISMA entrada, el MISMO perfil y la MISMA semilla estable. Y la SPA pide las
+    // dos superficies al abrir Jubilación, así que era el caso normal.
+    //
+    // La clave es de CONTENIDO (`level1_fingerprint` sobre los cinco argumentos del solve), así
+    // que un hit **es** el mismo resultado y no una aproximación: si algo del hogar, del perfil,
+    // del presupuesto o de la semilla cambia, la clave cambia y no hay hit que servir.
+    let level1_key = has_plan.then(|| {
+        level1_fingerprint(
+            &input,
+            &volatilities,
+            plan_seed,
+            &plan_profile,
+            PlanBudget::FULL,
+        )
+    });
+    let cached_level1 = match level1_key {
+        Some(k) => state.level1_cache_get(&k).await,
+        None => None,
+    };
+    if cached_level1.is_some() {
+        tracing::info!(
+            installation_id = %iid,
+            level1_key = level1_key.map(|k| k.as_u64()),
+            "plan level 1 cache HIT (bands reuse the series solve)"
+        );
+    }
 
     // Bajo el MISMO semáforo que las proyecciones (`heavy::run_projection_sim`): el recurso
     // escaso es el mismo —núcleos— y este llamante es el más caro de todos, así que dejarlo
     // fuera del techo habría reabierto el agujero que el semáforo cerró.
     let t0 = std::time::Instant::now();
-    let outcome = crate::heavy::run_projection_sim("monte carlo bands", move || {
-        let scenario = match level1 {
-            Some(l1) => plan_scenario(&input, &l1),
-            None if has_plan => {
-                let l1 = solve_plan_level1(&input, &volatilities, plan_seed, &plan_profile)?;
-                plan_scenario(&input, &l1)
-            }
-            None => input.clone(),
-        };
-        project_percentile_bands(&scenario, &volatilities, &config).map_err(map_mc_err)
-    })
+    // **El mes forzado sale del sorteo, no se adivina de su resultado** (WP A12). La tarea
+    // devuelve el `forced_month` del escenario que ha simulado junto a la salida: es el único
+    // dato que distingue «este plan aguanta» de «este escenario no se jubila y por eso no puede
+    // fallar», y las dos cosas producen exactamente la misma salida de Monte Carlo.
+    let (outcome, forced_month, solved) = crate::heavy::run_projection_sim(
+        "monte carlo bands",
+        move || {
+            // Tres orígenes para el mismo escenario, en orden de coste creciente: el nivel 1 que
+            // trajera el ensamblado, el que la cache guarde, y el que hay que resolver. El
+            // tercero devuelve además el `PlanLevel1` para que el llamante lo guarde: así la
+            // SERIE hereda este solve igual que las bandas heredan el suyo, y la primera de las
+            // dos superficies que llegue paga por las dos.
+            let (scenario, forced_month, solved) = match (level1, cached_level1) {
+                (Some(l1), _) => (plan_scenario(&input, &l1), l1.forced_month, None),
+                (None, Some(l1)) => (plan_scenario(&input, &l1), l1.forced_month, None),
+                (None, None) if has_plan => {
+                    let l1 = solve_plan_level1(&input, &volatilities, plan_seed, &plan_profile)?;
+                    let scenario = plan_scenario(&input, &l1);
+                    let forced_month = l1.forced_month;
+                    (scenario, forced_month, Some(Arc::new(l1)))
+                }
+                (None, None) => (input.clone(), None, None),
+            };
+            project_percentile_bands(&scenario, &volatilities, &config)
+                .map_err(map_mc_err)
+                .map(|outcome| (outcome, forced_month, solved))
+        },
+    )
     .await??;
     let computed_in_ms = t0.elapsed().as_millis() as u64;
+
+    // Solo se guarda lo que se ha resuelto AQUÍ: un hit no se reinserta (ya refrescó su TTL al
+    // leerse) y el nivel 1 que venía del ensamblado tampoco, porque quien lo resolvió ya lo guardó.
+    if let (Some(key), Some(l1)) = (level1_key, solved) {
+        state.level1_cache_insert(key, l1).await;
+    }
 
     Ok(assemble_bands_response(
         &outcome,
@@ -769,13 +898,50 @@ async fn compute_projection_bands(
         ctx.session_birth_date,
         strategy_label(ctx.retirement_profile.strategy),
         ctx.retirement_profile.success_threshold_pct,
+        success_absent_reason(plan_absent_reason, forced_month),
         computed_in_ms,
     ))
+}
+
+/// **Por qué esta respuesta no puede publicar un éxito**, decidido con el PLAN y no con la salida
+/// del sorteo (5.0.0, WP A12).
+///
+/// Dos causas y ninguna más, en este orden:
+///
+/// 1. **No hay plan** (`plan_absent_reason` del ensamblado): se propaga su literal tal cual —
+///    `birth_date_missing` es el único alcanzable desde esta superficie, ver el doc de
+///    [`ProjectionBandsResponse::success_absent_reason`]—. Reescribirlo aquí crearía un segundo
+///    vocabulario para la misma causa.
+/// 2. **Hay plan y no tiene fecha**: el nivel 1 devolvió `forced_month: None`, que es exactamente
+///    [`DATE_BASIS_NOT_REACHABLE`] — se reusa esa constante en vez de escribir el literal, para
+///    que este campo y `retirement_date_basis` de la serie no puedan divergir en una letra.
+///
+/// El orden importa: sin plan tampoco hay mes forzado, así que la segunda condición se cumple
+/// también en el primer caso y el literal que gana tiene que ser el más específico —el que dice
+/// que **no se llegó a preguntar**, frente al que dice que se preguntó y no había respuesta.
+///
+/// La comparte el eje `monte_carlo` de `simulate_projection` por lado
+/// (`SimKpis::success_probability_absent_reason`): el sorteo es el mismo, el fallo silencioso es
+/// el mismo y una segunda copia de esta decisión divergiría en el primer literal nuevo.
+pub(crate) fn success_absent_reason(
+    plan_absent_reason: Option<&'static str>,
+    forced_month: Option<u32>,
+) -> Option<&'static str> {
+    match (plan_absent_reason, forced_month) {
+        (Some(reason), _) => Some(reason),
+        (None, None) => Some(DATE_BASIS_NOT_REACHABLE),
+        (None, Some(_)) => None,
+    }
 }
 
 /// Salida del motor estocástico → respuesta publicada. Función aparte, y sin I/O, porque es
 /// donde viven las DOS traducciones que se pueden equivocar en silencio: los meses del bucle a
 /// la rejilla 0-based (`engine_month_to_grid`) y las probabilidades `f64` a `Decimal`.
+///
+/// **`absent_reason` gobierna las cuatro cifras del éxito y solo esas** (WP A12): con motivo, las
+/// cuatro van a `null` y el motivo viaja; sin él, se publican las del sorteo. Se pasa como
+/// parámetro —y no se deduce aquí de `outcome`— porque de la salida del sorteo NO se puede
+/// deducir: un plan sin fecha y un plan perfecto producen el mismo `success_probability = 1`.
 #[allow(clippy::too_many_arguments)]
 fn assemble_bands_response(
     outcome: &McOutcome,
@@ -785,6 +951,7 @@ fn assemble_bands_response(
     birth_date: Option<chrono::NaiveDate>,
     strategy: String,
     threshold_pct: u32,
+    absent_reason: Option<&'static str>,
     computed_in_ms: u64,
 ) -> ProjectionBandsResponse {
     let len = outcome
@@ -835,15 +1002,29 @@ fn assemble_bands_response(
         seed: outcome.seed.to_string(),
         percentiles: outcome.percentiles.clone(),
         points,
-        success_of_plan: probability_out(outcome.success_probability),
+        // Las cuatro cifras del éxito viajan juntas o faltan juntas: publicar el intervalo sin el
+        // punto —o la barra sin el intervalo— dejaría media medición suelta en una respuesta que
+        // ya ha declarado que no hay nada que medir.
+        success_of_plan: absent_reason
+            .is_none()
+            .then(|| probability_out(outcome.success_probability))
+            .flatten(),
         success_threshold_pct: threshold_pct,
-        success_wilson_low: probability_out(outcome.wilson_low),
-        success_sampling_error_pp: sampling_error_out(outcome.half_width_pp),
-        success_verdict: success_verdict(
-            outcome.success_probability,
-            outcome.wilson_low,
-            threshold_pct,
-        ),
+        success_wilson_low: absent_reason
+            .is_none()
+            .then(|| probability_out(outcome.wilson_low))
+            .flatten(),
+        success_sampling_error_pp: absent_reason
+            .is_none()
+            .then(|| sampling_error_out(outcome.half_width_pp)),
+        success_verdict: absent_reason.is_none().then(|| {
+            success_verdict(
+                outcome.success_probability,
+                outcome.wilson_low,
+                threshold_pct,
+            )
+        }),
+        success_absent_reason: absent_reason,
         failures_by_kind: outcome.failures_by_kind,
         failure_probability_by_age,
         months_below_need_p50: outcome.months_below_need_p50,
@@ -919,8 +1100,11 @@ pub(crate) fn failure_points(
 /// # Qué NO decide esta función
 ///
 /// Si el plan **tiene** fecha. Con `retirement_date_basis = not_reachable` el escenario sorteado
-/// es «no jubilarse dentro del horizonte», que casi nunca falla: el verde de ahí dice «este plan
-/// sin jubilación aguanta», no «llegas». Quien pinte el semáforo mira antes la serie.
+/// es «no jubilarse dentro del horizonte», que no puede fallar, y esta función devolvería `green`
+/// sobre un plan que no existe. Por eso **no se la llama en ese caso**: el llamante decide antes
+/// con [`success_absent_reason`] y publica `success_verdict: null` con su motivo (WP A12). La
+/// función se queda con una sola responsabilidad —comparar tres números— y quien la reutiliza
+/// (`summary.rs`, `simulate_projection`) tiene que hacer la misma comprobación antes.
 pub(crate) fn success_verdict(success: f64, wilson_low: f64, threshold_pct: u32) -> &'static str {
     let target = f64::from(threshold_pct) / 100.0;
     // La MISMA expresión que `SuccessAt::meets`, rama a rama.

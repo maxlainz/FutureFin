@@ -21,9 +21,10 @@ use crate::handlers::retirement_profile::{
 /// CPU que la serie y publica lo que devuelve. Ver el doc de `retirement_solver` para los dos
 /// niveles y sus presupuestos.
 use crate::handlers::retirement_solver::{
-    plan_fingerprint, plan_scenario, solve_plan_level1, solve_plan_level1_with_budget,
-    spawn_plan_extras, CoastSolveMode, PartialSolveMode, PlanBudget, PlanExtras, PlanKey,
-    PlanLevel1, PlanSolveProfile, PlanStrategy, PLAN_EXTRAS_READY, SOLVE_CONFIRM_PATHS,
+    level1_fingerprint, plan_fingerprint, plan_scenario, solve_plan_level1,
+    solve_plan_level1_with_budget, spawn_plan_extras, CoastSolveMode, PartialSolveMode, PlanBudget,
+    PlanExtras, PlanKey, PlanLevel1, PlanSolveProfile, PlanStrategy, PLAN_EXTRAS_READY,
+    SOLVE_CONFIRM_PATHS,
 };
 use crate::handlers::person_view::LedgerView;
 /// Monte Carlo (5.0.0, WP6b): el eje `monte_carlo` de `simulate_projection` reusa las MISMAS
@@ -111,7 +112,9 @@ fn resolve_density(q: &ProjectionSeriesQuery) -> Result<Density, ApiError> {
 /// Ese último empujón no es cosmético. El bucle anual solo emite múltiplos de 12, así que con
 /// un horizonte que no lo fuera la serie se cortaba antes de tiempo **sin decir nada**: con
 /// `?months=100&density=hybrid` el último punto era el mes 96 y los meses 97–100 no existían
-/// en `points`, ni en `fire_target_series`, ni en `asset_series[].values`. Desaparecía además
+/// en `points`, ni en `asset_series[].values`, ni en la serie auxiliar de entonces
+/// (`fire_target_series`, retirada en el modelo v2; su sitio lo ocupa hoy
+/// `needed_capital_curve`, también paralela a `points`). Desaparecía además
 /// el punto que cualquiera lee como «patrimonio al final». Con `?months=19` se perdía el 32 %
 /// del horizonte pedido. Invisible desde la web (el horizonte derivado siempre es años × 12),
 /// pero alcanzable por `?months=N` y por la tool MCP `get_projection`, que fuerza `hybrid`.
@@ -246,8 +249,13 @@ pub struct ProjectionPoint {
     #[schema(value_type = f64)]
     pub net_worth_real: Decimal,
     /// Patrimonio LÍQUIDO nominal del mes (4.8.0, #143): Σ activos `is_liquid` + caja sin
-    /// repartir, SIN restar pasivos. **Es la base que decide el cruce FIRE** — la línea que hay
-    /// que comparar contra `fire_target_series`; `net_worth` sigue siendo el total del chart.
+    /// repartir, SIN restar pasivos. `net_worth` sigue siendo el total del chart.
+    ///
+    /// **Ya no decide ninguna fecha.** Hasta 4.15.x era la base del CRUCE contra
+    /// `fire_target_series`; el modelo v2 retiró las dos cosas —el cruce y esa serie— porque la
+    /// fecha la decide el éxito del sorteo. Sigue siendo la línea que el motor VENDE en la
+    /// jubilación (y por tanto la que mide la tasa inicial de retirada, F2), y la que
+    /// `needed_capital_curve` cruza en la fecha del plan.
     #[serde(serialize_with = "serialize_decimal_as_f64")]
     #[schema(value_type = f64)]
     pub net_worth_liquid: Decimal,
@@ -362,8 +370,8 @@ pub struct HouseholdMemberProjection {
     /// misma decimación y los mismos f64 (excepción chart-only D4/I3). Es lo que dibuja la
     /// «línea fina por miembro» bajo la suma en grueso.
     ///
-    /// Lleva `month_index` propio —y no solo dos arrays alineados por posición como
-    /// `fire_target_series`— porque estas series se leen POR SEPARADO de `points`: un chart que
+    /// Lleva `month_index` propio —y no un array alineado por posición con `points`, como sí lo
+    /// está `needed_capital_curve`— porque estas series se leen POR SEPARADO de `points`: un chart que
     /// pinta cuatro líneas de dos fuentes distintas no puede depender de que ambas se hayan
     /// decimado igual, y aquí el coste de decirlo son cuatro bytes por punto.
     pub series: Vec<MemberSeriesPoint>,
@@ -2863,7 +2871,7 @@ pub(crate) async fn assets_projection_context(
     path = "/v1/projection/series",
     tag = "projection",
     params(
-        ("view" = Option<String>, Query, description = "`mine` (default desde 5.0.0: `view` omitido o vacío) = una simulación con el perfil, la fecha de nacimiento y las filas del solicitante. `household` = AGREGADO de una simulación por miembro (suma de series; `jubilacion_*` y `fire_target_series` vacíos, detalle por persona en `members[]`). Cualquier otro valor → 400 `invalid_view`."),
+        ("view" = Option<String>, Query, description = "`mine` (default desde 5.0.0: `view` omitido o vacío) = una simulación con el perfil, la fecha de nacimiento y las filas del solicitante. `household` = AGREGADO de una simulación por miembro (suma de series; el bloque «plan» viaja entero ausente con `plan_absent_reason: household_aggregate` y los `jubilacion_*` vacíos, detalle por persona en `members[]`). Cualquier otro valor → 400 `invalid_view`."),
         ("months" = Option<u32>, Query, description = "Horizonte en meses (12–840; fuera de rango → 400 `months_out_of_range`); omitir = horizonte derivado (`lifespan_age` | `fallback_no_demographics`), ver `horizon_basis` + `horizon_lifespan_age` en la respuesta"),
         ("density" = Option<String>, Query, description = "`monthly` (default) | `hybrid` (mensual el primer año, anual después). Cualquier otro valor → 400 `invalid_density`"),
     ),
@@ -2929,6 +2937,12 @@ pub(crate) async fn projection_series_cached(
         }
         tracing::info!(installation_id = %iid, view = ?view, density = ?density, "projection cache MISS, computing");
         let t0 = std::time::Instant::now();
+        // **La generación se captura ANTES de computar** (5.0.0, WP A12). Este compute dura
+        // segundos —el nivel 1 va dentro del mismo permiso—, y una mutación que invalide mientras
+        // tanto quedaría PISADA por la inserción de abajo: el usuario editaría un activo y
+        // seguiría viendo la cifra vieja hasta que expirara el TTL. Ver
+        // `AppState::projection_generation`.
+        let generation = state.projection_generation(iid).await;
         let (mut response, spawn) =
             compute_projection_series_response(state, user_id, iid, view, None, density).await?;
         tracing::info!(
@@ -2941,9 +2955,21 @@ pub(crate) async fn projection_series_cached(
         // luego): una entrada sin ella publicaría `computing` para siempre, porque ningún HIT
         // podría volver a encontrar sus extras.
         let plan_key = spawn.as_ref().map(|s| s.key);
+        // Si la generación cambió, la entrada se descarta y esta respuesta **se sirve igual**: era
+        // correcta cuando se calculó y el llamante ya está esperándola. Lo que no se hace es
+        // guardarla, para que el siguiente GET recalcule contra los datos de ahora.
         state
-            .projection_cache_insert(key, Arc::new(response.clone()), plan_key)
+            .projection_cache_insert_if_current(
+                key,
+                generation,
+                Arc::new(response.clone()),
+                plan_key,
+            )
             .await;
+        // El nivel 2 se lanza igual: su cache está direccionada por CONTENIDO, así que una entrada
+        // calculada sobre datos ya sustituidos es inalcanzable —nadie puede pedirla— y no hay nada
+        // que proteger. Lo único que cuesta es la CPU de un sorteo que quizá nadie lea, y sale más
+        // barato que dejar sin extras al caso normal por una carrera que casi nunca ocurre.
         match spawn {
             Some(spawn) => {
                 let key = spawn.key;
@@ -2979,7 +3005,7 @@ pub(crate) async fn projection_series_cached(
 /// Calcula la respuesta de proyección sin tocar el cache. Es la unidad de
 /// recompute reusada por: (a) cache miss en el handler, (b) warm-up post-login,
 /// (c) warm-up post-mutación. `density` solo afecta a la serialización (qué
-/// puntos incluir en `points`/`fire_target_series`/`asset_series.values`);
+/// puntos incluir en `points`/`needed_capital_curve`/`asset_series.values`);
 /// el compute interno del engine siempre es el horizonte mensual completo.
 /// Cotas del horizonte EXPLÍCITO (`GET /v1/projection/series?months=`, tool `get_projection.months`
 /// y `simulate_projection.months`). Son las mismas que declara el JSON Schema de las tools.
@@ -3250,10 +3276,38 @@ async fn run_member_projection(
         let vols = crate::handlers::projection_bands::volatilities_f64(&built);
         let solve_input = built.input.clone();
         let solve_profile = built.plan_profile.clone();
-        let level1 = crate::heavy::run_projection_sim("plan level 1", move || {
-            solve_plan_level1(&solve_input, &vols, seed, &solve_profile)
-        })
-        .await??;
+        // **Antes de gastar el permiso, se pregunta a la cache del nivel 1** (5.0.0, WP A12). La
+        // clave es de contenido sobre los cinco argumentos del solve, así que un hit ES el mismo
+        // resultado. Quien lo dejó ahí puede ser la otra densidad de esta misma respuesta, o
+        // `GET /v1/projection/bands`, que resuelve el MISMO plan con la MISMA semilla estable: la
+        // primera de las dos superficies que llegue paga por las dos.
+        let level1_key = level1_fingerprint(
+            &solve_input,
+            &vols,
+            seed,
+            &solve_profile,
+            PlanBudget::FULL,
+        );
+        let level1 = match state.level1_cache_get(&level1_key).await {
+            Some(cached) => {
+                tracing::info!(
+                    installation_id = %iid,
+                    level1_key = level1_key.as_u64(),
+                    "plan level 1 cache HIT"
+                );
+                (*cached).clone()
+            }
+            None => {
+                let level1 = crate::heavy::run_projection_sim("plan level 1", move || {
+                    solve_plan_level1(&solve_input, &vols, seed, &solve_profile)
+                })
+                .await??;
+                state
+                    .level1_cache_insert(level1_key, Arc::new(level1.clone()))
+                    .await;
+                level1
+            }
+        };
         // **El escenario que se hashea es el que se simula.** `plan_scenario` aplica las tres
         // decisiones del nivel 1 (mes forzado, corte de aportaciones, inicio de la media jornada)
         // con las plantillas públicas del crate; la huella se calcula sobre ESE valor y sobre
@@ -4554,13 +4608,28 @@ pub(crate) struct SimKpis {
     // con los `paths` y la `seed` que pidió el llamante, sobre el escenario que el solve fijó. Con
     // los valores por defecto (2.500 caminos y la semilla estable) coinciden con el bloque de
     // arriba, porque ese eje pone además los dos lados en presupuesto COMPLETO.
-    /// Fracción de caminos SIN ningún fallo, medida por el sorteo del eje. `null` ⟺ no se pidió.
+    /// Fracción de caminos SIN ningún fallo, medida por el sorteo del eje. `null` ⟺ no se pidió el
+    /// eje, **o este lado no tiene fecha de jubilación** y entonces lo dice
+    /// [`Self::success_probability_absent_reason`] (WP A12).
     #[serde(with = "rust_decimal::serde::str_option")]
     pub success_probability: Option<Decimal>,
     /// Barra de error de Wilson del sorteo del eje, en PUNTOS PORCENTUALES y a un decimal (la
     /// misma resolución con la que la publica `GET /v1/projection/bands`).
     #[serde(with = "rust_decimal::serde::str_option")]
     pub sampling_error_pp: Option<Decimal>,
+    /// **Por qué este lado no publica probabilidad de éxito aunque se pidiera el eje** (5.0.0, WP
+    /// A12): `not_reachable` (hay plan y ningún mes cumple el umbral) o el `plan_absent_reason` de
+    /// este lado. `null` ⟺ la probabilidad de arriba viaja, o no se pidió el eje.
+    ///
+    /// Existe por el mismo motivo que su gemelo de `GET /v1/projection/bands`: un lado sin fecha
+    /// se sortea «sin jubilarse», el motor solo clasifica fallos estando jubilado y el sorteo
+    /// devolvía mecánicamente un `1` que se leía como «este escenario es seguro». Se decide con el
+    /// PLAN, antes del sorteo, porque de la salida no se puede distinguir.
+    ///
+    /// **Viaja siempre, también como `null`**, igual que el resto del bloque: es el campo que
+    /// convierte un hueco en una respuesta, y una clave que desaparece obliga a distinguir «no
+    /// falta nada» de «este servidor no publica el motivo».
+    pub success_probability_absent_reason: Option<&'static str>,
     /// **Fallos por motivo, contando el PRIMER fallo de cada camino**, en el orden fijo
     /// `[F1 cartera agotada, F2 tasa inicial excedida, F3 la regla no llega a la necesidad]`.
     /// Son CONTADORES, no probabilidades. Distinguirlos importa porque los arreglos son opuestos:
@@ -5078,6 +5147,7 @@ fn sim_kpis(
         // 2·paths simulaciones la sacaría del semáforo de CPU.
         success_probability: None,
         sampling_error_pp: None,
+        success_probability_absent_reason: None,
         failures_by_kind: None,
         failure_probability_by_age: Vec::new(),
         months_below_need_p50: None,
@@ -5990,9 +6060,28 @@ pub(crate) async fn simulate_projection_core(
             );
             let b_out = b_join?.map_err(map_mc_err)?;
             let s_out = s_join?.map_err(map_mc_err)?;
-            let apply = |k: &mut SimKpis, out: &futurefin_engine_stochastic::McOutcome| {
-                k.success_probability = probability_out(out.success_probability);
-                k.sampling_error_pp = Some(sampling_error_out(out.half_width_pp));
+            // **El lado sin fecha no publica probabilidad, publica su motivo** (WP A12). Se
+            // decide con el PLAN de ese lado —`plan_absent_reason` y el `forced_month` del nivel
+            // 1— y no con la salida del sorteo, que no distingue «este plan aguanta» de «este
+            // escenario no se jubila y por eso no puede fallar»: los dos dan `1`. Es la MISMA
+            // función que usa `GET /v1/projection/bands`, no una segunda copia de la regla.
+            let absent_of = |built: &BuiltProjection| {
+                crate::handlers::projection_bands::success_absent_reason(
+                    built.plan_absent_reason,
+                    built.plan_level1.as_ref().and_then(|p| p.forced_month),
+                )
+            };
+            let apply = |k: &mut SimKpis,
+                         out: &futurefin_engine_stochastic::McOutcome,
+                         absent: Option<&'static str>| {
+                k.success_probability_absent_reason = absent;
+                k.success_probability = absent
+                    .is_none()
+                    .then(|| probability_out(out.success_probability))
+                    .flatten();
+                k.sampling_error_pp = absent
+                    .is_none()
+                    .then(|| sampling_error_out(out.half_width_pp));
                 k.failures_by_kind = Some(out.failures_by_kind);
                 // La MISMA función que construye la tabla de `/v1/projection/bands`: misma
                 // rejilla, misma traducción a la rejilla publicada y el mismo `by_kind` repetido
@@ -6002,8 +6091,8 @@ pub(crate) async fn simulate_projection_core(
                 k.withdrawal_to_need_ratio_p50 =
                     out.withdrawal_to_need_ratio_p50.and_then(probability_out);
             };
-            apply(&mut baseline, &b_out);
-            apply(&mut scenario, &s_out);
+            apply(&mut baseline, &b_out, absent_of(&baseline_built));
+            apply(&mut scenario, &s_out, absent_of(&scenario_built));
             Some(MonteCarloKpis {
                 paths,
                 seed: seed.to_string(),
@@ -6414,6 +6503,10 @@ pub async fn warm_up_mine_projection(
             owner_user_id: Some(user_id),
             density,
         };
+        // Generación capturada ANTES del compute, igual que en el miss del GET (WP A12). Aquí la
+        // carrera está MEDIDA, no supuesta: el arnés de tests vio este warm-up de login repoblar la
+        // cache después de la invalidación de un PATCH del perfil.
+        let generation = state.projection_generation(installation_id).await;
         match compute_projection_series_response(
             &state,
             user_id,
@@ -6426,9 +6519,21 @@ pub async fn warm_up_mine_projection(
         {
             Ok((response, spawn)) => {
                 let plan_key = spawn.as_ref().map(|s| s.key);
-                state
-                    .projection_cache_insert(key, Arc::new(response), plan_key)
+                let stored = state
+                    .projection_cache_insert_if_current(
+                        key,
+                        generation,
+                        Arc::new(response),
+                        plan_key,
+                    )
                     .await;
+                if !stored {
+                    tracing::info!(
+                        installation_id = %installation_id,
+                        density = ?density,
+                        "warm-up discarded: the data changed while it was computing"
+                    );
+                }
                 // El warm-up deja también el NIVEL 2 en marcha: es la misma clave de contenido
                 // que servirá el primer GET, así que el usuario llega con la curva ya hecha (o
                 // ya calculándose) en vez de estrenar el `computing` al abrir Jubilación. Las dos
@@ -6468,6 +6573,19 @@ pub async fn warm_up_mine_projection(
 /// hace compute on-demand — paga ~500 ms una vez tras una mutación, luego
 /// cache. El warm-up proactivo se mantiene solo en login (sin
 /// invalidaciones concurrentes).
+///
+/// **5.0.0 (WP A12): la guardia de generación NO deroga esa decisión, la respalda.** Desde este
+/// release toda inserción de proyección presenta la generación que capturó antes de computar
+/// (`AppState::projection_cache_insert_if_current`), así que el cómputo que llega tarde ya no
+/// puede pisar a la mutación: se descarta. Eso arregla la carrera de **una** invalidación contra
+/// **un** cómputo — que era real y ahora dura segundos, porque el nivel 1 del plan vive dentro del
+/// mismo permiso—, y es exactamente por lo que el warm-up del login dejó de ser peligroso.
+///
+/// Lo que la guardia **no** compra es el warm-up tras mutación, y por eso sigue sin haberlo: con
+/// M1 y M2 seguidas, el warm-up de M1 se descartaría (bien) pero el de M2 volvería a poner en
+/// marcha decenas de segundos de CPU por cada edición del usuario, y la tercera edición seguida
+/// dejaría dos sorteos completos corriendo para nada. El compute on-demand del siguiente GET paga
+/// eso **una** vez y solo si alguien mira.
 ///
 /// **Se espera, no se lanza en background** (antes era un `tokio::spawn`). Dos razones:
 ///

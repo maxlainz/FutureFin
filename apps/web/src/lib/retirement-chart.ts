@@ -233,14 +233,17 @@ export type ValidDateMark = {
  *
  * En v2 el chart ya no marca «el mes en que cruzaste un objetivo» —no hay objetivo—, marca **el
  * mes en que jubilarse cumple tu umbral**, y el rótulo lleva su éxito porque la fecha sin el éxito
- * es media respuesta. Las cuatro bases se rotulan distinto a propósito:
+ * es media respuesta. Las TRES bases —las tres que el servidor emite, ni una más— se rotulan
+ * distinto a propósito:
  *
  * | `retirement_date_basis` | marca | rótulo |
  * |---|---|---|
  * | `success_threshold` | `safe_date_month_index` | «Fecha válida · 95 de cada 100» |
  * | `target_age` | `jubilacion_month_index` | «A los 55, como pediste · 82 de cada 100» |
  * | `not_reachable` | — | nota «sin fecha válida al 95 %» |
- * | `pending` | — | nota «Resolviendo tu fecha válida…» |
+ *
+ * Había una cuarta fila, `pending` → «Resolviendo tu fecha válida…», y se retiró en A12 con el
+ * literal: el nivel 1 del solve se resuelve en línea y esa nota no se podía leer nunca.
  *
  * Con `target_age` la marca va en la EDAD QUE PEDISTE, no en la fecha válida: es el mes en que el
  * plan simulado se jubila, y ponerla en la fecha válida marcaría un mes en el que esta simulación
@@ -268,9 +271,8 @@ export function chartValidDateMark(
         finite(u) ? `sin fecha válida al ${u} %` : "sin fecha válida a tu umbral",
     };
   }
-  if (basis === "pending") {
-    return { mark: null, note: "Resolviendo tu fecha válida…" };
-  }
+  // La rama `pending` («Resolviendo tu fecha válida…») se retiró en A12 con el literal: el nivel 1
+  // del solve se resuelve en línea y esa nota no podía leerse nunca.
   if (basis === "target_age") {
     const m = series.jubilacion_month_index;
     if (!finite(m)) return { mark: null, note: null };

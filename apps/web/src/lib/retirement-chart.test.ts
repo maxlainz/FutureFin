@@ -273,18 +273,6 @@ describe("chartValidDateMark", () => {
     expect(got.note).toBe("sin fecha válida al 95 %");
   });
 
-  it("pending: sin marca, y la nota dice que se está resolviendo (no que no exista)", () => {
-    const got = chartValidDateMark(
-      plan({
-        retirement_date_basis: "pending",
-        safe_date_month_index: null,
-        success_of_plan: null,
-      }),
-    );
-    expect(got.mark).toBeNull();
-    expect(got.note).toContain("Resolviendo");
-  });
-
   // El hogar (y un backend anterior al bloque «plan») no publican base: ahí la ausencia de marca
   // no es un hecho del plan y no se explica — una nota diría que este hogar no tiene fecha, y lo
   // que pasa es que no se resuelve UNA fecha de N personas.

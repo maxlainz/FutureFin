@@ -273,9 +273,18 @@ async fn fire_number_classic_absent_reason_reaches_http_with_swr_zero() {
 
     let token = create_token(&app, &owner).await;
     let sim = tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
+    // **El nombre del campo es el del modelo v2 en LAS DOS superficies.** Este assert citaba
+    // `fire_target_absent_reason`, el nombre de 4.15.x: el what-if lo renombró a
+    // `fire_number_classic_absent_reason` con el resto (WP A4/A8) y la comparación pasó a medir
+    // `null` contra un literal — o sea, a fallar. Lo peligroso habría sido lo contrario: un
+    // `is_null()` sobre una clave inexistente pasa siempre y la paridad dejaría de vigilarse.
     assert_eq!(
-        sim["baseline"]["fire_target_absent_reason"], "swr_not_positive",
+        sim["baseline"]["fire_number_classic_absent_reason"], "swr_not_positive",
         "paridad HTTP↔MCP rota: {sim}"
+    );
+    assert!(
+        sim["baseline"].get("fire_target_absent_reason").is_none(),
+        "el nombre de 4.15.x no puede volver por la puerta de atrás: {sim}"
     );
 }
 
@@ -532,4 +541,76 @@ async fn a_plan_that_cannot_reach_the_threshold_says_not_reachable_not_zero() {
             && s["needed_capital_absent_reason"].is_string(),
         "un hogar sin líquido no necesita 0 €; la ausencia se nombra: {s}"
     );
+}
+
+
+/// **El what-if hereda la misma regla: sin fecha, ni probabilidad ni barra — y su motivo al lado**
+/// (5.0.0, WP A12).
+///
+/// El eje `monte_carlo` sortea el escenario del PLAN de cada lado. Cuando ese escenario no lleva
+/// mes de jubilación —porque ningún mes cumple el umbral— se sortea la línea que **nunca se
+/// jubila**, y el motor solo clasifica fallos estando jubilado: `success_probability` salía `"1"`
+/// en los dos lados con `success_of_plan: "0"` tres campos más arriba, en la misma respuesta. Dos
+/// éxitos del mismo plan que se contradicen es peor que ninguno.
+///
+/// Ahora `success_probability` y `sampling_error_pp` van a `null` con
+/// `success_probability_absent_reason: "not_reachable"` — el MISMO literal que
+/// `retirement_date_basis` y que el `success_absent_reason` de `/v1/projection/bands`, resuelto por
+/// la MISMA función (`projection_bands::success_absent_reason`) y no por una segunda copia de la
+/// regla. Y se decide con el PLAN, antes del sorteo: de la salida no se puede distinguir un plan
+/// perfecto de uno que no ocurre.
+///
+/// `failures_by_kind` y `failure_probability_by_age` **siguen viajando**: describen la trayectoria
+/// sin jubilarse, que es una respuesta legítima.
+#[tokio::test]
+async fn a_whatif_without_a_reachable_date_publishes_null_monte_carlo_with_its_reason() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("nrxmc").await;
+    let cat_i = app.create_category(&owner, "income", "Nómina").await;
+    let cat_e = app.create_category(&owner, "expense", "Vida").await;
+    for body in [
+        json!({"category_id": cat_i, "amount": "1200", "ends_at_retirement": true}),
+        json!({"category_id": cat_e, "amount": "1800", "ends_at_retirement": false}),
+    ] {
+        let r = app
+            .post_json_with_cookie("/v1/budget/entries", body, &owner.cookie)
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    let token = create_token(&app, &owner).await;
+    // Pocos caminos: lo que se prueba es la RAMA, no la estadística.
+    let sim = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call("simulate_projection", json!({"monte_carlo": {"paths": 16}})),
+        )
+        .await,
+    );
+    assert!(sim["monte_carlo"].is_object(), "se pidió el eje: {sim}");
+
+    for lado in ["baseline", "scenario"] {
+        let k = &sim[lado];
+        assert_eq!(
+            k["retirement_date_basis"], "not_reachable",
+            "{lado}: el fixture tiene que ser un plan sin fecha: {sim}"
+        );
+        assert_eq!(
+            k["success_probability_absent_reason"], "not_reachable",
+            "{lado}: el motivo viaja, con el mismo literal que la base de la fecha: {sim}"
+        );
+        for campo in ["success_probability", "sampling_error_pp"] {
+            assert!(
+                k.get(campo).is_some() && k[campo].is_null(),
+                "{lado}: `{campo}` viaja como null, jamás como un 1 que diría «este escenario \
+                 aguanta»: {sim}"
+            );
+        }
+        // La trayectoria sin jubilarse sigue publicándose entera.
+        assert!(
+            k["failures_by_kind"].as_array().is_some_and(|a| a.len() == 3),
+            "{lado}: el reparto por motivo sigue viajando: {sim}"
+        );
+    }
 }

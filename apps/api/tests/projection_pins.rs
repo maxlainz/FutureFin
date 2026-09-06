@@ -283,7 +283,11 @@ async fn pin_escenario_b_inflacion() {
     // **5.0.0**: la serie del objetivo (`fire_target_series`) se retiró — el motor ya no recibe
     // objetivo y el cruce no decide nada. La línea que la app dibuja contra el patrimonio es hoy
     // `needed_capital_curve`, de NIVEL 2 y por tanto ausente en un `?months=`.
-    assert!(s["fire_target_series"].is_null(), "{s}");
+    // `.get(...).is_none()` y no `is_null()` (WP A12): sobre un objeto JSON, indexar una clave
+    // que NO EXISTE devuelve `Value::Null`, así que un `is_null()` sobre un campo retirado pasa
+    // haga lo que haga el servidor — incluido volver a publicarlo. Lo que hay que comprobar es que
+    // la CLAVE no está.
+    assert!(s.get("fire_target_series").is_none(), "{s}");
 
     // INVERTIDO en la Ola 5 (#139; capturado en 4.6.0 como 285 / 211.361,91 / 1.094.275,23 con
     // el gasto congelado). Con el gasto indexado al 2,5 % e ingresos planos, este hogar —que

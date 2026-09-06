@@ -269,8 +269,7 @@ fn the_plan_block_is_declared_in_the_document() {
     // una frase, pero por debajo lo alimenta ahora el bloque `plan` de la serie (mismos nombres,
     // `safe_date_month_index`/`success_of_plan`/`success_wilson_low`/`needed_capital_today`) y
     // añade `plan_state` (`ready`/`pending`/`absent`, el semáforo de simulaciones del apagado
-    // ordenado). `disposable_monthly` se conserva siempre `null`: el modelo v2 no tiene margen
-    // determinista que publicar, pero la SPA (`SummaryPlanApi`) todavía lo declara obligatorio.
+    // ordenado).
     let plan_ref = doc["components"]["schemas"]["SummaryResponse"]["properties"]["plan"].to_string();
     assert!(
         plan_ref.contains("SummaryPlan"),
@@ -283,7 +282,6 @@ fn the_plan_block_is_declared_in_the_document() {
         "safe_date_month_index",
         "jubilacion_month_index",
         "required_savings_monthly",
-        "disposable_monthly",
         "underfunded",
         "absent_reason",
         "success_of_plan",
@@ -295,16 +293,20 @@ fn the_plan_block_is_declared_in_the_document() {
     ] {
         assert!(!plan[k].is_null(), "SummaryPlan.{k} no está declarado: {plan}");
     }
-    // Y los cuatro nombres del modelo viejo que la v2 retiró de `SummaryPlan`: `retirement_trigger`
-    // (el modelo v2 no distingue un disparador aparte de la fecha), y las tres caras de la
+    // Y los CINCO nombres del modelo viejo que la v2 retiró de `SummaryPlan`: `retirement_trigger`
+    // (el modelo v2 no distingue un disparador aparte de la fecha), las tres caras de la
     // probabilidad de la revisión adversarial anterior (`success_probability`,
-    // `never_retired_probability`, `success_given_retired`) — sustituidas por `success_of_plan` /
-    // `success_wilson_low`, que ya vienen del mismo sorteo sin necesitar las otras dos.
+    // `never_retired_probability`, `success_given_retired`) —sustituidas por `success_of_plan` /
+    // `success_wilson_low`, que ya vienen del mismo sorteo sin necesitar las otras dos— y
+    // `disposable_monthly` (WP A12), que sobrevivió una versión valiendo SIEMPRE `null` solo
+    // porque la SPA lo declaraba obligatorio: un campo que no puede tomar ningún valor se lee como
+    // «no lo sabemos» y lo cierto es que esa pregunta ya no se hace.
     for k in [
         "retirement_trigger",
         "success_probability",
         "never_retired_probability",
         "success_given_retired",
+        "disposable_monthly",
     ] {
         assert!(
             plan[k].is_null(),

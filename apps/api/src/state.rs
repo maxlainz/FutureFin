@@ -1,7 +1,9 @@
 use crate::handlers::person_view::LedgerView;
 use crate::handlers::projection::ProjectionSeriesResponse;
 use crate::handlers::projection_bands::ProjectionBandsResponse;
-use crate::handlers::retirement_solver::{PlanExtras, PlanKey, PLAN_CACHE_MAX_ENTRIES, PLAN_CACHE_TTL};
+use crate::handlers::retirement_solver::{
+    Level1Key, PlanExtras, PlanKey, PlanLevel1, PLAN_CACHE_MAX_ENTRIES, PLAN_CACHE_TTL,
+};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -53,6 +55,15 @@ pub struct ProjectionCacheEntry {
     /// inventada para rellenar el hueco apuntaría a los extras de otro hogar.
     pub plan_key: Option<PlanKey>,
 }
+
+/// El estado de la **cache del nivel 1** (5.0.0, WP A12): el `PlanLevel1` resuelto y cuándo se usó
+/// por última vez. Ver [`AppState::level1_cache`].
+pub(crate) struct Level1CacheEntry {
+    pub level1: Arc<PlanLevel1>,
+    pub last_used: Instant,
+}
+
+pub(crate) type Level1CacheMap = HashMap<Level1Key, Level1CacheEntry>;
 
 pub type ProjectionCacheMap = HashMap<ProjectionCacheKey, ProjectionCacheEntry>;
 
@@ -174,6 +185,58 @@ pub struct AppState {
     /// lancen **un** solo cálculo. Un `Mutex` y no un `RwLock` porque toda operación aquí escribe
     /// (`insert` / `remove`); un lock de lectura no tendría usuarios.
     pub plan_inflight: Mutex<HashSet<PlanKey>>,
+    /// **Cache del NIVEL 1 del plan** (5.0.0, WP A12): la fecha, el éxito y el capital necesario
+    /// hoy — de dos a cinco segundos de bisección estocástica por entrada.
+    ///
+    /// # Qué problema resuelve
+    ///
+    /// El nivel 1 lo necesitan DOS superficies del mismo hogar: `GET /v1/projection/series` (que
+    /// lo resuelve dentro de su miss) y `GET /v1/projection/bands` (que hasta 5.0.0 lo volvía a
+    /// resolver ENTERO en cada miss propio, con la misma entrada, el mismo perfil y la misma
+    /// semilla estable — o sea, para obtener exactamente el mismo resultado). La SPA pide las dos
+    /// al abrir Jubilación, así que ese doble solve era el caso NORMAL, no el raro.
+    ///
+    /// # Por qué no le vale la clave del nivel 2
+    ///
+    /// `PlanKey` se calcula sobre el escenario de DESPUÉS del solve, y aquí hay que preguntar
+    /// antes de resolver. La clave es [`Level1Key`], huella de los cinco argumentos de
+    /// `solve_plan_level1_with_budget` — que es una función pura de ellos.
+    ///
+    /// # Por qué NO se invalida
+    ///
+    /// El mismo argumento que en [`Self::plan_cache`], y por la misma propiedad: la clave **es**
+    /// el contenido. Cambiar un activo, el perfil, el umbral, el presupuesto o la semilla produce
+    /// otra clave, así que una entrada obsoleta se queda sin quien la pida. Lo único que hay que
+    /// acotar es el tamaño, y de eso se ocupan el TTL y el LRU de
+    /// [`AppState::level1_cache_insert`] — los mismos del nivel 2.
+    pub(crate) level1_cache: RwLock<Level1CacheMap>,
+    /// **Generación del cache de proyección, por instalación** (5.0.0, WP A12).
+    ///
+    /// # El fallo que cierra
+    ///
+    /// Un miss de proyección (o un warm-up) computa durante segundos y DESPUÉS inserta. Si entre
+    /// medias una mutación invalida, la inserción llegaba tarde y **repoblaba la cache con la foto
+    /// de antes**: el usuario editaba un activo y seguía viendo la cifra vieja hasta el TTL. En
+    /// 4.x la ventana era de ~500 ms y se toleraba; desde 5.0.0 el nivel 1 vive DENTRO de ese
+    /// permiso y la ventana es de segundos — el arnés de tests ya la vio (el warm-up del login
+    /// repoblando la cache después de la invalidación de un PATCH).
+    ///
+    /// # Cómo se cierra
+    ///
+    /// Todo camino que inserte captura la generación **antes** de computar y la presenta al
+    /// insertar; si no coincide, la entrada se descarta. Las dos invalidaciones incrementan.
+    ///
+    /// **El orden de los locks es lo que lo hace hermético**, y es siempre el mismo: primero este
+    /// mutex, después el mapa. La invalidación incrementa y limpia **sosteniendo los dos**, y la
+    /// inserción comprueba e inserta **sosteniendo los dos**, así que no existe el intervalo en el
+    /// que una comprobación ya pasó y la limpieza todavía no ha llegado. Con la generación en un
+    /// lock aparte que se soltara antes de insertar, ese intervalo volvería y con él el bug.
+    /// Nadie toma los locks en el orden contrario (el `get` del cache no mira la generación), así
+    /// que no hay ciclo posible.
+    ///
+    /// Es un `HashMap` y no un `AtomicU64` global para que una mutación en una instalación no tire
+    /// el cómputo en vuelo de otra. Una instalación que no está en el mapa vale 0.
+    projection_generation: Mutex<HashMap<Uuid, u64>>,
 }
 
 /// Configuración viva del login con Home Assistant: el origen público de HA y el proveedor.
@@ -211,6 +274,8 @@ impl AppState {
             bands_cache: RwLock::new(HashMap::new()),
             plan_cache: RwLock::new(HashMap::new()),
             plan_inflight: Mutex::new(HashSet::new()),
+            level1_cache: RwLock::new(HashMap::new()),
+            projection_generation: Mutex::new(HashMap::new()),
         }
     }
 
@@ -269,19 +334,51 @@ impl AppState {
         None
     }
 
-    /// Guarda una respuesta de proyección **con la clave de su plan**.
+    /// **La generación actual** de una instalación, para capturarla ANTES de computar. Una
+    /// instalación que nadie ha invalidado todavía vale 0. Ver [`Self::projection_generation`].
+    pub async fn projection_generation(&self, installation_id: Uuid) -> u64 {
+        self.projection_generation
+            .lock()
+            .await
+            .get(&installation_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Guarda una respuesta de proyección **con la clave de su plan**, y **solo si la generación
+    /// que el llamante capturó antes de computar sigue vigente**. Devuelve `false` si se descartó.
     ///
     /// `plan_key` es un parámetro y no un campo opcional que se rellena luego a propósito: es la
     /// única forma de que sea **imposible olvidarlo**. Una entrada guardada sin su clave publicaría
     /// `computing` para siempre —el nivel 2 nunca se buscaría ni se lanzaría— y ese fallo no
     /// levanta ningún assert de tipo. `None` es una respuesta legítima (sin plan: `?months=`,
     /// miembro del hogar sin solve, usuario sin fecha de nacimiento), pero hay que escribirla.
-    pub async fn projection_cache_insert(
+    ///
+    /// **`generation` es un parámetro por la MISMA razón** (5.0.0, WP A12): no existe una versión
+    /// sin guardia de este método, así que ningún camino nuevo puede olvidarse de la carrera. Lo
+    /// que se descarta es una respuesta **correcta pero vieja**: el siguiente GET la recalcula
+    /// contra los datos de ahora, que es exactamente lo que la mutación pidió.
+    pub async fn projection_cache_insert_if_current(
         &self,
         key: ProjectionCacheKey,
+        generation: u64,
         response: Arc<ProjectionSeriesResponse>,
         plan_key: Option<PlanKey>,
-    ) {
+    ) -> bool {
+        // Orden de locks: generación → mapa, el MISMO que usan las dos invalidaciones. Se sostiene
+        // la generación hasta después de insertar, así que una invalidación no puede colarse entre
+        // la comprobación y la escritura (ver el doc de `projection_generation`).
+        let generations = self.projection_generation.lock().await;
+        let current = generations.get(&key.installation_id).copied().unwrap_or(0);
+        if current != generation {
+            tracing::info!(
+                installation_id = %key.installation_id,
+                captured = generation,
+                current,
+                "projection compute discarded: a mutation invalidated while it was computing"
+            );
+            return false;
+        }
         let mut cache = self.projection_cache.write().await;
         cache.insert(
             key,
@@ -291,6 +388,9 @@ impl AppState {
                 plan_key,
             },
         );
+        drop(cache);
+        drop(generations);
+        true
     }
 
     /// La clave del plan de una entrada cacheada, si la tiene. **No refresca el TTL**: quien lo
@@ -319,11 +419,27 @@ impl AppState {
         None
     }
 
-    pub async fn bands_cache_insert(
+    /// Gemelo de [`Self::projection_cache_insert_if_current`] para las bandas, y por la misma
+    /// razón: un sorteo de 2.500 caminos tarda lo suyo, y una banda insertada después de la
+    /// invalidación describiría unos activos que ya no existen **junto a** una línea determinista
+    /// ya actualizada. Las dos caches comparten generación porque comparten `ProjectionInput`.
+    pub async fn bands_cache_insert_if_current(
         &self,
         key: BandsCacheKey,
+        generation: u64,
         response: Arc<ProjectionBandsResponse>,
-    ) {
+    ) -> bool {
+        let generations = self.projection_generation.lock().await;
+        let current = generations.get(&key.installation_id).copied().unwrap_or(0);
+        if current != generation {
+            tracing::info!(
+                installation_id = %key.installation_id,
+                captured = generation,
+                current,
+                "bands compute discarded: a mutation invalidated while it was computing"
+            );
+            return false;
+        }
         let mut cache = self.bands_cache.write().await;
         cache.insert(
             key,
@@ -332,6 +448,60 @@ impl AppState {
                 last_used: Instant::now(),
             },
         );
+        drop(cache);
+        drop(generations);
+        true
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Cache del NIVEL 1 — **direccionada por CONTENIDO**, ver el doc de `level1_cache`.
+    // ---------------------------------------------------------------------------------------
+
+    /// Hit de la cache del nivel 1, con el MISMO TTL sliding que la proyección.
+    pub(crate) async fn level1_cache_get(&self, key: &Level1Key) -> Option<Arc<PlanLevel1>> {
+        {
+            let cache = self.level1_cache.read().await;
+            let entry = cache.get(key)?;
+            if entry.last_used.elapsed() < PLAN_CACHE_TTL {
+                let level1 = entry.level1.clone();
+                drop(cache);
+                let mut cache = self.level1_cache.write().await;
+                if let Some(e) = cache.get_mut(key) {
+                    e.last_used = Instant::now();
+                }
+                return Some(level1);
+            }
+        }
+        let mut cache = self.level1_cache.write().await;
+        cache.remove(key);
+        None
+    }
+
+    /// Inserta y **acota el mapa**, con la misma política (y las mismas cotas) que
+    /// [`Self::plan_cache_insert`]: barrido de expiradas, inserción, desalojo LRU. **No hay
+    /// guardia de generación aquí y es correcto**: la clave ES el contenido, así que una entrada
+    /// vieja no es alcanzable por una petición nueva — el problema que la generación resuelve es
+    /// el de las caches direccionadas por HOGAR, que sí siguen siendo alcanzables tras un cambio.
+    pub(crate) async fn level1_cache_insert(&self, key: Level1Key, level1: Arc<PlanLevel1>) {
+        let mut cache = self.level1_cache.write().await;
+        cache.retain(|_, e| e.last_used.elapsed() < PLAN_CACHE_TTL);
+        cache.insert(
+            key,
+            Level1CacheEntry {
+                level1,
+                last_used: Instant::now(),
+            },
+        );
+        while cache.len() > PLAN_CACHE_MAX_ENTRIES {
+            let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, e)| e.last_used)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            cache.remove(&oldest);
+        }
     }
 
     // ---------------------------------------------------------------------------------------
@@ -423,6 +593,17 @@ impl AppState {
     /// sobre activos borrados junto a una línea determinista ya actualizada — dos cifras que se
     /// contradicen en la misma pantalla, que es el peor fallo de cache posible.
     pub async fn invalidate_projection_by_installation(&self, installation_id: Uuid) {
+        // **Primero la generación, y sin soltarla hasta haber limpiado los dos mapas** (WP A12).
+        // Un cómputo en vuelo cae por fuerza en uno de dos lados: si comprueba ANTES de esta
+        // línea, su generación queda obsoleta al incrementarla y su inserción se descarta; si
+        // comprueba DESPUÉS, se queda esperando este mutex y no llega a insertar hasta que los dos
+        // `retain` han pasado, así que lo que escriba ya no lo borra nadie — y no hace falta que
+        // nadie lo borre, porque a esas alturas su generación tampoco cuadra. Lo que NO puede
+        // ocurrir es lo de en medio: comprobar con la generación buena e insertar después de la
+        // limpieza. Ver el doc de `projection_generation`.
+        let mut generations = self.projection_generation.lock().await;
+        let generation = generations.entry(installation_id).or_insert(0);
+        *generation = generation.wrapping_add(1);
         let mut cache = self.projection_cache.write().await;
         let before = cache.len();
         cache.retain(|key, _| key.installation_id != installation_id);
@@ -432,6 +613,8 @@ impl AppState {
         let bands_before = bands.len();
         bands.retain(|key, _| key.installation_id != installation_id);
         let bands_removed = bands_before - bands.len();
+        drop(bands);
+        drop(generations);
         if removed > 0 || bands_removed > 0 {
             tracing::info!(
                 installation_id = %installation_id,
@@ -445,7 +628,27 @@ impl AppState {
     /// Al logout: borra las entries de ese usuario — `mine` y `household`, porque
     /// desde el arreglo de la clave ambas son suyas. Las de otros miembros no se tocan.
     pub async fn invalidate_projection_by_user(&self, user_id: Uuid) {
+        // Misma disciplina que la invalidación por instalación, con una diferencia que hay que
+        // decir: aquí el llamante trae un USUARIO y la generación se lleva por INSTALACIÓN, así
+        // que se incrementa la de **todas las instalaciones que el mapa conoce**. Es barato (una
+        // instalación por despliegue, y el mapa solo crece con las que ya se han invalidado o
+        // computado alguna vez) y cubre el caso real. Queda fuera una instalación que este proceso
+        // no ha visto nunca: entonces su primer warm-up puede insertar después de este logout, y
+        // el resultado es una entrada de datos CORRECTOS para un usuario que acaba de salir —
+        // higiene, no una cifra equivocada, que es lo que la generación protege.
+        let mut generations = self.projection_generation.lock().await;
         let mut cache = self.projection_cache.write().await;
+        // Las instalaciones de las entradas que se van a borrar entran en el mapa antes de
+        // incrementar, para que una instalación cuya primera invalidación sea ESTA también quede
+        // cubierta.
+        for key in cache.keys() {
+            if key.owner_user_id == Some(user_id) {
+                generations.entry(key.installation_id).or_insert(0);
+            }
+        }
+        for generation in generations.values_mut() {
+            *generation = generation.wrapping_add(1);
+        }
         let before = cache.len();
         cache.retain(|key, _| key.owner_user_id != Some(user_id));
         let removed = before - cache.len();
@@ -455,6 +658,8 @@ impl AppState {
         let bands_before = bands.len();
         bands.retain(|key, _| key.user_id != user_id);
         let bands_removed = bands_before - bands.len();
+        drop(bands);
+        drop(generations);
         if removed > 0 || bands_removed > 0 {
             tracing::info!(
                 user_id = %user_id,

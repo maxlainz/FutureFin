@@ -7,9 +7,11 @@
  *  1. **Las dos primeras son FIJAS** — «Capital necesario hoy» y «Éxito del plan» — y la tercera
  *     la elige la estrategia. Sin test, el día que alguien reordene un `if` la cabecera cambiará
  *     de contenido sin que nada falle.
- *  2. **Un plan que no está no se rellena**: `pending` dice «calculando…», `birth_date_missing`
- *     dice qué falta, y `not_reachable` dice «Nunca». Los tres son estados distintos y un guion
- *     mudo los haría indistinguibles.
+ *  2. **Un plan que no está no se rellena**: `birth_date_missing` dice qué falta, y
+ *     `not_reachable` dice «Nunca» en la tercera tarjeta y «no hay éxito que medir» en la del
+ *     éxito. Son estados distintos y un guion mudo los haría indistinguibles. (Había un tercero,
+ *     `retirement_date_basis: "pending"` → «calculando…», retirado en A12 con el literal: el
+ *     servidor nunca lo emitió.)
  *  3. **«Capital necesario hoy» está siempre en euros de hoy** y este módulo no acepta deflactor
  *     alguno: la cifra responde a «¿cuánto necesitaría si me jubilara YA?», y «ya» es hoy.
  */
@@ -135,6 +137,49 @@ describe("las dos tarjetas FIJAS", () => {
     expect(tile(input({ success_sampling_error_pp: null }), "success")?.subtitle).toBe(
       "umbral 95,0 %",
     );
+  });
+
+  // A12 — el caso que rotulaba un porcentaje junto a un plan que no ocurre. Con `not_reachable`
+  // la serie SÍ publica `success_of_plan`, pero mide la MEJOR observación del solve (el mes que
+  // más cerca se quedó), no «el éxito de tu plan», que es lo que esta tarjeta promete.
+  describe("sin fecha alcanzable no hay éxito que rotular", () => {
+    const noDate = (over: Partial<RetirementTileV2Series> = {}) =>
+      input({
+        retirement_date_basis: "not_reachable",
+        safe_date_month_index: null,
+        safe_date_date_ymd: null,
+        safe_date_age: null,
+        // La mejor observación del solve: un 68 % perfectamente respetable... de otro mes.
+        success_of_plan: 0.68,
+        success_wilson_low: 0.66,
+        ...over,
+      });
+
+    it("el valor es un guion, nunca la mejor observación del solve", () => {
+      const t = tile(noDate(), "success")!;
+      expect(t.value).toBe("—");
+      expect(t.value).not.toMatch(/%/);
+      expect(t.value).not.toContain("68");
+    });
+
+    it("el subtítulo dice por qué falta, y conserva el umbral del perfil", () => {
+      const t = tile(noDate(), "success")!;
+      expect(t.subtitle).toBe(
+        "no hay ninguna fecha que llegue a tu umbral, así que no hay éxito que medir · umbral 95,0 %",
+      );
+    });
+
+    it("sin color: el semáforo de un plan sin fecha es la ausencia de semáforo", () => {
+      expect(tile(noDate(), "success")!.tone).toBe("default");
+    });
+
+    it("«Capital necesario hoy» SÍ sigue publicando su cifra: contesta a otra pregunta", () => {
+      // «¿Cuánto necesitaría si me jubilara YA?» tiene respuesta aunque ningún mes del horizonte
+      // llegue al umbral — y es justo la cifra que dice cuánto falta.
+      const t = tile(noDate(), "needed_capital")!;
+      expect(t.value).toBe(eur("620.000"));
+      expect(t.subtitle).toContain("en euros de hoy");
+    });
   });
 
   it("sin serie no hay tarjetas", () => {
@@ -388,19 +433,12 @@ describe("«Inicio de la jornada reducida» (partial)", () => {
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 describe("un plan que no está no se rellena", () => {
-  it("a_pending_plan_shows_calculando_not_a_number", () => {
-    const i = input({ retirement_date_basis: "pending" });
-    const tiles = buildRetirementTilesV2(i);
-    expect(tiles.map((t) => t.key)).toEqual(["needed_capital", "success"]);
-    for (const t of tiles) {
-      expect(t.value, t.key).toBe("—");
-      expect(t.subtitle, t.key).toBe("calculando…");
-    }
-  });
-
-  it("`pending` gana aunque las cifras viejas sigan pegadas a la respuesta", () => {
+  it("una razón de ausencia gana aunque las cifras viejas sigan pegadas a la respuesta", () => {
     const t = tile(
-      input({ retirement_date_basis: "pending", needed_capital_today: "620000.0000" }),
+      input({
+        plan_absent_reason: "birth_date_missing",
+        needed_capital_today: "620000.0000",
+      }),
       "needed_capital",
     )!;
     expect(t.value).toBe("—");
@@ -422,10 +460,13 @@ describe("un plan que no está no se rellena", () => {
   it("cada razón de ausencia tiene su frase, y una desconocida no se inventa", () => {
     const reason = (r: RetirementTileV2Series["plan_absent_reason"]) =>
       tile(input({ plan_absent_reason: r }), "needed_capital")?.subtitle;
-    expect(reason("no_liquid_assets")).toBe("no tienes activos líquidos que vender");
     expect(reason("months_override")).toBe("esta vista fija un horizonte propio");
-    expect(reason("household_not_solved")).toBe("el hogar no resuelve un plan común");
+    expect(reason("household_aggregate")).toBe("el hogar no resuelve un plan común");
     expect(reason("algo_nuevo" as never)).toBe("no disponible");
+    // A12: `no_liquid_assets` NO es una razón de `plan_absent_reason` (vive en
+    // `needed_capital_absent_reason`), así que cae a la genérica como cualquier otro literal que
+    // el servidor no emite por este campo.
+    expect(reason("no_liquid_assets" as never)).toBe("no disponible");
   });
 
   it("sin plan no hay tercera tarjeta: repetir la razón por tercera vez no añade nada", () => {
@@ -483,10 +524,7 @@ describe("retirementDetailRows — lo que la cabecera ya no lleva", () => {
   });
 
   it("con el plan SIN resolver las cotas no se pintan: ahí `null` sí es «todavía no se sabe»", () => {
-    for (const over of [
-      { retirement_date_basis: "pending" as const },
-      { plan_absent_reason: "birth_date_missing" as const },
-    ]) {
+    for (const over of [{ plan_absent_reason: "birth_date_missing" as const }]) {
       const ks = retirementDetailRows(input(over)).map((r) => r.key);
       expect(ks, JSON.stringify(over)).not.toContain("safe_date_100");
       expect(ks, JSON.stringify(over)).not.toContain("safe_date_90");

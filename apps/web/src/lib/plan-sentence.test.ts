@@ -1,9 +1,11 @@
 /**
  * La tabla de frases del modelo v2 (§4 del documento del modelo), con insistencia en tres cosas:
  *
- *  * **Una por estrategia × estado.** `ready` / `pending` / `not_reachable` / bloque ausente son
- *    cuatro respuestas DISTINTAS del servidor y las cuatro tienen que leerse distintas; un plan
- *    que se está calculando no puede parecerse a uno que no llega.
+ *  * **Una por estrategia × estado.** Fecha resuelta / `not_reachable` / bloque ausente son TRES
+ *    respuestas distintas del servidor y las tres tienen que leerse distintas; un plan que no
+ *    llega no puede parecerse a uno del que no sabemos nada. (Eran cuatro hasta A12: el `pending`
+ *    describía un literal que el servidor nunca emitió — el nivel 1 del solve se resuelve en
+ *    línea.)
  *  * **B5 — nunca se rotula una edad que el motor no leyó.** Sin fecha de nacimiento no hay plan
  *    (C5) y la frase lo dice; la edad GUARDADA del perfil solo aparece como «lo que pediste»,
  *    jamás pegada a un mes.
@@ -203,12 +205,6 @@ describe("«Cuanto antes» — la fecha válida y sus dos alternativas", () => {
 });
 
 describe("estados que ganan a la estrategia", () => {
-  it("`pending`: el solve sigue corriendo y la frase lo dice", () => {
-    const s = sentence({ retirement_date_basis: "pending" });
-    expect(s.text).toBe("Calculando tu fecha…");
-    expect(s.tone).toBe("warn");
-  });
-
   it("`not_reachable`: ninguna fecha cumple, y se publica lo más cerca que se estuvo", () => {
     const s = sentence({
       retirement_date_basis: "not_reachable",
@@ -240,7 +236,7 @@ describe("estados que ganan a la estrategia", () => {
 
   it("`birth_date_missing`: sin fecha de nacimiento NO hay plan, y se dice en rojo (C5/B5)", () => {
     const s = sentence(
-      { plan_absent_reason: "birth_date_missing", retirement_date_basis: "pending" },
+      { plan_absent_reason: "birth_date_missing", retirement_date_basis: "not_reachable" },
       { targetRetirementAge: 55 },
     );
     expect(s.text).toBe(
@@ -250,16 +246,22 @@ describe("estados que ganan a la estrategia", () => {
     expect(s.text).not.toContain("55");
   });
 
-  it("las otras tres ausencias del bloque «plan» se dicen distintas entre sí", () => {
-    expect(sentence({ plan_absent_reason: "household_not_solved" }).text).toContain(
+  it("las otras dos ausencias del bloque «plan» se dicen distintas entre sí", () => {
+    expect(sentence({ plan_absent_reason: "household_aggregate" }).text).toContain(
       "El hogar no resuelve una fecha",
     );
     expect(sentence({ plan_absent_reason: "months_override" }).text).toContain(
       "horizonte forzado",
     );
-    const sinLiquido = sentence({ plan_absent_reason: "no_liquid_assets" });
-    expect(sinLiquido.text).toContain("Sin activos líquidos");
-    expect(sinLiquido.tone).toBe("danger");
+  });
+
+  // A12 — `no_liquid_assets` no es una razón de `plan_absent_reason`: vive en
+  // `needed_capital_absent_reason`. Mientras la tabla lo tradujo, esta frase parecía cubierta y no
+  // podía dispararse; un literal que la tabla no conoce cae a la genérica, que es lo correcto.
+  it("un literal que `plan_absent_reason` NO emite cae a la frase genérica, no a una inventada", () => {
+    const s = sentence({ plan_absent_reason: "no_liquid_assets" as never });
+    expect(s.text).toBe("Tu plan no tiene fecha válida.");
+    expect(s.text).not.toContain("líquidos");
   });
 });
 

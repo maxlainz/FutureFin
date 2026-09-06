@@ -557,10 +557,6 @@ async fn a_plan_with_no_reachable_date_draws_the_line_that_never_retires() {
     seed(&app, &owner, "2000", "1950", &[("Hucha", "1000", Some("0"))]).await;
 
     let b = bands(&app, &owner.cookie, &format!("?paths={PATHS_SPREAD}")).await;
-    assert_eq!(
-        b["success_of_plan"], "1",
-        "sin jubilación no hay nada que pueda fallar: {b}"
-    );
     assert_eq!(failures_by_kind(&b), [0, 0, 0], "{b}");
     // La tabla trae UNA fila —la del horizonte— y vale 0. No está vacía y no dice «seguro».
     let curve = b["failure_probability_by_age"].as_array().expect("curva");
@@ -581,8 +577,134 @@ async fn a_plan_with_no_reachable_date_draws_the_line_that_never_retires() {
         b["model_note"]
             .as_str()
             .expect("nota")
-            .contains("retirement_date_basis"),
-        "la nota tiene que mandar al lector a la serie: {b}"
+            .contains("success_absent_reason"),
+        "la nota tiene que nombrar el campo que declara el hueco: {b}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// 3-bis. Sin fecha: `null` con su motivo, jamás un verde (5.0.0, WP A12)
+// ---------------------------------------------------------------------------------------------
+
+/// **El bug que este test cierra publicaba un 100 % tranquilizador sobre un plan que no existe.**
+///
+/// El motor solo clasifica fallos estando jubilado o en media jornada, así que un escenario que se
+/// jubila en `horizonte + 1` —el que se sortea cuando ningún mes cumple el umbral— no puede fallar
+/// ni una vez: el sorteo devolvía `success_of_plan: "1"`, `success_verdict: "green"` y la SPA
+/// pintaba de verde la sección Riesgo. La respuesta no tenía ningún campo con el que desmentirlo y
+/// la nota de modelo mandaba al lector a MIRAR OTRO ENDPOINT.
+///
+/// El contrato ahora es el de la casa: **las cuatro cifras del éxito a `null` y el motivo al
+/// lado**. Se comprueban las cuatro —no una— porque publicar el intervalo sin el punto, o la barra
+/// sin el intervalo, dejaría media medición suelta en una respuesta que ya ha dicho que no hay
+/// nada que medir.
+///
+/// El hogar: ingreso 2.000 y gasto 1.950 con 1.000 € de hucha. Ahorra 50 € al mes durante 54 años
+/// y termina con ~173.000 € nominales, que no sostienen 1.950 €/mes de gasto indexado en ningún
+/// mes del horizonte — de ahí `not_reachable`, no `birth_date_missing` (la fecha de nacimiento
+/// está puesta: el horizonte sale de `lifespan_age`).
+#[tokio::test]
+async fn a_plan_without_a_reachable_date_publishes_null_success_with_its_reason() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner, "2000", "1950", &[("Hucha", "1000", Some("0"))]).await;
+
+    // La serie es quien nombra la situación; las bandas tienen que decir LO MISMO sin que haya que
+    // ir a buscarlo allí. Se lee primero para que un fallo de este test distinga «el plan no es
+    // `not_reachable`» de «las bandas no lo declaran».
+    let s = series(&app, &owner.cookie).await;
+    assert_eq!(
+        s["retirement_date_basis"], "not_reachable",
+        "el fixture tiene que ser un plan SIN fecha alcanzable, o este test prueba otra cosa: {s}"
+    );
+
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS_SPREAD}")).await;
+    assert_eq!(
+        b["success_absent_reason"], "not_reachable",
+        "el motivo viaja, y con el MISMO literal que `retirement_date_basis`: {b}"
+    );
+    for campo in [
+        "success_of_plan",
+        "success_wilson_low",
+        "success_sampling_error_pp",
+        "success_verdict",
+    ] {
+        assert!(
+            b.get(campo).is_some(),
+            "`{campo}` tiene que seguir viajando, como `null`: {b}"
+        );
+        assert!(
+            b[campo].is_null(),
+            "`{campo}` sin fecha es `null`, jamás un 1 ni un «green»: {b}"
+        );
+    }
+
+    // **Lo que NO desaparece**: la trayectoria sin jubilarse es una respuesta legítima y se sigue
+    // publicando entera. Lo que cambia es que ahora hay un campo que dice cómo leerla.
+    assert!(
+        b["points"].as_array().expect("puntos").len() > 10,
+        "las bandas de percentiles siguen viajando: {b}"
+    );
+    assert_eq!(b["failures_by_kind"].as_array().expect("reparto").len(), 3);
+    assert!(
+        !b["failure_probability_by_age"]
+            .as_array()
+            .expect("curva")
+            .is_empty(),
+        "la tabla de fallo sigue viajando (con su 0, que significa «sin jubilación no hay fallo \
+         que contar»): {b}"
+    );
+    assert_eq!(b["success_threshold_pct"], 95, "el umbral se ecoa igual: {b}");
+}
+
+/// **Sin plan que resolver, el mismo contrato y el MISMO literal que la serie.**
+///
+/// Sin fecha de nacimiento no hay plan (C5), así que tampoco hay mes forzado y el sorteo vuelve a
+/// ser el del escenario que nunca se jubila. El motivo que se publica **no se reescribe aquí**: es
+/// el `plan_absent_reason` del ensamblado tal cual, porque la causa es la misma y un literal
+/// propio sería un segundo vocabulario para el mismo hecho.
+///
+/// Es el único `plan_absent_reason` alcanzable por esta ruta, y conviene dejarlo escrito: los
+/// otros dos no pueden llegar. `months_override` necesita un `?months=` que este endpoint **no
+/// acepta** (`ProjectionBandsQuery` solo tiene `view`, `paths` y `seed`), y `household_not_solved`
+/// un `view=household` que aquí es 400 `household_bands_unavailable`.
+#[tokio::test]
+async fn without_a_birth_date_the_bands_publish_the_same_reason_as_the_series() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    seed(&app, &owner, "3000", "1000", &[("Fondo", "200000", Some("12"))]).await;
+    let r = app
+        .patch_json_with_cookie("/v1/auth/me", json!({"birth_date": null}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "borrar la DOB: {r:?}");
+
+    let s = series(&app, &owner.cookie).await;
+    assert_eq!(s["plan_absent_reason"], "birth_date_missing", "{s}");
+
+    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS_SPREAD}")).await;
+    assert_eq!(
+        b["success_absent_reason"], "birth_date_missing",
+        "las bandas propagan el motivo de la serie, no inventan uno propio: {b}"
+    );
+    assert!(b["success_of_plan"].is_null(), "{b}");
+    assert!(b["success_verdict"].is_null(), "{b}");
+
+    // Y un `?months=` no cambia nada: este endpoint no lo acepta y lo IGNORA, así que nunca puede
+    // publicar `months_override`. Se pinea para que quien añada el parámetro algún día se
+    // encuentre este test y decida el literal a propósito.
+    let con_months = bands(
+        &app,
+        &owner.cookie,
+        &format!("?paths={PATHS_SPREAD}&months=120"),
+    )
+    .await;
+    assert_eq!(
+        con_months["months"], b["months"],
+        "`?months=` no existe en esta superficie: el horizonte no se mueve: {con_months}"
+    );
+    assert_eq!(
+        con_months["success_absent_reason"], "birth_date_missing",
+        "y por tanto `months_override` no es alcanzable aquí: {con_months}"
     );
 }
 
@@ -717,8 +839,11 @@ async fn the_bands_cache_serves_hits_and_dies_with_the_projection() {
         resp.model_note = SENTINEL.to_string();
         resp
     };
+    // La generación vigente: no hay cómputo lento entre leerla e insertar, así que la entrada
+    // entra (5.0.0, WP A12 — la guardia se prueba aparte, en `projection_cache.rs`).
+    let generation = app.state.projection_generation(iid).await;
     app.state
-        .bands_cache_insert(k.clone(), std::sync::Arc::new(poisoned))
+        .bands_cache_insert_if_current(k.clone(), generation, std::sync::Arc::new(poisoned))
         .await;
     let hit = bands(&app, &owner.cookie, &q).await;
     assert_eq!(hit["model_note"], SENTINEL, "el segundo GET debió ser un HIT");
@@ -795,7 +920,11 @@ async fn the_bands_cache_key_carries_the_threshold() {
     // Se REINYECTA la entrada del umbral viejo: si la clave no llevara el umbral, el GET de
     // abajo la serviría.
     app.state
-        .bands_cache_insert(k95.clone(), std::sync::Arc::new(poisoned))
+        .bands_cache_insert_if_current(
+            k95.clone(),
+            app.state.projection_generation(iid).await,
+            std::sync::Arc::new(poisoned),
+        )
         .await;
 
     let after = bands(&app, &owner.cookie, &q).await;

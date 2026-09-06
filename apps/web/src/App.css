@@ -4832,17 +4832,6 @@ fieldset.retirement-config-stack {
    Cero hex: solo tokens `--ff-*`.
    ============================================================ */
 
-/* El nivel 1 del solve todavía resolviendo la fecha válida
-   («calculando…»). Es el `.spinner` de la app a escala de línea:
-   vive en la fila del título del panel, junto al interrogante, y
-   por eso no puede medir 1,75 rem ni empujar la baseline. */
-.retirement-pending-spinner {
-  width: 0.9rem;
-  height: 0.9rem;
-  border-width: 2px;
-  flex: 0 0 auto;
-}
-
 /* B7 — el TONO por miembro en las listas de frases del hogar
    («Planes del hogar», en Jubilación y en Resumen).
    Reusa el vocabulario de la frase del plan
@@ -4862,4 +4851,12 @@ fieldset.retirement-config-stack {
   padding-left: 0.55rem;
 }
 
-/* Huérfanas desde v2 (modelo de jubilación, 5.0.0), sin consumidor en apps/web/src/**/*.tsx — retirar en un pase que recuente los anclajes: .retirement-buffer-line, .retirement-buffer-line .btn, .retirement-basis-reset, .projection-chart-jubilacion-line, .projection-chart-jubilacion-label. */
+/* Huérfanas desde el modelo v2 (5.0.0): ningún `.tsx` de `apps/web/src` las nombra. Retirar en un
+   pase que recuente los anclajes: .retirement-buffer-line, .retirement-buffer-line .btn,
+   .retirement-basis-reset, .projection-chart-jubilacion-line, .projection-chart-jubilacion-label.
+
+   OJO con el glob que este comentario tenía escrito (`src/` + dos asteriscos + `/` + `*.tsx`): la
+   secuencia `*` + `/` de en medio CIERRA el comentario CSS, y lo que venía detrás quedaba como
+   regla suelta. `lightningcss` lo rechazaba con «Unexpected end of input» y `npm run build`
+   —solo el build: ni el typecheck, ni el lint, ni Vitest miran el CSS— llevaba rojo desde
+   8f4f7ff. Aquí no se escriben globs con asteriscos. */

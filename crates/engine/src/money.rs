@@ -152,6 +152,16 @@ pub trait MoneyOps:
     /// porque es una primitiva del contrato numérico —`crates/engine-stochastic` la implementa— y
     /// porque la familia `powd` sin red es exactamente la que ya panicó una vez. Si se retira,
     /// hay que retirar también su implementación en `crates/engine-stochastic/src/lib.rs`.
+    ///
+    /// **Que no tenga llamador NO lo delata como muerto, y aquí está el porqué de que nadie lo
+    /// haya cazado** (revisión A12 de 5.0.0): `MoneyOps` es un `pub trait` re-exportado en
+    /// `lib.rs`, así que `dead_code` no lo mira —cualquier crate de fuera podría llamarlo— y el
+    /// build sale sin un solo aviso. La comprobación es humana, y el criterio es el de este
+    /// módulo: **es una primitiva de FRONTERA del contrato, y hay cuatro**. Las otras tres son
+    /// `to_decimal`, `from_i64` e `is_sign_negative`, y las tres declaran arriba, cada una en su
+    /// doc, que el núcleo no las llama. Un tipo que implemente `MoneyOps` tiene que saber hacer
+    /// las cuatro cosas aunque el bucle de HOY solo ejercite algunas: retirarla porque hoy no se
+    /// usa dejaría al contrato dependiendo de qué llama el bucle esta semana.
     fn checked_powd_fraction(self, num: u32, den: u32) -> Option<Self>;
 
     /// ¿Son «la misma» fracción de plusvalía gravable? Decide el cortocircuito uniforme/mixto de

@@ -28,8 +28,8 @@
  *     hay plan: el servidor lo dice con `plan_absent_reason: "birth_date_missing"` (C5) y la
  *     frase lo repite en vez de inventar una edad.
  *  3. **Un índice `null` no es un cero.** Cada estado tiene su frase: «nunca» para una fecha al
- *     100 % inalcanzable, «Calculando tu fecha…» mientras el nivel 1 del solve corre, y la frase
- *     de `not_reachable` con lo más cerca que se llegó. Ninguna se rellena con un guion.
+ *     100 % inalcanzable, la razón de `plan_absent_reason` cuando no hay bloque, y la frase de
+ *     `not_reachable` con lo más cerca que se llegó. Ninguna se rellena con un guion.
  *  4. **El umbral no se re-juzga aquí.** El tono aplica la MISMA regla C3 que el servidor
  *     (`success_wilson_low ≥ umbral/100`, y con umbral 100 cero fallos) leyendo los campos que
  *     él publica — no es un segundo semáforo con otra muestra.
@@ -201,8 +201,13 @@ function meetsThresholdOf(s: PlanSentenceSeries): boolean | null {
   return low >= u / 100;
 }
 
-/** Copy de cada razón por la que el bloque «plan» no viaja. Las cuatro son situaciones
- *  DISTINTAS y se dicen distintas: un guion mudo las haría indistinguibles. */
+/** Copy de cada razón por la que el bloque «plan» no viaja. Las tres son situaciones DISTINTAS y
+ *  se dicen distintas: un guion mudo las haría indistinguibles.
+ *
+ *  Eran cuatro hasta A12: la de `no_liquid_assets` se retiró porque **`plan_absent_reason` no
+ *  emite ese literal** (sus tres constantes viven en `apps/api/src/handlers/projection.rs`) — el
+ *  que sí lo emite es `needed_capital_absent_reason`, que dice por qué falta una CIFRA y no por
+ *  qué falta el plan. La frase estaba escrita y no se podía leer nunca. */
 const ABSENT_ES: Record<PlanAbsentReason, { text: string; tone: PlanSentenceTone }> = {
   birth_date_missing: {
     text:
@@ -213,13 +218,14 @@ const ABSENT_ES: Record<PlanAbsentReason, { text: string; tone: PlanSentenceTone
     text: "Esta simulación usa un horizonte forzado, así que no resuelve tu fecha válida.",
     tone: "warn",
   },
-  household_not_solved: {
+  // **El literal del hogar es `household_aggregate`** (A12). La tabla decía
+  // `household_not_solved`, que es el valor fijo de OTRO campo
+  // (`HouseholdMemberProjectionApi.plan_state`): en `view=household` esta frase no se leía nunca y
+  // la vista caía al genérico «Tu plan no tiene fecha válida», que además dice otra cosa — el
+  // hogar no es que no llegue, es que no tiene UN plan.
+  household_aggregate: {
     text: "El hogar no resuelve una fecha: mira la de cada persona en su vista «Yo».",
     tone: "warn",
-  },
-  no_liquid_assets: {
-    text: "Sin activos líquidos no hay nada de lo que vivir: tu plan no tiene fecha válida.",
-    tone: "danger",
   },
 };
 
@@ -234,9 +240,10 @@ const ABSENT_ES: Record<PlanAbsentReason, { text: string; tone: PlanSentenceTone
  * | `coast` B | «Dejando de aportar a los 41, te jubilas en 2047 (a los 57) con 95 de cada 100.» |
  * | `partial` | «Puedes pasar a jornada reducida en 2031 (a los 41) y jubilarte del todo en 2045 (a los 55) con 95 de cada 100.» |
  *
- * Y tres estados que ganan a la estrategia, en este orden: **el bloque «plan» ausente**
- * (`plan_absent_reason`, con `birth_date_missing` a la cabeza), **`pending`** (el nivel 1 del
- * solve sigue corriendo) y **`not_reachable`** (ningún mes del horizonte cumple el umbral).
+ * Y dos estados que ganan a la estrategia, en este orden: **el bloque «plan» ausente**
+ * (`plan_absent_reason`, con `birth_date_missing` a la cabeza) y **`not_reachable`** (ningún mes
+ * del horizonte cumple el umbral). Eran tres hasta A12; el tercero, `pending`, describía un
+ * literal que el servidor nunca emitió.
  *
  * Una `strategy` nula (el agregado del hogar, o un backend viejo) usa la lectura de `asap`.
  */
@@ -332,9 +339,11 @@ export function planSentence(input: PlanSentenceInput): PlanSentence {
     if (copy) return done(copy.text, copy.tone);
     return done("Tu plan no tiene fecha válida.", "warn");
   }
-  if (basis === "pending") {
-    return done("Calculando tu fecha…", "warn");
-  }
+  // La rama `basis === "pending"` («Calculando tu fecha…») se retiró en A12: **el servidor nunca
+  // emitió ese literal**. El nivel 1 del solve se resuelve en línea, dentro del permiso de la
+  // serie, así que cuando esta respuesta llega la base ya está decidida. El único cálculo que sí
+  // llega tarde es el nivel 2 (`needed_capital_curve_state`), y no cambia ni una palabra de esta
+  // frase — solo la curva del chart.
   if (basis === "not_reachable") {
     const u = threshold ?? 95;
     const horizon = idx(s.horizon_lifespan_age);

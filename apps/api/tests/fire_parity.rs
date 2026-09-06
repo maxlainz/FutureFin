@@ -10,11 +10,27 @@
 //!   2. inserta un asset en estado inicial (mes 0),
 //!   3. inserta budget entries que reproducen los `monthly` del caso (income/expense),
 //!   4. llama `GET /v1/projection/series`,
-//!   5. compara `jubilacion_target_net_worth` con `expected_target_nw` ± 1 €.
+//!   5. compara **`fire_number_classic_today`** con `expected_target_nw` ± 1 €.
 //!
 //! El mismo JSON lo consume el test del frontend (`apps/web/src/lib/fire.test.ts`). Si alguien
 //! cambia los tramos fiscales o la fórmula en un lado y no en el otro, uno de los dos suites
 //! falla. La fuente de verdad es el JSON.
+//!
+//! # El campo cambió de nombre en 5.0.0; el NÚMERO no (WP A12)
+//!
+//! Hasta 4.15.x el campo se llamaba `jubilacion_target_net_worth` y era el objetivo que **disparaba
+//! la jubilación**: el motor cruzaba la línea contra él. El modelo v2 retiró ese cruce entero —la
+//! fecha la decide el éxito— y lo que queda es el **número FIRE CLÁSICO**, informativo:
+//! `fire_number_classic_today`.
+//!
+//! **El fixture NO se ha regenerado, y no debía**: lo que pinea es la ARITMÉTICA
+//! `gross_up(necesidad anual) / SWR` con los tramos españoles, que es exactamente la misma en las
+//! dos versiones. El handler la evalúa en el índice 0 de la rejilla —donde el factor de inflación
+//! es 1 exacto, o sea euros de HOY— sobre el mismo `FireTarget` que construía el objetivo de
+//! 4.15.x (`projection.rs`: `PlanFireTarget::new(Some(ft), &phase_plan).at(0)`), sin término de
+//! deuda porque estos casos no tienen pasivos. Lo único que cambió es qué DECIDE ese número: antes
+//! una fecha, ahora nada. Un fixture regenerado aquí habría convertido un renombrado en una
+//! licencia para mover diecisiete cifras sin derivarlas.
 
 mod common;
 
@@ -56,9 +72,9 @@ fn load_cases() -> Vec<FireCase> {
         .collect()
 }
 
-/// Para cada caso del fixture, monta el estado y verifica `jubilacion_target_net_worth`.
+/// Para cada caso del fixture, monta el estado y verifica `fire_number_classic_today`.
 #[tokio::test]
-async fn server_target_matches_canonical_fixtures() {
+async fn the_classic_fire_number_matches_the_canonical_fixtures() {
     let cases = load_cases();
     assert!(!cases.is_empty(), "fixtures vacíos");
 
@@ -196,24 +212,47 @@ async fn server_target_matches_canonical_fixtures() {
             case.name
         );
         let body = series.json();
-        let target = body["jubilacion_target_net_worth"].as_str();
+        let target = body["fire_number_classic_today"].as_str();
+        // El campo viejo no puede volver por la puerta de atrás: si reapareciera, habría DOS
+        // definiciones del mismo número en la misma respuesta y este test estaría mirando la que
+        // no decide nada.
+        assert!(
+            body.get("jubilacion_target_net_worth").is_none(),
+            "[{}] `jubilacion_target_net_worth` se retiró con el cruce (modelo v2): {body}",
+            case.name
+        );
 
         match (case.expected_target_nw, target) {
-            (None, None) => { /* ok */ }
+            (None, None) => {
+                // **Ausencia CON su razón**: un `null` mudo aquí sería indistinguible de un campo
+                // que el servidor se dejó sin rellenar. El caso del fixture es el ingreso de
+                // jubilación que cubre el gasto entero, así que no hay necesidad que capitalizar.
+                assert!(
+                    !body["fire_number_classic_absent_reason"].is_null(),
+                    "[{}] sin número FIRE tiene que viajar su razón: {body}",
+                    case.name
+                );
+            }
             (None, Some(_)) => panic!(
-                "[{}] esperado sin target, servidor devolvió uno",
+                "[{}] esperado sin número FIRE clásico, servidor devolvió uno",
                 case.name
             ),
             (Some(_), None) => panic!(
-                "[{}] esperado target, servidor devolvió null",
-                case.name
+                "[{}] esperado número FIRE clásico, servidor devolvió null (razón: {})",
+                case.name, body["fire_number_classic_absent_reason"]
             ),
             (Some(expected), Some(s)) => {
                 let actual: f64 = s.parse().expect("decimal");
                 let diff = (actual - expected).abs();
                 assert!(
                     diff <= 1.0,
-                    "[{}] target divergente: esperado ≈ {expected}, servidor {actual} (diff {diff})",
+                    "[{}] número FIRE divergente: esperado ≈ {expected}, servidor {actual} \
+                     (diff {diff})",
+                    case.name
+                );
+                assert!(
+                    body["fire_number_classic_absent_reason"].is_null(),
+                    "[{}] con número no puede haber razón de ausencia: {body}",
                     case.name
                 );
             }

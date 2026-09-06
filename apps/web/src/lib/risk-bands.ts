@@ -422,10 +422,42 @@ const FAILURE_KIND_LABELS: readonly [string, string, string] = [
  * informativas: la regla no recorta nunca, pero el dinero se puede acabar igual (un fixture medido
  * pasó de `1,0` a `0,0865` al dejar de ignorar el descubierto). Esconderlas ahí era esconder el
  * caso en que la cobertura tiene una sola causa y es la peor.
+ *
+ * ## La excepción: sin éxito que auditar no hay auditoría (A12)
+ *
+ * Cuando la respuesta trae `success_absent_reason`, el escenario sorteado **no lleva mes de
+ * jubilación** y el motor solo clasifica fallos estando jubilado. Las cifras que alimentan estas
+ * filas siguen viajando —el servidor no las esconde, porque describen la trayectoria del
+ * patrimonio sin jubilarse— pero valen todas 0 o casi: `failures_by_kind` es `[0, 0, 0]`,
+ * `failure_probability_by_age` trae una sola fila valiendo 0 y las dos de cobertura no tienen
+ * meses jubilados que medir.
+ *
+ * Pintadas como siempre, esas filas dicen «cero fallos, cobertura entera, 0 % de escenarios
+ * fallan»: **un plan impecable que no existe**, que es exactamente la lectura contraria a la
+ * verdadera. No son cifras equivocadas, son cifras de otra pregunta. Así que en ese caso NO se
+ * emite ninguna: se emite **una sola fila** que dice que no hay éxito que auditar y por qué. Sin
+ * porcentaje —no hay ninguno honesto que poner— y sin adjetivos: «no hay fecha» no es una alarma
+ * (nada se ha roto) ni una tranquilidad (nada aguanta), y la fila que lo cuenta tampoco.
  */
 export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
   const b = input.bands;
   if (!b) return [];
+
+  // Ver §«La excepción» del doc: los ceros de abajo son de un plan sin jubilación, no de un plan
+  // seguro. La fila pasa por `successAbsentReasonEs` —la MISMA tabla que subtitula el KPI del
+  // Resumen— para que las dos superficies no expliquen la misma ausencia con dos frases distintas.
+  if (b.success_absent_reason != null) {
+    return [
+      {
+        key: "success_absent",
+        label: "Sin éxito que auditar",
+        value: METRIC_DASH,
+        detail: successAbsentReasonEs(b.success_absent_reason),
+        helpId: "retirement.success",
+      },
+    ];
+  }
+
   const rows: RiskExtraRow[] = [];
 
   // ── Por qué falla el que falla (§2.4) ────────────────────────────────────────────────────
@@ -529,6 +561,33 @@ export function showsNoVolatilityNotice(
 }
 
 /**
+ * `true` ⟺ el fallo por edad de estas bandas **puede teñir la banda del chart**. Es el permiso,
+ * no el degradado: las paradas las calcula `riskGradientStops` (`lib/risk-gradient.ts`) y la
+ * ventana la pone la vista.
+ *
+ * Dos vetos, y los dos existen porque su caso pinta la banda de VERDE ENTERO —el color que nadie
+ * cuestiona— sobre un sorteo que no midió riesgo:
+ *
+ * - **sin volatilidad declarada**: las tres bandas SON la línea determinista, y un abanico de
+ *   ancho cero teñido de verde dice «ningún escenario falla» sobre escenarios que no se
+ *   dispersaron;
+ * - **sin éxito que medir** (`success_absent_reason`, A12): el escenario sorteado no lleva mes de
+ *   jubilación, el motor solo clasifica fallos estando jubilado y `failure_probability_by_age`
+ *   llega en ceros. Ese cero es «sin jubilación no hay fallo que contar», no «riesgo cero».
+ *
+ * Vive aquí y no en la vista **para poder probarse**: es una decisión de contrato (qué autoriza a
+ * pintar un juicio de riesgo), no una condición de layout, y escrita en un `useMemo` no había
+ * forma de fijarla con un test.
+ */
+export function showsRiskGradient(
+  bands: ProjectionBandsApi | null | undefined,
+): boolean {
+  if (bands == null) return false;
+  if (bands.any_volatility_declared === false) return false;
+  return bands.success_absent_reason == null;
+}
+
+/**
  * Pie del panel: coste, tamaño de la muestra y semilla. No es adorno — sin los caminos, la
  * probabilidad no tiene precisión declarada; sin la semilla, no se puede reproducir el sorteo.
  * `computed_in_ms: 0` es un HIT de cache y se dice así, en vez de fingir «0 ms de cálculo».
@@ -557,8 +616,18 @@ export type SuccessTileModel = {
 
 /** Copy de cada razón por la que el éxito no existe. Son situaciones DISTINTAS y se dicen
  *  distintas: el hogar no tiene un plan, la proyección no se pudo calcular, el sorteo falló con el
- *  plan intacto, y falta la fecha de nacimiento (sin edad no hay contra qué resolver nada, C5). Un
- *  `—` mudo las haría indistinguibles. */
+ *  plan intacto, falta la fecha de nacimiento (sin edad no hay contra qué resolver nada, C5) y
+ *  —desde A12— el plan existe pero **ninguna fecha del horizonte llega al umbral**. Un `—` mudo
+ *  las haría indistinguibles.
+ *
+ *  `not_reachable` es la única de la lista que NO describe una carencia de datos: hay plan, hay
+ *  sorteo y hay respuesta, y la respuesta es que no existe un mes en el que jubilarse cumpliendo
+ *  el listón. Por eso la frase habla de la FECHA que falta y no de un cálculo que faltó.
+ *
+ *  `no_liquid_assets` se retiró de esta tabla en A12: nunca fue un literal de `absent_reason` ni
+ *  de `success_absent_reason` —vive en `needed_capital_absent_reason`, que dice por qué falta una
+ *  cifra, no por qué falta el éxito— y traducirlo aquí prometía una frase que ningún backend
+ *  podía disparar. */
 const SUCCESS_ABSENT_ES: Record<string, string> = {
   household_aggregate: "solo en tu vista «Yo»",
   household_not_solved: "solo en tu vista «Yo»",
@@ -566,8 +635,21 @@ const SUCCESS_ABSENT_ES: Record<string, string> = {
   bands_unavailable: "no se pudieron sortear los escenarios",
   birth_date_missing: "falta tu fecha de nacimiento",
   months_override: "esta vista fija un horizonte propio",
-  no_liquid_assets: "no tienes activos líquidos que vender",
+  not_reachable: "no hay ninguna fecha que llegue a tu umbral, así que no hay éxito que medir",
 };
+
+/**
+ * La frase de una razón de ausencia del éxito — **la única traducción de la app**, para que el
+ * tile del Resumen, las filas de Jubilación y la nota de precisión del sorteo no expliquen la
+ * misma ausencia de tres maneras.
+ *
+ * Un literal que esta tabla no conoce cae a «no disponible» A PROPÓSITO: un backend más moderno
+ * puede estrenar una razón, y lo honesto entonces es decir que falta, no inventarle una frase que
+ * describiría una situación que nadie ha comprobado.
+ */
+export function successAbsentReasonEs(reason: string | null | undefined): string {
+  return (reason != null ? SUCCESS_ABSENT_ES[reason] : undefined) ?? "no disponible";
+}
 
 /**
  * `summary.plan` → la tarjeta «Éxito del plan», o `null` cuando el backend no publica el bloque
@@ -603,7 +685,7 @@ export function summarySuccessTile(
     if (reason == null) return null;
     return {
       value: METRIC_DASH,
-      detail: SUCCESS_ABSENT_ES[reason] ?? "no disponible",
+      detail: successAbsentReasonEs(reason),
       tone: "default",
     };
   }

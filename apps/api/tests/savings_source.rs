@@ -483,7 +483,15 @@ async fn mode_b_target_annual_expense_uses_expense_avg() {
     assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
 
     let body = app.get_with_cookie("/v1/projection/series?months=240", &owner.cookie).await.json();
-    let target = parse_dec(&body["jubilacion_target_net_worth"]);
+    // **`fire_number_classic_today`, no `jubilacion_target_net_worth`** (5.0.0, WP A12): el modelo
+    // v2 retiró el objetivo que disparaba la jubilación —la fecha la decide el éxito— y lo que
+    // queda es el número FIRE clásico, informativo. La ARITMÉTICA es la misma
+    // (`gross_up(necesidad anual)/SWR` evaluado en el índice 0, o sea euros de HOY), así que el
+    // número esperado NO se mueve; lo que este test comprueba sigue siendo de dónde sale la
+    // NECESIDAD según el modo de ahorro. Con el nombre viejo la lectura era `null` y `parse_dec`
+    // reventaba — el fallo ruidoso que hay que agradecer: un `.unwrap_or(0.0)` habría comparado
+    // ceros en silencio.
+    let target = parse_dec(&body["fire_number_classic_today"]);
     approx(target, 300_000.0);
 }
 
@@ -944,7 +952,15 @@ async fn mode_c_target_annual_expense_uses_expense_avg() {
     assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
 
     let body = app.get_with_cookie("/v1/projection/series?months=240", &owner.cookie).await.json();
-    let target = parse_dec(&body["jubilacion_target_net_worth"]);
+    // **`fire_number_classic_today`, no `jubilacion_target_net_worth`** (5.0.0, WP A12): el modelo
+    // v2 retiró el objetivo que disparaba la jubilación —la fecha la decide el éxito— y lo que
+    // queda es el número FIRE clásico, informativo. La ARITMÉTICA es la misma
+    // (`gross_up(necesidad anual)/SWR` evaluado en el índice 0, o sea euros de HOY), así que el
+    // número esperado NO se mueve; lo que este test comprueba sigue siendo de dónde sale la
+    // NECESIDAD según el modo de ahorro. Con el nombre viejo la lectura era `null` y `parse_dec`
+    // reventaba — el fallo ruidoso que hay que agradecer: un `.unwrap_or(0.0)` habría comparado
+    // ceros en silencio.
+    let target = parse_dec(&body["fire_number_classic_today"]);
     approx(target, 300_000.0);
 }
 
@@ -987,7 +1003,15 @@ async fn mode_c_target_current_income_uses_budget_income() {
     assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
 
     let body = app.get_with_cookie("/v1/projection/series?months=240", &owner.cookie).await.json();
-    let target = parse_dec(&body["jubilacion_target_net_worth"]);
+    // **`fire_number_classic_today`, no `jubilacion_target_net_worth`** (5.0.0, WP A12): el modelo
+    // v2 retiró el objetivo que disparaba la jubilación —la fecha la decide el éxito— y lo que
+    // queda es el número FIRE clásico, informativo. La ARITMÉTICA es la misma
+    // (`gross_up(necesidad anual)/SWR` evaluado en el índice 0, o sea euros de HOY), así que el
+    // número esperado NO se mueve; lo que este test comprueba sigue siendo de dónde sale la
+    // NECESIDAD según el modo de ahorro. Con el nombre viejo la lectura era `null` y `parse_dec`
+    // reventaba — el fallo ruidoso que hay que agradecer: un `.unwrap_or(0.0)` habría comparado
+    // ceros en silencio.
+    let target = parse_dec(&body["fire_number_classic_today"]);
     approx(target, 1_500_000.0);
 }
 

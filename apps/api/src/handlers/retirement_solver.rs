@@ -320,15 +320,13 @@ pub(crate) enum PlanStrategy {
 }
 
 impl PlanStrategy {
-    /// El literal público de la estrategia, el MISMO que serializa el perfil.
-    pub(crate) fn as_wire(self) -> &'static str {
-        match self {
-            PlanStrategy::Asap => "asap",
-            PlanStrategy::RetireAtAge => "retire_at_age",
-            PlanStrategy::Coast => "coast",
-            PlanStrategy::Partial => "partial",
-        }
-    }
+    // **No hay `as_wire`** (retirado en 5.0.0, WP A12). Existía como gemelo de `from_wire` y no lo
+    // llamaba nadie salvo un test que lo comparaba consigo mismo: el literal que de verdad se
+    // publica no sale de aquí, sale de `serde` sobre `RetirementStrategy`
+    // (`projection::strategy_label`), así que este método era una SEGUNDA tabla de los mismos
+    // cuatro literales — la clase de duplicado que diverge en el primer renombrado y no se entera
+    // nadie. Lo que hay que pinear es el cruce real, y lo pinea
+    // `the_profile_literals_are_the_ones_the_solver_accepts` contra `strategy_label`.
 
     /// Traducción desde el literal del perfil. `None` = literal desconocido — el llamante decide
     /// qué hacer con él (hoy: degradar a `asap` con aviso, nunca reventar una LECTURA).
@@ -444,6 +442,93 @@ impl PlanKey {
     pub fn as_u64(self) -> u64 {
         self.0
     }
+}
+
+/// **La clave de la cache del NIVEL 1**, y por qué NO puede ser [`PlanKey`] (5.0.0, WP A12).
+///
+/// [`PlanKey`] se calcula sobre el escenario **de después del solve** —el que ya lleva el mes
+/// forzado dentro— y por eso sirve para el nivel 2, que cuelga de ese escenario. Para reutilizar
+/// el nivel 1 hace falta una clave que se pueda calcular **antes de resolver**, o el hueco y el
+/// huevo: no se puede consultar una cache cuya clave necesita el resultado que se busca.
+///
+/// Es un **tipo propio y no un alias** a propósito. Las dos claves son `u64` y viven en el mismo
+/// `AppState`; si compartieran tipo, nada impediría preguntarle al mapa de una con la clave de la
+/// otra, y una colisión entre los dos espacios devolvería el plan de otro hogar sin que ningún
+/// test lo notara. Con dos tipos distintos eso no compila. Además la huella empieza sembrando un
+/// **dominio distinto** ([`LEVEL1_DOMAIN`]), así que las dos funciones no producen el mismo `u64`
+/// ni para la misma entrada.
+#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
+pub struct Level1Key(u64);
+
+impl Level1Key {
+    /// El hash desnudo, para el log. Ver [`PlanKey::as_u64`].
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+/// Separador de dominio de [`level1_fingerprint`] frente a [`plan_fingerprint`]. Cualquier valor
+/// sirve mientras sea distinto entre los dos; se escribe como constante para que quede claro que
+/// el número no significa nada y que lo único que importa es que no se repita.
+const LEVEL1_DOMAIN: u64 = 0x4c56_3120; // "LV1 "
+
+/// **La huella de una llamada a [`solve_plan_level1_with_budget`]: sus CINCO argumentos.**
+///
+/// El nivel 1 es una función pura de `(input, vols, seed, profile, budget)` —no lee reloj, no lee
+/// base de datos y su RNG se siembra con `seed`—, así que hashear exactamente esos cinco es
+/// necesario y suficiente: dos llamadas con la misma huella devuelven el MISMO `PlanLevel1`, bit a
+/// bit, y dos llamadas distintas no pueden compartir huella salvo colisión de SipHash.
+///
+/// Qué cambia respecto de [`plan_fingerprint`], y por qué:
+///
+/// - el `input` es el de **antes** del solve (ese es el punto entero de esta clave);
+/// - entra el **perfil** (`PlanSolveProfile`, que ya deriva `Hash`), y tiene que entrar: `asap` y
+///   `retire_at_age` sobre el mismo hogar comparten `ProjectionInput` y resuelven planes
+///   distintos. `plan_fingerprint` puede permitirse omitirlo porque el escenario post-solve ya
+///   lleva la decisión dentro; aquí ese escenario todavía no existe;
+/// - entra el **presupuesto** entero (los dos tamaños de muestra) y no solo el de confirmación: el
+///   what-if resuelve con [`PlanBudget::SEARCH_ONLY`] y publica `date_solved_with_paths` porque la
+///   cifra depende de él. Servirle a la serie un nivel 1 medido con 500 caminos sería publicar una
+///   fecha «confirmada con 2.500» que nadie confirmó con 2.500.
+///
+/// Como [`plan_fingerprint`], es una huella de CONTENIDO: una entrada obsoleta es **inalcanzable**
+/// (cambiar cualquier dato produce otra clave), así que este mapa tampoco se invalida — lo acotan
+/// el TTL y el LRU.
+pub(crate) fn level1_fingerprint(
+    input: &ProjectionInput,
+    vols: &[Option<f64>],
+    seed: u64,
+    profile: &PlanSolveProfile,
+    budget: PlanBudget,
+) -> Level1Key {
+    let mut h = DefaultHasher::new();
+    LEVEL1_DOMAIN.hash(&mut h);
+    format!("{input:?}").hash(&mut h);
+    // Longitud explícita y bits de cada `f64`, por las mismas dos razones que en
+    // `plan_fingerprint`: sin la longitud, `[Some(x)]` y `[Some(x), None]` colisionarían por
+    // prefijo; por bits, porque `f64` no es `Hash` y comparar bits es MÁS estricto que `==`.
+    vols.len().hash(&mut h);
+    for v in vols {
+        match v {
+            Some(x) => {
+                1u8.hash(&mut h);
+                x.to_bits().hash(&mut h);
+            }
+            None => 0u8.hash(&mut h),
+        }
+    }
+    seed.hash(&mut h);
+    profile.hash(&mut h);
+    // `PlanBudget` no deriva `Hash` (es un par de cotas, no una clave), así que se hashean sus dos
+    // campos a mano. Si algún día gana un tercero, este es el sitio que hay que tocar — y por eso
+    // se desestructura en vez de leerse por campos: un campo nuevo rompe la compilación aquí.
+    let PlanBudget {
+        search_paths,
+        confirm_paths,
+    } = budget;
+    search_paths.hash(&mut h);
+    confirm_paths.hash(&mut h);
+    Level1Key(h.finish())
 }
 
 /// **La huella del plan**: entrada + volatilidades + umbral + caminos + semilla.
@@ -1549,17 +1634,36 @@ mod tests {
         assert_eq!(p.bridge_k_min(), 1, "el suelo nunca baja del mes 1");
     }
 
-    /// Los literales de la estrategia son los del perfil, y se traducen en un solo sitio.
+    /// **El cruce que de verdad se puede romper**: el literal que `serde` produce para cada
+    /// estrategia del PERFIL tiene que ser uno de los que [`PlanStrategy::from_wire`] acepta.
+    ///
+    /// Es exactamente lo que hace el ensamblado (`projection.rs`:
+    /// `PlanStrategy::from_wire(&strategy_label(perfil.strategy)).unwrap_or(PlanStrategy::Asap)`),
+    /// y ese `unwrap_or` es lo que convierte un renombrado en un **fallo silencioso**: un literal
+    /// que dejara de casar no revienta, degrada la estrategia a `asap` y el usuario recibe el plan
+    /// de otra persona sin que ningún campo lo diga. Hasta 5.0.0 aquí había un round-trip contra
+    /// `PlanStrategy::as_wire`, un gemelo que solo usaba este test: comparaba esta tabla consigo
+    /// misma y no miraba el lado que puede moverse.
     #[test]
-    fn the_strategy_literals_round_trip() {
-        for s in [
-            PlanStrategy::Asap,
-            PlanStrategy::RetireAtAge,
-            PlanStrategy::Coast,
-            PlanStrategy::Partial,
+    fn the_profile_literals_are_the_ones_the_solver_accepts() {
+        use crate::handlers::projection::strategy_label;
+        use crate::handlers::retirement_profile::RetirementStrategy;
+        for (profile, expected) in [
+            (RetirementStrategy::Asap, PlanStrategy::Asap),
+            (RetirementStrategy::RetireAtAge, PlanStrategy::RetireAtAge),
+            (RetirementStrategy::Coast, PlanStrategy::Coast),
+            (RetirementStrategy::Partial, PlanStrategy::Partial),
         ] {
-            assert_eq!(PlanStrategy::from_wire(s.as_wire()), Some(s));
+            let wire = strategy_label(profile);
+            assert_eq!(
+                PlanStrategy::from_wire(&wire),
+                Some(expected),
+                "el perfil serializa `{wire}` y el solver no lo reconoce: el ensamblado \
+                 degradaría a `asap` en silencio"
+            );
         }
+        // El alias de 4.15.x lo resuelve el PERFIL antes de llegar aquí (A1), así que este lado
+        // tiene que seguir rechazándolo: aceptarlo sería un segundo sitio donde vive la migración.
         assert_eq!(PlanStrategy::from_wire("pension_bridge"), None);
         assert_eq!(PlanStrategy::from_wire(""), None);
     }

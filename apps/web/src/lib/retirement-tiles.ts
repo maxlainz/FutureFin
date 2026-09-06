@@ -29,10 +29,11 @@
  *     por un factor que ya está aplicado; multiplicarla por el nominal contestaría a una pregunta
  *     que nadie hace. Por eso el subtítulo lo dice en voz alta —«en euros de hoy»— en vez de
  *     confiar en que nadie mueva el toggle.
- *  3. **Un plan que no está no se rellena.** Con `plan_absent_reason`, o con
- *     `retirement_date_basis: "pending"`, las tarjetas fijas enseñan la RAZÓN, no un guion mudo ni
- *     un número viejo; «calculando…» y «falta tu fecha de nacimiento» son estados distintos y se
- *     dicen distinto.
+ *  3. **Un plan que no está no se rellena.** Con `plan_absent_reason` las tarjetas fijas enseñan
+ *     la RAZÓN, no un guion mudo ni un número viejo: «falta tu fecha de nacimiento» y «el hogar no
+ *     resuelve un plan común» son estados distintos y se dicen distinto. Y con el plan resuelto
+ *     pero **sin fecha** (`retirement_date_basis: "not_reachable"`), la del ÉXITO tampoco se
+ *     rellena: la serie publica ahí una cifra que mide otra cosa (A12, ver `buildRetirementTilesV2`).
  *  4. **Las unidades del contrato mandan.** `success_of_plan`/`success_wilson_low` son FRACCIONES
  *     `[0,1]`; `success_threshold_pct` es un PORCENTAJE entero; `success_sampling_error_pp` son
  *     PUNTOS PORCENTUALES y tiene formateador propio (`formatSamplingErrorPp`, en `risk-bands.ts`).
@@ -148,20 +149,33 @@ function formatCount(n: number): string {
 /**
  * Por qué el bloque «plan» no trae cifras, o `null` cuando sí las trae.
  *
- * `pending` va PRIMERO y no es una carencia: el nivel 1 del solve sigue corriendo (típicamente el
- * primer GET tras una mutación) y lo honesto es «calculando…», no un guion que dice «no hay».
+ * Llevaba una rama `retirement_date_basis: "pending"` que devolvía «calculando…» y **el servidor
+ * nunca emitió ese literal**: el nivel 1 del solve se resuelve en línea, dentro del permiso de la
+ * serie, así que no hay ninguna ventana en la que la base esté a medias. Se retiró en A12 junto
+ * con el literal del tipo. El único «calculando» real de esta pantalla es el nivel 2
+ * (`needed_capital_curve_state: "computing"`), que sí llega en un GET posterior y no pasa por
+ * aquí: no afecta a ninguna de las tres tarjetas.
+ *
+ * **`not_reachable` NO entra aquí**, y es deliberado: ahí el bloque «plan» sí viaja —hay
+ * `needed_capital_today`, hay umbral, hay estrategia— y lo único que falta es la FECHA. Vaciar las
+ * tres tarjetas por eso escondería la cifra que mejor contesta a «¿y cuánto me faltaría?». Lo que
+ * ese caso rompe es solo la tarjeta del éxito, y se corrige ahí (ver `buildRetirementTilesV2`).
+ *
+ * `no_liquid_assets` tampoco: **`plan_absent_reason` no lo emite nunca** (sus tres constantes
+ * viven en `apps/api/src/handlers/projection.rs`). El literal existe, pero en
+ * `needed_capital_absent_reason`, que responde a otra pregunta.
  */
 function planUnavailableReason(series: RetirementTileV2Series): string | null {
-  if (series.retirement_date_basis === "pending") return "calculando…";
   switch (series.plan_absent_reason) {
     case "birth_date_missing":
       return "falta tu fecha de nacimiento";
     case "months_override":
       return "esta vista fija un horizonte propio";
-    case "household_not_solved":
+    // `household_aggregate` y no `household_not_solved` (A12): el segundo es el valor fijo de
+    // `HouseholdMemberProjectionApi.plan_state`, otro campo. Con el literal equivocado, la vista
+    // del hogar caía al `default` y decía «no disponible».
+    case "household_aggregate":
       return "el hogar no resuelve un plan común";
-    case "no_liquid_assets":
-      return "no tienes activos líquidos que vender";
     case null:
     case undefined:
       return null;
@@ -235,20 +249,42 @@ export function buildRetirementTilesV2(
   });
 
   // 2 · Éxito del plan — fija, segunda.
+  //
+  // **Sin fecha válida no hay éxito que rotular** (A12). La serie SÍ publica un `success_of_plan`
+  // con `retirement_date_basis: "not_reachable"`, pero mide otra cosa —la MEJOR observación del
+  // solve, el mes que más cerca se quedó— y esta tarjeta promete «el éxito de TU plan». Copiarlo
+  // ponía un porcentaje respetable («68,0 %») bajo el rótulo de un plan que no ocurre, y el
+  // usuario no tiene forma de saber que ese número describe un mes que su plan no alcanza. El
+  // valor que más cerca se queda sigue estando en la pantalla —la frase-hito lo cita como «lo más
+  // cerca»— pero ahí va con su sujeto delante, que es lo que aquí no cabe.
+  //
+  // Sin color, además: **el semáforo del ÉXITO** de un plan sin fecha es la ausencia de semáforo
+  // —no hay porcentaje que colorear—. Que el PLAN sí sea rojo lo dicen sus dos sitios: la
+  // frase-hito de esta misma pantalla (`planSentence`, tono `danger`) y el estado de la tarjeta
+  // del Resumen (`planStatusFromPlan`, `noValidDate`). Son dos juicios distintos sobre dos cosas
+  // distintas, y por eso no se contradicen.
+  const noValidDate = series.retirement_date_basis === "not_reachable";
   tiles.push({
     key: "success",
     label: "Éxito del plan",
-    value: unavailable ? METRIC_DASH : formatSuccessPercent(series.success_of_plan),
+    value: unavailable || noValidDate ? METRIC_DASH : formatSuccessPercent(series.success_of_plan),
     subtitle:
       unavailable ??
-      joinBits([
-        finite(series.success_threshold_pct)
-          ? `umbral ${formatPercentDisplay(series.success_threshold_pct)}`
-          : null,
-        series.success_sampling_error_pp != null
-          ? formatSamplingErrorPp(series.success_sampling_error_pp)
-          : null,
-      ]),
+      (noValidDate
+        ? joinBits([
+            "no hay ninguna fecha que llegue a tu umbral, así que no hay éxito que medir",
+            finite(series.success_threshold_pct)
+              ? `umbral ${formatPercentDisplay(series.success_threshold_pct)}`
+              : null,
+          ])
+        : joinBits([
+            finite(series.success_threshold_pct)
+              ? `umbral ${formatPercentDisplay(series.success_threshold_pct)}`
+              : null,
+            series.success_sampling_error_pp != null
+              ? formatSamplingErrorPp(series.success_sampling_error_pp)
+              : null,
+          ])),
     tone: "default",
     helpId: "retirement.success",
   });
