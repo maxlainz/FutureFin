@@ -916,33 +916,14 @@ describe("retirementProfileIssue — espejo de validate_retirement_profile", () 
     });
   }
 
-  /**
-   * Códigos del modelo v2 cuya frase todavía NO está en el catálogo: las escribe A11, en el
-   * mismo commit que `fixtures/error-codes.json` (B8 — los mensajes tienen que nombrar rótulos
-   * que existan en pantalla).
-   *
-   * **Esta lista se vacía sola por la fuerza**: la aserción de abajo es una IGUALDAD, así que en
-   * cuanto A11 añada las frases el test se pone ROJO y obliga a borrar la fila. Un `filter` que
-   * las tolerara para siempre convertiría la deuda en un archivo.
-   */
-  const FRASES_PENDIENTES_A11 = [
-    "bridge_max_pct_not_above_swr",
-    "bridge_max_pct_out_of_range",
-    "bridge_max_years_out_of_range",
-    "coast_stop_age_out_of_range",
-    "coast_stop_age_required",
-    "partial_start_age_required",
-    "success_threshold_out_of_range",
-  ];
-
-  it("todo código que devuelve la guarda tiene frase en español (salvo los pendientes de A11)", () => {
+  it("todo código que devuelve la guarda tiene frase en español", () => {
     // Si la guarda inventara un código propio, el usuario vería el mensaje genérico y nadie se
     // enteraría: el catálogo es la única superficie donde se traduce lo que se lee en pantalla.
     const codes = new Set(
       cases.map(([, , code]) => code).filter((c): c is string => c !== null),
     );
     const missing = [...codes].filter((c) => !ERROR_MESSAGES[c]).sort();
-    expect(missing).toEqual(FRASES_PENDIENTES_A11);
+    expect(missing).toEqual([]);
   });
 
   it("los códigos del modelo viejo ya no los puede devolver nadie", () => {

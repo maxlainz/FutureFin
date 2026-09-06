@@ -478,28 +478,37 @@ export const ERROR_MESSAGES: Record<string, string> = {
   ids_do_not_match_scope:
     "El nuevo orden no coincide con las reglas que hay ahora. Recarga la página e inténtalo otra vez.",
 
-  // ── Plan de jubilación por usuario (5.0.0) ────────────────────────────────────────────
+  // ── Plan de jubilación por usuario (5.0.0 / modelo v2) ────────────────────────────────
   strategy: "Esa estrategia de jubilación no existe.",
   target_retirement_age_required:
     "Esa estrategia necesita que digas a qué edad quieres jubilarte.",
   retirement_age_out_of_range:
     "La edad de jubilación tiene que estar entre los 18 años y tu edad límite del horizonte.",
-  pension_required_for_bridge:
-    "«Puente hasta la pensión» necesita que declares tu pensión: importe y edad a la que empieza.",
+  coast_mode: "Ese modo de coast no existe.",
+  success_threshold_out_of_range:
+    "La probabilidad de éxito exigida tiene que estar entre el 80 % y el 100 %.",
   pension_age_out_of_range:
     "La edad a la que empieza la pensión tiene que estar entre los 50 años y tu edad límite del horizonte.",
   pension_amount_not_positive: "El importe de la pensión debe ser mayor que cero.",
   pension_fraction_out_of_range:
     "La parte de la pensión que se cobra en media jornada debe estar entre 0 y 1.",
+  bridge_max_pct_out_of_range:
+    "La tasa máxima del puente hasta la pensión tiene que ser mayor que 0 y como mucho el 20 %.",
+  bridge_max_pct_not_above_swr:
+    "La tasa máxima del puente hasta la pensión tiene que ser mayor que tu tasa de retirada segura: si no, no adelanta nada.",
+  bridge_max_years_out_of_range:
+    "Los años máximos del puente hasta la pensión tienen que estar entre 1 y 20.",
+  coast_stop_age_required:
+    "El modo «edad fija» de coast necesita que digas a qué edad dejas de aportar.",
+  coast_stop_age_out_of_range:
+    "La edad a la que dejas de aportar en coast tiene que estar entre los 18 años y tu edad de jubilación (o tu edad límite del horizonte si aún no la has fijado).",
   partial_age_out_of_range:
     "La edad a la que empieza la media jornada tiene que estar entre los 18 años y tu edad límite del horizonte.",
+  partial_start_age_required:
+    "El modo «a una edad» de la media jornada necesita que digas a qué edad la empiezas.",
   partial_not_before_retirement:
     "La media jornada tiene que empezar antes de la jubilación total.",
   partial_income_negative: "El ingreso de la media jornada no puede ser negativo.",
-  target_basis: "Esa base del objetivo de jubilación no es válida.",
-  bridge_discount_basis: "Esa forma de descontar el puente hasta la pensión no es válida.",
-  bridge_discount_out_of_range:
-    "La tasa con la que se descuenta el puente hasta la pensión se sale de lo que se puede calcular. Revisa la rentabilidad esperada de tus activos líquidos, o acorta el puente retrasando la jubilación o adelantando la pensión.",
   withdrawal_rule_kind: "Esa regla de retirada no existe.",
   spend_mode: "Esa forma de relacionar la regla de retirada con tu gasto no es válida.",
   expense_basis: "Esa base de gasto para la media jornada no es válida.",
@@ -510,7 +519,6 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "La banda y el ajuste de la regla de bandas deben ser mayores que 0 y como mucho 50 %.",
   hybrid_end_pct_not_below_start:
     "En la regla híbrida, el porcentaje final tiene que ser menor que el inicial.",
-  cash_buffer_out_of_range: "El colchón de caja debe estar entre 0 y 60 meses.",
   partial_retirement_required:
     "«Media jornada» necesita que declares la fase parcial: a qué edad empieza y con qué ingreso.",
   field_set_and_clear:
@@ -523,7 +531,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "La vista del hogar es solo de lectura para esta acción. Cambia a «Yo» y vuelve a intentarlo.",
 
   // ── Ajustes del hogar y del plan ──────────────────────────────────────────────────────
-  swr_out_of_range: "La tasa de retirada segura debe estar entre 0 y 4 %.",
+  swr_out_of_range: "La tasa de retirada segura debe estar entre 0 y 6 %.",
   fire_number_mode: "Esa forma de fijar el número FIRE no es válida.",
   fire_manual_amount_required:
     "Has elegido fijar el número FIRE a mano, pero falta la cifra.",
