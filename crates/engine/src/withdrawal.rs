@@ -45,7 +45,13 @@ use crate::sim::WithdrawalRuleG;
 ///
 /// Balance ≤ 0 (cartera vacía o en negativo) ⇒ permitido 0: un porcentaje de nada es nada, y
 /// nunca una retirada negativa.
-fn monthly_allowance<M: MoneyOps>(pct: M, balance: M) -> M {
+///
+/// **`pub(crate)` desde E1 de 5.0.0**: la puerta de tasa inicial (F2) compara la necesidad
+/// ORDINARIA anual del mes de jubilación contra `12 · monthly_allowance(tope, L(R−1))`, que es
+/// `tope/100 · L(R−1)` con el mismo redondeo y la misma reordenación anti-desbordamiento que el
+/// techo mensual de las reglas. Una segunda escritura de la misma fórmula sería la fórmula
+/// duplicada que esta casa ya sabe cómo termina.
+pub(crate) fn monthly_allowance<M: MoneyOps>(pct: M, balance: M) -> M {
     if balance <= M::zero() || pct <= M::zero() {
         return M::zero();
     }

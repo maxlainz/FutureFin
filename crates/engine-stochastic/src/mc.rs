@@ -2,14 +2,21 @@
 //!
 //! # El modelo de retornos, entero y sin letra pequeña
 //!
+//! **La rentabilidad que el usuario declara en un activo es COMPUESTA (CAGR)**: la tasa de
+//! crecimiento geométrico, la que publican los fondos y la que un hogar cobra de verdad (decisión
+//! M8 del modelo v2 de jubilación, owner, 2026-09-06). El camino determinista la compone tal cual
+//! —`m_i` es la raíz doceava del motor— y el sorteo se construye **alrededor** de esa línea: la
+//! línea determinista es la CENTRAL, no un techo ni un suelo.
+//!
 //! Un **shock de mercado COMÚN** por mes (D11). Para cada mes `k` del horizonte se sortea **un
 //! solo** normal estándar `z_k ~ N(0,1)` y todos los activos lo viven a la vez, escalado por su
 //! propia volatilidad:
 //!
 //! ```text
 //!   σ_i  = annual_volatility_percent_i / 100 / √12          (volatilidad MENSUAL del activo i)
-//!   f_ik = m_i · exp(σ_i·z_k − σ_i²/2)                       (factor de crecimiento del mes k)
-//!   σ_i = 0  ⇒  f_ik = m_i  exactamente
+//!   d_i  = m_i · exp(σ_i²/2)                                (DERIVA: la media aritmética)
+//!   f_ik = d_i · exp(σ_i·z_k − σ_i²/2)   ( = m_i · exp(σ_i·z_k) )
+//!   σ_i = 0  ⇒  d_i = m_i  y  f_ik = m_i  exactamente
 //! ```
 //!
 //! `m_i` es el multiplicador determinista del activo — la **raíz doceava del motor**
@@ -17,21 +24,37 @@
 //! conversión anual→mensual cambiara, «volatilidad cero» dejaría de significar «el camino
 //! determinista» sin que nada fallara.
 //!
-//! El término `−σ_i²/2` es la corrección de Itô, y su efecto es **exacto, no aproximado**: para
-//! `X ~ N(0, σ²)`, `E[exp(X)] = exp(σ²/2)`, luego
+//! **La conversión CAGR → media aritmética vive en UN SOLO SITIO**, `PathEngine::new`, y se aplica
+//! sobre la σ **MENSUAL**. Sumarla a la tasa ANUAL que el usuario escribió (`CAGR + σ_anual²/2`,
+//! como porcentajes) es la fórmula equivocada: la prima de varianza pertenece al factor que se
+//! sortea cada mes, y `σ_anual²/2` es 12 veces mayor que la corrección que ese factor necesita.
+//!
+//! El término `−σ_i²/2` es la corrección de Itô. `f_ik` se escribe con la deriva DENTRO y la
+//! corrección FUERA —en vez de simplificarlo a `m_i·exp(σ_i·z_k)`, que es lo mismo— porque así las
+//! dos propiedades que cargan peso se leen sin despejar nada: para `X ~ N(0, σ²)`,
+//! `E[exp(X)] = exp(σ²/2)` y `mediana(exp(X)) = 1`, luego
 //!
 //! ```text
-//!   E[f_ik] = m_i · exp(σ_i²/2) · exp(−σ_i²/2) = m_i
+//!   E[f_ik]       = d_i · exp(σ_i²/2) · exp(−σ_i²/2) = d_i = m_i · exp(σ_i²/2)
+//!   mediana(f_ik) = d_i · exp(−σ_i²/2)               = m_i
 //! ```
 //!
-//! Es decir: **la media aritmética del factor mensual es el factor determinista**, y como los
-//! `z_k` son independientes, `E[Π_{12} f] = m^12 = 1 + rentabilidad anual declarada`. La
-//! rentabilidad esperada que el usuario escribe en el activo es la aritmética, que es lo que
-//! significa «rentabilidad media» en la literatura que el issue cita. La **geométrica** —la que
-//! el hogar cobra de verdad— sale más baja, `≈ (1 + r)·exp(−σ²/2)` anualizada, y esa diferencia
-//! no es un error del modelo: es el coste de la volatilidad, y es justo lo que Monte Carlo
-//! existe para enseñar. `mc_mean_growth_matches_expected` mide la primera; la segunda se ve en
-//! la banda p50, que queda por DEBAJO de la línea determinista.
+//! Es decir: **la MEDIANA del factor mensual es el factor determinista**, y la media aritmética
+//! queda por ENCIMA en `exp(σ_m²/2)` — la **prima de varianza**, que es exactamente lo que hay que
+//! pagarle a la volatilidad para que la geométrica siga siendo la declarada. Con `σ_anual = 15 %`:
+//! `σ_m² = 0,001875`, `exp(σ_m²/2) = 1,000938` al mes ⇒ **+11,9 % de media** al cabo de 10 años
+//! sobre la línea determinista, que sigue siendo la mediana.
+//!
+//! **Lo que esto SÍ garantiza y lo que NO — dicho aquí para que nadie prometa de más.** Sin flujos,
+//! la mediana del patrimonio terminal ES la línea determinista y la igualdad es exacta
+//! (`Π_k f = m^H · exp(σ·Σz)` y la mediana de esa log-normal es `m^H`): lo mide
+//! `mc_median_is_the_deterministic_line`. **Con aportaciones o retiradas la igualdad deja de ser
+//! exacta**: la cascada, el drenaje y la fiscalidad son funciones NO lineales del camino, y la
+//! mediana del patrimonio se separa de la línea determinista **unos pocos puntos porcentuales**
+//! (medido por el panel adversarial del modelo v2: **±2–4 % a 20–35 años**, con el signo según el
+//! hogar esté aportando o retirando). La banda p50 del chart es por tanto una lectura MUY próxima
+//! a la línea determinista, no una identidad contable — y eso es lo que la ayuda de la UI tiene
+//! que decir, en vez de prometer una coincidencia que solo se cumple en el laboratorio sin flujos.
 //!
 //! # Lo que este modelo NO representa — dicho aquí para que nadie lo suponga
 //!
@@ -77,7 +100,7 @@ use rand_chacha::rand_core::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use futurefin_engine::{
-    monthly_growth_multiplier, simulate, EngineError, EngineWarning, ProjectionInput,
+    monthly_growth_multiplier, simulate, EngineError, ProjectionInput,
     RetirementTrigger, SimInput, SimOutput,
 };
 
@@ -343,8 +366,12 @@ fn monthly_sigma(annual_volatility_percent: Option<f64>) -> f64 {
 /// el núcleo.
 struct PathEngine {
     sim: SimInput<F64Money>,
-    /// `m_i`, el multiplicador determinista de cada activo.
+    /// `m_i`, el multiplicador determinista de cada activo: la CAGR declarada compuesta a mes, y
+    /// —desde el modelo v2— la **MEDIANA** del factor que se sortea.
     base: Vec<F64Money>,
+    /// `d_i = m_i · exp(σ_i²/2)`, la **deriva**: la MEDIA aritmética del factor que se sortea.
+    /// Es la conversión CAGR → aritmética, y vive solo aquí.
+    drift: Vec<F64Money>,
     /// `σ_i` mensual de cada activo.
     sigmas: Vec<f64>,
     seed: u64,
@@ -377,11 +404,34 @@ impl PathEngine {
             .map(|a| monthly_growth_multiplier(a.expected_annual_return_percent))
             .collect();
         let sigmas: Vec<f64> = volatilities.iter().copied().map(monthly_sigma).collect();
+        // **La conversión CAGR → media aritmética, en su ÚNICO sitio.** La rentabilidad declarada
+        // es COMPUESTA (decisión M8), así que `m_i` tiene que ser la MEDIANA del factor sorteado;
+        // para que lo sea, la deriva de la log-normal sube `exp(σ_m²/2)` y la corrección de Itô se
+        // la come justo hasta dejar la mediana en `m_i`.
+        //
+        // La σ es la **MENSUAL**: la prima de varianza pertenece al factor que se sortea cada mes.
+        // `CAGR + σ_anual²/2` sobre los porcentajes anuales es la fórmula equivocada — y es 12
+        // veces mayor que la corrección que este factor necesita.
+        let drift: Vec<F64Money> = base
+            .iter()
+            .zip(sigmas.iter())
+            .map(|(m, s)| {
+                if *s == 0.0 {
+                    // Rama explícita, no `m · exp(0)`: «sin volatilidad declarada» significa «el
+                    // camino determinista», y eso se ESCRIBE. Misma disciplina que la rama σ = 0
+                    // de `run`, aunque `x · 1.0 == x` en IEEE-754 la haga redundante hoy.
+                    *m
+                } else {
+                    F64Money(m.0 * (0.5 * s * s).exp())
+                }
+            })
+            .collect();
         let months = input.horizon_months as usize;
         let buf = Some(vec![vec![F64Money(0.0); sim.assets.len()]; months]);
         Ok(PathEngine {
             sim,
             base,
+            drift,
             sigmas,
             seed: config.seed,
             buf,
@@ -414,7 +464,12 @@ impl PathEngine {
                     // eso se escribe, no se deduce de que `1.0` sea neutro.
                     self.base[i]
                 } else {
-                    F64Money(self.base[i].0 * (s * z - 0.5 * s * s).exp())
+                    // `d_i · exp(σz − σ²/2)`, que se SIMPLIFICA a `m_i · exp(σz)` — y se escribe
+                    // sin simplificar a propósito: con la deriva dentro y la corrección de Itô
+                    // fuera, las dos propiedades se leen sin despejar nada.
+                    //   E[f]       = d_i          = m_i · exp(σ²/2)   (media aritmética)
+                    //   mediana(f) = d_i·exp(−σ²/2) = m_i             (la línea determinista)
+                    F64Money(self.drift[i].0 * (s * z - 0.5 * s * s).exp())
                 };
             }
         }
@@ -429,8 +484,9 @@ impl PathEngine {
 /// **Un solo camino de Monte Carlo**, con toda su salida del motor.
 ///
 /// Existe para lo que las bandas no pueden dar: verificar la reproducibilidad camino a camino,
-/// medir la media del terminal contra `E[factor] = m` (`mc_mean_growth_matches_expected`) y
-/// permitir que un caller inspeccione una realización concreta. Para dibujar bandas, use
+/// medir la MEDIANA del terminal contra la línea determinista y la MEDIA contra la prima de
+/// varianza (`mc_median_is_the_deterministic_line`) y permitir que un caller inspeccione una
+/// realización concreta. Para dibujar bandas, use
 /// [`project_percentile_bands`]: esta función reconstruye la maquinaria en cada llamada.
 pub fn run_path(
     input: &ProjectionInput,
@@ -593,7 +649,6 @@ pub fn project_percentile_bands(
 
     let mut depleted: Vec<Option<u32>> = Vec::with_capacity(n);
     let mut retired_at: Vec<Option<u32>> = Vec::with_capacity(n);
-    let mut underfunded_paths = 0usize;
     let mut months_below: Vec<f64> = Vec::with_capacity(n);
     let mut coverage_ratios: Vec<f64> = Vec::with_capacity(n);
 
@@ -606,12 +661,6 @@ pub fn project_percentile_bands(
         }
         depleted.push(out.assets_depleted_month_index);
         retired_at.push(out.retirement_month_index);
-        if out
-            .warnings
-            .contains(&EngineWarning::RetireAtAgeUnderfunded)
-        {
-            underfunded_paths += 1;
-        }
 
         // Las dos magnitudes del RECORTE (D24), sobre los meses JUBILADOS de este camino. Fuera
         // de la jubilación el motor no aplica techo alguno, así que el recorte solo puede vivir
@@ -746,14 +795,10 @@ pub fn project_percentile_bands(
             .collect()
     });
 
-    // Infra-financiación: **la lee el propio motor**, no esta capa. `RetireAtAgeUnderfunded` se
-    // emite dentro del bucle comparando `L(R−1) < T(R−1)` con los mismos escalares que el cruce
-    // acaba de usar; recalcularlo aquí sería una segunda definición de «no llego», y la segunda
-    // definición es la que se queda atrás.
-    let underfunded_probability = plan
-        .retirement_trigger
-        .forced_month()
-        .map(|_| underfunded_paths as f64 / n_f);
+    // Infra-financiación: E1 (modelo v2) retiró `EngineWarning::RetireAtAgeUnderfunded` del motor
+    // — la lectura «no llego a la edad» pasa a ser `1 − éxito(R)` del solver estocástico. El campo
+    // se publica `None` hasta que E9 lo retire de `McOutcome`.
+    let underfunded_probability: Option<f64> = None;
 
     sort_total(&mut months_below);
     let months_below_need_p50 = percentile_of_sorted(&months_below, 50) as u32;

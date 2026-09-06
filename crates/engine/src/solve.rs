@@ -271,7 +271,10 @@ pub fn required_contribution_monthly(
             search_ceiling: ceiling,
             iterations: 0,
             required_capital_path: full_out.liquid_worth,
-            warnings: vec![EngineWarning::RetireAtAgeUnderfunded],
+            // E1 retiró `RetireAtAgeUnderfunded`: quien dice «no llegas» es la bandera
+            // `underfunded` de aquí arriba, y el CUÁNTO no llegas lo mide el crate estocástico
+            // como `1 − éxito(R)`. Un aviso que repetía la bandera no añadía información.
+            warnings: Vec::new(),
         }));
     }
 

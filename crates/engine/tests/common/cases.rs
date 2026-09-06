@@ -1167,7 +1167,9 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
     // Jubilación forzada en el mes 120 con el objetivo TODAVÍA en el input: `crossing_is_reading_only`
     // impide que el cruce dispare nada, pero `liquid_crossing_month_index` se sigue anotando. Con
     // 400.000 € al 6 %, impuestos ES e inflación 2 %, el capital NO alcanza el objetivo en el mes
-    // 120, así que el caso pinea además el aviso `RetireAtAgeUnderfunded`.
+    // 120. Hasta E1 de 5.0.0 el caso pineaba además el aviso `RetireAtAgeUnderfunded`, que E1
+    // retiró: el caso no declara `initial_rate`, así que hoy pinea que **sin puerta no hay
+    // veredicto** (`failure_kind: null`) por bajo que entre el capital.
     // -----------------------------------------------------------------------------------------
     let mut p21 = base_input(
         360,

@@ -21,13 +21,15 @@ pub use history::{
 pub use money::MoneyOps;
 pub use net_return::{net_return_percentages, NetReturn};
 pub use phases::{
-    EngineWarning, ExpenseBasis, IncomePause, PartialPhase, PensionSchedule, Phase, PhasePlan,
-    RetirementTrigger, SpendMode, TargetBasis, WithdrawalRule,
+    BridgeCap, EngineWarning, ExpenseBasis, IncomePause, InitialRateGate, PartialPhase,
+    PathFailure, PensionSchedule, Phase, PhasePlan, RetirementTrigger, SpendMode, TargetBasis,
+    WithdrawalRule,
 };
 pub use sim::{
-    AllocationCapG, AllocationRuleG, FireNeedG, FireTargetG, FireTargetView,
-    FirstMonthAllocationG, IncomePauseG, PartialPhaseG, PensionScheduleG, PhasePlanG,
-    RuleOutcomeG, SimAssetG, SimInput, SimLiability, SimOutput, TaxBracketG, WithdrawalRuleG,
+    AllocationCapG, AllocationRuleG, BridgeCapG, FireNeedG, FireTargetG, FireTargetView,
+    FirstMonthAllocationG, IncomePauseG, InitialRateGateG, PartialPhaseG, PensionScheduleG,
+    PhasePlanG, RuleOutcomeG, SimAssetG, SimInput, SimLiability, SimOutput, TaxBracketG,
+    WithdrawalRuleG,
 };
 pub use sim_core::{monthly_multiplier_g as monthly_growth_multiplier, simulate};
 pub use projection::{

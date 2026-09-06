@@ -154,10 +154,25 @@ fn an_exact_landing_that_covers_every_later_need_is_not_a_depletion() {
         "y desde el 121 la pensión deja 500 €/mes"
     );
 
+    // (a bis) E1: el mismo discriminante gobierna el VEREDICTO del camino. El aterrizaje exacto
+    //         no falla —ni un euro de necesidad sin fundar en 240 meses—, así que
+    //         `failure_month_index` es `None` igual que el agotamiento.
+    assert_eq!(exact.failure_month_index, None);
+    assert_eq!(exact.failure_kind, None);
+
     // (b) Un euro menos SÍ deja necesidad sin cubrir, y entonces el mes se publica.
     let short = build("239999");
     assert_eq!(short.assets_depleted_month_index, Some(120));
     assert_eq!(short.uncovered_deficit_total, Decimal::ONE);
+    // Y el fallo del camino cae en el MISMO mes: aquí el mes que vacía la cartera es también el
+    // primero cuya venta no se pudo fundar. No siempre coinciden —cuando el vaciado es exacto y
+    // el descubierto llega después, el agotamiento va por delante (P23 de la batería: agota en el
+    // 16 y falla en el 17)—, y por eso son dos campos y no uno.
+    assert_eq!(short.failure_month_index, Some(120));
+    assert_eq!(
+        short.failure_kind,
+        Some(futurefin_engine::PathFailure::PortfolioDepleted)
+    );
 
     // (c) Y un céntimo más ni se vacía ni se agota.
     let spare = build("240000.01");

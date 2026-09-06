@@ -1016,6 +1016,14 @@ fn render_projection_outputs_5_0(name: &str, o: &ProjectionOutput) -> String {
     for (k, v) in o.disposable_cash.iter().enumerate() {
         let _ = writeln!(out, "dc {k} {v}");
     }
+    // E1: el veredicto de ESTE camino. Dos campos, no una serie: el latch es monótono y publica
+    // un mes y un motivo.
+    let _ = writeln!(out, "failure_month_index {}", opt(o.failure_month_index));
+    let _ = writeln!(
+        out,
+        "failure_kind {}",
+        o.failure_kind.map(|k| k.code()).unwrap_or("-")
+    );
     out
 }
 
@@ -1034,8 +1042,13 @@ struct Pin50 {
     pension_start_month_index: Option<u32>,
     partial_retirement_month_index: Option<u32>,
     disposable_cash_total: Decimal,
-    /// Los literales públicos de los avisos, separados por `|` («retire_at_age_underfunded»).
+    /// Los literales públicos de los avisos, separados por `|` («coast_not_reachable»).
     warnings: String,
+    // ---- E1 (modelo de jubilación v2): el veredicto del camino ---------------------------
+    failure_month_index: Option<u32>,
+    /// El literal público del motivo («portfolio_depleted» / «initial_rate_exceeded» /
+    /// «rule_below_need»), o vacío si el camino aguanta.
+    failure_kind: String,
     /// El hash de la capa WP1b/WP2 SOLA. No entra en el hash del caso: existe para que el diff
     /// diga si lo que se movió son los campos viejos o solo los nuevos.
     sha256_wp2: String,
@@ -1078,6 +1091,8 @@ fn live_pins_5_0() -> Vec<Pin50> {
                     .map(|w| w.code())
                     .collect::<Vec<_>>()
                     .join("|"),
+                failure_month_index: out.failure_month_index,
+                failure_kind: out.failure_kind.map(|k| k.code()).unwrap_or("").to_string(),
                 sha256_wp2: sha256_hex(&render_projection_outputs_wp2(c.name, &out)),
             }
         })
@@ -1110,7 +1125,10 @@ bridge_effective_withdrawal_pct, pension_coverage_ratio, partial_gap_target, \
 partial_phase_capital_growing y la serie disposable_cash mes a mes: por eso el sha256 de los 17 \
 casos anteriores cambio SIN que cambiara ningun numero suyo, y quien lo demuestra es el test \
 the_5_0_canonicalization_grew_without_moving_the_old_fields (rehashea la capa vieja sola contra \
-los SHA-256 de antes de WP3).";
+los SHA-256 de antes de WP3). E1 (modelo de jubilacion v2) la amplio otra vez con \
+failure_month_index y failure_kind — el veredicto de ESTE camino (F1 cartera sin fundar la \
+necesidad, F2 tasa inicial por encima del tope, F3 regla por saldo por debajo del gasto \
+ordinario)— y retiro el aviso retire_at_age_underfunded, que solo P21 tenia.";
 
 fn render_fixture_5_0(pins: &[Pin50]) -> String {
     let mut s = String::new();
@@ -1156,7 +1174,13 @@ fn render_fixture_5_0(pins: &[Pin50]) -> String {
             "      \"disposable_cash_total\": {},",
             json_dec(Some(p.disposable_cash_total))
         );
-        let _ = writeln!(s, "      \"warnings\": \"{}\"", p.warnings);
+        let _ = writeln!(s, "      \"warnings\": \"{}\",", p.warnings);
+        let _ = writeln!(
+            s,
+            "      \"failure_month_index\": {},",
+            json_u32(p.failure_month_index)
+        );
+        let _ = writeln!(s, "      \"failure_kind\": \"{}\"", p.failure_kind);
         let _ = writeln!(s, "    }}{comma}");
     }
     s.push_str("  }\n");
@@ -1238,6 +1262,8 @@ fn golden_pins_5_0_outputs_match() {
                 json_dec(Some(p.disposable_cash_total)),
             ),
             ("warnings", format!("\"{}\"", p.warnings)),
+            ("failure_month_index", json_u32(p.failure_month_index)),
+            ("failure_kind", format!("\"{}\"", p.failure_kind)),
         ] {
             let before = &stored_case[field];
             let before_txt = match before {

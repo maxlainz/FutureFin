@@ -41,6 +41,17 @@
 //! autocorrelación, correlación imperfecta entre activos, bootstrap histórico) están escritos en
 //! el doc de ese módulo, no en un comentario suelto: un modelo estocástico sin sus supuestos
 //! declarados es un generador de números que parecen ciertos.
+//!
+//! # La rentabilidad declarada es COMPUESTA, y quien convierte es este crate
+//!
+//! `expected_annual_return_percent` es una **CAGR** (decisión M8 del modelo v2, owner 2026-09-06):
+//! el crecimiento geométrico, el número que publican los fondos. El motor `Decimal` la compone tal
+//! cual y **no sabe nada de volatilidad**; es el sorteo el que, para que esa CAGR siga siendo la
+//! que el hogar cobra, sube la deriva del factor mensual en `exp(σ_m²/2)`. La consecuencia es la
+//! que se ve en los charts: **la línea determinista es la MEDIANA de los caminos**, no su media.
+//! La conversión vive en un solo sitio —`PathEngine::new`, en [`mc`]— y en ningún otro:
+//! [`deterministic_growth_multipliers`] y [`simulate_f64`] no la aplican, y por eso la puerta de
+//! degeneración (`tests/degeneration.rs`) sigue comparando exactamente lo mismo que antes.
 
 mod mc;
 

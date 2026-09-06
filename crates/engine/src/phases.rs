@@ -177,6 +177,85 @@ pub enum TargetBasis {
     BridgeToPension,
 }
 
+/// **Puerta de TASA INICIAL** (5.0.0 E1, correcciones C1/C2 del panel adversarial).
+///
+/// El SWR deja de ser una comprobación mensual sobre el saldo vivo y pasa a ser lo que la
+/// literatura dice que es: la **tasa de retirada INICIAL máxima**, evaluada UNA sola vez, en el
+/// mes `R` en que el hogar se jubila, sobre el patrimonio LÍQUIDO con el que entra (`L(R−1)`).
+///
+/// Se mide contra la **necesidad ORDINARIA anual** de ese mes —gasto de jubilación + retirada
+/// extra − ingresos del mes (pensión con fecha incluida si ya se cobra)—, sin servicio de deuda
+/// y sin «Próximos»: la regla del 4 % habla del gasto de vivir, no de una cuota que se extingue
+/// ni de un ingreso puntual.
+///
+/// `None` ⇒ **no hay puerta**: ninguna comparación se ejecuta y ningún camino puede fallar por
+/// F2. Es el valor de los dos constructores ([`PhasePlan::classic`] y [`PhasePlan::forced_at`]),
+/// y por eso los pines de 4.15.0 no se mueven.
+///
+/// Medido (panel adversarial, 2026-09-06): la alternativa —comparar la venta ordinaria del mes
+/// contra `SWR/12 · L(k−1)` TODOS los meses— ponía la fecha válida de la demo en la edad de la
+/// pensión (72 años) y el capital necesario en 56 M€, porque cualquier caída del saldo convierte
+/// un plan sano en un fallo retroactivo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InitialRateGate {
+    /// Tasa máxima ANUAL en % sobre el líquido (3,5 = 3,5 %). Es el `swr_pct` de la instalación.
+    pub swr_pct: Decimal,
+    /// Puente hasta la pensión (C2): un tope MAYOR con fecha límite. `None` ⇒ el SWR rige desde
+    /// el primer mes jubilado.
+    pub bridge: Option<BridgeCap>,
+}
+
+/// **El puente, como tope de tasa inicial con fecha límite** (C2).
+///
+/// Con una pensión con fecha a pocos años vista, exigir el SWR de una perpetuidad es exigir
+/// capital para un gasto que la pensión va a cubrir. El puente sube el tope de `R` a `max_pct`
+/// **solo** si la pensión llega dentro de `max_years` años. No hay tope mensual DURANTE el
+/// puente: lo que quede después lo juzgan F1 y F3 mes a mes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BridgeCap {
+    /// Tasa inicial máxima ANUAL en % mientras el puente aplica (típicamente > `swr_pct`).
+    pub max_pct: Decimal,
+    /// Años máximos de puente. La pensión tiene que llegar dentro de esta ventana desde `R`.
+    pub max_years: u32,
+}
+
+/// **Por qué falla UN camino** (5.0.0 E1, decisión M3 del owner corregida por C1).
+///
+/// El veredicto de un camino es binario —falla o no—, y su MOTIVO tiene tres formas que no
+/// comparten remedio. Se evalúan solo en meses de jubilación (o de media jornada, y ahí solo
+/// F1: supuesto S1, las reglas de retirada se anclan en `L(R−1)`, que durante la media jornada
+/// todavía no existe), con prioridad F1 > F2 > F3 dentro del mismo mes.
+///
+/// **El veredicto de un camino no es el veredicto del PLAN.** El plan se juzga con la proporción
+/// de caminos sin fallo (`crates/engine-stochastic`) contra el umbral del perfil; un camino
+/// determinista que falla no dice más que «este escenario concreto no aguanta».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathFailure {
+    /// **F1** — la cartera no pudo cubrir la necesidad del mes: hubo venta sin fundar y quedó
+    /// necesidad NETA sin cubrir. Es el fallo literal («te quedas sin dinero»).
+    PortfolioDepleted,
+    /// **F2** — la tasa de retirada INICIAL supera el tope ([`InitialRateGate`]) en el primer
+    /// mes jubilado. No se vuelve a evaluar: es una propiedad de la FECHA, no del mes.
+    InitialRateExceeded,
+    /// **F3** — con una regla por saldo (`percent_of_balance`, `hybrid`, `guardrails`), lo que
+    /// la regla PERMITE se queda por debajo de la necesidad ordinaria del mes: el hogar tendría
+    /// que recortar su nivel de vida. No aplica a `fixed_real`, donde el permitido ES la
+    /// necesidad por construcción.
+    RuleBelowNeed,
+}
+
+impl PathFailure {
+    /// Literal público y estable de cada motivo — el que la API publica. Vive aquí por la misma
+    /// razón que [`EngineWarning::code`]: un `match` duplicado en `apps/api` se queda atrás.
+    pub fn code(self) -> &'static str {
+        match self {
+            PathFailure::PortfolioDepleted => "portfolio_depleted",
+            PathFailure::InitialRateExceeded => "initial_rate_exceeded",
+            PathFailure::RuleBelowNeed => "rule_below_need",
+        }
+    }
+}
+
 /// Pausa de ingresos (P8.c): el ingreso GANADO del hogar se multiplica por `income_fraction`
 /// durante `months` meses a partir de `from_month` (1-based, ventana SEMIABIERTA:
 /// `from_month ≤ k < from_month + months`).
@@ -267,6 +346,10 @@ pub struct PhasePlan {
     /// Pausa de ingresos (P8.c). `None` = sin pausa, y entonces el ingreso del mes no pasa por
     /// ninguna multiplicación (bit-identidad).
     pub income_pause: Option<IncomePause>,
+    /// **Puerta de tasa inicial** (E1, C1/C2). `None` ⇒ sin puerta: el bucle no ejecuta ninguna
+    /// comparación y ningún camino puede fallar por [`PathFailure::InitialRateExceeded`]. Es el
+    /// default de los dos constructores, y por eso los pines de 4.15.0 no se mueven.
+    pub initial_rate: Option<InitialRateGate>,
 }
 
 impl PhasePlan {
@@ -292,6 +375,9 @@ impl PhasePlan {
             contribution_cap_monthly: None,
             contributions_stop_month: None,
             income_pause: None,
+            // Sin puerta de tasa inicial: 4.15.0 no la tenía y ningún pin suyo puede moverse por
+            // una comparación que no se ejecuta.
+            initial_rate: None,
         }
     }
 
@@ -318,22 +404,20 @@ impl PhasePlan {
     // plan, la que `apps/api` construye.
 }
 
-/// Avisos del motor. **WP3 le puso las tres primeras variantes**: el enum nació vacío en WP1b
-/// para que la salida ya tuviera la lista, y se llena aquí porque son exactamente los tres
-/// estados que el bucle y los solves SABEN diagnosticar. Los avisos de ensamblado
-/// (`birth_date_missing` y compañía) los añade el handler: el motor no conoce fechas de
-/// nacimiento.
+/// Avisos del motor. WP3 le puso tres variantes; **E1 de 5.0.0 retiró
+/// `RetireAtAgeUnderfunded`**: «me jubilo por edad y el capital no llega» dejó de ser un booleano
+/// sobre un objetivo descontado y pasó a ser una probabilidad —`1 − éxito(R)`, que mide el crate
+/// estocástico sobre miles de caminos—. Un aviso que decía «no llegas» comparando el líquido con
+/// un objetivo de perpetuidad no podía distinguir «no llegas por poco» de «no llegas jamás», y
+/// esa es justo la distinción que el owner pidió publicar.
+///
+/// Los avisos de ensamblado (`birth_date_missing` y compañía) los añade el handler: el motor no
+/// conoce fechas de nacimiento.
 ///
 /// Un aviso NO es un error: la simulación se publica igual. Lo que dice es que el plan
 /// configurado tiene una consecuencia que el usuario no vería mirando solo la curva.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineWarning {
-    /// D17: el hogar se jubila en `R` porque la EDAD manda, con el líquido POR DEBAJO del
-    /// objetivo de ese mes (`L(R−1) < T(R−1)`). El «aviso rojo grande» del plan.
-    ///
-    /// Se emite mirando el objetivo, no el trigger: si quien jubiló fue el cruce, `L(R−1) ≥
-    /// T(R−1)` por definición y este aviso no puede darse.
-    RetireAtAgeUnderfunded,
     /// Ni aportando TODOS los meses hasta `R` se alcanza `T(R−1)`: no existe un mes de coast.
     /// Lo emite [`crate::coast_fire_month_index`], que es quien lo puede saber.
     CoastNotReachable,
@@ -350,7 +434,6 @@ impl EngineWarning {
     /// aviso que nadie puede buscar.
     pub fn code(self) -> &'static str {
         match self {
-            EngineWarning::RetireAtAgeUnderfunded => "retire_at_age_underfunded",
             EngineWarning::CoastNotReachable => "coast_not_reachable",
             EngineWarning::PartialPhaseCapitalShrinking => "partial_phase_capital_shrinking",
         }
@@ -516,15 +599,23 @@ mod tests {
     /// literal NO puede cambiar sin que este test lo diga.
     #[test]
     fn warning_codes_are_stable_literals() {
-        assert_eq!(
-            EngineWarning::RetireAtAgeUnderfunded.code(),
-            "retire_at_age_underfunded"
-        );
         assert_eq!(EngineWarning::CoastNotReachable.code(), "coast_not_reachable");
         assert_eq!(
             EngineWarning::PartialPhaseCapitalShrinking.code(),
             "partial_phase_capital_shrinking"
         );
+    }
+
+    /// Los literales de los motivos de fallo son contrato público igual que los de los avisos:
+    /// la API los publica tal cual y la SPA los traduce por su nombre.
+    #[test]
+    fn path_failure_codes_are_stable_literals() {
+        assert_eq!(PathFailure::PortfolioDepleted.code(), "portfolio_depleted");
+        assert_eq!(
+            PathFailure::InitialRateExceeded.code(),
+            "initial_rate_exceeded"
+        );
+        assert_eq!(PathFailure::RuleBelowNeed.code(), "rule_below_need");
     }
 
     fn d(m: i64, s: u32) -> Decimal {

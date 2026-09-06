@@ -10,8 +10,10 @@
 //!    determinista (`mc_zero_volatility_degenerates_to_deterministic`), en `f64` bit a bit y
 //!    contra el motor `Decimal` dentro de las cotas de WP5.5.
 //! 3. **Orden de las bandas** — p10 ≤ p50 ≤ p90 en todos los meses.
-//! 4. **El modelo hace lo que dice** — la media del terminal sobre 2 000 caminos coincide con el
-//!    terminal determinista dentro de la tolerancia DERIVADA de la varianza log-normal.
+//! 4. **El modelo hace lo que dice** — la MEDIANA del terminal sobre 2 500 caminos ES la línea
+//!    determinista (la rentabilidad declarada es una CAGR, decisión M8) y la MEDIA queda por
+//!    encima justo la prima de varianza, las dos dentro de tolerancias DERIVADAS de la log-normal
+//!    (`mc_median_is_the_deterministic_line`).
 //! 5. **Los números del issue** — la tabla del #207 (6,5 % media / 17 % sd, 35 años, 3 % vs 4 %)
 //!    reproducida dentro de horquillas anchas y declaradas, con los valores IMPRESOS.
 //!
@@ -402,41 +404,61 @@ fn mc_bands_are_ordered() {
 }
 
 // =================================================================================================
-// 4. El modelo hace lo que dice: E[factor] = m
+// 4. El modelo hace lo que dice: mediana(f) = m,  E[f] = m·exp(σ_m²/2)
 // =================================================================================================
 
-/// **La media del terminal es el terminal determinista.**
+/// **La línea determinista es la MEDIANA de los caminos; la media va por encima.**
+///
+/// La rentabilidad declarada de un activo es COMPUESTA —una CAGR, la que publican los fondos
+/// (decisión M8 del modelo v2, owner 2026-09-06)—, así que el factor mensual sorteado tiene que
+/// tener a `m` por **mediana**, no por media. El sorteo lo consigue subiendo la deriva a
+/// `d = m·exp(σ_m²/2)` (`PathEngine::new`), y este test mide las DOS consecuencias a la vez: dónde
+/// cae la mediana del terminal y dónde cae su media.
 ///
 /// Un solo activo, sin gasto ni ingreso ni impuestos: el patrimonio terminal de un camino es
 ///
 /// ```text
-///   V_H = V_0 · Π_k m·exp(σ z_k − σ²/2) = D · exp(σ·S − H·σ²/2),   S = Σ z_k ~ N(0, H)
+///   V_H = V_0 · Π_k d·exp(σ z_k − σ²/2) = V_0·m^H · exp(σ·S) = D · exp(σ·S),   S = Σ z_k ~ N(0,H)
 /// ```
 ///
-/// con `D = V_0·m^H` el terminal determinista. `E[V_H] = D` **exactamente**, y
-/// `Var(V_H) = D²·(exp(H σ²) − 1)`.
-///
-/// # La tolerancia, derivada y no elegida
-///
-/// Con `r = 7 %`, `σ_a = 15 %`, `H = 120` meses y `N = 2 000` caminos:
+/// con `D = V_0·m^H` el terminal determinista. `exp(σ·S)` es log-normal de **mediana 1** y media
+/// `exp(H·σ²/2)`, luego
 ///
 /// ```text
-///   σ_m² = (0,15/√12)² = 1,875e-3      H·σ_m² = 0,225
-///   sd relativa de V_H         = √(e^0,225 − 1)      = 0,5023
-///   sd relativa de la MEDIA    = 0,5023/√2000        = 0,01123   (1,12 %)
+///   mediana(V_H) = D                    ← la línea determinista, EXACTA (sin flujos)
+///   E[V_H]       = D · exp(H·σ_m²/2)    ← la prima de varianza
+///   Var(V_H)     = E[V_H]²·(exp(H·σ_m²) − 1)
 /// ```
 ///
-/// La cota exigida es **5 %**, es decir ≈ 4,45 desviaciones típicas de la media muestral. No es
-/// un margen de seguridad arbitrario: por debajo de ~4 σ un test así falla de vez en cuando por
-/// azar aunque el modelo sea correcto, y un test que falla al azar es un test que se acaba
-/// ignorando. La semilla es fija, así que el valor observado es DETERMINISTA — se imprime.
+/// # Predicción, escrita ANTES de correr (100.000 € · 7 % CAGR · σ_a = 15 % · H = 120 · N = 2.500)
+///
+/// ```text
+///   D          = 100.000 · 1,07^10                        = 196.715,14 €
+///   σ_m²       = 0,15² / 12                               =      0,001875
+///   H·σ_m²/2   = 120 · 0,001875 / 2                       =      0,1125
+///   E[V_H]     = 196.715,14 · exp(0,1125) = · 1,1190723   = 220.138,45 €
+/// ```
+///
+/// # Las tolerancias, derivadas y no elegidas a ojo
+///
+/// `s = σ_m·√H = √0,225 = 0,4743` es la desviación típica del LOG del terminal.
+///
+/// - **Mediana muestral**: error típico `1/(2·f(D)·√N)` con `f` la densidad log-normal evaluada en
+///   su mediana, `f(D) = 1/(D·s·√(2π))` ⇒ `sd = D·s·√(2π)/(2·√N) = 1,19 % · D` con `N = 2.500`.
+///   La cota exigida —**5 %**— es ≈ **4,2 σ**.
+/// - **Media muestral**: la sd relativa de un camino es `√(exp(H·σ_m²) − 1) = 0,5023`; dividida por
+///   `√N` da **1,00 %**. La misma cota del 5 % es ≈ **5,0 σ**.
+///
+/// Por debajo de ~4 σ un test así falla de vez en cuando por azar aunque el modelo sea correcto, y
+/// un test que falla al azar es un test que se acaba ignorando. La semilla es fija, así que lo
+/// observado es DETERMINISTA — se imprime al lado de lo predicho.
 #[test]
-fn mc_mean_growth_matches_expected() {
+fn mc_median_is_the_deterministic_line() {
     let capital = Decimal::from(100_000);
     let horizon = 120u32;
     let input = single_asset_retiree(capital, Decimal::ZERO, Decimal::from(7), horizon);
     let vols = vec![Some(15.0)];
-    let paths = 2_000u32;
+    let paths = 2_500u32;
     let config = McConfig {
         seed: 4_242,
         paths,
@@ -446,42 +468,71 @@ fn mc_mean_growth_matches_expected() {
     let deterministic = simulate_f64(&input).expect("no falla");
     let d_terminal = deterministic.net_worth[horizon as usize].0;
 
-    let mut sum = 0.0f64;
-    let mut sum_sq = 0.0f64;
+    let mut terminals: Vec<f64> = Vec::with_capacity(paths as usize);
     for p in 0..paths {
         let out = run_path(&input, &vols, &config, p).expect("ningún camino falla");
-        let v = out.net_worth[horizon as usize].0;
-        sum += v;
-        sum_sq += v * v;
+        terminals.push(out.net_worth[horizon as usize].0);
     }
-    let mean = sum / f64::from(paths);
-    let var = (sum_sq - f64::from(paths) * mean * mean) / (f64::from(paths) - 1.0);
-    let rel_error = (mean - d_terminal) / d_terminal;
+
+    let n = f64::from(paths);
+    let mean = terminals.iter().sum::<f64>() / n;
+    let var = terminals.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (n - 1.0);
+    // Mediana por **rango más cercano**, la misma convención que las bandas
+    // (`nearest_rank_index`): `⌈50·N/100⌉ − 1`. Nunca interpola — el valor es uno que el sorteo
+    // produjo de verdad.
+    let mut sorted = terminals.clone();
+    sorted.sort_by(f64::total_cmp);
+    let median = sorted[(paths as usize).div_ceil(2) - 1];
 
     // Predicciones cerradas del modelo, para contrastarlas con lo medido.
     let sigma_m2 = (0.15f64 / 12f64.sqrt()).powi(2);
-    let predicted_rel_sd = ((f64::from(horizon) * sigma_m2).exp() - 1.0).sqrt();
-    let predicted_mean_sd = predicted_rel_sd / f64::from(paths).sqrt();
+    let h_sigma2 = f64::from(horizon) * sigma_m2;
+    let predicted_mean = d_terminal * (h_sigma2 / 2.0).exp();
+    let predicted_rel_sd = (h_sigma2.exp() - 1.0).sqrt();
+    let predicted_median_sd = h_sigma2.sqrt() * (2.0 * std::f64::consts::PI).sqrt() / (2.0 * n.sqrt());
+    let predicted_mean_sd = predicted_rel_sd / n.sqrt();
+
+    let median_err = (median - d_terminal) / d_terminal;
+    let mean_err = (mean - predicted_mean) / predicted_mean;
+    let observed_rel_sd = var.sqrt() / predicted_mean;
 
     println!(
-        "\n[media] 1 activo · 100.000 € · 7 % · σ 15 % · {horizon} meses · {paths} caminos\n\
-         [media]   terminal determinista D = {d_terminal:.2} €\n\
-         [media]   media muestral        = {mean:.2} €   (error relativo {:+.4} %)\n\
-         [media]   sd relativa del camino: predicha {predicted_rel_sd:.4}, observada {:.4}\n\
-         [media]   sd relativa de la media: predicha {predicted_mean_sd:.4} ⇒ cota 5 % ≈ {:.1} σ",
-        rel_error * 100.0,
-        var.sqrt() / d_terminal,
-        0.05 / predicted_mean_sd
+        "\n[mediana] 1 activo · 100.000 € · 7 % CAGR · σ 15 % · {horizon} meses · {paths} caminos\n\
+         [mediana]   línea determinista D  = predicha 196.715,14 €   medida {d_terminal:.2} €\n\
+         [mediana]   MEDIANA del terminal  = predicha {d_terminal:.2} €   medida {median:.2} €   \
+         (error {:+.3} %, cota 5 % ≈ {:.1} σ)\n\
+         [mediana]   MEDIA del terminal    = predicha {predicted_mean:.2} €   medida {mean:.2} €   \
+         (error {:+.3} %, cota 5 % ≈ {:.1} σ)\n\
+         [mediana]   prima de varianza exp(H·σ_m²/2) = {:.6}   (media/mediana medida = {:.6})\n\
+         [mediana]   sd relativa del camino: predicha {predicted_rel_sd:.4}, observada {observed_rel_sd:.4}",
+        median_err * 100.0,
+        0.05 / predicted_median_sd,
+        mean_err * 100.0,
+        0.05 / predicted_mean_sd,
+        (h_sigma2 / 2.0).exp(),
+        mean / median,
     );
 
     assert!(
-        rel_error.abs() < 0.05,
-        "la media muestral se desvía {:.3} % del terminal determinista: E[factor] ≠ m",
-        rel_error * 100.0
+        median_err.abs() < 0.05,
+        "la MEDIANA muestral se desvía {:.3} % de la línea determinista: la rentabilidad declarada \
+         ha dejado de ser la COMPUESTA",
+        median_err * 100.0
     );
-    // La dispersión también debe ser la del modelo (± 20 % relativo sobre la sd, que con 2 000
-    // caminos tiene su propio error de ~1/√(2N) = 1,6 % más la asimetría log-normal).
-    let observed_rel_sd = var.sqrt() / d_terminal;
+    assert!(
+        mean_err.abs() < 0.05,
+        "la MEDIA muestral se desvía {:.3} % de D·exp(H·σ_m²/2): la prima de varianza no es la del \
+         modelo",
+        mean_err * 100.0
+    );
+    // Y la media tiene que quedar POR ENCIMA de la mediana: si coincidieran, la conversión
+    // CAGR → aritmética no se estaría aplicando y la declarada volvería a ser la media.
+    assert!(
+        mean > median,
+        "sin prima de varianza la media ({mean:.2} €) no supera a la mediana ({median:.2} €)"
+    );
+    // La dispersión también debe ser la del modelo (± 20 % relativo sobre la sd, que con 2 500
+    // caminos tiene su propio error de ~1/√(2N) = 1,4 % más la asimetría log-normal).
     assert!(
         (observed_rel_sd / predicted_rel_sd - 1.0).abs() < 0.2,
         "la dispersión observada ({observed_rel_sd:.4}) no es la del modelo ({predicted_rel_sd:.4})"
@@ -528,13 +579,32 @@ fn ruin_probability(withdrawal_pct: f64, paths: u32) -> (f64, McOutcome) {
 ///   retornos por debajo de −100 %). Esto EMPUJA LA RUINA A LA BAJA respecto al modelo del issue.
 /// - **Retirada mensual vs anual.** Retirar 1/12 cada mes en vez del año entero por adelantado
 ///   deja más capital invertido: otro empujón a la baja.
-/// - **`6,5 %` como media ARITMÉTICA.** Este modelo la respeta exactamente (`E[factor] = m`); si
-///   el del issue la hubiera tomado como geométrica, su cartera sería ~1,4 pp/año peor.
+/// - **`6,5 %` es media ARITMÉTICA allí y CAGR aquí (M8, modelo v2).** El issue toma ese 6,5 %
+///   como media aritmética anual; desde el modelo v2 este motor lo lee como COMPUESTO y sube la
+///   deriva para que la geométrica siga siendo 6,5 %, de modo que su media aritmética equivalente
+///   es `1,065·exp(σ_a²/2) − 1 ≈ 8,0 %`: **~1,5 pp/año más de deriva** que el modelo del issue.
+///   Es el tercer empujón a la baja sobre la ruina, y el mayor de los tres.
 ///
-/// Por eso se exige **3-15 %** y **12-30 %** en vez de las horquillas del issue: lo que este test
-/// prueba es que el orden de magnitud y —sobre todo— la RELACIÓN entre el 3 % y el 4 % son las
-/// que la literatura describe. Los valores medidos se imprimen para que la comparación la haga
-/// quien lea la salida, no el `assert`.
+/// Por eso se exigen horquillas propias en vez de las del issue: lo que este test prueba es que el
+/// orden de magnitud y —sobre todo— la RELACIÓN entre el 3 % y el 4 % son las que la literatura
+/// describe. Los valores medidos se imprimen para que la comparación la haga quien lea la salida,
+/// no el `assert`.
+///
+/// # Las horquillas se re-centraron con la convención CAGR (E5, modelo v2, 2026-09-06)
+///
+/// Al pasar la rentabilidad declarada de aritmética a COMPUESTA, la deriva de este activo subió
+/// `exp(σ_a²/2) = exp(0,17²/2) = 1,0146` al año y la ruina bajó, medido con la misma semilla y los
+/// mismos 1.000 caminos:
+///
+/// ```text
+///   retirada     antes (declarada = aritmética)   ahora (declarada = CAGR)   horquilla
+///     3 %                 10,60 %                        5,00 %              2-12 %  (antes 3-15 %)
+///     4 %                 22,30 %                       13,00 %              7-22 %  (antes 12-30 %)
+/// ```
+///
+/// Las horquillas nuevas son **más estrechas** que las viejas (10 y 15 puntos frente a 12 y 18): se
+/// re-centran sobre lo medido, no se ensanchan para que pase. El 13,00 % del 4 % estaba a 1 punto
+/// del suelo de 12 %, y un suelo a un punto es un test que se acaba relajando con prisa.
 #[test]
 fn mc_success_probability_of_the_issue_table() {
     let paths = 1_000u32;
@@ -543,8 +613,8 @@ fn mc_success_probability_of_the_issue_table() {
 
     println!(
         "\n[issue #207] 1.000.000 € · 6,5 % media · 17 % sd · 35 años · {paths} caminos\n\
-         [issue #207]   retirada 3 % ({:>7.2} €/mes): ruina = {:>6.2} %   (issue: 7-10 %, exigido 3-15 %)\n\
-         [issue #207]   retirada 4 % ({:>7.2} €/mes): ruina = {:>6.2} %   (issue: 18-23 %, exigido 12-30 %)\n\
+         [issue #207]   retirada 3 % ({:>7.2} €/mes): ruina = {:>6.2} %   (issue: 7-10 %, exigido 2-12 %)\n\
+         [issue #207]   retirada 4 % ({:>7.2} €/mes): ruina = {:>6.2} %   (issue: 18-23 %, exigido 7-22 %)\n\
          [issue #207]   éxito 3 % = {:.3}   éxito 4 % = {:.3}\n\
          [issue #207]   meses con recorte (p50): {} / {}   ratio retirada:necesidad (p50): {:?} / {:?}",
         1_000_000.0 * 0.03 / 12.0,
@@ -560,13 +630,13 @@ fn mc_success_probability_of_the_issue_table() {
     );
 
     assert!(
-        (0.03..=0.15).contains(&ruin3),
-        "ruina al 3 % = {:.2} %, fuera de 3-15 %",
+        (0.02..=0.12).contains(&ruin3),
+        "ruina al 3 % = {:.2} %, fuera de 2-12 %",
         ruin3 * 100.0
     );
     assert!(
-        (0.12..=0.30).contains(&ruin4),
-        "ruina al 4 % = {:.2} %, fuera de 12-30 %",
+        (0.07..=0.22).contains(&ruin4),
+        "ruina al 4 % = {:.2} %, fuera de 7-22 %",
         ruin4 * 100.0
     );
     assert!(
@@ -755,15 +825,10 @@ fn mc_readings_follow_the_retirement_trigger() {
     let forced = case("P21_retire_at_age_reading_only");
     let out = project_percentile_bands(&forced, &[Some(20.0)], &config).expect("no falla");
     assert!(out.retirement_month_index_percentiles.is_none());
-    let p = out
-        .underfunded_probability
-        .expect("con trigger por edad, la infra-financiación existe");
-    println!("[trigger] P21 (edad) · probabilidad de infra-financiación = {p:.3}");
-    assert!((0.0..=1.0).contains(&p));
-    assert!(
-        p > 0.5,
-        "el caso está pineado como infra-financiado en el camino determinista: {p}"
-    );
+    // E1 (modelo v2) retiró `RetireAtAgeUnderfunded`: la infra-financiación de una edad fija es
+    // `1 − éxito(R)` del solver estocástico (E6/E9). Hasta que E9 retire el campo, viaja `None`.
+    assert!(out.underfunded_probability.is_none());
+
 }
 
 // =================================================================================================
@@ -820,13 +885,31 @@ fn mc_coverage_counts_the_need_the_portfolio_could_not_fund() {
 ///
 /// El hogar: 1.000 € de partida, 2.100 € de ingreso contra 2.000 € de gasto, 6,5 % con σ = 17 %,
 /// SWR 4 % (objetivo 600.000 €), 840 meses, todo el sobrante a un único fondo. El camino
-/// determinista se jubila en el mes 655 — al filo del horizonte—, así que **un tercio de los
-/// caminos sorteados no llega nunca**.
+/// determinista se jubila en el mes 655 —al filo del horizonte—, así que **una parte material de
+/// los caminos sorteados no llega nunca**.
 ///
-/// Con la definición anterior (D22: «la cartera no se agota»), esos 331 caminos contaban como
-/// éxito porque un hogar que nunca se jubila nunca drena: 0,960 publicado. Entre los que sí se
-/// jubilan, la ruina es del 6 % y el éxito 0,940. La diferencia llega a **+6,8 pp** en el barrido
-/// medido (SWR 6 %, ingreso 2.050).
+/// Con la definición anterior (D22: «la cartera no se agota»), esos caminos contaban como éxito
+/// porque un hogar que nunca se jubila nunca drena, y por tanto nunca se agota. Medido hoy: la
+/// lectura vieja da **0,963** (= 0,856 + 0,107) frente al **0,856** honesto, y la diferencia son
+/// exactamente los caminos que no llegan.
+///
+/// # Las horquillas se re-centraron con la convención CAGR (E5, modelo v2, 2026-09-06)
+///
+/// La rentabilidad declarada pasó a ser COMPUESTA, así que el sorteo sube la deriva del factor
+/// mensual en `exp(σ_m²/2)`: con σ = 17 % son ~1,5 pp/año más de media aritmética, y este hogar
+/// —que se jubila **por CRUCE**— alcanza su objetivo mucho más a menudo. Medido con la MISMA
+/// semilla y los mismos 1.000 caminos, antes y después del cambio:
+///
+/// ```text
+///   magnitud                antes (declarada = aritmética)   ahora (declarada = CAGR)
+///   nunca se jubilan                 0,3310                          0,1070
+///   éxito del plan                   0,6290                          0,8560
+///   éxito | jubilado                 0,9402                          0,9586
+/// ```
+///
+/// **Lo que el test mide no ha cambiado**: que el éxito honesto es `P(jubilarse)·P(no agotar |
+/// jubilado)` y queda por debajo de la lectura vieja. Lo que ha cambiado es el hogar, que con más
+/// deriva llega antes. Las horquillas se re-centran sobre lo medido; **no se ensanchan**.
 #[test]
 fn mc_never_retiring_is_not_a_success() {
     let input = crossing_household(
@@ -850,9 +933,10 @@ fn mc_never_retiring_is_not_a_success() {
         out.success_probability, out.never_retired_probability
     );
 
-    // Un tercio de los caminos no llega: eso ya no se cuenta como plan cumplido.
+    // Uno de cada diez caminos no llega: eso no se cuenta como plan cumplido (antes eran uno de
+    // cada tres — ver la tabla del doc).
     assert!(
-        (0.30..0.36).contains(&out.never_retired_probability),
+        (0.08..0.14).contains(&out.never_retired_probability),
         "nunca se jubilan: {}",
         out.never_retired_probability
     );
@@ -861,15 +945,16 @@ fn mc_never_retiring_is_not_a_success() {
             < 1e-9,
         "éxito = P(jubilarse) × P(no agotar | jubilado)"
     );
-    // Y la lectura vieja («no agotar», sin exigir jubilarse) era exactamente 0,960: la diferencia
-    // con la nueva es la fracción que no llega.
+    // La lectura vieja («no agotar», sin exigir jubilarse) suma los caminos que nunca se jubilan
+    // —nunca drenan, así que nunca se agotan—: 0,856 + 0,107 = 0,963. La diferencia entre las dos
+    // definiciones SIGUE siendo material, que es todo el punto de este test.
     assert!(
-        out.success_probability < 0.70,
-        "el éxito honesto de este hogar está muy por debajo del 0,960 que se publicaba: {}",
+        (0.82..0.89).contains(&out.success_probability),
+        "éxito honesto del plan: {}",
         out.success_probability
     );
     assert!(
-        (0.92..0.96).contains(&conditional),
+        (0.94..0.98).contains(&conditional),
         "condicional a jubilarse, la ruina sigue siendo baja: {conditional}"
     );
 }

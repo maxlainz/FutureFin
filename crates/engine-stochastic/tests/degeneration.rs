@@ -6,8 +6,14 @@
 //! proyección en `Decimal` y en [`F64Money`] y se comparan:
 //!
 //! - `net_worth` y `liquid_worth` **mes a mes, en todo el horizonte** (840 meses en P9/P13/P18);
-//! - `retirement_month_index`, `liquid_crossing_month_index`, `assets_depleted_month_index` y
-//!   `phase_transitions`, que son las decisiones DISCRETAS del bucle.
+//! - `retirement_month_index`, `liquid_crossing_month_index`, `assets_depleted_month_index`,
+//!   `phase_transitions` y —desde E1— `failure_month_index` y `failure_kind`, que son las
+//!   decisiones DISCRETAS del bucle.
+//!
+//! Las dos últimas son las que más lo necesitan: el veredicto de un camino es lo que Monte Carlo
+//! CUENTA para publicar la probabilidad de éxito, y cada camino corre en coma flotante. Si el
+//! motivo o el mes del fallo dependieran del tipo numérico, la fecha de jubilación que la app
+//! publica dependería de él.
 //!
 //! Por qué importa: si los dos caminos divergieran, Monte Carlo estaría midiendo la dispersión de
 //! *otro* modelo y el número que la UI pinta en verde no significaría nada. Es la salvaguarda con
@@ -32,7 +38,7 @@
 mod cases;
 
 use cases::{projection_cases_5_0, projection_cases_all, ProjCase};
-use futurefin_engine::{project_net_worth_series, Phase, ProjectionOutput};
+use futurefin_engine::{project_net_worth_series, PathFailure, Phase, ProjectionOutput};
 use futurefin_engine_stochastic::{
     deterministic_growth_multipliers, simulate_f64, simulate_f64_with_multipliers, F64Money,
 };
@@ -134,7 +140,7 @@ fn every_case_degenerates_from_decimal_to_floating_point() {
 
     let mut failures: Vec<String> = Vec::new();
     println!(
-        "\n{:<32} {:>5} {:>11} {:>10} {:>5} {:>11} {:>10} {:>5} {:>13}  {:>6} {:>6} {:>6} {:>6}",
+        "\n{:<32} {:>5} {:>11} {:>10} {:>5} {:>11} {:>10} {:>5} {:>13}  {:>6} {:>6} {:>6} {:>6} {:>6} {:>20}",
         "caso",
         "meses",
         "max|Δ| NW",
@@ -147,7 +153,9 @@ fn every_case_degenerates_from_decimal_to_floating_point() {
         "jubil.",
         "cruce",
         "agot.",
-        "fases"
+        "fases",
+        "fallo",
+        "motivo"
     );
 
     for case in &cases {
@@ -184,6 +192,21 @@ fn every_case_degenerates_from_decimal_to_floating_point() {
             dec.assets_depleted_month_index,
             flo.assets_depleted_month_index,
         );
+        // E1: el veredicto del camino. El MES se compara como un índice más; el MOTIVO es un
+        // enum y no admite «a un mes de distancia»: o es el mismo o los dos caminos están
+        // diagnosticando planes distintos.
+        let d_fail = index_delta(dec.failure_month_index, flo.failure_month_index);
+        let kind_note = match (dec.failure_kind, flo.failure_kind) {
+            (None, None) => "-".to_string(),
+            (Some(a), Some(b)) if a == b => a.code().to_string(),
+            (a, b) => {
+                failures.push(format!(
+                    "{}: el MOTIVO del fallo difiere entre los dos caminos ({:?} vs {:?})",
+                    case.name, a, b
+                ));
+                format!("{a:?} vs {b:?}")
+            }
+        };
 
         // Fases: la SECUENCIA debe ser la misma; el mes de cada transición, a ≤ 1.
         let phases_dec: Vec<Phase> = dec.phase_transitions.iter().map(|(p, _)| *p).collect();
@@ -216,7 +239,7 @@ fn every_case_degenerates_from_decimal_to_floating_point() {
 
         debug_assert_eq!(nw_rule, lq_rule, "las dos series comparten magnitud, y por tanto regla");
         println!(
-            "{:<32} {:>5} {:>11.3e} {:>10.2e} {:>5} {:>11.3e} {:>10.2e} {:>5} {:>13}  {:>6} {:>6} {:>6} {:>6}",
+            "{:<32} {:>5} {:>11.3e} {:>10.2e} {:>5} {:>11.3e} {:>10.2e} {:>5} {:>13}  {:>6} {:>6} {:>6} {:>6} {:>6} {:>20}",
             case.name,
             case.input.horizon_months,
             nw.max_abs,
@@ -230,6 +253,8 @@ fn every_case_degenerates_from_decimal_to_floating_point() {
             describe(d_cross),
             describe(d_dep),
             phase_note,
+            describe(d_fail),
+            kind_note,
         );
 
         if !nw_ok {
@@ -238,6 +263,19 @@ fn every_case_degenerates_from_decimal_to_floating_point() {
                 case.name, nw.max_abs, nw.at_month, nw.max_magnitude, nw.rel_at_max, nw_rule
             ));
         }
+        for (path, month, kind) in [
+            ("Decimal", dec.failure_month_index, dec.failure_kind),
+            ("f64", flo.failure_month_index, flo.failure_kind),
+        ] {
+            if month.is_some() != kind.is_some() {
+                failures.push(format!(
+                    "{}: en el camino {path} los dos latches del fallo no cuadran ({month:?} / \
+                     {kind:?})",
+                    case.name
+                ));
+            }
+        }
+        let _ = PathFailure::PortfolioDepleted; // el enum viaja en la tabla, no solo en el assert
         if !lq_ok {
             failures.push(format!(
                 "{}: liquid_worth se desvía {:.6} € en el mes {} (magnitud máx {:.3e}, relativa {:.3e}, regla «{}»)",
@@ -248,6 +286,7 @@ fn every_case_degenerates_from_decimal_to_floating_point() {
             ("retirement_month_index", d_ret),
             ("liquid_crossing_month_index", d_cross),
             ("assets_depleted_month_index", d_dep),
+            ("failure_month_index", d_fail),
         ] {
             match delta {
                 None => {}
@@ -257,13 +296,20 @@ fn every_case_degenerates_from_decimal_to_floating_point() {
                     match label {
                         "retirement_month_index" => dec.retirement_month_index,
                         "liquid_crossing_month_index" => dec.liquid_crossing_month_index,
-                        _ => dec.assets_depleted_month_index,
+                        "assets_depleted_month_index" => dec.assets_depleted_month_index,
+                        _ => dec.failure_month_index,
                     },
                     match label {
                         "retirement_month_index" => flo.retirement_month_index,
                         "liquid_crossing_month_index" => flo.liquid_crossing_month_index,
-                        _ => flo.assets_depleted_month_index,
+                        "assets_depleted_month_index" => flo.assets_depleted_month_index,
+                        _ => flo.failure_month_index,
                     },
+                )),
+                Some(d) if label == "failure_month_index" => failures.push(format!(
+                    "{}: {label} se mueve {d} meses — el veredicto de un camino no admite \
+                     holgura: es lo que Monte Carlo cuenta",
+                    case.name
                 )),
                 Some(d) if d.abs() > 1 => failures.push(format!(
                     "{}: {label} se mueve {d} meses (> 1)",

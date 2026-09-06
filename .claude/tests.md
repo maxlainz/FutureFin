@@ -165,9 +165,16 @@ fondo). Pídele el estado al runner, no a esta página:
 `tests/degeneration.rs` es la **puerta de aceptación** de que el camino de coma flotante y el camino
 exacto son la MISMA simulación: para **todos** los casos de la batería del motor —reutilizada por
 `#[path = "../../engine/tests/common/cases.rs"]`, una sola definición y dos crates que la corren—
-compara `net_worth` y `liquid_worth` **mes a mes en todo el horizonte** y, exactos, las decisiones
-DISCRETAS del bucle (`retirement_month_index`, `liquid_crossing_month_index`,
-`assets_depleted_month_index`, `phase_transitions`).
+compara `net_worth` y `liquid_worth` **mes a mes en todo el horizonte** y, exactas, las **seis**
+decisiones DISCRETAS del bucle: `retirement_month_index`, `liquid_crossing_month_index`,
+`assets_depleted_month_index`, `phase_transitions` y —desde E1 de 5.0.0— `failure_month_index` y
+`failure_kind` (el veredicto del camino: F1/F2/F3, ver `financial-contracts.md` §2.5). Cada una
+tiene su columna en la tabla que el test imprime.
+
+- **Las dos de E1 no admiten la holgura de ±1 mes** que se les tolera a los índices de fase, y el
+  motivo tampoco admite «parecido»: el veredicto de un camino es lo que Monte Carlo CUENTA para
+  publicar la probabilidad de éxito, así que un mes de holgura ahí es un mes de holgura en la fecha
+  de jubilación que la app publica. Medido: los 25 casos coinciden EXACTAMENTE en las seis.
 
 - **La cota de contrato es 1 € por mes** (`EUR_TOLERANCE`). Por encima de `2^53 ≈ 9,0e15 €` la
   distancia entre dos `f64` consecutivos ya es mayor que un euro, así que exigir «± 1 €» ahí no es

@@ -32,8 +32,8 @@ use rust_decimal::Decimal;
 
 use crate::money::MoneyOps;
 use crate::phases::{
-    EngineWarning, ExpenseBasis, IncomePause, PartialPhase, PensionSchedule, Phase, PhasePlan,
-    RetirementTrigger, SpendMode, TargetBasis, WithdrawalRule,
+    EngineWarning, ExpenseBasis, IncomePause, PartialPhase, PathFailure, PensionSchedule, Phase,
+    PhasePlan, RetirementTrigger, SpendMode, TargetBasis, WithdrawalRule,
 };
 use crate::projection::{
     AllocationCap, AllocationKind, AllocationRule, AllocationSkipReason, EarlyRepaymentEffect,
@@ -144,6 +144,47 @@ pub enum WithdrawalRuleG<M> {
     Guardrails { pct: M, band_pct: M, adjust_pct: M },
 }
 
+/// El puente como tope de tasa inicial, en el tipo del núcleo. Gemelo de [`crate::BridgeCap`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BridgeCapG<M> {
+    pub max_pct: M,
+    pub max_years: u32,
+}
+
+/// La puerta de tasa inicial, en el tipo del núcleo. Gemelo de [`crate::InitialRateGate`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InitialRateGateG<M> {
+    pub swr_pct: M,
+    pub bridge: Option<BridgeCapG<M>>,
+}
+
+impl<M: MoneyOps> InitialRateGateG<M> {
+    /// **El tope ANUAL en % que rige en el mes de jubilación `r`** (1-based, la base del bucle).
+    ///
+    /// Es `bridge.max_pct` si hay puente configurado Y hay pensión con fecha Y esa pensión llega
+    /// dentro de la ventana (`P − r ≤ 12·max_years`, con `P` el mes del BUCLE en que la pensión
+    /// entra en caja: `start_index + 1`); si no, el `swr_pct`.
+    ///
+    /// La resta se hace con signo: una pensión que YA se cobra en `r` da una diferencia ≤ 0 y
+    /// también entra en la ventana. Es deliberado y no es generoso por accidente — la necesidad
+    /// ordinaria contra la que se compara el tope ya está NETA de esa pensión, así que el tope
+    /// mayor se aplica a un gasto menor.
+    pub(crate) fn cap_pct_at(&self, r: u32, pension: Option<PensionScheduleG<M>>) -> M {
+        match (self.bridge, pension) {
+            (Some(b), Some(pen)) => {
+                let pension_month = i64::from(pen.start_index.saturating_add(1));
+                let window = i64::from(b.max_years) * 12;
+                if pension_month - i64::from(r) <= window {
+                    b.max_pct
+                } else {
+                    self.swr_pct
+                }
+            }
+            _ => self.swr_pct,
+        }
+    }
+}
+
 /// El plan de fases, en el tipo del núcleo. Gemelo de [`PhasePlan`], campo a campo.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhasePlanG<M> {
@@ -161,6 +202,7 @@ pub struct PhasePlanG<M> {
     pub contribution_cap_monthly: Option<M>,
     pub contributions_stop_month: Option<u32>,
     pub income_pause: Option<IncomePauseG<M>>,
+    pub initial_rate: Option<InitialRateGateG<M>>,
 }
 
 impl<M: MoneyOps> PhasePlanG<M> {
@@ -388,6 +430,13 @@ pub struct SimOutput<M> {
     pub withdrawal_shortfall: Vec<M>,
     pub withdrawal_excess: Vec<M>,
     pub unmet_need: Vec<M>,
+    /// **Necesidad ORDINARIA del mes** (E1): `max(0, gasto + retirada extra − ingresos)`, con la
+    /// pensión con fecha ya dentro de los ingresos y SIN servicio de deuda ni «Próximos».
+    ///
+    /// No se refleja en [`ProjectionOutput`] a propósito —igual que en su día la serie de relleno
+    /// del colchón—: es un operando del veredicto por camino que consume el crate estocástico, no
+    /// una magnitud que la API publique. `len == horizon+1`, índice 0 = 0.
+    pub ordinary_need: Vec<M>,
     pub pension_start_month_index: Option<u32>,
     pub partial_retirement_month_index: Option<u32>,
     pub warnings: Vec<EngineWarning>,
@@ -397,6 +446,8 @@ pub struct SimOutput<M> {
     pub partial_phase_capital_growing: bool,
     pub disposable_cash: Vec<M>,
     pub disposable_cash_total: M,
+    pub failure_month_index: Option<u32>,
+    pub failure_kind: Option<PathFailure>,
 }
 
 // =============================================================================================
@@ -420,6 +471,13 @@ impl<M: MoneyOps> From<&PhasePlan> for PhasePlanG<M> {
             contribution_cap_monthly: p.contribution_cap_monthly.map(M::from_decimal),
             contributions_stop_month: p.contributions_stop_month,
             income_pause: p.income_pause.map(IncomePause::to_generic),
+            initial_rate: p.initial_rate.map(|g| InitialRateGateG {
+                swr_pct: M::from_decimal(g.swr_pct),
+                bridge: g.bridge.map(|b| BridgeCapG {
+                    max_pct: M::from_decimal(b.max_pct),
+                    max_years: b.max_years,
+                }),
+            }),
         }
     }
 }
@@ -571,6 +629,8 @@ impl From<SimOutput<Decimal>> for ProjectionOutput {
             partial_phase_capital_growing: o.partial_phase_capital_growing,
             disposable_cash: o.disposable_cash,
             disposable_cash_total: o.disposable_cash_total,
+            failure_month_index: o.failure_month_index,
+            failure_kind: o.failure_kind,
         }
     }
 }

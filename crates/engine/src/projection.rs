@@ -7,7 +7,7 @@
 //! ([`AllocationRule`]) ejecutadas en orden ascendente. Cada regla consume parte del sobrante
 //! para un activo destino hasta su tope opcional; lo que queda pasa a la siguiente regla.
 
-use crate::phases::{EngineWarning, Phase, PhasePlan};
+use crate::phases::{EngineWarning, PathFailure, Phase, PhasePlan};
 use crate::sim::{SimInput, SimLiability};
 use crate::sim_core::{self, liability_extra_principal_g, liability_month_g, plan_alive_g};
 use chrono::{Datelike, Months, NaiveDate};
@@ -807,6 +807,29 @@ pub struct ProjectionOutput {
     pub disposable_cash: Vec<Decimal>,
     /// Σ de [`ProjectionOutput::disposable_cash`]. `0` son cero euros, no «no aplica».
     pub disposable_cash_total: Decimal,
+    // -----------------------------------------------------------------------------------------
+    // 5.0.0 E1 — EL VEREDICTO DE ESTE CAMINO (modelo de jubilación v2, decisión M3 + C1).
+    // -----------------------------------------------------------------------------------------
+    /// **Primer mes (1-based) en que ESTE camino falló**, o `None` si aguanta hasta el horizonte.
+    ///
+    /// Latch monótono: se fija la primera vez que alguno de los tres motivos de
+    /// [`PathFailure`] se cumple y no se mueve nunca más — un plan que se rompe no se «arregla»
+    /// porque un mes posterior vaya bien.
+    ///
+    /// **Es el veredicto de UN camino, no el del PLAN.** El plan lo juzga la proporción de
+    /// caminos sin fallo que mide `crates/engine-stochastic` contra el umbral del perfil; sobre
+    /// la línea determinista este campo dice solo «este escenario concreto no aguanta», que es
+    /// exactamente un camino de los miles que deciden la fecha.
+    ///
+    /// **No es `assets_depleted_month_index`** y puede no coincidir con él: aquel marca el mes en
+    /// que la cartera se VACIÓ (con confirmación posterior) y se evalúa en cualquier fase; este
+    /// marca el primer mes JUBILADO (o de media jornada) en que la necesidad se quedó sin fundar,
+    /// la tasa inicial se pasó del tope o la regla se quedó por debajo del gasto ordinario.
+    pub failure_month_index: Option<u32>,
+    /// **Por qué falló** este camino. `Some` ⟺ [`Self::failure_month_index`] es `Some`
+    /// (invariante del latch: los dos se fijan a la vez). Prioridad dentro del mismo mes:
+    /// F1 (`PortfolioDepleted`) > F2 (`InitialRateExceeded`) > F3 (`RuleBelowNeed`).
+    pub failure_kind: Option<PathFailure>,
 }
 
 /// Primero-de-mes de una fecha (día 1 del mismo mes). Compartido con `history.rs`.

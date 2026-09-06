@@ -26,6 +26,8 @@
 //! | 5 | `uncovered_deficit_total > 1e-12 ⇒ assets_depleted_month_index` existe |
 //! | 6 | Agotamiento ⇒ alguna necesidad quedó sin cubrir en ese mes o después (modo `ceiling`) |
 //! | 7 | Determinismo: dos ejecuciones de la MISMA entrada dan el mismo `Display`, dígito a dígito |
+//! | 8 | La necesidad ORDINARIA no lleva deuda ni «Próximos»: `ordinaria ≤ neta + deuda + max(0, próximo)` |
+//! | 9 | El veredicto del camino: los dos latches se fijan a la vez, en rango, y en el PRIMER mes |
 //!
 //! # El generador
 //!
@@ -44,8 +46,9 @@ mod cases;
 
 use cases::es_tax_brackets_2025_26;
 use futurefin_engine::{
-    project_net_worth_series, AllocationCap, AllocationKind, AllocationRule, PensionSchedule,
-    PhasePlan, ProjectionInput, ProjectionOutput, SimAsset, SpendMode, WithdrawalRule,
+    project_net_worth_series, simulate, AllocationCap, AllocationKind, AllocationRule, PathFailure,
+    PensionSchedule, PhasePlan, ProjectionInput, ProjectionOutput, SimAsset, SimInput, SimOutput,
+    SpendMode, WithdrawalRule,
 };
 use rust_decimal::Decimal;
 use uuid::Uuid;
@@ -262,7 +265,12 @@ fn render(o: &ProjectionOutput) -> String {
 /// Las SIETE identidades sobre una salida. Devuelve `Err(motivo)` en vez de reventar para que el
 /// control negativo de abajo pueda comprobar que cada una de ellas se entera de verdad: un
 /// detector sin control negativo es un test que siempre pasa.
-fn check(name: &str, input: &ProjectionInput, out: &ProjectionOutput) -> Result<(), String> {
+fn check(
+    name: &str,
+    input: &ProjectionInput,
+    out: &ProjectionOutput,
+    sim: &SimOutput<Decimal>,
+) -> Result<(), String> {
     let h = input.horizon_months as usize;
     let fail = |m: String| Err(format!("{name}: {m}"));
 
@@ -378,6 +386,128 @@ fn check(name: &str, input: &ProjectionInput, out: &ProjectionOutput) -> Result<
             }
         }
     }
+
+    // (8) LA NECESIDAD ORDINARIA NO LLEVA NI DEUDA NI «PRÓXIMOS» (E1, C1).
+    //
+    //     La identidad DEMOSTRABLE, con `A = gasto + retirada extra − ingresos` (la ordinaria es
+    //     `max(0, A)`) y `neta = max(0, A + deuda − próximo)`:
+    //
+    //         ordinaria ≤ neta + deuda + max(0, próximo)
+    //
+    //     El signo del término de «Próximos» es el POSITIVO, no el negativo: un ingreso puntual
+    //     BAJA la necesidad neta sin bajar la ordinaria (es justo el caso que C1 excluye del
+    //     veredicto), mientras que un gasto puntual la sube y la desigualdad se cumple sola.
+    //     Con `próximo` negativo o nulo, `ordinaria ≤ neta + deuda`.
+    //
+    //     Este arnés sortea hogares SIN pasivos y SIN flujos puntuales, así que aquí los dos
+    //     términos son cero y la desigualdad se aprieta hasta la IGUALDAD con la constante que
+    //     el test conoce: la necesidad ordinaria ES la neta. Un mes con deuda o con un Próximo
+    //     que las separe vive en `phases_wp3.rs`
+    //     (`f3_ignores_the_mortgage_and_looks_at_the_ordinary_need`).
+    if sim.ordinary_need.len() != h + 1 {
+        return fail(format!(
+            "longitud de ordinary_need: {} ≠ {}",
+            sim.ordinary_need.len(),
+            h + 1
+        ));
+    }
+    if sim.ordinary_need[0] != Decimal::ZERO {
+        return fail(format!(
+            "ordinary_need[0] = {} y tiene que ser 0",
+            sim.ordinary_need[0]
+        ));
+    }
+    for k in 1..=h {
+        let debt = Decimal::ZERO; // el generador no sortea pasivos
+        let planning = input.planning_monthly_cash_adjustment[k - 1];
+        let bound = need + debt + planning.max(Decimal::ZERO);
+        if sim.ordinary_need[k] > bound + EPS {
+            return fail(format!(
+                "mes {k}: necesidad ordinaria {} > neta {need} + deuda {debt} + próximo {}",
+                sim.ordinary_need[k],
+                planning.max(Decimal::ZERO)
+            ));
+        }
+        if (sim.ordinary_need[k] - need).abs() > EPS {
+            return fail(format!(
+                "mes {k}: sin deuda ni Próximos la necesidad ordinaria ({}) ES la neta ({need})",
+                sim.ordinary_need[k]
+            ));
+        }
+    }
+
+    // (9) EL VEREDICTO DEL CAMINO: los dos latches se fijan A LA VEZ, dentro del horizonte, y en
+    //     el PRIMER mes en que algo falla — no en uno posterior.
+    if out.failure_kind.is_some() != out.failure_month_index.is_some() {
+        return fail(format!(
+            "los latches del fallo no cuadran: mes {:?}, motivo {:?}",
+            out.failure_month_index, out.failure_kind
+        ));
+    }
+    if out.failure_kind == Some(PathFailure::InitialRateExceeded) {
+        return fail("ningún caso del arnés declara puerta de tasa inicial".into());
+    }
+    let rule_has_ceiling = input.phase_plan.withdrawal != WithdrawalRule::FixedReal;
+    let first_f1 = (1..=h).find(|k| out.unmet_need[*k] > EPS);
+    // Con techo, «la regla permitió menos que la necesidad ordinaria» ⟺ hubo recorte: en este
+    // arnés la necesidad ordinaria y la neta coinciden (ver (8)), y el recorte ES su diferencia
+    // contra lo que la regla permitió.
+    let first_f3 = rule_has_ceiling
+        .then(|| (1..=h).find(|k| out.withdrawal_shortfall[*k] > EPS))
+        .flatten();
+    match out.failure_month_index {
+        Some(m) => {
+            if m < 1 || m as usize > h {
+                return fail(format!("mes de fallo {m} fuera del horizonte"));
+            }
+            let expected = match (first_f1, first_f3) {
+                (Some(a), Some(b)) => a.min(b),
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                (None, None) => {
+                    return fail(format!(
+                        "fallo publicado en el mes {m} sin descubierto ni recorte que lo explique"
+                    ))
+                }
+            };
+            // El latch es MONÓTONO: el mes publicado es el PRIMERO en que algo se rompió. Un
+            // latch que se moviera publicaría un mes posterior.
+            if m as usize > expected {
+                return fail(format!(
+                    "el fallo se publica en el mes {m} y el primer mes roto es el {expected}:                      el latch no es monótono"
+                ));
+            }
+            let kind_ok = match out.failure_kind {
+                Some(PathFailure::PortfolioDepleted) => out.unmet_need[m as usize] > EPS,
+                Some(PathFailure::RuleBelowNeed) => {
+                    out.withdrawal_shortfall[m as usize] > EPS && out.unmet_need[m as usize] <= EPS
+                }
+                _ => false,
+            };
+            if !kind_ok {
+                return fail(format!(
+                    "mes {m}: el motivo {:?} no cuadra con descubierto {} y recorte {}",
+                    out.failure_kind,
+                    out.unmet_need[m as usize],
+                    out.withdrawal_shortfall[m as usize]
+                ));
+            }
+        }
+        None => {
+            if let Some(k) = first_f1 {
+                return fail(format!(
+                    "descubierto de {} € en el mes {k} y el camino «no falla»",
+                    out.unmet_need[k]
+                ));
+            }
+            if let Some(k) = first_f3 {
+                return fail(format!(
+                    "la regla recortó {} € en el mes {k} y el camino «no falla»",
+                    out.withdrawal_shortfall[k]
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -392,15 +522,20 @@ fn random_households_satisfy_the_accounting_identities() {
         let mut with_excess = 0u64;
         for i in 0..CASES {
             let input = gen_case(seed, i);
-            let Ok(out) = project_net_worth_series(&input) else {
+            // Se llama al NÚCLEO y se convierte, en vez de a `project_net_worth_series`: es la
+            // misma simulación (aquella función es este par de líneas) y así la necesidad
+            // ORDINARIA —que no se refleja en `ProjectionOutput`— llega al arnés sin pagar una
+            // segunda proyección.
+            let Ok(sim) = simulate(&SimInput::<Decimal>::from(&input)) else {
                 // Un error TIPADO es una respuesta válida del motor (desbordamiento de un valor,
                 // regla imposible). Lo que este arnés prohíbe es el pánico, y un pánico aquí hace
                 // fallar el test por sí solo.
                 continue;
             };
             simulated += 1;
+            let out = ProjectionOutput::from(sim.clone());
             let name = format!("seed {seed:#x} caso #{i}");
-            if let Err(why) = check(&name, &input, &out) {
+            if let Err(why) = check(&name, &input, &out, &sim) {
                 panic!("{why}");
             }
             if out.assets_depleted_month_index.is_some() {
@@ -453,54 +588,63 @@ fn random_households_satisfy_the_accounting_identities() {
 /// de arriba podrían estar pasando porque no miran nada.
 #[test]
 fn the_harness_notices_a_single_broken_identity() {
-    // Un caso con agotamiento y descubierto: es el que ejercita los siete carriles.
-    let (input, base) = (0..CASES)
+    // Un caso con agotamiento y descubierto: es el que ejercita los nueve carriles.
+    let (input, base_sim) = (0..CASES)
         .map(|i| gen_case(0x5EED_0001, i))
         .filter_map(|inp| {
-            let out = project_net_worth_series(&inp).ok()?;
+            let sim = simulate(&SimInput::<Decimal>::from(&inp)).ok()?;
+            let out = ProjectionOutput::from(sim.clone());
             (out.assets_depleted_month_index.is_some()
                 && out.uncovered_deficit_total > Decimal::ONE)
-                .then_some((inp, out))
+                .then_some((inp, sim))
         })
         .next()
         .expect("el generador produce hogares arruinados");
-    assert!(check("base", &input, &base).is_ok(), "el caso base cumple");
+    let base = ProjectionOutput::from(base_sim.clone());
+    assert!(
+        check("base", &input, &base, &base_sim).is_ok(),
+        "el caso base cumple"
+    );
     let dep = base.assets_depleted_month_index.expect("se agota");
+    let failed_at = base
+        .failure_month_index
+        .expect("un hogar con descubierto REAL y jubilado desde el mes 1 falla por F1");
     let cent = Decimal::new(1, 2);
 
-    let mutations: Vec<(&str, Box<dyn Fn(&mut ProjectionOutput)>)> = vec![
+    type Mutation = Box<dyn Fn(&mut ProjectionOutput, &mut SimOutput<Decimal>)>;
+    let mutations: Vec<(&str, Mutation)> = vec![
         (
             "longitud",
-            Box::new(|o: &mut ProjectionOutput| {
+            Box::new(|o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| {
                 o.unmet_need.pop();
             }),
         ),
         (
             "mes 0 de una serie de flujo",
-            Box::new(move |o: &mut ProjectionOutput| o.withdrawal[0] = cent),
+            Box::new(move |o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| o.withdrawal[0] = cent),
         ),
         (
             "las tres magnitudes no cierran",
-            Box::new(move |o: &mut ProjectionOutput| o.withdrawal[1] += cent),
+            Box::new(move |o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| o.withdrawal[1] += cent),
         ),
         (
             "el balance no cuadra",
-            Box::new(move |o: &mut ProjectionOutput| o.net_worth[1] += cent),
+            Box::new(move |o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| o.net_worth[1] += cent),
         ),
         (
             "un signo negativo",
-            Box::new(move |o: &mut ProjectionOutput| {
+            Box::new(move |o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| {
                 o.withdrawal_shortfall[1] = -cent;
                 o.withdrawal[1] += cent;
             }),
         ),
         (
             "descubierto sin agotamiento",
-            Box::new(|o: &mut ProjectionOutput| o.assets_depleted_month_index = None),
+            Box::new(|o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| o.assets_depleted_month_index = None),
         ),
         (
             "agotamiento sin necesidad sin cubrir",
-            Box::new(move |o: &mut ProjectionOutput| {
+            Box::new(move |o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| {
                 o.assets_depleted_month_index = Some(dep.min(1));
                 for k in dep as usize..o.unmet_need.len() {
                     o.withdrawal[k] += o.unmet_need[k];
@@ -508,12 +652,42 @@ fn the_harness_notices_a_single_broken_identity() {
                 }
             }),
         ),
+        (
+            "la necesidad ordinaria se lleva algo que no es suyo",
+            Box::new(move |_o: &mut ProjectionOutput, s: &mut SimOutput<Decimal>| {
+                s.ordinary_need[1] += cent;
+            }),
+        ),
+        (
+            "un latch del fallo sin el otro",
+            Box::new(|o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| {
+                o.failure_kind = None;
+            }),
+        ),
+        (
+            "el fallo se publica más tarde de lo que ocurrió",
+            Box::new(move |o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| {
+                o.failure_month_index = Some(failed_at + 1);
+                // …y con un motivo que ese mes sí podría justificar, para que lo que caza el
+                // arnés sea la MONOTONÍA del latch y no el motivo.
+                o.failure_kind = Some(PathFailure::PortfolioDepleted);
+                o.unmet_need[failed_at as usize + 1] += Decimal::ONE;
+            }),
+        ),
+        (
+            "un camino que falla y dice que no",
+            Box::new(|o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| {
+                o.failure_month_index = None;
+                o.failure_kind = None;
+            }),
+        ),
     ];
     for (label, mutate) in mutations {
         let mut m = base.clone();
-        mutate(&mut m);
+        let mut ms = base_sim.clone();
+        mutate(&mut m, &mut ms);
         assert!(
-            check("mutado", &input, &m).is_err(),
+            check("mutado", &input, &m, &ms).is_err(),
             "el arnés NO se entera de: {label}"
         );
     }

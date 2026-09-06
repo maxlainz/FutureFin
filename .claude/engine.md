@@ -95,9 +95,12 @@ bucle donde estaba. Una fila mal dimensionada se ignora en vez de panicar.
 
 **La puerta de degeneración** (`crates/engine-stochastic/tests/degeneration.rs`) corre los 25 casos
 de la batería del motor por los dos caminos y compara `net_worth` y `liquid_worth` mes a mes en
-todo el horizonte más los índices discretos. Medido: **máximo 1,5e-7 € en 840 meses** (P9), y los
-cuatro índices (`retirement_month_index`, `liquid_crossing_month_index`,
-`assets_depleted_month_index`, `phase_transitions`) coinciden EXACTAMENTE en todos los casos. La
+todo el horizonte más las decisiones discretas. Medido: **máximo 1,5e-7 € en 840 meses** (P9), y
+las **seis** decisiones discretas (`retirement_month_index`, `liquid_crossing_month_index`,
+`assets_depleted_month_index`, `phase_transitions` y —desde E1— `failure_month_index` y
+`failure_kind`) coinciden EXACTAMENTE en todos los casos. Las dos últimas no admiten la holgura de
+±1 mes que se les tolera a los índices: el veredicto de un camino es lo que Monte Carlo CUENTA, y
+un mes de holgura ahí es un mes de holgura en la fecha que la app publica. La
 única fila con cota relativa es `P14_techo_numeric`, sintético (activo en el techo de
 `NUMERIC(18,4)` al 20 % durante 70 años ⇒ patrimonio ~3,5e19 €), donde el espaciado de los `f64`
 ya supera el euro: allí la cota es `1e-12` relativa y se mide 2,0e-14.
@@ -125,12 +128,29 @@ Los dos pines dorados no se movieron con ninguno de los tres.
 
 `project_percentile_bands(input, volatilities, McConfig) -> McOutcome` corre `paths` caminos del
 MISMO bucle con los factores de crecimiento sorteados. **Un shock de mercado común por mes** (D11):
-un solo `z_k ~ N(0,1)` que todos los activos viven a la vez, `f_ik = m_i·exp(σ_i·z_k − σ_i²/2)` con
-`σ_i = annual_volatility_percent/100/√12` y `m_i` la raíz doceava del propio motor
-(`monthly_growth_multiplier`, no una copia). La corrección de Itô hace `E[f_ik] = m_i` **exacto**:
-la rentabilidad que el usuario declara es la ARITMÉTICA; la geométrica que el hogar cobra sale más
-baja, y esa diferencia es el coste de la volatilidad, no un error. `σ_i = 0` ⇒ `f_ik = m_i` por rama
-explícita. Semilla estable por usuario (D23, `seed_for(installation_id, user_id)` = FNV-1a +
+un solo `z_k ~ N(0,1)` que todos los activos viven a la vez, `f_ik = d_i·exp(σ_i·z_k − σ_i²/2)` con
+`σ_i = annual_volatility_percent/100/√12`, `m_i` la raíz doceava del propio motor
+(`monthly_growth_multiplier`, no una copia) y `d_i = m_i·exp(σ_i²/2)` la **deriva**.
+
+**La rentabilidad declarada es COMPUESTA (CAGR)** — decisión M8 del modelo v2 (owner, 2026-09-06):
+lo que el usuario escribe es el crecimiento geométrico, el número que publican los fondos. Por eso
+el sorteo no centra la MEDIA en `m_i` sino la **MEDIANA**: la corrección de Itô se come la deriva
+justo hasta dejar `mediana(f_ik) = m_i` **exacta**, y `E[f_ik] = d_i = m_i·exp(σ_m,i²/2)` es la
+**prima de varianza** (con σ anual 15 %: +0,094 % al mes, +11,9 % a 10 años). Consecuencia
+publicable: **la línea determinista es la central de la banda**, no un techo.
+
+**La conversión CAGR → media aritmética vive en UN SOLO SITIO**: `PathEngine::new`
+(`crates/engine-stochastic/src/mc.rs`), sobre la σ **MENSUAL** — sumarla a la tasa anual
+(`CAGR + σ_anual²/2`) es la fórmula equivocada y 12 veces mayor de lo que el factor mensual
+necesita. Ni `crates/engine` ni `deterministic_growth_multipliers`/`simulate_f64` la aplican, y por
+eso la **puerta de degeneración no cambió de valor** con este cambio: no pasa por `PathEngine`.
+`σ_i = 0` ⇒ `d_i = m_i` y `f_ik = m_i`, las dos por **rama explícita**. La identidad «mediana del
+patrimonio = línea determinista» es exacta solo **sin flujos** (`mc_median_is_the_deterministic_line`
+la mide: mediana 197.313 € frente a 196.715 € deterministas, +0,30 %, con 2.500 caminos); con
+aportaciones o retiradas la cascada, el drenaje y la fiscalidad no son lineales y la mediana se
+separa unos pocos puntos porcentuales (±2–4 % a 20–35 años).
+
+Semilla estable por usuario (D23, `seed_for(installation_id, user_id)` = FNV-1a +
 finalizador de splitmix64), un flujo ChaCha8 propio por camino (ampliar la muestra no reescribe la
 que había), normales por Box–Muller y percentiles por **rango más cercano** (siempre un valor
 observado, nunca una interpolación). `McOutcome` publica bandas **puntuales** p10/p50/p90 de
@@ -357,6 +377,7 @@ pub struct PhasePlan {
     pub contribution_cap_monthly: Option<Decimal>, // default None — techo de lo que la cascada invierte
     pub contributions_stop_month: Option<u32>, // default None — desde ese mes, techo 0 (coast)
     pub income_pause: Option<IncomePause>,     // default None — P8.c
+    pub initial_rate: Option<InitialRateGate>, // E1 — default None ⇒ SIN puerta (pins 4.15 intactos)
 }
 pub enum RetirementTrigger { LiquidCrossing, AtMonth(u32) }
 pub enum SpendMode { Ceiling, RuleIsSpend }
@@ -367,8 +388,13 @@ pub enum Phase { Accumulating, Partial, Retired }
 pub enum TargetBasis { Perpetuity, BridgeToPension }
 // WP3 llenó el enum. `code()` es el literal PÚBLICO de cada aviso (el que la API publica en
 // `warnings[]`): vive en el motor para que no haya un `match` duplicado en `apps/api`.
-pub enum EngineWarning { RetireAtAgeUnderfunded, CoastNotReachable, PartialPhaseCapitalShrinking }
+pub enum EngineWarning { CoastNotReachable, PartialPhaseCapitalShrinking } // E1: RetireAtAgeUnderfunded FUERA
 impl EngineWarning { pub fn code(self) -> &'static str }
+// 5.0.0 E1 — puerta de tasa inicial y veredicto de UN camino (§2.5 de financial-contracts.md).
+pub struct InitialRateGate { pub swr_pct: Decimal, pub bridge: Option<BridgeCap> }
+pub struct BridgeCap { pub max_pct: Decimal, pub max_years: u32 }
+pub enum PathFailure { PortfolioDepleted, InitialRateExceeded, RuleBelowNeed }
+impl PathFailure { pub fn code(self) -> &'static str } // portfolio_depleted | initial_rate_exceeded | rule_below_need
 pub struct PartialPhase { pub start_month: u32, pub income_monthly: Decimal, pub expense_basis: ExpenseBasis }
 pub struct PensionSchedule { pub start_index: u32, pub monthly_today: Decimal, pub indexed: bool,
                              pub fraction_while_partial: Decimal }
@@ -747,13 +773,14 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
 2. **Fase del mes** (5.0.0 WP3, §B.1), monótona `Accumulating → Partial → Retired`:
    - **Jubilación** por el **latch absorbente** (4.8.0, #141): `retired = retired || (fire_reached && !crossing_is_reading_only) || k >= retirement_trigger.forced_month()` — una vez jubilado, SIEMPRE jubilado, aunque el patrimonio caiga después por debajo del objetivo (antes el estado parpadeaba mes a mes con gastos crecientes e ingresos planos). `fire_reached` compara **`liquid_prev`** — la riqueza LÍQUIDA del mes anterior (`liquid_worth[k−1]`): Σ de los activos `is_liquid`, BRUTA, sin restar principal (#143; `surplus_cash` retirado de este término en 4.12.1/#175 — teorema: el cruce solo pudo irse MÁS TARDE con el cambio, nunca adelantarse; emparejada con el término de deuda del target) — contra `PlanFireTarget::at(k−1)`.
      **`crossing_is_reading_only` (D17)** desactiva el cruce como TRIGGER sin tirar el objetivo: `liquid_crossing_month_index` se sigue anotando, y quien jubila es solo `AtMonth(R)`. Es lo que permite a una estrategia por edad conservar el objetivo para el chart y para medir el infra-financiado. Con `false` (el default) la unión `cruce || mes forzado` es la de 4.15.0, tal cual, y `P10_jubilacion_forzada` sigue pineado.
-     Si en el mes efectivo `liquid_prev < target(k−1)`, se emite `EngineWarning::RetireAtAgeUnderfunded` (se mira el OBJETIVO, no el trigger: si jubiló el cruce, la desigualdad no puede darse).
+     En el mes efectivo `R` (el primero jubilado) se evalúa la **puerta de tasa inicial** (5.0.0 E1, C1): con `phase_plan.initial_rate = Some(gate)`, si `12·ordinaria(R) > tope/100 · liquid_prev` el camino FALLA en `R` con `PathFailure::InitialRateExceeded`. El tope es `gate.bridge.max_pct` cuando hay puente Y pensión con fecha dentro de la ventana (`P − R ≤ 12·max_years`, `P = start_index + 1` en meses del bucle) y `gate.swr_pct` si no; se evalúa con `withdrawal::monthly_allowance` (la MISMA función que topa las reglas por saldo) y se compara con `MoneyOps::strictly_below`. `initial_rate: None` —el default de los dos constructores— **no ejecuta ninguna comparación**, y por eso `pins-4.15.json` no se mueve. Aquí vivía `EngineWarning::RetireAtAgeUnderfunded`, **retirado en E1**: «me jubilo por edad y no llego» dejó de ser un booleano contra un objetivo descontado y pasó a ser `1 − éxito(R)` en el crate estocástico.
    - **Media jornada** (P7/D10) si el latch no cerró y `k ≥ partial.start_month`: el ingreso es `partial.income_monthly` (PLANO) y el gasto el que diga `expense_basis` (jubilación por defecto, regular si el perfil lo dice). `partial_retirement_month_index` solo se publica si la fase se pisó de verdad — una media jornada declarada DESPUÉS de la jubilación no ocurre y no se pinta.
    El ingreso y el gasto salen de la fase; **el gasto elegido se multiplica por `f(k−1) = inflation_factor_at_month_index(input.annual_inflation_percent, k−1)`** (4.9.0, #139) — el ingreso no.
 3. **Pensión con fecha** (P2/D3/D8, WP3): desde `k−1 ≥ pension.start_index` se SUMA al ingreso, **en cualquier fase**, por `monthly_today·f(k−1)` si `indexed` y plana si no; durante `Partial`, × `fraction_while_partial`. Sin pensión con fecha aquí no se ejecuta ni una suma (bit-identidad). `pension_start_month_index = start_index + 1` (rejilla 0-based del target → mes 1-based del bucle), `None` si cae fuera del horizonte.
    **Pausa de ingresos** (P8.c): dentro de la ventana semiabierta de `income_pause`, el ingreso GANADO de la fase se multiplica por `income_fraction` — la pensión con fecha, que se suma después, NO se pausa.
 4. `retirement_withdrawal` = `phase_plan.extra_monthly_withdrawal` if `in_retirement`, else 0.
 5. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
+   **Y, al lado, la necesidad ORDINARIA** (5.0.0 E1): `ordinary_need = max(0, expense + retirement_withdrawal − income)` — el gasto de vivir, con la pensión con fecha y las rentas persistentes ya restadas, **sin servicio de deuda y sin `planning_adj`**. Es la magnitud que juzgan la puerta de tasa inicial (F2) y la regla por saldo (F3); `net_cash` sigue siendo lo que decide cuánto se VENDE. Se publica en `SimOutput::ordinary_need` (serie, `len = horizon+1`, `[0] = 0`) y **no** en `ProjectionOutput`: la consume el crate estocástico, no la API.
 6. If `net_cash > 0` (surplus): **techo de aportación** primero (WP3, §B.7) — con `contribution_cap_monthly = Some(c)` (o `k ≥ contributions_stop_month`, que impone `c = 0`) la cascada solo ve `min(sobrante, c)` y el resto se publica en `disposable_cash(k)`: **no se invierte, no compone y no entra en el patrimonio**, mismo trato que `unallocated_savings_total`. Sin techo, el pool es el sobrante entero y no se ejecuta una operación de más. Después, **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)) — **también en jubilación** (4.12.1, #175): es la MISMA cascada del usuario, sin rama especial por estado; los techos de la fase #171 pasan de explicativos a vinculantes también aquí. `AllocationSkipReason::InRetirement` y el literal de wire `in_retirement` MURIERON con la rama que los producía. Lo que ninguna regla absorbe **NO entra en el NW**: se acumula en `unallocated_savings_total` (ver [Output](#output)) — inalcanzable en producción con activos vivos (sumidero indestructible, #176). Lo reinvertido en cada activo, jubilado o no, **sube su base de coste** (`basis[i] += alloc[i]`, `basis_declared[i] = true`) y abarata sus ventas futuras (#178, ver paso 6). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
 7. **La venta del mes** (`execute_month_sale`). Desde 5.0.0 WP2 este paso ya NO es el `else`
    del anterior: corre SIEMPRE, después de la cascada, porque `spend_mode = rule_is_spend`
@@ -877,7 +904,7 @@ pub struct ProjectionOutput {
     pub unmet_need: Vec<Decimal>,                   // 5.0.0 (revisión D20): necesidad que la CARTERA no fundó — incremento mensual del descubierto, clampado a 0
     pub pension_start_month_index: Option<u32>,     // WP3: `pension.start_index + 1` (1-based), None si cae fuera del horizonte
     pub partial_retirement_month_index: Option<u32>,// WP3: primer mes de media jornada — None si la fase no se pisó
-    pub warnings: Vec<EngineWarning>,               // WP3: el bucle emite RetireAtAgeUnderfunded y PartialPhaseCapitalShrinking
+    pub warnings: Vec<EngineWarning>,               // WP3: el bucle emite PartialPhaseCapitalShrinking (E1 retiró RetireAtAgeUnderfunded)
     // --- 5.0.0 WP3 (§B.3, §B.7): lecturas de pensión, puente, media jornada y margen ---
     pub bridge_effective_withdrawal_pct: Option<Decimal>, // 100·12·need_full_m(R−1)/L(R−1) — % ANUAL; None sin pensión+puente
     pub pension_coverage_ratio: Option<Decimal>,    // P_m(P)/(E·f(P)) — FRACCIÓN (0,6 = 60 %); None sin pensión con fecha
@@ -885,8 +912,25 @@ pub struct ProjectionOutput {
     pub partial_phase_capital_growing: bool,        // true ⟺ HUBO fase parcial Y el líquido no bajó ni un mes en ella
     pub disposable_cash: Vec<Decimal>,              // caja que el techo de aportación dejó fuera de la cascada (len horizon+1, [0] = 0)
     pub disposable_cash_total: Decimal,             // Σ de la serie. "0" son cero euros, no «no aplica»
+    // --- 5.0.0 E1: EL VEREDICTO DE ESTE CAMINO. Latches monótonos, fijados a la vez ---
+    pub failure_month_index: Option<u32>,          // primer mes (1-based) en que el camino falló; None = aguanta
+    pub failure_kind: Option<PathFailure>,         // por qué. Prioridad F1 > F2 > F3 dentro del mes
 }
 ```
+
+**`failure_*` es el veredicto de UN camino, no el del PLAN.** El plan se juzga con la proporción de
+caminos sin fallo contra el umbral del perfil (`crates/engine-stochastic`); sobre la línea
+determinista estos dos campos describen un escenario. Y **no son `assets_depleted_month_index`**:
+aquel marca el mes en que la cartera se vació (con confirmación posterior) en CUALQUIER fase; estos
+solo miran meses `Retired`/`Partial` (durante `Partial`, solo F1) y marcan el primer mes en que la
+necesidad se quedó sin fundar, la tasa inicial se pasó del tope o la regla se quedó por debajo del
+gasto ordinario. En la batería: `P1` agota en el mes 20 y **no** falla (nunca se jubila); `P23`
+agota en el 16 y falla en el 17. La semántica completa —los tres predicados, la prioridad, el
+supuesto S1 y por qué F1 lleva `unfunded_sale` además de `unmet_need > 0`— vive en
+[`financial-contracts.md`](financial-contracts.md) §2.5.
+
+`SimOutput` publica además `ordinary_need: Vec<M>`, que `ProjectionOutput` **no** refleja (la
+consume el crate estocástico; la API no la publica).
 
 **Las lecturas de WP3 son `Option` por disciplina, no por comodidad** (norma de la casa: `null`
 nunca es cero). `bridge_effective_withdrawal_pct` es `None` sin pensión con fecha, sin base puente,
