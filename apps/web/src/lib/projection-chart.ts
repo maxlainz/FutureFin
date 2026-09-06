@@ -177,14 +177,15 @@ export type NeededCurveSeries = Pick<
  * escalar: cada punto es una bisección estocástica más del motor. Por eso se dibuja como curva y
  * NO entra en la familia del retirado `fire_target_series`.
  *
- * **Base de la deflactación (supuesto declarado).** El contrato de `needed_capital_curve` en
- * `api/types.ts` no dice en qué euros viaja; lo que sí dice es que «cruza la línea central de
- * patrimonio líquido EXACTAMENTE en la fecha válida», y esa línea es NOMINAL. Se asume por tanto
- * que la curva es NOMINAL y se le aplica el MISMO `deflator` mes a mes que al patrimonio: si el
- * servidor la publicara ya en euros de hoy, el toggle «En dinero de hoy» la deflactaría dos veces
- * y el cruce se rompería — un fallo visible, no silencioso, que es exactamente por lo que este
- * supuesto se escribe aquí en vez de dejarse implícito. (`needed_capital_today`, en cambio, SÍ
- * declara euros de hoy y no pasa por aquí.)
+ * **Base de la deflactación (contrato, no supuesto).** `needed_capital_curve` viaja en euros
+ * NOMINALES de cada mes (`api/types.ts`, doc del campo: «`amount_nominal` del nodo»), como el
+ * patrimonio, así que se le aplica el MISMO `deflator` mes a mes. Si el servidor la publicara ya
+ * en euros de hoy, el toggle «En dinero de hoy» la deflactaría dos veces — un fallo visible, no
+ * silencioso. Lo que el contrato NO promete es que la curva cruce la línea en la fecha válida:
+ * la fecha la decide el éxito camino a camino y la curva es otra pregunta (cuánto líquido hace
+ * falta para jubilarse en cada mes), así que la marca vertical y el cruce visual pueden no
+ * coincidir por diseño. (`needed_capital_today`, en cambio, SÍ declara euros de hoy y no pasa
+ * por aquí.)
  *
  * Cuatro reglas, todas ellas cosas que se rompen sin que nada falle:
  *
