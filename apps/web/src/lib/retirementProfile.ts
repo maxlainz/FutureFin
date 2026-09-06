@@ -1,6 +1,6 @@
 /**
  * Perfil de jubilación POR USUARIO en cliente: defaults, normalización, espejo de las cotas del
- * servidor y constructor del PATCH mínimo (5.0.0, issue #207, decisión D13).
+ * servidor y constructor del PATCH mínimo (5.0.0, issue #207, decisión D13; **modelo v2**, C1-C8).
  *
  * Tres responsabilidades, y ninguna más:
  *
@@ -15,9 +15,19 @@
  *     rechazar: el patrón de la casa es no prometer «Guardado automático» sobre un 400.
  *  3. **PATCH MÍNIMO y tri-estado** (`buildRetirementProfilePatch`) — solo las claves que
  *     cambian; `null` explícito para borrar `pension`, `partial_retirement`,
- *     `target_retirement_age` o `cash_buffer_months`. Mandar el perfil entero resetearía en
+ *     `target_retirement_age` o `coast_stop_age`. Mandar el perfil entero resetearía en
  *     silencio lo que el usuario no tocó: es el bug que el tri-estado del servidor existe para
  *     esquivar, y mandarlo completo lo reintroduciría desde este lado.
+ *
+ * **Qué cambió en el modelo v2** (y por qué este módulo encogió): el éxito define la fecha. Ya no
+ * hay objetivo descontado, así que se fueron `target_basis`, `bridge_discount_basis` y todo el
+ * bloque R6 (`effectiveTargetBasis` y compañía); tampoco hay colchón de caja (`cash_buffer_months`
+ * y su cota). En su lugar entran el **umbral de éxito** (`success_threshold_pct`, 80–100, default
+ * 95: la restricción que decide la fecha válida), los **dos modos de coast** (`coast_mode` +
+ * `coast_stop_age`), los **dos modos de jornada reducida** (`partial_retirement.mode`) y el
+ * **puente**, que dejó de ser una estrategia para ser un ajuste de la tarjeta Pensión
+ * (`bridge_enabled` + `bridge_max_pct` + `bridge_max_years`), disponible en cualquiera de las
+ * cuatro estrategias (C7).
  *
  * Las cotas están DUPLICADAS a propósito (aquí y en Rust): son el contrato publicado del
  * formulario. Si cambian allí, cambian aquí — `retirementProfile.test.ts` recorre la tabla
@@ -25,7 +35,7 @@
  */
 
 import type {
-  BridgeDiscountBasisApi,
+  CoastModeApi,
   FireNumberModeApi,
   PartialExpenseBasisApi,
   PartialRetirementApi,
@@ -34,11 +44,14 @@ import type {
   RetirementProfilePatchApi,
   RetirementStrategyApi,
   SpendModeApi,
-  TargetBasisApi,
   WithdrawalRuleApi,
   WithdrawalRuleKindApi,
 } from "../api/types";
 import { parseDisplayDecimal } from "./format";
+
+/** Los dos modos de arranque de la jornada reducida (M11). Se deriva del tipo del wire para que
+ *  no puedan separarse: si la API gana un modo, este alias lo gana solo. */
+export type PartialModeApi = PartialRetirementApi["mode"];
 
 // ---------------------------------------------------------------------------
 // Cotas — espejo de `retirement_profile.rs` §Cotas
@@ -52,11 +65,12 @@ export const MIN_PENSION_AGE = 50;
 export const MAX_WITHDRAWAL_PCT = 20;
 /** Techo de la banda y del ajuste de `guardrails` (%). */
 export const MAX_GUARDRAIL_PCT = 50;
-/** Colchón de caja máximo, en meses de gasto. Sigue siendo la cota del override explícito por
- *  API/MCP; la SPA ya no ofrece el campo (V6: el colchón se deriva del tope de la regla). */
-export const MAX_CASH_BUFFER_MONTHS = 60;
-/** Techo del SWR (%). El eje se movió al perfil; la cota no cambió. */
-export const MAX_SWR_PCT = 4;
+/**
+ * Techo del SWR (%). **6 desde el modelo v2** (era 4): el SWR dejó de ser «la tasa que fija el
+ * objetivo» —ese objetivo ya no existe— y pasó a ser el TOPE de venta ordinaria anual, que es una
+ * palanca que el usuario sí puede querer subir. La cota de abajo sigue siendo 0.
+ */
+export const MAX_SWR_PCT = 6;
 /** Cotas de la edad límite del horizonte (siguen viviendo en `installation.rs`, reusadas aquí). */
 export const MIN_HORIZON_LIFESPAN_AGE = 85;
 export const MAX_HORIZON_LIFESPAN_AGE = 105;
@@ -64,12 +78,62 @@ export const MAX_HORIZON_LIFESPAN_AGE = 105;
 /** Edades ofrecidas por el selector de horizonte (las mismas cinco de 4.9.0). */
 export const HORIZON_LIFESPAN_AGE_OPTIONS = [85, 90, 95, 100, 105] as const;
 
+/**
+ * Umbral de éxito (C3, entero): el porcentaje de caminos que tienen que aguantar hasta el
+ * horizonte para que un mes se considere fecha válida. `100` significa CERO fallos de N, no
+ * «casi todos»; por debajo de 100 el corte lo decide el límite inferior del intervalo de Wilson,
+ * que es estable frente a la semilla y a N.
+ */
+export const MIN_SUCCESS_THRESHOLD_PCT = 80;
+export const MAX_SUCCESS_THRESHOLD_PCT = 100;
+export const DEFAULT_SUCCESS_THRESHOLD_PCT = 95;
+
+/**
+ * Techo del puente (%). **Es el mismo que el de las reglas de retirada, y a propósito**: durante
+ * el puente el tope de la tasa inicial deja de ser el SWR y pasa a ser este porcentaje, así que
+ * las dos magnitudes miden lo mismo (cuánto se puede vender al año) y compartir cota es lo que
+ * impide que una acabe permitiendo lo que la otra prohíbe.
+ */
+export const MAX_BRIDGE_PCT = MAX_WITHDRAWAL_PCT;
+/** Años máximos de antelación sobre el inicio de la pensión durante los que aplica el puente. */
+export const MIN_BRIDGE_YEARS = 1;
+export const MAX_BRIDGE_YEARS = 20;
+/** Años del puente al activarlo, si no se dice otra cosa. */
+export const DEFAULT_BRIDGE_YEARS = 7;
+
+/**
+ * La tasa del puente al ACTIVARLO, como decimal-string: `max(5, swr + 1)` %.
+ *
+ * Los dos términos existen por motivos distintos. El `swr + 1` mantiene la invariante del puente
+ * —tiene que ser **estrictamente mayor** que el SWR, o no es un puente, es la misma tasa—, y el
+ * suelo de 5 evita proponer un puente tan tímido que no adelante ninguna fecha cuando el SWR es
+ * bajo. Con `MAX_SWR_PCT = 6` el resultado nunca pasa de 7, muy por debajo de `MAX_BRIDGE_PCT`.
+ *
+ * **El servidor rellena exactamente esto** cuando el puente está activo y el número falta (y es
+ * también lo que recibe un perfil guardado con la estrategia retirada `pension_bridge` al migrar,
+ * C7). Si esta fórmula se mueve aquí sin moverse allí, activar el puente enseñaría una tasa y
+ * guardaría otra.
+ */
+export function defaultBridgePct(swrPct: string): string {
+  const parsed = parseDisplayDecimal(swrPct);
+  const swr = parsed === null ? 0 : Math.min(Math.max(parsed, 0), MAX_SWR_PCT);
+  return roundDecimalString(Math.min(Math.max(5, swr + 1), MAX_BRIDGE_PCT));
+}
+
+/** Un número a decimal-string sin la basura binaria de `2.9 + 1` (`3.9000000000000004`). */
+function roundDecimalString(n: number): string {
+  return String(Math.round(n * 10000) / 10000);
+}
+
+/**
+ * Las CUATRO estrategias del modelo v2 (C7). `pension_bridge` ya no está: el puente pasó a ser un
+ * ajuste de la tarjeta Pensión disponible en cualquiera de estas cuatro.
+ */
 export const RETIREMENT_STRATEGIES: readonly RetirementStrategyApi[] = [
   "asap",
   "retire_at_age",
   "coast",
   "partial",
-  "pension_bridge",
 ] as const;
 
 /** Nombres de producto (D33). No los inventes en la vista: viven aquí una sola vez. */
@@ -77,22 +141,19 @@ export const RETIREMENT_STRATEGY_LABEL: Record<RetirementStrategyApi, string> = 
   asap: "Cuanto antes (FIRE clásico)",
   retire_at_age: "A una edad fija",
   coast: "Ahorrar ahora y dejar crecer (Coast FIRE)",
-  partial: "Media jornada",
-  pension_bridge: "Puente hasta la pensión",
+  partial: "Jornada reducida (Barista FIRE)",
 };
 
 /** Una frase por estrategia — lo que hace, no cómo se implementa. */
 export const RETIREMENT_STRATEGY_BLURB: Record<RetirementStrategyApi, string> = {
   asap:
-    "Ahorras todo lo que puedes y te jubilas el mes en que tu patrimonio líquido cubre el objetivo.",
+    "Ahorras todo lo que puedes y te jubilas en la primera fecha en la que tu plan aguanta hasta el final con el nivel de éxito que exijas.",
   retire_at_age:
-    "Eliges la edad; el plan te dice cuánto necesitas ahorrar y cuánto margen te sobra.",
+    "Eliges la edad y el plan te dice cuánto tienes que aportar cada mes para llegar a ella con tu nivel de éxito.",
   coast:
-    "Aportas fuerte hasta que el capital llegue solo a tu edad objetivo; después, cada euro es margen.",
+    "Aportas fuerte y luego dejas de aportar. Puedes fijar la edad de jubilación —y el plan te dice cuándo puedes dejar de ahorrar— o fijar la edad a la que dejas de ahorrar y ver a qué fecha te lleva.",
   partial:
-    "Reduces jornada a una edad y cubres el hueco con el capital hasta el cruce total.",
-  pension_bridge:
-    "Te jubilas por cruce y vives del capital hasta que llegue la pensión pública; el objetivo se dimensiona con ese puente.",
+    "Bajas de jornada a una edad (o en cuanto el plan pueda permitírselo) y cubres el hueco con tu capital hasta la jubilación total. No es la jubilación parcial legal española: es una decisión tuya sobre tu plan, sin trámite ni cotización asociada.",
 };
 
 export const WITHDRAWAL_RULE_KIND_LABEL: Record<WithdrawalRuleKindApi, string> = {
@@ -102,10 +163,16 @@ export const WITHDRAWAL_RULE_KIND_LABEL: Record<WithdrawalRuleKindApi, string> =
   guardrails: "Con bandas (Guyton-Klinger)",
 };
 
-export const BRIDGE_DISCOUNT_BASIS_LABEL: Record<BridgeDiscountBasisApi, string> = {
-  expected_return: "Rentabilidad esperada de tus líquidos",
-  swr: "Tu tasa segura de retirada",
-  none: "Sin descuento (más conservador)",
+/** Los dos modos de coast (M10). El modo decide QUÉ edad pide el formulario, no dos planes. */
+export const COAST_MODE_LABEL: Record<CoastModeApi, string> = {
+  fixed_retirement_age: "Fijo la edad a la que me jubilo",
+  fixed_stop_age: "Fijo la edad a la que dejo de aportar",
+};
+
+/** Los dos modos de arranque de la jornada reducida (M11). */
+export const PARTIAL_MODE_LABEL: Record<PartialModeApi, string> = {
+  at_age: "A la edad que yo diga",
+  asap: "En cuanto el plan pueda permitírselo",
 };
 
 // ---------------------------------------------------------------------------
@@ -204,10 +271,13 @@ export function defaultWithdrawalRuleApi(): WithdrawalRuleApi {
 }
 
 /**
- * El perfil de quien no ha tocado nada. Reproduce la jubilación de 4.15.x (cruce de líquido,
- * objetivo perpetuo, SWR 3,5 %, horizonte a 90) — el mismo `default_retirement_profile()` del
- * servidor. Si esto se moviera, el formulario propondría por defecto un plan distinto al que la
- * proyección está simulando.
+ * El perfil de quien no ha tocado nada: cruce por éxito (`asap`), SWR 3,5 %, horizonte a 90 y el
+ * **umbral al 95 %** — el mismo `default_retirement_profile()` del servidor. Si esto se moviera,
+ * el formulario propondría por defecto un plan distinto al que la proyección está simulando.
+ *
+ * `coast_mode` viaja siempre (aunque la estrategia no sea `coast`) porque es el que decide si
+ * `target_retirement_age` es obligatoria: un `undefined` aquí haría que la guarda pidiera una
+ * edad que la pantalla no está enseñando.
  */
 export function defaultRetirementProfileApi(): RetirementProfileApi {
   return {
@@ -217,12 +287,12 @@ export function defaultRetirementProfileApi(): RetirementProfileApi {
     fire_number_manual_amount: null,
     swr_pct: "3.5",
     horizon_lifespan_age: 90,
-    target_basis: null,
-    bridge_discount_basis: "expected_return",
+    success_threshold_pct: DEFAULT_SUCCESS_THRESHOLD_PCT,
+    coast_mode: "fixed_retirement_age",
+    coast_stop_age: null,
     withdrawal_rule: defaultWithdrawalRuleApi(),
     pension: null,
     partial_retirement: null,
-    cash_buffer_months: null,
   };
 }
 
@@ -236,16 +306,27 @@ function pick<T extends string>(v: unknown, allowed: readonly T[], fallback: T):
     : fallback;
 }
 
+/**
+ * `pension_bridge` es un literal RETIRADO (C7) que sigue vivo en perfiles guardados y en backups:
+ * se pliega a `asap`, igual que `annual_expense_adjusted` se pliega a `annual_expense` más abajo.
+ *
+ * **Lo que este pliegue NO hace es activar el puente.** Eso lo hace el servidor al resolver el
+ * perfil guardado (y lo anuncia con el aviso `strategy_pension_bridge_migrated`), porque es él
+ * quien conoce el estado almacenado; el cliente solo ve el perfil YA migrado. Plegar aquí a
+ * `asap` sin tocar la pensión es exactamente lo que hace falta para que el selector no se quede
+ * en blanco ante una estrategia que ya no existe.
+ */
 export function parseRetirementStrategy(v: unknown): RetirementStrategyApi {
+  if (v === "pension_bridge") return "asap";
   return pick(v, RETIREMENT_STRATEGIES, "asap");
 }
 
-export function parseTargetBasis(v: unknown): TargetBasisApi | null {
-  return v === "perpetuity" || v === "bridge_to_pension" ? v : null;
+export function parseCoastMode(v: unknown): CoastModeApi {
+  return pick(v, ["fixed_retirement_age", "fixed_stop_age"] as const, "fixed_retirement_age");
 }
 
-export function parseBridgeDiscountBasis(v: unknown): BridgeDiscountBasisApi {
-  return pick(v, ["expected_return", "swr", "none"] as const, "expected_return");
+export function parsePartialMode(v: unknown): PartialModeApi {
+  return pick(v, ["at_age", "asap"] as const, "at_age");
 }
 
 export function parseWithdrawalRuleKind(v: unknown): WithdrawalRuleKindApi {
@@ -330,13 +411,47 @@ export function normalizeWithdrawalRule(raw: unknown): WithdrawalRuleWithSourceA
 }
 
 /**
- * Espejo de `resolve_retirement_profile`: defaults y clamps en lectura, en el MISMO orden (el
- * horizonte primero, porque es el techo de todas las edades del perfil).
+ * Tasa del puente en LECTURA. Tres cosas, en este orden:
  *
- * Lo que NO hace: derivar `target_basis`. Aquí se conserva tal cual llega —`null` incluido—
- * porque el formulario necesita distinguir «no lo he elegido» de «he elegido esto» para no
- * congelar la derivación del servidor al guardar cualquier otro campo. La derivación para
- * PINTAR vive en `effectiveTargetBasis`.
+ *  * ausente o ilegible **con el puente activo** → la tasa por defecto (`defaultBridgePct`), que
+ *    es lo que rellena el servidor: dejarla vacía dejaría el formulario en un estado que la
+ *    guarda rechaza y el autosave no podría guardar nunca;
+ *  * cualquier valor se acota por arriba a `MAX_BRIDGE_PCT`;
+ *  * un valor que **no supera el SWR** —con el puente activo— se sube también a la tasa por
+ *    defecto: un puente que no es estrictamente mayor que el SWR no es un puente, es la misma
+ *    tasa, y la invariante se restaura en lectura en vez de bloquear el guardado.
+ *
+ * Con el puente APAGADO el número es inerte: se conserva tal cual (solo con el techo aplicado)
+ * para no destruir lo que alguien fijó por API o dejó preparado antes de encender el interruptor.
+ */
+function normalizeBridgePct(v: unknown, enabled: boolean, swrPct: string): string | null {
+  const fallback = enabled ? defaultBridgePct(swrPct) : null;
+  if (v == null || String(v).trim() === "") return fallback;
+  const n = parseDisplayDecimal(String(v));
+  if (n === null) return fallback;
+  const capped = Math.min(Math.max(n, 0), MAX_BRIDGE_PCT);
+  const swr = parseDisplayDecimal(swrPct) ?? 0;
+  if (enabled && capped <= swr) return defaultBridgePct(swrPct);
+  return roundDecimalString(capped);
+}
+
+/** Años del puente en LECTURA: mismo criterio que la tasa, con el rango `[1, 20]`. */
+function normalizeBridgeYears(v: unknown, enabled: boolean): number | null {
+  if (v == null) return enabled ? DEFAULT_BRIDGE_YEARS : null;
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return enabled ? DEFAULT_BRIDGE_YEARS : null;
+  return clampInt(n, MIN_BRIDGE_YEARS, MAX_BRIDGE_YEARS, DEFAULT_BRIDGE_YEARS);
+}
+
+/**
+ * Espejo de `resolve_retirement_profile`: defaults y clamps en lectura, en el MISMO orden (el
+ * horizonte primero, porque es el techo de todas las edades del perfil; el SWR antes que la
+ * pensión, porque el puente se acota contra él).
+ *
+ * **Las claves que no conoce se caen** —el objeto que devuelve es un literal cerrado—, y ese es
+ * el mecanismo por el que un JSONB de 4.15.x con `target_basis`, `bridge_discount_basis` o
+ * `cash_buffer_months` deja de existir sin migrar nada en cliente. El servidor hace lo mismo con
+ * su `#[serde(default)]` sin `deny_unknown_fields`.
  */
 export function normalizeRetirementProfile(
   raw: RetirementProfileApi | null | undefined,
@@ -350,41 +465,73 @@ export function normalizeRetirementProfile(
     MAX_HORIZON_LIFESPAN_AGE,
     base.horizon_lifespan_age,
   );
+  const swr = clampDecimalString(raw.swr_pct, 0, MAX_SWR_PCT, base.swr_pct);
+
+  const targetAge =
+    raw.target_retirement_age == null
+      ? null
+      : clampInt(raw.target_retirement_age, MIN_PROFILE_AGE, horizon, MIN_PROFILE_AGE);
+
+  // La edad de parada de coast no puede caer más tarde que la jubilación que la espera: si hay
+  // edad objetivo, ella es el techo; si no la hay, el horizonte.
+  const coastStopAge =
+    raw.coast_stop_age == null
+      ? null
+      : clampInt(raw.coast_stop_age, MIN_PROFILE_AGE, targetAge ?? horizon, MIN_PROFILE_AGE);
 
   const pension: PensionPlanApi | null =
     raw.pension && typeof raw.pension === "object"
-      ? {
-          monthly_amount_today: clampDecimalString(
-            raw.pension.monthly_amount_today,
-            0,
-            Number.MAX_SAFE_INTEGER,
-            "0",
-          ),
-          starts_at_age: clampInt(
-            raw.pension.starts_at_age,
-            Math.min(MIN_PENSION_AGE, horizon),
-            horizon,
-            Math.min(MIN_PENSION_AGE, horizon),
-          ),
-          indexed: raw.pension.indexed !== false,
-          fraction_while_partial: clampDecimalString(
-            raw.pension.fraction_while_partial,
-            0,
-            1,
-            "0",
-          ),
-        }
+      ? (() => {
+          const bridgeEnabled = raw.pension?.bridge_enabled === true;
+          return {
+            monthly_amount_today: clampDecimalString(
+              raw.pension?.monthly_amount_today,
+              0,
+              Number.MAX_SAFE_INTEGER,
+              "0",
+            ),
+            starts_at_age: clampInt(
+              raw.pension?.starts_at_age,
+              Math.min(MIN_PENSION_AGE, horizon),
+              horizon,
+              Math.min(MIN_PENSION_AGE, horizon),
+            ),
+            indexed: raw.pension?.indexed !== false,
+            fraction_while_partial: clampDecimalString(
+              raw.pension?.fraction_while_partial,
+              0,
+              1,
+              "0",
+            ),
+            bridge_enabled: bridgeEnabled,
+            bridge_max_pct: normalizeBridgePct(
+              raw.pension?.bridge_max_pct,
+              bridgeEnabled,
+              swr,
+            ),
+            bridge_max_years: normalizeBridgeYears(
+              raw.pension?.bridge_max_years,
+              bridgeEnabled,
+            ),
+          };
+        })()
       : null;
 
   const partial: PartialRetirementApi | null =
     raw.partial_retirement && typeof raw.partial_retirement === "object"
       ? {
-          starts_at_age: clampInt(
-            raw.partial_retirement.starts_at_age,
-            MIN_PROFILE_AGE,
-            horizon,
-            MIN_PROFILE_AGE,
-          ),
+          mode: parsePartialMode(raw.partial_retirement.mode),
+          // `null` se conserva: con `mode: "asap"` la edad de inicio la resuelve el servidor y
+          // rellenarla aquí inventaría una decisión que el usuario no tomó.
+          starts_at_age:
+            raw.partial_retirement.starts_at_age == null
+              ? null
+              : clampInt(
+                  raw.partial_retirement.starts_at_age,
+                  MIN_PROFILE_AGE,
+                  horizon,
+                  MIN_PROFILE_AGE,
+                ),
           income_monthly_today: clampDecimalString(
             raw.partial_retirement.income_monthly_today,
             0,
@@ -397,88 +544,89 @@ export function normalizeRetirementProfile(
 
   return {
     strategy: parseRetirementStrategy(raw.strategy),
-    target_retirement_age:
-      raw.target_retirement_age == null
-        ? null
-        : clampInt(raw.target_retirement_age, MIN_PROFILE_AGE, horizon, MIN_PROFILE_AGE),
+    target_retirement_age: targetAge,
     fire_number_mode: parseFireNumberMode(raw.fire_number_mode),
     fire_number_manual_amount:
       raw.fire_number_manual_amount == null ||
       String(raw.fire_number_manual_amount).trim() === ""
         ? null
         : String(raw.fire_number_manual_amount),
-    swr_pct: clampDecimalString(raw.swr_pct, 0, MAX_SWR_PCT, base.swr_pct),
+    swr_pct: swr,
     horizon_lifespan_age: horizon,
-    target_basis: parseTargetBasis(raw.target_basis),
-    bridge_discount_basis: parseBridgeDiscountBasis(raw.bridge_discount_basis),
+    success_threshold_pct:
+      raw.success_threshold_pct == null
+        ? DEFAULT_SUCCESS_THRESHOLD_PCT
+        : clampInt(
+            raw.success_threshold_pct,
+            MIN_SUCCESS_THRESHOLD_PCT,
+            MAX_SUCCESS_THRESHOLD_PCT,
+            DEFAULT_SUCCESS_THRESHOLD_PCT,
+          ),
+    coast_mode: parseCoastMode(raw.coast_mode),
+    coast_stop_age: coastStopAge,
     withdrawal_rule: normalizeWithdrawalRule(raw.withdrawal_rule),
     pension,
     partial_retirement: partial,
-    cash_buffer_months:
-      raw.cash_buffer_months == null
-        ? null
-        : clampInt(raw.cash_buffer_months, 0, MAX_CASH_BUFFER_MONTHS, 0),
   };
 }
 
 /**
- * La base del objetivo que se APLICA, derivada igual que el servidor (R6): `pension_bridge` la
- * fuerza a puente; sin elección explícita, hay puente si hay pensión declarada y perpetuidad si
- * no. Es lo que se pinta como seleccionado en el radio.
- */
-export function effectiveTargetBasis(p: RetirementProfileApi): TargetBasisApi {
-  if (p.strategy === "pension_bridge") return "bridge_to_pension";
-  if (p.target_basis) return p.target_basis;
-  return p.pension ? "bridge_to_pension" : "perpetuity";
-}
-
-/** De dónde sale la base del objetivo que se está aplicando. */
-export type TargetBasisSource =
-  /** El usuario la eligió a mano y está guardada. */
-  | "stored"
-  /** Nadie la ha elegido: la deriva el servidor (R6) y se mueve sola al declarar una pensión. */
-  | "derived"
-  /** La estrategia la impone (`pension_bridge` ES el puente); la elección guardada no pinta nada. */
-  | "forced_by_strategy";
-
-/**
- * Origen de `effectiveTargetBasis`, para que el formulario pueda rotular «(derivada)» en vez de
- * enseñar una elección que nadie hizo.
+ * El puente RESUELTO: los dos números que el motor va a usar de verdad (o `null` si no hay
+ * puente). Mismo papel que `resolveWithdrawalRule` para la regla de retirada — la guarda tiene
+ * que juzgar **lo que se va a aplicar**, no lo que hay tecleado, y el PATCH tiene que mandar lo
+ * que la pantalla estaba enseñando.
  *
- * Sin esta distinción, el radio marcado se lee como una decisión del usuario: la reenviaría en el
- * primer PATCH, y declarar una pensión después ya no movería la base del objetivo, que se quedaría
- * en la perpetuidad conservadora que nadie pidió. **Exige que `p.target_basis` lleve la elección
- * ALMACENADA** (`withStoredTargetBasis`), no la resuelta que publica el servidor.
+ * Un campo vacío se trata como ausente (no como cero): es el estado natural justo después de
+ * encender el interruptor, y el servidor lo rellena con el mismo default.
  */
-export function targetBasisSource(p: RetirementProfileApi): TargetBasisSource {
-  if (p.strategy === "pension_bridge") return "forced_by_strategy";
-  return p.target_basis == null ? "derived" : "stored";
+export function resolveBridge(
+  pension: PensionPlanApi,
+  swrPct: string,
+): { pct: string; years: number } | null {
+  if (!pension.bridge_enabled) return null;
+  const raw = String(pension.bridge_max_pct ?? "").trim();
+  return {
+    pct: raw === "" ? defaultBridgePct(swrPct) : raw,
+    years: pension.bridge_max_years ?? DEFAULT_BRIDGE_YEARS,
+  };
 }
 
 /**
- * El perfil que llega del servidor, con `target_basis` sustituido por la elección **ALMACENADA**
- * (`target_basis_stored` de la respuesta; `null` = derivada).
- *
- * `profile.target_basis` viaja siempre RESUELTO, así que un formulario que lo use como estado
- * pierde la única información que necesita para no congelar la derivación al guardar cualquier
- * otro campo. Lo que se pinta sigue saliendo de `effectiveTargetBasis`, que deriva con la misma
- * regla R6 que el servidor: la sustitución no cambia lo que ve el usuario, solo lo que se manda.
- *
- * `stored === undefined` = backend anterior a WP5-2, que no publica la elección almacenada: se
- * conserva el valor resuelto (el comportamiento de 4.15.x) porque inventar un `null` diría
- * «derivada» sobre una elección que quizá sí existe.
+ * La pensión con el puente encendido o apagado, con los defaults ya puestos al encenderlo. Es lo
+ * que el interruptor de la tarjeta Pensión tiene que llamar: activar el puente y dejar los dos
+ * números en `null` dejaría el borrador enseñando huecos donde el servidor va a guardar 5 % y 7
+ * años.
  */
-export function withStoredTargetBasis(
-  profile: RetirementProfileApi,
-  stored: TargetBasisApi | null | undefined,
-): RetirementProfileApi {
-  if (stored === undefined) return profile;
-  return { ...profile, target_basis: stored };
+export function withBridgeEnabled(
+  pension: PensionPlanApi,
+  enabled: boolean,
+  swrPct: string,
+): PensionPlanApi {
+  if (!enabled) {
+    return { ...pension, bridge_enabled: false };
+  }
+  return {
+    ...pension,
+    bridge_enabled: true,
+    bridge_max_pct: pension.bridge_max_pct ?? defaultBridgePct(swrPct),
+    bridge_max_years: pension.bridge_max_years ?? DEFAULT_BRIDGE_YEARS,
+  };
 }
 
-/** `true` para las estrategias cuyo trigger es una EDAD (y que por tanto la exigen). */
-export function strategyRequiresTargetAge(s: RetirementStrategyApi): boolean {
-  return s === "retire_at_age" || s === "coast";
+/**
+ * `true` para las combinaciones cuyo trigger es una EDAD DE JUBILACIÓN (y que por tanto la
+ * exigen). Espejo de `requires_target_age(strategy, coast_mode)`.
+ *
+ * `coast` **solo** la exige en su modo A (`fixed_retirement_age`): en el modo B el usuario fija
+ * la edad a la que deja de aportar y la fecha de jubilación es el RESULTADO, así que pedirle
+ * además la edad de jubilación sería pedirle la respuesta.
+ */
+export function strategyRequiresTargetAge(
+  strategy: RetirementStrategyApi,
+  coastMode: CoastModeApi,
+): boolean {
+  if (strategy === "retire_at_age") return true;
+  return strategy === "coast" && coastMode === "fixed_retirement_age";
 }
 
 // ---------------------------------------------------------------------------
@@ -539,12 +687,37 @@ export function retirementProfileIssue(p: RetirementProfileApi): string | null {
     return "horizon_lifespan_age_out_of_range";
   }
 
+  // --- Umbral de éxito (C3) ---------------------------------------------------------------
+  // Entero: «95,5 % de los caminos» no significa nada — el umbral se compara contra un conteo.
+  if (
+    !Number.isInteger(p.success_threshold_pct) ||
+    p.success_threshold_pct < MIN_SUCCESS_THRESHOLD_PCT ||
+    p.success_threshold_pct > MAX_SUCCESS_THRESHOLD_PCT
+  ) {
+    return "success_threshold_out_of_range";
+  }
+
   // --- Estrategia ------------------------------------------------------------------------
-  if (strategyRequiresTargetAge(p.strategy) && p.target_retirement_age == null) {
+  if (
+    strategyRequiresTargetAge(p.strategy, p.coast_mode) &&
+    p.target_retirement_age == null
+  ) {
     return "target_retirement_age_required";
   }
-  if (p.strategy === "pension_bridge" && p.pension == null) {
-    return "pension_required_for_bridge";
+  if (
+    p.strategy === "coast" &&
+    p.coast_mode === "fixed_stop_age" &&
+    p.coast_stop_age == null
+  ) {
+    return "coast_stop_age_required";
+  }
+  if (
+    p.strategy === "partial" &&
+    p.partial_retirement != null &&
+    p.partial_retirement.mode === "at_age" &&
+    p.partial_retirement.starts_at_age == null
+  ) {
+    return "partial_start_age_required";
   }
 
   // --- Edades ----------------------------------------------------------------------------
@@ -552,6 +725,15 @@ export function retirementProfileIssue(p: RetirementProfileApi): string | null {
     const a = p.target_retirement_age;
     if (!Number.isInteger(a) || a < MIN_PROFILE_AGE || a > horizon) {
       return "retirement_age_out_of_range";
+    }
+  }
+  if (p.coast_stop_age != null) {
+    // El techo es la jubilación que la espera (o el horizonte si no hay edad fijada): dejar de
+    // aportar DESPUÉS de jubilarte no describe ningún plan.
+    const a = p.coast_stop_age;
+    const ceiling = p.target_retirement_age ?? horizon;
+    if (!Number.isInteger(a) || a < MIN_PROFILE_AGE || a > ceiling) {
+      return "coast_stop_age_out_of_range";
     }
   }
   if (p.pension) {
@@ -570,32 +752,44 @@ export function retirementProfileIssue(p: RetirementProfileApi): string | null {
     const fr = decimalOrZero(p.pension.fraction_while_partial);
     if (fr === null) return "decimal_invalid";
     if (fr < 0 || fr > 1) return "pension_fraction_out_of_range";
+
+    // --- Puente (C2/C7): solo se juzga si está ENCENDIDO ---------------------------------
+    // Apagado, los dos números son inertes y el motor no los mira; rechazar el guardado por un
+    // valor invisible bloquearía el autosave sin que nada en pantalla lo explique.
+    const bridge = resolveBridge(p.pension, p.swr_pct);
+    if (bridge) {
+      const pct = parseDisplayDecimal(bridge.pct);
+      if (pct === null) return "decimal_invalid";
+      if (pct <= 0 || pct > MAX_BRIDGE_PCT) return "bridge_max_pct_out_of_range";
+      // El orden importa: primero «cabe en la escala», después «es un puente de verdad». Al
+      // revés, subir el SWR por encima de 20 daría el mensaje equivocado.
+      if (pct <= swr) return "bridge_max_pct_not_above_swr";
+      if (
+        !Number.isInteger(bridge.years) ||
+        bridge.years < MIN_BRIDGE_YEARS ||
+        bridge.years > MAX_BRIDGE_YEARS
+      ) {
+        return "bridge_max_years_out_of_range";
+      }
+    }
   }
   if (p.partial_retirement) {
     const a = p.partial_retirement.starts_at_age;
-    if (!Number.isInteger(a) || a < MIN_PROFILE_AGE || a > horizon) {
-      return "partial_age_out_of_range";
+    // `null` es legítimo con `mode: "asap"` (la edad sale de la serie); con `at_age` ya lo ha
+    // rechazado `partial_start_age_required` más arriba.
+    if (a != null) {
+      if (!Number.isInteger(a) || a < MIN_PROFILE_AGE || a > horizon) {
+        return "partial_age_out_of_range";
+      }
     }
     // Un ingreso vacío es un año sabático declarado (0 €/mes), no un error: el bloque de media
     // jornada existe precisamente para poder no cobrar nada durante la fase.
     const inc = decimalOrZero(p.partial_retirement.income_monthly_today);
     if (inc === null) return "decimal_invalid";
     if (inc < 0) return "partial_income_negative";
-    if (p.target_retirement_age != null && a >= p.target_retirement_age) {
+    if (a != null && p.target_retirement_age != null && a >= p.target_retirement_age) {
       return "partial_not_before_retirement";
     }
-  }
-
-  // --- Colchón ---------------------------------------------------------------------------
-  //
-  // El UMBRAL de éxito ya no se valida aquí porque ya no existe (V7): el corte es fijo al 100 %
-  // y lo decide el servidor. El PATCH sigue tolerando el campo por compatibilidad, pero la SPA
-  // no lo escribe, así que no hay nada que este espejo pueda rechazar.
-  if (p.cash_buffer_months != null) {
-    if (!Number.isInteger(p.cash_buffer_months) || p.cash_buffer_months < 0) {
-      return "cash_buffer_out_of_range";
-    }
-    if (p.cash_buffer_months > MAX_CASH_BUFFER_MONTHS) return "cash_buffer_out_of_range";
   }
 
   // U4 — se juzga el porcentaje EFECTIVO, no el escrito: `pct`/`start_pct` ausentes heredan
@@ -679,7 +873,10 @@ function samePension(a: PensionPlanApi | null, b: PensionPlanApi | null): boolea
     sameDecimal(a.monthly_amount_today, b.monthly_amount_today) &&
     a.starts_at_age === b.starts_at_age &&
     a.indexed === b.indexed &&
-    sameDecimalZeroDefault(a.fraction_while_partial, b.fraction_while_partial)
+    sameDecimalZeroDefault(a.fraction_while_partial, b.fraction_while_partial) &&
+    a.bridge_enabled === b.bridge_enabled &&
+    sameDecimal(a.bridge_max_pct, b.bridge_max_pct) &&
+    a.bridge_max_years === b.bridge_max_years
   );
 }
 
@@ -689,10 +886,25 @@ function samePartial(
 ): boolean {
   if (a == null || b == null) return a === b;
   return (
+    a.mode === b.mode &&
     a.starts_at_age === b.starts_at_age &&
     sameDecimalZeroDefault(a.income_monthly_today, b.income_monthly_today) &&
     a.expense_basis === b.expense_basis
   );
+}
+
+/** La pensión lista para el wire: importes sin cadenas vacías y el puente ya resuelto. */
+function pensionForWire(pension: PensionPlanApi, swrPct: string): PensionPlanApi {
+  const bridge = resolveBridge(pension, swrPct);
+  return {
+    ...pension,
+    monthly_amount_today: decimalStringForWire(pension.monthly_amount_today),
+    fraction_while_partial: decimalStringForWire(pension.fraction_while_partial),
+    // Con el puente apagado los dos van a `null`: son los valores que el contrato publica para
+    // ese estado, y mandar números inertes invitaría a que el servidor los aplicara algún día.
+    bridge_max_pct: bridge ? bridge.pct : null,
+    bridge_max_years: bridge ? bridge.years : null,
+  };
 }
 
 /**
@@ -705,15 +917,14 @@ function samePartial(
  *  * **Un decimal se compara por VALOR, no por texto.** Sin esto, teclear `3,50` sobre un
  *    `3.5` guardado mandaría un PATCH que no cambia nada, y cada pulsación de una coma sería
  *    una escritura y una invalidación de la cache de proyección.
- *  * **`target_basis` solo viaja si el borrador lo cambia.** El servidor lo DERIVA cuando está
- *    sin fijar (R6); mandarlo en cada PATCH congelaría esa derivación con el valor que se estaba
- *    enseñando, y al declarar después una pensión el objetivo se quedaría en perpetuidad —la
- *    opción conservadora que nadie pidió— sin ningún aviso. Para que esa comparación signifique
- *    «el usuario ha tocado el radio» y no «el servidor resolvió otra cosa», los dos lados deben
- *    llevar la elección ALMACENADA (`withStoredTargetBasis`): con el valor RESUELTO en `before`,
- *    un perfil derivado a `perpetuity` y un radio que el usuario marca en `perpetuity` se ven
- *    iguales y la fijación explícita no se manda nunca. El `null` del borrador («volver a la
- *    derivada») viaja como `null` explícito, que es lo que el tri-estado del servidor espera.
+ *  * **Los bloques viajan ENTEROS o no viajan.** `pension` (con sus tres campos de puente) y
+ *    `partial_retirement` (con su `mode`) se mandan completos: qué campos son obligatorios
+ *    dentro depende de otros campos del mismo bloque, y un merge parcial permitiría estados
+ *    —«puente encendido sin tasa», «modo `at_age` sin edad»— que nadie escribió.
+ *
+ * `coast_stop_age` es el tri-estado nuevo: ausente no cambia nada, un número la fija y `null`
+ * **la suelta**. El servidor la conserva aunque el modo no la use, igual que hace con
+ * `target_retirement_age`, así que borrarla tiene que ser una orden explícita.
  */
 export function buildRetirementProfilePatch(
   before: RetirementProfileApi,
@@ -735,23 +946,18 @@ export function buildRetirementProfilePatch(
   if (before.horizon_lifespan_age !== after.horizon_lifespan_age) {
     patch.horizon_lifespan_age = after.horizon_lifespan_age;
   }
-  if (before.target_basis !== after.target_basis) patch.target_basis = after.target_basis;
-  if (before.bridge_discount_basis !== after.bridge_discount_basis) {
-    patch.bridge_discount_basis = after.bridge_discount_basis;
+  if (before.success_threshold_pct !== after.success_threshold_pct) {
+    patch.success_threshold_pct = after.success_threshold_pct;
+  }
+  if (before.coast_mode !== after.coast_mode) patch.coast_mode = after.coast_mode;
+  if (before.coast_stop_age !== after.coast_stop_age) {
+    patch.coast_stop_age = after.coast_stop_age;
   }
   if (!sameWithdrawalRule(before.withdrawal_rule, after.withdrawal_rule)) {
     patch.withdrawal_rule = withdrawalRuleForWire(after.withdrawal_rule);
   }
   if (!samePension(before.pension, after.pension)) {
-    patch.pension = after.pension
-      ? {
-          ...after.pension,
-          monthly_amount_today: decimalStringForWire(after.pension.monthly_amount_today),
-          fraction_while_partial: decimalStringForWire(
-            after.pension.fraction_while_partial,
-          ),
-        }
-      : null;
+    patch.pension = after.pension ? pensionForWire(after.pension, after.swr_pct) : null;
   }
   if (!samePartial(before.partial_retirement, after.partial_retirement)) {
     patch.partial_retirement = after.partial_retirement
@@ -762,9 +968,6 @@ export function buildRetirementProfilePatch(
           ),
         }
       : null;
-  }
-  if (before.cash_buffer_months !== after.cash_buffer_months) {
-    patch.cash_buffer_months = after.cash_buffer_months;
   }
 
   return patch;
@@ -796,19 +999,38 @@ export function isEmptyRetirementProfilePatch(p: RetirementProfilePatchApi): boo
   return Object.keys(p).length === 0;
 }
 
-/** Bloque de pensión de partida al activar la casilla (importe vacío: lo pone el usuario). */
-export function newPensionPlanDraft(): PensionPlanApi {
-  return {
-    monthly_amount_today: "",
-    starts_at_age: 67,
-    indexed: true,
-    fraction_while_partial: "0",
-  };
+/**
+ * Bloque de pensión de partida al activar la casilla (importe vacío: lo pone el usuario).
+ *
+ * El puente arranca **apagado** —es un ajuste, no el estado natural de tener pensión— y por eso
+ * sus dos números son `null`. El SWR entra igualmente porque es lo que decide con qué tasa se
+ * enciende: el interruptor llama a `withBridgeEnabled` con este mismo valor y no puede
+ * inventarse otro, o la pantalla enseñaría una tasa distinta de la que el servidor guarda.
+ */
+export function newPensionPlanDraft(swrPct: string): PensionPlanApi {
+  return withBridgeEnabled(
+    {
+      monthly_amount_today: "",
+      starts_at_age: 67,
+      indexed: true,
+      fraction_while_partial: "0",
+      bridge_enabled: false,
+      bridge_max_pct: null,
+      bridge_max_years: null,
+    },
+    false,
+    swrPct,
+  );
 }
 
-/** Bloque de media jornada de partida al elegir la estrategia o activar la casilla. */
+/**
+ * Bloque de media jornada de partida al elegir la estrategia o activar la casilla. Arranca en el
+ * modo A (`at_age`) con una edad puesta: es el modo que el usuario puede razonar sin correr el
+ * plan, y dejarlo en `asap` escondería la única decisión que la fase pide.
+ */
 export function newPartialRetirementDraft(): PartialRetirementApi {
   return {
+    mode: "at_age",
     starts_at_age: 60,
     income_monthly_today: "",
     expense_basis: "retirement",
