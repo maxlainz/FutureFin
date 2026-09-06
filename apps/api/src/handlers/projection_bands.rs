@@ -170,9 +170,20 @@ pub(crate) const HTTP_MAX_PATHS: u32 = 5_000;
 /// HTTP **a propósito**: un agente en bucle es el llamante que más fácil satura el semáforo, y
 /// `simulate_projection` es cache-neutral por diseño (cada what-if paga sus caminos enteros).
 /// 2.500 caminos son el default de la superficie —o sea, lo que ya está cacheado— y la diferencia
-/// estadística con 5.000 (0,15 pp de barra frente a 0,11) es menor que el ancho de la propia
-/// banda.
+/// estadística con 5.000 (0,1534 pp de barra frente a 0,0768) es dos órdenes de magnitud menor que
+/// el ancho de la propia banda.
 pub(crate) const MCP_MAX_PATHS: u32 = 2_500;
+
+/// **Los techos de esta capa no pueden pasarse del techo DURO del crate.** Se comprueba en tiempo
+/// de COMPILACIÓN y no en un test: si `HTTP_MAX_PATHS` superara [`MAX_PATHS`], `resolve_paths`
+/// dejaría pasar un valor que `PathEngine::new` rechaza, y el 400 saldría por `map_mc_err` con otro
+/// mensaje —`paths_out_of_range` con el número del crate en vez del de la superficie— desde una
+/// rama que este módulo documenta como inalcanzable.
+const _: () = assert!(HTTP_MAX_PATHS <= MAX_PATHS && MCP_MAX_PATHS <= HTTP_MAX_PATHS);
+
+/// El default tiene que caber en las dos superficies, o la tool MCP contestaría 400 a su propio
+/// default. Compile-time por la misma razón que el de arriba.
+const _: () = assert!(DEFAULT_BANDS_PATHS <= MCP_MAX_PATHS);
 
 pub(crate) const VERDICT_GREEN: &str = "green";
 pub(crate) const VERDICT_AMBER: &str = "amber";
@@ -431,9 +442,17 @@ pub struct ProjectionBandsResponse {
     /// con **un decimal**. Es la barra que se dibuja hacia abajo, que es el lado que decide el
     /// umbral.
     ///
-    /// **Nunca es 0**, ni con cero fallos: con 0 de 2.500 vale 0,1534 pp y se publica `"0.2"`. La
-    /// serie publica esta misma medición con cuatro decimales (es una cifra auditable del solve,
-    /// no una barra de un gráfico); ver [`SAMPLING_ERROR_DP`].
+    /// **Nunca es 0 con cero fallos**: 0 de 2.500 vale 0,1534 pp y se publica `"0.2"`. Ese es el
+    /// caso que existe para cubrir — la aproximación normal daría exactamente cero ahí y
+    /// declararía «100 % seguro».
+    ///
+    /// **El único 0 posible es el simétrico**, con TODOS los caminos fallidos: ahí `p̂ = 0`, la
+    /// cota inferior de Wilson vale 0 exacto —una probabilidad no baja de cero— y la barra HACIA
+    /// ABAJO no tiene dónde ir. No es «medición sin error»: es que toda la incertidumbre está del
+    /// otro lado, y este campo publica el lado que decide el umbral.
+    ///
+    /// La serie publica esta misma medición con cuatro decimales (es una cifra auditable del
+    /// solve, no una barra de un gráfico); ver [`SAMPLING_ERROR_DP`].
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub success_sampling_error_pp: Decimal,
@@ -1112,9 +1131,6 @@ mod tests {
         // El techo del MCP es la mitad: 5 000 es válido por HTTP y 400 por MCP.
         assert!(resolve_paths(Some(5_000), MCP_MAX_PATHS).is_err());
         assert_eq!(resolve_paths(Some(2_500), MCP_MAX_PATHS).unwrap(), 2_500);
-        // El techo HTTP no puede pasarse del techo DURO del crate, o `McError::InvalidPaths`
-        // dejaría de ser inalcanzable y el 400 vendría con otro mensaje.
-        assert!(HTTP_MAX_PATHS <= MAX_PATHS);
     }
 
     /// La barra de error **nunca se publica como 0** en el caso que más se publica —cero fallos—,
@@ -1136,6 +1152,14 @@ mod tests {
             small.half_width_pp,
             clean.half_width_pp
         );
+        // **El caso simétrico**: con TODOS los caminos fallidos la cota inferior es 0 exacto —una
+        // probabilidad no baja de cero— y la barra hacia abajo vale 0. No es un fallo del cálculo
+        // ni «medición sin error»: es que toda la incertidumbre está del otro lado. Se pinea para
+        // que nadie lo lea como el bug que la aproximación normal sí tiene con `p̂ = 1`.
+        let all_fail = SuccessAt::new(1, 2_500, 2_500, [2_500, 0, 0]);
+        assert_eq!(all_fail.success, 0.0);
+        assert_eq!(all_fail.wilson_low, 0.0, "la cota no puede ser negativa");
+        assert_eq!(sampling_error_out(all_fail.half_width_pp), Decimal::ZERO);
     }
 
     /// Una semilla de 64 bits entera sobrevive al viaje por texto — que es la razón de que viaje

@@ -1075,17 +1075,29 @@ Handler: `handlers/retirement_solver.rs`.
 
 **Densidad (`?density=hybrid`)**: con `?density=hybrid` el response decima los arrays grandes (`points`, `needed_capital_curve`, `asset_series[].values`) a un patrón mixto — mes 0..12 mensual + mes 24, 36, … **y siempre el último mes del horizonte** (`density_month_indices`, `handlers/projection.rs`). Ese último empujón es de 4.0.0 y no es cosmético: el bucle anual solo emitía múltiplos de 12, así que con un horizonte que no lo fuera la serie se cortaba antes de tiempo sin decir nada — con `?months=100&density=hybrid` el último punto era el mes 96 y los meses 97–100 no existían en `points`, ni en las series paralelas, ni en `asset_series[].values`, y desaparecía el punto que cualquiera lee como «patrimonio al final»; con `?months=19` se perdía el 32 % del horizonte pedido. Invisible desde la web (el horizonte derivado siempre es años × 12) pero alcanzable por `?months=N` y por la tool MCP `get_projection`, que **fuerza** `hybrid` — o sea, era el camino por defecto de un consumidor conversacional. Pin: `hybrid_density_always_includes_the_last_month_of_the_horizon`. Total ~82 puntos en lugar de ~841. JSON ~5 KB. El compute interno del engine es idéntico (840 meses); solo cambia la serialización. Cada densidad tiene su propia entry en el cache (`ProjectionCacheKey.density`). Milestones, FIRE crossover y compound marker se calculan sobre el array full (no decimado) para no perder precisión. El campo `density: "monthly" | "hybrid"` viaja en el response para que el cliente sepa qué tiene.
 
-### Projection bands (`GET /v1/projection/bands`) — **5.0.0, Monte Carlo (WP6b)**
+### Projection bands (`GET /v1/projection/bands`) — **5.0.0, Monte Carlo del PLAN**
 
-Bandas de percentil del patrimonio y del líquido, probabilidad de éxito del plan y agotamiento por
-edad. Superficie HTTP de `futurefin_engine_stochastic::project_percentile_bands`; handler
+Bandas de percentil del patrimonio y del líquido, éxito del plan con su intervalo y su veredicto, y
+fallo acumulado por edad con el reparto por motivo. Superficie HTTP de
+`futurefin_engine_stochastic::project_percentile_bands`; handler
 `apps/api/src/handlers/projection_bands.rs`, montado dentro de `projection_router()`.
 
 | Query | Cota | Default | Fuera de rango |
 |---|---|---|---|
 | `view` | `mine` \| `household` | `mine` | `household` → **400 `household_bands_unavailable`**; otro valor → 400 `invalid_view` |
-| `paths` | `1..=2000` | 500 (`DEFAULT_PATHS`) | 400 `paths_out_of_range` (se rechaza, **no se clampa**) |
+| `paths` | `1..=5000` (`HTTP_MAX_PATHS`) | **2500** (`DEFAULT_BANDS_PATHS`) | 400 `paths_out_of_range` (se rechaza, **no se clampa**) |
 | `seed` | `u64` en dígitos decimales | `seed_for(installation_id, user_id)` (D23) | 400 `invalid_seed` |
+
+**Las tres cotas cambiaron en 5.0.0** (eran 500 / 2.000, y el MCP 1.000). El default **se desacopló
+del `DEFAULT_PATHS` del crate**, que sigue en 500: 500 caminos bastan para BUSCAR (comparar un mes
+con el siguiente) y 2.500 son los que hacen falta para PUBLICAR — su cota de Wilson con cero fallos
+es 0,99847, o sea una barra de error de 0,15 pp, y dejan alcanzable un umbral del 99 %. El techo
+MCP (`MCP_MAX_PATHS`) es **2.500**, la mitad del de HTTP: un agente en bucle es el llamante que más
+fácil satura el semáforo, y la diferencia estadística con 5.000 (barra de 0,1534 pp frente a
+0,0768 pp) es dos órdenes de magnitud menor que el ancho de la banda.
+
+**`DEFAULT_BANDS_PATHS` ES `retirement_solver::SOLVE_CONFIRM_PATHS`** — la constante del solver se
+define como este símbolo, no como un 2.500 escrito aparte. Es load-bearing: ver §La identidad.
 
 **No acepta `density` ni `months`.** La densidad es **siempre `hybrid`** (arqueología §2.18, veto 22:
 el mismo motivo por el que `get_projection` no lo expone — servir la banda mensual multiplicaría el
@@ -1098,17 +1110,31 @@ independientes. Sumar las dos bandas daría una demasiado ancha en el centro y d
 las colas sin que ningún campo lo dijera. Es la misma razón por la que `simulate_projection` rechaza
 el hogar (`household_not_simulable`): un plan es de una persona.
 
-**El ensamblado es el MISMO que el de la serie** — `build_installation_projection_input` con
-`LedgerView::Mine`, el perfil resuelto del solicitante y su fecha de nacimiento —, así que la línea
-determinista de `/series` y su abanico describen el mismo plan por construcción. Las volatilidades
-viajan en `BuiltProjection::asset_volatility_percent`, un vector **paralelo a `input.assets`**
-rellenado en el mismo `map` que los construye (una σ descolocada produce bandas estrechas y
-creíbles: el peor fallo posible aquí; regresión `projection_bands.rs::the_volatility_vector_follows_the_asset_order`).
+**Se sortea EL PLAN, no el ensamblado en crudo.** El ensamblado es el MISMO que el de la serie
+(`build_installation_projection_input` con `LedgerView::Mine`, el perfil resuelto del solicitante y
+su fecha de nacimiento) y encima se aplica `retirement_solver::plan_scenario`, que fuerza el mes de
+jubilación del nivel 1 — el de `BuiltProjection::plan_level1` si el ensamblado ya lo trae, y si no
+el de un `solve_plan_level1` que el handler corre con `built.plan_profile`. Hasta 4.15.x la
+jubilación la decidía un CRUCE dentro de cada camino, así que cada camino se jubilaba en un mes
+distinto y «éxito» mezclaba dos preguntas —¿ocurre? ¿aguanta?— en una cifra. **El `?seed=` mueve el
+sorteo, jamás el solve**: la fecha del plan se resuelve siempre con la semilla estable.
+
+Las volatilidades viajan en `BuiltProjection::asset_volatility_percent`, un vector **paralelo a
+`input.assets`** rellenado en el mismo `map` que los construye (una σ descolocada produce bandas
+estrechas y creíbles: el peor fallo posible aquí; regresión
+`projection_bands.rs::the_volatility_vector_follows_the_asset_order`).
+
+**La identidad con la serie.** Con el sorteo por defecto —`paths = DEFAULT_BANDS_PATHS` y la semilla
+estable— `success_of_plan` de esta respuesta es, **bit a bit**, el `success_of_plan` del bloque
+«plan» de `GET /v1/projection/series`: mismo escenario, misma semilla, mismo `N`, y los caminos
+dependen solo de `(semilla, índice de camino)`. Con `?seed=` o `?paths=` se re-sortea (otro mercado
+u otro tamaño de muestra) y la identidad no aplica — pero la FECHA no se mueve. Pin:
+`projection_bands.rs::the_bands_success_equals_the_plan_success_for_the_default_draw`.
 
 Response (`ProjectionBandsResponse`):
 
 - `view` (siempre `"mine"`), `months`, `horizon_basis`, `anchor_date_ymd`, `paths`, `percentiles`
-  (fijo `[10,50,90]`), `strategy`, `retirement_trigger`, `computed_in_ms`, `model_note`.
+  (fijo `[10,50,90]`), `strategy`, `computed_in_ms`, `model_note`.
 - **`seed` es un STRING de dígitos**, no un número: es un `u64` y `JSON.parse` lo redondea por
   encima de 2^53 — una semilla que cambia en el ida y vuelta no reproduce nada. Se acepta también
   como string en `?seed=`.
@@ -1117,77 +1143,113 @@ Response (`ProjectionBandsResponse`):
   resolución que `/v1/history/series`: el valor viene de un `f64` y publicar sus 17 dígitos sería
   precisión inventada sobre el percentil de una muestra). Las tres del líquido las omite la tool MCP
   salvo con `include_liquid_bands`.
-- **`success_probability` = el plan OCURRE y AGUANTA** (fracción, string, 6 dp — la misma política
-  que `savings_rate`): fracción de caminos en los que el hogar **se jubila dentro del horizonte**
-  —o la estrategia es por EDAD, y entonces la jubilación es un dato del plan y no un suceso— **Y**
-  la cartera no se agota nunca. Al lado, `success_verdict` ∈ `green` | `amber` | `red` (D28, corte
-  **FIJO desde 5.0.0** —decisión V7—: verde solo con `success_probability == 1`, ámbar en
-  `[0,90, 1)`, rojo por debajo de 0,90). **`success_threshold_pct` ya no viaja**: el umbral
-  configurable del perfil se retiró, así que no hay nada que ecoar para poder auditar el color.
-
-  **La definición cambió en el pase de correcciones de la revisión adversarial del motor.** D22
-  decía solo «la cartera no se agota nunca», y con un trigger por CRUCE eso premiaba al hogar que
-  **no se jubila jamás**: quien nunca llega al objetivo nunca drena, así que nunca se agota. Medido
-  sobre un hogar sintético que cruza en el mes 655 de 840: **0,960 publicados con el 33,1 % de los
-  caminos sin jubilarse**; hoy ese mismo hogar publica **0,629**, con `never_retired_probability`
-  0,331 y `success_given_retired` 0,940. **Las tres se leen juntas y ninguna es la de antes.**
-- `never_retired_probability` (fracción, string, 6 dp) — **cuántos caminos NO se jubilan** dentro
-  del horizonte. Con trigger por EDAD es `"0"` **por construcción** (allí la jubilación llega
-  llegue o no el capital). Es el denominador escondido del éxito: una probabilidad alta con un
-  tercio de caminos que no se jubilan nunca no describe un buen plan, describe un plan que no
-  ocurre. **Identidad comprobable: `success_probability ≤ 1 − never_retired_probability`** (los
-  caminos que no se jubilan no pueden contar como éxito; con trigger por edad la cota es trivial).
-- `success_given_retired` (fracción, string, 6 dp, **o `null`**) — **éxito entre los caminos que SÍ
-  se jubilan**. **`null` ⟺ ningún camino se jubila dentro del horizonte**: ahí la pregunta
-  «¿aguanta?» no tiene sobre qué formularse y un `0` la respondería en falso. Un
-  `success_given_retired` alto junto a un `never_retired_probability` alto es un plan sólido que
-  casi nunca llega a empezar — las dos preguntas que la definición vieja mezclaba en una cifra.
-- `depletion_probability_by_age[]` — `{month_index (rejilla), age (null sin DOB), probability}`
-  cada 5 años desde la jubilación efectiva; **vacío** si ningún camino se jubila dentro del
-  horizonte. **La ÚLTIMA fila es siempre el HORIZONTE** —la ruina total del plan—, así que **el
-  paso hasta ella puede ser de menos de cinco años**: la rejilla avanza de 60 en 60 desde el ancla
-  y antes se paraba en el último múltiplo que cabía (con ancla en el mes 655 y horizonte 840 la
-  tabla terminaba en el 835 y dejaba cinco meses fuera sin decirlo).
-- `retirement_month_index_percentiles` `{p10,p50,p90}` en la rejilla — **solo con trigger por
-  cruce**; `null` con trigger por edad. Un `null` DENTRO del objeto es un percentil que cae sobre un
-  camino que no se jubila nunca.
-- `underfunded_probability` — **solo con trigger por edad** (D17 en versión probabilística); `null`
-  con trigger por cruce. Es el excluyente del anterior, y `retirement_trigger` dice cuál toca.
+- **`success_of_plan` = la fracción de caminos SIN NINGÚN FALLO** (fracción, string, 6 dp — la misma
+  política que `savings_rate`). Hay **tres motivos de fallo y solo tres**, y el bucle clasifica el
+  PRIMERO de cada camino: F1 cartera agotada, F2 tasa inicial de retirada por encima del tope, F3 la
+  regla por saldo no llega a la necesidad ordinaria.
+  **Un camino solo puede fallar estando JUBILADO o en media jornada** (`sim_core.rs`: «un mes
+  acumulando con déficit puede vaciar la cartera, pero eso no es un plan de jubilación que falla»).
+  Consecuencia que hay que leer de frente: **un plan sin fecha alcanzable se simula «sin jubilarse»
+  y publica `success_of_plan = 1` con veredicto verde**, que significa «este plan sin jubilación no
+  se rompe» y NO «llegas». Quien pinte el semáforo mira antes `retirement_date_basis` de la serie;
+  `BANDS_MODEL_NOTE` lo dice para el consumidor que solo ve el JSON. Pin:
+  `a_plan_with_no_reachable_date_draws_the_line_that_never_retires`.
+- `success_threshold_pct` (`80..=100`) — **el umbral del perfil, ecoado**, porque es la restricción
+  que decidió la fecha y el listón del veredicto. Un color sin su umbral no se puede auditar. (En la
+  primera vuelta de 5.0.0 —V7— el corte era fijo al 100 % y este campo no viajaba; el modelo v2 lo
+  devolvió al perfil como restricción load-bearing.)
+- `success_wilson_low` (fracción, string, 6 dp) — **cota inferior del intervalo de Wilson al 95 %**,
+  y **el número contra el que se compara el umbral** por debajo de 100 (C3). Wilson y no la
+  aproximación normal: con `p̂ = 1` la normal da barra exactamente cero y declararía «100 % seguro».
+- `success_sampling_error_pp` (string, **1 decimal**) — la distancia del punto a la cota, en puntos
+  porcentuales: la barra que se dibuja hacia abajo. **Nunca 0 con cero fallos** (0 de 2.500 son
+  0,1534 pp → `"0.2"`); el único 0 posible es el simétrico, con TODOS los caminos fallidos, donde la
+  cota vale 0 exacto porque una probabilidad no baja de cero. **La serie publica esta misma medición
+  con CUATRO decimales** (`retirement_solver::SAMPLING_ERROR_DP`): allí es una cifra auditable del
+  solve, aquí la barra de un gráfico. Misma medición, distinta precisión de publicación.
+- `success_verdict` ∈ `green` | `amber` | `red` — el semáforo, con **la misma regla con la que el
+  solver decidió la fecha** (`SuccessAt::meets`):
+  `verde ⟺ (umbral < 100 ⇒ wilson_low ≥ umbral/100; umbral = 100 ⇒ cero fallos)`;
+  `ámbar ⟺ no verde pero success_of_plan ≥ umbral/100` (el estimador puntual llega, el intervalo
+  no); `rojo` el resto. **Con umbral 100 no hay ámbar** (cumplir es «cero fallos», que es
+  exactamente `success = 1`). Y el verde depende del `N` **de este sorteo**: con cero fallos la cota
+  topa en `n/(n+1,96²)`, así que un umbral del 95 % exige al menos **73 caminos** y el del 99 %,
+  **381**. El plan no se resiente —se resuelve siempre con 500/2.500—, solo el color de un sorteo
+  pedido con pocos caminos.
+- `failures_by_kind: [u32; 3]` — contadores del primer fallo de cada camino, en el orden
+  `[F1, F2, F3]` (los mismos índices que `KIND_*` del crate). Suma `paths − paths·success_of_plan`.
+  Se publican **crudos** porque F1, F2 y F3 tienen arreglos OPUESTOS (más capital / retrasar la
+  fecha / cambiar la regla) y una sola «probabilidad de ruina» los confundía.
+- `failure_probability_by_age[]` — `{month_index, age, probability, by_kind}` cada 5 años desde la
+  jubilación del plan. **Sustituye a `depletion_probability_by_age`**, que solo contaba F1: con la
+  puerta de tasa inicial y la regla por saldo dentro del bucle, el agotamiento dejó de ser el único
+  motivo (pin: `the_failure_curve_counts_more_than_depletion`, un plan `percent_of_balance` con
+  F3 = 100 % y F1 = 0).
+  **La última fila es siempre el HORIZONTE** y cierra al bit en `1 − success_of_plan`, así que el
+  último paso puede ser de menos de cinco años. **Ojo con su índice**: el horizonte del BUCLE es el
+  mes `months` y en la rejilla publicada eso es **`months − 1`** (`engine_month_to_grid`), un punto
+  antes del último de `points[]`. Con un plan sin fecha la tabla trae **una sola fila**, esa, y vale
+  `0` — que no dice «seguro», dice «plan que no ocurre».
+  `by_kind` es el reparto de la **ejecución entera**, repetido en todas las filas: `McOutcome`
+  clasifica el primer fallo de cada camino sobre todo el horizonte y no lo desglosa por mes, así que
+  es exacto solo en la última. Misma convención que
+  `retirement_solver::PlanExtras::failure_probability_by_age`, para que las dos tablas no signifiquen
+  cosas distintas con el mismo nombre.
 - `months_below_need_p50` y `withdrawal_to_need_ratio_p50` — **qué parte de su gasto cubrió el
-  hogar de verdad**. El RECORTE de la regla no es fracaso (D24) y por eso no entra en
-  `success_probability`, pero **estas dos cuentan el recorte Y el descubierto de la cartera** desde
-  el pase de correcciones de la revisión adversarial: `months_below_need_p50` es la mediana entre
-  caminos de los meses jubilados con `withdrawal_shortfall > 0` **o** `unmet_need > 0`, y
-  `withdrawal_to_need_ratio_p50` la mediana de `Σ retirada / Σ (retirada + recorte + descubierto)`
-  (`null` cuando ningún camino tiene meses jubilados con necesidad positiva). **Antes miraban solo
-  el recorte**, que con `fixed_real` es CERO por construcción —el permitido ES la necesidad—, así
-  que el cociente valía `1,0` en los 1.000 caminos de un hogar que cubría el 8,7 % de su gasto y
-  pasaba 366 de 400 meses sin cartera; ese mismo hogar publica hoy **0,086500**. El mes sin dinero
-  no aparecía en ninguna cifra publicada.
+  hogar de verdad**. El RECORTE de la regla no es por sí solo un fracaso (D24) y por eso no entra en
+  `success_of_plan`, pero **estas dos cuentan el recorte Y el descubierto de la cartera**:
+  `months_below_need_p50` es la mediana entre caminos de los meses jubilados con
+  `withdrawal_shortfall > 0` **o** `unmet_need > 0`, y `withdrawal_to_need_ratio_p50` la mediana de
+  la cobertura de la necesidad ORDINARIA (`null` cuando ningún camino tiene meses jubilados con
+  denominador positivo). El numerador se corrigió en E9 (bug B2): descuenta el `withdrawal_excess`
+  de `rule_is_spend` y clampa la necesidad neta **mes a mes**, porque puede ser negativa desde que
+  la pensión supera el gasto.
 - `any_volatility_declared` (con `false` las tres bandas SON la línea determinista).
-- El colchón de caja se retiró en 5.0.0 (modelo v2).
+- **Retirados en el modelo v2** (`assert_the_v1_fields_are_gone` los vigila): `success_probability`
+  (→ `success_of_plan`), `never_retired_probability`, `success_given_retired`,
+  `retirement_month_index_percentiles`, `underfunded_probability`, `depletion_probability_by_age`
+  (→ `failure_probability_by_age`), `retirement_trigger`. Los tres primeros existían porque la
+  jubilación era un SUCESO del camino; con el mes forzado del plan ya no lo es. El colchón de caja
+  se retiró en 5.0.0 (modelo v2, M6).
 
 **Cache propio** (`AppState::bands_cache`, `BandsCacheKey { installation_id, user_id, paths, seed,
 threshold_pct }`) con el TTL de la proyección. Sin `view` en la clave: solo existe una vista
 posible. **`threshold_pct` entró en 5.0.0** porque desde el modelo v2 la respuesta lleva el
 veredicto contra el umbral del perfil (`success_verdict`) y lo ecoa: dos umbrales describen dos
 respuestas distintas del mismo sorteo, y sin ese eje cambiar el umbral en Ajustes devolvía el
-veredicto anterior —verde donde tocaba ámbar— sin que ningún campo lo dijera. Las DOS
-invalidaciones de la proyección —`invalidate_projection_by_installation` y `..._by_user`— borran
-**los dos mapas**: las bandas salen del mismo `ProjectionInput`, y una banda vieja junto a una línea
-nueva son dos cifras que se contradicen en la misma pantalla. (El tercer mapa, `plan_cache`, **no**
-entra en esas invalidaciones — ver §Cache del PLAN.)
+veredicto anterior —verde donde tocaba ámbar— sin que ningún campo lo dijera (pin:
+`the_bands_cache_key_carries_the_threshold`). El handler resuelve el contexto **antes** de mirar la
+cache, porque el umbral está en la clave. Las DOS invalidaciones de la proyección
+—`invalidate_projection_by_installation` y `..._by_user`— borran **los dos mapas**: las bandas salen
+del mismo `ProjectionInput`, y una banda vieja junto a una línea nueva son dos cifras que se
+contradicen en la misma pantalla. (El tercer mapa, `plan_cache`, **no** entra en esas invalidaciones
+— ver §Cache del PLAN.)
 
-**Presupuesto de tiempo, medido** (`crates/engine-stochastic/tests/timing_mc.rs`, release, caso P9 de
+**Presupuesto de tiempo** (`crates/engine-stochastic/tests/timing_mc.rs`, release, caso P9 de
 840 meses): 100 caminos 20,5 ms · 500 caminos 104,2 ms · 1 000 caminos 204,1 ms · 2 000 caminos
-391,4 ms. Extremo a extremo, un MISS del endpoint con los 500 por defecto mide **55 ms en release**
-(49 ms de motor) y **541 ms en debug**; un HIT, 1–4 ms. El presupuesto se aplica **a priori**,
-acotando `paths`, y no con un `timeout`: `spawn_blocking` no se puede cancelar, así que un timeout
-solo liberaría al llamante mientras la CPU sigue ardiendo. Corre bajo el semáforo de simulaciones
-(`heavy::run_projection_sim`). Payload medido: **16,4 KB** a densidad hybrid con las seis series
-(66 puntos), ~9,9 KB sin las del líquido.
+391,4 ms — los cuatro **medidos**. **2 500 → ≈ 500 ms y 5 000 → ≈ 1,0 s son DERIVADOS** de los
+~0,2 ms/camino que sostienen esos cuatro puntos (el coste es lineal en `paths`): el arnés recorre
+hoy `[100, 500, 1 000, 2 000]` y **nadie ha cronometrado todavía el default nuevo ni el techo**.
+Quien añada esas dos filas al arnés borra esta advertencia. Memoria: `2·paths·(horizonte+1)·8`
+bytes — 33,6 MB con el default de 2 500 caminos × 840 meses, 67,3 MB en el extremo de 5 000. El
+presupuesto se aplica **a priori**, acotando `paths`, y no con un `timeout`: `spawn_blocking` no se
+puede cancelar, así que un timeout solo liberaría al llamante mientras la CPU sigue ardiendo. Corre
+bajo el semáforo de simulaciones (`heavy::run_projection_sim`), **el solve y el sorteo bajo UN solo
+permiso**. Payload medido (`the_hybrid_payload_stays_within_the_context_budget`, que lo imprime):
+**19,3 KB** a densidad hybrid con las seis series (66 puntos), ~12,6 KB sin las del líquido, de los
+cuales **4,8 KB son `model_note`**; el presupuesto de contexto es 32 KB. Creció desde los 16,4 KB de
+la primera vuelta de 5.0.0 por la nota reescrita y el `by_kind` de cada fila de la curva.
 
-Tests: `apps/api/tests/projection_bands.rs` (recuéntalos: `grep -c '#\[tokio::test\]' apps/api/tests/projection_bands.rs`), más el eco de `view` en `context_fields.rs` y, para la invalidación por regla de ahorro, `projection_cache.rs::an_allocation_rule_mutation_drops_the_projection_and_the_bands`.
+> **Coste del MISS, y por qué conviene mirarlo.** Mientras `build_installation_projection_input`
+> devuelva `plan_level1: None` —hoy lo rellena `run_member_projection`, no el ensamblado—, cada MISS
+> de bandas paga **un solve de plan entero** además del sorteo, y el solve DOMINA: medido en `debug`
+> sobre un hogar de un activo, `computed_in_ms` = **2.904 ms** con 120 caminos (el sorteo solo son
+> unos cientos de ms; el resto es la bisección). Bajo contención de la suite entera se han visto
+> MISSes de decenas de segundos. Una carga de la SPA que pida serie y bandas **resuelve el mismo
+> plan dos veces**. La salida barata es que el ensamblado —o la entrada de cache de proyección—
+> publique el nivel 1 ya resuelto: el handler lo usa en cuanto exista, sin tocar nada más.
+
+Tests: `apps/api/tests/projection_bands.rs` (recuéntalos: `grep -c '#\[tokio::test\]' apps/api/tests/projection_bands.rs`), más el eco de `view` en `context_fields.rs`, las cotas de `paths` en `query_param_validation.rs` y, para la invalidación por regla de ahorro, `projection_cache.rs::an_allocation_rule_mutation_drops_the_projection_and_the_bands`.
 
 **Two-phase loading en el cliente**: `App.tsx` dispara `?density=hybrid` y `?density=monthly` en paralelo. El hybrid suele llegar primero (JSON más pequeño) → se renderiza el chart con menos puntos. Cuando llega el monthly, se reemplaza dentro de `startTransition()` (sin bloquear inputs). Si ambos son cache hit, ambos llegan en <10 ms → el hybrid no añade latencia perceptible.
 

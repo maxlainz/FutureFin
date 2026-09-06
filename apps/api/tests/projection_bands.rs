@@ -177,10 +177,22 @@ fn assert_success_block_is_consistent(b: &Value) {
         .expect("la barra viaja como string decimal")
         .parse()
         .expect("barra parseable");
-    assert!(
-        bar > 0.0,
-        "la barra de Wilson NUNCA es cero, tampoco con cero fallos: {b}"
-    );
+    // **La barra es cero en un solo caso, y no es «medición sin error»**: con TODOS los caminos
+    // fallidos (`p̂ = 0`) la cota inferior de Wilson vale 0 exacto —una probabilidad no baja de
+    // cero—, así que la barra HACIA ABAJO no tiene dónde ir. Con cualquier éxito por encima de 0,
+    // incluido el 1 perfecto, es estrictamente positiva: ese es el sentido entero de Wilson
+    // frente a la aproximación normal.
+    if success > 0.0 {
+        assert!(
+            bar > 0.0,
+            "con éxito > 0 la barra de Wilson NUNCA es cero, tampoco con CERO fallos: {b}"
+        );
+    } else {
+        assert_eq!(
+            bar, 0.0,
+            "con p̂ = 0 la cota inferior es 0 exacto y la barra hacia abajo también: {b}"
+        );
+    }
     assert!(
         (bar - (success - low) * 100.0).abs() <= 0.06,
         "la barra ({bar} pp) debe ser la distancia punto→cota ({} pp) salvo el redondeo a un \
