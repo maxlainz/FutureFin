@@ -572,28 +572,26 @@ describe("memberPlanSentence — tercera persona, con estado (U10 + B7)", () => 
       strategy: "asap",
       jubilacion_month_index: null,
       jubilacion_age: null,
-      coast_fire_month_index: null,
       partial_retirement_month_index: null,
-      underfunded: null,
       warnings: [],
       plan_state: "household_not_solved",
       ...over,
     };
   }
 
-  it("estrategia por edad: la fecha está FIJADA, y se dice que lo está", () => {
+  it("estrategia por edad: la fecha está FIJADA, con el rótulo de producto de su estrategia", () => {
     const s = memberPlanSentence(
       member({ strategy: "retire_at_age", jubilacion_month_index: 420, jubilacion_age: 60 }),
       monthLabel,
     );
-    expect(s.text).toBe("Max se jubila a los 60 (fecha fijada).");
+    expect(s.text).toBe("Max: A una edad fija — a los 60, M420.");
     expect(s.tone).toBe("ok");
   });
 
-  it("estrategia por cruce: el hogar NO resuelve su fecha, y manda a su vista «Yo»", () => {
+  it("estrategia por umbral: el hogar NO resuelve su fecha, y manda a su vista Jubilación", () => {
     const s = memberPlanSentence(member({ username: "Ada" }), monthLabel);
     expect(s.text).toBe(
-      "Ada: sin fecha calculada en la vista Hogar — mírala en su vista «Yo».",
+      "Ada: Cuanto antes (FIRE clásico) — fecha válida: en su vista Jubilación.",
     );
     expect(s.tone).toBe("ok");
   });
@@ -604,40 +602,47 @@ describe("memberPlanSentence — tercera persona, con estado (U10 + B7)", () => 
       monthLabel,
     );
     expect(s.text).toBe(
-      "Ada: sin fecha calculada en la vista Hogar — mírala en su vista «Yo» — falta su fecha de nacimiento.",
+      "Ada: Cuanto antes (FIRE clásico) — fecha válida: en su vista Jubilación — falta su fecha de nacimiento.",
     );
     expect(s.tone).toBe("danger");
   });
 
-  it("`underfunded` gana a cualquier hueco de configuración y pinta de rojo", () => {
+  // El hogar nunca publicó una aportación mínima ni un margen por miembro (D9): no hay un
+  // «infra-financiado» que un booleano pueda decidir aquí, así que el único estado que puede
+  // pintar de rojo o de ámbar a un miembro es uno de sus `warnings` — la tabla de precedencia de
+  // MEMBER_WARNING_SUFFIX sigue viva sin el atajo de `underfunded`.
+  it("un aviso de configuración incompleta pinta de ámbar aunque la fecha esté fijada", () => {
     const s = memberPlanSentence(
       member({
         strategy: "retire_at_age",
         jubilacion_month_index: 420,
         jubilacion_age: 60,
-        underfunded: true,
         warnings: ["target_retirement_age_missing"],
       }),
       monthLabel,
     );
-    expect(s.text).toBe("Max se jubila a los 60 (fecha fijada) — con su ahorro actual no llega.");
-    expect(s.tone).toBe("danger");
+    expect(s.text).toBe(
+      "Max: A una edad fija — a los 60, M420 — falta su edad de jubilación.",
+    );
+    expect(s.tone).toBe("warn");
   });
 
-  it("coast y jornada reducida añaden su hito, sin inventar cifras", () => {
+  // El mes coast por miembro (`coast_fire_month_index`) ya no viaja: el hogar no resuelve el
+  // plan de nadie y ese campo era exactamente una cifra del solve. Solo queda la jornada
+  // reducida, que es un hecho determinista.
+  it("la jornada reducida añade su hito, sin inventar cifras (el mes coast ya no viaja por miembro)", () => {
     const s = memberPlanSentence(
       member({
         username: "Mariona",
         strategy: "coast",
         jubilacion_month_index: 216,
         jubilacion_age: 58,
-        coast_fire_month_index: 96,
         partial_retirement_month_index: 120,
       }),
       monthLabel,
     );
     expect(s.text).toBe(
-      "Mariona se jubila a los 58 (fecha fijada) y deja de aportar en M96 y hace jornada reducida desde M120.",
+      "Mariona: Ahorrar ahora y dejar crecer (Coast FIRE) — a los 58, M216 (hace jornada reducida desde M120).",
     );
   });
 
@@ -647,7 +652,7 @@ describe("memberPlanSentence — tercera persona, con estado (U10 + B7)", () => 
       monthLabel,
     );
     expect(s.text).toBe(
-      "Ada: sin fecha calculada en la vista Hogar — mírala en su vista «Yo» (hace jornada reducida desde M60).",
+      "Ada: Jornada reducida (Barista FIRE) — fecha válida: en su vista Jubilación (hace jornada reducida desde M60).",
     );
   });
 
@@ -656,7 +661,7 @@ describe("memberPlanSentence — tercera persona, con estado (U10 + B7)", () => 
       member({ strategy: "retire_at_age", jubilacion_month_index: 420 }),
       monthLabel,
     );
-    expect(s.text).toBe("Max se jubila en M420 (fecha fijada).");
+    expect(s.text).toBe("Max: A una edad fija — M420.");
   });
 
   it("quien ya puede jubilarse no espera «0 meses»", () => {
@@ -665,7 +670,7 @@ describe("memberPlanSentence — tercera persona, con estado (U10 + B7)", () => 
         member({ strategy: "retire_at_age", jubilacion_month_index: 0 }),
         monthLabel,
       ).text,
-    ).toBe("Max ya se puede jubilar (fecha fijada).");
+    ).toBe("Max: A una edad fija — ya puede jubilarse.");
   });
 
   it("un nombre vacío no deja la frase sin sujeto", () => {
@@ -674,6 +679,28 @@ describe("memberPlanSentence — tercera persona, con estado (U10 + B7)", () => 
         member({ username: "  ", strategy: "retire_at_age", jubilacion_month_index: 12, jubilacion_age: 40 }),
         monthLabel,
       ).text,
-    ).toBe("Esta persona se jubila a los 40 (fecha fijada).");
+    ).toBe("Esta persona: A una edad fija — a los 40, M12.");
+  });
+
+  // El struct de Rust nunca publicó `coast_fire_month_index` ni `underfunded` para un miembro del
+  // hogar (`HouseholdMemberProjection`, `apps/api/src/handlers/projection.rs`); esta frase los leyó
+  // de todos modos hasta que W10 encontró el hueco. Si un cliente viejo, o cualquier objeto que
+  // no pase por el tipo, todavía trae esas dos claves en el JSON, la frase no puede cambiar por
+  // su presencia — el día que alguien las reintroduzca sin querer, este test lo dice.
+  it("`coast_fire_month_index`/`underfunded` en el JSON (cliente viejo) no cambian la frase", () => {
+    const base = member({
+      strategy: "coast",
+      jubilacion_month_index: 216,
+      jubilacion_age: 58,
+      partial_retirement_month_index: 120,
+    });
+    const withStaleFields = {
+      ...base,
+      coast_fire_month_index: 96,
+      underfunded: true,
+    } as MemberPlanSentenceMember;
+    expect(memberPlanSentence(withStaleFields, monthLabel)).toEqual(
+      memberPlanSentence(base, monthLabel),
+    );
   });
 });

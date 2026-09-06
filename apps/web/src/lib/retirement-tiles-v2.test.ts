@@ -123,6 +123,24 @@ describe("las dos tarjetas FIJAS", () => {
     expect(Object.keys(input())).not.toContain("deflator");
   });
 
+  // El plan SÍ está resuelto (`plan_absent_reason: null`) y aun así falta esta CIFRA sola: el
+  // subtítulo tiene que decir por qué en vez de repetir «en euros de hoy» junto a un guion mudo.
+  it("sin capital necesario, PERO con plan resuelto, el subtítulo dice el motivo de la CIFRA", () => {
+    const reason = (r: RetirementTileV2Series["needed_capital_absent_reason"]) =>
+      tile(
+        input({ needed_capital_today: null, needed_capital_absent_reason: r }),
+        "needed_capital",
+      )!;
+    expect(reason("no_liquid_assets").value).toBe("—");
+    expect(reason("no_liquid_assets").subtitle).toBe("sin activos líquidos que escalar");
+    expect(reason("threshold_unreachable").subtitle).toBe("ningún capital alcanza tu umbral");
+    expect(reason("month_beyond_horizon").subtitle).toBe("la fecha cae fuera del horizonte");
+    // Un literal que este backend no reconoce (o su ausencia) cae al «no disponible» genérico de
+    // la casa, nunca a la frase de «en euros de hoy» que prometía una cifra que no llegó.
+    expect(reason(undefined).subtitle).toBe("no disponible");
+    expect(reason(undefined).subtitle).not.toContain("en euros de hoy");
+  });
+
   it("«Éxito del plan» lleva el umbral y la precisión del sorteo en el subtítulo", () => {
     const t = tile(input(), "success")!;
     expect(t.label).toBe("Éxito del plan");

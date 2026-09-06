@@ -80,6 +80,7 @@ export type RetirementTileV2Series = Pick<
   | "paths_used"
   | "seed"
   | "needed_capital_today"
+  | "needed_capital_absent_reason"
   | "contribution_required_monthly"
   | "contribution_required_search_ceiling"
   | "contribution_underfunded"
@@ -185,6 +186,28 @@ function planUnavailableReason(series: RetirementTileV2Series): string | null {
   }
 }
 
+/**
+ * Por qué falta `needed_capital_today` cuando el resto del plan SÍ está resuelto — la pregunta que
+ * `planUnavailableReason` de arriba responde para el bloque entero, aquí para esta CIFRA sola. Los
+ * tres literales son los de `needed_capital.rs` (ver el doc de `needed_capital_absent_reason` en
+ * `api/types.ts`); uno que esta función no reconoce cae al mismo «no disponible» genérico que el
+ * resto de razones de ausencia de la app, nunca a un guion mudo.
+ */
+function neededCapitalAbsentReasonEs(
+  reason: string | null | undefined,
+): string {
+  switch (reason) {
+    case "no_liquid_assets":
+      return "sin activos líquidos que escalar";
+    case "threshold_unreachable":
+      return "ningún capital alcanza tu umbral";
+    case "month_beyond_horizon":
+      return "la fecha cae fuera del horizonte";
+    default:
+      return "no disponible";
+  }
+}
+
 /** «a los 55 años» a partir del resolutor inyectado; `null` sin fecha de nacimiento. */
 function ageBit(
   monthIndex: number,
@@ -231,19 +254,23 @@ export function buildRetirementTilesV2(
   const unavailable = planUnavailableReason(series);
   const tiles: RetirementTileV2[] = [];
 
-  // 1 · Capital necesario hoy — fija, primera, siempre en euros de HOY.
+  // 1 · Capital necesario hoy — fija, primera, siempre en euros de HOY. Con el plan resuelto pero
+  // sin esta CIFRA sola (`needed_capital_absent_reason`), el subtítulo dice por qué en vez de
+  // repetir «en euros de hoy» junto a un guion mudo.
   tiles.push({
     key: "needed_capital",
     label: "Capital necesario hoy",
     value: unavailable ? METRIC_DASH : money(series.needed_capital_today),
     subtitle:
       unavailable ??
-      joinBits([
-        "en euros de hoy",
-        finite(series.success_threshold_pct)
-          ? `para que aguanten ${series.success_threshold_pct} de cada 100 escenarios`
-          : null,
-      ]),
+      (series.needed_capital_today == null
+        ? neededCapitalAbsentReasonEs(series.needed_capital_absent_reason)
+        : joinBits([
+            "en euros de hoy",
+            finite(series.success_threshold_pct)
+              ? `para que aguanten ${series.success_threshold_pct} de cada 100 escenarios`
+              : null,
+          ])),
     tone: "default",
     helpId: "retirement.needed_capital",
   });

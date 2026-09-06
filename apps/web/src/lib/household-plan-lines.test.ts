@@ -9,7 +9,8 @@
  *    aquí no rompería nada visible — solo haría que la frase de Max acompañara a la curva de
  *    Mariona.
  *  * **El TONO (B7).** Cada línea lleva el suyo. Antes las frases se leían todas iguales, y un
- *    miembro infra-financiado o sin fecha de nacimiento pasaba por uno que llega.
+ *    miembro con un aviso propio (le falta un dato, o no llega con la estrategia que fijó) pasaba
+ *    por uno que llega.
  */
 
 import { describe, expect, it } from "vitest";
@@ -24,9 +25,7 @@ function member(over: Partial<HouseholdPlanLineMember> = {}): HouseholdPlanLineM
     strategy: "asap",
     jubilacion_month_index: null,
     jubilacion_age: null,
-    coast_fire_month_index: null,
     partial_retirement_month_index: null,
-    underfunded: null,
     warnings: [],
     plan_state: "household_not_solved",
     ...over,
@@ -34,7 +33,7 @@ function member(over: Partial<HouseholdPlanLineMember> = {}): HouseholdPlanLineM
 }
 
 describe("householdPlanLines", () => {
-  it("el ejemplo de U10 en el modelo v2: fecha fijada de quien la tiene, y remisión a «Yo» de quien no", () => {
+  it("el ejemplo de U10 en el modelo v2: fecha fijada de quien la tiene, con el rótulo de su estrategia", () => {
     const lines = householdPlanLines(
       [
         member({
@@ -59,31 +58,33 @@ describe("householdPlanLines", () => {
       {
         userId: "u1",
         username: "Max",
-        text: "Max se jubila a los 55 (fecha fijada).",
+        text: "Max: A una edad fija — a los 55, M144.",
         tone: "ok",
       },
       {
         userId: "u2",
         username: "Mariona",
         text:
-          "Mariona se jubila a los 60 (fecha fijada) y hace jornada reducida desde M120.",
+          "Mariona: Jornada reducida (Barista FIRE) — a los 60, M216 (hace jornada reducida desde M120).",
         tone: "ok",
       },
     ]);
   });
 
-  it("una estrategia por cruce no tiene fecha en Hogar: se dice, y se manda a su vista «Yo» (B7)", () => {
+  it("una estrategia por umbral no tiene fecha en Hogar: se dice, y se manda a su vista Jubilación (B7)", () => {
     const [line] = householdPlanLines(
       [member({ username: "Ada", strategy: "asap" })],
       monthLabel,
     );
     expect(line.text).toBe(
-      "Ada: sin fecha calculada en la vista Hogar — mírala en su vista «Yo».",
+      "Ada: Cuanto antes (FIRE clásico) — fecha válida: en su vista Jubilación.",
     );
     expect(line.tone).toBe("ok");
   });
 
-  it("el estado de cada persona viaja en su línea: infra-financiada en rojo (B7)", () => {
+  // El hogar no publica aportación mínima ni margen por miembro (D9): sin ese booleano, lo único
+  // que puede pintar de rojo o de ámbar a un miembro es uno de sus `warnings`.
+  it("el estado de cada persona viaja en su línea: un aviso de configuración en ámbar, la fecha de nacimiento en rojo (B7)", () => {
     const lines = householdPlanLines(
       [
         member({
@@ -92,7 +93,7 @@ describe("householdPlanLines", () => {
           strategy: "retire_at_age",
           jubilacion_month_index: 144,
           jubilacion_age: 55,
-          underfunded: true,
+          warnings: ["target_retirement_age_missing"],
         }),
         member({
           user_id: "u2",
@@ -103,9 +104,9 @@ describe("householdPlanLines", () => {
       monthLabel,
     );
     expect(lines[0].text).toBe(
-      "Max se jubila a los 55 (fecha fijada) — con su ahorro actual no llega.",
+      "Max: A una edad fija — a los 55, M144 — falta su edad de jubilación.",
     );
-    expect(lines[0].tone).toBe("danger");
+    expect(lines[0].tone).toBe("warn");
     expect(lines[1].tone).toBe("danger");
     expect(lines[1].text).toContain("falta su fecha de nacimiento");
   });

@@ -49,7 +49,6 @@ function member(
     jubilacion_month_index: null,
     jubilacion_age: null,
     retirement_month_index: null,
-    coast_fire_month_index: null,
     partial_retirement_month_index: null,
     pension_start_month_index: null,
     assets_depleted_month_index: null,

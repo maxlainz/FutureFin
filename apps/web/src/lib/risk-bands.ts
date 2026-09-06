@@ -50,6 +50,7 @@ import {
 } from "./format";
 import type { HelpTextId } from "./helpTexts";
 import { lastPointIndexAtOrBeforeMonth } from "./projection-chart";
+import { riskCutoffsForThreshold } from "./risk-gradient";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Los ids de ayuda de las filas y las tarjetas del plan
@@ -239,6 +240,33 @@ export function successVerdictTone(
 ): RiskTone {
   if (verdict === "red") return "danger";
   if (verdict === "amber") return "warn";
+  return "ok";
+}
+
+/**
+ * Respaldo de `successVerdictTone` para el caso patológico en que `success_verdict` no viaja
+ * (`SummaryPlan::success_verdict` solo es `Some` cuando `success_of_plan`, `success_wilson_low` Y
+ * `success_threshold_pct` convierten los tres a `f64`; un desbordamiento aislado de uno solo deja
+ * el resto con cifra y el veredicto a `null`). Sin este respaldo, `successVerdictTone(null)` cae a
+ * `ok` **sin piel** — la lectura correcta para «no hay veredicto que evaluar», pero incorrecta
+ * para «hay un 40 % que sí se puede colorear y nadie lo coloreó».
+ *
+ * Usa los MISMOS cortes que la banda de riesgo de Jubilación (`riskCutoffsForThreshold`, sobre la
+ * probabilidad de FALLO — `1 − success_wilson_low`) para que un plan que se leería en rojo en el
+ * gráfico no se lea en verde aquí por dos reglas distintas. No es una segunda implementación de
+ * `success_verdict`: ese compara el estimador puntual Y el intervalo contra el umbral en dos
+ * pasos; esto es una escala continua de una sola cifra, más simple a propósito porque solo se usa
+ * cuando la cifra exacta ya no está.
+ */
+function toneFromWilsonLow(
+  wilsonLow: number | null | undefined,
+  thresholdPct: number | null | undefined,
+): RiskTone {
+  if (wilsonLow == null || !Number.isFinite(wilsonLow)) return "ok";
+  const cutoffs = riskCutoffsForThreshold(thresholdPct);
+  const failureProb = 1 - wilsonLow;
+  if (failureProb >= cutoffs.red) return "danger";
+  if (failureProb >= cutoffs.amber) return "warn";
   return "ok";
 }
 
@@ -627,10 +655,16 @@ export type SuccessTileModel = {
  *  `no_liquid_assets` se retiró de esta tabla en A12: nunca fue un literal de `absent_reason` ni
  *  de `success_absent_reason` —vive en `needed_capital_absent_reason`, que dice por qué falta una
  *  cifra, no por qué falta el éxito— y traducirlo aquí prometía una frase que ningún backend
- *  podía disparar. */
+ *  podía disparar.
+ *
+ *  `household_not_solved` se retiró de esta tabla en W10, por la MISMA razón: solo existe como
+ *  `members[].plan_state` (`apps/api/src/handlers/projection.rs`,
+ *  `PLAN_STATE_HOUSEHOLD_NOT_SOLVED`) — nunca como `success_absent_reason` (que en `view=household`
+ *  es 400 `household_bands_unavailable`, no un motivo que traducir) ni como el `absent_reason` del
+ *  Resumen (que en Hogar es `household_aggregate`, `apps/api/src/handlers/summary.rs`). Traducirlo
+ *  aquí prometía una frase que ningún backend podía disparar por esta ruta. */
 const SUCCESS_ABSENT_ES: Record<string, string> = {
   household_aggregate: "solo en tu vista «Yo»",
-  household_not_solved: "solo en tu vista «Yo»",
   projection_unavailable: "no se pudo calcular tu proyección",
   bands_unavailable: "no se pudieron sortear los escenarios",
   birth_date_missing: "falta tu fecha de nacimiento",
@@ -690,7 +724,14 @@ export function summarySuccessTile(
     };
   }
 
-  const tone = successVerdictTone(plan.success_verdict);
+  // `success_verdict` manda siempre que viaje: es la MISMA función que el fan chart, sobre la
+  // MISMA muestra. Solo se cae a `success_wilson_low` cuando el servidor no publicó veredicto con
+  // cifra puesta (ver el doc de `toneFromWilsonLow`) — nunca al revés, que enseñaría dos tonos
+  // del mismo plan según cuál mirase antes.
+  const tone =
+    plan.success_verdict != null
+      ? successVerdictTone(plan.success_verdict)
+      : toneFromWilsonLow(plan.success_wilson_low, plan.success_threshold_pct);
   return {
     value: formatSuccessPercent(plan.success_of_plan),
     // Sin `paths` en el bloque `plan` del Resumen, el subtítulo del 100 % cae a la frase genérica:

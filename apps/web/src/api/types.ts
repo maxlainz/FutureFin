@@ -457,6 +457,12 @@ export type SummaryPlanApi = {
    * aquí. `null` sin fecha válida (ver `plan_state`).
    */
   success_of_plan: number | null;
+  /** FRACCIÓN [0,1]: cota INFERIOR del intervalo de Wilson al 95 % de `success_of_plan` — el
+   *  número contra el que el servidor compara el umbral por debajo de 100 % (estable frente a la
+   *  semilla y a N, que es justo lo que `success_of_plan` no es). Mismo valor, mismo cache de
+   *  plan, que `ProjectionSeriesApi.success_wilson_low` y que `ProjectionBandsApi.success_wilson_low`.
+   *  `null` a la vez que `success_of_plan`. */
+  success_wilson_low?: number | null;
   /** Umbral EFECTIVO contra el que se evaluó `success_of_plan` (eco del perfil, 80–100). `null`
    *  a la vez que `success_of_plan`. */
   success_threshold_pct: number | null;
@@ -640,9 +646,6 @@ export type AssetSeriesApi = {
   values: number[];
 };
 
-/** Qué disparó la jubilación de la simulación (5.0.0, D17). */
-export type RetirementTriggerApi = "liquid_crossing" | "target_age";
-
 /** Fase del motor por la que pasa la simulación (5.0.0, §B.1). Monótonas: la que no ocurre no
  *  aparece en `phase_transitions`. */
 export type ProjectionPhaseApi = "accumulating" | "partial" | "retired";
@@ -669,16 +672,12 @@ export type HouseholdMemberProjectionApi = {
   // v2 y `HouseholdMemberProjection` (`apps/api/src/handlers/projection.rs`) dejó de publicarlo.
   /** El mes efectivo otra vez, con el nombre del motor (= `jubilacion_month_index`, R8). */
   retirement_month_index: number | null;
-  /** Mes «coast» de ESTE miembro, en la rejilla común (5.0.0 WP5-2b). `null` con cualquier
-   *  estrategia que no sea `coast`, y también con `coast` cuando su plan no llega ni aportando
-   *  siempre (entonces lleva `coast_not_reachable` en sus `warnings`). */
-  coast_fire_month_index: number | null;
-  /** `true` ⟺ ni invirtiendo cada euro de sobrante llega a su edad objetivo (D17). **`null` = la
-   *  pregunta no aplica a su estrategia**, nunca `false` para decir «no aplica». */
-  underfunded?: boolean | null;
-  // `required_contribution_monthly` y `disposable_monthly` TAMPOCO se declaran: el agregado del
-  // hogar no resuelve el plan de nadie (D9), así que no hay aportación mínima ni margen por
-  // persona que publicar, y el struct de Rust no los lleva.
+  // `coast_fire_month_index`, `underfunded`, `required_contribution_monthly` y
+  // `disposable_monthly` TAMPOCO se declaran: el agregado del hogar no resuelve el plan de nadie
+  // (D9), así que no hay mes coast, margen infra-financiado, aportación mínima ni margen por
+  // persona que publicar, y el struct de Rust no los lleva. Los dos primeros sobrevivieron aquí
+  // hasta W10 solo porque `memberPlanSentence` (`plan-sentence.ts`) los seguía leyendo sin que el
+  // servidor los sirviera jamás — un campo tipado que ninguna respuesta real rellenaba.
   /** Mes de inicio de la media jornada. `null` si esa fase no ocurre. */
   partial_retirement_month_index: number | null;
   /** Mes de inicio de la pensión con fecha. `null` sin pensión declarada. */
@@ -705,10 +704,9 @@ export type HouseholdMemberProjectionApi = {
    *  Lo que este miembro conserva son sus lecturas DETERMINISTAS —el mes de jubilación por edad,
    *  el de media jornada, el de la pensión, el de agotamiento y su horizonte propio— y **ni una
    *  cifra del solve**: no hay éxito, ni fecha válida, ni capital necesario, ni aportación mínima,
-   *  ni margen. El doc anterior citaba tres campos (`required_contribution_monthly`,
-   *  `disposable_monthly`, `coast_fire_month_index`) que el servidor había dejado de publicar con
-   *  el modelo v2; los dos primeros se retiraron de este tipo en A12 (`coast_fire_month_index`
-   *  sigue declarado porque `memberPlanSentence` todavía lo lee — ver issue abierta).
+   *  ni margen, ni mes coast. Este tipo se sincronizó del todo con `HouseholdMemberProjection`
+   *  en W10 (issue #207): el doc anterior citaba varios campos que el servidor había dejado de
+   *  publicar con el modelo v2 pero que este tipo, o `memberPlanSentence`, seguían leyendo.
    *  Ausente en backends anteriores al modelo v2. */
   plan_state?: "household_not_solved";
 };
@@ -914,6 +912,19 @@ export type ProjectionSeriesApi = {
    *  CIFRA de un plan que sí existe. Confundirlas fue lo que metió `no_liquid_assets` en la unión
    *  de `plan_absent_reason` y en cuatro tablas de copy que nunca podían dispararse. */
   needed_capital_today?: string | null;
+  /** Por qué falta `needed_capital_today` cuando el resto del plan SÍ está resuelto —
+   *  `no_liquid_assets` (el hogar no tiene líquido que escalar, o la escala ya lo deja a cero en
+   *  el cierre anterior) | `threshold_unreachable` (ni multiplicando la cartera se cumple el
+   *  umbral: el plan no falla por capital) | `month_beyond_horizon` (el mes pedido cae fuera del
+   *  horizonte de la entrada). Mismos tres literales que
+   *  `crates/engine-stochastic/src/needed_capital.rs` (`ABSENT_NO_LIQUID_ASSETS`,
+   *  `ABSENT_THRESHOLD_UNREACHABLE`, `ABSENT_MONTH_BEYOND_HORIZON`). `null` ⟺ hay cifra, o no hay
+   *  plan (`plan_absent_reason`). */
+  needed_capital_absent_reason?:
+    | "no_liquid_assets"
+    | "threshold_unreachable"
+    | "month_beyond_horizon"
+    | null;
   /** f64[] (excepción chart-only) paralelo a `points[]`: capital necesario por edad en cada mes
    *  de la rejilla, SIN escalar (C4), en euros NOMINALES de cada mes (la SPA la deflacta con el
    *  mismo factor que el patrimonio). No tiene por qué cruzar la línea central: lo que cruza es el

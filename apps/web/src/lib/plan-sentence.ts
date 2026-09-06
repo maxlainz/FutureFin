@@ -44,6 +44,7 @@ import type {
 } from "../api/types";
 import type { CoastModeApi } from "../api/types";
 import { formatCurrencyAmount } from "./format";
+import { RETIREMENT_STRATEGY_LABEL } from "./retirementProfile";
 import { scenariosPerHundred } from "./risk-bands";
 
 /** Tono de la frase — el mismo vocabulario de estado que `plan-card.ts` y el design system
@@ -554,16 +555,19 @@ function alternativeDates(
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 /** Los campos de un miembro del hogar que la frase en tercera persona necesita. B7: la frase
- *  anterior leía tres campos y se callaba el estado que el servidor ya publicaba. */
+ *  anterior leía tres campos y se callaba el estado que el servidor ya publicaba.
+ *
+ *  **NO lleva `coast_fire_month_index` ni `underfunded`**: el hogar no resuelve el plan de nadie
+ *  (D9) y `HouseholdMemberProjection` (`apps/api/src/handlers/projection.rs`) nunca los publicó —
+ *  esta frase los leyó igual hasta que la revisión de W10 encontró el hueco. Si cualquiera de los
+ *  dos vuelve a este objeto en el JSON de un cliente viejo, `memberPlanSentence` no lo mira. */
 export type MemberPlanSentenceMember = Pick<
   HouseholdMemberProjectionApi,
   | "username"
   | "strategy"
   | "jubilacion_month_index"
   | "jubilacion_age"
-  | "coast_fire_month_index"
   | "partial_retirement_month_index"
-  | "underfunded"
   | "warnings"
   | "plan_state"
 >;
@@ -611,61 +615,70 @@ const MEMBER_WARNING_SUFFIX: Array<{
  * que sí llega es lo determinista: si su estrategia impone una edad, el motor la simuló con ese
  * mes forzado y `jubilacion_month_index` existe; si su fecha la fijaría el sorteo, **no hay
  * ninguna** — y decir «no cruza el objetivo en el horizonte» sería mentir sobre un plan que
- * nadie ha resuelto. Por eso la frase distingue las dos cosas y manda a la vista «Yo».
+ * nadie ha resuelto. Por eso la frase dice que la fecha válida se resuelve en su propia vista
+ * Jubilación, en vez de rotular un mes que nadie calculó para ella.
  *
- * Los avisos que la fila publica (`birth_date_missing`, `coast_not_reachable`…) y el rojo de
- * `underfunded` se cuelgan como sufijo con su tono: antes un miembro infra-financiado se leía
- * exactamente igual que uno que llega, y la tarjeta propia sí lo pintaba de rojo.
+ * ## Qué dice, en orden
+ *
+ * 1. **Su estrategia**, con el mismo rótulo de producto que ve en su propio formulario
+ *    (`RETIREMENT_STRATEGY_LABEL`, `retirementProfile.ts`) — sin él, dos miembros con estrategias
+ *    distintas leían la misma frase genérica y no había forma de saber cuál llega por edad y
+ *    cuál por umbral.
+ * 2. **Su fecha por edad**, si el motor la fijó (`jubilacion_month_index` con `jubilacion_age`) —
+ *    nunca una edad inventada (B5): sin `jubilacion_age` se rotula el MES, y sin
+ *    `jubilacion_month_index` se manda a su vista Jubilación en vez de un guion o un
+ *    «calculando» que nadie va a resolver aquí.
+ * 3. **Su jornada reducida**, si la tiene (`partial_retirement_month_index`) — es un hecho
+ *    determinista suyo, no una cifra del sorteo, así que viaja aunque no haya fecha efectiva.
+ *
+ * Los avisos que la fila publica (`birth_date_missing`, `coast_not_reachable`…) se cuelgan como
+ * sufijo con su tono: antes un miembro al que le faltaba un dato se leía exactamente igual que
+ * uno que llega, y la tarjeta propia sí lo pintaba de rojo.
  */
 export function memberPlanSentence(
   member: MemberPlanSentenceMember,
   monthLabel: (monthIndex: number) => string,
 ): MemberPlanSentence {
   const name = String(member.username ?? "").trim() || "Esta persona";
+  const strategyLabel =
+    member.strategy != null ? (RETIREMENT_STRATEGY_LABEL[member.strategy] ?? null) : null;
   const mi = idx(member.jubilacion_month_index);
   const age = idx(member.jubilacion_age);
-  const coastMi = idx(member.coast_fire_month_index);
   const partialMi = idx(member.partial_retirement_month_index);
   const warned = new Set<string>(member.warnings ?? []);
 
-  // El estado: el rojo de «no llega» gana a cualquier hueco de configuración.
   let tone: PlanSentenceTone = "ok";
   let suffix: string | null = null;
-  if (member.underfunded === true) {
-    tone = "danger";
-    suffix = "con su ahorro actual no llega";
-  } else {
-    for (const entry of MEMBER_WARNING_SUFFIX) {
-      if (warned.has(entry.warning)) {
-        tone = entry.tone;
-        suffix = entry.text;
-        break;
-      }
+  for (const entry of MEMBER_WARNING_SUFFIX) {
+    if (warned.has(entry.warning)) {
+      tone = entry.tone;
+      suffix = entry.text;
+      break;
     }
   }
 
   const extras: string[] = [];
-  if (member.strategy === "coast" && coastMi != null) {
-    extras.push(`deja de aportar en ${monthLabel(coastMi)}`);
-  }
   if (partialMi != null) {
     extras.push(`hace jornada reducida desde ${monthLabel(partialMi)}`);
   }
-  const extraTail = extras.length === 0 ? "" : ` y ${extras.join(" y ")}`;
+  const extraTail = extras.length === 0 ? "" : ` (${extras.join(" y ")})`;
 
-  let head: string;
+  const head = strategyLabel != null ? `${name}: ${strategyLabel}` : name;
+
+  let dateBit: string;
   if (mi == null) {
-    // Sin mes efectivo la fecha la fijaría el sorteo, y el hogar no lo corre (D9).
-    head = `${name}: sin fecha calculada en la vista Hogar — mírala en su vista «Yo»`;
-    if (extras.length > 0) head = `${head} (${extras.join(" y ")})`;
-    return { text: `${head}${suffix == null ? "" : ` — ${suffix}`}.`, tone };
-  }
-  if (mi <= 0) {
-    head = `${name} ya se puede jubilar (fecha fijada)${extraTail}`;
+    // Sin mes efectivo la fecha la fijaría el sorteo, y el hogar no lo corre (D9): su fecha
+    // válida se resuelve en SU vista, nunca aquí.
+    dateBit = "fecha válida: en su vista Jubilación";
+  } else if (mi <= 0) {
+    dateBit = "ya puede jubilarse";
   } else if (age != null) {
-    head = `${name} se jubila a los ${age} (fecha fijada)${extraTail}`;
+    dateBit = `a los ${age}, ${monthLabel(mi)}`;
   } else {
-    head = `${name} se jubila en ${monthLabel(mi)} (fecha fijada)${extraTail}`;
+    // Sin `jubilacion_age` se rotula el MES, nunca una edad inventada (B5).
+    dateBit = monthLabel(mi);
   }
-  return { text: `${head}${suffix == null ? "" : ` — ${suffix}`}.`, tone };
+
+  const body = `${head} — ${dateBit}${extraTail}`;
+  return { text: `${body}${suffix == null ? "" : ` — ${suffix}`}.`, tone };
 }

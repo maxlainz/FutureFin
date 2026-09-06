@@ -8,8 +8,8 @@
  *     transiciones ⇒ mismos segmentos, tenga la serie 841 puntos o 42.
  *  2. La contigüidad de los tramos (un tramo acaba el mes anterior al siguiente) y el recorte a
  *     la ventana visible, que es lo que el chart traduce a píxeles.
- *  3. La regla del «Cruce»: solo cuando la edad manda y cae en un mes distinto del de la
- *     jubilación efectiva. Es la que evita rotular dos veces el mismo instante.
+ *  3. Las marcas de `buildPhaseMarks` (pensión, miembros) se ordenan por mes y se recortan a la
+ *     ventana visible igual que los tramos.
  */
 
 import { describe, expect, it } from "vitest";
@@ -156,72 +156,31 @@ describe("phaseAtMonth", () => {
 describe("buildPhaseMarks", () => {
   const win = { startMonth: 0, endMonth: 360 };
 
-  it("con `asap` el cruce NO se rotula aparte: es el mismo instante que la jubilación", () => {
-    const marks = buildPhaseMarks({
-      retirementTrigger: "liquid_crossing",
-      liquidCrossingMonthIndex: 235,
-      retirementMonthIndex: 235,
-      window: win,
-    });
-    expect(marks).toEqual([]);
-  });
-
-  it("con la edad al mando y cruce en OTRO mes, se rotula «Cruce»", () => {
-    const marks = buildPhaseMarks({
-      retirementTrigger: "target_age",
-      liquidCrossingMonthIndex: 280,
-      retirementMonthIndex: 235,
-      window: win,
-    });
-    expect(marks.map((m) => [m.kind, m.month, m.label])).toEqual([
-      ["crossing", 280, "Cruce"],
-    ]);
-  });
-
-  it("con la edad al mando pero cruce en el MISMO mes, tampoco se rotula", () => {
-    expect(
-      buildPhaseMarks({
-        retirementTrigger: "target_age",
-        liquidCrossingMonthIndex: 235,
-        retirementMonthIndex: 235,
-        window: win,
-      }),
-    ).toEqual([]);
-  });
-
-  it("un cruce ANTERIOR a la jubilación también es una lectura válida", () => {
-    const marks = buildPhaseMarks({
-      retirementTrigger: "target_age",
-      liquidCrossingMonthIndex: 180,
-      retirementMonthIndex: 235,
-      window: win,
-    });
-    expect(marks.map((m) => m.month)).toEqual([180]);
-  });
-
   it("la pensión es una flecha propia y va ordenada por mes con el resto", () => {
+    const members = [
+      { user_id: "u1", username: "Ana", retirement_month_index: 200 },
+    ] as unknown as HouseholdMemberProjectionApi[];
     const marks = buildPhaseMarks({
       pensionStartMonthIndex: 300,
-      retirementTrigger: "target_age",
-      liquidCrossingMonthIndex: 280,
-      retirementMonthIndex: 235,
+      members,
       window: win,
     });
     expect(marks.map((m) => [m.kind, m.month])).toEqual([
-      ["crossing", 280],
+      ["member", 200],
       ["pension", 300],
     ]);
   });
 
   it("descarta lo que cae fuera de la ventana visible (zoom)", () => {
+    const members = [
+      { user_id: "u1", username: "Ana", retirement_month_index: 320 },
+    ] as unknown as HouseholdMemberProjectionApi[];
     const marks = buildPhaseMarks({
       pensionStartMonthIndex: 300,
-      retirementTrigger: "target_age",
-      liquidCrossingMonthIndex: 280,
-      retirementMonthIndex: 235,
+      members,
       window: { startMonth: 0, endMonth: 290 },
     });
-    expect(marks.map((m) => m.kind)).toEqual(["crossing"]);
+    expect(marks.map((m) => m.kind)).toEqual([]);
   });
 
   it("en Hogar, un tick por miembro con su nombre y colores distintos", () => {

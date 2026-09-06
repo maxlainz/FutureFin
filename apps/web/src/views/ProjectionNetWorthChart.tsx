@@ -682,12 +682,11 @@ export function ProjectionNetWorthChart({
       startMonth: visibleMonthStart,
       endMonth: visibleMonthEnd,
     });
-    // Modelo v2: la marca de «cruce» desapareció con `liquid_crossing_month_index` y
-    // `retirement_trigger` — no hay objetivo que cruzar, y la lectura «el capital habría bastado
-    // aquí» dejó de existir. Quedan la pensión y, en Hogar, el hito de cada miembro.
+    // Modelo v2: la marca de «cruce» ya no existe — no hay objetivo que cruzar, y la lectura «el
+    // capital habría bastado aquí» dejó de existir. Quedan la pensión y, en Hogar, el hito de
+    // cada miembro.
     const phaseMarksAll = buildPhaseMarks({
       pensionStartMonthIndex: series.pension_start_month_index,
-      retirementMonthIndex: series.retirement_month_index,
       members: series.members,
       window: { startMonth: visibleMonthStart, endMonth: visibleMonthEnd },
     });
@@ -828,7 +827,6 @@ export function ProjectionNetWorthChart({
     viewWindow.startMonth,
     series.phase_transitions,
     series.pension_start_month_index,
-    series.retirement_month_index,
     series.members,
   ]);
 
@@ -2160,8 +2158,7 @@ export function ProjectionNetWorthChart({
                         y1={yTop - 2}
                         y2={yBot + 2}
                         stroke={mk.color}
-                        strokeWidth={mk.kind === "member" ? 1.6 : 1.2}
-                        strokeDasharray={mk.kind === "crossing" ? "2 2" : undefined}
+                        strokeWidth={1.6}
                       />
                     )}
                     {showLabel ? (

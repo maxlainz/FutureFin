@@ -24,6 +24,7 @@ import {
   formatSuccessPercent,
   riskFootnote,
   scenariosPerHundred,
+  successAbsentReasonEs,
   successParenthetical,
   showsNoVolatilityNotice,
   showsRiskGradient,
@@ -597,6 +598,28 @@ describe("pie del panel", () => {
   });
 });
 
+describe("successAbsentReasonEs — la única traducción de una razón de ausencia del éxito", () => {
+  it("`household_aggregate` sigue traducido: es el `absent_reason` real del Resumen en Hogar", () => {
+    expect(successAbsentReasonEs("household_aggregate")).toBe("solo en tu vista «Yo»");
+  });
+
+  // `household_not_solved` SOLO existe como `members[].plan_state`
+  // (`PLAN_STATE_HOUSEHOLD_NOT_SOLVED`, `apps/api/src/handlers/projection.rs`): nunca como
+  // `success_absent_reason` (en `view=household` esta ruta es 400 `household_bands_unavailable`)
+  // ni como el `absent_reason` del Resumen (que en Hogar es `household_aggregate`). Traducirlo
+  // aquí prometía una frase que ningún backend real podía disparar por esta vía — la misma
+  // incoherencia que A12 ya había cerrado para `no_liquid_assets`.
+  it("`household_not_solved` NO se traduce: ningún backend lo dispara por esta ruta", () => {
+    expect(successAbsentReasonEs("household_not_solved")).toBe("no disponible");
+  });
+
+  it("un literal desconocido cae a «no disponible», nunca a un guion mudo", () => {
+    expect(successAbsentReasonEs("algo_nuevo")).toBe("no disponible");
+    expect(successAbsentReasonEs(null)).toBe("no disponible");
+    expect(successAbsentReasonEs(undefined)).toBe("no disponible");
+  });
+});
+
 describe("KPI «Éxito del plan» del Resumen", () => {
   it("copia éxito, umbral y veredicto del plan, sin recalcular nada", () => {
     const tile = summarySuccessTile({
@@ -648,6 +671,48 @@ describe("KPI «Éxito del plan» del Resumen", () => {
     expect(tone("green")).toBe("default");
     expect(tone("amber")).toBe("warn");
     expect(tone("red")).toBe("danger");
+  });
+
+  // `SummaryPlan::success_verdict` (apps/api/src/handlers/summary.rs) solo es `Some` cuando LAS
+  // TRES cifras convierten a `f64`; un desbordamiento aislado de una sola deja el resto con cifra
+  // puesta y el veredicto a `null`. Sin este respaldo la tarjeta caía a `default` sin piel aunque
+  // hubiera un 15 % de fallo que colorear.
+  it("sin `success_verdict`, usa `success_wilson_low` con los MISMOS cortes que la banda de Jubilación", () => {
+    const tone = (wilsonLow: number, thresholdPct: number) =>
+      summarySuccessTile({
+        plan_state: "ready",
+        success_of_plan: 0.5,
+        success_threshold_pct: thresholdPct,
+        success_wilson_low: wilsonLow,
+        success_verdict: null,
+      })!.tone;
+    // riskCutoffsForThreshold(95) = { amber: 0,05, red: 0,10 } sobre la probabilidad de FALLO
+    // (1 − success_wilson_low).
+    expect(tone(0.97, 95)).toBe("default"); // fallo 0,03 < amber
+    expect(tone(0.93, 95)).toBe("warn"); // fallo 0,07 ∈ [amber, red)
+    expect(tone(0.85, 95)).toBe("danger"); // fallo 0,15 ≥ red
+  });
+
+  it("con `success_verdict` puesto, manda ÉL — nunca se recalcula con `success_wilson_low`", () => {
+    const tile = summarySuccessTile({
+      plan_state: "ready",
+      success_of_plan: 0.5,
+      success_threshold_pct: 95,
+      // Fallo del 50 % sobre este wilson_low sería «danger» por el respaldo; el veredicto explícito
+      // del servidor gana igual, porque es la MISMA muestra ya juzgada.
+      success_wilson_low: 0.5,
+      success_verdict: "green",
+    })!;
+    expect(tile.tone).toBe("default");
+  });
+
+  it("sin `success_verdict` NI `success_wilson_low` (backend antiguo), no hay piel que pintar", () => {
+    const tile = summarySuccessTile({
+      plan_state: "ready",
+      success_of_plan: 0.5,
+      success_threshold_pct: 95,
+    })!;
+    expect(tile.tone).toBe("default");
   });
 
   it("en Hogar es un guion CON su razón, no un hueco mudo", () => {

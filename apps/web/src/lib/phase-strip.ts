@@ -2,10 +2,9 @@
  * Geometría PURA de la tira de fases del chart de Proyección (5.0.0, D29 / §G del plan de #207).
  *
  * La tira que va bajo el eje X dice EN QUÉ FASE está cada tramo del horizonte («Trabajo», «Media
- * jornada», «Jubilado») y marca los dos hitos que no son fases: el inicio de la pensión y —solo
- * cuando la edad manda y no coinciden— el cruce del objetivo. Aquí vive el modelo; el SVG solo
- * pinta lo que estas funciones devuelven, igual que `cashflow-bars.ts` con las barras de
- * Movimientos.
+ * jornada», «Jubilado») y marca los hitos que no son fases: el inicio de la pensión y, en Hogar,
+ * el mes de jubilación de cada miembro. Aquí vive el modelo; el SVG solo pinta lo que estas
+ * funciones devuelven, igual que `cashflow-bars.ts` con las barras de Movimientos.
  *
  * **Todo se razona en MESES (`month_index`), jamás en posiciones de array.** El servidor decima la
  * serie con `density=hybrid` (meses 0..12, luego anuales, más el último del horizonte), así que la
@@ -22,7 +21,6 @@ import type {
   HouseholdMemberProjectionApi,
   PhaseTransitionApi,
   ProjectionPhaseApi,
-  RetirementTriggerApi,
 } from "../api/types";
 import { householdMemberColor, type ChartLegendItem } from "./chart-legend";
 
@@ -153,7 +151,7 @@ export function phaseAtMonth(
 }
 
 /** Marcas de la tira que no son fases. `member` solo aparece en la vista Hogar. */
-export type PhaseMarkKind = "pension" | "crossing" | "member";
+export type PhaseMarkKind = "pension" | "member";
 
 export type PhaseMark = {
   key: string;
@@ -171,21 +169,17 @@ export type PhaseMark = {
  * Las marcas de la tira, ordenadas por mes.
  *
  * - **Pensión** (`pension_start_month_index`): flecha con el rótulo «Pensión».
- * - **Cruce** (`liquid_crossing_month_index`): SOLO cuando la edad manda
- *   (`retirement_trigger === "target_age"`) **y** el cruce cae en un mes distinto del de la
- *   jubilación efectiva. Con `asap` los dos son el mismo mes por construcción, y rotular dos veces
- *   el mismo instante sugiere dos hechos donde hay uno. Es una LECTURA («el capital habría bastado
- *   aquí»), nunca un marcador vertical: los verticales son solo de la jubilación efectiva.
  * - **Miembros** (Hogar, D32): el mes de jubilación de cada miembro con su nombre, en el color que
  *   `householdMemberColor` reparte por posición — el MISMO de su línea fina y de su entrada de
  *   leyenda. La curva gruesa es la Σ y no se jubila: estas marcas son lo que dice de quién es cada
  *   hito.
+ *
+ * El modelo v2 retiró la marca «Cruce» (`liquid_crossing_month_index`/`retirement_trigger`, ambos
+ * fuera del wire — no hay objetivo con el que cruzar). No re-la introduzcas sin que el servidor
+ * vuelva a publicar esos campos.
  */
 export function buildPhaseMarks(input: {
   pensionStartMonthIndex?: number | null;
-  liquidCrossingMonthIndex?: number | null;
-  retirementTrigger?: RetirementTriggerApi | null;
-  retirementMonthIndex?: number | null;
   members?: readonly HouseholdMemberProjectionApi[] | null;
   window: MonthWindow;
 }): PhaseMark[] {
@@ -209,21 +203,6 @@ export function buildPhaseMarks(input: {
       label: "Pensión",
       shortLabel: "Pensión",
       color: "var(--proj-meta)",
-    });
-  }
-
-  if (
-    input.retirementTrigger === "target_age" &&
-    visible(input.liquidCrossingMonthIndex) &&
-    input.liquidCrossingMonthIndex !== input.retirementMonthIndex
-  ) {
-    marks.push({
-      key: "crossing",
-      kind: "crossing",
-      month: input.liquidCrossingMonthIndex,
-      label: "Cruce",
-      shortLabel: "Cruce",
-      color: "var(--proj-fire)",
     });
   }
 

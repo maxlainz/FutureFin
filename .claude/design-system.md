@@ -58,7 +58,11 @@ Radii: `--ff-radius-{frame=12, panel=14, kpi=12, pill=999, input=10}px`.
 > **`--proj-jub` está definido pero MUERTO** (verificado 2026-08-22): existe en las dos ramas de
 > [`theme.css`](../apps/web/src/styles/theme.css) como alias de `--ff-accent` y **nadie lo consume**
 > (`grep -rn 'proj-jub' apps/web/src` solo devuelve sus dos definiciones). La línea de jubilación
-> del chart usa `--proj-fire`. No lo cites como token vivo ni construyas nada nuevo sobre él: o se
+> del chart usa `--ff-accent` directamente (`MiniProjection.tsx`, marca de la fecha válida), y desde
+> W10 (2026-09-06) **`--proj-fire` está igual de huérfano**: su único consumidor era la marca de
+> «cruce» de `phase-strip.ts`, una rama a la que nadie pasaba ya la prop y que se retiró con
+> `RetirementTriggerApi` (`grep -rn 'proj-fire' apps/web/src` → solo `theme.css`). Mismo
+> tratamiento que `--proj-coast` (abajo). No los cites como tokens vivos ni construyas sobre ellos: o se
 > conecta a un consumidor real, o se borra. Se documenta aquí en vez de callarlo porque un token
 > huérfano que parece vivo se acaba usando y arrastra una intención que nadie decidió.
 
