@@ -1,40 +1,53 @@
 /**
- * Jubilación — **rediseño UX U1b** (5.0.0, issue #207, decisiones U1–U12 y S1–S11).
+ * Jubilación — rediseño UX U1b (5.0.0, issue #207, decisiones U1–U12 y S1–S11) reescrito por el
+ * **modelo v2**: «el éxito define la fecha» (C1–C8).
  *
- * **Tercera vuelta de UX (V1–V7, feedback F2 y F5–F10 del owner)**: la página tiene ahora DOS
- * bloques y ningún acordeón, en este orden y sin excepciones:
+ * La página tiene TRES bloques y ningún acordeón, en este orden y sin excepciones:
  *
  *  1. **Cabecera**: el título y UN solo indicador de guardado (S6). Antes había seis pies
  *     «Guardado automático.», uno por panel, que podían contradecirse entre sí.
  *  2. **«Tu plan»** (configuración): una TARJETA POR TEMA —Estrategia · Edades · Pensión · Gasto
  *     en jubilación · Retirada · Horizonte—, cada una con su frase de qué hace, y **solo los
- *     campos que la estrategia elegida usa**. La tabla U2 vive en `lib/plan-fields.ts` y aquí no
- *     se re-decide nada; lo que V3 cambió es su eje de agrupación, no una sola condición.
- *  3. **«Resultado»**: la FRASE del plan (`lib/plan-sentence.ts`), el rojo cuando lo hay, como
- *     mucho tres tarjetas (`buildRetirementTilesV2`), **un solo gráfico** —con eje Y, etiquetas
- *     de borde y la banda COLOREADA por la probabilidad de agotar el capital (V2/V5)—, el riesgo
- *     en compacto y un «Detalle del cálculo» plegado con todo lo de segundo orden.
+ *     campos que la estrategia elegida Y SU MODO usan**. La tabla U2 vive en
+ *     `lib/plan-fields.ts` y aquí no se re-decide nada.
+ *  3. **«Resultado»**: la FRASE del plan (`lib/plan-sentence.ts`), los avisos, tres tarjetas
+ *     (`buildRetirementTilesV2`), **un solo gráfico** —eje Y, banda coloreada por el fallo
+ *     acumulado, la curva de capital necesario, la marca de tu fecha y la tira de éxito por año
+ *     de jubilación—, el bloque «Riesgo» y un «Detalle del cálculo» plegado.
  *
- * Lo que se fue en esta vuelta, y por qué no vuelve sin deshacer una decisión del owner: el
- * **banner de alta** (F5 — con estrategia elegida, «Elige tu estrategia» es un cartel que sobra,
- * y su flag de `localStorage` nunca miró el perfil), el **acordeón «Avanzado»** con la línea
- * «Supuestos» de cabecera (F10 — la línea existía para enunciar lo que el acordeón escondía; sin
- * acordeón no hay nada escondido), la **tabla «agotar a los 65/70/…»** (F7/V5 — el color de la
- * banda lo dice con más resolución, y el total acumulado bajó a «Detalle del cálculo») y los dos
- * campos de la tarjeta «Riesgo» (V6/V7 — el colchón se deriva del tope de tu regla de ahorro y el
- * umbral de éxito es fijo al 100 %).
+ * ## Qué cambió con el modelo v2, y por qué no vuelve
  *
- * Cuatro invariantes que este archivo no puede romper:
+ * - **La fecha la decide el ÉXITO, no un cruce contra un objetivo.** No hay objetivo que
+ *   dimensionar (C1/M4), así que se fueron los campos «Base del objetivo» y «Descuento del
+ *   puente», la línea del objetivo FIRE del chart y la lectura del cruce del líquido. Lo que
+ *   ocupa su sitio es el **umbral de éxito** (C3), que vuelve al formulario como la restricción
+ *   que fija la fecha válida — no como el corte de semáforo fijo al 100 % que V7 retiró.
+ * - **El colchón de caja desapareció como MECANISMO** (M6): la caja es un activo y la regla de
+ *   ahorro decide cuánto se guarda. Con él se fue su línea informativa del bloque «Riesgo».
+ * - **El puente dejó de ser una estrategia** (C7): el selector tiene CUATRO tarjetas y el puente
+ *   es un ajuste de la tarjeta Pensión (interruptor + tasa + años), disponible en cualquiera de
+ *   ellas. Un perfil guardado con el literal retirado llega ya migrado, con su aviso.
+ * - **Coast y jornada reducida tienen dos MODOS cada una** (M10/M11), y el modo decide qué edad
+ *   se pregunta: la que el modo no usa no se pinta en gris, no se pinta.
  *
- *  - **Un solo porcentaje de retirada** (U4). El slider es `swr_pct` y el formulario **jamás**
- *    manda `withdrawal_rule.pct` ni `start_pct`: el servidor los hereda del SWR y publica de
- *    dónde salieron (`pct_source`). Dos porcentajes obligaban a explicar cuál mandaba, y la
- *    respuesta honesta era «depende de la pantalla».
+ * Cinco invariantes que este archivo no puede romper:
+ *
+ *  - **Un solo porcentaje de retirada** (U4). El slider es `swr_pct` —el tope de la tasa inicial
+ *    en la fecha— y el formulario **jamás** manda `withdrawal_rule.pct` ni `start_pct`: el
+ *    servidor los hereda del SWR y publica de dónde salieron (`pct_source`). Su mínimo es 0,1 %
+ *    y no 0: un plan que retira el 0 % no es un plan.
  *  - **Todo por MES** (`month_index`), nunca por posición de `points[]`: con `density=hybrid` la
- *    posición 13 es el mes 24.
- *  - **`null` no es cero**: una tarjeta que la estrategia no responde no se pinta con guion.
+ *    posición 13 es el mes 24. La única excepción es `safe_date_series_position`, que es una
+ *    posición **publicada por el servidor** y solo se usa como tal.
+ *  - **`null` no es cero**: una tarjeta que la estrategia no responde no se pinta con guion, y
+ *    `pending` («calculando…») no es lo mismo que ausente.
+ *  - **Ni una cifra se recalcula aquí.** El éxito, el umbral, el veredicto, la fecha y el capital
+ *    necesario vienen del MISMO sorteo que dibuja el chart; la escala de color sale de UN solo
+ *    `riskCutoffsForThreshold`. Dos derivaciones de la misma magnitud es cómo la pantalla acaba
+ *    enseñando dos cifras del mismo plan.
  *  - **En Hogar no hay plan** (D9/U10): el agregado no tiene estrategia propia, así que se
- *    enseñan las frases por miembro y nada más — ni tarjetas, ni chart, ni formulario.
+ *    enseñan las frases por miembro —con su tono (B7)— y nada más: ni tarjetas, ni chart, ni
+ *    formulario.
  */
 
 import {
@@ -61,7 +74,7 @@ import type {
 } from "../api/types";
 import { HelpPopover } from "../components/HelpPopover";
 import { Switch } from "../components/Switch";
-import { HELP_TEXTS } from "../lib/helpTexts";
+import { HELP_TEXTS, type HelpText, type HelpTextId } from "../lib/helpTexts";
 import { MetricCard } from "../components/MetricCard";
 import { MiniProjection } from "../components/charts/MiniProjection";
 import { ChartLegend } from "../components/charts/ChartLegend";
@@ -73,21 +86,27 @@ import {
 } from "../lib/format";
 import { savingsSourceUsesTransactions } from "../lib/fire";
 import {
-  BRIDGE_DISCOUNT_BASIS_LABEL,
+  COAST_MODE_LABEL,
   HORIZON_LIFESPAN_AGE_OPTIONS,
+  MAX_BRIDGE_PCT,
+  MAX_BRIDGE_YEARS,
+  MAX_SUCCESS_THRESHOLD_PCT,
+  MAX_SWR_PCT,
+  MIN_BRIDGE_YEARS,
+  MIN_SUCCESS_THRESHOLD_PCT,
+  PARTIAL_MODE_LABEL,
   RETIREMENT_STRATEGIES,
   RETIREMENT_STRATEGY_BLURB,
   RETIREMENT_STRATEGY_LABEL,
   WITHDRAWAL_RULE_KIND_LABEL,
   buildRetirementProfilePatch,
   defaultRetirementProfileApi,
-  effectiveTargetBasis,
   isEmptyRetirementProfilePatch,
   newPartialRetirementDraft,
   newPensionPlanDraft,
   normalizeRetirementProfile,
   retirementProfileIssue,
-  targetBasisSource,
+  withBridgeEnabled,
   withdrawalPctSource,
 } from "../lib/retirementProfile";
 import { messageForError } from "../lib/errorMessages";
@@ -114,43 +133,76 @@ import {
   saveIndicatorLabel,
   withdrawalPctNote,
 } from "../lib/retirement-form";
-import { buildRetirementChartMarkers } from "../lib/retirement-chart";
+import {
+  buildRetirementChartMarkers,
+  chartValidDateMark,
+} from "../lib/retirement-chart";
 import {
   buildRiskExtraRows,
-  cashBufferLine,
-  formatSuccessPercent,
+  formatSamplingErrorPp,
   riskFootnote,
+  scenariosPerHundred,
   showsNoVolatilityNotice,
-  successParenthetical,
-  successVerdictTone,
 } from "../lib/risk-bands";
 import {
-  RISK_AMBER_AT,
-  RISK_RED_AT,
-  depletionProbabilityAtMonth,
+  failureKindsAtMonth,
+  failureProbabilityAtMonth,
   riskColorForProbability,
+  riskCutoffsForThreshold,
   riskGradientStops,
 } from "../lib/risk-gradient";
+import { resolvePlanMilestoneCivil } from "../lib/plan-card";
 import { type LedgerPersonScope } from "../lib/ledger";
 import { TAB_PATH, settingsSubTabPath } from "../lib/navigation";
 import { appUrl } from "../lib/basePath";
 import {
+  NEEDED_CAPITAL_SERIES,
   PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY,
   deflationFactorAt,
+  neededCurveForChart,
   projectionXTickLabel,
   resolveProjectionAxisAgeMode,
+  successStripForChart,
 } from "../lib/projection-chart";
 
 /**
- * Prosa es-ES para `projectionSeries.fire_target_absent_reason` (#119) — los mismos tres
- * literales que `SimKpis.fire_target_absent_reason` en el servidor.
+ * El catálogo de ayudas **sin creerse que la clave existe** (puente a W8).
+ *
+ * Los módulos puros del modelo v2 (`lib/retirement-tiles.ts`, `lib/risk-bands.ts`,
+ * `lib/retirement-form.ts`) ya nombran las seis claves nuevas —`retirement.needed_capital`,
+ * `retirement.safe_date`, `retirement.success_threshold`, `retirement.bridge_settings`,
+ * `retirement.coast_mode`, `retirement.partial_mode`, `retirement.failure_by_age`— con el
+ * `as unknown as HelpTextId` que W2 estrenó, porque el escáner de `helpTexts.test.ts` tiene que
+ * verlas consumidas ANTES de que W8 las escriba. Consecuencia: hasta W8, `HELP_TEXTS[id]` es
+ * `undefined` para ellas y un `.title` directo **revienta la pantalla en runtime**.
+ *
+ * Esta función es el único acceso al catálogo de esta vista: sin texto, no hay interrogante. El
+ * `as` no se propaga a la UI y la página sigue funcionando mientras el catálogo llega.
  */
-const FIRE_TARGET_ABSENT_REASON_ES: Record<string, string> = {
-  manual_amount_missing: "Falta el importe del objetivo manual: no se calcula fecha de cruce.",
-  net_need_not_positive:
-    "El gasto neto de jubilación no es positivo: no se calcula fecha de cruce.",
-  swr_not_positive: "SWR 0 %: no se calcula fecha de cruce.",
-};
+function helpTextOrNull(id: HelpTextId): HelpText | null {
+  return (HELP_TEXTS as Partial<Record<HelpTextId, HelpText>>)[id] ?? null;
+}
+
+/** Interrogante de una ayuda, o nada si W8 todavía no ha escrito su texto. */
+function HelpFor({ id }: { id: HelpTextId }) {
+  const t = helpTextOrNull(id);
+  return t ? <HelpPopover title={t.title} body={t.body} /> : null;
+}
+
+/**
+ * Las ayudas que ESTA vista nombra por su cuenta (las de campo viven en `PLAN_FIELD_HELP` y las
+ * de tarjeta/fila las traen los módulos puros). El valor es un OBJETO con la clave entrecomillada
+ * al lado —una de las tres formas que el escáner de `helpTexts.test.ts` reconoce—, así que la
+ * ayuda cuenta como consumida desde ya y W8 no la encontrará huérfana.
+ *
+ * (Esa forma NO se escribe literalmente en este comentario: el escáner no distingue código de
+ * prosa y se contaría a sí mismo, registrando un id que no existe — CLAUDE.md, «comandos que se
+ * cuentan a sí mismos», y el mismo tropiezo que ya está documentado en `lib/risk-bands.ts`.)
+ */
+const RESULT_HELP = {
+  /** La escala de color de la banda: fallo ACUMULADO por edad, las tres formas juntas. */
+  failureByAge: { helpId: "retirement.failure_by_age" as unknown as HelpTextId },
+} as const;
 
 /** Un decimal tecleado por el usuario, listo para el wire: coma española → punto. */
 function typedDecimal(raw: string): string {
@@ -330,14 +382,10 @@ export function RetirementView({
         if (seq !== profileSaveSeqRef.current || !saved) return;
         syncedProfileRef.current = saved;
         setSavedAtMs(Date.now());
-        // `saved.target_basis` es la elección ALMACENADA (`null` = derivada): resincronizar el
-        // borrador con ella lo mantiene alineado sin convertir en elección explícita lo que
-        // sigue siendo una derivación.
-        setProfileDraft((d) =>
-          d.target_basis === saved.target_basis
-            ? d
-            : { ...d, target_basis: saved.target_basis },
-        );
+        // Sin resincronización del borrador: con el modelo v2 ya no hay ningún campo cuya
+        // elección ALMACENADA difiera de la resuelta (`target_basis` era el único, y murió con
+        // el objetivo). Copiar el perfil guardado encima del borrador aquí pisaría lo que el
+        // usuario esté tecleando mientras el PATCH viaja.
       })
       .catch(() => {
         // El banner lo pinta App.tsx. Aquí solo hay que NO marcar como guardado.
@@ -452,6 +500,26 @@ export function RetirementView({
     [mc, axisAgeMode, axisBirth, axisAnchor, calendarTz],
   );
 
+  /**
+   * Mes de la rejilla → EDAD CUMPLIDA, con el mismo calendario civil que el eje (el ancla de la
+   * proyección + la fecha de nacimiento). Lo consumen la frase (`ageAt`) y las tarjetas
+   * (`monthAge`): una sola aritmética para que las dos digan la misma edad del mismo mes.
+   *
+   * **`null` sin fecha de nacimiento, y ahí se acaba** (B5). No se estima restando años a nada:
+   * una edad inventada en la frase-hito se copia como si fuera exacta, y es justo la razón por la
+   * que el servidor deja el bloque «plan» sin publicar (`plan_absent_reason:
+   * "birth_date_missing"`) en vez de resolverlo a ojo.
+   */
+  const ageAt = useCallback(
+    (mi: number): number | null =>
+      resolvePlanMilestoneCivil({
+        monthIndex: mi,
+        anchorDateYmd: axisAnchor,
+        birthDateIso: axisBirth,
+      }).age,
+    [axisAnchor, axisBirth],
+  );
+
   const configuredSavingsUsesTransactions = savingsSourceUsesTransactions(
     installation?.installation.fire_settings?.savings_source,
   );
@@ -484,8 +552,6 @@ export function RetirementView({
     (!configuredSavingsUsesTransactions || summary != null);
 
   // ── Resultado: frase, tarjetas y avisos ───────────────────────────────────────────────────
-  const basis = effectiveTargetBasis(profileDraft);
-  const basisSource = targetBasisSource(profileDraft);
   const rule = profileDraft.withdrawal_rule;
   const pension = profileDraft.pension;
   const partial = profileDraft.partial_retirement;
@@ -501,48 +567,90 @@ export function RetirementView({
         series: retirementMetricsReady ? projectionSeries : null,
         targetRetirementAge: savedProfile.target_retirement_age ?? null,
         monthLabel,
+        ageAt,
+        currencyIso,
         ageMode: axisAgeMode,
+        // El modo del perfil GUARDADO: es el que el servidor simuló. Con el del borrador la
+        // frase describiría un coast que la respuesta de al lado no resolvió.
+        coastMode: savedProfile.coast_mode,
       }),
     [
       retirementMetricsReady,
       projectionSeries,
       savedProfile.target_retirement_age,
+      savedProfile.coast_mode,
       monthLabel,
+      ageAt,
+      currencyIso,
       axisAgeMode,
     ],
   );
 
-  /** Las tarjetas se leen del perfil GUARDADO, no del borrador: la base y la edad del borrador
-   *  nombrarían un plan que la respuesta del servidor no simuló. */
+  /** Las tarjetas se leen del perfil GUARDADO, no del borrador: una edad del borrador
+   *  nombraría un plan que la respuesta del servidor no simuló. */
   const tilesInput = useMemo(
     () => ({
       series: retirementMetricsReady ? projectionSeries : null,
       currencyIso,
       monthLabel,
+      monthAge: ageAt,
       targetRetirementAge: savedProfile.target_retirement_age ?? null,
-      targetBasis: retirementProfile ? effectiveTargetBasis(savedProfile) : null,
-      pensionStartAge: savedProfile.pension?.starts_at_age ?? null,
     }),
     [
       retirementMetricsReady,
       projectionSeries,
       currencyIso,
       monthLabel,
-      savedProfile,
-      retirementProfile,
+      ageAt,
+      savedProfile.target_retirement_age,
     ],
   );
   const tiles = useMemo(() => buildRetirementTilesV2(tilesInput), [tilesInput]);
-  const detailRows = useMemo(() => retirementDetailRows(tilesInput), [tilesInput]);
-  /** El rojo de D17 va ARRIBA, con el resto de banners; los demás avisos bajan al «Detalle»
-   *  dentro de `retirementDetailRows`, así que aquí solo se filtran los que suben. */
-  const dangerNotices = useMemo(
+  /**
+   * Las filas del «Detalle», **sin los avisos**: `retirementDetailRows` los añade al final como
+   * filas `notice:` porque hay consumidores que solo pintan el plegado, y esta vista los enseña
+   * arriba con su banner. Contar lo mismo dos veces en la misma pantalla es ruido, y el filtro
+   * va por el prefijo de la key —que es estable por contrato— y no por el tono.
+   */
+  const planDetailRows = useMemo(
+    () => retirementDetailRows(tilesInput).filter((r) => !r.key.startsWith("notice:")),
+    [tilesInput],
+  );
+  /**
+   * TODOS los avisos suben al panel de resultado, cada uno con su piel: el rojo de D17 como
+   * `error-banner` y los ámbar —`strategy_pension_bridge_migrated`, `no_volatility_declared`,
+   * `coast_not_reachable`…— como `info-banner`.
+   *
+   * Antes solo subía el rojo y el resto se leía en el «Detalle» plegado, que es donde nadie mira
+   * cuando la cifra de arriba le acaba de cambiar sola: un perfil migrado desde la estrategia
+   * retirada `pension_bridge` (C7) tiene que enterarse en la primera pantalla, no al desplegar.
+   * Como contrapartida, las filas `notice:` de `retirementDetailRows` se filtran abajo: contarlo
+   * dos veces en la misma pantalla es ruido.
+   */
+  const notices = useMemo(
     () =>
       buildRetirementNotices(
         retirementMetricsReady ? projectionSeries : null,
         savedProfile.target_retirement_age ?? null,
-      ).filter((n) => n.tone === "danger"),
+      ),
     [retirementMetricsReady, projectionSeries, savedProfile.target_retirement_age],
+  );
+
+  /**
+   * El aviso de «sin volatilidad declarada» tiene DOS fuentes que dicen lo mismo desde sitios
+   * distintos: el `warnings[]` de la serie (lo trae `buildRetirementNotices`) y
+   * `any_volatility_declared` de las bandas. Cuando hay bandas se pinta **donde importa** —junto
+   * al éxito que deja de medir riesgo, y con el enlace a Activos que la lib no puede llevar—, así
+   * que se saca de los banners de arriba: la misma frase dos veces en la misma pantalla es ruido.
+   * Sin bandas cargadas todavía, el banner de arriba es el único sitio donde puede decirse.
+   */
+  const noVolatilityInRiskBlock = showsNoVolatilityNotice(projectionBands);
+  const topNotices = useMemo(
+    () =>
+      noVolatilityInRiskBlock
+        ? notices.filter((n) => n.code !== "no_volatility_declared")
+        : notices,
+    [notices, noVolatilityInRiskBlock],
   );
 
   // ── El chart único (U5) ───────────────────────────────────────────────────────────────────
@@ -602,14 +710,49 @@ export function RetirementView({
     }));
   }, [projectionBands]);
 
+  /**
+   * La marca VERTICAL de la fecha del plan (C4) y, cuando no la hay, la nota que lo explica.
+   * `chartValidDateMark` decide las cuatro lecturas —fecha válida, «como pediste», sin fecha y
+   * «calculando»— y su rótulo lleva el éxito, contado con la MISMA función que la frase.
+   */
+  const validDate = useMemo(
+    () => chartValidDateMark(retirementMetricsReady ? projectionSeries : null),
+    [retirementMetricsReady, projectionSeries],
+  );
+
+  /**
+   * Los hitos secundarios. **Sin el de jubilación cuando hay marca de fecha**: los dos saldrían
+   * en el mismo mes y el chart pintaría dos verticales sobre la misma X (el contrato de
+   * `MiniProjection.validDateMark` lo dice con todas las letras). La marca gana porque es la que
+   * lleva el éxito en el rótulo.
+   */
   const chartMarkers = useMemo(() => {
     const pts = projectionSeries?.points;
     if (!pts || pts.length === 0) return [];
-    return buildRetirementChartMarkers(projectionSeries, {
+    const all = buildRetirementChartMarkers(projectionSeries, {
       startMonth: pts[0]!.month_index,
       endMonth: pts[pts.length - 1]!.month_index,
     });
-  }, [projectionSeries]);
+    return validDate.mark == null ? all : all.filter((m) => m.kind !== "retirement");
+  }, [projectionSeries, validDate.mark]);
+
+  /**
+   * Los dos cortes de la escala de color, derivados del UMBRAL DEL PERFIL (C3). Salen de la
+   * serie —el umbral con el que el servidor resolvió la fecha— y solo caen a las bandas si la
+   * serie no lo publica. Un umbral ausente lo trata `riskCutoffsForThreshold` como 100, que es
+   * el caso más exigente: ante un umbral que no llegó, la escala no se ablanda sola.
+   *
+   * Los tiñen los TRES sitios que hablan de riesgo —banda, tira de éxito y escala de la
+   * leyenda—, y por eso se calculan UNA vez: tres derivaciones del mismo umbral en tres sitios
+   * es exactamente cómo se destiñe una leyenda sin que nada falle.
+   */
+  const riskCutoffs = useMemo(
+    () =>
+      riskCutoffsForThreshold(
+        projectionSeries?.success_threshold_pct ?? projectionBands?.success_threshold_pct,
+      ),
+    [projectionSeries?.success_threshold_pct, projectionBands?.success_threshold_pct],
+  );
 
   /**
    * El color de la banda (V2/V5). Los extremos son los MISMOS que los de `chartMarkers` —el
@@ -625,35 +768,83 @@ export function RetirementView({
     if (!showBand || !pts || pts.length === 0) return [];
     if (!projectionBands || projectionBands.any_volatility_declared === false) return [];
     return riskGradientStops({
-      points: projectionBands.depletion_probability_by_age,
+      points: projectionBands.failure_probability_by_age,
       monthStart: pts[0]!.month_index,
       monthEnd: pts[pts.length - 1]!.month_index,
+      cutoffs: riskCutoffs,
     });
-  }, [showBand, projectionSeries, projectionBands]);
+  }, [showBand, projectionSeries, projectionBands, riskCutoffs]);
 
-  /** Rótulo del hover. Sale de `depletionProbabilityAtMonth`, **la misma función que colorea**:
-   *  un tooltip alimentado por otro cálculo podría contradecir al tinte y nadie lo notaría. */
+  /**
+   * Rótulo del hover. Sale de `failureProbabilityAtMonth`, **la misma función que colorea**: un
+   * tooltip alimentado por otro cálculo podría contradecir al tinte y nadie lo notaría.
+   *
+   * El desglose por causa va entre paréntesis y NO se interpola (`failureKindsAtMonth` devuelve
+   * la muestra real más cercana): tres acumuladas interpoladas por separado darían un trío que
+   * no suma la cifra que el propio tooltip enseña justo delante.
+   */
   const chartHoverLabel = useMemo(() => {
     if (gradientStops.length < 2 || !projectionBands) return null;
-    const points = projectionBands.depletion_probability_by_age;
+    const points = projectionBands.failure_probability_by_age;
     return (mi: number): string | null => {
-      const p = depletionProbabilityAtMonth(points, mi);
+      const p = failureProbabilityAtMonth(points, mi);
       if (p == null) return null;
-      return `${monthLabel(mi)} · ${formatPercentDisplay(p * 100)} de los escenarios ya se han quedado sin capital`;
+      const kinds = failureKindsAtMonth(points, mi);
+      const breakdown =
+        kinds == null
+          ? ""
+          : ` (sin dinero ${formatPercentDisplay(kinds[0] * 100)}, tasa ${formatPercentDisplay(
+              kinds[1] * 100,
+            )}, regla ${formatPercentDisplay(kinds[2] * 100)})`;
+      return `${monthLabel(mi)} · ${formatPercentDisplay(p * 100)} de los escenarios ya han fallado${breakdown}`;
     };
   }, [gradientStops, projectionBands, monthLabel]);
 
-  /** Qué decir del colchón de caja, que desde V6 se DERIVA del tope de tu regla de ahorro. */
-  const bufferLine = useMemo(
-    () => cashBufferLine(projectionBands, currencyIso),
-    [projectionBands, currencyIso],
-  );
+  /**
+   * La curva «Capital necesario» (C4), ya deflactada y por MES. Sustituye a la línea del
+   * objetivo FIRE: en v2 no hay objetivo que cruzar — la fecha la fija el éxito— y lo que se
+   * dibuja es el líquido que hace cumplir el umbral jubilándose en cada mes.
+   *
+   * `neededCurveForChart` devuelve un array PARALELO a `points[]` (o `null` entero si el nivel 2
+   * no ha terminado o la longitud no cuadra); aquí solo se le pega su `month_index`, nunca su
+   * posición.
+   */
+  const neededCurve = useMemo(() => {
+    const pts = projectionSeries?.points;
+    if (!pts || pts.length === 0) return null;
+    const values = neededCurveForChart(projectionSeries, chartDeflator);
+    if (values == null) return null;
+    return pts.map((p, i) => ({ month: p.month_index, value: values[i] ?? null }));
+  }, [projectionSeries, chartDeflator]);
+
+  /** La tira de éxito por AÑO de jubilación bajo el eje X. El rótulo lo compone la vista, que es
+   *  quien sabe si el eje va en fechas o en edades. */
+  const successStrip = useMemo(() => {
+    const pts = successStripForChart(retirementMetricsReady ? projectionSeries : null);
+    return pts.map((p) => {
+      const n = scenariosPerHundred(p.success);
+      return {
+        monthIndex: p.monthIndex,
+        success: p.success,
+        label:
+          n == null
+            ? undefined
+            : `si te fueras en ${monthLabel(p.monthIndex)}: ${n} de cada 100`,
+      };
+    });
+  }, [retirementMetricsReady, projectionSeries, monthLabel]);
 
   // ── Riesgo compacto ───────────────────────────────────────────────────────────────────────
   const riskExtraRows = useMemo(
-    () => buildRiskExtraRows({ bands: projectionBands, currencyIso, monthLabel }),
-    [projectionBands, currencyIso, monthLabel],
+    () => buildRiskExtraRows({ bands: projectionBands }),
+    [projectionBands],
   );
+
+  /** El tile «Éxito del plan» tal y como lo construyó `buildRetirementTilesV2`: el bloque
+   *  «Riesgo» lo REUTILIZA en vez de armar otro con `projectionBands`. Dos tarjetas de éxito
+   *  construidas por caminos distintos es cómo la misma pantalla acaba enseñando dos cifras del
+   *  mismo sorteo. */
+  const successTile = useMemo(() => tiles.find((t) => t.key === "success") ?? null, [tiles]);
 
   // ── Hogar (U10): frases por miembro y nada más ────────────────────────────────────────────
   const memberLines = useMemo(
@@ -669,9 +860,9 @@ export function RetirementView({
         if (s === "partial" && next.partial_retirement == null) {
           next.partial_retirement = newPartialRetirementDraft();
         }
-        if (s === "pension_bridge" && next.pension == null) {
-          next.pension = newPensionPlanDraft();
-        }
+        // Ninguna estrategia crea ya el bloque de pensión: «Puente hasta la pensión» dejó de ser
+        // una estrategia (C7) y el puente es un ajuste de la tarjeta Pensión, que solo existe
+        // cuando el usuario declara una.
         return next;
       });
     },
@@ -699,8 +890,7 @@ export function RetirementView({
   const fieldHelp = (id: PlanFieldId): ReactNode => {
     const entry = PLAN_FIELD_HELP[id];
     if (!entry) return null;
-    const t = HELP_TEXTS[entry.helpId];
-    return <HelpPopover title={t.title} body={t.body} />;
+    return <HelpFor id={entry.helpId} />;
   };
 
   // ═══════════════════════════════════════════════════════════════════════════════════════════
@@ -736,6 +926,77 @@ export function RetirementView({
           </label>
         );
 
+      // ── M10 · los dos modos de coast ──────────────────────────────────────────────────────
+      // El modo va ANTES que su edad porque decide CUÁL de las dos edades tiene sentido: en el
+      // modo A fijas la jubilación y el plan resuelve cuándo puedes dejar de aportar; en el B
+      // fijas la parada y la fecha sale del sorteo. Por eso la edad que el modo no usa
+      // desaparece (`lib/plan-fields.ts`) en vez de quedarse en gris.
+      case "coast_mode":
+        return (
+          <div className="field" key={f.id}>
+            <span className="label-with-help field-label-text">
+              {f.label}
+              {fieldHelp(f.id)}
+            </span>
+            <div
+              className="retirement-mode-grid"
+              role="radiogroup"
+              aria-label="Qué fijas tú en Coast FIRE"
+            >
+              {(["fixed_retirement_age", "fixed_stop_age"] as const).map((mode) => (
+                <label
+                  key={mode}
+                  className={`retirement-mode-card ${
+                    profileDraft.coast_mode === mode ? "is-active" : ""
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="coast_mode"
+                    className="sr-only"
+                    checked={profileDraft.coast_mode === mode}
+                    onChange={() => patchDraft((p) => ({ ...p, coast_mode: mode }))}
+                  />
+                  <span className="retirement-mode-name">{COAST_MODE_LABEL[mode]}</span>
+                  <span className="retirement-mode-sub">
+                    {mode === "fixed_retirement_age"
+                      ? "el plan resuelve cuándo puedes dejar de aportar"
+                      : "el plan resuelve a qué fecha te lleva"}
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+        );
+
+      case "coast_stop_age":
+        return (
+          <label className="field" key={f.id}>
+            <span className="label-with-help">
+              {f.label}
+              {fieldHelp(f.id)}
+            </span>
+            <input
+              inputMode="numeric"
+              value={intFieldValue(profileDraft.coast_stop_age)}
+              placeholder="p. ej. 45"
+              onChange={(e) => {
+                const v = readIntField(e.target.value);
+                if (v === undefined) return;
+                patchDraft((p) => ({ ...p, coast_stop_age: v }));
+              }}
+              onBlur={() => queueProfileSave(0)}
+            />
+            {missing ? (
+              <RequiredHint />
+            ) : (
+              <small className="muted">
+                Desde esa edad no entra ni un euro más: lo que haya, crece solo.
+              </small>
+            )}
+          </label>
+        );
+
       case "target_retirement_age":
         return (
           <label className="field" key={f.id}>
@@ -759,62 +1020,127 @@ export function RetirementView({
           </label>
         );
 
-      // La media jornada se pinta ENTERA en su primer campo: edad e ingreso son un solo dato
-      // partido en dos y separarlos en dos filas obligaba a leer la fase dos veces.
-      case "partial_start_age":
+      // ── M11 · los dos modos de la jornada reducida ────────────────────────────────────────
+      case "partial_mode":
         return (
-          <div className="field-row" key={f.id}>
-            <label className="field">
-              <span className="label-with-help">
-                {f.label}
-                {fieldHelp(f.id)}
-              </span>
-              <input
-                inputMode="numeric"
-                value={partial ? String(partial.starts_at_age) : ""}
-                onChange={(e) => {
-                  const v = readIntField(e.target.value);
-                  if (v === undefined || v === null) return;
-                  patchDraft((p) =>
-                    p.partial_retirement
-                      ? {
-                          ...p,
-                          partial_retirement: { ...p.partial_retirement, starts_at_age: v },
-                        }
-                      : p,
-                  );
-                }}
-                onBlur={() => queueProfileSave(0)}
-              />
-              {missing ? <RequiredHint /> : null}
-            </label>
-            <label className="field">
-              <span>Ingreso mensual en media jornada</span>
-              <input
-                inputMode="decimal"
-                placeholder="0"
-                value={partial?.income_monthly_today ?? ""}
-                onChange={(e) =>
-                  patchDraft((p) =>
-                    p.partial_retirement
-                      ? {
-                          ...p,
-                          partial_retirement: {
-                            ...p.partial_retirement,
-                            income_monthly_today: typedDecimal(e.target.value),
-                          },
-                        }
-                      : p,
-                  )
-                }
-                onBlur={() => queueProfileSave(0)}
-              />
-              <small className="muted">En euros de hoy. Vacío = año sabático.</small>
-            </label>
+          <div className="field" key={f.id}>
+            <span className="label-with-help field-label-text">
+              {f.label}
+              {fieldHelp(f.id)}
+            </span>
+            <div
+              className="retirement-mode-grid"
+              role="radiogroup"
+              aria-label="Cuándo empieza la media jornada"
+            >
+              {(["at_age", "asap"] as const).map((mode) => (
+                <label
+                  key={mode}
+                  className={`retirement-mode-card ${
+                    (partial?.mode ?? "at_age") === mode ? "is-active" : ""
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="partial_mode"
+                    className="sr-only"
+                    checked={(partial?.mode ?? "at_age") === mode}
+                    onChange={() =>
+                      patchDraft((p) =>
+                        p.partial_retirement
+                          ? {
+                              ...p,
+                              partial_retirement: {
+                                ...p.partial_retirement,
+                                mode,
+                                // Cambiar a «en cuanto pueda» SUELTA la edad: la resuelve el
+                                // servidor y conservarla dejaría en el borrador un dato que la
+                                // simulación no mira. Al volver al modo A el campo pide la suya.
+                                starts_at_age:
+                                  mode === "asap"
+                                    ? null
+                                    : p.partial_retirement.starts_at_age,
+                              },
+                            }
+                          : p,
+                      )
+                    }
+                  />
+                  <span className="retirement-mode-name">{PARTIAL_MODE_LABEL[mode]}</span>
+                  <span className="retirement-mode-sub">
+                    {mode === "at_age"
+                      ? "tú pones la edad de inicio"
+                      : "el plan busca el primer mes que se lo puede permitir"}
+                  </span>
+                </label>
+              ))}
+            </div>
           </div>
         );
+
+      // La edad de inicio solo existe en el modo A: en «en cuanto pueda» la resuelve el servidor
+      // (`partial_start_month_index`) y `lib/plan-fields.ts` ni siquiera emite el campo.
+      case "partial_start_age":
+        return (
+          <label className="field" key={f.id}>
+            <span className="label-with-help">
+              {f.label}
+              {fieldHelp(f.id)}
+            </span>
+            <input
+              inputMode="numeric"
+              value={intFieldValue(partial?.starts_at_age ?? null)}
+              placeholder="p. ej. 60"
+              onChange={(e) => {
+                const v = readIntField(e.target.value);
+                if (v === undefined) return;
+                patchDraft((p) =>
+                  p.partial_retirement
+                    ? {
+                        ...p,
+                        partial_retirement: { ...p.partial_retirement, starts_at_age: v },
+                      }
+                    : p,
+                );
+              }}
+              onBlur={() => queueProfileSave(0)}
+            />
+            {missing ? <RequiredHint /> : null}
+          </label>
+        );
+
+      // El ingreso se pinta APARTE de la edad (antes iban juntos en una fila): con el modo B no
+      // hay edad que pintar, y colgar el ingreso de un campo que no se emite lo habría hecho
+      // desaparecer justo en la mitad de la fase que el usuario sí decide.
       case "partial_income":
-        return null; // se pinta con `partial_start_age`
+        return (
+          <label className="field" key={f.id}>
+            <span className="label-with-help">
+              {f.label}
+              {fieldHelp(f.id)}
+            </span>
+            <input
+              inputMode="decimal"
+              placeholder="0"
+              value={partial?.income_monthly_today ?? ""}
+              onChange={(e) =>
+                patchDraft((p) =>
+                  p.partial_retirement
+                    ? {
+                        ...p,
+                        partial_retirement: {
+                          ...p.partial_retirement,
+                          income_monthly_today: typedDecimal(e.target.value),
+                        },
+                      }
+                    : p,
+                )
+              }
+              onBlur={() => queueProfileSave(0)}
+            />
+            <small className="muted">En euros de hoy. Vacío = año sabático.</small>
+          </label>
+        );
 
       // La pensión se pinta entera en su primer campo: la casilla y sus dos cifras son un bloque.
       case "pension_amount":
@@ -824,13 +1150,12 @@ export function RetirementView({
               <input
                 type="checkbox"
                 checked={pension != null}
-                // El puente ES la pensión: quitarla dejaría la estrategia sin su dato y el
-                // servidor rechazaría el PATCH.
-                disabled={profileDraft.strategy === "pension_bridge" && pension != null}
                 onChange={(e) =>
                   patchDraft((p) => ({
                     ...p,
-                    pension: e.target.checked ? newPensionPlanDraft() : null,
+                    // El borrador arranca con el PUENTE APAGADO (C7): tener pensión no implica
+                    // querer adelantar la fecha vendiendo por encima de tu tasa.
+                    pension: e.target.checked ? newPensionPlanDraft(p.swr_pct) : null,
                   }))
                 }
               />
@@ -871,16 +1196,97 @@ export function RetirementView({
                   />
                 </label>
               </div>
-            ) : profileDraft.strategy === "pension_bridge" ? (
-              <small className="muted">
-                «Puente hasta la pensión» la necesita: el objetivo se dimensiona con los años que
-                van de tu jubilación a la primera paga.
-              </small>
             ) : null}
           </div>
         );
       case "pension_start_age":
         return null; // se pinta con `pension_amount`
+
+      // ── C2/C7 · el PUENTE: un ajuste de la pensión, no una estrategia ─────────────────────
+      //
+      // Encenderlo tiene que dejar los dos números YA PUESTOS (`withBridgeEnabled`): el servidor
+      // los rellena con `max(5, swr + 1)` % y 7 años, y un interruptor que deja dos huecos en
+      // pantalla enseñaría un puente sin tope donde el perfil guardado tiene uno.
+      case "bridge_enabled":
+        return (
+          <div className="field" key={f.id}>
+            <span className="label-with-help field-label-text">
+              {f.label}
+              {fieldHelp(f.id)}
+            </span>
+            <Switch
+              checked={pension?.bridge_enabled === true}
+              onChange={(on) =>
+                setPension((p) => withBridgeEnabled(p, on, profileDraft.swr_pct))
+              }
+              ariaLabel="Activar el puente hasta la pensión"
+              label={pension?.bridge_enabled === true ? "Activado" : "Desactivado"}
+            />
+            <p className="muted tight">
+              Jubilación anticipada: sin sueldo no hay aportaciones; se vende hasta la pensión.
+            </p>
+          </div>
+        );
+
+      case "bridge_max_pct":
+        return (
+          <label className="field" key={f.id}>
+            <span className="label-with-help">
+              {f.label} (%)
+              {fieldHelp(f.id)}
+            </span>
+            <input
+              inputMode="decimal"
+              placeholder="p. ej. 5"
+              value={pension?.bridge_max_pct ?? ""}
+              onChange={(e) =>
+                setPension((p) => ({
+                  ...p,
+                  bridge_max_pct: typedDecimalOrNull(e.target.value),
+                }))
+              }
+              onBlur={() => queueProfileSave(0)}
+            />
+            {missing ? (
+              <RequiredHint />
+            ) : (
+              <small className="muted">
+                Mayor que tu tasa de retirada ({formatPercentAmount(profileDraft.swr_pct)}) y
+                hasta {formatPercentAmount(String(MAX_BRIDGE_PCT))}: si no la supera no es un
+                puente, es la misma tasa.
+              </small>
+            )}
+          </label>
+        );
+
+      case "bridge_max_years":
+        return (
+          <label className="field" key={f.id}>
+            <span className="label-with-help">
+              {f.label}
+              {fieldHelp(f.id)}
+            </span>
+            <input
+              inputMode="numeric"
+              placeholder="p. ej. 7"
+              value={intFieldValue(pension?.bridge_max_years ?? null)}
+              onChange={(e) => {
+                const v = readIntField(e.target.value);
+                if (v === undefined) return;
+                setPension((p) => ({ ...p, bridge_max_years: v }));
+              }}
+              onBlur={() => queueProfileSave(0)}
+            />
+            {missing ? (
+              <RequiredHint />
+            ) : (
+              <small className="muted">
+                Entre {MIN_BRIDGE_YEARS} y {MAX_BRIDGE_YEARS}. Tu fecha nunca cae más de estos
+                años antes de la primera paga.
+              </small>
+            )}
+          </label>
+        );
 
       case "fire_number_mode":
         return (
@@ -944,11 +1350,15 @@ export function RetirementView({
           </label>
         );
 
-      // ── Supuestos con default: retirada, base del objetivo, pensión fina y horizonte ────
+      // ── Supuestos con default: umbral, retirada, pensión fina y horizonte ───────────────
       //
       // Antes vivían en el acordeón «Avanzado»; desde V3 caen en la tarjeta de su tema
-      // (`lib/plan-fields.ts`) y comparten switch con el resto. Ni uno solo cambió de editor.
-      case "swr_pct":
+      // (`lib/plan-fields.ts`) y comparten switch con el resto.
+      //
+      // El UMBRAL va el primero de «Retirada» porque en v2 **es la restricción que decide la
+      // fecha válida**, no un corte de semáforo: mover este slider mueve la fecha, el capital
+      // necesario y el color de la banda a la vez.
+      case "success_threshold_pct":
         return (
           <label className="field" key={f.id}>
             <span className="label-with-help">
@@ -957,10 +1367,49 @@ export function RetirementView({
             </span>
             <input
               type="range"
-              min={0}
-              max={40}
+              min={MIN_SUCCESS_THRESHOLD_PCT}
+              max={MAX_SUCCESS_THRESHOLD_PCT}
               step={1}
-              value={Math.round((parseDisplayDecimal(profileDraft.swr_pct) ?? 0) * 10)}
+              value={profileDraft.success_threshold_pct}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                if (!Number.isInteger(v)) return;
+                patchDraft((p) => ({ ...p, success_threshold_pct: v }));
+              }}
+              onBlur={() => queueProfileSave(0)}
+            />
+            <span className="retirement-slider-value">
+              {formatPercentDisplay(profileDraft.success_threshold_pct)}
+            </span>
+            <small className="muted">
+              de tus escenarios tienen que aguantar hasta el horizonte.
+              {profileDraft.success_threshold_pct >= MAX_SUCCESS_THRESHOLD_PCT
+                ? " Al 100 % no puede fallar ni uno de los caminos sorteados."
+                : ""}
+            </small>
+          </label>
+        );
+
+      case "swr_pct":
+        return (
+          <label className="field" key={f.id}>
+            <span className="label-with-help">
+              {f.label}
+              {fieldHelp(f.id)}
+            </span>
+            {/* El slider trabaja en DÉCIMAS de punto (`value = pct · 10`) para poder pisar los
+                0,1 sin `step` fraccionario. El mínimo es 1 —0,1 %— y NO 0: un plan que retira
+                el 0 % no es un plan, y con la regla por saldo el servidor lo rechaza
+                (`withdrawal_pct_out_of_range`) sin que nada en pantalla lo explique. */}
+            <input
+              type="range"
+              min={1}
+              max={MAX_SWR_PCT * 10}
+              step={1}
+              value={Math.max(
+                1,
+                Math.round((parseDisplayDecimal(profileDraft.swr_pct) ?? 0) * 10),
+              )}
               onChange={(e) => {
                 const v = Number(e.target.value);
                 patchDraft((p) => ({ ...p, swr_pct: String(v / 10) }));
@@ -971,7 +1420,7 @@ export function RetirementView({
               {formatPercentAmount(profileDraft.swr_pct)}
             </span>
             <small className="muted">
-              Dimensiona tu objetivo y es el que retira la regla de abajo.
+              lo máximo que sacas el primer año sobre tu líquido.
             </small>
           </label>
         );
@@ -987,9 +1436,23 @@ export function RetirementView({
               value={rule.kind}
               onChange={(e) => {
                 const kind = e.target.value as WithdrawalRuleKindApi;
+                // B8 — al cambiar de regla se SUELTAN los subcampos de la anterior. Sin esto, el
+                // `end_pct` de la híbrida o la banda de las bandas viajaban en el PATCH de una
+                // regla que no los usa: el servidor los guarda, la pantalla no los enseña, y al
+                // volver a aquella regla reaparecía un número que nadie recordaba haber puesto.
+                // `spend_mode` vuelve a `ceiling` en `fixed_real` por el mismo motivo: esa regla
+                // no tiene modo que aplicar (`lib/plan-fields.ts` ni siquiera pinta el campo).
                 patchDraft((p) => ({
                   ...p,
-                  withdrawal_rule: { ...p.withdrawal_rule, kind },
+                  withdrawal_rule: {
+                    ...p.withdrawal_rule,
+                    kind,
+                    end_pct: kind === "hybrid" ? p.withdrawal_rule.end_pct : null,
+                    band_pct: kind === "guardrails" ? p.withdrawal_rule.band_pct : null,
+                    adjust_pct: kind === "guardrails" ? p.withdrawal_rule.adjust_pct : null,
+                    spend_mode:
+                      kind === "fixed_real" ? "ceiling" : p.withdrawal_rule.spend_mode,
+                  },
                 }));
               }}
             >
@@ -1101,86 +1564,6 @@ export function RetirementView({
               ))}
             </div>
           </div>
-        );
-
-      case "target_basis":
-        return (
-          <div className="field" key={f.id}>
-            <div
-              className="retirement-radio-stack"
-              role="radiogroup"
-              aria-label="Base del objetivo"
-            >
-              <span className="label-with-help field-label-text">
-                {f.label}
-                {fieldHelp(f.id)}
-                {/* La opción marcada puede no ser una elección: mientras nadie la fija, la
-                    deriva el servidor. Decirlo evita que se lea como una decisión tomada. */}
-                {basisSource === "derived" ? <span className="muted"> (derivada)</span> : null}
-              </span>
-              <label className="field checkbox-field">
-                <input
-                  type="radio"
-                  name="target_basis"
-                  checked={basis === "perpetuity"}
-                  onChange={() => patchDraft((p) => ({ ...p, target_basis: "perpetuity" }))}
-                />
-                <span>Renta perpetua (ignora la pensión)</span>
-              </label>
-              <label className="field checkbox-field">
-                <input
-                  type="radio"
-                  name="target_basis"
-                  checked={basis === "bridge_to_pension"}
-                  onChange={() =>
-                    patchDraft((p) => ({ ...p, target_basis: "bridge_to_pension" }))
-                  }
-                />
-                <span>Puente hasta la pensión</span>
-              </label>
-            </div>
-            {/* FUERA del `radiogroup`: un botón enfocable entre radios rompe la navegación con
-                flechas. Sin esta salida, fijar la base a mano es irreversible desde la UI. */}
-            {basisSource === "stored" ? (
-              <button
-                type="button"
-                className="btn ghost text retirement-basis-reset"
-                onClick={() => patchDraft((p) => ({ ...p, target_basis: null }))}
-              >
-                Volver a la derivada
-              </button>
-            ) : null}
-          </div>
-        );
-
-      case "bridge_discount_basis":
-        return (
-          <label className="field" key={f.id}>
-            <span className="label-with-help">
-              {f.label}
-              {fieldHelp(f.id)}
-            </span>
-            <select
-              value={profileDraft.bridge_discount_basis}
-              onChange={(e) =>
-                patchDraft((p) => ({
-                  ...p,
-                  bridge_discount_basis:
-                    e.target.value === "swr"
-                      ? "swr"
-                      : e.target.value === "none"
-                        ? "none"
-                        : "expected_return",
-                }))
-              }
-            >
-              {(["expected_return", "swr", "none"] as const).map((b) => (
-                <option key={b} value={b}>
-                  {BRIDGE_DISCOUNT_BASIS_LABEL[b]}
-                </option>
-              ))}
-            </select>
-          </label>
         );
 
       case "pension_indexed":
@@ -1316,6 +1699,31 @@ export function RetirementView({
   const chartReady =
     hasMembership && projectionSeries != null && projectionSeries.points.length > 0;
 
+  /**
+   * El nivel 1 del solve sigue corriendo (típicamente el primer GET tras una mutación): no hay
+   * fecha, ni éxito, ni capital necesario **todavía**. No es una carencia y no se dice con un
+   * guion: la frase y las tarjetas ya traen su copy de «calculando…» (W5/W6) y el panel entero
+   * se marca `aria-busy` para que un lector de pantalla no lea cifras a medio resolver.
+   */
+  const planPending =
+    retirementMetricsReady && projectionSeries?.retirement_date_basis === "pending";
+
+  /** El nivel 2 (segundo plano) todavía está resolviendo la curva de capital necesario por edad:
+   *  la línea del chart llegará sola en un GET posterior. */
+  const neededCurveComputing =
+    retirementMetricsReady && projectionSeries?.needed_capital_curve_state === "computing";
+
+  /**
+   * C5/B4/B11 — sin fecha de nacimiento no hay fecha válida, y hay que decirlo **donde se
+   * arregla**: en la tarjeta «Edades», que es la que trae el campo. Las dos señales son del
+   * servidor y significan lo mismo desde ángulos distintos: el bloque «plan» no se publica
+   * (`plan_absent_reason`) y el horizonte cayó a su fallback demográfico (`horizon_basis`).
+   */
+  const birthDateBlocksPlan =
+    projectionSeries != null &&
+    (projectionSeries.plan_absent_reason === "birth_date_missing" ||
+      projectionSeries.horizon_basis === "fallback_no_demographics");
+
   return (
     <div className="workspace">
       {/* ── 1 · Cabecera: título + UN indicador de guardado (S6) ────────────────────────── */}
@@ -1368,8 +1776,13 @@ export function RetirementView({
           </p>
           {memberLines.length > 0 ? (
             <ul className="household-plan-lines bordered-top">
+              {/* B7 — cada línea lleva el TONO de esa persona. Sin él, un miembro
+                  infra-financiado o al que le falta la fecha de nacimiento se leía exactamente
+                  igual que uno que llega, mientras su propia tarjeta sí lo pintaba de rojo. */}
               {memberLines.map((l) => (
-                <li key={l.userId}>{l.text}</li>
+                <li key={l.userId} className={`retirement-sentence--${l.tone}`}>
+                  {l.text}
+                </li>
               ))}
             </ul>
           ) : (
@@ -1462,6 +1875,14 @@ export function RetirementView({
                       ) : (
                         fields.map((f) => renderField(f))
                       )}
+                      {/* C5/B4/B11 — el aviso va en la tarjeta que trae el campo, no arriba del
+                          todo: sin fecha de nacimiento el servidor no publica NADA del plan y
+                          el usuario tiene que saber que se arregla dos líneas más arriba. */}
+                      {card === "ages" && birthDateBlocksPlan ? (
+                        <p className="muted tight">
+                          Sin tu fecha de nacimiento no hay fecha válida: ponla aquí.
+                        </p>
+                      ) : null}
                     </div>
                   </section>
                 ))}
@@ -1470,9 +1891,16 @@ export function RetirementView({
           </section>
 
           {/* ── 3 · «Resultado» ───────────────────────────────────────────────────────────── */}
-          <section className="panel">
+          <section className="panel" aria-busy={planPending || undefined}>
             <div className="panel-head-row">
               <h3 className="panel-title">Resultado</h3>
+              {planPending ? (
+                <span
+                  className="spinner retirement-pending-spinner"
+                  role="status"
+                  aria-label="Resolviendo tu fecha válida"
+                />
+              ) : null}
               <HelpPopover
                 title={HELP_TEXTS["retirement.plan_sentence"].title}
                 body={HELP_TEXTS["retirement.plan_sentence"].body}
@@ -1480,7 +1908,9 @@ export function RetirementView({
             </div>
 
             {/* U7 — la cabecera de resultados es una FRASE, no tres tarjetas que el usuario
-                tenga que volver a juntar en su cabeza. */}
+                tenga que volver a juntar en su cabeza. Los tres estados que no son un plan
+                —bloque ausente, `pending` y `not_reachable`— los dice la propia frase
+                (`lib/plan-sentence.ts`): aquí no se re-decide ninguno. */}
             <p className={`retirement-sentence retirement-sentence--${sentence.tone}`}>
               {retirementMetricsReady ? sentence.text : "Calculando tu plan…"}
             </p>
@@ -1490,26 +1920,23 @@ export function RetirementView({
               </p>
             ) : null}
 
-            {/* D17 — el rojo GRANDE. No es un error (la simulación existe y la fecha no se
-                mueve): dice que te jubilarás POR DEBAJO de tu objetivo, y va antes de las cifras
-                porque cambia cómo se leen todas. */}
-            {dangerNotices.map((n) => (
-              <div key={n.code} className="banner error-banner" role="status">
+            {/* Todos los avisos, con su piel: el rojo de D17 como error y los ámbar como info.
+                No es un error (la simulación existe y la fecha no se mueve): dicen que el plan
+                está degradado, y van antes de las cifras porque cambian cómo se leen todas. */}
+            {topNotices.map((n) => (
+              <div
+                key={n.code}
+                className={`banner ${n.tone === "danger" ? "error-banner" : "info-banner"}`}
+                role="status"
+              >
                 {n.text}
               </div>
             ))}
 
-            {retirementMetricsReady && projectionSeries?.fire_target_absent_reason ? (
-              <p className="muted tight">
-                {FIRE_TARGET_ABSENT_REASON_ES[projectionSeries.fire_target_absent_reason] ??
-                  "No se calcula fecha de cruce."}
-              </p>
-            ) : null}
-
             {installationInflationPct <= 0 ? (
               <div className="banner info-banner">
-                Con la inflación a 0 %, tu objetivo se queda plano en dinero de hoy: la fecha que
-                ves puede ser optimista frente a lo que costará vivir entonces.{" "}
+                Con la inflación a 0 %, tu gasto de jubilación se queda plano en dinero de hoy:
+                la fecha que ves puede ser optimista frente a lo que costará vivir entonces.{" "}
                 <a
                   href={appUrl(settingsSubTabPath("plan"))}
                   onClick={(e) => {
@@ -1533,7 +1960,14 @@ export function RetirementView({
                   <MetricCard
                     key={t.key}
                     label={t.label}
-                    helpId={t.helpId}
+                    /* El id puede ser uno de los que W8 todavía no ha escrito: se pasa solo si
+                       el catálogo lo tiene, porque `MetricCard` lo lee sin red y un `undefined`
+                       reventaría la tarjeta. Cuando W8 aterrice, el interrogante aparece solo. */
+                    helpId={
+                      helpTextOrNull(t.helpId as HelpTextId)
+                        ? (t.helpId as HelpTextId)
+                        : undefined
+                    }
                     value={t.value}
                     parenthetical={t.subtitle}
                     tone={t.tone === "danger" ? "danger" : "default"}
@@ -1542,9 +1976,15 @@ export function RetirementView({
               </div>
             ) : null}
 
-            {/* U5 — UN gráfico: patrimonio, objetivo, banda de escenarios y los hitos del plan,
-                todos sobre el mismo eje y hasta el horizonte. Antes eran dos charts con ejes X
-                distintos que el usuario tenía que emparejar a ojo. */}
+            {/* Nivel 2 en segundo plano: la curva de capital necesario por edad llegará sola.
+                Se dice en vez de dejar el chart sin su línea auxiliar sin explicación. */}
+            {neededCurveComputing ? (
+              <p className="muted tight">Calculando el capital necesario por edad…</p>
+            ) : null}
+
+            {/* U5 — UN gráfico: patrimonio, capital necesario, banda de escenarios, la marca de
+                tu fecha y los hitos del plan, todos sobre el mismo eje y hasta el horizonte.
+                Antes eran dos charts con ejes X distintos que el usuario emparejaba a ojo. */}
             {chartReady ? (
               <div className="retirement-chart-block bordered-top">
                 <div className="retirement-chart-toolbar">
@@ -1568,18 +2008,19 @@ export function RetirementView({
                 <MiniProjection
                   series={projectionSeries}
                   height={260}
-                  showFire={
-                    !!projectionSeries?.fire_target_series &&
-                    projectionSeries.fire_target_series.length > 0
-                  }
-                  /* El hito de jubilación lo dibujan las MARCAS (con su rótulo): dejar también
-                     `showJub` pintaría dos líneas verticales en el mismo mes. */
+                  /* El hito de jubilación lo dibujan la MARCA de la fecha (con su éxito en el
+                     rótulo) y, si no la hay, las marcas secundarias: dejar también `showJub`
+                     pintaría dos líneas verticales en el mismo mes. */
                   showJub={false}
                   showPhases
                   showAreas={false}
                   zoomY
                   band={showBand ? bandPoints : null}
                   markers={chartMarkers}
+                  neededCurve={neededCurve}
+                  validDateMark={validDate.mark}
+                  successStrip={successStrip}
+                  successStripCutoffs={riskCutoffs}
                   deflator={chartDeflator}
                   xAxis={{
                     ageUiMode: axisAgeMode,
@@ -1604,13 +2045,17 @@ export function RetirementView({
                       color: "var(--proj-nw)",
                       swatch: "line",
                     },
-                    ...(projectionSeries?.fire_target_series &&
-                    projectionSeries.fire_target_series.length > 0
+                    /* La curva de capital necesario sustituye a la del objetivo FIRE: en v2 no
+                       hay objetivo que cruzar, hay el líquido que hace cumplir tu umbral
+                       jubilándote en cada mes. Su rótulo y su color viven en
+                       `NEEDED_CAPITAL_SERIES` para que la leyenda no pueda desincronizarse de
+                       la polilínea. */
+                    ...(neededCurve && neededCurve.some((p) => p.value != null)
                       ? ([
                           {
-                            key: "fire",
-                            label: "Objetivo FIRE",
-                            color: "var(--proj-fire)",
+                            key: NEEDED_CAPITAL_SERIES.key,
+                            label: NEEDED_CAPITAL_SERIES.label,
+                            color: NEEDED_CAPITAL_SERIES.color,
                             swatch: "dashed",
                           },
                         ] as const)
@@ -1644,25 +2089,35 @@ export function RetirementView({
                       : []),
                   ]}
                 />
+                {/* La nota que sustituye a la MARCA cuando no hay ninguna que pintar: sin
+                    fecha válida al umbral, o el nivel 1 todavía resolviéndola. Va bajo la
+                    leyenda porque explica una ausencia del chart, no una serie. */}
+                {validDate.note ? (
+                  <p className="muted tight">{validDate.note}</p>
+                ) : null}
                 {/* La ESCALA del color (V5). No es un ítem de `ChartLegend` a propósito: una
                     leyenda nombra SERIES, y esto es una escala continua — meterla ahí la haría
-                    parecer una cuarta línea del gráfico. */}
+                    parecer una línea más del gráfico.
+                    Los tres peldaños salen de `riskCutoffs`, los MISMOS que tiñen la banda y la
+                    tira de éxito: con el umbral al 80 % el rojo empieza en el 20 % de fallo, y
+                    una escala fija diría «10 % o más» sobre una banda que no se pone roja ahí. */}
                 {gradientStops.length > 1 ? (
                   <p className="retirement-risk-scale">
                     <span className="label-with-help">
                       <strong>Banda 10–90 %</strong>
-                      <HelpPopover
-                        title={HELP_TEXTS["retirement.depletion_by_age"].title}
-                        body={HELP_TEXTS["retirement.depletion_by_age"].body}
-                      />
+                      <HelpFor id={RESULT_HELP.failureByAge.helpId} />
                     </span>{" "}
-                    · el color dice qué parte de los escenarios se ha quedado ya sin capital a esa
-                    edad:{" "}
+                    · el color dice qué parte de los escenarios ya ha fallado a esa edad —se
+                    quedaron sin dinero, se pasaron de tasa inicial o su regla no cubrió el
+                    gasto:{" "}
                     {(
                       [
                         [0, "ninguno"],
-                        [RISK_AMBER_AT, "5 %"],
-                        [RISK_RED_AT, "10 % o más"],
+                        [riskCutoffs.amber, formatPercentDisplay(riskCutoffs.amber * 100)],
+                        [
+                          riskCutoffs.red,
+                          `${formatPercentDisplay(riskCutoffs.red * 100)} o más`,
+                        ],
                       ] as const
                     ).map(([p, label]) => (
                       <span key={label} className="retirement-risk-scale-step">
@@ -1674,7 +2129,7 @@ export function RetirementView({
                              clase fija. */
                           style={
                             {
-                              "--ff-risk-swatch": riskColorForProbability(p),
+                              "--ff-risk-swatch": riskColorForProbability(p, riskCutoffs),
                             } as CSSProperties
                           }
                           aria-hidden
@@ -1704,87 +2159,93 @@ export function RetirementView({
                 ) : (
                   <p className="muted tight">Aún no hay escenarios que mostrar.</p>
                 )
-              ) : showsNoVolatilityNotice(projectionBands) ? (
-                /* Sin σ declarada las tres bandas SON la línea, y un abanico plano se lee como
-                   certeza — la lectura más cara posible de esta pantalla. */
-                <div className="banner info-banner">
-                  Sin volatilidad declarada: la banda es la línea. Añade la volatilidad anual a
-                  tus activos.{" "}
-                  <a
-                    href={appUrl(TAB_PATH.assets)}
-                    onClick={(e) => {
-                      if (e.button !== 0 || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey)
-                        return;
-                      e.preventDefault();
-                      navigate(TAB_PATH.assets);
-                    }}
-                  >
-                    Ir a Activos
-                  </a>
-                  .
-                </div>
               ) : (
                 <>
-                  <div className="metric-grid summary-success-grid">
-                    <MetricCard
-                      label="Éxito del plan"
-                      helpId="retirement.success"
-                      value={formatSuccessPercent(projectionBands.success_probability)}
-                      parenthetical={successParenthetical(
-                        projectionBands.success_probability,
-                        projectionBands.paths,
-                      )}
-                      /* El veredicto lo decide el SERVIDOR (verde SOLO al 100 %, ámbar hasta
-                         diez puntos por debajo, V7): aquí solo se traduce a la piel que la app
-                         ya habla. Recalcularlo aquí es cómo el tile y el chart acaban contando
-                         dos éxitos distintos del mismo plan. */
-                      tone={(() => {
-                        const t = successVerdictTone(projectionBands.success_verdict);
-                        return t === "danger" ? "danger" : t === "warn" ? "warn" : "default";
-                      })()}
-                    />
-                  </div>
-                  {/* V6 — el colchón de caja ya no se PREGUNTA: se deriva del tope de tu regla
-                      de ahorro y aquí se informa de dónde sale. Un valor derivado se rotula
-                      como derivado, y con su salida cuando alguien lo ha fijado por API. */}
-                  {bufferLine ? (
-                    <p className="retirement-buffer-line">
-                      <span className="label-with-help">
-                        {bufferLine.text}
-                        <HelpPopover
-                          title={HELP_TEXTS["retirement.cash_buffer"].title}
-                          body={HELP_TEXTS["retirement.cash_buffer"].body}
-                        />
-                      </span>
-                      {bufferLine.linksToAllocationRules ? (
-                        <a
-                          href={appUrl(TAB_PATH.assets)}
-                          onClick={(e) => {
-                            if (e.button !== 0 || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey)
-                              return;
-                            e.preventDefault();
-                            navigate(TAB_PATH.assets);
-                          }}
-                        >
-                          Cambiar en Reglas de ahorro
-                        </a>
-                      ) : null}
-                      {bufferLine.canResetToDerived && canEditProfile ? (
-                        // Tri-estado del PATCH: `null` SUELTA el override y devuelve la
-                        // derivación. Sin esta salida, un colchón puesto por API sería
-                        // irreversible desde la pantalla.
-                        <button
-                          type="button"
-                          className="btn ghost text"
-                          onClick={() =>
-                            void onSaveRetirementProfile({ cash_buffer_months: null })
-                          }
-                        >
-                          Volver al tope de tu regla
-                        </button>
-                      ) : null}
-                    </p>
+                  {/* C5 — sin σ declarada el sorteo no dispersa y el éxito sale 0 % o 100 % por
+                      construcción. Es un AVISO, no un bloqueo: las cifras de abajo siguen
+                      siendo las que el servidor calculó, y esconderlas dejaría la pantalla sin
+                      su desglose justo cuando más hace falta explicarlo. */}
+                  {noVolatilityInRiskBlock ? (
+                    <div className="banner info-banner">
+                      Sin volatilidad declarada: la banda es la línea y el éxito no mide riesgo.
+                      Añade la volatilidad anual a tus activos.{" "}
+                      <a
+                        href={appUrl(TAB_PATH.assets)}
+                        onClick={(e) => {
+                          if (e.button !== 0 || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey)
+                            return;
+                          e.preventDefault();
+                          navigate(TAB_PATH.assets);
+                        }}
+                      >
+                        Ir a Activos
+                      </a>
+                      .
+                    </div>
                   ) : null}
+                  {/* El MISMO tile que la cabecera, sacado de `buildRetirementTilesV2`: aquí no
+                      se arma una segunda tarjeta de éxito con `projectionBands`. Dos tarjetas
+                      construidas por caminos distintos es cómo la misma pantalla acaba
+                      enseñando dos cifras del mismo sorteo. */}
+                  {successTile ? (
+                    <div className="metric-grid summary-success-grid">
+                      <MetricCard
+                        label={successTile.label}
+                        helpId={
+                          helpTextOrNull(successTile.helpId as HelpTextId)
+                            ? (successTile.helpId as HelpTextId)
+                            : undefined
+                        }
+                        value={successTile.value}
+                        parenthetical={successTile.subtitle}
+                        tone={successTile.tone === "danger" ? "danger" : "default"}
+                      />
+                    </div>
+                  ) : null}
+                  {/* La PRECISIÓN de la cifra de al lado, con los números del servidor y sin
+                      aritmética de cliente: el semiancho de Wilson y el tamaño de la muestra.
+                      Sin ella, un 95,0 % se lee como exacto cuando lo que hay es un intervalo —
+                      y con 0 fallos ni siquiera hay intervalo, sino la cota de la regla de tres
+                      que la propia tarjeta ya cita en su subtítulo. */}
+                  <p className="muted tight">
+                    Precisión del sorteo:{" "}
+                    {formatSamplingErrorPp(projectionBands.success_sampling_error_pp)} sobre{" "}
+                    {projectionBands.paths} caminos (intervalo de Wilson al 95 %; con cero
+                    fallos, la cota de la regla de tres).
+                  </p>
+                  {/* Lo que hace AUDITABLE el número grande: por qué falla el que falla, cuánto
+                      se apretó el cinturón el que aguantó. Antes vivían en el «Detalle»
+                      plegado, que es donde nadie mira cuando la cifra de arriba no le cuadra. */}
+                  {riskExtraRows.length > 0 ? (
+                    <div className="risk-extra-rows">
+                      {riskExtraRows.map((r) => (
+                        <div key={r.key} className="risk-extra-row">
+                          <div className="risk-extra-head">
+                            {/* La ayuda cuelga del RÓTULO, no del bloque: estas filas miden
+                                cosas distintas y una sola ayuda arriba explicaría la que el
+                                usuario no está mirando. */}
+                            <span
+                              className={
+                                r.helpId
+                                  ? "label-with-help risk-extra-label"
+                                  : "risk-extra-label"
+                              }
+                            >
+                              {r.label}
+                              {r.helpId ? <HelpFor id={r.helpId as HelpTextId} /> : null}
+                            </span>
+                            <span className="risk-extra-value">{r.value}</span>
+                          </div>
+                          {r.detail ? (
+                            <span className="risk-extra-detail">{r.detail}</span>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
+                  {/* Coste, tamaño de la muestra y semilla: sin ellos la probabilidad no tiene
+                      precisión declarada ni se puede reproducir el sorteo. */}
+                  <p className="risk-footnote">{riskFootnote(projectionBands)}</p>
                 </>
               )}
             </div>
@@ -1794,35 +2255,11 @@ export function RetirementView({
                 cifra de arriba en vez de responder una pregunta propia— más los avisos. Que
                 estén plegadas no las hace opcionales; que estén fuera de la cabecera es lo que
                 permite leer la cabecera de un vistazo. */}
-            {detailRows.length > 0 || riskExtraRows.length > 0 || projectionBands ? (
+            {planDetailRows.length > 0 || projectionBands ? (
               <details className="retirement-detail bordered-top">
                 <summary className="details-trigger">Detalle del cálculo</summary>
                 <div className="risk-extra-rows">
-                  {detailRows
-                    .filter((r) => r.tone !== "danger")
-                    .map((r) => (
-                      <div key={r.key} className="risk-extra-row">
-                        <div className="risk-extra-head">
-                          <span
-                            className={
-                              r.key === "liquid_crossing"
-                                ? "label-with-help risk-extra-label"
-                                : "risk-extra-label"
-                            }
-                          >
-                            {r.label}
-                            {r.key === "liquid_crossing" ? (
-                              <HelpPopover
-                                title={HELP_TEXTS["retirement.crossing_reading"].title}
-                                body={HELP_TEXTS["retirement.crossing_reading"].body}
-                              />
-                            ) : null}
-                          </span>
-                          <span className="risk-extra-value">{r.value}</span>
-                        </div>
-                      </div>
-                    ))}
-                  {riskExtraRows.map((r) => (
+                  {planDetailRows.map((r) => (
                     <div key={r.key} className="risk-extra-row">
                       <div className="risk-extra-head">
                         {/* La ayuda cuelga del RÓTULO, no del bloque: estas filas miden cosas
@@ -1834,18 +2271,10 @@ export function RetirementView({
                           }
                         >
                           {r.label}
-                          {r.helpId ? (
-                            <HelpPopover
-                              title={HELP_TEXTS[r.helpId].title}
-                              body={HELP_TEXTS[r.helpId].body}
-                            />
-                          ) : null}
+                          {r.helpId ? <HelpFor id={r.helpId as HelpTextId} /> : null}
                         </span>
                         <span className="risk-extra-value">{r.value}</span>
                       </div>
-                      {r.detail ? (
-                        <span className="risk-extra-detail">{r.detail}</span>
-                      ) : null}
                     </div>
                   ))}
                   {projectionBands ? (
@@ -1866,9 +2295,6 @@ export function RetirementView({
                     </div>
                   ) : null}
                 </div>
-                {projectionBands ? (
-                  <p className="risk-footnote">{riskFootnote(projectionBands)}</p>
-                ) : null}
               </details>
             ) : null}
           </section>

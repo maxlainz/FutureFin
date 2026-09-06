@@ -220,12 +220,27 @@ export function SummaryView({
     return civil.ymd ? formatDateDmy(civil.ymd) : `mes ${monthIndex}`;
   };
 
+  /**
+   * Edad cumplida en un mes de la rejilla, con el MISMO ancla civil que `planMonthLabel`. La
+   * fecha de nacimiento sale de la propia serie (`viewer_birth_date`), que es la que el servidor
+   * usó para resolver el plan; sin ella devuelve `null` y la frase se queda sin su paréntesis de
+   * edad en vez de estimarla restando años (B5).
+   */
+  const planAgeAt = (monthIndex: number): number | null =>
+    resolvePlanMilestoneCivil({
+      monthIndex,
+      anchorDateYmd: projectionSeries?.anchor_date_ymd ?? null,
+      birthDateIso: projectionSeries?.viewer_birth_date ?? null,
+    }).age;
+
   const cardV2 =
     hasMembership && ledgerPersonScope === "mine" && (summary?.plan != null || projectionSeries != null)
       ? planCardV2({
           plan: summary?.plan,
           series: projectionSeries,
           monthLabel: planMonthLabel,
+          ageAt: planAgeAt,
+          currencyIso,
           targetRetirementAge: retirementProfile?.target_retirement_age ?? null,
         })
       : null;
@@ -327,8 +342,15 @@ export function SummaryView({
           {ledgerPersonScope === "household" ? (
             <>
               <ul className="plan-sentence-list bordered-top">
+                {/* B7 — la línea lleva el TONO de esa persona: un miembro infra-financiado o
+                    al que le falta la fecha de nacimiento se leía exactamente igual que uno que
+                    llega, mientras su propia tarjeta sí lo pintaba de rojo. El vocabulario de
+                    tonos es el de la frase del plan (`retirement-sentence--{tone}`). */}
                 {householdLines.map((line, idx) => (
-                  <li key={line.userId} className="plan-sentence-item">
+                  <li
+                    key={line.userId}
+                    className={`plan-sentence-item retirement-sentence--${line.tone}`}
+                  >
                     <span
                       className="plan-sentence-dot"
                       style={{ background: householdMemberColor(idx) }}
@@ -376,6 +398,22 @@ export function SummaryView({
                       parenthetical={cardV2.success.parenthetical}
                       detail={cardV2.success.detail}
                       tone={cardV2.success.tone}
+                    />
+                  </div>
+                ) : null}
+                {/* «Capital necesario hoy» — la MISMA cifra que Jubilación y Proyección, al
+                    euro: sale del bloque `plan` del summary, no de un segundo cálculo. Va junto
+                    al éxito porque las dos contestan la misma pregunta desde los dos lados
+                    («¿aguanta?» y «¿cuánto haría falta?»), y sin cifra no se pinta: un guion
+                    mudo se leería como «tu plan no necesita capital». */}
+                {cardV2.neededCapital ? (
+                  <div className="plan-card-wide-kpi">
+                    <MetricCard
+                      label={cardV2.neededCapital.label}
+                      value={cardV2.neededCapital.value}
+                      parenthetical={cardV2.neededCapital.parenthetical}
+                      detail={cardV2.neededCapital.detail}
+                      tone={cardV2.neededCapital.tone}
                     />
                   </div>
                 ) : null}
@@ -498,7 +536,6 @@ export function SummaryView({
                 series={projectionSeries}
                 months={12}
                 height={170}
-                showFire={false}
                 showAreas={true}
                 zoomY
               />

@@ -56,7 +56,6 @@ import { savingsSourceUsesTransactions } from "./lib/fire";
 import {
   isEmptyRetirementProfilePatch,
   normalizeRetirementProfile,
-  withStoredTargetBasis,
 } from "./lib/retirementProfile";
 import { buildAssetWriteBody } from "./lib/asset-form";
 import { readFileAsBase64 } from "./lib/files";
@@ -851,15 +850,10 @@ export default function App() {
       const body = await apiGet<RetirementProfileResponseApi>(
         "/v1/auth/me/retirement-profile",
       );
-      // `target_basis` se guarda con la elección ALMACENADA, no con la resuelta que publica el
-      // servidor: es la única forma de que el formulario distinga «no lo he elegido» de «he
-      // elegido esto» y no congele la derivación (R6) al guardar cualquier otro campo. Lo que se
-      // PINTA sigue derivándose igual (`effectiveTargetBasis`), así que el usuario ve lo mismo.
-      setRetirementProfile(
-        normalizeRetirementProfile(
-          withStoredTargetBasis(body.profile, body.target_basis_stored),
-        ),
-      );
+      // El perfil se toma tal y como lo publica el servidor: YA resuelto. El modelo v2 retiró
+      // `target_basis_stored` —el único campo cuya elección ALMACENADA difería de la resuelta—
+      // junto con el objetivo descontado (C1/M4), así que no queda nada que recomponer aquí.
+      setRetirementProfile(normalizeRetirementProfile(body.profile));
     } catch (e: unknown) {
       setRetirementProfile(null);
       setRetirementProfileError(e instanceof Error ? e.message : String(e));
@@ -2335,11 +2329,11 @@ export default function App() {
 
   /**
    * Guarda un PATCH **mínimo** del perfil de jubilación y devuelve el perfil resuelto que
-   * responde el servidor (lo necesita la vista para resincronizar `target_basis`, que el
-   * servidor DERIVA — ver `buildRetirementProfilePatch`).
+   * responde el servidor (lo necesita la vista para saber que el guardado cuajó — ver
+   * `buildRetirementProfilePatch`).
    *
-   * El perfil es un input del motor (SWR, modo del objetivo, edad límite y, desde WP5, la fase
-   * entera): tras guardarlo se recarga la serie de proyección igual que hace
+   * El perfil es un input del motor (umbral, SWR, regla, edad límite y la fase entera): tras
+   * guardarlo se recarga la serie de proyección igual que hace
    * `saveFireSettingsPatch`, para que el chart de Jubilación / Resumen / Proyección no se quede
    * enseñando el plan anterior hasta el siguiente cambio de pestaña.
    *
@@ -2363,9 +2357,7 @@ export default function App() {
         throw await apiErrorFromResponse(res);
       }
       const body = (await res.json()) as RetirementProfileResponseApi;
-      const saved = normalizeRetirementProfile(
-        withStoredTargetBasis(body.profile, body.target_basis_stored),
-      );
+      const saved = normalizeRetirementProfile(body.profile);
       setRetirementProfile(saved);
       // S1 (5.0.0 U1b) — este PATCH acepta también `birth_date`, y Jubilación lo usa para que la
       // estrategia por edad no obligue a ir a «Tu cuenta» a mitad de la elección. Sin
@@ -2373,7 +2365,7 @@ export default function App() {
       // el campo volvería a pedirla y el resto de la app la seguiría dando por ausente.
       setUser((u) => (u && u.birth_date !== body.birth_date ? { ...u, birth_date: body.birth_date } : u));
       void loadProjectionSeriesPage();
-      // El perfil ES el input del sorteo (estrategia, regla, colchón derivado del tope): sin esto la
+      // El perfil ES el input del sorteo (estrategia, umbral, regla, puente): sin esto la
       // sección «Riesgo» seguiría enseñando el abanico del plan anterior junto a la línea nueva.
       void loadProjectionBands();
       return saved;

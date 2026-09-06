@@ -4821,3 +4821,43 @@ fieldset.retirement-config-stack {
   width: 0;
   border-left: 2px solid var(--ff-legend-color);
 }
+
+/* ============================================================
+   JUBILACIÓN — modelo v2 (5.0.0, C1–C8, issue #207) · WP W4
+   ------------------------------------------------------------
+   Aditivo y al FINAL del archivo, como el bloque anterior: así
+   ninguna línea previa se desplaza y las anclas por `file:línea`
+   del freezer `no-hex-outside-theme.test.ts` (App.css:2396/2397,
+   la sombra del tooltip de Proyección) siguen donde están.
+   Cero hex: solo tokens `--ff-*`.
+   ============================================================ */
+
+/* El nivel 1 del solve todavía resolviendo la fecha válida
+   («calculando…»). Es el `.spinner` de la app a escala de línea:
+   vive en la fila del título del panel, junto al interrogante, y
+   por eso no puede medir 1,75 rem ni empujar la baseline. */
+.retirement-pending-spinner {
+  width: 0.9rem;
+  height: 0.9rem;
+  border-width: 2px;
+  flex: 0 0 auto;
+}
+
+/* B7 — el TONO por miembro en las listas de frases del hogar
+   («Planes del hogar», en Jubilación y en Resumen).
+   Reusa el vocabulario de la frase del plan
+   (`.retirement-sentence--{ok,warn,danger}`, que ya define el
+   `border-left-color`) y solo añade lo que un `<li>` no tiene: el
+   filete y su sangría. El verde NO lleva filete — «va bien» es el
+   estado normal y no se decora, misma regla que en la frase.
+   El filete va a la IZQUIERDA del punto de color del miembro, que
+   identifica su línea del chart: son dos cosas distintas (quién
+   es y cómo va) y por eso no comparten sitio. */
+.household-plan-lines > li.retirement-sentence--warn,
+.household-plan-lines > li.retirement-sentence--danger,
+.plan-sentence-item.retirement-sentence--warn,
+.plan-sentence-item.retirement-sentence--danger {
+  border-left-width: 3px;
+  border-left-style: solid;
+  padding-left: 0.55rem;
+}
