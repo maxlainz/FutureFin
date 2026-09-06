@@ -173,7 +173,7 @@ export type CoastModeApi = "fixed_retirement_age" | "fixed_stop_age";
  */
 export type RetirementProfileApi = {
   strategy: RetirementStrategyApi;
-  /** OBLIGATORIA en `retire_at_age` y con `coast_mode: "fixed_stop_age"`; opcional en `partial`
+  /** OBLIGATORIA en `retire_at_age` y con `coast_mode: "fixed_retirement_age"` (en modo `fixed_stop_age` la resuelve el sorteo y el campo se esconde); opcional en `partial`
    *  modo A; ignorada por el resto. */
   target_retirement_age: number | null;
   /** Los cuatro ejes que en 4.15.x vivían en `fire_settings` (mismos defaults y cotas). */

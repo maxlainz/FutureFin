@@ -144,8 +144,14 @@ export type MissingPlanFieldsInput = {
  * - `partial_income`: un ingreso en blanco es un año sabático declarado (0 €/mes), que es
  *   exactamente para lo que existe la fase; bloquear ahí dejaría el plan sin guardar por un
  *   dato que el usuario ya ha contestado.
- * - `partial_start_age` / `pension_start_age`: son enteros del bloque y el bloque no existe a
- *   medias — si el bloque está, la edad está.
+ * - `pension_start_age`: es un entero del bloque y el bloque no existe a medias — si el bloque
+ *   está, la edad está. `partial_start_age` **ya no** comparte esa suerte: con el modelo v2 es
+ *   `number | null` dentro del bloque (en modo «en cuanto pueda» la resuelve el servidor), así
+ *   que un bloque en modo A con la edad todavía sin escribir SÍ es un hueco de verdad.
+ *
+ * Los dos números del puente (`bridge_max_pct`, `bridge_max_years`) se comprueban igual que
+ * cualquier otro obligatorio: el servidor los rellena al activar el interruptor, pero un `null`
+ * llegado por API o por MCP es un puente sin tope, y ese plan no es el que se pidió.
  */
 export function missingRequiredPlanFields(
   input: MissingPlanFieldsInput,
@@ -157,8 +163,12 @@ export function missingRequiredPlanFields(
         return String(birthDate ?? "").trim() !== "";
       case "target_retirement_age":
         return profile.target_retirement_age != null;
+      case "coast_stop_age":
+        return profile.coast_stop_age != null;
       case "partial_start_age":
-        return profile.partial_retirement != null;
+        // Modo A: la edad la escribe el usuario y puede venir `null` en un bloque recién creado.
+        // Modo B ni siquiera pide el campo, así que aquí no llega.
+        return profile.partial_retirement?.starts_at_age != null;
       case "partial_income":
         return profile.partial_retirement != null;
       case "pension_amount":
@@ -168,6 +178,10 @@ export function missingRequiredPlanFields(
         );
       case "pension_start_age":
         return profile.pension != null;
+      case "bridge_max_pct":
+        return String(profile.pension?.bridge_max_pct ?? "").trim() !== "";
+      case "bridge_max_years":
+        return profile.pension?.bridge_max_years != null;
       case "fire_number_manual_amount":
         return String(profile.fire_number_manual_amount ?? "").trim() !== "";
       default:
@@ -213,7 +227,7 @@ export function withdrawalPctNote(input: WithdrawalPctNoteInput): string | null 
   const effective = effectiveWithdrawalPct(rule, swrPct);
   if (effective == null) return null;
   return inherited
-    ? `Retira el ${formatPercentAmount(effective)}: tu tasa de retirada.`
+    ? `Retira el ${formatPercentAmount(effective)}: lo máximo que sacas el primer año sobre tu líquido.`
     : `Regla al ${formatPercentAmount(effective)}, fijado por API.`;
 }
 
@@ -239,28 +253,52 @@ export function withdrawalPctNote(input: WithdrawalPctNoteInput): string | null 
  * fallo exacto que ese test existe para impedir, del revés, y el mismo que ya obligó a añadir la
  * forma de objeto cuando los KPIs por estrategia se movieron a `lib/retirement-tiles.ts`.
  */
+/**
+ * **Puente temporal a W8.** Las cuatro claves de ayuda que el modelo v2 estrena
+ * —`retirement.success_threshold`, `retirement.bridge_settings`, `retirement.coast_mode`,
+ * `retirement.partial_mode`— las escribe el paquete W8 en `lib/helpTexts.ts`; el cableado (esta
+ * tabla) es de W2. Entre uno y otro hacen falta las dos mitades a la vez, y por eso llevan un
+ * `as unknown as HelpTextId` en vez de esconderse tras un helper:
+ *
+ *  - **el `as`**, porque sin él este módulo no compila contra un catálogo que aún no las tiene;
+ *  - **el literal pegado a `helpId:`**, porque el escáner de `helpTexts.test.ts` lee las claves
+ *    USADAS con un `RegExp` que exige la comilla justo detrás (`helpId:` + espacios + `"`).
+ *    Envolverlas en una llamada las haría invisibles para él: W8 añadiría los textos y el test los
+ *    declararía HUÉRFANOS, empujando a borrar cuatro ayudas vivas — el fallo exacto, del revés,
+ *    que ese test existe para impedir.
+ *
+ * Consecuencia buscada: `helpTexts.test.ts` queda ROJO en su mitad «toda clave usada existe» hasta
+ * que W8 aterrice. **Cuando W8 esté, los cuatro `as unknown as` se borran** y las entradas vuelven
+ * al literal pelado; si siguen aquí con las claves ya en el catálogo, es deuda, no diseño.
+ */
 export const PLAN_FIELD_HELP: Partial<Record<PlanFieldId, { helpId: HelpTextId }>> = {
   target_retirement_age: { helpId: "retirement.target_age" },
+  coast_mode: { helpId: "retirement.coast_mode" as unknown as HelpTextId },
+  coast_stop_age: { helpId: "retirement.coast_mode" as unknown as HelpTextId },
+  partial_mode: { helpId: "retirement.partial_mode" as unknown as HelpTextId },
   partial_start_age: { helpId: "retirement.partial" },
   partial_income: { helpId: "retirement.partial" },
   pension_amount: { helpId: "retirement.pension" },
   pension_start_age: { helpId: "retirement.pension" },
+  success_threshold_pct: { helpId: "retirement.success_threshold" as unknown as HelpTextId },
   swr_pct: { helpId: "settings.swr" },
   withdrawal_rule_kind: { helpId: "retirement.withdrawal_rule" },
   hybrid_end_pct: { helpId: "retirement.withdrawal_rule" },
   guardrails_band_pct: { helpId: "retirement.withdrawal_rule" },
   guardrails_adjust_pct: { helpId: "retirement.withdrawal_rule" },
   spend_mode: { helpId: "retirement.spend_mode" },
-  target_basis: { helpId: "retirement.target_basis" },
-  bridge_discount_basis: { helpId: "retirement.bridge_discount" },
   pension_indexed: { helpId: "retirement.pension" },
   pension_fraction_while_partial: { helpId: "retirement.pension" },
+  bridge_enabled: { helpId: "retirement.bridge_settings" as unknown as HelpTextId },
+  bridge_max_pct: { helpId: "retirement.bridge_settings" as unknown as HelpTextId },
+  bridge_max_years: { helpId: "retirement.bridge_settings" as unknown as HelpTextId },
   partial_expense_basis: { helpId: "retirement.partial" },
   horizon_lifespan_age: { helpId: "settings.horizon_age" },
 };
 
 /**
- * Título y FRASE de cada tarjeta de configuración (V3 de la tercera vuelta de UX, F9/F10).
+ * Título y FRASE de cada tarjeta de configuración (V3 de la tercera vuelta de UX, F9/F10;
+ * reescritas por el modelo v2 — «el éxito define la fecha», C1–C8).
  *
  * Sustituye a `ADVANCED_SECTION_LABEL`, que solo tenía rótulos porque el acordeón «Avanzado» los
  * usaba como separadores. El owner pidió lo contrario de un separador: «cada cuadro abre con una
@@ -270,7 +308,22 @@ export const PLAN_FIELD_HELP: Partial<Record<PlanFieldId, { helpId: HelpTextId }
  *
  * Las frases son el contrato de esta pantalla y `retirement-form.test.ts` las fija: título corto,
  * frase de más de 40 caracteres acabada en punto, una entrada por tarjeta. Ese test no juzga
- * prosa: caza la entrada que alguien añade sin frase al meter una tarjeta nueva.
+ * prosa: caza la entrada que alguien añade sin frase al meter una tarjeta nueva… y desde el
+ * modelo v2 caza también una frase concreta, porque **cuatro de las seis afirmaban cosas que en
+ * v2 son FALSAS**:
+ *
+ *  - «Horizonte»: decía «alargarlo no mueve tu fecha de jubilación». Era cierto cuando la fecha
+ *    era un cruce de capital contra un objetivo; con v2 la fecha válida es el primer mes cuyo
+ *    éxito **hasta el horizonte** cumple el umbral, así que alargar el horizonte la RETRASA. Es la
+ *    mentira más cara de las cuatro —invita a subir la edad límite «por si acaso» y a no entender
+ *    por qué se va la fecha—, y por eso tiene su propio test.
+ *  - «Retirada»: hablaba de un porcentaje que «dimensiona el objetivo». No hay objetivo (C1/M4);
+ *    hay un umbral y una tasa inicial, y la fecha es la primera en que se cumplen las dos.
+ *  - «Gasto en jubilación»: «es el número que multiplica tu objetivo». Tampoco: es el gasto que el
+ *    bucle drena mes a mes.
+ *  - «Pensión»: «la edad a la que empieza mueve el objetivo». La pensión es un flujo de caja; lo
+ *    que mueve es cuánto tiene que poner tu capital antes de que entre — y, con el puente
+ *    activado, cuánto se te deja sacar en ese tramo.
  *
  * `PLAN_FIELD_HELP` no se toca: la ayuda POR CAMPO sigue colgando de su rótulo, y una frase de
  * tarjeta no la sustituye — explican cosas de tamaño distinto.
@@ -280,36 +333,40 @@ export const PLAN_CARD_COPY: Record<PlanCardId, { title: string; blurb: string }
     title: "Estrategia",
     blurb:
       "Elige qué dispara tu jubilación. Cambiarla cambia lo que te preguntamos aquí abajo y cómo " +
-      "se dimensiona tu objetivo.",
+      "se resuelve tu fecha: unas la fijas tú, otras la resuelve el sorteo.",
   },
   ages: {
     title: "Edades",
     blurb:
-      "Las edades que fijan tu calendario. Se convierten en meses con tu fecha de nacimiento: sin " +
-      "ella, la simulación te jubila por capital y no por edad.",
+      "Las edades que fijan tu calendario, convertidas en meses con tu fecha de nacimiento. En " +
+      "«Coast FIRE» y en «Media jornada» eliges además qué fijas tú y qué resuelve el plan: la " +
+      "edad de jubilación o la de dejar de aportar; empezar la fase a una edad o en cuanto puedas.",
   },
   pension: {
     title: "Pensión",
     blurb:
-      "Una renta con fecha de inicio. Los años anteriores los paga tu capital entero, así que la " +
-      "edad a la que empieza mueve el objetivo, no solo el flujo de caja.",
+      "Una renta con fecha: entra en tu plan como un ingreso más el mes en que empieza, y hasta " +
+      "entonces lo paga tu capital. Si activas el puente, la cartera puede pagar más que tu tasa " +
+      "durante unos años hasta que entre la pensión; no hay aportaciones en ese tramo.",
   },
   spending: {
     title: "Gasto en jubilación",
     blurb:
-      "De dónde sale el gasto anual que tu plan tiene que cubrir. Es el número que multiplica tu " +
-      "objetivo: cambiarlo lo mueve todo.",
+      "De dónde sale el gasto que tu plan tiene que cubrir. No multiplica ningún objetivo: es el " +
+      "dinero que hay que poner cada mes desde que te jubilas hasta el final del horizonte.",
   },
   withdrawal: {
     title: "Retirada",
     blurb:
-      "Cuánto sacas cada año una vez jubilado. El mismo porcentaje dimensiona el objetivo y " +
-      "alimenta la regla: subirlo adelanta la fecha y sube el riesgo de quedarte sin capital.",
+      "Cuánto sacas y con cuánta seguridad. El umbral es la parte de los escenarios que tiene que " +
+      "aguantar hasta el horizonte; la tasa es lo máximo que sacas el primer año sobre tu " +
+      "líquido: la fecha válida es la primera en que las dos se cumplen.",
   },
   horizon: {
     title: "Horizonte",
     blurb:
-      "Hasta qué edad tiene que durar el dinero. Alargarlo no mueve tu fecha de jubilación: mueve " +
-      "cuántos escenarios llegan al final con capital.",
+      "Hasta qué edad tiene que durar el dinero. Alargarlo RETRASA tu fecha: se valida contando " +
+      "los escenarios que llegan al final, así que cuantos más años tengan que aguantar, más " +
+      "tarde llega el primer mes que cumple tu umbral.",
   },
 };

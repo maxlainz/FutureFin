@@ -1,18 +1,28 @@
 /**
- * Paso «Tu plan» del asistente de primera vez (5.0.0, decisión U8, issue #207).
+ * Paso «Tu plan» del asistente de primera vez (5.0.0, decisión U8, issue #207; reescrito para el
+ * modelo v2, C1–C8).
  *
- * Tres cosas que esta suite existe para impedir, todas silenciosas si se rompen:
+ * Cuatro cosas que esta suite existe para impedir, todas silenciosas si se rompen:
  *
  *  1. **`onboardingPlanFields` divergiendo de `requiredPlanFields`.** Si alguien cambia la tabla
- *     de `lib/plan-fields.ts` (U2/U12) sin tocar este fichero, el asistente de alta y la línea de
- *     supuestos de Jubilación empezarían a pedir cosas distintas para la misma estrategia.
- *  2. **Un PATCH que se cuela con `withdrawal_rule`, con el bloque de la estrategia contraria, o
+ *     de `lib/plan-fields.ts` (U2/U12) sin tocar este fichero, el asistente de alta y el
+ *     formulario de Jubilación empezarían a pedir cosas distintas para la misma estrategia.
+ *  2. **Un MODO que no llega al PATCH.** Con el modelo v2, `coast` y `partial` tienen dos modos
+ *     cada una (M10/M11) y cada uno pide una edad distinta. Un asistente que recoja el modo y no
+ *     lo mande deja al servidor resolviendo el plan por el modo por defecto, con la edad del otro
+ *     — y el usuario ve un plan que no es el que pidió, sin ningún error de por medio.
+ *  3. **Un PATCH que se cuela con `withdrawal_rule`, con el bloque de la estrategia contraria, o
  *     con una edad/decimal a medio teclear.** El servidor lo rechazaría con 400, pero el usuario
  *     vería «No se ha podido guardar» sin saber por qué — la guarda tiene que atraparlo antes.
- *  3. **Una cota que se mueve en `retirementProfile.ts` (`MIN_PROFILE_AGE`,
+ *  4. **Una cota que se mueve en `retirementProfile.ts` (`MIN_PROFILE_AGE`,
  *     `MAX_HORIZON_LIFESPAN_AGE`, `MIN_PENSION_AGE`) sin que este formulario se entere.** Las
  *     constantes se IMPORTAN, nunca se copian a mano, precisamente para que un cambio ahí mueva
  *     también el mensaje y el rango aceptado aquí.
+ *
+ * **`pension_bridge` ya no es una estrategia** (C7): el selector tiene CUATRO tarjetas y el puente
+ * es un ajuste de la tarjeta Pensión, que este paso no ofrece. Lo que sí sobrevive de aquel caso
+ * es la pensión misma: si el borrador la trae, sus dos campos son obligatorios y —C5— la fecha de
+ * nacimiento pasa a serlo también.
  */
 
 import { describe, expect, it } from "vitest";
@@ -31,16 +41,20 @@ import {
   MIN_PROFILE_AGE,
 } from "./retirementProfile";
 
+/** Las CUATRO del modelo v2. Se listan contra la unión del wire para que el compilador caiga
+ *  sobre este array si nace o muere una estrategia. */
 const STRATEGIES: readonly RetirementStrategyApi[] = [
   "asap",
   "retire_at_age",
   "coast",
   "partial",
-  "pension_bridge",
 ];
 
-function fieldIds(strategy: RetirementStrategyApi): string[] {
-  return onboardingPlanFields(strategy).map((f) => f.id);
+function fieldIds(
+  strategy: RetirementStrategyApi,
+  ctx?: Parameters<typeof onboardingPlanFields>[1],
+): string[] {
+  return onboardingPlanFields(strategy, ctx).map((f) => f.id);
 }
 
 function codes(state: OnboardingPlanState): string[] {
@@ -56,16 +70,43 @@ function validState(strategy: RetirementStrategyApi): OnboardingPlanState {
   const base = { ...emptyOnboardingPlanState(), strategy, birthDate: "1990-05-20" };
   switch (strategy) {
     case "asap":
-      return { ...base, birthDate: "" }; // asap no exige fecha de nacimiento
+      return { ...base, birthDate: "" }; // asap sin pensión no exige fecha de nacimiento
     case "retire_at_age":
     case "coast":
       return { ...base, targetRetirementAge: "55" };
     case "partial":
       return { ...base, partialStartAge: "55", partialIncome: "800" };
-    case "pension_bridge":
-      return { ...base, birthDate: "", pensionAmount: "1200", pensionStartAge: "67" };
   }
 }
+
+/** Coast en su modo B: fijo la edad a la que dejo de aportar y la fecha sale donde salga. */
+const coastModeB = (over: Partial<OnboardingPlanState> = {}): OnboardingPlanState => ({
+  ...validState("coast"),
+  coastMode: "fixed_stop_age",
+  targetRetirementAge: "",
+  coastStopAge: "45",
+  ...over,
+});
+
+/** Media jornada en su modo B: empiezo en cuanto pueda, y la edad la resuelve el servidor. */
+const partialModeB = (over: Partial<OnboardingPlanState> = {}): OnboardingPlanState => ({
+  ...validState("partial"),
+  partialMode: "asap",
+  partialStartAge: "",
+  ...over,
+});
+
+/** Un borrador con pensión declarada, en la estrategia que sea. */
+const withPension = (
+  strategy: RetirementStrategyApi = "asap",
+  over: Partial<OnboardingPlanState> = {},
+): OnboardingPlanState => ({
+  ...validState(strategy),
+  birthDate: "1990-05-20",
+  pensionAmount: "1200",
+  pensionStartAge: "67",
+  ...over,
+});
 
 describe("onboardingPlanFields — envoltorio de requiredPlanFields (U2/U12)", () => {
   it("asap no pide ningún esencial", () => {
@@ -76,20 +117,45 @@ describe("onboardingPlanFields — envoltorio de requiredPlanFields (U2/U12)", (
     expect(fieldIds("retire_at_age")).toEqual(["target_retirement_age"]);
   });
 
-  it("coast pide solo la edad objetivo", () => {
+  it("coast modo A pide la edad de jubilación; modo B, la de parada — nunca las dos", () => {
     expect(fieldIds("coast")).toEqual(["target_retirement_age"]);
+    expect(fieldIds("coast", { coastMode: "fixed_retirement_age" })).toEqual([
+      "target_retirement_age",
+    ]);
+    expect(fieldIds("coast", { coastMode: "fixed_stop_age" })).toEqual(["coast_stop_age"]);
   });
 
-  it("partial pide la edad de inicio y el ingreso, NO la edad total (es opcional ahí)", () => {
+  it("partial modo A pide la edad de inicio y el ingreso; modo B, solo el ingreso", () => {
     expect(fieldIds("partial")).toEqual(["partial_start_age", "partial_income"]);
+    expect(fieldIds("partial", { partialMode: "asap" })).toEqual(["partial_income"]);
   });
 
-  it("pension_bridge pide el importe y la edad de la pensión", () => {
-    expect(fieldIds("pension_bridge")).toEqual(["pension_amount", "pension_start_age"]);
+  it("una pensión declarada añade sus dos campos en cualquier estrategia (C7)", () => {
+    expect(fieldIds("asap", { hasPension: true })).toEqual([
+      "pension_amount",
+      "pension_start_age",
+    ]);
+    expect(fieldIds("retire_at_age", { hasPension: true })).toEqual([
+      "target_retirement_age",
+      "pension_amount",
+      "pension_start_age",
+    ]);
+  });
+
+  it("sin contexto, los defaults son los del servidor: modo A en las dos y sin pensión", () => {
+    for (const s of STRATEGIES) {
+      expect(fieldIds(s), s).toEqual(
+        fieldIds(s, {
+          coastMode: "fixed_retirement_age",
+          partialMode: "at_age",
+          hasPension: false,
+        }),
+      );
+    }
   });
 
   it("cada descriptor trae su rótulo canónico, no un id pelado", () => {
-    for (const f of onboardingPlanFields("pension_bridge")) {
+    for (const f of onboardingPlanFields("partial")) {
       expect(f.label.length).toBeGreaterThan(0);
       // Los esenciales viven en las tarjetas que se pueden dejar a medias; un supuesto con
       // default del servidor nunca es obligatorio y por tanto nunca llega aquí (V3).
@@ -98,7 +164,7 @@ describe("onboardingPlanFields — envoltorio de requiredPlanFields (U2/U12)", (
     }
   });
 
-  it("las 5 estrategias tienen una entrada — ninguna hace que la tabla lance", () => {
+  it("las 4 estrategias tienen una entrada — ninguna hace que la tabla lance", () => {
     for (const s of STRATEGIES) {
       expect(() => onboardingPlanFields(s)).not.toThrow();
     }
@@ -112,18 +178,39 @@ describe("strategyNeedsBirthDate", () => {
     expect(strategyNeedsBirthDate("partial")).toBe(true);
   });
 
-  it("asap y pension_bridge no la necesitan (se disparan por cruce o por la pensión)", () => {
+  it("asap sin pensión no la necesita (se jubila por el sorteo, no por una edad)", () => {
     expect(strategyNeedsBirthDate("asap")).toBe(false);
-    expect(strategyNeedsBirthDate("pension_bridge")).toBe(false);
+    expect(strategyNeedsBirthDate("asap", false)).toBe(false);
+  });
+
+  it("con pensión declarada la necesitan TODAS, asap incluida (C5)", () => {
+    // Sin fecha de nacimiento el servidor no sabe si la pensión ya se cobra en la fecha válida y
+    // devuelve el bloque «plan» vacío (`plan_absent_reason: "birth_date_missing"`): ni fecha, ni
+    // éxito, ni capital necesario.
+    for (const s of STRATEGIES) {
+      expect(strategyNeedsBirthDate(s, true), s).toBe(true);
+    }
   });
 });
 
-describe("validateOnboardingPlan — un estado válido por estrategia no tiene problemas", () => {
+describe("validateOnboardingPlan — un estado válido por estrategia y modo no tiene problemas", () => {
   for (const s of STRATEGIES) {
     it(`${s}`, () => {
       expect(validateOnboardingPlan(validState(s))).toEqual([]);
     });
   }
+
+  it("coast modo B", () => {
+    expect(validateOnboardingPlan(coastModeB())).toEqual([]);
+  });
+
+  it("partial modo «en cuanto pueda»", () => {
+    expect(validateOnboardingPlan(partialModeB())).toEqual([]);
+  });
+
+  it("asap con pensión declarada y fecha de nacimiento", () => {
+    expect(validateOnboardingPlan(withPension())).toEqual([]);
+  });
 });
 
 describe("validateOnboardingPlan — fecha de nacimiento", () => {
@@ -132,9 +219,27 @@ describe("validateOnboardingPlan — fecha de nacimiento", () => {
     expect(codes({ ...s, birthDate: "" })).toContain("birth_date_required");
   });
 
-  it("vacía + estrategia que NO la necesita ⇒ sin problema", () => {
+  it("vacía + asap SIN pensión ⇒ sin problema", () => {
     expect(validateOnboardingPlan(validState("asap"))).toEqual([]);
-    expect(validateOnboardingPlan(validState("pension_bridge"))).toEqual([]);
+  });
+
+  it("vacía + asap CON pensión ⇒ birth_date_required (C5)", () => {
+    expect(codes(withPension("asap", { birthDate: "" }))).toContain("birth_date_required");
+  });
+
+  it("basta con medio bloque de pensión para que haga falta: media pensión es una pensión", () => {
+    const soloElImporte: OnboardingPlanState = {
+      ...validState("asap"),
+      birthDate: "",
+      pensionAmount: "1200",
+    };
+    expect(codes(soloElImporte)).toContain("birth_date_required");
+    const soloLaEdad: OnboardingPlanState = {
+      ...validState("asap"),
+      birthDate: "",
+      pensionStartAge: "67",
+    };
+    expect(codes(soloLaEdad)).toContain("birth_date_required");
   });
 
   it("formato inválido ⇒ birth_date_format", () => {
@@ -163,13 +268,13 @@ describe("validateOnboardingPlan — fecha de nacimiento", () => {
     expect(validateOnboardingPlan({ ...s, birthDate: today })).toEqual([]);
   });
 
-  it("se ofrece igualmente en asap/pension_bridge y, si se rellena mal, se valida igual", () => {
-    const s = validState("pension_bridge");
+  it("se ofrece igualmente en asap y, si se rellena mal, se valida igual", () => {
+    const s = validState("asap");
     expect(codes({ ...s, birthDate: "no-es-una-fecha" })).toContain("birth_date_format");
   });
 });
 
-describe("validateOnboardingPlan — retire_at_age / coast (edad objetivo)", () => {
+describe("validateOnboardingPlan — retire_at_age / coast modo A (edad objetivo)", () => {
   for (const strategy of ["retire_at_age", "coast"] as const) {
     it(`${strategy}: vacía ⇒ target_retirement_age_required`, () => {
       const s = validState(strategy);
@@ -214,13 +319,55 @@ describe("validateOnboardingPlan — retire_at_age / coast (edad objetivo)", () 
   }
 });
 
-describe("validateOnboardingPlan — partial (media jornada)", () => {
-  it("edad de inicio vacía ⇒ partial_age_out_of_range", () => {
-    const s = validState("partial");
-    expect(codes({ ...s, partialStartAge: "" })).toContain("partial_age_out_of_range");
+describe("validateOnboardingPlan — coast modo B (edad de parada, M10)", () => {
+  it("vacía ⇒ coast_stop_age_required, el mismo código que el servidor", () => {
+    expect(codes(coastModeB({ coastStopAge: "" }))).toContain("coast_stop_age_required");
   });
 
-  it("edad fuera de rango ⇒ partial_age_out_of_range", () => {
+  it("a medio teclear tampoco es una edad ⇒ coast_stop_age_required", () => {
+    expect(codes(coastModeB({ coastStopAge: "cuarenta" }))).toContain(
+      "coast_stop_age_required",
+    );
+    expect(codes(coastModeB({ coastStopAge: "45,5" }))).toContain("coast_stop_age_required");
+  });
+
+  it("fuera de rango ⇒ coast_stop_age_out_of_range (código distinto: el dato ESTÁ)", () => {
+    expect(codes(coastModeB({ coastStopAge: String(MIN_PROFILE_AGE - 1) }))).toContain(
+      "coast_stop_age_out_of_range",
+    );
+    expect(
+      codes(coastModeB({ coastStopAge: String(MAX_HORIZON_LIFESPAN_AGE + 1) })),
+    ).toContain("coast_stop_age_out_of_range");
+  });
+
+  it("los dos extremos son válidos", () => {
+    expect(
+      validateOnboardingPlan(coastModeB({ coastStopAge: String(MIN_PROFILE_AGE) })),
+    ).toEqual([]);
+    expect(
+      validateOnboardingPlan(
+        coastModeB({ coastStopAge: String(MAX_HORIZON_LIFESPAN_AGE) }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("en modo B la edad de JUBILACIÓN no se valida: no se pregunta", () => {
+    expect(validateOnboardingPlan(coastModeB({ targetRetirementAge: "basura" }))).toEqual([]);
+  });
+
+  it("y en modo A la de PARADA tampoco: el simétrico exacto", () => {
+    const s = validState("coast");
+    expect(validateOnboardingPlan({ ...s, coastStopAge: "-3" })).toEqual([]);
+  });
+});
+
+describe("validateOnboardingPlan — partial (media jornada)", () => {
+  it("edad de inicio vacía en modo A ⇒ partial_start_age_required", () => {
+    const s = validState("partial");
+    expect(codes({ ...s, partialStartAge: "" })).toContain("partial_start_age_required");
+  });
+
+  it("edad fuera de rango ⇒ partial_age_out_of_range (el dato está, pero no vale)", () => {
     const s = validState("partial");
     expect(codes({ ...s, partialStartAge: String(MIN_PROFILE_AGE - 1) })).toContain(
       "partial_age_out_of_range",
@@ -230,9 +377,18 @@ describe("validateOnboardingPlan — partial (media jornada)", () => {
     ).toContain("partial_age_out_of_range");
   });
 
-  it("ingreso vacío ⇒ partial_income_not_positive (aquí NO se admite el año sabático a 0)", () => {
-    const s = validState("partial");
-    expect(codes({ ...s, partialIncome: "" })).toContain("partial_income_not_positive");
+  it("en modo «en cuanto pueda» la edad de inicio no se valida: la resuelve el servidor", () => {
+    expect(validateOnboardingPlan(partialModeB({ partialStartAge: "-3" }))).toEqual([]);
+    expect(validateOnboardingPlan(partialModeB({ partialStartAge: "" }))).toEqual([]);
+  });
+
+  it("el ingreso sigue siendo obligatorio en los DOS modos", () => {
+    expect(codes({ ...validState("partial"), partialIncome: "" })).toContain(
+      "partial_income_not_positive",
+    );
+    expect(codes(partialModeB({ partialIncome: "" }))).toContain(
+      "partial_income_not_positive",
+    );
   });
 
   it("ingreso 0 ⇒ partial_income_not_positive", () => {
@@ -279,52 +435,52 @@ describe("validateOnboardingPlan — partial (media jornada)", () => {
   });
 });
 
-describe("validateOnboardingPlan — pension_bridge (puente hasta la pensión)", () => {
-  it("importe vacío ⇒ pension_amount_not_positive (vacío no es decimal_invalid)", () => {
-    const s = validState("pension_bridge");
-    expect(codes({ ...s, pensionAmount: "" })).toContain("pension_amount_not_positive");
-  });
-
-  it("importe 0 o negativo ⇒ pension_amount_not_positive", () => {
-    const s = validState("pension_bridge");
-    expect(codes({ ...s, pensionAmount: "0" })).toContain("pension_amount_not_positive");
-  });
-
-  it("importe no numérico ⇒ decimal_invalid", () => {
-    const s = validState("pension_bridge");
-    expect(codes({ ...s, pensionAmount: "mucho" })).toContain("decimal_invalid");
-  });
-
-  it(`edad por debajo de ${MIN_PENSION_AGE} ⇒ pension_age_out_of_range`, () => {
-    const s = validState("pension_bridge");
-    expect(codes({ ...s, pensionStartAge: String(MIN_PENSION_AGE - 1) })).toContain(
-      "pension_age_out_of_range",
+describe("validateOnboardingPlan — la pensión, cuando el borrador la trae (C7)", () => {
+  it("importe vacío con la edad escrita ⇒ pension_amount_not_positive", () => {
+    expect(codes(withPension("asap", { pensionAmount: "" }))).toContain(
+      "pension_amount_not_positive",
     );
   });
 
-  it(`edad por encima de ${MAX_HORIZON_LIFESPAN_AGE} ⇒ pension_age_out_of_range`, () => {
-    const s = validState("pension_bridge");
+  it("importe 0 o negativo ⇒ pension_amount_not_positive", () => {
+    expect(codes(withPension("asap", { pensionAmount: "0" }))).toContain(
+      "pension_amount_not_positive",
+    );
+    expect(codes(withPension("asap", { pensionAmount: "-1" }))).toContain(
+      "pension_amount_not_positive",
+    );
+  });
+
+  it("importe no numérico ⇒ decimal_invalid", () => {
+    expect(codes(withPension("asap", { pensionAmount: "mucho" }))).toContain(
+      "decimal_invalid",
+    );
+  });
+
+  it(`edad fuera de [${MIN_PENSION_AGE}, ${MAX_HORIZON_LIFESPAN_AGE}] ⇒ pension_age_out_of_range`, () => {
     expect(
-      codes({ ...s, pensionStartAge: String(MAX_HORIZON_LIFESPAN_AGE + 1) }),
+      codes(withPension("asap", { pensionStartAge: String(MIN_PENSION_AGE - 1) })),
+    ).toContain("pension_age_out_of_range");
+    expect(
+      codes(withPension("asap", { pensionStartAge: String(MAX_HORIZON_LIFESPAN_AGE + 1) })),
     ).toContain("pension_age_out_of_range");
   });
 
   it(`los dos extremos (${MIN_PENSION_AGE} y ${MAX_HORIZON_LIFESPAN_AGE}) son válidos`, () => {
-    const s = validState("pension_bridge");
     expect(
-      validateOnboardingPlan({ ...s, pensionStartAge: String(MIN_PENSION_AGE) }),
+      validateOnboardingPlan(withPension("asap", { pensionStartAge: String(MIN_PENSION_AGE) })),
     ).toEqual([]);
     expect(
-      validateOnboardingPlan({
-        ...s,
-        pensionStartAge: String(MAX_HORIZON_LIFESPAN_AGE),
-      }),
+      validateOnboardingPlan(
+        withPension("asap", { pensionStartAge: String(MAX_HORIZON_LIFESPAN_AGE) }),
+      ),
     ).toEqual([]);
   });
 
-  it("edad vacía ⇒ pension_age_out_of_range (no hay código 'required' separado)", () => {
-    const s = validState("pension_bridge");
-    expect(codes({ ...s, pensionStartAge: "" })).toContain("pension_age_out_of_range");
+  it("edad vacía con importe escrito ⇒ pension_age_out_of_range (no hay código 'required' aparte)", () => {
+    expect(codes(withPension("asap", { pensionStartAge: "" }))).toContain(
+      "pension_age_out_of_range",
+    );
   });
 });
 
@@ -335,10 +491,9 @@ describe("validateOnboardingPlan — asap no valida nada de lo que no pregunta",
       validateOnboardingPlan({
         ...s,
         targetRetirementAge: "no-es-una-edad",
+        coastStopAge: "-3",
         partialStartAge: "-3",
         partialIncome: "no-es-dinero",
-        pensionAmount: "-1",
-        pensionStartAge: "3",
       }),
     ).toEqual([]);
   });
@@ -356,7 +511,7 @@ describe("validateOnboardingPlan — cambiar de estrategia no arrastra el campo 
   });
 });
 
-describe("buildOnboardingPlanPatch — cuerpo exacto por estrategia", () => {
+describe("buildOnboardingPlanPatch — cuerpo exacto por estrategia y modo", () => {
   it("asap: sin fecha de nacimiento ⇒ solo strategy", () => {
     const patch = buildOnboardingPlanPatch(validState("asap"));
     expect(patch).toEqual<RetirementProfilePatchApi>({ strategy: "asap" });
@@ -382,21 +537,43 @@ describe("buildOnboardingPlanPatch — cuerpo exacto por estrategia", () => {
     });
   });
 
-  it("coast: mismo cuerpo que retire_at_age salvo la estrategia", () => {
+  it("retire_at_age NO manda `coast_mode`: ese eje no es suyo", () => {
+    expect(buildOnboardingPlanPatch(validState("retire_at_age"))).not.toHaveProperty(
+      "coast_mode",
+    );
+  });
+
+  it("coast modo A: manda el modo EXPLÍCITO y la edad de jubilación, sin la de parada", () => {
+    // El modo viaja aunque sea el default del servidor: quien vuelva al asistente con un perfil
+    // ya en modo B y elija «fijo la edad de jubilación» necesita que el PATCH lo diga.
     const patch = buildOnboardingPlanPatch(validState("coast"));
     expect(patch).toEqual<RetirementProfilePatchApi>({
       strategy: "coast",
       birth_date: "1990-05-20",
+      coast_mode: "fixed_retirement_age",
       target_retirement_age: 55,
     });
+    expect(patch).not.toHaveProperty("coast_stop_age");
   });
 
-  it("partial: strategy + birth_date + partial_retirement completo, sin pension ni target_retirement_age", () => {
+  it("coast modo B: manda el modo y la edad de parada, sin la de jubilación", () => {
+    const patch = buildOnboardingPlanPatch(coastModeB());
+    expect(patch).toEqual<RetirementProfilePatchApi>({
+      strategy: "coast",
+      birth_date: "1990-05-20",
+      coast_mode: "fixed_stop_age",
+      coast_stop_age: 45,
+    });
+    expect(patch).not.toHaveProperty("target_retirement_age");
+  });
+
+  it("partial modo A: bloque completo con `mode: at_age` y su edad", () => {
     const patch = buildOnboardingPlanPatch(validState("partial"));
     expect(patch).toEqual<RetirementProfilePatchApi>({
       strategy: "partial",
       birth_date: "1990-05-20",
       partial_retirement: {
+        mode: "at_age",
         starts_at_age: 55,
         income_monthly_today: "800",
         expense_basis: "retirement",
@@ -404,51 +581,93 @@ describe("buildOnboardingPlanPatch — cuerpo exacto por estrategia", () => {
     });
   });
 
-  it("pension_bridge: strategy + pension completo, sin birth_date (no se escribió) ni partial_retirement", () => {
-    const patch = buildOnboardingPlanPatch(validState("pension_bridge"));
+  it("partial modo B: `starts_at_age` viaja NULL, no una edad inventada", () => {
+    // Mandar un número aquí fijaría la fase a una edad que nadie eligió; el `null` es lo que le
+    // dice al servidor que la resuelva él (`earliest_partial_start`).
+    const patch = buildOnboardingPlanPatch(partialModeB());
     expect(patch).toEqual<RetirementProfilePatchApi>({
-      strategy: "pension_bridge",
+      strategy: "partial",
+      birth_date: "1990-05-20",
+      partial_retirement: {
+        mode: "asap",
+        starts_at_age: null,
+        income_monthly_today: "800",
+        expense_basis: "retirement",
+      },
+    });
+  });
+
+  it("partial modo B ignora una edad de inicio que hubiera quedado escrita en otro modo", () => {
+    const patch = buildOnboardingPlanPatch(partialModeB({ partialStartAge: "55" }));
+    expect(patch.partial_retirement?.starts_at_age).toBeNull();
+  });
+
+  it("con pensión: bloque completo, con el puente APAGADO y sus dos números en null", () => {
+    // El puente es un ajuste fino sobre una pensión ya declarada (C7) y se activa en Jubilación;
+    // este paso solo recoge lo mínimo para tener un plan.
+    const patch = buildOnboardingPlanPatch(withPension("asap"));
+    expect(patch).toEqual<RetirementProfilePatchApi>({
+      strategy: "asap",
+      birth_date: "1990-05-20",
       pension: {
         monthly_amount_today: "1200",
         starts_at_age: 67,
         indexed: true,
         fraction_while_partial: "0",
+        bridge_enabled: false,
+        bridge_max_pct: null,
+        bridge_max_years: null,
       },
     });
   });
 
-  it("nunca incluye withdrawal_rule — ni para partial ni para pension_bridge", () => {
+  it("sin pensión en el borrador, el bloque no viaja", () => {
     for (const s of STRATEGIES) {
-      const patch = buildOnboardingPlanPatch(validState(s));
-      expect(patch).not.toHaveProperty("withdrawal_rule");
+      expect(buildOnboardingPlanPatch(validState(s)), s).not.toHaveProperty("pension");
     }
   });
 
-  it("nunca incluye swr_pct, horizon_lifespan_age ni fire_number_mode — ejes que este paso no toca", () => {
-    for (const s of STRATEGIES) {
-      const patch = buildOnboardingPlanPatch(validState(s));
+  it("nunca incluye withdrawal_rule — en ninguna estrategia ni modo", () => {
+    for (const state of [
+      ...STRATEGIES.map(validState),
+      coastModeB(),
+      partialModeB(),
+      withPension(),
+    ]) {
+      expect(buildOnboardingPlanPatch(state)).not.toHaveProperty("withdrawal_rule");
+    }
+  });
+
+  it("nunca incluye swr_pct, horizon_lifespan_age, fire_number_mode ni el umbral", () => {
+    for (const state of [
+      ...STRATEGIES.map(validState),
+      coastModeB(),
+      partialModeB(),
+      withPension(),
+    ]) {
+      const patch = buildOnboardingPlanPatch(state);
       expect(patch).not.toHaveProperty("swr_pct");
       expect(patch).not.toHaveProperty("horizon_lifespan_age");
       expect(patch).not.toHaveProperty("fire_number_mode");
+      expect(patch).not.toHaveProperty("success_threshold_pct");
+      // Y los dos ejes que murieron con el objetivo (C1/M4) tampoco resucitan por aquí.
       expect(patch).not.toHaveProperty("target_basis");
       expect(patch).not.toHaveProperty("bridge_discount_basis");
       expect(patch).not.toHaveProperty("cash_buffer_months");
-      expect(patch).not.toHaveProperty("success_threshold_pct");
     }
   });
 
-  it("partial y pension_bridge son mutuamente excluyentes en el cuerpo", () => {
+  it("los dos bloques son mutuamente excluyentes salvo que el borrador traiga los dos datos", () => {
     const partialPatch = buildOnboardingPlanPatch(validState("partial"));
     expect(partialPatch).not.toHaveProperty("pension");
-    const bridgePatch = buildOnboardingPlanPatch(validState("pension_bridge"));
-    expect(bridgePatch).not.toHaveProperty("partial_retirement");
+    const pensionPatch = buildOnboardingPlanPatch(withPension("asap"));
+    expect(pensionPatch).not.toHaveProperty("partial_retirement");
   });
 
   it("el importe con coma decimal se normaliza a decimal-string de la API (punto)", () => {
-    const patch = buildOnboardingPlanPatch({
-      ...validState("pension_bridge"),
-      pensionAmount: "1.234,5",
-    });
+    const patch = buildOnboardingPlanPatch(
+      withPension("asap", { pensionAmount: "1.234,5" }),
+    );
     expect(patch.pension?.monthly_amount_today).toBe("1234.5");
   });
 });
