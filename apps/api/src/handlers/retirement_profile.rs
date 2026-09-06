@@ -24,7 +24,7 @@
 //!   nivel de struct resetearía a defaults todo lo ausente (un PATCH «solo el SWR» borraría la
 //!   pensión declarada). Es el mismo bug que `FireSettingsPatch` existe para esquivar.
 //!
-//! Dos reglas de RESOLUCIÓN que no son defaults sino derivaciones, y que por eso viven en
+//! Reglas de RESOLUCIÓN que no son defaults sino derivaciones, y que por eso viven en
 //! `resolve_retirement_profile` y no en el `Default`:
 //!
 //! * **U4 — el porcentaje de retirada es ÚNICO.** `swr_pct` dimensiona el objetivo FIRE **y** es
@@ -34,15 +34,40 @@
 //!   el número (`withdrawal_rule.pct_source`: `swr` | `explicit`). Un porcentaje explícito se
 //!   sigue honrando y gana. El resolvedor es uno solo —[`resolve_withdrawal_rule`]— porque con
 //!   dos, «único» valdría en el formulario y no en el chart.
-//! * **S4 — quitar la pensión suelta la base del objetivo.** `PATCH {"pension": null}` pone el
-//!   `target_basis` ALMACENADO a `null` para que se vuelva a derivar. Antes no lo hacía y el
-//!   perfil se quedaba con un `bridge_to_pension` hacia una pensión que ya no existía; el detalle
-//!   y la evidencia medida están en `RetirementProfilePatch::apply_to`.
+//! * **C7 — el puente NO es una estrategia, es un ajuste de la pensión.** `pension.bridge_enabled`
+//!   está disponible con CUALQUIER estrategia y viene apagado. Al encenderlo sin números, el
+//!   resolvedor rellena `bridge_max_pct = max(5, swr + 1)` y `bridge_max_years = 7`: el puente sin
+//!   tope no es un puente, es una retirada sin límite.
+//!
+//! # El modelo v2 (5.0.0, decisiones M2/M4/M5/C3/C5/C7 del owner)
+//!
+//! Lo que cambia respecto de la primera vuelta de 5.0.0, y qué se llevó por delante:
+//!
+//! * **El éxito define la fecha** ⇒ `success_threshold_pct` vuelve al perfil como RESTRICCIÓN
+//!   (80–100, default 95, C3). Desde V7 y hasta aquí era «se acepta y se ignora»; ahora es
+//!   load-bearing y la migración `20260906091500_drop_stored_success_threshold.sql` borra los 95
+//!   que aquella promesa dejó almacenados (un valor guardado que nadie leía no puede resucitar
+//!   como elección del usuario).
+//! * **La pensión es un FLUJO DE CAJA** (M4): no hay objetivo descontado, así que mueren
+//!   `target_basis` (con su derivación R6 y su `target_basis_stored`) y `bridge_discount_basis`.
+//! * **El colchón de caja desaparece** (M6): `cash_buffer_months` fuera. La caja es un activo y
+//!   la regla de ahorro decide cuánto se guarda.
+//! * **`pension_bridge` deja de ser una estrategia** (C7). El literal se sigue ACEPTANDO en la
+//!   deserialización como alias de `asap`; el perfil resuelto enciende el puente con sus defaults
+//!   y el ensamblado avisa (`strategy_pension_bridge_migrated`). **Nunca se re-emite**: la primera
+//!   escritura deja `"strategy":"asap"` en el JSONB.
+//! * **Dos modos nuevos**: `coast_mode` (`fixed_retirement_age` | `fixed_stop_age`, M10) y
+//!   `partial_retirement.mode` (`at_age` | `asap`, M11) — por eso `partial_retirement.starts_at_age`
+//!   pasa a ser opcional y por eso [`requires_target_age`] es una función libre de dos argumentos:
+//!   con `coast` la edad de jubilación solo es obligatoria en el modo A.
 //!
 //! La columna es `users.retirement_profile jsonb NULL` (`NULL` = defaults). La migración
 //! `20260902200000_users_retirement_profile.sql` la crea y **copia** los cuatro ejes movidos
 //! desde `installation.fire_settings` al perfil de cada usuario, para que el upgrade no mueva
-//! un número.
+//! un número; `20260906091500_drop_stored_success_threshold.sql` limpia las cuatro claves que v2
+//! retira. Ninguna de las dos es necesaria para LEER un perfil viejo: el struct no lleva
+//! `deny_unknown_fields`, así que un JSONB con `target_basis`, `bridge_discount_basis` o
+//! `cash_buffer_months` sigue cargando y esas claves se ignoran solas.
 
 use crate::error::ApiError;
 use crate::handlers::installation::{
@@ -82,27 +107,69 @@ pub(crate) const MAX_WITHDRAWAL_PCT: Decimal = Decimal::from_parts(20, 0, 0, fal
 /// Techo de la banda y del ajuste de `guardrails` (%). 50 % es ya un régimen extremo (Guyton-
 /// Klinger usa 20 % de banda y 10 % de ajuste); por encima la regla no reacciona, oscila.
 pub(crate) const MAX_GUARDRAIL_PCT: Decimal = Decimal::from_parts(50, 0, 0, false, 0);
-/// Colchón de caja máximo, en meses de gasto. Cinco años es el límite útil: más allá, «colchón»
-/// y «cartera» son la misma cosa.
-pub(crate) const MAX_CASH_BUFFER_MONTHS: u32 = 60;
-/// Techo del SWR (%). Mismo que tenía en `FireSettings`: el eje se movió, la cota no.
-pub(crate) const MAX_SWR_PCT: Decimal = Decimal::from_parts(4, 0, 0, false, 0);
+/// Techo del SWR (%). Era 4 desde `FireSettings`; **sube a 6 en 5.0.0** (decisión de integración
+/// del plan v2, bajo M5): el SWR deja de dimensionar un objetivo y pasa a ser «el máximo que se
+/// vende en cualquier año», con la fecha decidida por el éxito. Un 5–6 % es un régimen agresivo
+/// pero describible —y el sorteo lo castiga solo—; con el tope en 4 no se podía ni escribir.
+pub(crate) const MAX_SWR_PCT: Decimal = Decimal::from_parts(6, 0, 0, false, 0);
+
+/// Umbral de éxito mínimo aceptable (%). Por debajo del 80 el plan ya no describe una jubilación:
+/// describe una apuesta, y el veredicto verde dejaría de significar nada.
+pub(crate) const MIN_SUCCESS_THRESHOLD_PCT: u32 = 80;
+/// Umbral máximo (%). `100` es un literal con semántica propia (C3): **cero fallos de N caminos**,
+/// evaluado sobre el estimador puntual, no sobre la cota de Wilson.
+pub(crate) const MAX_SUCCESS_THRESHOLD_PCT: u32 = 100;
+/// Umbral por defecto (%). C3: el 100 hacía que la fecha fuera el mínimo muestral (±10 años según
+/// la semilla, sin converger al subir N). 95 sobre el límite inferior de Wilson es estable.
+pub(crate) const DEFAULT_SUCCESS_THRESHOLD_PCT: u32 = 95;
+
+/// Techo de la tasa inicial del puente (%). Es el MISMO techo que el de cualquier retirada
+/// ([`MAX_WITHDRAWAL_PCT`]) y se nombra aparte porque se lee en otro sitio: el puente es una tasa
+/// inicial mayor con fecha límite (C2), no una regla distinta.
+pub(crate) const MAX_BRIDGE_PCT: Decimal = MAX_WITHDRAWAL_PCT;
+/// Años máximos del puente: mínimo 1 (menos de un año no es un puente, es un mes de caja).
+pub(crate) const MIN_BRIDGE_YEARS: u32 = 1;
+/// Años máximos del puente: 20. Más allá, «puente hasta la pensión» describe la jubilación entera
+/// y el tope deja de ser una restricción.
+pub(crate) const MAX_BRIDGE_YEARS: u32 = 20;
+/// Años del puente al ENCENDERLO sin decir cuántos (C7).
+pub(crate) const DEFAULT_BRIDGE_YEARS: u32 = 7;
+
+/// Tasa inicial del puente al ENCENDERLO sin decir cuál (C7): `max(5, swr + 1)` %.
+///
+/// El puente solo sirve para algo si permite vender MÁS que el régimen ordinario, así que el
+/// default tiene que quedar por encima del SWR sea cual sea el SWR — de ahí el `swr + 1`. El
+/// suelo de 5 % es el número que el owner fijó para el caso normal (SWR 3–3,5): sin él, un perfil
+/// conservador estrenaría el puente con un 4 % que apenas mueve la fecha.
+pub(crate) fn default_bridge_pct(swr: Decimal) -> Decimal {
+    let five = Decimal::from(5u32);
+    let lifted = swr + Decimal::ONE;
+    let v = if lifted > five { lifted } else { five };
+    // Un SWR pegado al techo dejaría el default por encima de la cota del propio puente.
+    v.min(MAX_BRIDGE_PCT)
+}
 
 // ---------------------------------------------------------------------------
 // Enumerados del perfil
 // ---------------------------------------------------------------------------
 
-/// Las cinco estrategias de jubilación (D15). **Una por usuario**: la estrategia decide el
-/// trigger de la jubilación, la base del objetivo y qué lecturas tienen sentido.
+/// Las CUATRO estrategias de jubilación (D15, C7). **Una por usuario**: la estrategia decide el
+/// trigger de la jubilación y qué lecturas tienen sentido.
 ///
 /// El `Deserialize` es manual —como los de `FireSettings`— para que un literal desconocido dé
 /// un error con la lista de variantes en vez de un `unknown variant` genérico, y para que la
 /// superficie MCP pueda reusar EXACTAMENTE esta lista (`parse_enum_param`).
+///
+/// **`pension_bridge` ya no es una estrategia** (C7): el puente es un ajuste de la tarjeta
+/// Pensión, disponible con cualquier estrategia. El literal se sigue aceptando como ALIAS de
+/// `asap` —ver [`RetirementProfile::migrated_from_pension_bridge`]— y **no aparece en la lista de
+/// variantes válidas del error**: quien escribe hoy una estrategia nueva no debe aprender un
+/// nombre que ya no existe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RetirementStrategy {
-    /// «Cuanto antes (FIRE clásico)»: se jubila el primer mes en que el líquido cruza el
-    /// objetivo. Es la conducta de 4.15.x y por eso es el default.
+    /// «Cuanto antes (FIRE clásico)»: se jubila el primer mes válido. Es la conducta de 4.15.x y
+    /// por eso es el default.
     #[default]
     Asap,
     /// «A una edad fija»: la edad manda (D17), llegue o no el capital.
@@ -111,8 +178,28 @@ pub enum RetirementStrategy {
     Coast,
     /// «Media jornada».
     Partial,
-    /// «Puente hasta la pensión».
-    PensionBridge,
+}
+
+/// El literal retirado que se sigue aceptando como alias de [`RetirementStrategy::Asap`].
+pub(crate) const PENSION_BRIDGE_ALIAS: &str = "pension_bridge";
+
+/// Las variantes VÁLIDAS, en el orden en que se enseñan. El alias no está: es compatibilidad de
+/// entrada, no una opción que ofrecer. La superficie MCP reusa esta lista (`parse_enum_param`).
+pub(crate) const RETIREMENT_STRATEGY_VARIANTS: &[&str] =
+    &["asap", "retire_at_age", "coast", "partial"];
+
+/// **El único sitio donde un literal se convierte en estrategia.** Devuelve además si llegó por el
+/// alias retirado `pension_bridge` — el dato que [`RetirementProfile`] necesita para encender el
+/// puente y avisar. Con dos parsers, el alias valdría en una superficie y no en la otra.
+pub(crate) fn parse_retirement_strategy(s: &str) -> Option<(RetirementStrategy, bool)> {
+    match s {
+        "asap" => Some((RetirementStrategy::Asap, false)),
+        "retire_at_age" => Some((RetirementStrategy::RetireAtAge, false)),
+        "coast" => Some((RetirementStrategy::Coast, false)),
+        "partial" => Some((RetirementStrategy::Partial, false)),
+        PENSION_BRIDGE_ALIAS => Some((RetirementStrategy::Asap, true)),
+        _ => None,
+    }
 }
 
 impl<'de> Deserialize<'de> for RetirementStrategy {
@@ -120,43 +207,49 @@ impl<'de> Deserialize<'de> for RetirementStrategy {
     where
         D: Deserializer<'de>,
     {
+        Ok(StrategyChoice::deserialize(deserializer)?.strategy)
+    }
+}
+
+/// La estrategia MÁS de dónde vino: `migrated` = llegó como `pension_bridge` (C7).
+///
+/// Es un tipo propio y no un `deserialize_with` porque el dato tiene que sobrevivir hasta el
+/// struct del perfil, y un `deserialize_with` de un campo no puede escribir en otro campo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct StrategyChoice {
+    pub strategy: RetirementStrategy,
+    pub migrated: bool,
+}
+
+impl<'de> Deserialize<'de> for StrategyChoice {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
         use serde::de::Error;
         let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "asap" => Ok(Self::Asap),
-            "retire_at_age" => Ok(Self::RetireAtAge),
-            "coast" => Ok(Self::Coast),
-            "partial" => Ok(Self::Partial),
-            "pension_bridge" => Ok(Self::PensionBridge),
-            _ => Err(D::Error::unknown_variant(
-                &s,
-                &["asap", "retire_at_age", "coast", "partial", "pension_bridge"],
-            )),
+        match parse_retirement_strategy(&s) {
+            Some((strategy, migrated)) => Ok(StrategyChoice { strategy, migrated }),
+            None => Err(D::Error::unknown_variant(&s, RETIREMENT_STRATEGY_VARIANTS)),
         }
     }
 }
 
-impl RetirementStrategy {
-    /// `true` para las estrategias cuyo trigger es una EDAD y que, por tanto, exigen
-    /// `target_retirement_age`.
-    pub(crate) fn requires_target_age(self) -> bool {
-        matches!(self, Self::RetireAtAge | Self::Coast)
-    }
-}
-
-/// Sobre qué se dimensiona el objetivo de jubilación.
+/// Los dos modos de Coast FIRE (M10, C8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum TargetBasis {
-    /// Perpetuidad sobre la necesidad neta: `gross_up(12·need)/SWR`. Es lo de siempre.
+pub enum CoastMode {
+    /// **Modo A — fijo la edad de jubilación**: el solver busca el PRIMER mes en que se puede
+    /// dejar de aportar y aun así llegar a esa edad con el plan en pie. Exige
+    /// `target_retirement_age`; `coast_stop_age` es una LECTURA, no un dato.
     #[default]
-    Perpetuity,
-    /// Puente: capital para cubrir el gasto hasta que empieza la pensión + la perpetuidad
-    /// sobre lo que la pensión NO cubra (P2).
-    BridgeToPension,
+    FixedRetirementAge,
+    /// **Modo B — fijo cuándo dejo de aportar** (`coast_stop_age`): la fecha de jubilación es la
+    /// que salga del umbral. Aquí `target_retirement_age` NO es obligatoria.
+    FixedStopAge,
 }
 
-impl<'de> Deserialize<'de> for TargetBasis {
+impl<'de> Deserialize<'de> for CoastMode {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -164,30 +257,30 @@ impl<'de> Deserialize<'de> for TargetBasis {
         use serde::de::Error;
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
-            "perpetuity" => Ok(Self::Perpetuity),
-            "bridge_to_pension" => Ok(Self::BridgeToPension),
+            "fixed_retirement_age" => Ok(Self::FixedRetirementAge),
+            "fixed_stop_age" => Ok(Self::FixedStopAge),
             _ => Err(D::Error::unknown_variant(
                 &s,
-                &["perpetuity", "bridge_to_pension"],
+                &["fixed_retirement_age", "fixed_stop_age"],
             )),
         }
     }
 }
 
-/// Con qué tasa se descuentan los flujos del puente (D7).
+/// Los dos modos de arranque de la media jornada (M11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum BridgeDiscountBasis {
-    /// Rentabilidad esperada ponderada por valor de los activos líquidos.
+pub enum PartialStartMode {
+    /// **Modo A — a una edad fija**: exige `partial_retirement.starts_at_age`.
     #[default]
-    ExpectedReturn,
-    /// El propio SWR del perfil.
-    Swr,
-    /// Sin descuento: el puente cuesta la suma nominal de sus flujos (conservador).
-    None,
+    AtAge,
+    /// **Modo B — «en cuanto pueda»**: el solver busca el primer mes en que bajar a media jornada
+    /// deja el plan en pie. La edad de inicio pasa a ser una LECTURA y puede faltar.
+    #[serde(rename = "asap")]
+    AsSoonAsPossible,
 }
 
-impl<'de> Deserialize<'de> for BridgeDiscountBasis {
+impl<'de> Deserialize<'de> for PartialStartMode {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -195,14 +288,27 @@ impl<'de> Deserialize<'de> for BridgeDiscountBasis {
         use serde::de::Error;
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
-            "expected_return" => Ok(Self::ExpectedReturn),
-            "swr" => Ok(Self::Swr),
-            "none" => Ok(Self::None),
-            _ => Err(D::Error::unknown_variant(
-                &s,
-                &["expected_return", "swr", "none"],
-            )),
+            "at_age" => Ok(Self::AtAge),
+            "asap" => Ok(Self::AsSoonAsPossible),
+            _ => Err(D::Error::unknown_variant(&s, &["at_age", "asap"])),
         }
+    }
+}
+
+/// `true` cuando el plan EXIGE `target_retirement_age`.
+///
+/// Es una función LIBRE y de dos argumentos —y no un método de [`RetirementStrategy`]— porque
+/// desde v2 la respuesta depende también del modo de coast (M10): con `fixed_stop_age` la edad de
+/// jubilación no se impone, la calcula el umbral.
+///
+/// **`partial` no está en la lista, y es deliberado**: la media jornada USA
+/// `target_retirement_age` cuando la hay (es el fin OPCIONAL de la fase), pero no la exige — con
+/// la fase declarada, la jubilación total la decide el éxito.
+pub(crate) fn requires_target_age(strategy: RetirementStrategy, coast_mode: CoastMode) -> bool {
+    match strategy {
+        RetirementStrategy::RetireAtAge => true,
+        RetirementStrategy::Coast => coast_mode == CoastMode::FixedRetirementAge,
+        RetirementStrategy::Asap | RetirementStrategy::Partial => false,
     }
 }
 
@@ -380,8 +486,10 @@ impl Default for WithdrawalRule {
     }
 }
 
-/// Pensión pública (u otra renta vitalicia) **con fecha** (D3/D8). No es una partida de
-/// presupuesto: su fecha de inicio cambia el OBJETIVO, no solo el flujo de caja.
+/// Pensión pública (u otra renta vitalicia) **con fecha** (D3/D8, M4). Desde v2 es un FLUJO DE
+/// CAJA y nada más: no descuenta ningún objetivo, no dimensiona ningún capital. Lo único que
+/// cambia por tener fecha es **cuándo** entra el dinero — y, si el puente está encendido, hasta
+/// cuándo se permite vender por encima del SWR.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PensionPlan {
     /// Importe MENSUAL en euros de HOY (> 0).
@@ -394,27 +502,63 @@ pub struct PensionPlan {
     #[serde(default = "default_true")]
     pub indexed: bool,
     /// Fracción del importe que se cobra DURANTE la fase de media jornada, en `[0, 1]`.
-    /// Default `0`: la jubilación parcial no da derecho a pensión salvo que se declare.
+    ///
+    /// **Default `0` porque por defecto no se supone que cobres pensión mientras trabajas a
+    /// jornada reducida; súbelo si tu régimen te la paga.** No es una regla legal —lo era en el
+    /// texto anterior, y era falso: hay regímenes que compatibilizan pensión y trabajo a tiempo
+    /// parcial—, es el supuesto CONSERVADOR: contar una pensión que no cobras adelanta la fecha
+    /// de jubilación con dinero que no existe.
     #[serde(default, with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub fraction_while_partial: Decimal,
+
+    // ---- El PUENTE (C2/C7): un ajuste de la pensión, no una estrategia ----------------------
+    /// **Puente hasta la pensión, apagado por defecto.** Encendido, el tope de la tasa inicial en
+    /// el mes de jubilación pasa a ser [`Self::bridge_max_pct`] —en vez del SWR— siempre que la
+    /// pensión llegue dentro de [`Self::bridge_max_years`], y la fecha válida nunca es anterior a
+    /// `pensión − años máximos`.
+    ///
+    /// Qué modela: **jubilación anticipada — sin sueldo no hay aportaciones; se vende hasta la
+    /// pensión; el tope del puente es la tasa inicial máxima si la pensión llega dentro de los
+    /// años máximos.** Fuera de esa ventana manda el SWR de siempre. Está disponible con
+    /// CUALQUIER estrategia (C7).
+    #[serde(default)]
+    pub bridge_enabled: bool,
+    /// Tasa inicial máxima del puente (% anual, BRUTO igual que el SWR). Estrictamente mayor que
+    /// `swr_pct` —si no, el puente no permite nada que el régimen ordinario no permitiera ya— y
+    /// como mucho [`MAX_BRIDGE_PCT`]. Ausente con el puente encendido:
+    /// [`default_bridge_pct`].
+    #[serde(default, with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub bridge_max_pct: Option<Decimal>,
+    /// Años máximos entre la jubilación y la pensión para que el puente aplique. `[1, 20]`;
+    /// ausente con el puente encendido: [`DEFAULT_BRIDGE_YEARS`].
+    #[serde(default)]
+    pub bridge_max_years: Option<u32>,
 }
 
 fn default_true() -> bool {
     true
 }
 
-/// Fase de media jornada (P7). No lleva `ends_at_age` a propósito: termina en la jubilación
+/// Fase de media jornada (P7, M11). No lleva `ends_at_age` a propósito: termina en la jubilación
 /// total, que ya tiene su propio trigger — dos fines chocarían.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct PartialRetirement {
-    pub starts_at_age: u32,
+    /// Edad a la que se baja a media jornada. **Opcional desde v2**: con
+    /// [`PartialStartMode::AsSoonAsPossible`] la calcula el solver y aquí no hay dato que dar. Con
+    /// el modo `at_age` es obligatoria (`partial_start_age_required`).
+    #[serde(default)]
+    pub starts_at_age: Option<u32>,
     /// Ingreso MENSUAL en euros de HOY durante la fase (>= 0; `0` = año sabático).
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub income_monthly_today: Decimal,
     #[serde(default)]
     pub expense_basis: PartialExpenseBasis,
+    /// `at_age` (default, conducta de 5.0.0-WP3) | `asap`.
+    #[serde(default)]
+    pub mode: PartialStartMode,
 }
 
 // ---------------------------------------------------------------------------
@@ -422,14 +566,18 @@ pub struct PartialRetirement {
 // ---------------------------------------------------------------------------
 
 /// Perfil de jubilación de UN usuario. Todas las claves son opcionales en el wire: un JSONB
-/// `{}` —o `NULL`— es el perfil por defecto, que reproduce la conducta de 4.15.x.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(default)]
+/// `{}` —o `NULL`— es el perfil por defecto.
+///
+/// **Sin `deny_unknown_fields`, y eso es contrato**: un JSONB escrito por 5.0.0-WP5 con
+/// `target_basis`, `bridge_discount_basis` o `cash_buffer_months` sigue cargando y esas tres
+/// claves se ignoran solas. La migración las borra para dejar el almacén limpio, pero LEER nunca
+/// dependió de que la migración hubiera corrido.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct RetirementProfile {
     pub strategy: RetirementStrategy,
-    /// Edad de jubilación total. OBLIGATORIA en `retire_at_age` y `coast`; opcional en
-    /// `partial` (fin de la fase parcial); ignorada por `asap` y `pension_bridge`, que se
-    /// disparan por cruce.
+    /// Edad de jubilación total. OBLIGATORIA con `retire_at_age` y con `coast` en modo
+    /// `fixed_retirement_age` ([`requires_target_age`]); opcional en `partial` (fin de la fase
+    /// parcial); ignorada por `asap`, que se jubila en la primera fecha válida.
     pub target_retirement_age: Option<u32>,
 
     // ---- Los cuatro ejes MOVIDOS desde `installation.fire_settings` (5.0.0) ----------------
@@ -444,22 +592,32 @@ pub struct RetirementProfile {
     pub swr_pct: Decimal,
     pub horizon_lifespan_age: u32,
 
-    /// Base del objetivo. **`None` en el almacén = derivar** (R6): `bridge_to_pension` cuando
-    /// hay `pension` declarada, `perpetuity` cuando no. `resolve_retirement_profile` lo rellena
-    /// siempre, así que lo que sale por el API nunca es `null`. Fijarlo a `perpetuity` teniendo
-    /// pensión es la opción explícita «ignorar la pensión» (conservadora).
-    pub target_basis: Option<TargetBasis>,
-    pub bridge_discount_basis: BridgeDiscountBasis,
+    /// **Umbral de éxito, en % de caminos que llegan al horizonte sin volver a trabajar** (M2/C3).
+    /// `[80, 100]`, default 95. Es una RESTRICCIÓN sobre la fecha, no un adorno del veredicto: la
+    /// fecha válida es el primer mes que lo cumple. `100` significa cero fallos de N.
+    pub success_threshold_pct: u32,
+    /// Modo de coast (M10). Con `fixed_stop_age` la edad de jubilación deja de ser obligatoria.
+    pub coast_mode: CoastMode,
+    /// Edad a la que se deja de aportar. **Dato en el modo `fixed_stop_age`, lectura en el modo
+    /// `fixed_retirement_age`** (allí lo resuelve el solver). Cota: `[18, edad de jubilación o
+    /// horizonte]`.
+    pub coast_stop_age: Option<u32>,
+
     pub withdrawal_rule: WithdrawalRule,
     pub pension: Option<PensionPlan>,
     pub partial_retirement: Option<PartialRetirement>,
-    /// Colchón de caja en meses de gasto (P4). Solo actúa en Monte Carlo; en el camino
-    /// determinista es un no-op declarado.
+
+    /// **El perfil llegó con el literal retirado `strategy: "pension_bridge"`** (C7). No es un
+    /// campo del wire —no se deserializa desde ninguna clave, no se serializa, no se persiste—:
+    /// lo pone el [`Deserialize`] de este struct al ver el alias, y lo consumen dos sitios:
     ///
-    /// **`None` no es «sin colchón» desde 5.0.0 (V6)**: es «derívalo del tope de mi regla de
-    /// ahorro» (`handlers::cash_buffer::resolve_cash_buffer`). Un valor explícito sigue ganando
-    /// —una elección no se deriva— y `PATCH {"cash_buffer_months": null}` es el camino de vuelta.
-    pub cash_buffer_months: Option<u32>,
+    /// 1. [`resolve_retirement_profile`], que enciende el puente y le pone sus defaults;
+    /// 2. el ensamblado de la proyección, que emite el aviso `strategy_pension_bridge_migrated`.
+    ///
+    /// Como no viaja, la primera escritura del perfil deja `"strategy":"asap"` en el JSONB y el
+    /// flag se apaga solo para siempre. **El perfil NUNCA re-emite `pension_bridge`.**
+    #[serde(skip)]
+    pub migrated_from_pension_bridge: bool,
 }
 
 impl Default for RetirementProfile {
@@ -468,8 +626,101 @@ impl Default for RetirementProfile {
     }
 }
 
-/// El perfil de quien no ha tocado nada. Reproduce EXACTAMENTE la jubilación de 4.15.x: cruce
-/// de líquido, objetivo perpetuo, drenaje del gasto declarado sin techo.
+/// Gemelo DERIVADO de [`RetirementProfile`] usado solo para deserializar.
+///
+/// Existe por una razón concreta: el alias `pension_bridge` es información del WIRE que hay que
+/// llevarse a un campo del perfil (`migrated_from_pension_bridge`), y un `deserialize_with` de un
+/// campo no puede escribir en otro. Las alternativas eran un thread-local —que se rompe en cuanto
+/// la carga cruza un `.await` y tokio mueve la tarea de hilo, encendiendo el puente del perfil
+/// equivocado— o un visitor a mano de doce campos con sus decimales-string, que es exactamente el
+/// sitio donde se pierde un default en silencio.
+///
+/// **La duplicación es segura porque la conversión de abajo construye el struct SIN `..`**: añadir
+/// un campo a `RetirementProfile` y olvidarlo aquí no compila.
+#[derive(Deserialize)]
+#[serde(default)]
+struct RetirementProfileWire {
+    /// Lleva el alias consigo (ver [`StrategyChoice`]). **Una sola clave `strategy`**: dos campos
+    /// serde con el mismo nombre dejarían el segundo sin rellenar en silencio.
+    strategy: StrategyChoice,
+    target_retirement_age: Option<u32>,
+    fire_number_mode: FireNumberMode,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    fire_number_manual_amount: Option<Decimal>,
+    #[serde(with = "rust_decimal::serde::str")]
+    swr_pct: Decimal,
+    horizon_lifespan_age: u32,
+    success_threshold_pct: u32,
+    coast_mode: CoastMode,
+    coast_stop_age: Option<u32>,
+    withdrawal_rule: WithdrawalRule,
+    pension: Option<PensionPlan>,
+    partial_retirement: Option<PartialRetirement>,
+}
+
+impl Default for RetirementProfileWire {
+    fn default() -> Self {
+        let d = default_retirement_profile();
+        RetirementProfileWire {
+            strategy: StrategyChoice {
+                strategy: d.strategy,
+                migrated: false,
+            },
+            target_retirement_age: d.target_retirement_age,
+            fire_number_mode: d.fire_number_mode,
+            fire_number_manual_amount: d.fire_number_manual_amount,
+            swr_pct: d.swr_pct,
+            horizon_lifespan_age: d.horizon_lifespan_age,
+            success_threshold_pct: d.success_threshold_pct,
+            coast_mode: d.coast_mode,
+            coast_stop_age: d.coast_stop_age,
+            withdrawal_rule: d.withdrawal_rule,
+            pension: d.pension,
+            partial_retirement: d.partial_retirement,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RetirementProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let w = RetirementProfileWire::deserialize(deserializer)?;
+        let RetirementProfileWire {
+            strategy,
+            target_retirement_age,
+            fire_number_mode,
+            fire_number_manual_amount,
+            swr_pct,
+            horizon_lifespan_age,
+            success_threshold_pct,
+            coast_mode,
+            coast_stop_age,
+            withdrawal_rule,
+            pension,
+            partial_retirement,
+        } = w;
+        Ok(RetirementProfile {
+            strategy: strategy.strategy,
+            target_retirement_age,
+            fire_number_mode,
+            fire_number_manual_amount,
+            swr_pct,
+            horizon_lifespan_age,
+            success_threshold_pct,
+            coast_mode,
+            coast_stop_age,
+            withdrawal_rule,
+            pension,
+            partial_retirement,
+            migrated_from_pension_bridge: strategy.migrated,
+        })
+    }
+}
+
+/// El perfil de quien no ha tocado nada: se jubila en la primera fecha que cumple el umbral, con
+/// el SWR de siempre como tope de venta anual y el gasto declarado como necesidad.
 pub(crate) fn default_retirement_profile() -> RetirementProfile {
     RetirementProfile {
         strategy: RetirementStrategy::Asap,
@@ -478,12 +729,13 @@ pub(crate) fn default_retirement_profile() -> RetirementProfile {
         fire_number_manual_amount: None,
         swr_pct: Decimal::new(35, 1),
         horizon_lifespan_age: 90,
-        target_basis: None,
-        bridge_discount_basis: BridgeDiscountBasis::ExpectedReturn,
+        success_threshold_pct: DEFAULT_SUCCESS_THRESHOLD_PCT,
+        coast_mode: CoastMode::FixedRetirementAge,
+        coast_stop_age: None,
         withdrawal_rule: WithdrawalRule::default(),
         pension: None,
         partial_retirement: None,
-        cash_buffer_months: None,
+        migrated_from_pension_bridge: false,
     }
 }
 
@@ -561,10 +813,22 @@ pub(crate) fn resolve_retirement_profile(stored: Option<RetirementProfile>) -> R
         .horizon_lifespan_age
         .clamp(MIN_HORIZON_LIFESPAN_AGE, MAX_HORIZON_LIFESPAN_AGE);
     p.swr_pct = p.swr_pct.clamp(Decimal::ZERO, MAX_SWR_PCT);
-    p.cash_buffer_months = p.cash_buffer_months.map(|m| m.min(MAX_CASH_BUFFER_MONTHS));
+    p.success_threshold_pct = p
+        .success_threshold_pct
+        .clamp(MIN_SUCCESS_THRESHOLD_PCT, MAX_SUCCESS_THRESHOLD_PCT);
     p.target_retirement_age = p
         .target_retirement_age
         .map(|a| a.clamp(MIN_PROFILE_AGE, p.horizon_lifespan_age));
+    // Dejar de aportar DESPUÉS de jubilarse no describe nada, así que el techo es la edad de
+    // jubilación cuando la hay (ya clampada, así que nunca es menor que el suelo) y el horizonte
+    // cuando no.
+    let coast_ceiling = p
+        .target_retirement_age
+        .unwrap_or(p.horizon_lifespan_age)
+        .max(MIN_PROFILE_AGE);
+    p.coast_stop_age = p
+        .coast_stop_age
+        .map(|a| a.clamp(MIN_PROFILE_AGE, coast_ceiling));
 
     p.withdrawal_rule.pct = clamp_pct(p.withdrawal_rule.pct, MAX_WITHDRAWAL_PCT);
     p.withdrawal_rule.start_pct = clamp_pct(p.withdrawal_rule.start_pct, MAX_WITHDRAWAL_PCT);
@@ -575,24 +839,43 @@ pub(crate) fn resolve_retirement_profile(stored: Option<RetirementProfile>) -> R
     p.withdrawal_rule = resolve_withdrawal_rule(&p.withdrawal_rule, p.swr_pct);
 
     let horizon = p.horizon_lifespan_age;
+    let swr = p.swr_pct;
+    // **C7 — el alias `pension_bridge` enciende el puente.** El perfil guardado decía «mi
+    // estrategia ES el puente»; en v2 eso se dice con `pension.bridge_enabled`, así que apagarlo
+    // al migrar cambiaría el plan de esa persona sin que tocara nada.
+    if p.migrated_from_pension_bridge {
+        if let Some(pen) = p.pension.as_mut() {
+            pen.bridge_enabled = true;
+        }
+    }
     if let Some(pen) = p.pension.as_mut() {
         pen.monthly_amount_today = pen.monthly_amount_today.max(Decimal::ZERO);
         pen.starts_at_age = pen.starts_at_age.clamp(MIN_PENSION_AGE.min(horizon), horizon);
         pen.fraction_while_partial = pen.fraction_while_partial.clamp(Decimal::ZERO, Decimal::ONE);
+        if pen.bridge_enabled {
+            // Encender el puente sin números no es «puente sin tope»: es un puente con los
+            // defaults del owner (C7). Sin esto, `bridge_max_pct = None` con el puente encendido
+            // llegaría al motor como una puerta sin cota — una retirada inicial libre.
+            pen.bridge_max_pct = Some(pen.bridge_max_pct.unwrap_or_else(|| default_bridge_pct(swr)));
+            pen.bridge_max_years = Some(pen.bridge_max_years.unwrap_or(DEFAULT_BRIDGE_YEARS));
+        }
+        // Clamps de lectura. El suelo del % es el SWR y NO «el SWR + un épsilon»: la cota de
+        // ESCRITURA es abierta —`bridge_max_pct_not_above_swr`— y aquí solo hay que impedir un
+        // valor imposible. Un puente igual al SWR es un puente que no concede nada: una lectura
+        // honesta y acotada. Inventar un número que el usuario no escribió sería peor.
+        pen.bridge_max_pct = pen
+            .bridge_max_pct
+            .map(|v| v.clamp(swr.min(MAX_BRIDGE_PCT), MAX_BRIDGE_PCT));
+        pen.bridge_max_years = pen
+            .bridge_max_years
+            .map(|y| y.clamp(MIN_BRIDGE_YEARS, MAX_BRIDGE_YEARS));
     }
     if let Some(par) = p.partial_retirement.as_mut() {
         par.income_monthly_today = par.income_monthly_today.max(Decimal::ZERO);
-        par.starts_at_age = par.starts_at_age.clamp(MIN_PROFILE_AGE, horizon);
+        par.starts_at_age = par
+            .starts_at_age
+            .map(|a| a.clamp(MIN_PROFILE_AGE, horizon));
     }
-
-    // R6 — la base del objetivo se DERIVA cuando no está fijada, y `pension_bridge` la fuerza:
-    // esa estrategia ES el puente, así que un `perpetuity` guardado ahí describiría otra cosa.
-    p.target_basis = Some(match (p.strategy, p.target_basis, p.pension.is_some()) {
-        (RetirementStrategy::PensionBridge, _, _) => TargetBasis::BridgeToPension,
-        (_, Some(b), _) => b,
-        (_, None, true) => TargetBasis::BridgeToPension,
-        (_, None, false) => TargetBasis::Perpetuity,
-    });
 
     p
 }
@@ -605,9 +888,9 @@ pub(crate) fn validate_retirement_profile(p: &RetirementProfile) -> Result<(), A
     // Son los mismos códigos que devolvía `validate_fire_settings`, a propósito: la SPA ya los
     // traduce y el eje es el mismo, solo ha cambiado de dueño.
     if p.swr_pct < Decimal::ZERO || p.swr_pct > MAX_SWR_PCT {
-        return Err(ApiError::BadRequest(
-            "swr_out_of_range: swr_pct must be between 0 and 4 (percent)".into(),
-        ));
+        return Err(ApiError::BadRequest(format!(
+            "swr_out_of_range: la tasa de retirada tiene que estar entre 0 y {MAX_SWR_PCT} %"
+        )));
     }
     match p.fire_number_mode {
         FireNumberMode::Manual => {
@@ -630,26 +913,47 @@ pub(crate) fn validate_retirement_profile(p: &RetirementProfile) -> Result<(), A
         )));
     }
 
+    // ---- Umbral de éxito (M2/C3) -----------------------------------------------------------
+    if !(MIN_SUCCESS_THRESHOLD_PCT..=MAX_SUCCESS_THRESHOLD_PCT).contains(&p.success_threshold_pct) {
+        return Err(ApiError::BadRequest(format!(
+            "success_threshold_out_of_range: la probabilidad de éxito exigida tiene que estar entre {MIN_SUCCESS_THRESHOLD_PCT} y {MAX_SUCCESS_THRESHOLD_PCT} %"
+        )));
+    }
+
     // ---- Estrategia ------------------------------------------------------------------------
-    if p.strategy.requires_target_age() && p.target_retirement_age.is_none() {
+    if requires_target_age(p.strategy, p.coast_mode) && p.target_retirement_age.is_none() {
         return Err(ApiError::BadRequest(
-            "target_retirement_age_required: strategies retire_at_age and coast need target_retirement_age".into(),
+            "target_retirement_age_required: falta la edad a la que quieres jubilarte".into(),
         ));
     }
-    if p.strategy == RetirementStrategy::PensionBridge && p.pension.is_none() {
-        return Err(ApiError::BadRequest(
-            "pension_required_for_bridge: strategy pension_bridge needs a pension block".into(),
-        ));
-    }
-    // Espejo exacto de las dos reglas de arriba: una estrategia que nombra una fase exige el
-    // bloque que la define. Sin él, `partial` no tenía fase parcial que simular y se comportaba
-    // como `asap` en silencio — la UI enseñaba «Media jornada» sobre una proyección que no la
-    // tenía. Es la tercera pata de la misma familia (`target_retirement_age_required`,
-    // `pension_required_for_bridge`), no una regla nueva.
+    // Espejo exacto de la regla de arriba: una estrategia que nombra una fase exige el bloque que
+    // la define. Sin él, `partial` no tenía fase parcial que simular y se comportaba como `asap`
+    // en silencio — la UI enseñaba «Media jornada» sobre una proyección que no la tenía.
     if p.strategy == RetirementStrategy::Partial && p.partial_retirement.is_none() {
         return Err(ApiError::BadRequest(
-            "partial_retirement_required: strategy partial needs a partial_retirement block".into(),
+            "partial_retirement_required: elige a partir de cuándo trabajas a media jornada".into(),
         ));
+    }
+    // Coast modo B: la edad de parada ES el dato del plan. Sin ella no hay nada que resolver, y
+    // callarlo devolvería la conducta del modo A sin decirlo.
+    if p.strategy == RetirementStrategy::Coast
+        && p.coast_mode == CoastMode::FixedStopAge
+        && p.coast_stop_age.is_none()
+    {
+        return Err(ApiError::BadRequest(
+            "coast_stop_age_required: falta la edad a la que dejas de aportar".into(),
+        ));
+    }
+    // Media jornada modo A: la edad de inicio ES el dato. Con `asap` la calcula el solver.
+    if p.strategy == RetirementStrategy::Partial {
+        if let Some(par) = &p.partial_retirement {
+            if par.mode == PartialStartMode::AtAge && par.starts_at_age.is_none() {
+                return Err(ApiError::BadRequest(
+                    "partial_start_age_required: falta la edad a la que empiezas la media jornada"
+                        .into(),
+                ));
+            }
+        }
     }
 
     // ---- Edades ----------------------------------------------------------------------------
@@ -677,12 +981,47 @@ pub(crate) fn validate_retirement_profile(p: &RetirementProfile) -> Result<(), A
                 "pension_fraction_out_of_range: pension.fraction_while_partial must be between 0 and 1 (fraction)".into(),
             ));
         }
+        // ---- El puente (C2/C7) -------------------------------------------------------------
+        // Se valida SIEMPRE que haya números, esté encendido o no: guardar un puente imposible
+        // «porque ahora está apagado» es dejar el error para el día que se encienda.
+        if let Some(pct) = pen.bridge_max_pct {
+            if pct <= Decimal::ZERO || pct > MAX_BRIDGE_PCT {
+                return Err(ApiError::BadRequest(format!(
+                    "bridge_max_pct_out_of_range: la tasa máxima del puente tiene que ser mayor que 0 y como mucho {MAX_BRIDGE_PCT} %"
+                )));
+            }
+            // El puente es «una tasa inicial MAYOR con fecha límite» (C2): igual o menor que el
+            // SWR no concede nada y el usuario creería estar adelantando su jubilación.
+            if pct <= p.swr_pct {
+                let swr = p.swr_pct.normalize();
+                return Err(ApiError::BadRequest(format!(
+                    "bridge_max_pct_not_above_swr: la tasa máxima del puente tiene que ser mayor que tu tasa de retirada ({swr} %)"
+                )));
+            }
+        }
+        if let Some(years) = pen.bridge_max_years {
+            if !(MIN_BRIDGE_YEARS..=MAX_BRIDGE_YEARS).contains(&years) {
+                return Err(ApiError::BadRequest(format!(
+                    "bridge_max_years_out_of_range: los años máximos del puente tienen que estar entre {MIN_BRIDGE_YEARS} y {MAX_BRIDGE_YEARS}"
+                )));
+            }
+        }
+    }
+    if let Some(age) = p.coast_stop_age {
+        let ceiling = p.target_retirement_age.unwrap_or(horizon);
+        if !(MIN_PROFILE_AGE..=ceiling).contains(&age) {
+            return Err(ApiError::BadRequest(format!(
+                "coast_stop_age_out_of_range: la edad a la que dejas de aportar tiene que estar entre {MIN_PROFILE_AGE} y {ceiling}"
+            )));
+        }
     }
     if let Some(par) = &p.partial_retirement {
-        if !(MIN_PROFILE_AGE..=horizon).contains(&par.starts_at_age) {
-            return Err(ApiError::BadRequest(format!(
-                "partial_age_out_of_range: partial_retirement.starts_at_age must be between {MIN_PROFILE_AGE} and horizon_lifespan_age ({horizon})"
-            )));
+        if let Some(age) = par.starts_at_age {
+            if !(MIN_PROFILE_AGE..=horizon).contains(&age) {
+                return Err(ApiError::BadRequest(format!(
+                    "partial_age_out_of_range: partial_retirement.starts_at_age must be between {MIN_PROFILE_AGE} and horizon_lifespan_age ({horizon})"
+                )));
+            }
         }
         if par.income_monthly_today < Decimal::ZERO {
             return Err(ApiError::BadRequest(
@@ -692,21 +1031,12 @@ pub(crate) fn validate_retirement_profile(p: &RetirementProfile) -> Result<(), A
         }
         // La fase parcial termina en la jubilación total: empezar después (o el mismo mes) la
         // dejaría vacía, y una fase vacía que la UI dibuja es peor que un error.
-        if let Some(total) = p.target_retirement_age {
-            if par.starts_at_age >= total {
+        if let (Some(start), Some(total)) = (par.starts_at_age, p.target_retirement_age) {
+            if start >= total {
                 return Err(ApiError::BadRequest(
                     "partial_not_before_retirement: partial_retirement.starts_at_age must be lower than target_retirement_age".into(),
                 ));
             }
-        }
-    }
-
-    // ---- Colchón ---------------------------------------------------------------------------
-    if let Some(m) = p.cash_buffer_months {
-        if m > MAX_CASH_BUFFER_MONTHS {
-            return Err(ApiError::BadRequest(format!(
-                "cash_buffer_out_of_range: cash_buffer_months must be between 0 and {MAX_CASH_BUFFER_MONTHS}"
-            )));
         }
     }
 
@@ -730,9 +1060,13 @@ fn validate_withdrawal_rule(r: &WithdrawalRule) -> Result<(), ApiError> {
                 "withdrawal_pct_required: withdrawal_rule.{label} is required for this rule kind"
             )));
         };
+        // B8 — el mensaje dice la COTA REAL, no «out of range» a secas. Sin el número, quien
+        // escribe un 25 no sabe si el techo es 5, 20 o 100, y la SPA no puede decírselo: el
+        // catálogo de `errorMessages.ts` traduce el código, no interpola cotas.
         if v <= Decimal::ZERO || v > max {
+            let max = max.normalize();
             return Err(ApiError::BadRequest(format!(
-                "withdrawal_pct_out_of_range: withdrawal_rule.{label} must be greater than 0 and at most {max} (percent)"
+                "withdrawal_pct_out_of_range: {label} tiene que ser mayor que 0 y como mucho {max} %"
             )));
         }
         Ok(v)
@@ -747,9 +1081,13 @@ fn validate_withdrawal_rule(r: &WithdrawalRule) -> Result<(), ApiError> {
             let start = need_pct("start_pct", r.start_pct, MAX_WITHDRAWAL_PCT)?;
             let end = need_pct("end_pct", r.end_pct, MAX_WITHDRAWAL_PCT)?;
             if end >= start {
-                return Err(ApiError::BadRequest(
-                    "hybrid_end_pct_not_below_start: withdrawal_rule.end_pct must be lower than start_pct".into(),
-                ));
+                // B8 — el arranque puede ser HEREDADO del SWR (U4), así que el mensaje nombra el
+                // número contra el que se ha comparado de verdad: sin él, «menor que start_pct»
+                // señala a un campo que el usuario ha dejado vacío a propósito.
+                let start = start.normalize();
+                return Err(ApiError::BadRequest(format!(
+                    "hybrid_end_pct_not_below_start: el porcentaje final tiene que ser menor que tu tasa de retirada ({start} %)"
+                )));
             }
         }
         WithdrawalRuleKind::Guardrails => {
@@ -794,24 +1132,14 @@ pub(crate) struct RetirementProfilePatch {
     pub fire_number_manual_amount: Option<Option<Decimal>>,
     pub swr_pct: Option<Decimal>,
     pub horizon_lifespan_age: Option<u32>,
-    pub target_basis: Option<Option<TargetBasis>>,
-    pub bridge_discount_basis: Option<BridgeDiscountBasis>,
+    /// **Load-bearing desde el modelo v2** (M2/C3). Entre V7 y v2 se aceptaba y se descartaba;
+    /// ahora es la restricción que decide la fecha.
+    pub success_threshold_pct: Option<u32>,
+    pub coast_mode: Option<CoastMode>,
+    pub coast_stop_age: Option<Option<u32>>,
     pub withdrawal_rule: Option<WithdrawalRule>,
     pub pension: Option<Option<PensionPlan>>,
     pub partial_retirement: Option<Option<PartialRetirement>>,
-    pub cash_buffer_months: Option<Option<u32>>,
-    /// **`success_threshold_pct`, deprecado e IGNORADO desde 5.0.0** (decisión V7 del owner).
-    ///
-    /// Viaja hasta aquí y **no se aplica a nada**: no está en `RetirementProfile`, `apply_to` no
-    /// lo mira y ninguna respuesta lo publica. Existe por una sola razón: que un PATCH que lo
-    /// mande **solo a él** no se conteste con `patch_empty`. La compatibilidad prometida es «se
-    /// acepta y se ignora», y un 400 no es aceptarlo — y el cliente que lo manda no puede dejar
-    /// de mandarlo (las dos tools MCP son `deny_unknown_fields`, así que borrarlo del schema
-    /// convertiría en 400 lo que hoy funciona).
-    ///
-    /// El prefijo del nombre es deliberado: si alguien lo vuelve a cablear, tiene que renombrarlo
-    /// primero.
-    pub deprecated_success_threshold_pct: Option<u32>,
 }
 
 impl RetirementProfilePatch {
@@ -820,6 +1148,20 @@ impl RetirementProfilePatch {
     /// test lo note (la lección de `FireSettingsPatch::apply_to`).
     pub(crate) fn apply_to(&self, base: &RetirementProfile) -> RetirementProfile {
         let mut after = base.clone();
+        // **C7 — el alias `pension_bridge` se MATERIALIZA en la primera escritura.** El flag no
+        // se serializa (es información del wire de entrada), así que sin esto un PATCH de
+        // cualquier otro campo persistiría `strategy: "asap"` con `bridge_enabled: false` y el
+        // puente de esa persona desaparecería sin que nada lo dijera. Se materializa SOLO el
+        // encendido —que es la elección que el usuario expresó con el vocabulario viejo—: el
+        // tope y los años se siguen derivando en lectura, para que muevan con el SWR.
+        //
+        // Va ANTES del patchset a propósito: un `pension` explícito en el mismo PATCH gana, y
+        // quien manda un bloque de pensión entero está eligiendo, no arrastrando.
+        if after.migrated_from_pension_bridge {
+            if let Some(pen) = after.pension.as_mut() {
+                pen.bridge_enabled = true;
+            }
+        }
         if let Some(v) = self.strategy {
             after.strategy = v;
         }
@@ -838,42 +1180,26 @@ impl RetirementProfilePatch {
         if let Some(v) = self.horizon_lifespan_age {
             after.horizon_lifespan_age = v;
         }
-        if let Some(v) = self.target_basis {
-            after.target_basis = v;
+        if let Some(v) = self.success_threshold_pct {
+            after.success_threshold_pct = v;
         }
-        if let Some(v) = self.bridge_discount_basis {
-            after.bridge_discount_basis = v;
+        if let Some(v) = self.coast_mode {
+            after.coast_mode = v;
+        }
+        if let Some(v) = self.coast_stop_age {
+            after.coast_stop_age = v;
         }
         if let Some(v) = self.withdrawal_rule.clone() {
             after.withdrawal_rule = v;
         }
         if let Some(v) = self.pension.clone() {
-            let pension_removed = v.is_none();
             after.pension = v;
-            // **S4 — quitar la pensión SUELTA también la base del objetivo.** `target_basis` se
-            // DERIVA cuando no está fijada (R6: puente si hay pensión, perpetuidad si no), pero
-            // una vez fijada sobrevive a todo. Medido en vivo antes del arreglo: tras
-            // `PATCH {"pension": null}` el perfil seguía devolviendo `target_basis_stored:
-            // "bridge_to_pension"` y resolvía `bridge_to_pension`, mientras
-            // `/v1/projection/series` publicaba `target_basis: null` (perpetuidad) — el formulario
-            // y el chart contando dos planes distintos, sin un solo campo que lo delatara. Un
-            // puente hacia una pensión que ya no existe no describe nada, así que se suelta y se
-            // vuelve a derivar.
-            //
-            // **Un `target_basis` explícito en el MISMO patch gana**: quien dice a la vez «quita
-            // la pensión» y «la base es perpetuidad» está eligiendo, no arrastrando un valor
-            // viejo. `strategy: pension_bridge` sigue forzando el puente en `resolve_*` (y sin
-            // pensión ese perfil no valida: `pension_required_for_bridge`), así que el caso
-            // simétrico ya está cubierto y se deja como está.
-            if pension_removed && self.target_basis.is_none() {
-                after.target_basis = None;
-            }
+            // **S4 murió con `target_basis` (M4).** Quitar la pensión ya no tiene que soltar
+            // ninguna base derivada: en v2 la pensión es un flujo de caja y no dimensiona nada.
+            // El puente, que sí colgaba de ella, se va con el bloque — vive DENTRO de `pension`.
         }
         if let Some(v) = self.partial_retirement.clone() {
             after.partial_retirement = v;
-        }
-        if let Some(v) = self.cash_buffer_months {
-            after.cash_buffer_months = v;
         }
         after
     }
@@ -888,13 +1214,12 @@ impl RetirementProfilePatch {
             fire_number_manual_amount,
             swr_pct,
             horizon_lifespan_age,
-            target_basis,
-            bridge_discount_basis,
+            success_threshold_pct,
+            coast_mode,
+            coast_stop_age,
             withdrawal_rule,
             pension,
             partial_retirement,
-            cash_buffer_months,
-            deprecated_success_threshold_pct,
         } = self;
         strategy.is_none()
             && target_retirement_age.is_none()
@@ -902,14 +1227,12 @@ impl RetirementProfilePatch {
             && fire_number_manual_amount.is_none()
             && swr_pct.is_none()
             && horizon_lifespan_age.is_none()
-            && target_basis.is_none()
-            && bridge_discount_basis.is_none()
+            && success_threshold_pct.is_none()
+            && coast_mode.is_none()
+            && coast_stop_age.is_none()
             && withdrawal_rule.is_none()
             && pension.is_none()
             && partial_retirement.is_none()
-            && cash_buffer_months.is_none()
-            // Cuenta como «algo que el cliente pidió» aunque no cambie nada: ver su doc.
-            && deprecated_success_threshold_pct.is_none()
     }
 }
 
@@ -956,27 +1279,28 @@ pub(crate) async fn stored_retirement_profile(
 ///
 /// Van juntas porque se editan juntas: una estrategia por edad sin `birth_date` degrada a `asap`
 /// y la SPA tiene que poder decirlo en la misma pantalla.
+///
+/// **Sin `target_basis_stored` desde el modelo v2** (M4): ese campo existía para que un cliente
+/// distinguiera la base del objetivo ELEGIDA de la DERIVADA, y en v2 no hay base del objetivo —
+/// la pensión es un flujo de caja. Todo lo que el perfil publica es lo que el usuario escribió,
+/// con sus defaults y sus clamps aplicados.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RetirementProfileResponse {
     pub profile: RetirementProfile,
     #[schema(value_type = Option<String>, format = "date")]
     pub birth_date: Option<NaiveDate>,
-    /// **La elección ALMACENADA de `target_basis`, sin resolver.** `null` = el usuario no la ha
-    /// elegido y el servidor la DERIVA (R6: `bridge_to_pension` si hay pensión declarada,
-    /// `perpetuity` si no); un valor = la eligió a mano y manda sobre la derivación.
-    ///
-    /// Existe porque `profile.target_basis` sale siempre resuelto, así que sin este campo un
-    /// cliente no puede distinguir «no lo he elegido» de «he elegido esto» — y al reenviar lo
-    /// que leyó (un formulario que reescribe todos sus campos) congelaba la derivación:
-    /// declarar una pensión después ya no cambiaba la base del objetivo, que se quedaba en la
-    /// perpetuidad conservadora que nadie pidió. Un formulario debe mandar `target_basis` solo
-    /// cuando este campo no sea `null`, o `null` explícito para volver a derivar.
-    pub target_basis_stored: Option<TargetBasis>,
 }
 
 /// Cuerpo del PATCH. Tri-estado en todo lo opcional: **omitir = no cambiar**, `null` = borrar.
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct PatchRetirementProfileBody {
+    /// `asap` | `retire_at_age` | `coast` | `partial`.
+    ///
+    /// **El literal retirado `pension_bridge` se sigue aceptando y aterriza en `asap`** (C7), sin
+    /// tocar el puente: encenderlo es `pension.bridge_enabled`. No se rechaza —un 400 rompería a
+    /// quien reenvíe un perfil que leyó antes de v2— y no es silencioso: la respuesta devuelve
+    /// `strategy: "asap"` y el `bridge_enabled` que haya. Lo que sí migra solo es el perfil ya
+    /// ALMACENADO con ese literal (ver `RetirementProfilePatch::apply_to`).
     #[serde(default)]
     pub strategy: Option<RetirementStrategy>,
     #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
@@ -992,44 +1316,41 @@ pub struct PatchRetirementProfileBody {
     pub swr_pct: Option<String>,
     #[serde(default)]
     pub horizon_lifespan_age: Option<u32>,
-    /// `perpetuity` | `bridge_to_pension`; `null` vuelve a la base DERIVADA (R6). El
-    /// `value_type` nombra el enum y no un string libre: un cliente generado a partir del
-    /// documento tiene que ver las dos únicas variantes que el `Deserialize` acepta, o
-    /// descubrirá la lista con un 400.
-    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
-    #[schema(value_type = Option<TargetBasis>, nullable = true)]
-    pub target_basis: Option<Option<TargetBasis>>,
+    /// **Umbral de éxito exigido (%), `[80, 100]` — LOAD-BEARING desde el modelo v2** (M2/C3).
+    ///
+    /// Entre la decisión V7 y v2 este campo se «aceptaba y se ignoraba»: no estaba en el perfil,
+    /// no se validaba y no salía por ninguna respuesta. Vuelve a mandar, y ahora decide la fecha:
+    /// la jubilación válida es el primer mes en que al menos este porcentaje de los caminos llega
+    /// al horizonte sin volver a trabajar. Fuera de rango es **400
+    /// `success_threshold_out_of_range`** — donde antes era un 200 silencioso.
+    ///
+    /// La migración `20260906091500_drop_stored_success_threshold.sql` borra los valores que la
+    /// promesa anterior dejó almacenados: quien quiera un umbral distinto del 95 lo vuelve a
+    /// escribir, y nadie hereda como elección un número que nunca eligió.
     #[serde(default)]
-    pub bridge_discount_basis: Option<BridgeDiscountBasis>,
+    pub success_threshold_pct: Option<u32>,
+    /// `fixed_retirement_age` (default) | `fixed_stop_age` (M10). En el modo B la edad de
+    /// jubilación deja de ser obligatoria y `coast_stop_age` pasa a serlo.
+    #[serde(default)]
+    pub coast_mode: Option<CoastMode>,
+    /// Edad a la que dejas de aportar. Tri-estado: omitir no la toca, un valor la fija, `null` la
+    /// borra (y con el modo B, un perfil sin ella no valida).
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
+    #[schema(value_type = Option<u32>, nullable = true)]
+    pub coast_stop_age: Option<Option<u32>>,
     /// Regla de retirada COMPLETA: **sustituye a la actual**, no se mergea campo a campo. `pct`
     /// y `start_pct` son opcionales (U4): omitidos heredan `swr_pct`, y omitirlos es justamente
     /// cómo se suelta un porcentaje que antes era explícito.
     #[serde(default)]
     pub withdrawal_rule: Option<WithdrawalRule>,
-    /// `null` borra la pensión declarada **y suelta el `target_basis` almacenado** para que se
-    /// vuelva a derivar (S4): un puente hacia una pensión que ya no existe no describe nada.
-    /// Mandar `target_basis` en el mismo PATCH gana sobre esa soltura.
+    /// Pensión COMPLETA (el puente vive dentro, C7): **sustituye a la actual**. `null` la borra —
+    /// y con ella el puente, que sin pensión no tiene destino.
     #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
     #[schema(value_type = Option<PensionPlan>, nullable = true)]
     pub pension: Option<Option<PensionPlan>>,
     #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
     #[schema(value_type = Option<PartialRetirement>, nullable = true)]
     pub partial_retirement: Option<Option<PartialRetirement>>,
-    /// Colchón de caja en meses. **Desde 5.0.0 (V6) la SPA ya no lo escribe**: el colchón se
-    /// DERIVA del tope de tu regla de ahorro. Sigue siendo escribible por API y MCP como
-    /// override explícito, y `null` es el camino de vuelta a la derivación.
-    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
-    #[schema(value_type = Option<u32>, nullable = true)]
-    pub cash_buffer_months: Option<Option<u32>>,
-    /// **Ignorado desde 5.0.0** (decisión V7 del owner): el veredicto verde exige el 100 % de
-    /// escenarios sin agotar la cartera y ya no hay umbral que configurar. Se sigue ACEPTANDO en
-    /// el cuerpo —rechazarlo rompería a todo cliente que lo mandara— y no se lee: ni se valida,
-    /// ni se persiste, ni sale por ninguna respuesta. El valor ya almacenado en
-    /// `users.retirement_profile` se ignora al leer y desaparece en la siguiente escritura, sin
-    /// migración.
-    #[serde(default)]
-    #[schema(deprecated)]
-    pub success_threshold_pct: Option<u32>,
     /// Misma columna que `PATCH /v1/auth/me` (`users.birth_date`): `null` la borra,
     /// `"YYYY-MM-DD"` la fija, omitirla no la toca. Vive también aquí porque la fecha de
     /// nacimiento es lo que convierte las edades del perfil en meses — pedirla en otra pantalla
@@ -1060,14 +1381,12 @@ impl PatchRetirementProfileBody {
                 .map(|v| parse_profile_decimal("swr_pct", v))
                 .transpose()?,
             horizon_lifespan_age: self.horizon_lifespan_age,
-            target_basis: self.target_basis,
-            bridge_discount_basis: self.bridge_discount_basis,
+            success_threshold_pct: self.success_threshold_pct,
+            coast_mode: self.coast_mode,
+            coast_stop_age: self.coast_stop_age,
             withdrawal_rule: self.withdrawal_rule.clone(),
             pension: self.pension.clone(),
             partial_retirement: self.partial_retirement.clone(),
-            cash_buffer_months: self.cash_buffer_months,
-            // Se lee del cuerpo y se DESCARTA (V7): solo evita el `patch_empty`.
-            deprecated_success_threshold_pct: self.success_threshold_pct,
         })
     }
 }
@@ -1101,11 +1420,9 @@ pub(crate) async fn get_retirement_profile_core(
             .await?;
     let (stored, birth_date) = row.ok_or(ApiError::NotFound)?;
     let stored = stored.map(|j| j.0);
-    let target_basis_stored = stored.as_ref().and_then(|p| p.target_basis);
     Ok(RetirementProfileResponse {
         profile: resolve_retirement_profile(stored),
         birth_date,
-        target_basis_stored,
     })
 }
 
@@ -1158,15 +1475,12 @@ pub(crate) async fn patch_retirement_profile_core(
     let stored = stored.map(|j| j.0);
 
     // **El merge va sobre lo ALMACENADO, no sobre lo resuelto.** Es la diferencia entre «no lo he
-    // elegido» y «he elegido esto», y `target_basis` es justo el campo donde importa: su valor
-    // resuelto se DERIVA de si hay pensión (R6). Mergeando sobre el resuelto, el `perpetuity`
-    // derivado de un perfil sin pensión se persistiría como si el usuario lo hubiera pedido, y al
-    // declarar después su pensión el objetivo se quedaría en perpetuidad — la opción conservadora
-    // que nadie pidió, sin ningún aviso. Lo mismo valdría para cualquier campo derivado futuro.
+    // elegido» y «he elegido esto». En v2 ya no hay `target_basis` que derivar, pero la regla se
+    // queda: los defaults del puente (C7) los pone `resolve_*` al leer, y mergear sobre el
+    // resuelto los persistiría como si el usuario los hubiera escrito — con lo que mover el SWR
+    // dejaría de mover el tope del puente que nadie eligió. Vale para cualquier campo derivado
+    // futuro.
     let base = stored.clone().unwrap_or_else(default_retirement_profile);
-    // La elección almacenada ANTES del patch: `None` = derivada. Viaja al outcome junto a la de
-    // después para que el preview de la tool enseñe qué se está fijando y qué se está soltando.
-    let base_target_basis_stored = stored.as_ref().and_then(|p| p.target_basis);
     let before = resolve_retirement_profile(stored);
 
     let after_stored = patchset.apply_to(&base);
@@ -1205,8 +1519,6 @@ pub(crate) async fn patch_retirement_profile_core(
     Ok(RetirementProfilePatchOutcome {
         before,
         after,
-        target_basis_stored_before: base_target_basis_stored,
-        target_basis_stored_after: after_stored.target_basis,
         birth_date_before: birth_before,
         birth_date_after: birth_after,
     })
@@ -1217,12 +1529,6 @@ pub(crate) async fn patch_retirement_profile_core(
 pub(crate) struct RetirementProfilePatchOutcome {
     pub before: RetirementProfile,
     pub after: RetirementProfile,
-    /// La elección ALMACENADA de `target_basis` a cada lado (`null` = derivada). Misma razón que
-    /// el campo homónimo de [`RetirementProfileResponse`]: `before.target_basis` y
-    /// `after.target_basis` van resueltos, así que sin esto un preview no puede decir si el
-    /// patch está FIJANDO la base o soltándola para que se derive.
-    pub target_basis_stored_before: Option<TargetBasis>,
-    pub target_basis_stored_after: Option<TargetBasis>,
     pub birth_date_before: Option<NaiveDate>,
     pub birth_date_after: Option<NaiveDate>,
 }
@@ -1254,16 +1560,28 @@ pub async fn patch_retirement_profile(
     Ok(Json(RetirementProfileResponse {
         profile: outcome.after,
         birth_date: outcome.birth_date_after,
-        target_basis_stored: outcome.target_basis_stored_after,
     }))
 }
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn pension(amount: u32, age: u32) -> PensionPlan {
+        PensionPlan {
+            monthly_amount_today: Decimal::from(amount),
+            starts_at_age: age,
+            indexed: true,
+            fraction_while_partial: Decimal::ZERO,
+            bridge_enabled: false,
+            bridge_max_pct: None,
+            bridge_max_years: None,
+        }
+    }
+
     #[test]
-    fn an_absent_profile_is_the_4_15_behaviour() {
+    fn an_absent_profile_is_the_v2_default() {
         let p = resolve_retirement_profile(None);
         assert_eq!(p.strategy, RetirementStrategy::Asap);
         assert_eq!(p.swr_pct, Decimal::new(35, 1));
@@ -1271,10 +1589,11 @@ mod tests {
         assert_eq!(p.fire_number_mode, FireNumberMode::AnnualExpense);
         assert_eq!(p.withdrawal_rule.kind, WithdrawalRuleKind::FixedReal);
         assert_eq!(p.withdrawal_rule.spend_mode, SpendMode::Ceiling);
-        assert_eq!(p.target_basis, Some(TargetBasis::Perpetuity));
-        // Sin colchón declarado: `None` significa «derívalo del tope de la regla» (V6), y esa
-        // derivación vive en el ensamblado de la proyección, no aquí (D25: esto es ledger-free).
-        assert_eq!(p.cash_buffer_months, None);
+        // v2: el umbral vuelve al perfil (M2/C3) y el coast estrena modo (M10).
+        assert_eq!(p.success_threshold_pct, DEFAULT_SUCCESS_THRESHOLD_PCT);
+        assert_eq!(p.coast_mode, CoastMode::FixedRetirementAge);
+        assert_eq!(p.coast_stop_age, None);
+        assert!(!p.migrated_from_pension_bridge);
     }
 
     #[test]
@@ -1296,42 +1615,105 @@ mod tests {
         assert_eq!(p.horizon_lifespan_age, 95);
     }
 
+    /// **Un JSONB de 5.0.0-WP5 sigue cargando y sus tres claves retiradas se ignoran solas.**
+    /// El struct no lleva `deny_unknown_fields` a propósito: si lo llevara, el perfil de todo el
+    /// que hubiera tocado la pantalla antes de v2 dejaría de deserializar — y un perfil que no
+    /// carga es un 500 en la pantalla de jubilación, no un default.
     #[test]
-    fn target_basis_is_derived_from_the_pension_when_not_set() {
-        let mut p = default_retirement_profile();
-        p.pension = Some(PensionPlan {
-            monthly_amount_today: Decimal::from(1200u32),
-            starts_at_age: 67,
-            indexed: true,
-            fraction_while_partial: Decimal::ZERO,
-        });
-        assert_eq!(
-            resolve_retirement_profile(Some(p.clone())).target_basis,
-            Some(TargetBasis::BridgeToPension)
+    fn a_stored_v1_profile_ignores_the_three_retired_keys() {
+        let stored: RetirementProfile = serde_json::from_str(
+            r#"{"strategy":"asap","swr_pct":"3.5","target_basis":"bridge_to_pension",
+                "bridge_discount_basis":"swr","cash_buffer_months":24}"#,
+        )
+        .expect("un perfil v1 tiene que seguir cargando");
+        let p = resolve_retirement_profile(Some(stored));
+        assert_eq!(p, resolve_retirement_profile(None));
+        // Y no vuelven por la salida: lo que se publica es el perfil v2 y nada más.
+        let json = serde_json::to_value(&p).expect("serializa");
+        for dead in ["target_basis", "bridge_discount_basis", "cash_buffer_months"] {
+            assert!(json.get(dead).is_none(), "{dead} no debe re-emitirse: {json}");
+        }
+    }
+
+    /// **C7 — el literal `pension_bridge` es un ALIAS de `asap` que enciende el puente.**
+    #[test]
+    fn the_pension_bridge_literal_migrates_to_asap_with_the_bridge_on() {
+        let stored: RetirementProfile = serde_json::from_str(
+            r#"{"strategy":"pension_bridge","swr_pct":"3.5",
+                "pension":{"monthly_amount_today":"1200","starts_at_age":67}}"#,
+        )
+        .expect("el alias tiene que seguir deserializando");
+        assert_eq!(stored.strategy, RetirementStrategy::Asap);
+        assert!(stored.migrated_from_pension_bridge, "el alias debe quedar registrado");
+
+        let p = resolve_retirement_profile(Some(stored));
+        let pen = p.pension.as_ref().expect("la pensión sigue ahí");
+        assert!(pen.bridge_enabled, "el alias enciende el puente");
+        // Defaults del owner: `max(5, swr + 1)` % y 7 años.
+        assert_eq!(pen.bridge_max_pct, Some(Decimal::from(5u32)));
+        assert_eq!(pen.bridge_max_years, Some(DEFAULT_BRIDGE_YEARS));
+
+        // Y NUNCA se re-emite: lo que se guarda es `asap`.
+        let json = serde_json::to_value(&p).expect("serializa");
+        assert_eq!(json["strategy"], "asap", "{json}");
+        assert!(
+            json.get("migrated_from_pension_bridge").is_none(),
+            "el flag no viaja por el wire: {json}"
         );
-        // …y `perpetuity` explícito gana: es la opción «ignorar la pensión».
-        p.target_basis = Some(TargetBasis::Perpetuity);
-        assert_eq!(
-            resolve_retirement_profile(Some(p)).target_basis,
-            Some(TargetBasis::Perpetuity)
+
+        // Un perfil `asap` normal no enciende nada.
+        let plain: RetirementProfile = serde_json::from_str(
+            r#"{"strategy":"asap","pension":{"monthly_amount_today":"1200","starts_at_age":67}}"#,
+        )
+        .expect("asap");
+        assert!(!plain.migrated_from_pension_bridge);
+        assert!(!resolve_retirement_profile(Some(plain)).pension.unwrap().bridge_enabled);
+    }
+
+    /// Una estrategia desconocida trae la lista de las CUATRO vivas — el alias no se ofrece.
+    #[test]
+    fn an_unknown_strategy_lists_the_four_live_variants() {
+        let err = serde_json::from_str::<RetirementProfile>(r#"{"strategy":"no_existe"}"#)
+            .expect_err("literal desconocido");
+        let msg = err.to_string();
+        for v in RETIREMENT_STRATEGY_VARIANTS {
+            assert!(msg.contains(v), "el error debe listar `{v}`: {msg}");
+        }
+        assert!(
+            !msg.contains(PENSION_BRIDGE_ALIAS),
+            "el alias no es una opción que ofrecer: {msg}"
         );
     }
 
+    /// El default del puente es `max(5, swr + 1)`: nunca por debajo del 5, y siempre por encima
+    /// del SWR (un puente que no levanta la tasa no es un puente).
     #[test]
-    fn pension_bridge_forces_the_bridge_basis() {
+    fn the_default_bridge_pct_is_five_or_the_swr_plus_one() {
+        assert_eq!(default_bridge_pct(Decimal::new(35, 1)), Decimal::from(5u32));
+        assert_eq!(default_bridge_pct(Decimal::from(3u32)), Decimal::from(5u32));
+        assert_eq!(default_bridge_pct(Decimal::from(5u32)), Decimal::from(6u32));
+        assert_eq!(default_bridge_pct(Decimal::new(55, 1)), Decimal::new(65, 1));
+        for swr in [Decimal::ZERO, Decimal::from(4u32), MAX_SWR_PCT] {
+            assert!(default_bridge_pct(swr) > swr, "swr = {swr}");
+            assert!(default_bridge_pct(swr) <= MAX_BRIDGE_PCT);
+        }
+    }
+
+    /// Encender el puente sin números lo deja con los defaults — con CUALQUIER estrategia (C7).
+    #[test]
+    fn enabling_the_bridge_without_numbers_fills_the_defaults() {
         let mut p = default_retirement_profile();
-        p.strategy = RetirementStrategy::PensionBridge;
-        p.target_basis = Some(TargetBasis::Perpetuity);
+        p.strategy = RetirementStrategy::Coast;
+        p.target_retirement_age = Some(60);
+        p.swr_pct = Decimal::from(5u32);
         p.pension = Some(PensionPlan {
-            monthly_amount_today: Decimal::from(900u32),
-            starts_at_age: 65,
-            indexed: false,
-            fraction_while_partial: Decimal::ZERO,
+            bridge_enabled: true,
+            ..pension(1200, 67)
         });
-        assert_eq!(
-            resolve_retirement_profile(Some(p)).target_basis,
-            Some(TargetBasis::BridgeToPension)
-        );
+        let r = resolve_retirement_profile(Some(p));
+        let pen = r.pension.expect("pensión");
+        assert_eq!(pen.bridge_max_pct, Some(Decimal::from(6u32)));
+        assert_eq!(pen.bridge_max_years, Some(7));
     }
 
     #[test]
@@ -1339,13 +1721,77 @@ mod tests {
         let mut p = default_retirement_profile();
         p.swr_pct = Decimal::from(99u32);
         p.horizon_lifespan_age = 200;
-        p.cash_buffer_months = Some(999);
         p.target_retirement_age = Some(3);
-        let r = resolve_retirement_profile(Some(p));
+        p.success_threshold_pct = 500;
+        p.coast_stop_age = Some(2);
+        let r = resolve_retirement_profile(Some(p.clone()));
         assert_eq!(r.swr_pct, MAX_SWR_PCT);
         assert_eq!(r.horizon_lifespan_age, MAX_HORIZON_LIFESPAN_AGE);
-        assert_eq!(r.cash_buffer_months, Some(MAX_CASH_BUFFER_MONTHS));
         assert_eq!(r.target_retirement_age, Some(MIN_PROFILE_AGE));
+        assert_eq!(r.success_threshold_pct, MAX_SUCCESS_THRESHOLD_PCT);
+        assert_eq!(r.coast_stop_age, Some(MIN_PROFILE_AGE));
+
+        // Y por abajo.
+        p.success_threshold_pct = 0;
+        p.target_retirement_age = Some(60);
+        p.coast_stop_age = Some(200);
+        let r = resolve_retirement_profile(Some(p));
+        assert_eq!(r.success_threshold_pct, MIN_SUCCESS_THRESHOLD_PCT);
+        // El techo de «dejo de aportar» es la edad de jubilación cuando la hay.
+        assert_eq!(r.coast_stop_age, Some(60));
+    }
+
+    /// Los números del puente se ACOTAN al leer (la vía no validada: restore, edición directa).
+    #[test]
+    fn the_bridge_numbers_are_clamped_on_read() {
+        let mut p = default_retirement_profile();
+        p.swr_pct = Decimal::from(4u32);
+        p.pension = Some(PensionPlan {
+            bridge_enabled: true,
+            bridge_max_pct: Some(Decimal::from(99u32)),
+            bridge_max_years: Some(999),
+            ..pension(1000, 65)
+        });
+        let pen = resolve_retirement_profile(Some(p.clone())).pension.expect("pensión");
+        assert_eq!(pen.bridge_max_pct, Some(MAX_BRIDGE_PCT));
+        assert_eq!(pen.bridge_max_years, Some(MAX_BRIDGE_YEARS));
+
+        // Por debajo del SWR el suelo es el SWR: un puente que no concede nada, pero acotado y
+        // sin inventar un número que el usuario no escribió.
+        p.pension = Some(PensionPlan {
+            bridge_enabled: true,
+            bridge_max_pct: Some(Decimal::from(1u32)),
+            bridge_max_years: Some(0),
+            ..pension(1000, 65)
+        });
+        let pen = resolve_retirement_profile(Some(p)).pension.expect("pensión");
+        assert_eq!(pen.bridge_max_pct, Some(Decimal::from(4u32)));
+        assert_eq!(pen.bridge_max_years, Some(MIN_BRIDGE_YEARS));
+    }
+
+    /// [`requires_target_age`] depende del MODO de coast (M10), no solo de la estrategia.
+    #[test]
+    fn only_the_age_driven_plans_require_the_retirement_age() {
+        assert!(requires_target_age(
+            RetirementStrategy::RetireAtAge,
+            CoastMode::FixedRetirementAge
+        ));
+        assert!(requires_target_age(
+            RetirementStrategy::RetireAtAge,
+            CoastMode::FixedStopAge
+        ));
+        assert!(requires_target_age(
+            RetirementStrategy::Coast,
+            CoastMode::FixedRetirementAge
+        ));
+        assert!(!requires_target_age(
+            RetirementStrategy::Coast,
+            CoastMode::FixedStopAge
+        ));
+        for s in [RetirementStrategy::Asap, RetirementStrategy::Partial] {
+            assert!(!requires_target_age(s, CoastMode::FixedRetirementAge));
+            assert!(!requires_target_age(s, CoastMode::FixedStopAge));
+        }
     }
 
     #[test]
@@ -1359,17 +1805,85 @@ mod tests {
                 "{err:?}"
             );
         }
+        // …salvo coast en modo B, donde el dato es la edad de PARADA.
+        let mut p = default_retirement_profile();
+        p.strategy = RetirementStrategy::Coast;
+        p.coast_mode = CoastMode::FixedStopAge;
+        let err = validate_retirement_profile(&p).expect_err("sin edad de parada debe fallar");
+        assert!(
+            matches!(&err, ApiError::BadRequest(m) if m.starts_with("coast_stop_age_required: ")),
+            "{err:?}"
+        );
+        p.coast_stop_age = Some(50);
+        validate_retirement_profile(&p).expect("coast B con edad de parada y sin edad de jubilación");
+    }
+
+    /// Un puente con tasa igual o menor que el SWR se RECHAZA al escribir.
+    #[test]
+    fn a_bridge_pct_at_or_below_the_swr_is_rejected() {
+        let mut p = default_retirement_profile();
+        p.swr_pct = Decimal::from(4u32);
+        for pct in [Decimal::from(3u32), Decimal::from(4u32)] {
+            p.pension = Some(PensionPlan {
+                bridge_enabled: true,
+                bridge_max_pct: Some(pct),
+                ..pension(1000, 65)
+            });
+            let err = validate_retirement_profile(&p).expect_err("una tasa de puente <= swr debe fallar");
+            assert!(
+                matches!(&err, ApiError::BadRequest(m) if m.starts_with("bridge_max_pct_not_above_swr: ")),
+                "{err:?}"
+            );
+            // El mensaje dice la cota REAL (B8), no «out of range» a secas.
+            let ApiError::BadRequest(m) = &err else { unreachable!() };
+            assert!(m.contains('4'), "el mensaje debe nombrar el SWR: {m}");
+        }
+        p.pension = Some(PensionPlan {
+            bridge_enabled: true,
+            bridge_max_pct: Some(Decimal::from(5u32)),
+            ..pension(1000, 65)
+        });
+        validate_retirement_profile(&p).expect("por encima del SWR entra");
+
+        // Y las cotas duras del puente.
+        p.pension = Some(PensionPlan {
+            bridge_enabled: true,
+            bridge_max_pct: Some(Decimal::from(25u32)),
+            ..pension(1000, 65)
+        });
+        let err = validate_retirement_profile(&p).expect_err("por encima del techo");
+        assert!(
+            matches!(&err, ApiError::BadRequest(m) if m.starts_with("bridge_max_pct_out_of_range: ")),
+            "{err:?}"
+        );
+        p.pension = Some(PensionPlan {
+            bridge_enabled: true,
+            bridge_max_pct: Some(Decimal::from(5u32)),
+            bridge_max_years: Some(50),
+            ..pension(1000, 65)
+        });
+        let err = validate_retirement_profile(&p).expect_err("demasiados años");
+        assert!(
+            matches!(&err, ApiError::BadRequest(m) if m.starts_with("bridge_max_years_out_of_range: ")),
+            "{err:?}"
+        );
     }
 
     #[test]
-    fn pension_bridge_requires_a_pension() {
+    fn the_success_threshold_is_bounded_on_write() {
         let mut p = default_retirement_profile();
-        p.strategy = RetirementStrategy::PensionBridge;
-        let err = validate_retirement_profile(&p).expect_err("sin pensión debe fallar");
-        assert!(
-            matches!(&err, ApiError::BadRequest(m) if m.starts_with("pension_required_for_bridge: ")),
-            "{err:?}"
-        );
+        for bad in [0u32, 79, 101, 1_000] {
+            p.success_threshold_pct = bad;
+            let err = validate_retirement_profile(&p).expect_err("umbral fuera de rango debe fallar");
+            assert!(
+                matches!(&err, ApiError::BadRequest(m) if m.starts_with("success_threshold_out_of_range: ")),
+                "{err:?}"
+            );
+        }
+        for ok in [MIN_SUCCESS_THRESHOLD_PCT, 95, MAX_SUCCESS_THRESHOLD_PCT] {
+            p.success_threshold_pct = ok;
+            validate_retirement_profile(&p).expect("dentro de rango");
+        }
     }
 
     #[test]
@@ -1397,6 +1911,9 @@ mod tests {
             matches!(&err, ApiError::BadRequest(m) if m.starts_with("hybrid_end_pct_not_below_start: ")),
             "{err:?}"
         );
+        // B8 — el mensaje nombra el arranque REAL contra el que se comparó.
+        let ApiError::BadRequest(m) = &err else { unreachable!() };
+        assert!(m.contains('3'), "{m}");
 
         p.withdrawal_rule.end_pct = Some(Decimal::from(2u32));
         validate_retirement_profile(&p).expect("hybrid coherente");
@@ -1495,40 +2012,25 @@ mod tests {
         assert_eq!(again.withdrawal_rule.pct_source, Some(PctSource::Explicit));
     }
 
-    /// S4 — quitar la pensión suelta el `target_basis` ALMACENADO, salvo que el mismo patch lo
-    /// fije a mano.
+    /// La media jornada en modo `asap` no necesita edad de inicio; en modo `at_age`, sí.
     #[test]
-    fn clearing_the_pension_releases_the_stored_target_basis() {
-        let mut base = default_retirement_profile();
-        base.pension = Some(PensionPlan {
-            monthly_amount_today: Decimal::from(1000u32),
-            starts_at_age: 67,
-            indexed: true,
-            fraction_while_partial: Decimal::ZERO,
+    fn the_partial_start_age_is_required_only_in_at_age_mode() {
+        let mut p = default_retirement_profile();
+        p.strategy = RetirementStrategy::Partial;
+        p.partial_retirement = Some(PartialRetirement {
+            starts_at_age: None,
+            income_monthly_today: Decimal::from(900u32),
+            expense_basis: PartialExpenseBasis::Retirement,
+            mode: PartialStartMode::AtAge,
         });
-        base.target_basis = Some(TargetBasis::BridgeToPension);
-
-        let after = RetirementProfilePatch {
-            pension: Some(None),
-            ..RetirementProfilePatch::default()
-        }
-        .apply_to(&base);
-        assert_eq!(after.target_basis, None, "la base debe volver a derivarse");
-        assert_eq!(
-            resolve_retirement_profile(Some(after)).target_basis,
-            Some(TargetBasis::Perpetuity)
+        let err = validate_retirement_profile(&p).expect_err("modo A sin edad");
+        assert!(
+            matches!(&err, ApiError::BadRequest(m) if m.starts_with("partial_start_age_required: ")),
+            "{err:?}"
         );
-
-        // Elegir la base en el MISMO patch gana sobre la soltura.
-        let after = RetirementProfilePatch {
-            pension: Some(None),
-            target_basis: Some(Some(TargetBasis::BridgeToPension)),
-            ..RetirementProfilePatch::default()
-        }
-        .apply_to(&base);
-        assert_eq!(after.target_basis, Some(TargetBasis::BridgeToPension));
+        p.partial_retirement.as_mut().unwrap().mode = PartialStartMode::AsSoonAsPossible;
+        validate_retirement_profile(&p).expect("modo B sin edad");
     }
-
 
     #[test]
     fn the_partial_phase_must_start_before_the_full_retirement() {
@@ -1536,16 +2038,17 @@ mod tests {
         p.strategy = RetirementStrategy::Partial;
         p.target_retirement_age = Some(60);
         p.partial_retirement = Some(PartialRetirement {
-            starts_at_age: 60,
+            starts_at_age: Some(60),
             income_monthly_today: Decimal::from(1000u32),
             expense_basis: PartialExpenseBasis::Retirement,
+            mode: PartialStartMode::AtAge,
         });
         let err = validate_retirement_profile(&p).expect_err("parcial no anterior");
         assert!(
             matches!(&err, ApiError::BadRequest(m) if m.starts_with("partial_not_before_retirement: ")),
             "{err:?}"
         );
-        p.partial_retirement.as_mut().unwrap().starts_at_age = 55;
+        p.partial_retirement.as_mut().unwrap().starts_at_age = Some(55);
         validate_retirement_profile(&p).expect("parcial antes de la total");
     }
 
@@ -1553,12 +2056,7 @@ mod tests {
     fn the_patch_only_touches_what_it_names() {
         let base = RetirementProfile {
             swr_pct: Decimal::new(30, 1),
-            pension: Some(PensionPlan {
-                monthly_amount_today: Decimal::from(1100u32),
-                starts_at_age: 67,
-                indexed: true,
-                fraction_while_partial: Decimal::ZERO,
-            }),
+            pension: Some(pension(1100, 67)),
             ..default_retirement_profile()
         };
         let patch = RetirementProfilePatch {
@@ -1568,8 +2066,9 @@ mod tests {
         let after = patch.apply_to(&base);
         assert_eq!(after.swr_pct, Decimal::new(35, 1));
         assert_eq!(after.pension, base.pension, "la pensión NO se resetea");
+        assert_eq!(after.success_threshold_pct, base.success_threshold_pct);
 
-        // `null` explícito sí borra.
+        // `null` explícito sí borra — y el puente se va con la pensión, porque vive dentro.
         let clear = RetirementProfilePatch {
             pension: Some(None),
             ..RetirementProfilePatch::default()
@@ -1577,5 +2076,39 @@ mod tests {
         assert_eq!(clear.apply_to(&base).pension, None);
         assert!(RetirementProfilePatch::default().is_empty());
         assert!(!clear.is_empty());
+
+        // El umbral es un campo más del patchset (ya no un descarte).
+        let threshold = RetirementProfilePatch {
+            success_threshold_pct: Some(90),
+            ..RetirementProfilePatch::default()
+        };
+        assert!(!threshold.is_empty());
+        assert_eq!(threshold.apply_to(&base).success_threshold_pct, 90);
+
+        // `coast_stop_age` es tri-estado: omitir ≠ `null`.
+        let base_coast = RetirementProfile {
+            coast_stop_age: Some(50),
+            ..default_retirement_profile()
+        };
+        assert_eq!(
+            RetirementProfilePatch {
+                coast_mode: Some(CoastMode::FixedStopAge),
+                ..RetirementProfilePatch::default()
+            }
+            .apply_to(&base_coast)
+            .coast_stop_age,
+            Some(50),
+            "omitir no toca"
+        );
+        assert_eq!(
+            RetirementProfilePatch {
+                coast_stop_age: Some(None),
+                ..RetirementProfilePatch::default()
+            }
+            .apply_to(&base_coast)
+            .coast_stop_age,
+            None,
+            "`null` borra"
+        );
     }
 }
