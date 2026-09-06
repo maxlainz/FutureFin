@@ -596,7 +596,7 @@ pub(crate) const PLAN_ABSENT_BANDS_UNAVAILABLE: &str = "bands_unavailable";
 /// hasta 26 proyecciones). No es coste nuevo del Resumen, es el MISMO que iba a pagar el GET de
 /// la serie un instante después — y como se inserta en la cache, ese GET pasa a ser un HIT. Tras
 /// un login o una mutación con warm-up, esto es siempre un HIT.
-async fn summary_plan(state: &AppState, iid: Uuid, user_id: Uuid) -> SummaryPlan {
+async fn summary_plan(state: &Arc<AppState>, iid: Uuid, user_id: Uuid) -> SummaryPlan {
     use crate::state::{Density, ProjectionCacheKey};
     for density in [crate::state::Density::Hybrid, Density::Monthly] {
         let key = ProjectionCacheKey {
@@ -638,7 +638,7 @@ async fn summary_plan(state: &AppState, iid: Uuid, user_id: Uuid) -> SummaryPlan
 ///
 /// Un fallo aquí **no tumba el Resumen**: se publican a `null` todos los campos del éxito con
 /// `success_absent_reason`, y el resto del plan sigue viajando.
-async fn attach_success(state: &AppState, iid: Uuid, user_id: Uuid, mut plan: SummaryPlan) -> SummaryPlan {
+async fn attach_success(state: &Arc<AppState>, iid: Uuid, user_id: Uuid, mut plan: SummaryPlan) -> SummaryPlan {
     use crate::handlers::projection_bands::{projection_bands_cached, DEFAULT_BANDS_PATHS};
     if plan.absent_reason.is_some() {
         return plan;
@@ -654,10 +654,15 @@ async fn attach_success(state: &AppState, iid: Uuid, user_id: Uuid, mut plan: Su
     .await
     {
         Ok(bands) => {
-            plan.success_probability = bands.success_probability;
+            // **A7 pendiente (5.0.0)**: el KPI de éxito pasa a leerse del PLAN (nivel 1), no de
+            // las bandas — la misma muestra que decidió la fecha. Hasta entonces se copia lo que
+            // las bandas v2 sí publican; `never_retired_probability` y `success_given_retired`
+            // desaparecieron con la pregunta que respondían («¿ocurre el plan?»), porque en v2 la
+            // fecha es un DATO del plan y no algo que pueda no ocurrir.
+            plan.success_probability = bands.success_of_plan;
             plan.success_verdict = Some(bands.success_verdict);
-            plan.never_retired_probability = bands.never_retired_probability;
-            plan.success_given_retired = bands.success_given_retired;
+            plan.never_retired_probability = None;
+            plan.success_given_retired = None;
         }
         Err(e) => {
             tracing::warn!(error = %e, "no se pudieron calcular las bandas para el KPI de éxito");
@@ -674,11 +679,13 @@ fn plan_from_series(
 ) -> SummaryPlan {
     SummaryPlan {
         strategy: s.strategy.clone(),
-        retirement_trigger: s.retirement_trigger.map(str::to_string),
+        // A7: `retirement_trigger` se sustituye por `retirement_date_basis` y `disposable_monthly`
+        // desaparece con el margen; aquí se mapea lo mínimo para que el Resumen siga compilando.
+        retirement_trigger: s.retirement_date_basis.map(str::to_string),
         jubilacion_month_index: s.jubilacion_month_index,
-        required_savings_monthly: s.required_contribution_monthly,
-        disposable_monthly: s.disposable_monthly,
-        underfunded: s.underfunded,
+        required_savings_monthly: s.contribution_required_monthly,
+        disposable_monthly: None,
+        underfunded: s.contribution_underfunded,
         absent_reason: None,
         // Los rellena `attach_success` con la entrada del cache de bandas: aquí no se calcula
         // nada, igual que el resto de esta función.
@@ -746,7 +753,7 @@ async fn household_min_swr_pct(
 
 /// Core sin HTTP: lo comparten el handler GET y la tool MCP `get_summary`.
 pub(crate) async fn summary_core(
-    state: &AppState,
+    state: &Arc<AppState>,
     iid: Uuid,
     user_id: Uuid,
     view: LedgerView,

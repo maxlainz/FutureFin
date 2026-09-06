@@ -9,13 +9,17 @@
 //! * `liquid_crossing_month_index` — cuándo el capital habría bastado. Una LECTURA: puede caer
 //!   después (te vas sin llegar) o no caer nunca dentro del horizonte.
 //!
-//! Y obliga a una decisión de motor (D17): **un solo trigger por simulación**. Desde WP5-2b el
-//! objetivo SÍ entra al bucle —el chart lo pinta, los solves lo miden y el infra-financiado se
-//! decide contra él— pero con `crossing_is_reading_only`: el cruce ya no jubila, solo se anota.
+//! **5.0.0 llevó esa separación hasta el final**: el cruce contra un objetivo determinista dejó de
+//! existir como salida (`liquid_crossing_month_index` y `fire_target_series` se retiraron) porque
+//! ya no decide nada — el motor recibe `fire_target: None`. Lo que queda es una sola pregunta con
+//! dos respuestas posibles, y `retirement_date_basis` dice cuál:
 //!
-//! Sobre eso, WP5-2b añade lo que CUESTA llegar (§B.7): `required_contribution_monthly` (el
-//! ahorro mínimo que alcanza el objetivo en `R`), su techo de búsqueda, `underfunded` —el rojo de
-//! D17: ni ahorrándolo todo se llega— y el margen (`disposable_monthly`, `disposable_capital`).
+//! * `target_age` — la fecha es un DATO del usuario, y lo que el sorteo mide es **si se llega**
+//!   (`success_of_plan`) y **cuánto falta aportar** (`contribution_required_monthly`).
+//! * `success_threshold` — la fecha la decide el umbral.
+//!
+//! Y de ahí el pin central de este fichero: **una estrategia por edad NO bisecciona la fecha, la
+//! CONFIRMA**.
 
 mod common;
 
@@ -106,7 +110,6 @@ async fn retire_at_age_puts_the_retirement_on_the_birthday_month_and_keeps_the_c
     let r_grid = months_until_age(anchor, birth, 55);
 
     assert_eq!(s["strategy"], "retire_at_age", "{s}");
-    assert_eq!(s["retirement_trigger"], "target_age", "{s}");
     assert_eq!(
         s["jubilacion_month_index"], r_grid,
         "la edad manda: se jubila en el mes {r_grid}, no cuando llega el capital ({s})"
@@ -135,30 +138,18 @@ async fn retire_at_age_puts_the_retirement_on_the_birthday_month_and_keeps_the_c
         );
     }
 
-    // El objetivo sigue vivo como LECTURA: línea del chart, base en euros de hoy y nominal del
-    // mes en que se jubila.
-    assert!(
-        !s["fire_target_series"].as_array().unwrap().is_empty(),
-        "la línea discontinua no desaparece porque la edad tome el mando: {s}"
+    // **La EDAD manda aunque no haya plan**: `R` es un dato del perfil, no una búsqueda, así que
+    // el ensamblado lo coloca en el `PhasePlan` sin gastar un solo sorteo. Es lo que hace que un
+    // `?months=` —y un miembro del hogar— publiquen su fecha por edad igual.
+    assert_eq!(
+        s["jubilacion_absent_reason"], "months_override",
+        "un `?months=` no resuelve plan, y la ausencia se nombra: {s}"
     );
-    assert!(s["jubilacion_target_net_worth"].is_string(), "{s}");
-    assert!(s["jubilacion_target_net_worth_nominal"].is_string(), "{s}");
-    assert!(s["fire_target_absent_reason"].is_null(), "hay objetivo: {s}");
-    assert!(s["jubilacion_absent_reason"].is_null(), "hay trigger: {s}");
-    assert!(
-        s["liquid_crossing_absent_reason"].is_null(),
-        "hay objetivo contra el que cruzar: {s}"
-    );
-
-    // Y el cruce es OTRA cifra: o cae en un mes distinto, o no cae. Lo que no puede es
-    // confundirse con el trigger.
-    let cruce = s["liquid_crossing_month_index"].clone();
-    if let Some(k) = cruce.as_u64() {
-        assert_ne!(
-            k as u32, r_grid,
-            "este escenario está elegido para que el cruce NO coincida con la edad: {s}"
-        );
-    }
+    // **El objetivo determinista se retiró en 5.0.0**: el motor recibe `fire_target: None` y el
+    // cruce ya no se publica, porque no decide nada. Lo que sobrevive es el escalar informativo.
+    assert!(s["fire_target_series"].is_null(), "{s}");
+    assert!(s["liquid_crossing_month_index"].is_null(), "{s}");
+    assert!(!s["fire_number_classic_today"].is_null(), "el escalar sigue: {s}");
 
     // La fase «jubilado» empieza en el mismo mes que el marcador — invariante de comportamiento
     // (§C): se comprueba sobre la serie, no sobre el enum de la estrategia.
@@ -187,20 +178,23 @@ async fn coast_uses_the_same_age_trigger() {
     let anchor = NaiveDate::parse_from_str(s["anchor_date_ymd"].as_str().unwrap(), "%Y-%m-%d").unwrap();
     let r_grid = months_until_age(anchor, NaiveDate::from_ymd_opt(1990, 1, 1).unwrap(), 60);
     assert_eq!(s["strategy"], "coast", "{s}");
-    assert_eq!(s["retirement_trigger"], "target_age", "{s}");
     assert_eq!(s["jubilacion_month_index"], r_grid, "{s}");
     assert_eq!(s["jubilacion_age"], 60, "{s}");
 }
 
-/// **Sin fecha de nacimiento, una estrategia por edad DEGRADA a `asap` con aviso** — nunca un 500,
-/// y nunca una jubilación inventada.
+/// **Sin fecha de nacimiento NO HAY PLAN** (5.0.0, C5) — nunca un 500, y nunca una jubilación
+/// inventada.
 ///
 /// Es el estado real de cualquier usuario que elija la estrategia antes de rellenar su perfil, y
-/// la respuesta tiene que poder decirlo: `warnings: ["birth_date_missing"]` es lo que permite a la
-/// SPA enseñar «añade tu fecha de nacimiento» en vez de una fecha de jubilación que no significa
-/// nada.
+/// la respuesta tiene que poder decirlo: `plan_absent_reason: "birth_date_missing"` más el aviso
+/// es lo que permite a la SPA enseñar «añade tu fecha de nacimiento» en vez de una fecha que no
+/// significa nada.
+///
+/// **Hasta 4.15.x se degradaba al CRUCE** y la respuesta traía un `jubilacion_month_index` que
+/// parecía una fecha de jubilación. En v2 no hay cruce al que degradar, y la única salida honesta
+/// es la ausencia con su razón: la proyección de patrimonio sigue publicándose entera.
 #[tokio::test]
-async fn an_age_strategy_without_a_birth_date_degrades_to_asap_with_a_warning() {
+async fn an_age_strategy_without_a_birth_date_has_no_plan_and_says_why() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     seed(&app, &owner).await;
@@ -216,25 +210,25 @@ async fn an_age_strategy_without_a_birth_date_degrades_to_asap_with_a_warning() 
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
     assert!(r.json()["birth_date"].is_null(), "la DOB debía borrarse: {}", r.json());
 
-    let s = series(&app, &owner.cookie, "?months=600").await;
+    // Sin `?months=`: así la única razón de ausencia posible es la fecha de nacimiento.
+    let s = series(&app, &owner.cookie, "").await;
     assert_eq!(s["strategy"], "retire_at_age", "la estrategia guardada no se toca: {s}");
-    assert_eq!(
-        s["retirement_trigger"], "liquid_crossing",
-        "sin DOB no hay edad que convertir en mes: se degrada al cruce ({s})"
+    assert_eq!(s["plan_absent_reason"], "birth_date_missing", "{s}");
+    assert!(
+        s["jubilacion_month_index"].is_null(),
+        "sin DOB no hay edad que convertir en mes, y no se inventa ninguna: {s}"
     );
+    assert!(s["retirement_date_basis"].is_null(), "sin plan no hay base: {s}");
     let warnings: Vec<&str> = s["warnings"]
         .as_array()
         .expect("warnings")
         .iter()
         .map(|w| w.as_str().unwrap())
         .collect();
-    assert_eq!(warnings, vec!["birth_date_missing"], "{s}");
-
-    // Degradado a `asap` ⇒ el mes efectivo vuelve a SER el cruce.
-    assert_eq!(
-        s["jubilacion_month_index"], s["liquid_crossing_month_index"],
-        "degradado al cruce, las dos cifras coinciden: {s}"
-    );
+    assert!(warnings.contains(&"birth_date_missing"), "{warnings:?} en {s}");
+    // Y la serie determinista se publica igual: un campo opcional del perfil no tumba una
+    // lectura.
+    assert!(!s["points"].as_array().expect("points").is_empty(), "{s}");
 }
 
 /// Una **edad ya cumplida** jubila desde el primer mes de la simulación (mes 0 de la rejilla), no
@@ -255,7 +249,6 @@ async fn an_already_reached_target_age_retires_immediately() {
 
     let s = series(&app, &owner.cookie, "?months=120").await;
     assert_eq!(s["jubilacion_month_index"], 0, "ya está en edad: se jubila hoy ({s})");
-    assert_eq!(s["retirement_trigger"], "target_age", "{s}");
     assert_eq!(
         s["jubilacion_date_ymd"], s["anchor_date_ymd"],
         "la fecha del mes 0 es el ancla: {s}"
@@ -304,72 +297,23 @@ async fn taxes_off(app: &TestApp, u: &LoggedInOwner) {
     assert_eq!(r.status, http::StatusCode::OK, "taxes off: {r:?}");
 }
 
-/// **EL ROJO DE D17**: un hogar que no llega a su edad objetivo ni invirtiendo cada euro de
-/// sobrante. La respuesta no falla ni esconde nada — se jubila igual, publica la serie entera, y
-/// dice las tres cosas que hacen falta para poder pintar el banner rojo.
+/// **`retire_at_age` NO bisecciona la fecha: la CONFIRMA.**
 ///
-/// Predicho a mano: ingreso 2.400, gasto 1.800, sin deuda ⇒ el sobrante es **600 €/mes** todos
-/// los meses de acumulación, así que el techo de búsqueda del solve es exactamente 600. La edad
-/// objetivo son 40 años (el owner tiene 36) ⇒ cuatro años de 600 € sobre 20.000 € de partida no
-/// se acercan al objetivo (`12·1800/0,04 = 540.000 €`), así que la bisección topa contra el techo
-/// y devuelve el techo. Por eso `required_contribution_monthly == search_ceiling` no es una
-/// tautología: es la firma de un plan que no llega.
-#[tokio::test]
-async fn a_household_that_cannot_reach_its_target_age_is_flagged_underfunded_at_the_search_ceiling()
-{
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    taxes_off(&app, &owner).await;
-    seed_with(&app, &owner, "2400", "1800").await;
-    let r = app
-        .patch_json_with_cookie(
-            "/v1/auth/me/retirement-profile",
-            json!({"strategy": "retire_at_age", "target_retirement_age": 40, "swr_pct": "4"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
-
-    let s = series(&app, &owner.cookie, "?months=600").await;
-    assert_eq!(s["underfunded"], true, "{s}");
-    assert_eq!(
-        s["required_contribution_search_ceiling"], "600.0000",
-        "el sobrante mensual es 2.400 − 1.800 = 600 y no cambia en todo el horizonte: {s}"
-    );
-    assert_eq!(
-        s["required_contribution_monthly"], s["required_contribution_search_ceiling"],
-        "«todo lo que tienes, y aun así no llega»: {s}"
-    );
-    assert_eq!(
-        s["disposable_monthly"], "0.0000",
-        "si el plan se lleva el techo entero, no sobra nada: {s}"
-    );
-    let warnings: Vec<&str> = s["warnings"]
-        .as_array()
-        .expect("warnings")
-        .iter()
-        .filter_map(|w| w.as_str())
-        .collect();
-    assert!(
-        warnings.contains(&"retire_at_age_underfunded"),
-        "{warnings:?} en {s}"
-    );
-    // Y aun así la simulación existe entera: se jubila a los 40, con la serie y el objetivo.
-    assert_eq!(s["retirement_trigger"], "target_age", "{s}");
-    assert_eq!(s["jubilacion_age"], 40, "{s}");
-    assert!(!s["required_capital_path"].as_array().expect("serie").is_empty(), "{s}");
-}
-
-/// **El camino verde**: el mismo trigger por edad, pero con margen. Aquí el solve devuelve una
-/// aportación POR DEBAJO del techo, y la diferencia es el «margen disponible» de D16/D31.
+/// Es la decisión de reparto del solver, vista desde fuera. Con la fecha dada no hay nada que
+/// buscar —la puso el usuario—, así que lo que el sorteo hace es medir DOS cosas con un
+/// presupuesto grande: si se llega (`success_of_plan` contra el umbral) y cuánto falta aportar
+/// (`contribution_required_monthly`). Biseccionar ahí gastaría veinte sorteos para devolver el
+/// número que ya se tenía.
 ///
-/// Predicho a mano: ingreso 2.400, gasto 1.000 ⇒ sobrante 1.400 €/mes (el techo), objetivo
-/// `12·1000/0,04 = 300.000 €` a los 60 (280 meses de rejilla desde el ancla). Aportando el
-/// sobrante entero el líquido llegaría a ~790.000 €, muy por encima, así que la `c` mínima ronda
-/// los 430 €/mes y el margen los 970 €/mes. Lo que el test pinea es la RELACIÓN (0 < c < techo, y
-/// margen = techo − c), no la cifra exacta: esa la decide la cascada del motor.
+/// Se comprueba por lo que la respuesta AFIRMA, que es lo único que un test de integración puede
+/// ver: `retirement_date_basis` vale `target_age` —no `success_threshold`—, la fecha es
+/// exactamente el mes de la edad pedida, y las tres cifras de la aportación mínima viajan (con la
+/// fecha decidida por el umbral no existirían: no hay «cuánto me falta para esa fecha»).
+///
+/// **Sin `?months=` a propósito**: un horizonte a medida no resuelve plan (D7), y sin plan no hay
+/// solve que mirar.
 #[tokio::test]
-async fn a_funded_target_age_leaves_a_positive_monthly_and_capital_margin() {
+async fn retire_at_age_does_not_bisect_it_only_confirms() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     taxes_off(&app, &owner).await;
@@ -383,50 +327,112 @@ async fn a_funded_target_age_leaves_a_positive_monthly_and_capital_margin() {
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
 
-    let s = series(&app, &owner.cookie, "?months=600").await;
-    let parse = |v: &Value| -> f64 { v.as_str().expect("decimal").parse().expect("f64") };
+    let s = series(&app, &owner.cookie, "").await;
+    let anchor = NaiveDate::parse_from_str(s["anchor_date_ymd"].as_str().unwrap(), "%Y-%m-%d")
+        .expect("ancla");
+    let r_grid = months_until_age(anchor, NaiveDate::from_ymd_opt(1990, 1, 1).unwrap(), 60);
 
-    assert_eq!(s["underfunded"], false, "{s}");
     assert_eq!(
-        s["required_contribution_search_ceiling"], "1400.0000",
-        "2.400 − 1.000 = 1.400: {s}"
+        s["retirement_date_basis"], "target_age",
+        "la fecha es un DATO, no algo que el umbral haya buscado: {s}"
     );
-    let c = parse(&s["required_contribution_monthly"]);
-    let techo = parse(&s["required_contribution_search_ceiling"]);
-    assert!(
-        c > 0.0 && c < techo,
-        "el plan llega sin comerse todo el sobrante: c = {c}, techo = {techo} ({s})"
+    assert_eq!(s["jubilacion_month_index"], r_grid, "{s}");
+    assert_eq!(
+        s["safe_date_month_index"], s["jubilacion_month_index"],
+        "los dos nombres son la misma fecha: {s}"
     );
-    // El margen es exactamente lo que sobra del techo: identidad comprobable con una resta.
-    let margen = parse(&s["disposable_monthly"]);
-    assert!(
-        (margen - (techo - c)).abs() < 0.0001,
-        "margen {margen} != techo {techo} − c {c}: {s}"
-    );
-    assert!(margen > 0.0, "{s}");
+    assert_eq!(s["jubilacion_age"], 60, "{s}");
+    assert!(s["plan_absent_reason"].is_null(), "hay plan: {s}");
 
-    // El margen de CAPITAL: la simulación real invierte todo, así que a partir de algún mes está
-    // por encima del capital estrictamente necesario. En el mes 0 es 0 por construcción (las dos
-    // series arrancan del mismo patrimonio de hoy).
-    let cap = s["disposable_capital"].as_array().expect("disposable_capital");
-    let path = s["required_capital_path"].as_array().expect("required_capital_path");
-    let points = s["points"].as_array().expect("points");
-    assert_eq!(cap.len(), points.len(), "series paralelas a points");
-    assert_eq!(path.len(), points.len(), "series paralelas a points");
-    assert!(cap[0].as_f64().expect("f64").abs() < 0.01, "el mes 0 es el mismo patrimonio: {}", cap[0]);
-    let r_grid = s["jubilacion_month_index"].as_u64().expect("mes de jubilación") as usize;
+    // Lo que el sorteo SÍ hizo: medir. Y decir con qué muestra.
+    assert!(!s["success_of_plan"].is_null(), "{s}");
+    assert!(!s["success_wilson_low"].is_null(), "{s}");
     assert!(
-        cap[r_grid].as_f64().expect("f64") > 0.0,
-        "en el mes de la jubilación sobra capital por encima del necesario: {}",
-        cap[r_grid]
+        !s["success_sampling_error_pp"].is_null() && !s["paths_used"].is_null(),
+        "una probabilidad sin su barra y su N no se puede leer: {s}"
     );
-    // Y su lectura escalar, nominal y en euros de hoy. Con inflación 0 son la MISMA cifra: el
-    // deflactor es exactamente 1, no ~1.
-    let nominal = parse(&s["disposable_capital_at_retirement"]);
-    let hoy = parse(&s["disposable_capital_today"]);
-    assert!(nominal > 0.0, "{s}");
+    assert!(s["seed"].is_string(), "la semilla viaja como string: {s}");
+
+    // Y las tres cifras de la aportación mínima, que SOLO existen con la fecha dada.
     assert!(
-        (nominal - hoy).abs() < 0.0001,
-        "con inflación 0 el deflactor es 1 exacto: {nominal} vs {hoy}"
+        s["contribution_underfunded"].is_boolean(),
+        "con fecha dada se contesta SIEMPRE cuánto falta aportar: {s}"
     );
+    let techo: f64 = s["contribution_required_search_ceiling"]
+        .as_str()
+        .expect("el techo de búsqueda viaja como decimal-string")
+        .parse()
+        .expect("decimal");
+    assert!(techo > 0.0, "el techo da sentido al infra-financiado: {techo} ({s})");
+    if let Some(c) = s["contribution_required_monthly"].as_str() {
+        let c: f64 = c.parse().expect("decimal");
+        assert!(
+            (0.0..=techo).contains(&c),
+            "la aportación mínima cae dentro del techo que se exploró: c = {c}, techo = {techo}"
+        );
+        assert_eq!(
+            s["contribution_underfunded"], false,
+            "con solución no está infra-financiado: {s}"
+        );
+    } else {
+        assert_eq!(
+            s["contribution_underfunded"], true,
+            "sin importe, la única lectura es «ni el techo llega»: {s}"
+        );
+    }
+
+    // El capital necesario HOY viaja siempre — es la única cifra del plan que no depende de la
+    // estrategia («cuánto necesitarías para jubilarte ya» se contesta igual).
+    assert!(
+        !s["needed_capital_today"].is_null() || s["needed_capital_absent_reason"].is_string(),
+        "o hay cifra o hay razón; nunca un hueco mudo: {s}"
+    );
+}
+
+/// **El rojo del modelo v2**: un hogar al que **no le queda tiempo** para llegar a su edad
+/// objetivo. La respuesta no falla ni esconde nada — se jubila igual, publica la serie entera, y
+/// dice las dos cosas que hacen falta para pintar el banner rojo: que no llega
+/// (`contribution_underfunded`) y contra qué cota se midió.
+///
+/// **Por qué una edad YA CUMPLIDA y no un hogar pobre**: en el modelo v2 el techo de la búsqueda
+/// **se dobla** hasta que cumple (`minimum_extra_contribution` en `crates/engine-stochastic`), y
+/// el crate lo dice sin adornos — «no es *lo que el hogar puede aportar*: es la cota de la
+/// bisección». Así que un hogar con poco sobrante casi nunca sale infra-financiado: sale con una
+/// aportación mínima que no puede permitirse, que es información distinta y también útil. Lo que
+/// **ningún** importe arregla es no tener meses en los que aportarlo: con la edad objetivo ya
+/// cumplida, `R = 1` y la fase de acumulación dura cero meses.
+///
+/// Predicho a mano: el owner del arnés nació en 1990 (36 años), la edad objetivo son 36 ⇒ `R = 1`
+/// ⇒ se jubila el mes 0 de la rejilla con los 20.000 € que tiene, contra un gasto de 1.800 €/mes
+/// de por vida. Ni el techo doblado cambia un euro de esa cartera.
+#[tokio::test]
+async fn a_target_age_with_no_time_to_save_is_flagged_underfunded() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    taxes_off(&app, &owner).await;
+    seed_with(&app, &owner, "2400", "1800").await;
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"strategy": "retire_at_age", "target_retirement_age": 36, "swr_pct": "4"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    let s = series(&app, &owner.cookie, "").await;
+    assert_eq!(s["jubilacion_month_index"], 0, "la edad ya está cumplida: {s}");
+    assert_eq!(s["contribution_underfunded"], true, "{s}");
+    assert!(
+        s["contribution_required_monthly"].is_null(),
+        "sin solución no se publica el techo como si fuera la respuesta: {s}"
+    );
+    assert!(
+        !s["contribution_required_search_ceiling"].is_null(),
+        "el techo viaja igual: es lo que da sentido al infra-financiado ({s})"
+    );
+    // Y aun así la simulación existe entera: se jubila, con su serie y su éxito medido.
+    assert_eq!(s["retirement_date_basis"], "target_age", "{s}");
+    assert!(!s["points"].as_array().expect("points").is_empty(), "{s}");
+    assert!(!s["success_of_plan"].is_null(), "{s}");
 }

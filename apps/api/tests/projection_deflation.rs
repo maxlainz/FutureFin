@@ -437,14 +437,19 @@ async fn negative_inflation_deflates_upward_and_shrinks_the_target() {
         );
     }
 
-    // El objetivo decrece: la serie paralela del target baja entre el primer y el último punto.
-    let ft = s["fire_target_series"].as_array().unwrap();
-    if ft.len() >= 2 {
-        assert!(
-            num(&ft[ft.len() - 1]) < num(&ft[0]),
-            "con inflación negativa el objetivo debe DECRECER a lo largo de la serie"
-        );
-    }
+    // **5.0.0 — el objetivo determinista ya no viaja.** `fire_target_series` murió con el modelo
+    // v2: la línea que la app dibuja contra el patrimonio es hoy `needed_capital_curve` (el
+    // capital REAL que hace éxito ≥ umbral jubilándose en cada edad), y es de NIVEL 2 — no está
+    // en una respuesta con `?months=`, que no resuelve plan por diseño (D7). Lo que aquí se
+    // pinea, y es lo que este fichero existe para pinear, es el DEFLACTOR: la curva del capital
+    // necesario viaja en euros NOMINALES y la SPA la deflacta con el MISMO factor que el
+    // patrimonio, así que su comportamiento bajo deflación es el del bucle de arriba y no una
+    // segunda regla. La curva tiene su propio pin en `projection_number_semantics.rs`
+    // (`the_plan_block_indexes_the_grid_and_the_curve_is_parallel_to_points`).
+    assert!(
+        s["fire_target_series"].is_null(),
+        "el objetivo determinista se retiró en 5.0.0: {s}"
+    );
 
     // Y los hitos en euros de hoy viajan (con inflación 0 siguen vacíos — contrato intacto).
     assert!(

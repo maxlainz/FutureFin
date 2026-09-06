@@ -1088,7 +1088,7 @@ pub struct SimulateParams {
     /// **Monte Carlo sobre los dos lados** (opt-in): añade a `baseline` y a `scenario` el bloque
     /// del éxito —`success_probability` (se jubila Y no agota), `success_verdict`,
     /// `never_retired_probability`, `success_given_retired`, `underfunded_probability`,
-    /// `months_below_need_p50` y `buffer_inactive_reason`— y `success_probability_delta` a
+    /// `months_below_need_p50`— y `success_probability_delta` a
     /// `deltas`. Sin bandas (usa get_projection_bands).
     #[serde(default)]
     pub monte_carlo: Option<MonteCarloParam>,
@@ -2453,13 +2453,22 @@ impl UpdateRetirementProfileParams {
                     .map(|v| parse_decimal_param("pension.fraction_while_partial", v))
                     .transpose()?
                     .unwrap_or(rust_decimal::Decimal::ZERO),
+                // **A9 pendiente (5.0.0)**: el PUENTE (`bridge_enabled` / `bridge_max_pct` /
+                // `bridge_max_years`) todavía no tiene parámetros en el schema de la tool, así
+                // que por MCP se manda apagado — el mismo default que el perfil. A9 los añade.
+                bridge_enabled: false,
+                bridge_max_pct: None,
+                bridge_max_years: None,
             }),
         };
 
         let partial_retirement = match &self.partial_retirement {
             None => None,
             Some(x) => Some(rp::PartialRetirement {
-                starts_at_age: x.starts_at_age,
+                starts_at_age: Some(x.starts_at_age),
+                // A9: el modo («a una edad fija» / «en cuanto pueda») todavía no viaja por MCP;
+                // el default es el de siempre, la edad fija.
+                mode: Default::default(),
                 income_monthly_today: parse_decimal_param(
                     "partial_retirement.income_monthly_today",
                     &x.income_monthly_today,
@@ -2494,14 +2503,6 @@ impl UpdateRetirementProfileParams {
                 .map(|v| parse_decimal_param("swr_pct", v))
                 .transpose()?,
             horizon_lifespan_age: self.horizon_lifespan_age,
-            target_basis: tri(
-                parse_enum_param(&self.target_basis)
-                    .map_err(|e| ApiError::BadRequest(format!("target_basis: {e}")))?,
-                self.clear_target_basis,
-                "target_basis",
-            )?,
-            bridge_discount_basis: parse_enum_param(&self.bridge_discount_basis)
-                .map_err(|e| ApiError::BadRequest(format!("bridge_discount_basis: {e}")))?,
             withdrawal_rule,
             pension: tri(pension, self.clear_pension, "pension")?,
             partial_retirement: tri(
@@ -2509,15 +2510,15 @@ impl UpdateRetirementProfileParams {
                 self.clear_partial_retirement,
                 "partial_retirement",
             )?,
-            cash_buffer_months: tri(
-                self.cash_buffer_months,
-                self.clear_cash_buffer_months,
-                "cash_buffer_months",
-            )?,
-            // Deprecado e ignorado (V7): se acepta en el schema —los dos params son
-            // `deny_unknown_fields` y borrarlo convertiría en 400 lo que hoy funciona— y solo
-            // sirve para que un update que lo mande a él solo no sea `patch_empty`.
-            deprecated_success_threshold_pct: self.success_threshold_pct,
+            // **A9 pendiente (5.0.0)**: `success_threshold_pct` deja de estar deprecado y pasa
+            // a ser el eje que decide la fecha (80..=100), y llegan `coast_mode` /
+            // `coast_stop_age`. Los parámetros retirados (`target_basis`,
+            // `bridge_discount_basis`, `cash_buffer_months`) se DEPRECAN en el schema —nunca se
+            // borran: los dos params son `deny_unknown_fields` y quitarlos convertiría en 400 lo
+            // que hoy funciona— y aquí se ignoran.
+            success_threshold_pct: None,
+            coast_mode: None,
+            coast_stop_age: None,
         })
     }
 

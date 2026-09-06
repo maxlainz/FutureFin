@@ -32,7 +32,7 @@ use crate::handlers::history::MAX_HISTORY_WINDOW_MONTHS;
 use crate::handlers::installation::{MAX_HORIZON_LIFESPAN_AGE, MIN_HORIZON_LIFESPAN_AGE};
 use crate::handlers::liabilities::{MAX_SCHEDULE_WINDOW_MONTHS, SCHEDULE_HORIZON_MONTHS};
 use crate::handlers::retirement_profile::{
-    MAX_CASH_BUFFER_MONTHS, MIN_PENSION_AGE, MIN_PROFILE_AGE,
+    MIN_PENSION_AGE, MIN_PROFILE_AGE,
 };
 
 const CATALOG_JSON: &str =
@@ -145,15 +145,11 @@ const PINNED_BOUNDS: &[PinnedBound] = &[
                       `#[schemars(range(min = 50, max = 105))]` sobre \
                       `PensionParam::starts_at_age`; (3) regenera el fixture",
     },
-    PinnedBound {
-        tool: "update_retirement_profile",
-        pointer: "$.cash_buffer_months",
-        expected_min: Some(0),
-        expected_max: MAX_CASH_BUFFER_MONTHS as i64,
-        runtime_const: "apps/api/src/handlers/retirement_profile.rs: MAX_CASH_BUFFER_MONTHS",
-        also_update: "(1) la const; (2) el literal `#[schemars(range(min = 0, max = 60))]` sobre \
-                      `UpdateRetirementProfileParams::cash_buffer_months`; (3) regenera el fixture",
-    },
+    // `$.cash_buffer_months` **ya no tiene fila** (5.0.0, M6): el colchón de caja se retiró del
+    // modelo entero, así que no hay const de runtime que sujetar. **A9 pendiente**: el parámetro
+    // sigue en el schema de las tools —son `deny_unknown_fields`— y pasa a estar DEPRECADO e
+    // ignorado, sin cotas; A9 reescribe su descripción y añade las filas de `success_threshold_pct`
+    // y `bridge_max_years`.
     // `$.success_threshold_pct` **ya no tiene fila** (5.0.0, V7): el parámetro sigue en el schema
     // de las dos tools —son `deny_unknown_fields` y borrarlo convertiría en 400 lo que hoy
     // funciona— pero está DEPRECADO e ignorado, y ya no tiene cotas que sujetar. Pinear una

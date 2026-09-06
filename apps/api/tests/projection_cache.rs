@@ -63,8 +63,11 @@ async fn projection_series_serves_the_second_get_from_the_cache() {
         resp.model_note = SENTINEL.to_string();
         resp
     };
+    // La clave del plan se conserva: envenenar el cuerpo no puede desconectar la entrada de su
+    // nivel 2, o el HIT publicaría `unavailable` y el centinela se leería como un fallo de cache.
+    let plan_key = app.state.projection_cache_plan_key(&key).await;
     app.state
-        .projection_cache_insert(key.clone(), std::sync::Arc::new(poisoned))
+        .projection_cache_insert(key.clone(), std::sync::Arc::new(poisoned), plan_key)
         .await;
 
     // 3. HIT: si el body trae el centinela, salió de la cache y no de un recompute.
@@ -552,51 +555,54 @@ async fn seed_retire_at_age(app: &TestApp, owner: &common::LoggedInOwner) {
     let r = app
         .patch_json_with_cookie(
             "/v1/auth/me/retirement-profile",
+            // **La fecha de nacimiento es obligatoria para que haya plan** (C5): sin ella no hay
+            // edad que convertir en mes, y la respuesta sale con `plan_absent_reason:
+            // "birth_date_missing"` y sin una sola cifra del sorteo.
             serde_json::json!({"strategy": "retire_at_age", "target_retirement_age": 60,
-                               "swr_pct": "4"}),
+                               "swr_pct": "4", "birth_date": "1986-04-01"}),
             &owner.cookie,
         )
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
 }
 
-/// **Los solves se calculan UNA vez, con la serie, y se sirven desde la cache** (M4). Cada uno es
-/// una bisección sobre el motor entero —hasta 26 proyecciones—, así que recalcularlos en cada GET
-/// haría de la lectura más cara de la app la más cara por un orden de magnitud.
+/// **El plan se resuelve UNA vez, con la serie, y se sirve desde la cache** (M4 · 5.0.0).
 ///
-/// Se prueba con el mismo centinela que el resto del fichero, y no con un cronómetro: se
-/// envenena la entrada cacheada con un `required_contribution_monthly` imposible y se comprueba
-/// que el siguiente GET lo devuelve. Si el read path volviera a biseccionar, el centinela
-/// desaparecería.
+/// El nivel 1 del plan es una bisección estocástica sobre miles de caminos: entre uno y cinco
+/// segundos de CPU. Recalcularlo en cada GET convertiría la lectura más cara de la app en la más
+/// cara por un orden de magnitud.
+///
+/// Se prueba con el mismo centinela que el resto del fichero, y no con un cronómetro: se envenena
+/// la entrada cacheada con un `success_of_plan` imposible y se comprueba que el siguiente GET lo
+/// devuelve. Si el read path volviera a sortear, el centinela desaparecería.
 #[tokio::test]
-async fn the_strategy_solves_are_computed_once_and_served_from_the_cache() {
+async fn the_plan_is_solved_once_and_served_from_the_cache() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     seed_retire_at_age(&app, &owner).await;
 
-    let first = app
-        .get_with_cookie("/v1/projection/series?months=600", &owner.cookie)
-        .await;
-    assert_eq!(first.status, http::StatusCode::OK, "{first:?}");
-    let body = first.json();
-    assert!(
-        !body["required_contribution_monthly"].is_null(),
-        "una estrategia por edad publica su solve: {body}"
-    );
-    assert!(
-        !body["required_capital_path"].as_array().expect("serie").is_empty(),
-        "{body}"
-    );
+    let iid = installation_id_of(&app, &owner.cookie).await;
+    let uid = user_id_of(&app, &owner.cookie).await;
+    app.settle_login_warmup(iid).await;
 
-    // `?months=` salta la cache por diseño, así que el centinela se pone sobre la entrada del
-    // camino cacheado (sin `months`).
     let warm = app
         .get_with_cookie("/v1/projection/series", &owner.cookie)
         .await;
     assert_eq!(warm.status, http::StatusCode::OK, "{warm:?}");
+    let body = warm.json();
+    assert_eq!(
+        body["retirement_date_basis"], "target_age",
+        "una estrategia por edad publica su base: {body}"
+    );
+    assert!(
+        !body["success_of_plan"].is_null(),
+        "con la fecha dada, el sorteo mide si se llega: {body}"
+    );
+    assert!(
+        !body["contribution_underfunded"].is_null(),
+        "con fecha dada se contesta SIEMPRE cuánto falta aportar: {body}"
+    );
 
-    let iid = installation_id_of(&app, &owner.cookie).await;
-    let uid = user_id_of(&app, &owner.cookie).await;
     let key = ProjectionCacheKey {
         installation_id: iid,
         view: LedgerView::Mine,
@@ -607,38 +613,45 @@ async fn the_strategy_solves_are_computed_once_and_served_from_the_cache() {
         let mut cache = app.state.projection_cache.write().await;
         let entry = cache.get_mut(&key).expect("entrada cacheada tras el GET");
         let mut poisoned = (*entry.response).clone();
-        poisoned.required_contribution_monthly = Some(rust_decimal::Decimal::from(424_242));
+        poisoned.success_of_plan = Some(rust_decimal::Decimal::new(4242, 4));
         entry.response = std::sync::Arc::new(poisoned);
     }
     let cached = app
         .get_with_cookie("/v1/projection/series", &owner.cookie)
         .await;
     assert_eq!(
-        cached.json()["required_contribution_monthly"], "424242",
-        "el solve sale de la cache, no de una bisección nueva: {}",
+        cached.json()["success_of_plan"], "0.4242",
+        "el plan sale de la cache, no de un sorteo nuevo: {}",
         cached.json()
     );
 }
 
-/// **Un PATCH del perfil invalida la cache**, y por tanto los solves. El perfil es input del
-/// motor (estrategia, edad, SWR, pensión…): servir la serie anterior sería enseñar el plan viejo
-/// con la estrategia nueva escrita al lado.
+/// **Un PATCH del perfil mueve la clave del PLAN**, además de invalidar la serie.
+///
+/// Son dos mecanismos distintos y los dos hacen falta. La cache de proyección se invalida por
+/// instalación (el perfil es input del motor: estrategia, edad, SWR, umbral, pensión…); la cache
+/// de PLAN no se invalida nunca porque está direccionada por CONTENIDO — su clave es una huella
+/// de la entrada entera, así que una entrada obsoleta no se borra: se queda **inalcanzable**.
+///
+/// Lo que este test sujeta es exactamente eso: tras el PATCH, la clave de plan que sirve el GET es
+/// OTRA. Si no se moviera, el nivel 2 del plan viejo se serviría junto a la serie nueva.
 #[tokio::test]
-async fn a_retirement_profile_patch_invalidates_the_cached_projection_and_its_solves() {
+async fn a_retirement_profile_patch_invalidates_the_series_and_moves_the_plan_key() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     seed_retire_at_age(&app, &owner).await;
+
+    let iid = installation_id_of(&app, &owner.cookie).await;
+    let uid = user_id_of(&app, &owner.cookie).await;
+    app.settle_login_warmup(iid).await;
 
     let before = app
         .get_with_cookie("/v1/projection/series", &owner.cookie)
         .await
         .json();
     assert_eq!(before["strategy"], "retire_at_age", "{before}");
-    let c_before = before["required_contribution_monthly"].clone();
-    assert!(!c_before.is_null(), "{before}");
+    assert_eq!(before["success_threshold_pct"], 95, "{before}");
 
-    let iid = installation_id_of(&app, &owner.cookie).await;
-    let uid = user_id_of(&app, &owner.cookie).await;
     let key = ProjectionCacheKey {
         installation_id: iid,
         view: LedgerView::Mine,
@@ -646,12 +659,17 @@ async fn a_retirement_profile_patch_invalidates_the_cached_projection_and_its_so
         density: Density::Monthly,
     };
     assert!(app.cache_contains(&key).await, "el GET dejó entrada");
+    let plan_key_before = app.state.projection_cache_plan_key(&key).await;
+    assert!(
+        plan_key_before.is_some(),
+        "una entrada con plan lleva su clave: sin ella el nivel 2 no se podría volver a encontrar"
+    );
 
-    // Cambiar SOLO la estrategia: ninguna fila del ledger se mueve.
+    // Cambiar SOLO el umbral: ninguna fila del ledger se mueve, pero la pregunta sí.
     let r = app
         .patch_json_with_cookie(
             "/v1/auth/me/retirement-profile",
-            serde_json::json!({"strategy": "coast"}),
+            serde_json::json!({"success_threshold_pct": 85}),
             &owner.cookie,
         )
         .await;
@@ -662,20 +680,22 @@ async fn a_retirement_profile_patch_invalidates_the_cached_projection_and_its_so
         .get_with_cookie("/v1/projection/series", &owner.cookie)
         .await
         .json();
-    assert_eq!(after["strategy"], "coast", "{after}");
-    // `coast` no publica aportación necesaria: publica el mes coast. Si la cache no se hubiera
-    // invalidado, seguiríamos viendo el solve de `retire_at_age`.
-    assert!(after["required_contribution_monthly"].is_null(), "{after}");
-    assert!(!after["coast_fire_month_index"].is_null(), "{after}");
+    assert_eq!(after["success_threshold_pct"], 85, "{after}");
+    let plan_key_after = app.state.projection_cache_plan_key(&key).await;
+    assert_ne!(
+        plan_key_before, plan_key_after,
+        "otro umbral es otra pregunta: la huella del plan tiene que moverse o la cache serviría \
+         los extras del umbral anterior"
+    );
 }
 
-/// **Una mutación de una REGLA DE AHORRO tira las DOS caches** (5.0.0, V6).
+/// **Una mutación de una REGLA DE AHORRO tira las DOS caches.**
 ///
 /// Hasta 5.0.0 este fichero no tenía ni un test de reglas de asignación: la invalidación existía
 /// (`allocation_rules.rs` llama a `invalidate_projection_by_installation` en create/patch/delete/
-/// reorder) pero nadie la sujetaba. Ahora es doblemente cara: además de mover la cascada, el tope
-/// de una regla ES el colchón de caja de las bandas (`buffer_target_amount`), así que una regla
-/// editada con la banda cacheada publicaría un colchón que ya no existe.
+/// reorder) pero nadie la sujetaba. Cambiar el tope de una regla mueve la CASCADA que ve el motor
+/// —y por tanto el reparto del ahorro y el patrimonio simulado—, así que una banda cacheada con
+/// la regla vieja describiría un plan que ya no es el guardado.
 #[tokio::test]
 async fn an_allocation_rule_mutation_drops_the_projection_and_the_bands() {
     use futurefin_api::state::BandsCacheKey;
@@ -751,19 +771,21 @@ async fn an_allocation_rule_mutation_drops_the_projection_and_the_bands() {
         user_id: uid,
         paths: 24,
         seed: 11,
+        // 5.0.0: el umbral entra en la clave porque entra en la RESPUESTA (el veredicto se mide
+        // contra él). Aquí va el default del perfil, que es el que la petición usó.
+        threshold_pct: 95,
     };
     let b = app
         .get_with_cookie("/v1/projection/bands?paths=24&seed=11", &owner.cookie)
         .await;
     assert_eq!(b.status, http::StatusCode::OK, "{b:?}");
-    let b = b.json();
-    assert_eq!(b["buffer_target_amount"], "6000.0000", "{b}");
+    let _b = b.json();
     assert!(
         app.state.bands_cache.read().await.contains_key(&bands_key),
         "el GET de bandas dejó entrada"
     );
 
-    // Subir el tope: la cascada cambia Y el colchón cambia.
+    // Subir el tope: la cascada cambia.
     let r = app
         .patch_json_with_cookie(
             &format!("/v1/allocation-rules/{rule_id}"),
@@ -776,14 +798,16 @@ async fn an_allocation_rule_mutation_drops_the_projection_and_the_bands() {
     app.assert_invalidated(&series_key, "PATCH de una regla de ahorro").await;
     assert!(
         !app.state.bands_cache.read().await.contains_key(&bands_key),
-        "la mutación de una regla tiene que tirar TAMBIÉN las bandas: el tope ES el colchón"
+        "la mutación de una regla tiene que tirar TAMBIÉN las bandas"
     );
 
-    // Y el recálculo publica el tope nuevo.
-    let b = app
+    // Y el recálculo repuebla la cache de bandas.
+    let r = app
         .get_with_cookie("/v1/projection/bands?paths=24&seed=11", &owner.cookie)
-        .await
-        .json();
-    assert_eq!(b["buffer_target_amount"], "9000.0000", "{b}");
-    assert_eq!(b["buffer_source_rule_id"], rule_id, "{b}");
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert!(
+        app.state.bands_cache.read().await.contains_key(&bands_key),
+        "el recálculo debe dejar una entrada nueva"
+    );
 }

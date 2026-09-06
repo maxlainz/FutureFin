@@ -99,9 +99,8 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   sobre el mismo motor que dibuja la línea determinista: bandas puntuales p10/p50/p90 del
   patrimonio y del líquido, `success_probability` con su veredicto **y sus dos caras**
   (`never_retired_probability`, `success_given_retired`), agotamiento por edad,
-  percentiles del mes de jubilación, las dos lecturas de COBERTURA y las del COLCHÓN de caja (P4:
-  `buffer_active` + `buffer_inactive_reason` + `buffer_refills_p50` + `buffer_refill_net_total_p50`,
-  los dos últimos `null` cuando no se simuló — que no es «cero rellenos»). Params: `view` (solo `mine`),
+  percentiles del mes de jubilación y las dos lecturas de COBERTURA (el colchón de caja se retiró
+  en 5.0.0, modelo v2). Params: `view` (solo `mine`),
   `paths` (1–**1 000**, default 500), `seed` (string de dígitos) e `include_liquid_bands`.
   Cuatro decisiones que hay que leer juntas:
   - **Sin `density`** — fuerza `hybrid`, igual que `get_projection` y por el mismo veto

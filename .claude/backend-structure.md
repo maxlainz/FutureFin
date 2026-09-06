@@ -9,16 +9,32 @@ Espejo de [`frontend-structure.md`](frontend-structure.md) para el backend: qué
 Entry point: `main.rs` (bin); los módulos compartidos del crate se declaran en `lib.rs`.
 
 - `routes/mod.rs` — full route map; all routes under `/v1/` except `/health`, `/openapi.json`, `/mcp` y el protocolo OAuth. `DefaultBodyLimit` caps requests at 1 MiB globally, 16 MiB on `/backup/user-import*` — **pero `DefaultBodyLimit` actúa vía extractores y `/mcp` es un `route_service`**, así que su tope se fija aparte y explícitamente en `mcp::MCP_MAX_REQUEST_BODY_BYTES` (1 MiB; sin esa línea regía el default de rmcp, 4 MiB). Aquí viven también las **dos** capas CORS: la del API con `allow_credentials(true)` y la de `/mcp` sin credenciales — el `merge` de `mcp` va **después** del `.layer(...)` a propósito, porque `Router::layer` solo envuelve lo ya registrado.
-- `state.rs` — `AppState` (pool, cookie_secure, session_ttl_days, version) y **los DOS caches de
+- `state.rs` — `AppState` (pool, cookie_secure, session_ttl_days, version) y **los TRES caches de
   proyección**: `projection_cache` (`ProjectionCacheKey { installation_id, view, owner_user_id,
-  density }`) y, desde 5.0.0/WP6b, `bands_cache` (`BandsCacheKey { installation_id, user_id, paths,
-  seed }`, las bandas de Monte Carlo). Comparten TTL (`PROJECTION_CACHE_TTL`, 60 min sliding) y
-  —lo que de verdad importa— **las dos invalidaciones**: `invalidate_projection_by_installation` y
-  `invalidate_projection_by_user` borran los dos mapas. Van separados porque la clave de las bandas
-  lleva dos ejes que la serie no tiene (`paths`, `seed`) y su contenido cuesta un orden de magnitud
-  más; mezclarlos habría hecho que un cambio de semilla tirara la serie determinista por el suelo.
-  La clave de bandas **no** lleva `view`: solo existe `mine` (§Projection bands de
-  [`api-routes.md`](api-routes.md)).
+  density }`), `bands_cache` (`BandsCacheKey { installation_id, user_id, paths, seed,
+  threshold_pct }`, las bandas de Monte Carlo) y, desde 5.0.0/WP A3, `plan_cache` (nivel 2 del
+  plan de jubilación, clave `PlanKey`). Los tres comparten TTL (`PROJECTION_CACHE_TTL`, 60 min
+  sliding) pero **no la política de invalidación**, y esa asimetría es el hecho que hay que saber:
+  - `projection_cache` y `bands_cache` se invalidan juntos —
+    `invalidate_projection_by_installation` y `invalidate_projection_by_user` borran los dos
+    mapas—, porque su clave nombra un HOGAR y el contenido cuelga de datos que pueden cambiar. Van
+    separados entre sí porque la clave de las bandas lleva ejes que la serie no tiene (`paths`,
+    `seed`, `threshold_pct`) y su contenido cuesta un orden de magnitud más; mezclarlos habría
+    hecho que un cambio de semilla tirara la serie determinista por el suelo. La clave de bandas
+    **no** lleva `view`: solo existe `mine` (§Projection bands de
+    [`api-routes.md`](api-routes.md)). `threshold_pct` entró en 5.0.0 porque el veredicto
+    (`success_verdict`) se calcula contra el umbral del perfil: sin ese eje, cambiarlo en Ajustes
+    devolvía el veredicto anterior.
+  - `plan_cache` **no se invalida nunca** y no es un olvido: su clave es un hash del CONTENIDO
+    (`retirement_solver::plan_fingerprint`), así que una mutación produce otra clave y la entrada
+    vieja queda **inalcanzable, no obsoleta-y-servible**. Lo único que hay que acotar es su tamaño:
+    TTL + LRU (`PLAN_CACHE_MAX_ENTRIES`), los dos dentro de `plan_cache_insert`.
+  - `ProjectionCacheEntry.plan_key: Option<PlanKey>` cose los dos: un HIT de la serie mira el
+    nivel 2 sin reconstruir el `ProjectionInput`. Es un **parámetro** de
+    `projection_cache_insert`, no un campo que se rellena luego, para que olvidarlo sea imposible
+    — una entrada sin clave publicaría `computing` para siempre y ningún tipo lo cazaría. `None`
+    es legítimo y hay que escribirlo: `?months=`, miembro del hogar sin solve, usuario sin fecha
+    de nacimiento.
 - `error.rs` — `ApiError` → `(StatusCode, JSON {error, code, message})` via `IntoResponse`, donde `code` es el **código estable** que sale del prefijo `snake_code:` del mensaje (desde 3.10.0; sin prefijo válido cae a la clase HTTP). Ese mismo `ErrorBody` es el que viaja en los errores de las tools MCP. `impl From<sqlx::Error>` detects SQLSTATE 23505 → `Conflict` (409), 23503 → `BadRequest`; handlers can just `?` any `sqlx::Error` without manual mapping.
 - `auth/` — password hashing (Argon2id)
 - `handlers/session.rs` — `require_session_user` reads cookie `ff_session` → validates against `sessions` table
@@ -48,6 +64,39 @@ Entry point: `main.rs` (bin); los módulos compartidos del crate se declaran en 
     propiedad de construcción a propósito: una σ descolocada produce bandas estrechas y creíbles —
     el peor fallo posible en esa superficie — y ningún assert de tipo la cazaría. Regresión de
     comportamiento: `projection_bands.rs::the_volatility_vector_follows_the_asset_order`.
+- `handlers/retirement_solver.rs` — **el ÚNICO sitio de la API donde el sorteo elige un mes**
+  (5.0.0, modelo v2, WP A3). Frontera entre `crates/engine-stochastic` y el ensamblado HTTP, y
+  deliberadamente la única: si `projection.rs`, `projection_bands.rs` y `simulate_projection`
+  decidieran cada uno su presupuesto de sorteos, la misma instalación publicaría tres fechas
+  distintas en tres pantallas. Cuatro cosas que hay que saber antes de tocarlo:
+  - **Se busca con `SOLVE_SEARCH_PATHS` (500) y se confirma con `SOLVE_CONFIRM_PATHS`.** El
+    segundo **es** `DEFAULT_BANDS_PATHS`, no un literal escrito aparte: esa identidad es la que
+    hace que la probabilidad que confirma la fecha y la que dibuja el fan chart salgan de **la
+    misma muestra**. Los dos están por encima de 381, el mínimo que exige el umbral máximo del
+    perfil por debajo de 100 (con cero fallos Wilson colapsa a `n/(n+z²)`); lo pinea
+    `the_budgets_can_reach_the_highest_profile_threshold`.
+  - **Dos niveles.** `solve_plan_level1` (síncrono, dentro del miss de proyección y bajo el mismo
+    permiso de `heavy::run_projection_sim`) resuelve la fecha, el éxito con su cota de Wilson y el
+    capital necesario hoy — 1,3–2,8 s por solve. `spawn_plan_extras` (`tokio::spawn`, deduplicado
+    por `plan_inflight`, UN permiso para los cinco cómputos) resuelve las fechas al 100 % y al
+    90 %, la curva de capital por edad (≈ 16 s), la tira anual de éxito (≈ 7 s) y el fallo
+    acumulado por edad. Meterlo todo en el nivel 1 sumaría ~25 s a un GET; publicar el nivel 1 en
+    segundo plano dejaría Jubilación sin fecha hasta un segundo sondeo.
+  - **`spawn_plan_extras` es `async` aunque solo lance una tarea**, y por la misma razón por la que
+    `refresh_projection_after_mutation` dejó de ser un `spawn`: el `Pending` tiene que estar en la
+    cache **antes** de que el llamante responda, o un lector que caiga en medio publica
+    `unavailable` («no se puede») donde la verdad es `computing` («todavía no»).
+  - **`plan_scenario` construye en UN sitio la entrada que el plan describe** (mes forzado, corte
+    de aportaciones, inicio de la media jornada), con las plantillas públicas del crate
+    (`retiring_at`/`stopping_at`/`partial_starting_at`). Lo que se pasa a `plan_fingerprint` y lo
+    que se pasa a `spawn_plan_extras` tiene que ser **ese mismo valor**, o la clave deja de
+    describir lo que hay dentro; hay un `debug_assert` que lo comprueba.
+  - **Las dos bases de los euros no son la misma y está declarado**: `needed_capital_today` va en
+    euros de HOY (se compara con la cartera de hoy) y `needed_capital_curve` en euros NOMINALES de
+    cada mes (se dibuja contra la trayectoria del patrimonio, que es nominal). Coinciden en `k = 1`
+    y divergen a partir de ahí. Los nodos sin cifra salen del vector de importes y su razón viaja
+    en `needed_capital_curve_absent`, para que la línea se pueda **partir** ahí en vez de
+    interpolar por encima de un hueco.
 - `handlers/projection_bands.rs` — **`GET /v1/projection/bands`** (5.0.0/WP6b): la superficie HTTP
   de `futurefin_engine_stochastic::project_percentile_bands`, su cache propio y las conversiones
   de frontera. Tres funciones que viven aquí a propósito y las usa también `projection.rs` (para el

@@ -157,18 +157,37 @@ async fn household_series_is_the_sum_of_each_members_mine_series() {
         "jubilacion_month_index",
         "jubilacion_date_ymd",
         "jubilacion_age",
-        "jubilacion_target_net_worth",
         "jubilacion_series_position",
-        "jubilacion_target_net_worth_nominal",
         "retirement_month_index",
         "retirement_series_position",
-        "liquid_crossing_month_index",
         "compound_outpaces_true_savings_month_index",
         "strategy",
-        "retirement_trigger",
         "pension_start_month_index",
         "partial_retirement_month_index",
-        "fire_target_debt_component",
+        // 5.0.0 — el bloque «plan»: el agregado no resuelve ninguno.
+        "retirement_date_basis",
+        "success_threshold_pct",
+        "safe_date_month_index",
+        "safe_date_series_position",
+        "safe_date_date_ymd",
+        "safe_date_age",
+        "safe_date_is_approximate",
+        "safe_date_at_100_month_index",
+        "safe_date_at_90_month_index",
+        "success_of_plan",
+        "success_wilson_low",
+        "success_sampling_error_pp",
+        "paths_used",
+        "seed",
+        "needed_capital_today",
+        "needed_capital_absent_reason",
+        "contribution_required_monthly",
+        "contribution_required_search_ceiling",
+        "contribution_underfunded",
+        "coast_stop_month_index",
+        "partial_start_month_index",
+        "fire_number_classic_today",
+        "pension_absent_reason",
     ] {
         assert!(
             hh.get(campo).map(|v| v.is_null()).unwrap_or(true),
@@ -176,16 +195,27 @@ async fn household_series_is_the_sum_of_each_members_mine_series() {
             hh[campo]
         );
     }
-    assert_eq!(hh["fire_target_absent_reason"], "household_aggregate", "{hh}");
+    assert_eq!(
+        hh["fire_number_classic_absent_reason"], "household_aggregate",
+        "{hh}"
+    );
     assert_eq!(hh["jubilacion_absent_reason"], "household_aggregate", "{hh}");
-    assert_eq!(hh["liquid_crossing_absent_reason"], "household_aggregate", "{hh}");
+    assert_eq!(hh["plan_absent_reason"], "household_aggregate", "{hh}");
     assert_eq!(
         hh["compound_outpaces_true_savings_absent_reason"], "household_aggregate",
         "{hh}"
     );
+    assert_eq!(
+        hh["needed_capital_curve_state"], "unavailable",
+        "sin plan no hay curva, y no la va a haber: {hh}"
+    );
     assert!(
-        hh["fire_target_series"].as_array().unwrap().is_empty(),
-        "sin objetivo del hogar no hay línea que dibujar: {hh}"
+        hh["needed_capital_curve"].as_array().unwrap().is_empty(),
+        "sin plan del hogar no hay línea que dibujar: {hh}"
+    );
+    assert!(
+        hh["success_by_retirement_year"].as_array().unwrap().is_empty(),
+        "{hh}"
     );
     assert!(
         hh["phase_transitions"].as_array().unwrap().is_empty(),
@@ -206,13 +236,12 @@ async fn household_series_is_the_sum_of_each_members_mine_series() {
     let mb = by_name("bob");
     assert_eq!(ma["strategy"], "asap", "{ma}");
     assert_eq!(mb["strategy"], "retire_at_age", "{mb}");
-    assert_eq!(
-        ma["jubilacion_month_index"], mine_a["jubilacion_month_index"],
-        "el hito de alice en el agregado debe ser el de su propia vista: {ma}"
-    );
+    // La fecha por EDAD es la misma en el agregado que en su propia vista: `members[]` explica
+    // la suma, no la reinterpreta. (La de `alice` no viaja: su estrategia la decidiría el
+    // umbral, y el hogar no resuelve planes — ver el bloque 5.)
     assert_eq!(
         mb["jubilacion_month_index"], mine_b["jubilacion_month_index"],
-        "ídem para bob: {mb}"
+        "la edad de bob no depende de la vista: {mb} vs {mine_b}"
     );
     assert_eq!(mb["jubilacion_age"], 60, "bob se jubila a los 60 por estrategia: {mb}");
     for m in members {
@@ -224,56 +253,33 @@ async fn household_series_is_the_sum_of_each_members_mine_series() {
         assert!(m["warnings"].as_array().is_some(), "{m}");
     }
 
-    // 5. **Los solves de §B.7, por miembro** (WP5-2b). `bob` corre `retire_at_age`, así que su
-    // fila trae lo que le cuesta llegar; `alice` corre `asap` (por cruce) y las suyas van a
-    // `null` — que no es cero: es «esa estrategia no responde a esa pregunta».
-    for k in [
-        "underfunded",
-        "required_contribution_monthly",
-        "disposable_monthly",
-    ] {
-        assert!(ma[k].is_null(), "alice se jubila por cruce: {k} en {ma}");
-        assert!(!mb[k].is_null(), "bob se jubila por edad: {k} en {mb}");
-    }
-    // Ninguno de los dos hace `coast`, así que su mes coast no existe.
-    assert!(ma["coast_fire_month_index"].is_null(), "{ma}");
-    assert!(mb["coast_fire_month_index"].is_null(), "{mb}");
-    // Y la cifra del agregado es la MISMA que su vista `mine` publica: `members[]` explica la
-    // suma, no la reinterpreta.
-    assert_eq!(
-        mb["required_contribution_monthly"], mine_b["required_contribution_monthly"],
-        "{mb} vs {mine_b}"
-    );
-    assert_eq!(
-        mb["disposable_monthly"], mine_b["disposable_monthly"],
-        "{mb} vs {mine_b}"
-    );
-    assert_eq!(mb["underfunded"], mine_b["underfunded"], "{mb} vs {mine_b}");
-
-    // 6. El agregado NO publica plan propio: los solves son de una persona.
-    for k in [
-        "required_contribution_monthly",
-        "required_contribution_search_ceiling",
-        "underfunded",
-        "disposable_monthly",
-        "coast_fire_month_index",
-        "coast_number",
-        "partial_gap_target",
-        "partial_phase_capital_growing",
-        "pension_coverage_ratio",
-        "bridge_effective_withdrawal_pct",
-        "bridge_discount_annual_pct",
-        "disposable_capital_at_retirement",
-        "disposable_capital_today",
-    ] {
-        assert!(hh[k].is_null(), "el hogar no tiene plan propio: {k} en {hh}");
-    }
-    for k in ["required_capital_path", "disposable_capital", "coast_path"] {
-        assert!(
-            hh[k].as_array().expect("array").is_empty(),
-            "las series del plan son de una persona: {k} en {hh}"
+    // 5. **El hogar NO resuelve fecha por miembro** (5.0.0). Cada solve estocástico cuesta
+    // segundos y el agregado corre N simulaciones: resolver N planes convertiría la vista más
+    // informativa en la petición más cara de la app. Cada fila lo DICE con su `plan_state`, en
+    // vez de dejar un hueco que se leería como «este miembro no tiene plan».
+    for m in members {
+        assert_eq!(
+            m["plan_state"], "household_not_solved",
+            "el estado es una propiedad de la VISTA, igual para todos: {m}"
         );
     }
+    // Lo que sí viaja es la fecha por EDAD de quien la tenga: es un DATO del perfil, no una
+    // búsqueda, así que no cuesta un solo sorteo. `bob` corre `retire_at_age`; `alice` corre
+    // `asap`, cuya fecha la decidiría el umbral — y el hogar no lo resuelve.
+    assert!(
+        ma["jubilacion_month_index"].is_null(),
+        "la fecha de `asap` la decide el umbral, y el hogar no lo resuelve: {ma}"
+    );
+    assert!(
+        !mb["jubilacion_month_index"].is_null(),
+        "la edad de bob es un dato, no una búsqueda: {mb}"
+    );
+
+    // 6. El agregado NO publica plan propio.
+    assert!(
+        hh["warnings"].as_array().expect("warnings").is_empty(),
+        "los avisos son por miembro: {hh}"
+    );
 }
 
 /// Un miembro **sin ningún dato** no rompe el agregado: aporta una serie plana de ceros y su fila

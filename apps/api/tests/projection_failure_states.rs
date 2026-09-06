@@ -216,11 +216,16 @@ async fn negative_amortization_is_published_per_liability() {
     assert_eq!(dec(&m1["principal_repaid"]), -200.0, "{m1}");
 }
 
-/// T3 · `swr_pct = "0"` es escritura válida («jamás») pero anulaba el objetivo SIN explicación
+/// T3 · `swr_pct = "0"` es escritura válida («jamás») pero anulaba el número FIRE SIN explicación
 /// en HTTP. Ahora la razón viaja con el mismo literal que simulate_projection publica — paridad
 /// por construcción (mismo campo, misma función).
+///
+/// **5.0.0**: el campo se llama `fire_number_classic_absent_reason` y lo que falta es un ESCALAR
+/// informativo, no un objetivo que dispare nada (el motor recibe `fire_target: None`). Los tres
+/// literales y la causa son los mismos; el nombre cambió para que su ausencia no se lea como
+/// «esta simulación no se jubila», que es lo que significaba en 4.15.x.
 #[tokio::test]
-async fn fire_target_absent_reason_reaches_http_with_swr_zero() {
+async fn fire_number_classic_absent_reason_reaches_http_with_swr_zero() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("t3x").await;
     let cat_a = app.create_category(&owner, "asset", "Cash").await;
@@ -253,8 +258,11 @@ async fn fire_target_absent_reason_reaches_http_with_swr_zero() {
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
 
     let series = app.get_with_cookie("/v1/projection/series", &owner.cookie).await.json();
-    assert!(series["jubilacion_target_net_worth"].is_null(), "{series}");
-    assert_eq!(series["fire_target_absent_reason"], "swr_not_positive", "{series}");
+    assert!(series["fire_number_classic_today"].is_null(), "{series}");
+    assert_eq!(
+        series["fire_number_classic_absent_reason"], "swr_not_positive",
+        "{series}"
+    );
 
     let token = create_token(&app, &owner).await;
     let sim = tool_json(&mcp_post(&app, &token, tool_call("simulate_projection", json!({}))).await);
@@ -266,7 +274,7 @@ async fn fire_target_absent_reason_reaches_http_with_swr_zero() {
 
 /// T4 · Las otras dos causas + el control de que el campo no es siempre no-nulo.
 #[tokio::test]
-async fn fire_target_absent_reason_covers_the_other_two_causes() {
+async fn fire_number_classic_absent_reason_covers_the_other_two_causes() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("t4x").await;
     let cat_i = app.create_category(&owner, "income", "Pension").await;
@@ -305,7 +313,10 @@ async fn fire_target_absent_reason_covers_the_other_two_causes() {
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
     let series = app.get_with_cookie("/v1/projection/series", &owner.cookie).await.json();
-    assert_eq!(series["fire_target_absent_reason"], "net_need_not_positive", "{series}");
+    assert_eq!(
+        series["fire_number_classic_absent_reason"], "net_need_not_positive",
+        "{series}"
+    );
 
     // (c) bien configurado ⇒ razón null Y objetivo presente (el campo no es siempre no-nulo).
     let r = app
@@ -325,6 +336,193 @@ async fn fire_target_absent_reason_covers_the_other_two_causes() {
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
     let series = app.get_with_cookie("/v1/projection/series", &owner.cookie).await.json();
-    assert!(series["fire_target_absent_reason"].is_null(), "{series}");
-    assert!(!series["jubilacion_target_net_worth"].is_null(), "{series}");
+    assert!(series["fire_number_classic_absent_reason"].is_null(), "{series}");
+    assert!(!series["fire_number_classic_today"].is_null(), "{series}");
+}
+
+// =================================================================================================
+// 5.0.0 — los estados de fallo del modelo v2
+// =================================================================================================
+
+/// **Una pensión declarada que no puede entrar al plan lo DICE** (B4).
+///
+/// Sin fecha de nacimiento no hay edad que convertir en mes, así que la pensión no tiene
+/// calendario y el bucle no la cobra nunca. Publicar la serie sin más dejaría al usuario mirando
+/// una proyección sin pensión con la pensión escrita en su perfil: el mismo hueco silencioso que
+/// esta casa persigue. La razón viaja en su propio campo, no solo como aviso.
+#[tokio::test]
+async fn a_pension_without_birth_date_publishes_its_absent_reason() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("penx").await;
+    let cat_e = app.create_category(&owner, "expense", "Vida").await;
+    let r = app
+        .post_json_with_cookie(
+            "/v1/budget/entries",
+            json!({"category_id": cat_e, "amount": "1500", "ends_at_retirement": false}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"pension": {"monthly_amount_today": "1200", "starts_at_age": 67},
+                   "birth_date": Value::Null}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    let s = app
+        .get_with_cookie("/v1/projection/series", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(s["pension_absent_reason"], "birth_date_missing", "{s}");
+    assert!(
+        s["pension_start_month_index"].is_null(),
+        "sin calendario no hay mes de inicio: {s}"
+    );
+    // Y el plan entero está ausente por la misma causa (C5), con la serie publicándose igual.
+    assert_eq!(s["plan_absent_reason"], "birth_date_missing", "{s}");
+    assert!(!s["points"].as_array().expect("points").is_empty(), "{s}");
+}
+
+/// **La pensión que empieza DENTRO de la media jornada y no se cobra se avisa** (B9).
+///
+/// `fraction_while_partial` vale 0 por defecto —el supuesto conservador: contar una pensión que
+/// no cobras adelanta la fecha con dinero que no existe—, así que un hogar que baja a media
+/// jornada a los 60 y cumple la edad de pensión a los 63 pasa tres años sin sueldo completo y sin
+/// pensión. No es un error: es el supuesto. Pero tiene que decirse, porque la tarjeta de la
+/// pensión enseña un importe que en esos meses no entra.
+#[tokio::test]
+async fn a_pension_inside_the_partial_phase_warns_that_it_is_unpaid() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("b9x").await;
+    let cat_i = app.create_category(&owner, "income", "Nómina").await;
+    let cat_e = app.create_category(&owner, "expense", "Vida").await;
+    let cat_a = app.create_category(&owner, "asset", "Fondos").await;
+    for body in [
+        json!({"category_id": cat_i, "amount": "3000", "ends_at_retirement": true}),
+        json!({"category_id": cat_e, "amount": "2000", "ends_at_retirement": false}),
+    ] {
+        let r = app
+            .post_json_with_cookie("/v1/budget/entries", body, &owner.cookie)
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat_a, "name": "Indexado", "current_value": "100000",
+                   "is_liquid": true, "expected_annual_return_percent": "5",
+                   "annual_volatility_percent": "15"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    // Media jornada a los 55 (edad fija) y pensión a los 67: **doce años** de fase con la pensión
+    // entrando por el medio. La fase es larga a propósito — con una ventana corta el sorteo
+    // podría colocar la jubilación TOTAL antes de la pensión, y entonces no habría ningún mes en
+    // que la pensión coincida con la media jornada: el aviso no tendría nada que advertir.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"strategy": "partial", "swr_pct": "4",
+                   "partial_retirement": {"mode": "at_age", "starts_at_age": 55,
+                                          "income_monthly_today": "1000"},
+                   "pension": {"monthly_amount_today": "1400", "starts_at_age": 67,
+                               "fraction_while_partial": "0"}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    let s = app
+        .get_with_cookie("/v1/projection/series", &owner.cookie)
+        .await
+        .json();
+    let warnings: Vec<&str> = s["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(|w| w.as_str())
+        .collect();
+    assert!(
+        warnings.contains(&"pension_unpaid_during_partial"),
+        "la pensión empieza dentro de la fase y no se cobra: {warnings:?} en {s}"
+    );
+
+    // Control negativo: cobrándola entera durante la fase, el aviso desaparece — el aviso mide el
+    // SUPUESTO, no la mera coincidencia de fechas.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"pension": {"monthly_amount_today": "1400", "starts_at_age": 67,
+                               "fraction_while_partial": "1"}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let s2 = app
+        .get_with_cookie("/v1/projection/series", &owner.cookie)
+        .await
+        .json();
+    let warnings2: Vec<&str> = s2["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(|w| w.as_str())
+        .collect();
+    assert!(
+        !warnings2.contains(&"pension_unpaid_during_partial"),
+        "cobrándola no hay nada que advertir: {warnings2:?} en {s2}"
+    );
+}
+
+/// **Un plan que no alcanza el umbral en ningún mes dice `not_reachable`, no «mes 0»**.
+///
+/// «No llegas» y «llegas ya» son respuestas opuestas, y la segunda es la que sale sola si alguien
+/// rellena la ausencia con el valor que más se le parece. Lo que se publica es la base
+/// `not_reachable`, la fecha a `null` y el éxito del **mejor intento observado** al lado — porque
+/// «lo más cerca que llegas es el 40 %» es información, y un hueco no.
+#[tokio::test]
+async fn a_plan_that_cannot_reach_the_threshold_says_not_reachable_not_zero() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("nrx").await;
+    let cat_i = app.create_category(&owner, "income", "Nómina").await;
+    let cat_e = app.create_category(&owner, "expense", "Vida").await;
+    // Gasto por encima del ingreso y sin cartera: no hay ningún mes del horizonte en que este
+    // hogar pueda jubilarse.
+    for body in [
+        json!({"category_id": cat_i, "amount": "1200", "ends_at_retirement": true}),
+        json!({"category_id": cat_e, "amount": "1800", "ends_at_retirement": false}),
+    ] {
+        let r = app
+            .post_json_with_cookie("/v1/budget/entries", body, &owner.cookie)
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    }
+
+    let s = app
+        .get_with_cookie("/v1/projection/series", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(s["retirement_date_basis"], "not_reachable", "{s}");
+    assert!(
+        s["jubilacion_month_index"].is_null(),
+        "sin fecha se publica null, JAMÁS un 0 — un 0 se lee como «ya puedes»: {s}"
+    );
+    assert!(
+        s["plan_absent_reason"].is_null(),
+        "«no llegas» es un RESULTADO, no un plan ausente: {s}"
+    );
+    assert!(
+        !s["success_of_plan"].is_null(),
+        "sin fecha sigue habiendo una medición: la del mejor intento: {s}"
+    );
+    assert!(
+        s["needed_capital_today"].is_null()
+            && s["needed_capital_absent_reason"].is_string(),
+        "un hogar sin líquido no necesita 0 €; la ausencia se nombra: {s}"
+    );
 }

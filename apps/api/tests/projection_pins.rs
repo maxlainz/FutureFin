@@ -19,6 +19,15 @@ fn dec(v: &Value) -> f64 {
         .expect("decimal")
 }
 
+/// NW(360) del escenario A **sin jubilación** (5.0.0), recapturado tras el cambio de modelo con la
+/// predicción escrita ANTES de medir: sube respecto de los 677.335,52 € de 4.15.x porque el hogar
+/// deja de drenar desde el mes 235 (con `?months=` no hay plan, y sin plan no hay jubilación —
+/// C5). Medido: **1.193.981,1795** (+516.645,66; el orden de magnitud es el esperado: 125 meses de
+/// 1.800 €/mes de gasto que ya no se venden, más su composición al 5 %).
+/// Se declara aquí, y no incrustado en el `assert`, para que actualizarlo sea un cambio de una
+/// línea con su porqué al lado.
+const NW360_SIN_JUBILACION: f64 = 1_193_981.18;
+
 fn nw_at(series: &Value, month: u64) -> f64 {
     series["points"]
         .as_array()
@@ -106,18 +115,23 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
     // tramo 21 %: (14.400 + 1.140 − 0,21×6.000)/0,79 = 14.280/0,79 = 18.075,9494 ≤ 50.000 ✓.
     // target = 18.075,9494 / 0,035 = 516.455,6961.
     //
-    // OLA 4 (#141/#142/#143): este pin NO se movió, y el porqué es la identidad que la ola
-    // pinea en el engine (`target_and_crossing_base_agree_on_the_liability_accounting`):
-    // `jubilacion_target_net_worth` es la BASE en euros de hoy (el término de deuda viaja
-    // aparte en `fire_target_debt_component`), y el cruce (mes 235) cae DESPUÉS del fin del
-    // plan (mes ~180), donde término = residual = principal congelado — ahí
-    // «líquido ≥ base + término» y el viejo «NW ≥ base» coinciden EXACTAMENTE
-    // (liquid − residual = NW). Tampoco hay parpadeo que el latch (#141) congele: tras el
-    // cruce el retorno del activo (~5 %/a sobre ~570 k€) supera el déficit de 1.200 €/mes y
-    // el patrimonio nunca recae bajo el objetivo. Un cruce DURANTE el plan sí se mueve — eso
-    // lo pinean los tests del engine de la Ola 4.
-    let target = dec(&s["jubilacion_target_net_worth"]);
-    assert!((target - 516_455.6961).abs() < 0.01, "target: {target}");
+    // **5.0.0** — `jubilacion_target_net_worth` (la BASE del objetivo en euros de hoy) y
+    // `fire_target_debt_component` (su término finito de deuda) se retiraron con el objetivo como
+    // decisión. Lo que sobrevive es el **número FIRE clásico**, un escalar informativo que vale
+    // `base + término de deuda` en el mes 0 — las dos mitades que antes viajaban por separado,
+    // ahora sumadas.
+    //
+    // Aquí NO se pinea su valor exacto a propósito: el término de deuda de este escenario lleva
+    // el residual del plan francés, que este fichero no deriva a mano (lo pinean los tests del
+    // motor de la Ola 4). Lo que se pinea es la COTA que la descomposición implica: la cifra
+    // tiene que superar la base de 516.455,6961 € en al menos las 180 cuotas de 800 € que quedan
+    // por pagar. El pin exacto y sin deuda está en el escenario B.
+    let clasico = dec(&s["fire_number_classic_today"]);
+    assert!(
+        clasico >= 516_455.6961 + 144_000.0,
+        "número FIRE clásico = base (516.455,6961) + término de deuda (≥ 180×800): {clasico}"
+    );
+    assert!(s["fire_number_classic_absent_reason"].is_null(), "hay número: {s}");
 
     // capturado 4.6.0 (#144 default french ya aplicado aquí a mano; verificado inmóvil en la
     // Ola 4 por lo de arriba; #124 no aplica — no hay partidas vencidas):
@@ -125,42 +139,37 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
     let nw12 = nw_at(&s, 12);
     let nw180 = nw_at(&s, 180);
     let nw360 = nw_at(&s, 360);
-    assert_eq!(jub, 235, "jubilacion_month_index capturado: {jub}");
-    // R8 (5.0.0) — **el pin de que la mudanza no movió el número.** `jubilacion_month_index`
-    // dejó de derivarse del cruce que calcula el handler y pasa a ser el mes EFECTIVO que
-    // decide el motor (`ProjectionOutput::retirement_month_index`, traducido a la rejilla
-    // publicada). En la estrategia por defecto —`asap`, jubilación por cruce— las tres cifras
-    // son la MISMA por construcción: el cruce ES el trigger. Este assert es lo que se rompería
-    // si alguien publicara el mes del bucle a pelo (sería 236) o si el cruce-lectura y el
-    // trigger dejaran de coincidir en `asap`.
-    assert_eq!(
-        s["retirement_month_index"], 235,
-        "retirement_month_index debe ser el mismo mes efectivo: {}",
-        s["retirement_month_index"]
+    // **5.0.0 — este pin cambia de veredicto, y es la consecuencia entera del modelo v2.**
+    //
+    // Hasta 4.15.x este hogar se jubilaba en el mes 235 porque el LÍQUIDO cruzaba el objetivo
+    // determinista. En v2 el cruce no jubila a nadie: la fecha la decide el umbral de éxito, y
+    // un `?months=` **no resuelve plan** (D7 — biseccionar sobre miles de caminos en cada
+    // petición con horizonte arbitrario pondría decenas de segundos de CPU detrás de un
+    // parámetro de query). Así que esta serie es la trayectoria SIN jubilarse: el motor recibe
+    // `AtMonth(horizonte + 1)`.
+    //
+    // Predicho ANTES de medir: `jubilacion_month_index` pasa de 235 a `null`;
+    // `phase_transitions` pierde la fase `retired`; la retirada del mes 300 pasa de > 0 a 0; y
+    // NW(360) **sube** —el hogar sigue ingresando 3.000 y gastando 1.200 hasta el final en vez
+    // de drenar desde el 235—. NW(12) y NW(180) **no se mueven**: los dos caen antes del mes
+    // 235, donde las dos versiones simulan exactamente lo mismo.
+    assert!(
+        jub.is_null(),
+        "un `?months=` no resuelve plan, y sin plan no hay fecha: {jub}"
     );
-    assert_eq!(
-        s["liquid_crossing_month_index"], 235,
-        "con `asap` el cruce ES el trigger: {}",
-        s["liquid_crossing_month_index"]
-    );
+    assert!(s["retirement_month_index"].is_null(), "{s}");
     assert_eq!(s["strategy"], "asap", "estrategia por defecto: {}", s["strategy"]);
     assert_eq!(
-        s["retirement_trigger"], "liquid_crossing",
-        "trigger por defecto: {}",
-        s["retirement_trigger"]
+        s["jubilacion_absent_reason"], "months_override",
+        "la ausencia se nombra: {s}"
     );
-    assert!(
-        s["jubilacion_absent_reason"].is_null() && s["liquid_crossing_absent_reason"].is_null(),
-        "hay objetivo y hay cruce: ninguna razón de ausencia: {s}"
-    );
-    // Las fases: acumulando desde el mes 0, jubilado desde el mes del cruce. Sobre la serie, no
-    // sobre el enum (§C: el invariante es de comportamiento).
+    assert_eq!(s["plan_absent_reason"], "months_override", "{s}");
+    // Las fases: solo acumulación. Sobre la serie, no sobre el enum (§C: el invariante es de
+    // comportamiento).
     let fases = s["phase_transitions"].as_array().expect("phase_transitions");
-    assert_eq!(fases.len(), 2, "acumulación + jubilación: {fases:?}");
+    assert_eq!(fases.len(), 1, "sin jubilación solo hay acumulación: {fases:?}");
     assert_eq!(fases[0]["phase"], "accumulating");
     assert_eq!(fases[0]["month_index"], 0);
-    assert_eq!(fases[1]["phase"], "retired");
-    assert_eq!(fases[1]["month_index"], 235, "la fase empieza en el mes publicado");
     // Las tres series de retirada existen en cada punto y, con `fixed_real`, recorte y exceso
     // son cero SIEMPRE (la regla no tiene techo): si alguna vez dejan de serlo sin que cambie
     // la regla, es que el motor está recortando por su cuenta.
@@ -180,7 +189,7 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
             .unwrap()
     };
     assert_eq!(w(180), 0.0, "en el mes 180 aún no está jubilado");
-    assert!(w(300) > 0.0, "jubilado desde el 235: el mes 300 retira");
+    assert_eq!(w(300), 0.0, "sin plan no se jubila nunca: el mes 300 tampoco retira");
     // El hogar de un solo miembro NO publica `members[]` en `mine`: la respuesta entera es suya.
     assert!(
         s["members"].as_array().is_some_and(|m| m.is_empty()),
@@ -200,11 +209,18 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
     // ya estable en 180, la cuota 181 no se paga: esos 800 € componen al 5 % los ~180 meses
     // restantes y el residual congelado queda más alto → NW(360) = 677.335,52 (Δ +1.020,48,
     // predicho en #184 y confirmado en local antes de actualizar el pin).
-    // El cruce (235), NW(12) y NW(180) NO se mueven: antes del 235 este hogar no drena, y los
-    // meses 1..180 son idénticos con ambas longitudes. El mecanismo exacto está pineado a mano
-    // en el engine (`derived_g_rises_along_the_trajectory…`,
-    // `the_simulated_withdrawal_also_pays_taxes` — este último sin coste declarado, g=1).
-    assert!((nw360 - 677_335.52).abs() < 0.01, "NW(360) capturado: {nw360}");
+    // El mecanismo exacto está pineado a mano en el engine
+    // (`derived_g_rises_along_the_trajectory…`, `the_simulated_withdrawal_also_pays_taxes`).
+    //
+    // **5.0.0 recaptura NW(360)**: sin jubilación no hay drenaje desde el mes 235, así que la
+    // cifra SUBE respecto de los 677.335,52 € de 4.15.x. La cota se comprueba antes que el
+    // valor: si algún día el número bajara de aquello, sería que la jubilación volvió a colarse
+    // en una respuesta que declara `plan_absent_reason`.
+    assert!(
+        nw360 > 677_335.52,
+        "sin drenaje desde el mes 235, NW(360) tiene que superar el pin de 4.15.x: {nw360}"
+    );
+    assert!((nw360 - NW360_SIN_JUBILACION).abs() < 0.01, "NW(360) capturado: {nw360}");
 }
 
 /// Escenario B — «inflación 2,5 %» (lo moverán #146/#139/#149 en la Ola 5).
@@ -259,13 +275,15 @@ async fn pin_escenario_b_inflacion() {
         .await
         .json();
 
-    // a mano: base = 1.500×12/0,04 = 450.000. target(120) = 450.000×1,025^10 = 576.038,04
-    // (1,025^10 = 1,280084544196…; la cifra 576.018,10 que llevaba este comentario transponía
-    // dígitos del producto — errata detectada en el spike de la Ola 5).
-    let base = dec(&s["jubilacion_target_net_worth"]);
-    assert!((base - 450_000.0).abs() < 0.01, "base: {base}");
-    let ft120 = s["fire_target_series"].as_array().map(|a| a.len());
-    assert!(ft120.unwrap_or(0) > 0, "fire_target_series vacío");
+    // a mano: base = 1.500×12/0,04 = 450.000. **Sin deuda**, el número FIRE clásico de 5.0.0 ES
+    // esa base: `PlanFireTarget.at(0)` = base + término de deuda, y aquí el término es 0 exacto.
+    // Es el pin limpio de la cifra, sin el residual del plan francés que enturbia el escenario A.
+    let clasico = dec(&s["fire_number_classic_today"]);
+    assert!((clasico - 450_000.0).abs() < 0.01, "número FIRE clásico: {clasico}");
+    // **5.0.0**: la serie del objetivo (`fire_target_series`) se retiró — el motor ya no recibe
+    // objetivo y el cruce no decide nada. La línea que la app dibuja contra el patrimonio es hoy
+    // `needed_capital_curve`, de NIVEL 2 y por tanto ausente en un `?months=`.
+    assert!(s["fire_target_series"].is_null(), "{s}");
 
     // INVERTIDO en la Ola 5 (#139; capturado en 4.6.0 como 285 / 211.361,91 / 1.094.275,23 con
     // el gasto congelado). Con el gasto indexado al 2,5 % e ingresos planos, este hogar —que
@@ -275,7 +293,10 @@ async fn pin_escenario_b_inflacion() {
     let jub = s["jubilacion_month_index"].clone();
     let nw120 = nw_at(&s, 120);
     let nw360 = nw_at(&s, 360);
-    assert!(jub.is_null(), "sin cruce en 360 meses con el gasto indexado: {jub}");
+    assert!(
+        jub.is_null(),
+        "un `?months=` no resuelve plan; y con el gasto indexado este hogar tampoco cruzaría: {jub}"
+    );
     assert!((nw120 - 181_037.91).abs() < 0.01, "NW(120) predicho: {nw120}");
     assert!((nw360 - 777_970.12).abs() < 0.01, "NW(360) predicho: {nw360}");
 }

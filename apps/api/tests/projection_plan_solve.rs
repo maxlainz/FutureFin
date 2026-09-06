@@ -1,20 +1,14 @@
 //! **El plan de jubilación resuelto por el sorteo**: los dos niveles de
 //! `handlers/retirement_solver.rs` vistos desde fuera, por HTTP (5.0.0, modelo v2, WP A3).
 //!
-//! # Estos tests están escritos contra el CONTRATO, y todavía no pueden correr
+//! # Escritos contra el CONTRATO, y ya conectados
 //!
-//! A3 construye el solver y su cache; quien los **conecta** a la respuesta es A4 (ensamblado) y
-//! quien **publica** el bloque «plan» de `ProjectionSeriesResponse` es A5. Hasta que esos dos
-//! aterricen, `GET /v1/projection/series` no tiene ni `retirement_date_basis` ni
-//! `needed_capital_today` ni `needed_capital_curve_state`, así que todo esto fallaría por campos
-//! ausentes — no por el solver.
-//!
-//! Por eso van con `#[ignore]` y con la misma frase en todos: **A5 tiene que quitar el `ignore`**.
-//! No es un adorno: un test ignorado que nadie desmarca es peor que un test que no existe, porque
-//! aparenta cobertura. Si al cerrar A5 alguno sigue ignorado, o falta el campo o falta el test.
-//!
-//! Compilan HOY —van por HTTP y leen `serde_json::Value`, así que ningún campo nuevo es un símbolo
-//! de Rust— y eso es lo que los hace verificables ya: `cargo check --tests` los cubre.
+//! A3 construyó el solver y su cache; A4 lo conectó al ensamblado y A5 publicó el bloque «plan»
+//! de `ProjectionSeriesResponse`. Estos tests nacieron con `#[ignore]` porque la respuesta
+//! todavía no tenía ni `retirement_date_basis` ni `needed_capital_today` ni
+//! `needed_capital_curve_state`; A5 los desmarcó al publicarlos. **Ninguno vuelve a llevar
+//! `#[ignore]`**: un test ignorado que nadie desmarca es peor que un test que no existe, porque
+//! aparenta cobertura.
 //!
 //! # Qué se mide aquí y qué no
 //!
@@ -29,9 +23,6 @@ use common::{LoggedInOwner, TestApp};
 use futurefin_api::state::Density;
 use serde_json::Value;
 use uuid::Uuid;
-
-/// La razón, escrita una sola vez, para que quitarla sea un `grep` y no una búsqueda.
-const PENDING_A5: &str = "el bloque «plan» de la serie lo publica A5; A5 debe QUITAR este ignore";
 
 /// Un hogar con cartera y con margen: sin líquido no hay ni fecha ni capital que medir, y todos
 /// estos tests se quedarían midiendo la ausencia.
@@ -59,8 +50,9 @@ async fn household_with_a_plan(app: &TestApp, name: &str) -> LoggedInOwner {
     for (cat, amount) in [(income_cat, "3000"), (expense_cat, "1500")] {
         let r = app
             .post_json_with_cookie(
-                "/v1/budget",
-                serde_json::json!({"category_id": cat, "amount": amount}),
+                "/v1/budget/entries",
+                serde_json::json!({"category_id": cat, "amount": amount,
+                                   "ends_at_retirement": false}),
                 &owner.cookie,
             )
             .await;
@@ -90,14 +82,19 @@ async fn date_with_threshold(app: &TestApp, owner: &LoggedInOwner, threshold: u3
 /// Espera a que el nivel 2 aterrice, con una cota acotada por EVENTO y no por reloj: sale en
 /// cuanto el estado deja de ser `computing`. El tope solo se agota si de verdad no llegó.
 async fn settle_plan_extras(app: &TestApp, cookie: &str) -> Value {
-    for _ in 0..600 {
+    // **El presupuesto es de EVENTO, no de reloj**: se sale en cuanto el estado deja de ser
+    // `computing`. El tope es generoso a propósito — los costes medidos del nivel 2 (≈ 16 s la
+    // curva, ≈ 7 s la tira anual) están tomados en `release`, y estos tests corren en `debug`,
+    // donde la coma flotante del sorteo va un orden de magnitud más lenta y además compite por
+    // los DOS permisos del semáforo de CPU con el resto de la suite.
+    for _ in 0..1_200 {
         let r = app.get_with_cookie("/v1/projection/series", cookie).await;
         assert_eq!(r.status, http::StatusCode::OK);
         let body = r.json();
         if body["needed_capital_curve_state"] != "computing" {
             return body;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     panic!("el nivel 2 no aterrizó dentro del margen");
 }
@@ -115,7 +112,6 @@ async fn settle_plan_extras(app: &TestApp, cookie: &str) -> Value {
 /// que afirma no es el reloj, es el CONTRATO: los campos del nivel 1 están y los del nivel 2
 /// todavía no.
 #[tokio::test]
-#[ignore = "el bloque «plan» de la serie lo publica A5; A5 debe QUITAR este ignore"]
 async fn the_series_waits_for_level_one_and_the_extras_arrive_later() {
     let app = TestApp::spawn().await;
     let owner = household_with_a_plan(&app, "alice").await;
@@ -169,13 +165,13 @@ async fn the_series_waits_for_level_one_and_the_extras_arrive_later() {
 /// contenido, así que si la deduplicación funcionara mal habría dos tareas escribiendo la misma
 /// entrada, y lo que se observa es que la entrada es una y su contenido, uno.
 #[tokio::test]
-#[ignore = "el bloque «plan» de la serie lo publica A5; A5 debe QUITAR este ignore"]
 async fn two_concurrent_requests_solve_the_date_once() {
     let app = TestApp::spawn().await;
     let owner = household_with_a_plan(&app, "alice").await;
     let iid = app.installation_id().await;
     app.settle_login_warmup(iid).await;
 
+    let before = app.state.plan_cache.read().await.len();
     let (a, b) = tokio::join!(
         app.get_with_cookie("/v1/projection/series", &owner.cookie),
         app.get_with_cookie("/v1/projection/series", &owner.cookie),
@@ -194,8 +190,11 @@ async fn two_concurrent_requests_solve_the_date_once() {
     settle_plan_extras(&app, &owner.cookie).await;
     assert_eq!(
         app.state.plan_cache.read().await.len(),
-        1,
-        "una pregunta, una entrada: la deduplicación por `plan_inflight` es lo que lo garantiza"
+        before + 1,
+        "una pregunta, una entrada: la deduplicación por `plan_inflight` es lo que lo garantiza. \
+         Se mide el DELTA y no el total porque el warm-up del login ya dejó la suya —del hogar \
+         vacío de antes de sembrarlo—, y esa entrada es legítima: la cache está direccionada por \
+         contenido y aquel hogar era otro"
     );
 }
 
@@ -210,7 +209,6 @@ async fn two_concurrent_requests_solve_the_date_once() {
 /// comprueba es justo eso: tras mutar, la entrada del plan que sirve el GET es OTRA, y la vieja
 /// sigue ahí sin que nadie pueda alcanzarla.
 #[tokio::test]
-#[ignore = "el bloque «plan» de la serie lo publica A5; A5 debe QUITAR este ignore"]
 async fn the_plan_cache_is_content_addressed_and_a_mutation_moves_the_key() {
     let app = TestApp::spawn().await;
     let owner = household_with_a_plan(&app, "alice").await;
@@ -275,7 +273,6 @@ async fn the_plan_cache_is_content_addressed_and_a_mutation_moves_the_key() {
 /// exactamente esa y no un margen a ojo. **Una violación mayor no es un flake: es un hallazgo**, y
 /// se abre como issue.
 #[tokio::test]
-#[ignore = "el bloque «plan» de la serie lo publica A5; A5 debe QUITAR este ignore"]
 async fn a_higher_threshold_never_moves_the_date_earlier() {
     use futurefin_engine_stochastic::MAX_CONFIRMATION_ADVANCES;
 
@@ -304,7 +301,6 @@ async fn a_higher_threshold_never_moves_the_date_earlier() {
 /// Misma monotonía del criterio, aplicada a las dos fechas de referencia del nivel 2 con el umbral
 /// por defecto (95 %) en medio. Misma tolerancia y por la misma razón.
 #[tokio::test]
-#[ignore = "el bloque «plan» de la serie lo publica A5; A5 debe QUITAR este ignore"]
 async fn the_hundred_and_ninety_dates_bracket_the_ninety_five() {
     use futurefin_engine_stochastic::MAX_CONFIRMATION_ADVANCES;
 
@@ -349,7 +345,6 @@ async fn the_hundred_and_ninety_dates_bracket_the_ninety_five() {
 /// muestra finita, que es la clase de número que esta casa no publica. Con 0 fallos de 2.500 la
 /// barra vale 0,1534 pp — pequeña, pero nunca nula.
 #[tokio::test]
-#[ignore = "el bloque «plan» de la serie lo publica A5; A5 debe QUITAR este ignore"]
 async fn the_sampling_error_is_not_zero_with_zero_failures() {
     let app = TestApp::spawn().await;
     // Cartera enorme y gasto pequeño: ningún camino falla, que es justo el caso que importa.
@@ -400,7 +395,6 @@ async fn the_sampling_error_is_not_zero_with_zero_failures() {
 /// alguien rellena la ausencia con el valor que más se le parece. Lo que se publica es
 /// `not_reachable` con el `best_effort` al lado — «lo más cerca que llegas es el 78 % a los 67».
 #[tokio::test]
-#[ignore = "el bloque «plan» de la serie lo publica A5; A5 debe QUITAR este ignore"]
 async fn not_reachable_publishes_best_effort_not_a_date() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
@@ -411,8 +405,9 @@ async fn not_reachable_publishes_best_effort_not_a_date() {
     for (cat, amount) in [(income_cat, "1200"), (expense_cat, "1800")] {
         let r = app
             .post_json_with_cookie(
-                "/v1/budget",
-                serde_json::json!({"category_id": cat, "amount": amount}),
+                "/v1/budget/entries",
+                serde_json::json!({"category_id": cat, "amount": amount,
+                                   "ends_at_retirement": false}),
                 &owner.cookie,
             )
             .await;
@@ -456,13 +451,13 @@ async fn not_reachable_publishes_best_effort_not_a_date() {
 /// de un parámetro de query — el agujero exacto que `heavy.rs` documenta. La serie sale igual, con
 /// `plan_absent_reason` diciendo por qué.
 #[tokio::test]
-#[ignore = "el bloque «plan» de la serie lo publica A5; A5 debe QUITAR este ignore"]
 async fn a_months_override_publishes_the_line_without_the_stochastic_date() {
     let app = TestApp::spawn().await;
     let owner = household_with_a_plan(&app, "alice").await;
     let iid = app.installation_id().await;
     app.settle_login_warmup(iid).await;
 
+    let antes = app.state.plan_cache.read().await.len();
     let r = app
         .get_with_cookie("/v1/projection/series?months=240", &owner.cookie)
         .await;
@@ -475,9 +470,11 @@ async fn a_months_override_publishes_the_line_without_the_stochastic_date() {
     assert_eq!(body["plan_absent_reason"], "months_override", "{body}");
     assert!(body["jubilacion_month_index"].is_null(), "{body}");
     assert!(body["needed_capital_today"].is_null(), "{body}");
-    // Y no deja rastro en la cache de plan: un horizonte a medida no puebla nada.
-    assert!(
-        app.state.plan_cache.read().await.is_empty(),
+    // Y no deja rastro en la cache de plan: un horizonte a medida no puebla nada. Se mide el
+    // DELTA y no el total porque el warm-up del login ya dejó su entrada, que es legítima.
+    assert_eq!(
+        app.state.plan_cache.read().await.len(),
+        antes,
         "un `?months=` no puede sembrar la cache de plan"
     );
 }
@@ -489,7 +486,6 @@ async fn a_months_override_publishes_the_line_without_the_stochastic_date() {
 /// por un campo opcional del perfil (§A del plan de #207), y nunca una fecha inventada a partir de
 /// la edad de otro miembro del hogar.
 #[tokio::test]
-#[ignore = "el bloque «plan» de la serie lo publica A5; A5 debe QUITAR este ignore"]
 async fn without_birth_date_the_plan_is_absent_with_its_reason() {
     let app = TestApp::spawn().await;
     let owner = household_with_a_plan(&app, "alice").await;
@@ -530,7 +526,6 @@ async fn without_birth_date_the_plan_is_absent_with_its_reason() {
 /// distintas en `?density=hybrid` y `?density=monthly` serían dos respuestas a la misma pregunta
 /// en la misma pantalla — la SPA pide las dos a la vez (two-phase loading).
 #[tokio::test]
-#[ignore = "el bloque «plan» de la serie lo publica A5; A5 debe QUITAR este ignore"]
 async fn both_densities_share_one_plan() {
     let app = TestApp::spawn().await;
     let owner = household_with_a_plan(&app, "alice").await;
@@ -575,12 +570,4 @@ fn plan_view_key(
         owner_user_id: Some(user_id),
         density,
     }
-}
-
-/// Nota para quien venga a quitar los `#[ignore]`: el literal está arriba, en [`PENDING_A5`], y
-/// esta función existe para que un `cargo check` avise si alguien lo borra sin quitar los atributos
-/// (que llevan el mismo texto escrito a mano, porque `#[ignore = ...]` no admite una constante).
-#[test]
-fn the_pending_reason_is_written_once() {
-    assert!(PENDING_A5.contains("A5"), "la razón tiene que nombrar al WP que la cierra");
 }
