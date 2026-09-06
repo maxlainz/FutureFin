@@ -451,11 +451,12 @@ async fn get_projection_bands_matches_http_and_hides_the_liquid_bands_by_default
         "debe nombrar el código: {text}"
     );
 
-    // Y el techo del MCP es la MITAD del de HTTP: 2.000 caminos son válidos por HTTP y 400 aquí.
+    // Y el techo del MCP es la MITAD del de HTTP: 3.000 caminos son válidos por HTTP (≤5.000) y
+    // 400 aquí (>2.500).
     let envelope = mcp_post(
         &app,
         &token,
-        tool_call_body("get_projection_bands", serde_json::json!({"paths": 2000})),
+        tool_call_body("get_projection_bands", serde_json::json!({"paths": 3000})),
     )
     .await;
     assert_eq!(envelope["result"]["isError"], true, "{envelope}");
@@ -2917,10 +2918,13 @@ async fn enumerated_params_publish_a_real_enum_in_the_json_schema() {
             "fire_number_mode",
             &["manual", "annual_expense", "current_income"],
         ),
+        // El literal retirado "pension_bridge" NO se anuncia (modelo v2, C7): se sigue aceptando
+        // como alias en el deserializador de dominio, pero no aparece en el schema — nadie debe
+        // aprender un nombre que ya no existe.
         (
             "update_retirement_profile",
             "strategy",
-            &["asap", "retire_at_age", "coast", "partial", "pension_bridge"],
+            &["asap", "retire_at_age", "coast", "partial"],
         ),
         ("update_fire_settings", "expense_avg_window_mode", &["data", "calendar"]),
         ("simulate_projection", "view", &["mine", "household"]),

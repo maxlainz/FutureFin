@@ -139,7 +139,14 @@ async fn portfolio_depletion_month_is_published_and_exact() {
         .get_with_cookie("/v1/projection/series?months=360", &owner.cookie)
         .await
         .json();
-    assert_eq!(series["jubilacion_month_index"], 0, "{series}");
+    // **5.0.0**: aquí ya no hay jubilación que mirar. En 4.15.x este hogar cruzaba el objetivo el
+    // mes 0 (200.000 € líquidos contra un número FIRE manual de 8.000 €) y se «jubilaba» al
+    // instante; en el modelo v2 el cruce no dispara nada y un `?months=` no resuelve plan, así
+    // que la cartera se vacía por el GASTO REGULAR —2.000 €/mes, que es lo que de verdad la
+    // drena— y no por un drenaje de jubilación. El mes de agotamiento no se mueve ni un día: los
+    // 200.000 € se acaban igual.
+    assert!(series["jubilacion_month_index"].is_null(), "{series}");
+    assert_eq!(series["plan_absent_reason"], "months_override", "{series}");
     // #210 — **99, no 100**: el motor agota la cartera en su mes 100 (1-based del bucle) y desde
     // 5.0.0 el handler publica ese hecho en la MISMA rejilla 0-based que `points[].month_index` y
     // que `jubilacion_month_index`, con `engine_month_to_grid` (k − 1). El mes civil no se ha

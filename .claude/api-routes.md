@@ -1085,6 +1085,108 @@ Handler: `handlers/retirement_solver.rs`.
 
 **Densidad (`?density=hybrid`)**: con `?density=hybrid` el response decima los arrays grandes (`points`, `needed_capital_curve`, `asset_series[].values`) a un patrón mixto — mes 0..12 mensual + mes 24, 36, … **y siempre el último mes del horizonte** (`density_month_indices`, `handlers/projection.rs`). Ese último empujón es de 4.0.0 y no es cosmético: el bucle anual solo emitía múltiplos de 12, así que con un horizonte que no lo fuera la serie se cortaba antes de tiempo sin decir nada — con `?months=100&density=hybrid` el último punto era el mes 96 y los meses 97–100 no existían en `points`, ni en las series paralelas, ni en `asset_series[].values`, y desaparecía el punto que cualquiera lee como «patrimonio al final»; con `?months=19` se perdía el 32 % del horizonte pedido. Invisible desde la web (el horizonte derivado siempre es años × 12) pero alcanzable por `?months=N` y por la tool MCP `get_projection`, que **fuerza** `hybrid` — o sea, era el camino por defecto de un consumidor conversacional. Pin: `hybrid_density_always_includes_the_last_month_of_the_horizon`. Total ~82 puntos en lugar de ~841. JSON ~5 KB. El compute interno del engine es idéntico (840 meses); solo cambia la serialización. Cada densidad tiene su propia entry en el cache (`ProjectionCacheKey.density`). Milestones, FIRE crossover y compound marker se calculan sobre el array full (no decimado) para no perder precisión. El campo `density: "monthly" | "hybrid"` viaja en el response para que el cliente sepa qué tiene.
 
+### `simulate_projection` (tool MCP, sin ruta HTTP) — **el what-if bajo el modelo v2 (5.0.0, WP A8)**
+
+What-if puro: dos ensamblados, dos planes, dos simulaciones, cero escrituras y **cero entradas de
+cache** (`simulate_never_touches_the_projection_cache`). Core `simulate_projection_core`
+(`handlers/projection.rs`); la capa MCP solo parsea strings. `view=household` es 400
+`household_not_simulable` — ver arriba.
+
+**Los dos lados resuelven su fecha con el sorteo, y con las MISMAS condiciones.** Cada lado llama a
+`solve_plan_level1_with_budget` (`handlers/retirement_solver.rs`, la única frontera del sorteo)
+con:
+
+- **la misma semilla**: la estable del usuario, `resolve_seed(iid, user, None)` — la misma con la
+  que `GET /v1/projection/series` resuelve su plan y con la que `/v1/projection/bands` dibuja su
+  fan chart. Un `monte_carlo.seed` mueve el SORTEO del eje, **nunca** la fecha (mismo contrato que
+  `?seed=` en las bandas);
+- **el mismo presupuesto de caminos**, publicado por lado en `date_solved_with_paths`:
+  `PlanBudget::SEARCH_ONLY` (500) por defecto, y `PlanBudget::FULL` (500 + confirmación con 2.500)
+  cuando se pide el eje `monte_carlo`. Buscar con 500 en un lado y confirmar con 2.500 en el otro
+  haría que un delta comparase dos tamaños de muestra en vez de dos planes.
+
+Con el presupuesto COMPLETO el lado baseline publica, **cifra a cifra, el mismo plan que
+`GET /v1/projection/series`**: misma entrada, mismas volatilidades, mismo umbral, mismos caminos y
+misma semilla ⇒ la misma `plan_fingerprint`, o sea un HIT de la cache de plan por construcción y no
+una segunda búsqueda que podría contestar otra fecha. Con el presupuesto de BÚSQUEDA la fecha es la
+misma (la confirmación amplía la muestra, no la cambia de sitio) pero la **barra de error** no:
+`success_wilson_low` y `success_sampling_error_pp` son función de `N`. Pins:
+`mcp_simulate.rs::the_baseline_side_is_a_plan_cache_hit` (identidad completa con presupuesto
+completo), `::baseline_without_overrides_matches_get_projection_and_scenario` (la fecha y el
+capital, con el presupuesto por defecto) y `::both_sides_solve_the_date_with_the_same_seed_and_paths`.
+
+**Lo que se SIMULA es el escenario del plan.** Tras el solve, cada lado pasa por `plan_scenario`
+—la misma función que `run_member_projection`—, que aplica el mes forzado, el corte de aportaciones
+y el inicio de la media jornada. Sin eso el bucle recibiría `AtMonth(horizonte + 1)` y la línea
+describiría un hogar que no se jubila nunca.
+
+**El bloque del PLAN, por lado** (todo `null` cuando hay `plan_absent_reason`): `retirement_date_basis`
+(`success_threshold` | `target_age` | `not_reachable`), `safe_date_month_index` (**el mismo valor**
+que `jubilacion_month_index`, que se conserva), `success_of_plan`, `success_wilson_low`,
+`success_sampling_error_pp` (PUNTOS PORCENTUALES, 4 dp), `success_threshold_pct`, `success_verdict`
+(`green|amber|red`, misma regla que las bandas), `date_solved_with_paths`, `needed_capital_today` +
+`needed_capital_absent_reason`, `contribution_required_monthly` +
+`contribution_required_search_ceiling` + `contribution_underfunded`, `coast_stop_month_index`,
+`partial_start_month_index`, `plan_absent_reason`, `warnings`.
+
+- **`plan_absent_reason` en el what-if solo puede valer `birth_date_missing`.** La serie veta
+  además con `months_override` porque un horizonte a medida salta su cache y con ella el sorteo;
+  aquí no hay cache que saltar, así que `months` es parte de la pregunta y se resuelve con él.
+- `success_threshold_pct` viaja **por lado** porque `profile_overrides` lo mueve: sin él, un
+  `jubilacion_months_delta` negativo se leería como una mejora del plan cuando puede ser
+  simplemente un listón más bajo.
+
+**El eje `monte_carlo`, por lado** (ausente ⟺ no se pidió): `success_probability`,
+`sampling_error_pp` (1 dp, como en las bandas), `failures_by_kind` `[F1, F2, F3]`,
+`failure_probability_by_age[]` (**el mismo tipo `FailureProbabilityPoint` y la misma función
+`projection_bands::failure_points`**), `months_below_need_p50`, `withdrawal_to_need_ratio_p50`. El
+bloque compartido `monte_carlo` mantiene solo `paths`, `seed` (string) y `any_volatility_declared`.
+Cotas: `paths` 1..=`MCP_MAX_PATHS` (**2.500** desde 5.0.0; HTTP llega a 5.000).
+
+**Deltas del plan** (`null` en cuanto falta una de las dos columnas — restar contra un «no aplica»
+inventaría un número): `jubilacion_months_delta`, `success_of_plan_delta` (FRACCIÓN, 6 dp; **no
+necesita el eje `monte_carlo`**: sale del solve), `needed_capital_today_delta`,
+`contribution_required_monthly_delta`, `coast_stop_months_delta`. Los `bool` y el veredicto **no
+tienen delta**: se leen comparando las dos columnas.
+
+**Renombrados y retiradas de 5.0.0** (la tool es MCP-only y el catálogo se regenera, así que el
+cambio es de contrato, no de compatibilidad HTTP):
+
+| antes | ahora | por qué |
+|---|---|---|
+| `fire_target_base` | `fire_number_classic_today` | el objetivo dejó de disparar nada; lo que queda es el «25× tu gasto» informativo, y el nombre viejo describía un listón que ya no existe |
+| `fire_target_absent_reason` | `fire_number_classic_absent_reason` | mismos literales (`manual_amount_missing` / `net_need_not_positive` / `swr_not_positive`), misma causa |
+| `fire_target_base_delta` | `fire_number_classic_today_delta` | idem |
+| `required_contribution_*`, `underfunded` | `contribution_required_*`, `contribution_underfunded` | mismo vocabulario que el bloque «plan» de la serie |
+| `coast_fire_month_index`, `coast_fire_months_delta` | `coast_stop_month_index`, `coast_stop_months_delta` | idem |
+| `success_probability_delta` | `success_of_plan_delta` | el delta que importa sale del SOLVE y existe sin pedir el sorteo |
+| `retirement_trigger`, `liquid_crossing_month_index` | — | el cruce contra un objetivo determinista dejó de decidir; quién decidió la fecha lo dice `retirement_date_basis` |
+| `disposable_monthly(_delta)`, `coast_number`, `partial_gap_target(_delta)`, `pension_coverage_ratio(_delta)`, `bridge_effective_withdrawal_pct(_delta)`, `bridge_discount_annual_pct`, `partial_phase_capital_growing` | — | murieron con el objetivo, el descuento del puente y el colchón |
+| `never_retired_probability`, `success_given_retired`, `underfunded_probability` | — | con el mes de jubilación FORZADO, «no jubilarse nunca» dejó de ser un desenlace del sorteo; la infra-financiación es `contribution_underfunded` (plan) y `1 − success_of_plan` |
+
+**Los tres ejes que cambiaron de mecánica sin cambiar de nombre:**
+
+- **`income_pause`** — el retraso ya no sale de `futurefin_engine::retirement_delay_months` (dos
+  simulaciones deterministas): con la fecha forzada eso publicaba `0` en toda estrategia por edad y
+  `null` en las demás, o sea «la excedencia no te cuesta nada» dicho al revés y en silencio. Ahora
+  `income_pause.baseline_month_index` sale de **un solve extra** del MISMO escenario sin la pausa,
+  con la misma semilla y el mismo presupuesto; `paused_month_index` es `scenario.safe_date_month_index`.
+  Lo paga solo quien pide el eje.
+- **`income_growth_real_pct_annual`** — la «primera pasada» que decide dónde se corta el
+  crecimiento es también **un solve**, por lo mismo: una proyección sin plan no tiene fecha que
+  devolver, el corte caía en el horizonte y el escenario cobraba nómina cuarenta años jubilado.
+  `income_growth_stops_at_month_index` sigue publicándose porque el corte sigue siendo aproximado.
+- **`solve.extra_monthly_expense_keeping_date`** — se resuelve sobre el escenario del PLAN, así que
+  la fecha que mantiene fija es la que el solve eligió. Y como esa fecha **no depende del gasto**,
+  la bisección agota su techo y devuelve el máximo sobrante mensual: un SUELO honesto («al menos
+  esto»), no un infinito. Lo que **no** promete es que el éxito aguante ese gasto — la fecha no se
+  mueve, pero gastar más deja menos capital; para eso se simula `extra_monthly_expense` de verdad.
+
+**Coste**: dos solves por llamada (en paralelo, bajo el semáforo de `heavy::run_projection_sim`),
+más uno por cada eje que necesita su propia sonda (`income_pause`, `income_growth_real_pct_annual`).
+Con el presupuesto de búsqueda son ≈ 2,5 s por lado sobre el caso P9; el eje `monte_carlo` los sube
+al presupuesto completo y añade `2 · paths` simulaciones f64.
+
 ### Projection bands (`GET /v1/projection/bands`) — **5.0.0, Monte Carlo del PLAN**
 
 Bandas de percentil del patrimonio y del líquido, éxito del plan con su intervalo y su veredicto, y

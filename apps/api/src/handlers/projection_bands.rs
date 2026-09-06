@@ -232,7 +232,7 @@ pub(crate) fn probability_out(p: f64) -> Option<Decimal> {
 /// vive en `[0, 100]`. La rama imposible publica `Decimal::ZERO` y **deja rastro en el log**,
 /// porque un 0 ahí se leería como «medición sin error», que es exactamente lo contrario de lo que
 /// este número existe para decir.
-fn sampling_error_out(half_width_pp: f64) -> Decimal {
+pub(crate) fn sampling_error_out(half_width_pp: f64) -> Decimal {
     match Decimal::from_f64_retain(half_width_pp) {
         Some(d) => d.round_dp(SAMPLING_ERROR_DP),
         None => {
@@ -824,26 +824,7 @@ fn assemble_bands_response(
         })
         .collect();
 
-    // El reparto por motivo es el de la EJECUCIÓN entera y se repite en todas las filas: el motor
-    // clasifica el PRIMER fallo de cada camino sobre todo el horizonte y no lo desglosa por mes.
-    // Va documentado en `FailureProbabilityPoint::by_kind` — y es la misma convención que
-    // `PlanExtras::failure_probability_by_age`, para que las dos tablas signifiquen lo mismo.
-    let by_kind = outcome.failures_by_kind;
-    let failure_probability_by_age: Vec<FailureProbabilityPoint> = outcome
-        .cumulative_failure_by_age
-        .iter()
-        .map(|&(engine_month, p)| {
-            // El motor cuenta meses 1-based; la respuesta habla la rejilla de `points[]`.
-            let month_index = engine_month_to_grid(Some(engine_month)).unwrap_or(0);
-            let (_, age) = jubilacion_civil(today, birth_date, Some(month_index));
-            FailureProbabilityPoint {
-                month_index,
-                age,
-                probability: probability_out(p),
-                by_kind,
-            }
-        })
-        .collect();
+    let failure_probability_by_age = failure_points(outcome, today, birth_date);
 
     ProjectionBandsResponse {
         view: LedgerView::Mine.as_str(),
@@ -874,6 +855,39 @@ fn assemble_bands_response(
         computed_in_ms,
         model_note: BANDS_MODEL_NOTE.into(),
     }
+}
+
+/// **La tabla «cuándo se rompe el plan»**, de la salida del sorteo a la respuesta publicada.
+///
+/// Vive aquí y no en cada llamante porque las dos superficies que la publican —esta respuesta y
+/// los dos lados de `simulate_projection`— tienen que significar **lo mismo**: mismo paso de
+/// rejilla, misma traducción de meses del bucle a la rejilla publicada
+/// (`engine_month_to_grid`), misma edad civil y el mismo reparto por motivo repetido en todas las
+/// filas (ver [`FailureProbabilityPoint::by_kind`]). Dos copias divergirían en el primer cambio
+/// del crate, y la divergencia sería una tabla que se lee igual y cuenta otra cosa.
+pub(crate) fn failure_points(
+    outcome: &McOutcome,
+    today: chrono::NaiveDate,
+    birth_date: Option<chrono::NaiveDate>,
+) -> Vec<FailureProbabilityPoint> {
+    // El reparto por motivo es el de la EJECUCIÓN entera y se repite en todas las filas: el motor
+    // clasifica el PRIMER fallo de cada camino sobre todo el horizonte y no lo desglosa por mes.
+    let by_kind = outcome.failures_by_kind;
+    outcome
+        .cumulative_failure_by_age
+        .iter()
+        .map(|&(engine_month, p)| {
+            // El motor cuenta meses 1-based; la respuesta habla la rejilla de `points[]`.
+            let month_index = engine_month_to_grid(Some(engine_month)).unwrap_or(0);
+            let (_, age) = jubilacion_civil(today, birth_date, Some(month_index));
+            FailureProbabilityPoint {
+                month_index,
+                age,
+                probability: probability_out(p),
+                by_kind,
+            }
+        })
+        .collect()
 }
 
 /// **El semáforo de D28 contra el umbral DEL PERFIL** (5.0.0, modelo v2, decisión C3).

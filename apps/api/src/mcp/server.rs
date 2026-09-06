@@ -472,10 +472,10 @@ pub struct ProjectionBandsParams {
     #[serde(default)]
     #[schemars(extend("enum" = ["mine", "household"]))]
     pub view: Option<String>,
-    /// Caminos de Monte Carlo (1–1000; default 500). Más caminos afinan la cuarta cifra de la
-    /// probabilidad, no la respuesta: 500 ya distinguen 87 % de 92 %.
+    /// Caminos de Monte Carlo (1–2500; default 2500). Más caminos afinan la cuarta cifra de la
+    /// probabilidad, no la respuesta: ya con 500 se distingue 87 % de 92 %.
     #[serde(default)]
-    #[schemars(range(min = 1, max = 1000))]
+    #[schemars(range(min = 1, max = 2500))]
     pub paths: Option<u32>,
     /// Semilla de 64 bits **en dígitos decimales, como string**. Omitida = la ESTABLE del
     /// usuario: la misma pregunta devuelve la misma cifra hoy y dentro de un año.
@@ -988,11 +988,12 @@ pub struct SimulateParams {
     /// «ahorrar 300 más» es el otro. No elijas por el nombre.
     ///
     /// Gasto mensual extra REAL (string decimal): mueve las bases de los caps `months_expense`
-    /// en los tres modos, y el target FIRE **solo con `fire_number_mode = annual_expense`** (en
-    /// `current_income` el objetivo se deriva del ingreso y en `manual` es fijo, así que ahí
-    /// `fire_target_base_delta` sale 0 y NO es un fallo). **Admite NEGATIVO**: es el único eje
-    /// con signo, porque es el único con semántica de gasto. Si el recorte se pasa de la base,
-    /// la base efectiva se queda en 0 (no se rechaza) y `expense_base_monthly` dice cuál quedó.
+    /// en los tres modos, y el número FIRE clásico **solo con `fire_number_mode = annual_expense`**
+    /// (en `current_income` el número se deriva del ingreso y en `manual` es fijo, así que ahí
+    /// `fire_number_classic_today_delta` sale 0 y NO es un fallo) — es informativo desde 5.0.0, no
+    /// dispara la jubilación ni mueve la fecha. **Admite NEGATIVO**: es el único eje con signo,
+    /// porque es el único con semántica de gasto. Si el recorte se pasa de la base, la base
+    /// efectiva se queda en 0 (no se rechaza) y `expense_base_monthly` dice cuál quedó.
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_SIGNED))]
     pub extra_monthly_expense: Option<String>,
@@ -1016,9 +1017,12 @@ pub struct SimulateParams {
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub extra_monthly_savings: Option<String>,
-    /// SWR en % (0–4, string decimal): «¿y si el SWR fuera 3?». **`"0"` se acepta pero no es un
-    /// escenario conservador, es «jamás»**: anula el objetivo FIRE entero (`fire_target_base` y
-    /// `jubilacion_month_index` salen `null` y la serie del target, vacía)..
+    /// SWR en % (0–6, string decimal): «¿y si el SWR fuera 3?». Es el TOPE de la tasa de retirada
+    /// INICIAL en el mes en que te jubilas (evaluado UNA vez): ya NO dimensiona ningún objetivo.
+    /// **`"0"` se acepta pero no es un escenario conservador, es «jamás»**: con SWR 0 casi ningún
+    /// mes cumple el umbral (`retirement_date_basis: "not_reachable"`, `safe_date_month_index:
+    /// null`) y el número FIRE clásico también se ausenta
+    /// (`fire_number_classic_absent_reason: "swr_not_positive"`).
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub swr_pct: Option<String>,
@@ -1085,11 +1089,15 @@ pub struct SimulateParams {
     /// Inversas caras, opt-in: hoy solo «¿cuánto más puedo gastar sin mover la fecha?».
     #[serde(default)]
     pub solve: Option<SolveParam>,
-    /// **Monte Carlo sobre los dos lados** (opt-in): añade a `baseline` y a `scenario` el bloque
-    /// del éxito —`success_probability` (se jubila Y no agota), `success_verdict`,
-    /// `never_retired_probability`, `success_given_retired`, `underfunded_probability`,
-    /// `months_below_need_p50`— y `success_probability_delta` a
-    /// `deltas`. Sin bandas (usa get_projection_bands).
+    /// **Pedirlo sube el presupuesto del solve de fecha en los DOS lados de 500 a 2.500 caminos**
+    /// (`date_solved_with_paths` pasa de 500 a 2.500): con el eje, el lado `baseline` coincide,
+    /// cifra a cifra, con `GET /v1/projection/series`. Añade además, POR LADO, un bloque
+    /// suplementario con SU PROPIO sorteo de `paths` caminos: `success_probability` (fracción SIN
+    /// ningún fallo F1/F2/F3), `sampling_error_pp` (Wilson, en puntos porcentuales),
+    /// `failures_by_kind`, `failure_probability_by_age` y `months_below_need_p50`. `null`/vacío ⟺
+    /// no se pidió el eje. Sin bandas puntuales (usa get_projection_bands para eso);
+    /// `success_of_plan_delta` en `deltas` viaja SIEMPRE, con o sin este eje — es del solve de
+    /// fecha, no de este bloque.
     #[serde(default)]
     pub monte_carlo: Option<MonteCarloParam>,
 }
@@ -1099,9 +1107,9 @@ pub struct SimulateParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MonteCarloParam {
-    /// Caminos POR LADO (1–1000; default 500). El coste total es el doble.
+    /// Caminos POR LADO (1–2500; default 2500). El coste total es el doble.
     #[serde(default)]
-    #[schemars(range(min = 1, max = 1000))]
+    #[schemars(range(min = 1, max = 2500))]
     pub paths: Option<u32>,
     /// Semilla de 64 bits **en dígitos decimales, como string** (un entero así no sobrevive a un
     /// JSON number). Omitida = la ESTABLE del usuario, la misma que dibuja get_projection_bands:
@@ -1158,10 +1166,13 @@ pub struct SolveParam {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileOverrideParam {
-    /// "asap" | "retire_at_age" | "coast" | "partial" | "pension_bridge". retire_at_age y coast
-    /// exigen target_retirement_age; pension_bridge exige pension; partial exige partial_retirement.
+    /// "asap" | "retire_at_age" | "coast" | "partial". retire_at_age exige target_retirement_age;
+    /// coast exige target_retirement_age (modo fixed_retirement_age) o coast_stop_age (modo
+    /// fixed_stop_age); partial exige partial_retirement. El literal retirado "pension_bridge" se
+    /// SIGUE ACEPTANDO y aterriza en "asap" con pension.bridge_enabled encendido, pero no aparece
+    /// aquí: es compatibilidad de entrada, no una opción que ofrecer.
     #[serde(default)]
-    #[schemars(extend("enum" = ["asap", "retire_at_age", "coast", "partial", "pension_bridge"]))]
+    #[schemars(extend("enum" = ["asap", "retire_at_age", "coast", "partial"]))]
     pub strategy: Option<String>,
     /// Edad de jubilación total (18..=horizon_lifespan_age).
     #[serde(default)]
@@ -1182,7 +1193,7 @@ pub struct ProfileOverrideParam {
     /// true = simular sin importe manual.
     #[serde(default)]
     pub clear_fire_number_manual_amount: Option<bool>,
-    /// SWR en % (0–4), string decimal. Es el MISMO eje que `swr_pct` de primer nivel: pasar los
+    /// SWR en % (0–6), string decimal. Es el MISMO eje que `swr_pct` de primer nivel: pasar los
     /// dos a la vez es un 400.
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
@@ -1191,21 +1202,21 @@ pub struct ProfileOverrideParam {
     #[serde(default)]
     #[schemars(range(min = 85, max = 105))]
     pub horizon_lifespan_age: Option<u32>,
-    /// "perpetuity" (ignora la pensión: conservador) | "bridge_to_pension".
+    /// Ignorado desde 5.0.0 (modelo v2): la pensión es un flujo de caja, no hay base de objetivo
+    /// que elegir.
     #[serde(default)]
-    #[schemars(extend("enum" = ["perpetuity", "bridge_to_pension"]))]
     pub target_basis: Option<String>,
-    /// true = volver a la base derivada.
+    /// Ignorado desde 5.0.0 (modelo v2): no hay base derivada que restaurar.
     #[serde(default)]
     pub clear_target_basis: Option<bool>,
-    /// "expected_return" (default) | "swr" | "none".
+    /// Ignorado desde 5.0.0 (modelo v2): el puente ya no descuenta ningún flujo — ver
+    /// `pension.bridge_max_pct`/`pension.bridge_max_years`.
     #[serde(default)]
-    #[schemars(extend("enum" = ["expected_return", "swr", "none"]))]
     pub bridge_discount_basis: Option<String>,
     /// Regla de retirada COMPLETA (sustituye a la actual).
     #[serde(default)]
     pub withdrawal_rule: Option<WithdrawalRuleParam>,
-    /// Bloque de pensión COMPLETO (sustituye al actual).
+    /// Bloque de pensión COMPLETO (sustituye al actual; el puente vive dentro, ver `PensionParam`).
     #[serde(default)]
     pub pension: Option<PensionParam>,
     /// true = simular sin pensión declarada.
@@ -1217,17 +1228,32 @@ pub struct ProfileOverrideParam {
     /// true = simular sin media jornada.
     #[serde(default)]
     pub clear_partial_retirement: Option<bool>,
-    /// Colchón de caja en meses de gasto (0–60). Solo actúa en Monte Carlo.
+    /// Ignorado desde 5.0.0 (modelo v2): el colchón de caja se retiró; la caja es un activo y la
+    /// regla de ahorro decide cuánto se guarda.
     #[serde(default)]
-    #[schemars(range(min = 0, max = 60))]
     pub cash_buffer_months: Option<u32>,
-    /// true = simular sin colchón.
+    /// Ignorado desde 5.0.0 (modelo v2): no hay colchón que borrar.
     #[serde(default)]
     pub clear_cash_buffer_months: Option<bool>,
-    /// DEPRECADO e IGNORADO desde 5.0.0: el veredicto exige el 100 % de escenarios sin agotar la
-    /// cartera. Se acepta y se descarta; no cambia nada del resultado.
+    /// Umbral de éxito 80–100 (default 95): la parte de los escenarios que tiene que aguantar
+    /// hasta el horizonte; decide la fecha.
     #[serde(default)]
+    #[schemars(range(min = 80, max = 100))]
     pub success_threshold_pct: Option<u32>,
+    /// "fixed_retirement_age" (default: el solver busca el primer mes en que dejar de aportar aún
+    /// llega a target_retirement_age) | "fixed_stop_age" (coast_stop_age es el dato; la jubilación
+    /// la decide el umbral).
+    #[serde(default)]
+    #[schemars(extend("enum" = ["fixed_retirement_age", "fixed_stop_age"]))]
+    pub coast_mode: Option<String>,
+    /// Edad a la que dejas de aportar (18..=105). Dato en coast_mode="fixed_stop_age"; con
+    /// "fixed_retirement_age" la resuelve el solver y mandarla no la fija.
+    #[serde(default)]
+    #[schemars(range(min = 18, max = 105))]
+    pub coast_stop_age: Option<u32>,
+    /// true = simular sin edad de coast fija.
+    #[serde(default)]
+    pub clear_coast_stop_age: Option<bool>,
 }
 
 impl ProfileOverrideParam {
@@ -1257,6 +1283,9 @@ impl ProfileOverrideParam {
             cash_buffer_months: self.cash_buffer_months,
             clear_cash_buffer_months: self.clear_cash_buffer_months,
             success_threshold_pct: self.success_threshold_pct,
+            coast_mode: self.coast_mode.clone(),
+            coast_stop_age: self.coast_stop_age,
+            clear_coast_stop_age: self.clear_coast_stop_age,
             birth_date: None,
             clear_birth_date: None,
             confirm: None,
@@ -2285,6 +2314,22 @@ pub struct PensionParam {
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub fraction_while_partial: Option<String>,
+    /// Puente hasta la pensión, apagado por defecto y disponible con CUALQUIER estrategia:
+    /// mientras la pensión llegue dentro de `bridge_max_years`, el tope de la tasa inicial en el
+    /// mes de jubilación pasa a ser `bridge_max_pct` en vez del SWR, y la fecha válida nunca es
+    /// anterior a pensión − años máximos.
+    #[serde(default)]
+    pub bridge_enabled: Option<bool>,
+    /// Tasa inicial máxima del puente, % ANUAL bruto (> tu swr_pct, ≤ 20), string decimal. Al
+    /// activar el puente sin darla: max(5, swr + 1).
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
+    pub bridge_max_pct: Option<String>,
+    /// Años máximos entre la jubilación y la pensión para que el puente aplique (1–20). Al
+    /// activar el puente sin darlo: 7.
+    #[serde(default)]
+    #[schemars(range(min = 1, max = 20))]
+    pub bridge_max_years: Option<u32>,
 }
 
 /// Fase de media jornada. Termina en la jubilación total (no lleva edad de fin: chocaría con el
@@ -2293,8 +2338,11 @@ pub struct PensionParam {
 #[serde(deny_unknown_fields)]
 pub struct PartialRetirementParam {
     /// Edad a la que empieza (18..=horizon_lifespan_age, y menor que target_retirement_age).
+    /// OBLIGATORIA con mode="at_age" (default); con mode="asap" la resuelve el solver y aquí no
+    /// hay dato que dar.
+    #[serde(default)]
     #[schemars(range(min = 18, max = 105))]
-    pub starts_at_age: u32,
+    pub starts_at_age: Option<u32>,
     /// Ingreso MENSUAL en euros de HOY durante la fase (>= 0; "0" = año sabático).
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub income_monthly_today: String,
@@ -2302,6 +2350,11 @@ pub struct PartialRetirementParam {
     #[serde(default)]
     #[schemars(extend("enum" = ["retirement", "regular"]))]
     pub expense_basis: Option<String>,
+    /// "at_age" (default: edad fija, arriba) | "asap" (el solver busca el primer mes en que bajar
+    /// a media jornada deja el plan en pie; `starts_at_age` pasa a ser una LECTURA).
+    #[serde(default)]
+    #[schemars(extend("enum" = ["at_age", "asap"]))]
+    pub mode: Option<String>,
 }
 
 /// Cambios del perfil de jubilación del usuario DEL TOKEN. Merge campo a campo: lo omitido no se
@@ -2310,11 +2363,14 @@ pub struct PartialRetirementParam {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateRetirementProfileParams {
-    /// "asap" (cruce de líquido, el de siempre) | "retire_at_age" (la edad manda, llegue o no el
-    /// capital) | "coast" | "partial" | "pension_bridge". retire_at_age y coast exigen
-    /// target_retirement_age; pension_bridge exige pension.
+    /// "asap" (la fecha la decide el umbral de éxito) | "retire_at_age" (la edad manda, llegue o
+    /// no el capital) | "coast" | "partial". retire_at_age exige target_retirement_age; coast
+    /// exige target_retirement_age (modo fixed_retirement_age) o coast_stop_age (modo
+    /// fixed_stop_age); partial exige partial_retirement. El literal retirado "pension_bridge" se
+    /// SIGUE ACEPTANDO y aterriza en "asap" con pension.bridge_enabled encendido, pero no aparece
+    /// aquí: es compatibilidad de entrada, no una opción que ofrecer.
     #[serde(default)]
-    #[schemars(extend("enum" = ["asap", "retire_at_age", "coast", "partial", "pension_bridge"]))]
+    #[schemars(extend("enum" = ["asap", "retire_at_age", "coast", "partial"]))]
     pub strategy: Option<String>,
     /// Edad de jubilación total (18..=horizon_lifespan_age).
     #[serde(default)]
@@ -2337,7 +2393,8 @@ pub struct UpdateRetirementProfileParams {
     /// true = borrar el importe manual.
     #[serde(default)]
     pub clear_fire_number_manual_amount: Option<bool>,
-    /// SWR en % (0–4), string decimal. Desde 5.0.0 es del PERFIL.
+    /// SWR en % (0–6), string decimal. Desde 5.0.0 es del PERFIL, y ya no dimensiona ningún
+    /// objetivo: es el TOPE de venta ordinaria anual en el mes en que te jubilas.
     #[serde(default)]
     #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
     pub swr_pct: Option<String>,
@@ -2345,24 +2402,21 @@ pub struct UpdateRetirementProfileParams {
     #[serde(default)]
     #[schemars(range(min = 85, max = 105))]
     pub horizon_lifespan_age: Option<u32>,
-    /// "perpetuity" (ignora la pensión: conservador) | "bridge_to_pension" (capital para llegar
-    /// a la pensión + perpetuidad sobre lo que no cubra). Omitido se DERIVA: bridge si hay
-    /// pensión declarada, perpetuity si no.
+    /// Ignorado desde 5.0.0 (modelo v2): la pensión es un flujo de caja, no hay base de objetivo
+    /// que elegir.
     #[serde(default)]
-    #[schemars(extend("enum" = ["perpetuity", "bridge_to_pension"]))]
     pub target_basis: Option<String>,
-    /// true = volver a la base derivada.
+    /// Ignorado desde 5.0.0 (modelo v2): no hay base derivada que restaurar.
     #[serde(default)]
     pub clear_target_basis: Option<bool>,
-    /// Tasa con la que se descuentan los flujos del puente: "expected_return" (default) | "swr" |
-    /// "none" (sin descuento, conservador).
+    /// Ignorado desde 5.0.0 (modelo v2): el puente ya no descuenta ningún flujo — ver
+    /// `pension.bridge_max_pct`/`pension.bridge_max_years`.
     #[serde(default)]
-    #[schemars(extend("enum" = ["expected_return", "swr", "none"]))]
     pub bridge_discount_basis: Option<String>,
     /// Regla de retirada COMPLETA (sustituye a la actual).
     #[serde(default)]
     pub withdrawal_rule: Option<WithdrawalRuleParam>,
-    /// Bloque de pensión COMPLETO (sustituye al actual).
+    /// Bloque de pensión COMPLETO (sustituye al actual; el puente vive dentro, ver `PensionParam`).
     #[serde(default)]
     pub pension: Option<PensionParam>,
     /// true = borrar la pensión declarada.
@@ -2374,17 +2428,34 @@ pub struct UpdateRetirementProfileParams {
     /// true = borrar la fase de media jornada.
     #[serde(default)]
     pub clear_partial_retirement: Option<bool>,
-    /// Colchón de caja en meses de gasto (0–60). Solo actúa en Monte Carlo.
+    /// Ignorado desde 5.0.0 (modelo v2): el colchón de caja se retiró; la caja es un activo y la
+    /// regla de ahorro decide cuánto se guarda.
     #[serde(default)]
-    #[schemars(range(min = 0, max = 60))]
     pub cash_buffer_months: Option<u32>,
-    /// true = borrar el colchón (vuelve a derivarse del tope de tu regla de ahorro).
+    /// Ignorado desde 5.0.0 (modelo v2): no hay colchón que borrar.
     #[serde(default)]
     pub clear_cash_buffer_months: Option<bool>,
-    /// DEPRECADO e IGNORADO desde 5.0.0: el veredicto exige el 100 % de escenarios sin agotar la
-    /// cartera. Se acepta y se descarta; no se guarda ni sale por ninguna respuesta.
+    /// **Umbral de éxito exigido (%), `[80, 100]` — LOAD-BEARING desde el modelo v2.** Decide la
+    /// fecha: la jubilación válida es el primer mes en que al menos este porcentaje de los
+    /// caminos llega al horizonte sin volver a trabajar. Default 95. Fuera de rango es 400
+    /// `success_threshold_out_of_range`.
     #[serde(default)]
+    #[schemars(range(min = 80, max = 100))]
     pub success_threshold_pct: Option<u32>,
+    /// "fixed_retirement_age" (default: el solver busca el primer mes en que dejar de aportar aún
+    /// llega a target_retirement_age) | "fixed_stop_age" (coast_stop_age es el dato; la jubilación
+    /// la decide el umbral, no la edad).
+    #[serde(default)]
+    #[schemars(extend("enum" = ["fixed_retirement_age", "fixed_stop_age"]))]
+    pub coast_mode: Option<String>,
+    /// Edad a la que dejas de aportar (18..=105). OBLIGATORIA con coast_mode="fixed_stop_age";
+    /// con "fixed_retirement_age" es una LECTURA (la resuelve el solver) y mandarla no la fija.
+    #[serde(default)]
+    #[schemars(range(min = 18, max = 105))]
+    pub coast_stop_age: Option<u32>,
+    /// true = borrar la edad de coast fija (vuelve a resolverse).
+    #[serde(default)]
+    pub clear_coast_stop_age: Option<bool>,
     /// Fecha de nacimiento "YYYY-MM-DD" del usuario del token: es lo que convierte cada edad del
     /// perfil en un mes de la serie. Sin ella, las estrategias por edad no pueden resolverse.
     #[serde(default)]
@@ -2453,22 +2524,23 @@ impl UpdateRetirementProfileParams {
                     .map(|v| parse_decimal_param("pension.fraction_while_partial", v))
                     .transpose()?
                     .unwrap_or(rust_decimal::Decimal::ZERO),
-                // **A9 pendiente (5.0.0)**: el PUENTE (`bridge_enabled` / `bridge_max_pct` /
-                // `bridge_max_years`) todavía no tiene parámetros en el schema de la tool, así
-                // que por MCP se manda apagado — el mismo default que el perfil. A9 los añade.
-                bridge_enabled: false,
-                bridge_max_pct: None,
-                bridge_max_years: None,
+                bridge_enabled: p.bridge_enabled.unwrap_or(false),
+                bridge_max_pct: p
+                    .bridge_max_pct
+                    .as_deref()
+                    .map(|v| parse_decimal_param("pension.bridge_max_pct", v))
+                    .transpose()?,
+                bridge_max_years: p.bridge_max_years,
             }),
         };
 
         let partial_retirement = match &self.partial_retirement {
             None => None,
             Some(x) => Some(rp::PartialRetirement {
-                starts_at_age: Some(x.starts_at_age),
-                // A9: el modo («a una edad fija» / «en cuanto pueda») todavía no viaja por MCP;
-                // el default es el de siempre, la edad fija.
-                mode: Default::default(),
+                starts_at_age: x.starts_at_age,
+                mode: parse_enum_param(&x.mode)
+                    .map_err(|e| ApiError::BadRequest(format!("partial_retirement.mode: {e}")))?
+                    .unwrap_or_default(),
                 income_monthly_today: parse_decimal_param(
                     "partial_retirement.income_monthly_today",
                     &x.income_monthly_today,
@@ -2510,15 +2582,15 @@ impl UpdateRetirementProfileParams {
                 self.clear_partial_retirement,
                 "partial_retirement",
             )?,
-            // **A9 pendiente (5.0.0)**: `success_threshold_pct` deja de estar deprecado y pasa
-            // a ser el eje que decide la fecha (80..=100), y llegan `coast_mode` /
-            // `coast_stop_age`. Los parámetros retirados (`target_basis`,
-            // `bridge_discount_basis`, `cash_buffer_months`) se DEPRECAN en el schema —nunca se
-            // borran: los dos params son `deny_unknown_fields` y quitarlos convertiría en 400 lo
-            // que hoy funciona— y aquí se ignoran.
-            success_threshold_pct: None,
-            coast_mode: None,
-            coast_stop_age: None,
+            // `success_threshold_pct` es LOAD-BEARING desde el modelo v2 (deja de estar
+            // deprecado): decide la fecha. Los parámetros retirados (`target_basis`,
+            // `bridge_discount_basis`, `cash_buffer_months` y sus `clear_*`) se DEPRECAN en el
+            // schema —nunca se borran: los dos params son `deny_unknown_fields` y quitarlos
+            // convertiría en 400 lo que hoy funciona— y aquí se ignoran, sin más lectura.
+            success_threshold_pct: self.success_threshold_pct,
+            coast_mode: parse_enum_param(&self.coast_mode)
+                .map_err(|e| ApiError::BadRequest(format!("coast_mode: {e}")))?,
+            coast_stop_age: tri(self.coast_stop_age, self.clear_coast_stop_age, "coast_stop_age")?,
         })
     }
 
@@ -2954,7 +3026,7 @@ const LIST_IMPORTS_MAX_LIMIT: usize = 200;
 impl FutureFinMcp {
     #[tool(
         name = "get_summary",
-        description = "Estado financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingreso y gasto mensuales, tasa de ahorro, runway) y desgloses. TRAMPA: `financial_health` trae DOS ahorros. `net_monthly_equivalent` es el REAL del modo activo (`savings_source`) y el que usa el motor — úsalo para razonar y hacer cuentas; `savings_expected_monthly_equivalent` sale siempre del PRESUPUESTO y existe solo para el delta «real vs plan». `net_return_*_annual_pct` es rentabilidad ESPERADA, no realizada.",
+        description = "Estado financiero del hogar: patrimonio neto, totales de activos/pasivos, salud financiera (ingreso, gasto, ahorro, runway), desgloses y tu PLAN de jubilación (`plan.plan_state`, `plan.needed_capital_today`, igual que en Proyección). TRAMPA: `financial_health` trae DOS ahorros. `net_monthly_equivalent` es el REAL del modo activo y el que usa el motor; `savings_expected_monthly_equivalent` sale del PRESUPUESTO, solo para el delta. `net_return_*_annual_pct` es rentabilidad ESPERADA, no realizada.",
         annotations(title = "Resumen financiero", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_summary(
@@ -2972,7 +3044,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_projection",
-        description = "Proyección de patrimonio y jubilación (FIRE): serie futura (~82 puntos, mensual el primer año y anual después), objetivo FIRE por mes, jubilación estimada (`jubilacion_date_ymd`, `jubilacion_age`), hitos y supuestos. Cada punto trae `net_worth` (euros NOMINALES de ese mes) y `net_worth_real` (los mismos en euros de HOY, con `deflation_annual_inflation_percent`): di cuál citas, y lo mismo con `jubilacion_target_net_worth` (hoy) vs `..._nominal`. Los escalones los explica `events` (tope 100).",
+        description = "Proyección de patrimonio y jubilación: serie futura (~82 puntos) MÁS el PLAN — fecha válida (`safe_date_*`/`jubilacion_*`) que decide el umbral de éxito, `success_of_plan`/`success_wilson_low`, capital necesario HOY (`needed_capital_today`) con su curva nominal (`needed_capital_curve`) y el solve de tu estrategia. `net_worth` es nominal, `net_worth_real` lo deflacta. `plan_absent_reason` dice por qué falta (p. ej. sin fecha de nacimiento). Los escalones los explica `events` (tope 100).",
         annotations(title = "Proyección FIRE", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_projection(
@@ -3021,7 +3093,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_projection_bands",
-        description = "Riesgo del plan por Monte Carlo, solo `view: \"mine\"` (el hogar es 400 `household_bands_unavailable`: los percentiles no suman). Bandas puntuales p10/p50/p90 del patrimonio (~82 puntos; el líquido con `include_liquid_bands`), agotamiento por edad y percentiles del mes de jubilación. ÉXITO = se jubila dentro del horizonte (o la estrategia es por edad) Y la cartera nunca se agota: léelo junto a `never_retired_probability` y `success_given_retired`, no solo. Semilla estable por usuario. Lee `model_note` antes de citar nada.",
+        description = "Riesgo del plan por Monte Carlo, solo `view: \"mine\"` (household es 400). Bandas p10/p50/p90 del patrimonio (líquido con `include_liquid_bands`). ÉXITO = fracción de caminos que no rompen el plan (`success_of_plan`), medido contra tu UMBRAL con Wilson (`success_wilson_low`, nunca 0); `success_verdict` es el semáforo. `failures_by_kind` reparte tres motivos [cartera agotada, tasa inicial excedida, regla insuficiente]; `failure_probability_by_age` dice cuándo. Semilla estable. Lee `model_note` antes de citar nada.",
         annotations(title = "Riesgo del plan (Monte Carlo)", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_projection_bands(
@@ -3321,7 +3393,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "simulate_projection",
-        description = "What-if de proyección/FIRE sin persistir NADA: baseline vs escenario, KPIs, deltas y `model_note` para leerlos. `profile_overrides` simula TU PLAN: «¿y si me jubilo a los 55?» = strategy retire_at_age + target_retirement_age. PREGUNTA QUÉ EJE quiere: «ahorrar 300 más» (`extra_monthly_savings`) y «gastar 300 menos» (`extra_monthly_expense: -300`) NO son la misma simulación y separan la jubilación años. `liability_overrides`: «¿compensa amortizar?» por el delta de interés. `monte_carlo` añade probabilidad de éxito a los DOS lados y su delta.",
+        description = "What-if de proyección/FIRE sin persistir NADA: baseline vs escenario, KPIs, deltas, `model_note`. `profile_overrides` simula tu plan («¿me jubilo a los 55?» = retire_at_age + target_retirement_age): los dos lados fijan la fecha con la MISMA semilla, con 500 caminos salvo `monte_carlo` (sube a 2500; baseline iguala a get_projection). `date_solved_with_paths` dice cuántos usó cada lado. PREGUNTA QUÉ EJE: «ahorrar 300 más» y «gastar 300 menos» (`extra_monthly_expense: -300`) no son la misma simulación. `liability_overrides`: ¿compensa amortizar?",
         annotations(title = "Simular escenario", read_only_hint = true, open_world_hint = false)
     )]
     async fn simulate_projection(
@@ -5588,7 +5660,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_retirement_profile",
-        description = "Plan de jubilación del usuario del token —estrategia, edad objetivo, SWR, modo del objetivo FIRE, regla de retirada, pensión con fecha, media jornada, colchón, umbral— más su fecha de nacimiento: sin ella las estrategias por edad no se resuelven. Es PERSONAL y decide SU proyección; lo compartido del hogar está en get_settings.",
+        description = "Plan de jubilación del usuario —estrategia (asap/retire_at_age/coast/partial), edad objetivo, SWR, modo FIRE, regla de retirada, pensión con fecha y puente, media jornada, y el umbral que decide la fecha (80–100, default 95)— más su fecha de nacimiento: sin ella las estrategias por edad no se resuelven. PERSONAL; lo del hogar está en get_settings.",
         annotations(title = "Plan de jubilación", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_retirement_profile(
@@ -5608,7 +5680,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_retirement_profile",
-        description = "Cambia el plan de jubilación del usuario del token (y su fecha de nacimiento). Merge campo a campo: lo omitido NUNCA se resetea, los clear_* borran; `withdrawal_rule` se sustituye ENTERA y sus `pct` omitidos heredan `swr_pct`. Dato PERSONAL: cualquier rol edita el suyo, nadie el de otro. Mueve SU proyección entera — enseña antes el impacto con simulate_projection.",
+        description = "Cambia el plan de jubilación (y fecha de nacimiento): 4 estrategias (asap/retire_at_age/coast/partial); umbral que decide la fecha (80–100); modos de coast y media jornada; puente hasta la pensión (`pension.bridge_*`, apagado, cualquier estrategia). Merge campo a campo: omitido no cambia, `clear_*` borra; `withdrawal_rule`/`pension`/`partial_retirement` se sustituyen ENTEROS. Personal: cada rol, el suyo. Ver impacto: simulate_projection.",
         annotations(title = "Configurar jubilación", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_retirement_profile(
@@ -7026,21 +7098,27 @@ impl ServerHandler for FutureFinMcp {
                 Por lo mismo `simulate_projection` RECHAZA el hogar con `household_not_simulable`: un \
                 what-if necesita un plan, y el hogar tiene N.\n\nMONTE CARLO. `get_projection_bands` \
                 —y el eje opt-in `monte_carlo` de `simulate_projection`— contestan «¿qué \
-                probabilidad tiene mi plan?» sorteando cientos de caminos del MISMO motor que \
-                dibuja la línea determinista. ÉXITO son DOS cosas a la vez: que el hogar **se \
-                jubile dentro del horizonte** (o que la estrategia sea por EDAD, y entonces la \
-                jubilación es un dato y no un suceso) **y** que la cartera **no se agote nunca**, \
-                con las pensiones y las fases ya dentro de la simulación. Nunca cites \
-                `success_probability` sola: al lado viajan `never_retired_probability` (cuántos \
-                caminos no llegan a jubilarse — 0 con trigger por edad) y `success_given_retired` \
-                (éxito entre los que sí), y un 0,63 con un tercio sin jubilarse no describe el \
-                mismo plan que un 0,63 con todos jubilándose. El RECORTE de una regla de retirada \
-                NO es fracaso y viaja aparte (`months_below_need_p50`, \
-                `withdrawal_to_need_ratio_p50`, que cuentan el recorte de la regla Y el gasto que \
-                la cartera no pudo financiar): son dos preguntas distintas y mezclarlas da un \
-                diagnóstico falso. La última fila de `depletion_probability_by_age` es SIEMPRE el \
-                horizonte —la ruina total del plan—, así que el paso hasta ella puede ser menor de \
-                cinco años. Las bandas son PUNTUALES: cada \
+                probabilidad tiene mi plan?» sorteando miles de caminos del MISMO motor que dibuja \
+                la línea determinista, sobre el escenario que el SOLVER ya fijó: la fecha es un \
+                DATO de la simulación, no algo que decida el sorteo. Un camino FALLA por tres \
+                motivos y solo tres —`failures_by_kind`, en este orden fijo—: F1 la cartera se \
+                queda sin cubrir el gasto; F2 la tasa de retirada INICIAL del mes en que te jubilas \
+                supera el tope (el SWR, o el del puente); F3 con una regla por saldo, lo que la \
+                regla permite se queda por debajo de la necesidad ordinaria. Tienen arreglos \
+                OPUESTOS: F1 pide más capital o menos gasto, F2 pide retrasar la fecha, F3 pide \
+                cambiar la regla. LA FECHA la decide el UMBRAL de tu perfil (80–100, default 95) \
+                sobre la cota INFERIOR del intervalo de Wilson (`success_wilson_low` con \
+                `success_sampling_error_pp` al lado), no sobre el estimador puntual — nunca cites \
+                `success_of_plan`/`success_probability` sola: cítala junto a `success_wilson_low` \
+                y `failures_by_kind`. `retirement_date_basis: \"not_reachable\"` significa que \
+                NINGÚN mes del horizonte cumple el umbral, aunque el éxito de la línea muestre \
+                1,0 — esa cifra describe el mejor intento observado, no una fecha que exista. El \
+                RECORTE de una regla de retirada NO es fracaso y viaja aparte \
+                (`months_below_need_p50`, `withdrawal_to_need_ratio_p50`, que cuentan el recorte \
+                de la regla Y el gasto que la cartera no pudo financiar): son dos preguntas \
+                distintas y mezclarlas da un diagnóstico falso. La última fila de \
+                `failure_probability_by_age` es SIEMPRE el horizonte —la ruina total del plan—, \
+                así que el paso hasta ella puede ser menor de cinco años. Las bandas son PUNTUALES: cada \
                 percentil se calcula mes a mes sobre los caminos de ESE mes, así que la curva p50 \
                 no es ninguna simulación real y no cumple ninguna identidad contable — no la cites \
                 punto a punto como «tu patrimonio probable». Con `any_volatility_declared: false` \

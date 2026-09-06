@@ -1150,6 +1150,72 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     `description_sha256_12` de las tres no se movieron); lo que cambia son doc-comments de campos,
     que son schema y no entran en el tope de 600. Se regeneró el fixture y solo se movieron dos
     `constraints_sha256_12` (los del `success_threshold_pct` que pierde sus cotas).
+- **5.0.0 / A9 (MCP v2, issue #207) — cero tools nuevas; el modelo v2 completo llega al catálogo.**
+  Evaluación de paridad: **cuatro tools actualizadas** (`update_retirement_profile`,
+  `simulate_projection` vía `ProfileOverrideParam`/`MonteCarloParam`, `get_projection_bands` vía su
+  `paths`, y `get_retirement_profile`/`get_summary` solo en su `description`); ninguna omisión
+  nueva, **ningún contador se mueve** (siguen 71/30/41/41/18/8/41/19 — recuéntalos con los comandos
+  de `futurefin-mcp-parity` §5, no los copies).
+  - **La deprecación de `success_threshold_pct` (V7, arriba) queda SUSTITUIDA, no la fila
+    siguiente**: M2/C3 lo devuelven al perfil como la restricción que decide la fecha (`[80,
+    100]`, default 95). Recupera su `#[schemars(range(min = 80, max = 100))]` **y** su fila de
+    `schema_bounds_parity.rs` (`update_retirement_profile $.success_threshold_pct`), que la propia
+    fila de V7 había retirado por buena razón entonces —«pinear la cota de un parámetro que nadie
+    lee sería congelar una promesa que el runtime no cumple»— y que ahora sí lee.
+  - **Los cinco parámetros de M4/M6 pasan de vivos a DEPRECADOS y SE QUEDAN**: `target_basis`,
+    `clear_target_basis`, `bridge_discount_basis`, `cash_buffer_months` y
+    `clear_cash_buffer_months` siguen en `ProfileOverrideParam` y en
+    `UpdateRetirementProfileParams` —los dos `deny_unknown_fields`, y borrarlos convertiría en 400
+    lo que hoy funciona— pero pierden su `#[schemars(range/regex/enum)]` (ya no acotan nada que el
+    runtime lea) y se descartan sin persistir, cada uno con un `///` de una línea: «Ignorado desde
+    5.0.0 (modelo v2): …». Es la MISMA política que V7 ya había estrenado con
+    `success_threshold_pct` — un parámetro deprecado no se borra de un schema `deny_unknown_fields`,
+    se vacía de cotas y de efecto.
+  - **`coast_mode`/`coast_stop_age`/`clear_coast_stop_age` y el puente DENTRO de `pension`
+    (`bridge_enabled`/`bridge_max_pct`/`bridge_max_years`) llegan a las dos tools de perfil.** El
+    puente no es una estrategia (C7): es un ajuste de la pensión disponible con cualquiera de las
+    CUATRO estrategias, y el literal retirado `pension_bridge` se sigue aceptando como alias en el
+    deserializador de dominio (`parse_retirement_strategy`) pero **ya no se anuncia** en el
+    `enum` del schema — quien escribe hoy no debe aprender un nombre que ya no existe.
+    `PartialRetirementParam` gana `mode` (`at_age` | `asap`) y `starts_at_age` pasa a opcional
+    (modo B lo resuelve el solver). Tres filas nuevas en `schema_bounds_parity.rs`:
+    `update_retirement_profile $.coast_stop_age`, `$defs.PensionParam.bridge_max_years`.
+  - **El techo de Monte Carlo por MCP sube de 1.000 a 2.500** en `MonteCarloParam.paths`
+    (`simulate_projection`) y en `ProjectionBandsParams.paths` (`get_projection_bands`) — y esto
+    **cerraba una deriva ya viva, no solo subía un número**: el runtime (`resolve_paths(...,
+    MCP_MAX_PATHS)`) ya topaba en 2.500 antes de este cambio, así que un cliente que leyera el
+    schema y respetara «1.000» se quedaba corto de una capacidad que la tool ya ofrecía; uno que
+    probara 1.500 a ciegas la recibía igual, sin que el schema lo hubiera prometido. Dos filas
+    nuevas en `schema_bounds_parity.rs` (`simulate_projection $defs.MonteCarloParam.paths`,
+    `get_projection_bands $.paths`), ambas contra `MCP_MAX_PATHS`.
+  - **`strategy` enumera CUATRO literales, no cinco**, en `ProfileOverrideParam` y en
+    `UpdateRetirementProfileParams`: `asap`, `retire_at_age`, `coast`, `partial`. El quinto —el
+    alias retirado— sigue funcionando por escritura, solo dejó de aparecer en la lista que el
+    modelo lee. Regresión: `mcp_http.rs::enumerated_params_publish_a_real_enum_in_the_json_schema`.
+  - **Los `swr_pct` de las tres tools pasan de «(0–4)» a «(0–6)»** (`MAX_SWR_PCT` sube en A1): son
+    STRINGS con solo un `#[schemars(regex(...))]`, así que `schema_bounds_parity.rs` —que solo lee
+    `minimum`/`maximum` numéricos— no tiene nada que pinear ahí; el propio fichero lo documenta
+    para que nadie busque una fila que no puede existir con el arnés actual.
+  - **Presupuesto de descripciones: reescritas LIBERANDO antes de gastar, las seis que hablan del
+    plan.** `get_projection`, `get_projection_bands`, `simulate_projection`,
+    `update_retirement_profile`, `get_retirement_profile` y `get_summary` dejan de mencionar
+    colchón, base del objetivo y cruce, y pasan a nombrar fecha válida, éxito con Wilson, capital
+    necesario hoy, umbral, puente y modos. Medido antes de escribir: margen **94** de 24.000. Total
+    tras el cambio: `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
+    → **71 23982 548** (margen **18**). **No confíes en estas dos cifras dentro de un mes**: el
+    comando es el contrato, el número de esta frase es una fotografía del día en que se escribió —
+    exactamente el error que esta misma sección lleva corrigiéndose a sí misma desde WP6b (207 →
+    172 → 94 → 18: cada ola gasta parte del margen de la anterior, ninguna lo repone).
+  - Tests: `mcp_http.rs::tool_descriptions_stay_within_the_context_budget`,
+    `::tools_list_freezes_the_input_contract_of_every_tool` (catálogo regenerado,
+    `UPDATE_MCP_CATALOG=1`), `::enumerated_params_publish_a_real_enum_in_the_json_schema`, y su
+    `get_projection_bands_matches_http_and_hides_the_liquid_bands_by_default` (el caso «2.000
+    caminos son válidos por HTTP e ilegales por MCP» se re-ancla a 3.000, porque 2.000 ya cabe en
+    el techo nuevo); `schema_bounds_parity.rs` (las cinco filas de arriba);
+    `mcp_write.rs::update_retirement_profile_accepts_the_v2_axes_and_ignores_the_deprecated_ones`
+    (los cinco retirados junto a un eje real → 200 sin rastro suyo en el perfil; `success_threshold_pct`
+    persiste y el GET lo ecoa; `coast_mode`/`coast_stop_age` idem; `pension.bridge_enabled: true`
+    sin cifras rellena `bridge_max_pct`/`bridge_max_years` con sus defaults).
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
   mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,

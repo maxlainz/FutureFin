@@ -4122,12 +4122,12 @@ async fn retirement_profile_tools_are_personal_and_preview_before_writing() {
         &mcp_post(
             &app,
             &token,
-            tool_call("update_retirement_profile", json!({"cash_buffer_months": 12, "confirm": true})),
+            tool_call("update_retirement_profile", json!({"coast_stop_age": 40, "confirm": true})),
         )
         .await,
     );
     let after = &applied2["outcome"]["after"];
-    assert_eq!(after["cash_buffer_months"], 12, "{applied2}");
+    assert_eq!(after["coast_stop_age"], 40, "{applied2}");
     assert_eq!(after["target_retirement_age"], 57, "el merge no resetea: {applied2}");
     assert_eq!(after["swr_pct"], "3.0", "{applied2}");
 
@@ -4146,7 +4146,7 @@ async fn retirement_profile_tools_are_personal_and_preview_before_writing() {
         &token,
         tool_call(
             "update_retirement_profile",
-            json!({"cash_buffer_months": 6, "clear_cash_buffer_months": true}),
+            json!({"coast_stop_age": 30, "clear_coast_stop_age": true}),
         ),
     )
     .await;
@@ -4173,6 +4173,124 @@ async fn retirement_profile_tools_are_personal_and_preview_before_writing() {
     // Y no ha tocado la del owner.
     let owners = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
     assert_eq!(owners["profile"]["strategy"], "retire_at_age", "{owners}");
+}
+
+/// **Los cinco ejes retirados por el modelo v2 (M4/M6) se aceptan y se ignoran** (5.0.0/A9):
+/// `target_basis`, `clear_target_basis`, `bridge_discount_basis`, `cash_buffer_months` y
+/// `clear_cash_buffer_months` siguen en el schema —los dos params son `deny_unknown_fields` y
+/// borrarlos convertiría en 400 lo que hoy funciona— pero no tienen cotas y no llegan al
+/// dominio: mandarlos junto a un eje real es un 200 normal en el que el eje real aplica y los
+/// retirados no dejan rastro. Al lado, los ejes NUEVOS de v2: `success_threshold_pct`
+/// (load-bearing, ya no deprecado), `coast_mode`/`coast_stop_age`, y el puente dentro de
+/// `pension` con sus defaults al encenderlo sin números.
+#[tokio::test]
+async fn update_retirement_profile_accepts_the_v2_axes_and_ignores_the_deprecated_ones() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+
+    // Los cinco retirados, junto a un eje real: 200, el eje real aplica, los retirados no
+    // aparecen en el perfil publicado (ya no son columnas de `RetirementProfile`).
+    let applied = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_retirement_profile",
+                json!({
+                    "strategy": "retire_at_age",
+                    "target_retirement_age": 60,
+                    "target_basis": "bridge_to_pension",
+                    "clear_target_basis": true,
+                    "bridge_discount_basis": "swr",
+                    "cash_buffer_months": 12,
+                    "clear_cash_buffer_months": true,
+                    "confirm": true
+                }),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(applied["applied"], true, "{applied}");
+    let after = &applied["outcome"]["after"];
+    assert_eq!(after["strategy"], "retire_at_age", "el eje real SÍ aplica: {applied}");
+    assert!(
+        after.get("target_basis").is_none(),
+        "target_basis ya no es una columna del perfil: {applied}"
+    );
+    assert!(
+        after.get("cash_buffer_months").is_none(),
+        "cash_buffer_months ya no es una columna del perfil: {applied}"
+    );
+
+    // `success_threshold_pct` deja de ser «se acepta y se ignora» (V7): decide la fecha, y el
+    // GET lo ecoa.
+    let applied2 = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_retirement_profile",
+                json!({"success_threshold_pct": 90, "confirm": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(applied2["applied"], true, "{applied2}");
+    let got = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
+    assert_eq!(got["profile"]["success_threshold_pct"], 90, "{got}");
+
+    // `coast_mode`/`coast_stop_age`: el modo B hace del stop age un DATO, y el GET lo ecoa.
+    let applied3 = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_retirement_profile",
+                json!({
+                    "strategy": "coast",
+                    "coast_mode": "fixed_stop_age",
+                    "coast_stop_age": 45,
+                    "confirm": true
+                }),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(applied3["applied"], true, "{applied3}");
+    let got = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
+    assert_eq!(got["profile"]["coast_mode"], "fixed_stop_age", "{got}");
+    assert_eq!(got["profile"]["coast_stop_age"], 45, "{got}");
+
+    // El puente vive DENTRO de `pension` (C7): encenderlo sin números rellena los defaults
+    // (max(5, swr+1) % y 7 años).
+    let applied4 = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_retirement_profile",
+                json!({
+                    "pension": {
+                        "monthly_amount_today": "1200",
+                        "starts_at_age": 67,
+                        "bridge_enabled": true
+                    },
+                    "confirm": true
+                }),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(applied4["applied"], true, "{applied4}");
+    let got = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
+    let pension = &got["profile"]["pension"];
+    assert_eq!(pension["bridge_enabled"], true, "{got}");
+    assert!(
+        pension["bridge_max_pct"].is_string(),
+        "el default se rellena al encender el puente sin cifra: {got}"
+    );
+    assert_eq!(pension["bridge_max_years"], 7, "{got}");
 }
 
 /// **`update_asset` puede BORRAR la rentabilidad esperada y la volatilidad** (5.0.0, WP5-2).

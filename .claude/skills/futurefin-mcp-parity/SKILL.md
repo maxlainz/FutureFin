@@ -228,8 +228,9 @@ dilo así.
 ### 3.5 Evaluación del tren 5.0.0 (issue #207) — 68 → 71 tools
 
 La evaluación de §1 corrida sobre toda la superficie HTTP que la release movió. **Ninguna fila queda
-sin clasificar**; las tres tools nuevas y los cambios de contrato están abajo (las dos últimas filas
-son del WP-F: colchón derivado y umbral retirado, **cero tools nuevas**).
+sin clasificar**; las tres tools nuevas y los cambios de contrato están abajo (V6/V7 son del WP-F:
+colchón derivado y umbral retirado; la última es de A9, el modelo v2 completo — **cero tools
+nuevas** en ninguna de las tres).
 
 | Superficie HTTP nueva o cambiada (5.0.0) | Resultado de paridad |
 |---|---|
@@ -251,6 +252,7 @@ son del WP-F: colchón derivado y umbral retirado, **cero tools nuevas**).
 | `UserResponse` gana `has_password` (aditivo, issue #213) | **n/a**. `UserResponse` es la respuesta de `login`/`register`/`/v1/auth/sso`/`GET /v1/auth/me`, y **las cuatro rutas están excluidas** en §3.1 (categorías «Session lifecycle» y «OAuth protocol»): un cliente MCP llega ya autenticado por Bearer, no hay tarro de cookies que llenar. El campo no aparece en ninguna respuesta de tool — `grep -c 'has_password' apps/api/src/mcp/server.rs` → **0** |
 | **V6** — el colchón de caja se DERIVA del tope de la regla de ahorro; `GET /v1/projection/bands` gana cinco campos | **Dos tools actualizadas, sin código propio en ninguna.** `get_projection_bands` y `simulate_projection` publican `buffer_source`, `buffer_target_amount`, `buffer_months_effective`, `buffer_source_rule_id` y `buffer_source_asset_name` porque comparten las cores; `buffer_inactive_reason` sigue siendo UN campo y sus motivos pasan a `no_capped_rule` \| `cap_is_zero` \| `no_safe_liquid_asset` \| `no_volatility` (**`not_requested` ya no se emite**). En `simulate_projection` van **por lado**, no en el bloque `monte_carlo`: `profile_overrides.cash_buffer_months` fija el colchón solo del escenario, y un campo compartido describiría el colchón equivocado en la mitad de las simulaciones. **Todo es SOLO SALIDA**: ningún `inputSchema` gana nada por esto, y `cash_buffer_months` + `clear_cash_buffer_months` siguen intactos como override explícito |
 | **V7** — `success_threshold_pct` deprecado e ignorado; sale de toda respuesta | **Un parámetro deprecado en DOS tools, y no se puede borrar.** `UpdateRetirementProfileParams` y `ProfileOverrideParam` son `deny_unknown_fields`, así que retirarlo del schema convertiría en **400** lo que hoy funciona: se queda, marcado deprecado en su `///`, se acepta y se descarta —sin validación, sin persistencia, fuera de toda salida—, y **pierde su `#[schemars(range)]`** porque ya no acota nada (con él, su fila de `schema_bounds_parity.rs` — pinear la cota de un parámetro que nadie lee sería congelar una promesa que el runtime no cumple). Del lado de la salida, `get_projection_bands`, `simulate_projection` (bloque `monte_carlo`), `get_summary` (`plan`) y `get_retirement_profile` dejan de publicarlo. **El fixture congelado se regeneró**: solo se mueven los dos `constraints_sha256_12` de esas tools; ninguna `description_sha256_12`, así que el presupuesto de descripciones **no cambia** |
+| **A9 (modelo v2 completo)** — `success_threshold_pct` vuelve a ser load-bearing (M2/C3, sustituye a la fila V7 de arriba); `coast_mode`/`coast_stop_age`/`clear_coast_stop_age` nuevos; el puente se muda DENTRO de `pension` (`bridge_enabled`/`bridge_max_pct`/`bridge_max_years`); `PartialRetirementParam.starts_at_age` pasa a opcional + `mode`; `target_basis`/`clear_target_basis`/`bridge_discount_basis`/`cash_buffer_months`/`clear_cash_buffer_months` pasan de vivos a DEPRECADOS; `strategy` pasa de 5 a 4 literales anunciados; el techo de `paths` en Monte Carlo sube de 1.000 a 2.500 en dos tools | **Dos tools actualizadas en su forma** (`update_retirement_profile`, `simulate_projection` vía `ProfileOverrideParam`/`MonteCarloParam`), **una en su ceiling** (`get_projection_bands.paths`), **dos solo en descripción** (`get_retirement_profile`, `get_summary`). Cero tools nuevas, cero retiradas. La política de deprecación es la MISMA que V7 acuñó, aplicada a los cinco ejes de M4/M6 a la vez: no se borran (`deny_unknown_fields`), pierden sus `#[schemars(range/regex/enum)]` y su `///` pasa a un one-liner «Ignorado desde 5.0.0 (modelo v2): …». El puente NO gana un parámetro nuevo suelto: se reubica dentro de `PensionParam`, porque en v2 es un ajuste de la pensión y no un eje independiente (C7) — mismo movimiento que hizo el propio modelo en el dominio. `strategy` pierde `pension_bridge` de su `enum` publicado pero el literal SIGUE resolviendo por escritura (alias en `parse_retirement_strategy`), así que esto es contrato de SCHEMA, no de comportamiento — nadie que ya mandara `pension_bridge` se rompe. El techo de `paths` (1.000→2.500) **cerraba una deriva que ya vivía en producción**: `resolve_paths(..., MCP_MAX_PATHS)` ya topaba en 2.500 en el runtime antes de este cambio, así que el schema venía MINTIENDO por debajo (prometía menos capacidad de la que la tool daba) — el incidente inverso al «default 15 cuando el real era 30» de CLAUDE.md, pero de la misma familia: schema y runtime deben ser el mismo número. Cinco filas nuevas en `schema_bounds_parity.rs` (`update_retirement_profile $.success_threshold_pct`, `$.coast_stop_age`, `$defs.PensionParam.bridge_max_years`; `simulate_projection $defs.MonteCarloParam.paths`; `get_projection_bands $.paths`), las tres primeras sustituyen/complementan la fila que V7 había retirado y las dos últimas cierran la deriva de Monte Carlo. El `swr_pct` (0–4→0–6) de las tres tools **no tiene fila posible**: viaja como string con solo un `pattern`, y el arnés de `schema_bounds_parity.rs` únicamente lee `minimum`/`maximum` numéricos — documentado en el propio fichero para que nadie busque una fila que no puede existir. Presupuesto de descripciones: las SEIS que hablan del plan se reescriben liberando antes de gastar (fuera buffer/basis/cruce/percentiles; dentro fecha válida, Wilson, capital necesario, umbral, puente, modos); margen medido ANTES: 94; DESPUÉS: `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"` → **71 23982 548** (margen 18). Tests: `mcp_http.rs::enumerated_params_publish_a_real_enum_in_the_json_schema` (strategy a 4 literales), `::get_projection_bands_matches_http_and_hides_the_liquid_bands_by_default` (el caso «HTTP sí, MCP no» se re-ancla de 2.000 a 3.000 caminos porque 2.000 ya cabe en el techo nuevo), `mcp_write.rs::update_retirement_profile_accepts_the_v2_axes_and_ignores_the_deprecated_ones` (nueva) |
 
 ### 3.4 View echo — object responses vs `list_*` envelopes (Fase 5, issue #86)
 
@@ -385,6 +387,17 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
    parsed with `parse_uuid_param`/`parse_date_param`/`parse_decimal_param`. A PATCH-style
    "omit vs null" tri-state cannot be expressed in the schema — model it as a `clear_*: bool`
    flag (precedents: `clear_expense_end_date`, `clear_cap`, `clear_purchase_price`).
+   **Retiring a param on a `deny_unknown_fields` struct is a stub, never a deletion**: deleting the
+   field turns a call that works today into a 400 for anyone still sending it; instead keep the
+   field, strip every `#[schemars(range/regex/enum)]` bound (it no longer constrains anything the
+   runtime reads), replace its `///` with a one-line "Ignorado desde `<version>` (`<motivo>`): …",
+   and stop referencing it in `to_patch()`/the core — it is deserialized and dropped, never
+   forwarded. Drop its `schema_bounds_parity.rs` row too (a pinned bound on a parameter nobody
+   reads freezes a promise the runtime doesn't keep). Two precedents, same policy: V7 did it first
+   for `success_threshold_pct` alone; A9 (5.0.0, this file's §3.5) applied it to all five params the
+   v2 model retired (`target_basis`, `clear_target_basis`, `bridge_discount_basis`,
+   `cash_buffer_months`, `clear_cash_buffer_months`) in the same PR that made `success_threshold_pct`
+   load-bearing again — proof the stub survives a model change in either direction, not just one.
 3. **Tool fn** inside the `#[tool_router] impl FutureFinMcp`, placed next to its thematic
    neighbors. Canonical body: `identity(&ctx)?` → a `run()` closure mapping params to the
    handler's body struct (fail early via `to_tool_outcome`) → async block: `require_mcp_write`
@@ -516,6 +529,21 @@ or — the finding — an unclassified gap, which means the parity contract was 
 it now and check what else that PR missed.
 
 ## Provenance and maintenance
+
+**Ampliada 2026-09-06 (A9 del tren 5.0.0, modelo v2 completo)**: §3.5 gana una fila (el modelo v2
+llega al catálogo: `success_threshold_pct` vuelve a ser load-bearing, sustituyendo la decisión V7 de
+abajo; `coast_mode`/`coast_stop_age`/`clear_coast_stop_age` nuevos; el puente se muda dentro de
+`pension`; cinco parámetros de M4/M6 pasan a stubs deprecados; `strategy` pasa de 5 a 4 literales
+anunciados; el techo de `paths` en Monte Carlo sube de 1.000 a 2.500 en dos tools, cerrando una
+deriva schema↔runtime que ya estaba viva) y §4 paso 2 gana el párrafo de la política de
+deprecación (un parámetro retirado de un struct `deny_unknown_fields` es un STUB, nunca un borrado).
+Cinco filas nuevas en `schema_bounds_parity.rs`. **Presupuesto de descripciones**: seis tools
+reescritas liberando antes de gastar; margen antes 94, después
+`python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
+→ `71 23982 548` (margen 18). **Ningún contador de §5 se mueve** (siguen 71/30/41/41/18/8/41/19).
+Fuentes: `apps/api/src/mcp/{server,schema_bounds_parity}.rs`,
+`apps/api/src/handlers/retirement_profile.rs`, `apps/api/tests/{mcp_http,mcp_write}.rs` y
+`apps/api/tests/fixtures/mcp-catalog.json`.
 
 **Ampliada 2026-09-05 (WP-F del tren 5.0.0, decisiones V6 y V7 del owner)**: §3.5 gana dos filas —el
 colchón derivado del tope de la regla (cinco campos de SALIDA en `get_projection_bands` y

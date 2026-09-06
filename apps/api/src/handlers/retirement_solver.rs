@@ -182,6 +182,51 @@ pub(crate) const SOLVE_SEARCH_PATHS: u32 = 500;
 /// la tabla del doc del módulo están calculados con 2.500, que es el destino declarado.
 pub(crate) const SOLVE_CONFIRM_PATHS: u32 = DEFAULT_BANDS_PATHS;
 
+/// **El presupuesto de sorteos de un nivel 1**, como un valor y no como dos constantes leídas
+/// desde dentro.
+///
+/// Existe por `simulate_projection` (WP A8): un what-if simula DOS planes —baseline y escenario— y
+/// pagar dos veces la confirmación de 2.500 caminos convierte una pregunta conversacional en diez
+/// segundos de espera. El eje no es «cuánta precisión quiero» sino «cuánto estoy dispuesto a
+/// pagar», así que viaja como parámetro y **se PUBLICA** ([`PlanLevel1::paths_used`], que la API
+/// sirve como `date_solved_with_paths`): una probabilidad sin su tamaño de muestra no se compara
+/// con nada, y dos lados medidos con presupuestos distintos no se restan.
+///
+/// **Los dos lados de una misma llamada usan SIEMPRE el mismo presupuesto y la misma semilla.** Lo
+/// contrario haría que un delta mezclara el cambio del plan con el ruido de dos muestras de
+/// tamaños distintos — exactamente el fallo que la doctrina del módulo existe para evitar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PlanBudget {
+    /// Caminos de la fase de búsqueda.
+    pub search_paths: u32,
+    /// Caminos de la fase de confirmación. **Nunca menor que [`Self::search_paths`]**: confirmar
+    /// con menos muestra que la búsqueda desmentiría una medición con otra peor.
+    pub confirm_paths: u32,
+}
+
+impl PlanBudget {
+    /// El presupuesto **completo**: busca con [`SOLVE_SEARCH_PATHS`] y confirma con
+    /// [`SOLVE_CONFIRM_PATHS`]. Es el de `GET /v1/projection/series`, el de `/v1/projection/bands`
+    /// y el que produce la fecha que el resto de la app publica — un plan resuelto con él es, bit a
+    /// bit, el mismo plan.
+    pub(crate) const FULL: Self = Self {
+        search_paths: SOLVE_SEARCH_PATHS,
+        confirm_paths: SOLVE_CONFIRM_PATHS,
+    };
+
+    /// Solo **búsqueda**: la fase de confirmación se ejecuta igual, pero con el mismo tamaño de
+    /// muestra que la búsqueda. Ni se salta un paso ni se publica una fecha sin verificar; lo que
+    /// se reduce es la MUESTRA, y la respuesta lo dice publicando `date_solved_with_paths`.
+    ///
+    /// Es el presupuesto por defecto del what-if: cuesta ~1/5 y contesta la pregunta que un
+    /// what-if hace de verdad —«¿en qué dirección y cuánto se mueve mi fecha?»—, que es un DELTA
+    /// entre dos lados medidos igual, no una fecha para grabar en piedra.
+    pub(crate) const SEARCH_ONLY: Self = Self {
+        search_paths: SOLVE_SEARCH_PATHS,
+        confirm_paths: SOLVE_SEARCH_PATHS,
+    };
+}
+
 /// Paso de la rejilla de la **curva de capital necesario por edad**: cinco años.
 ///
 /// Mismo paso que `FAILURE_STEP_MONTHS` del crate y que el bracket de `valid_retirement_month`, y
@@ -590,7 +635,22 @@ pub(crate) fn solve_plan_level1(
     seed: u64,
     profile: &PlanSolveProfile,
 ) -> Result<PlanLevel1, ApiError> {
-    solve_plan_level1_inner(input, vols, seed, profile).map_err(map_mc_err)
+    solve_plan_level1_with_budget(input, vols, seed, profile, PlanBudget::FULL)
+}
+
+/// [`solve_plan_level1`] con el **presupuesto elegido por el llamante**.
+///
+/// Único usuario hoy: `simulate_projection` (WP A8), que resuelve DOS planes por llamada y por
+/// defecto los mide a los dos con [`PlanBudget::SEARCH_ONLY`]. El presupuesto viaja de vuelta en
+/// [`PlanLevel1::paths_used`]: lo que se publica dice con cuántos caminos se midió.
+pub(crate) fn solve_plan_level1_with_budget(
+    input: &ProjectionInput,
+    vols: &[Option<f64>],
+    seed: u64,
+    profile: &PlanSolveProfile,
+    budget: PlanBudget,
+) -> Result<PlanLevel1, ApiError> {
+    solve_plan_level1_inner(input, vols, seed, profile, budget).map_err(map_mc_err)
 }
 
 fn solve_plan_level1_inner(
@@ -598,9 +658,14 @@ fn solve_plan_level1_inner(
     vols: &[Option<f64>],
     seed: u64,
     profile: &PlanSolveProfile,
+    budget: PlanBudget,
 ) -> Result<PlanLevel1, McError> {
-    let search = mc(seed, SOLVE_SEARCH_PATHS);
-    let confirm = mc(seed, SOLVE_CONFIRM_PATHS);
+    debug_assert!(
+        budget.confirm_paths >= budget.search_paths,
+        "confirmar con menos muestra que la búsqueda desmiente una medición con otra peor"
+    );
+    let search = mc(seed, budget.search_paths);
+    let confirm = mc(seed, budget.confirm_paths);
     let threshold = profile.threshold_pct;
     let k_min = profile.bridge_k_min();
 
@@ -610,7 +675,7 @@ fn solve_plan_level1_inner(
         success_of_plan: 0.0,
         success_wilson_low: 0.0,
         success_sampling_error_pp: Decimal::ZERO,
-        paths_used: SOLVE_CONFIRM_PATHS,
+        paths_used: budget.confirm_paths,
         seed,
         needed_capital_today: None,
         needed_capital_absent_reason: None,
@@ -678,7 +743,7 @@ fn solve_plan_level1_inner(
                 Some(date) => {
                     out.draws_search += date.draws_search;
                     out.draws_confirm += date.draws_confirm;
-                    apply_date(&mut out, date);
+                    apply_date(&mut out, date, budget);
                 }
                 // Sin fase declarada no hay `S` y no hay fecha anidada: la única lectura honesta
                 // es la de la fase, y `not_reachable` con su `best_effort` vacío.
@@ -701,7 +766,7 @@ fn solve_plan_level1_inner(
             let date = valid_retirement_month(&scenario, vols, &search, &confirm, threshold, floor)?;
             out.draws_search += date.draws_search;
             out.draws_confirm += date.draws_confirm;
-            apply_date(&mut out, &date);
+            apply_date(&mut out, &date, budget);
             // Los dos ejes que en estas ramas son DATO se ecoan para que la respuesta no obligue
             // a nadie a mirar el perfil para saber qué se simuló.
             if matches!(profile.strategy, PlanStrategy::Coast) {
@@ -766,7 +831,7 @@ fn apply_success(out: &mut PlanLevel1, s: &SuccessAt) {
 }
 
 /// Copia un `RetirementDateSolve` a la salida, con su base y su honestidad.
-fn apply_date(out: &mut PlanLevel1, date: &RetirementDateSolve) {
+fn apply_date(out: &mut PlanLevel1, date: &RetirementDateSolve, budget: PlanBudget) {
     out.forced_month = date.month;
     out.retirement_date_basis = if date.month.is_some() {
         DATE_BASIS_SUCCESS_THRESHOLD
@@ -780,9 +845,9 @@ fn apply_date(out: &mut PlanLevel1, date: &RetirementDateSolve) {
     // fecha, las cifras describen la mejor observación de la BÚSQUEDA. Publicar 2.500 ahí sería
     // atribuirle a una medición un tamaño de muestra que no tuvo.
     out.paths_used = if date.draws_confirm > 0 {
-        SOLVE_CONFIRM_PATHS
+        budget.confirm_paths
     } else {
-        SOLVE_SEARCH_PATHS
+        budget.search_paths
     };
     out.date_is_approximate = date.date_is_approximate;
     out.best_effort = date.best_effort;

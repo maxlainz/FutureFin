@@ -31,8 +31,10 @@
 use crate::handlers::history::MAX_HISTORY_WINDOW_MONTHS;
 use crate::handlers::installation::{MAX_HORIZON_LIFESPAN_AGE, MIN_HORIZON_LIFESPAN_AGE};
 use crate::handlers::liabilities::{MAX_SCHEDULE_WINDOW_MONTHS, SCHEDULE_HORIZON_MONTHS};
+use crate::handlers::projection_bands::MCP_MAX_PATHS;
 use crate::handlers::retirement_profile::{
-    MIN_PENSION_AGE, MIN_PROFILE_AGE,
+    MAX_BRIDGE_YEARS, MAX_SUCCESS_THRESHOLD_PCT, MIN_BRIDGE_YEARS, MIN_PENSION_AGE,
+    MIN_PROFILE_AGE, MIN_SUCCESS_THRESHOLD_PCT,
 };
 
 const CATALOG_JSON: &str =
@@ -145,15 +147,97 @@ const PINNED_BOUNDS: &[PinnedBound] = &[
                       `#[schemars(range(min = 50, max = 105))]` sobre \
                       `PensionParam::starts_at_age`; (3) regenera el fixture",
     },
-    // `$.cash_buffer_months` **ya no tiene fila** (5.0.0, M6): el colchón de caja se retiró del
-    // modelo entero, así que no hay const de runtime que sujetar. **A9 pendiente**: el parámetro
-    // sigue en el schema de las tools —son `deny_unknown_fields`— y pasa a estar DEPRECADO e
-    // ignorado, sin cotas; A9 reescribe su descripción y añade las filas de `success_threshold_pct`
-    // y `bridge_max_years`.
-    // `$.success_threshold_pct` **ya no tiene fila** (5.0.0, V7): el parámetro sigue en el schema
-    // de las dos tools —son `deny_unknown_fields` y borrarlo convertiría en 400 lo que hoy
-    // funciona— pero está DEPRECADO e ignorado, y ya no tiene cotas que sujetar. Pinear una
-    // cota de un parámetro que no se lee sería congelar una promesa que el runtime no cumple.
+    // `$.cash_buffer_months` (y `target_basis`/`bridge_discount_basis`) **siguen sin fila** (modelo
+    // v2): el colchón, la base del objetivo y el descuento del puente se retiraron del modelo
+    // entero, así que no hay const de runtime que sujetar. Los tres parámetros siguen en el schema
+    // de las dos tools —son `deny_unknown_fields` y borrarlos convertiría en 400 lo que hoy
+    // funciona— pero están DEPRECADOS e ignorados, sin `#[schemars(range/regex/enum)]` que pinear:
+    // pinear la cota de un parámetro que nadie lee sería congelar una promesa que el runtime no
+    // cumple.
+    //
+    // **`$.success_threshold_pct` recupera su fila (modelo v2, A9)**: deja de estar deprecado y
+    // pasa a decidir la fecha, así que su cota vuelve a ser una duplicación real.
+    PinnedBound {
+        tool: "update_retirement_profile",
+        pointer: "$.success_threshold_pct",
+        expected_min: Some(MIN_SUCCESS_THRESHOLD_PCT as i64),
+        expected_max: MAX_SUCCESS_THRESHOLD_PCT as i64,
+        runtime_const: "apps/api/src/handlers/retirement_profile.rs: \
+                        MIN/MAX_SUCCESS_THRESHOLD_PCT",
+        also_update: "(1) las dos consts; (2) el literal \
+                      `#[schemars(range(min = 80, max = 100))]` sobre \
+                      `UpdateRetirementProfileParams::success_threshold_pct` (y su gemelo en \
+                      `ProfileOverrideParam`, que no está en esta tabla porque su tool no es \
+                      `update_retirement_profile`, pero debe moverse a la vez); (3) el mensaje \
+                      `success_threshold_out_of_range`; (4) regenera el fixture (ver la fila de \
+                      `$.months`)",
+    },
+    // `coast_stop_age` topa en el mismo par que `target_retirement_age` (arriba): el techo real
+    // depende de `target_retirement_age` cuando lo hay, y el schema no puede expresar esa
+    // dependencia, así que publica el techo absoluto y `validate_retirement_profile` aprieta el
+    // resto (`coast_stop_age_out_of_range`).
+    PinnedBound {
+        tool: "update_retirement_profile",
+        pointer: "$.coast_stop_age",
+        expected_min: Some(MIN_PROFILE_AGE as i64),
+        expected_max: MAX_HORIZON_LIFESPAN_AGE as i64,
+        runtime_const: "apps/api/src/handlers/retirement_profile.rs: MIN_PROFILE_AGE \
+                        (techo: MAX_HORIZON_LIFESPAN_AGE)",
+        also_update: "(1) `MIN_PROFILE_AGE`; (2) el literal \
+                      `#[schemars(range(min = 18, max = 105))]` sobre \
+                      `UpdateRetirementProfileParams::coast_stop_age`; (3) regenera el fixture \
+                      (ver la fila de `$.months`)",
+    },
+    PinnedBound {
+        tool: "update_retirement_profile",
+        pointer: "$defs.PensionParam.bridge_max_years",
+        expected_min: Some(MIN_BRIDGE_YEARS as i64),
+        expected_max: MAX_BRIDGE_YEARS as i64,
+        runtime_const: "apps/api/src/handlers/retirement_profile.rs: MIN/MAX_BRIDGE_YEARS",
+        also_update: "(1) las dos consts; (2) el literal \
+                      `#[schemars(range(min = 1, max = 20))]` sobre \
+                      `PensionParam::bridge_max_years`; (3) regenera el fixture",
+    },
+    // ---- Monte Carlo: el mismo techo (`MCP_MAX_PATHS`) en dos tools -------------------------
+    // `simulate_projection.monte_carlo.paths` y `get_projection_bands.paths` comparten el mismo
+    // límite MCP (2.500, la mitad del HTTP: un agente en bucle es el llamante que más satura el
+    // semáforo de simulaciones) — dos filas, no una, porque son dos `#[schemars(range(...))]`
+    // independientes y ambos pueden divergir por separado.
+    PinnedBound {
+        tool: "simulate_projection",
+        pointer: "$defs.MonteCarloParam.paths",
+        expected_min: Some(1),
+        expected_max: MCP_MAX_PATHS as i64,
+        runtime_const: "apps/api/src/handlers/projection_bands.rs: MCP_MAX_PATHS",
+        also_update: "(1) `MCP_MAX_PATHS`; (2) el literal \
+                      `#[schemars(range(min = 1, max = 2500))]` sobre `MonteCarloParam::paths`; \
+                      (3) la llamada `resolve_paths(Some(mc.paths), MCP_MAX_PATHS)` en \
+                      `handlers/projection.rs`, que es la que de verdad topa en tiempo de \
+                      ejecución; (4) regenera el fixture (ver la fila de `$.months`)",
+    },
+    PinnedBound {
+        tool: "get_projection_bands",
+        pointer: "$.paths",
+        expected_min: Some(1),
+        expected_max: MCP_MAX_PATHS as i64,
+        runtime_const: "apps/api/src/handlers/projection_bands.rs: MCP_MAX_PATHS",
+        also_update: "(1) `MCP_MAX_PATHS`; (2) el literal \
+                      `#[schemars(range(min = 1, max = 2500))]` sobre \
+                      `ProjectionBandsParams::paths`; (3) la llamada \
+                      `resolve_paths(p.paths, MCP_MAX_PATHS)` en `mcp/server.rs`, que es la que \
+                      de verdad topa; (4) regenera el fixture (ver la fila de `$.months`)",
+    },
+    // ---- `swr_pct` (0–6): duplicación real, pero el arnés no la puede pinear ------------------
+    // Los tres `swr_pct` del catálogo (`SimulateParams`, `ProfileOverrideParam`,
+    // `UpdateRetirementProfileParams`) viajan como STRING decimal con un `#[schemars(regex(...))]`
+    // — nunca `range(...)` porque `range` no aplica a un `string` en JSON Schema. `numeric_bound`
+    // (más abajo) solo sabe leer los tokens `minimum=`/`maximum=` que UN `range` numérico deja en
+    // `constraints`; un `pattern` no deja ninguno, así que no hay nada que esta tabla pueda pinear
+    // para "SWR en % (0–6)" — el número vive solo en la prosa del doc-comment y en
+    // `MAX_SWR_PCT`/`validate_retirement_profile`. Si esto te preocupa (con razón: es la misma
+    // clase de duplicación que el resto de la tabla, solo que en un formato que el arnés no lee),
+    // la red que sí existe es leer el 6 a mano contra `MAX_SWR_PCT` cada vez que uno de los dos
+    // cambie — no hay una segunda automática hasta que el arnés sepa comparar texto libre.
 ];
 
 /// Lee `constraints["<pointer>"]` de la tool y extrae `minimum` / `maximum`.

@@ -194,11 +194,18 @@ impl TestApp {
         // no van a aparecer nunca. Lo que NO puede es quedarse corta cuando sí van a llegar —
         // de ahí el conteo por usuario.
         let esperadas = users * 2;
-        for _ in 0..200 {
+        // **El tope subió a 30 s en 5.0.0 (modelo v2) y no es un margen a ojo**: el warm-up ya no
+        // es una proyección determinista de milisegundos — desde A3/A4 arrastra el NIVEL 1 del
+        // plan, que son miles de simulaciones f64 por usuario (segundos, incluso con los crates
+        // del motor optimizados en dev). Con el segundo escaso de antes, `settle` se rendía, la
+        // cache quedaba vacía, y el warm-up aterrizaba DESPUÉS —dentro de la llamada que el test
+        // estaba midiendo—: un `assert!(cache.is_empty())` fallaba culpando al código bajo prueba.
+        // Sigue siendo una espera acotada por un EVENTO: sale en cuanto las entradas aparecen.
+        for _ in 0..600 {
             if self.state.projection_cache.read().await.len() >= esperadas {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         // ...y se limpia: a partir de aquí solo puebla la cache quien el test decida.
         self.state
