@@ -1,95 +1,491 @@
 /**
- * Modelo PURO de las tarjetas de estrategia y de los avisos de la vista Jubilación
- * (5.0.0, D16/D17/D31 y tabla §C del plan de #207).
+ * Modelo PURO de la cabecera de resultados de Jubilación y de sus avisos (5.0.0, **modelo v2**:
+ * «el éxito define la fecha», C1–C8 + §4 «Salidas y pantalla»).
  *
- * Cada estrategia contesta preguntas DISTINTAS y por eso enseña tarjetas distintas: «¿cuánto
- * tengo que ahorrar para llegar a los 55?» no existe en «Cuanto antes», y «¿cuál es mi número
- * coast?» solo existe en Coast FIRE. La correspondencia estrategia → tarjetas es una tabla del
- * contrato (§C), no una preferencia de layout, así que vive aquí con un test que la fija y la
- * vista se limita a pintar `MetricCard` con lo que salga.
+ * ## Qué cambió respecto de la primera 5.0.0, y por qué importa aquí
  *
- * Tres reglas que este módulo NO puede romper:
+ * Hasta el modelo v2 la cabecera giraba alrededor de un OBJETIVO: un capital estático que la línea
+ * determinista cruzaba, con su base (perpetuidad / puente), su descuento y su colchón. El
+ * diagnóstico del owner fue que ese objetivo decidía la fecha y el éxito solo la COMENTABA — «no
+ * es tolerable planear y que luego no alcance». Así que el objetivo desapareció del contrato y con
+ * él las tarjetas que lo servían (`target`, `coast_number`, `partial_gap`, `bridge`, `disposable`).
  *
- *  1. **`null` no es cero.** Un `required_contribution_monthly` ausente significa «esta
- *     estrategia no responde a esa pregunta», y se pinta con guion — nunca con un 0 €, que se
- *     leería como «no necesitas ahorrar nada». Lo mismo con `underfunded`, donde `null` es «la
- *     pregunta no aplica» y `false` es «vas bien»: colapsarlos pinta de verde un plan que nadie
- *     ha evaluado.
- *  2. **El margen tiene DOS bases** y la copia lo dice (§B.7): con una edad objetivo es «lo que
- *     te sobra del máximo sobrante una vez cubierto el plan»; con Coast FIRE es «todo tu
- *     sobrante, pero solo desde el mes coast» — y antes de ese mes vale 0 de verdad, no por
- *     falta de dato. Publicar los dos con la misma frase haría que el mismo número significara
- *     dos cosas.
- *  3. **Las unidades del contrato mandan.** `bridge_effective_withdrawal_pct` y
- *     `bridge_discount_annual_pct` son PORCENTAJES (`6.5` = 6,5 %); `pension_coverage_ratio` es
- *     una FRACCIÓN (`0.6` = 60 %). Formatearlos con el helper equivocado multiplica o divide por
- *     100 lo que el usuario lee.
+ * Lo que queda son **tres tarjetas y ni una más**, y las tres contestan a la misma pregunta desde
+ * ángulos distintos: cuánto necesitarías HOY, con qué seguridad aguanta el plan que tienes, y el
+ * hito propio de tu estrategia. La correspondencia estrategia → tercera tarjeta es una tabla del
+ * contrato (§4), no una preferencia de layout, así que vive aquí con un test que la fija y la
+ * vista se limita a pintar lo que salga.
  *
- * Lo que este módulo NO hace: dibujar nada, resolver fechas (recibe un rotulador de meses de la
- * vista, que es quien sabe si el eje va en fechas o en edades) ni tocar la serie
- * `disposable_capital` — D31 la deja fuera del chart y fuera de aquí: el margen es tile.
+ * ## Cuatro reglas que este módulo NO puede romper
+ *
+ *  1. **`null` no es cero.** Una `contribution_required_monthly` ausente significa «esta
+ *     estrategia no responde a esa pregunta», y la tarjeta no se emite — nunca un 0 €, que se
+ *     leería como «no necesitas ahorrar nada». Lo mismo con `contribution_underfunded`, donde
+ *     `null` es «la pregunta no aplica» y `false` es «vas bien»: colapsarlos pinta de verde un
+ *     plan que nadie ha evaluado.
+ *  2. **«Capital necesario hoy» está SIEMPRE en euros de hoy** y el toggle «en dinero de hoy» del
+ *     chart **no lo toca**. No es un olvido: la cifra es `needed_c(1)` (§2.7), una respuesta a
+ *     «¿cuánto necesitaría si me jubilara ya?», y «ya» es hoy. Deflactarla otra vez la dividiría
+ *     por un factor que ya está aplicado; multiplicarla por el nominal contestaría a una pregunta
+ *     que nadie hace. Por eso el subtítulo lo dice en voz alta —«en euros de hoy»— en vez de
+ *     confiar en que nadie mueva el toggle.
+ *  3. **Un plan que no está no se rellena.** Con `plan_absent_reason`, o con
+ *     `retirement_date_basis: "pending"`, las tarjetas fijas enseñan la RAZÓN, no un guion mudo ni
+ *     un número viejo; «calculando…» y «falta tu fecha de nacimiento» son estados distintos y se
+ *     dicen distinto.
+ *  4. **Las unidades del contrato mandan.** `success_of_plan`/`success_wilson_low` son FRACCIONES
+ *     `[0,1]`; `success_threshold_pct` es un PORCENTAJE entero; `success_sampling_error_pp` son
+ *     PUNTOS PORCENTUALES y tiene formateador propio (`formatSamplingErrorPp`, en `risk-bands.ts`).
+ *     Mezclarlos multiplica o divide por 100 lo que el usuario lee.
+ *
+ * Lo que este módulo NO hace: dibujar nada y resolver fechas por su cuenta. Recibe de la vista un
+ * rotulador de meses y un resolutor de edades, porque los dos dependen del modo del eje, de la
+ * fecha de nacimiento y de la zona horaria, y ninguna de las tres es asunto de este módulo.
  */
 
-import type {
-  ProjectionSeriesApi,
-  RetirementStrategyApi,
-  TargetBasisApi,
-} from "../api/types";
-import type { HelpTextId } from "./helpTexts";
+import type { ProjectionSeriesApi, RetirementStrategyApi } from "../api/types";
 import { formatMonthSpanEs } from "./duration";
+import { formatProjectionAxisYear, parseYmdComponents } from "./dates";
 import {
+  DISPLAY_NUMBER_LOCALE,
+  METRIC_DASH,
   formatCurrencyOrDash,
-  formatFractionAsPercent,
-  formatPercentAmount,
+  formatPercentDisplay,
+  parseDisplayDecimal,
 } from "./format";
-import { formatYearsEsFromMonths } from "./projection-chart";
+import {
+  formatSamplingErrorPp,
+  formatSuccessPercent,
+  type PlanHelpTextId,
+} from "./risk-bands";
 
-/** Los campos de la respuesta que deciden las tarjetas. Un `Pick` y no la respuesta entera para
- *  que un test pueda escribir el caso mínimo sin inventarse una proyección completa. */
-export type RetirementTileSeries = Pick<
+/**
+ * Los campos del bloque «plan» de la serie que la cabecera lee. Un `Pick` y no la respuesta entera
+ * para que un test pueda escribir el caso mínimo sin inventarse una proyección completa.
+ */
+export type RetirementTileV2Series = Pick<
   ProjectionSeriesApi,
   | "strategy"
-  | "required_contribution_monthly"
-  | "required_contribution_search_ceiling"
-  | "underfunded"
-  | "disposable_monthly"
-  | "disposable_capital_at_retirement"
-  | "disposable_capital_today"
-  | "coast_fire_month_index"
-  | "coast_number"
-  | "partial_gap_target"
-  | "partial_phase_capital_growing"
-  | "pension_start_month_index"
-  | "bridge_effective_withdrawal_pct"
-  | "pension_coverage_ratio"
-  | "bridge_discount_annual_pct"
+  | "retirement_date_basis"
+  | "success_threshold_pct"
+  | "safe_date_month_index"
+  | "safe_date_date_ymd"
+  | "safe_date_age"
+  | "safe_date_at_100_month_index"
+  | "safe_date_at_90_month_index"
+  | "success_of_plan"
+  | "success_wilson_low"
+  | "success_sampling_error_pp"
+  | "paths_used"
+  | "seed"
+  | "needed_capital_today"
+  | "contribution_required_monthly"
+  | "contribution_required_search_ceiling"
+  | "contribution_underfunded"
+  | "coast_stop_month_index"
+  | "partial_start_month_index"
+  | "plan_absent_reason"
+  | "fire_number_classic_today"
   | "warnings"
+>;
+
+/** Lo mínimo que necesitan los avisos: la estrategia no entra, los `warnings` mandan. */
+export type RetirementNoticeSeries = Pick<
+  ProjectionSeriesApi,
+  "contribution_underfunded" | "warnings"
 >;
 
 export type RetirementTileTone = "default" | "danger";
 
-/** Una tarjeta lista para `MetricCard`: mismos slots y mismos nombres, sin traducción intermedia. */
-export type RetirementTileModel = {
-  /** Key de React y del test. Estable por tarjeta, no por posición. */
+/** Cuántas tarjetas caben en la cabecera de resultados. §4: **una frase de hito + 3 tarjetas**. */
+export const RETIREMENT_TILES_V2_CAP = 3;
+
+/** Una tarjeta de la cabecera: **una sola cifra** y un subtítulo COMPLETO (U7 prohíbe truncarlo —
+ *  el subtítulo es donde vive la base de la cifra, y media base es peor que ninguna). */
+export type RetirementTileV2 = {
+  /** Key de React y del test. Estable por tarjeta, nunca por posición. */
   key: string;
   label: string;
-  helpId: HelpTextId;
   value: string;
-  /** Primer slot bajo la cifra (`MetricCard` lo pinta entre paréntesis). */
-  parenthetical?: string;
-  /** Segundo slot, bajo el anterior. */
-  detail?: string;
+  /** Texto completo, puede ser largo. `undefined` = no hay nada que añadir, y entonces la vista
+   *  reserva el slot igual (misma disciplina que el paréntesis de `MetricCard`). */
+  subtitle?: string;
   tone: RetirementTileTone;
+  helpId: PlanHelpTextId;
 };
 
-/** Literales cerrados de `warnings[]` que esta vista sabe explicar. `birth_date_missing` NO está:
- *  lo cuenta el banner de alta (D33), y decirlo dos veces en la misma pantalla es ruido. */
+export type RetirementTilesV2Input = {
+  series: RetirementTileV2Series | null | undefined;
+  /** ISO de la divisa del hogar (`""` degrada a número sin símbolo, como el resto de la app). */
+  currencyIso: string;
+  /**
+   * Rotulador de un mes de la rejilla → etiqueta del eje («2043», «a los 55»). Lo inyecta la
+   * vista porque depende del modo del eje, de la fecha de nacimiento y de la zona horaria, y
+   * ninguna de las tres es asunto de este módulo.
+   */
+  monthLabel: (monthIndex: number) => string;
+  /**
+   * Edad cumplida en un mes de la rejilla, o `null` sin fecha de nacimiento resuelta. Misma razón
+   * que `monthLabel`: la aritmética civil vive en la vista. Ausente ⇒ los subtítulos van sin edad,
+   * nunca con una inventada.
+   */
+  monthAge?: (monthIndex: number) => number | null;
+  /** Edad objetivo del perfil, para nombrarla en el rojo. `null` ⇒ «tu edad objetivo». */
+  targetRetirementAge: number | null;
+};
+
+function finite(n: unknown): n is number {
+  return typeof n === "number" && Number.isFinite(n);
+}
+
+/** Un RECUENTO (caminos sorteados) con separador de millar español: ni dinero ni porcentaje. */
+function formatCount(n: number): string {
+  return new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
+    maximumFractionDigits: 0,
+  }).format(n);
+}
+
+/**
+ * Por qué el bloque «plan» no trae cifras, o `null` cuando sí las trae.
+ *
+ * `pending` va PRIMERO y no es una carencia: el nivel 1 del solve sigue corriendo (típicamente el
+ * primer GET tras una mutación) y lo honesto es «calculando…», no un guion que dice «no hay».
+ */
+function planUnavailableReason(series: RetirementTileV2Series): string | null {
+  if (series.retirement_date_basis === "pending") return "calculando…";
+  switch (series.plan_absent_reason) {
+    case "birth_date_missing":
+      return "falta tu fecha de nacimiento";
+    case "months_override":
+      return "esta vista fija un horizonte propio";
+    case "household_not_solved":
+      return "el hogar no resuelve un plan común";
+    case "no_liquid_assets":
+      return "no tienes activos líquidos que vender";
+    case null:
+    case undefined:
+      return null;
+    default:
+      // Literal nuevo de un backend más moderno: se dice que falta, no se inventa el motivo.
+      return "no disponible";
+  }
+}
+
+/** «a los 55 años» a partir del resolutor inyectado; `null` sin fecha de nacimiento. */
+function ageBit(
+  monthIndex: number,
+  monthAge: RetirementTilesV2Input["monthAge"],
+): string | null {
+  const age = monthAge?.(monthIndex);
+  return finite(age) ? `a los ${age} años` : null;
+}
+
+/** «dentro de 7 años» / «ya» — un tramo desde hoy, no una fecha. */
+function withinBit(monthIndex: number, already: string): string {
+  return monthIndex <= 0 ? already : `dentro de ${formatMonthSpanEs(monthIndex)}`;
+}
+
+function joinBits(bits: (string | null | undefined)[]): string | undefined {
+  const kept = bits.filter((b): b is string => b != null && b !== "");
+  return kept.length > 0 ? kept.join(" · ") : undefined;
+}
+
+/**
+ * La cabecera de resultados de Jubilación: **exactamente hasta 3 tarjetas, una cifra por tarjeta**.
+ *
+ * El orden es fijo y ES el contrato (§4):
+ *
+ * 1. **«Capital necesario hoy»** — la única cifra que todas las estrategias comparten. Es
+ *    `needed_c(1)`: el líquido que, con tu mezcla de activos, sostiene el plan al umbral si te
+ *    jubilaras ya. Siempre en euros de hoy (regla 2 de la cabecera del módulo).
+ * 2. **«Éxito del plan»** — el KPI central del modelo v2, con el umbral y la precisión del sorteo
+ *    en el subtítulo. Sin el umbral, el mismo 95,0 % es «justo lo que pedí» para uno y «cinco
+ *    puntos de más» para otro.
+ * 3. **La tercera, por estrategia**: `asap` → «Fecha válida»; `retire_at_age` → «Aportación
+ *    mínima»; `coast` → «Mes coast»; `partial` → «Inicio de la jornada reducida».
+ *
+ * Las dos primeras se emiten SIEMPRE (con su razón cuando el plan no está). La tercera solo cuando
+ * el servidor publica su cifra o el aviso que la sustituye: una tarjeta con guion diría «esto se
+ * calcula y hoy falta el dato», y lo cierto es que la estrategia no hace esa pregunta.
+ */
+export function buildRetirementTilesV2(
+  input: RetirementTilesV2Input,
+): RetirementTileV2[] {
+  const { series, currencyIso } = input;
+  if (!series) return [];
+  const money = (s: string | null | undefined) => formatCurrencyOrDash(s, currencyIso);
+  const unavailable = planUnavailableReason(series);
+  const tiles: RetirementTileV2[] = [];
+
+  // 1 · Capital necesario hoy — fija, primera, siempre en euros de HOY.
+  tiles.push({
+    key: "needed_capital",
+    label: "Capital necesario hoy",
+    value: unavailable ? METRIC_DASH : money(series.needed_capital_today),
+    subtitle:
+      unavailable ??
+      joinBits([
+        "en euros de hoy",
+        finite(series.success_threshold_pct)
+          ? `para que aguanten ${series.success_threshold_pct} de cada 100 escenarios`
+          : null,
+      ]),
+    tone: "default",
+    helpId: "retirement.needed_capital",
+  });
+
+  // 2 · Éxito del plan — fija, segunda.
+  tiles.push({
+    key: "success",
+    label: "Éxito del plan",
+    value: unavailable ? METRIC_DASH : formatSuccessPercent(series.success_of_plan),
+    subtitle:
+      unavailable ??
+      joinBits([
+        finite(series.success_threshold_pct)
+          ? `umbral ${formatPercentDisplay(series.success_threshold_pct)}`
+          : null,
+        series.success_sampling_error_pp != null
+          ? formatSamplingErrorPp(series.success_sampling_error_pp)
+          : null,
+      ]),
+    tone: "default",
+    helpId: "retirement.success",
+  });
+
+  // 3 · La de la estrategia. Sin plan no hay tercera: repetir la misma razón por tercera vez no
+  // añade nada, y un guion afirmaría que esa cifra se calcula y hoy falta.
+  if (!unavailable) {
+    const third = strategyTile(input, series);
+    if (third) tiles.push(third);
+  }
+
+  return tiles.slice(0, RETIREMENT_TILES_V2_CAP);
+}
+
+/** La tercera tarjeta, la que cambia con la estrategia (§4). `null` = esta estrategia no publica
+ *  su hito (y entonces la cabecera se queda en dos, que es honesto). */
+function strategyTile(
+  input: RetirementTilesV2Input,
+  series: RetirementTileV2Series,
+): RetirementTileV2 | null {
+  const strategy: RetirementStrategyApi | null | undefined = series.strategy;
+  switch (strategy) {
+    case "asap":
+      return safeDateTile(input, series);
+    case "retire_at_age":
+      return requiredContributionTile(input, series);
+    case "coast":
+      return coastTile(input, series);
+    case "partial":
+      return partialTile(input, series);
+    default:
+      // `null` en `view=household` (el agregado no tiene UNA estrategia) o un literal futuro.
+      return null;
+  }
+}
+
+/**
+ * «Fecha válida» (`asap`): el primer mes en que, jubilándote ahí, ≥ umbral de los caminos no
+ * vuelven a necesitar trabajar (§2.6, definición A).
+ *
+ * El valor es el AÑO —la misma unidad que la frase-hito de §4 («te jubilas en 2043 (a los 55)»)—
+ * porque una fecha al día fingiría una precisión que un sorteo no tiene. El mes exacto sigue
+ * viviendo en la marca vertical del chart, que es donde se puede leer sin prometer nada.
+ *
+ * `not_reachable` es «nunca», nunca un 0: ningún mes del horizonte cumple el umbral, y esa es una
+ * respuesta, no un hueco.
+ */
+function safeDateTile(
+  input: RetirementTilesV2Input,
+  series: RetirementTileV2Series,
+): RetirementTileV2 | null {
+  if (series.retirement_date_basis === "not_reachable") {
+    return {
+      key: "safe_date",
+      label: "Fecha válida",
+      value: "Nunca",
+      subtitle: "ningún mes del horizonte llega a tu umbral de éxito",
+      tone: "danger",
+      helpId: "retirement.safe_date",
+    };
+  }
+
+  const mi = series.safe_date_month_index;
+  const civil = parseYmdComponents(series.safe_date_date_ymd);
+  const value = civil
+    ? formatProjectionAxisYear(civil)
+    : finite(mi)
+      ? input.monthLabel(mi)
+      : null;
+  if (value == null) return null;
+
+  const age = series.safe_date_age;
+  return {
+    key: "safe_date",
+    label: "Fecha válida",
+    value,
+    subtitle: joinBits([
+      finite(age) ? `a los ${age} años` : null,
+      finite(mi) ? withinBit(mi, "ya puedes jubilarte") : null,
+    ]),
+    tone: "default",
+    helpId: "retirement.safe_date",
+  };
+}
+
+/**
+ * «Aportación mínima» (`retire_at_age`): la menor aportación mensual extra que hace cumplir el
+ * umbral en la edad que pediste (§3.2).
+ *
+ * Los tres estados que la cifra puede tener y que un importe pelado colapsaría:
+ *
+ * - **`contribution_underfunded`** — ni con el techo entero se llega. El importe SERÍA el techo, y
+ *   pintarlo diría «ahorra esto y llegas», que es exactamente lo contrario. Va en rojo y con
+ *   palabras.
+ * - **cero** — «Ya llegas»: no hace falta aportar nada MÁS de lo que ya aportas. Un «0 €» aquí se
+ *   lee como «no ahorres», que no es lo que dice el motor.
+ * - **un importe** — con su denominador («de X €/mes de sobrante»), sin el cual no se sabe si es
+ *   mucho o poco.
+ */
+function requiredContributionTile(
+  input: RetirementTilesV2Input,
+  series: RetirementTileV2Series,
+): RetirementTileV2 | null {
+  const money = (s: string | null | undefined) =>
+    formatCurrencyOrDash(s, input.currencyIso);
+  const ceiling = series.contribution_required_search_ceiling;
+  const ceilingBit = ceiling != null ? `de ${money(ceiling)}/mes de sobrante` : null;
+
+  if (series.contribution_underfunded === true) {
+    return {
+      key: "required_contribution",
+      label: "Aportación mínima",
+      value: "Ni ahorrándolo todo",
+      subtitle: joinBits([
+        "ni invirtiendo cada euro de tu sobrante llegas a esa edad",
+        ceilingBit,
+      ]),
+      tone: "danger",
+      helpId: "retirement.required_contribution",
+    };
+  }
+
+  const amount = series.contribution_required_monthly;
+  if (amount == null) return null;
+  const n = parseDisplayDecimal(String(amount));
+  if (n === 0) {
+    return {
+      key: "required_contribution",
+      label: "Aportación mínima",
+      value: "Ya llegas",
+      subtitle: "con lo que ya aportas, tu plan cumple el umbral a esa edad",
+      tone: "default",
+      helpId: "retirement.required_contribution",
+    };
+  }
+
+  return {
+    key: "required_contribution",
+    label: "Aportación mínima",
+    value: money(amount),
+    subtitle: joinBits(["al mes, además de lo que ya aportas", ceilingBit]),
+    tone: "default",
+    helpId: "retirement.required_contribution",
+  };
+}
+
+/**
+ * «Mes coast» (`coast`): el primer mes en que puedes dejar de aportar y aun así llegar (modo A) o
+ * el que fijaste tú (modo B).
+ *
+ * `coast_not_reachable` no es «no calculado»: es que no existe tal mes, ni aportando siempre. Se
+ * dice con palabras porque un guion invitaría a esperar a que llegue el dato.
+ */
+function coastTile(
+  input: RetirementTilesV2Input,
+  series: RetirementTileV2Series,
+): RetirementTileV2 | null {
+  const warnings = new Set(series.warnings ?? []);
+  if (warnings.has("coast_not_reachable")) {
+    return {
+      key: "coast_month",
+      label: "Mes coast",
+      value: "No puedes parar nunca",
+      subtitle: "ni aportando todos los meses llegas al umbral en tu edad objetivo",
+      tone: "danger",
+      helpId: "retirement.coast_month",
+    };
+  }
+
+  const mi = series.coast_stop_month_index;
+  if (!finite(mi)) return null;
+  return {
+    key: "coast_month",
+    label: "Mes coast",
+    value: input.monthLabel(mi),
+    subtitle: joinBits([
+      ageBit(mi, input.monthAge),
+      withinBit(mi, "ya puedes dejar de aportar"),
+    ]),
+    tone: "default",
+    helpId: "retirement.coast_month",
+  };
+}
+
+/**
+ * «Inicio de la jornada reducida» (`partial`, Barista FIRE): el mes en que arranca la fase, sea
+ * porque lo pediste (modo A) o porque es el primero que el plan puede permitirse (modo B).
+ *
+ * Los dos fallos de solve de §3.4 dicen cosas distintas y por eso no comparten copy:
+ * `partial_never_starts` es «la fase no empieza nunca» (y entonces no hay mes que enseñar);
+ * `partial_never_fully_retires` es «empiezas, pero de ahí no sales» — la fase arranca y la
+ * jubilación total nunca llega, que es peor y va en rojo con el mes puesto.
+ */
+function partialTile(
+  input: RetirementTilesV2Input,
+  series: RetirementTileV2Series,
+): RetirementTileV2 | null {
+  const warnings = new Set(series.warnings ?? []);
+  if (warnings.has("partial_never_starts")) {
+    return {
+      key: "partial_start",
+      label: "Inicio de la jornada reducida",
+      value: "Nunca",
+      subtitle: "tu plan no puede permitirse empezar la jornada reducida en ningún mes",
+      tone: "danger",
+      helpId: "retirement.partial_mode",
+    };
+  }
+
+  const mi = series.partial_start_month_index;
+  if (!finite(mi)) return null;
+  const neverFull = warnings.has("partial_never_fully_retires");
+  return {
+    key: "partial_start",
+    label: "Inicio de la jornada reducida",
+    value: input.monthLabel(mi),
+    subtitle: joinBits([
+      ageBit(mi, input.monthAge),
+      withinBit(mi, "ya puedes empezarla"),
+      neverFull ? "pero nunca llegas a jubilarte del todo" : null,
+    ]),
+    tone: neverFull ? "danger" : "default",
+    helpId: "retirement.partial_mode",
+  };
+}
+
+/** Literales cerrados de `warnings[]` que esta vista sabe explicar, más el rojo que sale de un
+ *  booleano. `birth_date_missing` NO está: lo cuenta la tarjeta «Capital necesario hoy» con su
+ *  razón, y decirlo dos veces en la misma pantalla es ruido. */
 export type RetirementNoticeCode =
-  | "retire_at_age_underfunded"
+  | "contribution_underfunded"
   | "coast_not_reachable"
-  | "partial_phase_capital_shrinking"
-  | "bridge_discount_no_liquid_assets"
-  | "bridge_discount_clamped"
+  | "partial_never_starts"
+  | "partial_never_fully_retires"
+  | "pension_unpaid_during_partial"
+  | "no_volatility_declared"
+  | "strategy_pension_bridge_migrated"
   | "target_retirement_age_missing";
 
 export type RetirementNoticeTone = "danger" | "warn";
@@ -100,212 +496,35 @@ export type RetirementNotice = {
   text: string;
 };
 
-export type RetirementTilesInput = {
-  series: RetirementTileSeries | null | undefined;
-  /** ISO de la divisa del hogar (`""` degrada a número sin símbolo, como el resto de la app). */
-  currencyIso: string;
-  /**
-   * Rotulador de un mes de la rejilla → etiqueta del eje («2043», «a los 55»). Lo inyecta la
-   * vista porque depende del modo del eje, de la fecha de nacimiento y de la zona horaria, y
-   * ninguna de las tres es asunto de este módulo.
-   */
-  monthLabel: (monthIndex: number) => string;
-  /** Edad objetivo del perfil, para nombrarla en el rojo. `null` ⇒ «tu edad objetivo». */
-  targetRetirementAge: number | null;
-};
-
-export type RetirementTilesModel = {
-  tiles: RetirementTileModel[];
-  /** Avisos ya ordenados: primero lo que invalida el plan, después lo que le falta. */
-  notices: RetirementNotice[];
-};
-
-/**
- * Estrategias que resuelven una aportación necesaria contra una edad (§B.7). `partial` solo
- * cuando el servidor de verdad ha resuelto —el perfil puede no tener edad total y entonces el
- * campo viene `null` y la tarjeta se cae sola.
- */
-function hasAgeSolve(strategy: RetirementStrategyApi | null | undefined): boolean {
-  return strategy === "retire_at_age" || strategy === "partial";
-}
-
-/**
- * §C: qué tarjetas enseña cada estrategia, con las cifras del servidor tal cual.
- *
- * Ninguna tarjeta se inventa por «coherencia visual»: una fila de tarjetas con guiones dice
- * «esto se calcula y hoy no hay dato», y eso es falso cuando la estrategia simplemente no hace
- * esa pregunta. Por eso la lista es variable y no un hueco fijo.
- *
- * @deprecated — retirar en U1b/U2. La cabecera de resultados del rediseño (U7) es **una frase de
- * hito + como mucho 3 tarjetas**, y esta versión emite hasta cinco con dos slots de subtítulo por
- * tarjeta. Su sustituta es `buildRetirementTilesV2` (+ `retirementDetailRows` para lo que baja al
- * «Detalle»). Se conserva mientras `RetirementView.tsx` siga consumiéndola.
- */
-export function buildRetirementTiles(
-  input: RetirementTilesInput,
-): RetirementTilesModel {
-  const { series, currencyIso, monthLabel, targetRetirementAge } = input;
-  const tiles: RetirementTileModel[] = [];
-  const notices: RetirementNotice[] = [];
-  if (!series) return { tiles, notices };
-
-  const strategy = series.strategy ?? null;
-  const money = (s: string | null | undefined) => formatCurrencyOrDash(s, currencyIso);
-
-  // ── «Ahorro necesario» (retire_at_age / partial con edad) ────────────────────────────────
-  //
-  // El rojo de D17 vive en la tarjeta además de en el banner: quien mira la cifra tiene que ver
-  // ahí mismo que no es «lo que hay que ahorrar» sino «todo lo que hay, y aun así no llega».
-  if (hasAgeSolve(strategy) && series.required_contribution_monthly != null) {
-    const underfunded = series.underfunded === true;
-    const ceiling = series.required_contribution_search_ceiling;
-    tiles.push({
-      key: "required_contribution",
-      label: "Ahorro necesario",
-      helpId: "retirement.required_contribution",
-      value: money(series.required_contribution_monthly),
-      parenthetical:
-        ceiling != null ? `de ${money(ceiling)}/mes de sobrante` : undefined,
-      detail: underfunded ? "es TODO tu sobrante y no basta" : undefined,
-      tone: underfunded ? "danger" : "default",
-    });
-  }
-
-  // ── «Mes coast» y «Número coast» (solo coast) ────────────────────────────────────────────
-  if (strategy === "coast") {
-    const coastMi = series.coast_fire_month_index;
-    const reachable = typeof coastMi === "number" && Number.isFinite(coastMi);
-    tiles.push({
-      key: "coast_month",
-      label: "Mes coast",
-      helpId: "retirement.coast_month",
-      value: reachable ? monthLabel(coastMi as number) : "No alcanzable",
-      parenthetical: reachable
-        ? (coastMi as number) <= 0
-          ? "ya puedes dejar de aportar"
-          : `dentro de ${formatYearsEsFromMonths(coastMi as number)}`
-        : "ni aportando siempre llegas",
-      tone: "default",
-    });
-    tiles.push({
-      key: "coast_number",
-      label: "Número coast",
-      helpId: "retirement.coast_number",
-      value: money(series.coast_number),
-      parenthetical: reachable ? "líquido al entrar en el mes coast" : undefined,
-      tone: "default",
-    });
-  }
-
-  // ── «Margen disponible» (D16/D31) — dos bases, dos copias ────────────────────────────────
-  if (
-    (hasAgeSolve(strategy) || strategy === "coast") &&
-    series.disposable_monthly != null
-  ) {
-    const capAtRet = series.disposable_capital_at_retirement;
-    const capToday = series.disposable_capital_today;
-    const coastMi = series.coast_fire_month_index;
-    const coastPending =
-      strategy === "coast" &&
-      (typeof coastMi !== "number" || !Number.isFinite(coastMi) || coastMi > 0);
-    tiles.push({
-      key: "disposable",
-      label: "Margen disponible",
-      helpId: "retirement.disposable",
-      value: money(series.disposable_monthly),
-      parenthetical: coastPending
-        ? typeof coastMi === "number" && Number.isFinite(coastMi)
-          ? "al mes hasta el mes coast; desde él, todo tu sobrante"
-          : "al mes: sin mes coast no hay sobrante que liberar"
-        : capAtRet != null
-          ? `al mes · ${money(capAtRet)} acumulados al jubilarte`
-          : "al mes",
-      detail:
-        !coastPending && capToday != null
-          ? `${money(capToday)} en dinero de hoy`
-          : undefined,
-      tone: "default",
-    });
-  }
-
-  // ── «Hueco de media jornada» (solo partial) ──────────────────────────────────────────────
-  if (strategy === "partial" && series.partial_gap_target != null) {
-    // `partial_phase_capital_growing` es `true` / `false` / `null`, y los tres dicen cosas
-    // distintas: creció, menguó, y «no hubo fase parcial que medir». El `null` no pinta línea.
-    const growing = series.partial_phase_capital_growing;
-    tiles.push({
-      key: "partial_gap",
-      label: "Hueco de media jornada",
-      helpId: "retirement.partial_gap",
-      value: money(series.partial_gap_target),
-      parenthetical: "capital que cubriría ese hueco a perpetuidad",
-      detail:
-        growing === true
-          ? "el capital sigue creciendo en media jornada"
-          : growing === false
-            ? "el capital DECRECE en media jornada"
-            : undefined,
-      tone: growing === false ? "danger" : "default",
-    });
-  }
-
-  // ── «Puente» (pension_bridge, o cualquier estrategia con pensión con fecha) ──────────────
-  //
-  // La condición es la PENSIÓN, no la estrategia: quien declara una pensión con fecha tiene un
-  // puente que cubrir aunque se jubile por cruce, y esconderle la tasa efectiva sería esconder
-  // justo lo que la perpetuidad disimula.
-  const pensionMi = series.pension_start_month_index;
-  if (typeof pensionMi === "number" && Number.isFinite(pensionMi)) {
-    const eff = series.bridge_effective_withdrawal_pct;
-    const cov = series.pension_coverage_ratio;
-    const disc = series.bridge_discount_annual_pct;
-    const parts: string[] = [];
-    if (cov != null) parts.push(`la pensión cubre el ${formatFractionAsPercent(cov)} del gasto`);
-    if (disc != null) parts.push(`descontado al ${formatPercentAmount(disc)} anual`);
-    tiles.push({
-      key: "bridge",
-      label: "Puente hasta la pensión",
-      helpId: "retirement.bridge",
-      value: pensionMi <= 0 ? "Ya la cobras" : formatYearsEsFromMonths(pensionMi),
-      parenthetical:
-        eff != null
-          ? `retiras el ${formatPercentAmount(eff)} del capital al año durante el puente`
-          : undefined,
-      detail: parts.length > 0 ? parts.join(" · ") : undefined,
-      tone: "default",
-    });
-  }
-
-  return { tiles, notices: buildRetirementNotices(series, targetRetirementAge) };
-}
-
 /**
  * Los avisos de `warnings[]` traducidos, ya ordenados por precedencia: **primero lo que invalida
- * el plan (rojo), después lo que lo degrada o lo hace más conservador**.
+ * el plan (rojo), después lo que lo degrada o lo hace menos fiable**.
  *
- * Vive aparte de las tarjetas porque las dos generaciones de cabecera los necesitan igual: la v1
- * los pinta bajo su rejilla y la v2 los baja al «Detalle» (`retirementDetailRows`). Duplicar la
- * traducción habría dejado dos catálogos de copy para los mismos seis literales.
+ * Vive aparte de las tarjetas porque la vista los pinta en dos sitios: los que suben al panel de
+ * resultado y los que bajan al «Detalle» (`retirementDetailRows`). Duplicar la traducción habría
+ * dejado dos catálogos de copy para los mismos literales.
  *
- * `birth_date_missing` NO está a propósito: lo cuenta el banner de alta (D33), y decirlo dos
- * veces en la misma pantalla es ruido.
+ * `no_volatility_declared` merece su párrafo: NO es un fallo del plan, es un fallo del INDICADOR.
+ * Sin ningún activo con σ el sorteo no dispersa, los 2.500 caminos son el mismo camino y el éxito
+ * sale 0 % o 100 % por construcción. Ese 100 % es la lectura más cara de toda la pantalla, así que
+ * el aviso dice explícitamente que no mide riesgo en vez de limitarse a describir la carencia.
  */
 export function buildRetirementNotices(
-  series: RetirementTileSeries | null | undefined,
+  series: RetirementNoticeSeries | null | undefined,
   targetRetirementAge: number | null,
 ): RetirementNotice[] {
   const notices: RetirementNotice[] = [];
   if (!series) return notices;
   const warnings = new Set(series.warnings ?? []);
 
-  if (warnings.has("retire_at_age_underfunded") || series.underfunded === true) {
+  if (series.contribution_underfunded === true) {
     notices.push({
-      code: "retire_at_age_underfunded",
+      code: "contribution_underfunded",
       tone: "danger",
       text:
         targetRetirementAge != null
-          ? `Con tu ahorro actual no llegas a los ${targetRetirementAge} años. Te jubilarás igual —manda la edad— pero por debajo de tu objetivo.`
-          : "Con tu ahorro actual no llegas a tu edad objetivo. Te jubilarás igual —manda la edad— pero por debajo de tu objetivo.",
+          ? `Con tu ahorro actual no llegas a los ${targetRetirementAge} años: ni invirtiendo todo tu sobrante alcanzas tu umbral de éxito a esa edad.`
+          : "Con tu ahorro actual no llegas a tu edad objetivo: ni invirtiendo todo tu sobrante alcanzas tu umbral de éxito a esa edad.",
     });
   }
   if (warnings.has("coast_not_reachable")) {
@@ -313,35 +532,47 @@ export function buildRetirementNotices(
       code: "coast_not_reachable",
       tone: "warn",
       text:
-        "No hay mes coast: ni aportando todos los meses llegas al objetivo en tu edad. La línea discontinua del chart es lo mejor que da tu plan.",
+        "No hay mes coast: ni aportando todos los meses llegas al umbral en tu edad objetivo. No puedes dejar de aportar y llegar.",
     });
   }
-  if (warnings.has("partial_phase_capital_shrinking")) {
+  if (warnings.has("partial_never_starts")) {
     notices.push({
-      code: "partial_phase_capital_shrinking",
+      code: "partial_never_starts",
       tone: "warn",
       text:
-        "Durante la media jornada tu capital DECRECE: el ingreso parcial no cubre el gasto y la diferencia sale de la cartera.",
+        "La jornada reducida no empieza en ningún mes del horizonte: con el ingreso que declaras, la fase falla desde el primer mes en que podría arrancar.",
     });
   }
-  if (warnings.has("bridge_discount_no_liquid_assets")) {
+  if (warnings.has("partial_never_fully_retires")) {
     notices.push({
-      code: "bridge_discount_no_liquid_assets",
+      code: "partial_never_fully_retires",
       tone: "warn",
       text:
-        "Sin activos líquidos declarados no hay rentabilidad con la que descontar el puente: se calcula sin descuento, y el objetivo sale más alto.",
+        "Empiezas la jornada reducida pero nunca te jubilas del todo: desde esa fase ningún mes del horizonte llega a tu umbral de éxito.",
     });
   }
-  // Hermano del anterior y distinto caso (5.0.0, pase de correcciones §H): SÍ hay líquidos, pero
-  // su rentabilidad esperada es negativa. Descontar el puente a una tasa negativa lo encarecería
-  // exponencialmente —y a horizontes largos se sale de lo calculable—, así que el motor la sube
-  // a 0 y lo dice. El aviso existe porque el objetivo resultante NO es el que la configuración
-  // del usuario describe, y sin la frase esa diferencia sería invisible.
-  if (warnings.has("bridge_discount_clamped")) {
+  if (warnings.has("pension_unpaid_during_partial")) {
     notices.push({
-      code: "bridge_discount_clamped",
+      code: "pension_unpaid_during_partial",
       tone: "warn",
-      text: "La rentabilidad esperada de tus líquidos es negativa: el puente se descuenta al 0 %.",
+      text:
+        "Tu pensión empieza durante la jornada reducida y el plan no la cobra hasta la jubilación total: solo entra la fracción que declaraste para esa fase.",
+    });
+  }
+  if (warnings.has("no_volatility_declared")) {
+    notices.push({
+      code: "no_volatility_declared",
+      tone: "warn",
+      text:
+        "Sin volatilidad declarada el sorteo no dispersa: el éxito no mide riesgo. Declara la desviación típica de tus activos para que la cifra signifique algo.",
+    });
+  }
+  if (warnings.has("strategy_pension_bridge_migrated")) {
+    notices.push({
+      code: "strategy_pension_bridge_migrated",
+      tone: "warn",
+      text:
+        "Tu estrategia «Puente hasta la pensión» ahora es «Cuanto antes» con el puente activado: revísalo.",
     });
   }
   if (warnings.has("target_retirement_age_missing")) {
@@ -356,266 +587,31 @@ export function buildRetirementNotices(
   return notices;
 }
 
-/** Rótulo de la base del objetivo para el subtítulo del tile «Patrimonio objetivo». */
-export const TARGET_BASIS_TILE_LABEL: Record<"perpetuity" | "bridge_to_pension", string> = {
-  perpetuity: "base: renta perpetua",
-  bridge_to_pension: "base: puente hasta la pensión",
-};
-
-// ═════════════════════════════════════════════════════════════════════════════════════════════
-// V2 — la cabecera de resultados del rediseño (U7)
-// ═════════════════════════════════════════════════════════════════════════════════════════════
-
-/** Cuántas tarjetas caben en la cabecera de resultados. U7: **una frase de hito + como mucho 3**. */
-export const RETIREMENT_TILES_V2_CAP = 3;
-
-/** Una tarjeta de la cabecera V2: **una sola cifra** y un subtítulo COMPLETO (U7 prohíbe
- *  truncarlo — el subtítulo es donde vive la base de la cifra, y media base es peor que ninguna). */
-export type RetirementTileV2 = {
-  /** Key de React y del test. Estable por tarjeta, nunca por posición. */
-  key: string;
-  label: string;
-  value: string;
-  /** Texto completo, puede ser largo. `undefined` = no hay nada que añadir, y entonces la vista
-   *  reserva el slot igual (misma disciplina que el paréntesis de `MetricCard`). */
-  subtitle?: string;
-  tone: RetirementTileTone;
-  helpId: HelpTextId;
-};
-
-/** Los campos de la serie que la cabecera V2 lee. Añade a los de V1 el objetivo, el mes de
- *  jubilación y el cruce puro: la tarjeta «Objetivo» y el puente de S8 los necesitan. */
-export type RetirementTileV2Series = RetirementTileSeries &
-  Pick<
-    ProjectionSeriesApi,
-    | "jubilacion_month_index"
-    | "jubilacion_age"
-    | "jubilacion_target_net_worth"
-    | "jubilacion_target_net_worth_nominal"
-    | "liquid_crossing_month_index"
-  >;
-
-export type RetirementTilesV2Input = {
-  series: RetirementTileV2Series | null | undefined;
-  currencyIso: string;
-  /** Mes de la rejilla → etiqueta del eje. Lo inyecta la vista (fechas o edades). */
-  monthLabel: (monthIndex: number) => string;
-  /** Edad objetivo GUARDADA; respalda a `jubilacion_age` cuando no hay fecha de nacimiento. */
-  targetRetirementAge: number | null;
-  /** Base EFECTIVA del objetivo (R6). `null` ⇒ la tarjeta «Objetivo» va sin subtítulo. */
-  targetBasis: TargetBasisApi | null;
-  /** Edad de inicio de la pensión declarada. `null` ⇒ el puente se rotula sin edades. */
-  pensionStartAge: number | null;
-};
-
-/**
- * La cabecera de resultados de Jubilación (U7): **como mucho 3 tarjetas, una cifra por tarjeta**.
- *
- * ## La regla de prioridad, que es lo que hay que acertar
- *
- * Los candidatos se construyen SIEMPRE en este orden, y **el orden ES la prioridad**:
- *
- * 1. **«Objetivo (euros de hoy)»** — primera y nunca se cae. Es la única cifra que todas las
- *    estrategias comparten y contra la que se leen las demás. (La versión NOMINAL «al cruce» ya
- *    no comparte tarjeta con ella: baja a `retirementDetailRows`, porque dos importes del mismo
- *    nombre en la misma tarjeta era la confusión que el catálogo de métricas documenta.)
- * 2. **Las de la estrategia**: `retire_at_age`/`partial` con solve ⇒ «Ahorro necesario» y
- *    «Margen disponible»; `coast` ⇒ «Mes coast» y «Número coast»; `partial` ⇒ «Hueco de media
- *    jornada».
- * 3. **El puente, siempre el último.** Existe con CUALQUIER estrategia que declare una pensión
- *    con fecha, pero es la lectura más contextual de las tres, así que es la primera en caerse.
- *
- * Al pasarse del tope se trunca **por el final**. Consecuencias que el test fija, porque son
- * decisiones y no accidentes:
- *
- * - `partial` con solve de edad enseña objetivo + ahorro + margen, y **pierde el hueco y el
- *   puente**: sin saber cuánto hay que ahorrar, el hueco de la fase parcial no se puede
- *   interpretar.
- * - `coast` nunca enseña margen (sus dos tarjetas propias ocupan los dos huecos), a diferencia
- *   de la V1. El margen de coast sigue publicándose por el servidor y se lee en el Resumen.
- * - `asap` enseña objetivo (+ puente si hay pensión): es la estrategia que menos preguntas hace.
- *
- * `null` sigue sin ser cero: una tarjeta cuya cifra el servidor no publica **no se emite**.
- */
-export function buildRetirementTilesV2(
-  input: RetirementTilesV2Input,
-): RetirementTileV2[] {
-  const { series, currencyIso, monthLabel } = input;
-  if (!series) return [];
-  const money = (s: string | null | undefined) => formatCurrencyOrDash(s, currencyIso);
-  const strategy = series.strategy ?? null;
-  const tiles: RetirementTileV2[] = [];
-
-  // 1 · Objetivo — siempre primera, nunca se cae.
-  tiles.push({
-    key: "target",
-    label: "Objetivo (euros de hoy)",
-    value: money(series.jubilacion_target_net_worth),
-    subtitle:
-      input.targetBasis != null ? TARGET_BASIS_TILE_LABEL[input.targetBasis] : undefined,
-    tone: "default",
-    helpId: "retirement.target",
-  });
-
-  // 2 · Las de la estrategia.
-  if (hasAgeSolve(strategy) && series.required_contribution_monthly != null) {
-    const underfunded = series.underfunded === true;
-    const ceiling = series.required_contribution_search_ceiling;
-    const bits: string[] = [];
-    if (ceiling != null) bits.push(`de ${money(ceiling)}/mes de sobrante`);
-    if (underfunded) bits.push("es TODO tu sobrante y no basta");
-    tiles.push({
-      key: "required_contribution",
-      label: "Ahorro necesario",
-      value: money(series.required_contribution_monthly),
-      subtitle: bits.length > 0 ? bits.join(" · ") : undefined,
-      tone: underfunded ? "danger" : "default",
-      helpId: "retirement.required_contribution",
-    });
-    if (series.disposable_monthly != null) {
-      const bitsM: string[] = ["al mes"];
-      if (series.disposable_capital_at_retirement != null) {
-        bitsM.push(`${money(series.disposable_capital_at_retirement)} acumulados al jubilarte`);
-      }
-      tiles.push({
-        key: "disposable",
-        label: "Margen disponible",
-        value: money(series.disposable_monthly),
-        subtitle: bitsM.join(" · "),
-        tone: "default",
-        helpId: "retirement.disposable",
-      });
-    }
-  }
-
-  if (strategy === "coast") {
-    const coastMi = series.coast_fire_month_index;
-    const reachable = typeof coastMi === "number" && Number.isFinite(coastMi);
-    tiles.push({
-      key: "coast_month",
-      label: "Mes coast",
-      value: reachable ? monthLabel(coastMi as number) : "No alcanzable",
-      subtitle: reachable
-        ? (coastMi as number) <= 0
-          ? "ya puedes dejar de aportar"
-          : `dentro de ${formatMonthSpanEs(coastMi as number)}`
-        : "ni aportando todos los meses llegas al objetivo en tu edad",
-      tone: "default",
-      helpId: "retirement.coast_month",
-    });
-    tiles.push({
-      key: "coast_number",
-      label: "Número coast",
-      value: money(series.coast_number),
-      subtitle: reachable ? "líquido al entrar en el mes coast" : undefined,
-      tone: "default",
-      helpId: "retirement.coast_number",
-    });
-  }
-
-  if (strategy === "partial" && series.partial_gap_target != null) {
-    // `partial_phase_capital_growing` tiene TRES valores y los tres dicen cosas distintas:
-    // creció, menguó, y «no hubo fase parcial que medir». El `null` no añade línea.
-    const growing = series.partial_phase_capital_growing;
-    const bits = ["capital que cubriría ese hueco a perpetuidad"];
-    if (growing === true) bits.push("el capital sigue creciendo en media jornada");
-    if (growing === false) bits.push("el capital DECRECE en media jornada");
-    tiles.push({
-      key: "partial_gap",
-      label: "Hueco de media jornada",
-      value: money(series.partial_gap_target),
-      subtitle: bits.join(" · "),
-      tone: growing === false ? "danger" : "default",
-      helpId: "retirement.partial_gap",
-    });
-  }
-
-  // 3 · El puente, siempre el último candidato.
-  const bridge = bridgeTile(input);
-  if (bridge) tiles.push(bridge);
-
-  return tiles.slice(0, RETIREMENT_TILES_V2_CAP);
-}
-
-/**
- * La tarjeta de puente, con la corrección **S8**.
- *
- * El bug que corrige: la V1 rotulaba el puente con `formatYearsEsFromMonths(pension_start)`, es
- * decir **meses desde HOY hasta la pensión** — que incluye los años que faltan para jubilarse. Un
- * puente real de 12 años se leía como 22, y el número era perfectamente plausible.
- *
- * La longitud del puente es el TRAMO `pension_start_month_index − jubilacion_month_index`, los
- * dos en la misma rejilla (mes 0 = hoy). Sin mes de jubilación **no hay puente que medir** y la
- * tarjeta no se emite: un puente necesita sus dos extremos, y publicar solo la fecha de la
- * pensión invita otra vez a contar desde hoy.
- *
- * Rótulo y subtítulo, tal y como los pide U7: label «Puente 60→72», valor «12 años», subtítulo
- * «retiras el 8,7 % del capital al año · la pensión cubre el 96 % del gasto». La tasa de
- * descuento del puente NO entra aquí — es un supuesto, no un resultado, y vive en el «Detalle».
- */
-function bridgeTile(input: RetirementTilesV2Input): RetirementTileV2 | null {
-  const s = input.series;
-  if (!s) return null;
-  const pensionMi = s.pension_start_month_index;
-  const retMi = s.jubilacion_month_index;
-  if (typeof pensionMi !== "number" || !Number.isFinite(pensionMi)) return null;
-  if (typeof retMi !== "number" || !Number.isFinite(retMi)) return null;
-
-  const months = pensionMi - retMi;
-  const fromAge = s.jubilacion_age ?? input.targetRetirementAge ?? null;
-  const toAge = input.pensionStartAge;
-  const label =
-    fromAge != null && toAge != null
-      ? `Puente ${fromAge}→${toAge}`
-      : "Puente hasta la pensión";
-
-  const bits: string[] = [];
-  if (s.bridge_effective_withdrawal_pct != null) {
-    bits.push(
-      `retiras el ${formatPercentAmount(s.bridge_effective_withdrawal_pct)} del capital al año`,
-    );
-  }
-  if (s.pension_coverage_ratio != null) {
-    bits.push(`la pensión cubre el ${formatFractionAsPercent(s.pension_coverage_ratio)} del gasto`);
-  }
-
-  return {
-    key: "bridge",
-    label,
-    value: months > 0 ? formatMonthSpanEs(months) : "Sin puente",
-    subtitle:
-      months > 0
-        ? bits.length > 0
-          ? bits.join(" · ")
-          : undefined
-        : ["cobras la pensión desde el primer mes de jubilación", ...bits].join(" · "),
-    tone: "default",
-    helpId: "retirement.bridge",
-  };
-}
-
 /** Una fila del «Detalle» plegado. `tone` solo lo llevan los avisos. */
 export type RetirementDetailRow = {
   key: string;
   label: string;
   value: string;
   tone?: RetirementNoticeTone;
+  /** Ayuda del catálogo, cuando la fila mide algo que su rótulo no puede explicar entero. */
+  helpId?: PlanHelpTextId;
 };
 
 /**
- * Lo que la cabecera de 3 tarjetas ya no puede llevar, en el «Detalle» plegado (U7).
+ * Lo que la cabecera de 3 tarjetas ya no puede llevar, en el «Detalle» plegado.
  *
- * No es un cajón de sastre: son las lecturas de SEGUNDO orden —las que matizan una cifra de
- * arriba en vez de responder una pregunta propia— más los avisos. Que estén plegadas no las hace
- * opcionales; que estén **fuera de la cabecera** es lo que permite que la cabecera se lea de un
- * vistazo.
+ * No es un cajón de sastre: son las lecturas de SEGUNDO orden —las que acotan o auditan una cifra
+ * de arriba en vez de responder una pregunta propia— más los avisos.
  *
- * - **Objetivo al cruce (nominal)**: el mismo objetivo en euros del mes del cruce. Difiere del de
- *   arriba en más de 2× a décadas vista, y compartir tarjeta con él es el enredo que el catálogo
- *   de métricas documenta en `retirement.target`.
- * - **Cruce del objetivo**: solo cuando cae en un mes DISTINTO del de la jubilación efectiva —
- *   con `asap` coinciden y repetirlo diría que son dos hechos.
- * - **Margen acumulado en dinero de hoy**, **descuento del puente**, **cobertura de la pensión**.
+ * - **Número FIRE clásico**: 25× tu gasto de jubilación, sin restar la pensión. Sobrevive como
+ *   LECTURA (S7) y como pin de `fire-parity.json`; ya no decide nada. Baja al detalle justamente
+ *   porque durante media 5.0.0 fue el objetivo que disparaba la jubilación, y arriba invitaría a
+ *   seguir leyéndolo así.
+ * - **Fecha al 100 % / al 90 %**: las dos fechas que ACOTAN la del umbral configurado («al 100 %
+ *   serían ocho años más»). `null` con el plan resuelto es «nunca», que es un resultado; con el
+ *   plan sin resolver la fila no se pinta, porque ahí `null` sí sería «todavía no se sabe».
+ * - **Semilla y caminos**: sin ellos el éxito no tiene precisión declarada ni se puede reproducir
+ *   el sorteo. Es la fila que hace auditable todo lo demás.
  * - **Los avisos**, con su tono, en el orden de precedencia de `buildRetirementNotices`.
  */
 export function retirementDetailRows(
@@ -625,49 +621,46 @@ export function retirementDetailRows(
   const rows: RetirementDetailRow[] = [];
   if (!series) return rows;
   const money = (s: string | null | undefined) => formatCurrencyOrDash(s, currencyIso);
+  const planReady = planUnavailableReason(series) == null;
 
-  if (series.jubilacion_target_net_worth_nominal != null) {
+  if (series.fire_number_classic_today != null) {
     rows.push({
-      key: "target_nominal",
-      label: "Objetivo al cruce (euros de ese mes)",
-      value: money(series.jubilacion_target_net_worth_nominal),
+      key: "fire_number_classic",
+      label: "Número FIRE clásico (25× tu gasto, sin pensión)",
+      value: money(series.fire_number_classic_today),
+      helpId: "retirement.fire_number_classic",
     });
   }
 
-  const crossing = series.liquid_crossing_month_index;
-  if (
-    typeof crossing === "number" &&
-    Number.isFinite(crossing) &&
-    crossing !== series.jubilacion_month_index
-  ) {
+  // Las dos cotas de la fecha. Solo con el plan resuelto: sin él, un «nunca» sería una afirmación
+  // sobre un sorteo que no ha terminado.
+  if (planReady) {
+    const bound = (mi: number | null | undefined) =>
+      finite(mi) ? monthLabel(mi) : "nunca";
     rows.push({
-      key: "liquid_crossing",
-      label: "Cruce del objetivo",
-      value: monthLabel(crossing),
+      key: "safe_date_100",
+      label: "Fecha al 100 %",
+      value: bound(series.safe_date_at_100_month_index),
+      helpId: "retirement.safe_date",
+    });
+    rows.push({
+      key: "safe_date_90",
+      label: "Fecha al 90 %",
+      value: bound(series.safe_date_at_90_month_index),
+      helpId: "retirement.safe_date",
     });
   }
 
-  if (series.disposable_capital_today != null) {
+  // Semilla y caminos: la identidad del resultado (D4 enmendada — cuando el sorteo fija el mes de
+  // un hito, la semilla y los caminos son parte de ese resultado, no metadatos).
+  if (series.seed != null || finite(series.paths_used)) {
     rows.push({
-      key: "disposable_today",
-      label: "Margen acumulado en dinero de hoy",
-      value: money(series.disposable_capital_today),
-    });
-  }
-
-  if (series.bridge_discount_annual_pct != null) {
-    rows.push({
-      key: "bridge_discount",
-      label: "Descuento del puente",
-      value: formatPercentAmount(series.bridge_discount_annual_pct),
-    });
-  }
-
-  if (series.pension_coverage_ratio != null) {
-    rows.push({
-      key: "pension_coverage",
-      label: "Cobertura de la pensión",
-      value: formatFractionAsPercent(series.pension_coverage_ratio),
+      key: "seed_and_paths",
+      label: "Semilla y caminos",
+      value: joinBits([
+        finite(series.paths_used) ? `${formatCount(series.paths_used)} caminos` : null,
+        series.seed != null ? `semilla ${series.seed}` : null,
+      ]) ?? METRIC_DASH,
     });
   }
 

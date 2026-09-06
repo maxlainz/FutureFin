@@ -1,13 +1,12 @@
 /**
- * Modelo PURO de la sección «Riesgo» de Jubilación (5.0.0, D22/D25/D28 y §B.5 del plan de #207):
- * el abanico de percentiles, el semáforo de éxito, la tabla de agotamiento por edad y las
- * lecturas que solo existen en algunas estrategias.
+ * Modelo PURO de la sección «Riesgo» de Jubilación (5.0.0, modelo v2 §2.4/§2.5 y §4 «Riesgo»):
+ * el abanico de percentiles, el KPI de éxito y las lecturas que lo hacen auditable.
  *
- * Aquí no se dibuja nada y no se recalcula NADA del modelo: el veredicto, la probabilidad y las
- * medianas las decide el servidor (`GET /v1/projection/bands`) y este módulo se limita a
- * alinearlas, deflactarlas y traducirlas a copy. Que sea un módulo aparte con test es
- * deliberado — lo que aquí puede romperse en silencio son cuatro cosas, y ninguna se ve mirando
- * la pantalla:
+ * Aquí no se dibuja nada y no se recalcula NADA del modelo: el veredicto, la probabilidad, el
+ * intervalo de Wilson y las medianas las decide el servidor (`GET /v1/projection/bands`) y este
+ * módulo se limita a alinearlas, deflactarlas y traducirlas a copy. Que sea un módulo aparte con
+ * test es deliberado — lo que aquí puede romperse en silencio son cuatro cosas, y ninguna se ve
+ * mirando la pantalla:
  *
  *  1. **La alineación por `month_index`.** La banda viaja SIEMPRE a densidad `hybrid`; la serie
  *     determinista que el chart ya tiene cargada puede ser `monthly` (la segunda fase del
@@ -20,32 +19,67 @@
  *  3. **El redondeo de la probabilidad.** «100 de cada 100 escenarios» con un plan que falla en
  *     alguno es exactamente la mentira silenciosa que esta app existe para no contar: el
  *     redondeo se topa a 99 mientras la probabilidad no sea 1 exacta (y a 1 mientras no sea 0).
- *  4. **El SUJETO de la probabilidad.** Desde el pase de correcciones de 5.0.0 (§F/§G) el éxito
- *     exige jubilarse Y no agotar, y la cobertura cuenta también el gasto que la cartera no
- *     pudo financiar. Las dos son cifras cuyo nombre corto —«éxito», «recorte»— sobrevivió a su
- *     definición: la copy tiene que llevar la condición dentro, no en el popover.
+ *  4. **El SUJETO de la probabilidad.** En el modelo v2 el éxito ya no es «no agotar el capital»:
+ *     un camino falla si la cartera no cubre un mes (F1), si la tasa inicial del mes de
+ *     jubilación supera el tope (F2) o si el permitido de una regla por saldo se queda por debajo
+ *     de la necesidad ordinaria (F3). El verbo de la casa para las tres es **«aguantar»**, y la
+ *     copy lo lleva dentro, no en el popover.
  *
- * Y una regla de lectura que la copy no puede olvidar: **la mediana no es un camino**. El p50 de
- * cada mes se calcula ordenando los valores de ESE mes, así que la curva p50 no corresponde a
- * ninguna simulación real y no cumple ninguna identidad contable. Lo dice el `model_note` del
- * servidor y lo dice la ayuda `retirement.bands`.
+ * Y dos reglas de lectura que la copy no puede olvidar:
+ *
+ * - **La mediana no es un camino.** El p50 de cada mes se calcula ordenando los valores de ESE
+ *   mes, así que la curva p50 no corresponde a ninguna simulación real y no cumple ninguna
+ *   identidad contable. Lo dice el `model_note` del servidor y lo dice la ayuda `retirement.bands`.
+ * - **«pp» no es «%».** El semiancho de Wilson viaja en PUNTOS PORCENTUALES: «±1,2 pp» sobre un
+ *   95,0 % es «entre 93,8 % y 96,2 %», no «±1,2 % de 95». Por eso tiene formateador propio
+ *   (`formatSamplingErrorPp`) y no comparte el de los porcentajes.
  */
 
 import type {
   ProjectionBandPointApi,
   ProjectionBandsApi,
+  SummaryPlanApi,
   SuccessVerdictApi,
 } from "../api/types";
 import {
   DISPLAY_NUMBER_LOCALE,
   METRIC_DASH,
-  formatCurrencyOrDash,
   formatFractionAsPercent,
   formatPercentDisplay,
   parseDisplayDecimal,
 } from "./format";
 import type { HelpTextId } from "./helpTexts";
 import { lastPointIndexAtOrBeforeMonth } from "./projection-chart";
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Los ids de ayuda que W8 todavía no ha dado de alta
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Ids de ayuda que el modelo v2 estrena y que `helpTexts.ts` (WP W8) todavía no contiene.
+ *
+ * Existe para que los módulos puros del rediseño compilen ANTES que el catálogo, sin renunciar al
+ * literal: el escáner de `helpTexts.test.ts` busca la propiedad de ayuda de un tile con su id
+ * entrecomillado al lado, así que los ids de aquí abajo ya cuentan como consumidos y ese test se
+ * queda **rojo hasta que W8 los escriba** — que es exactamente la señal que queremos, no un
+ * problema que tapar. (Ese patrón NO se escribe en prosa en ningún comentario de este repo: el
+ * escáner no distingue código de comentario y se contaría a sí mismo — CLAUDE.md, «comandos que se
+ * cuentan a sí mismos».)
+ *
+ * **Cuando W8 aterrice, esta lista se vacía y `PlanHelpTextId` vuelve a ser `HelpTextId` a secas.**
+ * Si al leer esto la lista sigue aquí y `helpTexts.ts` ya tiene los seis, bórrala: un alias que ya
+ * no añade nada es un permiso abierto para inventarse ids.
+ */
+type PendingHelpTextId =
+  | "retirement.needed_capital"
+  | "retirement.safe_date"
+  | "retirement.success_threshold"
+  | "retirement.failure_by_age"
+  | "retirement.fire_number_classic"
+  | "retirement.partial_mode";
+
+/** `HelpTextId` más los ids del modelo v2 que W8 aún no ha dado de alta (ver arriba). */
+export type PlanHelpTextId = HelpTextId | PendingHelpTextId;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Abanico
@@ -98,15 +132,23 @@ function formatCount(n: number): string {
   }).format(n);
 }
 
+/** Fracción `[0,1]` que viaja como `number` (excepción chart-only) o como Decimal-string: las dos
+ *  formas conviven en este contrato y ninguna de las dos puede caer a 0 por accidente. */
+function fractionOf(v: string | number | null | undefined): number | null {
+  if (v == null) return null;
+  const n = typeof v === "number" ? v : parseDisplayDecimal(String(v));
+  return n != null && Number.isFinite(n) ? n : null;
+}
+
 /**
  * Banda + línea determinista → todo lo que el SVG necesita, en unidades de MES.
  *
  * @deprecated 5.0.0 U1b — **sin consumidor de UI**. El rediseño funde los dos gráficos de
  * Jubilación en uno (U5): la banda entra ahora en `MiniProjection` como una lista de
  * `{month, p10, p90}` en euros NOMINALES, y la deflactación de las tres series (patrimonio,
- * objetivo y banda) la aplica el chart una sola vez, que es lo que garantiza que el abanico
- * contenga a la línea. `RiskFanChart.tsx` se retiró con él. Se conserva esta función —con su
- * test— porque es donde vive la alineación de dos rejillas distintas por MES: si alguna vez
+ * capital necesario y banda) la aplica el chart una sola vez, que es lo que garantiza que el
+ * abanico contenga a la línea. `RiskFanChart.tsx` se retiró con él. Se conserva esta función —con
+ * su test— porque es donde vive la alineación de dos rejillas distintas por MES: si alguna vez
  * vuelve a hacer falta un abanico con su mediana y su determinista, la aritmética no hay que
  * volver a derivarla. Si al leer esto sigue sin consumidores, bórrala.
  *
@@ -198,9 +240,9 @@ export function buildRiskFan(input: RiskFanInput): RiskFanModel | null {
 export type RiskTone = "ok" | "warn" | "danger";
 
 /**
- * Veredicto del SERVIDOR → tono de la app. Es una traducción, no una decisión: el umbral y los
- * 10 puntos de margen de D28 los aplica `projection_bands.rs`, y recalcularlos aquí abriría la
- * puerta a que el tile y el fan chart discreparan sobre el mismo plan.
+ * Veredicto del SERVIDOR → tono de la app. Es una traducción, no una decisión: el umbral del
+ * perfil y el intervalo de Wilson los aplica `projection_bands.rs` (C3), y recalcularlos aquí
+ * abriría la puerta a que el tile y el fan chart discreparan sobre el mismo plan.
  *
  * Un literal desconocido cae a `ok` **sin piel**: un veredicto futuro no debe pintar de rojo
  * algo que nadie ha evaluado.
@@ -221,10 +263,10 @@ export function successVerdictTone(
  * `null` ⟺ no hay cifra que contar (ni la hay que inventar).
  */
 export function scenariosPerHundred(
-  probability: string | null | undefined,
+  probability: string | number | null | undefined,
 ): number | null {
-  const p = probability == null ? null : parseDisplayDecimal(String(probability));
-  if (p == null || !Number.isFinite(p)) return null;
+  const p = fractionOf(probability);
+  if (p == null) return null;
   let n = Math.round(p * 100);
   if (n >= 100 && p < 1) n = 99;
   if (n <= 0 && p > 0) n = 1;
@@ -232,24 +274,25 @@ export function scenariosPerHundred(
 }
 
 /**
- * `success_probability` → «87,0 %» (V1 de la tercera vuelta de UX, 5.0.0).
+ * `success_of_plan` → «87,0 %» (V1 de la tercera vuelta de UX, 5.0.0).
  *
- * Antes esta función devolvía la ORACIÓN entera («87 de cada 100 escenarios se jubilan y no
- * agotan el capital») como valor del tile. La frase era correcta y la tipografía del valor
- * (`.metric-value`, mono, `tabular-nums`) es para «87,0 %», no para once palabras: el owner la
- * leyó como «demasiado texto para caber en una caja» (F2). La condición no se pierde — baja al
- * subtítulo (`successParenthetical`), que es el slot que SÍ envuelve.
+ * Antes esta función devolvía la ORACIÓN entera como valor del tile. La frase era correcta y la
+ * tipografía del valor (`.metric-value`, mono, `tabular-nums`) es para «87,0 %», no para once
+ * palabras: el owner la leyó como «demasiado texto para caber en una caja» (F2). La condición no
+ * se pierde — baja al subtítulo (`successParenthetical`), que es el slot que SÍ envuelve.
  *
  * **Se pasa por `scenariosPerHundred` y no por `formatFractionAsPercent`** a propósito: ahí
- * viven los dos topes anti-mentira (línea 214). `formatFractionAsPercent("0.9999")` imprimiría
- * «100,0 %» sobre un plan que falla en uno de cada diez mil, que es exactamente la mentira
- * silenciosa que esta app existe para no contar — y desde V7 el verde es EXCLUSIVO del 100 %,
- * así que un redondeo optimista pintaría de verde un plan que el servidor da por ámbar.
+ * viven los dos topes anti-mentira. `formatFractionAsPercent("0.9999")` imprimiría «100,0 %»
+ * sobre un plan que falla en uno de cada diez mil, que es exactamente la mentira silenciosa que
+ * esta app existe para no contar. **Efecto lateral asumido**: el porcentaje queda cuantizado a
+ * unidades de «de cada 100», así que un `0,952` se imprime «95,0 %» y no «95,2 %». Es el precio
+ * de los topes, y la precisión real del sorteo la declara `formatSamplingErrorPp` justo al lado
+ * (±1,2 pp hace irrelevante la segunda cifra).
  *
  * Un decimal, como todo porcentaje de la casa (`design-system.md` §Formato de cifras).
  */
 export function formatSuccessPercent(
-  probability: string | null | undefined,
+  probability: string | number | null | undefined,
 ): string {
   const n = scenariosPerHundred(probability);
   if (n == null) return METRIC_DASH;
@@ -258,42 +301,97 @@ export function formatSuccessPercent(
 
 /** «4 de cada 100» — la misma cifra sin sujeto, para las filas que ya lo llevan en el rótulo. */
 export function formatScenariosPerHundred(
-  probability: string | null | undefined,
+  probability: string | number | null | undefined,
 ): string {
   const n = scenariosPerHundred(probability);
   return n == null ? METRIC_DASH : `${n} de cada 100`;
 }
 
 /**
- * El SUBTÍTULO del tile de éxito: qué mide ese «87,0 %».
+ * Semiancho del intervalo de Wilson → «±1,2 pp».
  *
- * **Sin «umbral» (V7)**: el corte ya no es del usuario —verde solo con cero caminos fallidos,
- * ámbar hasta el 90 %, rojo por debajo—, así que un denominador configurable que ya no existe
- * solo podía confundir. Lo que queda es el sujeto de la cifra, que sin él vuelve a quedar
- * abierto: un «87,0 %» pelado no dice de qué.
+ * **`pp` no es `%` y por eso esto no es `formatPercentAmount`.** Un «±1,2 %» sobre un 95,0 % se
+ * leería como «±1,2 % DE 95», es decir ±1,14 puntos; lo que el servidor publica son PUNTOS
+ * PORCENTUALES: el intervalo va de 93,8 a 96,2. La distinción es la misma que la regla de oro de
+ * las unidades del contrato (`_pct` vs `_ratio`), y se rompe igual de silenciosamente.
  *
- * En VERDE la frase genérica sería una perífrasis de «no falla ninguno», así que se sustituye
- * por el recuento exacto —«0 de 500 escenarios agotan el capital»— que es la lectura que hace
- * auditable el verde: con 500 caminos, un solo fallo ya es ámbar, y decir cuántos se sortearon
- * declara la precisión del 100 %. `paths` solo viaja con las bandas (el bloque `plan` del
- * Resumen no lo publica): sin él se cae a la frase genérica en vez de inventar un denominador.
+ * Un decimal, como todo porcentaje de la casa, y el sufijo lo pone la función — **nunca se
+ * concatena a mano** (misma disciplina que `formatPercentAmount`, que también trae el suyo).
+ *
+ * `null` ⟺ el sorteo no publicó precisión: guion, no un «±0,0 pp» que afirmaría una muestra
+ * infinita.
+ */
+export function formatSamplingErrorPp(pp: string | number | null | undefined): string {
+  const n = fractionOf(pp);
+  if (n == null) return METRIC_DASH;
+  const abs = Math.abs(n);
+  const digits = new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+  }).format(abs);
+  return `±${digits} pp`;
+}
+
+/**
+ * Cota de la REGLA DE TRES, en porcentaje, para el caso «0 fallos de N» (§2.5, S5).
+ *
+ * Con cero fallos observados el estimador puntual es 100 % y no hay intervalo que calcular: lo
+ * que la estadística sí da es una cota superior aproximada del riesgo real, `3/N`. Con 2.500
+ * caminos son 0,12 %.
+ *
+ * **Deliberadamente hasta DOS decimales**, y es la única cifra de la app que se sale del decimal
+ * único: `3/N` con los N que este contrato admite (500–5.000) vive siempre por debajo del 1 %, y
+ * un decimal imprimiría «0,1 %» donde el número es 0,12 y «0,0 %» en cuanto N pase de 6.000 — un
+ * riesgo cero que es justo lo que esta frase existe para negar. El mínimo sigue siendo un decimal,
+ * así que la forma habitual («0,6 %») no cambia.
+ */
+function formatRuleOfThreePercent(paths: number): string {
+  const pct = (3 / paths) * 100;
+  const digits = new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 2,
+  }).format(pct);
+  return `${digits} %`;
+}
+
+/**
+ * El SUBTÍTULO del tile de éxito: qué mide ese «87,0 %» y **contra qué listón** (C3).
+ *
+ * El umbral vuelve al subtítulo —donde V7 lo había quitado— porque en el modelo v2 vuelve a ser
+ * del usuario, y además es lo que DEFINE la fecha: sin él, el mismo 95,0 % es «justo lo que pedí»
+ * para uno y «cinco puntos de más» para otro, y la tarjeta no distingue los dos casos.
+ *
+ * En el 100 % la frase genérica sería una perífrasis de «no falla ninguno», así que se sustituye
+ * por el recuento exacto MÁS la cota de la regla de tres: «0 de 2.500 escenarios fallan · el
+ * riesgo real puede llegar al 0,12 %». Ese segundo trozo no es un adorno estadístico — es lo
+ * único que impide leer un 100 % muestral como una certeza, y el owner cerró el umbral 100 % con
+ * esa condición explícita (§2.5). `paths` solo viaja con las bandas (el bloque `plan` del Resumen
+ * no lo publica): sin él se cae a la frase genérica en vez de inventar un denominador.
  *
  * `undefined` ⟺ no hay cifra que subtitular.
  */
 export function successParenthetical(
-  probability: string | null | undefined,
+  probability: string | number | null | undefined,
+  thresholdPct?: number | null,
   paths?: number | null,
 ): string | undefined {
   const n = scenariosPerHundred(probability);
   if (n == null) return undefined;
-  if (n >= 100 && finite(paths) && paths > 0) {
-    return `0 de ${formatCount(paths)} escenarios agotan el capital`;
-  }
-  return "de los escenarios no agotan el capital";
+  const bits =
+    n >= 100 && finite(paths) && paths > 0
+      ? [
+          `0 de ${formatCount(paths)} escenarios fallan`,
+          `el riesgo real puede llegar al ${formatRuleOfThreePercent(paths)}`,
+        ]
+      : ["de los escenarios aguantan"];
+  // El umbral va SIEMPRE que se conozca, también en el 100 %: es el listón que fija la fecha, y
+  // saber si el usuario pidió 100 o 95 cambia por completo cómo se lee un plan que aguanta todo.
+  if (finite(thresholdPct)) bits.push(`umbral ${formatPercentDisplay(thresholdPct)}`);
+  return bits.join(" · ");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// Lecturas que solo existen en algunas estrategias
+// Lecturas de segundo orden del panel de riesgo
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 export type RiskExtraRow = {
@@ -304,139 +402,69 @@ export type RiskExtraRow = {
   detail?: string;
   /** Ayuda del catálogo, cuando la fila mide algo que su rótulo no puede explicar entero. La
    *  pinta la vista junto al rótulo; el escáner de `helpTexts.test.ts` ve esta forma de objeto. */
-  helpId?: HelpTextId;
+  helpId?: PlanHelpTextId;
 };
 
 export type RiskExtraRowsInput = {
   bands: ProjectionBandsApi | null | undefined;
-  /** ISO de la divisa (`""` degrada a número sin símbolo, como el resto de la app). */
-  currencyIso: string;
-  /** Rotulador de un mes de la rejilla → etiqueta del eje («2043», «a los 55»). Lo inyecta la
-   *  vista: depende del modo del eje, de la fecha de nacimiento y de la zona horaria. */
-  monthLabel: (monthIndex: number) => string;
 };
 
 /**
- * Copy de cada razón por la que el colchón NO se simuló (5.0.0, pase de correcciones §E,
- * ampliado por V6).
- *
- * `not_requested` **no está a propósito**: desde V6 ese literal ya no puede llegar con un perfil
- * vivo (sin colchón explícito el servidor lo deriva del tope de la regla), y si llegara diría
- * «no falta nada» — convertir el estado normal en una carencia es justo lo que no queremos.
- *
- * Las demás sí se enseñan, y cada una dice qué habría que TOCAR para tenerlo: son razones
- * accionables, no diagnósticos. Un literal desconocido (backend más nuevo) no pinta nada:
- * inventar la razón es peor que no darla.
+ * Los tres modos de fallo de §2.4, en el ORDEN FIJO de `failures_by_kind`. Cada rótulo dice lo
+ * que le pasó al camino, no la sigla: «F2» no significa nada para quien mira la pantalla, y
+ * «tasa inicial por encima del tope» sí — es además la única de las tres que ocurre en un solo
+ * mes (el de la jubilación) y la que más sorprende, porque el dinero sigue ahí.
  */
-const BUFFER_INACTIVE_REASON_ES: Record<string, string> = {
-  no_volatility: "sin volatilidad declarada, no hay de qué protegerse",
-  no_safe_liquid_asset: "no tienes un activo líquido sin volatilidad donde vivir",
-  no_capped_rule:
-    "ninguna regla de ahorro con tope («hasta X €») apunta a tu líquido sin volatilidad",
-  cap_is_zero: "el tope de tu regla de ahorro es 0 €",
-};
+const FAILURE_KIND_LABELS: readonly [string, string, string] = [
+  "Se quedan sin dinero",
+  "Tasa inicial por encima del tope",
+  "La regla no cubre el gasto",
+];
 
 /**
- * Las filas EXTRA del panel de riesgo, cada una condicionada a que su pregunta exista.
+ * Las filas EXTRA del panel de riesgo: lo que hace AUDITABLE el «Éxito del plan» de arriba.
  *
- * `retirement_month_index_percentiles` y `underfunded_probability` son EXCLUYENTES por contrato
- * (el trigger dice cuál toca), así que nunca aparecen las dos: no hay que elegir aquí, basta con
- * respetar los `null` del servidor.
+ * Cada una responde una pregunta que el número grande deja abierta: por qué fallan los que
+ * fallan, cuánto se apretó el cinturón en los que aguantan, cuántos acaban fallando en algún
+ * momento del horizonte, y qué garantiza la muestra.
+ *
+ * Ninguna se esconde por la regla de retirada. Hasta el pase de correcciones de 5.0.0 las dos
+ * filas de cobertura se ocultaban con `fixed_real` porque medían solo el recorte de la REGLA —y
+ * esa regla no tiene techo, así que sus cifras eran 0 y 1 por construcción. Desde §F miden también
+ * **el gasto que la cartera no pudo financiar**, así que con `fixed_real` son perfectamente
+ * informativas: la regla no recorta nunca, pero el dinero se puede acabar igual (un fixture medido
+ * pasó de `1,0` a `0,0865` al dejar de ignorar el descubierto). Esconderlas ahí era esconder el
+ * caso en que la cobertura tiene una sola causa y es la peor.
  */
 export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
   const b = input.bands;
   if (!b) return [];
   const rows: RiskExtraRow[] = [];
-  const money = (s: string | null | undefined) =>
-    formatCurrencyOrDash(s, input.currencyIso);
 
-  // ── Las dos mitades del éxito nuevo (§G del pase de correcciones) ────────────────────────
+  // ── Por qué falla el que falla (§2.4) ────────────────────────────────────────────────────
   //
-  // Van las PRIMERAS y solo cuando hay algo que contar: si ningún camino se queda sin jubilar,
-  // el éxito del tile ya es la historia entera y estas dos filas serían un 0 y una repetición.
-  // Cuando sí los hay, la de arriba dice cuántos y la de abajo devuelve la lectura que el
-  // usuario creía estar leyendo antes del pase — el éxito ENTRE los que llegan a jubilarse.
-  const neverRetired = scenariosPerHundred(b.never_retired_probability);
-  if (neverRetired != null && neverRetired > 0) {
-    rows.push({
-      key: "never_retired",
-      label: "No llegan a jubilarse en el horizonte",
-      value: formatScenariosPerHundred(b.never_retired_probability),
-      detail:
-        "escenarios en los que el plan nunca te jubila: no cuentan como éxito aunque el dinero siga entero",
-    });
-    // `null` = no hay denominador (nadie se jubila), y entonces no hay condicional que enseñar.
-    // Un «—» aquí se leería como dato perdido en vez de como pregunta sin sujeto.
-    if (b.success_given_retired != null) {
+  // Las TRES filas o ninguna. Si no ha fallado nadie, tres «0 de 2.500» son ruido: el número
+  // grande ya cuenta la historia entera. Si ha fallado alguien, un cero SÍ es una lectura («por
+  // esto no falló ninguno») y además es lo que hace que las tres casillas cuadren con el total:
+  // esconder las vacías dejaría un desglose que no suma.
+  const kinds = Array.isArray(b.failures_by_kind) ? b.failures_by_kind : null;
+  if (kinds && kinds.length === 3 && kinds.some((n) => finite(n) && n > 0)) {
+    const total = finite(b.paths) && b.paths > 0 ? b.paths : null;
+    kinds.forEach((count, i) => {
+      if (!finite(count)) return;
       rows.push({
-        key: "success_given_retired",
-        label: "Éxito entre los que se jubilan",
-        value: formatFractionAsPercent(b.success_given_retired),
-        detail: "de los escenarios que sí te jubilan, los que además no agotan el capital",
+        key: `failure_kind_${i + 1}`,
+        label: FAILURE_KIND_LABELS[i]!,
+        value:
+          total == null
+            ? formatCount(count)
+            : `${formatCount(count)} de ${formatCount(total)}`,
+        helpId: i === 0 ? "retirement.success" : undefined,
       });
-    }
-  }
-
-  // ── Ruina total: la cifra que se queda sin sitio al retirar la tabla por edad ────────────
-  //
-  // La tabla «agotar a los 65/70/…» desaparece con el degradado de la banda (V5): el color YA
-  // dice la probabilidad edad a edad y con más resolución. Lo que el color no dice es el TOTAL,
-  // porque su última parada es el borde derecho del plot y ahí no hay etiqueta. Sin esta fila,
-  // el peor número del panel —cuántos escenarios se quedaron sin capital EN ALGÚN MOMENTO— se
-  // habría perdido en el rediseño, y con él la única lectura acumulada del sorteo.
-  //
-  // Se toma el ÚLTIMO punto de la rejilla porque la serie es acumulada por contrato (solo puede
-  // crecer) y el último mes es el final del horizonte. `null` no se pinta: inventar un 0 % ahí
-  // sería declarar un plan infalible a partir de un dato que no llegó.
-  const depletionPoints = Array.isArray(b.depletion_probability_by_age)
-    ? b.depletion_probability_by_age.filter((p) => finite(p.month_index))
-    : [];
-  const depletionLast = depletionPoints[depletionPoints.length - 1];
-  if (depletionLast != null && depletionLast.probability != null) {
-    rows.push({
-      key: "depletion_total",
-      label: "Escenarios que agotan el capital en algún momento",
-      value: formatFractionAsPercent(depletionLast.probability),
-      detail:
-        "acumulado hasta el final del horizonte: es el mismo sorteo que colorea la banda del gráfico",
-      helpId: "retirement.depletion_by_age",
     });
   }
 
-  // ── «Jubilación probable» (solo trigger por cruce) ──────────────────────────────────────
-  const pct = b.retirement_month_index_percentiles;
-  if (pct) {
-    const at = (m: number | null) =>
-      finite(m) ? input.monthLabel(m) : "no se jubila";
-    rows.push({
-      key: "retirement_percentiles",
-      label: "Jubilación probable",
-      value: at(pct.p50),
-      detail: `${at(pct.p10)} en el 10 % de mercados mejores · ${at(pct.p90)} en el 10 % peores`,
-    });
-  }
-
-  // ── «Probabilidad de no llegar a la edad» (solo trigger por edad, D17 probabilístico) ────
-  if (b.underfunded_probability != null) {
-    rows.push({
-      key: "underfunded_probability",
-      label: "Probabilidad de no llegar a la edad",
-      value: formatFractionAsPercent(b.underfunded_probability),
-      detail: "escenarios que alcanzan tu edad objetivo por debajo del objetivo",
-    });
-  }
-
-  // ── Las dos lecturas de la COBERTURA, en TODAS las reglas ────────────────────────────────
-  //
-  // Hasta el pase de correcciones estas dos filas se escondían con `fixed_real` porque medían
-  // solo el recorte de la REGLA, y esa regla no tiene techo: sus cifras eran 0 y 1 por
-  // construcción. Desde §F miden algo distinto — incluyen también **el gasto que la cartera no
-  // pudo financiar** —, así que con `fixed_real` son perfectamente informativas: la regla no
-  // recorta nunca, pero el dinero se puede acabar igual. Esconderlas ahí era esconder justo el
-  // caso en que la cobertura tiene una sola causa y es la peor (un fixture medido pasó de `1,0`
-  // a `0,0865` al dejar de ignorar el descubierto). Por eso ya no hay condición de regla, y por
-  // eso el parámetro de la entrada que la gobernaba desapareció con ella: uno que ya no decide
-  // nada es una invitación a volver a esconderlas.
+  // ── Cuánto se apretó el cinturón el que aguantó ──────────────────────────────────────────
   rows.push({
     key: "months_below_need",
     label: "Meses por debajo del gasto (mediana)",
@@ -446,122 +474,55 @@ export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
   });
   rows.push({
     key: "withdrawal_to_need",
-    label: "Retirada / gasto (mediana)",
+    label: "Parte del gasto que la regla cubrió (mediana)",
     value: formatFractionAsPercent(b.withdrawal_to_need_ratio_p50),
     detail:
-      "qué parte de la necesidad se pagó de verdad, por el techo de la regla y por lo que la cartera no dio; 100 % = entera",
+      "por el techo de la regla y por lo que la cartera no dio; 100 % = el gasto entero",
+    helpId: "retirement.coverage",
   });
 
-  // ── Colchón (P4). El importe es la mediana de un TOTAL MOVIDO, no un saldo ───────────────
-  if (b.buffer_active) {
-    const refills = b.buffer_refills_p50;
+  // ── El total acumulado, que el color de la banda no puede rotular ────────────────────────
+  //
+  // La tabla «agotar a los 65/70/…» desapareció con el degradado (V5): el color YA dice la
+  // probabilidad edad a edad y con más resolución. Lo que el color no dice es el TOTAL, porque su
+  // última parada es el borde derecho del plot y ahí no hay etiqueta.
+  //
+  // Se toma el ÚLTIMO punto de la rejilla porque la serie es acumulada por contrato (solo puede
+  // crecer) y el último mes es el final del horizonte. `null` no se pinta: inventar un 0 % ahí
+  // sería declarar un plan infalible a partir de un dato que no llegó.
+  const failurePoints = Array.isArray(b.failure_probability_by_age)
+    ? b.failure_probability_by_age.filter((p) => finite(p.month_index))
+    : [];
+  const failureLast = failurePoints[failurePoints.length - 1];
+  if (failureLast != null && failureLast.probability != null) {
     rows.push({
-      key: "buffer",
-      label: "Colchón de caja",
-      value: finite(refills) ? `${refills} meses con relleno` : METRIC_DASH,
+      key: "failure_total",
+      label: "Escenarios que fallan en algún momento",
+      value: formatFractionAsPercent(String(failureLast.probability)),
       detail:
-        b.buffer_refill_net_total_p50 != null
-          ? `${money(b.buffer_refill_net_total_p50)} movidos al colchón (mediana entre escenarios, no un saldo)`
-          : undefined,
-      helpId: "retirement.cash_buffer",
+        "acumulado hasta el final del horizonte: es el mismo sorteo que colorea la banda del gráfico",
+      helpId: "retirement.failure_by_age",
     });
   }
-  // El caso INACTIVO ya no es una fila de detalle: desde V6 el colchón se deriva y su procedencia
-  // (o su ausencia y por qué) es información de primer orden, así que vive en la línea del bloque
-  // «Riesgo» (`cashBufferLine`). Aquí se queda solo lo que el sorteo MIDIÓ, que es de segundo
-  // orden por definición: cuántas veces hubo que rellenarlo y cuánto se movió.
+
+  // ── Qué garantiza la MUESTRA (C3) ────────────────────────────────────────────────────────
+  //
+  // El límite inferior de Wilson es la magnitud que de verdad decide el umbral, y es la única
+  // que no se mueve con la semilla. Enseñar solo el estimador puntual invita a leer un 95,0 %
+  // como un hecho cuando con 2.500 caminos puede ser un 93,8 %.
+  const wilson = fractionOf(b.success_wilson_low);
+  if (wilson != null) {
+    rows.push({
+      key: "success_wilson_low",
+      label: "Con 95 % de confianza, al menos",
+      value: formatFractionAsPercent(String(wilson)),
+      detail:
+        "límite inferior del intervalo sobre el éxito: es lo que se compara con tu umbral, no la cifra de arriba",
+      helpId: "retirement.success_threshold",
+    });
+  }
 
   return rows;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// La línea informativa del colchón de caja (V6)
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/**
- * Lo que el bloque «Riesgo» dice del colchón de caja, ahora que la SPA ya no lo PREGUNTA (V6).
- *
- * El owner cerró la decisión así: «lo lógico sería derivar el colchón de caja de las reglas de
- * ahorro (hasta X en activos)». El input desapareció del formulario y el servidor resuelve el
- * colchón desde el tope de la regla que apunta a tu líquido sin volatilidad. Un valor derivado se
- * ROTULA como derivado (regla 5 de `design-system.md` §Reglas para añadir UI nueva): sin decir de
- * dónde sale, un colchón que aparece solo se lee como un ajuste que alguien hizo, y el usuario no
- * sabría dónde cambiarlo.
- *
- * Las cuatro formas de la línea, y por qué cada una dice lo que dice:
- *
- *  - **`allocation_cap`** — el caso normal. Dice el IMPORTE (que es lo que el motor mantiene, en
- *    nominal, P2), de qué regla sale, su equivalente informativo en meses, y **el precio**: el
- *    colchón cuesta puntos de éxito en este modelo (hallazgo P4). Callar el coste convertiría una
- *    derivación automática en una promesa de seguridad que los números no sostienen.
- *  - **`explicit`** — alguien lo fijó por API o MCP y manda sobre la derivación. La línea lo dice
- *    y ofrece SOLTARLO (`PATCH {"cash_buffer_months": null}`): sin esa salida, un override puesto
- *    desde fuera sería irreversible desde la pantalla, que es el mismo fallo que ya obligó a
- *    añadir «Volver a la derivada» en la base del objetivo.
- *  - **`none`** — no hay colchón, y la razón dice qué habría que tocar para tenerlo.
- *  - **Sin `buffer_source`** (backend anterior a V6) — solo se enseña la razón cuando el colchón
- *    NO se simuló; con colchón activo, la fila de «Detalle del cálculo» ya lo cuenta y una línea
- *    más solo repetiría.
- *
- * `null` ⟺ no hay nada que decir (sin bandas, o un backend viejo con el colchón funcionando).
- */
-export type CashBufferLine = {
-  text: string;
-  /** `true` ⟺ ofrecer «volver al tope de tu regla» — un `PATCH` del colchón a `null`. */
-  canResetToDerived: boolean;
-  /** `true` ⟺ ofrecer el salto a las reglas de ahorro, que es donde se cambia de verdad. */
-  linksToAllocationRules: boolean;
-};
-
-export function cashBufferLine(
-  bands: ProjectionBandsApi | null | undefined,
-  currencyIso: string,
-): CashBufferLine | null {
-  if (!bands) return null;
-  const reason = BUFFER_INACTIVE_REASON_ES[bands.buffer_inactive_reason ?? ""];
-  const months = bands.buffer_months_effective;
-
-  switch (bands.buffer_source) {
-    case "allocation_cap": {
-      const amount = formatCurrencyOrDash(bands.buffer_target_amount, currencyIso);
-      const rule = bands.buffer_source_asset_name
-        ? ` — el tope de tu regla de ahorro para «${bands.buffer_source_asset_name}»`
-        : " — el tope de tu regla de ahorro";
-      const equiv = finite(months) ? ` (≈ ${months} meses de tu gasto de hoy)` : "";
-      return {
-        text:
-          `Colchón de caja: ${amount}${rule}${equiv}. Se mantiene en efectivo durante la ` +
-          "jubilación y se rellena vendiendo inversiones; en este modelo cuesta unos puntos de " +
-          "éxito.",
-        canResetToDerived: false,
-        linksToAllocationRules: true,
-      };
-    }
-    case "explicit":
-      return {
-        text: finite(months)
-          ? `Colchón de caja: ${months} meses, fijados por API. De serie sale del tope de tu regla de ahorro.`
-          : "Colchón de caja fijado por API. De serie sale del tope de tu regla de ahorro.",
-        canResetToDerived: true,
-        linksToAllocationRules: false,
-      };
-    case "none":
-      return reason == null
-        ? null
-        : {
-            text: `Sin colchón de caja: ${reason}.`,
-            canResetToDerived: false,
-            linksToAllocationRules: false,
-          };
-    default:
-      // Backend anterior a V6: solo hay algo que decir si el colchón NO corrió.
-      if (bands.buffer_active || reason == null) return null;
-      return {
-        text: `Sin colchón de caja: ${reason}.`,
-        canResetToDerived: false,
-        linksToAllocationRules: false,
-      };
-  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -571,7 +532,8 @@ export function cashBufferLine(
 /**
  * `true` ⟺ hay bandas y **ningún activo declara volatilidad**: las tres coinciden con la línea
  * determinista y hay que decirlo. Un abanico plano sin este aviso se lee como certeza, que es
- * la lectura más cara posible de este chart.
+ * la lectura más cara posible de este chart — y en el modelo v2 el precio sube: sin dispersión el
+ * éxito sale 0 % o 100 % y deja de medir riesgo (aviso `no_volatility_declared`, C5).
  */
 export function showsNoVolatilityNotice(
   bands: ProjectionBandsApi | null | undefined,
@@ -593,13 +555,12 @@ export function riskFootnote(bands: ProjectionBandsApi): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// El KPI «Éxito del plan» del Resumen (D28)
+// El KPI «Éxito del plan» del Resumen (D27, modelo v2)
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 export type SuccessTileModel = {
   value: string;
-  /** Slot del paréntesis: el SUJETO de la cifra («de los escenarios no agotan el capital»).
-   *  Hasta V7 aquí iba el umbral; ese ajuste ya no existe y el corte es fijo. */
+  /** Slot del paréntesis: el SUJETO de la cifra y el umbral contra el que se evaluó. */
   parenthetical?: string;
   /** Segundo slot: por qué no hay cifra, cuando no la hay. */
   detail?: string;
@@ -607,41 +568,51 @@ export type SuccessTileModel = {
   tone: "default" | "warn" | "danger";
 };
 
-/** Copy de cada razón por la que el éxito no existe. Las tres son situaciones DISTINTAS y se
- *  dicen distintas: el hogar no tiene un plan, la proyección no se pudo calcular, y el sorteo
- *  falló con el plan intacto. Un `—` mudo las haría indistinguibles. */
+/** Copy de cada razón por la que el éxito no existe. Son situaciones DISTINTAS y se dicen
+ *  distintas: el hogar no tiene un plan, la proyección no se pudo calcular, el sorteo falló con el
+ *  plan intacto, y falta la fecha de nacimiento (sin edad no hay contra qué resolver nada, C5). Un
+ *  `—` mudo las haría indistinguibles. */
 const SUCCESS_ABSENT_ES: Record<string, string> = {
   household_aggregate: "solo en tu vista «Yo»",
+  household_not_solved: "solo en tu vista «Yo»",
   projection_unavailable: "no se pudo calcular tu proyección",
   bands_unavailable: "no se pudieron sortear los escenarios",
+  birth_date_missing: "falta tu fecha de nacimiento",
+  months_override: "esta vista fija un horizonte propio",
+  no_liquid_assets: "no tienes activos líquidos que vender",
 };
 
 /**
  * `summary.plan` → la tarjeta «Éxito del plan», o `null` cuando el backend no publica el bloque
- * (anterior a WP6b) y por tanto no hay nada que enseñar — ni siquiera un guion, que se leería
- * como «tu plan no tiene éxito medible» en vez de «esta versión no lo mide».
+ * y por tanto no hay nada que enseñar — ni siquiera un guion, que se leería como «tu plan no tiene
+ * éxito medible» en vez de «esta versión no lo mide».
  *
- * Cero aritmética: la probabilidad y el veredicto vienen del MISMO sorteo que dibuja la sección
- * «Riesgo» de Jubilación (el servidor los sirve de su cache de bandas). Recalcular aquí el
- * semáforo con otra muestra enseñaría dos éxitos del mismo plan en la misma pantalla.
+ * Cero aritmética: la probabilidad, el umbral y el veredicto vienen del MISMO sorteo (la misma
+ * cache de plan) que dibuja la sección «Riesgo» de Jubilación. Recalcular aquí el semáforo con
+ * otra muestra enseñaría dos éxitos del mismo plan en la misma pantalla.
+ *
+ * Los TRES estados de `plan_state` se dicen distinto, y esa es la mitad del trabajo de esta
+ * función:
+ *
+ * - **`pending`** — «calculando…». El nivel 1 del solve sigue en marcha (típicamente el primer GET
+ *   tras una mutación). NO es un guion: un guion dice «no hay», y aquí lo que hay es una espera.
+ * - **`absent`** — el guion CON su razón.
+ * - **`ready`** — la cifra. Y si aun así falta el éxito (`success_absent_reason`), su razón: «no
+ *   sabemos tu probabilidad» ≠ «no sabemos tu plan».
  */
 export function summarySuccessTile(
-  plan:
-    | {
-        success_probability?: string | null;
-        success_verdict?: SuccessVerdictApi | string | null;
-        success_absent_reason?: string | null;
-        absent_reason?: string | null;
-        never_retired_probability?: string | null;
-      }
-    | null
-    | undefined,
+  plan: Partial<SummaryPlanApi> | null | undefined,
 ): SuccessTileModel | null {
   if (!plan) return null;
-  if (plan.success_probability == null) {
+
+  if (plan.plan_state === "pending") {
+    return { value: METRIC_DASH, detail: "calculando…", tone: "default" };
+  }
+
+  if (plan.success_of_plan == null) {
     const reason = plan.success_absent_reason ?? plan.absent_reason ?? null;
-    // Sin probabilidad NI razón el backend está publicando un hueco mudo: es exactamente el
-    // caso en que no hay nada honesto que decir, así que la tarjeta no se pinta.
+    // Sin cifra NI razón el backend está publicando un hueco mudo: es exactamente el caso en que
+    // no hay nada honesto que decir, así que la tarjeta no se pinta.
     if (reason == null) return null;
     return {
       value: METRIC_DASH,
@@ -649,20 +620,17 @@ export function summarySuccessTile(
       tone: "default",
     };
   }
+
   const tone = successVerdictTone(plan.success_verdict);
-  // Subtítulo solo cuando hay escenarios sin jubilar: es la mitad que el número grande ya no
-  // cuenta sola desde §G, y la que explica un éxito bajo que no se debe a agotar el capital
-  // sino a no llegar nunca. Con cero, la tarjeta no gana nada diciendo «0 de cada 100».
-  const neverRetired = scenariosPerHundred(plan.never_retired_probability);
   return {
-    value: formatSuccessPercent(plan.success_probability),
-    // Sin `paths` en el bloque `plan` del Resumen, el subtítulo del verde cae a la frase
-    // genérica: el recuento exacto solo se puede afirmar donde viaja el tamaño de la muestra.
-    parenthetical: successParenthetical(plan.success_probability),
-    detail:
-      neverRetired != null && neverRetired > 0
-        ? `${formatScenariosPerHundred(plan.never_retired_probability)} no llegan a jubilarse`
-        : undefined,
+    value: formatSuccessPercent(plan.success_of_plan),
+    // Sin `paths` en el bloque `plan` del Resumen, el subtítulo del 100 % cae a la frase genérica:
+    // el recuento exacto y la cota de la regla de tres solo se pueden afirmar donde viaja el
+    // tamaño de la muestra.
+    parenthetical: successParenthetical(
+      plan.success_of_plan,
+      plan.success_threshold_pct,
+    ),
     tone: tone === "danger" ? "danger" : tone === "warn" ? "warn" : "default",
   };
 }

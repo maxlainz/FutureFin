@@ -1,14 +1,17 @@
 /**
- * La cabecera de resultados de U7: **una frase + como mucho 3 tarjetas**, una cifra por tarjeta.
+ * La cabecera de resultados del modelo v2: **tres tarjetas, una cifra por tarjeta**.
  *
- * Dos cosas se fijan aquí porque son decisiones, no accidentes de implementación:
+ * Tres cosas se fijan aquí porque son decisiones del contrato (§4), no accidentes de
+ * implementación:
  *
- *  1. **La regla de prioridad del tope de 3** — el orden de construcción ES la prioridad, el
- *     objetivo nunca se cae y el puente es siempre el primero en caerse. Sin test, el día que
- *     alguien reordene el `if` de la media jornada la cabecera cambiará de contenido sin que
- *     nada falle.
- *  2. **S8** — el puente mide `pension_start − jubilación`, no meses desde hoy. La V1 medía lo
- *     segundo y el número era plausible: 22 años donde el puente real son 12.
+ *  1. **Las dos primeras son FIJAS** — «Capital necesario hoy» y «Éxito del plan» — y la tercera
+ *     la elige la estrategia. Sin test, el día que alguien reordene un `if` la cabecera cambiará
+ *     de contenido sin que nada falle.
+ *  2. **Un plan que no está no se rellena**: `pending` dice «calculando…», `birth_date_missing`
+ *     dice qué falta, y `not_reachable` dice «Nunca». Los tres son estados distintos y un guion
+ *     mudo los haría indistinguibles.
+ *  3. **«Capital necesario hoy» está siempre en euros de hoy** y este módulo no acepta deflactor
+ *     alguno: la cifra responde a «¿cuánto necesitaría si me jubilara YA?», y «ya» es hoy.
  */
 
 import { describe, expect, it } from "vitest";
@@ -22,6 +25,8 @@ import {
 
 const EUR = "EUR";
 const monthLabel = (mi: number) => `M${mi}`;
+/** Edad de juguete: 30 años hoy, uno más por cada 12 meses de la rejilla. */
+const monthAge = (mi: number) => 30 + Math.floor(mi / 12);
 /** Lo que emite `Intl` en es-ES: espacio DURO antes del símbolo y miles solo a partir de
  *  10.000. Se construye aquí para que el test no dependa de cómo se teclea un NBSP. */
 const eur = (digits: string) => `${digits}\u00a0\u20ac`;
@@ -29,26 +34,27 @@ const eur = (digits: string) => `${digits}\u00a0\u20ac`;
 function series(over: Partial<RetirementTileV2Series> = {}): RetirementTileV2Series {
   return {
     strategy: "asap",
-    required_contribution_monthly: null,
-    required_contribution_search_ceiling: null,
-    underfunded: null,
-    disposable_monthly: null,
-    disposable_capital_at_retirement: null,
-    disposable_capital_today: null,
-    coast_fire_month_index: null,
-    coast_number: null,
-    partial_gap_target: null,
-    partial_phase_capital_growing: null,
-    pension_start_month_index: null,
-    bridge_effective_withdrawal_pct: null,
-    pension_coverage_ratio: null,
-    bridge_discount_annual_pct: null,
+    retirement_date_basis: "success_threshold",
+    success_threshold_pct: 95,
+    safe_date_month_index: 204,
+    safe_date_date_ymd: "2043-09-01",
+    safe_date_age: 55,
+    safe_date_at_100_month_index: null,
+    safe_date_at_90_month_index: null,
+    success_of_plan: 0.952,
+    success_wilson_low: 0.944,
+    success_sampling_error_pp: "1.2000",
+    paths_used: 2500,
+    seed: "12345678901234567890",
+    needed_capital_today: "620000.0000",
+    contribution_required_monthly: null,
+    contribution_required_search_ceiling: null,
+    contribution_underfunded: null,
+    coast_stop_month_index: null,
+    partial_start_month_index: null,
+    plan_absent_reason: null,
+    fire_number_classic_today: null,
     warnings: [],
-    jubilacion_month_index: null,
-    jubilacion_age: null,
-    jubilacion_target_net_worth: "600000.0000",
-    jubilacion_target_net_worth_nominal: null,
-    liquid_crossing_month_index: null,
     ...over,
   };
 }
@@ -61,9 +67,8 @@ function input(
     series: series(over),
     currencyIso: EUR,
     monthLabel,
+    monthAge,
     targetRetirementAge: 55,
-    targetBasis: "perpetuity",
-    pensionStartAge: null,
     ...rest,
   };
 }
@@ -73,138 +78,63 @@ const tile = (i: RetirementTilesV2Input, key: string) =>
   buildRetirementTilesV2(i).find((t) => t.key === key);
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-describe("el tope de 3 y su prioridad", () => {
-  it("el tope es 3 y NUNCA se pasa, con ninguna combinación", () => {
+describe("las dos tarjetas FIJAS", () => {
+  it("el tope es 3 y NUNCA se pasa, con ninguna estrategia", () => {
     expect(RETIREMENT_TILES_V2_CAP).toBe(3);
-    const rich = input(
-      {
-        strategy: "partial",
-        required_contribution_monthly: "1200.0000",
-        required_contribution_search_ceiling: "1800.0000",
-        disposable_monthly: "600.0000",
-        disposable_capital_at_retirement: "90000.0000",
-        partial_gap_target: "150000.0000",
-        partial_phase_capital_growing: true,
-        jubilacion_month_index: 120,
-        pension_start_month_index: 264,
-      },
-      { pensionStartAge: 72 },
-    );
-    expect(buildRetirementTilesV2(rich).length).toBeLessThanOrEqual(3);
-  });
-
-  it("«Objetivo» es SIEMPRE la primera y nunca se cae", () => {
-    for (const strategy of ["asap", "retire_at_age", "coast", "partial", "pension_bridge"] as const) {
-      expect(keys(input({ strategy }))[0], strategy).toBe("target");
+    for (const strategy of ["asap", "retire_at_age", "coast", "partial"] as const) {
+      const rich = input({
+        strategy,
+        contribution_required_monthly: "300.0000",
+        contribution_required_search_ceiling: "1800.0000",
+        coast_stop_month_index: 84,
+        partial_start_month_index: 120,
+      });
+      expect(buildRetirementTilesV2(rich).length, strategy).toBeLessThanOrEqual(3);
     }
   });
 
-  it("el puente es el último candidato: se cae antes que cualquier tarjeta de la estrategia", () => {
-    const withBridge = input(
-      {
-        strategy: "retire_at_age",
-        required_contribution_monthly: "1200.0000",
-        disposable_monthly: "600.0000",
-        jubilacion_month_index: 120,
-        pension_start_month_index: 264,
-      },
-      { pensionStartAge: 72 },
+  it("«Capital necesario hoy» y «Éxito del plan» son las dos primeras, siempre y en ese orden", () => {
+    for (const strategy of ["asap", "retire_at_age", "coast", "partial"] as const) {
+      expect(keys(input({ strategy })).slice(0, 2), strategy).toEqual([
+        "needed_capital",
+        "success",
+      ]);
+    }
+  });
+
+  it("«Capital necesario hoy» va en euros de HOY y lo dice, con el umbral como recuento", () => {
+    const t = tile(input(), "needed_capital")!;
+    expect(t.label).toBe("Capital necesario hoy");
+    expect(t.value).toBe(eur("620.000"));
+    expect(t.subtitle).toBe(
+      "en euros de hoy · para que aguanten 95 de cada 100 escenarios",
     );
-    expect(keys(withBridge)).toEqual(["target", "required_contribution", "disposable"]);
+    expect(t.helpId).toBe("retirement.needed_capital");
+  });
 
-    // Quitando el margen, el puente entra: no estaba «desactivado», estaba desplazado.
-    const roomy = input(
-      {
-        strategy: "retire_at_age",
-        required_contribution_monthly: "1200.0000",
-        jubilacion_month_index: 120,
-        pension_start_month_index: 264,
-      },
-      { pensionStartAge: 72 },
+  it("el toggle «en dinero de hoy» NO puede tocarla: aquí no entra ningún deflactor", () => {
+    // La garantía es estructural — `RetirementTilesV2Input` no tiene deflactor —, así que lo que
+    // se fija es el efecto: la cifra es exactamente la que publica el servidor, sin escalar.
+    expect(tile(input({ needed_capital_today: "620000.0000" }), "needed_capital")?.value).toBe(
+      eur("620.000"),
     );
-    expect(keys(roomy)).toEqual(["target", "required_contribution", "bridge"]);
+    expect(Object.keys(input())).not.toContain("deflator");
   });
 
-  it("«Media jornada» con solve de edad pierde el hueco Y el puente, en ese orden", () => {
-    const solved = input(
-      {
-        strategy: "partial",
-        required_contribution_monthly: "1200.0000",
-        disposable_monthly: "600.0000",
-        partial_gap_target: "150000.0000",
-        jubilacion_month_index: 120,
-        pension_start_month_index: 264,
-      },
-      { pensionStartAge: 72 },
+  it("«Éxito del plan» lleva el umbral y la precisión del sorteo en el subtítulo", () => {
+    const t = tile(input(), "success")!;
+    expect(t.label).toBe("Éxito del plan");
+    // Los topes anti-mentira de `scenariosPerHundred` cuantizan a unidades de «de cada 100»:
+    // 0,952 se imprime «95,0 %», y la precisión real la declara el «±1,2 pp» de al lado.
+    expect(t.value).toBe("95,0 %");
+    expect(t.subtitle).toBe("umbral 95,0 % · ±1,2 pp");
+    expect(t.helpId).toBe("retirement.success");
+  });
+
+  it("sin precisión publicada el subtítulo se queda en el umbral, sin «±0,0 pp»", () => {
+    expect(tile(input({ success_sampling_error_pp: null }), "success")?.subtitle).toBe(
+      "umbral 95,0 %",
     );
-    expect(keys(solved)).toEqual(["target", "required_contribution", "disposable"]);
-
-    // Sin solve de edad, el hueco sube y el puente cabe.
-    const unsolved = input(
-      {
-        strategy: "partial",
-        partial_gap_target: "150000.0000",
-        jubilacion_month_index: 120,
-        pension_start_month_index: 264,
-      },
-      { pensionStartAge: 72 },
-    );
-    expect(keys(unsolved)).toEqual(["target", "partial_gap", "bridge"]);
-  });
-});
-
-describe("qué tarjetas trae cada estrategia", () => {
-  it("«Cuanto antes» solo el objetivo (y el puente si hay pensión con fecha)", () => {
-    expect(keys(input({ strategy: "asap" }))).toEqual(["target"]);
-    expect(
-      keys(
-        input({
-          strategy: "asap",
-          jubilacion_month_index: 120,
-          pension_start_month_index: 264,
-        }),
-      ),
-    ).toEqual(["target", "bridge"]);
-  });
-
-  it("«A una edad fija»: ahorro necesario y margen", () => {
-    expect(
-      keys(
-        input({
-          strategy: "retire_at_age",
-          required_contribution_monthly: "1200.0000",
-          disposable_monthly: "600.0000",
-        }),
-      ),
-    ).toEqual(["target", "required_contribution", "disposable"]);
-  });
-
-  it("«Coast FIRE»: mes coast y número coast — nunca ahorro necesario", () => {
-    const m = keys(
-      input({
-        strategy: "coast",
-        coast_fire_month_index: 84,
-        coast_number: "310000.0000",
-        disposable_monthly: "500.0000",
-      }),
-    );
-    expect(m).toEqual(["target", "coast_month", "coast_number"]);
-    expect(m).not.toContain("required_contribution");
-    // El margen de coast existe en el servidor y NO cabe aquí: se lee en el Resumen.
-    expect(m).not.toContain("disposable");
-  });
-
-  it("«Media jornada» sin solve: el hueco", () => {
-    expect(keys(input({ strategy: "partial", partial_gap_target: "150000.0000" }))).toEqual([
-      "target",
-      "partial_gap",
-    ]);
-  });
-
-  it("una cifra que el servidor NO publica no se pinta con guion: la tarjeta no existe", () => {
-    // `required_contribution_monthly: null` ≠ 0 €: la estrategia degradó y no hay solve.
-    expect(keys(input({ strategy: "retire_at_age" }))).toEqual(["target"]);
-    expect(keys(input({ strategy: "partial" }))).toEqual(["target"]);
   });
 
   it("sin serie no hay tarjetas", () => {
@@ -212,165 +142,302 @@ describe("qué tarjetas trae cada estrategia", () => {
   });
 });
 
-describe("contenido de las tarjetas — una cifra y un subtítulo COMPLETO", () => {
-  it("«Objetivo (euros de hoy)» lleva la base en el subtítulo", () => {
-    const t = tile(input(), "target");
-    expect(t?.label).toBe("Objetivo (euros de hoy)");
-    expect(t?.value).toBe(eur("600.000"));
-    expect(t?.subtitle).toBe("base: renta perpetua");
-    expect(t?.helpId).toBe("retirement.target");
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe("the_third_tile_follows_the_strategy", () => {
+  it("cada estrategia trae SU tercera tarjeta y ninguna otra", () => {
+    expect(keys(input({ strategy: "asap" }))).toEqual([
+      "needed_capital",
+      "success",
+      "safe_date",
+    ]);
+    expect(
+      keys(
+        input({
+          strategy: "retire_at_age",
+          contribution_required_monthly: "300.0000",
+          contribution_required_search_ceiling: "1800.0000",
+        }),
+      ),
+    ).toEqual(["needed_capital", "success", "required_contribution"]);
+    expect(keys(input({ strategy: "coast", coast_stop_month_index: 84 }))).toEqual([
+      "needed_capital",
+      "success",
+      "coast_month",
+    ]);
+    expect(keys(input({ strategy: "partial", partial_start_month_index: 120 }))).toEqual([
+      "needed_capital",
+      "success",
+      "partial_start",
+    ]);
   });
 
-  it("sin base declarada, la tarjeta va sin subtítulo (no se inventa una)", () => {
-    expect(tile(input({}, { targetBasis: null }), "target")?.subtitle).toBeUndefined();
-  });
-
-  it("el objetivo NOMINAL «al cruce» ya NO comparte tarjeta: baja al Detalle", () => {
-    const i = input({ jubilacion_target_net_worth_nominal: "1200000.0000" });
-    expect(tile(i, "target")?.subtitle).toBe("base: renta perpetua");
-    expect(retirementDetailRows(i).map((r) => r.key)).toContain("target_nominal");
-  });
-
-  it("«Ahorro necesario» en rojo cuando es TODO el sobrante y no basta", () => {
-    const t = tile(
-      input({
-        strategy: "retire_at_age",
-        required_contribution_monthly: "1800.0000",
-        required_contribution_search_ceiling: "1800.0000",
-        underfunded: true,
-      }),
-      "required_contribution",
+  it("las tarjetas muertas del objetivo NO vuelven por ninguna puerta", () => {
+    // `target`, `coast_number`, `partial_gap`, `disposable` y `bridge` servían a un objetivo que
+    // el modelo v2 retiró del contrato: si alguna reaparece, es que alguien resucitó la escuela
+    // del objetivo sin decirlo.
+    const all = new Set(
+      (["asap", "retire_at_age", "coast", "partial"] as const).flatMap((strategy) =>
+        keys(
+          input({
+            strategy,
+            contribution_required_monthly: "300.0000",
+            coast_stop_month_index: 84,
+            partial_start_month_index: 120,
+          }),
+        ),
+      ),
     );
-    expect(t?.value).toBe(eur("1800"));
-    expect(t?.subtitle).toBe(`de ${eur("1800")}/mes de sobrante · es TODO tu sobrante y no basta`);
-    expect(t?.tone).toBe("danger");
+    for (const dead of ["target", "coast_number", "partial_gap", "disposable", "bridge"]) {
+      expect(all.has(dead), dead).toBe(false);
+    }
   });
 
-  it("…y en tono normal cuando sí basta", () => {
-    const t = tile(
-      input({
-        strategy: "retire_at_age",
-        required_contribution_monthly: "1200.0000",
-        required_contribution_search_ceiling: "1800.0000",
-        underfunded: false,
-      }),
-      "required_contribution",
-    );
-    expect(t?.subtitle).toBe(`de ${eur("1800")}/mes de sobrante`);
-    expect(t?.tone).toBe("default");
+  it("una cifra que el servidor NO publica no se pinta con guion: la cabecera se queda en dos", () => {
+    // `null` ≠ 0: la estrategia no resolvió su hito, y una tercera tarjeta con «—» diría que el
+    // dato existe y hoy falta.
+    expect(keys(input({ strategy: "retire_at_age" }))).toEqual(["needed_capital", "success"]);
+    expect(keys(input({ strategy: "coast" }))).toEqual(["needed_capital", "success"]);
+    expect(keys(input({ strategy: "partial" }))).toEqual(["needed_capital", "success"]);
   });
 
-  it("«Mes coast» no alcanzable dice por qué, sin guion mudo", () => {
-    const t = tile(input({ strategy: "coast" }), "coast_month");
-    expect(t?.value).toBe("No alcanzable");
-    expect(t?.subtitle).toBe("ni aportando todos los meses llegas al objetivo en tu edad");
-  });
-
-  it("«Mes coast» alcanzable dice el plazo como TRAMO, y «ya» si es hoy", () => {
-    expect(tile(input({ strategy: "coast", coast_fire_month_index: 84 }), "coast_month")
-      ?.subtitle).toBe("dentro de 7 años");
-    expect(tile(input({ strategy: "coast", coast_fire_month_index: 0 }), "coast_month")
-      ?.subtitle).toBe("ya puedes dejar de aportar");
-  });
-
-  it("«Hueco de media jornada» se pone en rojo si el capital DECRECE", () => {
-    const shrinking = tile(
-      input({
-        strategy: "partial",
-        partial_gap_target: "150000.0000",
-        partial_phase_capital_growing: false,
-      }),
-      "partial_gap",
-    );
-    expect(shrinking?.tone).toBe("danger");
-    expect(shrinking?.subtitle).toContain("el capital DECRECE en media jornada");
-
-    // `null` (no hubo fase que medir) no añade línea ni tiñe nada.
-    const unknown = tile(
-      input({ strategy: "partial", partial_gap_target: "150000.0000" }),
-      "partial_gap",
-    );
-    expect(unknown?.tone).toBe("default");
-    expect(unknown?.subtitle).toBe("capital que cubriría ese hueco a perpetuidad");
+  it("en Hogar (sin estrategia) tampoco hay tercera", () => {
+    expect(keys(input({ strategy: null }))).toEqual(["needed_capital", "success"]);
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-describe("la tarjeta de puente — S8", () => {
-  const bridge = (
-    over: Partial<RetirementTileV2Series> = {},
-    rest: Partial<Omit<RetirementTilesV2Input, "series">> = {},
-  ) =>
+describe("«Fecha válida» (asap)", () => {
+  it("el AÑO como cifra y la edad + el tramo en el subtítulo", () => {
+    const t = tile(input({ strategy: "asap" }), "safe_date")!;
+    expect(t.label).toBe("Fecha válida");
+    expect(t.value).toBe("2043");
+    expect(t.subtitle).toBe("a los 55 años · dentro de 17 años");
+    expect(t.helpId).toBe("retirement.safe_date");
+  });
+
+  it("not_reachable_prints_nunca", () => {
+    const t = tile(
+      input({
+        strategy: "asap",
+        retirement_date_basis: "not_reachable",
+        safe_date_month_index: null,
+        safe_date_date_ymd: null,
+        safe_date_age: null,
+      }),
+      "safe_date",
+    )!;
+    // «Nunca» y no un 0, ni un guion: ningún mes del horizonte cumple el umbral, y eso es una
+    // respuesta.
+    expect(t.value).toBe("Nunca");
+    expect(t.subtitle).toContain("ningún mes del horizonte");
+    expect(t.tone).toBe("danger");
+  });
+
+  it("sin fecha civil se apoya en el rotulador del eje, no se queda muda", () => {
+    expect(
+      tile(input({ strategy: "asap", safe_date_date_ymd: null }), "safe_date")?.value,
+    ).toBe("M204");
+  });
+
+  it("sin edad resoluble no la inventa", () => {
+    expect(
+      tile(input({ strategy: "asap", safe_date_age: null }), "safe_date")?.subtitle,
+    ).toBe("dentro de 17 años");
+  });
+
+  it("una fecha válida que ya llegó no se anuncia como «dentro de 0 meses»", () => {
+    expect(
+      tile(
+        input({ strategy: "asap", safe_date_month_index: 0, safe_date_age: 38 }),
+        "safe_date",
+      )?.subtitle,
+    ).toBe("a los 38 años · ya puedes jubilarte");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe("«Aportación mínima» (retire_at_age)", () => {
+  const contrib = (over: Partial<RetirementTileV2Series> = {}) =>
     tile(
-      input(
-        {
-          strategy: "asap",
-          jubilacion_month_index: 120,
-          jubilacion_age: 60,
-          pension_start_month_index: 264,
-          bridge_effective_withdrawal_pct: "8.7000",
-          pension_coverage_ratio: "0.9600",
-          ...over,
-        },
-        { pensionStartAge: 72, ...rest },
+      input({
+        strategy: "retire_at_age",
+        contribution_required_monthly: "300.0000",
+        contribution_required_search_ceiling: "1800.0000",
+        contribution_underfunded: false,
+        ...over,
+      }),
+      "required_contribution",
+    );
+
+  it("el importe, con el sobrante del que sale (sin denominador no se sabe si es mucho)", () => {
+    const t = contrib()!;
+    expect(t.label).toBe("Aportación mínima");
+    expect(t.value).toBe(eur("300"));
+    expect(t.subtitle).toBe(
+      `al mes, además de lo que ya aportas · de ${eur("1800")}/mes de sobrante`,
+    );
+    expect(t.tone).toBe("default");
+    expect(t.helpId).toBe("retirement.required_contribution");
+  });
+
+  it("cero es «ya llegas», nunca un «0 €» que se leería como «no ahorres»", () => {
+    const t = contrib({ contribution_required_monthly: "0.0000" })!;
+    expect(t.value).toBe("Ya llegas");
+    expect(t.subtitle).toContain("con lo que ya aportas");
+    expect(t.tone).toBe("default");
+  });
+
+  it("infra-financiado es «ni ahorrándolo todo», en rojo y con palabras", () => {
+    // El importe SERÍA el techo entero, y pintarlo diría «ahorra esto y llegas» — lo contrario.
+    const t = contrib({
+      contribution_underfunded: true,
+      contribution_required_monthly: "1800.0000",
+    })!;
+    expect(t.value).toBe("Ni ahorrándolo todo");
+    expect(t.value).not.toContain("1800");
+    expect(t.tone).toBe("danger");
+    expect(t.subtitle).toContain("ni invirtiendo cada euro");
+  });
+
+  it("`contribution_underfunded: false` es «llegas», no «no aplica»", () => {
+    expect(contrib({ contribution_underfunded: false })?.tone).toBe("default");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe("«Mes coast» (coast)", () => {
+  it("el mes del eje, con la edad y el tramo", () => {
+    const t = tile(input({ strategy: "coast", coast_stop_month_index: 84 }), "coast_month")!;
+    expect(t.label).toBe("Mes coast");
+    expect(t.value).toBe("M84");
+    expect(t.subtitle).toBe("a los 37 años · dentro de 7 años");
+    expect(t.helpId).toBe("retirement.coast_month");
+  });
+
+  it("un mes coast ya alcanzado no se anuncia como un plazo futuro", () => {
+    expect(
+      tile(input({ strategy: "coast", coast_stop_month_index: 0 }), "coast_month")?.subtitle,
+    ).toBe("a los 30 años · ya puedes dejar de aportar");
+  });
+
+  it("sin edad resoluble el subtítulo se queda en el tramo", () => {
+    expect(
+      tile(
+        input({ strategy: "coast", coast_stop_month_index: 84 }, { monthAge: undefined }),
+        "coast_month",
+      )?.subtitle,
+    ).toBe("dentro de 7 años");
+  });
+
+  it("`coast_not_reachable` dice «No puedes parar nunca», no un guion", () => {
+    const t = tile(
+      input({
+        strategy: "coast",
+        coast_stop_month_index: null,
+        warnings: ["coast_not_reachable"],
+      }),
+      "coast_month",
+    )!;
+    expect(t.value).toBe("No puedes parar nunca");
+    expect(t.subtitle).toContain("ni aportando todos los meses");
+    expect(t.tone).toBe("danger");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe("«Inicio de la jornada reducida» (partial)", () => {
+  it("el mes de arranque de la fase, con edad y tramo", () => {
+    const t = tile(
+      input({ strategy: "partial", partial_start_month_index: 120 }),
+      "partial_start",
+    )!;
+    expect(t.label).toBe("Inicio de la jornada reducida");
+    expect(t.value).toBe("M120");
+    expect(t.subtitle).toBe("a los 40 años · dentro de 10 años");
+    expect(t.helpId).toBe("retirement.partial_mode");
+  });
+
+  it("`partial_never_starts` es «Nunca»: la fase no arranca en ningún mes", () => {
+    const t = tile(
+      input({
+        strategy: "partial",
+        partial_start_month_index: null,
+        warnings: ["partial_never_starts"],
+      }),
+      "partial_start",
+    )!;
+    expect(t.value).toBe("Nunca");
+    expect(t.tone).toBe("danger");
+  });
+
+  it("`partial_never_fully_retires` conserva el mes y avisa de que de ahí no se sale", () => {
+    // Es el caso PEOR y distinto del anterior: la fase empieza y la jubilación total nunca llega.
+    const t = tile(
+      input({
+        strategy: "partial",
+        partial_start_month_index: 120,
+        warnings: ["partial_never_fully_retires"],
+      }),
+      "partial_start",
+    )!;
+    expect(t.value).toBe("M120");
+    expect(t.subtitle).toContain("nunca llegas a jubilarte del todo");
+    expect(t.tone).toBe("danger");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe("un plan que no está no se rellena", () => {
+  it("a_pending_plan_shows_calculando_not_a_number", () => {
+    const i = input({ retirement_date_basis: "pending" });
+    const tiles = buildRetirementTilesV2(i);
+    expect(tiles.map((t) => t.key)).toEqual(["needed_capital", "success"]);
+    for (const t of tiles) {
+      expect(t.value, t.key).toBe("—");
+      expect(t.subtitle, t.key).toBe("calculando…");
+    }
+  });
+
+  it("`pending` gana aunque las cifras viejas sigan pegadas a la respuesta", () => {
+    const t = tile(
+      input({ retirement_date_basis: "pending", needed_capital_today: "620000.0000" }),
+      "needed_capital",
+    )!;
+    expect(t.value).toBe("—");
+    expect(t.value).not.toContain("620");
+  });
+
+  it("a_missing_birth_date_shows_why", () => {
+    const tiles = buildRetirementTilesV2(
+      input({
+        plan_absent_reason: "birth_date_missing",
+        needed_capital_today: null,
+        success_of_plan: null,
+      }),
+    );
+    expect(tiles.map((t) => t.key)).toEqual(["needed_capital", "success"]);
+    for (const t of tiles) expect(t.subtitle, t.key).toBe("falta tu fecha de nacimiento");
+  });
+
+  it("cada razón de ausencia tiene su frase, y una desconocida no se inventa", () => {
+    const reason = (r: RetirementTileV2Series["plan_absent_reason"]) =>
+      tile(input({ plan_absent_reason: r }), "needed_capital")?.subtitle;
+    expect(reason("no_liquid_assets")).toBe("no tienes activos líquidos que vender");
+    expect(reason("months_override")).toBe("esta vista fija un horizonte propio");
+    expect(reason("household_not_solved")).toBe("el hogar no resuelve un plan común");
+    expect(reason("algo_nuevo" as never)).toBe("no disponible");
+  });
+
+  it("sin plan no hay tercera tarjeta: repetir la razón por tercera vez no añade nada", () => {
+    expect(
+      keys(
+        input({
+          strategy: "coast",
+          coast_stop_month_index: 84,
+          plan_absent_reason: "birth_date_missing",
+        }),
       ),
-      "bridge",
-    );
-
-  it("el rótulo y la cifra de U7: «Puente 60→72 · 12 años»", () => {
-    const t = bridge();
-    expect(t?.label).toBe("Puente 60→72");
-    expect(t?.value).toBe("12 años");
-  });
-
-  it("mide el TRAMO jubilación→pensión, no los meses desde hoy", () => {
-    // 264 − 120 = 144 meses = 12 años. Contando desde hoy serían 22, y sonaría igual de creíble.
-    expect(bridge()?.value).toBe("12 años");
-    expect(bridge()?.value).not.toBe("22 años");
-  });
-
-  it("el subtítulo lleva la tasa efectiva y la cobertura, con SUS unidades", () => {
-    // `bridge_effective_withdrawal_pct` es un PORCENTAJE; `pension_coverage_ratio` una FRACCIÓN.
-    expect(bridge()?.subtitle).toBe(
-      "retiras el 8,7 % del capital al año · la pensión cubre el 96,0 % del gasto",
-    );
-  });
-
-  it("la tasa de DESCUENTO no entra: es un supuesto, y vive en el Detalle", () => {
-    const i = input(
-      {
-        jubilacion_month_index: 120,
-        pension_start_month_index: 264,
-        bridge_discount_annual_pct: "5.0000",
-      },
-      { pensionStartAge: 72 },
-    );
-    expect(tile(i, "bridge")?.subtitle ?? "").not.toContain("descontado");
-    expect(retirementDetailRows(i).map((r) => r.key)).toContain("bridge_discount");
-  });
-
-  it("sin mes de jubilación NO hay puente que medir y la tarjeta no se emite", () => {
-    expect(bridge({ jubilacion_month_index: null })).toBeUndefined();
-  });
-
-  it("sin pensión con fecha tampoco", () => {
-    expect(bridge({ pension_start_month_index: null })).toBeUndefined();
-  });
-
-  it("una pensión anterior a la jubilación no es un puente negativo: es «Sin puente»", () => {
-    const t = bridge({ jubilacion_month_index: 200, pension_start_month_index: 150 });
-    expect(t?.value).toBe("Sin puente");
-    expect(t?.subtitle).toContain("cobras la pensión desde el primer mes de jubilación");
-  });
-
-  it("sin edades resolubles, rótulo genérico en vez de un «Puente null→null»", () => {
-    const t = bridge({ jubilacion_age: null }, { pensionStartAge: null, targetRetirementAge: null });
-    expect(t?.label).toBe("Puente hasta la pensión");
-  });
-
-  it("la edad objetivo GUARDADA respalda a la calculada", () => {
-    const t = bridge({ jubilacion_age: null }, { targetRetirementAge: 58 });
-    expect(t?.label).toBe("Puente 58→72");
+    ).toEqual(["needed_capital", "success"]);
   });
 });
 
@@ -380,75 +447,108 @@ describe("retirementDetailRows — lo que la cabecera ya no lleva", () => {
     expect(retirementDetailRows({ ...input(), series: null })).toEqual([]);
   });
 
-  it("el objetivo nominal, con su rótulo propio", () => {
-    const rows = retirementDetailRows(
-      input({ jubilacion_target_net_worth_nominal: "1200000.0000" }),
-    );
-    const r = rows.find((x) => x.key === "target_nominal");
-    expect(r?.label).toBe("Objetivo al cruce (euros de ese mes)");
-    expect(r?.value).toBe(eur("1.200.000"));
+  it("el número FIRE clásico, con su rótulo completo y su ayuda", () => {
+    const r = retirementDetailRows(
+      input({ fire_number_classic_today: "900000.0000" }),
+    ).find((x) => x.key === "fire_number_classic")!;
+    expect(r.label).toBe("Número FIRE clásico (25× tu gasto, sin pensión)");
+    expect(r.value).toBe(eur("900.000"));
+    expect(r.helpId).toBe("retirement.fire_number_classic");
   });
 
-  it("el cruce puro SOLO cuando cae en un mes distinto de la jubilación efectiva", () => {
-    const same = retirementDetailRows(
-      input({ jubilacion_month_index: 120, liquid_crossing_month_index: 120 }),
-    );
-    expect(same.map((r) => r.key)).not.toContain("liquid_crossing");
-
-    const diff = retirementDetailRows(
-      input({ jubilacion_month_index: 240, liquid_crossing_month_index: 300 }),
-    );
-    const r = diff.find((x) => x.key === "liquid_crossing");
-    expect(r?.label).toBe("Cruce del objetivo");
-    expect(r?.value).toBe("M300");
+  it("sin número clásico no hay fila con guion", () => {
+    expect(
+      retirementDetailRows(input()).map((r) => r.key),
+    ).not.toContain("fire_number_classic");
   });
 
-  it("el margen en dinero de hoy, el descuento y la cobertura, con sus unidades", () => {
-    const rows = retirementDetailRows(
-      input({
-        disposable_capital_today: "45000.0000",
-        bridge_discount_annual_pct: "5.0000",
-        pension_coverage_ratio: "0.9600",
-      }),
+  it("las dos cotas de la fecha: al 100 % y al 90 %", () => {
+    const by = Object.fromEntries(
+      retirementDetailRows(
+        input({ safe_date_at_100_month_index: 300, safe_date_at_90_month_index: 168 }),
+      ).map((r) => [r.key, r]),
     );
-    const by = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-    expect(by["disposable_today"]).toBe(eur("45.000"));
-    expect(by["bridge_discount"]).toBe("5,0 %");
-    expect(by["pension_coverage"]).toBe("96,0 %");
+    expect(by["safe_date_100"]!.label).toBe("Fecha al 100 %");
+    expect(by["safe_date_100"]!.value).toBe("M300");
+    expect(by["safe_date_90"]!.label).toBe("Fecha al 90 %");
+    expect(by["safe_date_90"]!.value).toBe("M168");
+  });
+
+  it("con el plan resuelto, una cota ausente es «nunca» — un resultado, no un hueco", () => {
+    const by = Object.fromEntries(
+      retirementDetailRows(input()).map((r) => [r.key, r.value]),
+    );
+    expect(by["safe_date_100"]).toBe("nunca");
+    expect(by["safe_date_90"]).toBe("nunca");
+  });
+
+  it("con el plan SIN resolver las cotas no se pintan: ahí `null` sí es «todavía no se sabe»", () => {
+    for (const over of [
+      { retirement_date_basis: "pending" as const },
+      { plan_absent_reason: "birth_date_missing" as const },
+    ]) {
+      const ks = retirementDetailRows(input(over)).map((r) => r.key);
+      expect(ks, JSON.stringify(over)).not.toContain("safe_date_100");
+      expect(ks, JSON.stringify(over)).not.toContain("safe_date_90");
+    }
+  });
+
+  it("semilla y caminos: sin ellos el éxito no tiene precisión declarada ni se reproduce", () => {
+    const r = retirementDetailRows(input()).find((x) => x.key === "seed_and_paths")!;
+    expect(r.label).toBe("Semilla y caminos");
+    // La semilla es un u64 y viaja como STRING: pasarla por `Number` perdería dígitos y el sorteo
+    // dejaría de reproducirse.
+    expect(r.value).toBe("2500 caminos · semilla 12345678901234567890");
+  });
+
+  it("sin sorteo (fecha por edad) no hay fila de semilla", () => {
+    expect(
+      retirementDetailRows(input({ seed: null, paths_used: null })).map((r) => r.key),
+    ).not.toContain("seed_and_paths");
   });
 
   it("los avisos bajan aquí, con su tono y en su orden de precedencia", () => {
     const rows = retirementDetailRows(
       input({
         strategy: "retire_at_age",
-        underfunded: true,
-        warnings: ["coast_not_reachable", "retire_at_age_underfunded"],
+        contribution_underfunded: true,
+        warnings: ["no_volatility_declared", "coast_not_reachable"],
       }),
     );
     const notices = rows.filter((r) => r.key.startsWith("notice:"));
     expect(notices.map((n) => n.key)).toEqual([
-      "notice:retire_at_age_underfunded",
+      "notice:contribution_underfunded",
       "notice:coast_not_reachable",
+      "notice:no_volatility_declared",
     ]);
-    expect(notices[0].tone).toBe("danger");
-    expect(notices[1].tone).toBe("warn");
-    expect(notices[0].value).toContain("55");
+    expect(notices[0]!.tone).toBe("danger");
+    expect(notices[1]!.tone).toBe("warn");
+    expect(notices[0]!.value).toContain("55");
   });
 
-  it("un campo ausente no produce una fila con guion", () => {
-    expect(retirementDetailRows(input()).map((r) => r.key)).toEqual([]);
+  it("las filas muertas del objetivo NO reaparecen en el Detalle", () => {
+    const ks = retirementDetailRows(
+      input({ fire_number_classic_today: "900000.0000" }),
+    ).map((r) => r.key);
+    for (const dead of [
+      "target_nominal",
+      "liquid_crossing",
+      "disposable_today",
+      "bridge_discount",
+      "pension_coverage",
+    ]) {
+      expect(ks, dead).not.toContain(dead);
+    }
   });
 
   it("todas las claves son únicas (son keys de React)", () => {
     const rows = retirementDetailRows(
       input({
-        jubilacion_month_index: 240,
-        liquid_crossing_month_index: 300,
-        jubilacion_target_net_worth_nominal: "1200000.0000",
-        disposable_capital_today: "45000.0000",
-        bridge_discount_annual_pct: "5.0000",
-        pension_coverage_ratio: "0.9600",
-        warnings: ["target_retirement_age_missing", "bridge_discount_clamped"],
+        fire_number_classic_today: "900000.0000",
+        safe_date_at_100_month_index: 300,
+        safe_date_at_90_month_index: 168,
+        contribution_underfunded: true,
+        warnings: ["coast_not_reachable", "no_volatility_declared"],
       }),
     );
     expect(new Set(rows.map((r) => r.key)).size).toBe(rows.length);
