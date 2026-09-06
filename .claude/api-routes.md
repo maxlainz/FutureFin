@@ -160,7 +160,7 @@ cualquier cliente generado a partir de ella nacía sin enviar credencial ninguna
 | GET | `/v1/auth/me` | Current user info. `UserResponse` = `{id, username, birth_date?, has_password}`. **`has_password` es aditivo (5.0.0, issue #213)**: `false` = cuenta de identidad delegada (`users.password_hash IS NULL`). Viaja también en `login`, `register` y `POST /v1/auth/sso`; la SPA lo usa para decidir qué contraseña pide el modal de exportar `.ffbackup`. |
 | PATCH | `/v1/auth/me` | Update `birth_date` |
 | GET | `/v1/auth/me/retirement-profile` | **5.0.0**. Perfil de jubilación **del usuario de la sesión**, ya resuelto (defaults + clamps), más su `birth_date`: `{profile: {...}, birth_date}`. |
-| PATCH | `/v1/auth/me/retirement-profile` | **5.0.0**. Merge campo a campo, **tri-estado** (omitir = no cambiar; `null` = borrar). Acepta también `birth_date` (misma columna que `PATCH /v1/auth/me`). **Cualquier rol puede editar el SUYO**, `viewer` incluido. Invalida la proyección (el perfil es input del motor). |
+| PATCH | `/v1/auth/me/retirement-profile` | **5.0.0**. Merge campo a campo, **tri-estado** (omitir = no cambiar; `null` = borrar; **excepción**: `withdrawal_rule: null` equivale a omitir — la regla siempre existe y se vuelve a la de fábrica mandando `{"kind": "fixed_real"}`). Acepta también `birth_date` (misma columna que `PATCH /v1/auth/me`). **Cualquier rol puede editar el SUYO**, `viewer` incluido. Invalida la proyección (el perfil es input del motor). |
 
 #### Perfil de jubilación por usuario (`/v1/auth/me/retirement-profile`) — **5.0.0**, D13
 

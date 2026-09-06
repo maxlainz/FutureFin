@@ -2296,8 +2296,10 @@ pub struct WithdrawalRuleParam {
     pub spend_mode: Option<String>,
 }
 
-/// Pensión pública (u otra renta vitalicia) CON FECHA. No es una partida de presupuesto: su
-/// fecha de inicio cambia el OBJETIVO, no solo el flujo de caja.
+/// Pensión pública (u otra renta vitalicia) CON FECHA. Es un FLUJO: entra como ingreso desde su
+/// mes y baja lo que hay que vender, y por eso mueve la fecha válida (5.0.0: no hay objetivo que
+/// descontar). Como override del what-if SUSTITUYE a la pensión entera: `monthly_amount_today` y
+/// `starts_at_age` son obligatorios aunque solo quieras tocar el puente.
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PensionParam {

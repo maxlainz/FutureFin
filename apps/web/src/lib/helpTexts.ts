@@ -351,7 +351,9 @@ export const HELP_TEXTS = {
     body:
       "La cuenta de toda la vida: tu gasto anual de jubilación dividido entre tu tasa de " +
       "retirada —25 veces el gasto con el 4 % clásico, más con tasas más bajas—, con los " +
-      "impuestos por delante si los tienes activados y SIN restar la pensión que declares. Está " +
+      "impuestos por delante si los tienes activados, MÁS las cuotas de deuda que te quedan por " +
+      "pagar (una hipoteca se acaba, pero hasta que se acaba hay que pagarla) y SIN restar la " +
+      "pensión que declares. Está " +
       "aquí porque es la cifra con la que todo el mundo compara, y para que puedas compararla. " +
       "No decide nada: tu fecha y tu capital necesario salen de contar escenarios, no de esta " +
       "multiplicación, y por eso casi nunca coinciden.",

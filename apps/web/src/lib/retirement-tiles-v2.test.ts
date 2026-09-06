@@ -510,7 +510,9 @@ describe("retirementDetailRows — lo que la cabecera ya no lleva", () => {
     const r = retirementDetailRows(
       input({ fire_number_classic_today: "900000.0000" }),
     ).find((x) => x.key === "fire_number_classic")!;
-    expect(r.label).toBe("Número FIRE clásico (tu gasto anual ÷ tu tasa, sin pensión)");
+    expect(r.label).toBe(
+      "Número FIRE clásico (tu gasto anual ÷ tu tasa + lo que te queda de deuda, sin pensión)",
+    );
     expect(r.value).toBe(eur("900.000"));
     expect(r.helpId).toBe("retirement.fire_number_classic");
   });

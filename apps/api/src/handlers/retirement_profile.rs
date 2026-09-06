@@ -1341,6 +1341,12 @@ pub struct PatchRetirementProfileBody {
     /// Regla de retirada COMPLETA: **sustituye a la actual**, no se mergea campo a campo. `pct`
     /// y `start_pct` son opcionales (U4): omitidos heredan `swr_pct`, y omitirlos es justamente
     /// cómo se suelta un porcentaje que antes era explícito.
+    ///
+    /// **Excepción al tri-estado del cuerpo**: `null` aquí equivale a OMITIR (no toca la regla),
+    /// no la «borra» — la regla siempre existe y volver a la de fábrica es mandar
+    /// `{"kind": "fixed_real"}`. Medido en la demo 5.0.0: un PATCH con `withdrawal_rule: null`
+    /// dejaba una regla por saldo intacta y el capital necesario cambiaba de orden de magnitud
+    /// sin que nada lo dijera.
     #[serde(default)]
     pub withdrawal_rule: Option<WithdrawalRule>,
     /// Pensión COMPLETA (el puente vive dentro, C7): **sustituye a la actual**. `null` la borra —
