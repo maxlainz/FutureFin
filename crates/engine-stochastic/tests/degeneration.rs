@@ -128,7 +128,8 @@ fn all_cases() -> Vec<ProjCase> {
     out
 }
 
-/// **La puerta**: todos los casos, todo el horizonte, las dos series y los cuatro índices.
+/// **La puerta**: todos los casos, todo el horizonte, las dos series y las decisiones discretas del
+/// bucle enumeradas en el doc del módulo.
 #[test]
 fn every_case_degenerates_from_decimal_to_floating_point() {
     let cases = all_cases();

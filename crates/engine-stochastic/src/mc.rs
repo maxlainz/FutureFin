@@ -115,8 +115,9 @@ use crate::{
 /// Cota dura de caminos por ejecución. **No es un ajuste de producto**: es el punto a partir del
 /// cual la memoria de las bandas (`2 · caminos · (horizonte+1) · 8 bytes`, ver
 /// [`project_percentile_bands`]) y el tiempo dejan de caber en el presupuesto de un request. Con
-/// 5 000 caminos y 840 meses son ~67 MB y varios segundos: el plan fija 2 000 por HTTP y 1 000
-/// por MCP, y esos topes los aplica el handler, no este crate.
+/// 5 000 caminos y 840 meses son ~67 MB y varios segundos. Los topes de producto por transporte
+/// (`HTTP_MAX_PATHS` y `MCP_MAX_PATHS` en `apps/api/src/handlers/projection_bands.rs`) los aplica el
+/// handler, no este crate, y son ≤ esta cota.
 pub const MAX_PATHS: u32 = 5_000;
 
 /// Caminos por defecto (§B.5 del plan).

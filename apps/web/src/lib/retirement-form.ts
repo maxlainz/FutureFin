@@ -334,7 +334,7 @@ export const PLAN_CARD_COPY: Record<PlanCardId, { title: string; blurb: string }
     title: "Edades",
     blurb:
       "Las edades que fijan tu calendario, convertidas en meses con tu fecha de nacimiento. En " +
-      "«Coast FIRE» y en «Media jornada» eliges además qué fijas tú y qué resuelve el plan: la " +
+      "«Coast FIRE» y en «Jornada reducida» eliges además qué fijas tú y qué resuelve el plan: la " +
       "edad de jubilación o la de dejar de aportar; empezar la fase a una edad o en cuanto puedas.",
   },
   pension: {

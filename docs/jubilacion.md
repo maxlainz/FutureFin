@@ -94,7 +94,7 @@ No necesita ni edad objetivo ni pensión: solo tu fecha de nacimiento, para pode
 éxito y capital. Publica tu fecha válida, el éxito con el que llega, las fechas al 100 % y al 90 %,
 y —de lectura— cuánto se apretó el cinturón la mediana de los escenarios que aguantan.
 
-### Jubilarme a una edad
+### A una edad fija
 
 > Eliges la edad y el plan te dice cuánto tienes que aportar cada mes para llegar a ella con tu
 > nivel de éxito.
@@ -129,7 +129,7 @@ disponible para gastar — no vuelve a la cartera. Si no existe tal mes (ni apor
 o, en modo B, parar ahí no llega a tu umbral, el aviso lo dice sin rodeos: no puedes dejar de
 aportar y llegar.
 
-### Media jornada (Barista FIRE)
+### Jornada reducida (Barista FIRE)
 
 > Bajas de jornada a una edad —o en cuanto el plan pueda permitírsela— y cubres el hueco con tu
 > capital hasta la jubilación total.
