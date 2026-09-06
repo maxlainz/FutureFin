@@ -217,6 +217,11 @@ tiene su columna en la tabla que el test imprime.
 ### Integration tests (`apps/api/tests/`)
 - Each test spins up the full Axum router (`routes::app_router()`) and drives it via `tower::ServiceExt::oneshot` against a real Postgres.
 - **Schema-isolated per test**: `common::isolated_pool()` creates `ff_test_<uuid>`, sets `search_path`, applies every migration in `apps/api/migrations/` (count them with `ls apps/api/migrations | wc -l`), returns the pool. Schemas are leaked intentionally — drop them with `psql -c "DROP SCHEMA ff_test_<id> CASCADE"` or wipe the test DB.
+  **The symptom of the leak does not look like a test failure** (2026-09-06): after a few full-suite runs the
+  `ff-test-db` volume held thousands of `ff_test_*` schemas (≈12 GB) and the next run died with
+  `No space left on device` in the middle of a compile. Sweep with the one-liner in the doc header of
+  `apps/api/tests/common/mod.rs` (drops every `ff_test_%` schema) followed by `VACUUM FULL`; measure
+  with `docker system df -v | grep ff-test`.
 
 ### Test infrastructure (`apps/api/tests/common/mod.rs`)
 - `TestApp::spawn() -> TestApp { router, pool, schema, state }` — fresh schema + axum router wired with cookie cookies. Los cuatro campos son `pub`, lo que permite construir un `TestApp` a mano con otro `AppState` (es como se prueba el kill-switch, ver abajo).
