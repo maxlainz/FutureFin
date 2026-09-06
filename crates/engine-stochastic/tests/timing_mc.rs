@@ -18,7 +18,7 @@
 #[path = "../../engine/tests/common/cases.rs"]
 mod cases;
 
-use cases::projection_cases_all;
+use cases::{p9_household, projection_cases_all};
 use futurefin_engine::{project_net_worth_series, ProjectionInput};
 use futurefin_engine_stochastic::{
     project_percentile_bands, run_path, simulate_f64, McConfig, DEFAULT_PATHS,
@@ -171,3 +171,107 @@ fn the_cost_of_the_draw_against_the_cost_of_the_simulation() {
     );
 }
 
+
+/// (e) **El solve de la FECHA VÁLIDA**, que es el que paga el usuario cuando abre Jubilación.
+///
+/// Presupuesto declarado en el plan de 5.0.0: **≤ 3,5 s típico y ≤ 10 s en el peor caso**, con la
+/// partición «buscar con 500, confirmar con 2.500» que sale de los ~0,2 ms/camino de (c). El peor
+/// caso teórico son `15 + 4 + 6 = 25` sorteos de búsqueda más `1 + 12 + 1 = 14` de confirmación.
+///
+/// Se imprimen tres cosas, en este orden:
+///
+/// 1. el coste de UN sorteo con cada presupuesto — la primitiva de la que sale todo lo demás;
+/// 2. las cotas DERIVADAS (típica y peor caso) para poder ponerlas al lado del número del plan;
+/// 3. solves de verdad, con sus sorteos y sus segundos.
+///
+/// **Mide, no afirma**: no hay `assert` de tiempo.
+#[test]
+#[ignore = "mide, no afirma: correr con --release --ignored --nocapture"]
+fn the_date_solve_costs_what_the_plan_says() {
+    use futurefin_engine::InitialRateGate;
+    use futurefin_engine_stochastic::{success_at_month, valid_retirement_month};
+    use rust_decimal::Decimal;
+
+    let seed = 20_260_906u64;
+    let search = McConfig { seed, paths: 500, ..Default::default() };
+    let confirm = McConfig { seed, paths: 2_500, ..Default::default() };
+
+    let gate = |mut input: ProjectionInput, swr: Decimal| -> ProjectionInput {
+        input.phase_plan.initial_rate = Some(InitialRateGate { swr_pct: swr, bridge: None });
+        input
+    };
+
+    // ---- 1. La primitiva: un sorteo ---------------------------------------------------------
+    let base = gate(p9(), Decimal::new(35, 1));
+    let v = vols();
+    let t0 = Instant::now();
+    black_box(success_at_month(&base, &v, &search, 400).expect("no falla"));
+    let one_search = t0.elapsed().as_secs_f64();
+    let t0 = Instant::now();
+    black_box(success_at_month(&base, &v, &confirm, 400).expect("no falla"));
+    let one_confirm = t0.elapsed().as_secs_f64();
+    println!(
+        "[mc-timing/{}] P9 840 meses · un sorteo de éxito(k): 500 caminos = {:.0} ms · \
+         2.500 caminos = {:.0} ms",
+        profile(),
+        one_search * 1000.0,
+        one_confirm * 1000.0
+    );
+
+    // ---- 2. Las cotas derivadas -------------------------------------------------------------
+    println!(
+        "[mc-timing/{}] cotas derivadas · típico (12 búsqueda + 2 confirmación) = {:.2} s · \
+         peor caso (25 + 14) = {:.2} s · plan: ≤ 3,5 s / ≤ 10 s",
+        profile(),
+        12.0 * one_search + 2.0 * one_confirm,
+        25.0 * one_search + 14.0 * one_confirm
+    );
+
+    // ---- 3. Solves de verdad ----------------------------------------------------------------
+    // P9 tal cual **no tiene fecha válida** en el modelo v2, y no es un artefacto del arnés: su
+    // gasto de jubilación se indexa al 2,5 % y su pensión es plana, así que a 70 años la
+    // necesidad se ha multiplicado por 4,9 y ningún mes del horizonte pasa la puerta de tasa
+    // inicial. Es la forma BARATA del solve (bracket entero, cero confirmaciones).
+    //
+    // La forma cara —A→E completo— se mide sobre el MISMO hogar con la inflación apagada y sin
+    // saldo en la cuenta corriente: entonces la necesidad de jubilación es constante (1.400 €/mes
+    // netos de pensión) y existe un mes a partir del cual la cartera la sostiene.
+    let mut flat = p9_household(Decimal::ZERO);
+    flat.annual_inflation_percent = Decimal::ZERO;
+    if let Some(t) = flat.fire_target.as_mut() {
+        t.annual_inflation_percent = Decimal::ZERO;
+    }
+    let flat = gate(flat, Decimal::new(35, 1));
+    let tamer: Vec<Option<f64>> = vec![None, Some(5.0), Some(16.0), Some(8.0), Some(20.0)];
+
+    for (label, input, vv, threshold) in [
+        ("P9 tal cual", &base, &v, 95u32),
+        ("P9 sin inflación", &flat, &tamer, 80),
+        ("P9 sin inflación", &flat, &tamer, 90),
+        ("P9 sin inflación", &flat, &tamer, 95),
+    ] {
+        let t0 = Instant::now();
+        let solve = valid_retirement_month(input, vv, &search, &confirm, threshold, 1)
+            .expect("el sorteo no falla");
+        let secs = t0.elapsed().as_secs_f64();
+        let paths_total = solve.draws_search * search.paths + solve.draws_confirm * confirm.paths;
+        println!(
+            "[mc-timing/{}] {label} · umbral {threshold} ⇒ mes {:?} \
+             (éxito {:.4}, wilson_low {:.4}, barra {:.3} pp, aprox {}, fallos {:?}, \
+             predecesor {:?}, best_effort {:?}) · sorteos {}×500 + {}×2.500 = {paths_total} caminos \
+             · **{secs:.2} s**",
+            profile(),
+            solve.month,
+            solve.success,
+            solve.wilson_low,
+            solve.half_width_pp,
+            solve.date_is_approximate,
+            solve.failures_by_kind,
+            solve.predecessor_success.map(|x| (x * 1000.0).round() / 1000.0),
+            solve.best_effort.map(|(m, x)| (m, (x * 1000.0).round() / 1000.0)),
+            solve.draws_search,
+            solve.draws_confirm,
+        );
+        black_box(solve);
+    }
+}

@@ -185,6 +185,99 @@ rebalanceo— está escrito en el doc del módulo `mc`, no en un comentario suel
 mecanismo aparte que la rellene. No queda ni un tipo, ni un campo, ni un test suyo en
 `crates/engine` ni en `crates/engine-stochastic`.
 
+### Los solves estocásticos (5.0.0 E6 — `crates/engine-stochastic/src/solve_mc.rs`)
+
+Donde `mc` pregunta «¿cómo de ancha es la banda?», `solve_mc` pregunta **«¿cuándo me puedo
+jubilar?»** (decisión M1 del owner, «definición A»). **Misma doctrina que `crates/engine/src/solve.rs`**
+—bisección sobre el motor entero, extremo VERIFICADO, presupuesto de iteraciones— con una
+diferencia que cambia el vocabulario: cada evaluación de la función objetivo no es una proyección
+sino un **sorteo de N caminos**, y su respuesta no es un booleano sino una **proporción con barra
+de error**.
+
+```rust
+pub fn retiring_at(input: &ProjectionInput, month: u32) -> ProjectionInput   // AtMonth(k) + cruce como lectura
+
+pub fn success_at_month(input, vols: &[Option<f64>], mc: &McConfig, month: u32) -> Result<SuccessAt, McError>
+pub fn success_by_retirement_month(input, vols, mc, grid: &[u32]) -> Result<Vec<SuccessAt>, McError>
+pub struct SuccessAt { pub month: u32, pub paths: u32, pub failures: u32, pub success: f64,
+                       pub wilson_low: f64, pub half_width_pp: f64,
+                       pub rule_of_three_upper: Option<f64>, pub by_kind: [u32; 3] }
+impl SuccessAt { pub fn new(month, paths, failures, by_kind) -> Self; pub fn meets(&self, threshold_pct: u32) -> bool }
+
+pub fn valid_retirement_month(input, vols, search: &McConfig, confirm: &McConfig,
+                              threshold_pct: u32, k_min: u32) -> Result<RetirementDateSolve, McError>
+pub struct RetirementDateSolve { pub month: Option<u32>, pub success: f64, pub wilson_low: f64,
+                                 pub half_width_pp: f64, pub rule_of_three_upper: Option<f64>,
+                                 pub predecessor_success: Option<f64>, pub date_is_approximate: bool,
+                                 pub draws_search: u32, pub draws_confirm: u32,
+                                 pub failures_by_kind: [u32; 3], pub best_effort: Option<(u32, f64)> }
+```
+
+- **Un camino falla ⟺ `SimOutput::failure_month_index.is_some()`.** Los tres motivos (F1/F2/F3) los
+  clasifica el bucle del motor; aquí solo se CUENTAN (`by_kind`, en el orden
+  `KIND_PORTFOLIO_DEPLETED` / `KIND_INITIAL_RATE_EXCEEDED` / `KIND_RULE_BELOW_NEED`). Sin
+  `PhasePlan::initial_rate` no existe F2 y ningún camino puede fallar por tasa inicial.
+- **El escenario** es siempre `retiring_at`: `retirement_trigger = AtMonth(k)` **y**
+  `crossing_is_reading_only = true`. Sin lo segundo el motor conserva la unión `cruce || k ≥ forzado`
+  y un camino afortunado se jubilaría antes de `k` — `éxito(k)` mediría `min(cruce, k)`.
+- **Umbral (C3)**: `u < 100 ⇒ wilson_low ≥ u/100`; `u = 100 ⇒ failures == 0`, y ahí se publica la
+  cota de la regla de tres (`3/N`). El rango 80–100 lo valida el perfil, no el motor: aquí un
+  umbral fuera de rango **no se recorta**, simplemente no lo cumple nadie.
+- **Wilson, y por qué no la normal.** Con `p̂ = 1` la aproximación normal da una barra de error
+  EXACTAMENTE cero («100 % seguro con 2.500 caminos»). Wilson no degenera y además colapsa a una
+  forma cerrada que conviene tener escrita: **`wilson_low = n/(n + z²)`** con `z = 1,96`
+  (`2500/2503,8416 = 0,998466`, barra **0,1534 pp**; `500/503,8416 = 0,992376`). De ahí sale la
+  cota que hay que tener presente al elegir presupuestos: **un umbral `u < 100` es inalcanzable con
+  menos de `z²·u/(1−u)` caminos** — 73 para el 95 %, 381 para el 99 %. Los 500/2.500 del plan
+  cubren el rango entero. `half_width_pp` es la distancia del estimador puntual a la cota INFERIOR
+  (el lado que decide), no media anchura: el intervalo es asimétrico.
+- **Números aleatorios comunes.** `path_rng(seed, p)` no depende ni de `k` ni de `paths`, así que
+  el camino `p` vive el mismo mercado en todas las evaluaciones y **los 500 de la búsqueda son un
+  prefijo bit a bit de los 2.500 de la confirmación**. Es lo que hace comparables `éxito(k)` y
+  `éxito(k+1)` y lo que permite que la confirmación desmienta a la búsqueda sin ser otra muestra.
+  Regresión: `common_random_numbers_make_the_confirmation_a_superset`.
+
+**Las cinco fases de `valid_retirement_month`:**
+
+| fase | qué hace | presupuesto |
+|---|---|---|
+| A | bracket de 60 meses sobre `[k_min, H]`, **cerrando siempre en `H`**: el primer mes de la rejilla que cumple | ≤ 15 sorteos de `search` |
+| B | refinado ANUAL dentro del bracket, barrido de abajo arriba | ≤ 4 |
+| C | bisección MENSUAL, helper único `bisect_month(lo_fails, hi_ok, …)`, invariante «`lo` falla, `hi` cumple, se devuelve `hi`» | ≤ 6 |
+| D | confirmación con `confirm`; si no cumple, avanza mes a mes ≤ 12 veces y, si aun así no cierra, devuelve el que más cerca quedó con `date_is_approximate = true` | 1 + ≤ 12 |
+| E | auditoría de `k−1` con `confirm` → `predecessor_success` (`None` en el suelo: no hay predecesor, **nunca un 0**) | ≤ 1 |
+
+- **`k_min` lo pone el LLAMANTE**: `1` sin puente, `max(1, P − 12·bridge_max_years)` con puente
+  (C2). **Es el único sitio donde `bridge_max_years` acota la FECHA** — el tope de tasa inicial que
+  el puente levanta es cosa del motor (`InitialRateGate::bridge`). Un `k_min > H` devuelve
+  `month: None` sin sortear nada.
+- **Sin fecha en el horizonte ⇒ `month: None`, jamás un 0** (un 0 se leería como «ya puedes»), y se
+  publica `best_effort: (mes, éxito)` con la mejor observación —elegida por `wilson_low`, empate al
+  mes más temprano— además de `failures_by_kind`, que dice POR QUÉ no la hay.
+- **Lo que se garantiza es «un mes VERIFICADO que cumple», NO el mínimo demostrable.** Aquí la
+  monotonía ni siquiera se supone: un «Próximo» es un flujo en un mes absoluto, una fase parcial con
+  base de gasto regular se encarece al alargarse, y con la inflación por encima del crecimiento neto
+  el éxito **decrece** con `k` en tramos enteros. `predecessor_success` es el único dato honesto
+  sobre la minimalidad. Regresión: `a_non_monotone_success_curve_still_returns_a_verified_month`.
+
+**Coste medido** (release, P9 a 840 meses, `tests/timing_mc.rs::the_date_solve_costs_what_the_plan_says`):
+
+```text
+  un sorteo de éxito(k):   500 caminos ≈ 100–110 ms      2.500 caminos ≈ 445–465 ms
+  cotas derivadas:  típico (12+2) ≈ 2,1–2,2 s      peor caso (25+14) ≈ 8,7–9,2 s   (plan: ≤ 3,5 s / ≤ 10 s)
+  solve real A→E:   12–14 sorteos de 500 + 2 de 2.500  ⇒  1,8–1,9 s
+```
+
+El test IMPRIME estos números en cada ejecución en vez de afirmarlos: son de una máquina concreta y
+un rango es lo honesto. Lo que no cambia es la FORMA — el coste de una fecha es
+`draws_search · t(500) + draws_confirm · t(2.500)`, y los dos contadores se publican en
+`RetirementDateSolve`.
+
+La maquinaria del sorteo (`PathEngine`) se construye **una vez por presupuesto** y se sostiene todo
+el solve: entre evaluaciones solo se reescribe `sim.phase_plan.retirement_trigger`. Por eso
+`PathEngine` es `pub(crate)` — no es API pública del crate y `lib.rs` no lo reexporta.
+
+
 ## Public API
 
 ```rust

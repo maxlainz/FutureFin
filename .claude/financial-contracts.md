@@ -465,6 +465,64 @@ movidos):
 - Las dos decisiones son DISCRETAS y entran en la puerta de degeneración: `Decimal` y `f64`
   publican el mismo mes y el mismo motivo en los 25 casos de la batería (§`tests.md`).
 
+**Fecha válida (definición A)** — decisión M1 del owner, corregida por C2/C3 tras el panel
+adversarial. Vive en `crates/engine-stochastic/src/solve_mc.rs`; la API la publica como
+`safe_date_month_index` y su base como `retirement_date_basis`.
+
+> **La fecha válida es el primer mes `k ≥ k_min` que la búsqueda encuentra y la confirmación
+> verifica, tal que jubilándose en `k` la proporción de caminos SIN NINGÚN fallo hasta el horizonte
+> alcanza el umbral del perfil.**
+
+Cada camino trae su propia acumulación (se sortea entero, desde hoy hasta el horizonte, con la
+jubilación forzada en `k`) y **falla** ⟺ `SimOutput::failure_month_index.is_some()` — es decir, F1,
+F2 o F3 en cualquier mes jubilado o parcial. «No volver a trabajar nunca» es exactamente eso: cero
+fallos en todo el horizonte, no un saldo positivo al final.
+
+La regla del umbral, con `z = 1,96`:
+
+| umbral `u` | criterio | qué se publica al lado |
+|---|---|---|
+| `80 ≤ u < 100` | **`wilson_low ≥ u/100`** — el límite inferior del intervalo de score de Wilson al 95 %, no el estimador puntual | `success`, `wilson_low`, `half_width_pp` |
+| `u = 100` | **`failures == 0`** (estimador puntual) | además `rule_of_three_upper = 3/N` — con 0/2.500, el riesgo real está por debajo del **0,12 %** |
+
+Wilson y no la aproximación normal porque con `p̂ = 1` la normal da una barra de error
+**exactamente cero**, y «100 % seguro con 2.500 caminos» es la clase de cifra que esta casa no
+publica. Con cero fallos Wilson colapsa a la forma cerrada `n/(n + z²)` — `0,998466` con 2.500
+caminos, `0,992376` con 500— y de ahí sale una cota que hay que tener presente al elegir
+presupuestos: **un umbral `u < 100` es inalcanzable con menos de `z²·u/(1−u)` caminos** (73 para el
+95 %, 381 para el 99 %), no falle ni un camino. `half_width_pp` es la distancia del estimador
+puntual a la cota INFERIOR —el lado que decide—, no media anchura: el intervalo es asimétrico.
+Medido antes de C3: con el estimador puntual y umbral 100 la fecha era el **mínimo muestral** y
+bailaba ±10 años según la semilla, sin converger al subir `N`.
+
+**El suelo `k_min` lo pone el llamante**: `1` sin puente y `max(1, P − 12·bridge_max_years)` con
+puente, con `P` el mes en que la pensión entra en caja. **Es el único sitio donde
+`bridge_max_years` acota la FECHA** — el tope de tasa inicial que el puente levanta es cosa del
+motor (`InitialRateGate::bridge`), y confundir los dos ejes fue exactamente lo que el panel midió.
+
+**La honestidad de lo que se devuelve.** Lo que la fecha garantiza es **«un mes verificado que
+cumple», no «el mínimo demostrable»**, y la UI no puede prometer lo segundo. La búsqueda es una
+bisección con extremo verificado (bracket de 5 años → año → mes) y el mes devuelto se **reevalúa
+con el presupuesto grande** antes de publicarse; lo que no se supone en ningún punto es la
+MONOTONÍA de `éxito(k)`, porque se sabe que se rompe: un «Próximo» es un flujo en un mes absoluto,
+una fase de media jornada con base de gasto regular se encarece al alargarse, y con la inflación
+por encima del crecimiento neto de la cartera el éxito **decrece** con `k` en tramos enteros del
+horizonte. El único dato honesto sobre la minimalidad es `predecessor_success`: cuánto éxito tiene
+el mes inmediatamente anterior, medido con el mismo presupuesto — `null` cuando el mes devuelto es
+el suelo, **nunca un 0**. Y `date_is_approximate = true` dice que ni el mes que la búsqueda verificó
+ni los doce siguientes cumplieron al confirmarlos: la fecha se publica igual, con su éxito real al
+lado, porque «no lo sé» no es lo mismo que «no existe».
+
+**Sin fecha en el horizonte se publica `month: null`, jamás un 0** —un 0 se leería como «ya
+puedes»— junto a `best_effort` (el mejor par mes/éxito observado) y `failures_by_kind`, que dice
+por qué no la hay: todo F2 ⇒ la tasa inicial no da; todo F1 ⇒ la cartera no aguanta el horizonte.
+
+Presupuestos y coste (release, P9 a 840 meses): **se busca con 500 caminos y se confirma con
+2.500** (≈ 100–110 ms y ≈ 445–465 ms por sorteo). Un solve completo A→E son 12–14 sorteos de
+búsqueda más 2 de confirmación ⇒ **1,8–1,9 s**; la cota del peor caso (25 + 14 sorteos) es
+**≈ 8,7–9,2 s**. Objetivo del plan: ≤ 3,5 s típico, ≤ 10 s peor caso. Los mide, sin afirmarlos,
+`crates/engine-stochastic/tests/timing_mc.rs::the_date_solve_costs_what_the_plan_says`.
+
 **Los solves — inversas por bisección sobre el MOTOR ENTERO** (`crates/engine/src/solve.rs`,
 `MAX_SOLVE_ITERATIONS = 24`, una `project_net_worth_series` completa por evaluación). **E4 se llevó
 del motor los dos que preguntaban «¿llego a `T(R−1)`?»** —`required_contribution_monthly` y

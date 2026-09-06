@@ -364,8 +364,12 @@ fn monthly_sigma(annual_volatility_percent: Option<f64>) -> f64 {
 /// en cada camino: **cero asignaciones por mes y cero por camino** para los factores. Lo que
 /// `simulate` asigna por su cuenta (sus series de salida) no lo puede evitar esta capa sin tocar
 /// el núcleo.
-struct PathEngine {
-    sim: SimInput<F64Money>,
+/// `pub(crate)` para el módulo hermano `solve_mc`: los solves estocásticos evalúan el
+/// MISMO sorteo en muchos meses de jubilación distintos y necesitan sostener esta maquinaria entre
+/// evaluaciones (mutando `sim.phase_plan.retirement_trigger`) en vez de reconstruirla por sorteo.
+/// **No es API pública del crate**: `lib.rs` no lo reexporta.
+pub(crate) struct PathEngine {
+    pub(crate) sim: SimInput<F64Money>,
     /// `m_i`, el multiplicador determinista de cada activo: la CAGR declarada compuesta a mes, y
     /// —desde el modelo v2— la **MEDIANA** del factor que se sortea.
     base: Vec<F64Money>,
@@ -379,7 +383,7 @@ struct PathEngine {
 }
 
 impl PathEngine {
-    fn new(
+    pub(crate) fn new(
         input: &ProjectionInput,
         volatilities: &[Option<f64>],
         config: &McConfig,
@@ -446,7 +450,7 @@ impl PathEngine {
 
     /// Ejecuta el camino `path_index`: sortea sus factores en el buffer, los inyecta por
     /// `growth_overrides` y llama al MISMO `simulate` que produce el camino determinista.
-    fn run(&mut self, path_index: u32) -> Result<SimOutput<F64Money>, EngineError> {
+    pub(crate) fn run(&mut self, path_index: u32) -> Result<SimOutput<F64Money>, EngineError> {
         let mut buf = self
             .buf
             .take()

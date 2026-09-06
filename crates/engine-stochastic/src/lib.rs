@@ -42,6 +42,19 @@
 //! el doc de ese módulo, no en un comentario suelto: un modelo estocástico sin sus supuestos
 //! declarados es un generador de números que parecen ciertos.
 //!
+//! # Los solves estocásticos
+//!
+//! El módulo `solve_mc` es la otra mitad de 5.0.0: donde `mc` pregunta «¿cómo de ancha es la
+//! banda?», él pregunta **«¿cuándo me puedo jubilar?»** — y la responde biseccionando sobre el
+//! motor entero, exactamente con la doctrina de `crates/engine/src/solve.rs`, con la diferencia de
+//! que cada evaluación es un SORTEO de N caminos y su respuesta una proporción con barra de error
+//! (Wilson al 95 %). [`success_at_month`] mide un mes, [`success_by_retirement_month`] una rejilla
+//! y [`valid_retirement_month`] resuelve la fecha en cinco fases (bracket · año · mes ·
+//! confirmación · auditoría del predecesor). Lo que devuelve es **un mes verificado que cumple**,
+//! no el mínimo demostrable — la monotonía se rompe y el doc de ese módulo dice con qué.
+//!
+//! Sigue sin salir un euro: meses, contadores y proporciones.
+//!
 //! # La rentabilidad declarada es COMPUESTA, y quien convierte es este crate
 //!
 //! `expected_annual_return_percent` es una **CAGR** (decisión M8 del modelo v2, owner 2026-09-06):
@@ -54,10 +67,17 @@
 //! degeneración (`tests/degeneration.rs`) sigue comparando exactamente lo mismo que antes.
 
 mod mc;
+mod solve_mc;
 
 pub use mc::{
     project_percentile_bands, run_path, seed_for, McConfig, McError, McOutcome, DEFAULT_PATHS,
     DEFAULT_PERCENTILES, DEPLETION_STEP_MONTHS, MAX_PATHS,
+};
+pub use solve_mc::{
+    retiring_at, success_at_month, success_by_retirement_month, valid_retirement_month,
+    RetirementDateSolve, SuccessAt, BRACKET_STEP_MONTHS, KIND_INITIAL_RATE_EXCEEDED,
+    KIND_PORTFOLIO_DEPLETED, KIND_RULE_BELOW_NEED, MAX_ANNUAL_DRAWS, MAX_BRACKET_DRAWS,
+    MAX_CONFIRMATION_ADVANCES, MAX_MONTHLY_BISECTION_DRAWS, WILSON_Z_95,
 };
 
 use rust_decimal::prelude::ToPrimitive;
