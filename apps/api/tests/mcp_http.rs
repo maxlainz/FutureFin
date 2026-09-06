@@ -413,11 +413,13 @@ async fn get_projection_bands_matches_http_and_hides_the_liquid_bands_by_default
         )
         .await
         .json();
-    assert_eq!(
-        bands["success_probability"], http["success_probability"],
-        "MCP y HTTP citan la misma ejecución: {bands} / {http}"
-    );
-    assert_eq!(bands["success_verdict"], http["success_verdict"]);
+    // **5.0.0 (modelo v2)**: el campo es `success_of_plan` (antes `success_probability`, que ya no
+    // existe en ninguna de las dos superficies — compararlo era una aserción vacua: `Null == Null`).
+    // `.get()` en vez de indexar para que un renombrado futuro falle aquí en vez de pasar en silencio.
+    for field in ["success_of_plan", "success_verdict", "success_absent_reason", "success_threshold_pct"] {
+        assert!(bands.get(field).is_some() && http.get(field).is_some(), "{field} falta: {bands} / {http}");
+        assert_eq!(bands[field], http[field], "MCP y HTTP citan la misma ejecución ({field}): {bands} / {http}");
+    }
     assert_eq!(
         points.len(),
         http["points"].as_array().unwrap().len(),

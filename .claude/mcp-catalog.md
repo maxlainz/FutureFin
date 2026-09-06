@@ -1220,6 +1220,11 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     comando es el contrato, el número de esta frase es una fotografía del día en que se escribió —
     exactamente el error que esta misma sección lleva corrigiéndose a sí misma desde WP6b (207 →
     172 → 94 → 18: cada ola gasta parte del margen de la anterior, ninguna lo repone).
+  - **2026-09-06 (tarde, A12)**: `get_projection_bands` dice que sin fecha alcanzable las cuatro
+    cifras del éxito van a `null` con `success_absent_reason`. Se pagó recortando la MISMA
+    descripción («Semilla estable… antes de citar nada» fuera; el `model_note` lo cubre). Mismo
+    comando → **71 23994 548** (margen **6**): la siguiente frase que alguien quiera añadir al
+    catálogo tiene que empezar por liberar sitio, no por subir `TOTAL_BUDGET`.
   - Tests: `mcp_http.rs::tool_descriptions_stay_within_the_context_budget`,
     `::tools_list_freezes_the_input_contract_of_every_tool` (catálogo regenerado,
     `UPDATE_MCP_CATALOG=1`), `::enumerated_params_publish_a_real_enum_in_the_json_schema`, y su

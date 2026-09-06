@@ -735,10 +735,12 @@ sobre un eje distinto del `PhasePlan`:
   al 100 %, `success_threshold_pct` se acepta y se ignora») describía el modelo ANTES del panel
   adversarial de 2026-09-06 (C3): hoy el umbral SÍ gobierna el veredicto y viaja en la respuesta
   (`success_threshold_pct`, 80–100, default 95) junto con `success_wilson_low` y
-  `success_sampling_error_pp`. **Qué NO decide esta función**: si el plan TIENE fecha —con
-  `retirement_date_basis: not_reachable` el escenario sorteado es «no jubilarse dentro del
-  horizonte», que casi nunca falla, así que un verde ahí dice «este plan sin jubilación aguanta»,
-  no «llegas»; quien pinte el semáforo mira antes `retirement_date_basis` en la serie.
+  `success_sampling_error_pp`. **Sin fecha no hay veredicto** (A12, 2026-09-06): con
+  `retirement_date_basis: not_reachable` o sin plan, el escenario sorteado es «no jubilarse dentro
+  del horizonte» y un éxito ahí no mediría nada, así que las bandas publican `success_of_plan`,
+  `success_wilson_low`, `success_sampling_error_pp` y `success_verdict` a `null` con
+  `success_absent_reason` (`not_reachable` | `birth_date_missing`); el Resumen y el what-if siguen
+  la misma regla.
 - El contrato en prosa de cada métrica vive en `apps/web/src/lib/helpTexts.ts`
   (skill `futurefin-metric-definitions`).
 

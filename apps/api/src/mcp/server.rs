@@ -3093,7 +3093,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_projection_bands",
-        description = "Riesgo del plan por Monte Carlo, solo `view: \"mine\"` (household es 400). Bandas p10/p50/p90 del patrimonio (líquido con `include_liquid_bands`). ÉXITO = fracción de caminos que no rompen el plan (`success_of_plan`), medido contra tu UMBRAL con Wilson (`success_wilson_low`, nunca 0); `success_verdict` es el semáforo. `failures_by_kind` reparte tres motivos [cartera agotada, tasa inicial excedida, regla insuficiente]; `failure_probability_by_age` dice cuándo. Semilla estable. Lee `model_note` antes de citar nada.",
+        description = "Riesgo del plan por Monte Carlo, solo `view: \"mine\"` (household es 400). Bandas p10/p50/p90 del patrimonio (líquido con `include_liquid_bands`). ÉXITO = caminos que no rompen el plan (`success_of_plan`), contra tu UMBRAL con Wilson (`success_wilson_low`, nunca 0); `success_verdict` es el semáforo; sin fecha alcanzable los cuatro son null y `success_absent_reason` dice por qué. `failures_by_kind` reparte [cartera agotada, tasa inicial excedida, regla insuficiente]; `failure_probability_by_age` dice cuándo. Lee `model_note`.",
         annotations(title = "Riesgo del plan (Monte Carlo)", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_projection_bands(

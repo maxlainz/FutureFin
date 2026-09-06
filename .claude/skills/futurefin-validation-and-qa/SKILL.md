@@ -243,7 +243,7 @@ fix this table in the same change.
 
 | File | Tests | Covers |
 |---|---|---|
-| `smoke.rs` | 5 | health/ready, 401 unauth, register→login→me roundtrip, first-user bootstrap → owner |
+| `smoke.rs` | 11 (`grep -c '#\[tokio::test\]' apps/api/tests/smoke.rs`) | health/ready, 401 unauth, register→login→me roundtrip, first-user bootstrap → owner, y los añadidos de 5.0.0 |
 | `liabilities_purge.rs` | 5 | expired liabilities hidden from GET/summary but **persist in DB** (reads never mutate) |
 | `body_limits.rs` | 3 | 1 MiB global body cap → 413; `/backup/user-import` accepts up to 16 MiB; **4.4.0 (issue #85)**: `oversized_mcp_body_returns_413` — `/mcp` is a `route_service`, so `DefaultBodyLimit` never reaches it (rmcp reads the body itself, default 4 MiB); the documented "1 MiB global" invariant was false there until `with_max_request_body_bytes` fixed it explicitly. Test body is 2 MiB — above the global, below rmcp's old default |
 | `installation_patch.rs` | 5 | unknown `fire_number_mode` rejected; legacy `annual_expense_adjusted` alias accepted; valid mode change |
