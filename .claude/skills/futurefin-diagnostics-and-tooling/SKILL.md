@@ -492,18 +492,18 @@ SMOKE_USER=... SMOKE_PASS=... bash $S --compare /tmp/base.json # AFTER
 Fetches `/v1/projection/series` twice (positional args = raw query strings) and
 diffs: scalars (`months`, `horizon_*`, `starting_net_worth`,
 `monthly_delta_assumption`), KPIs (`jubilacion_month_index`,
-`jubilacion_target_net_worth`, `compound_outpaces_true_savings_month_index`),
-`milestones`/`milestones_real`, array lengths, and every value at **shared
-month_index points**. Exit 0 = no forbidden divergence; exit 1 = real DIFF.
-**CÓDIGO DESACTUALIZADO, no arreglado en esta pasada (documentación-only)**: el script sigue leyendo
-`jubilacion_target_net_worth` y `fire_target_series`, dos campos retirados enteros en el modelo v2
-(2026-09-06) — `a.get("jubilacion_target_net_worth")` siempre da `None` en los dos lados, así que esa
-fila del diff nunca puede fallar y la comparación es un placebo silencioso, no una guarda. Actualizar
-a `needed_capital_today`/`needed_capital_curve` es un cambio de código (`scripts/diagnostics/projection-diff.sh`),
-fuera de alcance de este pase.
+`compound_outpaces_true_savings_month_index`), the 5.0.0 plan block
+(`retirement_date_basis`, `safe_date_month_index`, `success_of_plan`,
+`needed_capital_today`, `needed_capital_curve_state`), `milestones`/`milestones_real`,
+array lengths (`points`, `needed_capital_curve`, `asset_series`), and every value at
+**shared month_index points** — `net_worth`, `contributed_capital` and the non-null
+entries of `needed_capital_curve` (parallel to `points[]`; a `null` there means «not
+measured at this point», never 0). Exit 0 = no forbidden divergence; exit 1 = real DIFF.
+Re-anclado el 2026-09-06 al modelo v2: hasta entonces comparaba `jubilacion_target_net_worth`
+y `fire_target_series`, retirados enteros, y esas filas no podían fallar nunca (placebo).
 
 Interpretation:
-- **Densities differ (default run)**: `points_len`/`fire_target_series_len`/last
+- **Densities differ (default run)**: `points_len`/`needed_capital_curve_len`/last
   `month_index` differences are labeled `diff (expected)` (decimation artifacts).
   Note the series is `months + 1` points long (index 0 + one per month), and at
   the default 840-month horizon BOTH densities end at `month_index = 840` (it is
