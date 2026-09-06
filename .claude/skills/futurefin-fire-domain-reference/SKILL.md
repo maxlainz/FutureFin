@@ -8,9 +8,13 @@ description: >
   retirement drawdown/drain, milestones vs milestones_real, deflation for display, the
   projection horizon rule, fire-parity.json, or any question like "why does the target grow?",
   "why did jubilación move?", "is this number in today-euros?", "how is the surplus split
-  across assets?"; and, since 5.0.0, retirement STRATEGIES (asap / retire_at_age / coast /
-  partial / pension_bridge), phases, dated pension, the classic FIRE number, withdrawal rules
-  (fixed_real / percent_of_balance / hybrid / guardrails) and the solves. Also load it BEFORE
+  across assets?"; and, since the 5.0.0 retirement model v2 (2026-09-06), retirement STRATEGIES
+  (asap / retire_at_age / coast / partial — `pension_bridge` is a deserialization alias that
+  folds into `asap` + a pension bridge, not a fifth live strategy), phases, the dated pension as
+  a cash flow, the classic FIRE number (informational only), withdrawal rules (fixed_real /
+  percent_of_balance / hybrid / guardrails), the success threshold, the initial-rate gate (SWR as
+  F2), and the five stochastic solves (valid date, needed capital, minimum contribution, coast
+  stop month, earliest partial start). Also load it BEFORE
   editing crates/engine/src/{projection,sim_core,phases,target,withdrawal,solve}.rs,
   apps/api/src/handlers/{projection,retirement_profile}.rs or apps/web/src/lib/fire.ts. Do NOT use it as a bug
   triage runbook (futurefin-debugging-playbook), to change the economic model
@@ -32,11 +36,14 @@ FASES de 5.0.0**, rama `release/5.0.0`, issue #207), not textbook FIRE theory.
 
 > **Lo que 5.0.0 cambia de raíz, y por qué casi todo lo de abajo se movió**: la jubilación deja de
 > ser un evento del hogar disparado por un cruce y pasa a ser una **estrategia por usuario**
-> (`users.retirement_profile`) que decide el disparador, la base del objetivo, las fases y la regla
-> de retirada. `installation.fire_settings` **pierde** `fire_number_mode`,
-> `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age` — viven ahora en el perfil
+> (`users.retirement_profile`) que decide el disparador, las fases y la regla de retirada.
+> `installation.fire_settings` **pierde** `fire_number_mode`, `fire_number_manual_amount`,
+> `swr_pct` y `horizon_lifespan_age` — viven ahora en el perfil
 > (`apps/api/src/handlers/retirement_profile.rs`) — y conserva los supuestos COMPARTIDOS (inflación,
-> impuestos, `savings_source` y sus ventanas, divisa, tz). §4b es el mapa nuevo.
+> impuestos, `savings_source` y sus ventanas, divisa, tz). **El modelo de jubilación v2 (2026-09-06)
+> fue más lejos**: no hay «base del objetivo» que decidir porque no hay objetivo que dimensionar —
+> la fecha la decide el éxito sobre miles de caminos (M1/C3), y el «número FIRE clásico» sobrevive
+> solo como lectura (E4). §4b es el mapa nuevo.
 
 > **⚠️ Los números de línea de este fichero son masivamente obsoletos y NO se han corregido uno a
 > uno.** `crates/engine/src/projection.rs` creció ~880 líneas con la Fase 6 (issue #87) y
@@ -463,35 +470,42 @@ Todo lo de esta sección vive en `crates/engine/src/{phases,target,withdrawal,so
 `apps/api/src/handlers/projection.rs`; **el motor no conoce estrategias ni fechas de nacimiento**,
 solo el plan que le pasan.
 
-#### Las cinco estrategias y el invariante del trigger único
+#### Las cuatro estrategias y el invariante del trigger único (SIEMPRE el mes forzado)
 
 > **E4 vació la columna «Objetivo»** (decisión M4): hay UNA base —el número FIRE clásico, una
 > lectura— y ninguna estrategia la elige. Las lecturas ~~tachadas~~ ya no existen en el motor; sus
-> preguntas las responde el solve estocástico contra el umbral de éxito (v2 §2.2/§2.3).
+> preguntas las responde el solve estocástico contra el umbral de éxito (v2 §2.2/§2.3). **C7
+> retiró la quinta estrategia** (`pension_bridge`): el puente es hoy un ajuste de la pensión
+> (`BridgeCap`), disponible con cualquiera de las cuatro que quedan.
 
-| Estrategia | Trigger | Lecturas propias |
+| Estrategia | Cómo llega el mes forzado al motor | Lecturas propias |
 |---|---|---|
-| `asap` | cruce del líquido | `liquid_crossing_month_index`, series `withdrawal_*` |
-| `retire_at_age` | `AtMonth(R)` | ~~`required_contribution_monthly`, `required_capital_path`, `underfunded`~~ (E4), `disposable_*` |
-| `coast` | `AtMonth(R)` | ~~`coast_fire_month_index`, `coast_number`, `coast_path`~~ (E4) |
-| `partial` | parcial en `AtMonth(X)`; total por cruce o `AtMonth(R)` | `partial_retirement_month_index`, `partial_phase_capital_growing`, ~~`partial_gap_target`~~ (E4) |
-| `pension_bridge` | cruce del líquido | `pension_start_month_index`, ~~`bridge_effective_withdrawal_pct`, `pension_coverage_ratio`~~ (E4) |
+| `asap` | `ForcedMonth::NeedsSolve` — lo busca `solve_mc::valid_retirement_month` | fecha válida, éxito, capital necesario hoy |
+| `retire_at_age` | `ForcedMonth::Known(R)` — la edad, SIN sorteo | veredicto (`1 − éxito(R)`), aportación mínima |
+| `coast` | modo A: `Known(R)` + `coast_stop_month(R)` resuelve `C`; modo B: `NeedsSolve` con `contributions_stop_month = C` | mes coast (el PRIMER `C` que cumple, C8), ahorro liberado (disponible, no se reinvierte) |
+| `partial` | total: `Known(R)` si hay edad, si no `NeedsSolve`; la fase entra en `AtMonth(S)` | inicio de la fase, `partial_phase_capital_growing` |
 
-- **Un solo trigger por simulación**, y lo impone la ESTRATEGIA (handler), no el motor. El bucle
-  conserva la UNIÓN de 4.15.0 —`cruce || k ≥ R`, o sea `min(cruce, R)`— porque es lo que el pin
-  dorado tiene fotografiado; el eje que apaga el cruce es `PhasePlan::crossing_is_reading_only`.
-  Con `true`, el cruce **no jubila** y solo se anota en `liquid_crossing_month_index`.
-- **Por qué un flag y no `fire_target: None`**: las estrategias por edad SIGUEN necesitando el
-  objetivo — el chart lo pinta y el infra-financiado se mide contra él. Desactivar el cruce quitando
-  el objetivo habría tirado también la lectura.
+- **Un solo trigger por simulación, y desde el modelo v2 es SIEMPRE el mes forzado, en las CUATRO
+  estrategias** — ya no depende de si la estrategia es «por edad». El bucle conserva la UNIÓN de
+  4.15.0 —`cruce || k ≥ mes_forzado`— porque es lo que el pin dorado tiene fotografiado, pero el
+  ensamblado pone `phase_plan.crossing_is_reading_only = true` **incondicionalmente**
+  (`handlers/projection.rs:2531`, sin la guarda `forced_retirement_month.is_some()` que tenía antes
+  de E4/A4): el cruce **nunca** jubila a nadie, solo se anota en `liquid_crossing_month_index`.
+- **Por qué el objetivo entra igualmente al motor**: no porque alguna estrategia lo necesite para
+  decidir (ninguna lo hace desde E4), sino porque sigue siendo una lectura que el chart pinta —el
+  número FIRE clásico— y porque `PhasePlan::classic` (los llamantes legacy que no pasan un mes
+  forzado) sigue usando el cruce como default, con P1–P13 de los pines hasheándolo.
 - **El invariante que hay que testear es de COMPORTAMIENTO, no del enum**: en cada estrategia, el
-  mes en que el ingreso cambia a jubilación == `retirement_month_index` == el marcador del chart ==
+  mes en que el ingreso cambia a jubilación == `jubilacion_month_index` == el marcador del chart ==
   el primer mes de `Retired`.
-- **La edad manda** (D17): en `retire_at_age`/`coast` el hogar se jubila en `R` aunque el capital no
-  llegue, con `EngineWarning::RetireAtAgeUnderfunded`. El aviso mira el **objetivo**, no el trigger:
-  si quien jubiló fue el cruce, `L(R−1) ≥ T(R−1)` por definición y la rama no puede darse.
-- Sin `users.birth_date` las estrategias por edad **degradan a `asap`** con `warnings:
-  ["birth_date_missing"]` — nunca un 500 ni una edad inventada.
+- **La edad manda, pero `EngineWarning::RetireAtAgeUnderfunded` YA NO EXISTE** (E1 lo retiró): un
+  booleano contra un objetivo descontado no distinguía «no llegas por poco» de «no llegas jamás».
+  Lo que responde hoy la misma pregunta es **`1 − éxito(R)`** — la proporción de caminos que fallan
+  jubilándose en `R` (`SuccessAt` de `solve_mc`), medido con el sorteo, no con una comparación
+  determinista.
+- Sin `users.birth_date` **ninguna estrategia** publica fecha/éxito/capital (C5, `plan_absent_reason:
+  birth_date_missing`) — no es solo un problema de las estrategias por edad: `asap` también necesita
+  la edad para resolver el umbral y para publicar a qué edad corresponde la fecha.
 
 #### Las fases
 
@@ -666,21 +680,36 @@ El bucle es **una sola implementación** parametrizada por su tipo numérico (`M
 
 `crates/engine-stochastic::project_percentile_bands` corre `paths` caminos del MISMO bucle con
 factores de crecimiento sorteados (un shock de mercado común por mes, escalado por la sd de cada
-activo). De aquí salen tres lecturas que hay que leer con cuidado:
+activo). Con el modelo v2 la pregunta que decide la fecha (`solve_mc`, §arriba) y la que describe
+el riesgo alrededor de una fecha ya fija (`McOutcome`, aquí) usan el MISMO criterio de fallo, así
+que las dos superficies no pueden discrepar sobre qué cuenta como «tu plan se rompió»:
 
-- **Éxito = el plan OCURRE y AGUANTA**, no solo «la cartera no se agota nunca» (definición
-  original, D22, corregida por la revisión adversarial). Esa definición premiaba al hogar que **no
-  se jubila jamás** — quien nunca drena nunca se agota —, y medido en un hogar que cruza en el mes
-  655 de 840 inflaba el éxito de 0,940 (entre los que sí se jubilan) a 0,960 publicado, con el
-  33,1 % de caminos sin jubilarse contando como éxito (hasta +6,8 pp de sesgo con SWR 6 %). Hoy
-  `success_probability` exige jubilarse dentro del horizonte (o un trigger por edad) **y** no
-  agotar; `never_retired_probability` y `success_given_retired` se publican al lado para separar
-  «¿ocurre?» de «¿aguanta?».
-- **La cobertura cuenta la necesidad que la CARTERA no pudo fundar**, no solo lo que la regla
-  rechazó: `withdrawal_to_need_ratio_p50 = Σw / Σ(w + recorte + descubierto)`. Con el denominador
-  antiguo (`Σ(w + recorte)`), un hogar con `fixed_real` —donde el recorte es CERO por
-  construcción— podía dar cobertura 1,0 en los 1.000 caminos aunque solo cubriera el 8,7 % real de
-  su gasto. `months_below_need_p50` cuenta meses con `recorte + descubierto > 0` por la misma razón.
+> **Historia (D22 corregida por D20, ANTES de E9) — dos definiciones intermedias que ya NO son las
+> vigentes**: hubo una definición «éxito = la cartera nunca se agota», que premiaba al hogar que
+> nunca se jubila (medido: +6,8 pp de sesgo con SWR 6 %, un hogar que cruza en el mes 655/840 subía
+> de 0,940 real a 0,960 publicado); la corrigió D20 a «éxito = el plan OCURRE (se jubila) Y
+> AGUANTA», publicando `never_retired_probability`/`success_given_retired` al lado. **E9 (modelo
+> v2, 2026-09-06) retiró los dos campos**: con el mes forzado uniforme de v2 (todo plan trae un
+> `AtMonth` que el solver externo resolvió, incluso `asap`), «no jubilarse nunca» dejó de ser un
+> desenlace posible del sorteo — la pregunta murió con el disparador variable, no con una tercera
+> corrección de sesgo.
+
+- **Éxito (E9) = CERO fallos F1/F2/F3 en el camino** — `success_probability` = caminos con
+  `failure_month_index.is_none()` / N, la MISMA fuente que clasifica el bucle del motor: F1
+  (`PortfolioDepleted`, la cartera no aguanta), F2 (`InitialRateExceeded`, la tasa inicial en `R`
+  excede el tope del perfil o del puente) y F3 (`RuleBelowNeed`, con regla por saldo, el permitido
+  no llega a la necesidad ordinaria). `failures_by_kind: [u32; 3]` cuenta el PRIMER motivo de cada
+  camino fallido, en ese mismo orden.
+- **La cobertura cuenta la necesidad que la CARTERA no pudo fundar Y descuenta el exceso de
+  `rule_is_spend`** — dos correcciones sucesivas, ninguna redundante con la otra:
+  `withdrawal_to_need_ratio_p50 = Σ max(0, w − excess) / Σ max(0, w + recorte + descubierto − excess)`,
+  cada término CLAMPADO a ≥ 0 mes a mes (`need_net` puede ser negativo desde que la pensión supera
+  el gasto). Sin `descubierto` (fix anterior a 5.0.0), un hogar con `fixed_real` —recorte CERO por
+  construcción— podía dar cobertura 1,0 en 1.000 caminos aunque solo cubriera el 8,7 % real de su
+  gasto. Sin restar `excess` (bug B2 del panel adversarial, corregido en E9), bajo `rule_is_spend`
+  el exceso sobre la necesidad contaba en las dos mitades de la fracción sin descontarlo, inflando
+  la cobertura: medido en el mismo hogar y semilla, **0,9888 → 0,9793**. `months_below_need_p50`
+  cuenta meses con `recorte + descubierto > 0`.
 - **El colchón de caja (P4) se DERIVA del tope de la regla de ahorro desde 5.0.0** (decisión V6 del
   owner): el input desapareció de la SPA y `handlers/cash_buffer.rs::resolve_cash_buffer` lo resuelve
   al final del ensamblado de la proyección —no en `resolve_retirement_profile`, que es ledger-free
@@ -710,11 +739,47 @@ activo). De aquí salen tres lecturas que hay que leer con cuidado:
   neto es real. **Y desde 5.0.0 ese coste aparece sin que nadie lo pida**, porque el colchón se
   deriva de un tope que ya existía: el owner lo aceptó explícitamente (V6) a cambio de que la UI lo
   diga.
-- **El veredicto del éxito tiene corte FIJO al 100 %** (5.0.0, decisión V7): verde ⟺ `p == 1`, o
-  sea ni un camino agotado; ámbar `[0,90, 1)`; rojo `< 0,90`. El borde es exacto sin épsilon (`n/n`
-  es `1.0` en IEEE 754 para cualquier `n`). El `success_threshold_pct` del perfil se retiró: se
-  acepta y se ignora en la entrada, y **no sale por ninguna respuesta**. Con 500 caminos, un solo
-  fallo ya es ámbar — consecuencia asumida.
+- **El veredicto contra el umbral del PERFIL, con Wilson (C3 sustituye a V7)**: `success_verdict`
+  (`handlers/projection_bands.rs`) es verde ⟺ `SuccessAt::meets(threshold_pct)` — con umbral < 100,
+  `wilson_low ≥ threshold/100` (la cota INFERIOR del intervalo de Wilson, no el estimador puntual);
+  con umbral 100, `success == 1.0` exacto (`n/n` en IEEE 754, sin épsilon). Ámbar ⟺ el estimador
+  puntual llega pero el intervalo no; con umbral 100 **no hay ámbar** (o ningún camino falla, o es
+  rojo). `success_threshold_pct` VOLVIÓ al perfil como restricción (80–100, default 95, C3) —ya no
+  se acepta-e-ignora— y sale en la respuesta junto con `success_wilson_low`/
+  `success_sampling_error_pp`. Medido antes de C3: con el estimador puntual y el corte fijo al
+  100 %, «0 fallos de N» era el mínimo muestral y bailaba ±10 años según la semilla, sin converger
+  al subir N; con 2.500 caminos y cero fallos, Wilson publica la cota de la regla de tres
+  (`rule_of_three_upper = 3/N`, ≈ 0,12 %).
+
+#### El SWR como tasa INICIAL, la puerta F2 y los cinco solves estocásticos (E1/E6–E8, `crates/engine-stochastic`)
+
+Detalle completo (fórmulas, presupuestos de iteraciones, coste medido) en
+[`engine.md`](../../engine.md) §«Los solves estocásticos». Resumen para quien solo necesita el
+CONTRATO:
+
+- **`swr_pct` ya no dimensiona un objetivo: es el techo de venta ordinaria anual** (C1). Se
+  comprueba UNA vez, en el primer mes jubilado `R` de cada camino: `12 · necesidad_ordinaria(R) >
+  tope/100 · L(R−1)` ⇒ el camino falla en `R` (F2, `initial_rate_exceeded`). **No** es una
+  comprobación mensual sobre el saldo vivo — esa alternativa (medida por el panel, ver
+  `futurefin-failure-archaeology` §3) ponía la fecha de la demo en la edad de la pensión.
+- **El puente (C2)** sustituye el tope por `bridge_max_pct` en `R` **solo** si hay pensión con
+  fecha y llega dentro de `bridge_max_years`; fuera de esa ventana, o sin puente, manda el SWR.
+- **Los cinco solves**, todos con la misma doctrina —bisección sobre el motor entero, extremo
+  VERIFICADO, se busca con 500 caminos y se confirma con 2.500—:
+
+  | Solve | Estrategia que lo usa | Qué resuelve |
+  |---|---|---|
+  | `valid_retirement_month` | `asap`, `coast` modo B, `partial` (fecha total) | el primer mes `k` cuyo éxito ≥ umbral (M1, definición A) |
+  | `needed_capital_today`/`needed_capital_curve` | las cuatro (M9) | el factor `λ` que escala el patrimonio LÍQUIDO hasta cumplir el umbral en `k` |
+  | `minimum_extra_contribution` | `retire_at_age`, `coast` (aportación) | la menor aportación extra PLANA que hace cumplir el umbral en `R` |
+  | `coast_stop_month` | `coast` modo A | el PRIMER mes desde el que se puede dejar de aportar y aun así llegar a `R` (C8: el primero, no el último) |
+  | `earliest_partial_start` | `partial` modo «en cuanto pueda» | el primer mes en que empezar la media jornada no rompe la fase (solo F1 puede fallar ahí, S1) |
+
+  Ninguno de los cinco garantiza el MÍNIMO demostrable — la monotonía no siempre aguanta (un
+  «Próximo», la inflación por encima del crecimiento neto) — solo un valor **verificado** que
+  cumple. `predecessor_success` (en la fecha) y los avisos `coast_not_reachable`/
+  `partial_never_starts`/`partial_never_fully_retires` son la honestidad sobre lo que no se
+  garantiza.
 
 ## 5. The monthly simulation loop, step by step
 
@@ -954,7 +1019,7 @@ como verdad tanto como un número congelado — es la lección de §3.1 de `futu
 |---|---|
 | «no variable/guardrail SWR» | **Implementado en 5.0.0**: cuatro reglas de retirada × dos modos de gasto, guardarraíles de Guyton-Klinger incluidos (`crates/engine/src/withdrawal.rs`, §4b) |
 | «no tax-aware withdrawal … no cost-basis tracking at withdrawal time» | **Falso desde 4.10.0/#140 + 4.12.0/#178**: todo drenaje vende BRUTO por la escala de tramos, la base de coste es POR ACTIVO y baja al vender (`b' = b·v_post/v_pre`), y la `g` de cada activo se DERIVA de su base viva. Lo que sigue sin existir es la **ordenación** tax-aware del drenaje (el orden es líquidos primero, menor rentabilidad primero) |
-| «deterministic single-path projection; no stochastic returns / Monte Carlo» | **Ya no es cierto, en ninguna mitad.** El bucle es genérico sobre su tipo numérico y `crates/engine-stochastic` lo instancia en `f64` con su puerta de degeneración verde (§4b). La capa Monte Carlo —RNG pineado, caminos, bandas p10/p50/p90, probabilidad de éxito— entró commiteada el 2026-09-03 (`ba6bdfe`) y, tras el pase de correcciones de la revisión adversarial (commit `0668f37`, issue #207 cerrado), su suite está **VERDE entera: 29 tests, 0 fallos** (13 unitarios + 3 de `degeneration.rs` + 13 de `monte_carlo.rs`). El `mc_cash_buffer_changes_the_band_under_sequence_risk` que fallaba —el colchón salía peor, no mejor, que sin él— no era un bug del test: el modelo del colchón tenía dos bugs reales (relleno anticipativo con el shock del propio mes, colchón sin filtro de liquidez), y corregidos el test se rehízo como `mc_cash_buffer_protects_and_the_drag_is_what_costs`. Comprueba el estado con `cargo test -p futurefin-engine-stochastic 2>&1 \| grep "test result"` — la claim ya es citable en público (`futurefin-research-frontier` §Claims) |
+| «deterministic single-path projection; no stochastic returns / Monte Carlo» | **Ya no es cierto, en ninguna mitad.** El bucle es genérico sobre su tipo numérico y `crates/engine-stochastic` lo instancia en `f64` con su puerta de degeneración verde (§4b). La capa Monte Carlo entró commiteada el 2026-09-03 (`ba6bdfe`) y creció con el modelo de jubilación v2 (2026-09-06, E1-E9): **75 tests, 0 fallos** (26 unitarios + 3 `degeneration.rs` + 13 `monte_carlo.rs` + 9 `needed_capital.rs` + 11 `solve_mc.rs` + 13 `strategy_solves.rs`), más 7 `#[ignore]` de `timing_mc.rs` que miden y no afirman. **El colchón de caja y su familia `mc_cash_buffer_*` se retiraron ENTEROS con E3** — no es que se corrigieran, es que el mecanismo dejó de existir (M6): `grep -rn "cash_buffer\|CashBuffer" crates/engine-stochastic/` sale vacío. Comprueba el estado con `cargo test -p futurefin-engine-stochastic 2>&1 \| grep "test result"` — la claim ya es citable en público (`futurefin-research-frontier` §Claims) |
 | «no sequence-of-returns risk» | Sigue sin superficie propia, pero deja de ser inalcanzable en cuanto WP6 aterrice |
 
 **Lo que sí hace desde 4.4.0 y conviene no confundir con la lista de arriba**: amortización
@@ -982,6 +1047,19 @@ el `closing_principal` que el motor ya derivaba y tiraba.
   `.claude/skills/futurefin-failure-archaeology/SKILL.md`.
 
 ## Provenance and maintenance
+
+**Reescrito 2026-09-06 (WP D2, modelo de jubilación v2 — API y SPA ya en v2, decisiones M1–M13/
+C1–C8 del owner)**: §4b tenía DOS capas de deriva sobre el mismo texto. La tabla de estrategias
+seguía enumerando CINCO (con `pension_bridge`) y describiendo `crossing_is_reading_only` como
+condicional a la estrategia — corregido a las cuatro de C7 y al flag INCONDICIONAL (verificado:
+`grep -n "crossing_is_reading_only = true" apps/api/src/handlers/projection.rs` → 1 hit, sin
+guarda). La subsección de Monte Carlo describía la definición de éxito de D20 (que el propio E9
+sustituyó) y el veredicto con corte fijo de V7 (que C3 sustituyó) como si fueran el estado actual
+— las dos reescritas contra el código real (`crates/engine-stochastic/src/lib.rs`,
+`handlers/projection_bands.rs::success_verdict`). Se añadió la subsección de los cinco solves
+estocásticos, que no existía. Re-verificación: `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`
+(75 passed, 0 failed, 7 ignored) y `grep -c "pension_bridge" apps/api/src/handlers/retirement_profile.rs`
+(el literal sigue vivo, pero SOLO como alias — `grep -n "PENSION_BRIDGE_ALIAS"` lo confirma).
 
 Facts above verified 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`); **re-verificados y
 ampliados el 2026-09-03 contra `release/5.0.0`** (issue #207) — todos los comandos de abajo se

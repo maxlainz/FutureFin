@@ -246,7 +246,13 @@ realidad** o entre superficies, no error de aritmética.
   - **Es una ESTIMACIÓN muestral, y viaja rotulada** (D4 enmendado): el error que lleva es el del
     sorteo, no el del tipo numérico, y por eso viene con su medición al lado (`success_at_lambda`:
     `N`, fallos por motivo y cota de Wilson) y con `capital_is_approximate` cuando la confirmación
-    no cerró. La contabilidad del hogar sigue saliendo del camino `Decimal`.
+    no cerró. La contabilidad del hogar sigue saliendo del camino `Decimal`. **La condición nueva
+    de D4 (panel adversarial, 2026-09-06)**: cuando el sorteo fija el mes de un hito —una fecha
+    válida, un capital necesario, una aportación mínima—, la SEMILLA y el número de CAMINOS son
+    parte de la identidad del resultado, no un detalle interno: viajan en la respuesta (`seed`,
+    `paths_used`) y en la clave de cache del plan (`PlanKey`, `handlers/retirement_solver.rs`),
+    porque dos sorteos con distinta semilla o distintos caminos son, literalmente, dos mediciones
+    distintas del mismo plan.
   - **Nunca 0 €**: sin activos líquidos (o con `L_det(k−1) = 0`) se publica
     `absent_reason: no_liquid_assets`; si ni multiplicando la cartera por 4.096 se cumple el umbral,
     `threshold_unreachable`. Un 0 € se leería como «no necesitas nada», la respuesta contraria.
@@ -271,30 +277,43 @@ las fases y la regla de retirada. El motor las ejecuta como un `PhasePlan`
 **Fases**, latch **monótono** `Accumulating → (Partial) → Retired` (#141 generalizado): una vez
 avanzada no se vuelve atrás, ni porque el patrimonio caiga un mes por debajo del objetivo inflado.
 
-**Las cinco estrategias** (§C del plan de #207; quien las traduce a `PhasePlan` es
-`apps/api/src/handlers/projection.rs`, no el motor):
+**Las cuatro estrategias** (§3 del modelo v2, owner 2026-09-05/06; corrección C7 retiró la quinta;
+quien traduce el perfil a `PhasePlan` es `apps/api/src/handlers/projection.rs::resolve_forced_month`,
+no el motor):
 
 > **E4 (modelo v2) vació la columna «Objetivo».** El objetivo dejó de ser un eje de la estrategia:
 > hay UNA sola base —el número FIRE clásico de §2.4, una lectura informativa— y ningún trigger
 > cuelga de ella. Las lecturas tachadas abajo ya no existen en el motor; sus preguntas las responde
-> el solve estocástico (`crates/engine-stochastic`) contra el umbral de éxito. Las columnas
-> «Trigger» y «Aportación simulada» siguen vigentes.
+> el solve estocástico (`crates/engine-stochastic`) contra el umbral de éxito. La columna «Trigger»
+> ya no distingue cruce de edad: **las cuatro llegan al motor como `AtMonth`** (mes forzado), la
+> diferencia es SOLO quién decide ese mes.
 
-| Estrategia | Trigger | Aportación simulada | Lecturas propias |
+| Estrategia | Cómo se resuelve el mes forzado | Aportación simulada | Lecturas propias |
 |---|---|---|---|
-| `asap` | cruce del líquido | toda la cascada | `liquid_crossing_month_index`, series `withdrawal_*` |
-| `retire_at_age` | `AtMonth(R)` | toda la cascada (D16) | ~~`required_contribution_monthly`, `required_capital_path`, `underfunded`~~ (E4: al solve estocástico), `disposable_*` |
-| `coast` | `AtMonth(R)` | toda la cascada | ~~`coast_fire_month_index`, `coast_number`, `coast_path`~~ (E4: al solve estocástico) |
-| `partial` | parcial en `AtMonth(X)`; total por cruce o `AtMonth(R)` si hay `R` | toda la cascada | `partial_retirement_month_index`, `partial_phase_capital_growing`, ~~`partial_gap_target`~~ (E4) |
-| `pension_bridge` | cruce del líquido | toda la cascada | `pension_start_month_index`, ~~`bridge_effective_withdrawal_pct`, `pension_coverage_ratio`~~ (E4); el puente es hoy un `BridgeCap` de tasa inicial |
+| `asap` | `solve_mc::valid_retirement_month` — el umbral de éxito busca el mes (`ForcedMonth::NeedsSolve`) | toda la cascada | fecha válida, éxito, capital necesario hoy, fechas al 100/90 |
+| `retire_at_age` | la edad declarada, `ForcedMonth::Known(R)` — **sin sorteo**, el sorteo solo mide si `R` cumple | toda la cascada | veredicto (`SuccessAt` en `R`), aportación mínima (`minimum_extra_contribution`) |
+| `coast` | modo A: `Known(R)` (edad fija) + `coast_stop_month(R)` resuelve `C`; modo B: `NeedsSolve` con `contributions_stop_month = C` fijo | toda la cascada hasta `C`, cero después (S4: liberado = disponible, no se reinvierte) | mes coast (`C`, el PRIMER que cumple, C8), ahorro liberado |
+| `partial` | total: `Known(R)` si hay edad, si no `NeedsSolve`; la fase entra en `AtMonth(S)` (modo A: edad fija; modo B: `earliest_partial_start`) | toda la cascada | inicio de la fase (`S`), `partial_phase_capital_growing` |
 
-- **Un solo trigger por simulación (D17) — y lo impone la ESTRATEGIA, no el motor.** El bucle
-  conserva la UNIÓN de 4.15.0 (`cruce || k ≥ mes forzado`, o sea `min(cruce, R)`) porque es lo que el
-  pin dorado tiene fotografiado; el eje que apaga el cruce es
-  `PhasePlan::crossing_is_reading_only`: con `true` el cruce **no jubila**, solo se anota como
-  `liquid_crossing_month_index`. Existe porque las estrategias por edad **siguen necesitando el
-  objetivo** —el chart lo pinta y el infra-financiado se mide contra él—, así que pasarle
-  `fire_target: None` al motor lo habría desactivado tirando también la lectura.
+**`pension_bridge` se retiró como estrategia (C7)**: no tiene fila propia — es el interruptor
+`pension.bridge_enabled` de la tarjeta Pensión, disponible en las cuatro de arriba y apagado por
+defecto. Un perfil guardado con la estrategia `pension_bridge` se acepta como ALIAS de
+deserialización y migra a `asap` + `bridge_enabled: true` (5 %/7 años si faltan), con el aviso
+`strategy_pension_bridge_migrated`.
+
+- **Un solo trigger por simulación (D17) — y desde el modelo v2 es SIEMPRE el mes forzado, en las
+  CUATRO estrategias.** El bucle conserva la UNIÓN de 4.15.0 (`cruce || k ≥ mes forzado`) porque es
+  lo que el pin dorado tiene fotografiado, pero el ensamblado pone
+  `phase_plan.crossing_is_reading_only = true` **incondicionalmente**
+  (`handlers/projection.rs:2531` — ya no depende de si la estrategia es por edad): el cruce
+  **nunca** jubila a nadie, solo se anota como `liquid_crossing_month_index`. Lo que antes leía
+  esta fila («las estrategias por edad siguen necesitando el objetivo») describía el ensamblado
+  ANTES de E4/A4: hoy el objetivo entra siempre como lectura informativa (el número FIRE clásico,
+  §2.4), pero de eso no depende ninguna estrategia — `retire_at_age`/`coast` fijan su mes por la
+  edad (`ForcedMonth::Known`), no por comparar con un objetivo. El wire ya no publica
+  `retirement_trigger: liquid_crossing|target_age`: publica
+  `retirement_date_basis: success_threshold|target_age|not_reachable|pending`
+  (`retirement_solver.rs::DATE_BASIS_*`).
 - `retirement_month_index` es el mes **EFECTIVO** (1-based) y es lo que la API publica como
   `jubilacion_month_index` (R8); `liquid_crossing_month_index` es el cruce puro, evaluado TODOS los
   meses —también después de que el latch cierre— y **no gobierna nada**.
@@ -705,13 +724,21 @@ sobre un eje distinto del `PhasePlan`:
 - `runway`: retirada-antes-de-crecimiento, multiplicador ponderado por valor (aprox. conservadora
   del drenaje real), «indefinido» ⟺ umbral SWR sobre el saldo líquido; 1200 meses es SUELO.
   Incoherencias con la simulación en §4 (D29).
-- **`success_verdict`: el corte es FIJO al 100 %** (5.0.0, decisión V7 del owner). Verde ⟺
-  `success_probability == 1`, o sea **ni un camino agota la cartera**; ámbar en `[0,90, 1)`; rojo
-  por debajo de 0,90. El borde es EXACTO y no necesita épsilon: la probabilidad es `n/n` con `n`
-  caminos enteros y en IEEE 754 esa división da `1.0` para cualquier `n`. El
-  `success_threshold_pct` configurable del perfil se retiró de la entrada útil (se acepta y se
-  ignora) y de **toda** la salida: un umbral por persona hacía incomparables dos veredictos del
-  mismo número. Consecuencia asumida: con 500 caminos, **un solo fallo ya es ámbar**.
+- **`success_verdict`: contra el umbral del PERFIL, con Wilson (V7 sustituida por §2.5/C3, modelo
+  v2, WP A6)** — `crates/engine-stochastic::SuccessAt::meets`, espejado bit a bit en
+  `handlers/projection_bands.rs::success_verdict`. Verde ⟺ `meets(threshold_pct)`: con
+  `threshold < 100` es `wilson_low ≥ threshold/100` (la cota INFERIOR de Wilson, no el estimador
+  puntual); con `threshold == 100` es `success == 1.0` exacto (`n/n` en IEEE 754, sin épsilon).
+  Ámbar ⟺ el estimador puntual llega pero el intervalo no (`success ≥ threshold/100` sin cumplir
+  `meets`); con `threshold = 100` **no hay ámbar** — o ningún camino falla, o es rojo
+  (`the_hundred_percent_threshold_has_no_amber_band`). Rojo en el resto. La V7 vieja («corte fijo
+  al 100 %, `success_threshold_pct` se acepta y se ignora») describía el modelo ANTES del panel
+  adversarial de 2026-09-06 (C3): hoy el umbral SÍ gobierna el veredicto y viaja en la respuesta
+  (`success_threshold_pct`, 80–100, default 95) junto con `success_wilson_low` y
+  `success_sampling_error_pp`. **Qué NO decide esta función**: si el plan TIENE fecha —con
+  `retirement_date_basis: not_reachable` el escenario sorteado es «no jubilarse dentro del
+  horizonte», que casi nunca falla, así que un verde ahí dice «este plan sin jubilación aguanta»,
+  no «llegas»; quien pinte el semáforo mira antes `retirement_date_basis` en la serie.
 - El contrato en prosa de cada métrica vive en `apps/web/src/lib/helpTexts.ts`
   (skill `futurefin-metric-definitions`).
 
@@ -920,11 +947,32 @@ drenaje post-cruce ya solo tributa la ganancia real de la base que la cascada co
 |---|---|---|
 | **El recorte de una regla de retirada NO es fracaso ni descubierto** (D22/D24): `withdrawal_shortfall` puede crecer todo un horizonte sin que el patrimonio lo note | 0 € de patrimonio; sí cambia la lectura de «¿me va bien?» | Un hogar que gasta menos porque su regla se lo dice **está siguiendo su plan**, no arruinándose. Meterlo en `uncovered_deficit_total` mezclaría una decisión con una imposibilidad — hallazgo B2 de la revisión adversarial |
 | ~~**Éxito de Monte Carlo = el plan OCURRE y AGUANTA** (D22 corregida por la revisión D20): jubilarse dentro del horizonte —o tener un trigger por edad— **y** no agotar la cartera~~ — **decisión SUSTITUIDA en 5.0.0 v2 (E9, 2026-09-06)**, ver abajo | La definición D20 bajaba la probabilidad publicada donde el cruce era tardío: medido 0,960 → 0,629 en un hogar que cruza en el mes 655 de 840, porque D22 premiaba al hogar que **no se jubila jamás** (33,1 % de los caminos no llegaba a jubilarse y los 1.000 contaban como éxito; sesgo hasta **+6,8 pp** con SWR 6 %) | Paso intermedio, no el final: D20 separaba «¿ocurre?» de «¿aguanta?» mientras el disparador seguía siendo binario (cruce o edad). **E9 la sustituye** porque en v2 el disparador YA NO ES la pregunta —todo plan trae un mes FORZADO que el solver externo resuelve—, así que la única pregunta es si ALGÚN motivo (F1/F2/F3) falla en el camino: `success_probability` = caminos con `failure_month_index.is_none()` / N. `never_retired_probability` y `success_given_retired` **se retiraron de `McOutcome`** — esa pregunta murió con el disparador variable, no con una corrección de sesgo |
-| **Guyton-Klinger sin la *portfolio management rule* (ventana de 15 años) ni la *inflation rule*** (saltarse la subida por IPC del año siguiente a un recorte) | Modelo **más reactivo**: recorta antes y más veces que el artículo de 2006 | Las dos omitidas SUAVIZAN la regla; omitirlas va en la dirección prudente. Declarado en `withdrawal.rs::review_guardrails` y en el `helpTexts` de la regla, para que nadie lo descubra comparando con el artículo |
+| **Guyton-Klinger sin la *portfolio management rule* (ventana de 15 años) ni la *inflation rule*** (saltarse la subida por IPC del año siguiente a un recorte) | Modelo **más reactivo**: recorta antes y más veces que el artículo de 2006 | ~~Las dos omitidas SUAVIZAN la regla; omitirlas va en la dirección prudente.~~ **Esa lectura es el signo FALSO que el modelo v2 dejó escrito y aún no se ha corregido** (declarado en `docs/jubilacion.md` §Lo que el modelo NO hace): la *inflation rule* de la literatura sirve para no acumular DOS recortes reales el mismo tramo malo (el recorte de capital preservation Y la subida de IPC completa encima); omitirla no es «más prudente», es una regla MÁS agresiva de lo publicado en 2006, sin que el modelo lo declare como tal. Deuda con dueño: issue [#220](https://github.com/maxlainz/FutureFin/issues/220) |
 | **Un solo shock de mercado común por mes, escalado por la sd de cada activo** (D11), en vez de una matriz de correlaciones | Subestima la diversificación entre clases: las bandas salen **más anchas** de lo que daría una correlación < 1 | Una matriz de correlación exige datos que la instalación no tiene (el usuario declara μ y σ por activo, no covarianzas); inventarlas sería falsa precisión, y el sesgo es conservador. **Simulado desde WP6a** (commit `ba6bdfe`, 2026-09-03): `engine_stochastic::project_percentile_bands` inyecta por mes `f_ik = d_i·exp(σ_i·z_k − σ_i²/2)` con `d_i = m_i·exp(σ_i²/2)` (un solo `z_k` por mes para toda la cartera; **`mediana(f) = m_i` exacta** y `E[f] = d_i`, porque la declarada es la CAGR — M8, 2026-09-06; `σ = 0` ⇒ `d_i = m_i` y `f = m_i`, las dos por rama explícita) sobre el MISMO bucle genérico. **La sd NO viaja en `SimAsset`**: se pasa como slice alineado a `assets[]`, así que el camino `Decimal` la ignora por construcción y su bit-identidad no depende de nadie. (La suite del crate está en VERDE desde el pase de correcciones de la revisión D20.) |
 | **`partial_phase_capital_growing`: `bool` en el motor, `Option<bool>` en la API** | 0 € | El motor es una función pura y debe definir el estado (sin fase parcial ⇒ `false`); el wire no puede darle el mismo valor a «no hubo media jornada» y a «hubo y menguó», así que la capa que serializa lo convierte en `null` mirando `partial_retirement_month_index`. Verificado en `apps/api/src/handlers/projection.rs` |
 | **Cola de redondeo negativa de `uncovered_deficit_total` clampada al PUBLICAR, no en el motor** | medido hasta ≈ −1,7·10⁻²⁴ € (y hasta +5,6·10⁻²³ en el corpus diferencial) | El descubierto se acumula como residuo de ventas brutas y puede salir con una cola negativa que no es «−0,0000000000000000000000005 € descubiertos», es cero. El motor debe seguir publicando su aritmética tal cual —el golden la hashea—; quien redondea para un humano es la capa que serializa (`money_out(… .max(ZERO))`) |
 | **La sd del activo no llega al motor determinista** | 0 € en el camino `Decimal` | Por diseño: la volatilidad **no es un campo de `SimAsset`** — viaja como argumento del evaluador estocástico, así que el camino exacto no puede verla y su bit-identidad con 4.15.0 no depende de una rama que alguien pueda tocar. De ese camino no sale un euro (§1) |
+
+### Aceptadas por el owner (2026-09-05/06, modelo de jubilación v2) — decisiones M1–M13 + C1–C8
+
+El rediseño completo del modelo de jubilación (entrevista 2026-09-05/06 + panel adversarial de la
+mañana del 06): «el éxito define la fecha», no un objetivo estático que el patrimonio cruza. Las
+decisiones M1–M13 son la entrevista; C1–C8 son las correcciones que el panel adversarial (5 lentes,
+39 objeciones, 17 refutadas con evidencia) forzó sobre esas mismas M al reimplementar el modelo en
+un Monte Carlo independiente con los datos de la demo. Documento fuente: «Modelo de jubilación v2»
+(memoria de sesión); implementación: WPs E1–E9 (motor/estocástico), A1–A12 (API), W1–W9 (SPA),
+D1–D3 (docs) de la rama `release/5.0.0`.
+
+| Divergencia / decisión aceptada | Coste o consecuencia (sintético) | Razón de aceptación |
+|---|---|---|
+| **El número FIRE clásico (25× el gasto) sobrevive solo como lectura informativa** (M9, S7): no dispara nada y no resta la pensión con fecha | Casi nunca coincide con la fecha ni el capital que el plan publica — es una cifra de cultura FIRE, no del modelo | Es el número que la literatura y la comunidad FIRE conocen; retirarlo del todo habría sido más disruptivo que rotularlo bien. Vive en «Detalle del cálculo» y como pin de `fire-parity.json` |
+| **Guardrails (Guyton-Klinger) sin ventana de 15 años ni *inflation rule*** (M3/C1 heredan la limitación ya aceptada arriba) | Regla más reactiva que el artículo de 2006 | Ver la fila de arriba — **el signo se corrigió de «prudente» a issue declarado (#220)** en esta misma pasada |
+| **El hogar (`view=household`) no resuelve fecha ni éxito propios** (§5 del modelo v2, `plan_state: household_not_solved`) | Sin fecha válida agregada del hogar; cada persona resuelve la suya en `view=mine` | Un sorteo por miembro más una agregación por hogar es un tercer modelo (correlación entre planes) que nadie pidió resolver en esta fase; issue #219 |
+| **`fire_number_mode` / ingresos actuales gobiernan el GASTO que el bucle drena, no solo un objetivo** (S8) | La tarjeta «Gasto en jubilación» decide una magnitud que antes solo alimentaba el objetivo perpetuo | Mantiene un solo lugar de verdad para «cuánto gasta el plan jubilado»: el bucle y el número clásico leen la MISMA cifra en vez de dos derivaciones que podían divergir |
+| **La aportación mínima y el ahorro liberado de coast son NOMINALES PLANOS** (S2/S9, #139) | Con inflación alta, el poder adquisitivo de una aportación fija cae con los años | Coherente con que el motor NUNCA indexa ingresos (#139, decisión de 4.9.0): indexar solo esta aportación habría sido una excepción sin justificar |
+| **`MAX_SWR_PCT` sube de 4 a 6** (S9) | Perfiles con tasas de retirada agresivas (5–6 %) dejan de ser rechazados por el servidor | Los guardarraíles de la literatura (Guyton-Klinger, variable %) arrancan en 5–5,6 %; un tope en 4 los habría hecho irrepresentables |
+| **Parámetros MCP retirados se DEPRECAN, nunca se borran** (schemas `deny_unknown_fields`) | Un cliente MCP viejo que siga mandando `target_basis`/`cash_buffer_months`/etc. no rompe, pero tampoco hace nada | Rotura silenciosa de un agente en producción es peor que un campo fantasma documentado como «ignorado desde 5.0.0» |
+| **El excedente en jubilación sigue las reglas de ahorro sin publicar su coste fiscal** | Reinvertir el sobrante tiene un coste en impuestos que el plan no enseña; los tres modos de gasto (`ceiling`/`rule_is_spend`) acaban pareciendo el mismo «gasto de hoy» por dentro | Calcular y publicar ese coste es una campaña de proyección-realismo aparte, no una corrección de esta; issue [#227](https://github.com/maxlainz/FutureFin/issues/227) |
 
 ## 5. Convenciones españolas de referencia (fuentes)
 
@@ -951,6 +999,27 @@ drenaje post-cruce ya solo tributa la ganancia real de la base que la cascada co
 - Cuenta corriente hogares: ~0,15 % TEDR (BdE tabla 19.7, 2024-26).
 
 ## 6. Provenance and maintenance
+
+**Ampliado el 2026-09-06 (WP D2, cierre documental del modelo v2 — API y SPA ya en v2, WPs A1–A12 y
+W1–W9 mergeados en `release/5.0.0`)**: tres correcciones de deriva doc↔código que las entradas de
+abajo (escritas por E7/E5/E3, ANTES de que A4/A6 tocaran el ensamblado) habían dejado desactualizadas:
+§2.5 tenía la tabla de estrategias vieja (cinco filas, `pension_bridge` con fila propia,
+`crossing_is_reading_only` descrito como «solo para estrategias por edad») — sustituida por la de
+cuatro estrategias con el mes forzado uniforme (`ForcedMonth::Known`/`NeedsSolve`,
+`handlers/projection.rs:2531` pone `crossing_is_reading_only = true` INCONDICIONAL, verificado
+`grep -n "crossing_is_reading_only = true" apps/api/src/handlers/projection.rs` → 1 hit sin guardas).
+§2.7 tenía `success_verdict` descrito con el corte fijo al 100 % de V7 — sustituido por el contrato
+real de `handlers/projection_bands.rs::success_verdict` (Wilson contra el umbral del perfil),
+verificable con `grep -n "fn success_verdict" -A 15 apps/api/src/handlers/projection_bands.rs`. La
+fila de Guyton-Klinger en §4 tenía el signo «prudente» que el propio `docs/jubilacion.md` (WP D1,
+mismo día) ya había marcado como falso — corregida para apuntar al issue
+[#220](https://github.com/maxlainz/FutureFin/issues/220) en vez de repetir la promesa rota. D4 gana
+la condición de las decisiones M1–M13/C1–C8 (semilla y caminos como identidad del resultado cuando
+fijan un hito) y se añade el bloque «Aceptadas por el owner (2026-09-05/06)» con `#227` como deuda
+declarada. Re-verificación: `grep -n "DATE_BASIS_SUCCESS_THRESHOLD\|DATE_BASIS_TARGET_AGE" apps/api/src/handlers/retirement_solver.rs`
+(el wire real, no `retirement_trigger`) y `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`
+(75 passed, 0 failed, 7 ignored — 6 binarios de test: `degeneration` 3, `monte_carlo` 13,
+`needed_capital` 9, `solve_mc` 11, `strategy_solves` 13, más 26 unitarios de `src/`).
 
 **Ampliado el 2026-09-06 (WP E7 del plan «Modelo de jubilación v2», decisión M9 del propietario y
 corrección C4 del panel adversarial)**: §2.4 gana el **capital necesario**, que sustituye al

@@ -64,12 +64,17 @@ Radii: `--ff-radius-{frame=12, panel=14, kpi=12, pill=999, input=10}px`.
 
 Áreas de activos: `--proj-area-1` a `--proj-area-10` (paleta polícroma — azul/teal/violeta/... en claro, pasteles más claros en oscuro). Consumidos por [`ASSET_LINE_COLORS`](../apps/web/src/lib/projection-chart.ts).
 
-Series auxiliares del plan (5.0.0, D29, issue #207): **`--proj-required`** («Capital necesario») y
-**`--proj-coast`** («Si dejas de aportar en el mes coast»), las dos discontinuas y consumidas solo
-desde [`lib/plan-series.ts`](../apps/web/src/lib/plan-series.ts). Son **familia del acento** —lo
-que el plan exige, igual que el objetivo FIRE— y se separan entre sí por **luminancia y patrón de
-guion**, no por un hue nuevo: `color-mix(in oklch, var(--ff-accent) 80%|45%, var(--proj-nw))`, con
-dash `6 4` y `2 5`. Al derivarse de dos tokens que ya tienen rama clara y oscura, el mismo texto
+Serie auxiliar del plan: **`--proj-required`** («Capital necesario»), discontinua, hoy alimenta
+`needed_capital_curve` (`lib/projection-chart.ts::neededCurveForChart`/`NEEDED_CAPITAL_SERIES`), no
+`lib/plan-series.ts` — **ese fichero se borró con el modelo de jubilación v2** (2026-09-06): la
+segunda serie auxiliar (`coast_path`) se retiró con el objetivo determinista que dimensionaba.
+**`--proj-coast` sigue DEFINIDO en `theme.css` (claro y oscuro) pero es HUÉRFANO** —cero
+consumidores en `*.tsx`/`*.ts`, verificado `git grep -c "proj-coast" -- '*.tsx' '*.ts'` → vacío—:
+candidato a limpieza junto con `.retirement-buffer-line`/`.retirement-basis-reset` (ver la nota del
+freezer de `App.css` más abajo), no lo uses como precedente de un patrón vivo. `--proj-required` es
+**familia del acento** —lo que el plan exige, igual que el número FIRE clásico informativo— y se
+distingue por **luminancia**, no por un hue nuevo: `color-mix(in oklch, var(--ff-accent) 80%,
+var(--proj-nw))` con dash `6 4`. Al derivarse de un token que ya tiene rama clara y oscura, el mismo texto
 resuelve distinto en cada tema (mismo patrón que `--cf-savings-cash`); aun así se **repiten** en
 los dos bloques de `theme.css`, como sus vecinos. La paleta polícroma de `--proj-area-*` estaba
 descartada a propósito: esas diez son ÁREAS de activo y una línea fina del mismo hue se leería como
@@ -220,7 +225,11 @@ Props clave:
 - `clampToMonth?` — última posición (mes) visible; tiene prioridad sobre `months`. Usado en Jubilación para mostrar `jub + 12`.
 - `zoomY?` — eje Y entre min/max de los valores visibles. Combinable con áreas (el stack se ancla al suelo del rango).
 - `showAreas?` — apila los `asset_series`.
-- `showFire?`, `showJub?` — overlays del target FIRE y marcador del primer cruce.
+- `showJub?` (default `true`) — marcador circular en `jubilacion_series_position` (el mes efectivo
+  de la serie determinista). **`showFire` ya NO existe** (retirado con `fire_target_series`, modelo
+  v2) — ver §Props `neededCurve`/`validDateMark` más abajo, que lo sustituyen con otra semántica.
+- `showPhases?` (default `false`) — la tira de fases bajo el eje (8 px), independiente de la tira
+  de éxito por año (ver `successStrip` más abajo): los dos carriles conviven, no comparten alto.
 - `xAxis?: { ageUiMode, birthDateIso, anchorDateYmd, calendarTz }` — cuando se pasa, dibuja ~5 ticks de edad/fecha en la base.
 
 **Invariante crítica**: las áreas se escalan proporcionalmente a NW(t), idéntico a [`ProjectionNetWorthChart`](../apps/web/src/views/ProjectionNetWorthChart.tsx#L213-L223): `area_i(t) = NW(t) × (asset_i(t) / Σ asset_j(t))`. Por construcción la suma de áreas == NW, así que **las áreas nunca pueden exceder la línea NW** geométricamente.
@@ -266,22 +275,43 @@ claro qué representa cada cosa» (F6), «los tiles no muestran nada que la grá
   (`niceYTicks` filtrado a `[vmin, vmax]`, `--proj-grid`) rotuladas con `formatAxisMoney`, que es
   una de las **dos excepciones sancionadas** a los helpers canónicos (ver §Formateo de importes en
   charts). Los valores ya vienen deflactados, así que «En dinero de hoy» mueve el eje entero.
-- **`bandGradient?: RiskGradientStop[]`** — el relleno de la banda por probabilidad de agotar el
-  capital ([`lib/risk-gradient.ts`](../apps/web/src/lib/risk-gradient.ts)). `<linearGradient>` con
-  **`gradientUnits="userSpaceOnUse"` obligatorio**: con el default (`objectBoundingBox`) el
-  degradado se estiraría a la caja del `path` —que no empieza en `monthStart` ni acaba en
-  `monthEnd`— y el mapeo mes→color se desplazaría sin que nada fallara. Los `<stop>` llevan
-  `style={{ stopColor }}` porque el valor es un `color-mix()` y el atributo de presentación de
-  SVG 1.1 no lo acepta: **es la única excepción sancionada a «cero estilos inline»**, y el `id`
-  va prefijado `ff-risk-` para que un `#` en `url(#…)` nunca se confunda con un hex. Opacidades
-  0,28 / 0,55 con degradado; 0,16 / 0,30 sin él (el acento plano de siempre).
+- **`bandGradient?: RiskGradientStop[]`** — el relleno de la banda por probabilidad de FALLO
+  acumulada ([`lib/risk-gradient.ts`](../apps/web/src/lib/risk-gradient.ts), F1+F2+F3 desde el
+  modelo v2 — antes solo agotamiento). `<linearGradient>` con **`gradientUnits="userSpaceOnUse"`
+  obligatorio**: con el default (`objectBoundingBox`) el degradado se estiraría a la caja del
+  `path` —que no empieza en `monthStart` ni acaba en `monthEnd`— y el mapeo mes→color se
+  desplazaría sin que nada fallara. Los `<stop>` llevan `style={{ stopColor }}` porque el valor es
+  un `color-mix()` y el atributo de presentación de SVG 1.1 no lo acepta: **es la única excepción
+  sancionada a «cero estilos inline»**, y el `id` va prefijado `ff-risk-` para que un `#` en
+  `url(#…)` nunca se confunda con un hex. Opacidades 0,28 / 0,55 con degradado; 0,16 / 0,30 sin él
+  (el acento plano de siempre).
 - **`bandEdgeLabels?: { p10, p90 }`** — qué es cada borde, en el extremo derecho y dentro del
   plot, con halo (`.proj-mini-band-label`, `paint-order: stroke`). Se omiten **los dos** si los
   bordes distan < 14 px: media etiqueta rotularía el borde equivocado.
-- **`hoverLabel?: (month) => string | null`** — el porcentaje exacto por edad. Rect captor
-  `fill="none" pointerEvents="all"` el ÚLTIMO del SVG, crosshair `--proj-crosshair` y texto con
-  halo. Lo construye el llamante desde `depletionProbabilityAtMonth`, **la misma función que
-  colorea**: un tooltip alimentado por otro cálculo podría contradecir al tinte y nadie lo notaría.
+- **`hoverLabel?: (month) => string | null`** — el porcentaje exacto por edad, con el reparto por
+  motivo (F1/F2/F3) entre paréntesis. Rect captor `fill="none" pointerEvents="all"` el ÚLTIMO del
+  SVG, crosshair `--proj-crosshair` y texto con halo. Lo construye el llamante desde
+  `failureProbabilityAtMonth`/`failureKindsAtMonth` (`lib/risk-gradient.ts`, renombradas de
+  `depletionProbabilityAtMonth` con el modelo v2), **la misma función que colorea**: un tooltip
+  alimentado por otro cálculo podría contradecir al tinte y nadie lo notaría.
+
+**Cuatro props más, del modelo de jubilación v2 (2026-09-06, WP W7) — todas opt-in y sin efecto en
+el Resumen**, que no dibuja ninguna:
+
+- **`neededCurve?: MiniProjectionPoint[]`** — la curva de «Capital necesario» (`{month, value}`,
+  discontinua, token `--proj-required`). Es la respuesta simétrica a la fecha: para cada edad,
+  cuánto líquido haría falta para llegar con tu umbral de éxito. **No tiene por qué cruzar la línea
+  de patrimonio** — la fecha la deciden los escenarios que aguantan, no un cruce de curvas — así que
+  su ausencia de cruce no es un bug del dibujo.
+- **`validDateMark?: { monthIndex, label }`** — la marca vertical en la fecha válida, con el éxito
+  con el que llega escrito en el rótulo. Sustituye al antiguo marcador del cruce del objetivo:
+  con el modelo v2 no hay objetivo que cruzar, solo un mes que el umbral certificó.
+- **`successStrip?: MiniProjectionSuccessCell[]`** — la tira de éxito por año de jubilación bajo el
+  eje X (`{monthIndex, success, label?}`), coloreada con los mismos cortes que la banda.
+- **`successStripCutoffs?: RiskCutoffs`** — los cortes (`{amber, red}`) que colorean la tira, los
+  MISMOS que `bandGradient` calcula con `riskCutoffsForThreshold(success_threshold_pct)`: pasarlos
+  por separado sería una segunda oportunidad de que la tira y la banda discreparan sobre qué cuenta
+  como rojo.
 
 > **Invariante: sin estas props, la geometría es BYTE A BYTE la de antes.** El Resumen usa este
 > mismo componente y su chart no puede moverse un píxel por un cambio que solo pedía Jubilación.
@@ -295,6 +325,13 @@ fuentes distintas, pero ya no exigen un componente propio: `band` entra ya empar
 propio `MiniProjection` hace la intersección de ventana. La aritmética de alineación/deflactación
 que SÍ sigue viva por si hiciera falta un abanico con mediana en otro contexto vive en
 `buildRiskFan` (`lib/risk-bands.ts`), marcada `@deprecated` y sin consumidor de UI.
+
+**`showFire` ya NO existe** (el overlay del objetivo FIRE, retirado junto con `fire_target_series`
+del wire): `neededCurve` lo sustituye con una semántica distinta (una curva estocástica por edad,
+no un objetivo descontado que cruzar). **`showJub` SÍ sigue existiendo** (default `true`) — sigue
+gateando el marcador circular en `jubilacion_series_position` (el mes EFECTIVO de jubilación de la
+serie determinista), que es un dato DISTINTO de `validDateMark` (la fecha que el umbral de éxito
+verificó): un llamante puede querer el uno, el otro, o los dos a la vez.
 
 ### `ChartLegend` — [`components/charts/ChartLegend.tsx`](../apps/web/src/components/charts/ChartLegend.tsx)
 
@@ -319,43 +356,51 @@ HTML normal —nunca dentro de un `<svg>`— con `flex-wrap` real.
   owner en duplicados, colapso, top-N del tooltip) vive PURA en
   [`lib/chart-legend.ts`](../apps/web/src/lib/chart-legend.ts) y está testeada en Vitest.
 
-### Riesgo compacto y «Detalle del cálculo» (Jubilación) — sin chart propio (5.0.0, D28; reescrito por V1/V5/V6/V7)
+### Riesgo compacto y «Detalle del cálculo» (Jubilación) — sin chart propio (5.0.0, D28; reescrito por el modelo de jubilación v2, 2026-09-06)
 
 Desde U1b la sección «Riesgo» de Jubilación ya no es un panel con su propio chart: es un bloque
 **compacto** dentro del panel «Resultado», con todo lo de segundo orden plegado en «Detalle del
-cálculo» (el abanico vive en el chart único, ver §`MiniProjection` arriba). La tercera vuelta de UX
-lo dejó en TRES cosas y ni una más:
+cálculo» (el abanico vive en el chart único, ver §`MiniProjection` arriba). El modelo v2 le devolvió
+el umbral de éxito y le quitó el colchón — hoy son estas piezas, y ni una más:
 
 1. **El KPI «Éxito del plan»**, cuyo valor es «87,0 %» —un porcentaje con un decimal, como todo
-   porcentaje de la casa— y cuyo subtítulo dice el SUJETO de la cifra, no un umbral: «de los
-   escenarios no agotan el capital», o «0 de 500 escenarios agotan el capital» cuando es verde.
-2. **La línea informativa del colchón de caja** (`.retirement-buffer-line`, V6): de dónde sale, su
-   equivalente en meses y su coste en puntos de éxito, con el enlace a Reglas de ahorro o —si
-   alguien lo fijó por API— la salida «Volver al tope de tu regla» (`PATCH null`, tri-estado).
-3. **El aviso «sin volatilidad declarada»**, intacto.
+   porcentaje de la casa— y cuyo subtítulo lleva el umbral del perfil, no un sujeto genérico: «de
+   los 95 exigidos» o el mismo umbral con la precisión de Wilson al lado.
+2. **La precisión del sorteo** (`formatSamplingErrorPp`): el semiancho de Wilson en PUNTOS
+   PORCENTUALES («±1,2 pp»), o la cota de la regla de tres con cero fallos — **nunca confundida con
+   un `%`**: una barra de error en pp es una magnitud distinta de un porcentaje, y formatearla con
+   el símbolo `%` multiplicaría la confusión por su propia escala.
+3. **Los fallos por tipo** (F1/F2/F3), solo cuando ha fallado alguien — si nadie falla, las tres
+   filas no se pintan (un `0 de 0` no informa).
+4. **La cobertura de tu gasto, corregida** (`months_below_need_p50`/`withdrawal_to_need_ratio_p50`):
+   se pintan con **todas** las reglas, `fixed_real` incluida.
+5. **El aviso «sin volatilidad declarada»**, intacto.
 
-**Lo que se fue, y por qué no vuelve:**
+**No hay línea de colchón**: el mecanismo se retiró ENTERO del motor y del crate estocástico (M6),
+no solo de este bloque — no hay nada que derivar ni que soltar con un PATCH. **No hay tarjeta
+«Riesgo»** en `PLAN_CARD_ORDER`: el umbral volvió al perfil (C3), pero a la tarjeta «Retirada»
+—`success_threshold_pct` es su primer campo—, no a una tarjeta `risk` resucitada.
+
+**Lo que se fue con la tercera vuelta de UX, y sigue sin volver:**
 
 - **La tabla «Probabilidad de agotar el capital»** (`.risk-depletion-grid` y familia, retiradas de
   `App.css`). El owner: «los tiles de riesgo son inútiles: no muestran nada que la gráfica no
   muestre. Si la gráfica estuviera bien hecha no harían falta» (F7). Se cumplió la condición: el
   degradado de la banda dice lo mismo edad a edad y con más resolución, y el hover da el número
-  exacto. Lo único que el color NO puede rotular —el total acumulado al final del horizonte, porque
-  su última parada cae en el borde del plot— bajó a «Detalle del cálculo» como la fila
-  `depletion_total`. **Si alguien propone volver a tabular el agotamiento, la pregunta es qué dice
-  esa tabla que el color y el hover no digan ya.**
-- **Los dos campos de la tarjeta «Riesgo»** del formulario: el colchón se DERIVA (V6) y el umbral
-  de éxito dejó de existir (V7). Por eso no hay tarjeta «Riesgo» en `PLAN_CARD_ORDER`.
+  exacto (con el modelo v2, además por MOTIVO: F1/F2/F3). Lo único que el color NO puede rotular
+  —el total acumulado al final del horizonte, porque su última parada cae en el borde del plot—
+  vive en «Detalle del cálculo». **Si alguien propone volver a tabular el fallo, la pregunta es qué
+  dice esa tabla que el color y el hover no digan ya.**
 
-**El valor del KPI ya NO es una oración.** Entre U1b y esta vuelta, «Éxito del plan» fue el único
-KPI de la app cuyo valor era una frase entera («87 de cada 100 escenarios se jubilan y no agotan el
-capital»), envolviendo a dos o tres renglones dentro de `.metric-value-row`. El owner lo leyó como
-«demasiado texto para caber en una caja» (F2) y tenía razón: `.metric-value` es mono, 1,25 rem y
-`tabular-nums` — tipografía para «87,0 %», no para once palabras. La condición **no se perdió**:
-bajó al subtítulo, que es el slot que sí envuelve (`.summary-success-grid
-.metric-value-parenthetical` y `.plan-card-wide-kpi .metric-value-parenthetical`, `white-space:
-normal`, mismo precedente que `.retirement-tiles-grid`). La lección general: **si una cifra necesita
-once palabras para no mentir, las palabras van en el subtítulo; el valor sigue siendo un valor.**
+**El valor del KPI ya NO es una oración.** «Éxito del plan» fue el único KPI de la app cuyo valor
+era una frase entera («87 de cada 100 escenarios se jubilan y no agotan el capital»), envolviendo a
+dos o tres renglones dentro de `.metric-value-row`. El owner lo leyó como «demasiado texto para
+caber en una caja» (F2) y tenía razón: `.metric-value` es mono, 1,25 rem y `tabular-nums` —
+tipografía para «87,0 %», no para once palabras. La condición **no se perdió**: bajó al subtítulo,
+que es el slot que sí envuelve (`.summary-success-grid .metric-value-parenthetical` y
+`.plan-card-wide-kpi .metric-value-parenthetical`, `white-space: normal`, mismo precedente que
+`.retirement-tiles-grid`). La lección general: **si una cifra necesita once palabras para no
+mentir, las palabras van en el subtítulo; el valor sigue siendo un valor.**
 
 Otras reglas del bloque que siguen vigentes:
 
@@ -368,7 +413,8 @@ Otras reglas del bloque que siguen vigentes:
   parecer una cuarta línea del gráfico. El color de cada muestra entra por la custom property
   `--ff-risk-swatch`, el mismo patrón que `--ff-legend-color`. Cuando hay degradado, la entrada
   «Banda 10–90 %» **sale** de `ChartLegend`: su swatch tendría que enseñar UN color y la banda ya
-  no tiene uno.
+  no tiene uno. Los cortes de la escala son los de `riskCutoffsForThreshold(success_threshold_pct)`
+  —umbral-dependientes desde el modelo v2—, no unos fijos al 5 %/10 %.
 
 Clases que sobreviven (todas en `App.css`, cero color propio salvo `--ff-warn`):
 `.metric-card--warn` (tono ámbar del KPI, misma construcción que `--danger`; consumidor dinámico vía
@@ -377,14 +423,19 @@ Clases que sobreviven (todas en `App.css`, cero color propio salvo `--ff-warn`):
 (procedencia: ms, caminos y semilla; `overflow-wrap: anywhere` porque la semilla es un entero de 20
 dígitos que no cabe a 360px). **`.risk-fan-note` se retiró** con `RiskFanChart.tsx` — la nota
 «Bandas puntuales» vive ahora como fila de `retirementDetailRows`, con el `HelpPopover` de
-`retirement.bands`.
+`retirement.bands`. `.retirement-buffer-line`/`.retirement-basis-reset` quedaron HUÉRFANAS con el
+modelo v2 (ver §Reglas para añadir UI nueva, la nota del freezer de `App.css`) — no se citen como
+vivas.
 
-> **Variante DESCARTADA del color de riesgo (V5, documentada para no volver a proponerla)**: una
-> tira de 6 px bajo el eje X, coloreada por probabilidad de agotar el capital, en vez de teñir la
-> banda. Se descartó por dos razones: competiría con la tira de fases (D29), que ya vive exactamente
-> ahí y usa el tinte progresivo del acento, y dejaría la banda azul **sin significado** — el
-> problema que F6 denunciaba. Es el plan B si el contraste del degradado al 28 % no aguantara en
-> oscuro; en ese caso, la tira de fases tendría que moverse o desaparecer, no compartir carril.
+> **Variante propuesta y descartada en V5, IMPLEMENTADA después por el modelo v2 — con una
+> corrección geométrica que la hizo viable.** V5 propuso una tira bajo el eje X coloreada por
+> riesgo y la descartó porque «competiría con la tira de fases (D29), que ya vive exactamente ahí».
+> El modelo v2 (W7) SÍ añadió esa tira —el **éxito por año de jubilación**, `successStrip`/
+> `successStripCutoffs` de `MiniProjection`— pero resolviendo la objeción en vez de ignorarla:
+> fases y éxito son dos carriles de **8 px cada uno**, restados por separado del alto del plot
+> (`phaseH`/`stripH` en `MiniProjection.tsx`), nunca el mismo carril. La banda SIGUE teñida además
+> (F6 quería color, no solo una tira), así que hoy conviven las tres señales: banda por fallo
+> acumulado, tira de fases y tira de éxito por año — cada una en su sitio.
 
 ### `PlanningDirectionChart` — [`components/charts/PlanningDirectionChart.tsx`](../apps/web/src/components/charts/PlanningDirectionChart.tsx)
 
@@ -475,8 +526,8 @@ una tabla viva: sin consumidor solo podía envejecer. Registrado en `futurefin-f
 > issue #207): mismo tinte que `.error-banner` y que `.plan-card--danger` (`--ff-neg` al 8 % sobre
 > `--ff-paper`, borde al 45 %) — **un solo vocabulario de «esto va mal»**. Solo tiñe la piel y el
 > segundo slot (`.metric-value-detail`): la cifra sigue en tinta normal porque el número no está
-> mal; lo que está mal es lo que significa. Único consumidor hoy: «Ahorro necesario» de Jubilación
-> cuando `underfunded === true`.
+> mal; lo que está mal es lo que significa. Consumidor hoy (modelo v2): la tarjeta «Aportación
+> mínima» de `retire_at_age`, cuando `contribution_underfunded === true` («Ni ahorrándolo todo»).
 >
 > **Tono ámbar de KPI (`.metric-card--warn`, prop `tone="warn"` de `MetricCard`)** (5.0.0, D28,
 > issue #207): el peldaño INTERMEDIO del semáforo «Éxito del plan». Misma construcción que
@@ -666,18 +717,26 @@ ocultar.
 
 ## Reglas para añadir UI nueva
 
-1. **Usa los tokens**. Nunca hardcoded hex. Si necesitas un color que no está, primero pregúntate si puedes vivir con `color-mix(in oklch, var(--ff-accent) X%, var(--ff-paper))`. Si no, añade un token nuevo en `theme.css` con variantes claro/oscuro. El enforcement automático es el freezer [`styles/no-hex-outside-theme.test.ts`](../apps/web/src/styles/no-hex-outside-theme.test.ts): sus contadas excepciones sancionadas (p. ej. la sombra del tooltip de Proyección, issue #105) se registran en `RGBA_ZERO_EXCEPTIONS` por **`file:línea` exacta, no por patrón** — cualquier edición de `App.css` que inserte líneas por encima desplaza el anclaje y rompe el test aunque el CSS no haya cambiado de verdad. 5.0.0 lo movió varias veces: a 2425/2426 cuando el segmentado «Yo | Hogar» y los banners de ámbito/alta se insertaron más arriba; a 2404/2405 en la tercera vuelta de UX, al retirar F5 el banner de alta de Jubilación y sus 21 líneas de CSS; y **a 2396/2397** en WP-C/WP-G (F3/F12), que borraron por encima `.subsection-title` y su override `.summary-donut-card .subsection-title` (retiradas, ver §Una sola escala de títulos) y reescribieron `.assets-table--budget-lines` a `table-layout: fixed` — un neto de 8 líneas menos. Las anclas se mueven en los dos sentidos: un borrado por encima las desplaza igual que una inserción. Si el freezer falla así: `grep -n "rgba(0, 0, 0," apps/web/src/App.css` para encontrar las líneas reales de hoy y actualiza los literales de `RGBA_ZERO_EXCEPTIONS` a esos números — no borres la excepción, muévela.
+1. **Usa los tokens**. Nunca hardcoded hex. Si necesitas un color que no está, primero pregúntate si puedes vivir con `color-mix(in oklch, var(--ff-accent) X%, var(--ff-paper))`. Si no, añade un token nuevo en `theme.css` con variantes claro/oscuro. El enforcement automático es el freezer [`styles/no-hex-outside-theme.test.ts`](../apps/web/src/styles/no-hex-outside-theme.test.ts): sus contadas excepciones sancionadas (p. ej. la sombra del tooltip de Proyección, issue #105) se registran en `RGBA_ZERO_EXCEPTIONS` por **`file:línea` exacta, no por patrón** — cualquier edición de `App.css` que inserte líneas por encima desplaza el anclaje y rompe el test aunque el CSS no haya cambiado de verdad. 5.0.0 lo movió varias veces: a 2425/2426 cuando el segmentado «Yo | Hogar» y los banners de ámbito/alta se insertaron más arriba; a 2404/2405 en la tercera vuelta de UX, al retirar F5 el banner de alta de Jubilación y sus 21 líneas de CSS; y **a 2396/2397** en WP-C/WP-G (F3/F12), que borraron por encima `.subsection-title` y su override `.summary-donut-card .subsection-title` (retiradas, ver §Una sola escala de títulos) y reescribieron `.assets-table--budget-lines` a `table-layout: fixed` — un neto de 8 líneas menos. Las anclas se mueven en los dos sentidos: un borrado por encima las desplaza igual que una inserción. Si el freezer falla así: `grep -n "rgba(0, 0, 0," apps/web/src/App.css` para encontrar las líneas reales de hoy y actualiza los literales de `RGBA_ZERO_EXCEPTIONS` a esos números — no borres la excepción, muévela. **Re-verificado 2026-09-06 (WP D2, cierre documental del modelo v2)**: el mismo grep sigue devolviendo **2396/2397** sin moverse. **Limpieza pendiente declarada por W9** (comentario en el propio `App.css:4865`, no una nota de esta doc): retirar el objetivo con puente y el colchón de caja dejó CINCO clases huérfanas —`.retirement-buffer-line`, `.retirement-buffer-line .btn`, `.retirement-basis-reset`, `.projection-chart-jubilacion-line`, `.projection-chart-jubilacion-label`— sin un solo consumidor en `apps/web/src/**/*.tsx` (verificado: `git grep -c "retirement-buffer-line\|retirement-basis-reset\|projection-chart-jubilacion-line\|projection-chart-jubilacion-label" -- '*.tsx'` → vacío). **No se han borrado todavía**: quien las borre tiene que RECONTAR los anclajes del freezer después (un borrado por encima de 2396/2397 los desplaza igual que una inserción, ver arriba) y confirmar con el mismo `grep -n "rgba(0, 0, 0," apps/web/src/App.css` que la excepción sigue apuntando a la sombra del tooltip y no a una de estas reglas. **Añade a la misma limpieza pendiente**: el token `--proj-coast` de `theme.css` (§Áreas y tokens de series arriba), huérfano por la misma causa (el borrado de `lib/plan-series.ts`) pero en un fichero que el freezer no vigila por línea — retirarlo no mueve ningún anclaje de `App.css`, solo hay que confirmar `git grep -c "proj-coast" -- '*.tsx' '*.ts'` sigue vacío antes de borrar sus dos declaraciones (claro/oscuro).
 2. **Verifica claro y oscuro antes de mergear**. Toggle desde Ajustes y revisa: KPIs, modales, tooltips, hover states, focus rings.
 3. **No mezcles tab-bar legacy con TopBar**. La nav es responsabilidad exclusiva de `TopBar`. Sub-tabs (como las de Ajustes) van como pills con clase `ff-nav-pill`.
 4. **No introduzcas color decorativo**. Pos/neg = cifras delta. Acento = destacar UN ítem (botón primario, KPI hero, marker de jubilación, slice principal de un donut). El resto vive en grayscale.
-5. **Un valor que el servidor DERIVA se rotula como derivado.** Patrón fijado en 5.0.0 por «Base del
-   objetivo» de Jubilación: el radio marca la opción que se está aplicando y, mientras nadie la haya
-   elegido, el rótulo del grupo lleva un ` (derivada)` atenuado (`.muted` inline) y aparece la salida
-   «Volver a la derivada» (`btn ghost text` + `.retirement-basis-reset`, **fuera** del `radiogroup`:
-   un botón enfocable entre radios rompe la navegación con flechas) en cuanto sí está fijada, para
-   poder soltarla otra vez con el `null` del tri-estado. Sin el rótulo, una opción
-   marcada se lee como una decisión tomada — y el formulario la reenvía, congelando una derivación
-   que debía seguir moviéndose. Si añades otro campo derivado por el servidor, cópialo.
+5. **Un ajuste booleano que cambia dos campos a la vez se enciende con una función que los deja
+   coherentes, nunca con dos `setState` sueltos.** El ejemplo vivo es el interruptor «puente hasta
+   la pensión» de Jubilación (modelo v2, tarjeta Pensión): encenderlo tiene que dejar
+   `bridge_max_pct`/`bridge_max_years` YA PUESTOS con su default (`max(5, tu tasa de retirada + 1)`
+   %% / 7 años) en el MISMO cambio, no en un render siguiente donde el usuario vería el switch
+   encendido y los dos campos todavía vacíos. Patrón: `withBridgeEnabled(pension, on, swrPct)`
+   (`lib/retirementProfile.ts`) — una función pura que, con `on = true`, rellena los dos números si
+   faltan, y con `on = false` los deja intactos (apagar no borra lo que el usuario ya había
+   ajustado); la vista solo llama `setPension(p => withBridgeEnabled(p, on, profileDraft.swr_pct))`
+   (`views/RetirementView.tsx`, caso `bridge_enabled` del `renderField`). El patrón anterior de esta
+   fila («Base del objetivo» de Jubilación, un radio con rótulo « (derivada)» y un botón «Volver a
+   la derivada») se retiró con el objetivo descontado del modelo v2 (E4): ya no hay una base que
+   derivar, así que no hay ejemplo vivo de ese patrón — si vuelve a hacer falta un campo que el
+   servidor DERIVA y el usuario puede FIJAR, el precedente sigue siendo válido en espíritu (rotula
+   la derivación, no la escondas), solo que hoy no queda ninguna instancia en el árbol para copiar
+   literalmente.
 6. **Una vista no repite la divisa en el subtítulo.** «Moneda EUR» / «Mensual · EUR» /
    «Importes · EUR» se retiraron de Activos, Pasivos, Presupuesto, Movimientos, Próximos y Resumen
    en el barrido de copys de 5.0.0 (issue #207): la divisa vive en `Ajustes → General` y en cada

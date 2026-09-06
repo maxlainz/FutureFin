@@ -195,12 +195,28 @@ naturaleza distinta**. La primera es de **publicación** (el número se calcula 
 porque a ~12 ms por proyección `Decimal` de 840 meses, 500 caminos serían seis segundos por
 petición. Lo que la hace admisible son cuatro condiciones, y las cuatro son verificables:
 
-1. **De ahí no sale un euro.** Las salidas del crate son magnitudes **estadísticas** —probabilidad
-   de éxito, percentiles de una banda, probabilidad de agotamiento por edad—, donde un error
-   relativo de 1e-15 no cambia ninguna decisión. El patrimonio, el objetivo, la aportación necesaria
-   y cualquier cifra en euros siguen saliendo del camino `Decimal`. Está escrito en el crate
+1. **De ahí no sale un euro DERIVADO DE `f64`.** Las salidas del crate son magnitudes
+   **estadísticas** —probabilidad de éxito, percentiles de una banda, probabilidad de agotamiento
+   por edad—, donde un error relativo de 1e-15 no cambia ninguna decisión. Está escrito en el crate
    (`crates/engine-stochastic/src/lib.rs:14-20`) **y en el cable**: la última frase de
    `BANDS_MODEL_NOTE` (`handlers/projection_bands.rs:341`) se lo dice a quien consume la respuesta.
+   **Enmienda (5.0.0 E7/E8, panel adversarial 2026-09-06, modelo de jubilación v2)**: el crate SÍ
+   publica hoy cifras en euros —capital necesario (`needed_capital_today`/`needed_capital_curve`),
+   aportación mínima (`minimum_extra_contribution`), ahorro liberado de coast
+   (`coast_stop_month::freed_saving_monthly`)— y no rompe la regla porque cada una es el resultado
+   de una `project_net_worth_series` **`Decimal` real** ejecutada por el propio crate sobre el
+   candidato (escala de cartera, mes, aportación) que el sorteo `f64` decidió que cumplía: el
+   sorteo elige QUÉ escenario evaluar, nunca CUÁNTO vale en euros. Esas cifras viajan **rotuladas**
+   —redondeadas a cientos, con su intervalo de muestreo (`success_at_lambda`,
+   `capital_is_approximate`)— para que quien las lea sepa que llevan el error del SORTEO, no el del
+   tipo numérico. Y una segunda condición, distinta de la primera: **cuando el sorteo fija el mes
+   de un hito** (la fecha válida, el mes de coast, el inicio de la fase parcial), **la semilla y el
+   número de caminos son parte de la identidad del resultado**, no un detalle interno — viajan en
+   la respuesta (`seed`, `paths_used`) y en la clave de cache del plan (`PlanKey`,
+   `handlers/retirement_solver.rs::plan_fingerprint`), porque dos sorteos con distinta semilla o
+   distintos caminos son, literalmente, dos mediciones distintas del mismo plan y no pueden
+   compartir entrada de cache. El patrimonio, el objetivo, las series del chart y cualquier otra
+   cifra que NO venga de uno de estos solves siguen saliendo ÍNTEGRAMENTE del camino `Decimal`.
 2. **El freezer de `crates/engine` NO se tocó, y no se le añadió ninguna excepción.** El test es
    `crates_engine_src_has_no_f64_outside_comments` (`crates/engine/src/lib.rs:153`) y su mensaje de
    fallo sigue diciendo «JAMÁS en `crates/`». **Matiz honesto que hay que decir en voz alta**: ese
@@ -982,40 +998,64 @@ producto que solo vive en el frontend no es una promesa.
 silencio — la clase de fallo que D2 ya documenta para las lecturas, pero ahora con pérdida de datos.
 Regresión: `apps/api/tests/ledger_ownership.rs` (5 tests) + `mcp_write.rs` / `mcp_confirm_and_impact.rs`.
 
-### D24. Un solo trigger de jubilación por simulación; bajo estrategias por edad el CRUCE es una lectura (5.0.0, plan #207 D17)
+### D24. Un solo trigger de jubilación por simulación: SIEMPRE el mes forzado (5.0.0, plan #207 D17; reescrita 2026-09-06 para el modelo de jubilación v2)
 
-La jubilación dejó de tener un único disparador universal. Las estrategias `retire_at_age` y `coast`
-—y el fin de la fase de `partial` cuando lleva edad— se jubilan **por edad**, aunque el capital no
-llegue (con aviso rojo). Las demás siguen jubilándose **por cruce**. La regla dura es:
-**una simulación tiene exactamente un trigger**, o la edad no mandaría de verdad.
+> **Esta entrada describía el ensamblado ANTES de E4/A4** (objetivo con base puente, `retirement_trigger:
+> liquid_crossing|target_age`, crossing-lectura solo bajo estrategias por edad). El panel adversarial
+> de 2026-09-06 (modelo v2, `docs/jubilacion.md`) cambió el ensamblado entero: hoy **las CUATRO
+> estrategias** (`asap`, `retire_at_age`, `coast`, `partial`) llegan al motor como `AtMonth` — nunca
+> por cruce — y el objetivo dejó de decidir nada (§`financial-contracts.md` §2.4/§2.5). El texto de
+> abajo describe el estado ACTUAL; la versión vieja queda en el historial de este fichero.
 
-- **La invariante la hace cumplir el HANDLER, no el motor**, y eso está declarado
-  (`crates/engine/src/phases.rs:26-35`). El motor conserva a propósito la **unión** de 4.15.0
-  (`retired || cruce || k ≥ s`) porque es lo que el pin dorado tiene fotografiado; quien decide es
-  `build_installation_projection_input` (`handlers/projection.rs:2397-2408`), poniendo
-  `phase_plan.crossing_is_reading_only = forced_retirement_month.is_some()`.
-- **El cruce no desaparece: se degrada a LECTURA.** El bucle siempre anota
-  `liquid_crossing_month_index` (`sim_core.rs:1417-1418`) y solo deja que **jubile** cuando el flag
-  está apagado (`:1423-1426`). La respuesta publica `retirement_trigger` (`liquid_crossing` |
-  `target_age`), el mes efectivo en `jubilacion_month_index` y el cruce aparte, con su
-  `liquid_crossing_absent_reason`.
-- **Por qué no basta con pasar `fire_target: None`**, que es lo que el handler hacía hasta WP5-2a:
-  sin objetivo dentro, el handler tenía que recalcular el cruce por su cuenta — y con base
-  `bridge_to_pension` esa segunda lectura **no es el objetivo que el motor evalúa**. Con
-  `pension_bridge` eran dos cruces distintos para la misma línea del chart. El objetivo entra
-  siempre (lo necesitan el chart, el rojo de infra-financiación y los solves) y lo que se apaga es su
-  poder de disparar.
+La jubilación no tiene un disparador universal fijo, pero **cada simulación concreta lleva
+exactamente uno, y siempre de la misma forma**: un mes forzado (`RetirementTrigger::AtMonth(k)`).
+Lo que cambia entre estrategias es **quién decide `k`**, nunca el mecanismo con el que llega al
+motor:
+
+- **`ForcedMonth::Known(R)`** — la edad manda, sin sorteo: `retire_at_age`, `coast` modo A y
+  `partial` cuando declara edad de jubilación total. El sorteo solo MIDE si `R` cumple el umbral
+  (`1 − éxito(R)`), no lo elige.
+- **`ForcedMonth::NeedsSolve`** — el umbral de éxito busca `k`: `asap`, `coast` modo B, `partial`
+  modo «en cuanto pueda». Lo resuelve `retirement_solver::solve_plan_level1` (nivel 1, síncrono,
+  dentro del miss de proyección) llamando a `crates/engine-stochastic::solve_mc::valid_retirement_month`.
+- **`ForcedMonth::Absent(reason)`** — sin fecha de nacimiento, **en CUALQUIER estrategia** (C5 del
+  modelo v2): no hay plan que resolver. La proyección de patrimonio sigue publicándose (con la
+  jubilación fijada al `horizon + 1`, «nunca dentro del horizonte»), pero fecha, éxito y capital
+  necesario van `null` con `plan_absent_reason: birth_date_missing` — nunca un valor inventado.
+
+Lo decide `resolve_forced_month` (`handlers/projection.rs:2729-2751`), no el motor: el motor solo ve
+un `PhasePlan::forced_at(m, …)` con `m` ya resuelto (`m = horizon + 1` como placeholder mientras
+`NeedsSolve`/`Absent` esperan su solve, `handlers/projection.rs:2516-2520`).
+
+- **El cruce YA NUNCA jubila, en NINGUNA estrategia** — `phase_plan.crossing_is_reading_only = true`
+  se pone **incondicionalmente** (`handlers/projection.rs:2531`; antes dependía de
+  `forced_retirement_month.is_some()`, o sea de si la estrategia era por edad). El bucle conserva la
+  **unión** de 4.15.0 (`retired || cruce || k ≥ s`) porque es lo que el pin dorado tiene fotografiado,
+  pero con el flag siempre activo esa unión nunca deja que el cruce decida: solo se anota
+  `liquid_crossing_month_index` (`sim_core.rs`), evaluado todos los meses y sin gobernar nada.
+- **El wire cambió de vocabulario.** Ya no existe `retirement_trigger: liquid_crossing | target_age`:
+  la respuesta publica `retirement_date_basis` (`retirement_solver.rs::DATE_BASIS_*`) —
+  `success_threshold` (lo resolvió el sorteo), `target_age` (lo puso la edad), `not_reachable`
+  (ningún mes del horizonte llega al umbral) o `pending` (nivel 1 todavía calculando). El objetivo
+  FIRE (el «número FIRE clásico», §2.4 de `financial-contracts.md`) entra siempre como LECTURA
+  informativa —nunca dispara nada, en ninguna estrategia—, así que la vieja razón de por qué el
+  cruce sobrevivía («las estrategias por edad lo necesitan») quedó obsoleta con E4: hoy sobrevive
+  porque el chart lo pinta y algunos consumidores legacy (`RetirementTrigger::LiquidCrossing` sigue
+  siendo el default de `PhasePlan::classic`) lo esperan, no porque ninguna estrategia lo consulte
+  para decidir su fecha.
 - **Readmisión declarada.** El trigger por edad estaba **vetado** desde 1.0.6
   (`futurefin-failure-archaeology` §2.2, migración `20260516120000_drop_projection_target_age.sql`).
   Lo que aquel veto retiró fue un ajuste **de instalación**; lo que vuelve es un eje **por usuario**,
-  exclusivo de dos estrategias, con un solo trigger por simulación y el cruce publicado al lado.
-  Sin fecha de nacimiento, las estrategias por edad **degradan a `asap`** con
-  `warnings: ["birth_date_missing"]` — nunca un 500 en una lectura.
-**Breaks if violated**: dos triggers activos a la vez producen un `jubilacion_month_index` que no
-coincide con el primer mes sin nómina de la serie — el chart, el KPI y la tarjeta del Resumen
-diciendo tres cosas distintas del mismo hecho. La invariante testeable no es sobre el enum sino
-sobre la serie: **el mes en que el ingreso cambia a jubilación == `jubilacion_month_index` == el
-marcador del chart == el primer mes de `Retired`**.
+  con un solo trigger por simulación —siempre el mes forzado— y el cruce publicado al lado como
+  lectura pura.
+**Breaks if violated**: dos triggers activos a la vez (o `crossing_is_reading_only` apagado en
+alguna rama) producen un `jubilacion_month_index` que no coincide con el primer mes sin nómina de la
+serie — el chart, el KPI y la tarjeta del Resumen diciendo tres cosas distintas del mismo hecho. La
+invariante testeable no es sobre el enum sino sobre la serie: **el mes en que el ingreso cambia a
+jubilación == `jubilacion_month_index` == el marcador del chart == el primer mes de `Retired`**.
+Verificación: `grep -n "crossing_is_reading_only = true" apps/api/src/handlers/projection.rs` (1 hit,
+sin condición) y `grep -n "pub retirement_trigger\b" apps/api/src/handlers/projection.rs` (vacío: el
+campo salió del wire).
 
 ### D25. El perfil de jubilación es una ENTRADA DEL MOTOR, por usuario (5.0.0, plan #207 D13)
 

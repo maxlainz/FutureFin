@@ -104,6 +104,12 @@ p10/p50/p90 de tu patrimonio. Las dos cosas se tratan distinto:
   ninguna instalación real».
 - Lo mismo vale para el **perfil de jubilación**: tu edad objetivo, tu pensión y su fecha, y tu
   gasto de jubilación son datos personales aunque no lleven ni un IBAN ni un nombre.
+- `scripts/seed-demo.sh` declara sus propios valores fabricados para el modelo v2, y son los que
+  hay que citar en una captura o un ejemplo en vez de inventar otros o pegar los de tu instalación:
+  `success_threshold_pct: 95` (el default del modelo) y el «Fondo indexado global» con
+  `annual_volatility_percent: "17"` (el único activo con volatilidad declarada de la demo, para que
+  el sorteo de Monte Carlo tenga algo que dispersar). Re-verifica con
+  `grep -n "success_threshold_pct\|annual_volatility_percent" scripts/seed-demo.sh`.
 
 ## 5. El gate
 

@@ -46,18 +46,28 @@ Entry point: `main.rs` (bin); los módulos compartidos del crate se declaran en 
 - `handlers/person_view.rs` — `LedgerView` enum (`Household` / `Mine`) **plus helpers** `scope_where(table_alias)`, `next_arg_index()`, `bind_scope_as`, `bind_scope_scalar`, `as_str()`. Use them instead of duplicating `match view { Household | Mine }` blocks — they enforce consistent placeholder ordering across both branches. `as_str()` es la etiqueta pública (`"household"` | `"mine"`) que las respuestas **ecoan**: existe desde 4.4.0 porque el eco vivía copiado en cuatro handlers como `if view == Mine { "mine" } else { "household" }`, y ese brazo `else` convertía cualquier variante nueva en `"household"` sin avisar. `resolve(as_str(v)) == v` está pinneado en `as_str_round_trips_through_resolve`. **Desde 5.0.0 el default de `resolve()` es `Mine`** (R2): ausente o vacío = el scope del solicitante, `household` explícito. Aquí también vive `require_row_owner` (D21). Y el ensamblado de la proyección (`build_installation_projection_input`, `handlers/projection.rs`) toma desde 5.0.0 **la fecha de nacimiento del usuario cuyo perfil simula** (parámetro `birth_date`, justo detrás de `retirement_profile`): es lo que convierte `target_retirement_age` en un mes del bucle, y en el agregado del hogar cada miembro pasa la SUYA — sin ese parámetro, una simulación por miembro heredaría la edad del solicitante.
 - `handlers/projection.rs` — el ensamblado del motor y todas sus lecturas. Dos cosas de 5.0.0
   WP5-2b que hay que saber antes de tocarlo:
-  - **`compute_strategy_solves(input, forced_retirement_month, strategy)`** es la ÚNICA función que
-    decide qué solve de `crates/engine/src/solve.rs` corresponde a cada estrategia. Tiene dos
-    llamantes con inputs distintos —`run_member_projection` (por miembro, el resultado se guarda en
-    la entrada de cache, M4) y `simulate_projection_core` (baseline y escenario, para los deltas)—
-    y si cada uno decidiera por su cuenta, `retire_at_age` podría publicar un ahorro necesario en la
-    serie y `null` en el what-if. Corre SIEMPRE dentro de `heavy::run_projection_sim`: son hasta 26
-    proyecciones enteras. `disposable_monthly_of` es su gemelo para el margen, por la misma razón.
-  - **`PlanFireTarget::new` se construye UNA vez por respuesta.** La forma de conveniencia
-    `fire_target_at_month_index_with_plan` rehace la tabla del puente (`O(P)` gross-ups) en cada
-    llamada, y la serie del objetivo la consulta una vez por punto: medido, **1.943 ms** de MISS con
-    pensión con fecha, contra 13 ms tras hoistarla. Cualquier lectura nueva que evalúe el objetivo
-    punto a punto tiene que reusar el evaluador, no la función libre.
+  - **`compute_strategy_solves` se RETIRÓ en el modelo v2 (E4/A4)** — describía los solves
+    deterministas contra el objetivo (`required_contribution_monthly`, `coast_fire_month_index`)
+    que E4 se llevó del motor. Su papel de «único choque de decisión, para que dos llamantes no
+    publiquen dos respuestas distintas del mismo hogar» lo hereda
+    `retirement_solver::solve_plan_level1`/`solve_plan_level1_with_budget`: dos llamantes con
+    presupuestos DISTINTOS —`run_member_projection` (por miembro, el resultado se guarda en la
+    entrada de cache, D25) con el presupuesto completo (busca 500, confirma 2.500), y
+    `simulate_projection_core` (baseline y escenario del what-if) con
+    `solve_plan_level1_with_budget`, que en el escenario busca con 500 sin confirmar salvo que el
+    eje `monte_carlo` lo pida — la asimetría es a propósito (A8): el baseline es casi siempre un
+    HIT del `plan_cache`, así que solo el escenario paga el sorteo completo. Corre SIEMPRE dentro
+    de `heavy::run_projection_sim` (el mismo semáforo que ya limitaba las 26 proyecciones del
+    solve determinista).
+  - **`PlanFireTarget::new` se construye UNA vez por respuesta** y la serie del «número FIRE
+    clásico» (§2.4 de `financial-contracts.md`) la consulta una vez por punto vía `.at(i)`.
+    **Post-E4 (modelo v2) esto ya NO es una optimización de coste, es solo el patrón**: la
+    construcción convierte la escala de tramos una sola vez (5 elementos) y `.at(i)` delega en
+    `sim_core::fire_target_at_index_g` sin tabular nada — el objetivo dejó de tener una base con
+    puente que reconstruir (`build_bridge_table`/`O(P)` gross-ups murieron con `TargetBasis` en
+    E4). La forma de conveniencia `fire_target_at_month_index_with_plan` sigue existiendo para un
+    consultante puntual, pero cualquier lectura que recorra la serie entera debe seguir
+    construyendo el evaluador una vez y llamando `.at(i)`, no la función libre por punto.
   - **`BuiltProjection::asset_volatility_percent` es un vector PARALELO a `input.assets`** (5.0.0
     WP6b) y se rellena en el MISMO `map` que los construye. El motor `Decimal` lo ignora; es
     entrada exclusiva de Monte Carlo, que **falla** si la longitud no cuadra. La alineación es una
@@ -103,8 +113,10 @@ Entry point: `main.rs` (bin); los módulos compartidos del crate se declaran en 
   eje `monte_carlo` de `simulate_projection`): `volatilities_f64` —la ÚNICA que produce `f64` para
   el crate estocástico, de modo que las bandas y el what-if conviertan igual—, `probability_out`
   —la única por la que sale un número de ese crate, y sale como PROBABILIDAD, nunca como euros— y
-  `success_verdict` —el semáforo de D28, con la comparación en puntos porcentuales enteros para que
-  «exactamente el umbral» salga verde—. El handler se monta dentro de `projection_router()`.
+  `success_verdict` —el semáforo contra el `success_threshold_pct` del PERFIL (no un corte fijo,
+  ver `financial-contracts.md` §2.7): verde exige `wilson_low ≥ umbral/100` (o `success == 1.0`
+  exacto con umbral 100), ámbar el estimador puntual sin el intervalo, rojo lo demás—. El handler
+  se monta dentro de `projection_router()`.
 - `handlers/summary.rs` — `summary_core` toma **`&AppState`, no `&PgPool`** desde 5.0.0 WP5-2b: el
   bloque `plan` (D27) se lee de la cache de proyección y, si no hay entrada, se calcula por
   `projection_series_cached`. Es deliberado que el Resumen dependa del estado: la alternativa era

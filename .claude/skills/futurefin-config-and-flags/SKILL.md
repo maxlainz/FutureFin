@@ -371,18 +371,28 @@ Las bandas de Monte Carlo. **No hereda los parámetros de la serie**: ni `densit
 
 | Param | Values | Default | Semantics |
 |---|---|---|---|
-| `paths` | u32, **1–2000**; fuera de rango → 400 `paths_out_of_range` (rechaza, **no clampa**) | `500` (`DEFAULT_PATHS`) | Caminos sorteados. La tool MCP topa en **1.000** (`MCP_MAX_PATHS`), no en 2.000: el contexto de un modelo es más caro que el ancho de banda de un navegador |
+| `paths` | u32, **1–5000**; fuera de rango → 400 `paths_out_of_range` (rechaza, **no clampa**) | `2500` (`DEFAULT_BANDS_PATHS` — **no** el `DEFAULT_PATHS` del crate, que sigue en 500 y es de búsqueda, no de publicación) | Caminos sorteados. La tool MCP topa en **2.500** (`MCP_MAX_PATHS`, la MITAD del de HTTP a propósito: un agente en bucle satura el semáforo más fácil que un navegador) |
 | `seed` | cadena de dígitos decimales de un `u64`; vacío o solo espacios = omitido; cualquier otra cosa → 400 `invalid_seed` | `seed_for(installation_id, user_id)` — **estable por usuario** (D23) | El mercado sorteado. **Viaja de vuelta como CADENA**, no como número JSON: es un `u64` y `JSON.parse` lo redondea por encima de 2⁵³ |
 | `view` | `mine` \| `household` | `mine` | **`household` → 400 `household_bands_unavailable`**: los percentiles no suman entre miembros y, con el shock común, los dos ni siquiera son independientes. La comprobación vive en la core (`projection_bands_cached`), no en el handler, así que la tool MCP y `/v1/summary` heredan la misma conducta |
 | `density` | — | — | **No existe** (arqueología §2.18, veto 22). Siempre `hybrid`, cableado. El struct no lleva `deny_unknown_fields`, así que `?density=monthly` se **ignora en silencio**, no da 400 |
 | `months` | — | — | Tampoco existe: `horizon_basis` nunca puede ser `months_override` aquí |
 
+**Los caminos por defecto subieron de 500 a 2.500 y el techo HTTP de 2.000 a 5.000 con el modelo v2**
+(WP A6): antes `DEFAULT_PATHS` del crate hacía doble papel (búsqueda Y publicación); ahora
+`DEFAULT_BANDS_PATHS` **ES** el presupuesto de confirmación del solver de plan
+(`retirement_solver::SOLVE_CONFIRM_PATHS`), para que la probabilidad que confirma la fecha y la que
+dibuja el fan chart salgan de la MISMA muestra.
+
 Cotas y cortes, todos constantes del mismo fichero — re-derívalos con
-`grep -nE 'const (DEFAULT_BANDS_PATHS|HTTP_MAX_PATHS|MCP_MAX_PATHS|VERDICT_GREEN_FLOOR_PCT|VERDICT_AMBER_MARGIN_PP|BANDS_PERCENTILES)' apps/api/src/handlers/projection_bands.rs`:
-percentiles fijos `[10, 50, 90]`; **el veredicto ya no tiene umbral configurable** (5.0.0/V7):
-`VERDICT_GREEN_FLOOR_PCT = 100` (verde solo sin ningún camino agotado) y ámbar a **10 puntos
-porcentuales** por debajo. **Cache propia**, por `(instalación, usuario, paths, semilla)`, con el
-TTL de la proyección y invalidada por **las mismas** mutaciones que la serie — incluidas las de
+`grep -nE 'const (DEFAULT_BANDS_PATHS|HTTP_MAX_PATHS|MCP_MAX_PATHS|BANDS_PERCENTILES)' apps/api/src/handlers/projection_bands.rs`:
+percentiles fijos `[10, 50, 90]`; **el veredicto YA NO tiene corte fijo** (V7 sustituida por C3 del
+modelo v2, `financial-contracts.md` §2.7): verde ⟺ `success_verdict()` con
+`wilson_low ≥ success_threshold_pct/100` (o `success == 1.0` exacto con umbral 100), ámbar el
+estimador puntual sin el intervalo, rojo lo demás — `VERDICT_GREEN_FLOOR_PCT`/`VERDICT_AMBER_MARGIN_PP`
+ya no existen (`grep -c "VERDICT_GREEN_FLOOR_PCT\|VERDICT_AMBER_MARGIN_PP" apps/api/src/handlers/projection_bands.rs`
+→ 0). **Cache propia**, por `(instalación, usuario, paths, semilla, threshold_pct)` — el umbral
+entró en la clave con el modelo v2, porque el veredicto ahora depende de él —, con el TTL de la
+proyección y invalidada por **las mismas** mutaciones que la serie — incluidas las de
 **reglas de ahorro**, que desde 5.0.0 mueven también el colchón derivado.
 
 **Opt-in por TAMAÑO, no por omisión** (los dos son axes de respuesta, no de configuración):
@@ -581,11 +591,15 @@ Note: `installation.projection_target_age` no longer exists — dropped by migra
 cruce FIRE es el único disparador de jubilación; no reintroduzcas un ajuste de edad»— dejó de ser
 cierto en 5.0.0** y se corrige aquí: la edad de jubilación volvió, pero **por USUARIO y no por
 instalación**, que es exactamente la forma que el veto de 1.0.6 no prohibía. Es una readmisión
-declarada (D17 + `futurefin-failure-archaeology` §2.2): `target_retirement_age` vive en el perfil
-personal (§5.1), es el trigger **exclusivo** de `retire_at_age` y `coast`, y **hay un solo trigger
-por simulación** — cuando manda la edad, el cruce del objetivo se publica aparte como una lectura
-(`liquid_crossing_month_index`). Un ajuste de edad **de instalación** sigue prohibido: era eso, y no
-la edad en sí, lo que 1.0.6 retiró.
+declarada (D17/D24 + `futurefin-failure-archaeology` §2.2): `target_retirement_age` vive en el
+perfil personal (§5.1), y desde el modelo de jubilación v2 (2026-09-06) es el dato que exige
+`retire_at_age` **y** `coast` en su modo `fixed_retirement_age` (no en modo `fixed_stop_age`, donde
+manda `coast_stop_age`, ni en `partial` modo `at_age`, donde solo la fase de media jornada la usa
+como fin opcional). **Hay un solo trigger por simulación, y desde v2 SIEMPRE es el mes forzado**
+—en cualquier estrategia, no solo cuando manda la edad—: el cruce del objetivo se publica
+SIEMPRE como lectura aparte (`liquid_crossing_month_index`), nunca como lo que decide la fecha
+(`financial-contracts.md` §2.5, `architecture-contract` D24). Un ajuste de edad **de instalación**
+sigue prohibido: era eso, y no la edad en sí, lo que 1.0.6 retiró.
 
 ### 5.1 Perfil de jubilación **por usuario** (`users.retirement_profile` JSONB, 5.0.0)
 
@@ -597,106 +611,122 @@ plan de jubilación**. Rutas `GET | PATCH /v1/auth/me/retirement-profile`
 
 Tres diferencias de gobierno frente a §5, y las tres importan:
 
-1. **Cualquier rol edita el SUYO** —`viewer` incluido (`retirement_profile.rs:977-979`)— y nadie el
-   de otro. Es la única escritura del API que un `viewer` puede hacer: sin fijar su edad de
-   jubilación no podría ver su propia proyección, que es justo lo que un viewer sí puede hacer.
-   `PATCH /v1/installation`, en cambio, sigue siendo **owner-only**.
-2. **Es una entrada del motor**: un PATCH aplicado invalida la cache de proyección
-   (`retirement_profile.rs:1044-1046`).
-3. **El merge se hace sobre el perfil ALMACENADO, no sobre el resuelto** (`:1010`), y la validación
-   corre sobre el resultado **sin clamps** (`:1017-1019`): fuera de rango se rechaza, no se reescribe
-   en silencio. La lectura sí clampa (`resolve_retirement_profile`, `:452-495`), que es la misma
-   asimetría de `fire_settings`.
+1. **Cualquier rol edita el SUYO** —`viewer` incluido— y nadie el de otro. Es la única escritura
+   del API que un `viewer` puede hacer: sin fijar su edad de jubilación no podría ver su propia
+   proyección, que es justo lo que un viewer sí puede hacer. `PATCH /v1/installation`, en cambio,
+   sigue siendo **owner-only**.
+2. **Es una entrada del motor**: un PATCH aplicado invalida la cache de proyección.
+3. **El merge se hace sobre el perfil ALMACENADO, no sobre el resuelto**, y la validación corre
+   sobre el resultado **sin clamps**: fuera de rango se rechaza, no se reescribe en silencio. La
+   lectura sí clampa (`resolve_retirement_profile`), que es la misma asimetría de `fire_settings`.
 
 Columna: `users.retirement_profile jsonb NULL`, sin CHECK y sin default
-(`apps/api/migrations/20260902200000_users_retirement_profile.sql:13`). `NULL` = todos los defaults.
+(`apps/api/migrations/20260902200000_users_retirement_profile.sql`). `NULL` = todos los defaults.
 El struct lleva `#[serde(default)]` a nivel de struct y **no** `deny_unknown_fields`: una clave
-ausente es su default, nunca un error de deserialización.
+ausente es su default, nunca un error de deserialización — y por eso un JSONB viejo con
+`target_basis`/`bridge_discount_basis`/`cash_buffer_months` sigue cargando y esas claves se ignoran
+solas (no hacía falta migrarlas para poder LEER; la migración de abajo es limpieza, no requisito).
+
+> **Reescrito 2026-09-06 para el modelo de jubilación v2** (decisiones M2/M4/M5/M6/C3/C5/C7 del
+> owner, panel adversarial 2026-09-06): la tabla de abajo describía la primera vuelta de 5.0.0
+> (V6/V7), con `target_basis`, colchón configurable y umbral retirado. Las tres cosas cambiaron de
+> raíz — ver el doc-comment de cabecera de `retirement_profile.rs`, que es más completo que esta
+> ficha y de donde salen los datos de abajo.
 
 | Clave JSON | Tipo | Default (lectura) | Cota de escritura | Código 400 | Tri-estado en el PATCH |
 |---|---|---|---|---|---|
-| `strategy` | enum | `asap` | `asap` \| `retire_at_age` \| `coast` \| `partial` \| `pension_bridge` | serde (HTTP) / `strategy` (MCP) | No |
+| `strategy` | enum | `asap` | `asap` \| `retire_at_age` \| `coast` \| `partial` (+ alias de entrada `pension_bridge` → `asap` + puente) | serde (HTTP) / `strategy` (MCP) | No |
 | `target_retirement_age` | `u32?` | — | `[18, horizon_lifespan_age]`, ambas inclusive | `retirement_age_out_of_range` | **Sí** (`null` borra) |
+| `coast_mode` | enum | `fixed_retirement_age` | `fixed_retirement_age` \| `fixed_stop_age` | serde / `coast_mode` | No |
+| `coast_stop_age` | `u32?` | — | `[18, ceiling]` (obligatorio con `coast_mode: fixed_stop_age`) | `coast_stop_age_required` · `coast_stop_age_out_of_range` | **Sí** |
 | `fire_number_mode` | enum | `annual_expense` | `manual` \| `annual_expense` \| `current_income` (+ alias legado `annual_expense_adjusted`) | serde / `fire_number_mode` | No |
 | `fire_number_manual_amount` | decimal string | — | requerido y **> 0** si el modo es `manual` | `fire_manual_amount_required` · `fire_manual_amount_not_positive` | **Sí** |
-| `swr_pct` | decimal string | `3.5` | `[0, 4]` — **PORCENTAJE** | `swr_out_of_range` | No |
+| `swr_pct` | decimal string | `3.5` | `[0, 6]` — **PORCENTAJE** (sube de 4 a 6, M5: el SWR deja de dimensionar un objetivo y pasa a ser el techo de venta ordinaria anual) | `swr_out_of_range` | No |
+| `success_threshold_pct` | `u32` | **`95`** (C3) | `[80, 100]` — **vuelve al perfil como RESTRICCIÓN**: decide la fecha de jubilación, no un adorno del semáforo | `success_threshold_out_of_range` | No |
 | `horizon_lifespan_age` | `u32` | `90` | `[85, 105]` | `horizon_lifespan_age_out_of_range` | No |
-| `target_basis` | enum | **derivado**, ver abajo | `perpetuity` \| `bridge_to_pension` | serde / `target_basis` | **Sí** (`null` = volver a derivarlo) |
-| `bridge_discount_basis` | enum | `expected_return` | `expected_return` \| `swr` \| `none` | serde / `bridge_discount_basis` | No |
 | `withdrawal_rule` | objeto | ver abajo | ver abajo | ver abajo | No — se sustituye **entero**, nunca campo a campo |
-| `pension` | objeto? | ausente | ver abajo | ver abajo | **Sí** |
+| `pension` | objeto? | ausente | ver abajo (incluye el puente) | ver abajo | **Sí** |
 | `partial_retirement` | objeto? | ausente | ver abajo | ver abajo | **Sí** |
-| `cash_buffer_months` | `u32?` | **derivado del tope de la regla de ahorro** (5.0.0/V6) | `[0, 60]` | `cash_buffer_out_of_range` | **Sí** (`null` = volver a derivarlo) |
-| ~~`success_threshold_pct`~~ | — | **retirado en 5.0.0** (V7) | — | — | — |
 | `birth_date` (no es del perfil) | `YYYY-MM-DD` | — | misma columna `users.birth_date` y **el mismo parser** que `PATCH /v1/auth/me` | los de `auth::validate_birth_date` | **Sí** |
 
-**`cash_buffer_months` ausente NO es «sin colchón» desde 5.0.0** (decisión V6 del owner): es
-«derívalo del tope de mi regla de ahorro». `handlers/cash_buffer.rs::resolve_cash_buffer` toma el
-MAYOR de los techos de las reglas habilitadas con tope que apuntan al líquido con σ = 0 y se lo pasa
-al motor como importe **nominal** (`CashBufferTarget::Amount`), no como meses; la SPA ya no escribe
-el campo, y HTTP/MCP lo conservan como override explícito. De dónde salió se publica en
-`GET /v1/projection/bands` (`buffer_source`, `buffer_target_amount`, `buffer_months_effective`,
-`buffer_source_rule_id`, `buffer_source_asset_name`).
+Fuera del perfil desde el modelo v2 (retirados, no aceptados aunque se manden — se ignoran por el
+`#[serde(default)]` sin `deny_unknown_fields`): `target_basis`, `bridge_discount_basis`,
+`cash_buffer_months`. Los tres murieron con la pensión-como-flujo (M4) y el colchón derivado (M6);
+la migración `20260906091500_drop_stored_success_threshold.sql` borra además el `success_threshold_pct`
+que la decisión V7 (anterior a v2) dejó almacenado e ignorado — para que el default 95 mande sin
+competir con un 95 fantasma que nadie eligió.
 
-**`success_threshold_pct` se retiró en 5.0.0** (decisión V7): el veredicto de éxito tiene corte
-**fijo** —verde solo con el 100 % de escenarios sin agotar la cartera, ámbar `[0,90, 1)`, rojo por
-debajo—, así que no hay eje que configurar. Se **acepta e ignora** en el PATCH HTTP y en las dos
-tools MCP (`deny_unknown_fields` impide borrarlo del schema), no se persiste, no sale por ninguna
-respuesta y su código de error `success_threshold_out_of_range` desapareció. Sin migración: el 95 ya
-almacenado se ignora al leer y se pierde en la siguiente escritura.
+`withdrawal_rule` (objeto anidado): `kind` (`fixed_real` default \| `percent_of_balance` \| `hybrid`
+\| `guardrails`), `spend_mode` (`ceiling` default \| `rule_is_spend`), y los porcentajes **brutos de
+impuestos** `pct` / `start_pct` / `end_pct` en `(0, 20]` y `band_pct` / `adjust_pct` en `(0, 50]` —
+el mínimo es **exclusivo**, el máximo inclusivo. **U4 se conserva**: `pct`/`start_pct` son
+OPCIONALES y, ausentes, heredan `swr_pct` (`pct_source: swr | explicit` en la respuesta). Qué exige
+cada `kind`: `percent_of_balance` → `pct` (o hereda); `hybrid` → `start_pct` + `end_pct` con
+`end < start` (`hybrid_end_pct_not_below_start`); `guardrails` → `pct` + `band_pct` + `adjust_pct`;
+`fixed_real` → nada. Faltar un valor requerido sin herencia es `withdrawal_pct_required`; salirse,
+`withdrawal_pct_out_of_range` o `withdrawal_band_out_of_range`.
 
-`withdrawal_rule` (objeto anidado, `retirement_profile.rs:293-332`): `kind` (`fixed_real` default \|
-`percent_of_balance` \| `hybrid` \| `guardrails`), `spend_mode` (`ceiling` default \| `rule_is_spend`),
-y los porcentajes **brutos de impuestos** `pct` / `start_pct` / `end_pct` en `(0, 20]` y `band_pct` /
-`adjust_pct` en `(0, 50]` — el mínimo es **exclusivo**, el máximo inclusivo. Qué exige cada `kind`:
-`percent_of_balance` → `pct`; `hybrid` → `start_pct` + `end_pct` con `end < start`
-(`hybrid_end_pct_not_below_start`); `guardrails` → `pct` + `band_pct` + `adjust_pct`; `fixed_real` →
-nada. Faltar cualquiera de ellos es `withdrawal_pct_required`; salirse, `withdrawal_pct_out_of_range`
-o `withdrawal_band_out_of_range`.
+`pension` (con el PUENTE dentro, C2/C7): `monthly_amount_today` (**requerido**, > 0,
+`pension_amount_not_positive`), `starts_at_age` (**requerido**, `[50, horizon]`,
+`pension_age_out_of_range`), `indexed` (default `true`), `fraction_while_partial` (`[0, 1]`, default
+`0`, `pension_fraction_out_of_range`) — y tres campos nuevos del puente, **apagado por defecto y
+disponible con CUALQUIER estrategia** (ya no es la quinta estrategia): `bridge_enabled` (`bool`,
+default `false`), `bridge_max_pct` (`(swr_pct, 6]` — estrictamente MAYOR que tu SWR, si no el
+puente no permitiría nada de más; código `bridge_max_pct_out_of_range` · `bridge_max_pct_not_above_swr`;
+al encender sin número, `default_bridge_pct(swr) = max(5, swr + 1) %` clamada al techo) y
+`bridge_max_years` (`[1, 20]`, `bridge_max_years_out_of_range`; al encender sin número, `7`).
 
-`pension` (`:336-352`): `monthly_amount_today` (**requerido**, > 0, `pension_amount_not_positive`),
-`starts_at_age` (**requerido**, `[50, horizon]`, `pension_age_out_of_range`), `indexed` (default
-`true`) y `fraction_while_partial` (`[0, 1]`, default `0`, `pension_fraction_out_of_range`).
+`partial_retirement`: `starts_at_age` (**opcional desde v2** — obligatoria solo con
+`mode: at_age`, `partial_start_age_required`; con `mode: asap` la calcula el solver y no hay dato
+que dar), `income_monthly_today` (**requerido**, `≥ 0`; 0 = año sabático), `expense_basis`
+(`retirement` default \| `regular`) y `mode` (`at_age` default \| `asap`, M11). **No existe
+`ends_at_age` a propósito**: la fase termina en la jubilación total, y una segunda fecha chocaría
+con el trigger.
 
-`partial_retirement` (`:360-369`): `starts_at_age` (**requerido**, `[18, horizon]` y **estrictamente
-menor** que `target_retirement_age` si la hay → `partial_not_before_retirement`),
-`income_monthly_today` (**requerido**, `≥ 0`; 0 = año sabático) y `expense_basis` (`retirement`
-default \| `regular`). **No existe `ends_at_age` a propósito** (`:358-359`): la fase termina en la
-jubilación total, y una segunda fecha chocaría con el trigger.
-
-**Qué exige cada estrategia** (si falta, 400 y la simulación no arranca): `retire_at_age` y `coast` →
-`target_retirement_age` (`target_retirement_age_required`); `pension_bridge` → `pension`
-(`pension_required_for_bridge`); `partial` → `partial_retirement` (`partial_retirement_required`);
-`asap` → nada.
-
-**`target_basis` se DERIVA cuando no se elige** (`:487-492`): `pension_bridge` la fuerza a
-`bridge_to_pension`; una elección explícita gana; si no hay elección, `bridge_to_pension` cuando hay
-pensión declarada y `perpetuity` cuando no. Por eso la respuesta publica **dos** campos: el resuelto
-(`profile.target_basis`, nunca `null`) y el **almacenado** (`target_basis_stored`, `null` = «no
-elegida»). Un formulario que leyera solo el resuelto y reescribiera el perfil entero **congelaría la
-derivación** como si fuera una elección — el agujero que WP5-2a cerró.
+**Qué exige cada estrategia** (si falta, 400 y la simulación no arranca): `retire_at_age` siempre, y
+`coast` **solo en modo `fixed_retirement_age`** → `target_retirement_age`
+(`target_retirement_age_required`); `coast` modo `fixed_stop_age` → `coast_stop_age`
+(`coast_stop_age_required`); `partial` modo `at_age` → `partial_retirement.starts_at_age`
+(`partial_start_age_required`); `partial` (cualquier modo) sin el bloque → `partial_retirement`
+(`partial_retirement_required`); `asap` → nada. El puente no exige nada por sí mismo más allá de
+tener `pension` declarada (es un campo DENTRO de `pension`, no puede activarse sin ella).
 
 Las cotas **no se copian a mano**: se re-derivan.
 
 ```bash
-grep -nE 'const (MIN|MAX)_[A-Z_]+' apps/api/src/handlers/retirement_profile.rs \
-                                   apps/api/src/handlers/installation.rs
+grep -nE 'pub(\(crate\))? const (MIN|MAX|DEFAULT)_[A-Z_]+' apps/api/src/handlers/retirement_profile.rs \
+                                                            apps/api/src/handlers/installation.rs
 ```
 
-Salida el 2026-09-05 (**10** líneas; eran 12 antes de que 5.0.0/V7 retirase
-`MIN/MAX_SUCCESS_THRESHOLD_PCT`): `MIN_PROFILE_AGE 18` · `MIN_PENSION_AGE 50` ·
-`MAX_WITHDRAWAL_PCT 20` · `MAX_GUARDRAIL_PCT 50` · `MAX_CASH_BUFFER_MONTHS 60` · `MAX_SWR_PCT 4`
-(todas en `retirement_profile.rs`), más `MIN/MAX_HORIZON_LIFESPAN_AGE 85/105` y
-`MIN/MAX_AVG_WINDOW_MONTHS 1/60` de `installation.rs`.
+Salida el 2026-09-06 (**16** líneas — 12 antes del modelo v2, +4: `MIN/MAX_SUCCESS_THRESHOLD_PCT`
+vuelven load-bearing y se suman `DEFAULT_SUCCESS_THRESHOLD_PCT`/`DEFAULT_BRIDGE_YEARS`):
+`MIN_PROFILE_AGE 18` · `MIN_PENSION_AGE 50` · `MAX_WITHDRAWAL_PCT 20` · `MAX_GUARDRAIL_PCT 50` ·
+`MAX_SWR_PCT 6` (subido de 4) · `MIN/MAX/DEFAULT_SUCCESS_THRESHOLD_PCT 80/100/95` ·
+`MAX_BRIDGE_PCT` (= `MAX_WITHDRAWAL_PCT`, 20) · `MIN/MAX_BRIDGE_YEARS 1/20` ·
+`DEFAULT_BRIDGE_YEARS 7` (todas en `retirement_profile.rs`, `pub(crate)`), más
+`MIN/MAX_HORIZON_LIFESPAN_AGE 85/105` y `MIN/MAX_AVG_WINDOW_MONTHS 1/60` de `installation.rs`
+(estas cuatro últimas `pub`, sin `(crate)` — por eso el patrón del grep cubre las dos formas).
+`MAX_CASH_BUFFER_MONTHS` desapareció con el colchón.
+
+Bandas de Monte Carlo (`GET /v1/projection/bands`, y el mismo default de confirmación que usa el
+solver de plan): `DEFAULT_BANDS_PATHS 2_500`, `HTTP_MAX_PATHS 5_000`, `MCP_MAX_PATHS 2_500`
+(`apps/api/src/handlers/projection_bands.rs`) — el techo por HTTP subió (era 2.000 en la primera
+vuelta de 5.0.0) y el de MCP es la MITAD del de HTTP a propósito, no un tercio de la constante del
+crate: un agente en bucle es quien más fácil satura el semáforo. `SOLVE_SEARCH_PATHS 500` /
+`SOLVE_CONFIRM_PATHS` (= `DEFAULT_BANDS_PATHS`, misma identidad) son la partición del solver de plan
+(`handlers/retirement_solver.rs`), no un tercer par de números sueltos.
 
 **En MCP el tri-estado se escribe distinto**: un schema de tool no puede expresar «omitir vs `null`»,
-así que viaja como `campo` + `clear_campo: bool`, y mandar los dos es 400 `field_set_and_clear`
-(`mcp/server.rs:2396`). Mismo patrón en `update_asset` (§5.2).
+así que viaja como `campo` + `clear_campo: bool`, y mandar los dos es 400 `field_set_and_clear`.
+Mismo patrón en `update_asset` (§5.2). Los cinco parámetros MCP retirados con el modelo v2
+(`target_basis`, `bridge_discount_basis`, `cash_buffer_months` y sus `clear_*`) se DEPRECAN en el
+schema —`///` «ignorado desde 5.0.0», sin cotas—, nunca se borran: un cliente MCP viejo que los siga
+mandando no debe romperse.
 
-**Duplicado deliberado en el cliente**: `apps/web/src/lib/retirementProfile.ts:48-66` repite las
-mismas cotas para validar antes de enviar, y `retirementProfile.test.ts` recorre la tabla. Si mueves
-una cota en Rust, mueve las dos — es el mismo contrato duplicado que `fire.ts` ↔ el motor, con el
-mismo riesgo de deriva silenciosa.
+**Duplicado deliberado en el cliente**: `apps/web/src/lib/retirementProfile.ts` repite las mismas
+cotas para validar antes de enviar (`grep -n "MAX_SWR_PCT\|SUCCESS_THRESHOLD\|BRIDGE" apps/web/src/lib/retirementProfile.ts | head`),
+y `retirementProfile.test.ts` recorre la tabla. Si mueves una cota en Rust, mueve las dos — es el
+mismo contrato duplicado que `fire.ts` ↔ el motor, con el mismo riesgo de deriva silenciosa.
 
 ### 5.2 Ejes por FILA del ledger: la volatilidad del activo (5.0.0)
 
@@ -784,6 +814,19 @@ and if the endpoint is the cached projection route, extend `ProjectionCacheKey` 
 
 ## Provenance and maintenance
 
+**Reescrito el 2026-09-06 (WP D2, modelo de jubilación v2, decisiones M1–M13/C1–C8 del owner
+2026-09-05/06)**: §5.1 entero (el perfil de jubilación) y la tabla de bandas de §4 describían la
+PRIMERA vuelta de 5.0.0 (V6/V7 — colchón configurable, `target_basis` con derivación R6, umbral de
+éxito retirado, bandas 500/2.000/1.000). El modelo v2 las sustituyó de raíz: `target_basis`,
+`bridge_discount_basis` y `cash_buffer_months` desaparecieron del perfil (M4/M6); `swr_pct` subió su
+techo a 6 (M5); `success_threshold_pct` VOLVIÓ al perfil como restricción 80–100/default 95 (C3); el
+puente pasó a vivir DENTRO de `pension` (`bridge_enabled`/`bridge_max_pct`/`bridge_max_years`, C2/C7)
+disponible con cualquier estrategia; nacieron `coast_mode`/`coast_stop_age` y
+`partial_retirement.mode`; y las bandas subieron a 2.500/5.000/2.500 con el veredicto contra el
+umbral del perfil (Wilson) en vez de un corte fijo al 100 %. Todo verificado contra
+`apps/api/src/handlers/retirement_profile.rs` (su doc-comment de cabecera es más completo que esta
+ficha) y `apps/api/src/handlers/projection_bands.rs`.
+
 Env/compose/entrypoint rows re-verified **2026-08-16 against v3.0.0**, the two OAuth-related
 rows (`FUTUREFIN_PUBLIC_URL`, `FUTUREFIN_MCP_ENABLED`) **2026-08-17 against v3.1.0**, and the
 `mcp_write_enabled` installation-setting row **2026-08-18** (issue #3; re-verify with
@@ -863,14 +906,21 @@ auditing for drift (all confirmed working on 2026-08-28):
 - `?density` / hybrid indices: `grep -n "resolve_density\|density_month_indices" -A 10 apps/api/src/handlers/projection.rs`
 - `?view` resolution — **el default es `mine` desde 5.0.0**, y el grep debe enseñar la rama
   `None | Some("") | Some("mine")`: `grep -n "fn resolve" -A 9 apps/api/src/handlers/person_view.rs`
-- **Perfil de jubilación (§5.1)**: cotas `grep -nE 'const (MIN|MAX)_[A-Z_]+' apps/api/src/handlers/retirement_profile.rs apps/api/src/handlers/installation.rs`
-  (12 líneas); derivación de `target_basis` `grep -n 'fn resolve_retirement_profile' -A 45 apps/api/src/handlers/retirement_profile.rs`;
+- **Perfil de jubilación (§5.1), modelo v2 (2026-09-06)**: cotas
+  `grep -nE 'pub(\(crate\))? const (MIN|MAX|DEFAULT)_[A-Z_]+' apps/api/src/handlers/retirement_profile.rs apps/api/src/handlers/installation.rs`
+  (**16** líneas); el alias retirado sigue vivo `grep -n "PENSION_BRIDGE_ALIAS\|parse_retirement_strategy" -A 3 apps/api/src/handlers/retirement_profile.rs`;
+  el puente por default `grep -n "fn default_bridge_pct" -A 6 apps/api/src/handlers/retirement_profile.rs`;
   ruta `grep -n 'me/retirement-profile' apps/api/src/handlers/retirement_profile.rs`; que
   `fire_settings` ya no lleva los cuatro ejes
   `grep -c "fire_number_mode\|fire_number_manual_amount\|swr_pct\|horizon_lifespan_age" apps/api/src/handlers/installation.rs`
-  (**2**, las dos doc-comments); espejo en el cliente `grep -nE 'const (MIN|MAX)_[A-Z_]+' apps/web/src/lib/retirementProfile.ts`
-- **Bandas (§4)**: `grep -nE 'const (DEFAULT_BANDS_PATHS|HTTP_MAX_PATHS|MCP_MAX_PATHS|VERDICT_GREEN_FLOOR_PCT|VERDICT_AMBER_MARGIN_PP|BANDS_PERCENTILES)' apps/api/src/handlers/projection_bands.rs`
-  y `grep -n 'household_bands_unavailable\|fn parse_seed\|fn resolve_paths' apps/api/src/handlers/projection_bands.rs`
+  (**2**, las dos doc-comments); espejo en el cliente
+  `grep -nE 'const (MIN|MAX|DEFAULT)_[A-Z_]+' apps/web/src/lib/retirementProfile.ts`; **ausencia de
+  `target_basis`/`bridge_discount_basis`/`cash_buffer_months`** (un grep vacío es la señal
+  correcta): `grep -rn "target_basis\|bridge_discount_basis\|cash_buffer_months" apps/api/src/handlers/retirement_profile.rs apps/web/src/lib/retirementProfile.ts` → 0 líneas
+- **Bandas (§4), modelo v2**: `grep -nE 'const (DEFAULT_BANDS_PATHS|HTTP_MAX_PATHS|MCP_MAX_PATHS|BANDS_PERCENTILES)' apps/api/src/handlers/projection_bands.rs`
+  (2.500/5.000/2.500/`[10,50,90]`); **ausencia del corte fijo** `grep -c "VERDICT_GREEN_FLOOR_PCT\|VERDICT_AMBER_MARGIN_PP" apps/api/src/handlers/projection_bands.rs`
+  → **0** (retirados con V7; el veredicto vive en `fn success_verdict` contra `threshold_pct`); y
+  `grep -n 'household_bands_unavailable\|fn parse_seed\|fn resolve_paths' apps/api/src/handlers/projection_bands.rs`
 - **Volatilidad del activo (§5.2)**: `grep -n 'annual_volatility_percent' apps/api/migrations/20260902200200_assets_annual_volatility.sql`
   y `grep -n 'fn assert_volatility_percent' -A 10 apps/api/src/handlers/assets.rs`
 - **Canal `:dev` (§1.3)**: `grep -n 'inputs:' -A 12 .github/workflows/dev-image.yml` (los dos inputs

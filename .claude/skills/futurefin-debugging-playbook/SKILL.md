@@ -79,7 +79,9 @@ Vocabulary you need (one line each; full domain detail in
 | API refuses to start: migration `VersionMismatch` / checksum error | Read the version number in the error | Edited already-applied migration; auto-repair removed v1.3.0 | Trap 4 |
 | Edited an asset/budget line, projection chart unchanged | Grep the mutating handler for `refresh_projection_after_mutation` | Missing cache invalidation | Trap 5 |
 | Chart wrong only with `density=hybrid` (deflation, X positions, milestones) | Diff hybrid vs monthly responses | Array-index math on non-equidistant points | Trap 6 |
-| **5.0.0** — la línea fina de un miembro, `required_capital_path`/`coast_path` o la banda p10/p50/p90 se descuadra respecto de la línea gruesa | Comprueba si el cálculo indexa por posición del array | Misma clase que Trap 6, ahora en **cinco** series más: todas viajan decimadas con la MISMA rejilla y **`/v1/projection/bands` no acepta `density`** (fuerza `hybrid`), así que ahí no hay «densidad monthly» donde el bug se esconda | Trap 6 |
+| **5.0.0** — la línea fina de un miembro, la curva de «capital necesario» (`needed_capital_curve`) o la banda p10/p50/p90 se descuadra respecto de la línea gruesa | Comprueba si el cálculo indexa por posición del array | Misma clase que Trap 6: todas viajan decimadas con la MISMA rejilla y **`/v1/projection/bands` no acepta `density`** (fuerza `hybrid`), así que ahí no hay «densidad monthly» donde el bug se esconda | Trap 6 |
+| **Modelo v2** — «no hay fecha válida» o «nunca», siempre, para cualquier plan | Comprueba en este orden: `birth_date` presente (C5, sin ella TODO plan es `plan_absent_reason: birth_date_missing`) → algún activo con `annual_volatility_percent` declarado (sin volatilidad el sorteo no dispersa) → `success_threshold_pct` del perfil (¿pediste 100 % con un hogar ajustado, donde 0 fallos de N nunca cierra?) → la puerta de tasa inicial F2 (¿el SWR es demasiado bajo para el gasto declarado, de modo que NINGÚN mes cumple la tasa inicial?) | Cualquiera de las cuatro puede ser la causa real; comprobarlas en ese orden porque las tres primeras son gratis (leer el perfil) y la cuarta exige razonar sobre el sorteo | Trap 14 |
+| **Modelo v2** — «Éxito del plan» sale 100 % y en verde, pero el plan no tiene ninguna fecha razonable | Mira `retirement_date_basis` en `/v1/projection/series` ANTES de creer el semáforo | La trampa de A6: con `retirement_date_basis: "not_reachable"` el escenario sorteado es «nunca jubilarse dentro del horizonte», que casi nunca falla — el verde dice «este plan sin jubilación aguanta», no «llegas». `success_verdict` no sabe si el plan TIENE fecha; eso lo dice `retirement_date_basis`, no el veredicto | Trap 15 |
 | Visual bug only in dark mode | Toggle theme, inspect computed CSS | Hardcoded hex instead of `var(--ff-*)`/`var(--proj-*)` token | Trap 7 |
 | Table columns overlap / content hidden under action buttons | Inspect the `<td>`'s computed `display` | `display` other than `table-cell` set on a `<td>` | Trap 8 |
 | `docker ps` shows container `unhealthy` | `curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/v1/ready` | `/v1/ready` 503 = embedded Postgres really down (3.0.0 dropped the `/dev/tcp` fallback that used to mask it); or `FUTUREFIN_MODE=db-only` | Trap 9 |
@@ -247,11 +249,12 @@ Server-side note: milestones and FIRE crossover are computed on the **full** 840
 before decimation, so if milestones are wrong at hybrid only, suspect *client* math, not the API.
 
 **5.0.0 amplía la superficie de esta trampa, no la cierra.** Ya no es una serie decimada: son
-seis. `points[]`, `members[].series` (la línea fina por miembro), `required_capital_path`,
-`coast_path`, `disposable_capital` y las tres bandas de `/v1/projection/bands` viajan **todas** por
-la misma rejilla `hybrid`, y el invariante que las ata es de `month_index`, no de posición: Σ
-`members[].series` == `points[]` **mes a mes** (pinned en
-`apps/api/tests/projection_household_aggregate.rs`). Dos consecuencias al depurar:
+varias. `points[]`, `members[].series` (la línea fina por miembro), `needed_capital_curve` (modelo
+v2 — sustituye a `required_capital_path`/`coast_path`, retirados con el objetivo determinista) y
+las tres bandas de `/v1/projection/bands` viajan **todas** por la misma rejilla `hybrid`, y el
+invariante que las ata es de `month_index`, no de posición: Σ `members[].series` == `points[]`
+**mes a mes** (pinned en `apps/api/tests/projection_household_aggregate.rs`). Dos consecuencias al
+depurar:
 
 - El experimento discriminante de arriba —comparar `monthly` contra `hybrid`— **no existe para las
   bandas**: `GET /v1/projection/bands` no acepta `density` a propósito (arqueología §2.18, veto 22:
@@ -486,6 +489,56 @@ Other discriminators worth a row each:
 | `/mcp` returns 403 and it's neither the role nor the `mcp_write_enabled` toggle | `curl -sS -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8080/mcp -H 'Origin: https://evil.example' -H "Authorization: Bearer $TOKEN"` | An `Origin` outside `CORS_ORIGINS` (anti-DNS-rebinding, 4.4.0). A request **without** `Origin` always passes rmcp's check, so this only ever bites browser-based clients — Claude Desktop, Claude Code and `curl` never send one and are unaffected |
 | An OAuth client behind a reverse proxy with a subpath fetches URLs the proxy doesn't route | `docker compose logs futurefin \| grep FUTUREFIN_PUBLIC_URL` | Missing `FUTUREFIN_PUBLIC_URL`: the issuer/`resource`/endpoint URLs are derived without the prefix. Fix: `FUTUREFIN_PUBLIC_URL=https://host/prefijo` (bounds and syntax in `futurefin-config-and-flags`). Since 4.4.0 the log also emits a one-shot `warn` naming the variable the first time a prefixed request hits OAuth metadata — before that it was a mute 404 on `/oauth/token` with no clue why |
 
+### 14. Modelo v2 — «no hay fecha válida» / «nunca», para cualquier estrategia
+
+**First move.** Check, in this order — the first three are free reads of the profile/assets, the
+fourth needs reasoning about the sorteo:
+
+1. `birth_date` — is it set? Without it (C5), **every** strategy (including `asap`) publishes
+   `plan_absent_reason: birth_date_missing`, not just the age-based ones. This is the single most
+   common cause and the cheapest to rule out.
+2. Volatility — does **any** asset carry `annual_volatility_percent`? Without it, the sorteo does
+   not disperse and `success` degenerates to 0 % or 100 % by construction (`no_volatility_declared`
+   warning) — a plan can look like «no hay fecha» when what's missing is dispersion to measure
+   against the threshold.
+3. `success_threshold_pct` — is it 100 on a household whose plan is already tight? At 100, the
+   criterion is `success == 1.0` (zero failures of N), which for a household that fails even 1 in
+   2.500 caminos is unreachable at ANY month — check with a lower threshold (e.g. 90) to see if the
+   date reappears.
+4. F2, the initial-rate gate (C1) — is `swr_pct` too low for the declared retirement spend? If
+   `12 · necesidad_ordinaria(R) > swr_pct/100 · L(R−1)` fails at EVERY candidate `R` in the
+   horizon, no month ever passes F2 and the date search returns `null` regardless of how good the
+   portfolio's growth is. This is the one that needs actual math, not just a profile read: compute
+   the annual need at a candidate `R` and compare to the SWR ceiling by hand before assuming a bug.
+
+**Story.** The panel adversarial measured all four of these independently on the same demo
+household before the model reached v2 — each one alone was mistaken for "the solver is broken" at
+least once. `crates/engine-stochastic::solve_mc::valid_retirement_month` returns `month: None`
+(never `0`) with `best_effort` (the closest month/success pair observed) and `failures_by_kind` —
+read those two fields before assuming the solver itself is wrong.
+
+### 15. Modelo v2 — «Éxito del plan» sale 100 % en verde con `not_reachable`
+
+**First move.** Look at `retirement_date_basis` in `GET /v1/projection/series` BEFORE trusting the
+color of the semáforo.
+
+**Story — the trap A6 built and A6's own doc-comment warns about.** `success_verdict` (bandas) and
+`success_of_plan` (serie/Resumen) answer "does the sorteado plan break?", never "does the household
+actually retire?". With `retirement_date_basis: "not_reachable"` the simulated scenario is "never
+retire within the horizon" — which, for a household still accumulating, almost never fails any of
+F1/F2/F3 (there's no withdrawal phase to fail in). A 100 %-green KPI in that state means "this
+never-retiring plan doesn't break", not "you reach your goal". The two fields answer different
+questions and neither implies the other:
+
+```bash
+# discriminator: fetch the series and check basis BEFORE reading success_of_plan
+curl -s ".../v1/projection/series" | jq '{basis: .retirement_date_basis, success: .success_of_plan}'
+```
+
+If `basis` is `not_reachable` or `pending`, the success percentage is not answering the question
+the user is asking on screen. `BANDS_MODEL_NOTE` in `projection_bands.rs` says this in the wire
+itself — read it before building any UI that colors a tile without also checking the basis.
+
 ## Where the evidence lives
 
 - **API logs**: `RUST_LOG` env filter; default (in `main.rs` and compose)
@@ -548,6 +601,13 @@ Other discriminators worth a row each:
   `.claude/skills/futurefin-diagnostics-and-tooling/SKILL.md`.
 
 ## Provenance and maintenance
+
+**Traps 14 and 15 added 2026-09-06 for the retirement model v2** (WP D2, decisions M1–M13/C1–C8):
+the master triage table's row about `required_capital_path`/`coast_path` desync was corrected to
+`needed_capital_curve` (the two old fields no longer exist — retired with the deterministic
+objective in E4/A5). Re-verify: `grep -n "required_capital_path\|coast_path" apps/api/src/handlers/projection.rs`
+(empty) and `grep -n "fn success_verdict" -A 5 apps/api/src/handlers/projection_bands.rs`
+(the function that Trap 15 warns does not know whether the plan HAS a date).
 
 Written 2026-07-02 against v1.4.3 (`apps/api/Cargo.toml`); traps 9 and 12, the container/DB
 evidence sections and the vocabulary entry rewritten 2026-08-16 for **v3.0.0** (self-contained
