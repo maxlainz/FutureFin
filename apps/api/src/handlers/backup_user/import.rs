@@ -40,6 +40,64 @@ pub struct ImportPreviewResponse {
     pub counts: ImportCounts,
     pub birth_date_will_change: bool,
     pub ui_preferences_present: bool,
+    /// Qué le va a pasar al perfil de jubilación de quien importa (5.0.0, B3). Antes de esto el
+    /// preview no decía nada: un v13 SOBRESCRIBE en silencio, y un fichero ≤ v12 importado
+    /// DESPUÉS de configurar el asistente descartaba en silencio el SWR/horizonte del fichero.
+    pub retirement_profile: RetirementProfileImportOutcome,
+}
+
+/// Clasificación de lo que le pasa (o le ha pasado) al perfil de jubilación de quien importa.
+/// La comparte el preview —que solo INFORMA— con el apply —que además ejecuta la rama—, para que
+/// las dos superficies no puedan divergir: dos aplicadores de la misma decisión es exactamente el
+/// bug que ya mordió a `FireSettingsPatch::apply_to` (ver el comentario de
+/// `RetirementProfilePatch::apply_to`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RetirementProfileImportOutcome {
+    /// El fichero no trae ni perfil (v13) ni ejes legados (≤ v12): lo que hay —defaults o tu
+    /// configuración— se queda exactamente igual.
+    Kept,
+    /// El fichero es v13 y trae un perfil explícito: sustituye al tuyo, tengas uno o no. Un v13
+    /// siempre gana porque, a diferencia de los ejes legados, SÍ es «tu plan tal cual lo dejaste».
+    Replaced,
+    /// El fichero es ≤ v12 (sin perfil) y trae los cuatro ejes legados; tú no tenías perfil
+    /// propio (`retirement_profile IS NULL`), así que se siembra con ellos.
+    ///
+    /// **`rename` explícito, no solo `rename_all`**: el `snake_case` de serde no mete un `_`
+    /// delante de un dígito (`SeededFrom4x` saldría `seeded_from4x`, sin la raya que el contrato
+    /// promete) — lo cazó el propio test de este WP, no una revisión.
+    #[serde(rename = "seeded_from_4x")]
+    SeededFrom4x,
+    /// El fichero es ≤ v12 y trae los cuatro ejes legados, pero ya tienes tu propio perfil
+    /// configurado: se ignoran para no pisar la estrategia que elegiste DESPUÉS de actualizar.
+    IgnoredAlreadyConfigured,
+}
+
+/// Decide la rama ÚNICA vez. Solo toca la base de datos para saber si quien importa ya tiene
+/// perfil propio —lo necesario para distinguir `seeded_from_4x` de `ignored_already_configured`—
+/// y solo cuando el fichero trae ejes legados de verdad: con perfil v13 o sin nada que sembrar,
+/// la clasificación es puramente del contenido del fichero.
+async fn classify_retirement_profile_import(
+    pool: &PgPool,
+    user_id: Uuid,
+    file_profile: Option<&crate::handlers::retirement_profile::RetirementProfile>,
+    legacy_seed: Option<&crate::handlers::retirement_profile::RetirementProfile>,
+) -> Result<RetirementProfileImportOutcome, ApiError> {
+    if file_profile.is_some() {
+        return Ok(RetirementProfileImportOutcome::Replaced);
+    }
+    if legacy_seed.is_none() {
+        return Ok(RetirementProfileImportOutcome::Kept);
+    }
+    let already_configured =
+        crate::handlers::retirement_profile::stored_retirement_profile(pool, user_id)
+            .await?
+            .is_some();
+    Ok(if already_configured {
+        RetirementProfileImportOutcome::IgnoredAlreadyConfigured
+    } else {
+        RetirementProfileImportOutcome::SeededFrom4x
+    })
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -104,6 +162,17 @@ pub async fn import_user_backup_preview(
     let birth_date_will_change = compute_birth_date_change(&state.pool, user.id.0, &payload).await?;
     let ui_preferences_present = payload.ui_preferences.person_scope.is_some()
         || payload.ui_preferences.projection_focus.is_some();
+    let legacy_seed = payload
+        .installation_snapshot_informative
+        .fire_settings
+        .legacy_retirement_profile();
+    let retirement_profile = classify_retirement_profile_import(
+        &state.pool,
+        user.id.0,
+        payload.retirement_profile.as_ref(),
+        legacy_seed.as_ref(),
+    )
+    .await?;
 
     Ok(Json(ImportPreviewResponse {
         schema_version: manifest.schema_version,
@@ -113,6 +182,7 @@ pub async fn import_user_backup_preview(
         counts,
         birth_date_will_change,
         ui_preferences_present,
+        retirement_profile,
     }))
 }
 
@@ -259,33 +329,52 @@ pub async fn import_user_backup_apply(
         .execute(&mut *tx)
         .await?;
 
-    // 5. Perfil de jubilación (schema 13). Tres casos, y el tercero es el que importa:
-    //    - el fichero trae perfil (v13) → se restaura tal cual, como el resto del ledger;
-    //    - el fichero NO trae perfil pero SÍ los cuatro ejes legados dentro de `fire_settings`
-    //      (v ≤ 12) → se SIEMBRA con ellos, pero **solo si el usuario no tiene ya perfil**:
-    //      importar un backup viejo no puede pisar la estrategia que esa persona configuró
-    //      después de actualizar;
-    //    - ninguna de las dos → no se toca nada (defaults).
+    // 5. Perfil de jubilación (schema 13). La rama la decide `classify_retirement_profile_import`
+    //    —la MISMA función que informa al preview— para que las dos superficies nunca puedan
+    //    divergir sobre qué le pasa al perfil:
+    //    - `Replaced` (el fichero trae perfil v13) → se restaura tal cual, como el resto del
+    //      ledger;
+    //    - `SeededFrom4x` (v ≤ 12 con los cuatro ejes legados y sin perfil propio) → se siembra
+    //      con ellos, con el `WHERE ... IS NULL` como cerrojo atómico: la clasificación de arriba
+    //      se computó ANTES de esta transacción, y ese cerrojo es lo que garantiza que un perfil
+    //      configurado entre medias no se pisa aunque la clasificación se haya quedado corta;
+    //    - `Kept` / `IgnoredAlreadyConfigured` → no se toca nada.
     let file_profile = payload.retirement_profile.as_ref();
     let legacy_seed = payload
         .installation_snapshot_informative
         .fire_settings
         .legacy_retirement_profile();
-    if let Some(p) = file_profile {
-        sqlx::query(r#"UPDATE users SET retirement_profile = $1 WHERE id = $2"#)
-            .bind(sqlx::types::Json(p))
+    let retirement_profile_outcome = classify_retirement_profile_import(
+        &state.pool,
+        user.id.0,
+        file_profile,
+        legacy_seed.as_ref(),
+    )
+    .await?;
+    match retirement_profile_outcome {
+        RetirementProfileImportOutcome::Replaced => {
+            let p = file_profile.expect("Replaced implica que el fichero trae perfil");
+            sqlx::query(r#"UPDATE users SET retirement_profile = $1 WHERE id = $2"#)
+                .bind(sqlx::types::Json(p))
+                .bind(user.id.0)
+                .execute(&mut *tx)
+                .await?;
+        }
+        RetirementProfileImportOutcome::SeededFrom4x => {
+            let seed = legacy_seed
+                .as_ref()
+                .expect("SeededFrom4x implica que hay ejes legados que sembrar");
+            sqlx::query(
+                r#"UPDATE users SET retirement_profile = $1
+                   WHERE id = $2 AND retirement_profile IS NULL"#,
+            )
+            .bind(sqlx::types::Json(seed))
             .bind(user.id.0)
             .execute(&mut *tx)
             .await?;
-    } else if let Some(seed) = legacy_seed {
-        sqlx::query(
-            r#"UPDATE users SET retirement_profile = $1
-               WHERE id = $2 AND retirement_profile IS NULL"#,
-        )
-        .bind(sqlx::types::Json(&seed))
-        .bind(user.id.0)
-        .execute(&mut *tx)
-        .await?;
+        }
+        RetirementProfileImportOutcome::Kept
+        | RetirementProfileImportOutcome::IgnoredAlreadyConfigured => {}
     }
 
     tx.commit().await?;

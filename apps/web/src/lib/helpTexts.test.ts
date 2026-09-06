@@ -50,6 +50,37 @@ describe("catálogo de descripciones", () => {
     expect(orphans, `textos huérfanos: ${orphans.join(", ")}`).toEqual([]);
   });
 
+  /**
+   * El modelo v2 (5.0.0) retiró tres conceptos ENTEROS: el patrimonio objetivo como disparador de
+   * la jubilación, su base (perpetuidad / puente descontado) y el colchón de caja. Los textos que
+   * los describían se borraron, pero el vocabulario sobrevive en la cabeza de quien escribe la
+   * siguiente entrada — y una ayuda que vuelva a prometer «el mes en que cruzas tu objetivo»
+   * describiría un mecanismo que ya no existe, delante del gráfico que no lo dibuja (issue #216,
+   * la mediana que se prometía y no se pintaba, es el precedente exacto).
+   *
+   * Se prohíben FRASES, no la palabra «objetivo»: «edad de jubilación objetivo» sigue siendo un
+   * campo vivo del plan.
+   */
+  it("ninguna ayuda resucita el objetivo, su base ni el colchón", () => {
+    const prohibidas = [
+      "colchón",
+      "patrimonio objetivo",
+      "objetivo fire",
+      "base del objetivo",
+      "cruce con el objetivo",
+      "cruce del objetivo",
+      "descuento del puente",
+    ];
+    const ofensas: string[] = [];
+    for (const [id, t] of Object.entries(HELP_TEXTS)) {
+      const texto = `${t.title} ${t.body}`.toLowerCase();
+      for (const frase of prohibidas) {
+        if (texto.includes(frase)) ofensas.push(`${id}: «${frase}»`);
+      }
+    }
+    expect(ofensas, `conceptos retirados en 5.0.0: ${ofensas.join(" · ")}`).toEqual([]);
+  });
+
   it("cada texto tiene título corto y cuerpo con sustancia", () => {
     for (const [id, t] of Object.entries(HELP_TEXTS)) {
       expect(t.title.length, `${id}: título vacío`).toBeGreaterThan(2);

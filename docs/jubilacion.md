@@ -1,496 +1,462 @@
 # Tu plan de jubilación
 
-Desde la **5.0.0**, la jubilación de FutureFin no es un ajuste del hogar: es **tuya**. Cada persona
-de la instalación elige su estrategia, su edad, su pensión y cómo piensa sacar el dinero cuando deje
-de trabajar — y la proyección se calcula con eso.
+Desde la **5.0.0**, la jubilación de FutureFin no es un objetivo que tu patrimonio persigue: es un
+plan que **el éxito decide**. Cada persona de la instalación elige su estrategia, su edad, su
+pensión y cómo piensa sacar el dinero — y la simulación resuelve, sorteando miles de futuros
+posibles, la primera fecha en la que ese plan aguanta sin que tengas que volver a trabajar.
 
-Todo vive en la pestaña **Jubilación**. Se guarda solo, como el resto de la app: cambias un campo,
-esperas un segundo y la curva, las cifras y el riesgo se recalculan.
+Todo vive en la pestaña **Jubilación**, es tuyo y no del hogar, y se guarda solo: cambias un campo,
+esperas un segundo y la frase, las tarjetas, el gráfico y el riesgo se recalculan.
 
-> **Si vienes de la 4.x**: al actualizar no se te mueve ningún número. Arrancas con la estrategia
-> «Cuanto antes», que es exactamente cómo funcionaba FutureFin hasta ahora, y con tu SWR, tu modo de
-> objetivo y tu edad límite tal y como los tenías. Lo que cambia es que ahora son tuyos y no del
-> hogar. Los detalles del salto están en [Actualizar](actualizar.md#actualizar-a-la-500).
+> **Modelo v2 (5.0.0).** Esta página describe el modelo tal y como quedó tras la revisión
+> adversarial de septiembre de 2026: «el éxito define la fecha», no un capital estático que tu
+> patrimonio cruza. Si buscas algo que esta página describía antes de esa revisión, el apéndice
+> [Qué desapareció en la 5.0.0](#apéndice--qué-desapareció-en-la-500-y-por-qué) dice qué cambió y
+> por qué.
 
-Si acabas de crear tu cuenta, el **asistente de bienvenida** ya te ha preguntado lo mínimo para
-tener un plan: tu fecha de nacimiento, con qué estrategia quieres jubilarte y el único dato que esa
-estrategia necesita (la edad objetivo; el ingreso de la media jornada; o el importe y la edad de tu
-pensión). La inflación y la tasa de retirada se quedan en su valor por defecto (2,5 % / 3,5 %) —
-todo lo demás, incluido afinar esos dos valores, se hace aquí, en Jubilación.
-
----
-
-## Cómo está organizada la pestaña
-
-La pantalla tiene **dos bloques y ningún acordeón**, siempre en este orden:
-
-1. **Cabecera** — el título y un único aviso de guardado («Guardando…» / «Guardado» / «Sin guardar
-   · falta un dato» / «No se pudo guardar»). Antes había un pie «Guardado automático.» por panel;
-   ahora hay uno solo, y manda el peor estado vivo.
-2. **«Tu plan»** — dónde configuras, en **una tarjeta por tema**: Estrategia · Edades · Pensión ·
-   Gasto en jubilación · Retirada · Horizonte. Cada tarjeta abre con una frase de qué hace y qué
-   implica cambiarla, y trae **solo los campos que tu estrategia necesita** — un campo que no ves es
-   un campo que la simulación no está mirando. Una tarjeta que se quedaría vacía tampoco se pinta:
-   con «Cuanto antes» y tu fecha de nacimiento ya puesta, «Edades» no aparece.
-3. **«Resultado»** — dónde lees lo que da tu plan: una frase con tu hito, como mucho tres cifras, un
-   único gráfico —con su eje de importes y la banda de escenarios coloreada por riesgo— y un bloque
-   de riesgo compacto. Lo que no cabe en esas tres cifras no desaparece: baja a «Detalle del
-   cálculo», plegado al final del panel.
-
-**Ya no hay un acordeón «Avanzado».** Lo hubo, y era un cajón de sastre: repartía trece campos en
-seis secciones plegadas, con tres mandos de la pensión a dos pantallas de la casilla «Cuento con una
-pensión». Con las tarjetas por tema, todo lo que tu plan asume está **a la vista, junto a lo que
-significa** — que es lo que aquel acordeón intentaba compensar con su línea «Supuestos: …», hoy
-retirada por innecesaria.
-
-En **Hogar** los bloques anteriores desaparecen: solo ves el aviso de solo lectura y una
-frase por persona — ver [El hogar](#el-hogar).
+Si acabas de crear tu cuenta, el asistente de bienvenida te pide lo mínimo para tener un plan: tu
+fecha de nacimiento, tu estrategia y el dato esencial que esa estrategia y su modo necesitan (una
+edad objetivo, la edad en que dejas de aportar, o el ingreso de la media jornada). Tu tasa de
+retirada se queda en su valor por defecto (3,5 %) hasta que la ajustes aquí, en la tarjeta
+«Retirada»; la inflación anual, en el suyo (2,5 %), vive en `Ajustes → Plan` porque es del hogar,
+no de una persona.
 
 ---
 
-## Antes de nada: el control «Yo | Hogar»
+## Qué decide la fecha
 
-Arriba a la derecha, junto al tema, hay un control con dos botones: **Yo** y **Hogar**.
+Tu fecha de jubilación **no es un cruce de tu patrimonio contra un objetivo**: es el primer mes en
+el que, jubilándote ahí, un número suficiente de futuros posibles aguanta hasta el final de tu
+horizonte sin que tengas que volver a trabajar.
 
-- **Yo** (por defecto) — tus activos, tus deudas, tu presupuesto y **tu** plan de jubilación.
-- **Hogar** — la suma de todo el mundo, **en solo lectura**. Sale un aviso bajo la barra superior
-  («Vista agregada del hogar · solo lectura») y desaparecen los botones de crear y editar.
+FutureFin sortea miles de futuros del mismo plan —Monte Carlo: cada mes, tus inversiones suben o
+bajan según la volatilidad que hayas declarado— y cuenta cuántos aguantan. Esa fracción es tu
+**éxito**. Tu **umbral de éxito** es la parte que exiges que aguante —de serie, el 95 %, ajustable
+entre el 80 % y el 100 %— y tu **fecha válida** es el primer mes en que el éxito llega a ese umbral.
 
-El ámbito es **global**: se aplica a todas las pestañas a la vez, no solo a la que estés mirando.
+Dos matices que cambian cómo se lee la cifra:
 
-**Esto cambió en la 5.0.0.** Hasta la 4.15 la vista por defecto era el hogar; ahora es la tuya.
-Con la jubilación convertida en un plan por persona, enseñar el hogar por defecto mezclaba las filas
-de dos personas bajo el plan de una sola.
+- **No se compara con el porcentaje que ves, sino con su cota inferior.** Con un sorteo de miles de
+  caminos, un 95,0 % observado puede ser en realidad un 93,8 % de la población entera; FutureFin
+  compara tu umbral contra el **límite inferior del intervalo de confianza de Wilson**, que es
+  estable frente a la semilla y al número de caminos. Es más prudente que comparar contra el
+  número grande, y es la razón por la que dos sorteos con la misma semilla siempre coinciden en
+  qué fecha es válida.
+- **Al 100 % la exigencia es «ningún escenario falla de los sorteados»**, y FutureFin publica hasta
+  dónde puede llegar el riesgo que no ves: con 2.500 caminos y cero fallos, el riesgo real puede
+  llegar al 0,12 % (la cota de la regla de tres). No es un 100 % certificado; es un 100 % muestral
+  con su margen declarado.
+
+Al lado de tu fecha ves siempre otras dos: **la fecha al 100 %** y **la fecha al 90 %**, que acotan
+la tuya por arriba y por abajo — «al 100 % sería ocho años más tarde; al 90 %, tres antes». Y si
+ningún mes de tu horizonte llega a tu umbral, la respuesta es **«nunca»**: no un hueco, no un cero,
+un resultado.
 
 ---
 
-## Las cinco estrategias
+## Qué cuenta como fallar
 
-La primera tarjeta de **«Tu plan»** es **«Estrategia»**, con cinco opciones. Eliges una y las demás
-tarjetas se quedan solo con los campos que esa estrategia necesita: no hay que rellenar lo que no
-aplica, y lo que no ves no lo está mirando la simulación (ver
-[más abajo](#nada-se-fuerza-sin-que-lo-veas-todo-campo-en-vigor-está-en-su-tarjeta)).
+Un futuro del sorteo («un escenario») falla —tiene que volver a trabajar— por una de tres vías, y
+solo una a la vez:
 
-En su propia tarjeta vive siempre **«Gasto en jubilación»**, con tres formas de fijar cuánto vas
-a necesitar cada año: **el gasto actual** (tus partidas de jubilación del presupuesto), **tus
-ingresos actuales** (para mantener tu nivel de vida) o **una cifra manual**. Elijas la que elijas,
-debajo aparece la cifra mensual/anual derivada con su procedencia («1.250 €/mes · 15.000 €/año · de
-tus partidas de jubilación del presupuesto»), para que dos hogares con el mismo número no crean
-estar mirando lo mismo cuando uno lee su presupuesto y el otro sus ingresos reales.
+| | Cuándo | Ejemplo |
+|---|---|---|
+| **F1 — sin dinero** | En algún mes de jubilación (total o de media jornada) la cartera no cubre lo que necesitas ese mes. | El líquido se agota en un año malo. |
+| **F2 — tasa inicial excesiva** | En el mes en que te jubilas del todo, lo que necesitas para el año que empieza supera el tope vigente sobre tu líquido: tu tasa de retirada, o la tasa del puente si lo tienes activado y tu pensión llega dentro de los años máximos que fijaste. | Te jubilas necesitando sacar el 6 % el primer año con una tasa del 4 %. |
+| **F3 — la regla no cubre el gasto** | Con una regla que retira un % del saldo («Un % del saldo», «Híbrida» o «Con bandas»), lo que la regla te deja sacar ese mes no llega a tu gasto ordinario. | Un año malo con «Un % del saldo» recorta más de lo que tu gasto exige. |
+
+La prioridad, dentro de un mismo mes, es **F1 > F2 > F3**: si te quedas sin dinero no importa si
+además te pasaste de tasa. Con la regla de serie, «Gasto fijo», solo pueden ocurrir F1 y F2, porque
+esa regla no tiene techo que recortar. **Durante la media jornada solo actúa F1**: la puerta de
+tasa inicial es de la jubilación total, no de la fase parcial.
+
+Tu **necesidad ordinaria** del mes —la que F1 y F3 comparan— es tu gasto más cualquier retirada
+extra, menos tus ingresos (pensión incluida): **sin deuda y sin «Próximos»**. Esas dos partidas
+mueven tu caja y, con ella, tu fecha, pero no son gasto ordinario — igual que la cuota de un
+préstamo no entra en lo que tu tasa de retirada tiene que cubrir.
+
+Y lo que **no** cuenta como fallo: que una regla por saldo te recorte el gasto en un año malo **y
+aun así te deje cubierto**. Bajar de nivel de vida no es fallar; quedarte corto, sí.
+
+---
+
+## Las cuatro estrategias
+
+La tarjeta «Estrategia» tiene cuatro opciones. Cambiarla cambia qué te pregunta el resto de «Tu
+plan» y cómo se resuelve tu fecha.
 
 ### Cuanto antes (FIRE clásico)
 
-> Ahorras todo lo que puedes y te jubilas el mes en que tu patrimonio líquido cubre el objetivo.
+> Ahorras todo lo que puedes y te jubilas en la primera fecha en la que tu plan aguanta hasta el
+> final con el nivel de éxito que exijas.
 
-Es la conducta de siempre. **No necesita nada más**: ni edad, ni pensión. La fecha de jubilación es
-el mes del **cruce** — cuando la línea de tu patrimonio líquido alcanza la del objetivo.
+No necesita ni edad objetivo ni pensión: solo tu fecha de nacimiento, para poder publicar fecha,
+éxito y capital. Publica tu fecha válida, el éxito con el que llega, las fechas al 100 % y al 90 %,
+y —de lectura— cuánto se apretó el cinturón la mediana de los escenarios que aguantan.
 
-### A una edad fija
+### Jubilarme a una edad
 
-> Eliges la edad; el plan te dice cuánto necesitas ahorrar y cuánto margen te sobra.
+> Eliges la edad y el plan te dice cuánto tienes que aportar cada mes para llegar a ella con tu
+> nivel de éxito.
 
-**Necesita** tu edad objetivo y tu **fecha de nacimiento** (en «Tu cuenta»; el propio formulario te
-lo pide si falta).
+Aquí **manda la edad**: te jubilas ese mes, aguante o no. Publica dos cosas más:
 
-Aquí **manda la edad**, no el capital: te jubilas ese mes llegues o no. Lo que publica, en las
-tarjetas de «Resultado» (junto al «Objetivo», que sale siempre primero):
-
-- **Ahorro necesario** — la aportación mensual mínima que te hace llegar al objetivo justo en esa
-  edad. No se despeja de una fórmula: se **simula** el plan entero probando aportaciones hasta dar
-  con la mínima que llega, con tu cascada de reparto, tus topes, tus deudas y tus impuestos dentro.
-  Es un **techo** sobre lo que tu reparto invierte cada mes, no un importe que se aporte pase lo que
-  pase: un mes con menos sobrante aporta lo que hay.
-- **Margen disponible** — lo que te sobra por encima de eso, al mes y acumulado (en dinero de hoy,
-  en el «Detalle del cálculo» plegado).
-
-> El gráfico de Jubilación dibuja tu patrimonio, tu objetivo y los hitos del plan — no la
-> trayectoria de «ahorrando exactamente lo necesario». Esa línea de puntos («Capital necesario»)
-> sigue existiendo, pero vive en el chart grande de la pestaña **Proyección**, que es donde tiene
-> sentido compararla trazo a trazo con tu curva real.
-
-**El estado rojo**: si ni invirtiendo cada euro que te sobra llegas, sale un aviso en rojo —
-*«Con tu ahorro actual no llegas a los N años. Te jubilarás igual —manda la edad— pero por debajo de
-tu objetivo»*— y la tarjeta «Tu plan» del Resumen también se pone en rojo. No es un error: la
-simulación existe, se jubila igual y se publica entera. Lo que te está diciendo es que te jubilas
-**por debajo** de tu objetivo.
+- **Un veredicto** — cuántos escenarios de cada 100 aguantan jubilándote a esa edad, contra tu
+  umbral. Si ya llegas de sobra, el aviso dice hasta qué edad podrías haberte jubilado.
+- **Una aportación mínima** — la menor aportación extra, **plana y nominal** (los mismos euros cada
+  mes, sin subirla con la inflación), que hace cumplir tu umbral a esa edad. No sale de una
+  fórmula: se prueba una cantidad, se sortea el plan entero con ella dentro —tu cascada de ahorro,
+  tus topes, tus impuestos— y se ajusta hasta dar con la más pequeña que llega. Es un TECHO sobre
+  lo que tu reparto invierte, no un importe fijo que se aporte pase lo que pase: un mes con menos
+  sobrante aporta lo que hay. Si ni invirtiendo cada euro de tu sobrante llegas, la tarjeta lo dice
+  con todas las letras —«Ni ahorrándolo todo»— en vez de fingir una cifra.
 
 ### Ahorrar ahora y dejar crecer (Coast FIRE)
 
-> Aportas fuerte hasta que el capital llegue solo a tu edad objetivo; después, cada euro es margen.
+> Aportas fuerte y luego dejas de aportar. Puedes fijar la edad de jubilación —y el plan te dice
+> cuándo puedes dejar de ahorrar— o fijar la edad a la que dejas de ahorrar y ver a qué fecha te
+> lleva.
 
-**Necesita** edad objetivo y fecha de nacimiento, igual que la anterior. Publica además:
+Tiene dos modos, y solo contestas uno: el otro lo resuelve el plan.
 
-- **Mes coast** — el primer mes a partir del cual puedes **dejar de aportar** y aun así llegar al
-  objetivo en tu edad. Sale de simular el plan cortando la aportación en cada mes candidato. El
-  chart de Jubilación marca ese mes con un hito propio («Coast») sobre el patrimonio.
-- **Número coast** — el patrimonio líquido con el que entras en ese mes. Ojo: no es tu objetivo de
-  jubilación ni tu patrimonio total (la vivienda no cuenta).
+- **Modo A — fijo la edad de jubilación.** Se busca el **primer** mes en que, dejando de aportar
+  ahí, tu éxito a esa edad sigue cumpliendo tu umbral.
+- **Modo B — fijo la edad en que dejo de aportar.** Tu fecha válida sale de ahí, sea la que sea.
 
-La trayectoria «si dejas de aportar aquí» como línea discontinua, comparable trazo a trazo con tu
-curva real, vive en el chart grande de la pestaña **Proyección** — igual que «Capital necesario»
-más arriba.
+En los dos modos, el plan que ves **deja de aportar de verdad** desde ese mes: la línea, la banda y
+los escenarios corren sin aportaciones a partir de ahí, y lo que dejas de ahorrar es dinero
+disponible para gastar — no vuelve a la cartera. Si no existe tal mes (ni aportando siempre llegas)
+o, en modo B, parar ahí no llega a tu umbral, el aviso lo dice sin rodeos: no puedes dejar de
+aportar y llegar.
 
-Si no hay mes coast, el aviso lo dice con todas las letras: no es que falte el dato, es que **ni
-aportando todos los meses** llegas al objetivo en esa edad.
+### Media jornada (Barista FIRE)
 
-### Media jornada
+> Bajas de jornada a una edad —o en cuanto el plan pueda permitírsela— y cubres el hueco con tu
+> capital hasta la jubilación total.
 
-> Reduces jornada a una edad y cubres el hueco con el capital hasta el cruce total.
+En el selector de estrategias se llama **«Jornada reducida (Barista FIRE)»**; sus campos (más
+abajo) siguen llamándose «media jornada» — es la misma fase con dos nombres. Declaras el
+**ingreso mensual** de la fase (en euros de hoy, **plano**: no sube con la inflación — un 0 € es un
+año sabático) y con qué gasto se compara. Dos modos:
 
-**Necesita** el bloque de media jornada: la edad en la que empieza y el ingreso mensual que tendrás
-entonces, en euros de hoy (un **0** es un año sabático). Sustituye a tu ingreso actual desde esa
-edad, y la fase **termina** cuando llega la jubilación total — por cruce, o en tu edad objetivo si
-la has puesto.
+- **Modo A — a una edad S.** Tu jubilación total es la fecha válida calculada **con la fase ya
+  dentro** desde S.
+- **Modo B — en cuanto pueda.** El primer mes S en que la fase no falla (solo mira F1: sin dinero),
+  y desde ahí se resuelve tu fecha válida. Si no hay ninguna, el aviso es: pasas a la fase, pero no
+  llegas a jubilarte del todo dentro del horizonte.
 
-Publica el **hueco de media jornada**: el capital que haría falta, a perpetuidad, para pagar lo que
-la media jornada no cubre (tu gasto menos el ingreso parcial menos la parte de pensión que cobres
-entonces, con los impuestos por delante, dividido entre tu SWR). Es informativo: no dispara nada.
-Al lado se dice si el patrimonio **creció o menguó** durante esa fase. El chart marca el inicio de
-la fase con su propio hito («Media jornada»), además del de la jubilación total.
+**No es la jubilación parcial legal de la Seguridad Social**: aquí no hay cotización, ni
+porcentajes legales, ni contrato de relevo — solo cuánto ingresas y desde cuándo.
 
-### Puente hasta la pensión
+### El puente hasta la pensión, como ajuste — ya no como estrategia
 
-> Te jubilas por cruce y vives del capital hasta que llegue la pensión pública; el objetivo se
-> dimensiona con ese puente.
+Si declaras una pensión con fecha, en la tarjeta **Pensión** aparece un interruptor: **el puente**.
+Apagado por defecto, y disponible con **cualquiera** de las cuatro estrategias de arriba.
 
-**Necesita** el bloque de pensión. Cambia el **objetivo**, no solo la caja — ver
-[La base del objetivo](#la-base-del-objetivo-perpetua-o-puente) más abajo. Entre las tarjetas de
-«Resultado» aparece «Puente N→M» (las edades de jubilación y de inicio de la pensión) con cuántos
-años dura y la tasa de retirada efectiva durante ese tramo — la misma tarjeta aparece con
-**cualquier** estrategia que declare una pensión con fecha, no solo con esta.
-
----
-
-## La pensión pública, con fecha
-
-En la 4.x una pensión se apuntaba como un ingreso que «persiste tras la jubilación», y la simulación
-se la restaba desde el primer mes de jubilación aunque fuera a llegar veinte años más tarde. Desde
-la 5.0.0 la pensión tiene **fecha**.
-
-Se declara con dos datos: el **importe mensual en euros de hoy** y la **edad a la que empieza a
-cobrarse**. Además:
-
-- **Indexada** (por defecto): crece con la inflación que tengas configurada. Puedes desactivarlo si
-  prefieres asumir que se queda plana.
-- **Parte que cobras durante la media jornada**: qué porcentaje de esa pensión cobras ya durante la
-  fase parcial, si es que cobras alguna. Se declara en **porcentaje (0 a 100 %)**; por defecto, 0.
-
-Lo importante: **su fecha cambia el objetivo**. Los años entre que dejas de trabajar y que empiezas
-a cobrarla hay que pagarlos **enteros** con el patrimonio, y eso es justo lo que la cuenta clásica
-del «25× tu gasto» esconde.
-
-FutureFin no asume nada sobre si la pensión te cubre o no: lee lo que has declarado frente a lo que
-gastas. Si la cubre entera, el objetivo se queda en el puente; si cubre una parte, queda además la
-renta perpetua sobre lo que falte.
+Actívalo y cambia UNA cosa: si al jubilarte falta menos que los años máximos que fijes para que
+entre tu pensión, el tope de lo que puedes sacar el primer año pasa de tu tasa de retirada a la
+**tasa del puente** —más alta— mientras dure ese tramo. Es jubilación anticipada de verdad: sin
+sueldo, sin aportaciones, el gasto sale entero de tu capital hasta que llega la pensión. No hay
+ningún otro tope durante el puente: si aguanta o no lo deciden las mismas reglas que el resto del
+plan (F1 y F3). Al activarlo, FutureFin rellena sus dos números con un default —la tasa, `max(5,
+tu tasa de retirada + 1)` %; los años, 7— y puedes cambiarlos (la tasa hasta el 20 %, los años
+hasta 20).
 
 ---
 
-## Las reglas de retirada
+## Las tarjetas y sus campos
 
-Ya jubilado, ¿cuánto sale del patrimonio cada mes? Hasta la 4.15 había una sola respuesta: tu gasto
-declarado, indexado, sin techo. Sigue siendo la de serie, pero ahora hay cuatro:
+«Tu plan» tiene **seis tarjetas** y, entre todas, **25 campos posibles** — pero nunca ves los 25 a
+la vez: solo aparece el campo que tu estrategia y su modo necesitan. Un campo que no ves es un
+campo que la simulación no está mirando; una tarjeta que se quedaría vacía tampoco se pinta.
 
-| Regla | Qué hace |
+| Campo | Tarjeta | ¿Cuándo se ve? | ¿Obligatorio? |
+|---|---|---|---|
+| Fecha de nacimiento | Edades | Solo si te falta | Sí, con pensión declarada o en «A una edad», «Coast» o «Media jornada» |
+| Qué fijas tú | Edades | Estrategia Coast | No (trae default) |
+| Edad de jubilación objetivo (o «edad de jubilación total» en Media jornada) | Edades | «A una edad»; Coast modo A; Media jornada | Sí, salvo en Media jornada |
+| Edad en que dejo de aportar | Edades | Coast modo B | Sí |
+| Cuándo empieza la media jornada | Edades | Media jornada | No (trae default) |
+| Edad de inicio de la media jornada | Edades | Media jornada, modo A | Sí |
+| Ingreso mensual en media jornada | Edades | Media jornada | Sí |
+| Gasto durante la media jornada | Edades | Media jornada | No |
+| Pensión mensual / Edad de inicio de la pensión | Pensión | Siempre visible (la casilla vive ahí) | Sí, en cuanto declaras pensión |
+| Pensión indexada a la inflación | Pensión | Con pensión declarada | No |
+| Pensión cobrada durante la media jornada | Pensión | Media jornada y pensión | No |
+| Puente hasta la pensión (el interruptor) | Pensión | Con pensión declarada, cualquier estrategia | No |
+| Tasa máxima / Años máximos del puente | Pensión | Con pensión **y** puente activado | Sí |
+| Cómo se calcula el gasto de jubilación | Gasto en jubilación | Siempre | No |
+| Gasto anual manual | Gasto en jubilación | Modo «Manual» | Sí |
+| Umbral de éxito | Retirada | Siempre, el primero | No (default 95) |
+| Tasa de retirada | Retirada | Siempre | No (default 3,5 %) |
+| Regla de retirada | Retirada | Siempre | No |
+| Baja al… | Retirada | Regla «Híbrida» | No |
+| Banda / Ajuste | Retirada | Regla «Con bandas» | No |
+| Cómo se aplica la regla | Retirada | Regla ≠ «Gasto fijo» | No |
+| Edad límite del horizonte | Horizonte | Siempre | No (default 90) |
+
+La **fecha de nacimiento es obligatoria** por dos motivos, no solo uno: las estrategias por edad la
+necesitan para tener un mes contra el que resolver nada, y **cualquier pensión declarada
+también** — la pensión entra al bucle a una edad, y sin fecha de nacimiento no se sabe si ya se
+cobra en tu fecha válida. Sin ella, el panel de resultado no publica ni fecha, ni éxito, ni
+capital: lo dice, no lo inventa.
+
+La **volatilidad** de tus activos no es un campo de esta tabla —vive en Activos, junto a la
+rentabilidad esperada— pero condiciona todo lo de arriba: sin volatilidad declarada en ningún
+activo, el sorteo no dispersa y el éxito sale 0 % o 100 % por construcción. FutureFin te avisa en
+vez de dejarte leer un 100 % que no mide nada.
+
+---
+
+## La pensión, como un flujo más
+
+En la 4.x, una pensión se apuntaba como un ingreso «que persiste tras la jubilación» y se restaba
+desde el primer mes de jubilación, aunque fuera a tardar veinte años en llegar. Desde el modelo v2,
+**la pensión es un flujo de caja como cualquier otro, con fecha**:
+
+- Entra en el bucle como un ingreso más, el mes exacto en que empieza a cobrarse (tu edad de
+  inicio), indexada a la inflación por defecto o plana si lo desactivas.
+- Si sobra, tus reglas de ahorro reparten el sobrante — la cascada corre igual jubilado o no
+  (4.12.1). Si falta, se vende cartera.
+- **No hay ningún «objetivo» que la pensión dimensione por adelantado.** FutureFin no asume que te
+  vaya a cubrir ni te la descuenta de nada: simplemente la cuenta cuando llega, mes a mes, como el
+  resto de tus ingresos.
+- Durante la media jornada puedes declarar qué **parte** de esa pensión ya cobras en esa fase
+  (0–100 %, por defecto 0 %). Si tu pensión empieza durante la fase y no has declarado esa parte,
+  un aviso (`pension_unpaid_during_partial`) te recuerda que el plan no la cobra entera hasta la
+  jubilación total.
+
+---
+
+## El gasto en jubilación
+
+Cuánto gasta tu plan cada mes jubilado lo fija uno de tres modos, en la tarjeta «Gasto en
+jubilación» — y ese gasto (más las retiradas extra, menos tus ingresos y tu pensión) es exactamente
+la necesidad ordinaria que F1 y F3 comparan:
+
+- **Gasto actual** — tus partidas de jubilación del presupuesto.
+- **Ingresos actuales** — para mantener tu nivel de vida.
+- **Manual** — una cifra anual que decides tú.
+
+Junto al selector verás la cifra mensual/anual derivada, con su procedencia, para que dos planes
+con el mismo número no crean estar mirando lo mismo si uno lee su presupuesto y otro sus ingresos
+reales.
+
+Aparte, y solo como lectura, está el **número FIRE clásico**: tu gasto anual de jubilación dividido
+entre tu tasa de retirada —25 veces el gasto solo si tu tasa es el 4 % clásico; con cualquier otra
+tasa, otro múltiplo— sin restar la pensión que declares. No decide nada: tu fecha y tu capital
+salen de contar escenarios, no de esta división, y por eso casi nunca coinciden. Vive en «Detalle
+del cálculo».
+
+---
+
+## El capital que necesitas
+
+FutureFin publica el capital necesario de dos formas, y **no son la misma cifra escalada**: cada
+una contesta una pregunta distinta.
+
+- **Capital necesario hoy** — el patrimonio LÍQUIDO que haría falta **ahora mismo**, invertido con
+  tu misma mezcla de activos (se escala el valor y el precio de compra de tus activos líquidos; tu
+  vivienda no cuenta), para que jubilándote hoy aguanten tantos escenarios de cada 100 como pida tu
+  umbral. Sale de una bisección sobre un factor de escala de tu cartera, con 500 caminos para
+  buscar y 2.500 para confirmar. Siempre en **euros de hoy** y redondeado a **cientos hacia
+  arriba** —sale de un sorteo, y el euro exacto fingiría una precisión que no hay—. Es la misma
+  cifra en Jubilación, en el Resumen y en la Proyección.
+- **La curva del gráfico** — la misma pregunta, contestada para cada edad de tu horizonte: «si te
+  jubilaras a esta edad, ¿cuánto líquido haría falta?». Viaja en euros **nominales** —los mismos
+  que tu línea de patrimonio—, así que el interruptor «En dinero de hoy» la deflacta igual que a
+  ella, y las dos siguen siendo comparables punto a punto. Internamente se resuelve solo en unos
+  pocos puntos —cada cinco años, más tu fecha exacta— y se interpola para que encaje mes a mes con
+  tu patrimonio en el gráfico; por eso puede calcularse en segundo plano sin bloquear la pantalla.
+
+La curva **no tiene por qué cruzar tu línea de patrimonio**, y que no la cruce no es un error del
+dibujo: tu fecha la deciden los escenarios que aguantan, no un cruce de dos líneas. Lo único que
+marca tu fecha válida en el gráfico es una **marca vertical**, con el éxito con el que llega escrito
+al lado.
+
+---
+
+## La pantalla
+
+### La frase-hito
+
+El resultado de tu plan abre con una frase, no con una tarjeta suelta. Cambia con tu estrategia y
+con el estado del cálculo (cifras de ejemplo, inventadas):
+
+| Estrategia / estado | Frase |
 |---|---|
-| **Gasto fijo en euros de hoy** (por defecto) | Retiras tu necesidad declarada, indexada con la inflación, sin tope. Es exactamente la conducta de la 4.x |
-| **Un % del saldo cada año** | Retiras un porcentaje de lo que te quede: en un año malo sacas menos, y el dinero técnicamente nunca se acaba — pero puede quedarse muy corto |
-| **Híbrida (empiezo alto y bajo)** | Empiezas con un porcentaje y bajas a otro más prudente cuando la cifra se sostiene |
-| **Con bandas (Guyton-Klinger)** | Retiras un importe indexado y lo ajustas arriba o abajo cuando la tasa efectiva se sale de su banda |
+| Cuanto antes | «Con tu plan te jubilas en 2043 (a los 55): aguantan 95 de cada 100 escenarios. Al 100 % sería 2051; al 90 %, 2040.» |
+| A una edad, ya llegas | «A los 55, como pediste: aguantan 82 de cada 100 escenarios (tu umbral es 95). Para llegar harían falta 300 € más al mes.» |
+| Coast, modo A | «Puedes dejar de aportar en 2031 (a los 41) y jubilarte a los 55 con 95 de cada 100.» |
+| Coast, modo B | «Dejando de aportar a los 41, te jubilas en 2047 (a los 57) con 95 de cada 100.» |
+| Media jornada | «Puedes pasar a jornada reducida en 2031 (a los 41) y jubilarte del todo en 2045 (a los 55) con 95 de cada 100.» |
 
-**Los porcentajes son BRUTOS de impuestos.** Dicho en claro: si pones un 4 %, ese 4 % es lo que
-**sale de la cartera**, y el impuesto de la venta va incluido dentro — no encima. Lo que te llega
-al bolsillo es algo menos. Es la misma convención que ya usaba el SWR, y por eso las dos cifras se
-pueden comparar.
+Y tres estados ganan a la estrategia, en este orden: que falte un dato imprescindible —empezando
+por la fecha de nacimiento—, que el cálculo siga en marcha («Calculando tu fecha…») y que ningún
+mes del horizonte llegue a tu umbral («no hay ninguna fecha… Lo más cerca: 2058 con 62 de cada
+100»).
 
-**En pantalla solo hay UN porcentaje de retirada**: el que fijas en la tarjeta «Retirada» (tu tasa
-de retirada segura, la misma que dimensiona el objetivo). «Un % del saldo» y la primera mitad de
-«Híbrida» retiran exactamente ese porcentaje — no hay un segundo campo que puedas desincronizar del
-primero. Mover el deslizador mueve las dos cosas a la vez: el objetivo y lo que la regla retira.
-Debajo del selector de regla verás una nota con el porcentaje efectivo («Retira el 3,5 %: tu tasa
-de retirada»); si en algún momento fijaste ese porcentaje **por API o por el conector MCP** en vez
-de por aquí, la nota lo dice explícitamente («Regla al 4,0 %, fijado por API») para que sepas por
-qué mover el deslizador no cambia lo que se retira.
+### Las tres tarjetas
 
-**Y cada regla se puede leer de dos maneras**, con el selector «Cómo se aplica la regla»:
+Como mucho tres, nunca más, una cifra por tarjeta:
 
-- **Techo: retiro como mucho la regla.** Sacas lo que necesitas, y nunca más de lo que la regla
-  permite. Si necesitas menos, sacas menos.
-- **La regla es mi gasto.** Sacas lo que la regla dice, necesites o no. Un año bueno significa
-  gastar más.
+1. **Capital necesario hoy** — siempre.
+2. **Éxito del plan** — siempre, con tu umbral en el subtítulo.
+3. **La de tu estrategia** — «Fecha válida» (Cuanto antes), «Aportación mínima» (A una edad),
+   «Mes coast» (Coast), «Inicio de la jornada reducida» (Media jornada). Si el plan no está
+   resuelto, no hay tercera tarjeta: repetir la misma razón tres veces no ayuda.
 
-Elegir uno u otro **no mueve el objetivo**: el objetivo lo dimensiona el SWR, la regla gobierna lo
-que sale una vez jubilado. Son dos cosas distintas y conviene no confundirlas.
+### El gráfico
 
----
+Un único gráfico, con un único eje de importes:
 
-## La base del objetivo: perpetua o puente
+- **Una línea**: tu patrimonio, la trayectoria central, creciendo con la rentabilidad **compuesta**
+  que declaraste en cada activo.
+- **Una banda p10–p90** —ocho de cada diez futuros caen dentro—, teñida por edad con la
+  probabilidad ACUMULADA de fallo (F1, F2 o F3 juntos): verde donde no falla ninguno, ámbar en
+  cuanto empiezan a fallar, rojo desde el 10 % — o desde el complemento de tu umbral si pides más
+  de un 90 % de éxito: con un umbral del 80 %, el rojo empieza en el 20 %. El corte ámbar va a la
+  mitad del rojo. Pasa el ratón por encima y ves el porcentaje exacto y, entre paréntesis, cuánto
+  es F1, cuánto F2 y cuánto F3 en ese punto.
+- **La curva de capital necesario**, discontinua.
+- **Una marca vertical** en tu fecha válida, con el éxito con el que llega.
+- **Una tira bajo el eje**, con el éxito si te jubilaras en cada año («si te fueras en 2036: 78 de
+  cada 100»).
 
-En «Objetivo anual» eliges sobre qué se dimensiona el objetivo:
+Sin volatilidad declarada en ningún activo, la banda no se colorea: no hay nada que colorear, y
+pintarla de verde diría que ningún escenario falla cuando lo que pasa es que no se ha sorteado
+ninguno.
 
-- **Renta perpetua** — el capital para vivir de él para siempre, ignorando la pensión. Es la cuenta
-  clásica y la más conservadora.
-- **Puente hasta la pensión** — el capital para llegar hasta la pensión, **más** la renta perpetua
-  sobre lo que la pensión no cubra.
+### Riesgo
 
-**Si no eliges**, FutureFin usa el puente cuando hay pensión declarada y la renta perpetua cuando no
-la hay. Y si eliges «Puente hasta la pensión» como estrategia, el puente se aplica siempre.
+Debajo del gráfico, un bloque compacto con lo que hace **auditable** el «Éxito del plan» de arriba
+(el propio KPI vive en la cabecera; no se repite aquí):
 
-La diferencia no es pequeña. Con un ejemplo de laboratorio —gasto de 2.000 €/mes, SWR del 4 %, sin
-impuestos, pensión de 1.200 €/mes a los 67, cartera líquida al 5 %— el objetivo pasa de **600.000 €**
-con renta perpetua a **≈435.300 €** con puente: 380.700 € del puente descontado más 54.600 € de la
-perpetuidad sobre los 800 €/mes que la pensión no cubre. *(Cifras inventadas para el ejemplo, no de
-ninguna instalación real.)*
+- La **precisión** del sorteo: el semiancho del intervalo de Wilson en puntos porcentuales
+  («±1,2 pp»), o la cota de la regla de tres con cero fallos; y, en claro, el límite inferior de
+  Wilson («con 95 % de confianza, al menos un 93,8 %») — es justo lo que se compara con tu umbral,
+  no el número grande de la cabecera.
+- Los **fallos por tipo** —cuántos escenarios cayeron por F1, F2 o F3, sobre el total— cuando ha
+  fallado alguien; si no ha fallado nadie, las tres filas no se pintan.
+- La **cobertura de tu gasto, corregida** — qué parte de tu gasto se pagó de verdad (nunca por
+  encima del 100 %) y en cuántos meses te quedaste corto, contando las DOS formas de quedarte
+  corto: lo que la regla se negó a sacar y lo que la cartera ya no pudo pagar. Antes esta cifra
+  solo miraba lo primero, así que con una regla que no recorta nunca —«Gasto fijo»— siempre daba el
+  gasto entero cubierto; hoy también cuenta el descubierto.
+- Cuántos escenarios **fallan en algún momento** del horizonte, por cualquiera de los tres
+  motivos — el total que el color de la banda no puede rotular en un solo punto.
+- El coste, el número de caminos y la semilla del sorteo, para que se pueda auditar y reproducir.
 
-### El descuento del puente
+### Detalle del cálculo, plegado
 
-Los años del puente están en el futuro, así que no hace falta tener hoy el dinero entero: lo que
-tengas seguirá creciendo mientras lo gastas. Con **el descuento del puente** eliges a qué tasa se
-cuenta eso:
-
-- **Rentabilidad esperada de tus líquidos** (por defecto) — la media de lo que esperas de tus
-  activos líquidos, ponderada por su valor.
-- **Tu tasa segura de retirada** — más prudente.
-- **Sin descuento** — el máximo de conservador: como si el dinero del puente no creciera nada.
-
-En el mismo ejemplo de arriba, **sin descontar** ese puente costaría 968.000 € en vez de 435.300 €.
-Si no tienes ni un euro líquido del que sacar la tasa, FutureFin cae a cero y **lo dice**, en vez de
-encarecerte el objetivo en silencio.
-
-Al lado del objetivo verás dos cifras que la cuenta clásica esconde:
-
-- **Tasa de retirada efectiva del puente** — lo que de verdad sacas de la cartera mientras la pensión
-  no llega. **Puede estar por encima de tu SWR sin que sea un error**: dura pocos años, no toda la
-  vida.
-- **Cobertura de la pensión** — qué parte de tu gasto cubre la pensión cuando empieza.
+Lo que no cabe en las tres tarjetas de arriba, sin desaparecer: el **número FIRE clásico**, las
+**fechas al 100 % y al 90 %**, y la **semilla y los caminos** con los que se resolvió tu plan — la
+identidad del resultado, no un metadato.
 
 ---
 
-## La sección «Riesgo»
+## Por qué la rentabilidad ahora es compuesta (CAGR)
 
-El riesgo —*¿y si los mercados no se portan como la media?*— ya no es un panel aparte con su propio
-gráfico: es la **banda** que puedes encender sobre el mismo chart de «Resultado», más un bloque
-**«Riesgo» compacto** justo debajo («Éxito del plan» y la línea de tu colchón de caja), con todo lo
-demás en «Detalle del cálculo», plegado.
+La rentabilidad que declaras en cada activo (Activos → «Rentabilidad anual esperada») siempre fue
+la anualizada que tu fondo publica. Lo que cambió con el modelo v2 es **cómo la lee el sorteo**:
+antes se trataba como una media aritmética de años sueltos; ahora se lee como lo que de verdad es,
+una tasa **compuesta** (CAGR), y el sorteo la convierte por dentro a la media aritmética que
+necesita para simular mes a mes.
 
-### Qué es la banda
+Para ti, en la práctica:
 
-FutureFin corre **cientos de veces el mismo plan** —el mismo motor, las mismas reglas, tus mismos
-datos— sorteando cada mes cuánto suben o bajan tus inversiones. El interruptor «Banda 10–90 %» del
-chart pinta la **franja** que sale de ese sorteo, del escenario 10 al escenario 90 —ocho de cada
-diez futuros caen dentro—, sobre la misma línea sólida de siempre (tu patrimonio) y el mismo
-objetivo discontinuo. Está encendida por defecto cuando hay escenarios que mostrar: el plan
-determinista es una lectura posible, no la única, y esconder la dispersión tras un clic la convierte
-en una curiosidad opcional.
+- **Tu línea no se mueve.** La trayectoria central sigue creciendo exactamente al ritmo que
+  declaraste: nada cambia en la cifra que ves como «tu patrimonio».
+- **El sorteo es más fiel.** Con activos volátiles, la media aritmética de muchos futuros sale algo
+  por encima de la línea central —es matemática, no un error—, y antes esa separación no estaba
+  bien calibrada.
+- **Tus cifras guardadas no se tocan.** No hay conversión que hacer: es la misma rentabilidad de
+  siempre, reinterpretada.
 
-### Qué dice el color de la banda
-
-La franja **no es de un solo color**: se tiñe por edad según **qué parte de los escenarios ya se ha
-quedado sin capital a esa altura del plan**. Verde donde no falla ninguno, ámbar en cuanto empiezan
-a fallar, rojo desde uno de cada diez. Los cortes son fijos y no dependen de nada que tú configures:
-
-| Escenarios agotados a esa edad | Color |
-|---|---|
-| ninguno (0 %) | verde |
-| hasta el 5 % | verde → ámbar, degradando |
-| del 5 % al 10 % | ámbar → rojo, degradando |
-| 10 % o más | rojo |
-
-Ese último corte no es arbitrario: **el 10 % de escenarios agotados es exactamente el 90 % de
-éxito**, el listón por debajo del cual FutureFin pinta tu plan en rojo. La escala se lee del otro
-lado, pero es el mismo semáforo.
-
-Pasa el ratón por encima y verás **el porcentaje exacto de esa edad**, no una aproximación del
-color: sale del mismo dato que lo tiñe. Y la cifra que el color no puede rotular —el total, cuántos
-escenarios se quedaron sin capital **en algún momento** del plan— está en «Detalle del cálculo».
-
-Sin volatilidad declarada en tus activos la banda no se colorea: no hay escenarios que contar, y
-pintarla de verde diría que ninguno falla cuando lo que pasa es que no se ha sorteado ninguno.
-
-Los dos bordes de la franja llevan su nombre a la derecha: **optimista (p90)** arriba y **pesimista
-(p10)** abajo.
-
-**La banda NO dibuja la mediana como una línea propia.** El valor central de cada mes —el que
-usan otras lecturas de esta sección, como los meses por debajo del gasto— sigue viviendo en los
-datos, pero no se traza aparte: solo se pinta el área entre el escenario 10 y el 90. Si buscas el
-trazo de la mediana en el gráfico, no está — la nota «Bandas puntuales» de «Detalle del cálculo»
-te lo recuerda: cada mes se ordena por separado, así que ni siquiera esa mediana correspondería a
-un futuro concreto.
-
-### Qué significa «Éxito del plan»
-
-**El éxito exige DOS cosas a la vez: que llegues a jubilarte dentro de tu horizonte —o en tu edad
-objetivo— y que, una vez jubilado, la cartera no se agote nunca**, con tus pensiones y tus fases ya
-dentro de la simulación. Un plan que nunca te jubila no cuenta como éxito aunque el dinero siga
-entero: quedarte para siempre en la fase de ahorro no es lograr tu plan, es no haberlo intentado.
-Por eso, cuando algún escenario se queda sin jubilar, debajo aparecen dos cifras más: cuántos son
-los que no llegan a jubilarse, y qué parte de los que **sí** se jubilan aguanta el capital hasta el
-final. El KPI principal es un porcentaje —«87,0 %»— con debajo, en pequeño, de qué es: «de los
-escenarios no agotan el capital».
-
-**El corte del color es fijo y ya no lo eliges tú.** Hubo un ajuste «umbral de éxito» (de serie,
-95 %) y se retiró: un listón configurable no hacía tu plan más seguro, solo más indulgente contigo
-mismo. Ahora es **verde solo con el 100,0 %** —cero escenarios agotados—, ámbar entre el 90 % y el
-100 %, rojo por debajo del 90 %. Con quinientos caminos sorteados, un solo fallo ya es ámbar; por
-eso, cuando el tile está verde, el subtítulo dice el recuento exacto («0 de 500 escenarios agotan el
-capital»), que es lo que hace auditable ese 100 %.
-
-**Que una regla de retirada te recorte el gasto en un año malo NO cuenta como fracaso.** Eso se mide
-aparte, en la **cobertura de tu gasto**: dos cifras que ahora se calculan igual con cualquier regla,
-incluida «Gasto fijo» — antes se escondían ahí porque solo miraban lo que la regla se negaba a
-sacar, y esa regla no recorta nunca por definición, así que siempre habrían dado «100 % cubierto».
-Ahora cuentan también lo que la cartera no pudo pagar porque ya no quedaba de dónde, que es la otra
-manera —y la peor— de quedarte corto. Son dos preguntas distintas: «¿me quedo sin dinero?» y «¿tengo
-que apretarme el cinturón?». Mezclarlas da un diagnóstico falso — con la regla del «% del saldo»
-nunca te quedas a cero, pero puedes acabar retirando céntimos.
-
-La misma cifra de éxito aparece en el Resumen, como KPI «Éxito del plan», y sale **del mismo
-sorteo**: no se recalcula en dos sitios, porque entonces la misma pantalla enseñaría dos
-probabilidades del mismo plan.
-
-La **probabilidad de agotar el capital** por edad ya no se tabula: **la dice el color de la banda**
-(arriba), con más detalle del que cabía en una tabla y con el porcentaje exacto en el hover. Es
-**acumulada**: el porcentaje a los 80 incluye a todos los que se quedaron sin dinero a los 75, así
-que solo puede crecer con la edad. El total —todos los escenarios que se agotaron en algún momento—
-está en «Detalle del cálculo», y esa cifra y el «éxito» cuentan lo mismo desde los dos lados.
-
-### La semilla
-
-El sorteo usa siempre **la misma semilla** para ti, así que la cifra **no baila entre visitas**: la
-misma pregunta da la misma respuesta hoy y dentro de un año. Sin eso, una herramienta como esta sería
-inservible — refrescarías la página y cambiaría el resultado.
-
-### La volatilidad se declara por activo
-
-Los escenarios necesitan saber **cuánto se mueve** cada cosa que tienes, y eso se declara en
-**Activos**, junto a la rentabilidad esperada: el campo **«Volatilidad anual (%)»**.
-
-Es la desviación típica **anual** de sus retornos — no una pérdida esperada ni un peor caso. Como
-referencia: renta variable global ~15–18 %, renta fija ~4–6 %, efectivo 0. Son cifras orientativas,
-no un dato de tu cartera: si conoces la de tu fondo, pon la suya.
-
-Dos cosas importan:
-
-- **La proyección de siempre —la línea— la ignora.** Declararla no mueve ni un euro de tu curva.
-  Solo alimenta las bandas.
-- **Si no la declaras en ningún activo, la banda es la línea** y el «éxito» sale del 100 %. FutureFin
-  lo avisa, porque un 100 % ahí es aritméticamente cierto y no significa nada.
-
-### El colchón de caja, contado honestamente
-
-El **colchón de caja** es dinero que la simulación mantiene siempre en efectivo durante la
-jubilación, para no tener que vender en un año malo. **Ya no se lo pides tú**: sale del **tope de tu
-regla de ahorro**. Si tienes una regla del tipo «hasta 6.000 € en la Cuenta corriente, el resto al
-fondo indexado», esos 6.000 € SON tu colchón — ya declaraste cuánto querías en caja al escribir la
-regla, y volver a preguntártelo en meses era pedirte el mismo dato dos veces con otra unidad.
-
-El bloque «Riesgo» te dice de dónde sale, cuánto es y a cuántos meses de tu gasto de hoy equivale, y
-enlaza a Reglas de ahorro, que es donde se cambia. **Es el importe, no los meses**: el tope de tu
-regla es una cifra fija en euros, mientras que «ocho meses de gasto» crecería con la inflación hasta
-valer casi el doble a veinte años — dos cosas distintas, y la que tú declaraste es la primera. Los
-meses que ves al lado son solo una equivalencia informativa.
-
-Si no tienes ninguna regla con tope apuntando a un activo líquido **sin volatilidad** declarada, no
-hay colchón, y la línea te dice cuál de las dos cosas falta en vez de callarlo. (Un colchón que
-también baja con el mercado no es un colchón.) Solo existe en los escenarios con volatilidad — en la
-línea determinista no hay meses buenos ni malos que distinguir, así que no tendría criterio.
-
-Se rellena vendiendo del resto de la cartera **solo con el shock del mes YA ocurrido**, nunca
-adelantándose al mercado, y **solo entre tus activos líquidos** — nunca vendiendo la vivienda para
-llenarlo.
-
-Se puede fijar a mano por API o por MCP (en meses), y entonces manda sobre la derivación; la línea
-lo dice y te ofrece «Volver al tope de tu regla» para soltarlo.
-
-**Y aquí va lo honesto, con las dos caras**: el colchón **SÍ protege** — medido, sube 3,9 puntos la
-probabilidad de éxito y casi dobla tu liquidez en el peor 10 % de los futuros —, pero **esa
-protección se paga**, y el precio es real: es la rentabilidad a la que renuncias por tener esos
-meses de gasto fuera del mercado en vez de invertidos. Si el dinero del colchón vive en una cuenta
-remunerada al 0 % —el caso más habitual—, ese coste se come la protección y el balance neto sale
-**negativo**, −3,5 puntos. El colchón no es gratis ni es mala idea por sistema: es tranquilidad que
-cuesta rentabilidad, y cuánto cuesta depende de dónde lo alojes. Se ofrece porque hay hogares que
-prefieren esa tranquilidad, y porque el número que importa es el tuyo: míralo en esta misma sección,
-con tus datos, antes de decidir.
+En Activos aparece, una única vez, un aviso que lo resume: «Desde 5.0.0 la rentabilidad que
+escribes se lee como compuesta (la anualizada que publica tu fondo). Tus cifras no cambian; el
+sorteo es más fiel para los activos volátiles.» Se apaga solo y no vuelve a aparecer.
 
 ---
 
-## Nada se fuerza sin que lo veas: todo campo en vigor está en su tarjeta
+## Cuánto tarda y por qué
 
-«Tu plan» te enseña solo los campos de tu estrategia — nada de fecha de nacimiento sin usarla, nada
-de bloque de pensión si no la has activado. Pero esconder un campo no es lo mismo que borrarlo: tu
-plan sigue asumiendo una tasa de retirada, una regla concreta y un horizonte aunque no te los esté
-preguntando en ese momento.
+Resolver tu plan no es una fórmula: es sortear el mismo plan miles de veces y contar cuántos
+aguantan, y eso tiene un coste.
 
-La respuesta a eso **son las tarjetas**. Todos esos supuestos viven en una —«Retirada»,
-«Horizonte»— junto a la frase que explica qué mueven, a la vista y sin desplegar nada. La regla es
-simple: **si tu plan lo asume, está en una tarjeta; si no está en ninguna tarjeta, tu plan no lo
-usa.**
+- **Lo que ves al momento** —con un indicador de «Resolviendo tu fecha válida» mientras corre—: tu
+  fecha válida, tu capital necesario hoy y el número propio de tu estrategia (aportación mínima,
+  mes coast, inicio de la fase). Cada uno se busca con **500 caminos** y se confirma con
+  **2.500** — los primeros 500 son los mismos en la búsqueda y en la confirmación, así que no se
+  tira trabajo.
+- **Lo que llega después, en segundo plano** —sin bloquear la pantalla, con su propio aviso:
+  «Calculando el capital necesario por edad…»—: la curva de capital necesario por edad, las
+  fechas al 100 % y al 90 %, el fallo acumulado por edad que tiñe la banda, y el éxito por año de
+  jubilación de la tira. Se resuelve una sola vez por plan —si dos pantallas piden lo mismo, no se
+  duplica el sorteo— y se apoya en los mismos 500/2.500 caminos que el resto.
 
-> **Antes había un acordeón «Avanzado» y una línea «Supuestos: retirada 3,5 % · gasto fijo en euros
-> de hoy · horizonte 90 años · sin colchón · umbral 95,0 %».** Los dos se retiraron a la vez, y no
-> por separado: la línea existía **para enunciar lo que el acordeón escondía**. Sin acordeón no hay
-> nada escondido que enunciar. Dos de los campos que vivían ahí ya ni existen: el colchón de caja se
-> deriva de tu regla de ahorro y el umbral de éxito es fijo.
-
----
-
-## El hogar
-
-Con **Hogar** activo, la pestaña Proyección enseña la suma de todo el mundo:
-
-- Una **línea gruesa** con el total, y **una línea fina por persona** con sus propios marcadores,
-  identificadas por nombre en la leyenda.
-- Los tiles del Resumen agregados, más **«Planes del hogar»**: no una rejilla de tarjetas, sino una
-  lista de frases, una por miembro (el mismo hito que da la pestaña Jubilación en tercera persona),
-  cada una con el punto de color de su línea fina en el chart.
-
-En la propia pestaña **Jubilación**, Hogar sustituye los tres bloques de configuración/resultado
-por un único aviso de solo lectura, la misma lista de frases por persona, y el enlace
-**Cambia a «Yo» para editar tu plan**.
-
-Tres cosas que conviene entender:
-
-1. **El hogar no tiene plan propio.** No hay una «jubilación del hogar», porque no existe: hay N
-   planes. Los campos de jubilación aparecen vacíos y con su razón, y el hito de cada persona va en
-   su frase.
-2. **El hogar no simula, suma.** El servidor corre una simulación por persona —con su perfil, su
-   fecha de nacimiento y sus filas— hasta el horizonte más largo de los miembros, y las suma.
-   **Si sois dos o más, los números del gráfico cambian respecto de la 4.x**: antes se simulaba una
-   sola cartera con una sola estrategia. Si vives solo, no se mueve nada.
-3. **El hogar es de solo lectura, y de verdad.** No es que se escondan los botones: **el servidor
-   también lo impide**. Editar o borrar una fila de otra persona devuelve un error de permisos, y
-   **el propietario de la instalación tampoco puede** — ser dueño del hogar no es ser dueño de la
-   fila. Leer sigue siendo libre: en Hogar ves el conjunto entero.
-
-La **banda de escenarios y el bloque «Riesgo»** no están disponibles en Hogar: los percentiles no se
-suman entre personas (el escenario 90 del hogar no es la suma de los escenarios 90 de cada uno), así
-que FutureFin no lo intenta en vez de enseñar una banda que nadie podría interpretar. Pero en Hogar
-tampoco hay «Tu plan»/«Resultado» que enseñar — ver arriba.
+El sorteo de referencia son **2.500 caminos**, siempre con la misma semilla por persona: la cifra
+no baila entre visitas. La vista Hogar no resuelve una fecha propia por miembro: cada persona
+resuelve la suya en su vista «Yo».
 
 ---
 
-## Qué cambió en Ajustes → Plan
+## Lo que el modelo NO hace (todavía)
 
-`Ajustes → Plan` **ya no tiene** tu SWR, tu modo de objetivo ni tu edad límite: se mudaron a
-Jubilación, que es donde vive tu plan. En su lugar hay un puntero a esa pestaña.
+Siete carencias, declaradas y con su issue, en vez de calladas:
 
-Lo que **sigue** en `Ajustes → Plan`, porque es del hogar y no de una persona:
+| No hace | Por qué importa | Issue |
+|---|---|---|
+| El sorteo es i.i.d. lognormal con un shock común, sin bootstrap histórico | Un «100 %» de verdad acotado exigiría muestrear de la historia real, no de una distribución teórica; el 100 % de hoy no converge con más caminos | #217 |
+| Los activos con volatilidad se mueven con correlación 1 entre ellos | Diversificar entre dos activos volátiles no reduce el riesgo del sorteo tanto como debería en la realidad | #217 |
+| El horizonte se fija por edad, sin ponderar por mortalidad | Un plan que «llega justo» a tu edad límite no dice qué pasa si vives más — y en una pareja de 65 años, que uno de los dos pase de los 95 no es tan raro | #218 |
+| La vista Hogar no resuelve fecha ni banda de escenarios por miembro | Cada persona sortea la suya en su vista «Yo»; el hogar solo suma lo determinista | #219 |
+| La regla «Con bandas» (Guyton-Klinger) no aplica su regla de inflación | El guardarraíl de subir o bajar la retirada existe; el ajuste por inflación que lo acompaña en la literatura, no | #220 |
+| Sin avisos legales sobre pensión anticipada o media jornada | Jubilarte antes de tiempo o reducir jornada tiene consecuencias legales sobre tu pensión pública real que este plan no modela | #221 |
+| El excedente en jubilación sigue tus reglas de ahorro sin publicar su coste fiscal | Reinvertir el sobrante tiene un coste en impuestos que el plan no enseña, y hace que los tres modos de gasto acaben pareciendo el mismo «gasto de hoy» por dentro | #227 |
 
-- La **inflación anual asumida**.
-- El **modo de edad** (fechas o edades en el eje del gráfico).
-- Los **tramos de IRPF** del ahorro y si los impuestos están activados.
-- La **fuente del ahorro** de la simulación y sus ventanas de promedio (ver
-  [Configuración](configuracion.md#la-fuente-del-ahorro-el-ajuste-que-redefine-tu-proyección)).
+Los impuestos se aplican como en el resto de la app —tramos de IRPF del ahorro, si los tienes
+activados—: el modelo v2 no cambió esa parte, y sigue siendo una simplificación conocida del motor.
 
-Es el reparto que la 5.0.0 establece y que conviene tener en la cabeza: **el hogar guarda los
-supuestos compartidos; cada persona guarda su plan.**
+---
+
+## Apéndice — Qué desapareció en la 5.0.0, y por qué
+
+Si buscas aquí algo que esta página describía antes, es porque el panel adversarial de septiembre
+de 2026 lo retiró. Ninguno se fue por descuido: cada uno tenía una razón.
+
+- **El objetivo como disparador de la fecha.** Un capital estático que tu patrimonio cruzaba
+  decidía cuándo te jubilabas; ahora decide el éxito —el primer mes en que aguantan los escenarios
+  que tu umbral exige—, porque un objetivo que se cruza en un año malo dice que estás bien
+  jubilándote justo cuando el sorteo dice lo contrario.
+- **La base del objetivo (perpetuidad o puente).** Elegías si tu objetivo FIRE se calculaba como
+  una renta perpetua —vivir de él para siempre, ignorando la pensión— o como un puente hasta la
+  pensión; sin objetivo que dimensionar, no queda base que elegir.
+- **El descuento del puente.** La tasa a la que se descontaban los años del puente —tus líquidos,
+  tu tasa de retirada, o sin descontar nada— desapareció con el objetivo que descontaba: el puente
+  de hoy es un tope de tasa inicial, no una cifra que traer a valor presente.
+- **El colchón de caja derivado de una regla de acumulación propia.** Una reserva en meses de gasto
+  que el motor mantenía aparte; hoy la caja es un activo más, y el tope en euros de tu regla de
+  ahorro ES tu colchón, sin una segunda cifra que pudiera desincronizarse de la primera.
+- **El semáforo fijo al 100 %.** Con la versión anterior el umbral es fijo: el color de «Éxito del
+  plan» solo se ponía verde con el 100 % exacto, decidiera el usuario lo que decidiera; hoy el
+  umbral es tuyo (80–100, de serie 95) y el color se compara contra él, no contra un listón que a
+  nadie servía si pedías un 80 %.
+- **«Puente hasta la pensión» como una estrategia más.** El selector tenía cinco estrategias, y
+  esta era la quinta, con su propio disparador; hoy son cuatro, y el puente vive como un ajuste de
+  la tarjeta Pensión disponible en cualquiera de ellas. Un perfil guardado con la estrategia
+  `pension_bridge` migra solo a «Cuanto antes» con el puente activado, con un aviso.
+- **Los percentiles del cruce por camino.** Antes se guardaba en qué mes cruzaba el objetivo cada
+  camino individual del sorteo; sin objetivo que cruzar, la pregunta deja de tener sentido, y lo
+  que queda es el éxito por fecha que ya cuenta esta página.
 
 ---
 
 ## Ver también
 
-- [Actualizar](actualizar.md#actualizar-a-la-500) — qué pasa al saltar desde la 4.x, y qué verá un
-  hogar de dos personas.
-- [Configuración](configuracion.md#ajustes-de-la-instalación-dentro-de-la-app-no-por-entorno) — los
-  ajustes que siguen siendo del hogar.
-- [Conectar Claude](mcp.md) — desde el chat puedes preguntar «¿y si me jubilo a los 55?» sin guardar
-  nada.
+- [Actualizar](actualizar.md#actualizar-a-la-500) — qué pasa al saltar desde la 4.x o desde la
+  primera versión de la 5.0.0.
+- [Configuración](configuracion.md#la-fuente-del-ahorro-el-ajuste-que-redefine-tu-proyección) — la
+  fuente del ahorro, la inflación anual y los tramos de IRPF, que siguen siendo del hogar.
+- [Conectar Claude](mcp.md) — desde el chat puedes preguntar «¿y si me jubilo a los 55?» sin
+  guardar nada.

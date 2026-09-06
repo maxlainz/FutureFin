@@ -585,6 +585,19 @@ impl BackupFireSettings {
     ///
     /// `None` cuando el fichero no llevaba ninguno (v13, o un v12 con el JSONB ya limpio): en ese
     /// caso no hay nada que sembrar y el usuario se queda con sus defaults.
+    ///
+    /// **Devuelve un perfil SIN RESOLVER (B3).** Hasta 5.0.0-WP5 esta función terminaba en
+    /// `resolve_retirement_profile(Some(p))` — «para mantener el clamp en un solo sitio», decía
+    /// el comentario que sustituye — y lo que sembraba el importador con ese resultado ERA lo que
+    /// se guardaba en `users.retirement_profile`. El problema no es el clamp (los cuatro ejes se
+    /// siguen acotando aquí, a mano, contra las MISMAS cotas): es que `resolve_retirement_profile`
+    /// también DERIVA — el `pct_source` de una regla por saldo, el `bridge_enabled` que el alias
+    /// `pension_bridge` enciende — y guardar ese resultado freza esas derivaciones como si el
+    /// usuario las hubiera elegido, en vez de dejarlas para que se calculen en cada lectura. Un
+    /// backup ≤ v12 nunca trae ni regla de retirada ni pensión (`LegacyFireAxes` solo tiene los
+    /// cuatro ejes de abajo), así que hoy el efecto observable es nulo — pero el día que este
+    /// sembrado se extienda a más campos, la próxima persona que lo toque no tiene que descubrir
+    /// esta trampa dos veces.
     pub fn legacy_retirement_profile(
         &self,
     ) -> Option<crate::handlers::retirement_profile::RetirementProfile> {
@@ -598,15 +611,27 @@ impl BackupFireSettings {
         if self.legacy.fire_number_manual_amount.is_some() {
             p.fire_number_manual_amount = self.legacy.fire_number_manual_amount;
         }
+        // Clamp A MANO de los dos ejes numéricos, contra las MISMAS cotas que
+        // `resolve_retirement_profile` aplicaría en lectura — un fichero manipulado a mano
+        // (o de una versión con cotas más laxas) no puede sembrar un SWR de 99 ni un horizonte
+        // de 200 años. `fire_number_mode` es un enum cerrado (no hay nada que acotar) y
+        // `fire_number_manual_amount` no lleva cota de lectura (solo la de ESCRITURA,
+        // `fire_manual_amount_not_positive`, que no aplica aquí: sembrar no es escribir).
         if let Some(v) = self.legacy.swr_pct {
-            p.swr_pct = v;
+            p.swr_pct = v.clamp(
+                rust_decimal::Decimal::ZERO,
+                crate::handlers::retirement_profile::MAX_SWR_PCT,
+            );
         }
         if let Some(v) = self.legacy.horizon_lifespan_age {
-            p.horizon_lifespan_age = v;
+            p.horizon_lifespan_age = v.clamp(
+                crate::handlers::installation::MIN_HORIZON_LIFESPAN_AGE,
+                crate::handlers::installation::MAX_HORIZON_LIFESPAN_AGE,
+            );
         }
-        // Resolver aquí (y no en el importador) mantiene el clamp en UN solo sitio: un fichero
-        // manipulado a mano no puede sembrar un SWR de 99.
-        Some(crate::handlers::retirement_profile::resolve_retirement_profile(Some(p)))
+        // Sin `resolve_retirement_profile`: lo que sale de aquí es exactamente lo que el fichero
+        // traía, acotado — nunca una derivación congelada como si fuera una elección.
+        Some(p)
     }
 }
 

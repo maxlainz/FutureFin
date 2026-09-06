@@ -1817,14 +1817,25 @@ async fn v13_roundtrips_the_retirement_profile_and_the_asset_volatility() {
         .await;
     assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
 
+    // Los campos del modelo v2 (5.0.0): umbral de éxito, coast en modo B y el puente DENTRO de la
+    // pensión — nada de `cash_buffer_months`/`target_basis`, que ya no existen.
     let r = app
         .patch_json_with_cookie(
             "/v1/auth/me/retirement-profile",
             serde_json::json!({
-                "strategy": "pension_bridge",
+                "strategy": "retire_at_age",
+                "target_retirement_age": 60,
                 "swr_pct": "3.1",
-                "pension": {"monthly_amount_today": "1100", "starts_at_age": 66},
-                "cash_buffer_months": 18
+                "success_threshold_pct": 90,
+                "coast_mode": "fixed_stop_age",
+                "coast_stop_age": 58,
+                "pension": {
+                    "monthly_amount_today": "1100",
+                    "starts_at_age": 66,
+                    "bridge_enabled": true,
+                    "bridge_max_pct": "6",
+                    "bridge_max_years": 10
+                }
             }),
             &owner.cookie,
         )
@@ -1833,10 +1844,12 @@ async fn v13_roundtrips_the_retirement_profile_and_the_asset_volatility() {
 
     let file = export_ffbackup_b64(&app, &owner.cookie).await;
 
-    // El manifiesto declara la versión nueva.
+    // El manifiesto declara la versión nueva, y el preview dice que el perfil se va a sustituir
+    // (un v13 con perfil propio SIEMPRE gana, tenga uno o no quien importa — B3).
     let preview = import_preview(&app, &owner.cookie, &file).await;
     assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
     assert_eq!(preview.json()["schema_version"], 13, "{preview:?}");
+    assert_eq!(preview.json()["retirement_profile"], "replaced", "{preview:?}");
 
     // Se borra todo y se restaura.
     let applied = import_apply(&app, &owner.cookie, &file).await;
@@ -1856,26 +1869,39 @@ async fn v13_roundtrips_the_retirement_profile_and_the_asset_volatility() {
         .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
         .await
         .json();
-    assert_eq!(profile["profile"]["strategy"], "pension_bridge", "{profile}");
-    assert_eq!(profile["profile"]["swr_pct"], "3.1", "{profile}");
-    assert_eq!(profile["profile"]["pension"]["starts_at_age"], 66, "{profile}");
-    assert_eq!(profile["profile"]["cash_buffer_months"], 18, "{profile}");
+    let p = &profile["profile"];
+    assert_eq!(p["strategy"], "retire_at_age", "{profile}");
+    assert_eq!(p["target_retirement_age"], 60, "{profile}");
+    assert_eq!(p["swr_pct"], "3.1", "{profile}");
+    assert_eq!(p["success_threshold_pct"], 90, "{profile}");
+    assert_eq!(p["coast_mode"], "fixed_stop_age", "{profile}");
+    assert_eq!(p["coast_stop_age"], 58, "{profile}");
+    assert_eq!(p["pension"]["starts_at_age"], 66, "{profile}");
+    assert_eq!(p["pension"]["bridge_enabled"], true, "{profile}");
+    assert_eq!(p["pension"]["bridge_max_pct"], "6", "{profile}");
+    assert_eq!(p["pension"]["bridge_max_years"], 10, "{profile}");
 }
 
 /// Importar un fichero **v12** (escrito por 4.15.x) SIEMBRA el perfil con los cuatro ejes que
-/// aquel `fire_settings` llevaba dentro — pero solo si quien importa no tiene perfil propio.
+/// aquel `fire_settings` llevaba dentro — pero solo si quien importa no tiene perfil propio, y
+/// **sin pasar por `resolve_retirement_profile`** (B3): lo que se guarda es el fichero acotado a
+/// las cotas de hoy, nunca una derivación congelada como si fuera una elección del usuario.
 ///
-/// Las dos mitades importan. Sin la siembra, restaurar un backup de 4.15.x devolvería a esa
-/// persona al SWR por defecto y su objetivo de jubilación cambiaría de tamaño sin ningún aviso.
-/// Sin la condición, restaurar un backup viejo pisaría la estrategia que configuró DESPUÉS de
-/// actualizar — que es justo lo que un restore no debe hacer con un dato que el fichero no
-/// conoce.
+/// Tres cosas en un test: los ejes fuera de rango se siguen acotando (eso no cambia con el
+/// arreglo de B3 — el clamp sigue existiendo, solo que ahora vive a mano en
+/// `legacy_retirement_profile` en vez de en `resolve_retirement_profile`); lo que SÍ se deriva en
+/// lectura (`pct_source`) no llega ya congelado como «explicit»; y sin la siembra, restaurar un
+/// backup de 4.15.x devolvería a esa persona al SWR por defecto sin ningún aviso, mientras que
+/// sin la condición de «solo si no tiene perfil», restaurar un backup viejo pisaría la estrategia
+/// que configuró DESPUÉS de actualizar.
 #[tokio::test]
-async fn importing_a_v12_file_seeds_the_profile_only_when_there_is_none() {
+async fn a_legacy_backup_seeds_an_unresolved_profile() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
 
-    // Un v12 mínimo: el `fire_settings` de entonces, con los cuatro ejes DENTRO.
+    // Un v12 mínimo: el `fire_settings` de entonces, con los cuatro ejes DENTRO — dos de ellos
+    // FUERA de las cotas de hoy (el SWR tope subió a 6 %, el horizonte tope es 105 años), como
+    // podría traerlos un fichero de una versión con cotas más laxas o editado a mano.
     let payload = serde_json::json!({
         "user": {"username": "alice", "birth_date": "1990-01-01"},
         "categories_used": [],
@@ -1892,8 +1918,8 @@ async fn importing_a_v12_file_seeds_the_profile_only_when_there_is_none() {
             "fire_settings": {
                 "fire_number_mode": "current_income",
                 "fire_number_manual_amount": null,
-                "swr_pct": "2.75",
-                "horizon_lifespan_age": 97,
+                "swr_pct": "9",
+                "horizon_lifespan_age": 200,
                 "taxes_enabled": true,
                 "tax_brackets": [{"up_to": null, "pct": "19"}],
                 "savings_source": "budget"
@@ -1902,21 +1928,39 @@ async fn importing_a_v12_file_seeds_the_profile_only_when_there_is_none() {
     });
     let file = craft_ffbackup_b64(12, &payload, owner.user_id);
 
-    // 1) Usuario SIN perfil (columna NULL): se siembra con los cuatro ejes del fichero.
+    // El preview ya avisa de que va a sembrar: nadie tiene perfil todavía.
+    let preview = import_preview(&app, &owner.cookie, &file).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(preview.json()["retirement_profile"], "seeded_from_4x", "{preview:?}");
+
+    // 1) Usuario SIN perfil (columna NULL): se siembra con los cuatro ejes del fichero, acotados.
     let applied = import_apply(&app, &owner.cookie, &file).await;
     assert_eq!(applied.status, http::StatusCode::OK, "{applied:?}");
     let profile = app
         .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
         .await
         .json();
-    assert_eq!(profile["profile"]["swr_pct"], "2.75", "{profile}");
-    assert_eq!(profile["profile"]["horizon_lifespan_age"], 97, "{profile}");
+    let p = &profile["profile"];
+    assert_eq!(p["swr_pct"], "6", "el SWR se acota al techo de hoy: {profile}");
     assert_eq!(
-        profile["profile"]["fire_number_mode"], "current_income",
-        "{profile}"
+        p["horizon_lifespan_age"], 105,
+        "el horizonte se acota al techo de hoy: {profile}"
     );
+    assert_eq!(p["fire_number_mode"], "current_income", "{profile}");
     // La estrategia no viene del fichero: es la de 4.15.x, que es `asap`.
-    assert_eq!(profile["profile"]["strategy"], "asap", "{profile}");
+    assert_eq!(p["strategy"], "asap", "{profile}");
+    // Lo que SÍ se deriva en lectura no llega congelado como una elección explícita: con la
+    // regla por defecto (`fixed_real`, la única que un fichero ≤ v12 puede sembrar) ni siquiera
+    // se publica —esa regla no tiene porcentaje que resolver—, y si algún día lo hiciera, solo
+    // puede venir heredado del SWR, nunca marcado `explicit`.
+    match p["withdrawal_rule"].get("pct_source") {
+        None => {}
+        Some(v) if v.is_null() => {}
+        Some(v) => assert_eq!(
+            v, "swr",
+            "un pct_source sembrado desde un fichero legado nunca puede ser explicit: {profile}"
+        ),
+    }
 
     // 2) El usuario configura SU plan después de actualizar…
     let r = app
@@ -1928,7 +1972,13 @@ async fn importing_a_v12_file_seeds_the_profile_only_when_there_is_none() {
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
 
-    // …y volver a importar el MISMO fichero viejo NO se lo pisa.
+    // …y volver a importar el MISMO fichero viejo NO se lo pisa — el preview lo anticipa.
+    let preview = import_preview(&app, &owner.cookie, &file).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(
+        preview.json()["retirement_profile"], "ignored_already_configured",
+        "{preview:?}"
+    );
     let applied = import_apply(&app, &owner.cookie, &file).await;
     assert_eq!(applied.status, http::StatusCode::OK, "{applied:?}");
     let profile = app
@@ -1938,6 +1988,138 @@ async fn importing_a_v12_file_seeds_the_profile_only_when_there_is_none() {
     assert_eq!(profile["profile"]["strategy"], "retire_at_age", "{profile}");
     assert_eq!(profile["profile"]["target_retirement_age"], 55, "{profile}");
     assert_eq!(profile["profile"]["swr_pct"], "3.5", "{profile}");
+}
+
+/// El preview de importación dice, para las CUATRO combinaciones posibles, qué le va a pasar al
+/// perfil de jubilación de quien importa — ANTES de que la importación real lo cambie.
+#[tokio::test]
+async fn the_import_preview_says_what_will_happen_to_the_retirement_profile() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let bare_v12 = |fire_settings: serde_json::Value| {
+        serde_json::json!({
+            "user": {"username": "alice", "birth_date": null},
+            "categories_used": [],
+            "assets": [],
+            "allocation_rules": [],
+            "liabilities": [],
+            "budget_entries": [],
+            "planning_flows": [],
+            "ui_preferences": {},
+            "installation_snapshot_informative": {
+                "base_currency": "EUR",
+                "calendar_tz": "UTC",
+                "show_age_mode": "dates",
+                "fire_settings": fire_settings
+            }
+        })
+    };
+
+    // 1) Sin perfil propio y SIN ejes legados en el fichero: no hay nada que cambiar.
+    let file_bare = craft_ffbackup_b64(12, &bare_v12(serde_json::json!({})), owner.user_id);
+    let preview = import_preview(&app, &owner.cookie, &file_bare).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(preview.json()["retirement_profile"], "kept", "{preview:?}");
+
+    // 2) v ≤ 12 con ejes legados y SIN perfil propio: se va a sembrar.
+    let file_legacy = craft_ffbackup_b64(
+        12,
+        &bare_v12(serde_json::json!({
+            "fire_number_mode": "current_income",
+            "swr_pct": "3.25",
+            "horizon_lifespan_age": 95,
+            "taxes_enabled": true,
+            "tax_brackets": [{"up_to": null, "pct": "19"}]
+        })),
+        owner.user_id,
+    );
+    let preview = import_preview(&app, &owner.cookie, &file_legacy).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(preview.json()["retirement_profile"], "seeded_from_4x", "{preview:?}");
+
+    // 3) Configura SU plan…
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({"strategy": "retire_at_age", "target_retirement_age": 55}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    // …y el MISMO fichero legado ahora se ignora: ya tiene perfil propio.
+    let preview = import_preview(&app, &owner.cookie, &file_legacy).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(
+        preview.json()["retirement_profile"], "ignored_already_configured",
+        "{preview:?}"
+    );
+
+    // 4) Un v13 con perfil EXPLÍCITO sustituye siempre, tenga uno o no quien importa.
+    let file_v13 = export_ffbackup_b64(&app, &owner.cookie).await;
+    let preview = import_preview(&app, &owner.cookie, &file_v13).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(preview.json()["retirement_profile"], "replaced", "{preview:?}");
+}
+
+/// **Exportar un perfil que llegó con el literal retirado `pension_bridge` no puede perder el
+/// puente** (A1's caveat, B3). `migrated_from_pension_bridge` es `#[serde(skip)]` — nunca viaja
+/// por el wire —, así que exportar el perfil TAL CUAL (con el flag transitorio solo en memoria)
+/// escribiría `strategy: "asap"` con `bridge_enabled` en lo que fuera que hubiera en la fila
+/// (normalmente `false`, porque nadie ha vuelto a escribir el perfil desde que llegó con ese
+/// literal). Una restauración posterior perdería el puente sin ningún aviso.
+///
+/// `stored_retirement_profile` en el export resuelve ESTE aspecto y solo este: enciende
+/// `bridge_enabled` y rellena sus defaults si faltan — el resto del perfil se sigue exportando
+/// sin resolver.
+#[tokio::test]
+async fn a_pension_bridge_profile_round_trips_with_the_bridge_on() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // El JSONB que podía dejar una build de 5.0.0 anterior a que C7 convirtiera la estrategia en
+    // un alias: nadie ha vuelto a escribir este perfil desde entonces.
+    sqlx::query(r#"UPDATE users SET retirement_profile = $1::jsonb WHERE id = $2"#)
+        .bind(
+            r#"{"strategy":"pension_bridge","swr_pct":"3.5",
+                "pension":{"monthly_amount_today":"1200","starts_at_age":67,"indexed":true}}"#,
+        )
+        .bind(owner.user_id)
+        .execute(&app.pool)
+        .await
+        .expect("seed pension_bridge profile");
+
+    // Exportar no pasa por ningún GET/PATCH: es la lectura directa de `stored_retirement_profile`.
+    let file = export_ffbackup_b64(&app, &owner.cookie).await;
+
+    // El fichero se restaura sobre la MISMA cuenta (import es replace-only de lo propio).
+    let applied = import_apply(&app, &owner.cookie, &file).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "{applied:?}");
+
+    let profile = app
+        .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
+        .await
+        .json();
+    let p = &profile["profile"];
+    assert_eq!(p["strategy"], "asap", "{profile}");
+    assert_eq!(
+        p["pension"]["bridge_enabled"], true,
+        "el puente sigue encendido tras el roundtrip: {profile}"
+    );
+    assert_eq!(p["pension"]["bridge_max_pct"], "5", "{profile}");
+    assert_eq!(p["pension"]["bridge_max_years"], 7, "{profile}");
+
+    // Y en el ALMACÉN, no solo en la lectura resuelta: el fichero materializó el puente de
+    // verdad, no un artefacto del clamp de lectura.
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT retirement_profile FROM users WHERE id = $1")
+            .bind(owner.user_id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("select profile");
+    assert_eq!(stored["strategy"], "asap", "{stored}");
+    assert_eq!(stored["pension"]["bridge_enabled"], true, "{stored}");
 }
 
 // ---------------------------------------------------------------------------

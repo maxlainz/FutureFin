@@ -234,8 +234,13 @@ async fn build_payload(
     // El perfil se exporta **sin resolver**: `None` significa «este usuario nunca lo configuró»,
     // y restaurar eso como `NULL` deja exactamente el mismo estado. Guardar el resuelto
     // convertiría un default en una elección.
+    //
+    // **Una única excepción, y acotada a un solo aspecto**: el alias retirado `pension_bridge`
+    // (ver `materialize_pension_bridge_alias_for_export`).
     let retirement_profile =
-        crate::handlers::retirement_profile::stored_retirement_profile(pool, user_id).await?;
+        crate::handlers::retirement_profile::stored_retirement_profile(pool, user_id)
+            .await?
+            .map(materialize_pension_bridge_alias_for_export);
     let transfer_match_rejections =
         fetch_transfer_match_rejections(pool, iid, user_id, &txn_id_to_index).await?;
 
@@ -257,6 +262,48 @@ async fn build_payload(
         recurring_transaction_rules,
         transfer_match_rejections,
     })
+}
+
+/// Resuelve el alias retirado `pension_bridge` en el perfil que se va a exportar, y SOLO ese
+/// aspecto (A1's caveat, B3).
+///
+/// `RetirementProfile::migrated_from_pension_bridge` es `#[serde(skip)]`: existe para que
+/// `resolve_retirement_profile` sepa que tiene que encender el puente EN LECTURA, pero nunca
+/// viaja por el wire — ni al escribir en la base, ni al exportar. Un perfil cuya fila en
+/// `users.retirement_profile` todavía lleva el literal retirado (`{"strategy":"pension_bridge",
+/// ...}`, herencia de una build de 5.0.0 anterior a que C7 lo convirtiera en alias, o de una
+/// edición directa de la base) y que **nadie ha vuelto a PATCHear desde entonces** exportaría, si
+/// se serializara tal cual, `strategy: "asap"` con el puente **apagado** — porque `strategy` ya
+/// vale `Asap` en memoria (la variante `PensionBridge` no existe) y lo único que decía «enciende
+/// el puente» era el flag que el `Serialize` derivado ignora. Restaurar ese fichero perdería el
+/// puente sin ningún aviso.
+///
+/// La corrección materializa aquí, en el struct que se va a serializar, exactamente lo que
+/// `resolve_retirement_profile` habría derivado para el puente —`bridge_enabled = true`, y sus
+/// dos números si faltan, con los MISMOS defaults del owner (`default_bridge_pct`/
+/// `DEFAULT_BRIDGE_YEARS`, C7) — y nada más: no se resuelve el resto del perfil (clamps,
+/// `withdrawal_rule.pct_source`…), que se sigue exportando tal cual el usuario lo dejó. El
+/// fichero resultante ya no necesita el alias para restaurar el puente: `strategy: "asap"` +
+/// `pension.bridge_enabled: true` es un perfil v2 perfectamente normal, y el import de hoy —sin
+/// tocar una línea— lo guarda tal cual llega.
+fn materialize_pension_bridge_alias_for_export(
+    mut p: crate::handlers::retirement_profile::RetirementProfile,
+) -> crate::handlers::retirement_profile::RetirementProfile {
+    if p.migrated_from_pension_bridge {
+        if let Some(pen) = p.pension.as_mut() {
+            pen.bridge_enabled = true;
+            if pen.bridge_max_pct.is_none() {
+                pen.bridge_max_pct = Some(crate::handlers::retirement_profile::default_bridge_pct(
+                    p.swr_pct,
+                ));
+            }
+            if pen.bridge_max_years.is_none() {
+                pen.bridge_max_years =
+                    Some(crate::handlers::retirement_profile::DEFAULT_BRIDGE_YEARS);
+            }
+        }
+    }
+    p
 }
 
 /// Recurring-transaction rules (schema_version ≥ 6). Returns the rules plus a `rule_id → index`

@@ -120,14 +120,21 @@ CAT_OCIO="$(pick_id "$CATS" 'Ocio')"
 # ── Activos ───────────────────────────────────────────────────────────────────
 
 # 5.0.0: el plan de jubilación es de cada persona, no del hogar (perfil por usuario). Modo del
-# objetivo, SWR y edad límite viven aquí; la pensión con fecha alimenta el objetivo puente y las
-# bandas de Monte Carlo la leen. Cifras inventadas, como todo lo demás.
-say "perfil de jubilación: estrategia, SWR y pensión con fecha"
+# objetivo, SWR, edad límite y umbral de éxito viven aquí; la pensión con fecha es un flujo de
+# caja que entra al jubilarse (SIN puente: `bridge_enabled` ausente ⇒ apagado, que es lo que
+# declara la mayoría de gente — el puente es un ajuste, no el caso general). Cifras inventadas,
+# como todo lo demás.
+#
+# Esta es la ÚNICA superficie del repositorio donde el modelo v2 se mira CON DATOS (el resto son
+# fixtures sintéticos aislados o unit tests): si un cambio del perfil rompe algo que solo se ve
+# con una instalación sembrada, es aquí donde se nota primero.
+say "perfil de jubilación: estrategia, SWR, umbral de éxito y pensión con fecha"
 api PATCH /v1/auth/me/retirement-profile '{
   "strategy": "asap",
   "fire_number_mode": "annual_expense",
   "swr_pct": "3.5",
   "horizon_lifespan_age": 90,
+  "success_threshold_pct": 95,
   "pension": {"monthly_amount_today": "1200", "starts_at_age": 67, "indexed": true}
 }' >/dev/null
 say "activos"

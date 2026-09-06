@@ -93,6 +93,37 @@ la versión anterior es la única copia que una 4.x podría volver a leer (ver e
   moverse porque se corrigió una venta de más que no debía ocurrir; y si en la sección Riesgo miras
   la probabilidad de éxito de un plan que se jubila muy tarde en tu horizonte, esa cifra también
   cambia — antes contaba como éxito a quien nunca llegaba a jubilarse, y ya no.
+- **Restaurar un `.ffbackup` puede sembrar tu plan, sustituirlo entero, o no tocarlo — según la
+  versión del fichero y si ya tienes uno.** Un fichero **anterior a la 5.0.0** (versión ≤ 12: no
+  llevaba plan de jubilación, solo los cuatro ajustes de siempre dentro de los del hogar) siembra
+  tu plan con esos cuatro ajustes **solo si todavía no tienes uno propio** — restaurarlo después de
+  haber tocado la pestaña Jubilación no te pisa la estrategia que hayas elegido. Un fichero **v13**
+  (5.0.0 en adelante, con plan de jubilación propio) **siempre sustituye tu plan entero** por el
+  que llevaba el fichero, tengas uno configurado o no: a diferencia de los cuatro ajustes sueltos
+  de un fichero viejo, un v13 es «tu plan tal cual lo dejaste», no un dato heredado que haya que
+  proteger. Antes de confirmar una importación, la pantalla de vista previa dice cuál de las tres
+  cosas le va a pasar a tu plan.
+- **El nombre «Puente hasta la pensión» no sobrevivió a la 5.0.0, pero el puente sí.** Si tu plan
+  quedó guardado con ese nombre durante una versión intermedia de la 5.0.0 —antes de que pasara a
+  ser un interruptor dentro de la tarjeta Pensión en vez de una estrategia propia—, la primera vez
+  que lo leas, lo exportes o lo toques se migra solo a «Cuanto antes» con el puente **encendido**
+  (con una tasa y un plazo por defecto si tu fichero no traía ninguno): no pierdes el puente, solo
+  cambia dónde vive el interruptor.
+- **La migración también limpia cuatro claves que nunca llegaron a decidir nada**: el umbral de
+  éxito guardado por una vuelta anterior de la 5.0.0 (se aceptaba y se ignoraba entonces; ahora
+  vuelve a mandar, con el 95 % de siempre como valor por defecto — nadie hereda como elección un
+  número que nunca eligió), y las tres claves retiradas `target_basis`, `bridge_discount_basis` y
+  `cash_buffer_months` (la pensión pasa a ser un flujo de caja sin objetivo que descontar, y el
+  colchón de caja desaparece como mecanismo aparte). Ninguna de las cuatro tenía ya un lector: no
+  hay nada que recuperar.
+- **Aviso para un hogar de más de una persona en modo «Importe manual» del objetivo FIRE.** La
+  migración copia el importe manual del hogar al plan de CADA persona, tal cual, sin repartirlo:
+  hasta la 4.15 ese importe describía la necesidad de todo el hogar simulado como una sola cartera,
+  y desde la 5.0.0 cada persona se simula sola. Si los dos seguís arrastrando el mismo importe
+  entero sin tocarlo, cada uno simula como si tuviera que cubrir el gasto de los DOS con solo la
+  mitad de los activos del hogar — la fecha de jubilación se retrasa años más de lo que le
+  correspondería. Revisa el objetivo de cada miembro en su pestaña Jubilación y ajusta el importe
+  manual al que le toca a esa persona.
 
 ### 3. Filas «de nadie»: el reasignado de propietario
 
