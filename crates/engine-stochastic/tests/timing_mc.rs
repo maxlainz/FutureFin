@@ -275,3 +275,231 @@ fn the_date_solve_costs_what_the_plan_says() {
         black_box(solve);
     }
 }
+
+/// (e) **El capital necesario** (WP E7): la cifra de HOY (`k = 1`, bisección sobre `λ` con
+/// confirmación) y la CURVA por edad (14 nodos, warm start, solo búsqueda).
+///
+/// Presupuesto del plan: **≤ 3 s** típico para la cifra de hoy —es de nivel 1, va en línea con la
+/// fecha— y **≈ 12 s** para la curva, que es de nivel 2 y se calcula en segundo plano. Como todo
+/// en este fichero, el test IMPRIME lo medido en vez de afirmarlo.
+///
+/// El coste tiene la misma FORMA que el de la fecha —`draws_search · t(500) + draws_confirm ·
+/// t(2.500)`— con una diferencia que conviene tener presente al leer los números: cada sorteo de
+/// `λ` **reconstruye** la maquinaria (`PathEngine`) porque cambia la ENTRADA, no solo el trigger.
+#[test]
+#[ignore = "mide, no afirma: correr con --release --ignored --nocapture"]
+fn the_needed_capital_solve_costs_what_the_plan_says() {
+    use futurefin_engine::InitialRateGate;
+    use futurefin_engine_stochastic::{needed_capital_curve, needed_capital_today};
+    use rust_decimal::Decimal;
+
+    let seed = 20_260_906u64;
+    let search = McConfig {
+        seed,
+        paths: 500,
+        ..Default::default()
+    };
+    let confirm = McConfig {
+        seed,
+        paths: 2_500,
+        ..Default::default()
+    };
+
+    let mut base = p9();
+    base.phase_plan.initial_rate = Some(InitialRateGate {
+        swr_pct: Decimal::new(35, 1),
+        bridge: None,
+    });
+    let v = vols();
+
+    // ---- 1. La cifra de HOY, con los dos umbrales de la demo -------------------------------
+    for threshold in [95u32, 80u32] {
+        let t0 = Instant::now();
+        let today = needed_capital_today(&base, &v, &search, &confirm, threshold)
+            .expect("el sorteo no falla");
+        let secs = t0.elapsed().as_secs_f64();
+        let paths_total = today.draws_search * search.paths + today.draws_confirm * confirm.paths;
+        println!(
+            "[mc-timing/{}] P9 840 meses · capital necesario HOY · umbral {threshold} ⇒ \
+             λ* {:?} · nominal {:?} € · hoy {:?} € · ausencia {:?} · aprox {} · \
+             éxito {:?} (wilson_low {:?}, fallos {:?}) · sorteos {}×500 + {}×2.500 \
+             = {paths_total} caminos · **{secs:.2} s** (plan: ≤ 3 s)",
+            profile(),
+            today.lambda.map(|l| (l * 10_000.0).round() / 10_000.0),
+            today.amount_nominal,
+            today.amount_today,
+            today.absent_reason,
+            today.capital_is_approximate,
+            today.success_at_lambda.map(|s| (s.success * 10_000.0).round() / 10_000.0),
+            today.success_at_lambda.map(|s| (s.wilson_low * 10_000.0).round() / 10_000.0),
+            today.success_at_lambda.map(|s| s.by_kind),
+            today.draws_search,
+            today.draws_confirm,
+        );
+        black_box(today);
+    }
+
+    // ---- 2. La CURVA: 14 nodos (cada 60 meses ∪ el horizonte) --------------------------------
+    let grid: Vec<u32> = (1..=13).map(|i| 1 + 60 * (i - 1)).chain([840]).collect();
+    let t0 = Instant::now();
+    let curve = needed_capital_curve(&base, &v, &search, 95, &grid).expect("el sorteo no falla");
+    let secs = t0.elapsed().as_secs_f64();
+    let draws: u32 = curve.iter().map(|n| n.draws_search).sum();
+    println!(
+        "[mc-timing/{}] P9 · curva de capital necesario · {} nodos · {draws} sorteos de 500 \
+         = {} caminos · **{secs:.2} s** (plan: ≈ 12 s, nivel 2 en segundo plano)",
+        profile(),
+        grid.len(),
+        draws * search.paths,
+    );
+    for node in curve.iter() {
+        println!(
+            "[mc-timing/{}]   mes {:>3} ⇒ λ* {:?} · hoy {:?} € · {:?} · {} sorteos",
+            profile(),
+            node.month,
+            node.lambda.map(|l| (l * 1_000.0).round() / 1_000.0),
+            node.amount_today,
+            node.absent_reason,
+            node.draws_search,
+        );
+    }
+    black_box(curve);
+}
+
+
+/// **Los tres solves de ESTRATEGIA** (E8): aportación mínima, primer mes de coast y primer mes de
+/// media jornada.
+///
+/// Presupuesto declarado del plan, típico y sobre un hogar P9-like: **aportación ≤ 3 s**,
+/// **coast ≤ 2 s**, **jornada reducida ≤ 5 s** (esta última incluye UNA fecha entera anidada, que
+/// por sí sola cuesta 1,8–1,9 s).
+///
+/// Las cotas se derivan del mismo `t(500)` / `t(2.500)` que mide (e), y los tres solves publican
+/// sus dos contadores de sorteos, así que el coste de cada uno es exactamente
+/// `draws_search · t(500) + draws_confirm · t(2.500)` — se imprime al lado para poder comprobarlo.
+///
+/// El hogar es **P9 con la inflación apagada y la cuenta corriente a cero**, el mismo que (e) usa
+/// para medir la forma CARA del solve de fecha: P9 tal cual no tiene fecha válida en el modelo v2
+/// (su gasto de jubilación se indexa al 2,5 % y su pensión es plana), y sobre un hogar sin
+/// respuesta los tres solves toman su camino más barato, que no es lo que hay que medir.
+///
+/// **Mide, no afirma**: no hay `assert` de tiempo.
+#[test]
+#[ignore = "mide, no afirma: correr con --release --ignored --nocapture"]
+fn the_three_strategy_solves_cost_what_the_plan_says() {
+    use futurefin_engine::{ExpenseBasis, InitialRateGate, PartialPhase};
+    use futurefin_engine_stochastic::{
+        coast_stop_month, earliest_partial_start, minimum_extra_contribution, success_at_month,
+    };
+    use rust_decimal::Decimal;
+
+    let seed = 20_260_906u64;
+    let search = McConfig { seed, paths: 500, ..Default::default() };
+    let confirm = McConfig { seed, paths: 2_500, ..Default::default() };
+    let threshold = 95u32;
+    // Jubilación a 40 años vista: el mes que las estrategias por edad pasan al solve.
+    let r = 480u32;
+
+    let mut flat = p9_household(Decimal::ZERO);
+    flat.annual_inflation_percent = Decimal::ZERO;
+    if let Some(t) = flat.fire_target.as_mut() {
+        t.annual_inflation_percent = Decimal::ZERO;
+    }
+    flat.phase_plan.initial_rate = Some(InitialRateGate {
+        swr_pct: Decimal::new(35, 1),
+        bridge: None,
+    });
+    let v: Vec<Option<f64>> = vec![None, Some(5.0), Some(16.0), Some(8.0), Some(20.0)];
+
+    // ---- La primitiva, otra vez (para poder leer los segundos de abajo sin volver a (e)) ------
+    let t0 = Instant::now();
+    black_box(success_at_month(&flat, &v, &search, r).expect("no falla"));
+    let one_search = t0.elapsed().as_secs_f64();
+    let t0 = Instant::now();
+    black_box(success_at_month(&flat, &v, &confirm, r).expect("no falla"));
+    let one_confirm = t0.elapsed().as_secs_f64();
+    println!(
+        "[mc-timing/{}] P9 sin inflación · un sorteo: 500 caminos = {:.0} ms · 2.500 = {:.0} ms",
+        profile(),
+        one_search * 1000.0,
+        one_confirm * 1000.0
+    );
+
+    // ---- 1. Aportación mínima ---------------------------------------------------------------
+    //
+    // Dos fechas a propósito: `r` (40 años vista, donde el hogar ya cumple y el solve para en la
+    // sonda de `c = 0`: la forma BARATA) y una a 20 años (donde hay que doblar el techo y
+    // biseccionar: la forma CARA). Medir solo la primera diría que el solve es gratis.
+    for target in [r, 240u32] {
+        let t0 = Instant::now();
+        let contribution =
+            minimum_extra_contribution(&flat, &v, &search, &confirm, threshold, target)
+                .expect("el sorteo no falla");
+        let secs = t0.elapsed().as_secs_f64();
+        println!(
+            "[mc-timing/{}] aportación mínima (R = {target}, umbral {threshold}) ⇒ {:?} €/mes \
+             (infrafinanciado {}, techo {}) · sorteos {}×500 + {}×2.500 \
+             (derivado {:.2} s) · **{secs:.2} s** · plan: ≤ 3 s",
+            profile(),
+            contribution.extra_monthly,
+            contribution.underfunded,
+            contribution.search_ceiling,
+            contribution.draws_search,
+            contribution.draws_confirm,
+            f64::from(contribution.draws_search) * one_search
+                + f64::from(contribution.draws_confirm) * one_confirm,
+        );
+        black_box(&contribution);
+    }
+
+    // ---- 2. Coast ---------------------------------------------------------------------------
+    let t0 = Instant::now();
+    let coast =
+        coast_stop_month(&flat, &v, &search, &confirm, threshold, r).expect("el sorteo no falla");
+    let secs = t0.elapsed().as_secs_f64();
+    println!(
+        "[mc-timing/{}] coast (R = {r}) ⇒ primer C = {:?} · libera {:?} €/mes · avisos {:?} \
+         · sorteos {}×500 + {}×2.500 (derivado {:.2} s) · **{secs:.2} s** · plan: ≤ 2 s",
+        profile(),
+        coast.stop_month,
+        coast.freed_saving_monthly,
+        coast.warnings.iter().map(|w| w.code()).collect::<Vec<_>>(),
+        coast.draws_search,
+        coast.draws_confirm,
+        f64::from(coast.draws_search) * one_search
+            + f64::from(coast.draws_confirm) * one_confirm,
+    );
+    black_box(&coast);
+
+    // ---- 3. Media jornada (UNA fecha anidada dentro) -----------------------------------------
+    let mut barista = flat.clone();
+    barista.phase_plan.partial = Some(PartialPhase {
+        start_month: 1,
+        income_monthly: Decimal::from(1_500),
+        expense_basis: ExpenseBasis::Retirement,
+    });
+    let t0 = Instant::now();
+    let partial = earliest_partial_start(&barista, &v, &search, &confirm, threshold)
+        .expect("el sorteo no falla");
+    let secs = t0.elapsed().as_secs_f64();
+    let date = partial.full_retirement;
+    let total_search = partial.draws_search + date.map_or(0, |d| d.draws_search);
+    let total_confirm = partial.draws_confirm + date.map_or(0, |d| d.draws_confirm);
+    println!(
+        "[mc-timing/{}] media jornada ⇒ primer S = {:?} · jubilación total {:?} · avisos {:?} \
+         · sorteos {}×500 + {}×2.500 ({}+{} propios, {}+{} de la ÚNICA fecha; derivado {:.2} s) \
+         · **{secs:.2} s** · plan: ≤ 5 s",
+        profile(),
+        partial.start_month,
+        date.and_then(|d| d.month),
+        partial.warnings.iter().map(|w| w.code()).collect::<Vec<_>>(),
+        total_search,
+        total_confirm,
+        partial.draws_search,
+        partial.draws_confirm,
+        date.map_or(0, |d| d.draws_search),
+        date.map_or(0, |d| d.draws_confirm),
+        f64::from(total_search) * one_search + f64::from(total_confirm) * one_confirm,
+    );
+    black_box(&partial);
+}

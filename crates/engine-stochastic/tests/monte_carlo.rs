@@ -27,11 +27,11 @@ mod cases;
 
 use cases::{projection_cases_5_0, projection_cases_all, ProjCase};
 use futurefin_engine::{
-    project_net_worth_series, AllocationKind, AllocationRule, FireNeed, FireTarget, PhasePlan,
-    ProjectionInput, SimAsset, SpendMode, WithdrawalRule,
+    project_net_worth_series, PhasePlan, ProjectionInput, SimAsset, SpendMode, WithdrawalRule,
 };
 use futurefin_engine_stochastic::{
     project_percentile_bands, run_path, seed_for, simulate_f64, McConfig, McOutcome,
+    KIND_INITIAL_RATE_EXCEEDED, KIND_PORTFOLIO_DEPLETED, KIND_RULE_BELOW_NEED, WILSON_Z_95,
 };
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -98,41 +98,6 @@ fn single_asset_retiree(
         phase_plan: PhasePlan::forced_at(1, Decimal::ZERO, monthly_expense, Decimal::ZERO),
         fire_target: None,
     }
-}
-
-/// Un hogar que **todavía no se ha jubilado**: ahorra, invierte todo el sobrante y se jubilará
-/// cuando el líquido cruce su número FIRE. Es el laboratorio de la definición de éxito (D22): sin
-/// un trigger por cruce, «no jubilarse nunca» no es un suceso posible.
-fn crossing_household(
-    start: Decimal,
-    income: Decimal,
-    expense: Decimal,
-    annual_return: Decimal,
-    swr_pct: Decimal,
-    horizon: u32,
-) -> ProjectionInput {
-    let mut input = single_asset_retiree(start, expense, annual_return, horizon);
-    input.income_regular_monthly = income;
-    input.allocation_rules = vec![AllocationRule {
-        target_index: 0,
-        kind: AllocationKind::Remainder,
-        amount: None,
-        cap: None,
-    }];
-    input.phase_plan = PhasePlan::classic(Decimal::ZERO, expense);
-    input.fire_target = Some(FireTarget {
-        need: FireNeed::ExpenseMinusPension {
-            expense_monthly: expense,
-            pension_monthly: Decimal::ZERO,
-        },
-        swr_pct,
-        tax_brackets: Vec::new(),
-        taxes_enabled: false,
-        taxable_gain_ratio: Decimal::ONE,
-        annual_inflation_percent: Decimal::ZERO,
-        debt_payments_remaining: vec![Decimal::ZERO; horizon as usize + 1],
-    });
-    input
 }
 
 // =================================================================================================
@@ -275,29 +240,17 @@ fn mc_zero_volatility_degenerates_to_deterministic() {
         // OCURRA: el hogar se jubila dentro del horizonte (o el trigger es por edad, y entonces
         // la jubilación es un dato) y además no agota la cartera. Con σ=0 todos los caminos son
         // el determinista, así que la expectativa se lee de él en los dos términos.
-        let age_triggered = c
-            .input
-            .phase_plan
-            .retirement_trigger
-            .forced_month()
-            .is_some();
-        let expected = if (age_triggered || det.retirement_month_index.is_some())
-            && det.assets_depleted_month_index.is_none()
-        {
-            1.0
-        } else {
-            0.0
-        };
-        assert_eq!(
-            out.never_retired_probability,
-            if age_triggered || det.retirement_month_index.is_some() {
-                0.0
-            } else {
-                1.0
-            },
-            "{}: con σ=0 «no se jubila nunca» tampoco admite matices",
-            c.name
-        );
+        // **E9 (McOutcome v2)**: el éxito ya no se reconstruye a mano comparando jubilación y
+        // agotamiento por separado — se lee DIRECTAMENTE de `failure_month_index` (ningún fallo
+        // F1/F2/F3), la MISMA fuente que usa `project_percentile_bands`. Con σ=0 los `paths`
+        // caminos son el determinista, así que el éxito es EXACTAMENTE 0 o 1 y coincide con él.
+        //
+        // La comparación vieja (jubilación + `assets_depleted_month_index`) dejó de ser
+        // equivalente en cuanto F2/F3 entraron en el bucle: P15/P17 fallan por
+        // `rule_below_need` (F3, un techo permanente bajo la necesidad) SIN agotar nunca la
+        // cartera, así que la vieja fórmula los habría marcado «éxito» y la nueva —correcta—
+        // los marca fallo.
+        let expected = if det.failure_month_index.is_none() { 1.0 } else { 0.0 };
         assert_eq!(
             out.success_probability, expected,
             "{}: con σ=0 el éxito no admite matices",
@@ -564,6 +517,38 @@ fn ruin_probability(withdrawal_pct: f64, paths: u32) -> (f64, McOutcome) {
     (1.0 - out.success_probability, out)
 }
 
+/// **La fórmula de cobertura ANTERIOR al fix de B2**, congelada aquí SOLO para que los tests que
+/// endurecen la corrección puedan imprimir «antes → después» con el mismo sorteo. No es parte del
+/// crate — es `Σw / Σ(w+s+u)`, sin descontar `withdrawal_excess` del numerador ni del denominador.
+fn old_style_coverage_ratio_p50(
+    input: &ProjectionInput,
+    vols: &[Option<f64>],
+    config: &McConfig,
+) -> Option<f64> {
+    let mut ratios: Vec<f64> = Vec::with_capacity(config.paths as usize);
+    for p in 0..config.paths {
+        let out = run_path(input, vols, config, p).expect("un camino suelto no falla");
+        let (mut sum_w, mut sum_need) = (0.0f64, 0.0f64);
+        if let Some(r) = out.retirement_month_index {
+            for k in (r as usize)..out.withdrawal.len() {
+                let w = out.withdrawal[k].0;
+                let s = out.withdrawal_shortfall[k].0;
+                let u = out.unmet_need[k].0;
+                sum_w += w;
+                sum_need += w + s + u;
+            }
+        }
+        if sum_need > 0.0 {
+            ratios.push(sum_w / sum_need);
+        }
+    }
+    if ratios.is_empty() {
+        return None;
+    }
+    ratios.sort_by(f64::total_cmp);
+    Some(ratios[ratios.len().div_ceil(2) - 1])
+}
+
 /// **La tabla del issue #207, reproducida dentro de la app.**
 ///
 /// El issue trae, calculados FUERA de FutureFin: con 6,5 % de media y 17 % de desviación típica,
@@ -654,49 +639,60 @@ fn mc_success_probability_of_the_issue_table() {
     assert_eq!(out3.months_below_need_p50, 0);
     assert_eq!(out4.months_below_need_p50, 0);
 
-    // La tabla de agotamiento por edad arranca en la jubilación (mes 1) y avanza de 5 en 5 años.
-    assert_eq!(out4.depletion_probability_by_age[0].0, 1);
-    assert_eq!(out4.depletion_probability_by_age[1].0, 61);
+    // La tabla de FALLO acumulado (E9: `cumulative_failure_by_age`, sustituye a
+    // `depletion_probability_by_age`) arranca en la jubilación (mes 1) y avanza de 5 en 5 años.
+    // Con `fixed_real` (el default de `single_asset_retiree`) el único motivo posible es F1
+    // (`PortfolioDepleted`), así que estos números no cambian frente a la vieja tabla de
+    // agotamiento — es la MISMA cuenta, leída de la fuente nueva.
+    assert_eq!(out4.cumulative_failure_by_age[0].0, 1);
+    assert_eq!(out4.cumulative_failure_by_age[1].0, 61);
     let cumulative: Vec<f64> = out4
-        .depletion_probability_by_age
+        .cumulative_failure_by_age
         .iter()
         .map(|(_, p)| *p)
         .collect();
-    println!("[issue #207]   agotamiento acumulado cada 5 años (4 %): {cumulative:?}");
+    println!("[issue #207]   fallo acumulado cada 5 años (4 %): {cumulative:?}");
     for w in cumulative.windows(2) {
         assert!(w[1] >= w[0], "una probabilidad ACUMULADA no puede bajar");
     }
     // **La última fila ES el horizonte** (corrección de la revisión adversarial): la rejilla
     // avanza de 60 en 60 desde la jubilación y antes se detenía en el último múltiplo que cabía
     // —el mes 361 de 420—, dejando fuera sin avisar a los caminos que se agotaban en los últimos
-    // cinco años. Ahora cierra en el mes 420 y esa fila ES la ruina total.
+    // cinco años. Ahora cierra en el mes 420 y esa fila ES `1 − éxito`.
     let last_row = *cumulative.last().expect("hay filas");
     assert_eq!(
-        out4.depletion_probability_by_age
-            .last()
-            .expect("hay filas")
-            .0,
+        out4.cumulative_failure_by_age.last().expect("hay filas").0,
         420,
         "la última fila de la tabla es el HORIZONTE, no el último múltiplo de 60"
     );
     assert!(
         (last_row - ruin4).abs() < 1e-12,
-        "la última fila ({last_row}) es la ruina total ({ruin4})"
+        "la última fila ({last_row}) es la ruina total ({ruin4}, = 1 − éxito)"
     );
 }
 
-/// **`percent_of_balance` no puede arruinar a nadie, y eso es una propiedad del modelo, no una
-/// medición.**
+/// **`percent_of_balance` no puede AGOTAR la cartera — eso sigue siendo una propiedad del modelo,
+/// no una medición — pero eso ya NO significa que el PLAN tenga éxito (E9, modelo v2).**
 ///
 /// Con la regla como GASTO (`rule_is_spend`), la retirada del mes es `pct/100 · líquido(k−1)/12`,
-/// que es una FRACCIÓN de la cartera: mientras quede algo, se retira menos que todo. La cartera
-/// se hace pequeña, pero no se agota — por eso `success_probability` debe ser exactamente `1.0`
-/// con la misma volatilidad del 17 % que arruina al 20 % de los caminos con `fixed_real`.
+/// que es una FRACCIÓN de la cartera: mientras quede algo, se retira menos que todo, así que F1
+/// (`PortfolioDepleted`) **no puede firmar nunca** aquí — se mide sobre
+/// [`McOutcome::failures_by_kind`], no reconstruyendo el agotamiento a mano.
 ///
-/// Lo que esa regla sí hace es **recortar el gasto**, y eso se ve en la otra dimensión (D24):
-/// meses por debajo de la necesidad y ratio retirada:necesidad. Un plan «sin riesgo de ruina»
-/// que en realidad vive con la mitad del presupuesto no es un plan que salga bien, y ese es
-/// exactamente el matiz que la app tiene que enseñar en vez de un semáforo verde.
+/// **Lo que SÍ cambió con E1 (ya fusionado antes de este WP) es que F3 (`RuleBelowNeed`, «el
+/// permitido no llega a la necesidad ordinaria») se evalúa para CUALQUIER regla por saldo,
+/// `rule_is_spend` incluido** — no solo bajo un techo. Este hogar calibra la necesidad EXACTAMENTE
+/// al 4 % del capital INICIAL (`permitido(mes 1) == necesidad` al euro), así que el primer shock
+/// negativo dentro de los primeros 12 meses deja `L(k−1)` por debajo del capital inicial y el
+/// permitido del mes siguiente cae por debajo de la necesidad: **F3 dispara casi de inmediato en
+/// casi todos los caminos**, medido más abajo. Es exactamente la separación que el modelo v2
+/// quiere hacer visible: la cartera nunca llega a cero, pero un plan sin colchón sobre el gasto
+/// declarado FALLA la mayoría de las veces — «nunca vuelvas a trabajar con este gasto» no se
+/// cumple aunque el dinero nunca se acabe.
+///
+/// Lo que esa regla sí hace, además, es **recortar el gasto** en los meses en que falla, y eso se
+/// ve en la otra dimensión (D24): meses por debajo de la necesidad y ratio retirada:necesidad
+/// (corregido en B2, más abajo).
 #[test]
 fn mc_percent_of_balance_never_ruins_but_cuts_the_spending() {
     let capital = Decimal::from(1_000_000);
@@ -717,12 +713,12 @@ fn mc_percent_of_balance_never_ruins_but_cuts_the_spending() {
 
     println!(
         "\n[percent_of_balance] 4 % del saldo, regla = gasto · 35 años · 1.000 caminos\n\
-         [percent_of_balance]   éxito = {} (agotamientos = {})\n\
+         [percent_of_balance]   éxito del PLAN = {}   fallos por motivo = {:?} (F1/F2/F3)\n\
          [percent_of_balance]   meses con recorte (p50) = {} de 420\n\
          [percent_of_balance]   ratio retirada:necesidad (p50) = {:?}\n\
          [percent_of_balance]   líquido final p10/p50/p90 = {:.0} / {:.0} / {:.0} €",
         out.success_probability,
-        ((1.0 - out.success_probability) * 1000.0).round() as u32,
+        out.failures_by_kind,
         out.months_below_need_p50,
         out.withdrawal_to_need_ratio_p50,
         out.liquid_worth[0][420],
@@ -730,9 +726,29 @@ fn mc_percent_of_balance_never_ruins_but_cuts_the_spending() {
         out.liquid_worth[2][420],
     );
 
+    // **La cartera nunca se agota** — F1 no puede firmar bajo una regla porcentual, sea cual sea
+    // `spend_mode`: mientras quede saldo, se retira una FRACCIÓN de él, nunca su totalidad.
     assert_eq!(
-        out.success_probability, 1.0,
-        "la regla porcentual retira una FRACCIÓN del saldo: agotarlo es imposible por construcción"
+        out.failures_by_kind[KIND_PORTFOLIO_DEPLETED], 0,
+        "F1 (`PortfolioDepleted`) no puede firmar bajo una regla porcentual: siempre queda algo"
+    );
+    // **Pero el PLAN sí falla, y mucho** (hallazgo de este WP, no un ajuste cosmético): con la
+    // necesidad pegada al 4 % del capital INICIAL, el primer shock negativo del sorteo empuja el
+    // permitido del mes siguiente por debajo de la necesidad y dispara F3. Medido con esta semilla:
+    // éxito ≈ 5,1 % (949 de 1.000 caminos fallan por `RuleBelowNeed`, 0 por los otros dos motivos).
+    assert!(
+        out.success_probability < 0.15,
+        "con la necesidad pegada al 4 % inicial, F3 debería disparar en casi todos los caminos: \
+         éxito medido {} (se esperaba < 0,15)",
+        out.success_probability
+    );
+    assert_eq!(
+        out.failures_by_kind[KIND_INITIAL_RATE_EXCEEDED], 0,
+        "este `PhasePlan` no declara `initial_rate`: F2 no puede firmar"
+    );
+    assert!(
+        out.failures_by_kind[KIND_RULE_BELOW_NEED] > 0,
+        "el fallo del plan tiene que venir de F3 (la regla no llega a la necesidad), no de la nada"
     );
     // Y sin embargo hay recorte: la mediana de los caminos pasa meses por debajo de la necesidad.
     assert!(
@@ -745,6 +761,32 @@ fn mc_percent_of_balance_never_ruins_but_cuts_the_spending() {
     assert!(
         (0.0..=1.0).contains(&ratio),
         "el ratio retirada:necesidad vive en [0,1]: {ratio}"
+    );
+
+    // **B2, endurecido.** Bajo `rule_is_spend` la regla vende `permitido` TODOS los meses
+    // jubilados, también cuando `permitido` (4 % del saldo CRECIENTE) supera la necesidad fija —y
+    // con una deriva de ~8,0 % anual (CAGR 6,5 % + prima de varianza) contra una retirada del 4 %,
+    // el saldo tiende a CRECER durante los 35 años, así que esos meses de excedente abundan. Antes
+    // del fix, ese exceso contaba en el numerador Y en el denominador (`Σw / Σ(w+s+u)`), y en esos
+    // meses la razón daba exactamente 1,0 igual que si la necesidad se hubiera cubierto entera —
+    // inflando la mediana agregada. El argumento del mediante (`(x+E)/(y+E) > x/y` para `x<y,
+    // E>0`) dice que la cifra vieja tiene que quedar POR ENCIMA de la nueva; se mide para dar el
+    // número, no solo el signo.
+    //
+    // Predicción (antes de correr): con esta semilla y 1.000 caminos, el `withdrawal_to_need_ratio_p50`
+    // ANTIGUO rondaba 0,98–0,99 (casi «cobertura total», por el exceso sin descontar). Medido:
+    // **0,9888 → 0,9793** — baja, como predice el argumento del mediante, aunque poco en términos
+    // absolutos porque el hogar mediano pasa la mayoría de los meses con excedente (solo 70 de 420
+    // tienen recorte de verdad).
+    let ratio_old = old_style_coverage_ratio_p50(&input, &[Some(17.0)], &config)
+        .expect("hay meses jubilados con necesidad");
+    println!(
+        "[percent_of_balance]   cobertura p50 — ANTES del fix B2 = {ratio_old:.4}   DESPUÉS = {ratio:.4}"
+    );
+    assert!(
+        ratio < ratio_old,
+        "B2: el exceso de `rule_is_spend` inflaba la cobertura antes del fix — antes {ratio_old:.4}, \
+         después {ratio:.4} (se esperaba que bajara)"
     );
 }
 
@@ -777,58 +819,77 @@ fn mc_seed_for_is_stable() {
     }
 }
 
-/// Las lecturas que dependen del TRIGGER: los percentiles del mes de jubilación existen solo si
-/// jubila el cruce, y la probabilidad de infra-financiación solo si jubila la edad.
+/// **Las lecturas de fallo ya NO dependen del tipo de trigger** (E9, `McOutcome` v2).
+///
+/// Antes de este WP, `retirement_month_index_percentiles` solo existía por CRUCE y
+/// `underfunded_probability` solo por EDAD — dos campos que se excluían mutuamente según cómo se
+/// jubilara el plan. Los dos se retiraron: con la API v2 todo plan se sortea con un mes FORZADO
+/// (`RetirementTrigger::AtMonth`, resuelto por el solver externo antes de llegar aquí), así que
+/// «el mes de jubilación es una distribución» dejó de tener sentido y la infra-financiación de una
+/// edad fija es ahora `1 − éxito(R)` (`solve_mc::success_at_month`). Lo que SÍ se publica —
+/// `failures_by_kind` y `cumulative_failure_by_age`— se publica IGUAL sea cual sea el trigger, y
+/// eso es justo lo que este test comprueba: un plan legacy por CRUCE (P3, que no ha migrado al mes
+/// forzado) y un plan por mes FORZADO (P21) dan lecturas con la MISMA forma.
+///
+/// Reemplaza a `mc_readings_follow_the_retirement_trigger`.
 #[test]
-fn mc_readings_follow_the_retirement_trigger() {
+fn mc_readings_are_the_same_for_every_trigger_now() {
     let config = McConfig {
         seed: 11,
-        paths: 40,
+        paths: 200,
         ..Default::default()
     };
 
-    // (a) P3 se jubila por CRUCE (190.000 € creciendo hacia un objetivo de 200.000): hay
-    //     percentiles del mes, no hay infra-financiación. Con volatilidad el mes de cruce se
-    //     DISPERSA, que es justo la lectura que las estrategias por cruce necesitan.
+    // (a) P3 sigue trayendo `RetirementTrigger::LiquidCrossing` (caso legacy que no ha migrado al
+    //     mes forzado de la v2): el ANCLA de `cumulative_failure_by_age` cae al camino
+    //     determinista (ver el doc de `McOutcome::cumulative_failure_by_age`), no al mes forzado.
     let crossing = case("P3_superavit_jubilacion");
-    let out = project_percentile_bands(&crossing, &[Some(18.0)], &config).expect("no falla");
-    let months = out
-        .retirement_month_index_percentiles
-        .as_ref()
-        .expect("con trigger por cruce, los percentiles del mes existen");
-    assert_eq!(months.len(), out.percentiles.len());
-    // Ordenados: un percentil mayor no puede jubilarse ANTES. `None` («nunca») ordena el último.
-    for w in months.windows(2) {
-        match (w[0], w[1]) {
-            (Some(a), Some(b)) => assert!(a <= b, "p{a} > p{b}: los meses no están ordenados"),
-            (None, Some(_)) => panic!("«nunca» debe ordenar después de cualquier mes"),
-            _ => {}
-        }
-    }
-    let deterministic_month = simulate_f64(&crossing)
-        .expect("no falla")
-        .retirement_month_index;
-    println!(
-        "[trigger] P3 (cruce) · mes de jubilación p10/p50/p90 = {months:?}           (determinista: {deterministic_month:?})"
-    );
-    assert!(
-        months[0] != months[2],
-        "con 18 % de volatilidad el mes de cruce no puede salir constante: {months:?}"
-    );
-    assert!(out.underfunded_probability.is_none());
+    let out_crossing = project_percentile_bands(&crossing, &[Some(18.0)], &config).expect("no falla");
 
-    // (b) P21 se jubila por EDAD con el objetivo vivo como LECTURA (D17): hay probabilidad de
-    //     infra-financiación, no hay percentiles del mes. En el camino determinista el capital NO
-    //     llega al objetivo del mes 120 (el caso pinea `RetireAtAgeUnderfunded`), así que la
-    //     probabilidad tiene que salir ALTA — y con volatilidad, no exactamente 1: algún camino
-    //     afortunado sí llega.
+    // (b) P21 trae `RetirementTrigger::AtMonth` — el caso normal desde 5.0.0.
     let forced = case("P21_retire_at_age_reading_only");
-    let out = project_percentile_bands(&forced, &[Some(20.0)], &config).expect("no falla");
-    assert!(out.retirement_month_index_percentiles.is_none());
-    // E1 (modelo v2) retiró `RetireAtAgeUnderfunded`: la infra-financiación de una edad fija es
-    // `1 − éxito(R)` del solver estocástico (E6/E9). Hasta que E9 retire el campo, viaja `None`.
-    assert!(out.underfunded_probability.is_none());
+    let out_forced = project_percentile_bands(&forced, &[Some(20.0)], &config).expect("no falla");
 
+    for (label, out) in [
+        ("P3 (cruce, legacy)", &out_crossing),
+        ("P21 (mes forzado)", &out_forced),
+    ] {
+        let n = f64::from(out.paths);
+        let failures_counted: u32 = out.failures_by_kind.iter().sum();
+        let failures_expected = ((1.0 - out.success_probability) * n).round() as u32;
+        println!(
+            "[trigger] {label} · éxito = {:.4}   fallos por motivo = {:?} (suma {failures_counted}, \
+             esperado {failures_expected})\n[trigger] {label} · fallo acumulado = {:?}",
+            out.success_probability, out.failures_by_kind, out.cumulative_failure_by_age
+        );
+        assert_eq!(
+            failures_counted, failures_expected,
+            "{label}: `failures_by_kind` no suma `paths − paths·éxito`"
+        );
+
+        assert!(
+            !out.cumulative_failure_by_age.is_empty(),
+            "{label}: los dos casos se jubilan dentro del horizonte, la tabla no puede ir vacía"
+        );
+        for w in out.cumulative_failure_by_age.windows(2) {
+            assert!(
+                w[1].1 >= w[0].1,
+                "{label}: una probabilidad ACUMULADA no puede bajar ({:?} → {:?})",
+                w[0],
+                w[1]
+            );
+        }
+        let (last_month, last_p) = *out.cumulative_failure_by_age.last().expect("no vacío");
+        assert_eq!(
+            last_month, out.horizon_months,
+            "{label}: la última fila de la tabla es el HORIZONTE"
+        );
+        assert!(
+            (last_p - (1.0 - out.success_probability)).abs() < 1e-9,
+            "{label}: la última fila ({last_p:.4}) debe coincidir con 1 − éxito ({:.4})",
+            1.0 - out.success_probability
+        );
+    }
 }
 
 // =================================================================================================
@@ -879,82 +940,156 @@ fn mc_coverage_counts_the_need_the_portfolio_could_not_fund() {
         "el camino mediano pasa la mayor parte del horizonte sin cubrir su gasto: {}",
         out.months_below_need_p50
     );
+
+    // **B2, endurecido — el reverso de `mc_percent_of_balance_never_ruins_but_cuts_the_spending`.**
+    // Este hogar usa `fixed_real` (el default de `single_asset_retiree`), donde `withdrawal_excess`
+    // es CERO por construcción: el permitido ES la necesidad, así que nunca hay «sobrante» que
+    // reclasificar. El fix de B2 solo resta cuando `excess > 0`; aquí no debe mover ni un bit.
+    let ratio_old = old_style_coverage_ratio_p50(&input, &[Some(15.0)], &config)
+        .expect("hay meses jubilados");
+    println!(
+        "[cobertura]   con `fixed_real` el exceso es CERO por construcción — ANTES = {ratio_old:.4}   \
+         DESPUÉS = {ratio:.4}"
+    );
+    assert_eq!(
+        ratio, ratio_old,
+        "B2 no debe mover nada bajo `fixed_real`: el exceso es cero por construcción, y sin embargo \
+         antes {ratio_old} ≠ después {ratio}"
+    );
 }
 
-/// **No jubilarse nunca no es un éxito.**
+// =================================================================================================
+// 9. `McOutcome` v2 (E9): éxito, motivo del fallo y su intervalo
+// =================================================================================================
+
+/// **Éxito = cero fallos, y los motivos suman exactamente los caminos fallidos.**
 ///
-/// El hogar: 1.000 € de partida, 2.100 € de ingreso contra 2.000 € de gasto, 6,5 % con σ = 17 %,
-/// SWR 4 % (objetivo 600.000 €), 840 meses, todo el sobrante a un único fondo. El camino
-/// determinista se jubila en el mes 655 —al filo del horizonte—, así que **una parte material de
-/// los caminos sorteados no llega nunca**.
-///
-/// Con la definición anterior (D22: «la cartera no se agota»), esos caminos contaban como éxito
-/// porque un hogar que nunca se jubila nunca drena, y por tanto nunca se agota. Medido hoy: la
-/// lectura vieja da **0,963** (= 0,856 + 0,107) frente al **0,856** honesto, y la diferencia son
-/// exactamente los caminos que no llegan.
-///
-/// # Las horquillas se re-centraron con la convención CAGR (E5, modelo v2, 2026-09-06)
-///
-/// La rentabilidad declarada pasó a ser COMPUESTA, así que el sorteo sube la deriva del factor
-/// mensual en `exp(σ_m²/2)`: con σ = 17 % son ~1,5 pp/año más de media aritmética, y este hogar
-/// —que se jubila **por CRUCE**— alcanza su objetivo mucho más a menudo. Medido con la MISMA
-/// semilla y los mismos 1.000 caminos, antes y después del cambio:
-///
-/// ```text
-///   magnitud                antes (declarada = aritmética)   ahora (declarada = CAGR)
-///   nunca se jubilan                 0,3310                          0,1070
-///   éxito del plan                   0,6290                          0,8560
-///   éxito | jubilado                 0,9402                          0,9586
-/// ```
-///
-/// **Lo que el test mide no ha cambiado**: que el éxito honesto es `P(jubilarse)·P(no agotar |
-/// jubilado)` y queda por debajo de la lectura vieja. Lo que ha cambiado es el hogar, que con más
-/// deriva llega antes. Las horquillas se re-centran sobre lo medido; **no se ensanchan**.
+/// Dos laboratorios: uno donde NADIE falla (colchón enorme, sin volatilidad — los `paths` caminos
+/// son el mismo determinista) y uno donde SÍ hay ruina (el mismo del issue #207, con una mezcla de
+/// motivos real). En los dos, `failures_by_kind.iter().sum()` tiene que ser exactamente
+/// `paths − paths·éxito` — la propiedad que el `debug_assert` de `project_percentile_bands` ya
+/// vigila en cada ejecución, medida aquí desde fuera del crate.
 #[test]
-fn mc_never_retiring_is_not_a_success() {
-    let input = crossing_household(
+fn mc_success_is_zero_failures_and_the_kinds_add_up() {
+    // (a) Colchón amplio, sin volatilidad: los 200 caminos son el determinista, que no falla.
+    let comfortable = single_asset_retiree(
+        Decimal::from(10_000_000),
         Decimal::from(1_000),
-        Decimal::from(2_100),
-        Decimal::from(2_000),
-        Decimal::try_from(6.5).unwrap(),
-        Decimal::from(4),
-        840,
+        Decimal::from(5),
+        120,
     );
     let config = McConfig {
-        seed: 207,
-        paths: 1_000,
-        percentiles: vec![10, 50, 90],
+        seed: 1,
+        paths: 200,
+        ..Default::default()
     };
-    let out = project_percentile_bands(&input, &[Some(17.0)], &config).expect("no falla");
-    let conditional = out.success_given_retired.expect("algún camino se jubila");
+    let out = project_percentile_bands(&comfortable, &[None], &config).expect("no falla");
     println!(
-        "\n[éxito] cruce a 840 meses · 1.000 caminos\n\
-         [éxito]   éxito = {:.4}   nunca se jubilan = {:.4}   éxito | jubilado = {conditional:.4}",
-        out.success_probability, out.never_retired_probability
+        "[éxito=0 fallos] éxito = {}   fallos por motivo = {:?}",
+        out.success_probability, out.failures_by_kind
     );
+    assert_eq!(
+        out.success_probability, 1.0,
+        "colchón amplio y sin volatilidad: nadie puede fallar"
+    );
+    assert_eq!(out.failures_by_kind, [0, 0, 0]);
 
-    // Uno de cada diez caminos no llega: eso no se cuenta como plan cumplido (antes eran uno de
-    // cada tres — ver la tabla del doc).
-    assert!(
-        (0.08..0.14).contains(&out.never_retired_probability),
-        "nunca se jubilan: {}",
-        out.never_retired_probability
+    // (b) El laboratorio de ruina del issue #207 al 4 %: aquí SÍ hay fallos, y tienen que sumar.
+    let (ruin, out2) = ruin_probability(4.0, 500);
+    let failures_expected = (ruin * 500.0).round() as u32;
+    let failures_counted: u32 = out2.failures_by_kind.iter().sum();
+    println!(
+        "[éxito=fallos suman] ruina = {ruin:.4} (500 caminos)   fallos contados = {failures_counted}   \
+         por motivo = {:?} (F1/F2/F3)",
+        out2.failures_by_kind
+    );
+    assert!(failures_counted > 0, "al 4 % tiene que haber ruina de sobra");
+    assert_eq!(
+        failures_counted, failures_expected,
+        "los tres motivos deben sumar exactamente los caminos fallidos, sea cual sea la mezcla"
+    );
+}
+
+/// **`cumulative_failure_by_age` es monótona y cierra en el horizonte con `1 − éxito`.**
+///
+/// Reutiliza el laboratorio de ruina del issue #207 (con retirada al 4 %, que arruina a una
+/// fracción material de los caminos): el ancla es el mes 1 (jubilación forzada desde el mes 1 en
+/// `single_asset_retiree`), la rejilla avanza de [`FAILURE_STEP_MONTHS`] en
+/// [`FAILURE_STEP_MONTHS`] y —sea cual sea el múltiplo que le toque al horizonte— la ÚLTIMA fila
+/// tiene que ser el mes 420 con la probabilidad ACUMULADA exactamente `1 − success_probability`, la
+/// misma identidad que mide `mc_readings_are_the_same_for_every_trigger_now` para otros dos casos.
+#[test]
+fn mc_cumulative_failure_by_age_is_monotone_and_closes_at_one_minus_success() {
+    let (_, out) = ruin_probability(4.0, 500);
+    println!(
+        "[fallo acumulado] éxito = {:.4}   tabla = {:?}",
+        out.success_probability, out.cumulative_failure_by_age
     );
     assert!(
-        (out.success_probability - (1.0 - out.never_retired_probability) * conditional).abs()
-            < 1e-9,
-        "éxito = P(jubilarse) × P(no agotar | jubilado)"
+        !out.cumulative_failure_by_age.is_empty(),
+        "el hogar se jubila desde el mes 1 — la tabla no puede ir vacía"
     );
-    // La lectura vieja («no agotar», sin exigir jubilarse) suma los caminos que nunca se jubilan
-    // —nunca drenan, así que nunca se agotan—: 0,856 + 0,107 = 0,963. La diferencia entre las dos
-    // definiciones SIGUE siendo material, que es todo el punto de este test.
+    assert_eq!(
+        out.cumulative_failure_by_age[0].0, 1,
+        "el ancla es el mes de jubilación forzado (mes 1 en este laboratorio)"
+    );
+    for w in out.cumulative_failure_by_age.windows(2) {
+        assert!(
+            w[1].1 >= w[0].1,
+            "una probabilidad ACUMULADA no puede bajar ({:?} → {:?})",
+            w[0],
+            w[1]
+        );
+    }
+    let (last_month, last_p) = *out
+        .cumulative_failure_by_age
+        .last()
+        .expect("no vacío, ya comprobado arriba");
+    assert_eq!(last_month, out.horizon_months, "la última fila es el HORIZONTE (420)");
     assert!(
-        (0.82..0.89).contains(&out.success_probability),
-        "éxito honesto del plan: {}",
-        out.success_probability
+        (last_p - (1.0 - out.success_probability)).abs() < 1e-9,
+        "la última fila ({last_p:.4}) debe coincidir con 1 − éxito ({:.4})",
+        1.0 - out.success_probability
+    );
+}
+
+/// **El éxito carga un intervalo de Wilson, y nunca un `half_width_pp` de cero.**
+///
+/// Con 0 fallos de N, Wilson colapsa a la forma cerrada `n/(n+z²)` (`solve_mc::wilson_lower_bound`,
+/// derivada a mano en su propio doc): se mide contra ESA fórmula, no contra un número copiado, para
+/// que el pin viaje con la derivación. `half_width_pp` tiene que ser estrictamente positivo incluso
+/// aquí — la propiedad entera de usar Wilson en vez de la aproximación normal.
+#[test]
+fn mc_success_carries_a_wilson_interval() {
+    let comfortable = single_asset_retiree(
+        Decimal::from(10_000_000),
+        Decimal::from(1_000),
+        Decimal::from(5),
+        120,
+    );
+    let config = McConfig {
+        seed: 1,
+        paths: 200,
+        ..Default::default()
+    };
+    let out = project_percentile_bands(&comfortable, &[None], &config).expect("no falla");
+    assert_eq!(out.success_probability, 1.0, "0 fallos de N, precondición del test");
+
+    let n = f64::from(out.paths);
+    let z2 = WILSON_Z_95 * WILSON_Z_95;
+    let expected_wilson_low = n / (n + z2);
+    println!(
+        "[wilson] N = {} (0 fallos)   wilson_low = {:.6} (forma cerrada: {:.6})   half_width_pp = {:.4}",
+        out.paths, out.wilson_low, expected_wilson_low, out.half_width_pp
     );
     assert!(
-        (0.94..0.98).contains(&conditional),
-        "condicional a jubilarse, la ruina sigue siendo baja: {conditional}"
+        (out.wilson_low - expected_wilson_low).abs() < 1e-12,
+        "wilson_low ({}) no coincide con la forma cerrada de `solve_mc::SuccessAt` ({expected_wilson_low})",
+        out.wilson_low
+    );
+    assert!(out.wilson_low < 1.0, "0 fallos no es «100 % seguro»");
+    assert!(
+        out.half_width_pp > 0.0,
+        "la barra de error hacia abajo nunca es 0, ni con 0 fallos observados"
     );
 }

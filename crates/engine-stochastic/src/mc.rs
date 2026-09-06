@@ -100,11 +100,13 @@ use rand_chacha::rand_core::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
 use futurefin_engine::{
-    monthly_growth_multiplier, simulate, EngineError, ProjectionInput,
+    monthly_growth_multiplier, simulate, EngineError, PathFailure, ProjectionInput,
     RetirementTrigger, SimInput, SimOutput,
 };
 
-use crate::F64Money;
+use crate::{
+    F64Money, SuccessAt, KIND_INITIAL_RATE_EXCEEDED, KIND_PORTFOLIO_DEPLETED, KIND_RULE_BELOW_NEED,
+};
 
 // =================================================================================================
 // Configuración
@@ -123,10 +125,13 @@ pub const DEFAULT_PATHS: u32 = 500;
 /// Percentiles por defecto: la banda p10/p50/p90 que la sección «Riesgo» dibuja (D28).
 pub const DEFAULT_PERCENTILES: [u8; 3] = [10, 50, 90];
 
-/// Cada cuántos meses se publica la probabilidad de agotamiento desde la jubilación efectiva
-/// (§B.5: «cada 5 años»). El caller traduce meses a edades — este crate no sabe de fechas de
-/// nacimiento.
-pub const DEPLETION_STEP_MONTHS: u32 = 60;
+/// Cada cuántos meses se publica el FALLO acumulado desde el mes de jubilación forzado (§B.5:
+/// «cada 5 años»). El caller traduce meses a edades — este crate no sabe de fechas de nacimiento.
+///
+/// Renombrada desde `DEPLETION_STEP_MONTHS` en E9 (modelo v2, McOutcome v2): la tabla ya no mide
+/// solo agotamiento de cartera (F1), mide CUALQUIER fallo del camino (F1 cartera agotada / F2
+/// tasa inicial excedida / F3 la regla no llega a la necesidad). El valor —60— no cambia.
+pub const FAILURE_STEP_MONTHS: u32 = 60;
 
 /// **La configuración de una ejecución de Monte Carlo.**
 ///
@@ -529,52 +534,71 @@ pub struct McOutcome {
     pub net_worth: Vec<Vec<f64>>,
     /// Bandas puntuales de `liquid_worth`, con la misma forma y la misma advertencia.
     pub liquid_worth: Vec<Vec<f64>>,
-    /// **D22**: fracción de caminos en los que la cartera NO se agota nunca antes del horizonte
-    /// (`assets_depleted_month_index.is_none()`). Las pensiones y las fases ya están dentro de la
-    /// simulación, así que esto es el éxito del PLAN, no el de una regla de retirada.
+    /// **Éxito v2 (E9, modelo de jubilación v2)**: fracción de caminos SIN fallo, es decir con
+    /// `failure_month_index.is_none()` — **ningún fallo F1/F2/F3 en el camino**. Los tres motivos
+    /// (F1 cartera agotada, F2 tasa inicial excedida, F3 la regla por saldo no llega a la
+    /// necesidad ordinaria) los clasifica el bucle del motor (`crates/engine`); aquí solo se
+    /// CUENTAN.
     ///
-    /// El recorte de una regla (`withdrawal_shortfall`) **no es fracaso** (D24) y se publica
-    /// aparte en [`Self::months_below_need_p50`] y [`Self::withdrawal_to_need_ratio_p50`].
+    /// Ya **no depende de si el hogar se jubila**: con la API v2 todo plan se sortea con
+    /// `RetirementTrigger::AtMonth` — un mes forzado que decide el llamante (el solver
+    /// `crates/engine-stochastic::solve_mc` o quien construya el `ProjectionInput`) — así que
+    /// «no jubilarse nunca» ha dejado de ser un desenlace posible del sorteo y los campos que
+    /// separaban esa pregunta (`never_retired_probability`, `success_given_retired`, y
+    /// `underfunded_probability`, que leía la infra-financiación de un trigger por edad) se
+    /// retiraron: esa lectura es ahora `1 − éxito(R)` del solver estocástico
+    /// (`solve_mc::valid_retirement_month`/`success_at_month`).
     pub success_probability: f64,
-    /// **Fracción de caminos que NO se jubilan** dentro del horizonte
-    /// (`retirement_month_index == None`). Con trigger por EDAD es 0 por construcción.
+    /// **Límite inferior del intervalo de Wilson al 95 %** de [`Self::success_probability`] —
+    /// calculado reutilizando [`crate::SuccessAt::new`] (nunca reimplementado aquí). Es el número
+    /// estable frente a semilla y a `N` con el que se compara un umbral de producto, y con
+    /// `failures == 0` es **estrictamente menor que 1** (nunca «100 % seguro» solo porque no se
+    /// vio ningún fallo en la muestra).
+    pub wilson_low: f64,
+    /// Distancia de [`Self::success_probability`] a [`Self::wilson_low`], en PUNTOS
+    /// PORCENTUALES: la barra de error que se dibuja hacia abajo. Ver
+    /// [`crate::SuccessAt::half_width_pp`] — misma cifra, misma fórmula.
+    pub half_width_pp: f64,
+    /// Fallos por motivo, contando el PRIMER fallo de cada camino, en el orden
+    /// [`PathFailure::PortfolioDepleted`] (F1) / [`PathFailure::InitialRateExceeded`] (F2) /
+    /// [`PathFailure::RuleBelowNeed`] (F3) — los mismos índices que
+    /// [`crate::KIND_PORTFOLIO_DEPLETED`]/[`crate::KIND_INITIAL_RATE_EXCEEDED`]/
+    /// [`crate::KIND_RULE_BELOW_NEED`] de `solve_mc`, para que las dos capas no diverjan en el
+    /// orden. Suma exactamente `paths − paths·`[`Self::success_probability`].
+    pub failures_by_kind: [u32; 3],
+    /// Fracción ACUMULADA de caminos con ALGÚN fallo (F1, F2 o F3) en `(mes, p)`, cada
+    /// [`FAILURE_STEP_MONTHS`] meses desde el ancla. `p` es la fracción de caminos con
+    /// `failure_month_index ≤ mes`. El caller traduce meses a edades.
     ///
-    /// Se publica porque es el denominador escondido del éxito: un plan por cruce con una
-    /// probabilidad de éxito alta y un tercio de caminos que no se jubilan nunca no es un buen
-    /// plan, es un plan que no ocurre.
-    pub never_retired_probability: f64,
-    /// Éxito **entre los caminos que sí se jubilan**: de los que llegan a la jubilación, cuántos
-    /// no agotan la cartera. `None` si ningún camino se jubila.
+    /// **Sustituye a `depletion_probability_by_age`** (que solo contaba F1): con la puerta de
+    /// tasa inicial (F2) y la regla por saldo (F3) dentro del bucle, «agotamiento» dejó de ser el
+    /// único motivo por el que un camino deja de cumplir el plan.
     ///
-    /// Junto a [`Self::success_probability`] separa las dos preguntas que D22 mezclaba: «¿ocurre
-    /// el plan?» y «¿aguanta?».
-    pub success_given_retired: Option<f64>,
-    /// Probabilidad ACUMULADA de agotamiento en `(mes, p)`, cada
-    /// [`DEPLETION_STEP_MONTHS`] meses desde la jubilación efectiva. `p` es la fracción de
-    /// caminos con `assets_depleted_month_index ≤ mes`. El caller traduce meses a edades.
-    ///
-    /// El ancla es la jubilación efectiva del camino DETERMINISTA; si ese camino no se jubila
-    /// dentro del horizonte, la mediana de los caminos sorteados; si no se jubila ninguno, el
-    /// vector va **vacío** — sin jubilación no hay «probabilidad de agotar a los 75».
-    pub depletion_probability_by_age: Vec<(u32, f64)>,
-    /// Percentiles del mes de jubilación EFECTIVA, alineados con [`Self::percentiles`], **solo
-    /// para planes que se jubilan por cruce**; `None` cuando el trigger es por edad (ahí el mes
-    /// es un dato, no una distribución).
-    ///
-    /// Un `None` dentro del vector es un percentil que cae en un camino que **no se jubila** en
-    /// todo el horizonte: los caminos sin jubilación ordenan los últimos, así que un `None` en
-    /// p90 dice «uno de cada diez planes no llega nunca».
-    pub retirement_month_index_percentiles: Option<Vec<Option<u32>>>,
-    /// Solo para planes con jubilación por EDAD: fracción de caminos que llegan a `R` con el
-    /// líquido por debajo del objetivo de `R−1` (D17, el «aviso rojo grande»). `None` si el plan
-    /// no se jubila por edad.
-    pub underfunded_probability: Option<f64>,
+    /// El ancla es el mes de jubilación FORZADO del plan
+    /// (`input.phase_plan.retirement_trigger.forced_month()`); si el plan todavía trae
+    /// `RetirementTrigger::LiquidCrossing` (llamantes/tests legacy que no han migrado al mes
+    /// forzado de la v2), el ancla es la jubilación efectiva del camino DETERMINISTA como ANTES
+    /// —y, a falta de ella, la mediana de los caminos sorteados—; si ninguno se jubila, el vector
+    /// va **vacío**. La última fila es SIEMPRE el horizonte (cierra ahí aunque no sea múltiplo del
+    /// paso), y esa fila coincide, al bit, con `1 − `[`Self::success_probability`].
+    pub cumulative_failure_by_age: Vec<(u32, f64)>,
     /// Mediana, entre los caminos, del número de meses jubilados con recorte
     /// (`withdrawal_shortfall > 0`). Con `fixed_real` es 0 por construcción.
     pub months_below_need_p50: u32,
-    /// Mediana, entre los caminos, de `Σ withdrawal / Σ (withdrawal + withdrawal_shortfall)`
-    /// sobre los meses jubilados: **qué fracción de la necesidad cubrió la regla**. `1.0` = la
-    /// cubrió entera. `None` si ningún camino tiene meses jubilados con denominador positivo.
+    /// Mediana, entre los caminos, de la cobertura de la necesidad ORDINARIA sobre los meses
+    /// jubilados: `Σ max(0, w − excess) / Σ max(0, w + s + u − excess)`, cada término clampado a
+    /// `≥ 0` **mes a mes** antes de sumar. `1.0` = la cubrió entera. `None` si ningún camino tiene
+    /// meses jubilados con denominador positivo.
+    ///
+    /// **Corregida en E9 (bug B2)**: hasta este cambio el numerador era `Σ w` sin más, y bajo
+    /// `rule_is_spend` (D5) `withdrawal` incluye el EXCESO sobre la necesidad
+    /// (`withdrawal_excess`, D24) — la regla ES el gasto y vende `permitido` aunque sobre. Un mes
+    /// con superávit inflaba la cobertura por encima de 1,0 sin que nada lo dijera. La identidad
+    /// del motor (`fuzz_invariants.rs`, `crates/engine`) es
+    /// `withdrawal + withdrawal_shortfall + unmet_need − withdrawal_excess = need_net`, así que
+    /// `w + s + u − excess` ES `need_net` exactamente — y **puede ser negativo** desde el mes en
+    /// que la pensión supera el gasto (need_net negativo), lo que exige el clamp mes a mes en vez
+    /// de uno solo al final.
     pub withdrawal_to_need_ratio_p50: Option<f64>,
     /// ¿Algún activo declaró volatilidad? Con `false` todas las bandas coinciden con la línea
     /// determinista y la UI debe decirlo («sin volatilidad declarada: la banda es la línea»).
@@ -651,8 +675,13 @@ pub fn project_percentile_bands(
     let mut nw_samples: Vec<Vec<f64>> = vec![vec![0.0; n]; len];
     let mut lq_samples: Vec<Vec<f64>> = vec![vec![0.0; n]; len];
 
-    let mut depleted: Vec<Option<u32>> = Vec::with_capacity(n);
+    // `retired_at` solo alimenta el ANCLA legacy de `cumulative_failure_by_age` (plan por CRUCE,
+    // ver más abajo): con el mes forzado de la v2 el ancla es directa y no necesita este vector,
+    // pero un `ProjectionInput` que todavía traiga `RetirementTrigger::LiquidCrossing` (llamantes
+    // o tests que no han migrado) sigue leyendo la jubilación efectiva del sorteo, como antes.
     let mut retired_at: Vec<Option<u32>> = Vec::with_capacity(n);
+    let mut failure_month: Vec<Option<u32>> = Vec::with_capacity(n);
+    let mut failure_kind: Vec<Option<PathFailure>> = Vec::with_capacity(n);
     let mut months_below: Vec<f64> = Vec::with_capacity(n);
     let mut coverage_ratios: Vec<f64> = Vec::with_capacity(n);
 
@@ -663,8 +692,14 @@ pub fn project_percentile_bands(
             nw_samples[k][p] = out.net_worth[k].0;
             lq_samples[k][p] = out.liquid_worth[k].0;
         }
-        depleted.push(out.assets_depleted_month_index);
         retired_at.push(out.retirement_month_index);
+        debug_assert_eq!(
+            out.failure_month_index.is_some(),
+            out.failure_kind.is_some(),
+            "un camino fallido sin motivo (o un motivo sin fallo) rompería `failures_by_kind`"
+        );
+        failure_month.push(out.failure_month_index);
+        failure_kind.push(out.failure_kind);
 
         // Las dos magnitudes del RECORTE (D24), sobre los meses JUBILADOS de este camino. Fuera
         // de la jubilación el motor no aplica techo alguno, así que el recorte solo puede vivir
@@ -683,8 +718,18 @@ pub fn project_percentile_bands(
                 if s + u > 0.0 {
                     below += 1;
                 }
-                sum_w += w;
-                sum_need += w + s + u;
+                // **B2**: bajo `rule_is_spend` (D5) `withdrawal` incluye el EXCESO sobre la
+                // necesidad (`withdrawal_excess`, D24) — la regla ES el gasto y vende `permitido`
+                // aunque sobre. Sin descontarlo, un mes con superávit inflaba la cobertura. La
+                // identidad del motor es `w + s + u − excess = need_net`
+                // (`fuzz_invariants.rs:385`), y `need_net` puede ser NEGATIVO desde el mes en que
+                // la pensión supera el gasto: se clampa a `≥ 0` MES A MES, no una sola vez al
+                // final, para que un mes de superávit no reste cobertura a los demás.
+                let e = out.withdrawal_excess[k].0;
+                let w_net = (w - e).max(0.0);
+                let need_net = (w + s + u - e).max(0.0);
+                sum_w += w_net;
+                sum_need += need_net;
             }
         }
         months_below.push(f64::from(below));
@@ -721,88 +766,85 @@ pub fn project_percentile_bands(
     // Probabilidades
     // ------------------------------------------------------------------------------------------
     let n_f = n as f64;
-    // **Éxito y jubilación** (hallazgo #7 de la revisión, decisión de modelo). D22 decía «la
-    // cartera no se agota nunca», y con un trigger por CRUCE eso premiaba al hogar que no se
-    // jubila jamás: un camino que trabaja hasta los 105 años sin llegar al objetivo nunca drena
-    // y por tanto nunca se agota. En el hogar medido, el 33,1 % de los caminos no se jubilaba y
-    // los 1.000 se contaban como éxito: 0,960 publicado frente a 0,940 entre los que sí se
-    // jubilan.
-    //
-    // Éxito = **el plan ocurre Y aguanta**: el hogar se jubila dentro del horizonte (o el plan es
-    // por edad, y entonces la jubilación es un dato, no un suceso) y la cartera no se agota. La
-    // fracción que no se jubila se publica aparte, y el condicional también.
-    let age_triggered = input.phase_plan.retirement_trigger.forced_month().is_some();
-    let never_retired = retired_at.iter().filter(|r| r.is_none()).count();
-    let never_retired_probability = never_retired as f64 / n_f;
-    let success_probability = (0..n)
-        .filter(|&p| (age_triggered || retired_at[p].is_some()) && depleted[p].is_none())
-        .count() as f64
-        / n_f;
-    let retired_count = n - never_retired;
-    let success_given_retired = (retired_count > 0).then(|| {
-        (0..n)
-            .filter(|&p| retired_at[p].is_some() && depleted[p].is_none())
-            .count() as f64
-            / retired_count as f64
-    });
+    // **Éxito v2 (E9, modelo de jubilación v2)**: un camino falla ⟺ `failure_month_index.is_some()`
+    // — ningún fallo F1/F2/F3 en el camino. Ya no depende de si el hogar se jubila: con la API v2
+    // todo plan trae `RetirementTrigger::AtMonth` (el mes forzado que decide el solver externo o
+    // el llamante), así que «no jubilarse nunca» dejó de ser un desenlace posible del sorteo. Las
+    // lecturas que D22/D24 separaban para esa pregunta (`never_retired_probability`,
+    // `success_given_retired`, `underfunded_probability`) se retiraron: esa infra-financiación es
+    // ahora `1 − éxito(R)` del solver estocástico (`solve_mc`).
+    let successes = (0..n).filter(|&p| failure_month[p].is_none()).count();
+    let success_probability = successes as f64 / n_f;
 
-    // Ancla de la tabla de agotamiento: la jubilación del camino DETERMINISTA (la que la app
-    // dibuja) y, a falta de ella, la mediana de los sorteados.
-    let deterministic = crate::simulate_f64(input)?;
-    let mut retired_sorted = retired_at.clone();
-    // Los caminos que no se jubilan ordenan los ÚLTIMOS: «nunca» es el peor mes posible.
-    retired_sorted.sort_by(|a, b| match (a, b) {
-        (Some(x), Some(y)) => x.cmp(y),
-        (Some(_), None) => core::cmp::Ordering::Less,
-        (None, Some(_)) => core::cmp::Ordering::Greater,
-        (None, None) => core::cmp::Ordering::Equal,
-    });
-    let anchor = deterministic
-        .retirement_month_index
-        .or(retired_sorted[nearest_rank_index(n, 50)]);
+    // Fallos por motivo: el PRIMER (y único, por construcción del bucle) motivo de cada camino
+    // fallido, en el orden común con `solve_mc::SuccessAt::by_kind`.
+    let mut failures_by_kind = [0u32; 3];
+    for kind in failure_kind.iter().flatten() {
+        failures_by_kind[kind_index(*kind)] += 1;
+    }
+    let failures = n - successes;
+    debug_assert_eq!(
+        failures_by_kind.iter().sum::<u32>() as usize,
+        failures,
+        "el reparto por motivo debe sumar exactamente los caminos fallidos"
+    );
 
-    let mut depletion_probability_by_age = Vec::new();
+    // Wilson del éxito, reutilizando el MISMO constructor que `solve_mc` — nunca reimplementado
+    // aquí. El `month` que pide la firma no se publica en `McOutcome` (esta banda no es la
+    // medición de UN mes concreto de un solve, es la lectura completa del plan tal como llegó);
+    // se pasa el mes forzado cuando existe, solo por trazabilidad de logs si se llegara a volcar
+    // el valor, y `0` si el plan es legacy por cruce.
+    let wilson_month = input.phase_plan.retirement_trigger.forced_month().unwrap_or(0);
+    let success_at = SuccessAt::new(wilson_month, config.paths, failures as u32, failures_by_kind);
+    let wilson_low = success_at.wilson_low;
+    let half_width_pp = success_at.half_width_pp;
+
+    // Ancla de `cumulative_failure_by_age`: el mes de jubilación FORZADO del plan (la v2 lo trae
+    // siempre que el llamante ya haya resuelto la fecha). Con un `ProjectionInput` legacy que
+    // todavía use `RetirementTrigger::LiquidCrossing`, el ancla es la jubilación efectiva del
+    // camino DETERMINISTA —como ANTES de E9— y, a falta de ella, la mediana de los sorteados.
+    let anchor = match input.phase_plan.retirement_trigger {
+        RetirementTrigger::AtMonth(m) => Some(m),
+        RetirementTrigger::LiquidCrossing => {
+            let deterministic = crate::simulate_f64(input)?;
+            let mut retired_sorted = retired_at.clone();
+            // Los caminos que no se jubilan ordenan los ÚLTIMOS: «nunca» es el peor mes posible.
+            retired_sorted.sort_by(|a, b| match (a, b) {
+                (Some(x), Some(y)) => x.cmp(y),
+                (Some(_), None) => core::cmp::Ordering::Less,
+                (None, Some(_)) => core::cmp::Ordering::Greater,
+                (None, None) => core::cmp::Ordering::Equal,
+            });
+            deterministic
+                .retirement_month_index
+                .or(retired_sorted[nearest_rank_index(n, 50)])
+        }
+    };
+
+    let mut cumulative_failure_by_age = Vec::new();
     if let Some(a) = anchor {
         let mut m = a;
         while m <= input.horizon_months {
-            let hit = depleted
+            let hit = failure_month
                 .iter()
-                .filter(|d| d.is_some_and(|x| x <= m))
+                .filter(|f| f.is_some_and(|x| x <= m))
                 .count() as f64;
-            depletion_probability_by_age.push((m, hit / n_f));
-            m += DEPLETION_STEP_MONTHS;
+            cumulative_failure_by_age.push((m, hit / n_f));
+            m += FAILURE_STEP_MONTHS;
         }
-        // **La última fila es el HORIZONTE** (hallazgo #8 de la revisión). La rejilla avanza de
-        // 60 en 60 desde el ancla y se paraba en el último múltiplo que cabía: con ancla 655 y
-        // horizonte 840, la tabla terminaba en el mes 835 y dejaba 5 meses fuera sin decirlo.
-        // Ahora siempre cierra en el horizonte, que es la fila que el usuario lee como «al final
-        // del plan».
-        if depletion_probability_by_age
+        // **La última fila es el HORIZONTE** (hallazgo #8 de la revisión, conservado en E9). La
+        // rejilla avanza de 60 en 60 desde el ancla y se pararía en el último múltiplo que
+        // cupiera si no se forzara el cierre: con ancla 655 y horizonte 840 dejaría 5 meses fuera
+        // sin decirlo. Ahora siempre cierra en el horizonte, y esa fila coincide al bit con
+        // `1 − éxito` — ambas cuentan el mismo conjunto de caminos (`failure_month_index.is_some()`).
+        if cumulative_failure_by_age
             .last()
             .is_none_or(|(m, _)| *m < input.horizon_months)
         {
-            let hit = depleted.iter().filter(|d| d.is_some()).count() as f64;
-            depletion_probability_by_age.push((input.horizon_months, hit / n_f));
+            let hit = failure_month.iter().filter(|f| f.is_some()).count() as f64;
+            cumulative_failure_by_age.push((input.horizon_months, hit / n_f));
         }
     }
-
-    // Percentiles del mes de jubilación: solo tienen sentido si la jubilación la decide el CRUCE.
-    // Con `crossing_is_reading_only` el cruce no jubila (D17) y el mes vuelve a ser un dato.
-    let plan = &input.phase_plan;
-    let by_crossing = matches!(plan.retirement_trigger, RetirementTrigger::LiquidCrossing)
-        && !plan.crossing_is_reading_only;
-    let retirement_month_index_percentiles = by_crossing.then(|| {
-        config
-            .percentiles
-            .iter()
-            .map(|&p| retired_sorted[nearest_rank_index(n, p)])
-            .collect()
-    });
-
-    // Infra-financiación: E1 (modelo v2) retiró `EngineWarning::RetireAtAgeUnderfunded` del motor
-    // — la lectura «no llego a la edad» pasa a ser `1 − éxito(R)` del solver estocástico. El campo
-    // se publica `None` hasta que E9 lo retire de `McOutcome`.
-    let underfunded_probability: Option<f64> = None;
 
     sort_total(&mut months_below);
     let months_below_need_p50 = percentile_of_sorted(&months_below, 50) as u32;
@@ -818,15 +860,28 @@ pub fn project_percentile_bands(
         net_worth,
         liquid_worth,
         success_probability,
-        never_retired_probability,
-        success_given_retired,
-        depletion_probability_by_age,
-        retirement_month_index_percentiles,
-        underfunded_probability,
+        wilson_low,
+        half_width_pp,
+        failures_by_kind,
+        cumulative_failure_by_age,
         months_below_need_p50,
         withdrawal_to_need_ratio_p50,
         any_volatility_declared,
     })
+}
+
+/// El índice de un [`PathFailure`] en [`McOutcome::failures_by_kind`] — los MISMOS índices que
+/// [`crate::KIND_PORTFOLIO_DEPLETED`]/[`crate::KIND_INITIAL_RATE_EXCEEDED`]/
+/// [`crate::KIND_RULE_BELOW_NEED`] de `solve_mc`, para que las dos capas cuenten en el mismo
+/// orden. Se escribe aquí (y no se importa de `solve_mc`, que lo mantiene privado) porque es un
+/// `match` de tres líneas sobre un enum exhaustivo: si `PathFailure` ganara una variante, el
+/// compilador obligaría a actualizar las DOS copias, y eso es más barato que acoplar los módulos.
+fn kind_index(kind: PathFailure) -> usize {
+    match kind {
+        PathFailure::PortfolioDepleted => KIND_PORTFOLIO_DEPLETED,
+        PathFailure::InitialRateExceeded => KIND_INITIAL_RATE_EXCEEDED,
+        PathFailure::RuleBelowNeed => KIND_RULE_BELOW_NEED,
+    }
 }
 
 #[cfg(test)]

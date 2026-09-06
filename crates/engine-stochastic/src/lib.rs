@@ -14,9 +14,10 @@
 //! # LA REGLA: de aquí NO sale un euro
 //!
 //! **Ninguna salida de este crate se publica como un KPI monetario.** Lo que sale son magnitudes
-//! ESTADÍSTICAS —probabilidad de éxito, percentiles de una banda, probabilidad de agotamiento por
-//! edad— y ahí un error relativo de 1e-15 no cambia ninguna decisión. El patrimonio, el objetivo
-//! FIRE, la aportación necesaria y cualquier cifra en euros de la app salen del camino
+//! ESTADÍSTICAS —probabilidad de éxito (con su intervalo de Wilson), percentiles de una banda,
+//! fallo acumulado por edad ([`McOutcome::cumulative_failure_by_age`], E9: F1/F2/F3, no solo
+//! agotamiento)— y ahí un error relativo de 1e-15 no cambia ninguna decisión. El patrimonio, el
+//! objetivo FIRE, la aportación necesaria y cualquier cifra en euros de la app salen del camino
 //! `Decimal` del motor, que es exacto y sigue siendo el único que la API publica como dinero.
 //!
 //! Es la salvaguarda con la que la arqueología (§2.9, campaña #4) readmite la coma flotante: el
@@ -68,16 +69,32 @@
 
 mod mc;
 mod solve_mc;
+mod strategy_solves;
+mod needed_capital;
 
 pub use mc::{
-    project_percentile_bands, run_path, seed_for, McConfig, McError, McOutcome, DEFAULT_PATHS,
-    DEFAULT_PERCENTILES, DEPLETION_STEP_MONTHS, MAX_PATHS,
+    project_percentile_bands, run_path, seed_for, FAILURE_STEP_MONTHS, McConfig, McError,
+    McOutcome, DEFAULT_PATHS, DEFAULT_PERCENTILES, MAX_PATHS,
 };
 pub use solve_mc::{
     retiring_at, success_at_month, success_by_retirement_month, valid_retirement_month,
     RetirementDateSolve, SuccessAt, BRACKET_STEP_MONTHS, KIND_INITIAL_RATE_EXCEEDED,
     KIND_PORTFOLIO_DEPLETED, KIND_RULE_BELOW_NEED, MAX_ANNUAL_DRAWS, MAX_BRACKET_DRAWS,
     MAX_CONFIRMATION_ADVANCES, MAX_MONTHLY_BISECTION_DRAWS, WILSON_Z_95,
+};
+pub use strategy_solves::{
+    coast_stop_month, contributing_extra, earliest_partial_start, minimum_extra_contribution,
+    partial_starting_at, stopping_at, CoastSolve, ContributionSolve, PartialSolve,
+    StrategySolveWarning, CONTRIBUTION_ROUNDING_STEP, CONTRIBUTION_SEED_FLOOR,
+    MAX_CONTRIBUTION_BISECTION_DRAWS, MAX_CONTRIBUTION_DOUBLINGS, MAX_MONTH_BISECTION_DRAWS,
+    MAX_STRATEGY_CONFIRMATION_ADVANCES,
+};
+pub use needed_capital::{
+    needed_capital_curve, needed_capital_today, needed_liquid_at_month, scale_liquid_assets,
+    NeededCapital, ABSENT_MONTH_BEYOND_HORIZON,
+    ABSENT_NO_LIQUID_ASSETS, ABSENT_THRESHOLD_UNREACHABLE, CAPITAL_CONFIRMATION_STEP,
+    CAPITAL_ROUNDING_EUR, MAX_CAPITAL_CONFIRMATION_ADVANCES, MAX_LAMBDA_BISECTION_DRAWS,
+    MAX_LAMBDA_DOUBLINGS, MAX_LAMBDA_HALVINGS, WARM_LAMBDA_BISECTION_DRAWS,
 };
 
 use rust_decimal::prelude::ToPrimitive;

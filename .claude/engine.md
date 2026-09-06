@@ -156,29 +156,60 @@ finalizador de splitmix64), un flujo ChaCha8 propio por camino (ampliar la muest
 que había), normales por Box–Muller y percentiles por **rango más cercano** (siempre un valor
 observado, nunca una interpolación). `McOutcome` publica bandas **puntuales** p10/p50/p90 de
 `net_worth` y `liquid_worth` (la p50 NO es un camino y no cumple ninguna identidad contable),
-`success_probability`, `never_retired_probability`, `success_given_retired`, agotamiento acumulado
-cada 60 meses desde la jubilación **más una última fila en el horizonte**, percentiles del mes de
-cruce, `underfunded_probability` y las dos lecturas de cobertura (D24).
+`success_probability` con su intervalo de Wilson (`wilson_low`, `half_width_pp`), `failures_by_kind`,
+fallo acumulado por edad (`cumulative_failure_by_age`) y las dos lecturas de cobertura (D24, B2).
 
-**Éxito = el plan OCURRE y AGUANTA** (corrección de la segunda revisión adversarial sobre D22).
-D22 decía «la cartera no se agota nunca», y con un trigger por cruce eso premiaba al hogar que no
-se jubila jamás: quien nunca drena nunca se agota. Medido en un hogar que cruza en el mes 655 de
-840, el 33,1 % de los caminos no se jubilaba y los 1.000 contaban como éxito — 0,960 publicado
-frente a 0,940 entre los que sí llegan, y hasta **+6,8 pp** de sesgo en el barrido (SWR 6 %). Hoy:
-`success_probability` = se jubila dentro del horizonte (o el trigger es por edad, y entonces la
-jubilación es un dato) **y** no agota; `never_retired_probability` y `success_given_retired` se
-publican al lado para que las dos preguntas se lean por separado.
+**`McOutcome` v2 (E9): éxito = CERO fallos F1/F2/F3 en el camino** —
+`success_probability` = caminos con `failure_month_index.is_none()` / N, la MISMA fuente que
+clasifica el bucle del motor (F1 `PortfolioDepleted`, F2 `InitialRateExceeded`, F3
+`RuleBelowNeed`). Ya NO depende de si el hogar se jubila: con la API v2 todo plan se sortea con
+`RetirementTrigger::AtMonth` —un mes forzado que resuelve el solver externo
+(`solve_mc::valid_retirement_month`) antes de llegar aquí—, así que «no jubilarse nunca» dejó de
+ser un desenlace posible del sorteo. Los campos que D22/D24 usaban para separar esa pregunta
+(`never_retired_probability`, `success_given_retired`) y la infra-financiación de una edad fija
+(`underfunded_probability`, publicado `None` desde que E1 retiró `RetireAtAgeUnderfunded` del
+motor) **se retiraron de `McOutcome`**: esa lectura es ahora `1 − éxito(R)` del solver estocástico.
+
+`failures_by_kind: [u32; 3]` cuenta el PRIMER motivo de cada camino fallido, en el orden
+`KIND_PORTFOLIO_DEPLETED` / `KIND_INITIAL_RATE_EXCEEDED` / `KIND_RULE_BELOW_NEED` —los MISMOS
+índices que `SuccessAt::by_kind` de `solve_mc`, para que las dos capas no diverjan— y suma
+exactamente `paths − paths·success_probability`. `wilson_low`/`half_width_pp` reutilizan
+`solve_mc::SuccessAt::new` (Wilson nunca se reimplementa en `mc.rs`): con `failures == 0`,
+`wilson_low` colapsa a la forma cerrada `n/(n+z²)` — **estrictamente menor que 1**, nunca «100 %
+seguro» solo porque la muestra no vio ningún fallo.
+
+`cumulative_failure_by_age` **sustituye a `depletion_probability_by_age`** (que solo contaba F1):
+fracción ACUMULADA de caminos con `failure_month_index ≤ mes`, cada `FAILURE_STEP_MONTHS` (60,
+renombrada desde `DEPLETION_STEP_MONTHS`) meses desde el ANCLA. El ancla es el mes de jubilación
+FORZADO del plan (`retirement_trigger.forced_month()`); si el `ProjectionInput` todavía trae
+`RetirementTrigger::LiquidCrossing` (llamantes/tests legacy que no han migrado al mes forzado de la
+v2), el ancla es la jubilación efectiva del camino DETERMINISTA como ANTES —y, a falta de ella, la
+mediana de los sorteados—. La última fila SIEMPRE es el horizonte, y coincide al bit con
+`1 − success_probability`.
 
 **Las dos lecturas de cobertura cuentan la necesidad que la CARTERA no pudo fundar**, no solo la
-que la regla rechazó: `withdrawal_to_need_ratio_p50 = Σw / Σ(w + recorte + descubierto)` y
-`months_below_need_p50` cuenta los meses con `recorte + descubierto > 0`. Antes el denominador era
-`Σ(w + recorte)`, y con `fixed_real` el recorte es CERO por construcción — el permitido ES la
-necesidad—, así que el cociente salía **1,0 en los 1.000 caminos** de un hogar que cubrió el 8,7 %
-de su gasto y pasó 366 de 400 meses sin cartera. La tercera magnitud vive ahora en la serie
-`ProjectionOutput::unmet_need`. **De este crate no sale un euro**: todo lo publicado es estadístico.
-Lo que el modelo NO representa —colas gruesas, autocorrelación, correlación imperfecta entre
-activos (con un `z` común es exactamente 1), bootstrap histórico, volatilidad de IPC/ingresos/gasto,
-rebalanceo— está escrito en el doc del módulo `mc`, no en un comentario suelto.
+que la regla rechazó. `months_below_need_p50` cuenta los meses con `recorte + descubierto > 0` (sin
+cambios en E9). `withdrawal_to_need_ratio_p50` se **corrigió en E9 (bug B2)**:
+`Σ max(0, w − excess) / Σ max(0, w + s + u − excess)`, cada término CLAMPADO a `≥ 0` MES A MES antes
+de sumar. Bajo `rule_is_spend` (D5), `withdrawal` incluye el EXCESO sobre la necesidad
+(`withdrawal_excess`, D24) —la regla ES el gasto y vende `permitido` aunque sobre—, y antes del fix
+ese exceso contaba en el numerador Y el denominador sin descontarlo, inflando la cobertura: medido
+en el mismo hogar y la misma semilla, **0,9888 → 0,9793**. La identidad del motor
+`w + s + u − excess = need_net` (`crates/engine/tests/fuzz_invariants.rs`) es la que exige el clamp
+MES A MES: `need_net` puede ser NEGATIVO desde el mes en que la pensión supera el gasto. **De este
+crate no sale un euro**: todo lo publicado es estadístico. Lo que el modelo NO representa —colas
+gruesas, autocorrelación, correlación imperfecta entre activos (con un `z` común es exactamente 1),
+bootstrap histórico, volatilidad de IPC/ingresos/gasto, rebalanceo— está escrito en el doc del
+módulo `mc`, no en un comentario suelto.
+
+**Hallazgo de E9, no un ajuste cosmético**: `PercentOfBalance`/`Hybrid`/`Guardrails` con
+`spend_mode = rule_is_spend` NUNCA disparan F1 (no pueden agotar la cartera, por construcción),
+pero SÍ pueden disparar F3 —introducido por E1 sin distinguir `spend_mode`— en cuanto el gasto
+declarado esté calibrado cerca del permitido inicial: un hogar de prueba con la necesidad pegada al
+4 % del capital inicial falla por F3 en el 94,9 % de los caminos (el primer shock negativo basta),
+aunque la cartera JAMÁS llegue a cero. Es la separación que el modelo v2 hace visible: «la cartera
+no se agota» y «el plan tiene éxito» son preguntas distintas incluso bajo una regla que por diseño
+no puede arruinar a nadie (`mc_percent_of_balance_never_ruins_but_cuts_the_spending`).
 
 **El colchón de caja se retiró en 5.0.0 antes de publicarse** (decisión del propietario,
 2026-09-06): la caja es un activo más y las reglas de ahorro fijan cuánto se guarda — no hay un
@@ -277,6 +308,227 @@ La maquinaria del sorteo (`PathEngine`) se construye **una vez por presupuesto**
 el solve: entre evaluaciones solo se reescribe `sim.phase_plan.retirement_trigger`. Por eso
 `PathEngine` es `pub(crate)` — no es API pública del crate y `lib.rs` no lo reexporta.
 
+#### Capital necesario (5.0.0 E7 — `crates/engine-stochastic/src/needed_capital.rs`)
+
+La pregunta simétrica de la fecha (decisión M9 del owner, corrección C4 del panel): fijado el mes de
+jubilación, **¿cuánto capital haría falta?**. Se responde igual —bisección sobre el motor entero,
+extremo VERIFICADO, presupuesto de iteraciones— pero moviendo el CAPITAL en vez de la FECHA: se
+escala el patrimonio LÍQUIDO por un factor `λ` hasta que el plan cumple el umbral.
+
+```text
+  λ*        = mín{λ : éxito(escalar_líquido(λ), k) ≥ umbral}
+  needed(k) = liquid_worth[k−1] de project_net_worth_series(retiring_at(scale_liquid_assets(input, λ*), k))
+```
+
+```rust
+pub fn scale_liquid_assets(input: &ProjectionInput, lambda: f64) -> ProjectionInput
+
+pub fn needed_liquid_at_month(input, vols: &[Option<f64>], search: &McConfig, confirm: &McConfig,
+                              threshold_pct: u32, k: u32) -> Result<NeededCapital, McError>
+pub fn needed_capital_today(input, vols, search, confirm, threshold_pct) -> Result<NeededCapital, McError>
+pub fn needed_capital_curve(input, vols, mc: &McConfig, threshold_pct: u32, grid: &[u32])
+                              -> Result<Vec<NeededCapital>, McError>
+
+pub struct NeededCapital { pub month: u32, pub lambda: Option<f64>,
+                           pub amount_nominal: Option<Decimal>, pub amount_today: Option<Decimal>,
+                           pub absent_reason: Option<&'static str>,
+                           pub success_at_lambda: Option<SuccessAt>,
+                           pub capital_is_approximate: bool,
+                           pub draws_search: u32, pub draws_confirm: u32 }
+```
+
+- **Qué escala `λ` y qué no.** Solo los activos con `is_liquid == true` (#143): la vivienda no es el
+  stock que el drenaje vende y multiplicarla movería el patrimonio publicado sin mover un euro de la
+  capacidad de jubilarse. Y de cada activo líquido se escalan **el valor Y la base de coste**
+  (`purchase_price`): mover el valor dejando la base quieta subiría la `g_i = 1 − b_i/v_i` que
+  gobierna el gross-up del drenaje y fabricaría una **plusvalía fantasma** que encarece el capital
+  necesario por un artefacto del método. Con las dos, `g_i` es invariante exacta y el neto de una
+  liquidación escala **exactamente** por `λ` (regresión con números a mano:
+  `scaling_moves_the_basis_with_the_value_so_no_phantom_gain_appears`, 88.000 → 176.000 € frente a
+  los 168.000 € del contrafactual sin base). Ingresos, gastos, deuda, «Próximos» y las reglas de la
+  cascada **no se tocan**.
+- **El importe es el líquido REAL de la trayectoria escalada, no `λ*·L_det(k−1)`.** Se paga UNA
+  proyección `Decimal` de más por cifra publicada (~12,6 ms en P9) y a cambio: (a) es exacto para
+  todo `k` —el producto solo coincide en `k = 1`, porque los flujos que no escalan (ahorro, gasto,
+  deuda, «Próximos») no han intervenido todavía—; (b) **los nodos tardíos no se rompen**: en un
+  hogar cuyo camino ACTUAL se agota antes del horizonte (P9 hacia el mes 800, ingreso plano contra
+  gasto indexado, #139) el producto valdría `λ·0 = 0 €` y el nodo saldría como ausencia aunque el
+  hogar escalado sí tenga cartera ahí. Regresión:
+  `the_curve_uses_the_scaled_liquid_so_late_nodes_are_not_zero`.
+- **Hoy = `k = 1`.** `needed_capital_today` es un envoltorio literal de `needed_liquid_at_month(…, 1)`,
+  no una segunda definición: la cifra que Jubilación, Resumen y Proyección enseñan sale de la MISMA
+  bisección que la curva. En `k = 1` el importe coincide con `λ*·L(0)` —el mes 0 es el estado
+  inicial— y no hay nada que deflactar (el factor en el índice 0 es 1).
+- **Fases y presupuesto.** (A) bracket sobre `λ` desde 1: duplicando ≤ 12 veces si no cumple,
+  halvando ≤ 8 si ya cumple; (B) bisección ≤ 12 pasos con `search` (500), extremo alto siempre
+  verificado; (C) confirmación con `confirm` (2.500) y, si desmiente a la búsqueda, avances de
+  **+2 %** hasta 6 veces — si aun así no cierra se publica el que más cerca quedó con
+  `capital_is_approximate = true`. La **curva** usa un solo presupuesto (`search`), **no confirma**
+  (`draws_confirm == 0`, `capital_is_approximate` siempre `false`) y **arranca cada nodo en el `λ*`
+  del anterior** (warm start, 8 pasos de bisección en vez de 12); el primer nodo va en frío.
+- **Rejilla del llamante**, en su orden y con sus repeticiones (la API pasa cada 60 meses ∪ `{k*}`):
+  este crate no sabe de fechas de nacimiento y no se inventa un muestreo.
+- **Redondeo a cientos HACIA ARRIBA** (D4 enmendado), los dos importes por separado: un capital
+  necesario redondeado a la baja quedaría por debajo del umbral que promete. `amount_today =
+  amount_nominal / inflation_factor_at_month_index(π, k−1)` — el MISMO factor del motor,
+  `(1 + π/100)^((k−1)/12)`, no una copia.
+- **Ausencias, nunca un 0 €**: `no_liquid_assets` (el hogar no tiene activos líquidos —se decide
+  sin sortear, escalar cero es cero— o el hogar ESCALADO llega a `k−1` sin líquido),
+  `threshold_unreachable` (ni `2^12` veces la cartera cumple) y `month_beyond_horizon`.
+- **Caveat de la cascada, declarado y no resuelto**: escalar supone que el reparto se mantiene
+  **proporcional**, y eso vale mientras ninguna regla toque su tope. Con un `AllocationCap::Amount`
+  un `λ` mayor **llena el tope antes** y desvía el resto a otro destino con otra rentabilidad y otra
+  fiscalidad; los topes `MonthsExpense`/`IncomeMultiple` no escalan en absoluto porque se definen
+  sobre el gasto o el ingreso. Reescalar los topes sería inventarse una regla que el usuario no
+  configuró.
+- **La monotonía tampoco se supone.** «Más capital ⇒ más éxito» casi siempre, pero con topes por
+  importe un `λ` mayor redirige aportaciones, y la medición es muestral. Lo que se garantiza es **un
+  `λ` VERIFICADO que cumple**, no el mínimo demostrable — la misma frase que gobierna `solve.rs` y
+  `solve_mc`.
+- **Coste.** Cada `λ` es un sorteo completo y además **reconstruye** el `PathEngine`: cambia la
+  ENTRADA, no solo el trigger, así que el atajo de `solve_mc` no aplica (el sobrecoste es la
+  conversión de la entrada y el buffer `meses × activos`, despreciable frente a los caminos).
+  Medido en release sobre P9 a 840 meses
+  (`tests/timing_mc.rs::the_needed_capital_solve_costs_what_the_plan_says`):
+
+  ```text
+    capital necesario HOY · umbral 95 ⇒ λ* 37,75 · 2.906.800 € · 19×500 + 1×2.500 ⇒ 2,5–2,8 s
+    capital necesario HOY · umbral 80 ⇒ λ* 20,60 · 1.586.100 € · 18×500 + 1×2.500 ⇒ 2,4–2,8 s
+    curva de 14 nodos (cada 60 meses + horizonte) · 149 sorteos de 500        ⇒ 16,1 s
+  ```
+
+  El plan pedía ≤ 3 s para la cifra de hoy (se cumple) y ≈ 12 s para la curva (**16,1 s medidos**:
+  19 sorteos del nodo frío + 10 por cada uno de los 13 calientes, más una proyección `Decimal` por
+  nodo). La curva es nivel 2 y se calcula en segundo plano; `WARM_LAMBDA_BISECTION_DRAWS` se queda
+  en 8 — bajarlo a 6 cuadraría el número, y ajustar un presupuesto para que cuadre un número es
+  exactamente lo que esta casa no hace. En P9 los fallos son todos F1 (`by_kind = [51, 0, 0]`): con
+  70 años de horizonte, gasto indexado al 2,5 % y pensión plana, quien manda es la supervivencia de
+  la cartera, no la puerta de tasa inicial.
+
+  **La forma de la curva de P9, ya sin el artefacto**: `λ*` BAJA con la edad (37,75 en el mes 1 →
+  30,70 en el 840) y el importe en euros de hoy SUBE (2,91 M€ → 93,5 M€), porque un hogar cuyo gasto
+  indexado acaba superando su ingreso plano necesita un colchón cada vez mayor para llegar a esa
+  edad sin agotarse. Con el producto `λ*·L_det(k−1)` la curva salía casi plana (4–5 M€) y el nodo
+  del horizonte, ausente: las dos cosas eran el artefacto, no el hogar.
+
+#### Aportación mínima, mes de coast, inicio de la jornada reducida (5.0.0 E8 — `strategy_solves.rs`)
+
+Las tres preguntas que una ESTRATEGIA concreta añade a «¿cuándo me puedo jubilar?» (M10/M11/M12),
+las tres con el mismo criterio —el umbral de éxito, `SuccessAt::meets`— y la misma doctrina
+(bisección sobre el motor entero, extremo VERIFICADO, presupuesto de iteraciones).
+
+```rust
+pub fn minimum_extra_contribution(input, vols, search: &McConfig, confirm: &McConfig,
+                                  threshold_pct: u32, r: u32) -> Result<ContributionSolve, McError>
+pub struct ContributionSolve { pub month: u32, pub extra_monthly: Option<Decimal>, pub underfunded: bool,
+                               pub search_ceiling: Decimal, pub success_at_solution: Option<SuccessAt>,
+                               pub draws_search: u32, pub draws_confirm: u32 }
+impl ContributionSolve { pub fn warning(&self) -> Option<StrategySolveWarning> }
+
+pub fn coast_stop_month(input, vols, search, confirm, threshold_pct, r: u32) -> Result<CoastSolve, McError>
+pub struct CoastSolve { pub retirement_month: u32, pub stop_month: Option<u32>,
+                        pub freed_saving_monthly: Option<Decimal>, pub success_at_solution: Option<SuccessAt>,
+                        pub warnings: Vec<StrategySolveWarning>, pub draws_search: u32, pub draws_confirm: u32 }
+
+pub fn earliest_partial_start(input, vols, search, confirm, threshold_pct) -> Result<PartialSolve, McError>
+pub struct PartialSolve { pub start_month: Option<u32>, pub phase_success: Option<SuccessAt>,
+                          pub full_retirement: Option<RetirementDateSolve>,
+                          pub warnings: Vec<StrategySolveWarning>, pub draws_search: u32, pub draws_confirm: u32 }
+
+pub enum StrategySolveWarning { CoastNotReachable, PartialNeverStarts,
+                                PartialNeverFullyRetires, RetireAtAgeUnderfunded }
+impl StrategySolveWarning { pub fn code(self) -> &'static str }   // contrato de cable
+
+// Los tres escenarios, cada uno una mutación y en un solo sitio:
+pub fn contributing_extra(input, extra: Decimal, r: u32) -> ProjectionInput
+pub fn stopping_at(input, stop: u32) -> ProjectionInput
+pub fn partial_starting_at(input, start_month: u32) -> ProjectionInput
+```
+
+- **Una bisección, escrita UNA vez.** `bisect(lo_fails, hi_ok, max_draws, midpoint, meets)` es
+  genérica sobre el eje: el mes lo parte `month_mid`, el importe `amount_mid`, y las dos guardas
+  devuelven `None` cuando ya no queda candidato interior. `solve_mc::bisect_month` **no** se
+  reutiliza porque es privado de ese módulo; lo que se reutiliza es su invariante, ahora escrito una
+  sola vez para los tres ejes.
+- **Cada evaluación RECONSTRUYE el `PathEngine`, y aquí no hay atajo.** Los tres ejes viven en el
+  `SimInput` convertido (no en `retirement_trigger`), así que cada candidato es una entrada distinta
+  y se pasa por `success_at_month`. El sobrecoste —conversión + buffer `meses × activos`— está por
+  debajo del 1 % de un sorteo de 500 caminos.
+- **De aquí SÍ salen euros, y son `Decimal` del camino EXACTO.** `extra_monthly` y `search_ceiling`
+  los construye este módulo (suelo de 100 €, sobrante del mes 1 de `first_month_allocation`,
+  doblajes y medias exactas); `freed_saving_monthly` sale de una ejecución DETERMINISTA
+  (`run_stopping_at`). El sorteo decide **qué escenario cumple**, nunca **cuánto vale** — por eso la
+  regla del crate («ninguna salida se publica como KPI monetario derivado de `f64`») sigue intacta y
+  D4 no gana ninguna excepción.
+
+**1 · `minimum_extra_contribution` (M12).** El menor extra mensual `c` **PLANO EN NOMINAL**
+(supuesto S2, #139: en este motor los ingresos no se indexan) tal que
+`success_at_month(input + c, …, r).meets(umbral)`. Se inyecta en `planning_monthly_cash_adjustment`
+—cuya rejilla es **0-based**: índice `i` ⇒ mes `i+1` del bucle—, en los índices `0..=r−2`, o sea los
+meses del bucle `1..=r−1`: se aporta mientras se trabaja y se deja de aportar al jubilarse. Va por
+«Próximos» y no por `income_regular_monthly` a propósito: subir el ingreso cambiaría también
+`ordinary_need` (`gasto − ingreso`) y con ella la puerta de tasa inicial, que es justo el criterio
+que se está midiendo.
+
+| fase | qué hace | presupuesto |
+|---|---|---|
+| 0 | sonda de `c = 0`: si el plan ya cumple, la respuesta es `Some(0)` — una respuesta, no una ausencia | 1 de `search` |
+| A | extremo alto desde `max(100 €, sobrante del mes 1)`, **DOBLANDO** | ≤ 1 + 12 |
+| B | bisección sobre el importe, «`lo` falla, `hi` cumple, se devuelve `hi`» | ≤ 12 |
+| C | redondeo **a decenas hacia arriba** y CONFIRMACIÓN con 2.500; si no cumple, +5 % (con suelo de 10 €) hasta 6 veces | 1 + ≤ 6 |
+
+Se **redondea antes de confirmar**: publicar una cifra distinta de la medida convertiría un solve
+verificado en uno decorativo. El techo se **descubre doblando** y no se lee de
+`solve.rs::search_ceiling`: aquella cota es el máximo sobrante del horizonte y es correcta para un
+solve que pone TECHO a lo que la cascada invierte, pero aquí la incógnita es **dinero nuevo** que la
+caja actual no acota — con esa cota se diría «no llegas» a un hogar sin sobrante que solo necesita
+encontrar 3.000 €/mes. `underfunded = true` ⟺ ni `search_ceiling` cumple, y entonces
+`extra_monthly: None` — **jamás un `Some(0)`**, que diría lo contrario.
+
+**2 · `coast_stop_month` (M10 modo A + corrección C8).** El **PRIMER** `C` (no el último) tal que,
+cortando las aportaciones desde ese mes y jubilándose igual en `r`, el plan sigue cumpliendo: la
+pregunta es «¿desde cuándo puedo dejar de ahorrar?». Sonda alta `C = r` —el corte es INCLUSIVO
+(`k ≥ C` ⇒ techo 0), así que `C = r` es «aportar durante toda la acumulación», el mejor plan de
+coast que existe—: si falla, `stop_month: None` + `CoastNotReachable` y **un solo sorteo**. Sonda
+baja `C = 1` ⇒ `Some(1)` («puedes dejar de aportar ya»). Si no, bisección ≤ 12 y confirmación
+avanzando `C` hacia `r`.
+
+`freed_saving_monthly` es `disposable_cash[C]` de una ejecución determinista con el corte —el mes
+`C`, **no** `C+1`, porque el corte es inclusivo y `C` es el primer mes sin aportación—. **Supuesto
+S4: el ahorro liberado es caja DISPONIBLE y no se reinvierte**; el pool que llega a la cascada es 0
+y el sobrante entero sale del balance. Regresión:
+`the_freed_saving_of_coast_is_disposable_and_is_not_reinvested`, que además comprueba la identidad
+que lo cierra — los euros liberados son **exactamente** los que le faltan a la cartera frente a la
+ejecución sin corte.
+
+**3 · `earliest_partial_start` (M11 modo «en cuanto pueda»).** El menor `S` tal que **la FASE no
+falla**, medido con `retirement_trigger = AtMonth(H+1)`: un plan que nunca se jubila del todo, para
+que el candidato se juzgue por la fase y no por lo que venga después. Durante `Phase::Partial` el
+motor solo puede fallar por **F1** (F3 está restringida a `Retired` y F2 se evalúa en el primer mes
+jubilado, que no llega — supuesto S1), así que el criterio dice literalmente «la media jornada no se
+come la cartera». Sondas `S = 1` y `S = H` (si la alta falla ⇒ `PartialNeverStarts`), bisección
+≤ 12, confirmación, y luego **UNA** llamada a `valid_retirement_month` con la fase desde `S*` y
+`k_min = S*+1`; si esa fecha vuelve `month: None` ⇒ `PartialNeverFullyRetires`.
+
+**UNA capa anidada, no un producto** — la propiedad que hace viable el solve y que pinea
+`the_partial_phase_solve_is_one_nested_layer_not_a_product`: el coste es `bisección_de_S + UNA
+fecha`, no `bisección_de_S × fecha` (que serían ~14 × ~39 ≈ 550 sorteos). Los contadores de
+`PartialSolve` son **los propios**, sin los de la fecha anidada: un total que esconde qué capa gastó
+qué no sirve para presupuestar. Sin `PhasePlan::partial` declarado, `start_month: None` **sin aviso**
+y sin sorteos («no hay pregunta que responder», la convención de `solve.rs`) — pero el `McConfig` se
+valida igual.
+
+**Coste medido** (release, P9 sin inflación a 840 meses,
+`tests/timing_mc.rs::the_three_strategy_solves_cost_what_the_plan_says`; un sorteo ≈ 79–93 ms con
+500 caminos y ≈ 380–390 ms con 2.500):
+
+```text
+  aportación mínima · R = 480 (ya cumple)  ⇒ 0 €/mes           ·  1×500 + 1×2.500  ⇒ 0,47 s
+  aportación mínima · R = 240 (hay que buscar) ⇒ 1.210 €/mes   · 16×500 + 1×2.500  ⇒ 1,86 s   (plan ≤ 3 s)
+  coast · R = 480 ⇒ primer C = 343, libera 1.600 €/mes         · 11×500 + 1×2.500  ⇒ 1,23 s   (plan ≤ 2 s)
+  jornada reducida ⇒ primer S = 241, sin jubilación total      · 23×500 + 1×2.500  ⇒ 2,42 s   (plan ≤ 5 s)
+                     (12+1 propios · 11+0 de la ÚNICA fecha)
+```
 
 ## Public API
 
