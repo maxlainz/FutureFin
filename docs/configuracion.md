@@ -138,7 +138,7 @@ instalación. Los toca el propietario.
 |---|---|---|
 | **Divisa base** | `Ajustes → General → Divisa` (solo el propietario), y también en el paso 1 del asistente de bienvenida | `EUR`, `USD` o `GBP`. **Una sola por instalación**: FutureFin no convierte ni mezcla divisas. Decide también qué filas acepta el importador de CSV. Cambiarla más tarde **no reconvierte** los importes ya guardados: solo cambia el símbolo. Un código de tres letras que no sea uno de esos tres se rechaza con un 400. |
 | **Zona horaria** | `Ajustes → General` | Define qué es "hoy" para los cálculos con fecha. El asistente propone la del navegador. |
-| **Inflación anual asumida** | `Ajustes → Plan` | Entre 0 y 50 %. Hace crecer el objetivo FIRE y permite ver las cifras en euros de hoy. |
+| **Inflación anual asumida** | `Ajustes → Plan` | Entre 0 y 50 %. Hace crecer el capital necesario y permite ver las cifras en euros de hoy. |
 | **Modo de edad** | `Ajustes → Plan` | Enseñar fechas o edades en la proyección. |
 | **Supuestos fiscales y fuente del ahorro** | `Ajustes → Plan` | Tramos de IRPF del ahorro para el *gross-up*, si los impuestos están activados, y de dónde sale el ahorro mensual de la simulación (presupuesto, promedio real de movimientos, o mezcla de ambos). **Desde la 5.0.0 la tasa de retirada segura (SWR), el modo del objetivo y la edad límite del horizonte YA NO están aquí**: son de cada persona y viven en la pestaña Jubilación. |
 | **Permitir escritura vía MCP** | `Ajustes → Integraciones` | Interruptor vivo: al apagarlo, las herramientas de escritura de Claude se cortan al instante. Solo el propietario. Ver [mcp.md](mcp.md). |
@@ -151,11 +151,11 @@ es de cada persona. Vive en la pestaña **Jubilación** y lo edita cada cual par
 los usuarios con rol de solo lectura, que sin poder fijar su edad de jubilación no podrían ver su
 propia proyección.
 
-Guarda tu **estrategia** (cuanto antes · a una edad fija · coast · media jornada · puente hasta la
-pensión), tu edad objetivo, tu **tasa de retirada segura (SWR)**, el modo del objetivo anual y su
-importe manual, la **edad límite del horizonte**, la base del objetivo y su descuento, la **regla de
-retirada** y cómo se aplica, la **pensión pública con su fecha**, la fase de **media jornada**, el
-colchón de caja y el umbral de éxito de los escenarios.
+Guarda tu **estrategia** (cuanto antes · a una edad fija · coast · media jornada), tu edad objetivo,
+tu **tasa de retirada segura (SWR)**, el modo del objetivo anual y su importe manual, la **edad
+límite del horizonte**, la **regla de retirada** y cómo se aplica, la **pensión pública con su
+fecha** —con el puente hasta ella como un ajuste suyo (activarlo, tasa máxima, años máximos), no una
+estrategia aparte—, la fase de **media jornada** y el umbral de éxito de los escenarios.
 
 Hay además un ajuste que vive en **cada activo**, no en los ajustes: la **volatilidad anual (%)**,
 junto a la rentabilidad esperada. Dejarla vacía o a `0` significa «este activo crece sin
@@ -170,7 +170,7 @@ fuente del ahorro, divisa, zona horaria); cada persona guarda su plan.
 
 En `Ajustes → Plan → Fuente del ahorro de la simulación` eliges de dónde salen el ingreso y el
 gasto con los que FutureFin simula tu futuro — y con ellos, qué significan la curva de proyección,
-el objetivo FIRE y la fecha de jubilación que ves:
+el capital necesario y la fecha válida que ves:
 
 | Opción | Qué alimenta la simulación |
 |---|---|

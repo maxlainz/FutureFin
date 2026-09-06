@@ -227,22 +227,29 @@ curl -sf -b "$JAR" -o /dev/null -w 'paths=2000 %{time_total}s  %{size_download} 
   "$BASE/v1/projection/bands?paths=2000&seed=1"
 
 # Qué se sorteó de verdad: sin volatilidad declarada la banda ES la línea.
-curl -sf -b "$JAR" "$BASE/v1/projection/bands" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("paths", d["paths"], "seed", d["seed"], "any_vol", d["any_volatility_declared"], "P(exito)", d["success_probability"], "verdict", d["success_verdict"])'
+curl -sf -b "$JAR" "$BASE/v1/projection/bands" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("paths", d["paths"], "seed", d["seed"], "any_vol", d["any_volatility_declared"], "success_of_plan", d["success_of_plan"], "verdict", d["success_verdict"])'
 ```
 
 - **Coste medido** (release, horizonte 840 meses, entrada de cache fría): **500 caminos 104 ms ·
   1.000 caminos 204 ms · 2.000 caminos 391 ms** — lineal en `paths`, que es lo que se espera de un
-  sorteo por camino y la señal de que algo va mal si deja de serlo. `paths` topa en **2.000** por
-  HTTP y en **1.000** por MCP.
+  sorteo por camino y la señal de que algo va mal si deja de serlo. **`paths` topa en 5.000 por HTTP
+  y en 2.500 por MCP, default 2.500** (subido del 2.000/1.000/500 de la primera vuelta de 5.0.0 con
+  el modelo v2 — `resolve_paths` en `apps/api/src/handlers/projection_bands.rs`); el campo de éxito
+  se llama `success_of_plan`, no `success_probability` (retirado con `never_retired_probability`/
+  `success_given_retired`, E9).
 - **`seed` viaja como CADENA de dígitos**, no como número JSON: es un `u64` y `JSON.parse` lo
   redondea por encima de 2⁵³. Si tu script la lee con `jq` y la reinyecta como número, «repetir el
   mismo sorteo» te devolverá otro en silencio — el fallo más caro de medir aquí, porque no da error.
 - **Cache propia**, con clave `(instalación, usuario, paths, semilla)` y el TTL de la proyección; se
   invalida con **las mismas** mutaciones que la serie. Para forzar un MISS de verdad, cambia `seed`
   (no `paths`, que también es clave pero cambia además el resultado).
-- **Solves del plan**: `required_contribution_monthly`, `coast_fire_month_index` y compañía se
-  calculan **una vez, con la serie, y se guardan en la misma entrada de cache**, así que un HIT no
-  los paga. Lo que sí cambia es el **primer** GET, y cambia con la estrategia — medido en release
+- **Solves del plan (nombres renombrados con el modelo v2, 2026-09-06)**: `contribution_required_monthly`,
+  `coast_stop_month_index` y compañía (antes `required_contribution_monthly`/`coast_fire_month_index`,
+  retirados con el objetivo) se calculan con el presupuesto de BÚSQUEDA (~500 caminos) y se guardan
+  con la serie (nivel 1), así que un HIT no los paga; la curva `needed_capital_curve` y las fechas al
+  100/90 % son **nivel 2**, en una cache APARTE (`AppState::plan_cache`) que se resuelve en segundo
+  plano con el presupuesto de confirmación (2.500 caminos) — ver `futurefin-architecture-contract`
+  D25. Lo que sí cambia es el **primer** GET, y cambia con la estrategia — medido en release
   sobre un hogar con 4 activos, hipoteca francesa y dos Próximos: **5 ms** (`asap`, sin solve),
   **19 ms** (`coast`), **41 ms** (`retire_at_age`), **100 ms** (`partial` con pensión y edad); los
   hits, 1–3 ms. Un «la proyección se ha vuelto lenta» sin decir la estrategia no es una medición.
@@ -488,6 +495,12 @@ diffs: scalars (`months`, `horizon_*`, `starting_net_worth`,
 `jubilacion_target_net_worth`, `compound_outpaces_true_savings_month_index`),
 `milestones`/`milestones_real`, array lengths, and every value at **shared
 month_index points**. Exit 0 = no forbidden divergence; exit 1 = real DIFF.
+**CÓDIGO DESACTUALIZADO, no arreglado en esta pasada (documentación-only)**: el script sigue leyendo
+`jubilacion_target_net_worth` y `fire_target_series`, dos campos retirados enteros en el modelo v2
+(2026-09-06) — `a.get("jubilacion_target_net_worth")` siempre da `None` en los dos lados, así que esa
+fila del diff nunca puede fallar y la comparación es un placebo silencioso, no una guarda. Actualizar
+a `needed_capital_today`/`needed_capital_curve` es un cambio de código (`scripts/diagnostics/projection-diff.sh`),
+fuera de alcance de este pase.
 
 Interpretation:
 - **Densities differ (default run)**: `points_len`/`fire_target_series_len`/last

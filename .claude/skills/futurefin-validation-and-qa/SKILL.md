@@ -249,7 +249,7 @@ fix this table in the same change.
 | `installation_patch.rs` | 5 | unknown `fire_number_mode` rejected; legacy `annual_expense_adjusted` alias accepted; valid mode change |
 | `unique_violation.rs` | 2 | duplicate username / duplicate category name → 409 via central `From<sqlx::Error>` |
 | `projection_marker.rs` | 1 | regression capture: stable marker + starting NW across the perf refactor (the template for capture-first) |
-| `fire_parity.rs` | 1 (×7 fixture cases) | server `jubilacion_target_net_worth` matches `fire-parity.json` ± 1 € |
+| `fire_parity.rs` | 1 (×**17** fixture cases — count with `python3 -c "import json;print(len(json.load(open('apps/api/tests/fixtures/fire-parity.json'))['cases']))"`, was ×7) | server `fire_number_classic_today` matches `fire-parity.json` ± 1 € (renamed from `jubilacion_target_net_worth` with the 5.0.0 v2 model, 2026-09-06 — same formula, informational only now) |
 | `projection_cache.rs` | 5 | cache hit faster than miss + identical body; invalidation on mutation; logout drops only `view=mine` entries; `density=hybrid` decimation (months 0–12 monthly, then 24,36,48…); monthly/hybrid cached as separate keys |
 | `history_snapshots.rs` | 20 | snapshot capture (copied terms) / same-day upsert / exclude shared+expired / backfill CRUD roundtrip with `year` filter + cascade / 400 validations (future, `duplicate_item_id`, terms-on-asset) / 409 date taken / 404 cross-user / 403 viewer on every mutation / GET never mutates / `snapshot_mutations_do_not_touch_projection_cache` (cache stays HIT — history is NOT a projection input) |
 | `history_series.rs` | 7 | `GET /v1/history/series`: empty→200, exact linear interpolation between two asset snapshots, join to live values (deleted asset→0 at k=0), amortization curve above the chord with exact endpoints, household sums two users + `?view=mine` filters, markers carry date/kind/total, single today snapshot. Numbers predicted before running |
@@ -479,8 +479,9 @@ source of truth. One JSON pins both:
 
 - Backend consumer: `apps/api/tests/fire_parity.rs` — for each case, PATCHes
   `fire_settings` on the installation, seeds an asset + budget entries reproducing `monthly`,
-  calls `GET /v1/projection/series`, asserts `jubilacion_target_net_worth` ≈
-  `expected_target_nw` ± 1 € (`null` must match `null`).
+  calls `GET /v1/projection/series`, asserts `fire_number_classic_today` ≈
+  `expected_target_nw` ± 1 € (`null` must match `null`). Renamed from `jubilacion_target_net_worth`
+  with the 5.0.0 v2 model (2026-09-06): same formula, now informational-only.
 - Frontend consumer: `apps/web/src/lib/fire.test.ts` — loads the same file via
   `readFileSync` (relative path `../../../api/tests/fixtures/fire-parity.json`), computes
   `grossUpNetAnnualFire(computeFireAnnualNeedNetEur(...)) / (swr/100)`, same ± 1 € tolerance.

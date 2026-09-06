@@ -1063,9 +1063,13 @@ ese WP, por diseño.
 
 **Ampliado el 2026-09-05 (WP-F del tren 5.0.0, decisiones V6/V7)**: §2.3 ganó el contrato del
 colchón derivado y §2.7 el veredicto de corte fijo al 100 %. La parte del colchón queda descrita
-arriba como retirada; §2.7 (veredicto al 100 %) sigue vigente y su re-verificación no cambia:
+arriba como retirada; ~~§2.7 (veredicto al 100 %) sigue vigente y su re-verificación no cambia:
 `grep -n "VERDICT_GREEN_FLOOR_PCT" apps/api/src/handlers/projection_bands.rs` (2 hits) y
-`cargo test -p futurefin-api --lib projection_bands::tests::el_verde_exige_todos_los_caminos`.
+`cargo test -p futurefin-api --lib projection_bands::tests::el_verde_exige_todos_los_caminos`~~ —
+**esto dejó de ser cierto el 2026-09-06 (C3, entrada WP D2 arriba)**: el corte fijo se sustituyó por
+el contrato Wilson-contra-umbral-del-perfil; `VERDICT_GREEN_FLOOR_PCT` ya no existe
+(`grep -c "VERDICT_GREEN_FLOOR_PCT" apps/api/src/handlers/projection_bands.rs` → 0) y el test citado
+tampoco está en el árbol.
 
 Escrito 2026-08-30 (auditoría del modelo financiero; rama `audit/modelo-financiero`).
 **Ampliado y re-verificado el 2026-09-03 para 5.0.0** (rama `release/5.0.0`, issue #207): §2.2/§2.3

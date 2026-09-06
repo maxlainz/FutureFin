@@ -148,7 +148,22 @@ ni categoría aparte ni ingreso; `totals.refunds_actual/_avg`). Retiradas `expen
 y `expenses.transferred_rate` (sus consumidores desaparecen con las tarjetas; el test de cobertura lo
 exige en las dos direcciones).
 
-**`retirement.target` — «Patrimonio objetivo»** (4.0.0; base declarada en 5.0.0). La métrica más cara de la app: gasto anual en jubilación **grosseado por impuestos si están activados** dividido entre el SWR, **más** el término finito de deuda. Desde 5.0.0 el texto **ya no promete una base fija**: la cifra grande está siempre en **la base que declara el subtítulo de su tarjeta**, y el id lo consumen **dos tarjetas que no miden lo mismo**: en **Jubilación** (`lib/retirement-tiles.ts`, «Objetivo (euros de hoy)») es `jubilacion_target_net_worth` —el objetivo evaluado en el mes 0, como si te jubilaras HOY—, con el nominal del mes del cruce en la fila «Objetivo al cruce (euros de ese mes)» de «Detalle del cálculo»; en **Proyección** (`views/ProjectionView.tsx`, «Objetivo al jubilarte») es `jubilacion_target_net_worth_nominal` —el objetivo del mes en que de verdad te jubilas— deflactado a euros de hoy mientras «En dinero de hoy» esté activo (`jubilacionTargetTileValue`, `lib/projection-chart.ts`). Dos campos distintos bajo el mismo texto: lo que los desambigua es el `detail` de la tarjeta, **no** el lector. El párrafo anterior era falso en Proyección desde el objetivo puente y sostenía el bug de 2,31× (F11, 5.0.0). Si tocas la base del target, el gross-up, el SWR **o la base en que se publica una de las dos tarjetas**, esta entrada es la que hay que revisar (y `futurefin-fire-domain-reference` §7).
+**HISTORIA, no estado — `retirement.target` («Patrimonio objetivo», 4.0.0–4.15.x) murió ENTERO con
+el modelo v2 (§6.4): no confundir con la entrada vigente.** Hasta la tercera vuelta de UX la
+métrica más cara de la app era el gasto anual en jubilación **grosseado por impuestos si están
+activados** dividido entre el SWR, **más** el término finito de deuda, y el mismo id alimentaba
+**dos tarjetas que no medían lo mismo**: en Jubilación (`jubilacion_target_net_worth`, el objetivo
+evaluado en el mes 0) y en Proyección (`jubilacion_target_net_worth_nominal`, el objetivo del mes
+del cruce). El párrafo llegó a estar falso en Proyección y sostuvo el bug de 2,31× (F11, 5.0.0) —
+la razón por la que en su día mereció una entrada tan larga. **Con el modelo v2 los dos campos, la
+tarjeta «Objetivo» y el propio id `retirement.target` se retiraron ENTEROS** (`grep -c
+'"retirement.target"' apps/web/src/lib/helpTexts.ts` → 0; `grep -rn jubilacion_target_net_worth
+apps/web/src` sale vacío): no hay ya ni base que declarar ni cruce que disparar. La cifra de
+referencia hoy es `retirement.needed_capital` («Capital necesario hoy»), la MISMA en Jubilación,
+Resumen y Proyección — ver la tabla de §6 y §6.4. Si tocas el gross-up o el SWR del NÚMERO FIRE
+CLÁSICO (que sí sobrevive, informativo, como `retirement.fire_number_classic`), esta nota explica
+de dónde viene la vieja tarjeta; para la semántica vigente ve a `retirement.needed_capital` y a
+`futurefin-fire-domain-reference` §7.
 
 **`summary.net_return` — «Rendimiento neto»** (2026-08-25). Rendimiento anual **esperado** del
 patrimonio neto: `Σ valor·rentabilidad − Σ principal·TAE` sobre el patrimonio neto, con los
@@ -461,6 +476,13 @@ la fila `depletion_total` del detalle); `retirement.bands` gana una frase sobre 
 `retirement.success` y `summary.success` pasan del umbral configurable al corte fijo; y
 `retirement.target` reescrita por WP-E (dos tarjetas, dos campos, base declarada en el subtítulo).
 Las dos filas del mapa de vistas se actualizan en §6.
+
+**Esta transición (umbral configurable → corte fijo) se DESHIZO al día siguiente y en dirección
+CONTRARIA a como suena leída sola**: el modelo v2 (C3, 2026-09-06 — §6.4 arriba, que es la entrada
+vigente) retira el corte fijo al 100 % y devuelve `success_threshold_pct` al perfil como la
+restricción que decide la fecha y el semáforo (80–100, default 95, evaluado sobre el suelo de
+Wilson). Quien lea solo este párrafo sin subir a §6.4 se queda con la dirección de V7, que hoy es
+historia, no el estado del catálogo.
 
 Introducido en 3.9.0 junto al popover de ayuda. **Ampliado el 2026-09-03 (5.0.0, issue #207)**:
 §5 (el tercer patrón del escáner de cobertura, la forma `helpId:` de objeto), §6 (recuento por

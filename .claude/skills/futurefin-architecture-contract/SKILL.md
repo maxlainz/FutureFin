@@ -144,10 +144,13 @@ Tres cambios, y ninguno toca la frase de arriba:
 - **`household` deja de ser una simulación y pasa a ser un AGREGADO informativo**: el servidor corre
   **una simulación por miembro** —con su perfil, su fecha de nacimiento y sus filas— al horizonte
   común `max(horizontes)` y suma las series. En consecuencia el hogar **no publica jubilación
-  propia**: `jubilacion_*`, `strategy`, `phase_transitions` y `fire_target_series` viajan vacíos con
-  `absent_reason: "household_aggregate"`, y el hito de cada persona va en `members[]`. «El ahorro
-  necesario del hogar» no es una cifra que exista, y por eso se publica `null` con razón en vez de
-  una suma que nadie podría interpretar.
+  propia**: `jubilacion_*`, `strategy`, `phase_transitions` y el bloque «plan» (`success_of_plan`,
+  `needed_capital_today`…) viajan vacíos con `plan_absent_reason: "household_aggregate"`, y el hito
+  de cada persona va en `members[]`. «El ahorro necesario del hogar» no es una cifra que exista, y
+  por eso se publica `null` con razón en vez de una suma que nadie podría interpretar.
+  **`fire_target_series` no es uno de los campos que falten en household — no existe en NINGÚN
+  scope desde el modelo v2** (retirado con el objetivo determinista; `grep -n "pub fire_target_series"
+  apps/api/src/handlers/projection.rs` no encuentra ningún campo).
 - **`view` sigue sin ser una frontera de autorización — la de ESCRITURA es otra cosa y es nueva**:
   ver D23. Un literal desconocido, además, es 400 `invalid_view` desde 4.0.0, no un `household`
   silencioso; esta sección lo afirmaba mal hasta 5.0.0.
@@ -168,8 +171,9 @@ API serializes amounts as decimal **strings** (`rust_decimal::serde::str`); the 
 arithmetic via `parseDisplayDecimal`-style helpers, never `parseFloat` on money.
 **Exception (v1.4.0; extended 2026-07-06; publication rounding added Fase 5/issue #86, 4.4.0)**: the
 large parallel arrays in `GET /v1/projection/series` — `points[].net_worth`,
-`points[].contributed_capital`, `fire_target_series`, `asset_series[].values` — AND the per-point
-arrays of `GET /v1/history/series` (`points[].net_worth/assets_total/liabilities_total`,
+`points[].contributed_capital`, `asset_series[].values`, and since 5.0.0 v2 `needed_capital_curve`
+(`fire_target_series` was retired entirely with the deterministic FIRE target, 2026-09-06) — AND
+the per-point arrays of `GET /v1/history/series` (`points[].net_worth/assets_total/liabilities_total`,
 `asset_series[].values`, `markers[].total`) serialize as `f64`. **Two separate
 `serialize_decimal_as_*` definitions since 4.4.0, not one**: `serialize_decimal_as_f64`
 (`pub(crate)`, `handlers/projection.rs`, full f64 precision) for projection responses, and
@@ -183,8 +187,9 @@ treatment at 4 decimals (`MONTH_FRACTION_DP`, `round_month_fraction`, same file)
 `.claude/api-routes.md`: "**`net_worth` y
 `contributed_capital` se serializan como `f64`** (no Decimal-as-string) por rendimiento: ~30 KB
 menos en JSON y evita ~5.000 `parseDisplayDecimal` cliente. Precisión <1 € en horizontes de 70
-años." Scalars/KPIs (`starting_net_worth`, `jubilacion_target_net_worth`, milestone targets)
-stay Decimal-as-string. **Breaks if violated**: `f64` upstream (engine, DB, KPI fields) causes
+años." Scalars/KPIs (`starting_net_worth`, `needed_capital_today` — `jubilacion_target_net_worth`
+until it was retired with the FIRE target in 5.0.0 v2 — milestone targets) stay Decimal-as-string.
+**Breaks if violated**: `f64` upstream (engine, DB, KPI fields) causes
 silent cent drift that compounds over 840 months; conversely, re-stringifying the big arrays
 regresses wire size and client parse cost for zero precision benefit at display resolution.
 
@@ -303,15 +308,21 @@ owner sign-off (the v1.1.0 `allocation_rules` drop was explicitly signed off and
   stale. The comment on `refresh_projection_after_mutation` documents this rejection. The first
   GET after a mutation eats one on-demand compute (~500 ms), then it's cached again.
 - `?months=` override **bypasses the cache entirely** (computed, not stored).
-- **5.0.0 — la entrada guarda también los SOLVES del plan.** No hay una cache de solves: los solves
-  son campos de la propia `ProjectionSeriesResponse`, así que se guardan y se sirven con ella
-  (`required_contribution_monthly`, su techo de búsqueda, `underfunded`, `required_capital_path`,
-  `disposable_*`, `coast_fire_month_index`, `coast_number`, `coast_path`). Importa porque **cada
-  solve es una bisección sobre el motor entero**: hasta 26 proyecciones completas, ~0,4 s a 600
-  meses. El primer GET tras una invalidación las paga; un HIT no paga nada. Medido en release sobre
-  un hogar con cuatro activos, hipoteca francesa y dos Próximos: **5 ms** (`asap`, sin solve),
-  **19 ms** (`coast`), **41 ms** (`retire_at_age`), **100 ms** (`partial` con pensión y edad); los
-  hits, 1–3 ms. Regresión: `projection_cache.rs::the_strategy_solves_are_computed_once_and_served_from_the_cache`.
+- **5.0.0 v2 — DOS niveles de plan, no uno, con cachés distintas** (rediseño posterior al
+  párrafo original de esta fila, que describía los solves deterministas de M4/E4-retirados —
+  `required_contribution_monthly`, `required_capital_path`, `disposable_*`,
+  `coast_fire_month_index`, `coast_number`, `coast_path` — como campos de `ProjectionSeriesResponse`;
+  esos campos no existen ya). **Nivel 1** (fecha válida, éxito, capital necesario HOY,
+  `contribution_required_monthly`, `coast_stop_month_index`, `partial_start_month_index`…) SÍ vive
+  dentro de `ProjectionSeriesResponse` y se sirve/invalida con la serie — resuelto con un
+  presupuesto de BÚSQUEDA (~500 caminos), en línea (≈2–5 s en un miss). **Nivel 2** (la curva de
+  `needed_capital_curve`, las fechas al 100/90 %, el fallo acumulado por edad) vive en una cache
+  APARTE, `AppState::plan_cache` (`PlanKey` → `PlanCacheSlot::{Pending, Done}`, content-addressed,
+  LRU + TTL): se calcula en SEGUNDO PLANO con el presupuesto de confirmación (2.500 caminos) y el
+  primer GET tras una entrada nueva la ve como `needed_capital_curve_state: "computing"`, no
+  bloqueante. `ProjectionCacheEntry.plan_key` (`Option<PlanKey>`) es el puente entre las dos: un HIT
+  de la serie mira el nivel 2 sin reconstruir el `ProjectionInput`. Regresión:
+  `grep -n "plan_cache\|PlanCacheSlot" apps/api/src/state.rs`.
 - **5.0.0 — una SEGUNDA cache: `bands_cache`.** Clave `{installation_id, user_id, paths, seed}`
   (`state.rs:56-62`), entrada `Arc<ProjectionBandsResponse>`, **mismo `PROJECTION_CACHE_TTL` de 60
   min, también deslizante**. **No lleva `view` a propósito**: las bandas solo existen en `mine`, y un
@@ -1071,12 +1082,17 @@ que no tiene ningún otro ajuste personal:
    jubilación no podría ver su propia proyección, que es exactamente lo que un `viewer` sí puede
    hacer. Contrasta con `PATCH /v1/installation`, que sigue siendo owner-only porque toca el hogar.
    Por MCP la puerta es `require_mcp_write` **por rol**, no owner-only.
-3. **El merge se hace sobre el perfil ALMACENADO, no sobre el resuelto**, y la respuesta publica los
+3. ~~**El merge se hace sobre el perfil ALMACENADO, no sobre el resuelto**, y la respuesta publica los
    dos (`profile.target_basis` resuelto + `target_basis_stored`, `null` = «no elegida»). Sin esa
    separación, un formulario que leyera el perfil y lo reescribiera entero **congelaría la
    derivación como si fuera una elección**: al declarar la pensión después, el objetivo se quedaba en
-   la perpetuidad conservadora que nadie pidió. La lectura clampa; la escritura **rechaza** fuera de
-   rango, no reescribe en silencio.
+   la perpetuidad conservadora que nadie pidió.~~ **Esta obligación murió con `target_basis` (M4,
+   modelo v2, 2026-09-06)**: sin objetivo que dimensionar, no hay base que derivar ni que congelar —
+   `target_basis`/`target_basis_stored` no existen (`grep -n target_basis_stored
+   apps/api/src/handlers/retirement_profile.rs` solo devuelve el doc-comment que declara su
+   ausencia). Ningún campo del perfil v2 tiene hoy esa dualidad resuelto/almacenado; si uno la
+   adquiere, esta fila es la plantilla a resucitar. Lo que SÍ sigue vigente: la lectura clampa; la
+   escritura **rechaza** fuera de rango, no reescribe en silencio.
 
 El reparto que esto establece, y que hay que respetar al añadir un eje nuevo: **la instalación guarda
 los supuestos COMPARTIDOS** (inflación, impuestos, fuente del ahorro y sus ventanas, divisa, zona
@@ -1093,7 +1109,7 @@ agregados de hogar que no suman.
 | # | Invariant | Enforced where | How to check |
 |---|-----------|----------------|--------------|
 | I1 | Exactly one **uncapped `remainder`** allocation rule per scope, always **last** in the cascade (the "sink") — and, **with live assets, SIEMPRE and habilitado**: indestructible since 4.12.1 (#176). Deleting the sink's asset with other assets alive, or disabling/downgrading the last enabled sink, is rejected the same way; only the scope's LAST asset may take the sink down with it | `handlers/allocation_rules.rs` create/patch/delete/reorder + `assert_asset_delete_keeps_the_sink` (called from `handlers/assets.rs` on asset delete); pre-guard `effective_sink = is_sink && enabled` in the PATCH; API errors `remainder_required`, `uncapped_remainder_exists`, `sink_must_be_last`; migration `20260901160000_allocation_rules_reenable_disabled_sinks.sql` re-enabled sinks left disabled before 4.12.1 | `grep -n "remainder_required\|uncapped_remainder_exists\|sink_must_be_last" apps/api/src/handlers/allocation_rules.rs`; `apps/api/tests/allocation_sink_invariant.rs` |
-| I2 | `fire_target_at_month_index` is the ONLY FIRE-target formula — engine crossover and API `fire_target_series` both call it | `crates/engine/src/projection.rs` (public fn + regression test for the old off-by-one) | `grep -rn "fire_target_at_month_index" crates/ apps/api/src/` — every inflation-compounding of a FIRE target must route through it |
+| I2 | `fire_target_at_month_index` is the ONLY FIRE-target formula. Historically the engine crossover and the API's `fire_target_series` both called it; `fire_target_series` was retired entirely with the v2 model (2026-09-06) — today `PlanFireTarget::at` (`crates/engine/src/target.rs`) calls the SAME function for the classic FIRE number (`fire_number_classic_today`), any live plan, and any engine crossover | `crates/engine/src/projection.rs` (public fn + regression test for the old off-by-one) | `grep -rn "fire_target_at_month_index" crates/ apps/api/src/` — every inflation-compounding of a FIRE target must route through it; `grep -n "pub fire_target_series" apps/api/src/handlers/projection.rs` → empty |
 | I3 | Amounts serialize as decimal strings, EXCEPT the documented f64 arrays of `/v1/projection/series` and the per-point arrays of `/v1/history/series` (D4) | `serialize_decimal_as_f64` (`pub(crate)`, `handlers/projection.rs`, full precision) for projection responses; `serialize_decimal_as_chart_f64` (private, `handlers/history.rs`, since Fase 5/issue #86, additionally rounds to `CHART_DP = 2`) for history responses — two definitions, no cross-use | `grep -rn "serialize_decimal_as_f64\|serialize_decimal_as_chart_f64" apps/api/src/` (one definition in projection.rs, one in history.rs) |
 | I4 | All routes live under `/v1/`, except root `/health`, `/openapi.json`, `/mcp` (v3.0.0) and the OAuth protocol routes (v3.1.0: `/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server[/mcp]`, `/oauth/register`, `/oauth/token`, `/oauth/revoke` — root-level because RFC 8414/9728 fix the `.well-known` URLs and the metadata advertises the rest). **`/mcp` and the seven protocol routes are mounted UNCONDITIONALLY** since 4.4.0 — `mcp_enabled` picks the handler (404 JSON `mcp_disabled`), not the route table (D21). `/oauth/authorize` has NO backend route (SPA fallback serves it; a 405 would not fall through). Plus the SPA static fallback when `WEB_STATIC_ROOT` is set | `routes/mod.rs` (`nest("/v1", v1)` + unconditional `merge(mcp)` + `merge(oauth_protocol(state.mcp_enabled))`); note `/health` is ALSO mirrored at `/v1/health`, and `/v1/ready` exists | `grep -n "route\|nest\|mcp\|oauth" apps/api/src/routes/mod.rs`; `cargo test -p futurefin-api --test mcp_http -- mcp_disabled_answers_json_even_with_the_spa_mounted` |
 | I5 | Reads never mutate (D5): expired liabilities filtered, never deleted, by GETs — since 3.4.0 the projection input query also filters them (fix C-10: an expired principal used to depress net worth forever, diverging from `/v1/summary`), pinned by `projection_excludes_expired_liability_principal` | WHERE clauses in liabilities/summary/budget/assets/projection handlers | `TEST_DATABASE_URL=... cargo test --workspace liabilities_purge` (en local; **desde 4.0.0 también en CI**, job `integration`) |

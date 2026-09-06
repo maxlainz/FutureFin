@@ -213,10 +213,12 @@ arithmetic. RATIONALE: float rounding compounds over an ~840-month simulation an
 gross-up; decimal-string round-trips are bit-exact. **The exception (v1.4.0, deliberate,
 boundary documented in `.claude/api-routes.md`):** the large arrays in
 `GET /v1/projection/series` (`points[].net_worth`, `points[].contributed_capital`,
-`fire_target_series`, `asset_series[].values`) are serialized as `f64` for wire size (~30 KB
-less JSON, ~5,000 fewer client parses; measured precision <1 € over 70 years). Scalars and KPIs
-(`starting_net_worth`, `jubilacion_target_net_worth`, milestones) stay Decimal-as-string. Do
-not extend the f64 exception to any scalar or any value used in arithmetic.
+`asset_series[].values`, and since 5.0.0 v2 `needed_capital_curve`) are serialized as `f64` for
+wire size (~30 KB less JSON, ~5,000 fewer client parses; measured precision <1 € over 70 years).
+Scalars and KPIs (`starting_net_worth`, `needed_capital_today`, milestones) stay
+Decimal-as-string. Do not extend the f64 exception to any scalar or any value used in
+arithmetic. (`fire_target_series` and `jubilacion_target_net_worth` — this rule's examples until
+5.0.0 v2 — were both retired entirely with the deterministic FIRE target, 2026-09-06.)
 
 **Segunda excepción (5.0.0): `crates/engine-stochastic`**, y es de otra naturaleza — la primera es
 de **publicación**, esta es de **cómputo**. El Monte Carlo evalúa el bucle del motor en `f64` porque
@@ -618,12 +620,15 @@ Las ocho familias de breaking de 5.0.0, como índice de lo que una major suele t
 default de un query param (`?view` → `mine`); **(b)** el significado de una vista (`household` pasa a
 agregado informativo, con `absent_reason`); **(c)** la convención de un índice
 (`assets_depleted_month_index` a 0-based); **(d)** el significado de un campo que no cambia de nombre
-(`jubilacion_month_index` pasa a ser el mes EFECTIVO; `jubilacion_target_net_worth` pasa a ser la
-base del objetivo del PLAN); **(e)** campos retirados y sustituidos (`fire_crossover_month` →
-`liquid_crossing_month_index`, ahora publicado por el motor); **(f)** claves que cambian de
-contenedor (los cuatro ejes de `fire_settings` → perfil por usuario); **(g)** una operación que
-empieza a devolver 403/400 donde antes devolvía 200 (D23 `not_row_owner`, `household_read_only`);
-**(h)** el `schema_version` del backup.
+(`jubilacion_month_index` pasa a ser el mes EFECTIVO — primero el de la estrategia por edad o cruce,
+y desde el panel adversarial del 2026-09-06 el de la fecha válida por umbral de éxito); **(e)** campos
+retirados y sustituidos (`fire_crossover_month` → `liquid_crossing_month_index`, ahora publicado por
+el motor; y, en la corrección del modelo v2, `jubilacion_target_net_worth(_nominal)` y
+`fire_target_series` RETIRADOS enteros — no reinterpretados — sustituidos por `needed_capital_today`
+y `needed_capital_curve`); **(f)** claves que cambian de contenedor (los cuatro ejes de
+`fire_settings` → perfil por usuario); **(g)** una operación que empieza a devolver 403/400 donde
+antes devolvía 200 (D23 `not_row_owner`, `household_read_only`); **(h)** el `schema_version` del
+backup.
 
 ## 6. Pre-merge checklist (execute literally, from repo root)
 

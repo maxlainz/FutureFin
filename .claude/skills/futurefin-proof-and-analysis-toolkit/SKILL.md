@@ -213,11 +213,12 @@ preview without a round-trip). Note the asymmetry: as of v1.4.3 the TS side stil
 90-iteration binary search while Rust uses the closed form — parity within ±1 € is exactly what the
 fixture proves despite different algorithms.
 
-**The pattern:** ONE canonical fixture, `apps/api/tests/fixtures/fire-parity.json` (6 cases:
-modes manual/annual_expense/current_income × taxes on/off × null-target case), consumed by BOTH
-suites:
+**The pattern:** ONE canonical fixture, `apps/api/tests/fixtures/fire-parity.json` (**count it, do
+not trust a frozen number** — `python3 -c "import json;print(len(json.load(open('apps/api/tests/fixtures/fire-parity.json'))['cases']))"`,
+17 as of 2026-09-06, up from 6; grew across several waves), consumed by BOTH suites:
 - `apps/api/tests/fire_parity.rs` — seeds a real installation per case via the HTTP API and asserts
-  `jubilacion_target_net_worth` ≈ `expected_target_nw` ±1 €.
+  `fire_number_classic_today` ≈ `expected_target_nw` ±1 € (renamed from `jubilacion_target_net_worth`
+  with the 5.0.0 v2 model, 2026-09-06 — same formula, no longer a retirement trigger).
 - `apps/web/src/lib/fire.test.ts` — loads the same file via `readFileSync("../../../api/tests/fixtures/fire-parity.json")`
   and runs the TS helpers to the same ±1 €.
 
@@ -269,11 +270,12 @@ Adding a case = append to `cases[]` with `name`, `fire_settings`, `monthly`, `ex
 The non-negotiable: money is `rust_decimal::Decimal` in domain/engine/DB; amounts cross the API as
 decimal strings. **Hay DOS excepciones deliberadas, y la segunda es de 5.0.0** — ver el recuadro tras
 los pasos. La primera (v1.4.0): large projection arrays
-(`points[].net_worth`, `points[].contributed_capital`, `fire_target_series`,
-`asset_series[].values`) serialize as f64 via `serialize_decimal_as_f64`
+(`points[].net_worth`, `points[].contributed_capital`, `asset_series[].values`, and since 5.0.0 v2
+`needed_capital_curve`) serialize as f64 via `serialize_decimal_as_f64`
 (`apps/api/src/handlers/projection.rs` ~line 177), cutting ~30 KB JSON and ~5 000 client-side
-parses; scalar KPIs (`starting_net_worth`, `jubilacion_target_net_worth`, milestones) stay
-Decimal-as-string.
+parses; scalar KPIs (`starting_net_worth`, `needed_capital_today`, milestones) stay
+Decimal-as-string. (`fire_target_series`/`jubilacion_target_net_worth` — this array/scalar pair
+until 5.0.0 v2 — were both retired entirely with the deterministic FIRE target, 2026-09-06.)
 
 **When to use:** you are adding a field/path and must decide Decimal vs f64, or reviewing whether
 an existing f64 shortcut is safe.

@@ -89,13 +89,13 @@ ecoado al lado. (The docs/comments that still described the old model were fixed
 |---|---|
 | **FIRE** | "Financial Independence, Retire Early". Reaching a net worth from which withdrawals can fund expenses indefinitely. |
 | **SWR** | Safe Withdrawal Rate, `swr_pct`, in **percent** (3.5 = 3.5%). FIRE number = gross annual need / (SWR/100). |
-| **FIRE number / target** | The net worth that triggers retirement. Stored per-month as a *moving* target (see §4). API field `jubilacion_target_net_worth` is the base (today-euros) value. |
+| **FIRE number / target** | **Historia, no estado (v2, 2026-09-06): ya no dispara nada.** Hasta la primera vuelta de 5.0.0 era el patrimonio que disparaba la jubilación, guardado mes a mes como objetivo MÓVIL, con el campo de wire `jubilacion_target_net_worth` (retirado ENTERO en v2 — `grep -rn jubilacion_target_net_worth apps/web/src` sale vacío). Hoy el éxito decide la fecha (§4b) y lo que sobrevive es el «número FIRE clásico» —informativo, `fire_number_classic_today`— y el capital necesario HOY, `needed_capital_today`, que es la cifra de referencia. |
 | **Gross-up** | Converting the *net* annual amount the user needs to spend into the *gross* amount to withdraw, so that after capital-gains tax the net remains. §3. |
 | **Nominal euros** | Euros of the moment they occur ("euros del momento"). All engine series are nominal. |
 | **Real euros / today-euros** | Nominal divided by `(1+inflation/100)^(years)`. Display-only concept. |
 | **Deflation** | The nominal→real division above. Done in the handler (`deflate_points_to_today`) and in the chart, never inside the engine. |
 | **Jubilación** | Retirement. UI tab name and API field prefix (`jubilacion_month_index`). **Desde 5.0.0 el disparador lo elige la ESTRATEGIA**: el cruce del líquido (`asap`, `pension_bridge`) o una EDAD (`retire_at_age`, `coast`), y solo uno por simulación (§4b). `jubilacion_month_index` es el mes EFECTIVO; el cruce puro, cuando no dispara, se publica aparte como `liquid_crossing_month_index`. La afirmación «there is no target-age trigger», cierta desde v1.0.6, **dejó de serlo el 2026-09-03** — la readmisión es deliberada y acotada (`futurefin-failure-archaeology` §1 fila 1, scope note 5.0.0). |
-| **Estrategia** | Una de las cinco de `RetirementProfile::strategy`: `asap`, `retire_at_age`, `coast`, `partial`, `pension_bridge`. Es dato **por usuario**, no de la instalación, y gobierna cómo corre el motor entero. §4b. |
+| **Estrategia** | **Cuatro desde el modelo v2** (C7, 2026-09-06), no cinco: `asap`, `retire_at_age`, `coast`, `partial`. `pension_bridge` **dejó de ser una estrategia** — el puente se reubicó como un AJUSTE de la pensión disponible en cualquiera de las cuatro — y sobrevive solo como alias de deserialización que resuelve a `asap` + `bridge_enabled: true` (`RETIREMENT_STRATEGY_VARIANTS` en `retirement_profile.rs` publica las cuatro; el alias no aparece en el `enum` que ve el cliente). Es dato **por usuario**, no de la instalación, y gobierna cómo corre el motor entero. §4b. |
 | **Fase** | `Accumulating` → (`Partial`) → `Retired`, latch **monótono** (`crates/engine/src/phases.rs::Phase`). Decide de qué partida sale el ingreso y con qué base se indexa el gasto. |
 | **Regla de retirada** | Cuánto se puede vender cada mes jubilado: `fixed_real` (default, = el drenaje de 4.15.0), `percent_of_balance`, `hybrid`, `guardrails`. Sus `pct` son **BRUTOS de impuestos**, como el SWR. §4b. |
 | **Modo de gasto** (`spend_mode`) | `ceiling` = la regla es un TECHO (se vende `min(necesidad, permitido)`, solo en déficit); `rule_is_spend` = la regla ES el gasto (se vende `permitido` todos los meses jubilados). |
@@ -147,8 +147,12 @@ Critical input nuances (source of the worst historical bug in this area):
 - `income_retirement_monthly` = sum of income entries with `persists_after_retirement = true`
   (budget.rs:354,376) — e.g. rental or pension. It is subtracted because that income keeps
   covering expenses in retirement, so the portfolio only needs to fund the difference.
-- No target (`None`) is a **valid outcome** (retirement income covers expenses): the API returns
-  `jubilacion_target_net_worth: null`, empty `fire_target_series`, `jubilacion_month_index: null`.
+- No target (`None`) is a **valid outcome** (retirement income covers expenses) for the classic
+  FIRE number calc: `fire_number_classic_today` is `null`. **Field names historical**: the API used
+  to return `jubilacion_target_net_worth: null`, empty `fire_target_series`,
+  `jubilacion_month_index: null` — both fields retired entirely in the v2 model (2026-09-06);
+  `jubilacion_month_index` is the one survivor, now driven by the success-threshold solve, not by
+  this target.
 
 ### 2b. Modes B & C: `savings_source` — need & net from the real 12-month average
 
@@ -923,8 +927,9 @@ All anchors in this section are in the HANDLER file `apps/api/src/handlers/proje
   `density=hybrid` (points 0..12 monthly then annual: non-equidistant). Any code touching
   decimated series must use `month_index`.
 - **Desde 4.4.0 (Fase 6) el deflactado también se SIRVE** —la SPA **sigue rehaciéndolo**, y tiene que:
-  solo `net_worth` viaja deflactado y el chart necesita además `contributed_capital`, la serie del
-  objetivo FIRE y cada `asset_series[].values` (`deflationFactorAt`,
+  solo `net_worth` viaja deflactado y el chart necesita además `contributed_capital`,
+  `needed_capital_curve` (la sustituta de la serie del objetivo FIRE, retirada en v2 —
+  `fire_target_series` ya no existe) y cada `asset_series[].values` (`deflationFactorAt`,
   `apps/web/src/lib/projection-chart.ts`)—. Y hay **un solo deflactor, con cuatro consumidores**: `points[].net_worth_real` de cada punto servido,
   `milestones_real`, `final_net_worth_real` (y su delta) de `simulate_projection`, y el endpoint
   dedicado `GET /v1/projection/deflate` (que además publica las dos
@@ -946,23 +951,28 @@ All anchors in this section are in the HANDLER file `apps/api/src/handlers/proje
   publica el motor (cruce o edad, §4b), y el cruce puro viaja aparte en
   `liquid_crossing_month_index`, con `retirement_trigger` diciendo cuál de los dos mandó.
 - **`jubilacion_month_index` does NOT index any served series (issue #82, 4.4.0) — it never did.**
-  It is a MONTH number; `points`/`fire_target_series`/`asset_series[].values` are **position**-
-  indexed and, under `density=hybrid` (the density the MCP tool `get_projection` forces), carry
-  far fewer positions than months. Indexing an array with the raw month either falls off the end
-  or — worse — silently lands on `[0]`, presenting today's FIRE target as if it were the target
-  decades out. Two fields close the hole, both `null` iff there is no crossing:
-  - **`jubilacion_series_position`** — the array position to use instead. Convention: the LAST
-    served position `p` with `points[p].month_index <= jubilacion_month_index` (the crossing
-    falls in the segment `[p, p+1)`; chosen over "next" because reading `points[p]` is
-    conservative — it underweights net worth instead of overstating it).
-  - **`jubilacion_target_net_worth_nominal`** — the FIRE target AT the crossing month, in NOMINAL
-    euros of that month. `jubilacion_target_net_worth` (the older field) is the target evaluated at
-    **month index 0**, es decir en euros de HOY (el campo `FireTarget.base_amount` que esta línea
-    citaba **se retiró en 4.10.0/#170**: ya no hay base pre-calculada, el objetivo se evalúa mes a
-    mes sobre la necesidad); with inflation the two diverge by a growing factor over decades. Evaluated EXACTLY via `fire_target_at_month_index(ft, jubilacion_month_index)`
-    — never interpolated between two points of `fire_target_series`, which under `hybrid` may not
-    even contain the crossing month as a served point.
-  Pin: `apps/api/tests/projection_number_semantics.rs`.
+  It is a MONTH number; `points`/`asset_series[].values` are **position**-indexed and, under
+  `density=hybrid` (the density the MCP tool `get_projection` forces), carry far fewer positions
+  than months. Indexing an array with the raw month either falls off the end or lands on the wrong
+  point. **`jubilacion_series_position`** closes the hole (`null` iff no plan date): the array
+  position to use instead, the LAST served position `p` with
+  `points[p].month_index <= jubilacion_month_index` (conservative — underweights net worth instead
+  of overstating it). This field **still exists in the v2 model** and still means the same thing;
+  what changed is what `jubilacion_month_index` marks — since 5.0.0 v2 it's the plan's SAFE DATE
+  (the success-threshold solve), not a target crossing.
+  - **HISTORY, not current state — `jubilacion_target_net_worth`/`_nominal` (issue #82, 4.4.0):**
+    these two paired fields — the FIRE target at month 0 (today-euros) and at the crossing month
+    (nominal) — were **retired ENTIRELY in the v2 model (2026-09-06)** along with `fire_target_series`,
+    the array they were evaluated against
+    (`grep -rn jubilacion_target_net_worth apps/web/src` and
+    `grep -n "pub fire_target_series" apps/api/src/handlers/projection.rs` both come back empty of
+    live fields — only doc-comments that cite the retired names remain). There is no target to
+    evaluate at any month anymore: retirement is decided by success probability against a
+    threshold, not by a net-worth crossing. What survives is `fire_number_classic_today`
+    (informational scalar, "25× your expense", evaluated once) and `needed_capital_today` (the
+    actual reference figure, from the stochastic solve — §4b).
+  Pin: `apps/api/tests/projection_number_semantics.rs` (rewritten for v2 — it now pins the safe
+  date / needed-capital contract, not the retired target fields).
 - **Horizon rule** — `projection_horizon_months`: configurable lifespan since 4.9.0 (#149).
   `years = clamp(horizon_lifespan_age − completed_age, 5, 70)` con
   `fire_settings.horizon_lifespan_age` (85..=105, default 90), using the session user's
@@ -973,9 +983,11 @@ All anchors in this section are in the HANDLER file `apps/api/src/handlers/proje
   `months_override`, con `horizon_lifespan_age` al lado; el margen al final es
   `points[último].net_worth` + `final_net_worth_real` (euros de hoy, paridad con simulate).
 - Large arrays (`points[].net_worth`, **`points[].net_worth_real`** desde 4.4.0,
-  `fire_target_series`, `asset_series[].values`) serialize as f64 for wire size; scalar KPIs (`jubilacion_target_net_worth`, milestones targets,
-  `starting_net_worth`) stay Decimal-as-string. This f64 boundary is deliberate (v1.4.0,
-  precision < 1 € over 70y) — do not extend it to scalars.
+  `asset_series[].values`, `needed_capital_curve` since v2) serialize as f64 for wire size; scalar
+  KPIs (`needed_capital_today`, milestones targets, `starting_net_worth`) stay Decimal-as-string.
+  This f64 boundary is deliberate (v1.4.0, precision < 1 € over 70y) — do not extend it to scalars.
+  (`fire_target_series` and `jubilacion_target_net_worth` — the array and the scalar this bullet
+  used to name — were both retired entirely in the v2 model, 2026-09-06.)
 
 ## 8. Worked example (fire-parity.json, case "annual_expense mode, ES taxes, modest expense")
 
@@ -989,9 +1001,11 @@ Inputs: mode `annual_expense`, `swr_pct 3.5`, taxes on, default ES brackets;
    solution. Check: tax = 1.140 + 0,21×16.632,91 = 4.632,91; 22.632,91 − 4.632,91 = 18.000 ✓.
 3. Target = 22.632,91 / 0,035 = **646.654,61 €** — matches the fixture's
    `expected_target_nw: 646654.611` (tolerance ±1 €).
-4. Eso es `target(0)`, el objetivo evaluado en el índice 0 — lo que la API publica como
-   `jubilacion_target_net_worth`. (Este paso decía «`FireTarget.base_amount`», un campo **retirado
-   en 4.10.0/#170**: hoy no hay base pre-calculada, cada mes se evalúa sobre su necesidad.) Con un
+4. Eso es `target(0)`, el objetivo evaluado en el índice 0 — lo que la API publica hoy como
+   `fire_number_classic_today` (histórico: hasta 5.0.0 v2 era `jubilacion_target_net_worth`, y antes
+   de eso «`FireTarget.base_amount`», un campo **retirado en 4.10.0/#170**: no hay base
+   pre-calculada, cada mes se evalúa sobre su necesidad — la fórmula del motor no cambió, solo el
+   nombre del campo de wire y su papel: ya no dispara nada). Con un
    2 % de inflación el objetivo móvil a 10 años ronda 646.654,61 × 1,02^10 ≈ 788.267 € **cuando la
    necesidad se indexa entera** —el caso de este fixture, sin pensión plana ni deuda—; con pensión
    la base crece MÁS rápido que `f(k)` (#170) y con deuda el término decreciente tira hacia abajo,
@@ -1128,8 +1142,16 @@ mismo error repetido en otros cinco documentos y corregido en la misma pasada.
   pasó de la línea 386 a ~1000, así que cada «(458-471)» apuntaba a otra función. Se retiraron en
   favor de nombres de función. **No vuelvas a poner números de línea en esta skill**: un anclaje
   numérico en un fichero vivo caduca en silencio y miente con más credibilidad que la ausencia.
-- `jubilacion_series_position`/`jubilacion_target_net_worth_nominal` (issue #82, 4.4.0):
-  `grep -n "jubilacion_series_position\|jubilacion_target_net_worth_nominal" apps/api/src/handlers/projection.rs` and the pin `grep -n "jubilacion_series_position_indexes_the_arrays" apps/api/tests/projection_number_semantics.rs`
+- `jubilacion_series_position` (issue #82, 4.4.0 — still live in v2, same convention):
+  `grep -n "pub jubilacion_series_position" apps/api/src/handlers/projection.rs` → 1 hit.
+  **`jubilacion_target_net_worth_nominal` is GONE, not just renamed**: the combined grep this line
+  used to run (`"jubilacion_series_position\|jubilacion_target_net_worth_nominal"`) still returned
+  non-empty matches after the field's retirement — every hit was `jubilacion_series_position`, so
+  the OR silently hid the field's disappearance. Verify the retired field on its own:
+  `grep -n "pub jubilacion_target_net_worth" apps/api/src/handlers/projection.rs` → empty. The old
+  pin test `jubilacion_series_position_indexes_the_arrays` no longer exists either
+  (`projection_number_semantics.rs` was rewritten for v2 — see the test's current names in
+  `.claude/tests.md`).
 - `simulate_projection`'s `model_note` (Fase 5, issue #86, 4.4.0): `grep -n "const SIMULATE_MODEL_NOTE" -A3 apps/api/src/handlers/projection.rs` (full text of the warning); `apps/api/tests/mcp_simulate.rs` pins the cache-neutral behavior this note sits next to. **5.0.0 lo reescribió entero** alrededor del perfil y las estrategias (trigger, `withdrawal_rule`, solves, `income_pause`, hogar no simulable): lo que §4 resume de él es la mitad que sigue viva —el aviso sobre inflación y SWR—, no su texto actual. Léelo del código, no de aquí.
 - Recuento de tests del motor: `grep -c '#\[test\]' crates/engine/src/*.rs | awk -F: '{s+=$2} END{print s}'` (**199** el 2026-09-03) — el glob importa: la lista de cuatro ficheros que otras fichas usan se deja fuera `money`, `phases`, `withdrawal`, `target`, `solve` y `tax`.
 
