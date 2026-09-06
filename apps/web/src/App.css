@@ -4861,3 +4861,5 @@ fieldset.retirement-config-stack {
   border-left-style: solid;
   padding-left: 0.55rem;
 }
+
+/* Huérfanas desde v2 (modelo de jubilación, 5.0.0), sin consumidor en apps/web/src/**/*.tsx — retirar en un pase que recuente los anclajes: .retirement-buffer-line, .retirement-buffer-line .btn, .retirement-basis-reset, .projection-chart-jubilacion-line, .projection-chart-jubilacion-label. */

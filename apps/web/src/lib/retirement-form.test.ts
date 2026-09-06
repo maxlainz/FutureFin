@@ -289,35 +289,15 @@ describe("U2 — qué obligatorio falta", () => {
 
 describe("cableado campo → ayuda", () => {
   /**
-   * Las cuatro claves que el modelo v2 estrena y que **escribe el paquete W8** en `helpTexts.ts`.
-   * El cableado (W2) llega antes que los textos, así que entre uno y otro esta lista existe.
-   *
-   * **Se vacía sola**: el segundo `it` se pone rojo en cuanto W8 aterrice, obligando a borrar la
-   * excepción en vez de dejarla envejecer. Una excepción sin fecha de caducidad es cómo un
-   * cableado roto sobrevive a la revisión que lo tenía que cazar.
+   * Sin excepciones desde W8: las cuatro claves que el modelo v2 estrenó
+   * (`retirement.success_threshold`, `retirement.bridge_settings`, `retirement.coast_mode`,
+   * `retirement.partial_mode`) ya están en el catálogo, así que la lista de pendientes y el `it`
+   * que la hacía caducar se borraron con ella — junto al `as` temporal de `retirement-form.ts`.
    */
-  const HELP_IDS_PENDING_W8: readonly string[] = [
-    "retirement.success_threshold",
-    "retirement.bridge_settings",
-    "retirement.coast_mode",
-    "retirement.partial_mode",
-  ];
-
-  it("todo id de ayuda cableado existe en el catálogo (salvo los cuatro que faltan de W8)", () => {
+  it("todo id de ayuda cableado existe en el catálogo", () => {
     for (const [field, entry] of Object.entries(PLAN_FIELD_HELP)) {
-      const id = entry!.helpId as string;
-      if (HELP_IDS_PENDING_W8.includes(id)) continue;
       expect(HELP_TEXTS[entry!.helpId], `${field} apunta a un texto inexistente`).toBeDefined();
     }
-  });
-
-  it("la excepción de W8 caduca sola: ninguna de las cuatro está ya en el catálogo", () => {
-    const catalogo = new Set(Object.keys(HELP_TEXTS));
-    const yaEscritas = HELP_IDS_PENDING_W8.filter((id) => catalogo.has(id));
-    expect(
-      yaEscritas,
-      "W8 ya escribió estos textos: borra HELP_IDS_PENDING_W8 y el `as unknown as HelpTextId` de retirement-form.ts",
-    ).toEqual([]);
   });
 
   it("los campos nuevos del modelo v2 están cableados: ninguno se queda sin ayuda", () => {

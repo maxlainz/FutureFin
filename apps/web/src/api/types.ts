@@ -881,8 +881,10 @@ export type ProjectionSeriesApi = {
    *  `plan_absent_reason: "no_liquid_assets"`). */
   needed_capital_today?: string | null;
   /** f64[] (excepción chart-only) paralelo a `points[]`: capital necesario por edad en cada mes
-   *  de la rejilla, SIN escalar (C4) — cruza la línea central de patrimonio líquido EXACTAMENTE
-   *  en la fecha válida. Un elemento `null` = ese punto de la curva aún no está resuelto (nivel
+   *  de la rejilla, SIN escalar (C4), en euros NOMINALES de cada mes (la SPA la deflacta con el
+   *  mismo factor que el patrimonio). No tiene por qué cruzar la línea central: lo que cruza es el
+   *  escenario que el umbral obliga a salvar; la fecha válida va como marca vertical (C4). Un
+   *  elemento `null` = ese punto de la curva aún no está resuelto (nivel
    *  2); el array entero es `null` mientras `needed_capital_curve_state !== "ready"`. */
   needed_capital_curve?: (number | null)[] | null;
   /** `ready` = curva completa; `computing` = el nivel 2 (segundo plano) sigue en marcha —
@@ -922,7 +924,7 @@ export type ProjectionSeriesApi = {
     | "no_liquid_assets"
     | null;
   /** Euros de HOY (Decimal-string): el número FIRE CLÁSICO (perpetuidad sobre el gasto de
-   *  jubilación indexado, 25×, SIN pensión ni objetivo puente — pin de `fire-parity.json`).
+   *  jubilación indexado ÷ SWR del perfil — 25× solo al 4 % —, SIN pensión ni objetivo puente — pin de `fire-parity.json`).
    *  Puramente informativo: NO decide la fecha ni el capital necesario. `null` ⟺
    *  `fire_number_classic_absent_reason`. */
   fire_number_classic_today?: string | null;

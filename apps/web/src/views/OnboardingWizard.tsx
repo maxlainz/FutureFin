@@ -252,7 +252,10 @@ export function OnboardingWizard({
                 {planIssueFor("birthDate") ??
                   (strategyNeedsBirthDate(planState.strategy)
                     ? "Esta estrategia se dispara por edad: sin fecha de nacimiento no se puede simular tal y como la has elegido."
-                    : "Se usa para mostrar tu edad en vez del mes en Jubilación. Puedes añadirla más tarde desde «Tu cuenta».")}
+                    : /* copy_fixes #23 de la revisión — sin fecha de nacimiento el horizonte
+                         cae al fallback de 30 años (`fallback_no_demographics`), no solo se
+                         pierde la edad en pantalla: es una simulación distinta, no un adorno. */
+                      "Sin ella el plan se simula sobre un horizonte fijo de 30 años. Puedes añadirla más tarde desde «Tu cuenta».")}
               </small>
             </label>
 
@@ -327,41 +330,6 @@ export function OnboardingWizard({
                   />
                   {planIssueFor("partialIncome") ? (
                     <small className="muted">{planIssueFor("partialIncome")}</small>
-                  ) : null}
-                </label>
-              </div>
-            ) : null}
-
-            {planState.strategy === "pension_bridge" ? (
-              <div className="field-row">
-                <label className="field">
-                  <span>{planLabelFor("pension_amount")}</span>
-                  <input
-                    inputMode="decimal"
-                    value={planState.pensionAmount}
-                    placeholder="p. ej. 1200"
-                    autoComplete="off"
-                    onChange={(e) =>
-                      setPlanState((s) => ({ ...s, pensionAmount: e.target.value }))
-                    }
-                  />
-                  {planIssueFor("pensionAmount") ? (
-                    <small className="muted">{planIssueFor("pensionAmount")}</small>
-                  ) : null}
-                </label>
-                <label className="field">
-                  <span>{planLabelFor("pension_start_age")}</span>
-                  <input
-                    inputMode="numeric"
-                    value={planState.pensionStartAge}
-                    placeholder="p. ej. 67"
-                    autoComplete="off"
-                    onChange={(e) =>
-                      setPlanState((s) => ({ ...s, pensionStartAge: e.target.value }))
-                    }
-                  />
-                  {planIssueFor("pensionStartAge") ? (
-                    <small className="muted">{planIssueFor("pensionStartAge")}</small>
                   ) : null}
                 </label>
               </div>

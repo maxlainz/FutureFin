@@ -201,7 +201,7 @@ function HelpFor({ id }: { id: HelpTextId }) {
  */
 const RESULT_HELP = {
   /** La escala de color de la banda: fallo ACUMULADO por edad, las tres formas juntas. */
-  failureByAge: { helpId: "retirement.failure_by_age" as unknown as HelpTextId },
+  failureByAge: { helpId: "retirement.failure_by_age" },
 } as const;
 
 /** Un decimal tecleado por el usuario, listo para el wire: coma española → punto. */
@@ -241,6 +241,7 @@ export function RetirementView({
   user,
   calendarTz,
   scopeReadOnly,
+  householdMemberCount,
   onSaveRetirementProfile,
   onSelectMineScope,
   navigate,
@@ -272,6 +273,10 @@ export function RetirementView({
   calendarTz: string;
   /** Vista Hogar (D9/D32): agregado de solo lectura — el plan se edita desde la vista «Yo». */
   scopeReadOnly: boolean;
+  /** Nº de miembros del hogar (`GET /v1/installation/members`, carga de `App.tsx`). `null` =
+   *  aún no ha llegado. Solo alimenta el aviso B10 (el gasto manual pre-5.0.0 venía del HOGAR;
+   *  con un único miembro nunca hubo ambigüedad que revisar). */
+  householdMemberCount: number | null;
   /** Guarda un PATCH mínimo y devuelve el perfil YA resuelto por el servidor. */
   onSaveRetirementProfile: (
     patch: RetirementProfilePatchApi,
@@ -460,11 +465,21 @@ export function RetirementView({
 
   // ── S1 · la fecha de nacimiento se puede fijar aquí mismo ─────────────────────────────────
   //
-  // Su sitio natural es «Tu cuenta», pero tres de las cinco estrategias no se pueden simular sin
+  // Su sitio natural es «Tu cuenta», pero tres de las cuatro estrategias no se pueden simular sin
   // ella: mandar al usuario a otra pestaña a mitad de la elección es donde se abandona el plan.
   // El PATCH del perfil acepta `birth_date` (misma columna que `PATCH /v1/auth/me`), así que se
   // guarda por el mismo camino y no hay una segunda vía de escritura.
   const [birthDraft, setBirthDraft] = useState("");
+  /** B4/B11 — el aviso de la tarjeta «Edades» ENLAZA con el campo, no solo lo menciona: sin
+   *  esta ref, «ponla aquí» era un texto sin destino y el usuario tenía que encontrar el campo
+   *  él solo entre el resto de la tarjeta (varias más allá en coast/partial). */
+  const birthDateInputRef = useRef<HTMLInputElement | null>(null);
+  const focusBirthDateField = useCallback(() => {
+    const el = birthDateInputRef.current;
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.focus({ preventScroll: true });
+  }, []);
   const saveBirthDate = useCallback(
     (value: string) => {
       const t = value.trim();
@@ -477,6 +492,56 @@ export function RetirementView({
     },
     [onSaveRetirementProfile],
   );
+
+  // ── B10 · el gasto manual venía del HOGAR en 4.x, ahora es solo tuyo ──────────────────────
+  //
+  // `fire_number_mode: "manual"` era, antes de 5.0.0, un campo de `fire_settings` (owner-only,
+  // compartido por todo el hogar); con D13 pasó a `RetirementProfile` (personal, uno por
+  // usuario). Un hogar de 2+ personas que ya tenía un importe manual guardado se encuentra, sin
+  // avisarle, con que la cifra que veía como «la del hogar» ahora es solo la suya — y puede ser
+  // la MISMA cifra copiada a cada miembro por la migración, no lo que cada uno querría declarar
+  // por separado. Con un único miembro no hubo agregación que deshacer: el aviso no aplica.
+  //
+  // Bandera de localStorage por instalación+usuario (aceptable per WP): no hay endpoint que
+  // registre «ya lo revisé», así que se apaga en cuanto el usuario TOCA el campo — editarlo es
+  // la señal de que ya lo ha mirado, se quede como estaba o no.
+  const manualAmountMigrationKey = useMemo(() => {
+    const instId = installation?.installation.id;
+    const uid = user?.id;
+    return instId && uid
+      ? `ff.retirement.fire-number-manual-migrated.v1.${instId}.${uid}`
+      : null;
+  }, [installation?.installation.id, user?.id]);
+
+  const [manualAmountMigrationAcked, setManualAmountMigrationAcked] = useState(false);
+  useEffect(() => {
+    if (!manualAmountMigrationKey) {
+      setManualAmountMigrationAcked(false);
+      return;
+    }
+    try {
+      setManualAmountMigrationAcked(
+        window.localStorage.getItem(manualAmountMigrationKey) === "1",
+      );
+    } catch {
+      setManualAmountMigrationAcked(false);
+    }
+  }, [manualAmountMigrationKey]);
+
+  const ackManualAmountMigration = useCallback(() => {
+    setManualAmountMigrationAcked(true);
+    if (!manualAmountMigrationKey) return;
+    try {
+      window.localStorage.setItem(manualAmountMigrationKey, "1");
+    } catch {
+      /* sin storage, el aviso simplemente reaparece la próxima vez */
+    }
+  }, [manualAmountMigrationKey]);
+
+  const showManualAmountMigrationNotice =
+    profileDraft.fire_number_mode === "manual" &&
+    (householdMemberCount ?? 0) > 1 &&
+    !manualAmountMigrationAcked;
 
   // ── Ejes y rotuladores ────────────────────────────────────────────────────────────────────
   const axisAgeMode = projectionSeries
@@ -840,12 +905,6 @@ export function RetirementView({
     [projectionBands],
   );
 
-  /** El tile «Éxito del plan» tal y como lo construyó `buildRetirementTilesV2`: el bloque
-   *  «Riesgo» lo REUTILIZA en vez de armar otro con `projectionBands`. Dos tarjetas de éxito
-   *  construidas por caminos distintos es cómo la misma pantalla acaba enseñando dos cifras del
-   *  mismo sorteo. */
-  const successTile = useMemo(() => tiles.find((t) => t.key === "success") ?? null, [tiles]);
-
   // ── Hogar (U10): frases por miembro y nada más ────────────────────────────────────────────
   const memberLines = useMemo(
     () => householdPlanLines(projectionSeries?.members, monthLabel),
@@ -909,6 +968,7 @@ export function RetirementView({
           <label className="field" key={f.id}>
             <span>{f.label}</span>
             <input
+              ref={birthDateInputRef}
               type="date"
               value={birthDraft}
               onChange={(e) => {
@@ -1333,20 +1393,30 @@ export function RetirementView({
       case "fire_number_manual_amount":
         return (
           <label className="field" key={f.id}>
-            <span>{f.label} · gasto anual neto</span>
+            {/* `f.label` (`lib/plan-fields.ts`) ya dice «Gasto anual manual»: un sufijo fijo
+                aquí repetía «gasto anual» dos veces en la misma línea (copy_fixes #9 de la
+                revisión: la etiqueta cambió sola y el sufijo se quedó pisándola). */}
+            <span>{f.label}</span>
             <input
               inputMode="decimal"
               placeholder="p. ej. 24000"
               value={profileDraft.fire_number_manual_amount ?? ""}
-              onChange={(e) =>
+              onChange={(e) => {
+                ackManualAmountMigration();
                 patchDraft((p) => ({
                   ...p,
                   fire_number_manual_amount: typedDecimalOrNull(e.target.value),
-                }))
-              }
+                }));
+              }}
               onBlur={() => queueProfileSave(0)}
             />
             {missing ? <RequiredHint /> : null}
+            {/* B10 — el importe manual venía del HOGAR en 4.x; con 5.0.0 es solo tuyo. */}
+            {showManualAmountMigrationNotice ? (
+              <p className="muted tight">
+                Este importe venía del hogar en 4.x y ahora es solo tuyo: revísalo.
+              </p>
+            ) : null}
           </label>
         );
 
@@ -1880,7 +1950,15 @@ export function RetirementView({
                           el usuario tiene que saber que se arregla dos líneas más arriba. */}
                       {card === "ages" && birthDateBlocksPlan ? (
                         <p className="muted tight">
-                          Sin tu fecha de nacimiento no hay fecha válida: ponla aquí.
+                          Sin tu fecha de nacimiento no hay fecha válida:{" "}
+                          <button
+                            type="button"
+                            className="btn ghost text"
+                            onClick={focusBirthDateField}
+                          >
+                            ponla aquí
+                          </button>
+                          .
                         </p>
                       ) : null}
                     </div>
@@ -2183,25 +2261,11 @@ export function RetirementView({
                       .
                     </div>
                   ) : null}
-                  {/* El MISMO tile que la cabecera, sacado de `buildRetirementTilesV2`: aquí no
-                      se arma una segunda tarjeta de éxito con `projectionBands`. Dos tarjetas
-                      construidas por caminos distintos es cómo la misma pantalla acaba
-                      enseñando dos cifras del mismo sorteo. */}
-                  {successTile ? (
-                    <div className="metric-grid summary-success-grid">
-                      <MetricCard
-                        label={successTile.label}
-                        helpId={
-                          helpTextOrNull(successTile.helpId as HelpTextId)
-                            ? (successTile.helpId as HelpTextId)
-                            : undefined
-                        }
-                        value={successTile.value}
-                        parenthetical={successTile.subtitle}
-                        tone={successTile.tone === "danger" ? "danger" : "default"}
-                      />
-                    </div>
-                  ) : null}
+                  {/* El KPI «Éxito del plan» ya vive en la CABECERA (`buildRetirementTilesV2`,
+                      tile #2, siempre presente). Aquí no se repite la tarjeta: repetirla es
+                      cómo la misma pantalla acaba enseñando dos cifras del mismo sorteo. Lo que
+                      queda es lo que la cabecera no lleva — la precisión, las filas de detalle y
+                      la nota de coste/semilla. */}
                   {/* La PRECISIÓN de la cifra de al lado, con los números del servidor y sin
                       aritmética de cliente: el semiancho de Wilson y el tamaño de la muestra.
                       Sin ella, un 95,0 % se lee como exacto cuando lo que hay es un intervalo —

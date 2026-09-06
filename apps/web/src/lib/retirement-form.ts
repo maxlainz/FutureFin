@@ -254,33 +254,28 @@ export function withdrawalPctNote(input: WithdrawalPctNoteInput): string | null 
  * forma de objeto cuando los KPIs por estrategia se movieron a `lib/retirement-tiles.ts`.
  */
 /**
- * **Puente temporal a W8.** Las cuatro claves de ayuda que el modelo v2 estrena
- * —`retirement.success_threshold`, `retirement.bridge_settings`, `retirement.coast_mode`,
- * `retirement.partial_mode`— las escribe el paquete W8 en `lib/helpTexts.ts`; el cableado (esta
- * tabla) es de W2. Entre uno y otro hacen falta las dos mitades a la vez, y por eso llevan un
- * `as unknown as HelpTextId` en vez de esconderse tras un helper:
+ * Las cuatro claves que el modelo v2 estrenó —`retirement.success_threshold`,
+ * `retirement.bridge_settings`, `retirement.coast_mode`, `retirement.partial_mode`— se cablearon
+ * aquí (W2) antes de que el catálogo las tuviera (W8), con un `as` temporal que dejaba
+ * `helpTexts.test.ts` **rojo a propósito** en su mitad «toda clave usada existe». W8 escribió los
+ * textos y el `as` se borró: hoy los cuatro ids son literales normales, comprobados por el tipo.
  *
- *  - **el `as`**, porque sin él este módulo no compila contra un catálogo que aún no las tiene;
- *  - **el literal pegado a `helpId:`**, porque el escáner de `helpTexts.test.ts` lee las claves
- *    USADAS con un `RegExp` que exige la comilla justo detrás (`helpId:` + espacios + `"`).
- *    Envolverlas en una llamada las haría invisibles para él: W8 añadiría los textos y el test los
- *    declararía HUÉRFANOS, empujando a borrar cuatro ayudas vivas — el fallo exacto, del revés,
- *    que ese test existe para impedir.
- *
- * Consecuencia buscada: `helpTexts.test.ts` queda ROJO en su mitad «toda clave usada existe» hasta
- * que W8 aterrice. **Cuando W8 esté, los cuatro `as unknown as` se borran** y las entradas vuelven
- * al literal pelado; si siguen aquí con las claves ya en el catálogo, es deuda, no diseño.
+ * Lo que sí sobrevive de aquella nota, porque es permanente: **el id va pegado a la propiedad de
+ * ayuda como literal entrecomillado**. El escáner de `helpTexts.test.ts` lee las claves USADAS con
+ * un `RegExp` que exige la comilla justo detrás; envolver el id en una llamada lo haría invisible
+ * para él y el test declararía HUÉRFANOS textos vivos, empujando a borrarlos — el fallo exacto,
+ * del revés, que ese test existe para impedir.
  */
 export const PLAN_FIELD_HELP: Partial<Record<PlanFieldId, { helpId: HelpTextId }>> = {
   target_retirement_age: { helpId: "retirement.target_age" },
-  coast_mode: { helpId: "retirement.coast_mode" as unknown as HelpTextId },
-  coast_stop_age: { helpId: "retirement.coast_mode" as unknown as HelpTextId },
-  partial_mode: { helpId: "retirement.partial_mode" as unknown as HelpTextId },
+  coast_mode: { helpId: "retirement.coast_mode" },
+  coast_stop_age: { helpId: "retirement.coast_mode" },
+  partial_mode: { helpId: "retirement.partial_mode" },
   partial_start_age: { helpId: "retirement.partial" },
   partial_income: { helpId: "retirement.partial" },
   pension_amount: { helpId: "retirement.pension" },
   pension_start_age: { helpId: "retirement.pension" },
-  success_threshold_pct: { helpId: "retirement.success_threshold" as unknown as HelpTextId },
+  success_threshold_pct: { helpId: "retirement.success_threshold" },
   swr_pct: { helpId: "settings.swr" },
   withdrawal_rule_kind: { helpId: "retirement.withdrawal_rule" },
   hybrid_end_pct: { helpId: "retirement.withdrawal_rule" },
@@ -289,9 +284,9 @@ export const PLAN_FIELD_HELP: Partial<Record<PlanFieldId, { helpId: HelpTextId }
   spend_mode: { helpId: "retirement.spend_mode" },
   pension_indexed: { helpId: "retirement.pension" },
   pension_fraction_while_partial: { helpId: "retirement.pension" },
-  bridge_enabled: { helpId: "retirement.bridge_settings" as unknown as HelpTextId },
-  bridge_max_pct: { helpId: "retirement.bridge_settings" as unknown as HelpTextId },
-  bridge_max_years: { helpId: "retirement.bridge_settings" as unknown as HelpTextId },
+  bridge_enabled: { helpId: "retirement.bridge_settings" },
+  bridge_max_pct: { helpId: "retirement.bridge_settings" },
+  bridge_max_years: { helpId: "retirement.bridge_settings" },
   partial_expense_basis: { helpId: "retirement.partial" },
   horizon_lifespan_age: { helpId: "settings.horizon_age" },
 };

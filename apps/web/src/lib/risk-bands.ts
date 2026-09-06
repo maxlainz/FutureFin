@@ -52,34 +52,21 @@ import type { HelpTextId } from "./helpTexts";
 import { lastPointIndexAtOrBeforeMonth } from "./projection-chart";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// Los ids de ayuda que W8 todavía no ha dado de alta
+// Los ids de ayuda de las filas y las tarjetas del plan
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
- * Ids de ayuda que el modelo v2 estrena y que `helpTexts.ts` (WP W8) todavía no contiene.
+ * Id de ayuda de una fila o de una tarjeta del plan: **exactamente los del catálogo**, sin
+ * excepciones.
  *
- * Existe para que los módulos puros del rediseño compilen ANTES que el catálogo, sin renunciar al
- * literal: el escáner de `helpTexts.test.ts` busca la propiedad de ayuda de un tile con su id
- * entrecomillado al lado, así que los ids de aquí abajo ya cuentan como consumidos y ese test se
- * queda **rojo hasta que W8 los escriba** — que es exactamente la señal que queremos, no un
- * problema que tapar. (Ese patrón NO se escribe en prosa en ningún comentario de este repo: el
- * escáner no distingue código de comentario y se contaría a sí mismo — CLAUDE.md, «comandos que se
- * cuentan a sí mismos».)
- *
- * **Cuando W8 aterrice, esta lista se vacía y `PlanHelpTextId` vuelve a ser `HelpTextId` a secas.**
- * Si al leer esto la lista sigue aquí y `helpTexts.ts` ya tiene los seis, bórrala: un alias que ya
- * no añade nada es un permiso abierto para inventarse ids.
+ * Durante W6 fue `HelpTextId` más una lista de ids que el modelo v2 estrenaba y que `helpTexts.ts`
+ * todavía no tenía, para que los módulos puros del rediseño compilaran antes que el catálogo. W8
+ * escribió esos textos y la lista se borró: el alias sobrevive solo como nombre de dominio —lo
+ * importan `retirement-tiles.ts` y las filas de riesgo—, y **no puede volver a ensancharse**. Un
+ * alias más ancho que el catálogo es un permiso abierto para inventarse ids que el popover
+ * enseñaría vacíos; si hace falta un id nuevo, el sitio donde se añade es el catálogo.
  */
-type PendingHelpTextId =
-  | "retirement.needed_capital"
-  | "retirement.safe_date"
-  | "retirement.success_threshold"
-  | "retirement.failure_by_age"
-  | "retirement.fire_number_classic"
-  | "retirement.partial_mode";
-
-/** `HelpTextId` más los ids del modelo v2 que W8 aún no ha dado de alta (ver arriba). */
-export type PlanHelpTextId = HelpTextId | PendingHelpTextId;
+export type PlanHelpTextId = HelpTextId;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Abanico

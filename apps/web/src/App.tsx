@@ -442,6 +442,10 @@ export default function App() {
     string,
     string | null
   > | null>(null);
+  /** Tamaño del hogar (nº de filas de `/v1/installation/members`), la MISMA carga que produce
+   *  `assetOwnerNames` — sin fetch propio. `null` = aún no ha llegado. Lo consume Jubilación
+   *  (B10: el aviso de migración del gasto manual solo aplica con más de un miembro). */
+  const [householdMemberCount, setHouseholdMemberCount] = useState<number | null>(null);
   const [assetCategories, setAssetCategories] = useState<CategoryRow[]>([]);
   const [allocationRules, setAllocationRules] = useState<AllocationRuleApiRow[]>([]);
   const [allocationRulesBusy, setAllocationRulesBusy] = useState(false);
@@ -1464,13 +1468,16 @@ export default function App() {
       if (!membersRes.ok || !assetsRes.ok) {
         // Best-effort: sin mapa no hay sufijo de owner en la leyenda, nada más.
         setAssetOwnerNames(null);
+        setHouseholdMemberCount(null);
         return;
       }
       const members = (await membersRes.json()) as MemberApiRow[];
       const rows = (await assetsRes.json()) as AssetApiRow[];
       setAssetOwnerNames(assetOwnerNameById(rows, members));
+      setHouseholdMemberCount(members.length);
     } catch {
       setAssetOwnerNames(null);
+      setHouseholdMemberCount(null);
     }
   }, []);
 
@@ -1756,6 +1763,7 @@ export default function App() {
   useEffect(() => {
     if (!user || !hasMembership) {
       setAssetOwnerNames(null);
+      setHouseholdMemberCount(null);
       return;
     }
     void loadAssetOwnerNames();
@@ -4248,6 +4256,7 @@ export default function App() {
             user={user}
             calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
             scopeReadOnly={scopeReadOnly}
+            householdMemberCount={householdMemberCount}
             onSaveRetirementProfile={saveRetirementProfilePatch}
             onSelectMineScope={() => setLedgerPersonScope("mine")}
             navigate={navigate}

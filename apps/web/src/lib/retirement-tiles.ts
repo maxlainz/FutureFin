@@ -603,7 +603,8 @@ export type RetirementDetailRow = {
  * No es un cajón de sastre: son las lecturas de SEGUNDO orden —las que acotan o auditan una cifra
  * de arriba en vez de responder una pregunta propia— más los avisos.
  *
- * - **Número FIRE clásico**: 25× tu gasto de jubilación, sin restar la pensión. Sobrevive como
+ * - **Número FIRE clásico**: tu gasto de jubilación anual ÷ el SWR del perfil (25× solo al 4 %),
+ *   sin restar la pensión. Sobrevive como
  *   LECTURA (S7) y como pin de `fire-parity.json`; ya no decide nada. Baja al detalle justamente
  *   porque durante media 5.0.0 fue el objetivo que disparaba la jubilación, y arriba invitaría a
  *   seguir leyéndolo así.
@@ -626,7 +627,7 @@ export function retirementDetailRows(
   if (series.fire_number_classic_today != null) {
     rows.push({
       key: "fire_number_classic",
-      label: "Número FIRE clásico (25× tu gasto, sin pensión)",
+      label: "Número FIRE clásico (tu gasto anual ÷ tu tasa, sin pensión)",
       value: money(series.fire_number_classic_today),
       helpId: "retirement.fire_number_classic",
     });
