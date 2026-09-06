@@ -28,10 +28,12 @@ import {
 } from "../lib/format";
 import {
   ASSET_LINE_COLORS,
+  NEEDED_CAPITAL_SERIES,
   buildProjectionChartLayout,
   buildWithdrawalTooltipRows,
   deflationFactorAt,
   formatProjectionChartHorizonLine,
+  neededCurveForChart,
   niceYTicks,
   projectionHoverTitle,
   projectionMaxXTicks,
@@ -54,7 +56,7 @@ import {
   type PhaseMark,
 } from "../lib/phase-strip";
 import { buildHouseholdMemberLines, memberValueAtMonth } from "../lib/member-lines";
-import { buildPlanAuxSeries } from "../lib/plan-series";
+import { chartValidDateMark } from "../lib/retirement-chart";
 import { ChartLegend } from "../components/charts/ChartLegend";
 import {
   formatAxisMoney,
@@ -285,10 +287,16 @@ export function ProjectionNetWorthChart({
     });
   }, [focusMode, focusWindow, pts.length, series.months, historyStartMonth]);
 
-  const hasFireTargetSeries = useMemo(() => {
-    const f = series.fire_target_series;
-    return Array.isArray(f) && f.length === series.points.length && f.length > 0;
-  }, [series.fire_target_series, series.points.length]);
+  /**
+   * La marca vertical de la FECHA VÁLIDA y, cuando no la hay, la nota que lo explica (modelo v2,
+   * C4). Sustituye al marcador de «jubilación» que dibujaba el hito sintético: en v2 no hay
+   * objetivo que cruzar, y lo que se marca es el mes en que jubilarse cumple TU umbral, con su
+   * éxito en el rótulo. `lib/retirement-chart.ts` decide las cuatro bases; aquí solo se pinta.
+   */
+  const validDate = useMemo(() => chartValidDateMark(series), [series]);
+  /** El nivel 2 sigue resolviendo la curva: se dice, no se deja el hueco en silencio (una curva
+   *  ausente y una curva que aún no está son cosas distintas y solo el estado las separa). */
+  const neededCurveComputing = series.needed_capital_curve_state === "computing";
 
   // #136-4a: la tasa del deflactor sale de la RESPUESTA (`deflation_annual_inflation_percent`,
   // la misma con la que el servidor construyó `net_worth_real` y `milestones_real`) y solo cae a
@@ -345,18 +353,23 @@ export function ProjectionNetWorthChart({
         : p.net_worth * deflator(p.month_index),
     );
     const cc = pts.map((p) => p.contributed_capital * deflator(p.month_index));
-    // `fire_target_series` es paralelo a `series.points` (SOLO futuro): se re-mapea a un array de
-    // longitud combinada `(number | null)[]`, null en el pasado (k < 0). Solo los vértices no-null
-    // se dibujan → la línea FIRE arranca en el mes 0.
-    const fireRaw = series.fire_target_series;
-    const fireTarget: (number | null)[] | null =
-      Array.isArray(fireRaw) && fireRaw.length === series.points.length
-        ? pts.map((p, i) =>
-            i >= merged.futureOffset
-              ? (fireRaw[i - merged.futureOffset] ?? 0) * deflator(p.month_index)
-              : null,
-          )
-        : null;
+    // ── «Capital necesario» (modelo v2, C4) ──────────────────────────────────────────────────
+    // Sustituye a la retirada línea del objetivo FIRE (`fire_target_series`, fuera del contrato):
+    // ya no hay un objetivo que cruzar, hay el LÍQUIDO que tu umbral exige para poder jubilarte en
+    // cada mes — una bisección estocástica por nodo, no un descuento escalar.
+    //
+    // `neededCurveForChart` la devuelve deflactada y paralela a `series.points` (SOLO futuro);
+    // aquí se re-mapea a la longitud combinada con el MISMO `futureOffset` que usaba el objetivo,
+    // con `null` en el pasado (k < 0) y en los nodos que el nivel 2 no ha resuelto. Solo los
+    // vértices no nulos se dibujan → la curva arranca en el mes 0 y se ROMPE en los huecos.
+    const neededParallel = neededCurveForChart(series, deflator);
+    const neededCurve: (number | null)[] | null = neededParallel
+      ? pts.map((_p, i) =>
+          i >= merged.futureOffset
+            ? (neededParallel[i - merged.futureOffset] ?? null)
+            : null,
+        )
+      : null;
     const assetSeries = merged.assetSeries
       .map((as) => {
         const values = as.values.map((v, i) => v * deflator(miAt(i)));
@@ -401,20 +414,6 @@ export function ProjectionNetWorthChart({
     // más allá, esa persona no declaró vivir y la línea TERMINA. En «Yo» no hay `members[]` y
     // esto es un array vacío que no cuesta nada.
     const memberLines = buildHouseholdMemberLines(series.members, deflator);
-    // ── Series auxiliares discontinuas del plan (D29) ──────────────────────────────────
-    // «Capital necesario» y «si dejas de aportar en el mes coast»: dos ejecuciones MÁS del
-    // motor, no un descuento escalar. Vienen paralelas a `series.points` (solo futuro), así que
-    // se re-mapean con el MISMO `futureOffset` que el objetivo FIRE y se deflactan con el mismo
-    // `deflator` por `month_index` real. Con `asap`/`pension_bridge` no hay solve y la lista
-    // sale vacía: el chart queda idéntico a 4.15.x. `disposable_capital` NO se dibuja (D31).
-    const planAux = buildPlanAuxSeries({
-      requiredCapitalPath: series.required_capital_path,
-      coastPath: series.coast_path,
-      responsePointCount: series.points.length,
-      points: pts,
-      futureOffset: merged.futureOffset,
-      deflator,
-    });
     const startNwParsed = parseDisplayDecimal(series.starting_net_worth);
     const startNw = startNwParsed !== null ? startNwParsed : nw[0] ?? 0;
     // El histórico puede bajar el NW por debajo de 0 en el pasado: el eje debe permitir negativos
@@ -424,21 +423,15 @@ export function ProjectionNetWorthChart({
     return {
       nw,
       cc,
-      fireTarget,
+      neededCurve,
       assetSeries,
       assetStacks,
       allowNegativeAxis,
       memberLines,
-      planAux,
     };
   }, [
     pts,
-    series.starting_net_worth,
-    series.points.length,
-    series.fire_target_series,
-    series.required_capital_path,
-    series.coast_path,
-    series.members,
+    series,
     merged.assetSeries,
     merged.futureOffset,
     merged.minNetWorth,
@@ -448,32 +441,28 @@ export function ProjectionNetWorthChart({
   // ── Modelo de la leyenda (HTML, fuera del SVG) ──
   const legendStructural = useMemo(
     () => [
+      // C4 — «Capital necesario» y la MARCA de la fecha válida. Rótulo y color de la curva salen
+      // de `NEEDED_CAPITAL_SERIES`, la misma constante con la que se pinta; el rótulo de la marca,
+      // del mismo `chartValidDateMark` que la coloca. Una leyenda que se escribe aparte es una
+      // leyenda que un día rotula una curva que ya no está.
       ...buildStructuralLegendItems({
-        hasFire: hasFireTargetSeries,
+        hasNeededCapital: (baseSeries?.neededCurve ?? null) !== null,
         hasHistory: historyStartMonth < 0,
         historyIsAssetsOnly: merged.pastIsAssetsOnly,
         hasContributed: !ccRetired,
+        validDateMarkLabel: validDate.mark?.label ?? null,
       }),
-      // D29 — auxiliares del plan. Salen de las MISMAS líneas que se dibujan (label y color
-      // incluidos), no de una lista paralela: una leyenda que se escribe aparte es una leyenda
-      // que un día rotula una curva que ya no está.
-      ...(baseSeries?.planAux ?? []).map((l) => ({
-        key: l.key,
-        label: l.label,
-        color: l.color,
-        swatch: "dashed" as const,
-      })),
       // D32 — Hogar: la curva gruesa es la Σ y bajo ella va una línea fina por miembro
       // (`lib/member-lines.ts`). Estas entradas rotulan ESA línea y, con el mismo color, su tick
       // de jubilación en la tira de fases. En «Yo» no hay `members[]` y esto no añade nada.
       ...buildHouseholdMemberLegendItems(series.members),
     ],
     [
-      hasFireTargetSeries,
       historyStartMonth,
       merged.pastIsAssetsOnly,
       ccRetired,
       baseSeries,
+      validDate,
       series.members,
     ],
   );
@@ -533,12 +522,11 @@ export function ProjectionNetWorthChart({
     const {
       nw,
       cc,
-      fireTarget,
+      neededCurve,
       assetSeries,
       assetStacks,
       allowNegativeAxis,
       memberLines,
-      planAux,
     } = baseSeries;
     const totalMonths = series.months;
     // Dominio panorámico: incluye el pasado histórico (historyStartMonth ≤ 0). Sin histórico,
@@ -575,8 +563,8 @@ export function ProjectionNetWorthChart({
       ? []
       : visibleIndices.filter((i) => pts[i]!.month_index >= 0);
     const ccVisible = ccVisibleIndices.map((i) => cc[i] ?? 0);
-    const fireTargetVisible = fireTarget
-      ? visibleIndices.map((i) => fireTarget[i] ?? null)
+    const neededVisible = neededCurve
+      ? visibleIndices.map((i) => neededCurve[i] ?? null)
       : null;
     const assetVisibleValues = assetSeries.flatMap((as) =>
       visibleIndices.map((i) => as.values[i] ?? 0),
@@ -598,34 +586,27 @@ export function ProjectionNetWorthChart({
     const memberVisibleValues = memberVisible.flatMap((l) =>
       l.points.map((p) => p.value),
     );
-    // Las auxiliares del plan SÍ entran en el dominio Y (a diferencia del objetivo FIRE, que
-    // puede crecer un orden de magnitud por encima del patrimonio y aplastaría la curva): son
-    // series LÍQUIDAS de la misma simulación, viven en el mismo rango, y recortarlas contra el
-    // clipPath las haría parecer curvas que se ACABAN — que aquí significaría otra cosa.
-    const planAuxVisible = planAux.map((line) => ({
-      ...line,
-      values: visibleIndices.map((i) => line.values[i] ?? null),
-    }));
-    const planAuxVisibleValues = planAuxVisible.flatMap((l) =>
-      l.values.filter((v): v is number => v != null && Number.isFinite(v)),
+    // «Capital necesario» SÍ entra en el dominio Y (a diferencia del retirado objetivo FIRE, que
+    // podía crecer un orden de magnitud por encima del patrimonio y aplastaba la curva): es una
+    // cifra de LÍQUIDO de la misma simulación, vive en el mismo rango, y recortarla contra el
+    // clipPath la haría parecer una curva que se ACABA — que aquí significaría otra cosa.
+    const neededVisibleValues = (neededVisible ?? []).filter(
+      (v): v is number => v != null && Number.isFinite(v),
     );
 
-    // El target FIRE inflado puede crecer muy por encima del patrimonio en horizontes largos;
-    // dejarlo fuera del rango del eje Y para no aplastar la curva del patrimonio. La línea se
-    // recorta visualmente por el clipPath del plot si excede.
     const dataMin = Math.min(
       ...nwVisible,
       ...ccVisible,
       ...assetVisibleValues,
       ...memberVisibleValues,
-      ...planAuxVisibleValues,
+      ...neededVisibleValues,
     );
     const dataMax = Math.max(
       ...nwVisible,
       ...ccVisible,
       ...assetVisibleValues,
       ...memberVisibleValues,
-      ...planAuxVisibleValues,
+      ...neededVisibleValues,
     );
     const rawSpan = dataMax - dataMin;
     const padY =
@@ -701,10 +682,11 @@ export function ProjectionNetWorthChart({
       startMonth: visibleMonthStart,
       endMonth: visibleMonthEnd,
     });
+    // Modelo v2: la marca de «cruce» desapareció con `liquid_crossing_month_index` y
+    // `retirement_trigger` — no hay objetivo que cruzar, y la lectura «el capital habría bastado
+    // aquí» dejó de existir. Quedan la pensión y, en Hogar, el hito de cada miembro.
     const phaseMarksAll = buildPhaseMarks({
       pensionStartMonthIndex: series.pension_start_month_index,
-      liquidCrossingMonthIndex: series.liquid_crossing_month_index,
-      retirementTrigger: series.retirement_trigger,
       retirementMonthIndex: series.retirement_month_index,
       members: series.members,
       window: { startMonth: visibleMonthStart, endMonth: visibleMonthEnd },
@@ -732,11 +714,22 @@ export function ProjectionNetWorthChart({
     };
     const compoundOutpaceMonth =
       series.compound_outpaces_true_savings_month_index ?? null;
+    // Los hitos MONETARIOS (1M, 2,5M…) siguen igual. El pseudo-hito `jubilacion` que la vista
+    // sintetiza para su tira de KPIs NO se pinta aquí: en v2 ese instante lo marca —con su éxito
+    // en el rótulo— la marca de la fecha válida, y dibujar los dos daría dos líneas verticales en
+    // el mismo mes diciendo cosas distintas del mismo hecho.
     const visibleMilestones = milestones.filter(
       (m) =>
+        m.target !== "jubilacion" &&
         m.reached_month_index >= visibleMonthStart &&
         m.reached_month_index <= visibleMonthEnd,
     );
+    const safeDateMark =
+      validDate.mark != null &&
+      validDate.mark.monthIndex >= visibleMonthStart &&
+      validDate.mark.monthIndex <= visibleMonthEnd
+        ? validDate.mark
+        : null;
     const showCompoundOutpaceMarker =
       compoundOutpaceMonth != null &&
       compoundOutpaceMonth >= visibleMonthStart &&
@@ -775,7 +768,9 @@ export function ProjectionNetWorthChart({
     return {
       nw,
       cc,
-      fireTargetVisible,
+      neededCurve,
+      neededVisible,
+      safeDateMark,
       assetSeries,
       assetStacks,
       nwVisible,
@@ -806,8 +801,6 @@ export function ProjectionNetWorthChart({
       visibleIndices,
       memberLines,
       memberVisible,
-      planAux,
-      planAuxVisible,
       phaseSegments: phaseSegmentsAll,
       phaseMarks: phaseMarksAll,
       phaseStripH,
@@ -830,12 +823,11 @@ export function ProjectionNetWorthChart({
     calendarTz,
     milestones,
     planningFlows,
+    validDate,
     viewWindow.monthSpan,
     viewWindow.startMonth,
     series.phase_transitions,
     series.pension_start_month_index,
-    series.liquid_crossing_month_index,
-    series.retirement_trigger,
     series.retirement_month_index,
     series.members,
   ]);
@@ -954,7 +946,9 @@ export function ProjectionNetWorthChart({
   const {
     nw,
     cc,
-    fireTargetVisible,
+    neededCurve,
+    neededVisible,
+    safeDateMark,
     assetSeries,
     assetStacks,
     nwVisible,
@@ -980,8 +974,6 @@ export function ProjectionNetWorthChart({
     visibleIndices,
     memberLines,
     memberVisible,
-    planAux,
-    planAuxVisible,
     phaseSegments,
     phaseMarks,
     phaseStripH,
@@ -1114,31 +1106,29 @@ export function ProjectionNetWorthChart({
   const ccPoints = ccVisibleIndices
     .map((i) => `${xScale(pts[i]!.month_index)},${yScale(cc[i] ?? 0)}`)
     .join(" ");
-  const firePoints = fireTargetVisible
-    ? fireTargetVisible
-        .map((v, j) =>
-          v == null
-            ? null
-            : `${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`,
-        )
-        .filter((s): s is string => s !== null)
-        .join(" ")
-    : null;
-  // D29 · auxiliares del plan. Mismo patrón que la línea FIRE: los `null` (el tramo histórico)
-  // se DESCARTAN en vez de dibujarse en el suelo del eje, así que la curva arranca en el mes 0.
-  const planAuxPolylines = planAuxVisible.map((line) => ({
-    key: line.key,
-    color: line.color,
-    dash: line.dash,
-    points: line.values
-      .map((v, j) =>
-        v == null || !Number.isFinite(v)
-          ? null
-          : `${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`,
-      )
-      .filter((t): t is string => t !== null)
-      .join(" "),
-  }));
+  /**
+   * C4 · «Capital necesario» → SEGMENTOS de polilínea.
+   *
+   * Los `null` del tramo histórico y los del nivel 2 sin resolver **cortan** el trazo en vez de
+   * descartarse: la línea del objetivo FIRE los descartaba y unía los extremos, que con un hueco
+   * al principio era inocuo (el pasado va antes de todo) pero con un nodo interior sin resolver
+   * dibujaría una recta que ninguna simulación ha producido.
+   */
+  const neededSegments: string[] = (() => {
+    if (!neededVisible) return [];
+    const out: string[] = [];
+    let current: string[] = [];
+    neededVisible.forEach((v, j) => {
+      if (v == null || !Number.isFinite(v)) {
+        if (current.length >= 2) out.push(current.join(" "));
+        current = [];
+        return;
+      }
+      current.push(`${xScale(pts[visibleIndices[j]!]!.month_index)},${yScale(v)}`);
+    });
+    if (current.length >= 2) out.push(current.join(" "));
+    return out;
+  })();
   let areaD = "";
   if (nwVisible.length > 0) {
     const parts: string[] = [];
@@ -1837,38 +1827,23 @@ export function ProjectionNetWorthChart({
               opacity={0.92}
             />
           ) : null}
-          {firePoints ? (
+          {/* C4 · «Capital necesario»: DISCONTINUA, porque no es tu patrimonio — es el líquido
+              que tu umbral exige para poder jubilarte en cada mes. Va por debajo de la curva de
+              patrimonio, que sigue siendo la protagonista, y se ROMPE en los nodos que el nivel 2
+              no ha resuelto. Sin curva no se dibuja nada. */}
+          {neededSegments.map((seg, i) => (
             <polyline
-              points={firePoints}
+              key={`needed-${i}`}
+              points={seg}
               fill="none"
-              stroke="var(--proj-fire)"
-              strokeWidth={1.2}
-              strokeDasharray="3 4"
+              stroke={NEEDED_CAPITAL_SERIES.color}
+              strokeWidth={1.5}
+              strokeDasharray={NEEDED_CAPITAL_SERIES.dash}
               strokeLinecap="round"
               strokeLinejoin="round"
-              opacity={0.225}
+              opacity={0.85}
             />
-          ) : null}
-          {/* D29 · «Capital necesario» y «si dejas de aportar en el mes coast»: DISCONTINUAS,
-              porque no son tu patrimonio — son la trayectoria que el plan exige y la que
-              tendrías si dejaras de aportar. Se pintan por encima del objetivo FIRE (que va al
-              22 % de opacidad, de fondo) y por debajo de la curva de patrimonio, que sigue
-              siendo la protagonista. Sin solve la lista está vacía y aquí no se dibuja nada. */}
-          {planAuxPolylines.map((line) =>
-            line.points === "" ? null : (
-              <polyline
-                key={line.key}
-                points={line.points}
-                fill="none"
-                stroke={line.color}
-                strokeWidth={1.5}
-                strokeDasharray={line.dash}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                opacity={0.85}
-              />
-            ),
-          )}
+          ))}
           {historyStartMonth < 0
             ? snapshotMarkers.map((mk, idx) => {
                 const val = valueAtMonth(mk.month_index, nw);
@@ -1900,7 +1875,6 @@ export function ProjectionNetWorthChart({
               y1: number;
               label: string;
               halfW: number;
-              isJubilacion: boolean;
             };
             // 22 y no 12: la etiqueta se pinta en y1−6 con ~10px de glifo por encima
             // de la baseline; con el suelo antiguo, un milestone cuyo NW roza el techo
@@ -1922,7 +1896,6 @@ export function ProjectionNetWorthChart({
                   y1Floor,
                   Math.min(y0 - 8, y1FromNetWorth),
                 );
-                const isJubilacion = m.target === "jubilacion";
                 const targetNum = parseDisplayDecimal(m.target);
                 const label =
                   targetNum != null
@@ -1938,7 +1911,6 @@ export function ProjectionNetWorthChart({
                   y1: y1Base,
                   label,
                   halfW,
-                  isJubilacion,
                 };
               })
               .sort((a, b) => a.x - b.x);
@@ -1965,27 +1937,50 @@ export function ProjectionNetWorthChart({
                   x2={it.x}
                   y1={it.y0}
                   y2={it.y1}
-                  className={
-                    it.isJubilacion
-                      ? "projection-chart-jubilacion-line"
-                      : "projection-chart-milestone-line"
-                  }
+                  className="projection-chart-milestone-line"
                 />
                 <text
                   x={it.x}
                   y={it.y1 - 6}
                   textAnchor="middle"
-                  className={
-                    it.isJubilacion
-                      ? "projection-chart-jubilacion-label"
-                      : "projection-chart-milestone-label"
-                  }
+                  className="projection-chart-milestone-label"
                 >
                   {it.label}
                 </text>
               </g>
             ));
           })()}
+          {/* C4 · la MARCA VERTICAL de la fecha válida, con su éxito en el rótulo. Es la única
+              marca de acento del plot y sustituye al pseudo-hito «jubilación» de 4.15.x: aquel
+              rotulaba el mes en que se cruzaba un objetivo que ya no existe. Va de suelo a techo
+              del plot —no muere en la curva como los hitos monetarios— porque no es un punto de
+              la serie, es un instante del plan. El rótulo lleva halo para leerse sobre las áreas
+              de activo sin abrirles un hueco. */}
+          {safeDateMark ? (
+            <g>
+              <line
+                x1={xScale(safeDateMark.monthIndex)}
+                x2={xScale(safeDateMark.monthIndex)}
+                y1={mt}
+                y2={mt + ph}
+                className="projection-chart-safe-date-line"
+              />
+              <text
+                x={xScale(safeDateMark.monthIndex)}
+                y={mt + 12}
+                textAnchor={
+                  xScale(safeDateMark.monthIndex) > ml + pw * 0.66
+                    ? "end"
+                    : xScale(safeDateMark.monthIndex) < ml + pw * 0.33
+                      ? "start"
+                      : "middle"
+                }
+                className="projection-chart-safe-date-label"
+              >
+                {safeDateMark.label}
+              </text>
+            </g>
+          ) : null}
           {chartPlanningMarkers.map((m) => {
             const x = xScale(m.mi);
             const y0 = mt + ph;
@@ -2095,7 +2090,7 @@ export function ProjectionNetWorthChart({
             `density=hybrid` una transición del mes 271 no tiene punto propio, así que
             cualquier aritmética sobre posiciones del array la colocaría años fuera de
             sitio. Los marcadores VERTICALES siguen siendo solo los de la jubilación
-            efectiva (bloque de milestones, `isJubilacion`): la tira es aditiva. */}
+            efectiva (la marca de la fecha válida, arriba): la tira es aditiva. */}
         {phaseStripH > 0 ? (
           <g>
             {phaseSegments.map((seg) => {
@@ -2209,6 +2204,20 @@ export function ProjectionNetWorthChart({
         ariaLabel="Series del gráfico de proyección"
       />
 
+      {/* Notas bajo la leyenda. NO son ítems de leyenda: no rotulan nada dibujado, y darles una
+          muestra de color afirmaría que hay una serie que no está.
+           - «Calculando…»: el nivel 2 sigue resolviendo la curva. Un hueco silencioso se lee como
+             «no hay capital necesario», que es otra cosa.
+           - «sin fecha válida al 95 %»: ningún mes del horizonte cumple el umbral. Es un
+             RESULTADO del plan, no un dato que falte, y por eso se dice aquí y no se calla. */}
+      {neededCurveComputing || validDate.note ? (
+        <p className="projection-chart-legend-note">
+          {neededCurveComputing
+            ? "Calculando el capital necesario…"
+            : validDate.note}
+        </p>
+      ) : null}
+
       {hover !== null &&
       pts[hover] != null &&
       pts[hover]!.month_index >= visibleMonthStart &&
@@ -2267,19 +2276,21 @@ export function ProjectionNetWorthChart({
               propio, y el vértice siguiente sería el patrimonio de hasta un año DESPUÉS. Un
               miembro cuya línea ya terminó (horizonte propio más corto) no aparece: su ausencia
               es el dato, y un 0 diría que se quedó sin nada. */}
-          {/* D29 — auxiliares del plan en el mes hovered. Se indexan por POSICIÓN del array
-              (`hover` ya es la posición del punto, igual que `nw[hover]`) porque estas dos
-              series son paralelas a los puntos dibujados, no series propias con sus meses. Ya
-              vienen deflactadas con el mismo factor que el patrimonio de arriba. */}
-          {planAux.map((line) => {
-            const v = line.values[hover!];
+          {/* C4 — «Capital necesario» en el mes hovered. Se indexa por POSICIÓN del array
+              (`hover` ya es la posición del punto, igual que `nw[hover]`) porque la curva es
+              paralela a los puntos dibujados, no una serie propia con sus meses. Ya viene
+              deflactada con el mismo factor que el patrimonio de arriba. Un nodo sin resolver no
+              pinta fila: un «0 €» diría que no necesitas nada. */}
+          {(() => {
+            const v = neededCurve?.[hover!];
             if (v == null || !Number.isFinite(v)) return null;
             return (
-              <div key={line.key}>
-                {line.label} — {formatCurrencyNumber(v, currencyIso)}
+              <div>
+                {NEEDED_CAPITAL_SERIES.label} —{" "}
+                {formatCurrencyNumber(v, currencyIso)}
               </div>
             );
-          })}
+          })()}
           {memberLines.map((line) => {
             const v = memberValueAtMonth(line, pts[hover]!.month_index);
             if (v === null) return null;

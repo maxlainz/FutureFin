@@ -4761,3 +4761,63 @@ fieldset.retirement-config-stack {
   font-weight: 600;
   color: var(--ff-ink-soft);
 }
+
+/* ---- W7 (modelo v2, C4): la marca de la FECHA VÁLIDA, la nota bajo la leyenda y la muestra de
+   marca de la leyenda ----
+   Se AÑADEN al final del fichero a propósito: el freezer `no-hex-outside-theme.test.ts` ancla sus
+   excepciones de sombra por `App.css:línea` EXACTA, así que cualquier inserción más arriba las
+   desplazaría y rompería el test sin que el CSS hubiera cambiado de verdad. (El literal de esas
+   sombras no se escribe aquí ni en un comentario: el comando de re-verificación de la casa lo
+   busca con `grep` sobre este fichero y contaría esta línea como una tercera aparición.) */
+
+/* Sustituye a `.projection-chart-jubilacion-line`: aquella marcaba el mes en que el patrimonio
+   cruzaba un objetivo FIRE que ya no existe. Esta va de suelo a techo del plot —no muere en la
+   curva como los hitos monetarios— porque no es un punto de la serie, es un instante del plan. */
+.projection-chart-safe-date-line {
+  stroke: var(--ff-accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  opacity: 0.9;
+}
+
+/* Con halo del color del fondo del plot (`paint-order: stroke`): el rótulo cae sobre las áreas de
+   activo apiladas y sin halo se pierde en cuanto hay más de dos. */
+.projection-chart-safe-date-label {
+  fill: var(--ff-accent);
+  font-size: 10px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: var(--proj-plot-bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+/* El mismo halo en el chart compacto, donde el rótulo cae además sobre la banda teñida. */
+.proj-mini-safe-date-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  paint-order: stroke;
+  stroke: var(--proj-plot-bg);
+  stroke-width: 2.5px;
+  stroke-linejoin: round;
+}
+
+/* Notas del pie de la leyenda («Calculando el capital necesario…», «sin fecha válida al 95 %»).
+   NO son ítems de leyenda —no rotulan nada dibujado— y por eso van en texto meta, sin muestra de
+   color: una muestra afirmaría que hay una serie que no está. */
+.projection-chart-legend-note {
+  margin: 0.15rem 0 0;
+  /* Alineado con el padding lateral de `.ff-chart-legend`, justo encima. */
+  padding: 0 0.15rem;
+  font-size: 0.72rem;
+  color: var(--ff-ink-soft);
+}
+
+/* Muestra de la leyenda para una MARCA vertical: un palo, no una línea horizontal — la diferencia
+   entre «esto es una serie» y «esto es un instante» se ve antes en la forma que en el rótulo. */
+.ff-chart-legend-swatch--mark {
+  height: 0.7rem;
+  width: 0;
+  border-left: 2px solid var(--ff-legend-color);
+}

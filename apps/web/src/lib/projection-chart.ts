@@ -12,11 +12,7 @@ import {
   parseYmdComponents,
   todayYmdInTimeZone,
 } from "./dates";
-import {
-  DISPLAY_NUMBER_LOCALE,
-  METRIC_DASH,
-  parseDisplayDecimal,
-} from "./format";
+import { DISPLAY_NUMBER_LOCALE, METRIC_DASH } from "./format";
 
 export const PROJECTION_FOCUS_STORAGE_KEY = "futurefin-projection-focus";
 export const PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY =
@@ -150,72 +146,168 @@ export function resolveDeflationAnnualPct(
  */
 export type MoneyBasis = "today" | "nominal";
 
-export type JubilacionTargetTileValue = {
+/**
+ * La ÚNICA definición de la serie auxiliar «Capital necesario» del chart de Proyección (modelo v2,
+ * C4): rótulo, token de color y patrón de guion.
+ *
+ * Vive aquí —y no en la vista— porque la leyenda y la polilínea la leen los dos, y una leyenda que
+ * se escribe aparte es una leyenda que un día rotula una curva que ya no está. Hasta el modelo v2
+ * esa pareja vivía en `lib/plan-series.ts` junto a la curva `coast`; con `required_capital_path` y
+ * `coast_path` retirados de la respuesta, quedaba UNA serie y el módulo entero era un envoltorio.
+ */
+export const NEEDED_CAPITAL_SERIES = {
+  key: "needed_capital",
+  label: "Capital necesario",
+  /** Token con variante clara y oscura en `styles/theme.css`; nunca un hex. */
+  color: "var(--proj-required)",
+  dash: "6 4",
+} as const;
+
+/** Lo ÚNICO que la curva lee de la serie. Un `Pick` y no `ProjectionSeriesApi` entero para que el
+ *  test escriba un fixture de tres campos: lo que no se lee no puede cambiar el resultado. */
+export type NeededCurveSeries = Pick<
+  ProjectionSeriesApi,
+  "points" | "needed_capital_curve" | "needed_capital_curve_state"
+>;
+
+/**
+ * `needed_capital_curve` → los valores YA DEFLACTADOS y paralelos a `series.points`.
+ *
+ * Es la curva REAL de capital necesario por edad (C4), no un objetivo descontado a una tasa
+ * escalar: cada punto es una bisección estocástica más del motor. Por eso se dibuja como curva y
+ * NO entra en la familia del retirado `fire_target_series`.
+ *
+ * **Base de la deflactación (supuesto declarado).** El contrato de `needed_capital_curve` en
+ * `api/types.ts` no dice en qué euros viaja; lo que sí dice es que «cruza la línea central de
+ * patrimonio líquido EXACTAMENTE en la fecha válida», y esa línea es NOMINAL. Se asume por tanto
+ * que la curva es NOMINAL y se le aplica el MISMO `deflator` mes a mes que al patrimonio: si el
+ * servidor la publicara ya en euros de hoy, el toggle «En dinero de hoy» la deflactaría dos veces
+ * y el cruce se rompería — un fallo visible, no silencioso, que es exactamente por lo que este
+ * supuesto se escribe aquí en vez de dejarse implícito. (`needed_capital_today`, en cambio, SÍ
+ * declara euros de hoy y no pasa por aquí.)
+ *
+ * Cuatro reglas, todas ellas cosas que se rompen sin que nada falle:
+ *
+ *  1. **Estado antes que contenido.** Con `needed_capital_curve_state` distinto de `ready` no hay
+ *     curva, aunque llegara un array: el nivel 2 sigue resolviéndose y media curva no es media
+ *     respuesta. Un backend que no publique el estado se juzga solo por el array.
+ *  2. **Longitud exacta o nada.** Si el array no mide lo mismo que `points[]`, se descarta ENTERO:
+ *     media curva alineada y media desplazada es peor que ninguna, porque nada en pantalla dice
+ *     cuál de las dos mitades es la buena.
+ *  3. **Un `null` se conserva como `null`** (nunca 0): ese punto de la curva no está resuelto, y un
+ *     cero dibujaría «no necesitas nada» justo donde no se sabe. El trazado rompe la línea ahí.
+ *  4. **El deflactor se llama con el `month_index` REAL del punto**, jamás con su posición: con
+ *     `density=hybrid` la posición 13 es el mes 24.
+ */
+export function neededCurveForChart(
+  series: NeededCurveSeries | null | undefined,
+  deflator: (monthIndex: number) => number,
+): (number | null)[] | null {
+  if (!series) return null;
+  const state = series.needed_capital_curve_state;
+  if (state !== undefined && state !== "ready") return null;
+  const raw = series.needed_capital_curve;
+  if (!Array.isArray(raw)) return null;
+  const points = series.points;
+  if (!Array.isArray(points) || points.length === 0) return null;
+  if (raw.length !== points.length) return null;
+  return points.map((p, i) => {
+    const v = raw[i];
+    if (v == null || !Number.isFinite(v)) return null;
+    return v * deflator(p.month_index);
+  });
+}
+
+/** Un punto de la tira de éxito por año de jubilación: «si te fueras en 2036, N de cada 100». */
+export type SuccessStripPoint = {
+  /** MES de la rejilla (`month_index`), nunca una posición de array. */
+  monthIndex: number;
+  /** FRACCIÓN [0, 1]. */
+  success: number;
+};
+
+/**
+ * `success_by_retirement_year` → los puntos dibujables de la tira que va bajo el eje X.
+ *
+ * Devuelve `[]` —nunca una tira a medias— cuando el nivel 2 todavía no ha publicado nada. Y
+ * **descarta** los puntos que no puede colorear en vez de inventarlos:
+ *
+ *  - `success` no finito o fuera de `[0, 1]` no se pinta. No se clampa: un 1,4 no es «éxito
+ *    total», es un valor que este chart no sabe leer, y pintarlo de verde afirmaría lo contrario.
+ *  - Mes no finito, fuera (no hay eje donde ponerlo).
+ *  - Mes repetido: gana la PRIMERA aparición, y el orden de salida es por mes ascendente.
+ */
+export function successStripForChart(
+  series:
+    | Pick<ProjectionSeriesApi, "success_by_retirement_year">
+    | null
+    | undefined,
+): SuccessStripPoint[] {
+  const raw = series?.success_by_retirement_year;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<number>();
+  const out: SuccessStripPoint[] = [];
+  for (const p of raw) {
+    if (p == null) continue;
+    const m = p.month_index;
+    const s = p.success;
+    if (typeof m !== "number" || !Number.isFinite(m)) continue;
+    if (typeof s !== "number" || !Number.isFinite(s) || s < 0 || s > 1) continue;
+    if (seen.has(m)) continue;
+    seen.add(m);
+    out.push({ monthIndex: m, success: s });
+  }
+  return out.sort((a, b) => a.monthIndex - b.monthIndex);
+}
+
+/** Lo que el tile «Capital necesario hoy» necesita de la serie para su SEGUNDA línea («al
+ *  jubilarte»). La primera línea es `needed_capital_today`, que ya viaja en euros de hoy y no
+ *  necesita nada de esto. */
+export type NeededCapitalAtRetirementSeries = Pick<
+  ProjectionSeriesApi,
+  | "points"
+  | "needed_capital_curve"
+  | "needed_capital_curve_state"
+  | "safe_date_series_position"
+  | "deflation_annual_inflation_percent"
+>;
+
+export type NeededCapitalAtRetirement = {
   amount: number | null;
   basis: MoneyBasis;
 };
 
-/** Lo ÚNICO que el tile lee de la serie. Un `Pick` y no `ProjectionSeriesApi` entero para que
- *  el test fije un fixture de cuatro campos en vez de una respuesta completa: lo que no se lee
- *  no puede cambiar el resultado, y así el test lo demuestra en vez de prometerlo. */
-export type JubilacionTargetTileSeries = Pick<
-  ProjectionSeriesApi,
-  | "jubilacion_target_net_worth"
-  | "jubilacion_target_net_worth_nominal"
-  | "jubilacion_month_index"
-  | "deflation_annual_inflation_percent"
->;
-
 /**
- * Valor del tile «Objetivo al jubilarte» de Proyección (F11).
+ * El capital necesario EN LA FECHA VÁLIDA: el valor de la curva en `safe_date_series_position`.
  *
- * Hasta 5.0.0 el tile enseñaba `jubilacion_target_net_worth`, que es el objetivo evaluado en el
- * **mes 0** — la base a k=0, inmóvil por contrato — y por eso NO se movía al activar «En dinero
- * de hoy». Con el objetivo puente (5.0.0) esa base y el objetivo del mes en que de verdad te
- * jubilas dejaron de ser la misma magnitud: en la demo, 1.609.855 € contra 696.563 €, un 2,31×.
+ * `safe_date_series_position` es una POSICIÓN de `points[]` publicada por el servidor (convención:
+ * el punto servido inmediatamente anterior o igual al mes de la fecha válida) — la curva es
+ * paralela a `points[]`, así que aquí sí se indexa por posición, y solo por la que publica el
+ * servidor. Nunca se busca el mes a mano: con `density=hybrid` no hay punto propio para ese mes.
  *
- * La cifra correcta es el objetivo del MES DEL CRUCE —`jubilacion_target_net_worth_nominal`,
- * evaluado exacto sobre ese mes por el servidor, nunca interpolado— deflactado con el mismo
- * factor y la misma tasa que el chart. Sin campo `_real` nuevo en el API (veto de arqueología
- * §1/§3): el deflactado de publicación se hace aquí, como el de la línea del objetivo.
- *
- * Reglas:
- *  - Sin nominal (no hay cruce, o backend anterior al campo) → se cae a
- *    `jubilacion_target_net_worth`, que YA está en euros de hoy → `basis: "today"`. Nunca se
- *    inventa un mes: sin mes no hay deflactor que aplicar.
- *  - Con nominal → `nominal × deflationFactorAt(mes, pct)`, con `pct` = la tasa del chart solo
- *    si el toggle está activo Y la tasa no es 0. `basis` sale del `pct` EFECTIVO, así que
- *    «toggle activo con inflación 0» se rotula honestamente como euros de ese mes: el factor
- *    vale 1 y las dos bases coinciden, pero la que describe la cifra es la nominal.
+ * `amount: null` (nunca 0) cuando no hay curva lista, no hay fecha válida, o ese nodo de la curva
+ * no está resuelto. La `basis` sale del pct EFECTIVO, así que «toggle activo con inflación 0» se
+ * rotula honestamente como euros de ese mes: el factor vale 1 y las dos bases coinciden, pero la
+ * que describe la cifra es la nominal.
  */
-export function jubilacionTargetTileValue(
-  series: JubilacionTargetTileSeries | null | undefined,
+export function neededCapitalAtRetirement(
+  series: NeededCapitalAtRetirementSeries | null | undefined,
   inflationAdjusted: boolean,
   installationInflationPct: number,
-): JubilacionTargetTileValue {
-  const nominalRaw = series?.jubilacion_target_net_worth_nominal;
-  const nominal = nominalRaw != null ? parseDisplayDecimal(nominalRaw) : null;
-  const monthIndex = series?.jubilacion_month_index;
-  if (
-    nominal === null ||
-    monthIndex == null ||
-    !Number.isFinite(monthIndex)
-  ) {
-    const baseRaw = series?.jubilacion_target_net_worth;
-    return {
-      amount: baseRaw != null ? parseDisplayDecimal(baseRaw) : null,
-      basis: "today",
-    };
-  }
+): NeededCapitalAtRetirement {
   const deflation = resolveDeflationAnnualPct(
     series?.deflation_annual_inflation_percent,
     installationInflationPct,
   );
   const pct = inflationAdjusted && deflation !== 0 ? deflation : 0;
-  return {
-    amount: nominal * deflationFactorAt(monthIndex, pct),
-    basis: pct !== 0 ? "today" : "nominal",
-  };
+  const basis: MoneyBasis = pct !== 0 ? "today" : "nominal";
+  const curve = neededCurveForChart(series, (mi) => deflationFactorAt(mi, pct));
+  const pos = series?.safe_date_series_position;
+  if (curve === null || pos == null || !Number.isFinite(pos)) {
+    return { amount: null, basis };
+  }
+  const v = curve[pos];
+  return { amount: v == null || !Number.isFinite(v) ? null : v, basis };
 }
 
 /**

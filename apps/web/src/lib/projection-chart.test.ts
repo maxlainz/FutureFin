@@ -3,16 +3,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  NEEDED_CAPITAL_SERIES,
   buildWithdrawalTooltipRows,
   deflationFactorAt,
   formatYearsEsFromMonths,
-  jubilacionTargetTileValue,
   lastPointIndexAtOrBeforeMonth,
+  neededCapitalAtRetirement,
+  neededCurveForChart,
   projectionMaxXTicks,
   projectionXTicks,
   resolveDeflationAnnualPct,
+  successStripForChart,
   thinTicksFromEnd,
-  type JubilacionTargetTileSeries,
+  type NeededCapitalAtRetirementSeries,
+  type NeededCurveSeries,
 } from "./projection-chart";
 
 describe("deflationFactorAt", () => {
@@ -321,127 +325,6 @@ describe("buildWithdrawalTooltipRows — flujos del mes jubilado", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-/**
- * F11 — el tile «Objetivo al jubilarte» de Proyección.
- *
- * Lo que este bloque impide que vuelva: el tile enseñaba `jubilacion_target_net_worth` (el
- * objetivo evaluado en el MES 0, inmóvil por contrato) y por eso no se movía al activar «En
- * dinero de hoy». Con el objetivo puente de 5.0.0 esa base dejó de ser un proxy del objetivo del
- * mes en que de verdad te jubilas: en la demo son 1.609.855 € contra 696.563 €, un 2,31×. Un
- * error de esta forma es SILENCIOSO — la cifra es plausible y nada falla.
- *
- * Y la base viaja pegada al importe: ningún consumidor puede re-derivarla mirando el toggle,
- * porque «toggle activo con inflación 0» y «toggle apagado» dan el MISMO número con la MISMA
- * base y solo el campo `basis` lo dice.
- */
-describe("jubilacionTargetTileValue (tile «Objetivo al jubilarte», F11)", () => {
-  const series = (
-    over: Partial<JubilacionTargetTileSeries> = {},
-  ): JubilacionTargetTileSeries => ({
-    jubilacion_target_net_worth: "1609855.0000",
-    jubilacion_target_net_worth_nominal: "1148467.0000",
-    jubilacion_month_index: 243,
-    deflation_annual_inflation_percent: "2.5",
-    ...over,
-  });
-
-  it("con nominal, toggle activo y 2,5 % → nominal deflactado al mes del cruce, base «today»", () => {
-    const got = jubilacionTargetTileValue(series(), true, 0);
-    expect(got.basis).toBe("today");
-    expect(got.amount).toBeCloseTo(1148467 * deflationFactorAt(243, 2.5), 9);
-  });
-
-  it("toggle apagado → el nominal tal cual, base «nominal»", () => {
-    const got = jubilacionTargetTileValue(series(), false, 0);
-    expect(got.basis).toBe("nominal");
-    expect(got.amount).toBeCloseTo(1148467, 9);
-  });
-
-  // El caso que obliga a que la base viaje con el importe: mismo número que el de arriba, y sin
-  // el campo `basis` sería indistinguible de «deflactado».
-  it("toggle activo con inflación 0 → el nominal tal cual, base «nominal» (el 0 no deflacta)", () => {
-    const got = jubilacionTargetTileValue(
-      series({ deflation_annual_inflation_percent: "0" }),
-      true,
-      0,
-    );
-    expect(got.basis).toBe("nominal");
-    expect(got.amount).toBeCloseTo(1148467, 9);
-  });
-
-  it("sin nominal (no hay cruce) → fallback a la base de hoy, con el toggle en cualquier posición", () => {
-    for (const adjusted of [true, false]) {
-      const got = jubilacionTargetTileValue(
-        series({ jubilacion_target_net_worth_nominal: null }),
-        adjusted,
-        0,
-      );
-      expect(got.basis).toBe("today");
-      expect(got.amount).toBeCloseTo(1609855, 9);
-    }
-  });
-
-  // Sin mes no hay deflactor que aplicar: el fallback es la única cifra honesta, nunca el
-  // nominal rotulado como euros de hoy.
-  it("sin mes de jubilación → fallback a la base de hoy aunque haya nominal", () => {
-    const got = jubilacionTargetTileValue(
-      series({ jubilacion_month_index: null }),
-      true,
-      2.5,
-    );
-    expect(got.basis).toBe("today");
-    expect(got.amount).toBeCloseTo(1609855, 9);
-  });
-
-  it("las dos cifras ausentes → importe null (nunca 0) y base «today»", () => {
-    expect(
-      jubilacionTargetTileValue(
-        series({
-          jubilacion_target_net_worth: null,
-          jubilacion_target_net_worth_nominal: null,
-        }),
-        true,
-        2.5,
-      ),
-    ).toEqual({ amount: null, basis: "today" });
-    expect(jubilacionTargetTileValue(null, true, 2.5)).toEqual({
-      amount: null,
-      basis: "today",
-    });
-  });
-
-  it("sin `deflation_annual_inflation_percent` cae a la tasa de la instalación (backend < 4.6.0)", () => {
-    const got = jubilacionTargetTileValue(
-      series({ deflation_annual_inflation_percent: undefined }),
-      true,
-      3,
-    );
-    expect(got.basis).toBe("today");
-    expect(got.amount).toBeCloseTo(1148467 * deflationFactorAt(243, 3), 9);
-  });
-
-  // La tasa de la RESPUESTA gana a la de la instalación: son la misma cifra salvo cuando no lo
-  // son, y entonces la que dibujó el chart es la del servidor.
-  it("con las dos tasas, manda la de la respuesta", () => {
-    const got = jubilacionTargetTileValue(series(), true, 9);
-    expect(got.amount).toBeCloseTo(1148467 * deflationFactorAt(243, 2.5), 9);
-  });
-
-  /**
-   * PIN de la demo local (2026-09-05, usuario `demo`, estrategia `asap` con objetivo puente):
-   * objetivo nominal del mes 243 = 1.148.467 €, inflación 2,5 % → 696.563 € de hoy. El tile
-   * enseñaba 1.609.855 €. Tolerancia de 1 € porque el número medido está redondeado al euro.
-   */
-  it("PIN demo: 1.148.467 € nominales en el mes 243 al 2,5 % → ≈ 696.563 € de hoy", () => {
-    const got = jubilacionTargetTileValue(series(), true, 0);
-    expect(got.amount).not.toBeNull();
-    expect(Math.abs(got.amount! - 696563)).toBeLessThanOrEqual(1);
-    // Y el tile viejo enseñaba otra magnitud: 2,31× la correcta.
-    expect(1609855 / got.amount!).toBeCloseTo(2.31, 2);
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
 describe("resolveDeflationAnnualPct", () => {
   it("la tasa de la respuesta manda cuando es un número finito", () => {
     expect(resolveDeflationAnnualPct("2.5", 9)).toBe(2.5);
@@ -462,5 +345,297 @@ describe("resolveDeflationAnnualPct", () => {
   // que el chart hacía y este extract NO cambia comportamiento.
   it("la cadena vacía se lee como 0 (borde heredado del memo del chart)", () => {
     expect(resolveDeflationAnnualPct("", 3.1)).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+/**
+ * `neededCurveForChart` — la curva «Capital necesario» del chart (modelo v2, C4).
+ *
+ * Sustituye a la línea del objetivo FIRE, y hereda de ella la única propiedad que importaba: se
+ * alinea con `points[]` por POSICIÓN y se deflacta por el `month_index` REAL de cada punto. Lo que
+ * añade son dos guardas que la línea vieja no necesitaba, porque su array siempre estaba completo:
+ * el ESTADO (`computing` ⇒ no hay curva) y los nodos `null` (el nivel 2 aún no los ha resuelto),
+ * que se conservan como `null` y nunca como cero.
+ *
+ * **Supuesto declarado**: la curva viaja NOMINAL. El contrato de `api/types.ts` no lo dice; lo que
+ * dice es que cruza la línea central de patrimonio líquido en la fecha válida, y esa línea es
+ * nominal. Si el servidor la publicara en euros de hoy, el toggle la deflactaría dos veces.
+ */
+describe("neededCurveForChart", () => {
+  const pts = (months: number[]) =>
+    months.map((m) => ({
+      month_index: m,
+      net_worth: 0,
+      contributed_capital: 0,
+    }));
+
+  const series = (over: Partial<NeededCurveSeries> = {}): NeededCurveSeries => ({
+    points: pts([0, 12, 24]),
+    needed_capital_curve: [100, 200, 300],
+    needed_capital_curve_state: "ready",
+    ...over,
+  });
+
+  const identity = () => 1;
+
+  it("deflacta cada nodo con el MES real del punto, no con su posición", () => {
+    // `density=hybrid`: la posición 2 es el mes 24. Deflactar por la posición aplicaría el factor
+    // de 2 meses a un importe de dos años vista.
+    const got = neededCurveForChart(series(), (mi) => deflationFactorAt(mi, 3));
+    expect(got).not.toBeNull();
+    expect(got![0]).toBeCloseTo(100, 9);
+    expect(got![1]).toBeCloseTo(200 * deflationFactorAt(12, 3), 9);
+    expect(got![2]).toBeCloseTo(300 * deflationFactorAt(24, 3), 9);
+  });
+
+  it("un nodo sin resolver se conserva como null (jamás como 0)", () => {
+    const got = neededCurveForChart(
+      series({ needed_capital_curve: [100, null, 300] }),
+      identity,
+    );
+    expect(got).toEqual([100, null, 300]);
+  });
+
+  it("estado `computing` o `unavailable` ⇒ no hay curva, aunque llegara un array", () => {
+    for (const state of ["computing", "unavailable"] as const) {
+      expect(
+        neededCurveForChart(
+          series({ needed_capital_curve_state: state }),
+          identity,
+        ),
+      ).toBeNull();
+    }
+  });
+
+  // Media curva alineada y media desplazada es peor que ninguna: nada en pantalla diría cuál de
+  // las dos mitades es la buena.
+  it("longitud distinta de `points[]` ⇒ se descarta ENTERA", () => {
+    expect(
+      neededCurveForChart(series({ needed_capital_curve: [100, 200] }), identity),
+    ).toBeNull();
+    expect(
+      neededCurveForChart(
+        series({ needed_capital_curve: [100, 200, 300, 400] }),
+        identity,
+      ),
+    ).toBeNull();
+  });
+
+  it("curva ausente, nula o vacía, serie nula, o sin puntos ⇒ null", () => {
+    expect(neededCurveForChart(series({ needed_capital_curve: null }), identity)).toBeNull();
+    expect(
+      neededCurveForChart(series({ needed_capital_curve: undefined }), identity),
+    ).toBeNull();
+    expect(
+      neededCurveForChart(
+        series({ points: [], needed_capital_curve: [] }),
+        identity,
+      ),
+    ).toBeNull();
+    expect(neededCurveForChart(null, identity)).toBeNull();
+    expect(neededCurveForChart(undefined, identity)).toBeNull();
+  });
+
+  // Backend anterior al campo de estado: se juzga solo por el array, sin dar por hecho que falta.
+  it("sin `needed_capital_curve_state` la curva vale si el array cuadra", () => {
+    const got = neededCurveForChart(
+      series({ needed_capital_curve_state: undefined }),
+      identity,
+    );
+    expect(got).toEqual([100, 200, 300]);
+  });
+
+  it("un nodo no finito (NaN/Infinity) se trata como no resuelto", () => {
+    expect(
+      neededCurveForChart(
+        series({ needed_capital_curve: [Number.NaN, Number.POSITIVE_INFINITY, 300] }),
+        identity,
+      ),
+    ).toEqual([null, null, 300]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+/**
+ * `successStripForChart` — la tira de éxito por año de jubilación que va bajo el eje X.
+ *
+ * Cada celda contesta una pregunta distinta de la que contesta la banda: no «qué le pasa a este
+ * plan» sino «qué pasaría si me fuera ese año». Por eso descarta en vez de rellenar: una celda que
+ * no se puede colorear no se pinta, porque un verde inventado ahí diría que irse ese año sale bien.
+ */
+describe("successStripForChart", () => {
+  it("ordena por mes y conserva la fracción tal cual", () => {
+    expect(
+      successStripForChart({
+        success_by_retirement_year: [
+          { month_index: 24, success: 0.5 },
+          { month_index: 12, success: 0.78 },
+        ],
+      }),
+    ).toEqual([
+      { monthIndex: 12, success: 0.78 },
+      { monthIndex: 24, success: 0.5 },
+    ]);
+  });
+
+  it("nivel 2 aún sin resolver (null/ausente) ⇒ tira vacía, no una tira a medias", () => {
+    expect(successStripForChart({ success_by_retirement_year: null })).toEqual([]);
+    expect(successStripForChart({ success_by_retirement_year: undefined })).toEqual([]);
+    expect(successStripForChart(null)).toEqual([]);
+    expect(successStripForChart(undefined)).toEqual([]);
+  });
+
+  // No se clampa: un 1,4 no es «éxito total», es un valor que este chart no sabe leer.
+  it("descarta el éxito fuera de [0, 1] y el no finito, en vez de recortarlo", () => {
+    expect(
+      successStripForChart({
+        success_by_retirement_year: [
+          { month_index: 12, success: 1.4 },
+          { month_index: 24, success: -0.1 },
+          { month_index: 36, success: Number.NaN },
+          { month_index: 48, success: 0 },
+          { month_index: 60, success: 1 },
+        ],
+      }),
+    ).toEqual([
+      { monthIndex: 48, success: 0 },
+      { monthIndex: 60, success: 1 },
+    ]);
+  });
+
+  it("descarta el mes no finito y desduplica quedándose con la PRIMERA aparición", () => {
+    expect(
+      successStripForChart({
+        success_by_retirement_year: [
+          { month_index: Number.NaN, success: 0.9 },
+          { month_index: 12, success: 0.7 },
+          { month_index: 12, success: 0.3 },
+        ],
+      }),
+    ).toEqual([{ monthIndex: 12, success: 0.7 }]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+/**
+ * `neededCapitalAtRetirement` — la SEGUNDA línea del tile «Capital necesario hoy».
+ *
+ * La primera línea (`needed_capital_today`) va en euros de hoy por contrato y no pasa por aquí.
+ * Esta sí sigue el toggle, y por eso **la base viaja pegada al importe**: «toggle activo con
+ * inflación 0» y «toggle apagado» dan el MISMO número con bases distintas, y solo el campo
+ * `basis` los separa (arqueología §2.26 — una base re-derivada de una segunda comparación acaba
+ * discrepando del número que rotula).
+ */
+describe("neededCapitalAtRetirement", () => {
+  const series = (
+    over: Partial<NeededCapitalAtRetirementSeries> = {},
+  ): NeededCapitalAtRetirementSeries => ({
+    points: [0, 12, 24].map((m) => ({
+      month_index: m,
+      net_worth: 0,
+      contributed_capital: 0,
+    })),
+    needed_capital_curve: [100_000, 200_000, 300_000],
+    needed_capital_curve_state: "ready",
+    safe_date_series_position: 2,
+    deflation_annual_inflation_percent: "2.5",
+    ...over,
+  });
+
+  it("toggle activo: el nodo de la fecha válida deflactado a su MES, base «today»", () => {
+    const got = neededCapitalAtRetirement(series(), true, 0);
+    expect(got.basis).toBe("today");
+    expect(got.amount).toBeCloseTo(300_000 * deflationFactorAt(24, 2.5), 9);
+  });
+
+  it("toggle apagado: el nominal tal cual, base «nominal»", () => {
+    const got = neededCapitalAtRetirement(series(), false, 0);
+    expect(got.basis).toBe("nominal");
+    expect(got.amount).toBeCloseTo(300_000, 9);
+  });
+
+  it("toggle activo con inflación 0: mismo número que apagado, y base «nominal»", () => {
+    const got = neededCapitalAtRetirement(
+      series({ deflation_annual_inflation_percent: "0" }),
+      true,
+      0,
+    );
+    expect(got.basis).toBe("nominal");
+    expect(got.amount).toBeCloseTo(300_000, 9);
+  });
+
+  it("la tasa de la RESPUESTA manda sobre la de la instalación", () => {
+    const got = neededCapitalAtRetirement(series(), true, 9);
+    expect(got.amount).toBeCloseTo(300_000 * deflationFactorAt(24, 2.5), 9);
+  });
+
+  it("sin tasa en la respuesta cae a la de la instalación (backend < 4.6.0)", () => {
+    const got = neededCapitalAtRetirement(
+      series({ deflation_annual_inflation_percent: undefined }),
+      true,
+      3,
+    );
+    expect(got.amount).toBeCloseTo(300_000 * deflationFactorAt(24, 3), 9);
+  });
+
+  // Los tres huecos dan `null`, NUNCA 0: un «0 €» en esta línea diría que llegado el día no
+  // necesitas nada.
+  it("sin curva lista, sin fecha válida, o con ese nodo sin resolver ⇒ importe null", () => {
+    expect(
+      neededCapitalAtRetirement(
+        series({ needed_capital_curve_state: "computing" }),
+        true,
+        0,
+      ).amount,
+    ).toBeNull();
+    expect(
+      neededCapitalAtRetirement(
+        series({ safe_date_series_position: null }),
+        true,
+        0,
+      ).amount,
+    ).toBeNull();
+    expect(
+      neededCapitalAtRetirement(
+        series({ needed_capital_curve: [100_000, 200_000, null] }),
+        true,
+        0,
+      ).amount,
+    ).toBeNull();
+    expect(neededCapitalAtRetirement(null, true, 2.5).amount).toBeNull();
+  });
+
+  // Una posición fuera del array no es el último punto: es una respuesta que no cuadra, y
+  // rotular el nodo equivocado sería peor que no rotular ninguno.
+  it("una posición fuera de rango no se recorta al último nodo", () => {
+    expect(
+      neededCapitalAtRetirement(
+        series({ safe_date_series_position: 9 }),
+        true,
+        0,
+      ).amount,
+    ).toBeNull();
+  });
+
+  // La base se declara aunque no haya importe: el tile decide con ella si escribe «(euros de
+  // hoy)» y no puede quedarse sin respuesta por un nodo ausente.
+  it("la base se publica aunque el importe sea null", () => {
+    expect(
+      neededCapitalAtRetirement(series({ safe_date_series_position: null }), true, 0)
+        .basis,
+    ).toBe("today");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+/** La curva y su leyenda salen de UNA constante: dos definiciones del rótulo o del color es cómo
+ *  una leyenda acaba nombrando una serie que ya no está. */
+describe("NEEDED_CAPITAL_SERIES", () => {
+  it("rótulo, token y guion, sin un solo hex", () => {
+    expect(NEEDED_CAPITAL_SERIES.label).toBe("Capital necesario");
+    expect(NEEDED_CAPITAL_SERIES.color).toBe("var(--proj-required)");
+    expect(NEEDED_CAPITAL_SERIES.color.startsWith("var(--")).toBe(true);
+    expect(NEEDED_CAPITAL_SERIES.dash).toBe("6 4");
   });
 });

@@ -49,6 +49,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "re
 import type { ProjectionSeriesApi } from "../../api/types";
 import {
   ASSET_LINE_COLORS,
+  NEEDED_CAPITAL_SERIES,
   lastPointIndexAtOrBeforeMonth,
   niceYTicks,
   projectionXTickLabel,
@@ -59,7 +60,11 @@ import {
   placeMarkerLabels,
   type RetirementChartMarker,
 } from "../../lib/retirement-chart";
-import type { RiskGradientStop } from "../../lib/risk-gradient";
+import {
+  riskColorForProbability,
+  type RiskCutoffs,
+  type RiskGradientStop,
+} from "../../lib/risk-gradient";
 
 export type MiniProjectionXAxisOpts = {
   ageUiMode: "dates" | "ages";
@@ -76,11 +81,34 @@ export type MiniProjectionBandPoint = {
   p90: number;
 };
 
+/**
+ * Un vértice de una serie auxiliar por MES (hoy solo «Capital necesario»), en euros NOMINALES:
+ * la deflactación la aplica el chart con el MISMO `deflator` que el patrimonio y la banda.
+ *
+ * `value: null` = ese nodo no está resuelto (el nivel 2 sigue en marcha). **Rompe la línea**: no
+ * se interpola por encima de un hueco, porque una recta entre dos nodos que el servidor no ha
+ * unido afirmaría una forma que nadie ha calculado.
+ */
+export type MiniProjectionPoint = {
+  month: number;
+  value: number | null;
+};
+
+/** Una celda de la tira de éxito por año de jubilación que va BAJO el eje X. */
+export type MiniProjectionSuccessCell = {
+  /** MES de la rejilla (`month_index`), nunca una posición de array. */
+  monthIndex: number;
+  /** FRACCIÓN [0, 1] de escenarios que aguantan jubilándose ese año. */
+  success: number;
+  /** Texto del hover nativo («si te fueras en 2036: 78 de cada 100»). Lo compone el llamante,
+   *  que es quien sabe si el eje va en fechas o en edades. */
+  label?: string;
+};
+
 export function MiniProjection({
   series,
   months,
   height = 120,
-  showFire = false,
   showJub = true,
   showPhases = false,
   showAreas = true,
@@ -93,13 +121,16 @@ export function MiniProjection({
   bandEdgeLabels,
   hoverLabel,
   markers,
+  neededCurve,
+  validDateMark,
+  successStrip,
+  successStripCutoffs,
   deflator,
 }: {
   series: ProjectionSeriesApi | null;
   /** Número de meses a mostrar; recorta si la serie es más larga. */
   months?: number;
   height?: number;
-  showFire?: boolean;
   showJub?: boolean;
   /**
    * Versión REDUCIDA de la tira de fases del chart grande (D29): una banda de 6px bajo el plot,
@@ -163,6 +194,40 @@ export function MiniProjection({
    *  `null` para un mes sin nada que decir. Ausente ⇒ el chart no captura el puntero. */
   hoverLabel?: ((monthIndex: number) => string | null) | null;
   markers?: readonly RetirementChartMarker[] | null;
+  /**
+   * Curva auxiliar DISCONTINUA «Capital necesario» (modelo v2, C4), en euros NOMINALES y por MES.
+   * Es el líquido que hace cumplir el umbral jubilándose en cada mes: una bisección estocástica
+   * por nodo, no un objetivo descontado. Entra en el dominio del eje Y —vive en el mismo rango
+   * que el patrimonio— y se rompe en los nodos sin resolver.
+   *
+   * Sustituye a la retirada línea del objetivo FIRE: en v2 no hay objetivo que cruzar (la fecha la
+   * fija el éxito), y por eso `showFire` desapareció junto con `fire_target_series`.
+   */
+  neededCurve?: readonly MiniProjectionPoint[] | null;
+  /**
+   * Marca VERTICAL de la fecha válida con su rótulo (modelo v2, C4). Es un instante, no una serie:
+   * el rótulo lleva halo para leerse sobre la banda teñida sin abrirle un hueco.
+   *
+   * Se dibuja SIEMPRE (no cede su rótulo como los `markers`): es el hito que la pantalla contesta.
+   * Un llamante que además pase la marca `retirement` en `markers` pintaría dos líneas en el mismo
+   * mes — pásala por uno de los dos canales, no por los dos.
+   */
+  validDateMark?: { monthIndex: number; label: string } | null;
+  /**
+   * Tira de éxito por AÑO DE JUBILACIÓN bajo el eje X: «si te fueras en 2036, 78 de cada 100».
+   * Un rectángulo por celda, coloreado por `riskColorForProbability(1 − success, cutoffs)` — la
+   * MISMA escala que tiñe la banda, para que el verde de la tira y el de la banda signifiquen lo
+   * mismo. Ausente o vacía ⇒ no se reserva ni un píxel de alto.
+   */
+  successStrip?: readonly MiniProjectionSuccessCell[] | null;
+  /**
+   * Los cortes de la escala de color de la tira, derivados del umbral del perfil con
+   * `riskCutoffsForThreshold`. **Sin ellos la tira NO se pinta**: inventar aquí la escala del
+   * umbral 100 la aplicaría en silencio al plan de quien pidió un 80 %, y el error no se vería —
+   * la tira saldría roja donde el plan cumple lo que su dueño pidió. Es el mismo motivo por el que
+   * `riskColorForProbability` exige `cutoffs` en vez de tener un default.
+   */
+  successStripCutoffs?: RiskCutoffs | null;
   /**
    * Factor por el que se multiplica cada importe NOMINAL del mes: `deflationFactorAt(mi, pct)`
    * para leer «en dinero de hoy», ausente (o `() => 1`) para leer en euros corrientes. Se aplica
@@ -230,12 +295,29 @@ export function MiniProjection({
     // Un deflactor ausente es la identidad: el Resumen no pasa ninguno y su chart no cambia.
     const df = deflator ?? (() => 1);
     const nw = points.map((p) => p.net_worth * df(p.month_index));
-    const fire =
-      showFire && series.fire_target_series && series.fire_target_series.length > 0
-        ? series.fire_target_series
-            .slice(0, total)
-            .map((v, i) => v * df(monthAt(i)))
-        : null;
+
+    // «Capital necesario» (C4): se recorta a la VENTANA por mes —igual que la banda, nunca por
+    // longitud: su rejilla es de 5 años y la de `points` no— y se deflacta con el MISMO factor.
+    // Los nodos sin resolver (`value: null`) parten la serie en SEGMENTOS: no se interpola por
+    // encima de un hueco.
+    const neededPoints = neededCurve
+      ? neededCurve
+          .filter(
+            (p) =>
+              Number.isFinite(p.month) &&
+              p.month >= monthStart &&
+              p.month <= monthEnd,
+          )
+          .slice()
+          .sort((a, b) => a.month - b.month)
+          .map((p) => ({
+            month: p.month,
+            value:
+              p.value == null || !Number.isFinite(p.value)
+                ? null
+                : p.value * df(p.month),
+          }))
+      : [];
 
     const assetSeries =
       showAreas && series.asset_series && series.asset_series.length > 0
@@ -265,9 +347,15 @@ export function MiniProjection({
       : [];
     const bandVisible = bandPoints.length >= 2;
 
+    // La curva de capital necesario SÍ entra en el dominio Y (a diferencia del retirado objetivo
+    // FIRE, que podía crecer un orden de magnitud por encima del patrimonio): es una cifra de
+    // líquido de la misma simulación y vive en el mismo rango. Recortarla contra el borde la haría
+    // parecer una curva que se ACABA, que aquí significaría otra cosa.
     const allValues = [
       ...nw,
-      ...(fire ?? []),
+      ...neededPoints
+        .map((p) => p.value)
+        .filter((v): v is number => v != null && Number.isFinite(v)),
       ...(bandVisible
         ? bandPoints.flatMap((b) => [b.p10, b.p90])
         : []),
@@ -302,8 +390,26 @@ export function MiniProjection({
       : [];
     // La banda sale del alto del plot, como el eje: el SVG mide `height` exacto.
     const phaseH = phaseSegments.length > 0 ? 8 : 0;
+    // Tira de éxito por año, BAJO el eje X. Su alto sale del plot igual que el del eje y el de la
+    // tira de fases — el `viewBox` mide `height` exacto y no puede crecer. **Cero cuando la prop
+    // no viene o llega vacía**: es lo que sostiene la invariante «sin props, geometría byte a byte
+    // la de antes» del Resumen. Sin `cutoffs` tampoco se reserva: la tira no se va a pintar.
+    const stripCells =
+      successStrip && successStripCutoffs
+        ? successStrip
+            .filter(
+              (c) =>
+                Number.isFinite(c.monthIndex) &&
+                Number.isFinite(c.success) &&
+                c.monthIndex >= monthStart &&
+                c.monthIndex <= monthEnd,
+            )
+            .slice()
+            .sort((a, b) => a.monthIndex - b.monthIndex)
+        : [];
+    const stripH = stripCells.length > 0 ? 8 : 0;
     const pw = W - padLeft - padX;
-    const ph = H - padY * 2 - axisH - phaseH;
+    const ph = H - padY * 2 - axisH - phaseH - stripH;
 
     /** X de un MES concreto (no de una posición): el reparto es temporal, no posicional. */
     const xAtMonth = (m: number) =>
@@ -418,6 +524,58 @@ export function MiniProjection({
           })
         : [];
 
+    // «Capital necesario» → SEGMENTOS de polilínea. Un nodo sin resolver corta el trazo: dos
+    // segmentos separados dicen «aquí no sé», una recta continua diría «aquí vale esto».
+    const neededSegments: string[] = [];
+    {
+      let current: string[] = [];
+      for (const p of neededPoints) {
+        if (p.value == null) {
+          if (current.length >= 2) neededSegments.push(current.join(" "));
+          current = [];
+          continue;
+        }
+        current.push(`${xAtMonth(p.month).toFixed(1)},${yAt(p.value).toFixed(1)}`);
+      }
+      if (current.length >= 2) neededSegments.push(current.join(" "));
+    }
+
+    /** La marca vertical de la fecha válida, ya en píxeles. Fuera de la ventana ⇒ `null`: una
+     *  marca pegada al borde se leería como «pasa justo aquí» cuando pasa fuera del gráfico. */
+    const safeDateMark =
+      validDateMark &&
+      Number.isFinite(validDateMark.monthIndex) &&
+      validDateMark.monthIndex >= monthStart &&
+      validDateMark.monthIndex <= monthEnd
+        ? { x: xAtMonth(validDateMark.monthIndex), label: validDateMark.label }
+        : null;
+
+    // Celdas de la tira: cada una ocupa hasta la siguiente (la última hereda el ancho de la
+    // anterior, o el resto del plot si es la única). El color sale de la MISMA escala que tiñe la
+    // banda — `1 − success` es la probabilidad de FALLO, que es lo que la escala mide.
+    const stripCutoffs = successStripCutoffs;
+    const stripRects =
+      stripCutoffs == null
+        ? []
+        : stripCells.map((cell, i) => {
+            const x = xAtMonth(cell.monthIndex);
+            const next = stripCells[i + 1];
+            const prev = stripCells[i - 1];
+            const w =
+              next != null
+                ? xAtMonth(next.monthIndex) - x
+                : prev != null
+                  ? x - xAtMonth(prev.monthIndex)
+                  : padLeft + pw - x;
+            return {
+              key: cell.monthIndex,
+              x,
+              width: Math.max(1, Math.min(w, padLeft + pw - x)),
+              color: riskColorForProbability(1 - cell.success, stripCutoffs),
+              label: cell.label,
+            };
+          });
+
     return {
       total,
       monthStart,
@@ -425,11 +583,13 @@ export function MiniProjection({
       monthSpan,
       visibleMonths,
       nw,
-      fire,
+      neededSegments,
       bandPath,
       bandEdge,
       yTicks,
       placedMarkers,
+      safeDateMark,
+      stripRects,
       W,
       H,
       padLeft,
@@ -446,12 +606,13 @@ export function MiniProjection({
       jubPos,
       phaseSegments,
       phaseH,
+      stripH,
+      axisH,
     };
   }, [
     series,
     months,
     height,
-    showFire,
     showJub,
     showPhases,
     showAreas,
@@ -462,6 +623,10 @@ export function MiniProjection({
     band,
     bandEdgeLabels,
     markers,
+    neededCurve,
+    validDateMark,
+    successStrip,
+    successStripCutoffs,
     deflator,
     containerW,
   ]);
@@ -495,11 +660,13 @@ export function MiniProjection({
     monthSpan,
     visibleMonths,
     nw,
-    fire,
+    neededSegments,
     bandPath,
     bandEdge,
     yTicks,
     placedMarkers,
+    safeDateMark,
+    stripRects,
     W,
     H,
     padLeft,
@@ -516,6 +683,8 @@ export function MiniProjection({
     jubPos,
     phaseSegments,
     phaseH,
+    stripH,
+    axisH,
   } = computed;
 
   /** Con menos de dos paradas no hay degradado que pintar y la banda vuelve al acento plano:
@@ -663,16 +832,22 @@ export function MiniProjection({
         )
       ) : null}
 
-      {/* Target FIRE (acento, dash) */}
-      {fire ? (
+      {/* «Capital necesario» (C4): DISCONTINUA, porque no es tu patrimonio — es el líquido que tu
+          umbral exige para poder jubilarte en cada mes. Un tramo que falta es un nodo que el nivel
+          2 aún no ha resuelto, no un cero. */}
+      {neededSegments.map((seg, i) => (
         <polyline
-          points={pointsStr(fire)}
+          key={`mini-needed-${i}`}
+          points={seg}
           fill="none"
-          stroke="var(--proj-fire)"
+          stroke={NEEDED_CAPITAL_SERIES.color}
           strokeWidth={1.5}
-          strokeDasharray="5 3"
+          strokeDasharray={NEEDED_CAPITAL_SERIES.dash}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          opacity={0.85}
         />
-      ) : null}
+      ))}
 
       {/* Patrimonio neto — línea principal */}
       <polyline
@@ -739,6 +914,37 @@ export function MiniProjection({
         );
       })}
 
+      {/* Marca vertical de la FECHA VÁLIDA (modelo v2, C4) con su rótulo. No cede el rótulo:
+          es el hito que la pantalla contesta. Va después de los `markers` para quedar encima. */}
+      {safeDateMark ? (
+        <g>
+          <line
+            x1={safeDateMark.x}
+            x2={safeDateMark.x}
+            y1={padY}
+            y2={padY + ph}
+            stroke="var(--ff-accent)"
+            strokeWidth={1.5}
+          />
+          <text
+            x={Math.min(Math.max(safeDateMark.x, padLeft + 4), padLeft + pw - 4)}
+            y={padY + 11}
+            textAnchor={
+              safeDateMark.x > padLeft + pw * 0.66
+                ? "end"
+                : safeDateMark.x < padLeft + pw * 0.33
+                  ? "start"
+                  : "middle"
+            }
+            className="proj-mini-safe-date-label"
+            fill="var(--ff-accent)"
+            fontSize="9.5"
+          >
+            {safeDateMark.label}
+          </text>
+        </g>
+      ) : null}
+
       {/* Tira de fases reducida (D29): banda sin rótulos bajo el plot. Las posiciones salen de
           `xAtMonth` (meses), nunca de `xAt` (posiciones del array): con `density=hybrid` los
           puntos no son equidistantes y el corte caería en el año equivocado. */}
@@ -797,6 +1003,30 @@ export function MiniProjection({
             </g>
           );
         })()
+      ) : null}
+
+      {/* Tira de ÉXITO POR AÑO DE JUBILACIÓN (modelo v2, §4), bajo el eje X: «si te fueras en
+          2036, 78 de cada 100». Es una pregunta distinta de la que contesta la banda —la banda
+          dice qué le pasa a ESTE plan, la tira qué pasaría si te fueras antes o después— y por eso
+          va en su propia franja y no dentro del plot. Colores de la MISMA escala que la banda
+          (`riskColorForProbability` sobre `1 − success`), y el número exacto en el `<title>`: un
+          color solo puede aproximarlo. */}
+      {stripH > 0 ? (
+        <g>
+          {stripRects.map((r) => (
+            <rect
+              key={`mini-strip-${r.key}`}
+              x={r.x}
+              y={padY + ph + phaseH + axisH + 2}
+              width={r.width}
+              height={stripH - 2}
+              fill={r.color}
+              fillOpacity={0.75}
+            >
+              {r.label ? <title>{r.label}</title> : null}
+            </rect>
+          ))}
+        </g>
       ) : null}
 
       {/* Rótulos de los dos bordes de la banda (V2). Dentro del plot y con halo del color del

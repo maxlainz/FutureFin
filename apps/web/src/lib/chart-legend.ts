@@ -9,10 +9,12 @@
  * Con N > 10 la paleta se recicla globalmente (módulo 10), decisión aceptada.
  */
 
-import { ASSET_LINE_COLORS } from "./projection-chart";
+import { ASSET_LINE_COLORS, NEEDED_CAPITAL_SERIES } from "./projection-chart";
 import { normalizeSearchText } from "./expenses";
 
-export type ChartLegendSwatch = "line" | "dashed" | "area";
+/** `mark` es la marca VERTICAL de la fecha válida (modelo v2): no es una serie, es un instante,
+ *  y su muestra se dibuja como un palo vertical para que no se lea como una curva más. */
+export type ChartLegendSwatch = "line" | "dashed" | "area" | "mark";
 
 export type ChartLegendItem = {
   /** Key de React (para activos: el asset_id). */
@@ -58,14 +60,27 @@ export const TOOLTIP_ASSET_LIMIT = 5;
  * color, así que basta con que la leyenda diga qué es — llamarlo «Histórico» junto a un
  * «Patrimonio neto» invita a leer las dos mitades como la misma magnitud, que es exactamente el
  * error que se está corrigiendo.
+ *
+ * **Modelo v2 (C4)**: fuera «Objetivo FIRE» —`fire_target_series` ya no existe y no hay objetivo
+ * que cruzar—, dentro «Capital necesario» (la curva discontinua real por edad) y la MARCA de la
+ * fecha válida. Rótulo y color de la curva salen de `NEEDED_CAPITAL_SERIES`, la misma constante
+ * con la que el chart la pinta: una leyenda que se escribe aparte acaba rotulando otra cosa.
+ *
+ * Las NOTAS del pie («sin fecha válida al 95 %», «Calculando el capital necesario…») **no salen de
+ * aquí**: no rotulan nada dibujado, así que no son ítems de leyenda y no llevan muestra de color.
+ * Las pinta la vista como texto bajo la leyenda.
  */
 export function buildStructuralLegendItems(opts: {
-  hasFire: boolean;
+  /** ¿Se está dibujando la curva «Capital necesario»? (`needed_capital_curve` lista y alineada). */
+  hasNeededCapital: boolean;
   hasHistory: boolean;
   historyIsAssetsOnly?: boolean;
   /** #136-5a: `false` = modo euros de hoy, donde la línea «aportado» está retirada (su cifra
    *  correcta no es computable desde la serie servida). Default `true` (nominal). */
   hasContributed?: boolean;
+  /** Rótulo de la marca vertical de la fecha válida («Fecha válida · 95 de cada 100»). Ausente o
+   *  vacío ⇒ no hay marca que rotular: sin fecha válida la leyenda no reserva su hueco. */
+  validDateMarkLabel?: string | null;
 }): ChartLegendItem[] {
   const items: ChartLegendItem[] = [
     { key: "nw", label: "Patrimonio neto", color: "var(--proj-nw)", swatch: "line" },
@@ -78,12 +93,21 @@ export function buildStructuralLegendItems(opts: {
       swatch: "dashed",
     });
   }
-  if (opts.hasFire) {
+  if (opts.hasNeededCapital) {
     items.push({
-      key: "fire",
-      label: "Objetivo FIRE",
-      color: "var(--proj-fire)",
+      key: NEEDED_CAPITAL_SERIES.key,
+      label: NEEDED_CAPITAL_SERIES.label,
+      color: NEEDED_CAPITAL_SERIES.color,
       swatch: "dashed",
+    });
+  }
+  const markLabel = opts.validDateMarkLabel?.trim();
+  if (markLabel) {
+    items.push({
+      key: "safe_date",
+      label: markLabel,
+      color: "var(--ff-accent)",
+      swatch: "mark",
     });
   }
   if (opts.hasHistory) {
