@@ -33,7 +33,7 @@ use rust_decimal::Decimal;
 use crate::money::MoneyOps;
 use crate::phases::{
     EngineWarning, ExpenseBasis, IncomePause, PartialPhase, PathFailure, PensionSchedule, Phase,
-    PhasePlan, RetirementTrigger, SpendMode, TargetBasis, WithdrawalRule,
+    PhasePlan, RetirementTrigger, SpendMode, WithdrawalRule,
 };
 use crate::projection::{
     AllocationCap, AllocationKind, AllocationRule, AllocationSkipReason, EarlyRepaymentEffect,
@@ -196,8 +196,6 @@ pub struct PhasePlanG<M> {
     pub income_retirement_monthly: M,
     pub expense_retirement_monthly: M,
     pub extra_monthly_withdrawal: M,
-    pub target_basis: TargetBasis,
-    pub bridge_discount_annual_pct: M,
     pub crossing_is_reading_only: bool,
     pub contribution_cap_monthly: Option<M>,
     pub contributions_stop_month: Option<u32>,
@@ -440,9 +438,6 @@ pub struct SimOutput<M> {
     pub pension_start_month_index: Option<u32>,
     pub partial_retirement_month_index: Option<u32>,
     pub warnings: Vec<EngineWarning>,
-    pub bridge_effective_withdrawal_pct: Option<M>,
-    pub pension_coverage_ratio: Option<M>,
-    pub partial_gap_target: Option<M>,
     pub partial_phase_capital_growing: bool,
     pub disposable_cash: Vec<M>,
     pub disposable_cash_total: M,
@@ -465,8 +460,6 @@ impl<M: MoneyOps> From<&PhasePlan> for PhasePlanG<M> {
             income_retirement_monthly: M::from_decimal(p.income_retirement_monthly),
             expense_retirement_monthly: M::from_decimal(p.expense_retirement_monthly),
             extra_monthly_withdrawal: M::from_decimal(p.extra_monthly_withdrawal),
-            target_basis: p.target_basis,
-            bridge_discount_annual_pct: M::from_decimal(p.bridge_discount_annual_pct),
             crossing_is_reading_only: p.crossing_is_reading_only,
             contribution_cap_monthly: p.contribution_cap_monthly.map(M::from_decimal),
             contributions_stop_month: p.contributions_stop_month,
@@ -623,9 +616,6 @@ impl From<SimOutput<Decimal>> for ProjectionOutput {
             pension_start_month_index: o.pension_start_month_index,
             partial_retirement_month_index: o.partial_retirement_month_index,
             warnings: o.warnings,
-            bridge_effective_withdrawal_pct: o.bridge_effective_withdrawal_pct,
-            pension_coverage_ratio: o.pension_coverage_ratio,
-            partial_gap_target: o.partial_gap_target,
             partial_phase_capital_growing: o.partial_phase_capital_growing,
             disposable_cash: o.disposable_cash,
             disposable_cash_total: o.disposable_cash_total,

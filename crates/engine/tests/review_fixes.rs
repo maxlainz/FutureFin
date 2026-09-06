@@ -12,14 +12,19 @@
 //! | `the_binding_allowance_is_a_cut_on_the_mixed_path_too` | #3 | el techo que no ataba en la vía mixta |
 //! | `guardrails_under_a_binding_allowance_classify_on_both_paths` | #3 | el mismo, con parámetros que la API acepta |
 //! | `rule_is_spend_funds_the_month_surplus_first` | #4 | comprar y vender el mismo fondo el mismo mes |
-//! | `a_bridge_discount_too_negative_is_a_typed_error_not_a_panic` | #1 | `powd` sin `checked` |
-//! | `the_partial_gap_target_needs_a_partial_phase_that_happened` | #9 | objetivo de una fase que no se vivió |
+//! | `the_partial_phase_readings_need_a_partial_phase_that_happened` | #9 | lectura de una fase que no se vivió |
+//!
+//! Falta uno: `a_bridge_discount_too_negative_is_a_typed_error_not_a_panic` (hallazgo #1, `powd`
+//! sin `checked`). **E4 lo borró con su sujeto**: el objetivo puente y su descuento se retiraron
+//! del motor (decisión M4 del modelo v2), y con ellos la tabla que desbordaba y el error tipado
+//! `BridgeDiscountOverflow`. La disciplina que dejó —`checked_powd_fraction` en `MoneyOps`—
+//! sigue en el contrato numérico.
 
 use chrono::NaiveDate;
 use futurefin_engine::{
-    project_net_worth_series, AllocationKind, AllocationRule, EngineError, FireNeed, FireTarget,
-    PartialPhase, PensionSchedule, PhasePlan, ProjectionInput, RetirementTrigger, SimAsset,
-    SpendMode, TargetBasis, TaxBracket, WithdrawalRule,
+    project_net_worth_series, AllocationKind, AllocationRule, FireNeed, FireTarget, PartialPhase,
+    PensionSchedule, PhasePlan, ProjectionInput, RetirementTrigger, SimAsset, SpendMode,
+    TaxBracket, WithdrawalRule,
 };
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -91,11 +96,14 @@ fn base(horizon: u32, income: &str, expense: &str, assets: Vec<SimAsset>) -> Pro
 /// **La cartera que se vacía EXACTAMENTE el mes en que entra una pensión que cubre todo el gasto
 /// posterior no se ha agotado: ha cumplido.**
 ///
-/// El hogar: 2.000 €/mes de gasto, pensión de 2.500 € desde el índice 120, objetivo puente sin
-/// descuento ⇒ `T(0) = 120 × 2.000 = 240.000 €` exactos. Con exactamente ese capital al 0 %, la
-/// venta del mes 120 consume el último euro y desde el 121 la pensión paga sola: 500 €/mes de
-/// sobra durante 120 meses ⇒ 60.000 € al final del horizonte, y **ni un euro de necesidad sin
-/// cubrir**.
+/// El hogar: 2.000 €/mes de gasto y pensión de 2.500 € desde el índice 120, jubilado a la fuerza
+/// desde el mes 1. El capital son `120 × 2.000 = 240.000 €` EXACTOS —los meses que faltan hasta
+/// la pensión, al 0 %—, así que la venta del mes 120 consume el último euro y desde el 121 la
+/// pensión paga sola: 500 €/mes de sobra durante 120 meses ⇒ 60.000 € al final del horizonte, y
+/// **ni un euro de necesidad sin cubrir**.
+///
+/// (Ese capital lo dimensionaba el objetivo PUENTE cuando el caso se escribió; E4 lo retiró. No
+/// cambia nada aquí: la jubilación es FORZADA en el mes 1 y ningún objetivo la dispara.)
 ///
 /// Hasta el pase de correcciones el motor publicaba `assets_depleted_month_index = Some(120)`
 /// porque el predicado era `venta_bruta >= drenable` y el aterrizaje exacto cae del lado del
@@ -117,8 +125,6 @@ fn an_exact_landing_that_covers_every_later_need_is_not_a_depletion() {
         input.taxes_enabled = false;
         input.tax_brackets = Vec::new();
         input.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(1);
-        input.phase_plan.target_basis = TargetBasis::BridgeToPension;
-        input.phase_plan.bridge_discount_annual_pct = Decimal::ZERO;
         input.phase_plan.pension = Some(PensionSchedule {
             start_index: 120,
             monthly_today: dec("2500"),
@@ -393,96 +399,22 @@ fn rule_is_spend_funds_the_month_surplus_first() {
 }
 
 // =================================================================================================
-// Hallazgo #1 — el descuento del puente ya no panica
+// Hallazgo #9 — las lecturas de la media jornada necesitan una fase parcial que ocurriera
 // =================================================================================================
 
-/// **Un descuento de puente demasiado negativo es un error TIPADO, no un pánico.**
-///
-/// `bridge_discount_annual_pct` no se escribe: se deriva de la rentabilidad esperada ponderada de
-/// los activos líquidos, y esa solo está acotada por `> −100`. Con `d` muy negativo el factor
-/// `q(j) = (1+d/100)^{j/12}` se hunde hacia 0, el término descontado explota y `powd` —o la suma
-/// sufijo, o el producto de la evaluación— se sale del rango de `Decimal`. Eso PANICABA, y salía
-/// como un 500 opaco de `/v1/projection/series`.
-///
-/// La lectura suelta (`fire_target_at_month_index_with_plan`) degrada a la perpetuidad sobre la
-/// necesidad íntegra, que es la misma degradación declarada de `p > MAX_BRIDGE_MONTHS`; la
-/// SIMULACIÓN falla en voz alta, porque publicar ese objetivo sería publicar un plan distinto del
-/// configurado.
-#[test]
-fn a_bridge_discount_too_negative_is_a_typed_error_not_a_panic() {
-    let build = |d: &str, p: u32| {
-        let mut input = base(
-            240,
-            "0",
-            "2000",
-            vec![asset(1, "500000", Some("0"), true, "0")],
-        );
-        input.taxes_enabled = false;
-        input.tax_brackets = Vec::new();
-        input.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(1);
-        input.phase_plan.target_basis = TargetBasis::BridgeToPension;
-        input.phase_plan.bridge_discount_annual_pct = dec(d);
-        input.phase_plan.pension = Some(PensionSchedule {
-            start_index: p,
-            monthly_today: dec("1200"),
-            indexed: false,
-            fraction_while_partial: Decimal::ZERO,
-        });
-        input.fire_target = Some(FireTarget {
-            need: FireNeed::ExpenseMinusPension {
-                expense_monthly: dec("2000"),
-                pension_monthly: Decimal::ZERO,
-            },
-            swr_pct: dec("4"),
-            tax_brackets: Vec::new(),
-            taxes_enabled: false,
-            taxable_gain_ratio: Decimal::ONE,
-            annual_inflation_percent: Decimal::ZERO,
-            debt_payments_remaining: Vec::new(),
-        });
-        input
-    };
-
-    // El caso que panicaba en `powd` («Pow overflowed»): pensión a 20 años, d = −99 %.
-    assert!(matches!(
-        project_net_worth_series(&build("-99", 240)),
-        Err(EngineError::BridgeDiscountOverflow)
-    ));
-    // Y el que panicaba en la suma sufijo («Addition overflowed»): pensión a 70 años, d = −60 %.
-    // Es el alcanzable de verdad: un solo activo líquido al −60 % con el descuento por defecto.
-    assert!(matches!(
-        project_net_worth_series(&build("-60", 840)),
-        Err(EngineError::BridgeDiscountOverflow)
-    ));
-    // Un descuento razonable sigue simulando.
-    assert!(project_net_worth_series(&build("5", 240)).is_ok());
-    // Y la LECTURA suelta nunca panica: degrada a la perpetuidad sobre la necesidad íntegra.
-    let degraded = build("-99", 240);
-    let t = futurefin_engine::fire_target_at_month_index_with_plan(
-        degraded.fire_target.as_ref(),
-        &degraded.phase_plan,
-        0,
-    );
-    assert_eq!(
-        t,
-        futurefin_engine::fire_target_at_month_index(degraded.fire_target.as_ref(), 0),
-        "la lectura degradada ES el objetivo de 4.15.0 sin pensión"
-    );
-}
-
-// =================================================================================================
-// Hallazgo #9 — el objetivo del hueco necesita una fase parcial que ocurriera
-// =================================================================================================
-
-/// **`partial_gap_target` solo existe si la media jornada se llegó a vivir.**
+/// **Las lecturas de la media jornada solo existen si la media jornada se llegó a vivir.**
 ///
 /// El hogar declara media jornada a partir del mes 60, pero con 598.000 € y 6.000 €/mes de
 /// superávit cruza su número FIRE (600.000 €) en el mes 2 y se jubila del todo **58 meses antes**.
 /// La fase parcial no ocurre —`partial_retirement_month_index` es `None` y `phase_transitions` no
 /// la menciona— y sin embargo el objetivo del hueco se publicaba: 270.000 €, calculados de la
-/// fase DECLARADA. Su gemelo `partial_phase_capital_growing` ya se gateaba así.
+/// fase DECLARADA.
+///
+/// **E4 retiró ese `partial_gap_target`** junto con el resto del objetivo como criterio, así que
+/// lo que queda vigilado aquí es su gemelo `partial_phase_capital_growing`, que se gateaba con el
+/// mismo criterio y por el que se descubrió la divergencia.
 #[test]
-fn the_partial_gap_target_needs_a_partial_phase_that_happened() {
+fn the_partial_phase_readings_need_a_partial_phase_that_happened() {
     let mut input = base(
         120,
         "8000",
@@ -516,20 +448,25 @@ fn the_partial_gap_target_needs_a_partial_phase_that_happened() {
         out.partial_retirement_month_index, None,
         "la fase no ocurre"
     );
-    assert_eq!(
-        out.partial_gap_target, None,
-        "y su objetivo tampoco: antes publicaba 270.000 € de una fase que nadie vivió"
+    assert!(
+        !out.partial_phase_capital_growing,
+        "y sus lecturas tampoco: nada crece en una fase que nadie vivió"
     );
-    assert!(!out.partial_phase_capital_growing, "el gemelo ya lo hacía");
 
-    // Con la fase parcial de verdad (sin cruce que la adelante), el objetivo vuelve a existir.
+    // Con la fase parcial de verdad (sin cruce que la adelante), la lectura vuelve a existir.
     let mut lived = input.clone();
     lived.assets = vec![asset(1, "1000", Some("1000"), true, "0")];
     lived.income_regular_monthly = dec("2500");
     let out = project_net_worth_series(&lived).expect("simula");
     assert_eq!(out.partial_retirement_month_index, Some(60));
     assert!(
-        out.partial_gap_target.is_some(),
-        "vivida la fase, el hueco vuelve a ser una lectura legítima"
+        out.warnings
+            .contains(&futurefin_engine::EngineWarning::PartialPhaseCapitalShrinking),
+        "vivida la fase, la lectura vuelve a describir algo: aquí la media jornada come capital \
+         (1.100 de ingreso contra 2.000 de gasto) y el aviso lo dice"
+    );
+    assert!(
+        !out.partial_phase_capital_growing,
+        "y su complementario también"
     );
 }

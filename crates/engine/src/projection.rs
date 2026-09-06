@@ -34,30 +34,6 @@ pub enum EngineError {
     AssetValueOverflow,
     #[error("history timeline dates must be strictly ascending")]
     InvalidHistoryTimeline,
-    /// 5.0.0: la tabla del objetivo PUENTE no cabe en el tipo numérico — descuento
-    /// `bridge_discount_annual_pct` demasiado negativo para el número de meses hasta la pensión.
-    ///
-    /// **Rango alcanzable y por qué existe el error.** El descuento no se escribe: se DERIVA de
-    /// la rentabilidad esperada ponderada de los activos líquidos, y `expected_annual_return_percent`
-    /// solo está acotada por `> −100`. Con `d < 0` el factor `q(j) = (1+d/100)^{j/12}` se hunde
-    /// hacia cero, el término descontado `G(m)/q(m)` explota y la suma sufijo se sale del rango
-    /// de `Decimal` (~7,9e28). La cota depende del número de meses hasta la pensión `P`:
-    ///
-    /// | `P` (meses) | primer `d` que desborda |
-    /// |---|---|
-    /// | 120 (10 años) | −99,6 % |
-    /// | 204 | −95,9 % |
-    /// | 324 | −86,6 % |
-    /// | 600 | −66,1 % |
-    /// | 840 (70 años) | −53,8 % |
-    /// | 1200 (`MAX_BRIDGE_MONTHS`) | −41,8 % |
-    ///
-    /// Hasta el pase de correcciones de la revisión adversarial esto **panicaba** dentro de
-    /// `powd` («Pow overflowed») o de un `+`/`*` de `Decimal`, y salía como un 500 opaco de
-    /// `/v1/projection/series`. Ahora es un error tipado; acotar `d` aguas arriba es trabajo de
-    /// la API, no del motor, que es una función pura y admite cualquier `Decimal` en su firma.
-    #[error("the bridge target table overflowed: bridge_discount_annual_pct is too negative for the months until the pension")]
-    BridgeDiscountOverflow,
     /// 5.0.0: el `PhasePlan` pide una regla de retirada que este motor todavía no ejecuta.
     ///
     /// **Desde WP2 no la produce ninguna regla**: las cuatro de `WithdrawalRule` se simulan
@@ -750,44 +726,21 @@ pub struct ProjectionOutput {
     pub pension_start_month_index: Option<u32>,
     /// Primer mes de media jornada. `None` en WP1b (WP3).
     pub partial_retirement_month_index: Option<u32>,
-    /// Avisos del motor (§B.8). Desde WP3 el bucle sabe emitir dos —jubilación por edad
-    /// infra-financiada y capital menguante en media jornada—; el tercero
-    /// ([`EngineWarning::CoastNotReachable`]) lo emite el solve, que es quien lo puede saber.
-    /// Los de ensamblado (`birth_date_missing`) los añade el handler.
+    /// Avisos del motor (§B.8). Desde E4 el bucle emite UNO —capital menguante en media
+    /// jornada—: los otros dos que WP3 introdujo colgaban de un objetivo determinista y el
+    /// modelo v2 los retiró (ver [`EngineWarning`]). Los de ensamblado (`birth_date_missing`) los
+    /// añade el handler.
     pub warnings: Vec<EngineWarning>,
     // -----------------------------------------------------------------------------------------
-    // 5.0.0 WP3 — LECTURAS de pensión, puente y media jornada (§B.3, §B.7). Todas APÉNDICE: el
-    // pin de 4.15.0 no las mira y el aditivo de 5.0.0 sí.
+    // 5.0.0 WP3 — LECTURAS de fase (§B.3, §B.7). Todas APÉNDICE: el pin de 4.15.0 no las mira y
+    // el aditivo de 5.0.0 sí.
+    //
+    // **E4 retiró tres** —`bridge_effective_withdrawal_pct`, `pension_coverage_ratio` y
+    // `partial_gap_target`—: las tres capitalizaban una necesidad al SWR para decir algo sobre una
+    // fase, y con el objetivo degradado a lectura informativa (M4) ninguna sostiene una decisión.
+    // La pregunta que respondían («¿cuánto riesgo tiene esta fase?») la contesta hoy el umbral de
+    // éxito de `crates/engine-stochastic`.
     // -----------------------------------------------------------------------------------------
-    /// **Tasa de retirada efectiva del puente**, en % ANUAL:
-    /// `100 · 12·need_full_m(R−1) / L(R−1)` en el mes efectivo de jubilación.
-    ///
-    /// Responde a la pregunta que el puente plantea y la perpetuidad esconde: mientras la pensión
-    /// no llega hay que sacar de la cartera el gasto ENTERO, y eso es una tasa que puede estar muy
-    /// por encima del SWR — legítimamente, porque dura pocos años (D7: por eso el riesgo del
-    /// puente es lo que Monte Carlo tendrá que medir en WP6).
-    ///
-    /// `None` sin pensión con fecha, sin base puente, sin objetivo, sin jubilación dentro del
-    /// horizonte o con `L(R−1) ≤ 0`: en ninguno de esos casos hay una tasa que medir — **jamás un
-    /// cero inventado**.
-    pub bridge_effective_withdrawal_pct: Option<Decimal>,
-    /// **Qué fracción del gasto cubre la pensión** el mes en que empieza: `P_m(P)/(E·f(P))`, en
-    /// FRACCIÓN (0,6 = 60 %). Es la lectura que hace explícitos los dos escenarios de D15 sin
-    /// asumir ninguno. `None` sin pensión con fecha, sin objetivo o con gasto no positivo en `P`.
-    pub pension_coverage_ratio: Option<Decimal>,
-    /// Capital que sostendría a perpetuidad el HUECO de la media jornada:
-    /// `gross_up(12·gap_m(X))/SWR` (§B.3). Informativo: no dispara nada.
-    ///
-    /// `None` cuando la fase parcial **no llegó a vivirse** (declarada o no: si el hogar se jubila
-    /// del todo antes de `X`, no hay hueco que medir), sin objetivo, o sin fase parcial en el
-    /// plan; `Some(0)` = la media jornada se paga sola.
-    ///
-    /// Va atado a [`Self::partial_retirement_month_index`], igual que
-    /// [`Self::partial_phase_capital_growing`]: los dos describen la MISMA fase y no pueden usar
-    /// criterios distintos para existir. Antes del pase de correcciones de la revisión
-    /// adversarial este se calculaba de la fase DECLARADA y publicaba 270.000 € para una media
-    /// jornada que el cruce FIRE había dejado 58 meses atrás.
-    pub partial_gap_target: Option<Decimal>,
     /// `true` ⟺ **hubo** fase parcial y el patrimonio LÍQUIDO no bajó ni un mes durante ella.
     ///
     /// Sin fase parcial es `false` — no hay fase que crezca. Para distinguir «no hubo» de «hubo y

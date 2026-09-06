@@ -31,7 +31,7 @@ use futurefin_engine::{
     debt_payments_remaining_series, AllocationCap, AllocationKind, AllocationRule,
     EarlyRepaymentEffect, ExpenseBasis, FireNeed, FireTarget, IncomePause, PartialPhase,
     PensionSchedule, PhasePlan, ProjectionInput, ProjectionLiabilityInput, RepaymentModel,
-    RetirementTrigger, SimAsset, SpendMode, TargetBasis, TaxBracket, WithdrawalRule,
+    RetirementTrigger, SimAsset, SpendMode, TaxBracket, WithdrawalRule,
 };
 use rust_decimal::Decimal;
 use uuid::Uuid;
@@ -999,16 +999,20 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
     });
 
     // -----------------------------------------------------------------------------------------
-    // P18: **el ejemplo del issue #207** — pensión con fecha y objetivo PUENTE.
+    // P18: **el ejemplo del issue #207** — pensión con fecha, sobre el número FIRE clásico.
     //
     // Gasto de jubilación 2.000 €/mes, SWR 4 %, pensión INDEXADA de 1.200 €/mes desde el índice
-    // 240 (20 años), puente descontado al 5 % anual, impuestos ES y `g` MIXTA (dos activos con
-    // base declarada), inflación 2 %, 40 años de horizonte.
+    // 240 (20 años), impuestos ES y `g` MIXTA (dos activos con base declarada), inflación 2 %,
+    // 40 años de horizonte.
     //
-    // Lo que pinea y ningún otro caso toca: la tabla del puente (240 gross-ups y 241 potencias
-    // calculados UNA vez), el escalón del objetivo al llegar `P`, la pensión entrando como
-    // INGRESO en un mes ya jubilado, y las dos lecturas nuevas
-    // (`bridge_effective_withdrawal_pct`, `pension_coverage_ratio`).
+    // Nació con `target_basis = BridgeToPension` y un descuento del 5 %: **E4 retiró la base
+    // puente** (M4), y con ella el objetivo dejó de descontar los 240 meses hasta la pensión. El
+    // objetivo pasa a ser la perpetuidad sobre el gasto ÍNTEGRO —más grande— y el cruce se
+    // retrasa del mes 145 al **262** (derivación en `golden_pins.rs`,
+    // `the_5_0_cases_are_anchored_by_hand_derived_numbers`).
+    //
+    // Lo que pinea hoy y ningún otro caso toca: la pensión con fecha entrando como INGRESO en un
+    // mes ya jubilado, con `g` mixta e impuestos ES sobre un horizonte de 480 meses.
     // -----------------------------------------------------------------------------------------
     let mut p18 = base_input(
         480,
@@ -1044,8 +1048,6 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
         indexed: true,
         fraction_while_partial: Decimal::ZERO,
     });
-    p18.phase_plan.target_basis = TargetBasis::BridgeToPension;
-    p18.phase_plan.bridge_discount_annual_pct = Decimal::from(5);
     p18.fire_target = Some(FireTarget {
         need: FireNeed::ExpenseMinusPension {
             expense_monthly: Decimal::from(2_000),
@@ -1065,12 +1067,18 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
 
     // -----------------------------------------------------------------------------------------
     // P19: **la pensión cubre el gasto entero** (2.500 contra 2.000, las dos indexadas al 1,5 %)
-    // desde el índice 120, con base PERPETUIDAD y un pasivo vivo.
+    // desde el índice 120, con un pasivo vivo.
     //
-    // Desde `P` la necesidad neta es 0 y el objetivo es SOLO el término de deuda (R6): con
-    // 90.000 € líquidos el cruce es inmediato en el mes 121, que es justo lo que el hallazgo B3
-    // de la revisión decía que no podía quedarse en `None`. Antes de `P` el objetivo son 600.000
-    // (la pensión no se cuenta) más la deuda, y no se cruza.
+    // Hasta E4 el objetivo restaba la pensión con fecha desde `P`: la necesidad neta era 0, el
+    // objetivo caía a SOLO el término de deuda y el cruce era inmediato en el mes 121. **Ese
+    // acantilado es exactamente lo que E4 mató** (M4: el número FIRE clásico es «25× tu gasto»,
+    // no «25× tu gasto menos tu pensión»). Hoy el objetivo es `600.000·f(i) + deuda(i)` en TODA
+    // la rejilla y el cruce lo produce la acumulación de verdad —la pensión es un flujo de caja
+    // que engorda el ahorro desde el mes 121— en el mes **306**.
+    //
+    // Lo que pinea: el término de deuda #142 vivo dentro del objetivo (se extingue en el índice
+    // 144 y el objetivo pasa a ser perpetuidad pura) y la pensión con fecha como INGRESO durante
+    // 185 meses de acumulación antes de jubilarse.
     // -----------------------------------------------------------------------------------------
     let p19_liab = mk_liab(
         Decimal::from(60_000),
@@ -1119,7 +1127,8 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
 
     // -----------------------------------------------------------------------------------------
     // P20: **la media jornada del ejemplo del issue** — 1.100 €/mes desde el mes 60, gasto de
-    // jubilación 2.000, hueco 900 ⇒ `partial_gap_target = 900·12/0,04` = **270.000 €**.
+    // jubilación 2.000, hueco 900 €/mes (la lectura `partial_gap_target` que lo capitalizaba a
+    // 270.000 € se retiró en E4; el hueco sigue siendo lo que la fase come).
     //
     // Sin impuestos ni inflación a propósito: el hueco de este caso tiene que salir en el número
     // redondo del issue. La fase come capital (900 €/mes contra ~330 de rentabilidad), así que
@@ -1209,7 +1218,7 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
     // -----------------------------------------------------------------------------------------
     // P22: **el escenario del solve**, congelado como caso.
     //
-    // Es la ejecución que `required_contribution_monthly` devuelve para el laboratorio de
+    // Es la ejecución que el solve de aportación mínima usaba como laboratorio en
     // `tests/phases_wp3.rs`: sobrante 2.000 €/mes, techo 1.000, 0 % de rentabilidad, objetivo
     // 100.000 € plano y jubilación por edad en el mes 101. Aquí la aritmética es de una línea —
     // `líquido(k) = 1.000k`, `disposable_cash(k) = 1.000` — y por eso el pin de este caso es el

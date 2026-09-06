@@ -85,20 +85,6 @@ pub(crate) fn inflation_factor_at_index_g<M: MoneyOps>(annual_percent: M, month_
     (M::one() + annual_percent / M::from_u32(100)).powd_fraction(month_index, 12)
 }
 
-/// El mismo factor **sin panicar cuando no cabe**. `None` = desbordó.
-///
-/// Solo lo usa la tabla del puente, que es el único sitio donde el «porcentaje anual» puede ser
-/// muy negativo (un descuento) en vez de una inflación acotada por la API.
-pub(crate) fn checked_inflation_factor_at_index_g<M: MoneyOps>(
-    annual_percent: M,
-    month_index: u32,
-) -> Option<M> {
-    if month_index == 0 || annual_percent.is_zero() {
-        return Some(M::one());
-    }
-    (M::one() + annual_percent / M::from_u32(100)).checked_powd_fraction(month_index, 12)
-}
-
 // =============================================================================================
 // Objetivo FIRE de 4.15.0 (sin pensión con fecha)
 // =============================================================================================
@@ -1193,8 +1179,9 @@ pub(crate) fn first_month_allocation_g<M: MoneyOps>(
     );
     let plan = &input.phase_plan;
     let ft_view = input.fire_target.as_ref().map(|f| f.view());
-    let fire_reached =
-        crate::target::plan_target_at(ft_view, plan, 0).is_some_and(|t| liquid_month_zero >= t);
+    // E4: el objetivo del plan ES el clásico de 4.15.0 — una sola base, sin restar la pensión
+    // con fecha. Se llama a la función del núcleo directamente para que no haya dos caminos.
+    let fire_reached = fire_target_at_index_g(ft_view, 0).is_some_and(|t| liquid_month_zero >= t);
     let in_retirement = (fire_reached && !plan.crossing_is_reading_only)
         || plan
             .retirement_trigger
@@ -1362,18 +1349,11 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
     let mut partial_month_index: Option<u32> = None;
     let mut partial_capital_shrank = false;
     let mut warnings: Vec<EngineWarning> = Vec::new();
-    // El objetivo CONSCIENTE DEL PLAN (§B.3). Se construye UNA vez: con puente activo tabula
-    // `O(P)` gross-ups y potencias, y consultarlo mes a mes es `O(1)`. Sin pensión con fecha
-    // evalúa el objetivo de 4.15.0 tal cual, así que el camino de siempre pasa por la misma
-    // función y el pin dorado no puede moverse.
+    // El objetivo FIRE clásico (E4): UNA base, la de 4.15.0, evaluada mes a mes con la misma
+    // función del núcleo que usan `fire_target_at_month_index` y `PlanFireTarget`. WP3 construía
+    // aquí un evaluador «consciente del plan» que tabulaba `O(P)` gross-ups para el puente; el
+    // modelo v2 retiró el puente como base del objetivo (M4/C2) y con él la tabla.
     let ft_view = input.fire_target.as_ref().map(|f| f.view());
-    let plan_target = crate::target::PlanTargetG::new(ft_view, plan);
-    // El puente que no cabe en el tipo se dice EN VOZ ALTA. El evaluador ya degradó a la
-    // perpetuidad para no panicar (una lectura suelta tiene que devolver un número), pero una
-    // simulación que publicara ese objetivo estaría publicando un plan distinto del configurado.
-    if plan_target.overflowed() {
-        return Err(EngineError::BridgeDiscountOverflow);
-    }
     // Caja que el techo de aportación deja fuera de la cascada (§B.7). Índice 0 = 0, como todas.
     let mut disposable_series: Vec<M> = Vec::with_capacity(input.horizon_months as usize + 1);
     disposable_series.push(M::zero());
@@ -1523,7 +1503,7 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         let liquid_prev = liquid_fn(&values);
         // El objetivo lo evalúa el evaluador CONSCIENTE DEL PLAN. Sin pensión con fecha delega en
         // el objetivo de 4.15.0 evaluado en `k−1` — misma llamada, mismos dígitos.
-        let target_prev = plan_target.at(ft_view, k - 1);
+        let target_prev = fire_target_at_index_g(ft_view, k - 1);
         let fire_reached = target_prev.map_or(false, |t| liquid_prev >= t);
         // Lectura pura: el cruce se evalúa TODOS los meses —también después de que el latch
         // cierre, porque la línea de arriba no depende de `retired`— así que anotar su primera
@@ -1920,33 +1900,10 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         (month <= input.horizon_months).then_some(month)
     });
 
-    // Tasa de retirada efectiva del puente: `100 · 12·need_full_m(R−1) / L(R−1)`.
-    // `12·need_full_m(i)` ES `need_full_annual_at(i)` — no se multiplica y divide por 12 para
-    // volver al mismo sitio.
-    let bridge_effective_withdrawal_pct = (plan.pension.is_some()
-        && plan.target_basis == crate::phases::TargetBasis::BridgeToPension)
-        .then(|| {
-            let r = retirement_month_index?;
-            let liquid_at_r = *liquid_series.get((r - 1) as usize)?;
-            if liquid_at_r <= M::zero() {
-                return None;
-            }
-            let need_annual = plan_target.need_full_annual_at(ft_view, r - 1)?;
-            need_annual
-                .checked_mul(M::from_u32(100))
-                .and_then(|x| x.checked_div(liquid_at_r))
-        })
-        .flatten();
-
-    let pension_coverage_ratio = plan_target.pension_coverage_ratio(ft_view);
-    // **Solo si la fase parcial OCURRIÓ** (revisión adversarial, hallazgo #9). El objetivo del
-    // hueco se calculaba de la fase DECLARADA, así que un hogar que cruza su número FIRE en el
-    // mes 2 y se jubila 58 meses antes de la media jornada que tenía apuntada publicaba
-    // `partial_gap_target = 270.000 €` para una fase que nunca vivió. El contrato de la API dice
-    // «`null` = no hay fase parcial», y su gemelo `partial_phase_capital_growing` ya se gateaba
-    // así una línea más abajo: eran dos campos de la misma fase con dos criterios distintos.
-    let partial_gap_target = partial_month_index
-        .and_then(|_| plan_target.partial_gap_target(ft_view, plan, input.expense_regular_monthly));
+    // E4 retiró las tres lecturas del puente y de la media jornada que se derivaban del objetivo
+    // (`bridge_effective_withdrawal_pct`, `pension_coverage_ratio`, `partial_gap_target`): las
+    // tres capitalizaban una necesidad al SWR para decir algo sobre una FASE, y la fase ya no se
+    // juzga contra un objetivo determinista sino contra el umbral de éxito.
 
     Ok(SimOutput {
         net_worth: net_series,
@@ -1969,9 +1926,6 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         pension_start_month_index,
         partial_retirement_month_index: partial_month_index,
         warnings,
-        bridge_effective_withdrawal_pct,
-        pension_coverage_ratio,
-        partial_gap_target,
         partial_phase_capital_growing,
         disposable_cash: disposable_series,
         disposable_cash_total: disposable_total,

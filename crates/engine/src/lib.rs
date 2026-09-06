@@ -22,8 +22,7 @@ pub use money::MoneyOps;
 pub use net_return::{net_return_percentages, NetReturn};
 pub use phases::{
     BridgeCap, EngineWarning, ExpenseBasis, IncomePause, InitialRateGate, PartialPhase,
-    PathFailure, PensionSchedule, Phase, PhasePlan, RetirementTrigger, SpendMode, TargetBasis,
-    WithdrawalRule,
+    PathFailure, PensionSchedule, Phase, PhasePlan, RetirementTrigger, SpendMode, WithdrawalRule,
 };
 pub use sim::{
     AllocationCapG, AllocationRuleG, BridgeCapG, FireNeedG, FireTargetG, FireTargetView,
@@ -47,10 +46,10 @@ pub use projection::{
 };
 pub use runway::{liquid_runway_months, RunwayOutcome, MAX_RUNWAY_MONTHS};
 pub use solve::{
-    coast_fire_month_index, max_extra_monthly_expense_keeping_date, required_contribution_monthly,
-    retirement_delay_months, CoastSolve, RetirementDelay, SolveResult, MAX_SOLVE_ITERATIONS,
+    max_extra_monthly_expense_keeping_date, retirement_delay_months, run_stopping_at, run_with_cap,
+    RetirementDelay, MAX_SOLVE_ITERATIONS,
 };
-pub use target::{fire_target_at_month_index_with_plan, PlanFireTarget, MAX_BRIDGE_MONTHS};
+pub use target::{fire_target_at_month_index_with_plan, PlanFireTarget};
 pub use tax::{after_tax_monthly, gross_up_monthly, gross_up_net_annual_fire, tax_on_gross_capital_annual, TaxBracket};
 
 #[cfg(test)]

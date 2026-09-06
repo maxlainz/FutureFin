@@ -161,22 +161,6 @@ impl PensionSchedule {
     }
 }
 
-/// Sobre qué se dimensiona el objetivo de jubilación (§B.3, R6). **Aditivo**: el default de los
-/// dos constructores es [`TargetBasis::Perpetuity`], que es lo que 4.15.0 hacía sin saber que
-/// tenía nombre.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TargetBasis {
-    /// Perpetuidad clásica: `gross_up(12·necesidad)/SWR + deuda`. Con pensión con fecha, la
-    /// necesidad que capitaliza es la ÍNTEGRA antes de `P` y la NETA de pensión desde `P` — la
-    /// pensión se ignora hasta que existe (R6: la opción conservadora, «no cuento con ella»).
-    Perpetuity,
-    /// **Puente hasta la pensión** (P2): antes de `P` el objetivo es el valor presente de los
-    /// meses que faltan hasta la pensión MÁS la perpetuidad sobre la necesidad que la pensión no
-    /// cubra, descontados a `bridge_discount_annual_pct`. Desde `P` coincide con la perpetuidad
-    /// neta.
-    BridgeToPension,
-}
-
 /// **Puerta de TASA INICIAL** (5.0.0 E1, correcciones C1/C2 del panel adversarial).
 ///
 /// El SWR deja de ser una comprobación mensual sobre el saldo vivo y pasa a ser lo que la
@@ -315,13 +299,6 @@ pub struct PhasePlan {
     // WP3 (§B.3, §B.7, D17). Todos ADITIVOS y con default en los dos constructores: un plan
     // construido con `classic`/`forced_at` sigue siendo la semántica de 4.15.0 campo a campo.
     // -----------------------------------------------------------------------------------------
-    /// Sobre qué se dimensiona el objetivo. Default [`TargetBasis::Perpetuity`].
-    pub target_basis: TargetBasis,
-    /// Tasa ANUAL en % con la que el puente descuenta los meses que faltan hasta la pensión
-    /// (D7: el handler la resuelve del perfil — rentabilidad esperada, SWR o ninguna). `0` ⇒ sin
-    /// descuento, y entonces el puente es la suma llana de las necesidades brutas. Solo se lee
-    /// con [`TargetBasis::BridgeToPension`].
-    pub bridge_discount_annual_pct: Decimal,
     /// **D17, «un solo trigger por simulación»**: con `true` el cruce `líquido(k−1) ≥ objetivo(k−1)`
     /// NO jubila — solo se anota como
     /// [`crate::ProjectionOutput::liquid_crossing_month_index`]—, y quien jubila es
@@ -337,11 +314,13 @@ pub struct PhasePlan {
     /// `min(sobrante, c)` y el resto **no se invierte**: sale del balance y se publica en
     /// [`crate::ProjectionOutput::disposable_cash`].
     ///
-    /// No es un ajuste de producto: es la palanca sobre la que bisecan los solves
-    /// ([`crate::required_contribution_monthly`]).
+    /// No es un ajuste de producto: es la palanca sobre la que bisecan los solves — desde E4 de
+    /// 5.0.0, los ESTOCÁSTICOS (`crates/engine-stochastic`), que biseccionan sobre el umbral de
+    /// éxito en vez de sobre un objetivo determinista.
     pub contribution_cap_monthly: Option<Decimal>,
     /// Mes (1-based) a partir del cual **no se aporta nada** — el techo efectivo pasa a 0 desde
-    /// `k ≥ contributions_stop_month`. Es la palanca de [`crate::coast_fire_month_index`].
+    /// `k ≥ contributions_stop_month`. Es la palanca del solve de coast (que desde E4 vive en
+    /// `crates/engine-stochastic`).
     pub contributions_stop_month: Option<u32>,
     /// Pausa de ingresos (P8.c). `None` = sin pausa, y entonces el ingreso del mes no pasa por
     /// ninguna multiplicación (bit-identidad).
@@ -369,8 +348,6 @@ impl PhasePlan {
             expense_retirement_monthly,
             extra_monthly_withdrawal: Decimal::ZERO,
             // WP3: todos los ejes nuevos, apagados. `classic` sigue siendo 4.15.0 campo a campo.
-            target_basis: TargetBasis::Perpetuity,
-            bridge_discount_annual_pct: Decimal::ZERO,
             crossing_is_reading_only: false,
             contribution_cap_monthly: None,
             contributions_stop_month: None,
@@ -404,12 +381,17 @@ impl PhasePlan {
     // plan, la que `apps/api` construye.
 }
 
-/// Avisos del motor. WP3 le puso tres variantes; **E1 de 5.0.0 retiró
-/// `RetireAtAgeUnderfunded`**: «me jubilo por edad y el capital no llega» dejó de ser un booleano
-/// sobre un objetivo descontado y pasó a ser una probabilidad —`1 − éxito(R)`, que mide el crate
-/// estocástico sobre miles de caminos—. Un aviso que decía «no llegas» comparando el líquido con
-/// un objetivo de perpetuidad no podía distinguir «no llegas por poco» de «no llegas jamás», y
-/// esa es justo la distinción que el owner pidió publicar.
+/// Avisos del motor. WP3 le puso tres variantes y el modelo v2 le quitó dos, las dos por la
+/// misma razón: **un booleano colgado de un objetivo determinista no es un veredicto**.
+///
+/// - **E1 retiró `RetireAtAgeUnderfunded`**: «me jubilo por edad y el capital no llega» pasó a ser
+///   una probabilidad —`1 − éxito(R)`, que mide el crate estocástico sobre miles de caminos—. Un
+///   aviso que decía «no llegas» comparando el líquido con una perpetuidad no distinguía «no
+///   llegas por poco» de «no llegas jamás», que es justo la distinción que el owner pidió.
+/// - **E4 retiró `CoastNotReachable`**: su emisor era `coast_fire_month_index`, cuyo criterio
+///   («líquido(R−1) ≥ T(R−1)») desapareció con el objetivo como decisión. El solve de coast vive
+///   ahora en `crates/engine-stochastic` con su propio enum de avisos, porque quien puede decir
+///   «no se puede parar» es el sorteo, no el motor determinista.
 ///
 /// Los avisos de ensamblado (`birth_date_missing` y compañía) los añade el handler: el motor no
 /// conoce fechas de nacimiento.
@@ -418,9 +400,6 @@ impl PhasePlan {
 /// configurado tiene una consecuencia que el usuario no vería mirando solo la curva.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineWarning {
-    /// Ni aportando TODOS los meses hasta `R` se alcanza `T(R−1)`: no existe un mes de coast.
-    /// Lo emite [`crate::coast_fire_month_index`], que es quien lo puede saber.
-    CoastNotReachable,
     /// Durante la media jornada el patrimonio LÍQUIDO bajó de un mes al siguiente: la fase se
     /// está comiendo el capital en vez de dejarlo crecer.
     PartialPhaseCapitalShrinking,
@@ -434,7 +413,6 @@ impl EngineWarning {
     /// aviso que nadie puede buscar.
     pub fn code(self) -> &'static str {
         match self {
-            EngineWarning::CoastNotReachable => "coast_not_reachable",
             EngineWarning::PartialPhaseCapitalShrinking => "partial_phase_capital_shrinking",
         }
     }
@@ -599,7 +577,6 @@ mod tests {
     /// literal NO puede cambiar sin que este test lo diga.
     #[test]
     fn warning_codes_are_stable_literals() {
-        assert_eq!(EngineWarning::CoastNotReachable.code(), "coast_not_reachable");
         assert_eq!(
             EngineWarning::PartialPhaseCapitalShrinking.code(),
             "partial_phase_capital_shrinking"

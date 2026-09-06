@@ -143,10 +143,15 @@ pub trait MoneyOps:
 
     /// La misma potencia, **sin panicar cuando el resultado no cabe**. `None` = desbordó.
     ///
-    /// Existe porque un descuento de puente muy negativo (`d = −50 %` con la pensión a 70 años,
-    /// que la API de hoy deja pasar) lleva `(1+d/100)^{j/12}` fuera del rango de `Decimal` y
-    /// `powd` **panica**: un 500 opaco en `/v1/projection/series`. La casa ya usa `checked_powd`
-    /// en `history.rs` y en `projection.rs`; esta era la única potencia sin red.
+    /// Existía porque un descuento de puente muy negativo (`d = −50 %` con la pensión a 70 años)
+    /// llevaba `(1+d/100)^{j/12}` fuera del rango de `Decimal` y `powd` **panicaba**: un 500 opaco
+    /// en `/v1/projection/series`.
+    ///
+    /// **E4 de 5.0.0 retiró ese consumidor** (la tabla del puente murió con la base del objetivo,
+    /// M4), así que hoy este método no lo llama nadie dentro de `crates/engine`. Se conserva
+    /// porque es una primitiva del contrato numérico —`crates/engine-stochastic` la implementa— y
+    /// porque la familia `powd` sin red es exactamente la que ya panicó una vez. Si se retira,
+    /// hay que retirar también su implementación en `crates/engine-stochastic/src/lib.rs`.
     fn checked_powd_fraction(self, num: u32, den: u32) -> Option<Self>;
 
     /// ¿Son «la misma» fracción de plusvalía gravable? Decide el cortocircuito uniforme/mixto de

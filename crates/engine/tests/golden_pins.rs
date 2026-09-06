@@ -714,10 +714,14 @@ fn p7_and_p9_are_anchored_by_hand_derived_numbers() {
     );
 }
 
-/// **Anclas derivadas a mano de los casos de 5.0.0** (P14–P17), gemelas de las de P7/P9: el hash
+/// **Anclas derivadas a mano de los casos de 5.0.0** (P14–P19), gemelas de las de P7/P9: el hash
 /// prueba que el motor es reproducible; esto prueba que cada caso ejercita LA REGLA QUE DICE
 /// ejercitar. Sin ellas, un caso que dejara de recortar —o que nunca disparase un guardarraíl—
 /// pasaría el pin perfectamente el día que alguien lo regenerase.
+///
+/// P18 y P19 entraron aquí en **E4**, que movió sus dos cruces: son los dos casos de la batería
+/// cuyo objetivo dependía de la pensión CON FECHA (uno por la base puente, el otro por la resta
+/// desde `P`), y el número FIRE clásico ya no mira ninguna de las dos cosas.
 #[test]
 fn the_5_0_cases_are_anchored_by_hand_derived_numbers() {
     let all = projection_cases_5_0();
@@ -830,6 +834,116 @@ fn the_5_0_cases_are_anchored_by_hand_derived_numbers() {
         "P17 existe para pinear MUCHAS revisiones, no una: {cortes:?}"
     );
     assert!(p17.withdrawal_excess.iter().all(|v| *v == Decimal::ZERO));
+
+    // ---- P18: el objetivo CLÁSICO, sin base puente y sin restar la pensión con fecha --------
+    //
+    // Derivado a mano ANTES de regenerar el pin (E4). Gasto de jubilación 2.000 €/mes indexado al
+    // 2 %, SWR 4 %, impuestos ES, sin deuda ⇒ la necesidad neta anual del índice `i` es
+    // `24.000·f(i)` con `f(i) = 1,02^{i/12}`, y mientras el bruto no salga del tramo del 21 %
+    // (`24.000·f ≤ 39.620`, o sea `i ≤ 304`):
+    //
+    // ```text
+    // G(i) = 6.000 + (24.000·f(i) − 4.860)/0,79
+    // T(i) = G(i)/0,04 = 759.493,670886…·f(i) − 3.797,468354…
+    // T(0) = 759.493,670886… − 3.797,468354… = 755.696,20 €
+    // ```
+    //
+    // Con la base PUENTE que el caso llevaba hasta E4, `T(0)` era el valor presente al 5 % de 240
+    // meses de gasto íntegro más la perpetuidad de los 800 €/mes que la pensión no cubría: mucho
+    // menor, y el hogar cruzaba en el mes **145**. Con el clásico el listón sube y el cruce se va
+    // al mes **262** — el primero cuyo cierre anterior lo supera:
+    //
+    // | `i` | `T(i)` | `líquido(i)` | ¿cruza? |
+    // |---|---|---|---|
+    // | 260 | 1.162.639,33 € | 1.160.500,73 € | no |
+    // | 261 | 1.164.565,80 € | 1.168.383,26 € | **sí** ⇒ jubilación en el mes 262 |
+    let p18 = project_net_worth_series(&get("P18_pension_bridge").input).expect("P18 simula");
+    let ft18 = get("P18_pension_bridge")
+        .input
+        .fire_target
+        .clone()
+        .expect("P18 lleva objetivo");
+    assert_eq!(
+        futurefin_engine::fire_target_at_month_index(Some(&ft18), 0)
+            .expect("hay objetivo en el índice 0")
+            .round_dp(2),
+        dec("755696.20"),
+        "T(0) de P18 = gross_up_ES(24.000)/0,04, sin restar la pensión con fecha"
+    );
+    assert_eq!(
+        p18.retirement_month_index,
+        Some(262),
+        "el objetivo clásico retrasa el cruce de P18 del mes 145 al 262"
+    );
+    assert_eq!(p18.liquid_crossing_month_index, Some(262));
+    for (i, cruza) in [(260usize, false), (261, true)] {
+        let t = futurefin_engine::fire_target_at_month_index(Some(&ft18), i as u32).unwrap();
+        assert_eq!(
+            p18.liquid_worth[i] >= t,
+            cruza,
+            "P18 índice {i}: líquido {} contra objetivo {t}",
+            p18.liquid_worth[i]
+        );
+    }
+
+    // ---- P19: el acantilado de la pensión que lo cubría todo, muerto ------------------------
+    //
+    // Derivado a mano ANTES de regenerar el pin (E4). Gasto 2.000 €/mes indexado al 1,5 %, SWR
+    // 4 %, SIN impuestos ⇒ la base es `24.000·f(i)/0,04 = 600.000·f(i)`, más el término finito de
+    // deuda (#142) del préstamo del caso, que se extingue en el índice 144:
+    //
+    // ```text
+    // T(0)   = 600.000 + 71.424,20 = 671.424,20 €
+    // T(305) = 600.000·1,015^{305/12} + 0 = 875.984,64 €
+    // ```
+    //
+    // Hasta E4 el objetivo restaba la pensión con fecha desde `P = 120`: `need_net ≤ 0`, el
+    // objetivo se desplomaba a `deuda(i)` y el cruce era **inmediato en el mes 121** — 600.000 €
+    // de objetivo el mes 120 y 4.000 € el 121. Hoy no hay escalón que dar, y el cruce lo produce
+    // la acumulación de verdad (la pensión de 2.500 € entra como INGRESO desde el mes 121 y el
+    // hogar ahorra ~2.500 €/mes) en el mes **306**:
+    //
+    // | `i` | `T(i)` | `líquido(i)` | ¿cruza? |
+    // |---|---|---|---|
+    // | 304 | 874.898,46 € | 873.598,14 € | no |
+    // | 305 | 875.984,64 € | 878.989,72 € | **sí** ⇒ jubilación en el mes 306 |
+    let p19 = project_net_worth_series(&get("P19_pension_perpetuity_covering").input)
+        .expect("P19 simula");
+    let ft19 = get("P19_pension_perpetuity_covering")
+        .input
+        .fire_target
+        .clone()
+        .expect("P19 lleva objetivo");
+    assert_eq!(
+        futurefin_engine::fire_target_at_month_index(Some(&ft19), 0)
+            .expect("hay objetivo en el índice 0")
+            .round_dp(2),
+        dec("671424.20"),
+        "T(0) de P19 = 600.000 (perpetuidad del gasto íntegro) + 71.424,20 de deuda"
+    );
+    // El acantilado, comprobado por su ausencia: entre el mes anterior a la pensión y el suyo el
+    // objetivo SUBE (indexación) en vez de caer a la deuda.
+    let t119 = futurefin_engine::fire_target_at_month_index(Some(&ft19), 119).unwrap();
+    let t120 = futurefin_engine::fire_target_at_month_index(Some(&ft19), 120).unwrap();
+    assert!(
+        t120 > t119,
+        "en P = 120 el objetivo no puede caer: antes se desplomaba de {t119} a la deuda"
+    );
+    assert_eq!(
+        p19.retirement_month_index,
+        Some(306),
+        "sin la resta de la pensión, P19 cruza cuando la acumulación llega, no en el mes 121"
+    );
+    assert_eq!(p19.liquid_crossing_month_index, Some(306));
+    for (i, cruza) in [(304usize, false), (305, true)] {
+        let t = futurefin_engine::fire_target_at_month_index(Some(&ft19), i as u32).unwrap();
+        assert_eq!(
+            p19.liquid_worth[i] >= t,
+            cruza,
+            "P19 índice {i}: líquido {} contra objetivo {t}",
+            p19.liquid_worth[i]
+        );
+    }
 }
 
 /// **REGRESIÓN de la issue #208** (era DIANA `#[ignore]` en WP0: entonces PANICABA; el arreglo
@@ -996,17 +1110,11 @@ fn render_projection_outputs_wp2(name: &str, o: &ProjectionOutput) -> String {
 /// «creció sin moverse».
 fn render_projection_outputs_5_0(name: &str, o: &ProjectionOutput) -> String {
     let mut out = render_projection_outputs_wp2(name, o);
-    let _ = writeln!(
-        out,
-        "bridge_effective_withdrawal_pct {}",
-        opt(o.bridge_effective_withdrawal_pct)
-    );
-    let _ = writeln!(
-        out,
-        "pension_coverage_ratio {}",
-        opt(o.pension_coverage_ratio)
-    );
-    let _ = writeln!(out, "partial_gap_target {}", opt(o.partial_gap_target));
+    // E4 retiró de la capa WP3 `bridge_effective_withdrawal_pct`, `pension_coverage_ratio` y
+    // `partial_gap_target`: los tres campos salieron de `ProjectionOutput` con el objetivo puente.
+    // El texto canónico se ACORTA, así que el sha256 de todos los casos se movió — pero la capa
+    // WP2, que es la que `the_5_0_canonicalization_grew_without_moving_the_old_fields` rehashea,
+    // no la tocó ni un byte.
     let _ = writeln!(
         out,
         "partial_phase_capital_growing {}",
@@ -1121,14 +1229,19 @@ aportacion y pausa de ingresos; P24-P25: los dos reproductores minimos de bit-id
 servicio de deuda). En los casos con fixed_real withdrawal_shortfall y \
 withdrawal_excess son cero por construccion — el permitido ES la necesidad — y ahi es donde este \
 pin demuestra que WP2 no movio la semantica de 4.15.0. WP3 AMPLIO la canonicalizacion con \
-bridge_effective_withdrawal_pct, pension_coverage_ratio, partial_gap_target, \
 partial_phase_capital_growing y la serie disposable_cash mes a mes: por eso el sha256 de los 17 \
 casos anteriores cambio SIN que cambiara ningun numero suyo, y quien lo demuestra es el test \
 the_5_0_canonicalization_grew_without_moving_the_old_fields (rehashea la capa vieja sola contra \
 los SHA-256 de antes de WP3). E1 (modelo de jubilacion v2) la amplio otra vez con \
 failure_month_index y failure_kind — el veredicto de ESTE camino (F1 cartera sin fundar la \
 necesidad, F2 tasa inicial por encima del tope, F3 regla por saldo por debajo del gasto \
-ordinario)— y retiro el aviso retire_at_age_underfunded, que solo P21 tenia.";
+ordinario)— y retiro el aviso retire_at_age_underfunded, que solo P21 tenia. E4 ENCOGIO la capa \
+WP3: bridge_effective_withdrawal_pct, pension_coverage_ratio y partial_gap_target salieron de \
+ProjectionOutput con el objetivo puente (decision M4 del modelo v2), asi que el sha256 de TODOS \
+los casos se movio sin que se moviera un numero de la capa WP2. Y dos casos si movieron numeros, \
+a proposito: P18 (cruce 145 -> 262) y P19 (cruce 121 -> 306), porque su objetivo dejo de \
+descontar la pension con fecha; la derivacion a mano esta en \
+the_5_0_cases_are_anchored_by_hand_derived_numbers.";
 
 fn render_fixture_5_0(pins: &[Pin50]) -> String {
     let mut s = String::new();
@@ -1627,12 +1740,9 @@ fn the_phase_readings_agree_with_the_series_they_describe() {
         });
         assert_eq!(out.pension_start_month_index, expected_pension, "{name}");
 
-        // 8) Las lecturas del puente solo existen con pensión con fecha; y la caja disponible
-        //    solo con techo de aportación. Un `None` aquí NO es un cero (norma de la casa).
-        if c.input.phase_plan.pension.is_none() {
-            assert_eq!(out.pension_coverage_ratio, None, "{name}");
-            assert_eq!(out.bridge_effective_withdrawal_pct, None, "{name}");
-        }
+        // 8) La caja disponible solo existe con techo de aportación. Un `None` aquí NO es un
+        //    cero (norma de la casa). Las lecturas del puente que se comprobaban aquí
+        //    (`pension_coverage_ratio`, `bridge_effective_withdrawal_pct`) las retiró E4.
         assert_eq!(
             out.disposable_cash.len(),
             out.net_worth.len(),

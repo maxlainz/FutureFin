@@ -1,10 +1,10 @@
 {
-  "_doc": "Pin ADITIVO de las salidas nuevas del motor 5.0.0 (WP1b, seccion B.8 del plan de la issue #207): SHA-256 del texto canonico de retirement_month_index, liquid_crossing_month_index, pension_start_month_index, partial_retirement_month_index, phase_transitions y las tres series withdrawal / withdrawal_shortfall / withdrawal_excess mes a mes con el Decimal completo via Display, mas el recuento de warnings. Cubre los casos de PROYECCION de tests/common/cases.rs (los L* son calendarios de amortizacion y no tienen fases). Vive APARTE de pins-4.15.json a proposito: aquel demuestra que las salidas de 4.15.0 no se movieron y dejaria de poder demostrarlo si creciera con cada lectura nueva. GENERADO: no editar a mano. Regenerar SOLO si el cambio es intencionado: UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG (futurefin-change-control). Cubre projection_cases_all() (los casos de 4.15.0) MAS projection_cases_5_0() (P14-P17: el techo numerico de la issue #209 y las tres reglas de retirada nuevas; P18-P23: pension con fecha, objetivo puente, media jornada, cruce como lectura, techo de aportacion y pausa de ingresos; P24-P25: los dos reproductores minimos de bit-identidad con 4.15.0 del pase de correcciones — la ESCALA del descubierto en la via mixta y la AGRUPACION del servicio de deuda). En los casos con fixed_real withdrawal_shortfall y withdrawal_excess son cero por construccion — el permitido ES la necesidad — y ahi es donde este pin demuestra que WP2 no movio la semantica de 4.15.0. WP3 AMPLIO la canonicalizacion con bridge_effective_withdrawal_pct, pension_coverage_ratio, partial_gap_target, partial_phase_capital_growing y la serie disposable_cash mes a mes: por eso el sha256 de los 17 casos anteriores cambio SIN que cambiara ningun numero suyo, y quien lo demuestra es el test the_5_0_canonicalization_grew_without_moving_the_old_fields (rehashea la capa vieja sola contra los SHA-256 de antes de WP3). E1 (modelo de jubilacion v2) la amplio otra vez con failure_month_index y failure_kind — el veredicto de ESTE camino (F1 cartera sin fundar la necesidad, F2 tasa inicial por encima del tope, F3 regla por saldo por debajo del gasto ordinario)— y retiro el aviso retire_at_age_underfunded, que solo P21 tenia.",
+  "_doc": "Pin ADITIVO de las salidas nuevas del motor 5.0.0 (WP1b, seccion B.8 del plan de la issue #207): SHA-256 del texto canonico de retirement_month_index, liquid_crossing_month_index, pension_start_month_index, partial_retirement_month_index, phase_transitions y las tres series withdrawal / withdrawal_shortfall / withdrawal_excess mes a mes con el Decimal completo via Display, mas el recuento de warnings. Cubre los casos de PROYECCION de tests/common/cases.rs (los L* son calendarios de amortizacion y no tienen fases). Vive APARTE de pins-4.15.json a proposito: aquel demuestra que las salidas de 4.15.0 no se movieron y dejaria de poder demostrarlo si creciera con cada lectura nueva. GENERADO: no editar a mano. Regenerar SOLO si el cambio es intencionado: UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG (futurefin-change-control). Cubre projection_cases_all() (los casos de 4.15.0) MAS projection_cases_5_0() (P14-P17: el techo numerico de la issue #209 y las tres reglas de retirada nuevas; P18-P23: pension con fecha, objetivo puente, media jornada, cruce como lectura, techo de aportacion y pausa de ingresos; P24-P25: los dos reproductores minimos de bit-identidad con 4.15.0 del pase de correcciones — la ESCALA del descubierto en la via mixta y la AGRUPACION del servicio de deuda). En los casos con fixed_real withdrawal_shortfall y withdrawal_excess son cero por construccion — el permitido ES la necesidad — y ahi es donde este pin demuestra que WP2 no movio la semantica de 4.15.0. WP3 AMPLIO la canonicalizacion con partial_phase_capital_growing y la serie disposable_cash mes a mes: por eso el sha256 de los 17 casos anteriores cambio SIN que cambiara ningun numero suyo, y quien lo demuestra es el test the_5_0_canonicalization_grew_without_moving_the_old_fields (rehashea la capa vieja sola contra los SHA-256 de antes de WP3). E1 (modelo de jubilacion v2) la amplio otra vez con failure_month_index y failure_kind — el veredicto de ESTE camino (F1 cartera sin fundar la necesidad, F2 tasa inicial por encima del tope, F3 regla por saldo por debajo del gasto ordinario)— y retiro el aviso retire_at_age_underfunded, que solo P21 tenia. E4 ENCOGIO la capa WP3: bridge_effective_withdrawal_pct, pension_coverage_ratio y partial_gap_target salieron de ProjectionOutput con el objetivo puente (decision M4 del modelo v2), asi que el sha256 de TODOS los casos se movio sin que se moviera un numero de la capa WP2. Y dos casos si movieron numeros, a proposito: P18 (cruce 145 -> 262) y P19 (cruce 121 -> 306), porque su objetivo dejo de descontar la pension con fecha; la derivacion a mano esta en the_5_0_cases_are_anchored_by_hand_derived_numbers.",
   "engine_version": "5.0.0",
   "hash_algo": "sha256 over the canonical text described in golden_pins.rs",
   "cases": {
     "P1_deficit_cronico": {
-      "sha256": "a67e5117f5abeac342899ca6b37f3bdd3a5457d56eaf90f57b3511c32f759615",
+      "sha256": "d3af7c5046a08605c3d00c11b4724d6b59082adf450c3dbfb3b42652dcf6c298",
       "retirement_month_index": null,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "30000",
@@ -17,7 +17,7 @@
       "failure_kind": ""
     },
     "P2_fire_mes0": {
-      "sha256": "309ddc81f6776483014009874b3eed57a0e78f11e27c9dbd338102101b9c082d",
+      "sha256": "e389c2e87432a4d6e40f19b3098f69729f6c258137a881103cd32f855b25f397",
       "retirement_month_index": 1,
       "liquid_crossing_month_index": 1,
       "withdrawal_total": "48000",
@@ -30,7 +30,7 @@
       "failure_kind": ""
     },
     "P3_superavit_jubilacion": {
-      "sha256": "6f57733f3248f38730d1c3ac7b3a9fdbf4d209ea2d19973c2b75a5febd3ba83a",
+      "sha256": "215477e466cba0b8b309bcc9d24e6cb4c897d501093ce35d3cf7c9fe8efef4c3",
       "retirement_month_index": 22,
       "liquid_crossing_month_index": 22,
       "withdrawal_total": "0",
@@ -43,7 +43,7 @@
       "failure_kind": ""
     },
     "P4_ret_menos100": {
-      "sha256": "ef7d75e169cf2ce81000b97f892a1d32dde4f9d428ba895dd4a76560aab252a3",
+      "sha256": "c67a67786516035365d62d4a1f48fd1d00f5df09e3cf979333f9077926ab51ca",
       "retirement_month_index": null,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "0",
@@ -56,7 +56,7 @@
       "failure_kind": ""
     },
     "P5_flat_nominal_30y": {
-      "sha256": "8b8de12f41ebcb627f9bf066d93037fadc257ab421847fe85b66c61cb3958ec0",
+      "sha256": "0aeee11825058624dd5f5df1efcf129de65a73b06423a2900b66b6c77c7fb948",
       "retirement_month_index": null,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "0",
@@ -69,7 +69,7 @@
       "failure_kind": ""
     },
     "P6_venc_saldo_vivo_proj": {
-      "sha256": "b4fa3b3ca9de926a529261cd95feded3834f3d0128e73207bf943ad7afdfd912",
+      "sha256": "cebb548d271449018512ca648409a7a7868795a2f87b6b0ca78bee70c02bb5b4",
       "retirement_month_index": null,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "0",
@@ -82,7 +82,7 @@
       "failure_kind": ""
     },
     "P13_cash8k_denormal_g": {
-      "sha256": "5dee7211e6e2b6b49f18b30d7503be353a68299963752017d9927214485e20fe",
+      "sha256": "c0edf6f66e23d29652f39b1fa3dd6dea426c81a5451a1cb577cd6c29a9650cdc",
       "retirement_month_index": null,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "1897961.6517787380958402623068",
@@ -95,7 +95,7 @@
       "failure_kind": ""
     },
     "P7_jubilado_pension_impuestos": {
-      "sha256": "1da5ab227df86567d168aa7b3d7942677ec3f9f81cf3ea79d2f89c2f6fac1e86",
+      "sha256": "71c51b23a76d80ad6584ad59964a5c3c20194ccad4e78c5d3156a71013d880e0",
       "retirement_month_index": 1,
       "liquid_crossing_month_index": 1,
       "withdrawal_total": "777684.29263120468941668899783",
@@ -108,7 +108,7 @@
       "failure_kind": ""
     },
     "P8_drenaje_g_mixta": {
-      "sha256": "5ab4fd8691f90491deb8c8453d328c10805faeed148f3a5a08100b92b477791e",
+      "sha256": "b16d21b63cd403293c925786b43371f2030c36863eb6621ab600219bd24efa5e",
       "retirement_month_index": null,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "42759.056176843132995569259128",
@@ -121,7 +121,7 @@
       "failure_kind": ""
     },
     "P9_hogar_realista": {
-      "sha256": "7aed26761b1560c58f5f4120dcecd04f2356fe7f5358101846af749ebb8b09b8",
+      "sha256": "6add4599f184ad67852c93460f3d73d51898fb8b5bce8be04f4c3ffc12143ba1",
       "retirement_month_index": null,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "2622169.3627191690891580998079",
@@ -134,7 +134,7 @@
       "failure_kind": ""
     },
     "P10_jubilacion_forzada": {
-      "sha256": "1cad5a9f05f4d790655f41211b37089156c27e58e593c8f3e35f3056c325afb5",
+      "sha256": "0bfcc4efb5bb1024365e633169fc45801906b55ac4caadef8c12ff623d2139d2",
       "retirement_month_index": 37,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "105407.39701715813061378924819",
@@ -147,7 +147,7 @@
       "failure_kind": "portfolio_depleted"
     },
     "P11_deflacion_negativa": {
-      "sha256": "5fd98ddf9852a68be788593d8b6df3d243381a2b6ec8439d3359db4d1c1af69a",
+      "sha256": "3e9cee3b8e06f32e67c2930e10fc8926283099110b214eafca16a98d742cf0c5",
       "retirement_month_index": 1,
       "liquid_crossing_month_index": 1,
       "withdrawal_total": "15901.262000256247482304287519",
@@ -160,7 +160,7 @@
       "failure_kind": ""
     },
     "P12_topes_de_cascada": {
-      "sha256": "a9ea515413df1c70ccb520f1b1d416548cc63af14259034900c72d307c6a8779",
+      "sha256": "c8a8a40a6105a5aad05340c93b2526af5b26ff6ee854166726b966c503d86d67",
       "retirement_month_index": null,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "0",
@@ -173,7 +173,7 @@
       "failure_kind": ""
     },
     "P14_techo_numeric": {
-      "sha256": "6c97c3f9d9c43c0337423917d7a1ab75711b8fa052301a56cc31ee1c2105ce81",
+      "sha256": "3522a0cd2457d13041392f2123c4f9718398e6e62e9ac727f6612995849d4ebc",
       "retirement_month_index": null,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "840000",
@@ -186,7 +186,7 @@
       "failure_kind": ""
     },
     "P15_percent_of_balance_ceiling": {
-      "sha256": "b8f08d2f9d697492ad629d4307d22bdb60b9fe4dc28ddcd8846945d83725016b",
+      "sha256": "d7b6d37e40cf05885b8dd8c392ed795b3fc1153e3608d37d38335c3b4c3b7529",
       "retirement_month_index": 1,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "518684.06099389898756237092108",
@@ -199,7 +199,7 @@
       "failure_kind": "rule_below_need"
     },
     "P16_hybrid_rule_is_spend": {
-      "sha256": "9c08882d17be7deb7286a0ecfb5dbad1f6222aa987a86b1f22729160e429ca3a",
+      "sha256": "6179b91b246219cb9603150321e36c24df74bc713ff1bb93e677bbd22991750e",
       "retirement_month_index": 1,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "733393.33558285015878468468257",
@@ -212,7 +212,7 @@
       "failure_kind": ""
     },
     "P17_guardrails_taxes_es": {
-      "sha256": "ff69e55c0fb69a790a4b25e6ce1c4e4f0e0c3740649f7374c37b439e3f274c45",
+      "sha256": "2055d6b54c62824026b05ec691dc783158affd8abc5985ddec70ad032a9c3a27",
       "retirement_month_index": 1,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "986541.8052190908357567812119",
@@ -225,11 +225,11 @@
       "failure_kind": "rule_below_need"
     },
     "P18_pension_bridge": {
-      "sha256": "7e42330772d9661ae3f2a02284733521bbf258642d1fc1d77676c546af9718f6",
-      "retirement_month_index": 145,
-      "liquid_crossing_month_index": 145,
-      "withdrawal_total": "613403.05546143882966999238845",
-      "phases": "accumulating@0|retired@145",
+      "sha256": "94ba2d0fd43f69d28e3cf3cb82e2e3e5ecbefbd1adcddda0cc4b5e6d93478d3a",
+      "retirement_month_index": 262,
+      "liquid_crossing_month_index": 262,
+      "withdrawal_total": "324389.57398329973214440078597",
+      "phases": "accumulating@0|retired@262",
       "pension_start_month_index": 241,
       "partial_retirement_month_index": null,
       "disposable_cash_total": "0",
@@ -238,11 +238,11 @@
       "failure_kind": ""
     },
     "P19_pension_perpetuity_covering": {
-      "sha256": "9519447b91f086f0cc01bb33e072946eec21820114e253506956ffb3f6094cfc",
-      "retirement_month_index": 121,
-      "liquid_crossing_month_index": 121,
+      "sha256": "886ddaee927dad6d18bb4bf6db2b582360bb547ae5bd1c252cc6db059e9b29cc",
+      "retirement_month_index": 306,
+      "liquid_crossing_month_index": 306,
       "withdrawal_total": "18626.521870551609228683812408",
-      "phases": "accumulating@0|retired@121",
+      "phases": "accumulating@0|retired@306",
       "pension_start_month_index": 121,
       "partial_retirement_month_index": null,
       "disposable_cash_total": "0",
@@ -251,7 +251,7 @@
       "failure_kind": ""
     },
     "P20_partial_media_jornada": {
-      "sha256": "7d632bb5e4db6d5385c64de5c31da6f4f64226695b4b4559c05adcf8b2829ab6",
+      "sha256": "bb4ff6b98cde7b81b3f96906337551d444586fdbddd239427233e81ee4152269",
       "retirement_month_index": null,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "118996.70044104667815050055780",
@@ -264,7 +264,7 @@
       "failure_kind": "portfolio_depleted"
     },
     "P21_retire_at_age_reading_only": {
-      "sha256": "eb8b92b732101028eda6fbf0bf007057bd3e16f47e43f8e3b54b6eb09dc366c4",
+      "sha256": "b11608771ddd74a3072ba90472418644c693d8837d9d9fa926370421c18e89e6",
       "retirement_month_index": 120,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "899709.1336268368079013420407",
@@ -277,7 +277,7 @@
       "failure_kind": ""
     },
     "P22_solve_required_contribution": {
-      "sha256": "b3f421cc285050c450a300bb935b78c3a2c5917397b9ee715440f58c48069eb1",
+      "sha256": "789a807730a04c9b2babcf04f85ed44b7913cfb7e29c46cbde1c0bac98184029",
       "retirement_month_index": 101,
       "liquid_crossing_month_index": 101,
       "withdrawal_total": "60000",
@@ -290,7 +290,7 @@
       "failure_kind": ""
     },
     "P23_income_pause": {
-      "sha256": "660189ebbf8a564b17b0da52df213252aa396c4dc938f018d33b1c0429a30e12",
+      "sha256": "af96968c54e6e7b623e25c887b4ff4022692461e3bf4a4119b0ea71bdfcf09ab",
       "retirement_month_index": 12,
       "liquid_crossing_month_index": 12,
       "withdrawal_total": "14000",
@@ -303,7 +303,7 @@
       "failure_kind": "portfolio_depleted"
     },
     "P24_undrained_scale": {
-      "sha256": "2938dfe45d726adfc60f09c5bfe8952a70b04b758de3586e3bdc7691dc9f65cf",
+      "sha256": "5d4923a655fa2ee94e87b6505c315242358285706144880e82163027088ee8c9",
       "retirement_month_index": 1,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "28417.03",
@@ -316,7 +316,7 @@
       "failure_kind": ""
     },
     "P25_debt_service_assoc": {
-      "sha256": "a1122b0e672e89b58d080f625681ceca6f4f30d5076d311106838625748b2713",
+      "sha256": "ec6aafc8bb52d89e9b3cbd04ab6252b7f9f5bf3601db912c0f4b2913e1937de4",
       "retirement_month_index": null,
       "liquid_crossing_month_index": null,
       "withdrawal_total": "73127.942952792669262196908588",

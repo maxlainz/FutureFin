@@ -15,10 +15,10 @@ mod cases;
 
 use cases::{base_input, mk_asset, mk_liab, projection_cases_all, rule_remainder};
 use futurefin_engine::{
-    coast_fire_month_index, max_extra_monthly_expense_keeping_date, project_net_worth_series,
-    required_contribution_monthly, retirement_delay_months, BridgeCap, EngineWarning, ExpenseBasis,
-    FireNeed, FireTarget, IncomePause, InitialRateGate, PartialPhase, PathFailure, PensionSchedule,
-    Phase, ProjectionInput, RepaymentModel, RetirementTrigger, TargetBasis, WithdrawalRule,
+    max_extra_monthly_expense_keeping_date, project_net_worth_series, retirement_delay_months,
+    BridgeCap, EngineWarning, ExpenseBasis, FireNeed, FireTarget, IncomePause, InitialRateGate,
+    PartialPhase, PathFailure, PensionSchedule, Phase, ProjectionInput, RepaymentModel,
+    RetirementTrigger, WithdrawalRule,
 };
 use rust_decimal::Decimal;
 
@@ -115,73 +115,6 @@ fn an_indexed_pension_uses_the_loops_inflation_factor() {
 }
 
 // =============================================================================================
-// B · Objetivo consciente del plan dentro del BUCLE
-// =============================================================================================
-
-/// **El puente cambia el mes de jubilación**, y cambia porque el objetivo es más pequeño.
-///
-/// Predicho: gasto de jubilación 2.000 €/mes, SWR 4 %, sin impuestos ni inflación, pensión plana
-/// de 1.200 desde el índice 24.
-/// - Perpetuidad: `T(i) = 600.000` mientras `i < 24`.
-/// - Puente sin descuento: `T(0) = 24·2.000 + 240.000 = 288.000`.
-///
-/// Con 300.000 € líquidos de partida, el puente cruza en el mes 1 (300.000 ≥ 288.000) y la
-/// perpetuidad no cruza nunca dentro de un horizonte de 12 meses sin ahorro.
-#[test]
-fn the_bridge_basis_moves_the_crossing_because_the_target_is_smaller() {
-    let mut input = lab(12, 2_000, 2_000, 300_000);
-    input.fire_target = Some(FireTarget {
-        need: FireNeed::ExpenseMinusPension {
-            expense_monthly: d(2_000),
-            pension_monthly: Decimal::ZERO,
-        },
-        ..flat_target(0, 4)
-    });
-    input.phase_plan.expense_retirement_monthly = d(2_000);
-    input.phase_plan.pension = Some(PensionSchedule {
-        start_index: 24,
-        monthly_today: d(1_200),
-        indexed: false,
-        fraction_while_partial: Decimal::ZERO,
-    });
-
-    let perpetuity = project_net_worth_series(&input).unwrap();
-    assert_eq!(
-        perpetuity.retirement_month_index, None,
-        "600.000 € de objetivo con 300.000 € de cartera: no se cruza"
-    );
-
-    input.phase_plan.target_basis = TargetBasis::BridgeToPension;
-    let bridge = project_net_worth_series(&input).unwrap();
-    assert_eq!(
-        bridge.retirement_month_index,
-        Some(1),
-        "el puente son 288.000 €, y hay 300.000"
-    );
-    assert_eq!(bridge.liquid_crossing_month_index, Some(1));
-    // 12·need_full_m(0)/L(0) = 24.000/300.000 = 8 % anual. Muy por encima del SWR — y legítimo:
-    // el puente dura dos años, no para siempre (D7).
-    assert_eq!(bridge.bridge_effective_withdrawal_pct, Some(d(8)));
-    assert_eq!(
-        bridge.pension_coverage_ratio,
-        Some(Decimal::new(6, 1)),
-        "1.200/2.000 del gasto"
-    );
-}
-
-/// Sin pensión con fecha ni base puente, las dos lecturas nuevas son `None` — **jamás un 0**.
-#[test]
-fn without_a_pension_the_bridge_readings_are_absent_not_zero() {
-    let mut input = lab(12, 3_000, 2_000, 1_000_000);
-    input.fire_target = Some(flat_target(24_000, 4));
-    let out = project_net_worth_series(&input).unwrap();
-    assert_eq!(out.bridge_effective_withdrawal_pct, None);
-    assert_eq!(out.pension_coverage_ratio, None);
-    assert_eq!(out.partial_gap_target, None);
-    assert!(!out.partial_phase_capital_growing);
-}
-
-// =============================================================================================
 // C · Fase parcial
 // =============================================================================================
 
@@ -256,11 +189,13 @@ fn a_partial_phase_that_eats_capital_warns_and_sells_without_a_ceiling() {
     );
 }
 
-/// La media jornada cobra la FRACCIÓN declarada de la pensión (D8), y el hueco que queda es el
-/// `partial_gap_target`.
+/// La media jornada cobra la FRACCIÓN declarada de la pensión (D8), y eso se ve en la CAJA.
 ///
-/// Predicho: gasto parcial 2.000, ingreso 1.100, pensión 1.200 al 50 % ⇒ 600.
-/// `gap_m = 2.000 − 1.100 − 600 = 300` ⇒ `300·12/0,04` = **90.000 €**.
+/// Predicho: gasto parcial 2.000, ingreso 1.100, pensión 1.200 al 50 % ⇒ 600. La caja de la fase
+/// es `1.100 + 600 − 2.000 = −300 €/mes`, que sale de la cartera.
+///
+/// (La lectura `partial_gap_target`, que capitalizaba ese hueco a `300·12/0,04` = 90.000 €, se
+/// retiró en E4 junto con el resto del objetivo como criterio.)
 #[test]
 fn the_partial_phase_collects_its_share_of_the_pension() {
     let mut input = lab(4, 3_000, 2_000, 0);
@@ -292,7 +227,6 @@ fn the_partial_phase_collects_its_share_of_the_pension() {
         out.liquid_worth,
         vec![d(0), d(2_200), d(4_400), d(4_100), d(3_800)]
     );
-    assert_eq!(out.partial_gap_target, Some(d(90_000)));
 }
 
 // =============================================================================================
@@ -722,125 +656,6 @@ fn stopping_contributions_beats_the_constant_cap() {
 // F · Solves (§B.7)
 // =============================================================================================
 
-/// El caso de laboratorio de los dos primeros solves: cartera vacía al 0 %, sobrante 2.000 €/mes,
-/// objetivo 100.000 € plano, jubilación por EDAD en el mes 101 (el cruce es lectura).
-fn solve_lab() -> ProjectionInput {
-    let mut input = lab(120, 5_000, 3_000, 0);
-    input.fire_target = Some(flat_target(4_000, 4)); // 4.000/0,04 = 100.000
-    input.phase_plan.expense_retirement_monthly = d(3_000);
-    input.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(101);
-    input.phase_plan.crossing_is_reading_only = true;
-    input
-}
-
-/// **Aportación necesaria, exacta**: con 0 % de rentabilidad, el criterio en el índice 100 son
-/// 100 aportaciones. `100·c ≥ 100.000 ⇒ c = 1.000 €/mes`, y la bisección aterriza en el valor
-/// EXACTO porque 1.000 es el punto medio de `[0, 2.000]`.
-///
-/// La serie devuelta es la de esa ejecución: `required_capital_path[100] = 100.000` clavado.
-#[test]
-fn required_contribution_is_exactly_a_thousand() {
-    let input = solve_lab();
-    let solved = required_contribution_monthly(&input, 101).unwrap().unwrap();
-
-    assert_eq!(solved.contribution, d(1_000));
-    assert!(!solved.underfunded);
-    assert!(solved.warnings.is_empty());
-    assert_eq!(solved.required_capital_path[100], d(100_000));
-    assert_eq!(solved.required_capital_path[0], Decimal::ZERO);
-    assert!(
-        solved.iterations <= 24,
-        "presupuesto de bisección: {} iteraciones",
-        solved.iterations
-    );
-}
-
-/// **Infra-financiado**: con el objetivo diez veces mayor, ni aportando los 2.000 € enteros se
-/// llega (100·2.000 = 200.000 < 1.000.000). Se devuelve el sobrante entero, la bandera roja y el
-/// aviso de D17.
-#[test]
-fn an_unreachable_target_reports_the_whole_headroom_as_underfunded() {
-    let mut input = solve_lab();
-    input.fire_target = Some(flat_target(40_000, 4)); // 1.000.000
-    let solved = required_contribution_monthly(&input, 101).unwrap().unwrap();
-
-    assert_eq!(solved.contribution, d(2_000), "todo el sobrante del mes 1");
-    assert!(solved.underfunded);
-    // E1: el aviso `retire_at_age_underfunded` se retiró — la bandera `underfunded` ya lo decía,
-    // y el CUÁNTO de «no llego» pasó a ser `1 − éxito(R)` en el crate estocástico.
-    assert!(solved.warnings.is_empty());
-    assert_eq!(solved.required_capital_path[100], d(200_000));
-}
-
-/// Un objetivo que ya está cubierto sin aportar nada devuelve **0 aportaciones y 0 iteraciones**.
-#[test]
-fn an_already_funded_plan_needs_no_contribution() {
-    let mut input = solve_lab();
-    input.assets[0].value = d(500_000);
-    let solved = required_contribution_monthly(&input, 101).unwrap().unwrap();
-    assert_eq!(solved.contribution, Decimal::ZERO);
-    assert_eq!(solved.iterations, 0);
-    assert!(!solved.underfunded);
-}
-
-/// Sin objetivo evaluable no hay pregunta: `Ok(None)`, que **no es «no necesitas aportar»**.
-#[test]
-fn no_target_means_no_solve_at_all() {
-    let mut input = solve_lab();
-    input.fire_target = None;
-    assert!(required_contribution_monthly(&input, 101).unwrap().is_none());
-    assert!(coast_fire_month_index(&input, 101).unwrap().is_none());
-    // Y un mes fuera de la serie tampoco tiene respuesta.
-    let full = solve_lab();
-    assert!(required_contribution_monthly(&full, 0).unwrap().is_none());
-    assert!(required_contribution_monthly(&full, 200).unwrap().is_none());
-}
-
-/// **Mes de coast, exacto**: con 0 % de rentabilidad nada crece, así que parar en el mes `k` deja
-/// `(k−1)·2.000` en la cartera. `(k−1)·2.000 ≥ 100.000 ⇒ k ≥ 51`.
-///
-/// El número coast es el líquido con el que se ENTRA en ese mes: `coast_path[50] = 100.000 €`.
-#[test]
-fn the_coast_month_is_the_fifty_first() {
-    let input = solve_lab();
-    let coast = coast_fire_month_index(&input, 101).unwrap().unwrap();
-
-    assert_eq!(coast.coast_month_index, Some(51));
-    assert_eq!(coast.coast_number, Some(d(100_000)));
-    assert_eq!(coast.coast_path[50], d(100_000));
-    assert_eq!(
-        coast.coast_path[100],
-        d(100_000),
-        "desde el mes 51 no se aporta y nada crece: la serie se queda plana"
-    );
-    assert!(coast.warnings.is_empty());
-    assert!(coast.iterations <= 24);
-}
-
-/// Coast inalcanzable: aviso propio y la MEJOR serie que el plan da (la de aportar siempre).
-#[test]
-fn an_unreachable_coast_says_so() {
-    let mut input = solve_lab();
-    input.fire_target = Some(flat_target(40_000, 4)); // 1.000.000
-    let coast = coast_fire_month_index(&input, 101).unwrap().unwrap();
-    assert_eq!(coast.coast_month_index, None);
-    assert_eq!(coast.coast_number, None);
-    assert_eq!(coast.warnings, vec![EngineWarning::CoastNotReachable]);
-    assert_eq!(coast.coast_path[100], d(200_000));
-}
-
-/// Un hogar que ya puede dejar de aportar HOY: el coast es el mes 1 y el número coast es el
-/// patrimonio de partida.
-#[test]
-fn a_household_that_can_coast_today_coasts_from_month_one() {
-    let mut input = solve_lab();
-    input.assets[0].value = d(150_000);
-    let coast = coast_fire_month_index(&input, 101).unwrap().unwrap();
-    assert_eq!(coast.coast_month_index, Some(1));
-    assert_eq!(coast.coast_number, Some(d(150_000)));
-    assert_eq!(coast.iterations, 0);
-}
-
 /// **Cuánto más puedo gastar sin mover la fecha** (P8.b).
 ///
 /// Predicho: cartera 5.000, sobrante 1.000 €/mes, objetivo 10.000 (400/0,04). Base: `liquid(k) =
@@ -993,18 +808,20 @@ fn a_partial_phase_after_retirement_never_happens() {
     );
 }
 
-/// **La cota de búsqueda del solve NO es el sobrante del mes 1**, y este test es la regresión de
-/// esa decisión (tomada en WP3 con la medición de P9 delante, ver `search_ceiling` en
+/// **La cota de búsqueda de los solves NO es el sobrante del mes 1**, y este test es la regresión
+/// de esa decisión (tomada en WP3 con la medición de P9 delante, ver `search_ceiling` en
 /// `crates/engine/src/solve.rs`).
 ///
 /// P9 es el hogar realista de la batería: su neto recurrente del mes 1 son **500 €/mes**, pero su
-/// caja mensual crece muy por encima cuando los pasivos se extinguen y los «Próximos» entran. Con
-/// 500 € como cota, la aportación máxima explorable dejaría `líquido(599)` en 91.444 € frente a
-/// los 725.197 € de la cascada real: cualquier objetivo entre esas dos cifras se declararía
-/// **infra-financiado siendo alcanzable** — un rojo falso de D17.
+/// caja mensual crece muy por encima cuando los pasivos se extinguen y los «Próximos» entran.
+/// Medido a 600 meses: con un techo de 500 €/mes `líquido(599)` se queda en 91.444 € frente a los
+/// 725.197 € de la cascada real, así que una cota de 500 € recortaría cualquier respuesta que
+/// viva por encima.
 ///
-/// Aquí se fija un objetivo dentro de esa horquilla (SWR forzado al 40 % ⇒ `T(599) ≈ 268.666 €`)
-/// y se exige que el solve encuentre una `c` de verdad, no que se rinda.
+/// E4 se llevó los dos solves que biseccionaban sobre un objetivo, pero **no la cota**: la sigue
+/// usando [`max_extra_monthly_expense_keeping_date`], y por ahí se comprueba. Con la jubilación
+/// FORZADA en el mes 600 la fecha no depende del gasto, así que la respuesta es la cota entera —
+/// y tiene que superar de largo los 500 €/mes del mes 1.
 #[test]
 fn the_solve_ceiling_is_the_max_monthly_surplus_not_the_first_months_headroom() {
     let mut input = projection_cases_all()
@@ -1014,24 +831,12 @@ fn the_solve_ceiling_is_the_max_monthly_surplus_not_the_first_months_headroom() 
         .input;
     input.phase_plan.crossing_is_reading_only = true;
     input.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(600);
-    input.fire_target.as_mut().unwrap().swr_pct = d(40);
 
-    let solved = required_contribution_monthly(&input, 600).unwrap().unwrap();
-
+    let extra = max_extra_monthly_expense_keeping_date(&input)
+        .unwrap()
+        .expect("P9 se jubila por edad en el mes 600: hay fecha que conservar");
     assert!(
-        solved.search_ceiling > d(500),
-        "la cota tiene que superar el neto recurrente del mes 1 (500 €): {}",
-        solved.search_ceiling
+        extra > d(500),
+        "la cota tiene que superar el neto recurrente del mes 1 (500 €): {extra}"
     );
-    assert!(
-        !solved.underfunded,
-        "P9 SÍ alcanza este objetivo; declararlo infra-financiado sería el rojo falso de D17"
-    );
-    assert!(
-        solved.contribution > d(500),
-        "y la aportación necesaria está por encima de los 500 €/mes del mes 1: {}",
-        solved.contribution
-    );
-    assert!(solved.iterations > 0, "esta vez la bisección trabaja de verdad");
-    assert!(solved.iterations <= 24);
 }
