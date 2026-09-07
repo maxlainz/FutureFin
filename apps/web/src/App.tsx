@@ -61,6 +61,7 @@ import { buildAssetWriteBody } from "./lib/asset-form";
 import { readFileAsBase64 } from "./lib/files";
 import { chartPerf } from "./lib/perf";
 import { PROJECTION_FOCUS_STORAGE_KEY } from "./lib/projection-chart";
+import { curvePollDelayMs, shouldPollNeededCurve } from "./lib/stale-data";
 import { assetOwnerNameById } from "./lib/chart-legend";
 import type { LedgerPersonScope } from "./lib/ledger";
 import {
@@ -1242,6 +1243,26 @@ export default function App() {
   }, [ledgerPersonScope]);
 
   /**
+   * Recarga de la serie **SIN tocar los flags de carga** (W13, informe del owner 2026-09-07).
+   *
+   * `loadProjectionSeriesPage` enciende `projectionBusy` y, si algo falla, vacía la serie: las
+   * dos cosas son correctas para una navegación (no hay nada que enseñar todavía) y ruinosas
+   * para una revalidación (hay una respuesta buena en pantalla y el usuario está mirándola). Esta
+   * variante es la que usa el sondeo del nivel 2: si la respuesta llega, sustituye el dato en
+   * sitio; si falla, **no pasa nada** — lo que ya estaba pintado sigue siendo válido y el
+   * siguiente intento lo corregirá.
+   */
+  const refreshProjectionSeriesQuietly = useCallback(async () => {
+    try {
+      await fetchProjectionTwoPhase(ledgerPersonScope, (data) => {
+        setProjectionSeries(data);
+      });
+    } catch {
+      /* revalidación silenciosa: lo último bueno se queda en pantalla */
+    }
+  }, [ledgerPersonScope]);
+
+  /**
    * `GET /v1/projection/bands` — el abanico de percentiles de la sección «Riesgo».
    *
    * **Solo en la vista «Yo»**: en Hogar el servidor contesta 400 `household_bands_unavailable`
@@ -1839,6 +1860,57 @@ export default function App() {
     // Solo recargar bloqueante al cambiar sesión / pestaña / vista; no cuando `user` muta tras PATCH pensión.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id, hasMembership, activeTab, loadRetirementPage]);
+
+  /**
+   * Sondeo del NIVEL 2 de la proyección (W13, informe del owner 2026-09-07).
+   *
+   * `needed_capital_curve` se calcula en segundo plano y la respuesta se declara `computing`
+   * (`handlers/projection.rs`, `CURVE_STATE_COMPUTING`): la curva llega en un GET POSTERIOR que
+   * **nadie pedía**. Sin un cambio de pestaña o una mutación, Jubilación se quedaba con
+   * «Calculando el capital necesario por edad…» indefinidamente y el chart sin su línea auxiliar.
+   *
+   * Las cotas viven puras y testeadas en `lib/stale-data.ts`: 2 s con backoff ×1,5 hasta 15 s,
+   * `CURVE_POLL_MAX_ATTEMPTS` intentos, y **parada seca** en `ready`/`unavailable` (los dos son
+   * finales; seguir pidiendo con `unavailable` sería un bucle contra una respuesta que no va a
+   * cambiar). El refetch es el SILENCIOSO: no toca `projectionBusy`, así que la vista revalida
+   * en sitio y lo único que se mueve es su indicador discreto.
+   *
+   * El contador vive en un ref porque cada respuesta trae un objeto nuevo y re-dispara el efecto:
+   * con el contador en estado, el backoff se reiniciaría en cada vuelta y el «sondeo suave»
+   * volvería a ser un bucle a 2 s.
+   */
+  const curvePollAttemptsRef = useRef(0);
+  useEffect(() => {
+    const state = projectionSeries?.needed_capital_curve_state;
+    if (state !== "computing") {
+      curvePollAttemptsRef.current = 0;
+      return;
+    }
+    const active =
+      user != null &&
+      hasMembership &&
+      (activeTab === "retirement" || activeTab === "projection");
+    if (
+      !shouldPollNeededCurve({
+        state,
+        attempts: curvePollAttemptsRef.current,
+        active,
+      })
+    ) {
+      return;
+    }
+    const id = window.setTimeout(() => {
+      curvePollAttemptsRef.current += 1;
+      void refreshProjectionSeriesQuietly();
+    }, curvePollDelayMs(curvePollAttemptsRef.current));
+    return () => window.clearTimeout(id);
+  }, [
+    projectionSeries,
+    user,
+    hasMembership,
+    activeTab,
+    refreshProjectionSeriesQuietly,
+  ]);
 
   useEffect(() => {
     if (!user || !hasMembership) return;
@@ -3827,7 +3899,15 @@ export default function App() {
             className={
               activeTab === "projection"
                 ? "app-main app-main--projection-fullbleed"
-                : "app-main"
+                : activeTab === "retirement"
+                  ? // W13: Jubilación pasa a dos columnas (plan a la izquierda, resultado a la
+                    // derecha) y necesita el ancho real de la ventana; con el tope de 66rem las
+                    // dos columnas caían a ~500px y ninguna cabía. Es un `max-width: none`, NO el
+                    // full-bleed de Proyección: esa vista además convierte `<main>` en un flex
+                    // con `overflow: hidden` para que el chart ocupe el viewport, y aquí la
+                    // página tiene que seguir siendo scroll vertical normal.
+                    "app-main app-main--wide"
+                  : "app-main"
             }
           >
         {/* Aviso de ámbito (D9/D32): el Hogar es un agregado informativo. Va en TODAS las

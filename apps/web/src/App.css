@@ -4374,33 +4374,22 @@ fieldset.retirement-config-stack {
   margin-top: 0.75rem;
 }
 
-/* ---- S11 · las cinco tarjetas de estrategia ----
-   Rejilla EXPLÍCITA y no `auto-fit`: con el reparto automático las
-   cinco caían en 4+1 a los anchos intermedios, y una tarjeta sola
-   en la segunda fila se lee como «la rara» en vez de como la
-   quinta opción de una lista. 5 en escritorio, 3+2 en tableta y
-   una columna en móvil. La especificidad doble gana a la regla de
-   `.retirement-mode-grid` (2 columnas a ≤900px), que es para la
-   rejilla de TRES modos y aquí desharía el 3+2. */
-.retirement-mode-grid.retirement-strategy-grid {
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-}
+/* ---- S11 · las tarjetas de estrategia ----
+   La rejilla EXPLÍCITA de cinco columnas que había aquí (con sus
+   dos media queries de VIEWPORT, `bp:strategy 1023` y `bp:mobile
+   640`) se retiró en W13, por dos motivos que se acumulaban:
 
-/* bp:strategy 1023 — excepción POR COMPONENTE, no un eje nuevo:
-   solo gobierna esta rejilla de cinco. La estructura de la página
-   sigue en 720/640. */
-@media (max-width: 1023px) {
-  .retirement-mode-grid.retirement-strategy-grid {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-}
+     · contaba CINCO estrategias y desde C7 son CUATRO
+       (`pension_bridge` dejó de ser una), así que la quinta
+       columna estaba vacía en todos los anchos;
+     · con la página en dos columnas, el ancho del viewport ya no
+       dice nada del ancho de la tarjeta: a 1280px la rejilla de
+       cinco caía dentro de una columna de ~570px y cada opción se
+       quedaba en 114px.
 
-/* bp:mobile 640 */
-@media (max-width: 640px) {
-  .retirement-mode-grid.retirement-strategy-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
+   Vuelve a mandar `.retirement-strategy-grid` (auto-fit con
+   `minmax(min(100%, 15rem), 1fr)`, el patrón sancionado), que
+   reparte por el ancho REAL del contenedor. */
 
 /* ---- 3 · «Resultado» ----
    La FRASE del plan (U7). Es la cabecera de resultados entera, así
@@ -4535,13 +4524,20 @@ fieldset.retirement-config-stack {
 }
 
 /* ---- V3 · tarjetas de configuración de «Tu plan» ----
-   `auto-fit` con un mínimo de 21rem da 2 columnas en escritorio sin
-   un breakpoint nuevo. Dos y no una: seis tarjetas en columna única
-   dejarían «Resultado» a dos pantallas de scroll, y U1 dice que el
-   resultado va DEBAJO del plan — debajo, no lejos. */
+   `auto-fit`, sin breakpoint: reparte por el ancho REAL del
+   contenedor, que desde W13 ya no es el de la página (el plan vive
+   en una columna de ~600px a 1280px y de ~780px a 1600px).
+
+   El mínimo sube de 21rem a 24rem con la maquetación en dos
+   columnas: con 21rem, la columna del plan a 1600px daba DOS
+   tarjetas por fila de ~360px, y las rejillas de tres modos que
+   viven dentro (`.retirement-mode-grid`) caían a ~105px por
+   opción. A 24rem la columna del plan es de UNA tarjeta hasta bien
+   pasados los 1600px, y la página apilada (por debajo de ~1100px)
+   sigue dando dos, que es donde U1 quería dos. */
 .retirement-card-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 21rem), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
   gap: 1rem;
 }
 
@@ -4556,10 +4552,13 @@ fieldset.retirement-config-stack {
   min-width: 0;
 }
 
-/* Las dos tarjetas cuyo contenido es una rejilla de radio-cards
-   (las cinco estrategias, los tres modos del objetivo): en una
-   columna de 21rem sus tarjetas caerían a ~7rem y el nombre no
-   cabría en una línea. */
+/* Las tarjetas que ocupan la fila entera (`WIDE_PLAN_CARDS`, en
+   `RetirementView.tsx`, que es donde está el criterio escrito):
+   las dos cuyo contenido es una rejilla de radio-cards —a media
+   fila cada opción caería a ~7rem y el nombre no cabría en una
+   línea— y, desde W13, «Pensión», que es la única con DOS
+   sub-temas (la pensión y su puente) y la que el owner señaló por
+   desaprovechar el ancho. */
 .retirement-card--wide {
   grid-column: 1 / -1;
 }
@@ -4860,3 +4859,229 @@ fieldset.retirement-config-stack {
    regla suelta. `lightningcss` lo rechazaba con «Unexpected end of input» y `npm run build`
    —solo el build: ni el typecheck, ni el lint, ni Vitest miran el CSS— llevaba rojo desde
    8f4f7ff. Aquí no se escriben globs con asteriscos. */
+
+/* ============================================================
+   JUBILACIÓN — W13 (informe del owner, 2026-09-07)
+   ------------------------------------------------------------
+   Aditivo y al FINAL del archivo, como los dos bloques anteriores:
+   así ninguna línea previa se desplaza y los anclajes por
+   `file:línea` del freezer `no-hex-outside-theme.test.ts`
+   (`App.css:2396/2397`) siguen valiendo. Cero hex: tokens
+   `--ff-*` y `color-mix`.
+
+   Tres cosas, en el orden del informe:
+     1 · que la recarga no parpadee ni mueva la altura;
+     2 · dos columnas a ancho completo (datos | resultado);
+     3 · la tarjeta «Pensión» al ancho de su columna, con el
+         puente a la izquierda.
+   ============================================================ */
+
+/* ---- 1 · Alturas estables y un solo indicio de recarga ----
+
+   La causa del parpadeo era lógica (ver `RetirementView.tsx`,
+   §stale-while-revalidate): el panel entero colgaba de los flags
+   de carga. Lo que queda aquí es la mitad geométrica — que lo que
+   SÍ aparece y desaparece no mueva a sus vecinos.
+
+   `min-height` en `em` y no en `px`: el slot mide UNA línea del
+   texto que va a contener, así que tiene que seguir a la
+   tipografía. */
+.retirement-note-slot {
+  min-height: 1.6em;
+  font-size: 0.78rem;
+}
+
+.retirement-note-slot > p {
+  margin: 0;
+}
+
+/* La frase-hito reserva DOS líneas: «Calculando tu plan…» ocupa
+   una y la frase resuelta casi siempre dos, así que sin esto la
+   primera respuesta empujaba media pantalla hacia abajo. Puede
+   crecer a tres en un plan con puente — es un mínimo, no un
+   recorte: media frase es peor que una frase larga. */
+.retirement-sentence {
+  min-height: 2.7em;
+}
+
+/* Placeholders de las tarjetas: la MISMA caja que un `MetricCard`
+   (borde, radio, papel) y la misma altura, para que la llegada de
+   las cifras no desplace el chart de debajo. Sin animación: un
+   esqueleto que late es otra forma de parpadeo. */
+.retirement-tiles-grid--placeholder {
+  pointer-events: none;
+}
+
+.retirement-tile-placeholder {
+  min-height: 5.75rem;
+  border: 1px solid var(--ff-line-soft);
+  border-radius: var(--ff-radius-kpi);
+  background: color-mix(in oklch, var(--ff-paper) 55%, var(--ff-bg));
+}
+
+/* La leyenda del chart CAMBIA de entradas en caliente: la de
+   «Capital necesario» aparece cuando aterriza el nivel 2 (que
+   desde W13 llega solo, por sondeo, con el usuario mirando) y la
+   de la banda sale cuando hay degradado. Una fila reservada evita
+   que el chart de arriba se mueva cuando eso pasa. La escala de
+   color de debajo no necesita reserva: solo aparece con la primera
+   carga de bandas, y a partir de ahí la latch la conserva. */
+.retirement-chart-block .ff-chart-legend {
+  min-height: 2.2rem;
+}
+
+/* El ÚNICO indicio de «se está recalculando» (informe del owner:
+   «nunca un spinner que sustituya contenido»). Vive en la fila del
+   título, en `nowrap`, así que no puede añadir una línea ni mover
+   nada de lo que hay debajo. */
+.retirement-refreshing {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+  font-size: 0.74rem;
+  color: var(--ff-muted);
+  white-space: nowrap;
+}
+
+/* `.panel-head-row` reparte con `space-between`, que con DOS hijos
+   manda el interrogante al borde derecho del panel y con TRES lo
+   dejaría flotando en medio, lejos del título que explica. Aquí se
+   agrupan a la izquierda y el indicador se va al borde con su
+   `margin-left: auto` — que es además lo que dice la norma de
+   ayudas: cuelgan del rótulo. */
+.panel-head-row.retirement-result-head {
+  justify-content: flex-start;
+}
+
+.retirement-refreshing-dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: var(--ff-radius-pill);
+  background: var(--ff-accent);
+  flex: 0 0 auto;
+  animation: ff-retirement-pulse 1.4s ease-in-out infinite;
+}
+
+/* Lo único que se mueve en toda la pantalla durante una recarga —y
+   son 6px de opacidad, no un relayout. Se apaga con
+   `prefers-reduced-motion`: entonces el punto se queda encendido,
+   que sigue diciendo lo mismo. */
+@keyframes ff-retirement-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .retirement-refreshing-dot {
+    animation: none;
+  }
+}
+
+/* ---- 2 · Dos columnas a ancho completo ----
+
+   `.app-main--wide` suelta el tope de 66rem SOLO en esta pestaña.
+   No reusa `.app-main--projection-fullbleed` a propósito: ese
+   convierte `<main>` en un flex con `overflow: hidden` para que el
+   chart ocupe el viewport, y aquí la página tiene que seguir
+   siendo scroll vertical normal. */
+.app-main--wide {
+  max-width: none;
+}
+
+/* La rejilla de la página. SIN breakpoint nuevo: `auto-fit` con
+   `minmax(min(100%, 34rem), 1fr)` da dos columnas a partir de
+   ~1.100 px (2 × 34rem + el hueco) y UNA por debajo, con el plan
+   primero por orden del DOM. Es el idioma que el design system ya
+   sanciona para las bandas de KPIs, y no clava un ancho concreto
+   en un `@media` que solo arregla una franja.
+
+   `align-items: start`: las dos columnas miden lo suyo. Sin esto,
+   la corta se estiraría hasta la larga y su panel quedaría con un
+   fondo vacío de varios cientos de píxeles. */
+.retirement-layout {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 34rem), 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+/* Las modificadoras `--plan` / `--result` no llevan reglas: son
+   marcadores en el DOM para leer la maquetación de un vistazo (y
+   el enganche por el que entraría un `position: sticky` el día que
+   se decida gatearlo). */
+.retirement-col {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+
+/* El hueco entre paneles lo pone el `gap` de la columna; el
+   `margin-bottom` que `.panel` trae de serie sumaría un segundo
+   hueco bajo el último (y en la columna corta, sobre el aire que
+   ya deja `align-items: start`). */
+.retirement-col > .panel {
+  margin-bottom: 0;
+}
+
+/* ---- 3 · La tarjeta «Pensión» usa su columna entera ----
+
+   Dos sub-columnas cuando caben, apiladas cuando no. El truco es
+   `row-reverse` + `wrap`: el DOM va pensión → puente (que es el
+   orden correcto apilado, y el de tabulación), y en una sola línea
+   `row-reverse` deja el puente a la IZQUIERDA, como pidió el
+   owner. Al envolver, cada uno se lleva su línea y vuelve el orden
+   del DOM. Cero media queries: el reparto lo decide el ancho
+   REAL de la tarjeta, que en dos columnas ya no es el del viewport.
+
+   `flex: 1 1 16rem` es lo que fija el punto de corte (~33rem de
+   tarjeta): por debajo, dos columnas de campos con `<select>`s y
+   sufijos dentro no caben sin desbordar. */
+.retirement-card-cols {
+  display: flex;
+  flex-direction: row-reverse;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+}
+
+.retirement-card-col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+/* Los pares de campos que van en fila (`.field-row`, p. ej. el
+   importe de la pensión y su edad de inicio) tienen que poder
+   apilarse aquí: en una sub-columna de ~16rem, dos campos en fila
+   dejan cada input en ~7rem y el rótulo en tres líneas. `wrap` +
+   una base de 9rem lo resuelve sin tocar la regla global, que la
+   comparten todos los formularios de la app. */
+.retirement-card-col .field-row {
+  flex-wrap: wrap;
+}
+
+.retirement-card-col .field-row > .field {
+  flex: 1 1 9rem;
+}
+
+/* Rótulo de una sub-columna. Tiene clase propia —y no un `<h5>`
+   pelado— porque la norma de títulos (P6) prohíbe que un elemento
+   sin clase decida su tamaño. Es un rótulo, no un título de
+   sección: por eso va en small-caps y en `--ff-muted`, un peldaño
+   por debajo del `.panel-title` de la tarjeta que lo contiene. */
+.retirement-subcard-title {
+  margin: 0;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ff-muted);
+}

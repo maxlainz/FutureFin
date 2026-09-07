@@ -4,7 +4,12 @@ Post-refactor (May 2026). Before: one `App.tsx` of 10.384 LOC owning everything.
 
 ```
 src/
-├── App.tsx                       # composition root: auth gate + global state + route → view dispatch
+├── App.tsx                       # composition root: auth gate + global state + route → view dispatch.
+│                                 #   W13 (2026-09-07): `refreshProjectionSeriesQuietly` (recarga de la serie SIN
+│                                 #   tocar `projectionBusy` ni vaciar el estado al fallar — es para REVALIDAR, no
+│                                 #   para navegar) y el sondeo del nivel 2 del cálculo, con sus cotas puras en
+│                                 #   `lib/stale-data.ts` y el contador de intentos en un `ref` (en estado, cada
+│                                 #   respuesta reiniciaría el backoff y el «sondeo suave» sería un bucle a 2 s).
 ├── App.css                       # global styles (consume --ff-* tokens; no hardcoded hex)
 ├── index.css                     # minimal reset, font-family
 ├── main.tsx                      # ReactDOM.createRoot entry — imports styles/theme.css before index.css.
@@ -319,6 +324,20 @@ src/
 │                                 #   (ver abajo), que dibuja la curva de `needed_capital_curve` — un cálculo
 │                                 #   distinto (bisección estocástica por edad, no un solve determinista) y por eso
 │                                 #   no es un simple renombrado. `ls apps/web/src/lib/plan-series.ts` → No such file or directory.
+│   ├── stale-data.ts             # W13 (informe del owner 2026-09-07): las dos piezas PURAS de «actualizar la data,
+│   │                             #   no descargar y cargar nada nuevo». (1) **nextLastGood(prev, incoming, busy)** —
+│   │                             #   stale-while-revalidate: con una petición en vuelo se CONSERVA la última
+│   │                             #   respuesta buena y solo cambia el flag `refreshing`; un `null` con la carga ya
+│   │                             #   apagada SÍ suelta el dato (es un error o un scope vacío, y seguir enseñando
+│   │                             #   cifras de otro momento sería mentir). Devuelve `prev` por IDENTIDAD cuando nada
+│   │                             #   cambia (lo consumen `useMemo`s) y es IDEMPOTENTE, que es lo que la hace segura
+│   │                             #   de aplicar sobre un `ref` durante el render, StrictMode incluido. (2) El SONDEO
+│   │                             #   del nivel 2 —`curvePollDelayMs` (2 s ×1,5, techo 15 s) y `shouldPollNeededCurve`
+│   │                             #   (solo con `needed_capital_curve_state === "computing"`, pestaña activa y sin
+│   │                             #   agotar `CURVE_POLL_MAX_ATTEMPTS`)—: antes NADIE pedía el GET posterior que trae
+│   │                             #   la curva, así que «Calculando el capital necesario por edad…» se quedaba puesto
+│   │                             #   hasta que el usuario cambiaba de pestaña. `ready`/`unavailable` son FINALES.
+│   │                             #   Test: stale-data.test.ts
 │   ├── history-merge.ts          # mergeProjectionWithHistory(series, history): une la serie histórica (month_index<0) con la
 │   │                             #   proyección en el vértice mes-0; identidad byte-idéntica si history null/vacío/anchor distinto.
 │   │                             #   Con net_worth null (pasivo sin fotografiar entero) cae a assets_total y marca pastIsAssetsOnly:
@@ -522,6 +541,24 @@ src/
 │   │                             #   `role === "owner"`: el perfil es dato personal, lo edita cualquier rol, `viewer`
 │   │                             #   incluido). **No hay PATCH del colchón**: el mecanismo se retiró del todo (M6),
 │   │                             #   no solo su input.
+│   │                             #
+│   │                             #   **W13 (informe del owner, 2026-09-07) — dos columnas y stale-while-revalidate.**
+│   │                             #   (a) La página se envuelve en `.retirement-layout` con dos `.retirement-col`
+│   │                             #   (plan | resultado): `auto-fit` a partir de ~1.100 px, apiladas por debajo con el
+│   │                             #   plan primero, y `<main>` pasa a `.app-main--wide` (suelta el `max-width: 66rem`
+│   │                             #   — NO es el full-bleed de Proyección). En Hogar no hay layout: el agregado sigue
+│   │                             #   siendo un panel único. (b) **La vista ya no se apaga al recargar**: dos latches
+│   │                             #   `nextLastGood` (`lib/stale-data.ts`) sobre `projectionSeries`/`projectionBands`
+│   │                             #   producen `shownSeries`/`shownBands`, que son los que consumen TODOS los memos
+│   │                             #   del resultado; `retirementMetricsReady` pasa a ser `hasMembership &&
+│   │                             #   shownSeries != null` y **ya no mira `projectionBusy`/`retirementBusy`** — eso lo
+│   │                             #   dice ahora `metricsRefreshing`, cuya única consecuencia visible es el punto
+│   │                             #   `.retirement-refreshing` junto al título «Resultado». Las latches se aplican
+│   │                             #   sobre `ref`s DURANTE el render (un efecto pintaría primero el hueco) y se vacían
+│   │                             #   al cambiar de ámbito. (c) La tarjeta «Pensión» entra en `WIDE_PLAN_CARDS` y se
+│   │                             #   parte en dos sub-columnas (`renderPensionCard`: DOM pensión → puente,
+│   │                             #   `row-reverse` en CSS para dejar el puente a la izquierda sin tocar el orden de
+│   │                             #   tabulación); `BRIDGE_FIELD_IDS` es la única lista de qué campo cae en cuál.
 │   ├── ProjectionView.tsx        # wraps ProjectionNetWorthChart; tile «Capital necesario hoy» vía
 │   │                             #   `neededCapitalAtRetirement` (`lib/projection-chart.ts`) — la MISMA cifra que
 │   │                             #   Jubilación y el Resumen (M9), nunca una segunda derivación

@@ -2,7 +2,10 @@
  * Jubilación — rediseño UX U1b (5.0.0, issue #207, decisiones U1–U12 y S1–S11) reescrito por el
  * **modelo v2**: «el éxito define la fecha» (C1–C8).
  *
- * La página tiene TRES bloques y ningún acordeón, en este orden y sin excepciones:
+ * La página tiene TRES bloques y ningún acordeón. Desde W13 (informe del owner, 2026-09-07) el
+ * segundo y el tercero van EN DOS COLUMNAS a ancho completo —el plan a la izquierda, el resultado a
+ * la derecha— a partir de ~1.100 px, y apilados (plan primero) por debajo; la maquetación la pone
+ * `.retirement-layout` con `auto-fit`, sin ningún breakpoint nuevo:
  *
  *  1. **Cabecera**: el título y UN solo indicador de guardado (S6). Antes había seis pies
  *     «Guardado automático.», uno por panel, que podían contradecirse entre sí.
@@ -124,6 +127,7 @@ import {
   planCardGroups,
   planFieldsContextFromProfile,
   requiredPlanFields,
+  type PlanCardId,
   type PlanFieldDescriptor,
   type PlanFieldId,
 } from "../lib/plan-fields";
@@ -136,6 +140,11 @@ import {
   saveIndicatorLabel,
   withdrawalPctNote,
 } from "../lib/retirement-form";
+import {
+  NO_LAST_GOOD,
+  nextLastGood,
+  type LastGood,
+} from "../lib/stale-data";
 import {
   buildRetirementChartMarkers,
   chartValidDateMark,
@@ -220,6 +229,42 @@ function typedDecimalOrNull(raw: string): string | null {
   const t = raw.trim();
   return t === "" ? null : typedDecimal(raw);
 }
+
+/**
+ * Los tres campos del PUENTE dentro de la tarjeta «Pensión» (W13).
+ *
+ * El owner, 2026-09-07: «el módulo de pensión no usa el ancho completo; que lo use. Si quieres
+ * optimizar, pon a la izquierda el puente». La tarjeta pasa a ocupar el ancho de su columna y su
+ * contenido se parte en dos sub-columnas — el puente y la pensión —, que es la partición que ya
+ * existía conceptualmente (C7: el puente es un AJUSTE de la pensión) y no tenía forma visual.
+ *
+ * La lista vive aquí y no en `plan-fields.ts` porque es una decisión de MAQUETACIÓN: la tabla U2
+ * dice qué campos existen y en qué tarjeta caen, no cómo se reparten dentro de ella.
+ */
+const BRIDGE_FIELD_IDS: ReadonlySet<PlanFieldId> = new Set<PlanFieldId>([
+  "bridge_enabled",
+  "bridge_max_pct",
+  "bridge_max_years",
+]);
+
+/**
+ * Las tarjetas que ocupan el ANCHO ENTERO de la columna del plan (W13).
+ *
+ * `strategy` y `spending` ya lo hacían: su contenido es una rejilla de radio-cards que en media
+ * columna quedaba ilegible. **`pension` se suma** por la razón del owner —era la tarjeta que peor
+ * aprovechaba el ancho— y porque es la única que contiene dos sub-temas (la pensión y su puente):
+ * a media anchura los apilaba en una columna larguísima de siete controles.
+ *
+ * El criterio, para la siguiente: una tarjeta va ancha si su contenido es una rejilla propia o si
+ * tiene DOS sub-temas que se leen mejor en paralelo. `ages`, `withdrawal` y `horizon` traen uno a
+ * tres campos de un mismo tema y se emparejan bien de dos en dos — a ancho completo dejarían una
+ * banda de aire a la derecha de cada campo.
+ */
+const WIDE_PLAN_CARDS: ReadonlySet<PlanCardId> = new Set<PlanCardId>([
+  "strategy",
+  "pension",
+  "spending",
+]);
 
 /** Marca de campo obligatorio sin rellenar (U2). No es un error del servidor: es el dato que la
  *  estrategia elegida necesita para poder simularse como se ha pedido. */
@@ -549,14 +594,67 @@ export function RetirementView({
     (householdMemberCount ?? 0) > 1 &&
     !manualAmountMigrationAcked;
 
+  // ── Stale-while-revalidate: lo último bueno se sigue pintando (W13) ───────────────────────
+  //
+  // El informe del owner (2026-09-07): «durante el cálculo la GUI parpadea constantemente… si
+  // recargara in situ sin mover nada aún sería tolerable: actualizar la data, no descargar y
+  // cargar nada nuevo».
+  //
+  // La causa era estructural, no cosmética: TODO el panel «Resultado» colgaba de
+  // `retirementMetricsReady`, que incluía `!projectionBusy && !retirementBusy`. Cada guardado del
+  // autosave dispara un PATCH → `loadProjectionSeriesPage()` + `loadProjectionBands()`, y durante
+  // esos 2–5 s la vista se apagaba entera con la respuesta anterior todavía en memoria: la frase
+  // volvía a «Calculando tu plan…», las tres tarjetas SE DESMONTABAN (de ahí el salto de altura)
+  // y el chart perdía marcas, curva y tira de éxito. Con el two-phase fetch (hybrid + monthly)
+  // eso pasaba dos veces por recarga.
+  //
+  // La latch (`lib/stale-data.ts`, pura y testeada) invierte la regla: mientras hay una petición
+  // en vuelo se conserva la ÚLTIMA respuesta buena y solo cambia un booleano. Un `null` con la
+  // carga ya apagada sí suelta el dato — es un error o un scope vacío, y seguir enseñando cifras
+  // de otro momento sería mentir.
+  //
+  // Se aplica sobre un `ref` DURANTE el render (no en un efecto) a propósito: un efecto pintaría
+  // primero el hueco y lo rellenaría en el siguiente commit, que es justo el parpadeo que esto
+  // viene a quitar. Es seguro porque `nextLastGood` es idempotente (test), así que el doble
+  // render de StrictMode no la altera.
+  const latchScopeRef = useRef(scopeReadOnly);
+  const seriesLatchRef = useRef<LastGood<ProjectionSeriesApi>>(NO_LAST_GOOD);
+  const bandsLatchRef = useRef<LastGood<ProjectionBandsApi>>(NO_LAST_GOOD);
+  if (latchScopeRef.current !== scopeReadOnly) {
+    // Cambiar de ámbito cambia lo que las cifras MIDEN: conservar las del ámbito anterior
+    // mientras llega el nuevo sería enseñar el plan de otro conjunto de personas.
+    latchScopeRef.current = scopeReadOnly;
+    seriesLatchRef.current = NO_LAST_GOOD;
+    bandsLatchRef.current = NO_LAST_GOOD;
+  }
+  seriesLatchRef.current = nextLastGood(
+    seriesLatchRef.current,
+    projectionSeries,
+    projectionBusy || retirementBusy,
+  );
+  bandsLatchRef.current = nextLastGood(
+    bandsLatchRef.current,
+    projectionBands,
+    projectionBandsBusy,
+  );
+  /** La serie que la vista PINTA: la del servidor, o la última buena mientras llega la siguiente. */
+  const shownSeries = seriesLatchRef.current.value;
+  /** Ídem para el sorteo. */
+  const shownBands = bandsLatchRef.current.value;
+  /** Hay una revalidación en vuelo: el ÚNICO indicio de «calculando» que se permite en pantalla
+   *  es un punto junto al título. Ni spinners que sustituyan contenido, ni contenedores que
+   *  cambien de altura. */
+  const metricsRefreshing =
+    seriesLatchRef.current.refreshing || bandsLatchRef.current.refreshing;
+
   // ── Ejes y rotuladores ────────────────────────────────────────────────────────────────────
-  const axisAgeMode = projectionSeries
-    ? resolveProjectionAxisAgeMode(projectionSeries, installation)
+  const axisAgeMode = shownSeries
+    ? resolveProjectionAxisAgeMode(shownSeries, installation)
     : "dates";
   const axisBirth =
-    projectionSeries?.viewer_birth_date?.trim() || birthDate || null;
-  const axisAnchor = projectionSeries?.anchor_date_ymd?.trim() || null;
-  const mc = projectionSeries?.months ?? 0;
+    shownSeries?.viewer_birth_date?.trim() || birthDate || null;
+  const axisAnchor = shownSeries?.anchor_date_ymd?.trim() || null;
+  const mc = shownSeries?.months ?? 0;
 
   /** Mes de la rejilla → etiqueta del eje. Lo consumen la frase, las tarjetas, el detalle y las
    *  líneas del hogar: una sola definición para que las cuatro digan lo mismo. */
@@ -594,8 +692,13 @@ export function RetirementView({
   const configuredSavingsUsesTransactions = savingsSourceUsesTransactions(
     installation?.installation.fire_settings?.savings_source,
   );
-  const retirementMetricsReady =
-    hasMembership && !projectionBusy && !retirementBusy && projectionSeries != null;
+  /**
+   * Hay cifras que enseñar. **Ya no mira los flags de carga** (W13): con la latch de arriba,
+   * «hay dato» y «hay una recarga en vuelo» son dos preguntas distintas, y mezclarlas era lo que
+   * apagaba la pantalla entera en cada autosave. Lo segundo lo dice `metricsRefreshing`, y su
+   * única consecuencia visible es el punto junto al título.
+   */
+  const retirementMetricsReady = hasMembership && shownSeries != null;
 
   const installationInflationPct = useMemo(() => {
     const raw = installation?.installation.annual_inflation_assumption_percent;
@@ -635,7 +738,7 @@ export function RetirementView({
   const sentence = useMemo(
     () =>
       planSentence({
-        series: retirementMetricsReady ? projectionSeries : null,
+        series: retirementMetricsReady ? shownSeries : null,
         targetRetirementAge: savedProfile.target_retirement_age ?? null,
         monthLabel,
         ageAt,
@@ -647,7 +750,7 @@ export function RetirementView({
       }),
     [
       retirementMetricsReady,
-      projectionSeries,
+      shownSeries,
       savedProfile.target_retirement_age,
       savedProfile.coast_mode,
       monthLabel,
@@ -661,7 +764,7 @@ export function RetirementView({
    *  nombraría un plan que la respuesta del servidor no simuló. */
   const tilesInput = useMemo(
     () => ({
-      series: retirementMetricsReady ? projectionSeries : null,
+      series: retirementMetricsReady ? shownSeries : null,
       currencyIso,
       monthLabel,
       monthAge: ageAt,
@@ -669,7 +772,7 @@ export function RetirementView({
     }),
     [
       retirementMetricsReady,
-      projectionSeries,
+      shownSeries,
       currencyIso,
       monthLabel,
       ageAt,
@@ -701,10 +804,10 @@ export function RetirementView({
   const notices = useMemo(
     () =>
       buildRetirementNotices(
-        retirementMetricsReady ? projectionSeries : null,
+        retirementMetricsReady ? shownSeries : null,
         savedProfile.target_retirement_age ?? null,
       ),
-    [retirementMetricsReady, projectionSeries, savedProfile.target_retirement_age],
+    [retirementMetricsReady, shownSeries, savedProfile.target_retirement_age],
   );
 
   /**
@@ -715,7 +818,7 @@ export function RetirementView({
    * que se saca de los banners de arriba: la misma frase dos veces en la misma pantalla es ruido.
    * Sin bandas cargadas todavía, el banner de arriba es el único sitio donde puede decirse.
    */
-  const noVolatilityInRiskBlock = showsNoVolatilityNotice(projectionBands);
+  const noVolatilityInRiskBlock = showsNoVolatilityNotice(shownBands);
   const topNotices = useMemo(
     () =>
       noVolatilityInRiskBlock
@@ -759,10 +862,10 @@ export function RetirementView({
    * `net_worth_real`), y solo cae a la de la instalación con un backend antiguo.
    */
   const deflationPct = useMemo(() => {
-    const raw = projectionSeries?.deflation_annual_inflation_percent;
+    const raw = shownSeries?.deflation_annual_inflation_percent;
     const parsed = raw != null ? Number(raw) : Number.NaN;
     return Number.isFinite(parsed) ? parsed : installationInflationPct;
-  }, [projectionSeries?.deflation_annual_inflation_percent, installationInflationPct]);
+  }, [shownSeries?.deflation_annual_inflation_percent, installationInflationPct]);
 
   /** UN solo deflactor para patrimonio, objetivo y banda. Deflactar solo unos los separaría y
    *  el abanico dejaría de contener a la línea que dice contener. */
@@ -783,14 +886,14 @@ export function RetirementView({
    * si algún día dejaran de venir.
    */
   const bandPoints = useMemo(() => {
-    if (!projectionBands) return null;
-    return projectionBands.points.flatMap((p) => {
+    if (!shownBands) return null;
+    return shownBands.points.flatMap((p) => {
       const p10 = p.net_worth_liquid_p10;
       const p90 = p.net_worth_liquid_p90;
       if (typeof p10 !== "number" || typeof p90 !== "number") return [];
       return [{ month: p.month_index, p10, p90 }];
     });
-  }, [projectionBands]);
+  }, [shownBands]);
 
   /**
    * La línea PRINCIPAL del chart (decisión C11, issue #228): el patrimonio LÍQUIDO, no el total
@@ -801,8 +904,8 @@ export function RetirementView({
    * comparar.
    */
   const chartNetWorthSeries = useMemo(
-    () => retirementNetWorthSeries(projectionSeries),
-    [projectionSeries],
+    () => retirementNetWorthSeries(shownSeries),
+    [shownSeries],
   );
 
   /**
@@ -811,8 +914,8 @@ export function RetirementView({
    * «calculando»— y su rótulo lleva el éxito, contado con la MISMA función que la frase.
    */
   const validDate = useMemo(
-    () => chartValidDateMark(retirementMetricsReady ? projectionSeries : null),
-    [retirementMetricsReady, projectionSeries],
+    () => chartValidDateMark(retirementMetricsReady ? shownSeries : null),
+    [retirementMetricsReady, shownSeries],
   );
 
   /**
@@ -822,14 +925,14 @@ export function RetirementView({
    * lleva el éxito en el rótulo.
    */
   const chartMarkers = useMemo(() => {
-    const pts = projectionSeries?.points;
+    const pts = shownSeries?.points;
     if (!pts || pts.length === 0) return [];
-    const all = buildRetirementChartMarkers(projectionSeries, {
+    const all = buildRetirementChartMarkers(shownSeries, {
       startMonth: pts[0]!.month_index,
       endMonth: pts[pts.length - 1]!.month_index,
     });
     return validDate.mark == null ? all : all.filter((m) => m.kind !== "retirement");
-  }, [projectionSeries, validDate.mark]);
+  }, [shownSeries, validDate.mark]);
 
   /**
    * Los dos cortes de la escala de color, derivados del UMBRAL DEL PERFIL (C3). Salen de la
@@ -844,9 +947,9 @@ export function RetirementView({
   const riskCutoffs = useMemo(
     () =>
       riskCutoffsForThreshold(
-        projectionSeries?.success_threshold_pct ?? projectionBands?.success_threshold_pct,
+        shownSeries?.success_threshold_pct ?? shownBands?.success_threshold_pct,
       ),
-    [projectionSeries?.success_threshold_pct, projectionBands?.success_threshold_pct],
+    [shownSeries?.success_threshold_pct, shownBands?.success_threshold_pct],
   );
 
   /**
@@ -862,16 +965,16 @@ export function RetirementView({
    * la lectura honesta: una trayectoria de patrimonio, sin un juicio de riesgo encima.
    */
   const gradientStops = useMemo(() => {
-    const pts = projectionSeries?.points;
+    const pts = shownSeries?.points;
     if (!showBand || !pts || pts.length === 0) return [];
-    if (!projectionBands || !showsRiskGradient(projectionBands)) return [];
+    if (!shownBands || !showsRiskGradient(shownBands)) return [];
     return riskGradientStops({
-      points: projectionBands.failure_probability_by_age,
+      points: shownBands.failure_probability_by_age,
       monthStart: pts[0]!.month_index,
       monthEnd: pts[pts.length - 1]!.month_index,
       cutoffs: riskCutoffs,
     });
-  }, [showBand, projectionSeries, projectionBands, riskCutoffs]);
+  }, [showBand, shownSeries, shownBands, riskCutoffs]);
 
   /**
    * Rótulo del hover. Sale de `failureProbabilityAtMonth`, **la misma función que colorea**: un
@@ -882,8 +985,8 @@ export function RetirementView({
    * no suma la cifra que el propio tooltip enseña justo delante.
    */
   const chartHoverLabel = useMemo(() => {
-    if (gradientStops.length < 2 || !projectionBands) return null;
-    const points = projectionBands.failure_probability_by_age;
+    if (gradientStops.length < 2 || !shownBands) return null;
+    const points = shownBands.failure_probability_by_age;
     return (mi: number): string | null => {
       const p = failureProbabilityAtMonth(points, mi);
       if (p == null) return null;
@@ -896,7 +999,7 @@ export function RetirementView({
             )}, regla ${formatPercentDisplay(kinds[2] * 100)})`;
       return `${monthLabel(mi)} · ${formatPercentDisplay(p * 100)} de los escenarios ya han fallado${breakdown}`;
     };
-  }, [gradientStops, projectionBands, monthLabel]);
+  }, [gradientStops, shownBands, monthLabel]);
 
   /**
    * La curva «Capital necesario» (C4), en euros NOMINALES y por MES: la deflactación la aplica
@@ -915,17 +1018,17 @@ export function RetirementView({
    * posición.
    */
   const neededCurve = useMemo(() => {
-    const pts = projectionSeries?.points;
+    const pts = shownSeries?.points;
     if (!pts || pts.length === 0) return null;
-    const values = neededCurveForChart(projectionSeries);
+    const values = neededCurveForChart(shownSeries);
     if (values == null) return null;
     return pts.map((p, i) => ({ month: p.month_index, value: values[i] ?? null }));
-  }, [projectionSeries]);
+  }, [shownSeries]);
 
   /** La tira de éxito por AÑO de jubilación bajo el eje X. El rótulo lo compone la vista, que es
    *  quien sabe si el eje va en fechas o en edades. */
   const successStrip = useMemo(() => {
-    const pts = successStripForChart(retirementMetricsReady ? projectionSeries : null);
+    const pts = successStripForChart(retirementMetricsReady ? shownSeries : null);
     return pts.map((p) => {
       const n = scenariosPerHundred(p.success);
       return {
@@ -937,18 +1040,18 @@ export function RetirementView({
             : `si te fueras en ${monthLabel(p.monthIndex)}: ${n} de cada 100`,
       };
     });
-  }, [retirementMetricsReady, projectionSeries, monthLabel]);
+  }, [retirementMetricsReady, shownSeries, monthLabel]);
 
   // ── Riesgo compacto ───────────────────────────────────────────────────────────────────────
   const riskExtraRows = useMemo(
-    () => buildRiskExtraRows({ bands: projectionBands }),
-    [projectionBands],
+    () => buildRiskExtraRows({ bands: shownBands }),
+    [shownBands],
   );
 
   // ── Hogar (U10): frases por miembro y nada más ────────────────────────────────────────────
   const memberLines = useMemo(
-    () => householdPlanLines(projectionSeries?.members, monthLabel),
-    [projectionSeries?.members, monthLabel],
+    () => householdPlanLines(shownSeries?.members, monthLabel),
+    [shownSeries?.members, monthLabel],
   );
 
   // ── Editores compartidos ──────────────────────────────────────────────────────────────────
@@ -1798,6 +1901,38 @@ export function RetirementView({
     )}/año · ${source}`;
   }
 
+  /**
+   * La tarjeta «Pensión» en DOS sub-columnas (W13): la pensión y el puente.
+   *
+   * **Orden del DOM: pensión primero.** Apilado (móvil, tableta y la columna estrecha) es el
+   * orden correcto — sin pensión declarada el puente ni siquiera existe —, y a lo ancho el CSS
+   * lo invierte con `flex-direction: row-reverse` para dejar el puente a la IZQUIERDA, que es lo
+   * que pidió el owner. Invertir con CSS y no con el DOM mantiene el orden de tabulación y el de
+   * lectura de un lector de pantalla alineados con la dependencia real entre los dos bloques.
+   *
+   * Sin puente que enseñar (pensión no declarada) no se abren sub-columnas: una columna sola con
+   * su rótulo anunciaría una partición que no existe.
+   */
+  const renderPensionCard = (fields: PlanFieldDescriptor[]): ReactNode => {
+    const bridge = fields.filter((f) => BRIDGE_FIELD_IDS.has(f.id));
+    const own = fields.filter((f) => !BRIDGE_FIELD_IDS.has(f.id));
+    if (bridge.length === 0 || own.length === 0) {
+      return fields.map((f) => renderField(f));
+    }
+    return (
+      <div className="retirement-card-cols">
+        <div className="retirement-card-col">
+          <h5 className="retirement-subcard-title">Tu pensión</h5>
+          {own.map((f) => renderField(f))}
+        </div>
+        <div className="retirement-card-col">
+          <h5 className="retirement-subcard-title">El puente hasta la pensión</h5>
+          {bridge.map((f) => renderField(f))}
+        </div>
+      </div>
+    );
+  };
+
   const editingPlan = canEditProfile && retirementProfile != null;
   /** Las tarjetas a pintar, ya sin vacías y en `PLAN_CARD_ORDER` (V3). Una sola lista: el
    *  formulario dejó de tener dos mitades el día que dejó de tener un acordeón. */
@@ -1807,7 +1942,7 @@ export function RetirementView({
   );
 
   const chartReady =
-    hasMembership && projectionSeries != null && projectionSeries.points.length > 0;
+    hasMembership && shownSeries != null && shownSeries.points.length > 0;
 
   // `planPending` (el spinner y el `aria-busy` del panel «Resultado») se retiró en A12: colgaba de
   // `retirement_date_basis === "pending"`, un literal que **el servidor nunca emite** — el nivel 1
@@ -1818,7 +1953,7 @@ export function RetirementView({
   /** El nivel 2 (segundo plano) todavía está resolviendo la curva de capital necesario por edad:
    *  la línea del chart llegará sola en un GET posterior. */
   const neededCurveComputing =
-    retirementMetricsReady && projectionSeries?.needed_capital_curve_state === "computing";
+    retirementMetricsReady && shownSeries?.needed_capital_curve_state === "computing";
 
   /**
    * C5/B4/B11 — sin fecha de nacimiento no hay fecha válida, y hay que decirlo **donde se
@@ -1827,9 +1962,9 @@ export function RetirementView({
    * (`plan_absent_reason`) y el horizonte cayó a su fallback demográfico (`horizon_basis`).
    */
   const birthDateBlocksPlan =
-    projectionSeries != null &&
-    (projectionSeries.plan_absent_reason === "birth_date_missing" ||
-      projectionSeries.horizon_basis === "fallback_no_demographics");
+    shownSeries != null &&
+    (shownSeries.plan_absent_reason === "birth_date_missing" ||
+      shownSeries.horizon_basis === "fallback_no_demographics");
 
   return (
     <div className="workspace">
@@ -1908,7 +2043,19 @@ export function RetirementView({
           ) : null}
         </section>
       ) : (
-        <>
+        /* ── Maquetación de la página (W13): DOS COLUMNAS a ancho completo ─────────────────
+           El owner, 2026-09-07: «datos a la izquierda y resultado a la derecha». Hasta aquí la
+           vista iba «plan arriba, resultado debajo» (U1) y dentro del tope de 66rem de
+           `.app-main`, así que en un monitor ancho la mitad de la pantalla estaba vacía y el
+           resultado quedaba fuera de la vista mientras se tocaba el plan — que es justo cuando
+           hace falta mirarlo.
+
+           La rejilla NO estrena breakpoint: `repeat(auto-fit, minmax(min(100%, 34rem), 1fr))`
+           da dos columnas a partir de ~1.100 px y UNA por debajo, con el plan primero por orden
+           del DOM. Es el mismo idioma que el design system ya sanciona para las bandas de KPIs
+           («no-op en escritorio»), y evita que un ancho concreto quede clavado en un `@media`. */
+        <div className="retirement-layout">
+          <div className="retirement-col retirement-col--plan">
           {/* ── 2 · «Tu plan»: una tarjeta por tema, todo a la vista (V3) ───────────────────
               Sin banner de alta (F5: con una estrategia ya elegida, «Elige tu estrategia» es un
               cartel que sobra — y el flag de `localStorage` que lo descartaba nunca miraba el
@@ -1928,9 +2075,7 @@ export function RetirementView({
                   <section
                     key={card}
                     className={`retirement-card${
-                      card === "strategy" || card === "spending"
-                        ? " retirement-card--wide"
-                        : ""
+                      WIDE_PLAN_CARDS.has(card) ? " retirement-card--wide" : ""
                     }`}
                   >
                     <h4
@@ -1979,6 +2124,8 @@ export function RetirementView({
                             </label>
                           ))}
                         </div>
+                      ) : card === "pension" ? (
+                        renderPensionCard(fields)
                       ) : (
                         fields.map((f) => renderField(f))
                       )}
@@ -2004,15 +2151,32 @@ export function RetirementView({
               </div>
             )}
           </section>
+          </div>
 
+          <div className="retirement-col retirement-col--result">
           {/* ── 3 · «Resultado» ───────────────────────────────────────────────────────────── */}
           <section className="panel">
-            <div className="panel-head-row">
+            <div className="panel-head-row retirement-result-head">
               <h3 className="panel-title">Resultado</h3>
               <HelpPopover
                 title={HELP_TEXTS["retirement.plan_sentence"].title}
                 body={HELP_TEXTS["retirement.plan_sentence"].body}
               />
+              {/* W13 — el ÚNICO indicio de «se está recalculando». Un punto y una palabra junto
+                  al título: no sustituye contenido, no ocupa una línea propia y no cambia la
+                  altura de nada (`.retirement-refreshing` no envuelve). Lo que había antes era
+                  la pantalla entera apagándose, que es lo que el owner leyó como parpadeo. */}
+              {metricsRefreshing ? (
+                /* SIN `aria-live`: el indicador de guardado de la cabecera ya es una región viva
+                   (`role="status"`, `saveIndicatorLabel`) y anuncia «Guardando…» en el mismo
+                   instante. Dos regiones vivas que se disparan a la vez con cada tecla convierten
+                   el lector de pantalla en el equivalente sonoro del parpadeo que esto arregla.
+                   El texto sigue ahí y se lee al navegar por la cabecera. */
+                <span className="retirement-refreshing">
+                  <span className="retirement-refreshing-dot" aria-hidden />
+                  Actualizando…
+                </span>
+              ) : null}
             </div>
 
             {/* U7 — la cabecera de resultados es una FRASE, no tres tarjetas que el usuario
@@ -2022,11 +2186,17 @@ export function RetirementView({
             <p className={`retirement-sentence retirement-sentence--${sentence.tone}`}>
               {retirementMetricsReady ? sentence.text : "Calculando tu plan…"}
             </p>
-            {profileDirty ? (
-              <p className="muted tight">
-                Tus cambios aún no están en estas cifras: se recalculan al guardar.
-              </p>
-            ) : null}
+            {/* W13 — slot de altura RESERVADA. La nota aparece al teclear y desaparece cuando el
+                guardado cuaja: sin el slot, esa línea entraba y salía del flujo justo en el
+                instante en que las cifras de abajo se actualizan, y la página daba el salto que
+                el owner describe como «la altura baila». */}
+            <div className="retirement-note-slot">
+              {profileDirty ? (
+                <p className="muted tight">
+                  Tus cambios aún no están en estas cifras: se recalculan al guardar.
+                </p>
+              ) : null}
+            </div>
 
             {/* Todos los avisos, con su piel: el rojo de D17 como error y los ámbar como info.
                 No es un error (la simulación existe y la fecha no se mueve): dicen que el plan
@@ -2062,7 +2232,20 @@ export function RetirementView({
 
             {/* U7 — como mucho TRES tarjetas, una cifra por tarjeta y el subtítulo COMPLETO: la
                 base de la cifra vive ahí, y media base es peor que ninguna. */}
-            {tiles.length > 0 ? (
+            {tiles.length === 0 ? (
+              /* W13 — placeholders del MISMO tamaño, no un hueco. `buildRetirementTilesV2`
+                 devuelve siempre 2–3 tarjetas en cuanto hay serie, así que una lista vacía solo
+                 significa «todavía no ha llegado la primera respuesta»: reservar su altura evita
+                 que la página entera se desplace cuando llega. */
+              <div
+                className="metric-grid retirement-tiles-grid retirement-tiles-grid--placeholder"
+                aria-hidden
+              >
+                <div className="retirement-tile-placeholder" />
+                <div className="retirement-tile-placeholder" />
+                <div className="retirement-tile-placeholder" />
+              </div>
+            ) : (
               <div className="metric-grid retirement-tiles-grid">
                 {tiles.map((t) => (
                   <MetricCard
@@ -2082,13 +2265,17 @@ export function RetirementView({
                   />
                 ))}
               </div>
-            ) : null}
+            )}
 
-            {/* Nivel 2 en segundo plano: la curva de capital necesario por edad llegará sola.
-                Se dice en vez de dejar el chart sin su línea auxiliar sin explicación. */}
-            {neededCurveComputing ? (
-              <p className="muted tight">Calculando el capital necesario por edad…</p>
-            ) : null}
+            {/* Nivel 2 en segundo plano: la curva de capital necesario por edad llegará sola —
+                y desde W13 se PIDE sola (sondeo con backoff en `App.tsx`, cotas en
+                `lib/stale-data.ts`), en vez de quedarse en «calculando» hasta que el usuario
+                cambiara de pestaña. Mismo slot de altura reservada que la nota de arriba. */}
+            <div className="retirement-note-slot">
+              {neededCurveComputing ? (
+                <p className="muted tight">Calculando el capital necesario por edad…</p>
+              ) : null}
+            </div>
 
             {/* U5 — UN gráfico: patrimonio, capital necesario, banda de escenarios, la marca de
                 tu fecha y los hitos del plan, todos sobre el mismo eje y hasta el horizonte.
@@ -2114,7 +2301,7 @@ export function RetirementView({
                   ) : null}
                 </div>
                 <MiniProjection
-                  series={projectionSeries}
+                  series={shownSeries}
                   height={260}
                   /* El hito de jubilación lo dibujan la MARCA de la fecha (con su éxito en el
                      rótulo) y, si no la hay, las marcas secundarias: dejar también `showJub`
@@ -2268,7 +2455,7 @@ export function RetirementView({
               <h4 className="panel-title">Riesgo</h4>
               {projectionBandsError ? (
                 <div className="banner error-banner">{projectionBandsError}</div>
-              ) : !projectionBands ? (
+              ) : !shownBands ? (
                 projectionBandsBusy ? (
                   <p className="muted tight">Sorteando escenarios…</p>
                 ) : (
@@ -2314,19 +2501,19 @@ export function RetirementView({
                       del sorteo: — sobre 2500 caminos», un guion mudo que se lee como «el dato no
                       ha llegado» cuando lo cierto es que la pregunta no tiene respuesta. Se
                       sustituye por el MOTIVO, que es lo único que se puede afirmar. */}
-                  {projectionBands.success_absent_reason != null ? (
+                  {shownBands.success_absent_reason != null ? (
                     <p className="muted tight">
                       Sin éxito que medir:{" "}
-                      {successAbsentReasonEs(projectionBands.success_absent_reason)}. Los{" "}
-                      {projectionBands.paths} caminos sorteados describen tu patrimonio sin
+                      {successAbsentReasonEs(shownBands.success_absent_reason)}. Los{" "}
+                      {shownBands.paths} caminos sorteados describen tu patrimonio sin
                       jubilarte: la banda sigue siendo tuya, pero no hay ningún plan al que
                       ponerle una probabilidad.
                     </p>
                   ) : (
                     <p className="muted tight">
                       Precisión del sorteo:{" "}
-                      {formatSamplingErrorPp(projectionBands.success_sampling_error_pp)} sobre{" "}
-                      {projectionBands.paths} caminos (intervalo de Wilson al 95 %; con cero
+                      {formatSamplingErrorPp(shownBands.success_sampling_error_pp)} sobre{" "}
+                      {shownBands.paths} caminos (intervalo de Wilson al 95 %; con cero
                       fallos, la cota de la regla de tres).
                     </p>
                   )}
@@ -2362,7 +2549,7 @@ export function RetirementView({
                   ) : null}
                   {/* Coste, tamaño de la muestra y semilla: sin ellos la probabilidad no tiene
                       precisión declarada ni se puede reproducir el sorteo. */}
-                  <p className="risk-footnote">{riskFootnote(projectionBands)}</p>
+                  <p className="risk-footnote">{riskFootnote(shownBands)}</p>
                 </>
               )}
             </div>
@@ -2372,7 +2559,7 @@ export function RetirementView({
                 cifra de arriba en vez de responder una pregunta propia— más los avisos. Que
                 estén plegadas no las hace opcionales; que estén fuera de la cabecera es lo que
                 permite leer la cabecera de un vistazo. */}
-            {planDetailRows.length > 0 || projectionBands ? (
+            {planDetailRows.length > 0 || shownBands ? (
               <details className="retirement-detail bordered-top">
                 <summary className="details-trigger">Detalle del cálculo</summary>
                 <div className="risk-extra-rows">
@@ -2394,7 +2581,7 @@ export function RetirementView({
                       </div>
                     </div>
                   ))}
-                  {projectionBands ? (
+                  {shownBands ? (
                     <div className="risk-extra-row">
                       <div className="risk-extra-head">
                         <span className="label-with-help risk-extra-label">
@@ -2415,14 +2602,14 @@ export function RetirementView({
               </details>
             ) : null}
           </section>
-
-        </>
+          </div>
+        </div>
       )}
 
       {hasMembership &&
       !projectionBusy &&
       !retirementBusy &&
-      (!projectionSeries || !retirementBudgetSnapshot) ? (
+      (!shownSeries || !retirementBudgetSnapshot) ? (
         <div className="banner info-banner">Sin datos.</div>
       ) : null}
     </div>

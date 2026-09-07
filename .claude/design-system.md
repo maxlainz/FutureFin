@@ -162,7 +162,7 @@ Reglas de presentación de toda cifra y texto del UI (los helpers viven en
 
 ## Layout
 
-- **Ancho de contenido**: `max-width: 66rem` (`app-main`). Antes era ancho completo; ahora el contenido se centra. Proyección sigue siendo full-bleed (`.app-main--projection-fullbleed`).
+- **Ancho de contenido**: `max-width: 66rem` (`app-main`). Antes era ancho completo; ahora el contenido se centra. **Dos pestañas se salen del tope, y por motivos distintos**: Proyección es full-bleed (`.app-main--projection-fullbleed` — además convierte `<main>` en un flex con `overflow: hidden` para que el chart ocupe el viewport) y **Jubilación** usa `.app-main--wide` (W13, 2026-09-07), que **solo** suelta el `max-width`: la página sigue siendo scroll vertical normal. Una vista se lleva `--wide` cuando su contenido son DOS columnas que a 66 rem caerían por debajo de ~500 px cada una; si lo que necesita es que un chart ocupe la ventana, lo suyo es el full-bleed, no esto.
 - **KPIs**:
   - Tile con borde + paper, radius `--ff-radius-kpi`, `align-self: stretch` para alinear en altura.
   - **Slot del paréntesis siempre presente** — `MetricCard` renderiza un `<div>` con `&nbsp;` cuando no hay valor, para que dos KPIs en la misma fila tengan baseline alineada. La info adicional de una KPI va **siempre en la prop `parenthetical`, nunca en `suffix`**.
@@ -511,13 +511,21 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 
 > **Segmented control (`.ff-theme-toggle`)**: dos consumidores desde 5.0.0 — el toggle de tema Auto/Claro/Oscuro (`ThemeToggle`, clase base `.ff-theme-toggle`) y el segmentado «Yo | Hogar» de la TopBar (`.ff-theme-toggle.ff-topbar-scope`, ver §Shell), que reusa la misma piel con una modificadora que solo compacta padding/tipografía — cero declaraciones nuevas de color. **Ya no es cierto que sea el único que queda**; si actualizas este párrafo por un tercer consumidor, dilo aquí y no lo dejes desactualizado otra vez. La antigua clase compartida **`.ff-segmented` se eliminó** tras 2.0.0: la «fuente del ahorro» de la entonces `Ajustes → Proyección` (hoy `Ajustes → Plan`) pasó a un `<select>` nativo estándar (con `<small>` de ayuda asociada por `aria-describedby`, fuera del `<label>`). Si necesitas un nuevo control inline de 2–3 opciones, valora primero un `<select>`; si de verdad hace falta un segmented con botones, extiende `.ff-theme-toggle` con una modificadora (precedente: `.ff-topbar-scope`), no reintroduzcas `.ff-segmented`. Verifica claro **y** oscuro.
 
-> **Radio-cards de configuración (`.retirement-mode-card`/`.retirement-mode-grid`)**: NO son un segmented — son `<label>` con un `<input type="radio" className="sr-only">` dentro, estilados como tarjeta (borde + `is-active` con tinte de acento). Nacieron para el modo del objetivo anual de Jubilación y 5.0.0 (D26, issue #207) los reusa tal cual para las **5 tarjetas de estrategia** (`RetirementView.tsx`, modificadora `.retirement-strategy-grid`: mismo `grid-template-columns` pero `repeat(auto-fit, minmax(min(100%, 15rem), 1fr))` porque cinco no caben en la rejilla fija de 3 del modo del objetivo — no-op en escritorio, colapsa solo en móvil, sin breakpoint nuevo).
+> **Radio-cards de configuración (`.retirement-mode-card`/`.retirement-mode-grid`)**: NO son un segmented — son `<label>` con un `<input type="radio" className="sr-only">` dentro, estilados como tarjeta (borde + `is-active` con tinte de acento). Nacieron para el modo del objetivo anual de Jubilación y 5.0.0 (D26, issue #207) los reusa tal cual para las **tarjetas de estrategia** (`RetirementView.tsx`, modificadora `.retirement-strategy-grid`: mismo `grid-template-columns` pero `repeat(auto-fit, minmax(min(100%, 15rem), 1fr))` — no-op en escritorio, colapsa solo en móvil, sin breakpoint nuevo).
 >
-> **Las dos rejillas de radio-cards viven en tarjetas ANCHAS.** Desde V3 las dos (estrategia y modo
-> del objetivo) caen dentro de una `.retirement-card`, y la columna de la rejilla de tarjetas mide
-> 21 rem: una radio-card de ~7 rem no cabe con su nombre en una línea. Por eso «Estrategia» y
-> «Gasto en jubilación» llevan `.retirement-card--wide` (`grid-column: 1 / -1`). Si añades una
-> tercera rejilla de radio-cards, su tarjeta va ancha también.
+> **W13 (2026-09-07) retiró el override `.retirement-mode-grid.retirement-strategy-grid`** que fijaba
+> `repeat(5, minmax(0, 1fr))` con dos media queries de VIEWPORT (`bp:strategy 1023` y una de 640).
+> Dos motivos acumulados: contaba CINCO estrategias cuando desde C7 son **cuatro** (la quinta columna
+> estaba vacía en todos los anchos), y con la página en dos columnas el ancho del viewport dejó de
+> decir nada del ancho de la tarjeta — a 1280 px la rejilla de cinco caía dentro de una columna de
+> ~570 px y cada opción se quedaba en 114 px. **`bp:strategy 1023` ya no existe**: no lo cites como
+> excepción viva. La lección general: una rejilla dentro de una tarjeta se reparte por el ancho de su
+> CONTENEDOR (`auto-fit`), nunca por el del viewport.
+>
+> **Las rejillas de radio-cards viven en tarjetas ANCHAS.** Estrategia y modo del objetivo caen
+> dentro de una `.retirement-card`, y a media fila una radio-card de ~7 rem no cabe con su nombre en
+> una línea. Por eso «Estrategia» y «Gasto en jubilación» llevan `.retirement-card--wide`
+> (`grid-column: 1 / -1`). Si añades una tercera rejilla de radio-cards, su tarjeta va ancha también.
 
 ### Tarjetas de configuración (`.retirement-card*`) — 5.0.0, V3 de la tercera vuelta de UX
 
@@ -527,14 +535,30 @@ jubilación…) en vez de macrobloques confusos» (F9). El formulario de Jubilac
 tarjeta por TEMA, todo a la vista**: Estrategia · Edades · Pensión · Gasto en jubilación · Retirada ·
 Horizonte.
 
-- `.retirement-card-grid`: `repeat(auto-fit, minmax(min(100%, 21rem), 1fr))`, `gap: 1rem`. **Dos
-  columnas en escritorio y no una**: seis tarjetas apiladas dejarían el panel «Resultado» a dos
-  pantallas de scroll, y U1 dice que el resultado va DEBAJO del plan — debajo, no lejos. Sin
-  breakpoint nuevo.
+- `.retirement-card-grid`: `repeat(auto-fit, minmax(min(100%, 24rem), 1fr))`, `gap: 1rem`, sin
+  breakpoint. **El mínimo subió de 21 rem a 24 rem con la maquetación en dos columnas (W13)**: el
+  plan ya no ocupa la página entera sino una columna de ~600 px (1280) a ~780 px (1600), y con 21 rem
+  esa columna daba DOS tarjetas por fila de ~360 px — con lo que las rejillas de tres modos que viven
+  dentro caían a ~105 px por opción. A 24 rem la columna del plan es de UNA tarjeta hasta bien pasados
+  los 1600 px, y la página apilada (por debajo de ~1100 px) sigue dando dos.
 - `.retirement-card`: borde `--ff-line-soft`, radio `--ff-radius-kpi`, fondo
   `color-mix(in oklch, var(--ff-paper) 60%, var(--ff-bg))` — un escalón por debajo del panel que las
   contiene, para que se lean como subdivisiones y no como paneles hermanos.
-- `.retirement-card--wide`: `grid-column: 1 / -1` (las dos rejillas de radio-cards, ver arriba).
+- `.retirement-card--wide`: `grid-column: 1 / -1`. **Tres tarjetas desde W13** — las dos de
+  radio-cards (ver arriba) y **«Pensión»**, que el owner señaló por desaprovechar el ancho y que es
+  la única con DOS sub-temas. El criterio, escrito como dato en `WIDE_PLAN_CARDS`
+  (`RetirementView.tsx`): va ancha si su contenido es una rejilla propia o si tiene dos sub-temas que
+  se leen mejor en paralelo. `ages`, `withdrawal` y `horizon` traen uno a tres campos de un mismo
+  tema y se emparejan bien de dos en dos.
+- `.retirement-card-cols` / `.retirement-card-col` / `.retirement-subcard-title` (W13): las dos
+  sub-columnas de «Pensión» — la pensión y su puente. **`flex-direction: row-reverse` + `wrap`**: el
+  DOM va pensión → puente (el orden correcto apilado, y el de tabulación) y en una sola línea el
+  `row-reverse` deja el puente a la IZQUIERDA, que es donde lo pidió el owner. Al envolver, cada uno
+  se lleva su línea y vuelve el orden del DOM. Cero media queries: el corte (~33 rem de tarjeta) lo
+  fija `flex: 1 1 16rem`, y lo decide el ancho REAL de la tarjeta. `.retirement-card-col .field-row`
+  añade `flex-wrap: wrap` con base 9 rem para que un par de campos en fila se apile dentro de una
+  sub-columna estrecha (la regla global `.field-row` la comparten todos los formularios y no se
+  toca).
 - `.retirement-card-blurb`: la frase de qué hace la tarjeta, 0,78 rem `--ff-ink-soft`. **No es
   decoración**: el copy de cada una (`PLAN_CARD_COPY`, `lib/retirement-form.ts`) dice qué cambia y
   qué implica cambiarlo, nunca «aquí van las edades» — un título más no habría arreglado nada.
@@ -629,7 +653,50 @@ una tabla viva: sin consumidor solo podía envejecer. Registrado en `futurefin-f
 > caso «guardado» se queda en tinta muted a propósito (misma regla que el verde sin piel: el estado
 > normal no se tiñe).
 >
-> **`.retirement-radio-stack`** (radios nativos en línea, `<label class="field checkbox-field">` por opción, `role="radiogroup"` en el contenedor): existía en `App.css` **sin ningún consumidor** antes de 5.0.0. `9ae5c24` le da los dos primeros — la base del objetivo (`perpetuity`/`bridge_to_pension`) y el `kind` de la regla de retirada, ambos en `RetirementView.tsx` (`grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` → 2). No lo confundas con el segmented: aquí el foco/tabulación son los `<input>` nativos, no un `role="group"` de botones.
+> **`.retirement-radio-stack`** (radios nativos en línea, `<label class="field checkbox-field">` por opción, `role="radiogroup"` en el contenedor): existía en `App.css` **sin ningún consumidor** antes de 5.0.0. `9ae5c24` le dio dos —la base del objetivo (`perpetuity`/`bridge_to_pension`) y el `kind` de la regla de retirada—, y el **modelo de jubilación v2 (2026-09-06) se llevó el primero con el objetivo**: hoy queda UNO, el `spend_mode` de la regla de retirada en `RetirementView.tsx` (cuenta viva: `grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx`; si algún día imprime 0, la clase se retira de `App.css` como sus vecinas huérfanas). No lo confundas con el segmented: aquí el foco/tabulación son los `<input>` nativos, no un `role="group"` de botones.
+
+### Jubilación en dos columnas y sin parpadeo (W13 — informe del owner, 2026-09-07)
+
+Tres reglas nuevas, las tres nacidas del mismo informe: «durante el cálculo la GUI parpadea
+constantemente… si recargara in situ sin mover nada aún sería tolerable», «datos a la izquierda y
+resultado a la derecha», «el módulo de pensión no usa el ancho completo».
+
+**1 · La página: `.retirement-layout` + `.retirement-col`.** `repeat(auto-fit, minmax(min(100%,
+34rem), 1fr))` con `align-items: start` — dos columnas a partir de ~1.100 px (plan a la izquierda,
+resultado a la derecha) y UNA por debajo, con el plan primero por orden del DOM. **Sin breakpoint
+nuevo**: es el idioma `minmax(min(100%, X), 1fr)` que la §Invariante de regresión ya sanciona. Un
+`@media` con un ancho clavado solo arregla una franja y reabre el problema en el monitor siguiente —
+la misma razón por la que W13 retiró `bp:strategy 1023`. `.retirement-col > .panel { margin-bottom:
+0 }` porque el hueco lo pone el `gap` de la columna. **No hay `position: sticky`** en la columna
+derecha: gatearla al caso de dos columnas exigiría el breakpoint que esto evita, y un contenedor con
+scroll propio dentro de la página compite con el scroll de la página.
+
+**2 · Stale-while-revalidate, y la altura no baila.** La causa del parpadeo NO era CSS: el panel
+«Resultado» entero colgaba de `retirementMetricsReady`, que incluía `!projectionBusy &&
+!retirementBusy`. Cada guardado del autosave dispara un PATCH → refetch de serie + bandas, y durante
+esos 2–5 s la frase volvía a «Calculando…», las tarjetas **se desmontaban** (de ahí el salto de
+altura) y el chart perdía marcas, curva y tira de éxito — con la respuesta anterior intacta en
+memoria. La latch `nextLastGood` (`lib/stale-data.ts`, pura y testeada) conserva la última respuesta
+buena mientras llega la siguiente. Lo que queda en el CSS es la mitad geométrica, y es norma para
+cualquier pantalla que revalide:
+
+- **Un slot de altura reservada por cada nota que aparece y desaparece** (`.retirement-note-slot`,
+  `min-height: 1.6em` — en `em`, porque mide UNA línea del texto que contiene).
+- **Placeholders del mismo tamaño, no un hueco** (`.retirement-tile-placeholder`, la caja de un
+  `MetricCard` sin contenido). **Sin animación**: un esqueleto que late es otra forma de parpadeo.
+- **Reserva para lo que cambia en caliente**: `.retirement-chart-block .ff-chart-legend` lleva
+  `min-height` porque sus entradas aparecen solas cuando aterriza el nivel 2 del cálculo.
+- **`min-height` en la frase-hito** (`.retirement-sentence`, 2,7 em ≈ dos líneas): es un mínimo, no
+  un recorte — media frase es peor que una frase larga.
+- **Un solo indicio de recarga**: `.retirement-refreshing` (punto de acento + «Actualizando…»), en la
+  fila del título, `nowrap`, `margin-left: auto`. **Nunca un spinner que sustituya contenido ni un
+  contenedor que cambie de altura.** El punto pulsa con `ff-retirement-pulse` y la animación se apaga
+  con `prefers-reduced-motion` (encendido fijo dice lo mismo). `.panel-head-row` reparte con
+  `space-between`, que con tres hijos dejaría el interrogante flotando en medio: la modificadora
+  `.retirement-result-head` agrupa a la izquierda y manda el indicador al borde.
+
+**3 · La tarjeta «Pensión»**: ver §Tarjetas de configuración (`.retirement-card-cols`, el
+`row-reverse` que deja el puente a la izquierda sin invertir el DOM).
 
 ## Iconografía
 
@@ -874,3 +941,15 @@ Proyección y el Resumen conservan el total. Re-verify with:
 - Único consumidor, y con la etiqueta de leyenda correcta: `grep -n "netWorthSeries={chartNetWorthSeries}" apps/web/src/views/RetirementView.tsx` y `grep -n "Patrimonio líquido" apps/web/src/views/RetirementView.tsx` (Resumen y Proyección siguen diciendo «Patrimonio neto»: `grep -c "Patrimonio líquido" apps/web/src/views/SummaryView.tsx apps/web/src/views/ProjectionNetWorthChart.tsx` → **0** en los dos)
 - La banda de esa vista es la líquida: `grep -n "net_worth_liquid_p10\|net_worth_liquid_p90" apps/web/src/views/RetirementView.tsx`
 - La extracción vive pura y testeada: `grep -n "export function retirementNetWorthSeries" apps/web/src/lib/retirement-chart.ts` y `grep -c "it(" apps/web/src/lib/retirement-chart.test.ts`
+
+**Añadido en W13 (informe del owner 2026-09-07, rama `release/5.0.0`)**: §Jubilación en dos columnas
+y sin parpadeo, `.app-main--wide`, las sub-columnas de «Pensión» y la retirada de `bp:strategy 1023`.
+Re-verify with:
+
+- La vista pide ancho completo y NO el full-bleed de Proyección: `grep -n "app-main--wide" apps/web/src/App.tsx apps/web/src/App.css`
+- La rejilla de dos columnas no estrena breakpoint: `grep -n "retirement-layout" -A 4 apps/web/src/App.css` (un `auto-fit`, ningún `@media`)
+- `bp:strategy` ya no existe como media query: `grep -c "bp:strategy" apps/web/src/App.css` (**1** — solo la nota que cuenta su retirada; si sube a 2, alguien la ha reintroducido)
+- La latch de datos es pura y está testeada: `grep -n "export function nextLastGood" apps/web/src/lib/stale-data.ts` y `grep -c "it(" apps/web/src/lib/stale-data.test.ts`
+- `retirementMetricsReady` ya NO mira los flags de carga: `grep -n "const retirementMetricsReady" -A 1 apps/web/src/views/RetirementView.tsx` (sin `projectionBusy`)
+- El sondeo del nivel 2 para en `ready`/`unavailable`: `grep -n "shouldPollNeededCurve" apps/web/src/App.tsx apps/web/src/lib/stale-data.ts`
+- «Pensión» es tarjeta ancha y se parte en dos: `grep -n "WIDE_PLAN_CARDS\|retirement-card-cols" apps/web/src/views/RetirementView.tsx`
