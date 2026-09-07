@@ -171,23 +171,29 @@ export type NeededCurveSeries = Pick<
 >;
 
 /**
- * `needed_capital_curve` → los valores YA DEFLACTADOS y paralelos a `series.points`.
+ * `needed_capital_curve` → los valores tal cual, paralelos a `series.points`.
  *
  * Es la curva REAL de capital necesario por edad (C4), no un objetivo descontado a una tasa
  * escalar: cada punto es una bisección estocástica más del motor. Por eso se dibuja como curva y
  * NO entra en la familia del retirado `fire_target_series`.
  *
- * **Base de la deflactación (contrato, no supuesto).** `needed_capital_curve` viaja en euros
+ * **Contrato: NOMINAL, y esta función NO deflacta.** `needed_capital_curve` viaja en euros
  * NOMINALES de cada mes (`api/types.ts`, doc del campo: «`amount_nominal` del nodo»), como el
- * patrimonio, así que se le aplica el MISMO `deflator` mes a mes. Si el servidor la publicara ya
- * en euros de hoy, el toggle «En dinero de hoy» la deflactaría dos veces — un fallo visible, no
- * silencioso. Lo que el contrato NO promete es que la curva cruce la línea en la fecha válida:
+ * patrimonio y como `bandPoints`/`netWorthSeries` — el mismo par (llamante entrega nominal,
+ * componente deflacta una vez) que sigue todo lo demás que dibuja `MiniProjection`. Deflactar
+ * aquí Y otra vez en el componente fue exactamente el bug que esta función tuvo hasta el 5.0.0
+ * (issue #228 W12): con «En dinero de hoy» activo la curva se encogía dos veces y el objetivo
+ * publicado quedaba muy por debajo del real. Un llamante que necesite el importe DEFLACTADO
+ * (p.ej. `neededCapitalAtRetirement`, que no pasa por `MiniProjection` sino que consume el
+ * número directamente) aplica su propio deflactor DESPUÉS de llamar aquí, nunca dentro.
+ *
+ * Lo que el contrato NO promete es que la curva cruce la línea de patrimonio en la fecha válida:
  * la fecha la decide el éxito camino a camino y la curva es otra pregunta (cuánto líquido hace
  * falta para jubilarse en cada mes), así que la marca vertical y el cruce visual pueden no
  * coincidir por diseño. (`needed_capital_today`, en cambio, SÍ declara euros de hoy y no pasa
  * por aquí.)
  *
- * Cuatro reglas, todas ellas cosas que se rompen sin que nada falle:
+ * Tres reglas, todas ellas cosas que se rompen sin que nada falle:
  *
  *  1. **Estado antes que contenido.** Con `needed_capital_curve_state` distinto de `ready` no hay
  *     curva, aunque llegara un array: el nivel 2 sigue resolviéndose y media curva no es media
@@ -197,12 +203,9 @@ export type NeededCurveSeries = Pick<
  *     cuál de las dos mitades es la buena.
  *  3. **Un `null` se conserva como `null`** (nunca 0): ese punto de la curva no está resuelto, y un
  *     cero dibujaría «no necesitas nada» justo donde no se sabe. El trazado rompe la línea ahí.
- *  4. **El deflactor se llama con el `month_index` REAL del punto**, jamás con su posición: con
- *     `density=hybrid` la posición 13 es el mes 24.
  */
 export function neededCurveForChart(
   series: NeededCurveSeries | null | undefined,
-  deflator: (monthIndex: number) => number,
 ): (number | null)[] | null {
   if (!series) return null;
   const state = series.needed_capital_curve_state;
@@ -212,11 +215,7 @@ export function neededCurveForChart(
   const points = series.points;
   if (!Array.isArray(points) || points.length === 0) return null;
   if (raw.length !== points.length) return null;
-  return points.map((p, i) => {
-    const v = raw[i];
-    if (v == null || !Number.isFinite(v)) return null;
-    return v * deflator(p.month_index);
-  });
+  return raw.map((v) => (v == null || !Number.isFinite(v) ? null : v));
 }
 
 /** Un punto de la tira de éxito por año de jubilación: «si te fueras en 2036, N de cada 100». */
@@ -290,6 +289,11 @@ export type NeededCapitalAtRetirement = {
  * no está resuelto. La `basis` sale del pct EFECTIVO, así que «toggle activo con inflación 0» se
  * rotula honestamente como euros de ese mes: el factor vale 1 y las dos bases coinciden, pero la
  * que describe la cifra es la nominal.
+ *
+ * `neededCurveForChart` ya NO deflacta (contrato NOMINAL, ver su doc) — esta función es uno de
+ * los llamantes que sí necesita el importe deflactado (no pasa por `MiniProjection`, consume el
+ * número directamente), así que aplica su propio `deflationFactorAt` UNA vez, después de leer el
+ * nodo, con el `month_index` real de `series.points[pos]` — nunca con la posición.
  */
 export function neededCapitalAtRetirement(
   series: NeededCapitalAtRetirementSeries | null | undefined,
@@ -302,13 +306,17 @@ export function neededCapitalAtRetirement(
   );
   const pct = inflationAdjusted && deflation !== 0 ? deflation : 0;
   const basis: MoneyBasis = pct !== 0 ? "today" : "nominal";
-  const curve = neededCurveForChart(series, (mi) => deflationFactorAt(mi, pct));
+  const curve = neededCurveForChart(series);
   const pos = series?.safe_date_series_position;
   if (curve === null || pos == null || !Number.isFinite(pos)) {
     return { amount: null, basis };
   }
-  const v = curve[pos];
-  return { amount: v == null || !Number.isFinite(v) ? null : v, basis };
+  const raw = curve[pos];
+  const monthIndex = series?.points[pos]?.month_index;
+  if (raw == null || !Number.isFinite(raw) || monthIndex == null) {
+    return { amount: null, basis };
+  }
+  return { amount: raw * deflationFactorAt(monthIndex, pct), basis };
 }
 
 /**

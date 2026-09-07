@@ -1772,7 +1772,7 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         let unmet_month = sale.undrained.unwrap_or_else(M::zero).max(M::zero());
 
         // -------------------------------------------------------------------------------------
-        // **EL VEREDICTO DE ESTE CAMINO** (E1, M3 + C1). Tres motivos, prioridad F1 > F2 > F3
+        // **EL VEREDICTO DE ESTE CAMINO** (E1, M3 + C1, C10). Tres motivos, prioridad F1 > F2 > F3
         // dentro del mismo mes, y un latch monótono que se fija la PRIMERA vez.
         //
         // Solo se evalúa en meses de jubilación o de media jornada, y durante la media jornada
@@ -1781,6 +1781,10 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         // con déficit puede vaciar la cartera —y `assets_depleted_month_index` lo marca—, pero
         // eso no es un plan de jubilación que falla: es un hogar que gasta más de lo que gana
         // hoy, y su remedio es otro.
+        //
+        // **F2 y F3 se deciden solo en `R`** (C10): los dos son propiedades de la FECHA. Después
+        // manda F1 mes a mes, y el recorte de la regla viaja como lectura informativa
+        // (`withdrawal_shortfall`), nunca como fracaso.
         // -------------------------------------------------------------------------------------
         if failure_month_index.is_none() && matches!(phase, Phase::Retired | Phase::Partial) {
             // **F1 — la cartera no pudo cubrir la necesidad.** DOS operandos, y ninguno sobra:
@@ -1796,8 +1800,28 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
             // falte un céntimo.
             let f1 = sale.unfunded_sale && M::strictly_below(M::zero(), unmet_month);
             // **F3 — la regla por saldo permite menos que el gasto ordinario.** Solo con techo
-            // (`fixed_real` devuelve `None`: el permitido ES la necesidad) y solo jubilado.
-            let f3 = matches!(phase, Phase::Retired)
+            // (`fixed_real` devuelve `None`: el permitido ES la necesidad) y **solo en `R`, el
+            // primer mes jubilado** (C10), la MISMA marca que usa la puerta F2 de arriba.
+            //
+            // Mes a mes era un problema de BARRERA, no una medición del plan: con una regla por
+            // saldo el permitido sigue al líquido, que en Monte Carlo pasea con ~17 % de
+            // volatilidad frente a una deriva de ~0,8 %/año, así que sobre 840 meses la
+            // probabilidad de tocar la barrera alguna vez tiende a 1 por la varianza y no por la
+            // salud del plan. Medido sobre la demo sintética con «3,5 % del saldo» +
+            // `rule_is_spend`: el capital necesario hoy salía **2,52 M€** (620 k€ con
+            // `fixed_real`), los 67 fallos de 2.500 caminos eran TODOS F3 y el primero caía
+            // siempre antes de la pensión (mediana: mes 293). Con F3 solo en `R` el mismo hogar
+            // pide 860 k€, y F2 y F3 pasan a ser la misma pregunta en el mes de jubilación —
+            // bruta la de F2 (`12·necesidad ≤ SWR·L(R−1)`), neta la de F3
+            // (`after_tax(regla(L(R−1))) ≥ necesidad`)—. Después de `R` manda F1 mes a mes.
+            //
+            // Retirar F3 del todo NO era la alternativa: colapsaría al suelo de F2 y el modo
+            // porcentual sería infalible por construcción (una fracción del saldo nunca lo vacía,
+            // así que F1 tampoco puede firmar).
+            //
+            // `is_first_retired_month` implica `Phase::Retired`, así que no hace falta
+            // comprobarlo aparte: la fase parcial no pasa por la regla (S1).
+            let f3 = is_first_retired_month
                 && sale
                     .rule_allowance_net
                     .is_some_and(|allowed| M::strictly_below(allowed, ordinary_need));

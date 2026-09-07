@@ -701,9 +701,22 @@ que las dos superficies no pueden discrepar sobre qué cuenta como «tu plan se 
 - **Éxito (E9) = CERO fallos F1/F2/F3 en el camino** — `success_probability` = caminos con
   `failure_month_index.is_none()` / N, la MISMA fuente que clasifica el bucle del motor: F1
   (`PortfolioDepleted`, la cartera no aguanta), F2 (`InitialRateExceeded`, la tasa inicial en `R`
-  excede el tope del perfil o del puente) y F3 (`RuleBelowNeed`, con regla por saldo, el permitido
-  no llega a la necesidad ordinaria). `failures_by_kind: [u32; 3]` cuenta el PRIMER motivo de cada
-  camino fallido, en ese mismo orden.
+  excede el tope del perfil o del puente) y F3 (`RuleBelowNeed`, con regla por saldo, lo que la
+  regla permite con el líquido de ENTRADA no llega a la necesidad ordinaria).
+  `failures_by_kind: [u32; 3]` cuenta el PRIMER motivo de cada camino fallido, en ese mismo orden.
+- **F2 y F3 se juzgan SOLO en `R`; después manda F1** (decisión C10 del owner, 2026-09-07). En `R`
+  los dos son la MISMA pregunta en dos unidades —bruta la de F2 (`12·necesidad ≤ SWR·L(R−1)`), neta
+  la de F3 (`after_tax(regla(L(R−1))) ≥ necesidad`)—, y el recorte que la regla haga más adelante
+  es una LECTURA (`withdrawal_shortfall`, `months_below_need_p50`), nunca un fracaso. **F3 mes a
+  mes era una barrera, no una medición**: el permitido sigue a `L(k−1)`, que pasea con ~17 % de
+  volatilidad frente a una deriva de ~0,8 %/año, así que sobre cientos de meses tocarla alguna vez
+  tiende a probabilidad 1 por la varianza. Medido sobre la demo sintética («3,5 % del saldo» +
+  `rule_is_spend`): capital necesario hoy **2,52 M€** frente a 620 k€ con `fixed_real`, **67 fallos
+  de 2.500 caminos, todos F3**, el primero siempre antes de la pensión (mediana: mes 293). Con F3
+  solo en `R`: **860 k€**. Retirar F3 del todo NO era la alternativa (colapsaría al suelo de F2 y el
+  modo porcentual sería infalible). Regresiones:
+  `crates/engine/tests/phases_wp3.rs::f3_fires_only_in_the_first_retired_month_never_after` y
+  `crates/engine-stochastic/tests/monte_carlo.rs::mc_f3_is_a_property_of_the_plan_not_of_the_draw`.
 - **La cobertura cuenta la necesidad que la CARTERA no pudo fundar Y descuenta el exceso de
   `rule_is_spend`** — dos correcciones sucesivas, ninguna redundante con la otra:
   `withdrawal_to_need_ratio_p50 = Σ max(0, w − excess) / Σ max(0, w + recorte + descubierto − excess)`,

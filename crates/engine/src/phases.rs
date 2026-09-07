@@ -194,7 +194,7 @@ pub struct InitialRateGate {
 /// Con una pensión con fecha a pocos años vista, exigir el SWR de una perpetuidad es exigir
 /// capital para un gasto que la pensión va a cubrir. El puente sube el tope de `R` a `max_pct`
 /// **solo** si la pensión llega dentro de `max_years` años. No hay tope mensual DURANTE el
-/// puente: lo que quede después lo juzgan F1 y F3 mes a mes.
+/// puente: lo que quede después lo juzga F1 mes a mes (F3, como F2, es una propiedad de `R`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeCap {
     /// Tasa inicial máxima ANUAL en % mientras el puente aplica (típicamente > `swr_pct`).
@@ -210,6 +210,9 @@ pub struct BridgeCap {
 /// F1: supuesto S1, las reglas de retirada se anclan en `L(R−1)`, que durante la media jornada
 /// todavía no existe), con prioridad F1 > F2 > F3 dentro del mismo mes.
 ///
+/// **Dos de los tres se deciden UNA vez, en `R`** (C10, 2026-09-07): F2 y F3 son propiedades de
+/// la FECHA de jubilación, no del mes. Después de `R` el único motivo vivo es F1.
+///
 /// **El veredicto de un camino no es el veredicto del PLAN.** El plan se juzga con la proporción
 /// de caminos sin fallo (`crates/engine-stochastic`) contra el umbral del perfil; un camino
 /// determinista que falla no dice más que «este escenario concreto no aguanta».
@@ -222,9 +225,13 @@ pub enum PathFailure {
     /// mes jubilado. No se vuelve a evaluar: es una propiedad de la FECHA, no del mes.
     InitialRateExceeded,
     /// **F3** — con una regla por saldo (`percent_of_balance`, `hybrid`, `guardrails`), lo que
-    /// la regla PERMITE se queda por debajo de la necesidad ordinaria del mes: el hogar tendría
-    /// que recortar su nivel de vida. No aplica a `fixed_real`, donde el permitido ES la
-    /// necesidad por construcción.
+    /// la regla PERMITE con el líquido de entrada se queda por debajo de la necesidad ordinaria:
+    /// el hogar tendría que recortar su nivel de vida ya desde el primer mes. No aplica a
+    /// `fixed_real`, donde el permitido ES la necesidad por construcción.
+    ///
+    /// **Se evalúa SOLO en `R`** (C10), como F2. Mes a mes era un problema de barrera —el
+    /// permitido sigue al líquido, que pasea con la volatilidad de la cartera— y no una medición
+    /// del plan: el recorte posterior es una LECTURA (`withdrawal_shortfall`), no un fracaso.
     RuleBelowNeed,
 }
 

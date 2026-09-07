@@ -671,28 +671,36 @@ fn mc_success_probability_of_the_issue_table() {
     );
 }
 
-/// **`percent_of_balance` no puede AGOTAR la cartera — eso sigue siendo una propiedad del modelo,
-/// no una medición — pero eso ya NO significa que el PLAN tenga éxito (E9, modelo v2).**
+/// **`percent_of_balance` no puede AGOTAR la cartera, y con la regla calibrada al permitido de `R`
+/// tampoco puede romper el plan: lo que hace es RECORTAR, y eso se mide aparte.**
 ///
 /// Con la regla como GASTO (`rule_is_spend`), la retirada del mes es `pct/100 · líquido(k−1)/12`,
 /// que es una FRACCIÓN de la cartera: mientras quede algo, se retira menos que todo, así que F1
 /// (`PortfolioDepleted`) **no puede firmar nunca** aquí — se mide sobre
 /// [`McOutcome::failures_by_kind`], no reconstruyendo el agotamiento a mano.
 ///
-/// **Lo que SÍ cambió con E1 (ya fusionado antes de este WP) es que F3 (`RuleBelowNeed`, «el
-/// permitido no llega a la necesidad ordinaria») se evalúa para CUALQUIER regla por saldo,
-/// `rule_is_spend` incluido** — no solo bajo un techo. Este hogar calibra la necesidad EXACTAMENTE
-/// al 4 % del capital INICIAL (`permitido(mes 1) == necesidad` al euro), así que el primer shock
-/// negativo dentro de los primeros 12 meses deja `L(k−1)` por debajo del capital inicial y el
-/// permitido del mes siguiente cae por debajo de la necesidad: **F3 dispara casi de inmediato en
-/// casi todos los caminos**, medido más abajo. Es exactamente la separación que el modelo v2
-/// quiere hacer visible: la cartera nunca llega a cero, pero un plan sin colchón sobre el gasto
-/// declarado FALLA la mayoría de las veces — «nunca vuelvas a trabajar con este gasto» no se
-/// cumple aunque el dinero nunca se acabe.
+/// **Y desde C10 (2026-09-07) tampoco puede romperlo F3.** F3 (`RuleBelowNeed`, «el permitido no
+/// llega a la necesidad ordinaria») se juzga UNA vez, en `R`, y este hogar está calibrado
+/// EXACTAMENTE al 4 % del capital inicial (`permitido(mes 1) == necesidad` al euro), así que pasa
+/// — y ya no se vuelve a preguntar. Resultado: los 1.000 caminos tienen éxito.
 ///
-/// Lo que esa regla sí hace, además, es **recortar el gasto** en los meses en que falla, y eso se
-/// ve en la otra dimensión (D24): meses por debajo de la necesidad y ratio retirada:necesidad
-/// (corregido en B2, más abajo).
+/// **Este test es la medición que condenó la forma anterior.** Con F3 mes a mes, el permitido
+/// seguía a `L(k−1)`, que pasea con un 17 % de volatilidad frente a una deriva de ~0,8 %/año: el
+/// primer shock negativo dentro de los primeros meses bastaba para cruzar la barrera y marcar el
+/// camino para siempre. Medido con esta misma semilla: **éxito 0,051 — 949 de 1.000 caminos
+/// fallaban por `RuleBelowNeed`**, ninguno por los otros dos motivos, y la cartera no llegaba a
+/// cero en ninguno. Eso no medía la salud del plan, medía la probabilidad de tocar una barrera
+/// sobre 420 meses, que tiende a 1 por la varianza. En la demo sintética el mismo mecanismo pedía
+/// 2,52 M€ de capital necesario hoy (620 k€ con `fixed_real`; 860 k€ con F3 solo en `R`).
+///
+/// Lo que la regla sí hace es **recortar el gasto**, y eso NO desaparece: se sigue midiendo en la
+/// otra dimensión (D24), meses por debajo de la necesidad y ratio retirada:necesidad (corregido en
+/// B2, más abajo). Las dos cifras son BYTE a byte las mismas antes y después de C10 —70 meses de
+/// recorte y 0,9793 de cobertura—, que es la prueba de que lo que se movió es el VEREDICTO y no la
+/// simulación.
+///
+/// La otra mitad del contrato —que F3 sí firma cuando la regla no llega YA en `R`— la mide
+/// [`mc_f3_is_a_property_of_the_plan_not_of_the_draw`], justo debajo.
 #[test]
 fn mc_percent_of_balance_never_ruins_but_cuts_the_spending() {
     let capital = Decimal::from(1_000_000);
@@ -732,23 +740,23 @@ fn mc_percent_of_balance_never_ruins_but_cuts_the_spending() {
         out.failures_by_kind[KIND_PORTFOLIO_DEPLETED], 0,
         "F1 (`PortfolioDepleted`) no puede firmar bajo una regla porcentual: siempre queda algo"
     );
-    // **Pero el PLAN sí falla, y mucho** (hallazgo de este WP, no un ajuste cosmético): con la
-    // necesidad pegada al 4 % del capital INICIAL, el primer shock negativo del sorteo empuja el
-    // permitido del mes siguiente por debajo de la necesidad y dispara F3. Medido con esta semilla:
-    // éxito ≈ 5,1 % (949 de 1.000 caminos fallan por `RuleBelowNeed`, 0 por los otros dos motivos).
-    assert!(
-        out.success_probability < 0.15,
-        "con la necesidad pegada al 4 % inicial, F3 debería disparar en casi todos los caminos: \
-         éxito medido {} (se esperaba < 0,15)",
-        out.success_probability
-    );
     assert_eq!(
         out.failures_by_kind[KIND_INITIAL_RATE_EXCEEDED], 0,
         "este `PhasePlan` no declara `initial_rate`: F2 no puede firmar"
     );
-    assert!(
-        out.failures_by_kind[KIND_RULE_BELOW_NEED] > 0,
-        "el fallo del plan tiene que venir de F3 (la regla no llega a la necesidad), no de la nada"
+    // **Y F3 tampoco, desde C10**: el permitido del mes 1 ES la necesidad al euro, así que la
+    // única comparación que se hace —la de `R`— la pasa, y los shocks posteriores ya no juzgan
+    // nada. Con F3 mes a mes esto valía 949 de 1.000.
+    assert_eq!(
+        out.failures_by_kind[KIND_RULE_BELOW_NEED], 0,
+        "F3 se juzga SOLO en `R`, y en `R` el permitido llega: un shock del mes 40 no jubila mal \
+         a nadie retroactivamente"
+    );
+    assert_eq!(
+        out.success_probability, 1.0,
+        "sin F1 posible, sin puerta de tasa inicial y con F3 superada en `R`, no queda motivo por \
+         el que este plan pueda romperse: éxito medido {}",
+        out.success_probability
     );
     // Y sin embargo hay recorte: la mediana de los caminos pasa meses por debajo de la necesidad.
     assert!(
@@ -788,6 +796,80 @@ fn mc_percent_of_balance_never_ruins_but_cuts_the_spending() {
         "B2: el exceso de `rule_is_spend` inflaba la cobertura antes del fix — antes {ratio_old:.4}, \
          después {ratio:.4} (se esperaba que bajara)"
     );
+}
+
+/// **F3 es una propiedad del PLAN, no del sorteo** (C10) — la otra mitad de
+/// [`mc_percent_of_balance_never_ruins_but_cuts_the_spending`].
+///
+/// Desde que F3 se juzga solo en `R` y este laboratorio se jubila en el mes 1, la comparación se
+/// hace contra `L(0)`, que es el capital declarado: **el mismo número en los 1.000 caminos, antes
+/// de que el sorteo haya movido un euro**. Así que el veredicto es binario y determinista — o
+/// fallan todos, o no falla ninguno—, y eso es exactamente lo que se quería: la regla de retirada
+/// se juzga contra la cartera con la que te jubilas, no contra la que el mercado te deje después.
+///
+/// Predicho: 1.000.000 € y una regla al 4 % ⇒ permitido en `R` = `1.000.000 × 0,04 / 12 =
+/// 3.333,33 €/mes`. Con una necesidad de **3.400 €** la regla NO llega ⇒ los 1.000 caminos fallan
+/// por `RuleBelowNeed` en el mes 1 (`success = 0`, reparto `[0, 0, 1.000]`), y con **3.300 €** sí
+/// llega ⇒ ninguno falla. Y las dos cifras no se mueven al cambiar la semilla: el mismo plan da el
+/// mismo veredicto con otro mercado.
+#[test]
+fn mc_f3_is_a_property_of_the_plan_not_of_the_draw() {
+    let run = |monthly_expense: i64, seed: u64| {
+        let mut input = single_asset_retiree(
+            Decimal::from(1_000_000),
+            Decimal::from(monthly_expense),
+            Decimal::try_from(6.5).unwrap(),
+            420,
+        );
+        input.phase_plan.withdrawal = WithdrawalRule::PercentOfBalance {
+            pct: Decimal::from(4),
+        };
+        input.phase_plan.spend_mode = SpendMode::RuleIsSpend;
+        let config = McConfig {
+            seed,
+            paths: 1_000,
+            percentiles: vec![50],
+        };
+        project_percentile_bands(&input, &[Some(17.0)], &config).expect("no falla")
+    };
+
+    // (a) La regla no llega YA en `R`: 3.333,33 < 3.400 ⇒ fallan los 1.000, en el mes 1.
+    let short = run(3_400, 207);
+    println!(
+        "[F3 en R] necesidad 3.400 > permitido 3.333,33 · éxito = {}   reparto = {:?}",
+        short.success_probability, short.failures_by_kind
+    );
+    assert_eq!(short.success_probability, 0.0);
+    assert_eq!(
+        short.failures_by_kind,
+        [0, 0, 1_000],
+        "el motivo es F3 y solo F3: la cartera no se agota y no hay puerta de tasa inicial"
+    );
+    let first = *short
+        .cumulative_failure_by_age
+        .first()
+        .expect("hay fecha de jubilación, así que hay tabla");
+    assert_eq!(
+        first,
+        (1, 1.0),
+        "y el fallo está fechado EN `R`: la primera fila de la curva ya es el 100 %"
+    );
+
+    // (b) Un plan con 100 € menos de gasto pasa la misma comparación y no falla NUNCA, ni con la
+    //     volatilidad del 17 % durante 35 años: después de `R` solo podría firmar F1, y una
+    //     fracción del saldo jamás lo vacía.
+    let ok = run(3_300, 207);
+    println!(
+        "[F3 en R] necesidad 3.300 < permitido 3.333,33 · éxito = {}   reparto = {:?}",
+        ok.success_probability, ok.failures_by_kind
+    );
+    assert_eq!(ok.success_probability, 1.0);
+    assert_eq!(ok.failures_by_kind, [0, 0, 0]);
+
+    // (c) Y el veredicto NO depende del mercado sorteado: otra semilla, mismos dos resultados.
+    //     Es lo que separa «una propiedad del plan» de «una barrera que la varianza acaba tocando».
+    assert_eq!(run(3_400, 4_242).failures_by_kind, [0, 0, 1_000]);
+    assert_eq!(run(3_300, 4_242).failures_by_kind, [0, 0, 0]);
 }
 
 // =================================================================================================

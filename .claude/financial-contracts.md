@@ -512,7 +512,8 @@ meses— ponía la fecha válida de la demo en la edad de la pensión (72) y el 
 dentro de la ventana: `P − R ≤ 12·max_years`, con `P` el mes del BUCLE en que la pensión entra en
 caja (`start_index + 1`). La resta es con signo: una pensión que YA se cobra en `R` entra en la
 ventana, y ahí el tope mayor se aplica a una necesidad que **ya está neta de esa pensión**. No hay
-tope mensual durante el puente: lo que queda después lo juzgan F1 y F3 mes a mes.
+tope mensual durante el puente: lo que queda después lo juzga F1 mes a mes (F3, como F2, se decide
+en `R`).
 
 **Los tres motivos de fallo de UN camino** (`PathFailure`, literales públicos entre paréntesis),
 evaluados solo en meses `Retired` o `Partial`, con prioridad **F1 > F2 > F3** dentro del mismo mes
@@ -523,7 +524,7 @@ movidos):
 |---|---|---|
 | F1 | `PortfolioDepleted` (`portfolio_depleted`) | la venta del mes no se pudo fundar (`unfunded_sale`, el booleano que publica el paseo) **y** quedó necesidad neta sin cubrir (`unmet_need > 0`) |
 | F2 | `InitialRateExceeded` (`initial_rate_exceeded`) | la puerta de arriba, **solo en `R`** |
-| F3 | `RuleBelowNeed` (`rule_below_need`) | con regla por saldo (`percent_of_balance`, `hybrid`, `guardrails`; **nunca** `fixed_real`), el NETO que la regla permitió está por debajo de la necesidad ORDINARIA del mes |
+| F3 | `RuleBelowNeed` (`rule_below_need`) | con regla por saldo (`percent_of_balance`, `hybrid`, `guardrails`; **nunca** `fixed_real`), el NETO que la regla permitió está por debajo de la necesidad ORDINARIA — **solo en `R`**, igual que F2 (C10) |
 
 - **S1 — durante la media jornada solo puede fallar F1**: las reglas se anclan en `L(R−1)`, que
   todavía no existe, y la tasa inicial es una propiedad de la fecha de jubilación total.
@@ -542,6 +543,21 @@ movidos):
 - **F3 mira la ordinaria, no el déficit de caja**: una cuota de hipoteca puede atar el techo de la
   regla (y generar `withdrawal_shortfall`) sin que el gasto de vivir quede descubierto. Regresión:
   `f3_ignores_the_mortgage_and_looks_at_the_ordinary_need`.
+- **F3 se juzga SOLO en `R`** (decisión C10 del owner, 2026-09-07), como F2: los dos preguntan por
+  la FECHA. Con `R` fijo, F2 y F3 son la misma pregunta en dos unidades —bruta la de F2
+  (`12·necesidad ≤ SWR·L(R−1)`), neta la de F3 (`after_tax(regla(L(R−1))) ≥ necesidad`)— y después
+  de `R` el único motivo vivo es F1; el recorte posterior de la regla es una LECTURA
+  (`withdrawal_shortfall`, informativo por contrato), no un fracaso. **Mes a mes era una barrera,
+  no una medición**: el permitido sigue a `L(k−1)`, que pasea con la volatilidad de la cartera
+  (~17 % frente a una deriva de ~0,8 %/año), así que sobre 840 meses la probabilidad de tocarla
+  alguna vez tiende a 1 por la varianza. Medido sobre la demo sintética con «3,5 % del saldo» +
+  `rule_is_spend`: capital necesario hoy **2,52 M€** (620 k€ con `fixed_real`), **67 fallos de
+  2.500 caminos, todos F3**, y el primero siempre antes de la pensión (mediana: mes 293). Con F3
+  solo en `R`, el mismo hogar pide **860 k€**. Regresiones:
+  `f3_fires_only_in_the_first_retired_month_never_after` (motor) y
+  `mc_f3_is_a_property_of_the_plan_not_of_the_draw` (estocástico). **Retirar F3 del todo NO era la
+  alternativa**: colapsaría al suelo de F2 y el modo porcentual sería infalible por construcción
+  (una fracción del saldo nunca lo vacía, así que F1 tampoco puede firmar).
 - **El veredicto de un camino NO es el del plan.** El plan se juzga con la proporción de caminos
   sin fallo contra el umbral del perfil (`crates/engine-stochastic`); sobre la línea determinista
   estos dos campos describen un escenario, que es uno de los miles que deciden la fecha.
@@ -558,8 +574,8 @@ adversarial. Vive en `crates/engine-stochastic/src/solve_mc.rs`; la API la publi
 
 Cada camino trae su propia acumulación (se sortea entero, desde hoy hasta el horizonte, con la
 jubilación forzada en `k`) y **falla** ⟺ `SimOutput::failure_month_index.is_some()` — es decir, F1,
-F2 o F3 en cualquier mes jubilado o parcial. «No volver a trabajar nunca» es exactamente eso: cero
-fallos en todo el horizonte, no un saldo positivo al final.
+F2 o F3 — F2 y F3 acotados a `R`, F1 en cualquier mes jubilado o parcial. «No volver a trabajar
+nunca» es exactamente eso: cero fallos en todo el horizonte, no un saldo positivo al final.
 
 La regla del umbral, con `z = 1,96`:
 
@@ -690,10 +706,9 @@ sobre un eje distinto del `PhasePlan`:
   `C` —el corte es INCLUSIVO (`k ≥ C` ⇒ techo 0), así que `C` ya es el primer mes sin aportación— y
   la regresión comprueba la identidad que lo cierra: lo liberado es **exactamente** lo que le falta a
   la cartera frente a la ejecución sin corte.
-- **Durante la media jornada solo puede fallar F1** (supuesto S1 del motor): F3 está restringida a
-  `Retired` y la puerta de tasa inicial se evalúa en el primer mes jubilado, que con `AtMonth(H+1)`
-  no llega. Por eso «la fase no falla» significa literalmente «la media jornada no se come la
-  cartera».
+- **Durante la media jornada solo puede fallar F1** (supuesto S1 del motor): F3 y la puerta de tasa
+  inicial se evalúan en el primer mes JUBILADO, que con `AtMonth(H+1)` no llega. Por eso «la fase
+  no falla» significa literalmente «la media jornada no se come la cartera».
 - **Avisos** (literales de cable): `coast_not_reachable` (ni aportando siempre se cumple),
   `partial_never_starts` (la fase falla incluso empezando en el horizonte),
   `partial_never_fully_retires` (se puede empezar, pero no hay fecha de jubilación total) y

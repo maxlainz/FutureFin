@@ -433,6 +433,10 @@ fn the_bridge_cap_applies_only_if_the_pension_is_within_max_years() {
 /// - Y el recorte de la regla SÍ existe (500 €/mes): la hipoteca ata la venta sin ser un fallo.
 ///
 /// El control: subir el gasto de jubilación a 2.500 € —sin tocar la hipoteca— sí dispara F3.
+///
+/// Las dos ramas se deciden en el mes 1, que es `R` (`AtMonth(1)`): desde C10 ese es el ÚNICO mes
+/// en que F3 se juzga, así que este test mide qué MAGNITUD compara —la ordinaria, no la de caja—
+/// y `f3_fires_only_in_the_first_retired_month_never_after` mide CUÁNDO.
 #[test]
 fn f3_ignores_the_mortgage_and_looks_at_the_ordinary_need() {
     let build = |expense_retirement: i64| {
@@ -473,6 +477,82 @@ fn f3_ignores_the_mortgage_and_looks_at_the_ordinary_need() {
         "ahora el GASTO ordinario (2.500) sí supera lo que la regla permite (2.000)"
     );
     assert_eq!(starved.failure_kind, Some(PathFailure::RuleBelowNeed));
+}
+
+/// **F3 se juzga en `R` y NUNCA se vuelve a juzgar** (C10) — el gemelo exacto de
+/// `the_initial_rate_gate_fires_in_r_only_and_never_after`, y por la misma razón.
+///
+/// Mes a mes, F3 no medía la salud del plan: medía una BARRERA. Con una regla por saldo el
+/// permitido sigue al líquido, así que basta un mes flojo para que el permitido cruce por debajo
+/// del gasto y el camino quede marcado para siempre — sobre 840 meses la probabilidad de tocar
+/// esa barrera alguna vez tiende a 1 por la varianza, no por el plan. Medido sobre la demo
+/// sintética («3,5 % del saldo» + `rule_is_spend`): el capital necesario hoy salía **2,52 M€**
+/// frente a los 620 k€ de `fixed_real`, los 67 fallos de 2.500 caminos eran TODOS F3 y el primero
+/// caía siempre antes de la pensión. Con F3 solo en `R`, el mismo hogar pide 860 k€.
+///
+/// **La regla POR SALDO no deja de recortar** — solo deja de ser un fracaso: el recorte sigue
+/// publicándose mes a mes en `withdrawal_shortfall`, que es informativo por contrato.
+///
+/// Predicho, con `pct = 6 %` (⇒ permitido = `L(k−1)/200`), jubilación forzada en el mes **3** —
+/// para que la marca sea `R` y no «el mes 1»—, 600.000 € al 0 %, ingreso 3.000 y gasto regular
+/// 2.000 (superávit 1.000 que la regla `remainder` reinvierte):
+///
+/// | mes | `L(k−1)` | permitido | necesidad | venta | recorte | `L(k)` |
+/// |---|---|---|---|---|---|---|
+/// | 1 | 600.000 | — (acumulando) | — | — | 0 | 601.000 |
+/// | 2 | 601.000 | — (acumulando) | — | — | 0 | 602.000 |
+/// | 3 = `R` | 602.000 | **3.010** | 3.000 | 3.000 | 0 | 599.000 |
+/// | 4 | 599.000 | 2.995 | 3.000 | 2.995 | **5** | 596.005 |
+///
+/// El mes 4 es exactamente el caso que el modelo viejo marcaba como `rule_below_need`: hoy es un
+/// recorte de 5 € y el camino **no falla**. El control es la desigualdad al revés: con 3.011 € de
+/// gasto la regla ya no llega EN `R` (3.010 < 3.011) y ahí sí falla, en el mes 3.
+#[test]
+fn f3_fires_only_in_the_first_retired_month_never_after() {
+    let build = |expense_retirement: i64| {
+        let mut input = lab(24, 3_000, 2_000, 600_000);
+        input.phase_plan.expense_retirement_monthly = d(expense_retirement);
+        input.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(3);
+        input.phase_plan.withdrawal = WithdrawalRule::PercentOfBalance { pct: d(6) };
+        project_net_worth_series(&input).unwrap()
+    };
+
+    // (a) La regla CUBRE en `R` y se queda corta después: el camino no falla.
+    let out = build(3_000);
+    assert_eq!(out.retirement_month_index, Some(3), "`R` es el mes 3");
+    assert_eq!(out.liquid_worth[2], d(602_000), "dos meses de superávit");
+    assert_eq!(out.withdrawal[3], d(3_000), "el permitido (3.010) no ata en `R`");
+    assert_eq!(out.withdrawal_shortfall[3], Decimal::ZERO);
+    assert_eq!(out.liquid_worth[3], d(599_000));
+    // El mes 4 SÍ recorta —y el modelo viejo lo habría publicado como `rule_below_need`—…
+    assert_eq!(out.withdrawal[4], d(2_995), "el permitido baja a 2.995 y ata");
+    assert_eq!(out.withdrawal_shortfall[4], d(5));
+    assert_eq!(out.liquid_worth[4], d(596_005));
+    assert!(
+        out.withdrawal_shortfall[5] > Decimal::ZERO,
+        "y sigue recortando los meses siguientes: el recorte no desaparece, deja de ser un fallo"
+    );
+    // …y aun así el camino NO falla: después de `R` el único motivo vivo es F1.
+    assert_eq!(
+        out.failure_month_index, None,
+        "un recorte posterior a `R` es una LECTURA (`withdrawal_shortfall`), no un fracaso"
+    );
+    assert_eq!(out.failure_kind, None);
+    assert_eq!(
+        out.uncovered_deficit_total,
+        Decimal::ZERO,
+        "y no falta un euro de gasto: la cartera fundó todo lo que la regla dejó vender"
+    );
+
+    // (b) La inversa: la regla se queda corta YA en `R` (3.010 < 3.011) ⇒ F3, en el mes 3.
+    let starved = build(3_011);
+    assert_eq!(starved.failure_month_index, Some(3), "el fallo cae EN `R`");
+    assert_eq!(starved.failure_kind, Some(PathFailure::RuleBelowNeed));
+    assert_eq!(
+        starved.withdrawal_shortfall[3],
+        d(1),
+        "1 € de recorte en `R` basta: la comparación es estricta"
+    );
 }
 
 /// **Durante la media jornada solo puede fallar F1** (supuesto S1).
@@ -528,12 +608,17 @@ fn during_the_partial_phase_only_f1_can_fire() {
 /// menos de lo que gastas» y «la cartera no ha podido dar ni eso»— y el segundo es el que manda:
 /// recortar el nivel de vida es una decisión; quedarse sin dinero, no.
 ///
-/// Predicho, sin reglas de asignación (el superávit no se reinvierte, así que el saldo se queda
-/// quieto en 500 €) y con `guardrails` anclada en `L(0) = 500` al 2.400 % anual ⇒
-/// `W_R = 500 × 2.400/1.200 = 1.000 €/mes`, constante (sin IPC ni revisión antes del mes 13):
+/// **La coincidencia tiene que caer en `R`** (C10): desde que F3 solo se juzga en el primer mes
+/// jubilado, un mes posterior no puede cumplir los dos y la prioridad no se ejercitaría. Por eso
+/// la jubilación se fuerza en el mes **5**, que es justo el mes en que la pausa de ingresos deja
+/// al hogar sin nómina — así el mismo mes es `R`, es F3 y es F1.
 ///
-/// - Meses 1–4: ingreso 3.000 > gasto 1.500 ⇒ necesidad ordinaria 0 ⇒ ni F1 ni F3.
-/// - Mes 5: la pausa de ingresos pone el ingreso a 0 ⇒ necesidad ordinaria 1.500 > 1.000
+/// Predicho, sin reglas de asignación (el superávit no se reinvierte, así que el saldo se queda
+/// quieto en 500 €) y con `guardrails` anclada en `L(R−1) = L(4) = 500` al 2.400 % anual ⇒
+/// `W_R = 500 × 2.400/1.200 = 1.000 €/mes`, constante (sin IPC ni revisión antes de doce meses):
+///
+/// - Meses 1–4: acumulando, ingreso 3.000 > gasto 1.500 ⇒ ni venta ni fallo posible.
+/// - Mes 5 = `R`: la pausa de ingresos pone el ingreso a 0 ⇒ necesidad ordinaria 1.500 > 1.000
 ///   permitidos ⇒ F3 se cumple; y la venta persigue 1.000 sobre una cartera de 500 ⇒ 500 € sin
 ///   fundar ⇒ F1 también. El latch guarda F1.
 #[test]
@@ -547,7 +632,8 @@ fn f1_wins_the_month_it_coincides_with_f3() {
     );
     input.phase_plan.expense_retirement_monthly = d(1_500);
     input.phase_plan.income_retirement_monthly = d(3_000);
-    input.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(1);
+    // `R` = 5, el mismo mes en que arranca la pausa: es donde los dos motivos coinciden.
+    input.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(5);
     input.phase_plan.withdrawal = WithdrawalRule::Guardrails {
         pct: d(2_400),
         band_pct: d(20),
@@ -561,6 +647,7 @@ fn f1_wins_the_month_it_coincides_with_f3() {
 
     let out = project_net_worth_series(&input).unwrap();
     assert_eq!(out.liquid_worth[4], d(500), "nada se vende ni se aporta");
+    assert_eq!(out.retirement_month_index, Some(5), "`R` es el mes de la pausa");
     assert_eq!(
         out.failure_month_index,
         Some(5),

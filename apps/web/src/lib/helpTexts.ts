@@ -280,9 +280,11 @@ export const HELP_TEXTS = {
       "necesitas, indexado, sin techo. «Un % del saldo» retira ese porcentaje de tu líquido del " +
       "mes anterior: nunca se agota, pero tu nivel de vida sube y baja con el mercado. " +
       "«Híbrida» empieza alta y baja al llegar a un saldo. «Con bandas» recorta o sube la " +
-      "retirada al salirse de su banda. Con las tres reglas por saldo hay una condición dura: el " +
-      "mes en que lo que la regla permite no cubra tu gasto ordinario, ese escenario cuenta como " +
-      "fallido — el fracaso que este plan mide es tener que volver a trabajar. La tasa de " +
+      "retirada al salirse de su banda. Con las tres reglas por saldo hay una condición dura, y se " +
+      "comprueba UNA vez: si el mes en que te jubilas lo que la regla permite no cubre tu gasto " +
+      "ordinario, ese escenario cuenta como fallido — el fracaso que este plan mide es tener que " +
+      "volver a trabajar. Lo que la regla recorte después, en un año malo, baja tu nivel de vida " +
+      "pero no es un fracaso: sale en la cobertura, no aquí. La tasa de " +
       "retirada es otra cosa y va aparte: es lo máximo que puedes sacar el PRIMER año, la puerta " +
       "que tu fecha tiene que pasar. Los porcentajes son BRUTOS: el impuesto de la venta va " +
       "dentro.",
@@ -293,9 +295,10 @@ export const HELP_TEXTS = {
       "Dos lecturas de la misma regla. Como TECHO, retiras lo que necesitas y nunca más de lo " +
       "que la regla permite: si tu gasto cabe, no vendes de más. Como GASTO, retiras lo que dice " +
       "la regla haya o no necesidad, y ese es tu nivel de vida — con un buen año sacas más y con " +
-      "uno malo, menos. La condición es la misma en los dos: el mes en que lo permitido no llegue " +
-      "a tu gasto ordinario, ese escenario cuenta como fallido. No mueve tu fecha por sí solo: " +
-      "cambia cuánto sale de la cartera cada mes, y con ello cuántos escenarios aguantan.",
+      "uno malo, menos. La condición es la misma en los dos y se mira solo en el mes en que te " +
+      "jubilas: si lo permitido no llega ahí a tu gasto ordinario, ese escenario cuenta como " +
+      "fallido; lo que la regla recorte después no lo es. No mueve tu fecha por sí solo: cambia " +
+      "cuánto sale de la cartera cada mes, y con ello cuántos escenarios aguantan.",
   },
 
   // --- Jubilación · resultado -----------------------------------------------
@@ -307,9 +310,13 @@ export const HELP_TEXTS = {
       "100 como pida tu umbral. Tu vivienda no cuenta: no paga la compra del mes. Siempre en " +
       "euros de hoy —aquí, en el Resumen y en la Proyección, la misma cifra al euro— y " +
       "redondeado a cientos hacia arriba, porque sale de un sorteo y el euro exacto fingiría una " +
-      "precisión que no hay. La curva del gráfico es esta misma cifra calculada para cada edad, " +
-      "sin escalar: no tiene por qué cruzar tu línea de patrimonio, y que no la cruce no es un " +
-      "error del dibujo — tu fecha la deciden los escenarios que aguantan, no un cruce. " +
+      "precisión que no hay. La curva del gráfico responde la misma pregunta para cada edad: lo " +
+      "que necesitarías TENER a esa edad para jubilarte entonces, suponiendo que llegas ahí por " +
+      "la trayectoria central de tu plan —no es «tu cartera de hoy multiplicada», ni el peor " +
+      "escenario de llegar—. Es la misma magnitud que la línea de tu patrimonio LÍQUIDO del " +
+      "gráfico, no una escala distinta, pero no tiene por qué cruzarla en tu fecha, y que no la " +
+      "cruce no es un error del dibujo: tu fecha la deciden los escenarios que aguantan, cada uno " +
+      "con su propia racha por el camino, no un cruce. " +
       "«Ya cubierto» en vez de una cifra no es un hueco: significa que la necesidad se queda por " +
       "debajo de lo que este cálculo sabe medir —con la cartera dividida por 256 tu plan seguiría " +
       "cumpliendo el umbral—, así que no te hace falta reunir nada más para jubilarte en ese mes. " +
@@ -370,9 +377,12 @@ export const HELP_TEXTS = {
     title: "Escenarios con volatilidad",
     body:
       "Miles de futuros del mismo plan: cada mes el mercado sube o baja según la volatilidad que " +
-      "hayas declarado en tus activos. La línea sólida es tu trayectoria central —la que el " +
-      "resto de la app enseña como dinero— y crece a la rentabilidad compuesta que declaras en " +
-      "cada activo. La franja recoge del escenario 10 al 90: uno de cada diez queda por encima y " +
+      "hayas declarado en tus activos. La línea sólida es tu patrimonio LÍQUIDO —lo que se " +
+      "puede vender: cartera, cuentas, fondos, sin tu vivienda—, la trayectoria central, y crece " +
+      "a la rentabilidad compuesta que declaras en cada activo. Es distinta del patrimonio TOTAL " +
+      "que ves en el Resumen y en la Proyección: aquí importa lo que financia tu jubilación, no " +
+      "lo que vale tu casa. La franja —también líquida— recoge del escenario 10 al 90: uno de " +
+      "cada diez queda por encima y " +
       "uno de cada diez por debajo. No hay línea de mediana, y sus bordes no son futuros " +
       "concretos: cada mes se ordena por separado. El color no es decorativo — dice qué parte de " +
       "los escenarios ha fallado ya a esa edad. Con ingresos y gastos de por medio, el centro " +
@@ -398,7 +408,9 @@ export const HELP_TEXTS = {
       "Qué parte de los escenarios ha fallado YA a esa edad, contando desde el mes en que te " +
       "jubilas. Fallar es tener que volver a trabajar, y pasa por tres motivos: la cartera no " +
       "cubre el gasto de un mes, el primer año de jubilación exige sacar más de lo que tu tope " +
-      "permite, o la regla de retirada te deja por debajo de tu gasto ordinario. Es acumulada, " +
+      "permite, o la regla de retirada te deja por debajo de tu gasto ordinario ya ese primer " +
+      "mes. Los dos últimos se deciden EN la jubilación y no se vuelven a mirar; después, el " +
+      "único motivo posible es la cartera. Es acumulada, " +
       "así que solo puede crecer con la edad: el 8 % a los 80 incluye a los que cayeron a los " +
       "75. Es lo que TIÑE la banda del gráfico, y al pasar el ratón salen el porcentaje exacto y " +
       "por cuál de los tres motivos.",

@@ -26,6 +26,46 @@
 import type { ProjectionSeriesApi } from "../api/types";
 import { scenariosPerHundred } from "./risk-bands";
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// La línea PRINCIPAL del chart: LÍQUIDA, no total (decisión C11, issue #228)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Lo que la línea principal necesita de la serie: solo `points`, para que un test escriba un
+ *  puñado de puntos y no una proyección entera. */
+export type RetirementNetWorthSeries = Pick<ProjectionSeriesApi, "points">;
+
+/**
+ * `net_worth_liquid` de cada punto → los valores NOMINALES paralelos a `series.points`, listos
+ * para sustituir al total en la línea PRINCIPAL del chart de Jubilación.
+ *
+ * La curva de capital necesario y el éxito del sorteo miden el patrimonio LÍQUIDO —lo que se
+ * puede vender: cartera, cuentas, fondos—, nunca el total con vivienda incluida y deuda restada.
+ * Dibujar el total sobre esas dos cifras invita a leer un cruce que no es el que decide la
+ * fecha (en la demo sintética, en el mes de la fecha válida, 1.273.936 € de total frente a
+ * 836.149 € de líquido — el 52 %). `net_worth` no se toca: sigue siendo la línea de la
+ * Proyección y del Resumen, donde no hay curva de capital que comparar.
+ *
+ * `net_worth_liquid` vive en el MISMO punto que `net_worth` —no en una rejilla propia como
+ * `band` o `needed_capital_curve`—, así que la salida es siempre tan larga como `points` y se
+ * empareja por POSICIÓN, sin necesidad de alinear por mes.
+ *
+ * Un punto sin `net_worth_liquid` (backend anterior a 4.8.0, o un histórico fusionado que no lo
+ * trae) sale `null`, **nunca** el total: mezclar total y líquido en la misma línea sin decirlo
+ * sería la mentira silenciosa que este chart existe para no contar. La deflactación la aplica el
+ * chart —`MiniProjection`, prop `netWorthSeries`—, con el MISMO `deflator` que ya usa para
+ * `net_worth`: esta función devuelve euros NOMINALES.
+ */
+export function retirementNetWorthSeries(
+  series: RetirementNetWorthSeries | null | undefined,
+): (number | null)[] {
+  const points = series?.points;
+  if (!Array.isArray(points)) return [];
+  return points.map((p) => {
+    const v = p.net_worth_liquid;
+    return typeof v === "number" && Number.isFinite(v) ? v : null;
+  });
+}
+
 /** Los cuatro hitos que el chart puede marcar. Cerrado: uno nuevo obliga a decidir su
  *  prioridad frente a los demás, que es justo lo que no puede quedar implícito. */
 export type RetirementMarkerKind = "retirement" | "coast" | "partial" | "pension";

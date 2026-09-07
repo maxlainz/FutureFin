@@ -782,6 +782,9 @@ pub struct ProjectionOutput {
     /// **Por qué falló** este camino. `Some` ⟺ [`Self::failure_month_index`] es `Some`
     /// (invariante del latch: los dos se fijan a la vez). Prioridad dentro del mismo mes:
     /// F1 (`PortfolioDepleted`) > F2 (`InitialRateExceeded`) > F3 (`RuleBelowNeed`).
+    ///
+    /// **F2 y F3 solo pueden firmar en `R`, el primer mes jubilado** (C10): los dos juzgan la
+    /// FECHA. A partir del mes siguiente el único motivo posible es F1.
     pub failure_kind: Option<PathFailure>,
 }
 

@@ -358,11 +358,19 @@ export function ProjectionNetWorthChart({
     // ya no hay un objetivo que cruzar, hay el LÍQUIDO que tu umbral exige para poder jubilarte en
     // cada mes — una bisección estocástica por nodo, no un descuento escalar.
     //
-    // `neededCurveForChart` la devuelve deflactada y paralela a `series.points` (SOLO futuro);
-    // aquí se re-mapea a la longitud combinada con el MISMO `futureOffset` que usaba el objetivo,
-    // con `null` en el pasado (k < 0) y en los nodos que el nivel 2 no ha resuelto. Solo los
-    // vértices no nulos se dibujan → la curva arranca en el mes 0 y se ROMPE en los huecos.
-    const neededParallel = neededCurveForChart(series, deflator);
+    // `neededCurveForChart` la devuelve NOMINAL y paralela a `series.points` (SOLO futuro): se
+    // deflacta AQUÍ, con el mismo `deflator` por `month_index` real que ya aplica al patrimonio
+    // (issue #228 W12 — deflactarla dentro de `neededCurveForChart` y otra vez aquí habría sido
+    // la misma doble deflactación que tenía `RetirementView`/`MiniProjection`). Luego se re-mapea
+    // a la longitud combinada con el MISMO `futureOffset` que usaba el objetivo, con `null` en el
+    // pasado (k < 0) y en los nodos que el nivel 2 no ha resuelto. Solo los vértices no nulos se
+    // dibujan → la curva arranca en el mes 0 y se ROMPE en los huecos.
+    const neededParallelNominal = neededCurveForChart(series);
+    const neededParallel = neededParallelNominal
+      ? neededParallelNominal.map((v, i) =>
+          v == null ? null : v * deflator(series.points[i]!.month_index),
+        )
+      : null;
     const neededCurve: (number | null)[] | null = neededParallel
       ? pts.map((_p, i) =>
           i >= merged.futureOffset

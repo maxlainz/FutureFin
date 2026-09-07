@@ -353,15 +353,17 @@ describe("resolveDeflationAnnualPct", () => {
  * `neededCurveForChart` — la curva «Capital necesario» del chart (modelo v2, C4).
  *
  * Sustituye a la línea del objetivo FIRE, y hereda de ella la única propiedad que importaba: se
- * alinea con `points[]` por POSICIÓN y se deflacta por el `month_index` REAL de cada punto. Lo que
- * añade son dos guardas que la línea vieja no necesitaba, porque su array siempre estaba completo:
- * el ESTADO (`computing` ⇒ no hay curva) y los nodos `null` (el nivel 2 aún no los ha resuelto),
- * que se conservan como `null` y nunca como cero.
+ * alinea con `points[]` por POSICIÓN. Lo que añade son dos guardas que la línea vieja no
+ * necesitaba, porque su array siempre estaba completo: el ESTADO (`computing` ⇒ no hay curva) y
+ * los nodos `null` (el nivel 2 aún no los ha resuelto), que se conservan como `null` y nunca
+ * como cero.
  *
- * **Supuesto declarado**: la curva viaja NOMINAL. El contrato de `api/types.ts` no lo dice con esas
- * palabras; lo que dice es que se compara con la línea de patrimonio, que es nominal —y que **NO
- * tiene por qué cruzarla en la fecha válida**, porque la fecha la deciden los caminos que aguantan y
- * no un cruce—. Si el servidor la publicara en euros de hoy, el toggle la deflactaría dos veces.
+ * **Contrato: NOMINAL, sin deflactar.** Hasta el 5.0.0 esta función deflactaba el nodo con un
+ * `deflator(monthIndex)` recibido por parámetro, y `MiniProjection` volvía a deflactar la curva
+ * que le llegaba por su prop `neededCurve` (documentada, correctamente, como NOMINAL) —
+ * doble deflactación, issue #228 (W12): con «En dinero de hoy» activo la curva se encogía dos
+ * veces (a 3 %/30 años, ~59 % de más de lo debido). La función ya NO recibe deflactor: devuelve
+ * el array tal cual llega, y cada llamante decide si y cuándo deflacta.
  */
 describe("neededCurveForChart", () => {
   const pts = (months: number[]) =>
@@ -378,72 +380,44 @@ describe("neededCurveForChart", () => {
     ...over,
   });
 
-  const identity = () => 1;
-
-  it("deflacta cada nodo con el MES real del punto, no con su posición", () => {
-    // `density=hybrid`: la posición 2 es el mes 24. Deflactar por la posición aplicaría el factor
-    // de 2 meses a un importe de dos años vista.
-    const got = neededCurveForChart(series(), (mi) => deflationFactorAt(mi, 3));
-    expect(got).not.toBeNull();
-    expect(got![0]).toBeCloseTo(100, 9);
-    expect(got![1]).toBeCloseTo(200 * deflationFactorAt(12, 3), 9);
-    expect(got![2]).toBeCloseTo(300 * deflationFactorAt(24, 3), 9);
+  it("devuelve la curva TAL CUAL, sin deflactar (el llamante decide)", () => {
+    const got = neededCurveForChart(series());
+    expect(got).toEqual([100, 200, 300]);
   });
 
   it("un nodo sin resolver se conserva como null (jamás como 0)", () => {
-    const got = neededCurveForChart(
-      series({ needed_capital_curve: [100, null, 300] }),
-      identity,
-    );
+    const got = neededCurveForChart(series({ needed_capital_curve: [100, null, 300] }));
     expect(got).toEqual([100, null, 300]);
   });
 
   it("estado `computing` o `unavailable` ⇒ no hay curva, aunque llegara un array", () => {
     for (const state of ["computing", "unavailable"] as const) {
-      expect(
-        neededCurveForChart(
-          series({ needed_capital_curve_state: state }),
-          identity,
-        ),
-      ).toBeNull();
+      expect(neededCurveForChart(series({ needed_capital_curve_state: state }))).toBeNull();
     }
   });
 
   // Media curva alineada y media desplazada es peor que ninguna: nada en pantalla diría cuál de
   // las dos mitades es la buena.
   it("longitud distinta de `points[]` ⇒ se descarta ENTERA", () => {
+    expect(neededCurveForChart(series({ needed_capital_curve: [100, 200] }))).toBeNull();
     expect(
-      neededCurveForChart(series({ needed_capital_curve: [100, 200] }), identity),
-    ).toBeNull();
-    expect(
-      neededCurveForChart(
-        series({ needed_capital_curve: [100, 200, 300, 400] }),
-        identity,
-      ),
+      neededCurveForChart(series({ needed_capital_curve: [100, 200, 300, 400] })),
     ).toBeNull();
   });
 
   it("curva ausente, nula o vacía, serie nula, o sin puntos ⇒ null", () => {
-    expect(neededCurveForChart(series({ needed_capital_curve: null }), identity)).toBeNull();
+    expect(neededCurveForChart(series({ needed_capital_curve: null }))).toBeNull();
+    expect(neededCurveForChart(series({ needed_capital_curve: undefined }))).toBeNull();
     expect(
-      neededCurveForChart(series({ needed_capital_curve: undefined }), identity),
+      neededCurveForChart(series({ points: [], needed_capital_curve: [] })),
     ).toBeNull();
-    expect(
-      neededCurveForChart(
-        series({ points: [], needed_capital_curve: [] }),
-        identity,
-      ),
-    ).toBeNull();
-    expect(neededCurveForChart(null, identity)).toBeNull();
-    expect(neededCurveForChart(undefined, identity)).toBeNull();
+    expect(neededCurveForChart(null)).toBeNull();
+    expect(neededCurveForChart(undefined)).toBeNull();
   });
 
   // Backend anterior al campo de estado: se juzga solo por el array, sin dar por hecho que falta.
   it("sin `needed_capital_curve_state` la curva vale si el array cuadra", () => {
-    const got = neededCurveForChart(
-      series({ needed_capital_curve_state: undefined }),
-      identity,
-    );
+    const got = neededCurveForChart(series({ needed_capital_curve_state: undefined }));
     expect(got).toEqual([100, 200, 300]);
   });
 
@@ -451,9 +425,20 @@ describe("neededCurveForChart", () => {
     expect(
       neededCurveForChart(
         series({ needed_capital_curve: [Number.NaN, Number.POSITIVE_INFINITY, 300] }),
-        identity,
       ),
     ).toEqual([null, null, 300]);
+  });
+
+  // Regresión directa del bug (#228 W12): un capital de 800.000 € en el mes 360 no debe salir
+  // encogido por esta función — la deflactación (si procede) la aplica el llamante, no aquí.
+  it("regresión #228 W12: 800.000 € en el mes 360 sale 800.000, no deflactado", () => {
+    const bigSeries: NeededCurveSeries = {
+      points: pts([0, 360]),
+      needed_capital_curve: [500_000, 800_000],
+      needed_capital_curve_state: "ready",
+    };
+    const got = neededCurveForChart(bigSeries);
+    expect(got).toEqual([500_000, 800_000]);
   });
 });
 

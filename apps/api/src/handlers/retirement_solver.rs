@@ -65,12 +65,23 @@
 //!   [`PlanExtras::needed_capital_curve_absent`], para que quien dibuja pueda **partir la línea**
 //!   ahí en vez de unir dos puntos por encima de un hueco.
 //!
+//!   **Qué mide cada nodo (decisión C9 del owner, 2026-09-07): «lo que hay que TENER (líquido) a
+//!   esa edad para jubilarse entonces al umbral».** El crate fija la acumulación hasta `k−1` en la
+//!   línea DETERMINISTA y sortea solo desde `k`, así que todos los caminos llegan al nodo con el
+//!   mismo líquido y el nodo publica ese líquido. Antes de C9 sorteaba también la acumulación y
+//!   publicaba la MEDIANA del hogar escalado, que arrastraba la dispersión de treinta años y el
+//!   sobrecoste de Wilson sobre ella: medido sobre P9 en release, la curva salía **monótona
+//!   creciente de 2,9 M€ a 93,5 M€ (euros de hoy) entre el mes 1 y el 840** — el ahorro que el
+//!   hogar acumula multiplicado por su propia incertidumbre, no un capital necesario. Condicionada
+//!   se queda en 2,4–2,9 M€ y baja a 737 k€ en el horizonte. **El coste no cambia** (15,62 s antes,
+//!   15,68 s después: la simulación recorre el horizonte entero igual).
+//!
 //! # Las dos bases de los euros, dichas aquí porque no son la misma
 //!
 //! | cifra | base | de dónde sale |
 //! |---|---|---|
 //! | [`PlanLevel1::needed_capital_today`] | **euros de HOY** | `NeededCapital::amount_today` del nodo `k = 1` |
-//! | [`PlanExtras::needed_capital_curve`] | **euros NOMINALES de cada mes** | `NeededCapital::amount_nominal` de cada nodo |
+//! | [`PlanExtras::needed_capital_curve`] | **euros NOMINALES de cada mes** | `NeededCapital::amount_nominal` de cada nodo — «lo que hay que TENER a esa edad» (C9) |
 //!
 //! No es una inconsistencia, es lo que cada una tiene que ser. El capital de hoy es una cifra que
 //! el usuario compara con su cartera de hoy: en euros de hoy. La curva se dibuja **contra la
@@ -1034,13 +1045,23 @@ pub struct PlanExtras {
     /// ese mes)`, ya redondeado a cientos hacia arriba por el crate
     /// (`NeededCapital::amount_nominal`).
     ///
+    /// **Qué mide un nodo (C9, 2026-09-07): «lo que necesitas TENER (líquido) a esa edad para
+    /// jubilarte entonces al umbral».** La acumulación hasta el mes anterior no se sortea —es la
+    /// línea determinista—, así que todos los caminos llegan al nodo con esta misma cifra y lo que
+    /// se sortea es solo lo que viene DESPUÉS de jubilarse. No es «el percentil de tu cartera de
+    /// hoy proyectada hasta esa edad», que es lo que la curva publicaba antes y lo que la hacía
+    /// crecer sin techo con el horizonte.
+    ///
     /// **Nominal, no deflactado, y es deliberado**: la curva se dibuja contra la trayectoria del
-    /// patrimonio, que es nominal, así que un nodo en euros de hoy cruzaría la línea en el mes
-    /// equivocado — y ese cruce es justo lo que la curva existe para enseñar. Quien la quiera «en
-    /// dinero de hoy» deflacta la curva y la línea **a la vez y con el mismo factor**, que es lo
-    /// que hace la SPA. Ojo con la asimetría respecto a
+    /// patrimonio, que es nominal, así que un nodo en euros de hoy se compararía con la línea en el
+    /// mes equivocado. Quien la quiera «en dinero de hoy» deflacta la curva y la línea **a la vez y
+    /// con el mismo factor**, que es lo que hace la SPA. Ojo con la asimetría respecto a
     /// [`PlanLevel1::needed_capital_today`], que va en euros de HOY: en `k = 1` las dos bases
     /// coinciden exactamente (el factor en el índice 0 es 1) y a partir de ahí divergen.
+    ///
+    /// **No tiene por qué CRUZAR la línea del patrimonio en la fecha del plan**: la fecha la decide
+    /// el éxito sobre miles de caminos, cada uno con su propia acumulación (definición A), y esta
+    /// curva contesta la otra pregunta. Son dos magnitudes, no dos vistas de una.
     ///
     /// Los nodos sin cifra **no aparecen aquí** —un 0 € diría lo contrario de lo que pasa— y su
     /// razón viaja en [`Self::needed_capital_curve_absent`].
@@ -1204,10 +1225,13 @@ fn compute_plan_extras(
     let at_90 = valid_retirement_month(input, vols, &search, &search, 90, k_min)?.month;
 
     // (3) La curva de capital: cada cinco años y, además, el mes del plan — el nodo que la SPA
-    // necesita para que la curva CRUCE la línea justo en la fecha.
+    // necesita para tener una MEDICIÓN en la fecha. No para forzar un cruce ahí: la fecha la
+    // decide el éxito sobre miles de caminos, no un cruce de esta curva con el patrimonio (el doc
+    // de `PlanExtras::needed_capital_curve` y `.claude/api-routes.md` §serie lo dicen igual).
     //
     // Los importes son **NOMINALES** (`amount_nominal`), no deflactados: la curva se dibuja contra
-    // la trayectoria del patrimonio, que es nominal. Ver el doc de `PlanExtras`.
+    // la trayectoria del patrimonio, que es nominal. Ver el doc de `PlanExtras`. Y desde C9 cada
+    // nodo es «lo que hay que TENER a esa edad», condicionado a llegar por la línea determinista.
     let nodes = needed_capital_curve(
         input,
         vols,

@@ -593,7 +593,19 @@ export type ProjectionPointApi = {
   net_worth_real?: number;
   /**
    * f64 (4.8.0, #143): patrimonio LÍQUIDO nominal — Σ activos vendibles + caja, sin restar
-   * pasivos. Es la base que decide el cruce FIRE (comparar contra fire_target_series).
+   * pasivos. `net_worth` sigue siendo el total del chart.
+   *
+   * **Ya no decide ningún cruce**: el modelo v2 (5.0.0) retiró `fire_target_series` y con él el
+   * cruce que este campo comparaba. Sigue siendo la línea que el motor VENDE en la jubilación
+   * (la que mide la tasa inicial de retirada, F2), la que `needed_capital_curve` cruza en la
+   * fecha del plan, y —desde la decisión C11 (issue #228)— la línea PRINCIPAL del chart de
+   * Jubilación (`MiniProjection`, prop `netWorthSeries`, construida por
+   * `retirementNetWorthSeries` en `lib/retirement-chart.ts`): la Proyección y el Resumen
+   * conservan el total.
+   *
+   * Declarado opcional (backend anterior a 4.8.0, o un punto histórico fusionado por
+   * `mergeProjectionWithHistory` que no lo trae) — nunca cae al total en silencio: un consumidor
+   * que lo necesite trata su ausencia como `null`, jamás como `net_worth`.
    */
   net_worth_liquid?: number;
   /**
@@ -933,9 +945,16 @@ export type ProjectionSeriesApi = {
     | "already_covered"
     | null;
   /** f64[] (excepción chart-only) paralelo a `points[]`: capital necesario por edad en cada mes
-   *  de la rejilla, SIN escalar (C4), en euros NOMINALES de cada mes (la SPA la deflacta con el
-   *  mismo factor que el patrimonio). No tiene por qué cruzar la línea central: lo que cruza es el
-   *  escenario que el umbral obliga a salvar; la fecha válida va como marca vertical (C4).
+   *  de la rejilla, en euros NOMINALES de cada mes (la SPA la deflacta con el mismo factor que el
+   *  patrimonio).
+   *
+   *  **Qué mide cada nodo (C9, 2026-09-07): «lo que necesitas TENER (líquido) a esa edad para
+   *  jubilarte entonces al umbral».** El solver fija la acumulación hasta el mes anterior en la
+   *  trayectoria central del plan y solo sortea el tramo jubilado, así que todos los caminos
+   *  llegan al nodo con esa misma cifra. **No** es el percentil de la cartera de hoy proyectada
+   *  hasta esa edad, que es lo que la curva publicaba antes y lo que la hacía crecer sin techo con
+   *  el horizonte. No tiene por qué cruzar la línea central del patrimonio en la fecha: la fecha la
+   *  decide el éxito sobre miles de caminos, y va como marca vertical (C4).
    *
    *  **Un elemento `null` significa una de dos cosas, nunca «aquí hacen falta 0 €»**: (a) ese punto
    *  no cae en la rejilla gruesa que el nivel 2 evaluó, o (b) el nodo SÍ se evaluó y salió

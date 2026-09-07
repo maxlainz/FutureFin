@@ -305,8 +305,9 @@ el Resumen**, que no dibuja ninguna:
 - **`neededCurve?: MiniProjectionPoint[]`** — la curva de «Capital necesario» (`{month, value}`,
   discontinua, token `--proj-required`). Es la respuesta simétrica a la fecha: para cada edad,
   cuánto líquido haría falta para llegar con tu umbral de éxito. **No tiene por qué cruzar la línea
-  de patrimonio** — la fecha la deciden los escenarios que aguantan, no un cruce de curvas — así que
-  su ausencia de cruce no es un bug del dibujo.
+  de patrimonio líquido** (desde W11 la línea principal ya es esa magnitud, ver `netWorthSeries`
+  abajo) — la fecha la deciden los escenarios que aguantan, no un cruce de curvas — así que su
+  ausencia de cruce no es un bug del dibujo.
 - **`validDateMark?: { monthIndex, label }`** — la marca vertical en la fecha válida, con el éxito
   con el que llega escrito en el rótulo. Sustituye al antiguo marcador del cruce del objetivo:
   con el modelo v2 no hay objetivo que cruzar, solo un mes que el umbral certificó.
@@ -336,6 +337,41 @@ no un objetivo descontado que cruzar). **`showJub` SÍ sigue existiendo** (defau
 gateando el marcador circular en `jubilacion_series_position` (el mes EFECTIVO de jubilación de la
 serie determinista), que es un dato DISTINTO de `validDateMark` (la fecha que el umbral de éxito
 verificó): un llamante puede querer el uno, el otro, o los dos a la vez.
+
+#### Prop `netWorthSeries` — la línea principal pasa a ser líquida en Jubilación (W11, issue #228)
+
+`net_worth` era la única fuente de la línea PRINCIPAL, sin excepción — la que la mide `nw` y
+dibuja `pointsStr(nw)`. La curva de capital necesario y el éxito del sorteo miden el patrimonio
+LÍQUIDO, y dibujar el total (vivienda incluida, deuda restada) por debajo invitaba a leer un
+cruce que no es el que decide la fecha: en la demo sintética, en el mes de la fecha válida,
+1.273.936 € de total frente a 836.149 € de líquido (el 52 %).
+
+- **`netWorthSeries?: readonly (number | null)[] | null`** — sustituye a `net_worth` como fuente
+  de la línea principal. NOMINAL y **paralela a `series.points` por POSICIÓN**: a diferencia de
+  `band`/`neededCurve`, que viven en su propia rejilla y se emparejan por mes, `net_worth_liquid`
+  vive en el MISMO punto que `net_worth`, así que no hace falta alinear nada. Se deflacta DENTRO
+  de `MiniProjection`, con el MISMO `deflator` que ya aplicaba a `net_worth` — ni un segundo sitio
+  de deflactación ni una pre-deflactación en la vista.
+- **Ausente ⇒ geometría BYTE A BYTE la de antes**: `primaryNw` (interno) es `null`, la línea sigue
+  siendo `pointsStr(nw)` en un único `<polyline>`, y el Resumen —que no pasa la prop— no se mueve
+  un píxel. Presente ⇒ se pinta por SEGMENTOS, uno por `<polyline>` (mismo patrón que
+  `neededSegments`): un `null` en una posición ROMPE el trazo en vez de interpolar un hueco que
+  nadie midió o caer al total en silencio, que sería la mentira que este chart existe para no
+  contar.
+- **El dominio Y sigue a lo que se dibuja**: con la prop presente, `allValues` usa los valores de
+  `netWorthSeries` (filtrando `null`), no `nw` — de lo contrario el eje escalaría a una magnitud
+  que ya no está en pantalla.
+- **No combinada con `showAreas`/`showJub` por ningún llamante hoy**: las áreas apiladas y el
+  marcador circular de jubilación siguen leyendo `nw` (total) sin condición. Jubilación pasa
+  `showAreas={false}` y `showJub={false}`, así que la combinación no se ejercita — documentado
+  aquí para que quien la combine algún día sepa que el marcador y la línea podrían no coincidir
+  de escala.
+- **Único consumidor**: `RetirementView.tsx` (`chartNetWorthSeries`, construida con
+  `retirementNetWorthSeries` de `lib/retirement-chart.ts`). La leyenda de esa vista rotula la
+  serie «Patrimonio líquido», no «Patrimonio neto» (que sigue siendo el rótulo del Resumen y de
+  Proyección). La banda de la misma vista (`bandPoints`) pasó de `net_worth_p10/p90` a
+  `net_worth_liquid_p10/p90` — por HTTP viajan siempre (`assemble_bands_response`, siempre
+  `Some`) — para medir la MISMA magnitud que la línea.
 
 ### `ChartLegend` — [`components/charts/ChartLegend.tsx`](../apps/web/src/components/charts/ChartLegend.tsx)
 
@@ -828,3 +864,13 @@ color. Re-verify with:
 - El valor del KPI de éxito es un porcentaje, no una oración: `grep -n "formatSuccessPercent\|successParenthetical" apps/web/src/lib/risk-bands.ts` y `grep -c "export function formatSuccessScenarios\|export function formatSuccessThreshold" apps/web/src/lib/risk-bands.ts` (**0**; el literal de la oración vieja NO sirve como grep: sobrevive citado en el docblock que explica por qué se retiró, y un comando que se cuenta a sí mismo es deriva silenciosa)
 - La escala del color NO es un ítem de leyenda: `grep -n "retirement-risk-scale" apps/web/src/App.css apps/web/src/views/RetirementView.tsx`
 - `.subsection-title` sigue teniendo consumidores (deuda declarada arriba): `grep -rl "subsection-title" apps/web/src/views apps/web/src/components` (hoy `charts/summary.tsx` y `GastosView.tsx`; el día que imprima vacío, retira la clase de `App.css`)
+
+**Añadido en W11 (issue #228, 2026-09-07, rama `release/5.0.0`)**: §Prop `netWorthSeries` — en
+Jubilación la línea principal (y su banda) pasan a ser el patrimonio LÍQUIDO, no el total; la
+Proyección y el Resumen conservan el total. Re-verify with:
+
+- La prop existe y es opcional: `grep -n "netWorthSeries?:" apps/web/src/components/charts/MiniProjection.tsx`
+- Sin ella, geometría byte a byte la de antes: `grep -n "primaryNw ?" apps/web/src/components/charts/MiniProjection.tsx` (el `pointsStr(nw)` de siempre en la rama `else`)
+- Único consumidor, y con la etiqueta de leyenda correcta: `grep -n "netWorthSeries={chartNetWorthSeries}" apps/web/src/views/RetirementView.tsx` y `grep -n "Patrimonio líquido" apps/web/src/views/RetirementView.tsx` (Resumen y Proyección siguen diciendo «Patrimonio neto»: `grep -c "Patrimonio líquido" apps/web/src/views/SummaryView.tsx apps/web/src/views/ProjectionNetWorthChart.tsx` → **0** en los dos)
+- La banda de esa vista es la líquida: `grep -n "net_worth_liquid_p10\|net_worth_liquid_p90" apps/web/src/views/RetirementView.tsx`
+- La extracción vive pura y testeada: `grep -n "export function retirementNetWorthSeries" apps/web/src/lib/retirement-chart.ts` y `grep -c "it(" apps/web/src/lib/retirement-chart.test.ts`

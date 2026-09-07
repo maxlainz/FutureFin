@@ -415,6 +415,44 @@ pub fn success_at_month(
     Draws::new(input, volatilities, mc)?.at(month)
 }
 
+/// **`éxito(k)` CONDICIONADO a llegar al mes `k` por la línea determinista.**
+///
+/// Idéntica a [`success_at_month`] salvo en un eje: los meses `1..stochastic_from_month−1` crecen
+/// con el multiplicador DETERMINISTA del motor y solo desde `stochastic_from_month` se sortea. Con
+/// `stochastic_from_month = 1` (o `0`) es literalmente [`success_at_month`].
+///
+/// # Para qué existe
+///
+/// Es la pregunta de la curva de capital necesario desde la corrección de 2026-09-07: **«si llego a
+/// esa edad con X, ¿aguanto?»**, no «¿qué percentil de mi hogar de hoy, treinta años después, aguanta?».
+/// Fijando la acumulación en la línea determinista, todos los caminos llegan al cierre de
+/// `k−1` con el MISMO líquido, así que:
+///
+/// - la puerta de tasa inicial (F2) se evalúa una sola vez sobre un `L(k−1)` común — pasa en todos
+///   los caminos o falla en todos, que es lo que convierte `éxito(X, k)` en un ESCALÓN más el
+///   margen que pida F1, en vez de en un percentil;
+/// - `éxito` deja de arrastrar la dispersión de la acumulación (medida: ×3,19 a 30 años con σ 17 %)
+///   y el sobrecoste que Wilson cobra sobre esa dispersión con 500 caminos (×1,24).
+///
+/// Con `stochastic_from_month = month` —el uso de `needed_capital`— el sorteo cubre exactamente el
+/// tramo jubilado, que es el único donde la secuencia de retornos decide algo.
+///
+/// # Lo que NO cambia
+///
+/// La FECHA (`valid_retirement_month`) sigue siendo la definición A: cada camino con su propia
+/// acumulación, sorteada desde el mes 1. Son dos preguntas distintas y ninguna sustituye a la otra.
+pub fn success_at_month_from(
+    input: &ProjectionInput,
+    volatilities: &[Option<f64>],
+    mc: &McConfig,
+    month: u32,
+    stochastic_from_month: u32,
+) -> Result<SuccessAt, McError> {
+    let mut draws = Draws::new(input, volatilities, mc)?;
+    draws.engine.set_stochastic_from_month(stochastic_from_month);
+    draws.at(month)
+}
+
 /// **La tira anual de la UI**: `éxito(k)` sobre la rejilla que el llamante pasa, en su MISMO orden
 /// y con sus repeticiones.
 ///

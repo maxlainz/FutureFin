@@ -427,8 +427,12 @@ export type RiskExtraRowsInput = {
 /**
  * Los tres modos de fallo de §2.4, en el ORDEN FIJO de `failures_by_kind`. Cada rótulo dice lo
  * que le pasó al camino, no la sigla: «F2» no significa nada para quien mira la pantalla, y
- * «tasa inicial por encima del tope» sí — es además la única de las tres que ocurre en un solo
- * mes (el de la jubilación) y la que más sorprende, porque el dinero sigue ahí.
+ * «tasa inicial por encima del tope» sí — y es la que más sorprende, porque el dinero sigue ahí.
+ *
+ * **Dos de las tres se deciden en un solo mes, el de la jubilación**: la tasa inicial (F2) y la
+ * regla de retirada (F3, desde la decisión C10). Solo «se quedan sin dinero» (F1) puede firmar en
+ * cualquier mes posterior; lo que la regla recorte después de la fecha vive en las dos filas de
+ * cobertura, no aquí.
  */
 const FAILURE_KIND_LABELS: readonly [string, string, string] = [
   "Se quedan sin dinero",

@@ -1,15 +1,53 @@
-//! **El CAPITAL NECESARIO** (WP E7 de 5.0.0; decisión M9 del owner y corrección C4 del panel
-//! adversarial de 2026-09-06).
+//! **El CAPITAL NECESARIO** (WP E7 de 5.0.0; decisión M9 del owner, corrección C4 del panel
+//! adversarial de 2026-09-06 y **decisión C9 del owner de 2026-09-07: la curva es CONDICIONADA**).
 //!
 //! `solve_mc` responde «¿cuándo me puedo jubilar?» moviendo la FECHA. Este módulo responde la
-//! pregunta simétrica —**«¿cuánto me falta?»**— moviendo el CAPITAL: se fija el mes de jubilación
-//! y se bisecciona sobre un factor `λ` que escala el patrimonio LÍQUIDO de partida hasta que el
-//! plan cumple el umbral de éxito.
+//! pregunta simétrica —**«¿cuánto necesito TENER a esa edad para jubilarme entonces?»**— moviendo
+//! el CAPITAL: se fija el mes de jubilación y se bisecciona sobre un factor `λ` que escala el
+//! patrimonio LÍQUIDO de partida hasta que el plan cumple el umbral de éxito.
 //!
 //! ```text
-//!   λ*        = mín{λ : éxito(escalar_líquido(λ), k) ≥ umbral}
+//!   λ*        = mín{λ : éxito_condicionado(escalar_líquido(λ), k) ≥ umbral}
 //!   needed(k) = líquido(k−1) DEL HOGAR ESCALADO POR λ* que se jubila en k
 //! ```
+//!
+//! # La definición CONDICIONADA (C9), y qué se rompía sin ella
+//!
+//! Para el nodo `k`, **la acumulación hasta `k−1` NO se sortea**: los factores de crecimiento de
+//! los meses `1..k−1` son los DETERMINISTAS del motor
+//! ([`futurefin_engine::monthly_growth_multiplier`], los mismos que
+//! `deterministic_growth_multipliers` publica), y el sorteo empieza **en `k`**, con jubilación
+//! forzada en `k` y con los mismos números aleatorios comunes de siempre
+//! (`crate::mc::PathEngine::set_stochastic_from_month`; el RNG se consume también en los meses
+//! deterministas para que el camino `p` vea en el mes `k` el mismo `z` en cualquier nodo).
+//!
+//! La consecuencia es toda la corrección: **todos los caminos llegan al cierre de `k−1` con el
+//! MISMO líquido**, que es exactamente `liquid_det(k−1; λ)`. Por tanto
+//!
+//! - la puerta de tasa inicial (F2) se evalúa una sola vez sobre un `L(k−1)` común: pasa en todos
+//!   los caminos o falla en todos, y `éxito(λ, k)` vuelve a ser un **ESCALÓN** más el margen que
+//!   pida F1 sobre el tramo jubilado — no un percentil;
+//! - el importe publicado, `liquid_det(k−1; λ*)`, **ES `X*`**: el capital con el que hay que
+//!   llegar, no la mediana de una distribución de llegadas.
+//!
+//! **Lo que la definición anterior publicaba** (medido por un verificador independiente sobre el
+//! hogar de la demo sintética, σ 17 % en RV): el nodo era la MEDIANA del hogar escalado y
+//! arrastraba dos sobrecostes que no tienen nada que ver con «cuánto necesito»: la dispersión de
+//! la acumulación (**×3,19 a 30 años** — para que el p5 del hogar escalado superase el suelo, la
+//! mediana tenía que estar tres veces por encima) y el sobrecoste que Wilson cobra sobre esa
+//! dispersión con 500 caminos (**×1,24**). Resultado: **3,56 M€ a los 66** frente a un suelo F2 de
+//! **899 k€**. Condicionado, el nodo cae al suelo F2 más el margen de F1, que es lo que un usuario
+//! entiende por «cuánto necesito a esa edad».
+//!
+//! **La FECHA no cambia.** `solve_mc::valid_retirement_month` sigue siendo la definición A: cada
+//! camino con su propia acumulación, sorteada desde el mes 1. Son dos preguntas distintas, y por
+//! eso **la curva NO tiene por qué cruzar la línea del patrimonio en la fecha del plan** — lo dicen
+//! ya `.claude/api-routes.md` §serie y `PROJECTION_MODEL_NOTE`.
+//!
+//! **`k = 1` no se mueve ni un euro**: con `k = 1` no hay prefijo que fijar (el mes 0 es el estado
+//! inicial), así que `éxito_condicionado(λ, 1) ≡ éxito(λ, 1)` operando a operando y
+//! [`needed_capital_today`] publica exactamente lo que publicaba. Regresión:
+//! `needed_capital_today_is_unchanged_by_the_conditional_curve`.
 //!
 //! # Por qué se escala, y por qué solo el líquido
 //!
@@ -63,10 +101,12 @@
 //!   tiene cartera ahí. Con la trayectoria escalada el nodo publica su cifra. Regresión:
 //!   `the_curve_uses_the_scaled_liquid_so_late_nodes_are_not_zero` (nodo del mes 840 de P9).
 //!
-//! Esa trayectoria es la **determinista**, es decir la **MEDIANA** de los caminos del hogar
-//! escalado (decisión M8: la rentabilidad declarada es una CAGR y el sorteo centra la mediana en la
-//! línea determinista). Es el mismo escenario que el sorteo evaluó —`retiring_at` incluido—, así
-//! que la cifra y la medición que la acompaña hablan del mismo hogar.
+//! **Y desde C9 esa trayectoria ya no es «la mediana»: es LA acumulación.** Con el prefijo
+//! determinista, los `paths` caminos del sorteo recorren los meses `1..k−1` con esos mismos
+//! factores, así que `liquid_det(k−1; λ*)` es el líquido con el que **todos** llegan —el `X*` de la
+//! definición—, no el percentil 50 de una nube de llegadas. La proyección `Decimal` y el sorteo
+//! `f64` describen ahí exactamente el mismo hogar, dentro de la cota de la puerta de degeneración
+//! (≤ 1 € por mes); el euro publicado sale, como siempre, del camino `Decimal`.
 //!
 //! El precio es **una proyección `Decimal` de más por nodo** (~12,6 ms en P9 a 840 meses), que
 //! frente a los 10–19 sorteos de 500 caminos de ese mismo nodo no se nota.
@@ -121,6 +161,14 @@
 //! factores (`meses × activos`) por sorteo — despreciable frente a los `paths` caminos que vienen
 //! detrás.
 //!
+//! **El prefijo determinista de C9 NO abarata el nodo, y conviene no esperarlo.** La intuición
+//! («si solo se sortea el tramo jubilado, el nodo cuesta menos») es falsa: la simulación recorre
+//! el horizonte entero igual —el hogar vive los meses `1..k−1`, solo que sin shock—, el
+//! `standard_normal` se paga igual (números aleatorios comunes, ver arriba) y lo único que se
+//! ahorra son las `exp` del relleno del buffer, que no se notan. **Medido en `tests/timing_mc.rs`
+//! sobre P9 (14 nodos, 500 caminos, release): 15,62 s sin prefijo · 15,68 s con prefijo.** Lo que
+//! el prefijo cambia es la RESPUESTA, no el precio.
+//!
 //! El presupuesto de una cifra es, por tanto, un número conocido de sorteos:
 //!
 //! ```text
@@ -136,7 +184,7 @@ use futurefin_engine::{inflation_factor_at_month_index, project_net_worth_series
 use rust_decimal::Decimal;
 
 use crate::mc::PathEngine;
-use crate::solve_mc::{retiring_at, success_at_month, SuccessAt};
+use crate::solve_mc::{retiring_at, success_at_month_from, SuccessAt};
 use crate::{McConfig, McError};
 
 // =================================================================================================
@@ -317,6 +365,11 @@ pub struct NeededCapital {
     /// en euros de ese mes (nominales) y redondeado a cientos hacia arriba. No es
     /// `λ*·L_det(month−1)` sobre la trayectoria sin escalar: ese producto solo coincide en
     /// `month = 1` (ver el doc del módulo).
+    ///
+    /// **Qué significa desde C9**: es «lo que hay que TENER (líquido) al cierre de `month−1` para
+    /// jubilarse en `month` al umbral». Con la acumulación fijada en la línea determinista, TODOS
+    /// los caminos del sorteo llegan ahí con esta cifra: es el `X*` de la definición, no la mediana
+    /// de una nube de llegadas.
     pub amount_nominal: Option<Decimal>,
     /// El mismo importe en euros de HOY: `amount_nominal / (1 + π/100)^((month−1)/12)`, con el
     /// factor del motor (`inflation_factor_at_month_index`) y redondeado a cientos hacia arriba
@@ -410,9 +463,19 @@ struct LambdaDraws<'a> {
 }
 
 impl LambdaDraws<'_> {
+    /// El sorteo arranca **en el propio mes de jubilación**: la acumulación hasta `month−1` es la
+    /// línea determinista y solo el tramo jubilado se sortea. Es la definición CONDICIONADA («lo
+    /// que hay que TENER a esa edad»), y en `month = 1` coincide literalmente con sortear todo el
+    /// horizonte —no hay prefijo—, que es por lo que `needed_capital_today` no se mueve ni un euro.
     fn at(&mut self, lambda: f64) -> Result<SuccessAt, McError> {
         let scenario = scale_liquid_assets(self.input, lambda);
-        let stats = success_at_month(&scenario, self.volatilities, self.mc, self.month)?;
+        let stats = success_at_month_from(
+            &scenario,
+            self.volatilities,
+            self.mc,
+            self.month,
+            self.month,
+        )?;
         self.draws += 1;
         Ok(stats)
     }
@@ -558,6 +621,12 @@ fn bracket_and_bisect(
 
 /// **El capital necesario para jubilarse en el mes `k`**: el líquido de cierre del mes `k−1` del
 /// hogar escalado por `λ*`, con `λ*` biseccionado con `search` y **verificado con `confirm`**.
+///
+/// **CONDICIONADO a llegar (C9)**: la acumulación hasta `k−1` no se sortea —los factores de los
+/// meses `1..k−1` son los deterministas del motor— y el sorteo cubre el tramo desde `k`, con
+/// jubilación forzada en `k`. Por eso el importe es «lo que hay que TENER a esa edad» y no un
+/// percentil del hogar de hoy proyectado treinta años. Con `k = 1` no hay prefijo y la función es
+/// **operando a operando** la de antes de C9.
 ///
 /// # Las fases
 ///
@@ -734,6 +803,23 @@ pub fn needed_capital_today(
 /// **La curva de capital necesario** sobre la rejilla que el llamante pasa, en su MISMO orden y con
 /// sus repeticiones (C4: la curva REAL por edad, sin escalados por mediana ni por cuantil — la
 /// fórmula `needed·mediana/q` era algebraicamente incapaz de cruzar la línea en la fecha).
+///
+/// # Qué mide cada nodo (C9)
+///
+/// **«Lo que necesitas TENER (líquido) a esa edad para jubilarte entonces al umbral.»** Cada nodo
+/// `k` fija la acumulación hasta `k−1` en la línea determinista y sortea desde `k`
+/// ([`needed_liquid_at_month`]), así que todos los caminos llegan al cierre de `k−1` con el mismo
+/// líquido y el nodo publica ese líquido: un ESCALÓN (el suelo de la puerta de tasa inicial) más el
+/// margen que pida F1 sobre el tramo jubilado.
+///
+/// Antes de C9 el nodo sorteaba también la acumulación y publicaba la MEDIANA del hogar escalado,
+/// que arrastraba la dispersión de treinta años (×3,19 medido a σ 17 %) y el sobrecoste de Wilson
+/// sobre ella (×1,24): 3,56 M€ a los 66 frente a un suelo de 899 k€. La lectura de esa curva no era
+/// «cuánto necesito» sino «cuánto tendría que valer mi cartera de HOY, multiplicada, para que su
+/// percentil malo a esa edad aguante» — una pregunta que nadie hace.
+///
+/// La FECHA sigue siendo la definición A (cada camino con su acumulación), así que **la curva no
+/// tiene por qué cruzar la línea del patrimonio en la fecha del plan**. Son dos preguntas.
 ///
 /// La rejilla la decide quien dibuja (la API pasa cada 60 meses ∪ `{k*}`): este crate no sabe de
 /// fechas de nacimiento y no se inventa un muestreo. Rejilla vacía ⇒ vector vacío, **después** de

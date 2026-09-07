@@ -162,7 +162,8 @@ fallo acumulado por edad (`cumulative_failure_by_age`) y las dos lecturas de cob
 **`McOutcome` v2 (E9): éxito = CERO fallos F1/F2/F3 en el camino** —
 `success_probability` = caminos con `failure_month_index.is_none()` / N, la MISMA fuente que
 clasifica el bucle del motor (F1 `PortfolioDepleted`, F2 `InitialRateExceeded`, F3
-`RuleBelowNeed`). Ya NO depende de si el hogar se jubila: con la API v2 todo plan se sortea con
+`RuleBelowNeed`; F2 y F3 solo pueden firmar en `R`). Ya NO depende de si el hogar se jubila: con la
+API v2 todo plan se sortea con
 `RetirementTrigger::AtMonth` —un mes forzado que resuelve el solver externo
 (`solve_mc::valid_retirement_month`) antes de llegar aquí—, así que «no jubilarse nunca» dejó de
 ser un desenlace posible del sorteo. Los campos que D22/D24 usaban para separar esa pregunta
@@ -202,14 +203,31 @@ gruesas, autocorrelación, correlación imperfecta entre activos (con un `z` com
 bootstrap histórico, volatilidad de IPC/ingresos/gasto, rebalanceo— está escrito en el doc del
 módulo `mc`, no en un comentario suelto.
 
-**Hallazgo de E9, no un ajuste cosmético**: `PercentOfBalance`/`Hybrid`/`Guardrails` con
-`spend_mode = rule_is_spend` NUNCA disparan F1 (no pueden agotar la cartera, por construcción),
-pero SÍ pueden disparar F3 —introducido por E1 sin distinguir `spend_mode`— en cuanto el gasto
-declarado esté calibrado cerca del permitido inicial: un hogar de prueba con la necesidad pegada al
-4 % del capital inicial falla por F3 en el 94,9 % de los caminos (el primer shock negativo basta),
-aunque la cartera JAMÁS llegue a cero. Es la separación que el modelo v2 hace visible: «la cartera
-no se agota» y «el plan tiene éxito» son preguntas distintas incluso bajo una regla que por diseño
-no puede arruinar a nadie (`mc_percent_of_balance_never_ruins_but_cuts_the_spending`).
+**F3 se juzga SOLO en `R`, el primer mes jubilado** (decisión C10 del owner, 2026-09-07) — la
+misma marca que F2, y por la misma razón: los dos preguntan por la FECHA. Después de `R` el único
+motivo vivo es F1, y el recorte que la regla haga más adelante viaja como LECTURA
+(`withdrawal_shortfall`), nunca como fracaso.
+
+**Por qué se movió, con la medición que lo condenó.** Mes a mes, F3 era un problema de BARRERA y no
+una medición del plan: el permitido sigue a `L(k−1)`, que en Monte Carlo pasea con ~17 % de
+volatilidad frente a una deriva de ~0,8 %/año, así que sobre cientos de meses la probabilidad de
+cruzarla alguna vez tiende a 1 por la varianza. `PercentOfBalance`/`Hybrid`/`Guardrails` con
+`spend_mode = rule_is_spend` NUNCA disparan F1 (no pueden agotar la cartera, por construcción), así
+que la barrera era el ÚNICO veredicto posible y decidía sola: un hogar de prueba con la necesidad
+pegada al 4 % del capital inicial fallaba por F3 en el **94,9 %** de los caminos, y sobre la demo
+sintética con «3,5 % del saldo» el capital necesario hoy salía **2,52 M€** (620 k€ con
+`fixed_real`), con **67 fallos de 2.500 caminos, todos F3** y el primero siempre antes de la
+pensión (mediana: mes 293). Con F3 solo en `R`, el mismo hogar pide **860 k€** y el hogar de prueba
+tiene éxito 1,0 con la cobertura intacta (70 meses de recorte, ratio 0,9793 — cifras BYTE a byte
+las de antes: lo que se movió es el veredicto, no la simulación).
+`mc_percent_of_balance_never_ruins_but_cuts_the_spending` mide esa mitad;
+`mc_f3_is_a_property_of_the_plan_not_of_the_draw` mide la otra —con `R` fijo, `L(R−1)` es el mismo
+en todos los caminos, así que F3 es determinista: o fallan todos o no falla ninguno—. **Retirar F3
+del todo NO era la alternativa**: colapsaría al suelo de F2 y el modo porcentual sería infalible.
+
+Sigue en pie la separación que el modelo v2 hace visible: «la cartera no se agota» y «el plan tiene
+éxito» son preguntas distintas, y bajo una regla que por diseño no puede arruinar a nadie el
+recorte se mide en `months_below_need_p50` / `withdrawal_to_need_ratio_p50`, no en el éxito.
 
 **El colchón de caja se retiró en 5.0.0 antes de publicarse** (decisión del propietario,
 2026-09-06): la caja es un activo más y las reglas de ahorro fijan cuánto se guarda — no hay un
@@ -247,7 +265,9 @@ pub struct RetirementDateSolve { pub month: Option<u32>, pub success: f64, pub w
 - **Un camino falla ⟺ `SimOutput::failure_month_index.is_some()`.** Los tres motivos (F1/F2/F3) los
   clasifica el bucle del motor; aquí solo se CUENTAN (`by_kind`, en el orden
   `KIND_PORTFOLIO_DEPLETED` / `KIND_INITIAL_RATE_EXCEEDED` / `KIND_RULE_BELOW_NEED`). Sin
-  `PhasePlan::initial_rate` no existe F2 y ningún camino puede fallar por tasa inicial.
+  `PhasePlan::initial_rate` no existe F2 y ningún camino puede fallar por tasa inicial. **F2 y F3
+  se deciden en `R`** (C10), así que con `R` fijo son deterministas respecto al sorteo —`L(R−1)` es
+  el mismo en todos los caminos cuando `R = 1`— y lo único que la volatilidad decide después es F1.
 - **El escenario** es siempre `retiring_at`: `retirement_trigger = AtMonth(k)` **y**
   `crossing_is_reading_only = true`. Sin lo segundo el motor conserva la unión `cruce || k ≥ forzado`
   y un camino afortunado se jubilaría antes de `k` — `éxito(k)` mediría `min(cruce, k)`.
@@ -310,15 +330,34 @@ el solve: entre evaluaciones solo se reescribe `sim.phase_plan.retirement_trigge
 
 #### Capital necesario (5.0.0 E7 — `crates/engine-stochastic/src/needed_capital.rs`)
 
-La pregunta simétrica de la fecha (decisión M9 del owner, corrección C4 del panel): fijado el mes de
-jubilación, **¿cuánto capital haría falta?**. Se responde igual —bisección sobre el motor entero,
-extremo VERIFICADO, presupuesto de iteraciones— pero moviendo el CAPITAL en vez de la FECHA: se
-escala el patrimonio LÍQUIDO por un factor `λ` hasta que el plan cumple el umbral.
+La pregunta simétrica de la fecha (decisión M9 del owner, corrección C4 del panel y **decisión C9
+del owner, 2026-09-07**): fijado el mes de jubilación, **¿cuánto capital hay que TENER a esa edad?**.
+Se responde igual —bisección sobre el motor entero, extremo VERIFICADO, presupuesto de iteraciones—
+pero moviendo el CAPITAL en vez de la FECHA: se escala el patrimonio LÍQUIDO por un factor `λ` hasta
+que el plan cumple el umbral.
 
 ```text
-  λ*        = mín{λ : éxito(escalar_líquido(λ), k) ≥ umbral}
+  λ*        = mín{λ : éxito_condicionado(escalar_líquido(λ), k) ≥ umbral}
   needed(k) = liquid_worth[k−1] de project_net_worth_series(retiring_at(scale_liquid_assets(input, λ*), k))
 ```
+
+- **CONDICIONADA a llegar (C9), y esto es lo que hace la cifra legible.** Para el nodo `k` la
+  acumulación hasta `k−1` **no se sortea**: los factores de los meses `1..k−1` son los deterministas
+  del motor (`monthly_growth_multiplier`, los mismos que `deterministic_growth_multipliers`) y el
+  sorteo arranca en `k` con jubilación forzada en `k`, con los mismos números aleatorios comunes
+  (`PathEngine::set_stochastic_from_month`; el RNG **se consume también** en los meses del prefijo,
+  para que el camino `p` vea en el mes `k` el mismo `z` en cualquier nodo). Consecuencia: todos los
+  caminos llegan al cierre de `k−1` con el MISMO líquido, la puerta F2 se evalúa una vez sobre él y
+  el importe publicado **es** `X*` —lo que hay que tener—, no la mediana de una nube de llegadas.
+  Sortear también la acumulación (lo de antes de C9) arrastraba su dispersión (**×3,19 a 30 años**
+  con σ 17 %) y el sobrecoste de Wilson sobre ella (**×1,24**): en la batería P9 la curva salía
+  monótona creciente de **2,9 M€ a 93,5 M€** en euros de hoy entre el mes 1 y el 840, y condicionada
+  se queda en 2,4–2,9 M€ bajando a 737 k€. **`k = 1` no se mueve ni un euro** (no hay prefijo que
+  fijar). **El coste no cambia**: 15,62 s → 15,68 s en la curva de 14 nodos de P9 (release) — el
+  bucle recorre el horizonte entero igual, solo que sin shock.
+- **La FECHA NO es condicionada**: `valid_retirement_month` sigue siendo la definición A (cada camino
+  con su acumulación, sorteada desde el mes 1). Por eso la curva **no tiene por qué cruzar** la
+  trayectoria del patrimonio en la fecha del plan: son dos preguntas.
 
 ```rust
 pub fn scale_liquid_assets(input: &ProjectionInput, lambda: f64) -> ProjectionInput
@@ -328,6 +367,12 @@ pub fn needed_liquid_at_month(input, vols: &[Option<f64>], search: &McConfig, co
 pub fn needed_capital_today(input, vols, search, confirm, threshold_pct) -> Result<NeededCapital, McError>
 pub fn needed_capital_curve(input, vols, mc: &McConfig, threshold_pct: u32, grid: &[u32])
                               -> Result<Vec<NeededCapital>, McError>
+
+// El eje que la definición condicionada necesita (C9). `stochastic_from_month <= 1` == la de siempre.
+pub fn success_at_month_from(input, vols, mc: &McConfig, month: u32, stochastic_from_month: u32)
+                              -> Result<SuccessAt, McError>          // solve_mc
+pub fn run_path_from(input, vols, config: &McConfig, path_index: u32, stochastic_from_month: u32)
+                              -> Result<SimOutput<F64Money>, McError> // mc
 
 pub struct NeededCapital { pub month: u32, pub lambda: Option<f64>,
                            pub amount_nominal: Option<Decimal>, pub amount_today: Option<Decimal>,
@@ -512,7 +557,7 @@ ejecución sin corte.
 **3 · `earliest_partial_start` (M11 modo «en cuanto pueda»).** El menor `S` tal que **la FASE no
 falla**, medido con `retirement_trigger = AtMonth(H+1)`: un plan que nunca se jubila del todo, para
 que el candidato se juzgue por la fase y no por lo que venga después. Durante `Phase::Partial` el
-motor solo puede fallar por **F1** (F3 está restringida a `Retired` y F2 se evalúa en el primer mes
+motor solo puede fallar por **F1** (F3 y F2 se evalúan en el primer mes
 jubilado, que no llega — supuesto S1), así que el criterio dice literalmente «la media jornada no se
 come la cartera». Sondas `S = 1` y `S = H` (si la alta falla ⇒ `PartialNeverStarts`), bisección
 ≤ 12, confirmación, y luego **UNA** llamada a `valid_retirement_month` con la fase desde `S*` y
@@ -1250,7 +1295,8 @@ pub struct ProjectionOutput {
     pub disposable_cash_total: Decimal,             // Σ de la serie. "0" son cero euros, no «no aplica»
     // --- 5.0.0 E1: EL VEREDICTO DE ESTE CAMINO. Latches monótonos, fijados a la vez ---
     pub failure_month_index: Option<u32>,          // primer mes (1-based) en que el camino falló; None = aguanta
-    pub failure_kind: Option<PathFailure>,         // por qué. Prioridad F1 > F2 > F3 dentro del mes
+    pub failure_kind: Option<PathFailure>,         // por qué. Prioridad F1 > F2 > F3 dentro del mes;
+                                                   // F2 y F3 SOLO pueden firmar en R (C10), después solo F1
 }
 ```
 

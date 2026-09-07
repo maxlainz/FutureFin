@@ -126,6 +126,7 @@ export function MiniProjection({
   successStrip,
   successStripCutoffs,
   deflator,
+  netWorthSeries,
 }: {
   series: ProjectionSeriesApi | null;
   /** Número de meses a mostrar; recorta si la serie es más larga. */
@@ -235,6 +236,23 @@ export function MiniProjection({
    * patrimonio y por tanto lo heredan.
    */
   deflator?: ((monthIndex: number) => number) | null;
+  /**
+   * Serie ALTERNATIVA para la línea PRINCIPAL, en vez de `series.points[].net_worth` (decisión
+   * C11, issue #228): Jubilación dibuja el patrimonio LÍQUIDO —la magnitud que mide la curva de
+   * capital necesario y el éxito del sorteo—, no el total con vivienda y deuda que se ve en
+   * Proyección y en el Resumen.
+   *
+   * En euros NOMINALES y **paralela a `series.points` por POSICIÓN** (nace del MISMO punto que
+   * `net_worth`, así que a diferencia de `band`/`neededCurve` no hace falta alinear por mes):
+   * se deflacta aquí, con el MISMO `deflator` que ya aplica al total. `null` en una posición
+   * ROMPE el trazo en SEGMENTOS en vez de caer al total en silencio o dibujar un 0 que nadie
+   * calculó — mismo criterio que `neededCurve`.
+   *
+   * Ausente ⇒ usa `net_worth` de siempre: el Resumen no la pasa y su chart no se mueve un
+   * píxel. No combinada con `showAreas`/`showJub` por ningún llamante hoy — las áreas y el
+   * marcador circular de jubilación siguen leyendo `net_worth`, no esta serie.
+   */
+  netWorthSeries?: readonly (number | null)[] | null;
 }) {
   // Medimos el ancho real del contenedor para que el viewBox del SVG use
   // unidades = px reales y los marcadores `<circle>` salgan redondos
@@ -296,6 +314,17 @@ export function MiniProjection({
     const df = deflator ?? (() => 1);
     const nw = points.map((p) => p.net_worth * df(p.month_index));
 
+    // Línea PRINCIPAL alternativa (decisión C11, #228): el líquido en vez del total. NOMINAL y
+    // paralela a `points` por POSICIÓN (nace del MISMO punto que `net_worth`, nunca hace falta
+    // alinear por mes). Ausente ⇒ `null`, y la línea sigue siendo `nw`: el Resumen no la pasa y
+    // su chart no se mueve un píxel. Un `null` en la fuente se conserva como `null` — nunca cae
+    // al total en silencio — y rompe el trazo en SEGMENTOS más abajo.
+    const primaryNw: (number | null)[] | null = netWorthSeries
+      ? netWorthSeries
+          .slice(0, total)
+          .map((v, i) => (v == null || !Number.isFinite(v) ? null : v * df(monthAt(i))))
+      : null;
+
     // «Capital necesario» (C4): se recorta a la VENTANA por mes —igual que la banda, nunca por
     // longitud: su rejilla es de 5 años y la de `points` no— y se deflacta con el MISMO factor.
     // Los nodos sin resolver (`value: null`) parten la serie en SEGMENTOS: no se interpola por
@@ -351,8 +380,11 @@ export function MiniProjection({
     // FIRE, que podía crecer un orden de magnitud por encima del patrimonio): es una cifra de
     // líquido de la misma simulación y vive en el mismo rango. Recortarla contra el borde la haría
     // parecer una curva que se ACABA, que aquí significaría otra cosa.
+    // El dominio Y sigue lo que se DIBUJA: con `netWorthSeries` la línea es el líquido, no el
+    // total, así que el rango tiene que ser el del líquido — de lo contrario el eje se calcularía
+    // sobre una magnitud que ya no está en pantalla.
     const allValues = [
-      ...nw,
+      ...(primaryNw ? primaryNw.filter((v): v is number => v != null) : nw),
       ...neededPoints
         .map((p) => p.value)
         .filter((v): v is number => v != null && Number.isFinite(v)),
@@ -423,6 +455,25 @@ export function MiniProjection({
 
     const pointsStr = (arr: number[]) =>
       arr.map((v, i) => `${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`).join(" ");
+
+    // `primaryNw` → SEGMENTOS de polilínea, igual que «Capital necesario» más abajo: un `null`
+    // rompe el trazo en vez de interpolar por encima de un hueco que nadie midió. Con
+    // `netWorthSeries` ausente, `primaryNw` es `null` y esto queda vacío — la línea se pinta con
+    // el `pointsStr(nw)` de siempre, sin pasar por aquí.
+    const primarySegments: string[] = [];
+    if (primaryNw) {
+      let current: string[] = [];
+      for (let i = 0; i < primaryNw.length; i++) {
+        const v = primaryNw[i];
+        if (v == null) {
+          if (current.length >= 2) primarySegments.push(current.join(" "));
+          current = [];
+          continue;
+        }
+        current.push(`${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`);
+      }
+      if (current.length >= 2) primarySegments.push(current.join(" "));
+    }
 
     const stackPath = (low: number[], high: number[]): string => {
       const top = high
@@ -583,6 +634,8 @@ export function MiniProjection({
       monthSpan,
       visibleMonths,
       nw,
+      primaryNw,
+      primarySegments,
       neededSegments,
       bandPath,
       bandEdge,
@@ -628,6 +681,7 @@ export function MiniProjection({
     successStrip,
     successStripCutoffs,
     deflator,
+    netWorthSeries,
     containerW,
   ]);
 
@@ -660,6 +714,8 @@ export function MiniProjection({
     monthSpan,
     visibleMonths,
     nw,
+    primaryNw,
+    primarySegments,
     neededSegments,
     bandPath,
     bandEdge,
@@ -849,15 +905,33 @@ export function MiniProjection({
         />
       ))}
 
-      {/* Patrimonio neto — línea principal */}
-      <polyline
-        points={pointsStr(nw)}
-        fill="none"
-        stroke="var(--proj-nw)"
-        strokeWidth={2}
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
+      {/* Línea principal — patrimonio TOTAL (`nw`) salvo que `netWorthSeries` la sustituya
+          (decisión C11, #228: Jubilación dibuja el LÍQUIDO en su lugar). Con la prop ausente
+          `primaryNw` es `null` y se pinta exactamente el `pointsStr(nw)` de siempre — el Resumen
+          no la pasa y su chart no cambia. Con la prop presente se pinta por SEGMENTOS (uno por
+          `<polyline>`): un `null` rompe el trazo en vez de interpolar un hueco sin medir. */}
+      {primaryNw ? (
+        primarySegments.map((seg, i) => (
+          <polyline
+            key={`mini-nw-${i}`}
+            points={seg}
+            fill="none"
+            stroke="var(--proj-nw)"
+            strokeWidth={2}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+        ))
+      ) : (
+        <polyline
+          points={pointsStr(nw)}
+          fill="none"
+          stroke="var(--proj-nw)"
+          strokeWidth={2}
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+      )}
 
       {/* Marcador jubilación: línea vertical + punto en NW */}
       {jubPos != null ? (

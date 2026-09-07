@@ -7105,8 +7105,9 @@ impl ServerHandler for FutureFinMcp {
                 DATO de la simulación, no algo que decida el sorteo. Un camino FALLA por tres \
                 motivos y solo tres —`failures_by_kind`, en este orden fijo—: F1 la cartera se \
                 queda sin cubrir el gasto; F2 la tasa de retirada INICIAL del mes en que te jubilas \
-                supera el tope (el SWR, o el del puente); F3 con una regla por saldo, lo que la \
-                regla permite se queda por debajo de la necesidad ordinaria. Tienen arreglos \
+                supera el tope (el SWR, o el del puente); F3, en ESE MISMO mes, con una regla por \
+                saldo: lo que la regla permite con el líquido de entrada se queda por debajo de \
+                la necesidad ordinaria (después solo juzga F1). Tienen arreglos \
                 OPUESTOS: F1 pide más capital o menos gasto, F2 pide retrasar la fecha, F3 pide \
                 cambiar la regla. LA FECHA la decide el UMBRAL de tu perfil (80–100, default 95) \
                 sobre la cota INFERIOR del intervalo de Wilson (`success_wilson_low` con \

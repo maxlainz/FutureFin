@@ -268,7 +268,10 @@ src/
 │   │                             #   jubilación nunca cede el suyo, las demás se ceden de izquierda a derecha si caen
 │   │                             #   a menos de `minGapPx` — 46 por defecto — de uno ya puesto; la línea se pinta
 │   │                             #   SIEMPRE, ceder es perder solo el texto). Todo en MESES, nunca en posiciones de
-│   │                             #   `points[]`. Test: retirement-chart.test.ts
+│   │                             #   `points[]`. W11 (issue #228): gana **`retirementNetWorthSeries`** — la línea
+│   │                             #   PRINCIPAL del chart, LÍQUIDA y no total (decisión C11): extrae `net_worth_liquid`
+│   │                             #   de cada punto, `null` si falta (nunca cae a `net_worth` en silencio), NOMINAL —
+│   │                             #   `MiniProjection` la deflacta, prop `netWorthSeries`. Test: retirement-chart.test.ts
 │   ├── risk-gradient.ts          # 5.0.0 (V2/V5/P1 de la tercera vuelta de UX; feedback F6/F7/F8); **cortes
 │   │                             #   dinámicos por umbral desde el modelo v2 (W6/W7)**: el COLOR de la banda
 │   │                             #   10–90 % — `riskGradientStops` (paradas del `<linearGradient>`, offset por MES
@@ -393,8 +396,9 @@ src/
 │       │                         #   {month, p10, p90}[]` — banda 10–90 % en euros NOMINALES, emparejada por MES
 │       │                         #   (`xAtMonth`, nunca por posición: la banda viaja siempre a `hybrid`, `points[]`
 │       │                         #   puede ser `monthly`) — pinta SOLO el área rellena, sin trazo de mediana (`p50`
-│       │                         #   ni se recibe: `RetirementView.tsx` lo descarta antes de construir la prop —
-│       │                         #   ver issue #216, el help text `retirement.bands` todavía promete esa línea).
+│       │                         #   ni se recibe: `RetirementView.tsx` lo descarta antes de construir la prop — el
+│       │                         #   help text `retirement.bands` ya no la promete, «No hay línea de mediana» es el
+│       │                         #   texto vigente desde que se cerró el issue #216).
 │       │                         #   `markers?: RetirementChartMarker[]` (`lib/retirement-chart.ts`) — los hitos del
 │       │                         #   plan, línea siempre pintada y rótulo cedido por prioridad. `deflator?: (mi:
 │       │                         #   number) => number` — UN factor aplicado a patrimonio + objetivo + banda a la

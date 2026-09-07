@@ -13,7 +13,10 @@
  *  3. **«Resultado»**: la FRASE del plan (`lib/plan-sentence.ts`), los avisos, tres tarjetas
  *     (`buildRetirementTilesV2`), **un solo gráfico** —eje Y, banda coloreada por el fallo
  *     acumulado, la curva de capital necesario, la marca de tu fecha y la tira de éxito por año
- *     de jubilación—, el bloque «Riesgo» y un «Detalle del cálculo» plegado.
+ *     de jubilación—, el bloque «Riesgo» y un «Detalle del cálculo» plegado. La línea del
+ *     gráfico y su banda son el patrimonio LÍQUIDO (decisión C11, issue #228), no el total que
+ *     enseñan la Proyección y el Resumen: es la magnitud que mide la curva de capital necesario
+ *     y el éxito del sorteo, y dibujar el total invitaría a leer un cruce que no decide nada.
  *
  * ## Qué cambió con el modelo v2, y por qué no vuelve
  *
@@ -136,6 +139,7 @@ import {
 import {
   buildRetirementChartMarkers,
   chartValidDateMark,
+  retirementNetWorthSeries,
 } from "../lib/retirement-chart";
 import {
   buildRiskExtraRows,
@@ -767,15 +771,39 @@ export function RetirementView({
     return (mi: number) => deflationFactorAt(mi, pct);
   }, [inflationAdjusted, deflationPct]);
 
-  /** Puntos de banda en euros NOMINALES: la deflactación la aplica el chart, una sola vez. */
+  /**
+   * Puntos de banda en euros NOMINALES: la deflactación la aplica el chart, una sola vez.
+   *
+   * **Banda LÍQUIDA (decisión C11, issue #228), no del total.** La línea principal del chart es
+   * ahora el patrimonio líquido, así que la banda tiene que medir la misma magnitud —una banda
+   * del total sobre una línea líquida sería un abanico de otra escala que no la contiene. Por
+   * HTTP los `net_worth_liquid_p10/p90` viajan siempre (`projection_bands.rs`,
+   * `assemble_bands_response`: siempre `Some`); se filtra igual, con el MISMO criterio que
+   * `MiniProjection` ya aplica al resto de puntos de la banda, para no caer al total en silencio
+   * si algún día dejaran de venir.
+   */
   const bandPoints = useMemo(() => {
     if (!projectionBands) return null;
-    return projectionBands.points.map((p) => ({
-      month: p.month_index,
-      p10: p.net_worth_p10,
-      p90: p.net_worth_p90,
-    }));
+    return projectionBands.points.flatMap((p) => {
+      const p10 = p.net_worth_liquid_p10;
+      const p90 = p.net_worth_liquid_p90;
+      if (typeof p10 !== "number" || typeof p90 !== "number") return [];
+      return [{ month: p.month_index, p10, p90 }];
+    });
   }, [projectionBands]);
+
+  /**
+   * La línea PRINCIPAL del chart (decisión C11, issue #228): el patrimonio LÍQUIDO, no el total
+   * con vivienda incluida y deuda restada — es la magnitud que mide `needed_capital_curve` y el
+   * éxito del sorteo, y dibujar el total invitaría a leer un cruce que no es el que decide la
+   * fecha. NOMINAL: `MiniProjection` la deflacta con el MISMO `chartDeflator` que ya aplica al
+   * total. La Proyección y el Resumen conservan el total — ahí no hay curva de capital que
+   * comparar.
+   */
+  const chartNetWorthSeries = useMemo(
+    () => retirementNetWorthSeries(projectionSeries),
+    [projectionSeries],
+  );
 
   /**
    * La marca VERTICAL de la fecha del plan (C4) y, cuando no la hay, la nota que lo explica.
@@ -871,9 +899,16 @@ export function RetirementView({
   }, [gradientStops, projectionBands, monthLabel]);
 
   /**
-   * La curva «Capital necesario» (C4), ya deflactada y por MES. Sustituye a la línea del
-   * objetivo FIRE: en v2 no hay objetivo que cruzar — la fecha la fija el éxito— y lo que se
-   * dibuja es el líquido que hace cumplir el umbral jubilándose en cada mes.
+   * La curva «Capital necesario» (C4), en euros NOMINALES y por MES: la deflactación la aplica
+   * `MiniProjection`, una sola vez, con el MISMO `chartDeflator` que ya aplica al patrimonio y a
+   * la banda (`chartNetWorthSeries`/`bandPoints` arriba). Sustituye a la línea del objetivo FIRE:
+   * en v2 no hay objetivo que cruzar — la fecha la fija el éxito— y lo que se dibuja es el
+   * líquido que hace cumplir el umbral jubilándose en cada mes.
+   *
+   * **Bug corregido (issue #228, W12): esta curva NO se deflacta aquí.** Hasta el 5.0.0 se
+   * llamaba a `neededCurveForChart(projectionSeries, chartDeflator)` — deflactando el nodo — y
+   * `MiniProjection` volvía a deflactarlo con su propio prop `deflator`, encogiendo la curva dos
+   * veces (a 3 %/30 años, ~59 % de más de lo debido) y sesgando con ella el dominio del eje Y.
    *
    * `neededCurveForChart` devuelve un array PARALELO a `points[]` (o `null` entero si el nivel 2
    * no ha terminado o la longitud no cuadra); aquí solo se le pega su `month_index`, nunca su
@@ -882,10 +917,10 @@ export function RetirementView({
   const neededCurve = useMemo(() => {
     const pts = projectionSeries?.points;
     if (!pts || pts.length === 0) return null;
-    const values = neededCurveForChart(projectionSeries, chartDeflator);
+    const values = neededCurveForChart(projectionSeries);
     if (values == null) return null;
     return pts.map((p, i) => ({ month: p.month_index, value: values[i] ?? null }));
-  }, [projectionSeries, chartDeflator]);
+  }, [projectionSeries]);
 
   /** La tira de éxito por AÑO de jubilación bajo el eje X. El rótulo lo compone la vista, que es
    *  quien sabe si el eje va en fechas o en edades. */
@@ -2088,6 +2123,10 @@ export function RetirementView({
                   showPhases
                   showAreas={false}
                   zoomY
+                  /* Decisión C11 (#228): la línea principal es el patrimonio LÍQUIDO, no el
+                     total — la misma magnitud que la banda de arriba y que la curva de capital
+                     necesario de abajo. */
+                  netWorthSeries={chartNetWorthSeries}
                   band={showBand ? bandPoints : null}
                   markers={chartMarkers}
                   neededCurve={neededCurve}
@@ -2114,7 +2153,10 @@ export function RetirementView({
                   structural={[
                     {
                       key: "nw",
-                      label: "Patrimonio neto",
+                      /* Decisión C11 (#228): la línea del chart de Jubilación es el patrimonio
+                         LÍQUIDO, no el total — «Patrimonio neto» (Resumen, Proyección) sería
+                         una etiqueta que promete otra cifra. */
+                      label: "Patrimonio líquido",
                       color: "var(--proj-nw)",
                       swatch: "line",
                     },

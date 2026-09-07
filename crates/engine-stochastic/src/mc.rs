@@ -385,6 +385,16 @@ pub(crate) struct PathEngine {
     /// `σ_i` mensual de cada activo.
     sigmas: Vec<f64>,
     seed: u64,
+    /// **Primer mes (1-based) en el que el factor se SORTEA.** Antes de él el factor es el
+    /// determinista `m_i`, exactamente el que usa el camino sin overrides. Default `1` = sortear
+    /// todo el horizonte, que es el comportamiento de siempre.
+    ///
+    /// Lo usa la definición CONDICIONADA del capital necesario
+    /// (`crate::needed_capital`): «lo que necesitas TENER a esa edad» fija la acumulación hasta
+    /// `k−1` en la línea determinista y solo sortea el tramo que viene DESPUÉS de jubilarse. Sin
+    /// este eje, el nodo `k` de la curva arrastraba la dispersión de treinta años de acumulación
+    /// (medido: ×3,19 a 30 años) y publicaba un percentil del hogar escalado en vez de un capital.
+    stochastic_from_month: u32,
     buf: Option<Vec<Vec<F64Money>>>,
 }
 
@@ -444,8 +454,17 @@ impl PathEngine {
             drift,
             sigmas,
             seed: config.seed,
+            stochastic_from_month: 1,
             buf,
         })
+    }
+
+    /// **Arranca el sorteo en `month`** (1-based): los meses `1..month−1` crecen con el factor
+    /// DETERMINISTA `m_i` y solo desde `month` se aplica el shock.
+    ///
+    /// `month ≤ 1` (y `0`) es el default: sortear todo el horizonte.
+    pub(crate) fn set_stochastic_from_month(&mut self, month: u32) {
+        self.stochastic_from_month = month.max(1);
     }
 
     /// ¿Hay algún activo con volatilidad declarada? Con `false`, todos los caminos son el camino
@@ -462,16 +481,32 @@ impl PathEngine {
             .take()
             .expect("el buffer siempre vuelve al final de `run`");
         let mut rng = path_rng(self.seed, path_index);
-        for row in buf.iter_mut() {
-            // UN shock por mes, sorteado SIEMPRE — también con la cartera entera a σ=0. Que el
-            // flujo del RNG no dependa de los datos es lo que hace comparables dos ejecuciones
-            // sobre carteras distintas con la misma semilla.
+        for (m, row) in buf.iter_mut().enumerate() {
+            // UN shock por mes, sorteado SIEMPRE — también con la cartera entera a σ=0, y también
+            // en los meses del PREFIJO DETERMINISTA. Que el flujo del RNG no dependa de los datos
+            // (ni del punto en que arranca el sorteo) es lo que hace comparables dos ejecuciones
+            // con la misma semilla.
+            //
+            // **Y es una decisión, no una casualidad**: con `stochastic_from_month = k` el camino
+            // `p` ve en el mes `k` EXACTAMENTE el mismo `z` que vería con `stochastic_from_month
+            // = 1`, o que en cualquier otro nodo de la curva. Consumir solo desde `k` desplazaría
+            // el flujo un mes por cada mes de prefijo y cada nodo mediría con otra muestra: la
+            // curva dejaría de ser comparable consigo misma y la bisección de un nodo se movería
+            // por cambiar el nodo, no por cambiar el capital. Números aleatorios comunes, la
+            // misma disciplina que `solve_mc` aplica entre presupuestos.
+            //
+            // El coste es un `standard_normal` (dos `next_u64`, un `ln`, un `cos`) por mes de
+            // prefijo — se paga a cambio de que la muestra no se mueva.
             let z = standard_normal(&mut rng);
+            // `m` es 0-based sobre el buffer; el mes del bucle es `m + 1`.
+            let deterministic_prefix = (m as u32) + 1 < self.stochastic_from_month;
             for (i, cell) in row.iter_mut().enumerate() {
                 let s = self.sigmas[i];
-                *cell = if s == 0.0 {
+                *cell = if s == 0.0 || deterministic_prefix {
                     // Rama explícita, no `exp(0)`: `σ=0` significa «el camino determinista», y
-                    // eso se escribe, no se deduce de que `1.0` sea neutro.
+                    // eso se escribe, no se deduce de que `1.0` sea neutro. Un mes del prefijo
+                    // entra por la MISMA puerta y con el MISMO `m_i`, así que el tramo `1..k−1`
+                    // de cualquier camino es, factor a factor, el del camino determinista.
                     self.base[i]
                 } else {
                     // `d_i · exp(σz − σ²/2)`, que se SIMPLIFICA a `m_i · exp(σz)` — y se escribe
@@ -504,7 +539,28 @@ pub fn run_path(
     config: &McConfig,
     path_index: u32,
 ) -> Result<SimOutput<F64Money>, McError> {
+    run_path_from(input, volatilities, config, path_index, 1)
+}
+
+/// **Un camino con PREFIJO DETERMINISTA**: los meses `1..stochastic_from_month−1` crecen con el
+/// multiplicador determinista del motor y solo desde `stochastic_from_month` se aplica el shock.
+///
+/// Es el eje que la definición CONDICIONADA del capital necesario necesita («lo que hay que TENER
+/// a esa edad»: la acumulación no se sortea, el tramo jubilado sí) y se expone aquí para que la
+/// propiedad que la sostiene sea comprobable desde fuera del crate: **el `z` del mes `k` es el
+/// mismo con prefijo y sin él**, porque el RNG se consume también en los meses deterministas.
+/// Regresión: `the_deterministic_prefix_consumes_the_same_random_numbers`.
+///
+/// `stochastic_from_month ≤ 1` es exactamente [`run_path`].
+pub fn run_path_from(
+    input: &ProjectionInput,
+    volatilities: &[Option<f64>],
+    config: &McConfig,
+    path_index: u32,
+    stochastic_from_month: u32,
+) -> Result<SimOutput<F64Money>, McError> {
     let mut engine = PathEngine::new(input, volatilities, config)?;
+    engine.set_stochastic_from_month(stochastic_from_month);
     engine.run(path_index).map_err(McError::Engine)
 }
 

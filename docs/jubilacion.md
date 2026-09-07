@@ -63,14 +63,23 @@ solo una a la vez:
 |---|---|---|
 | **F1 — sin dinero** | En algún mes de jubilación (total o de media jornada) la cartera no cubre lo que necesitas ese mes. | El líquido se agota en un año malo. |
 | **F2 — tasa inicial excesiva** | En el mes en que te jubilas del todo, lo que necesitas para el año que empieza supera el tope vigente sobre tu líquido: tu tasa de retirada, o la tasa del puente si lo tienes activado y tu pensión llega dentro de los años máximos que fijaste. | Te jubilas necesitando sacar el 6 % el primer año con una tasa del 4 %. |
-| **F3 — la regla no cubre el gasto** | Con una regla que retira un % del saldo («Un % del saldo», «Híbrida» o «Con bandas»), lo que la regla te deja sacar ese mes no llega a tu gasto ordinario. | Un año malo con «Un % del saldo» recorta más de lo que tu gasto exige. |
+| **F3 — la regla no cubre el gasto** | **En el mes en que te jubilas del todo**, con una regla que retira un % del saldo («Un % del saldo», «Híbrida» o «Con bandas»), lo que la regla te deja sacar con el líquido con el que entras no llega a tu gasto ordinario. | Te jubilas con 600.000 € y una regla del 3 %: 1.500 €/mes para un gasto de 2.000. |
 
 La prioridad, dentro de un mismo mes, es **F1 > F2 > F3**: si te quedas sin dinero no importa si
 además te pasaste de tasa. Con la regla de serie, «Gasto fijo», solo pueden ocurrir F1 y F2, porque
 esa regla no tiene techo que recortar. **Durante la media jornada solo actúa F1**: la puerta de
 tasa inicial es de la jubilación total, no de la fase parcial.
 
-Tu **necesidad ordinaria** del mes —la que F1 y F3 comparan— es tu gasto más cualquier retirada
+**F2 y F3 se comprueban una sola vez, el mes en que te jubilas; a partir de ahí el único motivo es
+F1.** Las dos preguntan lo mismo —«¿da tu cartera para el nivel de vida que declaras, el día que
+dejas de trabajar?»— y son la condición que tu fecha tiene que pasar. Que una regla por saldo te
+recorte el gasto diez años después no dice que tu plan fuera malo: dice que aquel año fue malo, y
+eso se lee en la **cobertura**, no en el éxito. Juzgarlo mes a mes no medía tu plan, medía la
+probabilidad de que el mercado tuviera alguna vez un mal año — que a treinta años es prácticamente
+1, por buena que sea tu cartera.
+
+Tu **necesidad ordinaria** del mes —la que F1 compara cada mes, y F2 y F3 el mes de tu
+jubilación— es tu gasto más cualquier retirada
 extra, menos tus ingresos (pensión incluida): **sin deuda y sin «Próximos»**. Esas dos partidas
 mueven tu caja y, con ella, tu fecha, pero no son gasto ordinario — igual que la cuota de un
 préstamo no entra en lo que tu tasa de retirada tiene que cubrir.
@@ -157,8 +166,8 @@ Actívalo y cambia UNA cosa: si al jubilarte falta menos que los años máximos 
 entre tu pensión, el tope de lo que puedes sacar el primer año pasa de tu tasa de retirada a la
 **tasa del puente** —más alta— mientras dure ese tramo. Es jubilación anticipada de verdad: sin
 sueldo, sin aportaciones, el gasto sale entero de tu capital hasta que llega la pensión. No hay
-ningún otro tope durante el puente: si aguanta o no lo deciden las mismas reglas que el resto del
-plan (F1 y F3). Al activarlo, FutureFin rellena sus dos números con un default —la tasa, `max(5,
+ningún otro tope durante el puente: si aguanta o no lo decide, mes a mes, la misma regla que el
+resto del plan (F1). Al activarlo, FutureFin rellena sus dos números con un default —la tasa, `max(5,
 tu tasa de retirada + 1)` %; los años, 7— y puedes cambiarlos (la tasa hasta el 20 %, los años
 hasta 20).
 
@@ -232,7 +241,7 @@ desde el primer mes de jubilación, aunque fuera a tardar veinte años en llegar
 
 Cuánto gasta tu plan cada mes jubilado lo fija uno de tres modos, en la tarjeta «Gasto en
 jubilación» — y ese gasto (más las retiradas extra, menos tus ingresos y tu pensión) es exactamente
-la necesidad ordinaria que F1 y F3 comparan:
+la necesidad ordinaria que F1, F2 y F3 comparan:
 
 - **Gasto actual** — tus partidas de jubilación del presupuesto.
 - **Ingresos actuales** — para mantener tu nivel de vida.
@@ -266,10 +275,17 @@ una contesta una pregunta distinta.
   medir —con tu cartera dividida por 256 tu plan seguiría cumpliendo el umbral—, así que **no te
   hace falta reunir nada más** para jubilarte ya. Suele pasar cuando tu pensión, o una renta que
   sigue cobrándose jubilado, cubre tu gasto de jubilación entero.
-- **La curva del gráfico** — la misma pregunta, contestada para cada edad de tu horizonte: «si te
-  jubilaras a esta edad, ¿cuánto líquido haría falta?». Viaja en euros **nominales** —los mismos
-  que tu línea de patrimonio—, así que el interruptor «En dinero de hoy» la deflacta igual que a
-  ella, y las dos siguen siendo comparables punto a punto. Internamente se resuelve solo en unos
+- **La curva del gráfico** — la misma pregunta, contestada para cada edad de tu horizonte: **«¿cuánto
+  necesito TENER a esta edad para jubilarme entonces?»**. Ojo al matiz, que es lo que hace que la
+  cifra sea legible: cada punto supone que **llegas a esa edad por la trayectoria central de tu
+  plan** —sin racha buena ni mala por el camino— y sortea solo lo que viene DESPUÉS de jubilarte,
+  que es donde el orden de los años decide algo. Por eso el punto de los 66 años es «el capital con
+  el que hay que llegar a los 66», y no «cuánto tendría que valer tu cartera de HOY para que su peor
+  escenario a los 66 aguante», que es una pregunta que nadie hace y que hacía la curva crecer sin
+  freno cuanto más lejos mirabas. Viaja en euros **nominales** —los mismos
+  que la línea de tu patrimonio LÍQUIDO en el gráfico—, así que el interruptor «En dinero de hoy»
+  la deflacta igual que a ella, y las dos siguen siendo comparables punto a punto, misma
+  magnitud. Internamente se resuelve solo en unos
   pocos puntos —cada cinco años, más tu fecha exacta—, y **no se interpola entre ellos**: cada
   punto dibujado es una medición, no una línea rellenada, porque una curva continua sobre un tramo
   que no se midió es una interpolación disfrazada de medición. Por eso puede calcularse en segundo
@@ -281,10 +297,11 @@ pensión cubre tu gasto no hace falta capital adicional para jubilarse, así que
 dibujar. Que la curva se corte ahí es lo correcto — lo que crecería después de ese punto sería el
 ahorro que vas acumulando, no una necesidad tuya.
 
-La curva **no tiene por qué cruzar tu línea de patrimonio**, y que no la cruce no es un error del
-dibujo: tu fecha la deciden los escenarios que aguantan, no un cruce de dos líneas. Lo único que
-marca tu fecha válida en el gráfico es una **marca vertical**, con el éxito con el que llega escrito
-al lado.
+La curva **no tiene por qué cruzar tu línea de patrimonio líquido**, y que no la cruce no es un
+error del dibujo: son dos preguntas distintas. La curva supone que llegas a cada edad por tu
+trayectoria central; tu **fecha** la deciden los escenarios que aguantan, cada uno con su propia
+racha por el camino. Lo único que marca tu fecha válida en el gráfico es una **marca vertical**, con
+el éxito con el que llega escrito al lado.
 
 ---
 
@@ -322,10 +339,14 @@ Como mucho tres, nunca más, una cifra por tarjeta:
 
 Un único gráfico, con un único eje de importes:
 
-- **Una línea**: tu patrimonio, la trayectoria central, creciendo con la rentabilidad **compuesta**
-  que declaraste en cada activo.
-- **Una banda p10–p90** —ocho de cada diez futuros caen dentro—, teñida por edad con la
-  probabilidad ACUMULADA de fallo (F1, F2 o F3 juntos): verde donde no falla ninguno, ámbar en
+- **Una línea**: tu patrimonio **LÍQUIDO** —lo que se puede vender: cartera, cuentas, fondos, sin
+  tu vivienda—, la trayectoria central, creciendo con la rentabilidad **compuesta** que
+  declaraste en cada activo. Es distinto del patrimonio total que ves en el Resumen y en la
+  Proyección: aquí importa lo que financia tu jubilación, no lo que vale tu casa — es la misma
+  magnitud que la curva de capital necesario y que el éxito del sorteo, así que las tres se leen
+  juntas sin traducir.
+- **Una banda p10–p90** —también líquida, ocho de cada diez futuros caen dentro—, teñida por edad
+  con la probabilidad ACUMULADA de fallo (F1, F2 o F3 juntos): verde donde no falla ninguno, ámbar en
   cuanto empiezan a fallar, rojo desde el 10 % — o desde el complemento de tu umbral si pides más
   de un 90 % de éxito: con un umbral del 80 %, el rojo empieza en el 20 %. El corte ámbar va a la
   mitad del rojo. Pasa el ratón por encima y ves el porcentaje exacto y, entre paréntesis, cuánto

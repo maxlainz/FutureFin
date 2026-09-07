@@ -7,12 +7,15 @@
 //! es el SOLVER —y el escalado que le da de comer—, así que la función objetivo tiene una forma
 //! conocida a propósito: un ESCALÓN en `λ`.
 //!
-//! **Presupuesto**: ningún test de este fichero pasa de 250 caminos, y todos salvo uno se quedan en
-//! 120 meses de horizonte. La excepción es
+//! **Presupuesto**: ningún test de este fichero pasa de 250 caminos, y todos salvo DOS se quedan en
+//! 120 meses de horizonte. Las excepciones, las dos por el mismo motivo (el fenómeno que fijan no
+//! existe en un horizonte corto) y las dos compensadas con pocos caminos:
 //! `the_curve_uses_the_scaled_liquid_so_late_nodes_are_not_zero`, que necesita P9 y sus 840 meses
-//! porque el fenómeno que fija —una trayectoria sin escalar que se agota antes del nodo— no existe
-//! en un horizonte corto; se compensa con el mínimo de caminos. La medición de tiempos vive en
-//! `tests/timing_mc.rs`, `#[ignore]` y en release.
+//! porque su trayectoria sin escalar tiene que agotarse antes del nodo, y
+//! `the_curve_node_is_conditional_on_reaching_it_not_on_todays_dispersion`, que necesita **treinta
+//! años de acumulación** para que la dispersión que la definición condicionada elimina sea
+//! grande (480 meses, nodo en el 361). La medición de tiempos vive en `tests/timing_mc.rs`,
+//! `#[ignore]` y en release.
 
 #[path = "../../engine/tests/common/cases.rs"]
 mod cases;
@@ -22,9 +25,9 @@ use futurefin_engine::{
     project_net_worth_series, InitialRateGate, PensionSchedule, ProjectionInput, TaxBracket,
 };
 use futurefin_engine_stochastic::{
-    needed_capital_curve, needed_capital_today, needed_liquid_at_month, retiring_at,
-    scale_liquid_assets, McConfig, ABSENT_ALREADY_COVERED, ABSENT_NO_LIQUID_ASSETS,
-    MAX_LAMBDA_HALVINGS, WARM_LAMBDA_FLOOR,
+    needed_capital_curve, needed_capital_today, needed_liquid_at_month, retiring_at, run_path_from,
+    scale_liquid_assets, success_at_month, success_at_month_from, McConfig, ABSENT_ALREADY_COVERED,
+    ABSENT_NO_LIQUID_ASSETS, MAX_LAMBDA_HALVINGS, WARM_LAMBDA_FLOOR,
 };
 use rust_decimal::Decimal;
 
@@ -728,4 +731,317 @@ fn the_curve_uses_the_scaled_liquid_so_late_nodes_are_not_zero() {
         nominal >= expected && nominal - expected < Decimal::from(100),
         "publicado {nominal} no es el redondeo hacia arriba de {expected}"
     );
+}
+
+// =================================================================================================
+// La curva CONDICIONADA (decisión C9 del owner, 2026-09-07)
+// =================================================================================================
+
+/// **El hogar del PREFIJO**: una sola cartera líquida al 5 % CAGR con **17 %** de volatilidad, sin
+/// ingreso ni gasto regulares (la acumulación es composición pura, sin cascada que intervenga),
+/// inflación 0, gasto de jubilación 2.000 €/mes, puerta de tasa inicial al 4 % y horizonte 480
+/// meses.
+///
+/// Derivado a mano ANTES de correr nada, para el nodo `k = 361` (treinta años):
+///
+/// ```text
+///   m           = 1,05^(1/12)                    (la raíz doceava del motor)
+///   L_det(360)  = 100.000 · m^360 = 432.194,24 € (sin flujos, la composición es exacta)
+///   necesidad   = 12 · 2.000 = 24.000 €/año      (inflación 0, sin pensión)
+///   suelo F2    ⟺ 24.000 > 4 % · L(360) falla ⟺ L(360) < 600.000 €
+///   λ_b         = 600.000 / 432.194,24 = 1,3882647
+///   σ_m         = 0,17/√12 = 0,0490748           (volatilidad MENSUAL)
+///   s(30 años)  = σ_m·√360 = 0,93113             (dispersión log del factor acumulado)
+/// ```
+///
+/// F1 no compite en el tramo jubilado: retirar el 4 % de 600.000 € durante 120 meses de una cartera
+/// al 5 % con `s(10 años) = 0,538` no la agota en ningún camino de la muestra. Y F3 tampoco, que
+/// `fixed_real` no tiene techo. Por tanto, **condicionado**, `éxito(λ, 361)` es un ESCALÓN exacto en
+/// `λ_b`: todos los caminos llegan al cierre del mes 360 con el MISMO líquido.
+fn prefix_household() -> ProjectionInput {
+    let mut input = base_input(
+        480,
+        Decimal::ZERO,
+        Decimal::ZERO,
+        vec![mk_asset(
+            1,
+            Decimal::from(100_000),
+            true,
+            Some(Decimal::from(5)),
+        )],
+        vec![rule_remainder(0)],
+    );
+    input.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
+    input.phase_plan.income_retirement_monthly = Decimal::ZERO;
+    input.phase_plan.initial_rate = Some(InitialRateGate {
+        swr_pct: Decimal::from(4),
+        bridge: None,
+    });
+    input
+}
+
+/// **El nodo de la curva mide «lo que hay que TENER a esa edad», no la dispersión de hoy** (C9).
+///
+/// Es la corrección entera, medida sobre un hogar cuyo escalón se deriva a mano. Con la acumulación
+/// fijada en la línea determinista, el nodo cae en el SUELO F2 más el margen que pida F1 —aquí,
+/// ninguno—; con la acumulación sorteada (la definición anterior) el nodo publicaba la MEDIANA del
+/// hogar escalado y tenía que subir hasta que su percentil malo superase ese mismo suelo.
+///
+/// PREDICCIONES, escritas antes de correr (aritmética en [`prefix_household`]):
+///
+/// 1. **El nodo condicionado ≈ el suelo F2.** `λ* ∈ [1,3882647, 1,3885088]` (bisección de 12 pasos
+///    sobre el bracket `[1, 2]`, resolución `2^-12`) ⇒ crudo `∈ [600.000,00, 600.105,52]` ⇒
+///    publicado (redondeo a cientos hacia arriba) **entre 600.000 y 600.200 €**.
+/// 2. **`draws_search == 14`** = 1 sondeo en `λ = 1` (falla: 432.194 < 600.000) + 1 en `λ = 2`
+///    (cumple: 864.388 ≥ 600.000) + 12 de bisección.
+/// 3. **El escalón es limpio**: éxito 1,0 exacto y `by_kind == [0, 0, 0]` en el `λ` publicado —
+///    ningún camino falla, porque todos llegan al mismo sitio.
+/// 4. **La definición ANTERIOR era ≥ 3× esta.** Con el sorteo desde el mes 1:
+///    - en el propio `λ*` el éxito es `P(L(360) ≥ 600.000) = 0,5` —600.000 es la MEDIANA de las
+///      llegadas, no la llegada—, así que el nodo viejo NO podía publicar esa cifra;
+///    - en `3·λ*` (mediana 1,8 M€) el éxito sube solo a
+///      `P(exp(s·Z) ≥ 1/3) = Φ(1,1798) = 0,881`, cuya cota de Wilson con 100 caminos es **0,803**,
+///      todavía por debajo del umbral 90. Luego `λ_viejo > 3·λ*` y el importe viejo era **> 3×** el
+///      condicionado. La cota es un HECHO medido, no una estimación de la bisección vieja.
+#[test]
+fn the_curve_node_is_conditional_on_reaching_it_not_on_todays_dispersion() {
+    const K: u32 = 361;
+    const THRESHOLD_90: u32 = 90;
+    let input = prefix_household();
+    let vols = vec![Some(17.0)];
+    let mc = cfg(100);
+
+    // La premisa aritmética del test, comprobada contra el motor antes de sortear nada.
+    let det = project_net_worth_series(&retiring_at(&input, K)).expect("el motor no falla");
+    let l_det = det.liquid_worth[(K - 1) as usize];
+    assert!(
+        l_det > Decimal::from(432_100) && l_det < Decimal::from(432_300),
+        "L_det(360) tenía que rondar 432.194 €: {l_det}"
+    );
+
+    // ---- (1)(2)(3) el nodo CONDICIONADO -------------------------------------------------------
+    let curve = needed_capital_curve(&input, &vols, &mc, THRESHOLD_90, &[K]).expect("ok");
+    let node = curve[0];
+    assert_eq!(node.absent_reason, None, "λ* = {:?}", node.lambda);
+    let published = node.amount_nominal.expect("importe");
+    assert!(
+        published >= Decimal::from(600_000) && published <= Decimal::from(600_200),
+        "el nodo condicionado tenía que caer en el suelo F2 (600.000 €): {published}"
+    );
+    assert_eq!(
+        node.draws_search, 14,
+        "1 sondeo + 1 duplicación + 12 de bisección"
+    );
+    let lambda = node.lambda.expect("λ verificado");
+    assert!(
+        lambda > 1.388 && lambda < 1.389,
+        "λ_b = 600.000/432.194 = 1,38826: λ* = {lambda}"
+    );
+    let stats = node.success_at_lambda.expect("la medición viaja");
+    assert_eq!(
+        (stats.success, stats.by_kind),
+        (1.0, [0, 0, 0]),
+        "con la acumulación fijada, el escalón es limpio: todos los caminos llegan al mismo sitio"
+    );
+    println!(
+        "[C9] k={K} · condicionado: λ*={lambda:.6} · publicado={published} € ·          L_det(360)={l_det} € · sorteos={}",
+        node.draws_search
+    );
+
+    // ---- (4) lo que la definición ANTERIOR publicaba -------------------------------------------
+    let scaled = scale_liquid_assets(&input, lambda);
+    let unconditional = success_at_month(&scaled, &vols, &mc, K).expect("ok");
+    assert!(
+        unconditional.success > 0.35 && unconditional.success < 0.65,
+        "600.000 € es la MEDIANA de las llegadas sorteadas, no la llegada: éxito {} \
+         (predicho ≈ 0,50)",
+        unconditional.success
+    );
+
+    let triple = scale_liquid_assets(&input, 3.0 * lambda);
+    let at_triple = success_at_month(&triple, &vols, &mc, K).expect("ok");
+    println!(
+        "[C9] k={K} · SIN condicionar: éxito(λ*)={:.4} (predicho ≈ 0,50) ·          éxito(3λ*)={:.4}/wilson {:.4} (predicho 0,881/0,803) · cumple90={}",
+        unconditional.success,
+        at_triple.success,
+        at_triple.wilson_low,
+        at_triple.meets(THRESHOLD_90)
+    );
+    assert!(
+        !at_triple.meets(THRESHOLD_90),
+        "ni con el TRIPLE del capital condicionado cumplía la definición vieja el umbral: \
+         éxito {} · wilson_low {} (predicho 0,881 / 0,803)",
+        at_triple.success,
+        at_triple.wilson_low
+    );
+}
+
+/// **La cifra de HOY no se mueve ni un euro con la curva condicionada.**
+///
+/// En `k = 1` no hay prefijo que fijar —el mes 0 es el estado inicial y ningún flujo ha
+/// intervenido—, así que `éxito_condicionado(λ, 1)` es, operando a operando,
+/// [`success_at_month`]`(λ, 1)`. La igualdad se comprueba **sobre la medición entera**, no sobre el
+/// importe: dos `SuccessAt` iguales campo a campo garantizan que la bisección ve la misma función
+/// objetivo y por tanto llega al mismo `λ*`.
+///
+/// PREDICCIONES escritas antes de correr:
+/// - `success_at_month_from(h, 1, 1) == success_at_month(h, 1)`, **bit a bit** (los dos `f64` salen
+///   de los mismos enteros).
+/// - Y el eje es un no-op también fuera de `k = 1`: con `stochastic_from_month = 1` el sorteo del
+///   mes 61 es idéntico al de siempre. Sin esta segunda mitad, un default mal puesto pasaría
+///   desapercibido en todo lo que no sea la curva.
+/// - `needed_capital_today` sobre [`pension_household`] sigue dando **600.000 € clavados** y
+///   `λ* = 60` exacto: la cifra que la app enseña en Jubilación, Resumen y Proyección.
+#[test]
+fn needed_capital_today_is_unchanged_by_the_conditional_curve() {
+    let input = pension_household();
+    let mc = cfg(100);
+
+    for &k in &[1u32, 61, 120] {
+        let scaled = scale_liquid_assets(&input, 1.5);
+        let plain = success_at_month(&scaled, &vol(), &mc, k).expect("ok");
+        let from_one = success_at_month_from(&scaled, &vol(), &mc, k, 1).expect("ok");
+        assert_eq!(
+            plain, from_one,
+            "con `stochastic_from_month = 1` el sorteo del mes {k} tiene que ser el de siempre"
+        );
+    }
+
+    let today = needed_capital_today(&input, &vol(), &mc, &cfg(250), THRESHOLD).expect("ok");
+    assert_eq!(today.absent_reason, None);
+    assert_eq!(today.lambda, Some(60.0), "λ* = 600.000/10.000, exacto");
+    assert_eq!(
+        today.amount_nominal,
+        Some(Decimal::from(600_000)),
+        "la cifra de hoy se movió con un cambio que solo afecta a los nodos k > 1"
+    );
+    assert_eq!(
+        today.amount_today,
+        Some(Decimal::from(600_000)),
+        "en k = 1 el factor de inflación del índice 0 es 1 exacto"
+    );
+}
+
+/// **El prefijo determinista consume los MISMOS números aleatorios.**
+///
+/// Es la mitad de la decisión que no se ve en ningún importe: el RNG se consume también en los
+/// meses del prefijo, así que el camino `p` ve en el mes `k` exactamente el mismo `z` con prefijo
+/// y sin él. Sin esa disciplina, cada nodo de la curva mediría con una muestra desplazada y la
+/// bisección de un nodo se movería por cambiar el nodo, no por cambiar el capital.
+///
+/// El hogar es composición pura (sin ingreso, sin gasto, sin venta), así que
+/// `v(m) = v(m−1) · f_m` y el cociente entre dos valores consecutivos **es** el factor del mes: el
+/// test lee el sorteo sin necesitar acceso a las tripas del crate.
+///
+/// PREDICCIONES escritas antes de correr:
+/// - Con `stochastic_from_month = 13`, los doce primeros meses son deterministas ⇒
+///   `v(12) = 100.000 · (1,05^(1/12))^12 = 105.000 €` (±1e-6 relativo, la cola de `powd` en `f64`).
+/// - El camino sin prefijo llega a `v(12)` en OTRO sitio — si no, el test sería vacío.
+/// - Y los factores de los meses **13..24 coinciden en los dos**, hasta el último bit útil
+///   (1e-12 relativo): el mismo `z`, el mismo `σ`, el mismo producto.
+#[test]
+fn the_deterministic_prefix_consumes_the_same_random_numbers() {
+    let mut input = base_input(
+        24,
+        Decimal::ZERO,
+        Decimal::ZERO,
+        vec![mk_asset(
+            1,
+            Decimal::from(100_000),
+            true,
+            Some(Decimal::from(5)),
+        )],
+        vec![rule_remainder(0)],
+    );
+    input.phase_plan.expense_retirement_monthly = Decimal::ZERO;
+    let scenario = retiring_at(&input, 24);
+    let vols = vec![Some(17.0)];
+    let mc = cfg(1);
+
+    let full = run_path_from(&scenario, &vols, &mc, 7, 1).expect("ok");
+    let prefixed = run_path_from(&scenario, &vols, &mc, 7, 13).expect("ok");
+    let a: Vec<f64> = full.per_asset_series[0].iter().map(|v| v.0).collect();
+    let b: Vec<f64> = prefixed.per_asset_series[0].iter().map(|v| v.0).collect();
+
+    // (1) el prefijo es la línea determinista, exactamente
+    let m12 = 100_000.0 * (1.05f64.powf(1.0 / 12.0)).powi(12);
+    assert!(
+        ((b[12] - m12) / m12).abs() < 1e-6,
+        "el prefijo tenía que componer 100.000 · 1,05 = 105.000 €: {}",
+        b[12]
+    );
+
+    // (2) el test no es vacío: sin prefijo, el camino 7 llega a otro sitio
+    assert!(
+        ((a[12] - b[12]) / b[12]).abs() > 1e-3,
+        "el camino sorteado y el determinista coinciden en el mes 12: el test no prueba nada \
+         ({} vs {})",
+        a[12],
+        b[12]
+    );
+
+    // (3) el MISMO `z` en cada mes del tramo sorteado
+    for m in 13..=24usize {
+        let fa = a[m] / a[m - 1];
+        let fb = b[m] / b[m - 1];
+        assert!(
+            ((fa - fb) / fb).abs() < 1e-12,
+            "el mes {m} vio otro sorteo: {fa} vs {fb} — el flujo del RNG se desplazó con el prefijo"
+        );
+    }
+}
+
+/// **Los nodos ya cubiertos siguen siendo ausencias con la curva condicionada** (el arreglo F1 de
+/// `Bracket::AlreadyCovered` + [`WARM_LAMBDA_FLOOR`] sigue vigente).
+///
+/// Complementa a `curve_nodes_after_the_valid_date_are_null_not_the_salary_asymptote`, que fijó el
+/// arreglo con el sorteo desde el mes 1: aquí los dos nodos cubiertos llevan **60 y 119 meses de
+/// prefijo determinista**, que es el camino nuevo, y el nodo heredero va DETRÁS para que el suelo
+/// del warm start tenga que actuar sobre un `λ` nacido del bracket condicionado.
+///
+/// PREDICCIONES escritas antes de correr (aritmética en [`pension_household`]):
+/// - Los nodos 61 y 120 son `already_covered`: desde el índice 60 la pensión (2.500) cubre el gasto
+///   (2.000), la necesidad ordinaria es 0, F2 compara `0 > 4 % · L` —falso para cualquier `λ`—, sin
+///   necesidad no hay venta (F1) y `fixed_real` no tiene techo (F3). Fijar la acumulación no cambia
+///   nada de eso: lo que decide es la PENSIÓN, no la dispersión.
+/// - Ni `λ` ni importes en esos dos nodos, y `draws_search == 9` en cada uno (sondeo de partida +
+///   ocho halvings).
+/// - El nodo 1, que va el último, hereda el suelo `λ = 1` y vuelve a resolver **600.000 €**.
+#[test]
+fn nodes_after_the_valid_date_stay_null_when_already_covered() {
+    let input = pension_household();
+    let curve =
+        needed_capital_curve(&input, &vol(), &cfg(100), THRESHOLD, &[61, 120, 1]).expect("ok");
+    assert_eq!(curve.len(), 3);
+
+    for node in &curve[..2] {
+        assert_eq!(
+            node.absent_reason,
+            Some(ABSENT_ALREADY_COVERED),
+            "el nodo del mes {} publicó una cifra con el prefijo determinista",
+            node.month
+        );
+        assert_eq!(node.lambda, None);
+        assert_eq!(node.amount_nominal, None);
+        assert_eq!(node.amount_today, None);
+        assert_eq!(
+            node.draws_search,
+            1 + MAX_LAMBDA_HALVINGS,
+            "el bracket del nodo {} sondea la partida y los ocho halvings",
+            node.month
+        );
+        let stats = node.success_at_lambda.expect("la afirmación viaja medida");
+        assert_eq!(stats.month, node.month);
+        assert_eq!(stats.by_kind, [0, 0, 0]);
+    }
+
+    let heir = curve[2];
+    assert_eq!(heir.month, 1);
+    assert_eq!(
+        heir.absent_reason, None,
+        "el heredero se quedó sin cifra: el warm start volvió a heredar el suelo de los halvings"
+    );
+    assert_eq!(heir.lambda, Some(60.0));
+    assert_eq!(heir.amount_nominal, Some(Decimal::from(600_000)));
+    assert_eq!(WARM_LAMBDA_FLOOR, 1.0);
 }

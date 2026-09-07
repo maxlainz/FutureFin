@@ -73,14 +73,14 @@ mod strategy_solves;
 mod needed_capital;
 
 pub use mc::{
-    project_percentile_bands, run_path, seed_for, FAILURE_STEP_MONTHS, McConfig, McError,
-    McOutcome, DEFAULT_PATHS, DEFAULT_PERCENTILES, MAX_PATHS,
+    project_percentile_bands, run_path, run_path_from, seed_for, FAILURE_STEP_MONTHS, McConfig,
+    McError, McOutcome, DEFAULT_PATHS, DEFAULT_PERCENTILES, MAX_PATHS,
 };
 pub use solve_mc::{
-    retiring_at, success_at_month, success_by_retirement_month, valid_retirement_month,
-    RetirementDateSolve, SuccessAt, BRACKET_STEP_MONTHS, KIND_INITIAL_RATE_EXCEEDED,
-    KIND_PORTFOLIO_DEPLETED, KIND_RULE_BELOW_NEED, MAX_ANNUAL_DRAWS, MAX_BRACKET_DRAWS,
-    MAX_CONFIRMATION_ADVANCES, MAX_MONTHLY_BISECTION_DRAWS, WILSON_Z_95,
+    retiring_at, success_at_month, success_at_month_from, success_by_retirement_month,
+    valid_retirement_month, RetirementDateSolve, SuccessAt, BRACKET_STEP_MONTHS,
+    KIND_INITIAL_RATE_EXCEEDED, KIND_PORTFOLIO_DEPLETED, KIND_RULE_BELOW_NEED, MAX_ANNUAL_DRAWS,
+    MAX_BRACKET_DRAWS, MAX_CONFIRMATION_ADVANCES, MAX_MONTHLY_BISECTION_DRAWS, WILSON_Z_95,
 };
 pub use strategy_solves::{
     coast_stop_month, contributing_extra, earliest_partial_start, minimum_extra_contribution,

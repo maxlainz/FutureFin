@@ -27,7 +27,7 @@
 //! | 6 | Agotamiento ⇒ alguna necesidad quedó sin cubrir en ese mes o después (modo `ceiling`) |
 //! | 7 | Determinismo: dos ejecuciones de la MISMA entrada dan el mismo `Display`, dígito a dígito |
 //! | 8 | La necesidad ORDINARIA no lleva deuda ni «Próximos»: `ordinaria ≤ neta + deuda + max(0, próximo)` |
-//! | 9 | El veredicto del camino: los dos latches se fijan a la vez, en rango, y en el PRIMER mes |
+//! | 9 | El veredicto del camino: los dos latches se fijan a la vez, en rango, y en el PRIMER mes (F3 solo puede firmar en `R`) |
 //!
 //! # El generador
 //!
@@ -452,9 +452,16 @@ fn check(
     // Con techo, «la regla permitió menos que la necesidad ordinaria» ⟺ hubo recorte: en este
     // arnés la necesidad ordinaria y la neta coinciden (ver (8)), y el recorte ES su diferencia
     // contra lo que la regla permitió.
+    //
+    // **Y solo cuenta en `R`, el primer mes jubilado** (C10): F3 es una propiedad de la FECHA,
+    // como F2. Un recorte del mes 13 es una lectura informativa (`withdrawal_shortfall`), no un
+    // fracaso — antes de C10 este arnés lo trataba como fallo y su rama `None` lo cazaba, que es
+    // exactamente lo que dejó de ser cierto.
     let first_f3 = rule_has_ceiling
-        .then(|| (1..=h).find(|k| out.withdrawal_shortfall[*k] > EPS))
-        .flatten();
+        .then(|| out.retirement_month_index)
+        .flatten()
+        .filter(|r| (*r as usize) <= h && out.withdrawal_shortfall[*r as usize] > EPS)
+        .map(|r| r as usize);
     match out.failure_month_index {
         Some(m) => {
             if m < 1 || m as usize > h {
@@ -502,7 +509,7 @@ fn check(
             }
             if let Some(k) = first_f3 {
                 return fail(format!(
-                    "la regla recortó {} € en el mes {k} y el camino «no falla»",
+                    "la regla recortó {} € en el mes {k} —que es `R`— y el camino «no falla»",
                     out.withdrawal_shortfall[k]
                 ));
             }

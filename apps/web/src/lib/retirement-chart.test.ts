@@ -3,9 +3,16 @@ import {
   buildRetirementChartMarkers,
   chartValidDateMark,
   placeMarkerLabels,
+  retirementNetWorthSeries,
   type RetirementMarkerSeries,
+  type RetirementNetWorthSeries,
   type ValidDateMarkSeries,
 } from "./retirement-chart";
+import {
+  deflationFactorAt,
+  neededCurveForChart,
+  type NeededCurveSeries,
+} from "./projection-chart";
 
 const series = (over: Partial<RetirementMarkerSeries> = {}): RetirementMarkerSeries => ({
   safe_date_month_index: null,
@@ -307,5 +314,127 @@ describe("chartValidDateMark", () => {
     expect(
       chartValidDateMark(plan({ safe_date_month_index: null })),
     ).toEqual({ mark: null, note: null });
+  });
+});
+
+/**
+ * `retirementNetWorthSeries` — la línea PRINCIPAL del chart (decisión C11, issue #228): líquida,
+ * no total. Lo único que este bloque impide que vuelva es la mentira silenciosa que costaría más
+ * caro: que un punto sin líquido caiga al total en vez de a `null`.
+ */
+describe("retirementNetWorthSeries", () => {
+  const point = (
+    over: Partial<{
+      month_index: number;
+      net_worth: number;
+      net_worth_liquid: number | undefined;
+    }> = {},
+  ) => ({
+    month_index: 0,
+    net_worth: 0,
+    contributed_capital: 0,
+    ...over,
+  });
+
+  it("extrae `net_worth_liquid`, no `net_worth`", () => {
+    const series: RetirementNetWorthSeries = {
+      points: [
+        point({ month_index: 0, net_worth: 1_000_000, net_worth_liquid: 700_000 }),
+        point({ month_index: 12, net_worth: 1_100_000, net_worth_liquid: 750_000 }),
+      ],
+    };
+    expect(retirementNetWorthSeries(series)).toEqual([700_000, 750_000]);
+  });
+
+  it("un punto sin `net_worth_liquid` sale `null`, NUNCA el total", () => {
+    const series: RetirementNetWorthSeries = {
+      points: [
+        point({ net_worth: 1_000_000, net_worth_liquid: 700_000 }),
+        point({ net_worth: 1_100_000, net_worth_liquid: undefined }),
+      ],
+    };
+    expect(retirementNetWorthSeries(series)).toEqual([700_000, null]);
+  });
+
+  it("un valor no finito (NaN/Infinity) se trata como no resuelto", () => {
+    const series: RetirementNetWorthSeries = {
+      points: [
+        point({ net_worth_liquid: Number.NaN }),
+        point({ net_worth_liquid: Number.POSITIVE_INFINITY }),
+        point({ net_worth_liquid: 500 }),
+      ],
+    };
+    expect(retirementNetWorthSeries(series)).toEqual([null, null, 500]);
+  });
+
+  it("sin puntos, o serie nula/indefinida ⇒ array vacío, nunca un guion", () => {
+    expect(retirementNetWorthSeries({ points: [] })).toEqual([]);
+    expect(retirementNetWorthSeries(null)).toEqual([]);
+    expect(retirementNetWorthSeries(undefined)).toEqual([]);
+  });
+});
+
+/**
+ * Regresión issue #228 (paquete W12): el pipeline «Capital necesario» de la vista de Jubilación
+ * — `RetirementView.tsx` construye `neededCurve` con `neededCurveForChart` (NOMINAL, esta función
+ * ya no deflacta) y se lo pasa a `MiniProjection` por su prop `neededCurve`; `MiniProjection`
+ * aplica su `deflator` una única vez (`p.value * df(p.month)`, `components/charts/
+ * MiniProjection.tsx` ≈:347), el MISMO `chartDeflator` que ya usa para `netWorthSeries` y `band`.
+ *
+ * Antes del arreglo, `RetirementView` deflactaba dentro de `neededCurveForChart` Y
+ * `MiniProjection` volvía a deflactar lo que ya venía deflactado: la curva se encogía DOS veces
+ * (a 3 %/30 años, un capital de 800.000 € nominales salía en pantalla como 135.795 €, no como los
+ * 329.594 € correctos). Este test pinea el pipeline completo — nominal → una sola deflactación —
+ * simulando exactamente el paso de `MiniProjection` (no hay arnés de render de componentes en
+ * este repo; los dos ficheros que forman el contrato se citan arriba).
+ */
+describe("pipeline «Capital necesario»: RetirementView → MiniProjection (issue #228, W12)", () => {
+  const point = (month_index: number) => ({
+    month_index,
+    net_worth: 0,
+    contributed_capital: 0,
+  });
+
+  it("una curva de 800.000 € en el mes 360 se deflacta EXACTAMENTE UNA VEZ a 3 %/30 años", () => {
+    const series: NeededCurveSeries = {
+      points: [point(0), point(360)],
+      needed_capital_curve: [500_000, 800_000],
+      needed_capital_curve_state: "ready",
+    };
+
+    // 1) `neededCurveForChart` ya NO deflacta: sale tal cual, en NOMINAL.
+    const nominal = neededCurveForChart(series);
+    expect(nominal).toEqual([500_000, 800_000]);
+
+    // 2) `RetirementView` solo le pega el `month_index` (sin tocar el valor).
+    const neededCurveProp = series.points.map((p, i) => ({
+      month: p.month_index,
+      value: nominal![i] ?? null,
+    }));
+
+    // 3) `MiniProjection` aplica el deflactor UNA vez, con el `chartDeflator` de «En dinero de
+    //    hoy» activo a 3 % anual — el mismo `df` que usaría para `netWorthSeries`/`band`.
+    const df = (mi: number) => deflationFactorAt(mi, 3);
+    const deflatedOnce = neededCurveProp.map((p) => ({
+      month: p.month,
+      value: p.value == null ? null : p.value * df(p.month),
+    }));
+
+    const factor30y = deflationFactorAt(360, 3);
+    expect(factor30y).toBeCloseTo(1 / Math.pow(1.03, 30), 9);
+
+    // ≈ 329.589 €, no los ≈ 135.786 € (800.000 × factor²) de la doble deflactación del bug
+    // (issue #228: «800.000 € nominales → 329.594 € correctos frente a 135.795 € publicados» —
+    // pequeñas diferencias de redondeo frente a la nota del issue, mismo orden de magnitud).
+    expect(deflatedOnce[1]!.value).toBeCloseTo(800_000 * factor30y, 6);
+    expect(deflatedOnce[1]!.value).toBeGreaterThan(320_000);
+    expect(deflatedOnce[1]!.value).toBeLessThan(340_000);
+    const doubleDeflated = 800_000 * factor30y * factor30y;
+    expect(doubleDeflated).toBeLessThan(140_000);
+    expect(deflatedOnce[1]!.value).toBeGreaterThan(doubleDeflated * 2);
+
+    // El mes 0 no se mueve (factor 1): sirve de control de que el mecanismo deflacta por mes, no
+    // por posición ni por un factor fijo.
+    expect(deflatedOnce[0]!.value).toBeCloseTo(500_000, 6);
   });
 });

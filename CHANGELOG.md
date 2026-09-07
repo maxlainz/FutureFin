@@ -469,6 +469,60 @@ distintas y con pensiones que empiezan en años distintos.
   chip «Mío · sin titular en Hogar» de las pantallas del ledger (el segmentado «Yo | Hogar» ya lo
   dice), y «(opc.)» → «(opcional)» en las etiquetas de esos formularios.
 
+### Tres correcciones de definición tras medir el modelo en la imagen (2026-09-07)
+
+La primera imagen v2 se midió sobre la demo sintética (`scripts/seed-demo.sh`) y un verificador independiente
+reprodujo con el motor, al euro, los doce nodos de la curva de capital necesario. Tres cosas no eran lo que el
+modelo decía medir, y el owner decidió las tres con los números delante (C9–C11; los que siguen son sintéticos).
+
+- **La curva de capital por edad es CONDICIONADA (C9)**: cada nodo responde ahora «lo que necesitas **TENER**
+  (líquido) a esa edad para jubilarte entonces al umbral». La acumulación hasta el mes anterior no se sortea —es
+  la línea determinista del motor— y el Monte Carlo cubre solo el tramo jubilado, con la misma semilla y los mismos
+  números aleatorios comunes (el RNG se consume también en los meses deterministas, a propósito: así el camino
+  `p` ve el mismo shock en el mes `k` en cualquier nodo y una bisección se mueve por cambiar el capital, nunca
+  por cambiar el nodo). Antes el nodo sorteaba también la acumulación y publicaba la **mediana** del hogar
+  escalado, así que arrastraba la dispersión de treinta años (×3,19 con 17 % de volatilidad) y el sobrecoste de
+  exigir Wilson con 500 caminos (×1,24): en la demo, 3,56 M€ a los 66 frente a un suelo de la puerta de tasa
+  inicial de 899 k€; sobre la batería P9 la curva salía monótona creciente de 2,9 M€ a 93,5 M€ (euros de hoy)
+  entre el mes 1 y el 840 — la incertidumbre de la acumulación, no un capital necesario. Condicionada da el suelo
+  F2 más el margen que pida F1: 899 k€ a los 66 y 36.706 € a los 67 en la demo (la pensión cubre casi todo).
+  **`needed_capital_today` no se mueve ni un euro** (en `k = 1` no hay prefijo que fijar), **la fecha tampoco**
+  —sigue siendo la definición A, cada camino con su acumulación— y por eso la curva no tiene por qué cruzar la
+  línea del patrimonio en la fecha. Coste sin cambios (15,6 s los 14 nodos de P9 en release). Interno:
+  `PathEngine::set_stochastic_from_month`, `success_at_month_from`, `run_path_from`; regresiones
+  `the_curve_node_is_conditional_on_reaching_it_not_on_todays_dispersion`,
+  `needed_capital_today_is_unchanged_by_the_conditional_curve`,
+  `the_deterministic_prefix_consumes_the_same_random_numbers`.
+- **El fallo F3 se juzga SOLO en el primer mes jubilado (C10)**, igual que la puerta de tasa inicial (F2), en vez
+  de en cada mes con latch. Mes a mes no medía la salud del plan sino una **barrera**: lo que una regla por saldo
+  permite sigue al líquido, que en el sorteo pasea con ~17 % de volatilidad frente a una deriva de ~0,8 %/año, así
+  que sobre cientos de meses la probabilidad de cruzarla alguna vez tiende a 1 por la varianza y no por el plan —
+  y bajo `rule_is_spend` una regla porcentual no puede disparar F1 (una fracción del saldo nunca lo vacía), de
+  modo que la barrera decidía sola. Medido con «3,5 % del saldo»: capital necesario hoy **2,52 M€** frente a
+  **620 k€** con «Gasto fijo», 67 fallos de 2.500 todos F3 y el primero siempre antes de la pensión (mediana: mes
+  293); con F3 solo en el mes de jubilación el mismo hogar pide **860 k€**. Ahí F2 y F3 son la misma pregunta en
+  dos unidades —bruta la de F2 (`12·necesidad ≤ SWR·líquido de entrada`), neta la de F3
+  (`neto(regla(líquido de entrada)) ≥ necesidad`)— y a partir del mes siguiente el único motivo de fallo es F1.
+  Lo que la regla recorte después se sigue publicando en `withdrawal_shortfall`, `months_below_need_p50` y
+  `withdrawal_to_need_ratio_p50`: es un recorte del nivel de vida, no un fracaso. Retirar F3 del todo se descartó
+  (colapsaría al suelo de F2 y el modo porcentual sería infalible por construcción). **Ni un pin se movió**:
+  `pins-4.15.json` no tiene reglas por saldo; los dos casos de `pins-5.0-outputs.json` con `rule_below_need`
+  (P15, P17) ya fallaban en su primer mes jubilado; el hogar de prueba de Monte Carlo publica las mismas 70
+  mensualidades con recorte y la misma cobertura 0,9793 — lo que se movió es el veredicto (éxito 0,051 → 1,0).
+  Regresiones: `f3_fires_only_in_the_first_retired_month_never_after`,
+  `mc_f3_is_a_property_of_the_plan_not_of_the_draw`; el invariante 9 del arnés `fuzz_invariants.rs` se acota a
+  `R`. La forma mes a mes queda registrada como rechazada en `futurefin-failure-archaeology`.
+- **En Jubilación la línea y la banda del gráfico miden el patrimonio LÍQUIDO (C11, issue #228)**, no el total:
+  la curva de capital necesario es líquida (el motor escala y mide `liquid_worth`), y dibujarla sobre el total
+  —vivienda incluida, deuda restada— invitaba a leer un cruce que no es el que se mide (en la demo, 1.273.936 €
+  de total frente a 836.149 € de líquido en el mes de la fecha válida). La marca de la fecha viene del servidor y
+  no cambia; Resumen y Proyección conservan el total. La serie ya publicaba `net_worth_liquid` por punto; la
+  banda de Jubilación pasa a `net_worth_liquid_p10/p90`; leyenda «Patrimonio líquido».
+- **Y un bug de deflactación de paso**: la curva de capital necesario se deflactaba dos veces en Jubilación (el
+  llamante la pre-deflactaba y el componente la volvía a deflactar), lo que la encogía ~59 % a 30 años con «En
+  dinero de hoy» activo y sesgaba el eje. El llamante pasa ahora la curva NOMINAL y el componente deflacta una
+  sola vez, como la banda y la línea.
+
 ### Los once hallazgos de la revisión adversarial (B1–B11)
 
 Todos **silenciosos**: números creíbles, ninguna excepción, ningún test en rojo.
