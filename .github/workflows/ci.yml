@@ -286,12 +286,14 @@ jobs:
           set -euo pipefail
           # Binarios de integración de la API por orden alfabético, repartidos round-robin.
           # `tests/common/` no es un binario (vive en un subdirectorio) y no entra en el glob.
+          # El glob expande en orden alfabético (bash), que es el orden del reparto.
           ARGS=()
           i=0
-          while IFS= read -r t; do
+          for f in apps/api/tests/*.rs; do
+            t=$(basename "$f" .rs)
             if [ $((i % SHARDS)) -eq "$SHARD" ]; then ARGS+=(--test "$t"); fi
             i=$((i + 1))
-          done < <(ls apps/api/tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' | sort)
+          done
           echo "shard $SHARD/$SHARDS → ${ARGS[*]}"
           if [ "$SHARD" -eq 0 ]; then
             cargo test --workspace --locked --exclude futurefin-api
