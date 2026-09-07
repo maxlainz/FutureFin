@@ -13,6 +13,12 @@ on:
 permissions:
   contents: read
 
+# Un push nuevo a la misma rama cancela el run anterior: desde el modelo v2 (5.0.0) la
+# integración dura decenas de minutos y dos runs en paralelo solo se roban minutos de runner.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Barato, rápido y primero: ningún dato personal entra al repositorio. Existe porque
   # hasta agosto de 2026 `apps/api/tests/fixtures/` llevaba extractos bancarios reales
@@ -220,14 +226,23 @@ jobs:
   # Sobre conexiones: cargo ejecuta los binarios de test en serie y libtest usa un
   # hilo por core (4 en el runner), y cada test abre un pool de 5 → ~20 conexiones
   # simultáneas, muy por debajo del max_connections=100 por defecto.
-  integration:
+  # Desde el modelo v2 de 5.0.0 (2026-09-07) la suite de integración resuelve fechas y capital
+  # por Monte Carlo en decenas de tests: en el runner de 2 núcleos, 58 de los 99 binarios tardaron
+  # 75 min (run 34132534408, intento 1, cancelado a los 90 con `savings_source` aún corriendo; el
+  # más lento, `fire_parity`, 7 min). La suite entera son ~150 min ahí frente a 15–25 en un Mac.
+  # Por eso los binarios de `apps/api/tests/*.rs` se reparten en SHARDS paralelos por orden
+  # alfabético (round-robin), y el shard 0 corre además los crates del motor y los tests de
+  # unidad de la API. El check que exige el ruleset de `main` sigue llamándose `integration`:
+  # es el job agregador de abajo, que falla si falla o se cancela cualquier shard.
+  integration-shard:
     runs-on: ubuntu-latest
-    # El tope evita que un test bloqueado se coma las 6 h por defecto del runner. Hasta 4.15
-    # bastaban ~3 min; desde el modelo v2 de 5.0.0 (2026-09-07) la suite de integración resuelve
-    # fechas y capital por Monte Carlo en decenas de tests y el job se CANCELÓ a los 45 min con
-    # suites aún corriendo (run 34100228793: 08:22 → 09:07 UTC). En este Mac la suite entera
-    # tarda 15–25 min; el runner va 2–4× más lento.
+    # El tope sigue evitando que un test bloqueado se coma las 6 h del runner; con 4 shards cada
+    # uno debería quedarse en ~40 min (medido: 75 min / 4 + 3 de compilación).
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
 
     services:
       postgres:
@@ -256,14 +271,46 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # `cargo test --workspace` cubre las tres cosas de golpe: los tests unitarios
-      # del engine, los unitarios de la lib de la API y los de integración contra
-      # Postgres. En local el puerto documentado es el 5433 (para no chocar con el
-      # Postgres de desarrollo); aquí no hay con qué chocar, así que 5432.
-      - name: cargo test --workspace (engine + integración contra Postgres)
+        with:
+          # Los cuatro shards compilan lo mismo: una sola cache compartida en vez de cuatro.
+          shared-key: integration
+      # En local el puerto documentado es el 5433 (para no chocar con el Postgres de desarrollo);
+      # aquí el servicio escucha en el 5432 del runner. Mismo esquema aislado por test que en local
+      # (`.claude/tests.md`).
+      - name: cargo test (shard ${{ matrix.shard }} de 4 — engine + integración contra Postgres)
         env:
           TEST_DATABASE_URL: postgres://futurefin:futurefin_test@127.0.0.1:5432/futurefin_test
-        run: cargo test --workspace --locked
+          SHARD: ${{ matrix.shard }}
+          SHARDS: 4
+        run: |
+          set -euo pipefail
+          # Binarios de integración de la API por orden alfabético, repartidos round-robin.
+          # `tests/common/` no es un binario (vive en un subdirectorio) y no entra en el glob.
+          ARGS=()
+          i=0
+          while IFS= read -r t; do
+            if [ $((i % SHARDS)) -eq "$SHARD" ]; then ARGS+=(--test "$t"); fi
+            i=$((i + 1))
+          done < <(ls apps/api/tests/*.rs | xargs -n1 basename | sed 's/\.rs$//' | sort)
+          echo "shard $SHARD/$SHARDS → ${ARGS[*]}"
+          if [ "$SHARD" -eq 0 ]; then
+            cargo test --workspace --locked --exclude futurefin-api
+            cargo test -p futurefin-api --locked --lib
+          fi
+          cargo test -p futurefin-api --locked "${ARGS[@]}"
+
+  # El check requerido por el ruleset de `main`. Agrega los shards: verde solo si TODOS lo son.
+  integration:
+    runs-on: ubuntu-latest
+    needs: integration-shard
+    if: always()
+    steps:
+      - name: todos los shards en verde
+        env:
+          RESULT: ${{ needs.integration-shard.result }}
+        run: |
+          echo "integration-shard: $RESULT"
+          test "$RESULT" = "success"
 
 
   # Imagen autocontenida (3.x): construye y ejercita los caminos críticos del contenedor
