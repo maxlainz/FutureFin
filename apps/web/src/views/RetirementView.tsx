@@ -410,6 +410,15 @@ export function RetirementView({
    *  reiniciaría el debounce en cada repintado ajeno. */
   const blockedBySomeRequired = missingIds.length > 0;
 
+  /** La función de guardado llega por prop desde `App.tsx` sin memoizar: cambia de identidad en
+   *  cada render de App. Si `runProfileSave` dependiera de ella, `queueProfileSave` y el efecto de
+   *  autosave se rearmarían (y limpiarían el temporizador de 420 ms) en cada repintado ajeno
+   *  mientras el borrador está sucio — un flujo continuo de renders retrasaría el guardado sin
+   *  fin. Se lee siempre la última a través de una referencia y las dependencias se quedan en
+   *  lo que de verdad cambia el PATCH. */
+  const onSaveRetirementProfileRef = useRef(onSaveRetirementProfile);
+  onSaveRetirementProfileRef.current = onSaveRetirementProfile;
+
   const runProfileSave = useCallback(() => {
     if (!canEditProfile) return;
     const patch = buildRetirementProfilePatch(syncedProfileRef.current, profileDraft);
@@ -433,7 +442,8 @@ export function RetirementView({
     }
     setProfileIssue(null);
     const seq = ++profileSaveSeqRef.current;
-    void onSaveRetirementProfile(patch)
+    void onSaveRetirementProfileRef
+      .current(patch)
       .then((saved) => {
         if (seq !== profileSaveSeqRef.current || !saved) return;
         syncedProfileRef.current = saved;
@@ -446,7 +456,7 @@ export function RetirementView({
       .catch(() => {
         // El banner lo pinta App.tsx. Aquí solo hay que NO marcar como guardado.
       });
-  }, [profileDraft, canEditProfile, blockedBySomeRequired, onSaveRetirementProfile]);
+  }, [profileDraft, canEditProfile, blockedBySomeRequired]);
 
   const queueProfileSave = useCallback(
     (delayMs: number) => {
