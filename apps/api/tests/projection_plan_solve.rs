@@ -99,6 +99,145 @@ async fn settle_plan_extras(app: &TestApp, cookie: &str) -> Value {
     panic!("el nivel 2 no aterrizó dentro del margen");
 }
 
+/// **Un hogar YA CUBIERTO**: su ingreso de jubilación (3.000 €/mes que persisten) cubre de sobra su
+/// gasto de jubilación (1.000 €/mes), **con la inflación a 0** para que lo siga cubriendo en todo
+/// el horizonte y no sólo al principio.
+///
+/// Tiene cartera —50.000 € líquidos— y ahorra 2.000 €/mes, así que acumula una fortuna por el
+/// camino: es justo lo que hace falta para que el bug tuviera algo grande que publicar.
+///
+/// Derivado a mano: con `necesidad ordinaria = max(0, 1.000 − 3.000) = 0` en TODOS los meses,
+/// ninguno de los tres motivos de fallo puede dispararse — F2 compara `12·0 > SWR% · L`, que es
+/// falso para cualquier cartera; sin necesidad no hay venta, así que F1 tampoco; y `fixed_real` no
+/// tiene techo, así que F3 tampoco. El éxito es 1 con la cartera dividida por 256, o sea que **no
+/// hay frontera `λ*` que biseccionar**.
+async fn household_already_covered(app: &TestApp, name: &str) -> LoggedInOwner {
+    let owner = app.register_and_login_owner(name).await;
+    // Inflación 0: sin ella el gasto de jubilación se indexa y acabaría alcanzando al ingreso
+    // (1.000 · 1,025^n > 3.000 a partir del año 45), y los nodos tardíos dejarían de estar
+    // cubiertos por una razón que este test no quiere medir.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            serde_json::json!({"annual_inflation_assumption_percent": "0"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "inflación 0: {r:?}");
+
+    let asset_cat = app.create_category(&owner, "asset", "Fondo").await;
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({
+                "category_id": asset_cat,
+                "name": "Indexado",
+                "current_value": "50000",
+                "expected_annual_return_percent": "5",
+                "annual_volatility_percent": "15",
+                "is_liquid": true,
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "crear activo: {r:?}");
+
+    let income_cat = app.create_category(&owner, "income", "Renta").await;
+    let expense_cat = app.create_category(&owner, "expense", "Vida").await;
+    let r = app
+        .post_json_with_cookie(
+            "/v1/budget/entries",
+            serde_json::json!({"category_id": income_cat, "amount": "3000",
+                               "persists_after_retirement": true}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "ingreso: {r:?}");
+    let r = app
+        .post_json_with_cookie(
+            "/v1/budget/entries",
+            serde_json::json!({"category_id": expense_cat, "amount": "1000",
+                               "ends_at_retirement": false}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "gasto: {r:?}");
+    owner
+}
+
+/// **Ya cubierto no es un 0 € ni una curva de nómina: es `already_covered` y una línea que no se
+/// dibuja.**
+///
+/// El bug que este test cierra vivía en el bracket sobre `λ`: cuando los ocho halvings cumplían
+/// TODOS —el caso de este hogar, que no necesita cartera para jubilarse—, se devolvía el último
+/// como si fuera `λ*` y se publicaba el líquido del hogar escalado por él. Con `λ ≈ 0` ese líquido
+/// no es una necesidad: es lo que el hogar ACUMULA DE SU NÓMINA hasta esa edad. Y el warm start lo
+/// componía nodo a nodo (`λ` heredado ÷ 256 otra vez), así que la curva salía CRECIENTE y se leía
+/// como «cuanto más viejo, más capital necesitas».
+///
+/// PREDICCIONES, escritas antes de correr:
+/// - El plan SÍ está (`plan_absent_reason: null`) y tiene fecha: con necesidad 0 el mes 1 ya cumple
+///   el umbral, así que la fecha válida es el primer mes de la rejilla.
+/// - `needed_capital_today: null` + `needed_capital_absent_reason: "already_covered"` — **nunca un
+///   importe pequeño**, que es lo que el bug publicaba (≈ el líquido dividido por 256).
+/// - `needed_capital_curve` viaja PARALELA a `points[]` y **entera a `null`**, con el estado en
+///   `ready`: los nodos se evaluaron, y ninguno tiene cifra.
+/// - Y la asíntota que el bug publicaba existe: el patrimonio del último punto es de siete cifras.
+///   Que la curva no lo publique es exactamente el arreglo.
+#[tokio::test]
+async fn an_already_covered_household_publishes_no_capital_and_a_curve_of_nulls() {
+    let app = TestApp::spawn().await;
+    let owner = household_already_covered(&app, "alice").await;
+    let body = settle_plan_extras(&app, &owner.cookie).await;
+
+    assert_eq!(body["plan_absent_reason"], Value::Null, "{body}");
+    assert_eq!(body["needed_capital_curve_state"], "ready", "{body}");
+
+    // (1) El capital de HOY: una ausencia con nombre, no una cifra diminuta.
+    assert_eq!(
+        body["needed_capital_today"],
+        Value::Null,
+        "el hogar ya cubierto publicó un importe: {}",
+        body["needed_capital_today"]
+    );
+    assert_eq!(
+        body["needed_capital_absent_reason"], "already_covered",
+        "la ausencia tiene que decir que es una RESPUESTA, no un fallo de medición: {body}"
+    );
+
+    // (2) La curva: paralela a `points[]` y entera vacía.
+    let points = body["points"].as_array().expect("points");
+    let curve = body["needed_capital_curve"]
+        .as_array()
+        .expect("la curva viaja siempre, aunque sea de nulos");
+    assert_eq!(
+        curve.len(),
+        points.len(),
+        "la curva es PARALELA a points[]: {} vs {}",
+        curve.len(),
+        points.len()
+    );
+    let with_amount: Vec<usize> = curve
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        with_amount.is_empty(),
+        "ningún nodo debería tener importe; los tienen las posiciones {with_amount:?}: {curve:?}"
+    );
+
+    // (3) Y la asíntota que el bug publicaba SÍ existe: el hogar ahorra 2.000 €/mes y termina con
+    //     siete cifras. Publicar eso como «capital necesario» era el bug entero.
+    let last = points.last().expect("al menos un punto");
+    let final_nw = last["net_worth"].as_f64().expect("net_worth es f64 en la serie");
+    assert!(
+        final_nw > 1_000_000.0,
+        "la premisa del test se ha roto: el hogar tenía que acumular una fortuna, y acabó en {final_nw}"
+    );
+}
+
 // =================================================================================================
 // Los dos niveles
 // =================================================================================================

@@ -358,9 +358,10 @@ describe("resolveDeflationAnnualPct", () => {
  * el ESTADO (`computing` ⇒ no hay curva) y los nodos `null` (el nivel 2 aún no los ha resuelto),
  * que se conservan como `null` y nunca como cero.
  *
- * **Supuesto declarado**: la curva viaja NOMINAL. El contrato de `api/types.ts` no lo dice; lo que
- * dice es que cruza la línea central de patrimonio líquido en la fecha válida, y esa línea es
- * nominal. Si el servidor la publicara en euros de hoy, el toggle la deflactaría dos veces.
+ * **Supuesto declarado**: la curva viaja NOMINAL. El contrato de `api/types.ts` no lo dice con esas
+ * palabras; lo que dice es que se compara con la línea de patrimonio, que es nominal —y que **NO
+ * tiene por qué cruzarla en la fecha válida**, porque la fecha la deciden los caminos que aguantan y
+ * no un cruce—. Si el servidor la publicara en euros de hoy, el toggle la deflactaría dos veces.
  */
 describe("neededCurveForChart", () => {
   const pts = (months: number[]) =>

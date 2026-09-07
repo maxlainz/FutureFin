@@ -96,6 +96,22 @@
 //! escalar se hubiera agotado. Misma disciplina que `month: None` en
 //! `solve_mc`: la ausencia se nombra, no se rellena con el valor que más se le parece.
 //!
+//! # Y nunca el SUELO DEL MÉTODO disfrazado de necesidad
+//!
+//! La misma disciplina, en el otro extremo. Cuando `λ` deja de morder —la pensión ya cubre el
+//! gasto, un ingreso persiste— el éxito vale 1 para cualquier `λ`, los [`MAX_LAMBDA_HALVINGS`]
+//! halvings cumplen todos y **no hay frontera que biseccionar**. La respuesta es
+//! [`ABSENT_ALREADY_COVERED`]: «no hace falta capital adicional hoy», sin importe.
+//!
+//! Hasta esa corrección el bracket devolvía en ese caso el último halving como si fuera `λ*`, y la
+//! curva publicaba el líquido del hogar escalado por él. Con `λ ≈ 0` ese líquido no es una
+//! necesidad: es lo que el hogar acumula de su NÓMINA hasta esa edad. Y el warm start lo empeoraba
+//! nodo a nodo —cada uno heredaba el `λ` del anterior y volvía a dividirlo por `2^8`—, así que en
+//! la demo sintética los cinco nodos posteriores a la fecha salían con `λ` = 0,0374 · 0,0001 · 0 ·
+//! 0 · 0 y publicaban 485.800 → 771.200 → 1.259.800 → 1.944.000 → 2.902.400 €: una curva CRECIENTE
+//! después de la fecha, que se lee como «a los 86 necesitas 2,9 M€». El suelo del warm start
+//! ([`WARM_LAMBDA_FLOOR`]) corta la composición; nombrar el caso corta la publicación.
+//!
 //! # Coste
 //!
 //! Cada evaluación de `λ` es un SORTEO completo, igual que en `solve_mc`, y además reconstruye la
@@ -133,9 +149,15 @@ use crate::{McConfig, McError};
 pub const MAX_LAMBDA_DOUBLINGS: u32 = 12;
 
 /// Halvings máximos del bracket cuando el punto de partida YA cumple (el hogar tiene de sobra).
-/// `2^-8 = 1/256`. Agotarlos sin encontrar un extremo malo no invalida nada: se devuelve el último
-/// `λ` **verificado bueno**, con la minimalidad sin establecer — la misma frase que gobierna
-/// `crates/engine/src/solve.rs`.
+/// `2^-8 = 1/256`, es decir `λ_min = start/256`.
+///
+/// **Agotarlos sin encontrar un extremo malo NO devuelve un `λ`**, y esta línea decía lo contrario:
+/// «se devuelve el último `λ` verificado bueno, con la minimalidad sin establecer». No es un
+/// problema de minimalidad, es que `λ*` **no existe** dentro de la rejilla explorada — con una
+/// cartera 256 veces menor el plan sigue cumpliendo, así que la necesidad está por debajo de lo
+/// que este método sabe medir y publicar `λ_min·L` sería publicar el SUELO DEL MÉTODO como si
+/// fuera una necesidad. Ese caso sale por [`Bracket::AlreadyCovered`] y se publica como
+/// [`ABSENT_ALREADY_COVERED`].
 pub const MAX_LAMBDA_HALVINGS: u32 = 8;
 
 /// Pasos máximos de la bisección sobre `λ` en el solve FRÍO (capital necesario hoy). Sobre un
@@ -148,6 +170,18 @@ pub const MAX_LAMBDA_BISECTION_DRAWS: u32 = 12;
 /// solve frío porque el bracket llega ya estrecho: el nodo anterior dejó su `λ*` y la curva es
 /// suave entre nodos separados 60 meses.
 pub const WARM_LAMBDA_BISECTION_DRAWS: u32 = 8;
+
+/// **Suelo del warm start: el `λ` del hogar REAL.** Ningún nodo hereda del anterior un punto de
+/// partida por debajo de `1`.
+///
+/// Sin este suelo, el warm start compone el suelo de los halvings: un nodo que se queda sin
+/// extremo malo deja `start/256`, el siguiente arranca ahí y vuelve a dividir por `2^8`, y en tres
+/// nodos el punto de partida es `1e-7`. Con la cartera de partida efectivamente a cero, el sorteo
+/// no puede distinguir un hogar de otro y **todos** los nodos posteriores «cumplen» — que es
+/// exactamente cómo la curva de la demo publicaba la asíntota `λ → 0` (el líquido que el hogar
+/// acumula de su nómina) rotulada como capital NECESARIO. El `λ` del hogar real es el primer
+/// sondeo natural y no cuesta nada: si ya cumple, el bracket baja desde ahí.
+pub const WARM_LAMBDA_FLOOR: f64 = 1.0;
 
 /// Avances de la fase de confirmación cuando el presupuesto grande desmiente a la búsqueda.
 pub const MAX_CAPITAL_CONFIRMATION_ADVANCES: u32 = 6;
@@ -181,6 +215,23 @@ pub const ABSENT_THRESHOLD_UNREACHABLE: &str = "threshold_unreachable";
 /// El mes pedido cae **fuera del horizonte** de la entrada. Guarda defensiva: el llamante decide
 /// la rejilla y el motor es una función pura que no debe indexar fuera de su serie.
 pub const ABSENT_MONTH_BEYOND_HORIZON: &str = "month_beyond_horizon";
+
+/// **Ya cubierto**: tu acumulación sola basta al umbral. La necesidad está **por debajo de
+/// `λ_min × tu líquido de hoy`** (`λ_min = 1/2^`[`MAX_LAMBDA_HALVINGS`]) y por tanto por debajo de
+/// lo que este método puede medir — no hace falta capital adicional HOY para jubilarse en ese mes.
+///
+/// **No es un importe, y por eso no se publica ninguno.** El caso aparece cuando la necesidad
+/// ordinaria del mes de jubilación es cero o casi —una pensión que ya cubre el gasto, un ingreso
+/// que persiste— y entonces ni la puerta de tasa inicial ni el drenaje muerden por pequeña que sea
+/// la cartera: el éxito es 1 para CUALQUIER `λ`, y no hay frontera que biseccionar.
+///
+/// **Qué se publicaba antes de nombrarlo, y por qué era falso.** El bracket devolvía como `λ*` el
+/// último halving verificado —el SUELO del método— y la curva publicaba
+/// `liquid_worth[k−1]` del hogar escalado por él: con `λ ≈ 0` eso no es una necesidad, es lo que el
+/// hogar acumula de su nómina hasta esa edad. En la demo sintética, los cinco nodos posteriores a
+/// la fecha publicaban 485.800 → 771.200 → 1.259.800 → 1.944.000 → 2.902.400 €, una curva
+/// CRECIENTE «porque sigues ahorrando» que se leía como «a los 86 necesitas 2,9 M€».
+pub const ABSENT_ALREADY_COVERED: &str = "already_covered";
 
 // =================================================================================================
 // El escenario: «la misma cartera, `λ` veces más grande»
@@ -259,7 +310,8 @@ pub struct NeededCapital {
     /// jubilándose en [`Self::month`]. `< 1` significa «ya tienes más del que necesitas».
     ///
     /// **`None` ⟺ hay [`Self::absent_reason`]**, y nunca un `0`, que se leería como «no necesitas
-    /// nada».
+    /// nada». Con [`ABSENT_ALREADY_COVERED`] es `None` **aunque haya habido sondeos que cumplen**:
+    /// lo que esos sondeos verificaron es que `λ` no muerde, no que valga uno concreto.
     pub lambda: Option<f64>,
     /// **El líquido de cierre del mes `month−1` de la trayectoria del hogar ESCALADO por `λ*`**,
     /// en euros de ese mes (nominales) y redondeado a cientos hacia arriba. No es
@@ -275,12 +327,20 @@ pub struct NeededCapital {
     /// una entrada que la API no puede producir (rango validado `[−2, 50]`) y que el motor, como
     /// función pura, admite en su firma.
     pub amount_today: Option<Decimal>,
-    /// Por qué no hay cifra: [`ABSENT_NO_LIQUID_ASSETS`], [`ABSENT_THRESHOLD_UNREACHABLE`] o
-    /// [`ABSENT_MONTH_BEYOND_HORIZON`]. `None` ⟺ hay cifra.
+    /// Por qué no hay cifra: [`ABSENT_NO_LIQUID_ASSETS`], [`ABSENT_THRESHOLD_UNREACHABLE`],
+    /// [`ABSENT_MONTH_BEYOND_HORIZON`] o [`ABSENT_ALREADY_COVERED`]. `None` ⟺ hay cifra.
+    ///
+    /// **Las cuatro son ausencias, pero no dicen lo mismo**: las tres primeras son «este método no
+    /// puede medirlo»; la cuarta es una RESPUESTA —«no hace falta capital adicional hoy»— y quien
+    /// la enseñe debería decirlo así, no con un guion mudo.
     pub absent_reason: Option<&'static str>,
     /// La medición que respalda el importe: el sorteo del `λ` publicado, con su `N`, sus fallos por
     /// motivo y su cota de Wilson. En `needed_liquid_at_month` es el de CONFIRMACIÓN; en
     /// `needed_capital_curve`, el de búsqueda.
+    ///
+    /// **Es la única ausencia que la trae**: con [`ABSENT_ALREADY_COVERED`] viaja la medición del
+    /// `λ` MÍNIMO que se llegó a sondear y aun así cumplió, porque «ya cubierto» es una afirmación
+    /// medida y sin su `N` no sería un resultado. Las otras tres la dejan en `None`.
     pub success_at_lambda: Option<SuccessAt>,
     /// `true` ⟺ **la confirmación no cerró**: ni el `λ` que la búsqueda verificó ni los
     /// [`MAX_CAPITAL_CONFIRMATION_ADVANCES`] avances del +2 % cumplieron el umbral con el
@@ -297,6 +357,28 @@ pub struct NeededCapital {
 }
 
 impl NeededCapital {
+    /// **«Ya cubierto»**: la necesidad está por debajo de `λ_min × líquido de hoy` y no hay `λ*`
+    /// que biseccionar. Se publica SIN importe y SIN `λ` —un `λ_min·L` sería el suelo del método
+    /// disfrazado de necesidad— pero CON la medición del sondeo más pequeño que cumplió, que es lo
+    /// que sostiene la afirmación.
+    ///
+    /// `draws_confirm` es 0 a propósito: no hay `λ` que confirmar. Lo que la búsqueda estableció es
+    /// que la frontera cae por debajo de la rejilla, y eso no se afina con más caminos sobre un
+    /// punto que ya cumple.
+    fn already_covered(month: u32, stats: SuccessAt, draws_search: u32) -> Self {
+        NeededCapital {
+            month,
+            lambda: None,
+            amount_nominal: None,
+            amount_today: None,
+            absent_reason: Some(ABSENT_ALREADY_COVERED),
+            success_at_lambda: Some(stats),
+            capital_is_approximate: false,
+            draws_search,
+            draws_confirm: 0,
+        }
+    }
+
     fn absent(month: u32, reason: &'static str, draws_search: u32, draws_confirm: u32) -> Self {
         NeededCapital {
             month,
@@ -340,6 +422,30 @@ impl LambdaDraws<'_> {
     }
 }
 
+/// **El desenlace del bracket sobre `λ`: TRES, no dos.**
+///
+/// La forma anterior —`Option<(f64, SuccessAt)>`— solo sabía distinguir «hay `λ`» de «no lo hay ni
+/// multiplicando la cartera», y metía en la primera un caso que **no es un `λ`**: el de los
+/// halvings agotados sin extremo malo. De ahí salía el bug de la curva
+/// ([`ABSENT_ALREADY_COVERED`]).
+enum Bracket {
+    /// **`λ` verificado que cumple, con un extremo MALO conocido por debajo**: la frontera está
+    /// acotada por los dos lados y el valor devuelto se ejecutó y cumplió.
+    Found(f64, SuccessAt),
+    /// **Los [`MAX_LAMBDA_HALVINGS`] halvings se agotaron y TODOS cumplieron.** No hay extremo malo
+    /// que acote la frontera por abajo: la necesidad cae por debajo de `λ_min = start/2^8` y `λ*`
+    /// no existe dentro de la rejilla explorada.
+    ///
+    /// El `lambda_probe` es el sondeo más pequeño que se verificó —**no un `λ*`**— y viaja solo
+    /// para el warm start y para la medición que acompaña a la ausencia.
+    AlreadyCovered {
+        lambda_probe: f64,
+        stats: SuccessAt,
+    },
+    /// Ni `2^`[`MAX_LAMBDA_DOUBLINGS`]`·start` cumple: el plan no falla por falta de capital.
+    Unreachable,
+}
+
 /// **Bracket + bisección sobre `λ`, escrito UNA vez.**
 ///
 /// 1. Se sondea `start`. Si cumple, se **baja** halvando hasta encontrar un `λ` que falle
@@ -348,11 +454,18 @@ impl LambdaDraws<'_> {
 /// 2. Con el bracket «`lo` falla, `hi` cumple», se bisecciona `bisection_budget` veces moviendo
 ///    `hi` solo a puntos que acaban de comprobarse BUENOS.
 ///
-/// **Lo que devuelve siempre se ejecutó y cumplió.** Agotar el presupuesto —o no encontrar el
-/// extremo malo tras ocho halvings— no invalida nada: deja el intervalo más ancho de lo que podría
-/// estar y se pierde MINIMALIDAD, no validez.
+/// **[`Bracket::Found`] siempre se ejecutó y cumplió.** Agotar el presupuesto de bisección no
+/// invalida nada: deja el intervalo más ancho de lo que podría estar y se pierde MINIMALIDAD, no
+/// validez.
 ///
-/// `Ok(None)` ⟺ ni `2^`[`MAX_LAMBDA_DOUBLINGS`]`·start` cumple.
+/// # Quedarse sin extremo malo NO es un `λ`
+///
+/// Si los ocho halvings cumplen, la respuesta honesta no es «`λ* = start/256`»: es que con la
+/// cartera dividida por 256 el plan **sigue** cumpliendo, o sea que la necesidad está por debajo de
+/// lo que este método sabe medir. Devolverlo como `λ` publicaba el SUELO del método como si fuera
+/// una necesidad, y en la curva ese suelo se componía nodo a nodo hasta `λ ≈ 0` —donde el hogar
+/// escalado es literalmente un hogar sin cartera— convirtiendo la curva en el ahorro acumulado de
+/// la nómina. Sale por [`Bracket::AlreadyCovered`].
 ///
 /// # La monotonía tampoco se supone aquí
 ///
@@ -365,7 +478,7 @@ fn bracket_and_bisect(
     draws: &mut LambdaDraws<'_>,
     start: f64,
     bisection_budget: u32,
-) -> Result<Option<(f64, SuccessAt)>, McError> {
+) -> Result<Bracket, McError> {
     let start = if start.is_finite() && start > 0.0 {
         start
     } else {
@@ -391,9 +504,14 @@ fn bracket_and_bisect(
         }
         match lo_fails {
             Some(lo) => (lo, hi, hi_stats),
-            // Sin extremo malo no hay nada que estrechar: se devuelve el bueno más pequeño que se
-            // llegó a verificar.
-            None => return Ok(Some((hi, hi_stats))),
+            // Sin extremo malo no hay frontera: NO se devuelve el bueno más pequeño como si fuera
+            // `λ*` (era el bug), se nombra el caso.
+            None => {
+                return Ok(Bracket::AlreadyCovered {
+                    lambda_probe: hi,
+                    stats: hi_stats,
+                })
+            }
         }
     } else {
         // ---- hacia ARRIBA: el punto de partida no llega ----------------------------------------
@@ -410,7 +528,7 @@ fn bracket_and_bisect(
             lo = candidate;
         }
         let Some((hi, hi_stats)) = found else {
-            return Ok(None);
+            return Ok(Bracket::Unreachable);
         };
         (lo, hi, hi_stats)
     };
@@ -431,7 +549,7 @@ fn bracket_and_bisect(
         }
         budget -= 1;
     }
-    Ok(Some((hi, hi_stats)))
+    Ok(Bracket::Found(hi, hi_stats))
 }
 
 // =================================================================================================
@@ -460,6 +578,9 @@ fn bracket_and_bisect(
 /// - [`ABSENT_NO_LIQUID_ASSETS`] si el hogar no tiene activos líquidos (se decide sin sortear) o
 ///   si el hogar ESCALADO llega a `k−1` con el líquido a cero — **nunca un 0 €**.
 /// - [`ABSENT_THRESHOLD_UNREACHABLE`] si ni `2^12` veces la cartera cumple el umbral.
+/// - [`ABSENT_ALREADY_COVERED`] si ni `1/2^8` veces la cartera lo incumple: **no hace falta capital
+///   adicional hoy**. Se salta la fase C entera —no hay `λ` que confirmar— y se publica la medición
+///   del sondeo más pequeño que cumplió.
 ///
 /// # Lo que NO promete
 ///
@@ -504,14 +625,26 @@ pub fn needed_liquid_at_month(
         month,
         draws: 0,
     };
-    let Some((lambda, _)) = bracket_and_bisect(&mut searching, 1.0, MAX_LAMBDA_BISECTION_DRAWS)?
-    else {
-        return Ok(NeededCapital::absent(
-            month,
-            ABSENT_THRESHOLD_UNREACHABLE,
-            searching.draws,
-            0,
-        ));
+    let lambda = match bracket_and_bisect(&mut searching, 1.0, MAX_LAMBDA_BISECTION_DRAWS)? {
+        Bracket::Found(lambda, _) => lambda,
+        // **No hace falta capital adicional hoy** para jubilarse en `month`, y eso no es un
+        // importe: publicar `λ_min·L` diría «necesitas esto» donde la verdad es «necesitas menos
+        // de lo que sé medir». Sin confirmación: no hay `λ` que confirmar.
+        Bracket::AlreadyCovered { stats, .. } => {
+            return Ok(NeededCapital::already_covered(
+                month,
+                stats,
+                searching.draws,
+            ))
+        }
+        Bracket::Unreachable => {
+            return Ok(NeededCapital::absent(
+                month,
+                ABSENT_THRESHOLD_UNREACHABLE,
+                searching.draws,
+                0,
+            ))
+        }
     };
     let draws_search = searching.draws;
 
@@ -609,10 +742,17 @@ pub fn needed_capital_today(
 /// # Warm start
 ///
 /// El primer nodo arranca en frío (`λ = 1`, [`MAX_LAMBDA_BISECTION_DRAWS`] pasos). Cada nodo
-/// siguiente **empieza el bracket en el `λ*` del nodo anterior** y bisecciona
-/// [`WARM_LAMBDA_BISECTION_DRAWS`] pasos: entre dos nodos separados 60 meses la curva se mueve
-/// poco, así que el bracket se cierra en uno o dos sondeos en vez de en cuatro. Un nodo sin `λ`
-/// (ausente) no envenena el warm start: se conserva el último `λ*` que sí se verificó.
+/// siguiente **empieza el bracket en el `λ*` del nodo anterior, nunca por debajo de
+/// [`WARM_LAMBDA_FLOOR`]**, y bisecciona [`WARM_LAMBDA_BISECTION_DRAWS`] pasos: entre dos nodos
+/// separados 60 meses la curva se mueve poco, así que el bracket se cierra en uno o dos sondeos en
+/// vez de en cuatro. Un nodo sin `λ` (ausente) no envenena el warm start: se conserva el último
+/// `λ*` que sí se verificó.
+///
+/// **El suelo no es cosmético.** Sin él, un nodo [`Bracket::AlreadyCovered`] deja `start/256` y el
+/// siguiente vuelve a dividir por `2^8`: en tres nodos el punto de partida es `1e-7` y el hogar
+/// escalado deja de tener cartera, con lo que todos los nodos posteriores «cumplen» por
+/// construcción. Es el mecanismo exacto del artefacto que la curva de la demo publicaba (ver el
+/// doc del módulo).
 ///
 /// El warm start **no cambia lo que se garantiza**: cada `λ` devuelto se ejecutó y cumplió. Lo que
 /// cambia es el coste, y que dos rejillas distintas pueden dar `λ` que difieren en el último
@@ -625,6 +765,14 @@ pub fn needed_capital_today(
 /// escalar. Es lo que hace que los nodos tardíos publiquen cifra: en un hogar cuyo camino actual se
 /// agota antes del horizonte (P9 hacia el mes 800), el producto valdría 0 € y el nodo saldría como
 /// ausencia aunque el hogar escalado sí tenga cartera ahí.
+///
+/// # Nodos sin cifra
+///
+/// Un nodo puede salir sin importe por las CUATRO razones de [`NeededCapital::absent_reason`], y la
+/// cuarta ([`ABSENT_ALREADY_COVERED`]) es la que más se ve: a partir de la fecha en que la pensión
+/// cubre el gasto, `λ` deja de morder y no hay frontera. Quien dibuje la curva **parte la línea**
+/// ahí; unir los dos nodos vecinos por encima del hueco sería una interpolación disfrazada de
+/// medición, y rellenarlo con el líquido del hogar escalado a cero fue el bug.
 ///
 /// # Sin confirmación
 ///
@@ -671,10 +819,11 @@ pub fn needed_capital_curve(
             draws: 0,
         };
         match bracket_and_bisect(&mut searching, start, budget)? {
-            Some((lambda, stats)) => {
+            Bracket::Found(lambda, stats) => {
                 // El `λ` verificado alimenta el warm start aunque el importe salga ausente: lo que
-                // el nodo siguiente hereda es la POSICIÓN de la frontera, no la cifra.
-                warm = Some(lambda);
+                // el nodo siguiente hereda es la POSICIÓN de la frontera, no la cifra. Nunca por
+                // debajo de [`WARM_LAMBDA_FLOOR`].
+                warm = Some(lambda.max(WARM_LAMBDA_FLOOR));
                 match scaled_liquid_before(input, lambda, month)? {
                     Some(raw_nominal) => curve.push(publish(
                         input,
@@ -694,7 +843,22 @@ pub fn needed_capital_curve(
                     )),
                 }
             }
-            None => curve.push(NeededCapital::absent(
+            // **Nodo sin frontera**: la necesidad cae por debajo de `λ_min × líquido de hoy`. Se
+            // publica como ausencia —no como el líquido de un hogar escalado a casi cero, que es
+            // el ahorro de su nómina y no una necesidad— y el warm start vuelve al suelo en vez de
+            // heredar el `λ` diminuto que compondría el mismo artefacto en el nodo siguiente.
+            Bracket::AlreadyCovered {
+                lambda_probe,
+                stats,
+            } => {
+                warm = Some(lambda_probe.max(WARM_LAMBDA_FLOOR));
+                curve.push(NeededCapital::already_covered(
+                    month,
+                    stats,
+                    searching.draws,
+                ));
+            }
+            Bracket::Unreachable => curve.push(NeededCapital::absent(
                 month,
                 ABSENT_THRESHOLD_UNREACHABLE,
                 searching.draws,

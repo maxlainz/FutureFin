@@ -374,7 +374,15 @@ pub struct NeededCapital { pub month: u32, pub lambda: Option<f64>,
   `(1 + π/100)^((k−1)/12)`, no una copia.
 - **Ausencias, nunca un 0 €**: `no_liquid_assets` (el hogar no tiene activos líquidos —se decide
   sin sortear, escalar cero es cero— o el hogar ESCALADO llega a `k−1` sin líquido),
-  `threshold_unreachable` (ni `2^12` veces la cartera cumple) y `month_beyond_horizon`.
+  `threshold_unreachable` (ni `2^12` veces la cartera cumple), `month_beyond_horizon` y
+  **`already_covered`** (ni `1/2^8` veces la cartera lo INCUMPLE: los ocho halvings cumplen todos,
+  no hay extremo malo y `λ*` no existe en la rejilla ⇒ **no hace falta capital adicional hoy**).
+  Las tres primeras son «este método no puede medirlo»; la cuarta es una RESPUESTA. Hasta la
+  corrección de 5.0.0 ese caso devolvía el ÚLTIMO halving como si fuera `λ*` y la curva publicaba
+  `liquid_worth[k−1]` de un hogar escalado a casi cero — o sea el ahorro acumulado de la nómina:
+  en la demo, cinco nodos CRECIENTES tras la fecha (485.800 → 2.902.400 €) leídos como «a los 86
+  necesitas 2,9 M€». El warm start lo componía nodo a nodo (`λ` heredado ÷ `2^8` otra vez), y por
+  eso hoy tiene suelo: **`WARM_LAMBDA_FLOOR = 1`**, el `λ` del hogar real.
 - **Caveat de la cascada, declarado y no resuelto**: escalar supone que el reparto se mantiene
   **proporcional**, y eso vale mientras ninguna regla toque su tope. Con un `AllocationCap::Amount`
   un `λ` mayor **llena el tope antes** y desvía el resto a otro destino con otra rentabilidad y otra

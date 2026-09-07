@@ -644,7 +644,12 @@ pub(crate) struct PlanLevel1 {
     /// «no necesitas nada».
     pub needed_capital_today: Option<Decimal>,
     /// Por qué no hay capital necesario: `no_liquid_assets` | `threshold_unreachable` |
-    /// `month_beyond_horizon` (literales del crate, no copiados aquí).
+    /// `month_beyond_horizon` | `already_covered` (literales del crate, no copiados aquí).
+    ///
+    /// **`already_covered` no es un fallo de medición, es una RESPUESTA**: con la cartera dividida
+    /// por 256 el plan sigue cumpliendo el umbral, así que no hace falta capital adicional hoy y la
+    /// necesidad queda por debajo de lo que el método sabe medir. Tampoco ahí se publica un 0 €:
+    /// la necesidad es «menor que `λ_min × tu líquido», no cero.
     pub needed_capital_absent_reason: Option<&'static str>,
     /// **Aportación extra mensual mínima** para que la fecha sea válida, plana y nominal, ya
     /// redondeada a decenas hacia arriba. Solo existe en las estrategias donde la fecha es un
@@ -1041,7 +1046,13 @@ pub struct PlanExtras {
     /// razón viaja en [`Self::needed_capital_curve_absent`].
     pub needed_capital_curve: Vec<(u32, Decimal)>,
     /// **Los nodos que no tienen importe, con su razón**: `(mes del bucle, `no_liquid_assets` |
-    /// `threshold_unreachable` | `month_beyond_horizon`)`, literales del crate.
+    /// `threshold_unreachable` | `month_beyond_horizon` | `already_covered`)`, literales del crate.
+    ///
+    /// **`already_covered` es el motivo esperado a partir de la fecha del plan**: cuando la pensión
+    /// ya cubre el gasto, `λ` deja de morder y no hay frontera que biseccionar. Los nodos que hasta
+    /// la corrección de este bug publicaban ahí una curva CRECIENTE («a los 86 necesitas 2,9 M€»)
+    /// no medían una necesidad: publicaban el líquido de un hogar escalado a casi cero, es decir lo
+    /// que el hogar acumula de su nómina hasta esa edad.
     ///
     /// Existe para que quien dibuja pueda **partir la línea** en ese mes en vez de unir los dos
     /// nodos vecinos por encima del hueco: una curva continua sobre un tramo que no se pudo medir

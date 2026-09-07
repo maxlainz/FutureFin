@@ -916,21 +916,32 @@ export type ProjectionSeriesApi = {
    *  `no_liquid_assets` (el hogar no tiene líquido que escalar, o la escala ya lo deja a cero en
    *  el cierre anterior) | `threshold_unreachable` (ni multiplicando la cartera se cumple el
    *  umbral: el plan no falla por capital) | `month_beyond_horizon` (el mes pedido cae fuera del
-   *  horizonte de la entrada). Mismos tres literales que
+   *  horizonte de la entrada) | `already_covered` (ni dividiendo la cartera por 256 se INCUMPLE el
+   *  umbral: **no hace falta capital adicional hoy**). Mismos cuatro literales que
    *  `crates/engine-stochastic/src/needed_capital.rs` (`ABSENT_NO_LIQUID_ASSETS`,
-   *  `ABSENT_THRESHOLD_UNREACHABLE`, `ABSENT_MONTH_BEYOND_HORIZON`). `null` ⟺ hay cifra, o no hay
-   *  plan (`plan_absent_reason`). */
+   *  `ABSENT_THRESHOLD_UNREACHABLE`, `ABSENT_MONTH_BEYOND_HORIZON`, `ABSENT_ALREADY_COVERED`).
+   *  `null` ⟺ hay cifra, o no hay plan (`plan_absent_reason`).
+   *
+   *  **Los tres primeros y el cuarto no dicen lo mismo**: los tres primeros son «este método no
+   *  puede medirlo» y `already_covered` es una RESPUESTA — la necesidad existe pero cae por debajo
+   *  de `λ_min × tu líquido`, así que no hay nada que reunir. Enseñarlo con el mismo guion mudo que
+   *  los otros tres tira la única de las cuatro que es una buena noticia. */
   needed_capital_absent_reason?:
     | "no_liquid_assets"
     | "threshold_unreachable"
     | "month_beyond_horizon"
+    | "already_covered"
     | null;
   /** f64[] (excepción chart-only) paralelo a `points[]`: capital necesario por edad en cada mes
    *  de la rejilla, SIN escalar (C4), en euros NOMINALES de cada mes (la SPA la deflacta con el
    *  mismo factor que el patrimonio). No tiene por qué cruzar la línea central: lo que cruza es el
-   *  escenario que el umbral obliga a salvar; la fecha válida va como marca vertical (C4). Un
-   *  elemento `null` = ese punto de la curva aún no está resuelto (nivel
-   *  2); el array entero es `null` mientras `needed_capital_curve_state !== "ready"`. */
+   *  escenario que el umbral obliga a salvar; la fecha válida va como marca vertical (C4).
+   *
+   *  **Un elemento `null` significa una de dos cosas, nunca «aquí hacen falta 0 €»**: (a) ese punto
+   *  no cae en la rejilla gruesa que el nivel 2 evaluó, o (b) el nodo SÍ se evaluó y salió
+   *  `already_covered` — no hace falta capital adicional ahí, lo normal a partir del mes en que la
+   *  pensión cubre el gasto. El array entero es `null` mientras
+   *  `needed_capital_curve_state !== "ready"`. */
   needed_capital_curve?: (number | null)[] | null;
   /** `ready` = curva completa; `computing` = el nivel 2 (segundo plano) sigue en marcha —
    *  reintentar más tarde; `unavailable` = no se pudo calcular. */

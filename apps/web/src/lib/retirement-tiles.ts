@@ -187,9 +187,23 @@ function planUnavailableReason(series: RetirementTileV2Series): string | null {
 }
 
 /**
+ * **El valor del tile cuando la necesidad cae por debajo de lo que el sorteo sabe medir.**
+ *
+ * `already_covered` es la única de las cuatro ausencias de `needed_capital_absent_reason` que es
+ * una RESPUESTA y no un fallo de medición: ni dividiendo la cartera por 256 el plan incumple el
+ * umbral, o sea que no hace falta capital adicional hoy. Enseñarlo con el mismo «—» que
+ * «sin activos líquidos» tiraría la única de las cuatro que es una buena noticia, así que el tile
+ * pone estas dos palabras donde iría la cifra.
+ */
+const ALREADY_COVERED_VALUE = "Ya cubierto";
+
+/** Y su explicación, que va de subtítulo. Fuente única de la frase completa de más abajo. */
+const ALREADY_COVERED_SUBTITLE = "con lo que tienes hoy tu plan cumple el umbral";
+
+/**
  * Por qué falta `needed_capital_today` cuando el resto del plan SÍ está resuelto — la pregunta que
  * `planUnavailableReason` de arriba responde para el bloque entero, aquí para esta CIFRA sola. Los
- * tres literales son los de `needed_capital.rs` (ver el doc de `needed_capital_absent_reason` en
+ * cuatro literales son los de `needed_capital.rs` (ver el doc de `needed_capital_absent_reason` en
  * `api/types.ts`); uno que esta función no reconoce cae al mismo «no disponible» genérico que el
  * resto de razones de ausencia de la app, nunca a un guion mudo.
  */
@@ -203,6 +217,8 @@ function neededCapitalAbsentReasonEs(
       return "ningún capital alcanza tu umbral";
     case "month_beyond_horizon":
       return "la fecha cae fuera del horizonte";
+    case "already_covered":
+      return `${ALREADY_COVERED_VALUE.toLowerCase()}: ${ALREADY_COVERED_SUBTITLE}`;
     default:
       return "no disponible";
   }
@@ -256,21 +272,32 @@ export function buildRetirementTilesV2(
 
   // 1 · Capital necesario hoy — fija, primera, siempre en euros de HOY. Con el plan resuelto pero
   // sin esta CIFRA sola (`needed_capital_absent_reason`), el subtítulo dice por qué en vez de
-  // repetir «en euros de hoy» junto a un guion mudo.
+  // repetir «en euros de hoy» junto a un guion mudo. Y con `already_covered` ni siquiera hay guion:
+  // el hueco no es una medición que falló, es «no te hace falta nada más».
+  const alreadyCovered =
+    !unavailable &&
+    series.needed_capital_today == null &&
+    series.needed_capital_absent_reason === "already_covered";
   tiles.push({
     key: "needed_capital",
     label: "Capital necesario hoy",
-    value: unavailable ? METRIC_DASH : money(series.needed_capital_today),
+    value: unavailable
+      ? METRIC_DASH
+      : alreadyCovered
+        ? ALREADY_COVERED_VALUE
+        : money(series.needed_capital_today),
     subtitle:
       unavailable ??
-      (series.needed_capital_today == null
-        ? neededCapitalAbsentReasonEs(series.needed_capital_absent_reason)
-        : joinBits([
-            "en euros de hoy",
-            finite(series.success_threshold_pct)
-              ? `para que aguanten ${series.success_threshold_pct} de cada 100 escenarios`
-              : null,
-          ])),
+      (alreadyCovered
+        ? ALREADY_COVERED_SUBTITLE
+        : series.needed_capital_today == null
+          ? neededCapitalAbsentReasonEs(series.needed_capital_absent_reason)
+          : joinBits([
+              "en euros de hoy",
+              finite(series.success_threshold_pct)
+                ? `para que aguanten ${series.success_threshold_pct} de cada 100 escenarios`
+                : null,
+            ])),
     tone: "default",
     helpId: "retirement.needed_capital",
   });

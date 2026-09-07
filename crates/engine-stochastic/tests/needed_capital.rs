@@ -18,10 +18,13 @@
 mod cases;
 
 use cases::{base_input, mk_asset, mk_asset_with_basis, p9_household, rule_remainder};
-use futurefin_engine::{project_net_worth_series, InitialRateGate, ProjectionInput, TaxBracket};
+use futurefin_engine::{
+    project_net_worth_series, InitialRateGate, PensionSchedule, ProjectionInput, TaxBracket,
+};
 use futurefin_engine_stochastic::{
     needed_capital_curve, needed_capital_today, needed_liquid_at_month, retiring_at,
-    scale_liquid_assets, McConfig, ABSENT_NO_LIQUID_ASSETS,
+    scale_liquid_assets, McConfig, ABSENT_ALREADY_COVERED, ABSENT_NO_LIQUID_ASSETS,
+    MAX_LAMBDA_HALVINGS, WARM_LAMBDA_FLOOR,
 };
 use rust_decimal::Decimal;
 
@@ -248,6 +251,97 @@ fn the_needed_capital_today_is_the_curve_at_month_one() {
     assert_eq!(curve[0].amount_today, today.amount_today);
 }
 
+/// **El hogar YA CUBIERTO**: un millón líquido al 5 % frente a un gasto de jubilación de 5 €/mes,
+/// **sin puerta de tasa inicial** (la de `base_input`, que es la de 4.15.0), horizonte 120 meses.
+///
+/// Derivado a mano ANTES de correr nada. Jubilándose en el mes 1 con la cartera dividida por
+/// `2^`[`MAX_LAMBDA_HALVINGS`]:
+///
+/// ```text
+///   λ_min = 1/256          ⇒  L(0) = 1.000.000/256 = 3.906,25 €
+///   necesidad TOTAL        =  120 meses × 5 € = 600 € nominales, contra una cartera que además
+///                             compone al 5 % anual
+///   F2 no existe (sin puerta), F3 tampoco (`fixed_real` no tiene techo)
+/// ```
+///
+/// Para agotar 3.906 € con 600 € de retiradas haría falta perder ~85 % en diez años: a σ = 8 %
+/// anual eso es imposible en la muestra. Por tanto **el éxito es 1 en los nueve sondeos** del
+/// bracket (el de partida más los ocho halvings) y NO hay extremo malo: `λ*` no existe dentro de la
+/// rejilla, que es exactamente lo que [`ABSENT_ALREADY_COVERED`] nombra.
+fn already_covered_household() -> ProjectionInput {
+    let mut input = base_input(
+        120,
+        Decimal::ZERO,
+        Decimal::ZERO,
+        vec![mk_asset(
+            1,
+            Decimal::from(1_000_000),
+            true,
+            Some(Decimal::from(5)),
+        )],
+        vec![rule_remainder(0)],
+    );
+    input.phase_plan.expense_retirement_monthly = Decimal::from(5);
+    input.phase_plan.income_retirement_monthly = Decimal::ZERO;
+    input
+}
+
+/// **El hogar de la PENSIÓN**: el que produce las dos mitades de la curva, y el que reproduce en
+/// pequeño lo que la demo sintética publicaba mal.
+///
+/// Ingreso 3.000 / gasto 1.000 (2.000 €/mes de sobrante al único activo líquido por la regla
+/// sumidero), un fondo de 10.000 € al 5 %, inflación 0, puerta de tasa inicial al 4 %, gasto de
+/// jubilación 2.000 €/mes y una **pensión con fecha** de 2.500 €/mes desde el índice 60.
+///
+/// Los dos regímenes, derivados a mano:
+///
+/// ```text
+///   k = 1  (índice 0):  la pensión NO ha llegado ⇒ necesidad = 2.000 €/mes = 24.000 €/año
+///                       la puerta falla  ⟺  24.000 > 4 % · L(0)  ⟺  L(0) < 600.000 €
+///                       y compara con «>» estricto, así que la igualdad PASA:
+///                       λ* = 600.000 / 10.000 = 60 EXACTO  ⇒  capital = 600.000 € clavados
+///   k ≥ 61 (índice ≥ 60): la pensión (2.500) cubre el gasto (2.000) ⇒ necesidad = 0
+///                       F2 compara 0 > 4 % · L, que es falso para CUALQUIER λ; sin necesidad no
+///                       hay venta, así que F1 tampoco; `fixed_real` no tiene techo, así que F3
+///                       tampoco  ⇒  éxito 1 con la cartera dividida por 256  ⇒  ya cubierto
+/// ```
+fn pension_household() -> ProjectionInput {
+    let mut input = base_input(
+        120,
+        Decimal::from(3_000),
+        Decimal::from(1_000),
+        vec![mk_asset(
+            2,
+            Decimal::from(10_000),
+            true,
+            Some(Decimal::from(5)),
+        )],
+        vec![rule_remainder(0)],
+    );
+    input.phase_plan.expense_retirement_monthly = Decimal::from(2_000);
+    input.phase_plan.income_retirement_monthly = Decimal::ZERO;
+    input.phase_plan.pension = Some(PensionSchedule {
+        start_index: 60,
+        monthly_today: Decimal::from(2_500),
+        indexed: true,
+        fraction_while_partial: Decimal::ZERO,
+    });
+    input.phase_plan.initial_rate = Some(InitialRateGate {
+        swr_pct: Decimal::from(4),
+        bridge: None,
+    });
+    input
+}
+
+/// El líquido que el hogar ESCALADO A CASI CERO acumula hasta el cierre de `k−1`: la cifra que el
+/// bug publicaba como «capital necesario». Con `λ = λ_min` la cartera de partida aporta menos de
+/// 50 €, así que lo que queda es la NÓMINA.
+fn salary_asymptote(input: &ProjectionInput, k: u32) -> Decimal {
+    let lambda_min = 1.0 / f64::from(1u32 << MAX_LAMBDA_HALVINGS);
+    let scaled = retiring_at(&scale_liquid_assets(input, lambda_min), k);
+    project_net_worth_series(&scaled).expect("el motor no falla").liquid_worth[(k - 1) as usize]
+}
+
 /// **Un hogar sin activos líquidos dice por qué en vez de publicar 0 €.** Escalar cero es cero: el
 /// método no puede medir, y un `0 €` se leería como «no necesitas nada», que es la respuesta
 /// contraria. Ni un sorteo se gasta.
@@ -422,6 +516,162 @@ fn the_curve_is_evaluated_on_the_grid_the_caller_passes_and_warm_starts() {
     assert!(needed_capital_curve(&input, &vol(), &mc, THRESHOLD, &[])
         .expect("ok")
         .is_empty());
+}
+
+// =================================================================================================
+// «Ya cubierto»: la necesidad por debajo del suelo del método
+// =================================================================================================
+
+/// **Un hogar ya cubierto no publica un capital diminuto: publica que no hace falta.**
+///
+/// Los ocho halvings cumplen todos, así que no hay extremo malo y `λ*` **no existe** dentro de la
+/// rejilla explorada. Devolver el último halving como si fuera `λ*` —lo que el bracket hacía— y
+/// multiplicar por el líquido publicaba el SUELO DEL MÉTODO rotulado como necesidad.
+///
+/// PREDICCIONES escritas antes de correr (ver [`already_covered_household`]):
+/// - `absent_reason == already_covered`, y NO `no_liquid_assets`: este hogar tiene un millón.
+/// - Ni `λ` ni importes: los tres a `None`, y **ningún 0 €**.
+/// - `draws_search == 9` = 1 sondeo de partida + [`MAX_LAMBDA_HALVINGS`] halvings; `draws_confirm
+///   == 0`, porque no hay `λ` que confirmar.
+/// - La medición SÍ viaja, y es la de BÚSQUEDA (100 caminos), con éxito 1 y cero fallos: «ya
+///   cubierto» es una afirmación medida.
+#[test]
+fn a_household_already_covered_publishes_no_amount_not_a_tiny_one() {
+    let input = already_covered_household();
+    let search = cfg(100);
+    let confirm = cfg(250);
+
+    let today = needed_capital_today(&input, &vol(), &search, &confirm, THRESHOLD).expect("ok");
+
+    assert_eq!(today.absent_reason, Some(ABSENT_ALREADY_COVERED));
+    assert_eq!(today.lambda, None, "no hay λ*: no hay frontera");
+    assert_eq!(today.amount_nominal, None, "ni un importe, ni un 0 €");
+    assert_eq!(today.amount_today, None);
+    assert!(!today.capital_is_approximate);
+    assert_eq!(
+        (today.draws_search, today.draws_confirm),
+        (1 + MAX_LAMBDA_HALVINGS, 0),
+        "el bracket sondea la partida y los ocho halvings, y no confirma nada"
+    );
+
+    let stats = today.success_at_lambda.expect("la afirmación viaja medida");
+    assert_eq!(stats.paths, 100, "la medición publicada es la de BÚSQUEDA");
+    assert_eq!(stats.by_kind, [0, 0, 0], "ningún camino falla ni con λ = 1/256");
+    assert_eq!(stats.success, 1.0);
+
+    // Y el suelo que el bug publicaba existe y es un número respetable: la cartera dividida por
+    // 256, que no es una necesidad de nadie.
+    let floor = salary_asymptote(&input, 1);
+    assert!(
+        floor > Decimal::from(3_000) && floor < Decimal::from(5_000),
+        "el suelo del método (λ_min · 1.000.000) tenía que rondar los 3.906 €: {floor}"
+    );
+}
+
+/// **Los nodos posteriores a la fecha del plan son ausencias, no la asíntota de la nómina.**
+///
+/// Es el bug medido sobre la demo sintética, reproducido en pequeño: en cuanto la pensión cubre el
+/// gasto, `λ` deja de morder y el bracket se queda sin extremo malo. El código anterior devolvía
+/// ahí el último halving y publicaba `liquid_worth[k−1]` del hogar escalado a casi cero — que con
+/// una cartera de 39 € es, al 99,97 %, **el ahorro acumulado de la nómina**. La curva salía
+/// CRECIENTE después de la fecha y se leía como «cuanto más viejo, más capital necesitas».
+///
+/// PREDICCIONES (ver [`pension_household`]):
+/// - `k = 1` publica **600.000 € clavados** (`λ* = 60` exacto, la puerta compara con «>»).
+/// - `k = 61` y `k = 120` son `already_covered`, sin importe.
+/// - Y la asíntota que el bug publicaba en esos dos nodos **existe, es de seis cifras y CRECE**:
+///   ≈ 136.000 € a los 61 meses y ≈ 306.000 € a los 120, con la cartera escalada aportando < 100 €
+///   de esa cifra. Esa es la forma exacta del artefacto.
+#[test]
+fn curve_nodes_after_the_valid_date_are_null_not_the_salary_asymptote() {
+    let input = pension_household();
+    let curve = needed_capital_curve(&input, &vol(), &cfg(100), THRESHOLD, &[1, 61, 120])
+        .expect("ok");
+    assert_eq!(curve.len(), 3);
+
+    // Antes de la pensión: la cifra sigue midiéndose, y sale clavada.
+    assert_eq!(curve[0].month, 1);
+    assert_eq!(curve[0].absent_reason, None);
+    assert_eq!(curve[0].lambda, Some(60.0), "λ* = 600.000/10.000, exacto");
+    assert_eq!(curve[0].amount_nominal, Some(Decimal::from(600_000)));
+
+    // Desde la pensión: ausencia declarada, ni importe ni λ.
+    for node in &curve[1..] {
+        assert_eq!(
+            node.absent_reason,
+            Some(ABSENT_ALREADY_COVERED),
+            "el nodo del mes {} volvió a publicar una cifra",
+            node.month
+        );
+        assert_eq!(node.lambda, None);
+        assert_eq!(node.amount_nominal, None);
+        assert_eq!(node.amount_today, None);
+    }
+
+    // La asíntota que el bug publicaba: seis cifras, creciente, y casi toda nómina.
+    let at_61 = salary_asymptote(&input, 61);
+    let at_120 = salary_asymptote(&input, 120);
+    assert!(
+        at_61 > Decimal::from(100_000),
+        "sin el arreglo, el nodo 61 publicaba {at_61} € de «capital necesario»"
+    );
+    assert!(
+        at_120 > at_61,
+        "la curva del bug CRECÍA después de la fecha: {at_61} → {at_120}"
+    );
+    // La cartera escalada aporta calderilla: lo publicado era la nómina, no la cartera.
+    let scaled_start = Decimal::from(10_000) / Decimal::from(1u32 << MAX_LAMBDA_HALVINGS);
+    assert!(
+        scaled_start < Decimal::from(100),
+        "la cartera escalada de partida ({scaled_start} €) tenía que ser calderilla"
+    );
+}
+
+/// **El warm start nunca hereda un `λ` por debajo de 1.**
+///
+/// Es la mitad del arreglo que la publicación honesta sola no cubre: sin suelo, un nodo ya cubierto
+/// deja `start/256` y el siguiente arranca ahí. La rejilla `[61, 1]` lo pone a prueba en un solo
+/// paso, aprovechando que la curva respeta el ORDEN del llamante: el nodo 61 sale ya cubierto y el
+/// nodo 1 —que necesita `λ* = 60`— hereda su punto de partida.
+///
+/// PREDICCIÓN, escrita antes de correr:
+/// - **Con el suelo** ([`WARM_LAMBDA_FLOOR`] = 1): el nodo 1 arranca en 1, dobla 2 → 4 → 8 → 16 →
+///   32 → 64 (el primero que cumple), bisecciona y cierra en `λ* = 60` ⇒ **600.000 €**, la misma
+///   cifra que la curva FRÍA de un solo nodo.
+/// - **Sin el suelo** (el bug): arrancaría en 1/256 y ni las doce duplicaciones llegan
+///   (`1/256 · 2^12 = 16 < 60`), así que el nodo publicaría `threshold_unreachable` y NINGUNA cifra
+///   — un hogar que necesita 600.000 € leído como «ningún capital alcanza tu umbral».
+#[test]
+fn the_warm_start_never_inherits_a_lambda_below_one() {
+    let input = pension_household();
+    let mc = cfg(100);
+
+    let warm = needed_capital_curve(&input, &vol(), &mc, THRESHOLD, &[61, 1]).expect("ok");
+    assert_eq!(warm.len(), 2);
+    assert_eq!(
+        warm[0].absent_reason,
+        Some(ABSENT_ALREADY_COVERED),
+        "la premisa del test: el nodo que va delante es el que se queda sin frontera"
+    );
+
+    let heir = warm[1];
+    assert_eq!(heir.month, 1);
+    assert_eq!(
+        heir.absent_reason, None,
+        "el nodo heredero se quedó sin cifra: el warm start heredó el suelo de los halvings"
+    );
+    assert_eq!(heir.lambda, Some(60.0));
+    assert_eq!(heir.amount_nominal, Some(Decimal::from(600_000)));
+
+    // Y es la MISMA cifra que en frío: el warm start ahorra sorteos, no cambia la respuesta.
+    let cold = needed_capital_curve(&input, &vol(), &mc, THRESHOLD, &[1]).expect("ok");
+    assert_eq!(cold[0].lambda, heir.lambda);
+    assert_eq!(cold[0].amount_nominal, heir.amount_nominal);
+
+    assert_eq!(
+        WARM_LAMBDA_FLOOR, 1.0,
+        "el suelo ES el λ del hogar real; bajarlo reabre la composición del artefacto"
+    );
 }
 
 /// **La curva lee el líquido del hogar ESCALADO, no `λ*·L_det`** — y por eso los nodos tardíos

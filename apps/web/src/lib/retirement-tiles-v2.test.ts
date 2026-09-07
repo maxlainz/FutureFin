@@ -141,6 +141,43 @@ describe("las dos tarjetas FIJAS", () => {
     expect(reason(undefined).subtitle).not.toContain("en euros de hoy");
   });
 
+  // `already_covered` es la ÚNICA de las cuatro ausencias que es una RESPUESTA y no un fallo de
+  // medición: ni dividiendo la cartera por 256 el plan incumple el umbral, así que no hace falta
+  // capital adicional hoy. Enseñarla con el mismo «—» que «sin activos líquidos» tira la única de
+  // las cuatro que es una buena noticia — y era el remate del bug de la curva, que publicaba el
+  // ahorro acumulado de la nómina donde no había necesidad ninguna.
+  it("«ya cubierto» ocupa el sitio de la cifra en vez de un guion mudo", () => {
+    const t = tile(
+      input({
+        needed_capital_today: null,
+        needed_capital_absent_reason: "already_covered",
+      }),
+      "needed_capital",
+    )!;
+    expect(t.value).toBe("Ya cubierto");
+    expect(t.value).not.toBe("—");
+    expect(t.subtitle).toBe("con lo que tienes hoy tu plan cumple el umbral");
+    // Sigue siendo la primera tarjeta y sigue apuntando a la misma ayuda: lo que cambia es lo que
+    // dice, no dónde está.
+    expect(t.label).toBe("Capital necesario hoy");
+    expect(t.helpId).toBe("retirement.needed_capital");
+  });
+
+  // Sin plan (`plan_absent_reason`) manda la ausencia del BLOQUE: ahí sí va el guion, porque no es
+  // que no haga falta capital, es que no hay plan del que hablar.
+  it("sin plan, «ya cubierto» no se cuela: manda la ausencia del bloque", () => {
+    const t = tile(
+      input({
+        plan_absent_reason: "birth_date_missing",
+        needed_capital_today: null,
+        needed_capital_absent_reason: "already_covered",
+      }),
+      "needed_capital",
+    )!;
+    expect(t.value).toBe("—");
+    expect(t.subtitle).not.toBe("con lo que tienes hoy tu plan cumple el umbral");
+  });
+
   it("«Éxito del plan» lleva el umbral y la precisión del sorteo en el subtítulo", () => {
     const t = tile(input(), "success")!;
     expect(t.label).toBe("Éxito del plan");

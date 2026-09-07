@@ -557,7 +557,8 @@ pub struct SummaryPlan {
     /// con el que la cartera del usuario cumpliría el umbral jubilándose YA. Exactamente
     /// `needed_capital_today` de `/v1/projection/series` — la MISMA cifra en Jubilación, Resumen y
     /// Proyección. `null` ⟺ hay `needed_capital_absent_reason` en la serie (sin líquidos, umbral
-    /// inalcanzable…) o no hay plan — **nunca un 0 €**, que se leería como «no necesitas nada».
+    /// inalcanzable, o `already_covered` — que NO es un fallo de medición: no hace falta capital
+    /// adicional hoy) o no hay plan — **nunca un 0 €**, que se leería como «no necesitas nada».
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub needed_capital_today: Option<Decimal>,

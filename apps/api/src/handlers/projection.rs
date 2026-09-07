@@ -785,7 +785,13 @@ pub struct ProjectionSeriesResponse {
     #[schema(value_type = Option<String>)]
     pub needed_capital_today: Option<Decimal>,
     /// Por qué no hay capital necesario: `no_liquid_assets` | `threshold_unreachable` |
-    /// `month_beyond_horizon`. `null` ⟺ hay cifra, o no hay plan.
+    /// `month_beyond_horizon` | `already_covered`. `null` ⟺ hay cifra, o no hay plan.
+    ///
+    /// **`already_covered` es una RESPUESTA, no un fallo de medición**: con la cartera dividida por
+    /// 256 el plan sigue cumpliendo el umbral, así que **no hace falta capital adicional hoy** y la
+    /// necesidad real queda por debajo de lo que el método sabe medir. Tampoco ahí un 0 €: la
+    /// necesidad es «menor que `λ_min × tu líquido», no cero. Quien lo enseñe debería decirlo con
+    /// palabras, no con un guion mudo.
     #[schema(value_type = Option<String>)]
     pub needed_capital_absent_reason: Option<&'static str>,
     /// **La curva de capital necesario por edad, PARALELA a `points[]`** (una entrada por punto)
@@ -799,8 +805,18 @@ pub struct ProjectionSeriesResponse {
     /// `needed_capital_today`, que va en euros de HOY: en el mes 0 las dos coinciden exactamente.
     ///
     /// La rejilla evaluada es gruesa (cada cinco años, más el mes del plan), así que **la mayoría
-    /// de las posiciones son `null`**: un `null` significa «aquí no se midió», nunca «aquí hace
-    /// falta 0 €». NIVEL 2: vacía mientras `needed_capital_curve_state` sea `computing`.
+    /// de las posiciones son `null`**. Un `null` significa **una de dos cosas, nunca «aquí hacen
+    /// falta 0 €»**:
+    ///
+    /// 1. «aquí no se midió» — la posición no cae en un nodo de la rejilla;
+    /// 2. «aquí no hace falta capital adicional hoy» — el nodo se evaluó y salió `already_covered`
+    ///    (`needed_capital_curve_absent`), porque con la cartera dividida por 256 el plan sigue
+    ///    cumpliendo y no hay frontera que medir. Es lo normal a partir del mes en que la pensión
+    ///    cubre el gasto.
+    ///
+    /// **La curva NO tiene por qué cruzar la trayectoria del patrimonio en la fecha**, y que no la
+    /// cruce no es un fallo del dibujo: en el modelo v2 la fecha la deciden los caminos que
+    /// aguantan, no un cruce. NIVEL 2: vacía mientras `needed_capital_curve_state` sea `computing`.
     pub needed_capital_curve: Vec<Option<f64>>,
     /// Estado del NIVEL 2: `ready` | `computing` | `unavailable`. **`computing` y `unavailable`
     /// no significan lo mismo**: uno dice «todavía no» y el otro «no se puede», y confundirlos le
@@ -4119,10 +4135,14 @@ pub(crate) fn attach_plan_extras(
 /// pueden caer en la misma posición.
 ///
 /// **No interpola**, y es deliberado: una curva continua sobre un tramo que no se midió es una
-/// interpolación disfrazada de medición, y el cruce con la trayectoria del patrimonio —lo único
-/// que la curva existe para enseñar— caería en un mes inventado. Los nodos que el crate no pudo
-/// medir (`needed_capital_curve_absent`) tampoco aparecen: quedan `null`, igual que los meses no
-/// evaluados, porque en los dos casos la respuesta honesta es «aquí no hay cifra».
+/// interpolación disfrazada de medición, y lo que la curva enseña —cuánto capital pediría cada edad
+/// contra la trayectoria del patrimonio— quedaría dibujado en meses inventados. (Lo que NO enseña es
+/// un cruce en la fecha: en el modelo v2 la fecha la deciden los caminos que aguantan, y la curva no
+/// tiene por qué cortar la línea ahí.) Los nodos que el crate no publicó
+/// (`needed_capital_curve_absent`) tampoco aparecen: quedan `null`, igual que los meses no
+/// evaluados. Cuidado con leer los dos `null` como el mismo: «aquí no se midió» y «aquí no hace
+/// falta capital adicional hoy» (`already_covered`) son respuestas distintas, y la segunda es la
+/// normal a partir del mes en que la pensión cubre el gasto.
 fn plan_curve_parallel_to_points(
     points: &[ProjectionPoint],
     extras: &PlanExtras,
@@ -4562,7 +4582,8 @@ pub(crate) struct SimKpis {
     #[serde(with = "rust_decimal::serde::str_option")]
     pub needed_capital_today: Option<Decimal>,
     /// Por qué no hay capital necesario: `no_liquid_assets` | `threshold_unreachable` |
-    /// `month_beyond_horizon`. `null` ⟺ sí lo hay.
+    /// `month_beyond_horizon` | `already_covered` (este último **no es un fallo de medición**: no
+    /// hace falta capital adicional hoy). `null` ⟺ sí lo hay.
     pub needed_capital_absent_reason: Option<&'static str>,
     /// **Aportación extra mensual mínima** (plana, nominal, redondeada a decenas hacia arriba)
     /// para que la fecha de este lado sea válida. Solo existe donde la fecha es un DATO
@@ -5173,7 +5194,7 @@ const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces l
 /// la regla de retirada gobierna lo que sale de la cartera— y confundirlas produce lecturas
 /// plausibles y falsas. Es constante y no un `format!` para que sea la MISMA cadena en cada
 /// respuesta (un `model_note` que cambia entre llamadas es ruido en la cache y en el diff).
-const PROJECTION_MODEL_NOTE: &str = "Motor mensual en euros NOMINALES: presupuesto regular sin las cuotas derivadas de pasivos, servicio de deuda por mes, ajustes por Próximos y crecimiento compuesto por activo. El GASTO (regular y de jubilación) se indexa a la inflación de la instalación con el eje (k−1)/12 —el mes 1 cobra el gasto declarado tal cual— y los INGRESOS quedan planos a propósito. LA FECHA LA DECIDE EL ÉXITO, no un cruce: `jubilacion_month_index` es el primer mes en que, jubilándote ahí, al menos `success_threshold_pct` de miles de caminos sorteados AGUANTA hasta el horizonte sin que tengas que volver a trabajar. `retirement_date_basis` dice quién la decidió: `success_threshold` (el umbral), `target_age` (la edad que fijaste — el umbral no la mueve, solo mide si llegas) o `not_reachable` (ningún mes del horizonte cumple; entonces la fecha es null y `success_of_plan` describe el mejor intento observado, JAMÁS un mes 0). UN CAMINO FALLA por tres motivos y solo tres: F1 la cartera se queda sin cubrir el gasto del mes; F2 la tasa de retirada INICIAL del mes en que te jubilas supera el tope —el SWR, o el del puente si la pensión llega dentro de sus años máximos—; F3 con una regla por saldo, lo que la regla permite se queda por debajo del gasto ordinario. El SWR ya NO dimensiona ningún objetivo: es ese tope inicial, evaluado UNA vez. `success_of_plan` y `success_wilson_low` son FRACCIONES (0.96 = 96 %) y `success_sampling_error_pp` va en PUNTOS PORCENTUALES. El umbral se compara contra la cota de Wilson por debajo de 100; «100 %» significa CERO fallos de `paths_used` caminos, que con una muestra finita no es certeza — por eso la barra de error nunca es 0. Sin `paths_used` y sin `seed` la cifra no es reproducible y por tanto no es un resultado. `needed_capital_today` (euros de HOY, redondeado a cientos hacia arriba) es el capital con el que TU cartera cumpliría el umbral jubilándote ya: es la cifra de referencia, no el número FIRE. `needed_capital_curve` es la misma pregunta por edad, en euros NOMINALES de cada mes y PARALELA a `points[]` — se dibuja contra la trayectoria del patrimonio, que también es nominal, y cruza la línea en la fecha; sus posiciones `null` significan «aquí no se midió» (la rejilla es de cinco en cinco años más el mes del plan), nunca «aquí hacen falta 0 €». Llega en segundo plano: mientras `needed_capital_curve_state` sea `computing` todavía se está calculando, y `unavailable` es otra cosa («no se puede»). `fire_number_classic_today` es el «25× tu gasto» de toda la vida y desde 5.0.0 SOLO eso: informativo, no dispara nada y no se compara con nada. TRES magnitudes por mes y no dos: `withdrawal` es lo que se obtuvo, `withdrawal_shortfall` lo que la REGLA rechazó (informativo: no resta patrimonio ni cuenta como fracaso; cero por construcción con `fixed_real`, que no tiene techo) y `unmet_need` lo que la CARTERA no pudo dar — su suma es la necesidad neta, y `uncovered_deficit_total` es la suma de la tercera en todo el horizonte. `withdrawal_excess` es lo que se retira de más en modo `rule_is_spend`. `assets_depleted_month_index` exige DOS condiciones: que la venta dejara la cartera a cero Y que alguna venta posterior se quedara sin fundar — un puente que se vacía EXACTAMENTE el mes en que entra una pensión que cubre todo el gasto es null, no una ruina. SIN PLAN NO HAY FECHA, y `plan_absent_reason` dice por qué: `birth_date_missing` (sin ella no hay edad que convertir en mes), `months_override` (pedir un horizonte a medida salta la cache y con ella el sorteo) o `household_aggregate` (el hogar suma N planes y no tiene uno; cada `members[].plan_state` dice `household_not_solved`). En esos casos la serie de patrimonio se publica ENTERA y describe una trayectoria SIN jubilarse: léela como tal, no como un plan. Con `view=household` la curva es la SUMA de una simulación independiente por miembro, cada una con su estrategia: una lectura INFORMATIVA del conjunto, no el plan de nadie. El hogar no resuelve fecha por miembro (`members[].plan_state: household_not_solved`); lo que sí viaja por persona es su fecha por EDAD, que es un dato y no una búsqueda.";
+const PROJECTION_MODEL_NOTE: &str = "Motor mensual en euros NOMINALES: presupuesto regular sin las cuotas derivadas de pasivos, servicio de deuda por mes, ajustes por Próximos y crecimiento compuesto por activo. El GASTO (regular y de jubilación) se indexa a la inflación de la instalación con el eje (k−1)/12 —el mes 1 cobra el gasto declarado tal cual— y los INGRESOS quedan planos a propósito. LA FECHA LA DECIDE EL ÉXITO, no un cruce: `jubilacion_month_index` es el primer mes en que, jubilándote ahí, al menos `success_threshold_pct` de miles de caminos sorteados AGUANTA hasta el horizonte sin que tengas que volver a trabajar. `retirement_date_basis` dice quién la decidió: `success_threshold` (el umbral), `target_age` (la edad que fijaste — el umbral no la mueve, solo mide si llegas) o `not_reachable` (ningún mes del horizonte cumple; entonces la fecha es null y `success_of_plan` describe el mejor intento observado, JAMÁS un mes 0). UN CAMINO FALLA por tres motivos y solo tres: F1 la cartera se queda sin cubrir el gasto del mes; F2 la tasa de retirada INICIAL del mes en que te jubilas supera el tope —el SWR, o el del puente si la pensión llega dentro de sus años máximos—; F3 con una regla por saldo, lo que la regla permite se queda por debajo del gasto ordinario. El SWR ya NO dimensiona ningún objetivo: es ese tope inicial, evaluado UNA vez. `success_of_plan` y `success_wilson_low` son FRACCIONES (0.96 = 96 %) y `success_sampling_error_pp` va en PUNTOS PORCENTUALES. El umbral se compara contra la cota de Wilson por debajo de 100; «100 %» significa CERO fallos de `paths_used` caminos, que con una muestra finita no es certeza — por eso la barra de error nunca es 0. Sin `paths_used` y sin `seed` la cifra no es reproducible y por tanto no es un resultado. `needed_capital_today` (euros de HOY, redondeado a cientos hacia arriba) es el capital con el que TU cartera cumpliría el umbral jubilándote ya: es la cifra de referencia, no el número FIRE. `needed_capital_curve` es la misma pregunta por edad, en euros NOMINALES de cada mes y PARALELA a `points[]` — se dibuja contra la trayectoria del patrimonio, que también es nominal, pero NO tiene por qué cruzarla en la fecha: la fecha la deciden los caminos que aguantan, no un cruce. Sus posiciones `null` significan «aquí no se midió» (la rejilla es de cinco en cinco años más el mes del plan) o «aquí no hace falta capital adicional hoy» (`already_covered`, el motivo normal a partir del mes en que la pensión cubre el gasto: con la cartera dividida por 256 el plan sigue cumpliendo y no hay frontera que medir), JAMÁS «aquí hacen falta 0 €». Llega en segundo plano: mientras `needed_capital_curve_state` sea `computing` todavía se está calculando, y `unavailable` es otra cosa («no se puede»). `fire_number_classic_today` es el «25× tu gasto» de toda la vida y desde 5.0.0 SOLO eso: informativo, no dispara nada y no se compara con nada. TRES magnitudes por mes y no dos: `withdrawal` es lo que se obtuvo, `withdrawal_shortfall` lo que la REGLA rechazó (informativo: no resta patrimonio ni cuenta como fracaso; cero por construcción con `fixed_real`, que no tiene techo) y `unmet_need` lo que la CARTERA no pudo dar — su suma es la necesidad neta, y `uncovered_deficit_total` es la suma de la tercera en todo el horizonte. `withdrawal_excess` es lo que se retira de más en modo `rule_is_spend`. `assets_depleted_month_index` exige DOS condiciones: que la venta dejara la cartera a cero Y que alguna venta posterior se quedara sin fundar — un puente que se vacía EXACTAMENTE el mes en que entra una pensión que cubre todo el gasto es null, no una ruina. SIN PLAN NO HAY FECHA, y `plan_absent_reason` dice por qué: `birth_date_missing` (sin ella no hay edad que convertir en mes), `months_override` (pedir un horizonte a medida salta la cache y con ella el sorteo) o `household_aggregate` (el hogar suma N planes y no tiene uno; cada `members[].plan_state` dice `household_not_solved`). En esos casos la serie de patrimonio se publica ENTERA y describe una trayectoria SIN jubilarse: léela como tal, no como un plan. Con `view=household` la curva es la SUMA de una simulación independiente por miembro, cada una con su estrategia: una lectura INFORMATIVA del conjunto, no el plan de nadie. El hogar no resuelve fecha por miembro (`members[].plan_state: household_not_solved`); lo que sí viaja por persona es su fecha por EDAD, que es un dato y no una búsqueda.";
 
 /// Cotas del eje P11 `income_growth_real_pct_annual` (% REAL anual, 5.0.0).
 ///

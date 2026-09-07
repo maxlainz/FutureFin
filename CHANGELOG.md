@@ -124,7 +124,29 @@ producían números creíbles.
   **euros de hoy** redondeado a **cientos hacia arriba** —es una estimación muestral y publicarla al
   céntimo sería fingir una precisión que no tiene— y es la MISMA cifra en Jubilación, Resumen y
   Proyección. Cuando no se puede calcular, dice por qué (`needed_capital_absent_reason`:
-  `no_liquid_assets` | `threshold_unreachable` | `month_beyond_horizon`).
+  `no_liquid_assets` | `threshold_unreachable` | `month_beyond_horizon` | `already_covered`).
+- **«Ya cubierto» es una respuesta, y la curva ya no publica el ahorro de tu nómina como si fuera una
+  necesidad.** La bisección sobre `λ` —el factor que escala tu líquido de hoy— baja halvando hasta
+  encontrar un `λ` que INCUMPLA el umbral. Cuando no lo encuentra en ocho intentos, la respuesta
+  honesta no es «`λ* = λ/256`»: es que **con la cartera dividida por 256 el plan sigue cumpliendo**, o
+  sea que no hace falta capital adicional hoy y la necesidad cae por debajo de lo que el método sabe
+  medir. Devolver ahí el último halving publicaba el SUELO DEL MÉTODO rotulado como necesidad, y el
+  warm start de la curva lo componía nodo a nodo (cada nodo heredaba el `λ` del anterior y lo volvía a
+  dividir por 256). Medido sobre la demo sintética (`scripts/seed-demo.sh`, fecha válida en el mes
+  371): los cinco nodos posteriores a la fecha salían con `λ` = 0,0374 · 0,0001 · 0 · 0 · 0 y
+  publicaban **485.800 → 771.200 → 1.259.800 → 1.944.000 → 2.902.400 €**, una curva CRECIENTE después
+  de la fecha que se leía como «a los 86 necesitas 2,9 M€». Con `λ = 10⁻⁹` —cartera inicial
+  efectivamente a cero— el umbral se cumplía al 100 % en los cinco: lo publicado no era capital
+  necesario, era `liquid_worth[k−1]` de un hogar sin cartera, es decir **lo que el hogar acumula de su
+  nómina** hasta esa edad. Ahora esos nodos son `null` (el solver los clasifica como `already_covered`
+  internamente; la línea se parte ahí), el capital de hoy publica `null` con la misma
+  razón en vez de un importe diminuto, el warm start no hereda nunca un `λ` por debajo de 1
+  (`WARM_LAMBDA_FLOOR`) y la tarjeta dice «Ya cubierto · con lo que tienes hoy tu plan cumple el
+  umbral» en vez de un guion mudo. **Los siete nodos anteriores a la fecha no se mueven ni un euro**
+  (619.700 · 758.500 · 1.084.200 · 1.438.300 · 2.006.500 · 2.615.700 · 3.555.800 € en la demo, antes y
+  después). De paso cae una frase falsa del `model_note` de la proyección: la curva **no tiene por qué
+  cruzar la línea de patrimonio en la fecha** —la fecha la deciden los caminos que aguantan, no un
+  cruce—, que es lo que `api/types.ts` ya decía bien y el `model_note` contradecía.
 - **La curva del chart es el capital necesario REAL por edad, sin escalar (C4)**, más una **marca
   vertical en la fecha válida** con su éxito. La versión anterior escalaba la curva por la
   mediana/cuantil para forzar que cruzara la línea en la fecha: era algebraicamente incapaz de

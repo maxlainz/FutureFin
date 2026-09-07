@@ -256,6 +256,11 @@ realidad** o entre superficies, no error de aritmética.
   - **Nunca 0 €**: sin activos líquidos (o con `L_det(k−1) = 0`) se publica
     `absent_reason: no_liquid_assets`; si ni multiplicando la cartera por 4.096 se cumple el umbral,
     `threshold_unreachable`. Un 0 € se leería como «no necesitas nada», la respuesta contraria.
+  - **Y nunca el SUELO DEL MÉTODO**: si ni dividiendo la cartera por 256 se INCUMPLE el umbral, no
+    hay frontera que biseccionar y se publica `absent_reason: already_covered` —«no hace falta
+    capital adicional hoy»—, sin importe. Es la ausencia que sí es una respuesta. Devolver ahí el
+    último halving como `λ*` publicaba el líquido de un hogar escalado a casi cero, que es el ahorro
+    acumulado de la NÓMINA y no una necesidad.
   - **No es `λ*·L_det(k−1)`**: el importe se lee de la trayectoria del hogar ESCALADO
     (`project_net_worth_series(retiring_at(scale_liquid_assets(input, λ*), k)).liquid_worth[k−1]`),
     a costa de una proyección `Decimal` por cifra. El producto solo coincide en `k = 1`, y en un

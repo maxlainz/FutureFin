@@ -261,13 +261,25 @@ una contesta una pregunta distinta.
   umbral. Sale de una bisección sobre un factor de escala de tu cartera, con 500 caminos para
   buscar y 2.500 para confirmar. Siempre en **euros de hoy** y redondeado a **cientos hacia
   arriba** —sale de un sorteo, y el euro exacto fingiría una precisión que no hay—. Es la misma
-  cifra en Jubilación, en el Resumen y en la Proyección.
+  cifra en Jubilación, en el Resumen y en la Proyección. Cuando en su lugar leas **«Ya cubierto»**,
+  no es que falte el dato: es que la necesidad se queda por debajo de lo que este cálculo sabe
+  medir —con tu cartera dividida por 256 tu plan seguiría cumpliendo el umbral—, así que **no te
+  hace falta reunir nada más** para jubilarte ya. Suele pasar cuando tu pensión, o una renta que
+  sigue cobrándose jubilado, cubre tu gasto de jubilación entero.
 - **La curva del gráfico** — la misma pregunta, contestada para cada edad de tu horizonte: «si te
   jubilaras a esta edad, ¿cuánto líquido haría falta?». Viaja en euros **nominales** —los mismos
   que tu línea de patrimonio—, así que el interruptor «En dinero de hoy» la deflacta igual que a
   ella, y las dos siguen siendo comparables punto a punto. Internamente se resuelve solo en unos
-  pocos puntos —cada cinco años, más tu fecha exacta— y se interpola para que encaje mes a mes con
-  tu patrimonio en el gráfico; por eso puede calcularse en segundo plano sin bloquear la pantalla.
+  pocos puntos —cada cinco años, más tu fecha exacta—, y **no se interpola entre ellos**: cada
+  punto dibujado es una medición, no una línea rellenada, porque una curva continua sobre un tramo
+  que no se midió es una interpolación disfrazada de medición. Por eso puede calcularse en segundo
+  plano sin bloquear la pantalla.
+
+La curva **se corta** donde no hay cifra, y también ahí hay dos motivos distintos. Uno es que ese
+mes no cae en la rejilla que se evaluó. El otro es «ya cubierto»: a partir de la edad en la que tu
+pensión cubre tu gasto no hace falta capital adicional para jubilarse, así que no hay nada que
+dibujar. Que la curva se corte ahí es lo correcto — lo que crecería después de ese punto sería el
+ahorro que vas acumulando, no una necesidad tuya.
 
 La curva **no tiene por qué cruzar tu línea de patrimonio**, y que no la cruce no es un error del
 dibujo: tu fecha la deciden los escenarios que aguantan, no un cruce de dos líneas. Lo único que

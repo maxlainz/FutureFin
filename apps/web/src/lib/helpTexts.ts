@@ -309,8 +309,14 @@ export const HELP_TEXTS = {
       "redondeado a cientos hacia arriba, porque sale de un sorteo y el euro exacto fingiría una " +
       "precisión que no hay. La curva del gráfico es esta misma cifra calculada para cada edad, " +
       "sin escalar: no tiene por qué cruzar tu línea de patrimonio, y que no la cruce no es un " +
-      "error del dibujo — tu fecha la deciden los escenarios que aguantan, no un cruce. El " +
-      "número FIRE clásico es otra cosa y está en «Detalle del cálculo».",
+      "error del dibujo — tu fecha la deciden los escenarios que aguantan, no un cruce. " +
+      "«Ya cubierto» en vez de una cifra no es un hueco: significa que la necesidad se queda por " +
+      "debajo de lo que este cálculo sabe medir —con la cartera dividida por 256 tu plan seguiría " +
+      "cumpliendo el umbral—, así que no te hace falta reunir nada más para jubilarte en ese mes. " +
+      "Es lo normal a partir de la edad en la que tu pensión ya cubre tu gasto, y por eso la " +
+      "curva se corta ahí en vez de seguir subiendo: lo que crecería después sería el ahorro que " +
+      "vas acumulando, no una necesidad. El número FIRE clásico es otra cosa y está en «Detalle " +
+      "del cálculo».",
   },
   "retirement.safe_date": {
     title: "Fecha válida",
