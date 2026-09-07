@@ -980,7 +980,7 @@ drenaje post-cruce ya solo tributa la ganancia real de la base que la cascada co
 El rediseño completo del modelo de jubilación (entrevista 2026-09-05/06 + panel adversarial de la
 mañana del 06): «el éxito define la fecha», no un objetivo estático que el patrimonio cruza. Las
 decisiones M1–M13 son la entrevista; C1–C8 son las correcciones que el panel adversarial (5 lentes,
-39 objeciones, 17 refutadas con evidencia) forzó sobre esas mismas M al reimplementar el modelo en
+40 objeciones planteadas; la fase de refutación se cortó por el límite de sesión y solo una refutación quedó registrada, así que las cuatro definiciones tumbadas se verificaron a mano en la sesión principal — el recuento «17 refutadas» que circuló no tiene respaldo en los datos crudos) forzó sobre esas mismas M al reimplementar el modelo en
 un Monte Carlo independiente con los datos de la demo. Documento fuente: «Modelo de jubilación v2»
 (memoria de sesión); implementación: WPs E1–E9 (motor/estocástico), A1–A12 (API), W1–W9 (SPA),
 D1–D3 (docs) de la rama `release/5.0.0`.
