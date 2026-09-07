@@ -222,9 +222,12 @@ jobs:
   # simultáneas, muy por debajo del max_connections=100 por defecto.
   integration:
     runs-on: ubuntu-latest
-    # ~3 min de tests + compilación. El tope evita que un test bloqueado se coma
-    # las 6 h por defecto del runner.
-    timeout-minutes: 45
+    # El tope evita que un test bloqueado se coma las 6 h por defecto del runner. Hasta 4.15
+    # bastaban ~3 min; desde el modelo v2 de 5.0.0 (2026-09-07) la suite de integración resuelve
+    # fechas y capital por Monte Carlo en decenas de tests y el job se CANCELÓ a los 45 min con
+    # suites aún corriendo (run 34100228793: 08:22 → 09:07 UTC). En este Mac la suite entera
+    # tarda 15–25 min; el runner va 2–4× más lento.
+    timeout-minutes: 90
 
     services:
       postgres:
