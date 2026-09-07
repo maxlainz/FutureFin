@@ -813,6 +813,9 @@ async fn compute_projection_bands(
         seed,
         paths,
         percentiles: BANDS_PERCENTILES.to_vec(),
+        // `None` = el pool compartido del crate estocástico, que es lo que mantiene acotado el
+        // total de CPU con varias simulaciones en vuelo bajo el semáforo de `heavy.rs`.
+        threads: None,
     };
 
     let input = built.input.clone();

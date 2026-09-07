@@ -197,6 +197,7 @@ fn mc_zero_volatility_degenerates_to_deterministic() {
         seed: 0xDEAD_BEEF,
         paths: 8,
         percentiles: vec![10, 50, 90],
+        threads: None,
     };
 
     let mut checked = 0usize;
@@ -322,6 +323,7 @@ fn mc_bands_are_ordered() {
         seed: 99,
         paths: 200,
         percentiles: vec![1, 5, 10, 25, 50, 75, 90, 95, 99],
+        threads: None,
     };
     let out = project_percentile_bands(&input, &vols, &config).expect("no falla");
     assert!(out.any_volatility_declared);
@@ -512,6 +514,7 @@ fn ruin_probability(withdrawal_pct: f64, paths: u32) -> (f64, McOutcome) {
         // Un solo percentil: lo que se mide es una probabilidad, no una banda, y ordenar tres
         // veces 421 vectores de 2.000 no aporta nada.
         percentiles: vec![50],
+        threads: None,
     };
     let out = project_percentile_bands(&input, &[Some(17.0)], &config).expect("no falla");
     (1.0 - out.success_probability, out)
@@ -716,6 +719,7 @@ fn mc_percent_of_balance_never_ruins_but_cuts_the_spending() {
         seed: 207,
         paths: 1_000,
         percentiles: vec![10, 50, 90],
+        threads: None,
     };
     let out = project_percentile_bands(&input, &[Some(17.0)], &config).expect("no falla");
 
@@ -829,6 +833,7 @@ fn mc_f3_is_a_property_of_the_plan_not_of_the_draw() {
             seed,
             paths: 1_000,
             percentiles: vec![50],
+            threads: None,
         };
         project_percentile_bands(&input, &[Some(17.0)], &config).expect("no falla")
     };
@@ -1001,6 +1006,7 @@ fn mc_coverage_counts_the_need_the_portfolio_could_not_fund() {
         seed: 207,
         paths: 1_000,
         percentiles: vec![10, 50, 90],
+        threads: None,
     };
     let out = project_percentile_bands(&input, &[Some(15.0)], &config).expect("no falla");
     let ratio = out

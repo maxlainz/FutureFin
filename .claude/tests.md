@@ -159,7 +159,8 @@ necesita base de datos** y CI la quiere en el job barato:
 cargo test -p futurefin-engine-stochastic          # también en ci.yml (job `rust`) y en scripts/test-all.sh
 ```
 
-**Seis binarios de test desde el modelo de jubilación v2 (2026-09-06, WPs E1–E9)**: `degeneration.rs`
+**Siete binarios de test desde E12 (2026-09-07)** —seis desde el modelo de jubilación v2
+(2026-09-06, WPs E1–E9) más `parallel_determinism.rs`—: `degeneration.rs`
 (abajo), `monte_carlo.rs` (las puertas de Monte Carlo: reproducibilidad por semilla, degeneración con
 σ = 0, orden de las bandas, `McOutcome` v2), y **tres nuevos** — `needed_capital.rs` (capital
 necesario hoy y la curva por edad, E7 — **+3 en el arreglo de la curva**:
@@ -177,14 +178,25 @@ umbral sorteando también la acumulación),
 `k` con prefijo y sin él — números aleatorios comunes entre nodos) y
 `nodes_after_the_valid_date_stay_null_when_already_covered` (el arreglo de arriba sigue vigente con
 60 y 119 meses de prefijo determinista)), `solve_mc.rs` (éxito(k) por camino y la fecha válida, E6) y
-`strategy_solves.rs` (aportación mínima, mes de coast, inicio de la media jornada, E8). **Estado
-2026-09-07, verificado con el runner** (`cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`
-— cuenta binario a binario, que el runner imprime una línea por binario):
+`strategy_solves.rs` (aportación mínima, mes de coast, inicio de la media jornada, E8), y —desde
+E12— `parallel_determinism.rs` (**la puerta del paralelismo**: repartir los caminos entre núcleos
+devuelve el MISMO resultado **bit a bit**, comparado con `f64::to_bits()` sobre P9/P13/P18/P15/P17
+y sobre las cinco salidas que un usuario ve —bandas, tira de éxito, fecha válida, capital de hoy y
+curva—; `results_do_not_depend_on_the_thread_count` barre 1/2/4/8 hilos con 100 caminos, que **no**
+es múltiplo del bloque de reparto, a propósito). **Estado 2026-09-07, verificado con el runner**
+(`cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"` — cuenta binario a binario,
+que el runner imprime una línea por binario):
 
 ```text
-26 unitarios (src/) + 3 degeneration + 14 monte_carlo + 16 needed_capital + 11 solve_mc + 13 strategy_solves
-= 83 tests, 0 fallos — más los 7 #[ignore] de timing_mc.rs (miden, no afirman)
+29 unitarios (src/) + 3 degeneration + 14 monte_carlo + 16 needed_capital + 3 parallel_determinism
++ 11 solve_mc + 13 strategy_solves = 89 tests, 0 fallos
+— más los 8 #[ignore] de timing_mc.rs (miden, no afirman)
 ```
+
+`parallel_determinism.rs` es el binario más LENTO de la suite (~11 s en `debug`), y es un coste
+deliberado: compara dos ejecuciones completas de cinco casos y cuatro solves cada una. Si algún día
+hay que recortarlo, se recortan casos —nunca el `to_bits()` por un `abs() < ε`, que es exactamente
+el fallo que este binario existe para cazar—.
 
 **El colchón de caja y sus tests desaparecieron ENTEROS con el modelo v2 (E3)**: `mc_cash_buffer_amount_holds_the_cap`,
 `mc_cash_buffer_protects_and_the_drag_is_what_costs` y toda la familia `mc_cash_buffer_*` no existen
@@ -202,7 +214,15 @@ fecha válida ≈ 1,8–1,9 s típico (≈ 8,7–9,2 s peor caso); capital neces
 de 14 nodos ≈ 15,7 s (nivel 2, en segundo plano; **la curva condicionada de C9 no cambió el coste**
 — 15,62 s sin prefijo vs 15,68 s con él, medido A/B el 2026-09-07: el bucle recorre el horizonte
 entero igual, solo que sin shock); aportación mínima ≈ 1,9 s, coast ≈ 1,2 s, media
-jornada ≈ 2,4 s. Estos números son de `--release`; el `Cargo.toml` raíz (ver el aviso al principio
+jornada ≈ 2,4 s. **Desde E12 (2026-09-07) el sorteo se reparte entre núcleos** y esos números bajan:
+medido en un Mac de 10 núcleos con el pool en 8 hilos, bandas de 2.500 caminos 0,51 s → 0,21 s
+(×2,5), fecha válida 2,67 s → 0,96 s (×2,8), capital de hoy 2,40 s → 0,75 s (×3,2) y curva de 14
+nodos 11,24 s → 4,09 s (×2,8) — la columna «antes» es literalmente `McConfig::threads = Some(1)`,
+que no toca rayon, y las cuatro salidas coinciden dígito a dígito en las cuatro columnas (éxito
+0,977200 · mes 372 · 914.300 €). El escalado es sublineal porque los núcleos no son iguales
+(4 de rendimiento + 6 de eficiencia): de 4 a 8 hilos apenas se gana. Lo mide
+`timing_mc.rs::the_parallel_draw_costs_less_than_the_sequential_one` (`#[ignore]`, `--release`).
+Estos números son de `--release`; el `Cargo.toml` raíz (ver el aviso al principio
 de §Backend) es lo que hace que la suite NORMAL (`cargo test`, perfil `test`) sin `--release` no
 pague el mismo coste en `debug`, que sería un orden de magnitud peor sin el override.
 
@@ -729,7 +749,7 @@ grep -n "5433" apps/api/tests/common/mod.rs
 grep -c '#\[test\]' crates/engine/src/*.rs   # 199 en total el 2026-09-03 (139 con la lista vieja)
 grep -c '#\[test\]' crates/engine/tests/*.rs crates/engine-stochastic/tests/*.rs
 cargo test -p futurefin-engine 2>&1 | grep "test result"              # 199 + 2 + 10 + 24, y 7 ignored
-cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"   # 26 + 3 + 14 + 16 + 11 + 13
+cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"   # 29 + 3 + 14 + 16 + 3 + 11 + 13
                                                 # = 83 el 2026-09-07, verde entero (ver §El crate
                                                 # estocástico). El «13 + 3 + 14» que esta línea
                                                 # llevaba era de ANTES del modelo v2 y contaba tres

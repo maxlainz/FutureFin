@@ -105,7 +105,7 @@
 
 use futurefin_engine::{PathFailure, ProjectionInput, RetirementTrigger};
 
-use crate::mc::PathEngine;
+use crate::mc::{for_each_path, PathEngine};
 use crate::{McConfig, McError};
 
 // =================================================================================================
@@ -350,6 +350,10 @@ pub fn retiring_at(input: &ProjectionInput, month: u32) -> ProjectionInput {
 struct Draws {
     engine: PathEngine,
     paths: u32,
+    /// Hilos con los que repartir los caminos de CADA sorteo (E12). Se resuelve una vez, al
+    /// construir el presupuesto, y no cambia entre evaluaciones: el reparto no es parte de la
+    /// pregunta, solo de cómo se contesta. Ver `crate::parallel`.
+    threads: usize,
     /// Sorteos completos ejecutados. Es el coste medido del solve, y se publica.
     draws: u32,
 }
@@ -366,31 +370,43 @@ impl Draws {
         Ok(Draws {
             engine: PathEngine::new(&scenario, volatilities, config)?,
             paths: config.paths,
+            threads: crate::parallel::resolve_threads(config),
             draws: 0,
         })
     }
 
     /// Un sorteo completo con la jubilación forzada en `month`.
+    ///
+    /// Los caminos se reparten entre hilos (E12) y **el conteo no se entera**: lo que cruza
+    /// caminos son dos contadores ENTEROS, que se incrementan en el hilo llamante y en orden de
+    /// índice desde el `sink` de `for_each_path`. Sumar enteros es asociativo y el orden no los
+    /// mueve; aun así se pliegan en orden, porque la regla de la casa es que el pliegue no
+    /// dependa de quién termine antes.
     fn at(&mut self, month: u32) -> Result<SuccessAt, McError> {
         self.engine.sim.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(month);
         let mut failures = 0u32;
         let mut by_kind = [0u32; 3];
-        for p in 0..self.paths {
-            let out = self.engine.run(p)?;
+        for_each_path(
+            &self.engine,
+            self.paths,
+            self.threads,
             // **El fallo lo define `failure_month_index`**, no el motivo: es el campo que el
             // contrato nombra. `failure_kind` solo clasifica, y el motor garantiza que los dos
             // son `Some` a la vez.
-            if out.failure_month_index.is_some() {
-                failures += 1;
-                debug_assert!(
-                    out.failure_kind.is_some(),
-                    "un camino fallido sin motivo rompería el reparto de `by_kind`"
-                );
-                if let Some(kind) = out.failure_kind {
-                    by_kind[kind_index(kind)] += 1;
+            |_p, out| (out.failure_month_index.is_some(), out.failure_kind),
+            |_p, (failed, kind)| {
+                if failed {
+                    failures += 1;
+                    debug_assert!(
+                        kind.is_some(),
+                        "un camino fallido sin motivo rompería el reparto de `by_kind`"
+                    );
+                    if let Some(kind) = kind {
+                        by_kind[kind_index(kind)] += 1;
+                    }
                 }
-            }
-        }
+            },
+        )?;
         self.draws += 1;
         Ok(SuccessAt::new(month, self.paths, failures, by_kind))
     }

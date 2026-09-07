@@ -27,6 +27,18 @@ rust_decimal = { version = "1.41", features = ["maths"] }
 # una actualización moviera el flujo, falla ahí y no en silencio dentro de una banda.
 rand_chacha = "0.10"
 
+# **El paralelismo entre caminos** (E12, 5.0.0). Los caminos son independientes por construcción
+# —cada uno tiene su propio flujo de RNG derivado de `(seed, path_index)`, ver `mc::path_rng`—, así
+# que repartirlos entre núcleos no cambia ni un bit: lo que rayon aporta aquí es un **pool acotado y
+# compartido** por todas las simulaciones en vuelo, que es justo la propiedad que el semáforo
+# `heavy::run_projection_sim` de la API necesita (N permisos × M hilos no puede desbordar los
+# núcleos si todos los M salen del mismo pool). Ver `crate::parallel`.
+#
+# La reproducibilidad NO depende de esta caja: rayon solo decide QUIÉN ejecuta cada camino, nunca
+# en qué orden se PLIEGAN los resultados —eso lo fija `mc::for_each_path`, que los entrega en
+# orden de índice de camino—. El guardián es `tests/parallel_determinism.rs`.
+rayon = "1"
+
 [dev-dependencies]
 # La batería de casos del motor se REUTILIZA por `#[path]` (`tests/common/cases.rs`): una sola
 # definición de los casos, dos crates que la corren. Estas tres son sus dependencias.

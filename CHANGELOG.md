@@ -523,6 +523,36 @@ modelo decía medir, y el owner decidió las tres con los números delante (C9�
   dinero de hoy» activo y sesgaba el eje. El llamante pasa ahora la curva NOMINAL y el componente deflacta una
   sola vez, como la banda y la línea.
 
+### Rendimiento y pantalla tras el primer uso de la imagen v2 (2026-09-07, tarde)
+
+- **Monte Carlo reparte los caminos entre núcleos, y ninguna cifra cambia.** El sorteo ejecuta sus caminos en
+  paralelo sobre un pool acotado (`rayon`, solo en `crates/engine-stochastic`): no es una aproximación más rápida,
+  es la misma cuenta repartida. Los caminos siempre fueron independientes —el RNG de cada uno se deriva de
+  `(seed, path_index)`— y el pliegue de sus resultados sigue haciéndose en orden de índice y en un solo hilo; el
+  error, si lo hay, también es determinista (el del camino de índice más bajo). **La promesa se comprueba, no se
+  afirma**: `tests/parallel_determinism.rs` compara TODAS las salidas —bandas, éxito, Wilson, fallos por motivo,
+  tabla acumulada, coberturas, fecha válida, capital de hoy, curva por edad y tira anual— con `f64::to_bits()`
+  entre 1, 2, 4 y 8 hilos sobre cinco casos de la batería; una tolerancia habría dejado pasar exactamente el fallo
+  que este cambio puede introducir. Medido en un Apple M4 con el pool en 8 hilos: bandas de 2.500 caminos
+  0,51 → 0,21 s, fecha válida 2,67 → 0,96 s, capital necesario de hoy 2,40 → 0,75 s, curva de 14 nodos
+  11,24 → 4,09 s. **El techo de CPU sigue en pie**: un solo pool compartido acotado a `[1, 8]` hilos, como el
+  semáforo de simulaciones, así que `N` peticiones concurrentes reparten los mismos hilos («permisos + pool», no
+  «permisos × núcleos»); `McConfig::threads` (`Some(1)` = secuencial) existe para medir y para los tests, la API
+  no lo fija nunca. `crates/engine` sigue sin hilos, sin RNG y sin `f64`.
+- **Jubilación ya no se apaga mientras recalcula.** Cada autosave volvía a pedir la serie y, durante esos
+  segundos, la frase decía «Calculando…», las tarjetas se desmontaban (de ahí el salto de altura) y el gráfico
+  perdía marcas, curva y banda con la respuesta anterior intacta en memoria. Ahora se sigue pintando la última
+  respuesta buena y los valores se actualizan **en sitio**; lo único que indica un cálculo en curso es un punto
+  discreto junto a «Resultado». Las tarjetas, la frase, la leyenda y los avisos reservan su altura. Y la curva de
+  «Capital necesario por edad» **llega sola**: antes el aviso «Calculando…» se quedaba puesto hasta cambiar de
+  pestaña; ahora se consulta con espera creciente (2 s → 15 s) y se deja de pedir en cuanto hay respuesta. El
+  autosave lee la función de guardado por referencia: el debounce ya no se rearmaba en cada render de la app.
+- **Jubilación en dos columnas a ancho completo**: el plan a la izquierda y el resultado a la derecha desde
+  ~1.100 px, apiladas (plan arriba) por debajo. La tarjeta «Pensión» ocupa el ancho de su columna y se parte en
+  dos —el puente a la izquierda, la pensión a la derecha—, apiladas (pensión primero) en pantallas estrechas. La
+  rejilla de estrategias se reparte por el ancho real de su tarjeta (antes fijaba cinco columnas, una por una
+  estrategia que ya no existe).
+
 ### Los once hallazgos de la revisión adversarial (B1–B11)
 
 Todos **silenciosos**: números creíbles, ninguna excepción, ningún test en rojo.

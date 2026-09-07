@@ -968,6 +968,9 @@ fn mc(seed: u64, paths: u32) -> McConfig {
         seed,
         paths,
         percentiles: vec![50],
+        // `None` = el pool compartido del crate estocástico (ver `heavy.rs`): un solve encadena
+        // decenas de sorteos y cada uno reparte sus caminos entre esos mismos hilos.
+        threads: None,
     }
 }
 

@@ -43,6 +43,15 @@
 //! el doc de ese módulo, no en un comentario suelto: un modelo estocástico sin sus supuestos
 //! declarados es un generador de números que parecen ciertos.
 //!
+//! # El reparto entre núcleos
+//!
+//! Los caminos se ejecutan en paralelo ([`parallel`], E12): son independientes por construcción
+//! —el RNG de cada uno se deriva de `(seed, path_index)`— y el pliegue de sus resultados se hace
+//! **siempre en orden de índice de camino**, así que el resultado es **idéntico bit a bit** con
+//! uno o con ocho hilos. La promesa se comprueba con `f64::to_bits()`, no con una tolerancia
+//! (`tests/parallel_determinism.rs`), y el interruptor para comparar es
+//! [`McConfig::threads`]`= Some(1)`.
+//!
 //! # Los solves estocásticos
 //!
 //! El módulo `solve_mc` es la otra mitad de 5.0.0: donde `mc` pregunta «¿cómo de ancha es la
@@ -71,6 +80,7 @@ mod mc;
 mod solve_mc;
 mod strategy_solves;
 mod needed_capital;
+pub mod parallel;
 
 pub use mc::{
     project_percentile_bands, run_path, run_path_from, seed_for, FAILURE_STEP_MONTHS, McConfig,

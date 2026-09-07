@@ -6074,6 +6074,9 @@ pub(crate) async fn simulate_projection_core(
                 seed,
                 paths,
                 percentiles: crate::handlers::projection_bands::BANDS_PERCENTILES.to_vec(),
+                // `None` = el pool compartido del crate estocástico. La API NUNCA fija hilos:
+                // ver la nota de `heavy.rs` sobre permisos × hilos.
+                threads: None,
             };
             let b_vols = baseline_vols.clone();
             let s_vols = scenario_vols.clone();

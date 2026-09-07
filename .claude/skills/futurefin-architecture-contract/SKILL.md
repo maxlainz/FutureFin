@@ -245,12 +245,34 @@ petición. Lo que la hace admisible son cuatro condiciones, y las cuatro son ver
    número de casos es un **suelo** asertado (`cases.len() >= 23`), no una constante. Medido hoy:
    **máximo 1,5e-7 €** en 840 meses (caso P9) y los cuatro índices coincidiendo **exactamente**.
 
+**La excepción gana HILOS, no frontera (5.0.0 E12).** Desde E12 el sorteo reparte sus caminos
+entre núcleos (`crates/engine-stochastic/src/parallel.rs`, dependencia nueva `rayon`). Es un
+cambio de VELOCIDAD, no de contrato, y las cuatro condiciones de arriba siguen exactamente donde
+estaban: no sale un euro más del crate, el freezer de `crates/engine` no se toca ni gana
+excepciones, no aparece un segundo bucle (rayon reparte llamadas al MISMO `simulate` genérico) y la
+puerta de degeneración compara lo mismo que antes. Lo que se añade es **una quinta condición
+propia del paralelismo, y es la que hay que verificar en una revisión**: el resultado es
+**idéntico bit a bit** con cualquier número de hilos, porque los caminos son independientes
+(`path_rng` depende solo de `(seed, path_index)`) y **el pliegue se hace siempre en orden de índice
+de camino** (`mc::for_each_path`; entre caminos solo hay conteos enteros y ordenaciones con
+`total_cmp`). Un cambio que introdujera una reducción `f64` en paralelo —un `par_iter().sum()`
+sobre los caminos, por ejemplo— rompería esto sin que ningún test de tolerancia se enterara: la
+puerta es `crates/engine-stochastic/tests/parallel_determinism.rs`, que compara TODAS las salidas
+con `f64::to_bits()` entre 1, 2, 4 y 8 hilos.
+
+Y una consecuencia operativa que vive en la API: el crate tiene **un solo pool compartido**,
+acotado a `available_parallelism()` en `[1, 8]`, así que el techo del semáforo
+`heavy::run_projection_sim` sigue significando algo (`permisos + pool`, no `permisos × núcleos`).
+La API **nunca** rellena `McConfig::threads`; si un handler empezara a hacerlo, cada petición
+abriría un pool efímero y ese techo desaparecería.
+
 Tests que hay que saber deletrear —hay **dos** con nombre parecido y greparlos mal da vacío—:
 `mc_zero_volatility_degenerates` (`degeneration.rs:295`, inyecta multiplicadores deterministas por
 el hook y exige igualdad **bit a bit**) y `mc_zero_volatility_degenerates_to_deterministic`
 (`monte_carlo.rs:225`, con el RNG en medio y σ=0). El de reproducibilidad es
 `mc_same_seed_bit_identical` (`monte_carlo.rs:142`), que además fija que el camino 7 es el camino 7
-tanto suelto como dentro de 64 o de 500.
+tanto suelto como dentro de 64 o de 500; el del paralelismo es
+`parallel_and_sequential_runs_are_bit_identical` (`parallel_determinism.rs`).
 
 ### D5. Reads never mutate
 Liabilities whose `payment_end_date < today` are **filtered** out of GET `/v1/liabilities`,
@@ -1363,6 +1385,18 @@ included) still said `?months=` was *clamped* to 12–840 — it has been a **re
   `grep -n 'fn require_row_owner' -A 8 apps/api/src/handlers/person_view.rs` (D23);
   `grep -n 'crossing_is_reading_only' crates/engine/src/phases.rs` (D24);
   `grep -n 'refresh_projection_after_mutation' apps/api/src/handlers/retirement_profile.rs` (D25).
+
+- **D4 ampliada 2026-09-07 con el paralelismo del sorteo (5.0.0 E12)**, leyendo
+  `crates/engine-stochastic/src/{parallel.rs,mc.rs,solve_mc.rs}`,
+  `crates/engine-stochastic/tests/parallel_determinism.rs` y `apps/api/src/heavy.rs`.
+  Re-verificación en una línea:
+  `grep -n 'pub fn pool_threads' -A 6 crates/engine-stochastic/src/parallel.rs` (un solo pool,
+  acotado a `[1, MAX_POOL_THREADS]`);
+  `grep -rn 'threads: None' apps/api/src/handlers/` (debe imprimir **tres** líneas: la API nunca
+  fija hilos);
+  `grep -n 'fn for_each_path' -A 4 crates/engine-stochastic/src/mc.rs` (el pliegue en orden de
+  índice es el único reparto de trabajo del crate);
+  `cargo test -p futurefin-engine-stochastic --test parallel_determinism` (la puerta bit a bit).
 
 Update this skill whenever: a decision above is overturned (record the new incident), a new
 cross-cutting mechanism appears (cache backend, auth scheme, second crate consumer of the

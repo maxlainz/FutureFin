@@ -98,6 +98,7 @@
 
 use rand_chacha::rand_core::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
+use rayon::prelude::*;
 
 use futurefin_engine::{
     monthly_growth_multiplier, simulate, EngineError, PathFailure, ProjectionInput,
@@ -150,6 +151,22 @@ pub struct McConfig {
     /// Percentiles a publicar, cada uno en `1..=99`. **Se respeta el orden dado** y se permite
     /// repetir: las bandas salen en las mismas posiciones que este vector.
     pub percentiles: Vec<u8>,
+    /// **Hilos con los que repartir los caminos** (E12). `None` = el pool compartido del crate
+    /// ([`crate::parallel::pool_threads`]); `Some(1)` = secuencial en el hilo llamante.
+    ///
+    /// **Es el ÚNICO campo de esta estructura que no cambia ni un bit del resultado**, y por eso
+    /// se escribe aquí en vez de en un parámetro suelto: viaja con la ejecución, se puede fijar en
+    /// un test, y su presencia en `PartialEq` dice la verdad —dos configuraciones que reparten el
+    /// trabajo distinto SON dos configuraciones distintas—, aunque produzcan el mismo
+    /// [`McOutcome`] bit a bit. Que lo produzcan es un contrato, no una casualidad: los caminos
+    /// son independientes (`path_rng` depende solo de `(seed, path_index)`) y el pliegue se hace
+    /// SIEMPRE en orden de índice de camino. Ver [`crate::parallel`] y
+    /// `tests/parallel_determinism.rs`.
+    ///
+    /// La API **no lo rellena**: en producción manda el pool compartido, que es lo que mantiene
+    /// acotado el total de CPU cuando hay varias simulaciones en vuelo bajo el semáforo de
+    /// `heavy.rs`.
+    pub threads: Option<usize>,
 }
 
 impl Default for McConfig {
@@ -158,6 +175,7 @@ impl Default for McConfig {
             seed: 0,
             paths: DEFAULT_PATHS,
             percentiles: DEFAULT_PERCENTILES.to_vec(),
+            threads: None,
         }
     }
 }
@@ -524,6 +542,167 @@ impl PathEngine {
         self.buf = self.sim.growth_overrides.take();
         out
     }
+
+    /// **Una copia independiente de esta maquinaria**, para que un hilo pueda correr caminos sin
+    /// compartir nada (E12).
+    ///
+    /// Lo que se copia es solo maquinaria: la entrada convertida, los `m_i`, las `d_i`, las `σ_i`,
+    /// la semilla y el punto de arranque del sorteo. **No hay estado que arrastrar entre caminos**
+    /// —el RNG se construye desde `(seed, path_index)` en cada `run`— así que un camino corrido
+    /// sobre una copia es, bit a bit, el mismo camino corrido sobre el original. Esa es toda la
+    /// justificación del paralelismo, y es la razón de que esta función no tenga que decidir nada.
+    ///
+    /// El buffer se crea **vacío y nuevo** en vez de clonarse: su contenido es basura del camino
+    /// anterior y `run` lo reescribe entero antes de mirarlo.
+    pub(crate) fn fork(&self) -> PathEngine {
+        let mut sim = self.sim.clone();
+        // Fuera del `run` esto ya es `None`; se fuerza para que la copia no herede jamás una fila
+        // de factores del camino del original.
+        sim.growth_overrides = None;
+        let months = sim.horizon_months as usize;
+        let assets = sim.assets.len();
+        PathEngine {
+            sim,
+            base: self.base.clone(),
+            drift: self.drift.clone(),
+            sigmas: self.sigmas.clone(),
+            seed: self.seed,
+            stochastic_from_month: self.stochastic_from_month,
+            buf: Some(vec![vec![F64Money(0.0); assets]; months]),
+        }
+    }
+}
+
+/// **Cuántos caminos toca cada hilo dentro de un bloque** (E12).
+///
+/// El reparto es por BLOQUES —`threads · PATHS_PER_THREAD_BLOCK` caminos cada uno— y no de una
+/// sola tacada por dos razones, ninguna de las cuales es el determinismo (ese lo da el índice, no
+/// el tamaño del bloque):
+///
+/// - **Memoria.** Con bandas, el resultado por camino son dos vectores de `horizonte+1` `f64`
+///   (~13,5 KB con 840 meses). Recoger los 5 000 caminos de golpe antes de transponerlos
+///   duplicaría el pico de las muestras (67 MB → 134 MB) dentro de un contenedor que lleva el
+///   PostgreSQL dentro. Por bloques, el excedente es `threads · 16 · 13,5 KB` ≈ 1,7 MB.
+/// - **Coste del `fork`.** Cada hilo copia la maquinaria una vez por bloque: una copia (clonar la
+///   entrada convertida y reservar el buffer de factores, decenas de µs) por cada 16 caminos
+///   (varios ms). Queda por debajo del 1 %; bajar el número a 1 lo multiplicaría por dieciséis sin
+///   ganar reparto, porque los caminos cuestan todos lo mismo — el bucle del motor recorre el
+///   horizonte entero, sin salidas anticipadas.
+///
+/// Y una tercera razón para NO hacerlo de una tacada, que se ve en las medidas: en una máquina
+/// heterogénea (núcleos de rendimiento + de eficiencia, o una VM con vecinos ruidosos) el reparto
+/// estático de todo el sorteo hace que el trozo que cayó en el núcleo lento marque el tiempo
+/// total. Los bloques reequilibran cada `threads · 16` caminos.
+const PATHS_PER_THREAD_BLOCK: usize = 16;
+
+/// **Recorre `0..paths` y entrega los resultados EN ORDEN DE ÍNDICE DE CAMINO** (E12).
+///
+/// Es el único sitio del crate donde se decide cómo se reparte el trabajo, y el contrato es de una
+/// línea: `extract` puede ejecutarse en cualquier hilo y en cualquier orden; `sink` se llama
+/// **siempre** con `p = 0, 1, 2, …` desde el hilo llamante. Toda reducción que un llamante haga en
+/// `sink` —sumar `f64`, contar, empujar a un vector— hereda por tanto el orden secuencial de
+/// siempre, que es lo que hace que el resultado sea bit a bit el mismo con uno o con ocho hilos.
+///
+/// Con `threads <= 1` no se toca rayon: se recorre en el hilo llamante sobre una única copia de la
+/// maquinaria. Es el modo con el que la batería de determinismo compara.
+///
+/// Un camino que falla **aborta la ejecución entera** (`?` en el llamante), igual que antes:
+/// descartarlo sesgaría la probabilidad de éxito hacia arriba justo en los escenarios extremos. Y
+/// **el error que sale es el del camino de índice más bajo que falló**, con uno o con ocho hilos —
+/// ver el comentario del `collect` de abajo: colapsar el `Result` en paralelo devolvería el error
+/// del hilo que llegara antes, y dos ejecuciones «iguales» podrían fallar con motivos distintos.
+pub(crate) fn for_each_path<T, F, S>(
+    engine: &PathEngine,
+    paths: u32,
+    threads: usize,
+    extract: F,
+    mut sink: S,
+) -> Result<(), EngineError>
+where
+    F: Fn(u32, &SimOutput<F64Money>) -> T + Sync + Send,
+    S: FnMut(u32, T) + Send,
+    T: Send,
+{
+    if threads <= 1 {
+        let mut engine = engine.fork();
+        for p in 0..paths {
+            let out = engine.run(p)?;
+            sink(p, extract(p, &out));
+        }
+        return Ok(());
+    }
+
+    // **Una sola entrada al pool para TODA la ejecución**, no una por bloque. Entrar y salir
+    // despierta y vuelve a dormir a los workers, y rayon los deja girando un rato antes de
+    // dormirse: con un sorteo de 500 caminos son cuatro ciclos de eso, y en una máquina saturada
+    // —la suite de integración, o un contenedor con el PostgreSQL dentro— ese giro le quita CPU al
+    // reactor sin adelantar nada. Con el bucle DENTRO, los workers se despiertan una vez y
+    // trabajan hasta el final.
+    //
+    // El precio es que el pliegue (`sink`) corre en un hilo del pool en vez de en el llamante. No
+    // cambia nada de lo que importa: **sigue siendo UN solo hilo y sigue yendo en orden de
+    // índice**, que es lo que hace el resultado reproducible; por eso `S: Send`.
+    crate::parallel::install(threads, move || {
+        for_each_path_blocks(engine, paths, threads, &extract, &mut sink)
+    })
+}
+
+/// El bucle de bloques de [`for_each_path`], ya **dentro** del pool. Separado solo para que la
+/// entrada al pool sea una sola línea y no un bloque de treinta.
+fn for_each_path_blocks<T, F, S>(
+    engine: &PathEngine,
+    paths: u32,
+    threads: usize,
+    extract: &F,
+    sink: &mut S,
+) -> Result<(), EngineError>
+where
+    F: Fn(u32, &SimOutput<F64Money>) -> T + Sync,
+    S: FnMut(u32, T),
+    T: Send,
+{
+    let block = (threads * PATHS_PER_THREAD_BLOCK) as u32;
+    let mut start = 0u32;
+    while start < paths {
+        let end = start.saturating_add(block).min(paths);
+        let indices: Vec<u32> = (start..end).collect();
+        let per_chunk = indices.len().div_ceil(threads).max(1);
+        // **El `Result` se recoge por trozo, no se colapsa en paralelo**, y esa distinción es parte
+        // del determinismo: `collect::<Result<_, _>>()` sobre un iterador de rayon devuelve UNO de
+        // los errores, y cuál depende de qué hilo llegó antes. Recogiendo `Vec<Result<…>>` —que
+        // conserva el orden— y desenvolviendo abajo en orden de índice, el error que sale es
+        // siempre el del camino de índice MÁS BAJO que falló, igual que en el bucle secuencial. Un
+        // `EngineError` distinto según el número de hilos sería la misma clase de fallo silencioso
+        // que este módulo existe para no tener.
+        let per_chunk: Vec<Result<Vec<T>, EngineError>> = indices
+            .par_chunks(per_chunk)
+            .map(|chunk| {
+                // Una copia de la maquinaria por hilo y por bloque. Nada se comparte.
+                let mut local = engine.fork();
+                // Dentro del trozo sí se cortocircuita: los índices de un trozo son
+                // contiguos y ascendentes, así que el primero que falla ES el más bajo.
+                chunk
+                    .iter()
+                    .map(|&p| local.run(p).map(|out| extract(p, &out)))
+                    .collect::<Result<Vec<T>, EngineError>>()
+            })
+            .collect();
+        let mut results: Vec<Vec<T>> = Vec::with_capacity(per_chunk.len());
+        for chunk in per_chunk {
+            results.push(chunk?);
+        }
+        // **Aquí es donde el paralelismo deja de existir.** `par_chunks` conserva el orden de los
+        // trozos y cada trozo conserva el suyo, así que aplanar reconstruye exactamente
+        // `start..end`.
+        let mut p = start;
+        for t in results.into_iter().flatten() {
+            sink(p, t);
+            p += 1;
+        }
+        debug_assert_eq!(p, end, "el pliegue debe cubrir el bloque entero, en orden");
+        start = end;
+    }
+    Ok(())
 }
 
 /// **Un solo camino de Monte Carlo**, con toda su salida del motor.
@@ -706,10 +885,12 @@ fn sort_total(values: &mut [f64]) {
 /// # Coste
 ///
 /// Tiempo: `paths` simulaciones completas del motor en `f64` más `O(paths·log paths)` por mes de
-/// ordenación. Memoria: `2 · paths · (horizonte+1) · 8` bytes para las muestras (67 MB en el
-/// extremo de 5 000 caminos × 840 meses), más el buffer de factores
-/// (`meses · activos · 8` bytes) y las series de una simulación viva. Los números medidos están
-/// en `tests/timing_mc.rs`.
+/// ordenación. Las simulaciones se reparten entre núcleos (E12, ver [`for_each_path`]); la
+/// ordenación y el resto del pliegue son secuenciales por contrato. Memoria:
+/// `2 · paths · (horizonte+1) · 8` bytes para las muestras (67 MB en el extremo de 5 000 caminos ×
+/// 840 meses), más `hilos · 16 · 2 · (horizonte+1) · 8` bytes de resúmenes en vuelo (~1,7 MB), un
+/// buffer de factores por hilo (`meses · activos · 8` bytes) y las series de las simulaciones
+/// vivas. Los números medidos están en `tests/timing_mc.rs`.
 ///
 /// # Determinismo
 ///
@@ -717,12 +898,20 @@ fn sort_total(values: &mut [f64]) {
 /// bit iguales**: el sorteo depende solo de `(seed, path_index)`, el orden de los caminos es el
 /// del bucle y el percentil es un índice entero sobre una muestra ordenada con un orden total.
 /// Lo pinea `mc_same_seed_bit_identical`.
+///
+/// **Y son iguales también con cualquier número de hilos** (E12). Los caminos se reparten entre
+/// núcleos, pero cada uno produce su resumen por su cuenta —ninguna suma cruza caminos dentro de
+/// un camino— y el pliegue (bandas, conteos, medianas, Wilson, tabla acumulada) se hace en ORDEN
+/// DE ÍNDICE, secuencialmente, sobre lo que devuelve [`for_each_path`]. `McConfig::threads =
+/// Some(1)` recorre los caminos en el hilo llamante y es el modo de comparar. Lo pinean
+/// `parallel_and_sequential_runs_are_bit_identical` y
+/// `results_do_not_depend_on_the_thread_count`.
 pub fn project_percentile_bands(
     input: &ProjectionInput,
     volatilities: &[Option<f64>],
     config: &McConfig,
 ) -> Result<McOutcome, McError> {
-    let mut engine = PathEngine::new(input, volatilities, config)?;
+    let engine = PathEngine::new(input, volatilities, config)?;
     let any_volatility_declared = engine.any_volatility();
 
     let n = config.paths as usize;
@@ -742,21 +931,30 @@ pub fn project_percentile_bands(
     let mut months_below: Vec<f64> = Vec::with_capacity(n);
     let mut coverage_ratios: Vec<f64> = Vec::with_capacity(n);
 
-    for p in 0..n {
-        let out = engine.run(p as u32)?;
+    // **Lo que un camino aporta al resultado**, recogido dentro del propio camino (E12). Todo lo
+    // que aquí se calcula es INTRA-camino: dos vectores de muestras, cuatro escalares y dos sumas
+    // sobre los meses de ESE camino. Ninguna suma cruza caminos, así que repartirlos entre hilos
+    // no puede mover un bit; lo que sí cruza caminos —las bandas, los conteos, las medianas— se
+    // pliega más abajo, en orden de índice y en un solo hilo.
+    struct PathDigest {
+        net_worth: Vec<f64>,
+        liquid_worth: Vec<f64>,
+        retired_at: Option<u32>,
+        failure_month: Option<u32>,
+        failure_kind: Option<PathFailure>,
+        months_below: u32,
+        /// `Σ w_net` y `Σ need_net` de los meses jubilados; `None` si el camino no aporta
+        /// cobertura (sin jubilación, o con denominador no positivo).
+        coverage: Option<f64>,
+    }
+
+    let digest = |_p: u32, out: &SimOutput<F64Money>| -> PathDigest {
         debug_assert_eq!(out.net_worth.len(), len);
-        for k in 0..len {
-            nw_samples[k][p] = out.net_worth[k].0;
-            lq_samples[k][p] = out.liquid_worth[k].0;
-        }
-        retired_at.push(out.retirement_month_index);
         debug_assert_eq!(
             out.failure_month_index.is_some(),
             out.failure_kind.is_some(),
             "un camino fallido sin motivo (o un motivo sin fallo) rompería `failures_by_kind`"
         );
-        failure_month.push(out.failure_month_index);
-        failure_kind.push(out.failure_kind);
 
         // Las dos magnitudes del RECORTE (D24), sobre los meses JUBILADOS de este camino. Fuera
         // de la jubilación el motor no aplica techo alguno, así que el recorte solo puede vivir
@@ -789,11 +987,39 @@ pub fn project_percentile_bands(
                 sum_need += need_net;
             }
         }
-        months_below.push(f64::from(below));
-        if sum_need > 0.0 {
-            coverage_ratios.push(sum_w / sum_need);
+        PathDigest {
+            net_worth: out.net_worth.iter().map(|m| m.0).collect(),
+            liquid_worth: out.liquid_worth.iter().map(|m| m.0).collect(),
+            retired_at: out.retirement_month_index,
+            failure_month: out.failure_month_index,
+            failure_kind: out.failure_kind,
+            months_below: below,
+            coverage: (sum_need > 0.0).then(|| sum_w / sum_need),
         }
-    }
+    };
+
+    // El pliegue, en ORDEN DE ÍNDICE DE CAMINO y en un solo hilo — con uno o con ocho hilos
+    // sorteando, esta parte se ejecuta exactamente igual. Ver `for_each_path`.
+    for_each_path(
+        &engine,
+        config.paths,
+        crate::parallel::resolve_threads(config),
+        digest,
+        |p, d| {
+            let p = p as usize;
+            for k in 0..len {
+                nw_samples[k][p] = d.net_worth[k];
+                lq_samples[k][p] = d.liquid_worth[k];
+            }
+            retired_at.push(d.retired_at);
+            failure_month.push(d.failure_month);
+            failure_kind.push(d.failure_kind);
+            months_below.push(f64::from(d.months_below));
+            if let Some(c) = d.coverage {
+                coverage_ratios.push(c);
+            }
+        },
+    )?;
 
     // ------------------------------------------------------------------------------------------
     // Bandas

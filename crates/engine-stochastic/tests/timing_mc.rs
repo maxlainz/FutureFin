@@ -503,3 +503,118 @@ fn the_three_strategy_solves_cost_what_the_plan_says() {
     );
     black_box(&partial);
 }
+
+/// (f) **El reparto entre núcleos** (E12): la MISMA batería con 1 hilo y con N, para poder poner
+/// el «antes» y el «después» uno al lado del otro.
+///
+/// Las cuatro medidas son las cuatro cosas que un usuario espera de la pantalla de Jubilación: el
+/// sorteo de 2.500 caminos que dibuja las bandas, la FECHA válida, el capital necesario de HOY y
+/// la CURVA de 14 nodos. Se miden con `McConfig::threads` fijado —`Some(1)` es literalmente el
+/// código de antes de E12, sin rayon de por medio— así que la comparación no depende de reconstruir
+/// nada ni de acordarse de qué revisión medía qué.
+///
+/// **Lo que este test NO mide es la corrección**: que los cuatro resultados sean bit a bit los
+/// mismos con uno y con ocho hilos lo prueba `tests/parallel_determinism.rs`, que sí afirma. Aquí
+/// solo se imprime, y se imprime también el resultado de cada medida para que un vistazo baste
+/// para ver que las dos columnas dicen lo mismo.
+#[test]
+#[ignore = "mide, no afirma: correr con --release --ignored --nocapture"]
+fn the_parallel_draw_costs_less_than_the_sequential_one() {
+    use futurefin_engine::InitialRateGate;
+    use futurefin_engine_stochastic::{
+        needed_capital_curve, needed_capital_today, parallel, valid_retirement_month,
+    };
+    use rust_decimal::Decimal;
+
+    let seed = 20_260_907u64;
+
+    // El hogar con fecha: P9 con la inflación apagada y la cuenta corriente a cero, el mismo que
+    // (d) usa para medir la forma CARA del solve. Sobre P9 tal cual no hay fecha y los solves
+    // toman su camino más barato, que no es lo que interesa cronometrar.
+    let mut flat = p9_household(Decimal::ZERO);
+    flat.annual_inflation_percent = Decimal::ZERO;
+    if let Some(t) = flat.fire_target.as_mut() {
+        t.annual_inflation_percent = Decimal::ZERO;
+    }
+    flat.phase_plan.initial_rate = Some(InitialRateGate {
+        swr_pct: Decimal::new(35, 1),
+        bridge: None,
+    });
+    let tamer: Vec<Option<f64>> = vec![None, Some(5.0), Some(16.0), Some(8.0), Some(20.0)];
+    let grid: Vec<u32> = (1..=13).map(|i| 1 + 60 * (i - 1)).chain([840]).collect();
+
+    let pool = parallel::pool_threads();
+    println!(
+        "[mc-timing/{}] E12 · núcleos vistos = {:?} · pool compartido = {pool} hilos \
+         (techo {})",
+        profile(),
+        std::thread::available_parallelism().map(|n| n.get()),
+        parallel::MAX_POOL_THREADS,
+    );
+
+    // 1 hilo primero (la referencia), luego el resto en orden creciente hasta el pool.
+    let mut lanes: Vec<usize> = vec![1, 2, 4, 8]
+        .into_iter()
+        .filter(|t| *t <= pool)
+        .collect();
+    if !lanes.contains(&pool) {
+        lanes.push(pool);
+    }
+
+    let mut baseline: Option<[f64; 4]> = None;
+    for threads in lanes {
+        let cfg = |paths: u32| McConfig {
+            seed,
+            paths,
+            percentiles: futurefin_engine_stochastic::DEFAULT_PERCENTILES.to_vec(),
+            threads: Some(threads),
+        };
+        let search = cfg(500);
+        let confirm = cfg(2_500);
+
+        let t0 = Instant::now();
+        let bands = project_percentile_bands(&flat, &tamer, &confirm).expect("no falla");
+        let t_bands = t0.elapsed().as_secs_f64();
+
+        let t0 = Instant::now();
+        let date = valid_retirement_month(&flat, &tamer, &search, &confirm, 95, 1).expect("no falla");
+        let t_date = t0.elapsed().as_secs_f64();
+
+        let t0 = Instant::now();
+        let today = needed_capital_today(&flat, &tamer, &search, &confirm, 95).expect("no falla");
+        let t_today = t0.elapsed().as_secs_f64();
+
+        let t0 = Instant::now();
+        let curve = needed_capital_curve(&flat, &tamer, &search, 95, &grid).expect("no falla");
+        let t_curve = t0.elapsed().as_secs_f64();
+
+        let now = [t_bands, t_date, t_today, t_curve];
+        let base = *baseline.get_or_insert(now);
+        println!(
+            "[mc-timing/{}] E12 · {threads} hilo(s) · bandas 2.500 = {:>7.2} s (×{:.2}) · \
+             fecha = {:>7.2} s (×{:.2}) · capital hoy = {:>7.2} s (×{:.2}) · \
+             curva {} nodos = {:>7.2} s (×{:.2})",
+            profile(),
+            t_bands,
+            base[0] / t_bands,
+            t_date,
+            base[1] / t_date,
+            t_today,
+            base[2] / t_today,
+            grid.len(),
+            t_curve,
+            base[3] / t_curve,
+        );
+        println!(
+            "[mc-timing/{}] E12 · {threads} hilo(s) · resultados: éxito {:.6} · mes {:?} \
+             (éxito {:.6}) · capital hoy {:?} € · curva[0] {:?} €",
+            profile(),
+            bands.success_probability,
+            date.month,
+            date.success,
+            today.amount_today,
+            curve.first().and_then(|n| n.amount_today),
+        );
+        black_box((bands, date, today, curve));
+    }
+}

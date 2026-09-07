@@ -234,6 +234,42 @@ recorte se mide en `months_below_need_p50` / `withdrawal_to_need_ratio_p50`, no 
 mecanismo aparte que la rellene. No queda ni un tipo, ni un campo, ni un test suyo en
 `crates/engine` ni en `crates/engine-stochastic`.
 
+#### Paralelismo entre caminos (5.0.0 E12) — bit a bit el mismo resultado
+
+Los caminos se reparten entre núcleos (`crates/engine-stochastic/src/parallel.rs`), y la promesa
+que acompaña al cambio es **identidad bit a bit**, no «dentro de tolerancia»: el mismo
+`McOutcome`, la misma fecha válida, el mismo capital necesario, la misma curva y la misma tira de
+éxito con 1, 2, 4 u 8 hilos. Se sostiene sobre dos hechos y ninguno es casual:
+
+1. **Los caminos son independientes.** El RNG de un camino se deriva de `(seed, path_index)` y de
+   nada más (`path_rng`), y el motor es puro. El camino 7 es el camino 7 lo ejecute quien lo
+   ejecute — la propiedad que el doc de `path_rng` ya anunciaba («la ejecución es paralelizable el
+   día que haga falta sin cambiar ni un dígito»).
+2. **El pliegue va en ORDEN DE ÍNDICE.** `mc::for_each_path` es el único sitio que reparte trabajo:
+   `extract` corre en cualquier hilo, `sink` se llama siempre con `p = 0, 1, 2, …` desde el hilo
+   llamante. Las únicas sumas de `f64` (cobertura y recorte) son INTRA-camino; entre caminos solo
+   hay conteos ENTEROS, `sort_unstable_by(total_cmp)` y percentiles por índice entero — ninguno
+   depende de quién termine antes. El reparto es por bloques de `hilos × 16` caminos, para que el
+   excedente de memoria sea `~1,7 MB` en vez de duplicar los 67 MB de las muestras. **También el
+   ERROR es determinista**: si un camino falla, el `EngineError` que se propaga es el del índice más
+   bajo que falló — colapsar el `Result` con el `collect` de rayon habría devuelto el del hilo que
+   llegara antes.
+
+**Un solo pool, compartido y acotado** a `available_parallelism()` en `[1, 8]`
+(`parallel::pool_threads`), creado una vez en un `OnceLock`. Es lo que hace que el techo del
+semáforo `heavy::run_projection_sim` de la API siga significando algo: `M` simulaciones
+concurrentes reparten los MISMOS hilos, así que el techo total pasa a ser `permisos + pool` y no
+`permisos × núcleos` (el razonamiento entero, en el doc de `projection_permits`).
+**La API nunca fija `McConfig::threads`**: los tres sitios que construyen un `McConfig` pasan
+`None`.
+
+`McConfig::threads: Option<usize>` es el interruptor —`Some(1)` recorre los caminos en el hilo
+llamante y no toca rayon— y es el **único campo de `McConfig` que no cambia ni un bit del
+resultado**. Puertas: `crates/engine-stochastic/tests/parallel_determinism.rs`
+(`parallel_and_sequential_runs_are_bit_identical`, `results_do_not_depend_on_the_thread_count`,
+comparando con `f64::to_bits()` sobre P9/P13/P18/P15/P17). Medición:
+`tests/timing_mc.rs::the_parallel_draw_costs_less_than_the_sequential_one` (`--release --ignored`).
+
 ### Los solves estocásticos (5.0.0 E6 — `crates/engine-stochastic/src/solve_mc.rs`)
 
 Donde `mc` pregunta «¿cómo de ancha es la banda?», `solve_mc` pregunta **«¿cuándo me puedo
@@ -1710,3 +1746,4 @@ Worked example (engine-verified, `worked_example_matches_the_documented_figures`
 - The gross-up of net-annual FIRE through tax brackets uses a **closed-form per-bracket solver** (no binary search). `gross = (net − r·prev_ceiling + K) / (1 − r)`, advancing one bracket at a time until the candidate fits. Old code used 90 iterations of binary search on `Decimal`. Desde la Ola 6 (#140) vive en el ENGINE (`crates/engine/src/tax.rs`, `pub`, con el eje `taxable_gain_ratio` — la validez por tramo es `g·G ≤ techo`) y tiene **cuatro consumidores**: el target FIRE (evaluado POR MES desde #170), el drenaje bruto del bucle, y los dos umbrales SWR del runway (summary + simulate) — cuyo bucle finito también vende bruto desde esta ola. Cualquier cambio en los tramos o en el solver mueve TODOS a la vez — es intencional: una sola definición fiscal.
 - `build_installation_projection_input` returns a `BuiltProjection` struct that carries `input`, `monthly_net_regular`, `asset_id_name` (Vec<(Uuid, String)>) and `planning_rows`. The handler reuses those instead of issuing a second `SELECT id, name FROM assets` and a second `SELECT planning_flows` (deleted with Fase 2.3). Desde v2.2.0 también expone `effective_savings_source` + (desde 3.9.0) `savings_income_basis` / `savings_expense_basis` — que **sustituyen** al escalar `savings_source_months_with_data`: con ventanas configurables por lado no existe *un* número de meses — (fuente **tras** el fallback, serializadas en `ProjectionSeriesResponse`) y `debt_service_monthly` (cuotas de pasivos activos; **no** es input del engine, que amortiza los pasivos aparte), que consume `assets_projection_context` para los caps `months_expense`.
 - Initial queries in `get_projection_series` (installation row, user birth_date, household birth_date) run concurrently via `tokio::try_join!`.
+- **El camino ESTOCÁSTICO reparte sus caminos entre núcleos desde 5.0.0/E12** (`crates/engine-stochastic/src/parallel.rs`, `rayon`): el pool es **uno solo, compartido y acotado** a `available_parallelism()` en `[1, 8]`, así que `N` simulaciones concurrentes bajo el semáforo de `heavy::run_projection_sim` reparten los mismos hilos en vez de abrir `N` pools (techo total `permisos + pool`, no `permisos × núcleos`). El camino `Decimal` (`project_net_worth_series`) **sigue siendo de un solo hilo**: no hay `rayon` en `crates/engine`. Medido (Mac de 10 núcleos, pool de 8, `--release`): bandas de 2.500 caminos 0,51 → 0,21 s (×2,5), fecha válida 2,67 → 0,96 s (×2,8), capital de hoy 2,40 → 0,75 s (×3,2), curva de 14 nodos 11,24 → 4,09 s (×2,8) — con el resultado **idéntico bit a bit**. Bajo una máquina ya saturada (la suite de integración, 15 tests en paralelo) la ganancia se estrecha a ~15 % de reloj: el paralelismo intra-sorteo solo tiene núcleos que ganar cuando sobran.
