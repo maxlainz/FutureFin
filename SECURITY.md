@@ -127,13 +127,31 @@ exportación) y el contenido, ya comprimido, se cifra con **AES-256-GCM** con un
 12 bytes. El manifiesto va autenticado como AAD, así que manipular el fichero se detecta al
 descifrar.
 
-**La contraseña es la de tu cuenta.** El servidor la verifica contra tu hash y deriva de ella la
-clave. Consecuencia práctica: un `.ffbackup` queda atado a la contraseña que tenías **cuando lo
-generaste**. Si la cambias después, los ficheros antiguos siguen necesitando la anterior — no se
-recifran solos. Guárdala si guardas backups viejos. Desde la 4.0.0 esto **importa de verdad**,
-porque ya se puede cambiar la contraseña: si la rotas por sospecha de compromiso, tu copia antigua
-se sigue abriendo con la contraseña filtrada. Si eso te preocupa, exporta una copia nueva después
-del cambio y destruye la vieja.
+**Qué contraseña cifra el archivo depende de si tu cuenta tiene una.** Desde la 5.0.0 son dos
+caminos, y solo el primero existía antes:
+
+- **Cuenta con contraseña** (registro clásico): la contraseña que envías al exportar es la de la
+  cuenta. El servidor la verifica contra tu hash y además deriva de ella la clave. Consecuencia
+  práctica: ese `.ffbackup` queda atado a la contraseña que tenías **cuando lo generaste**. Si la
+  cambias después, los ficheros antiguos siguen necesitando la anterior — no se recifran solos.
+  Guárdala si guardas backups viejos. Esto **importa de verdad** desde la 4.0.0, que trajo el
+  cambio de contraseña: si la rotas por sospecha de compromiso, tu copia antigua se sigue abriendo
+  con la contraseña filtrada. Si eso te preocupa, exporta una copia nueva después del cambio y
+  destruye la vieja.
+- **Cuenta sin contraseña** (identidad delegada: el add-on de Home Assistant crea la cuenta con
+  `password_hash` a `NULL`): al exportar **creas una contraseña propia de ese archivo**. No se
+  verifica contra nada —quien pide ya está autenticado por la sesión— y no se guarda en ninguna
+  parte: solo alimenta el KDF. La única regla es que no vaya vacía (422 `backup_password_empty`).
+  **Estos backups no están atados a ninguna contraseña de cuenta**, así que nada de lo que le pase
+  a las credenciales de la cuenta los afecta — ni para bien ni para mal: si la pierdes, el archivo
+  es irrecuperable igual.
+
+Hasta la 5.0.0 una cuenta sin contraseña no podía exportar (`401 sso_account_no_password`). Eso no
+protegía nada: dejaba al usuario del add-on sin copia de sus datos, y la única salida habría sido
+darle una contraseña de cuenta que el modelo de identidad delegada prohíbe a propósito.
+
+El **import no ha cambiado**: nunca verificó la contraseña contra la cuenta, así que los ficheros
+generados antes se siguen restaurando con la contraseña de cuenta de entonces.
 
 **Al importar, un `.ffbackup` es un fichero que trae quien sea.** El manifiesto viaja en claro y
 fuera de la parte autenticada, así que sus parámetros de derivación de clave los elige quien
@@ -284,10 +302,10 @@ respuesta del propio atacante (assets que no cargan). Lo que sí lo exige es rel
 anti-clickjacking y aceptar identidad, que es lo descrito arriba.
 
 **Cuentas sin contraseña, y un trade-off asumido.** Un usuario creado por esta vía tiene el hash de
-contraseña a `NULL`: no puede entrar por el formulario de acceso, no puede fijarse una contraseña
-en esta versión, y **no puede exportar su `.ffbackup`** (la clave del archivo se deriva de la
-contraseña; sin ella no hay nada de donde derivarla). Los tres casos responden un
-`401 sso_account_no_password` **hablado**. Eso revela que ese nombre existe como cuenta SSO, y es
+contraseña a `NULL`: no puede entrar por el formulario de acceso y no puede fijarse una contraseña
+en esta versión. Los dos casos responden un `401 sso_account_no_password` **hablado**. (Sí **puede**
+exportar su `.ffbackup` desde la 5.0.0: ese archivo lleva su propia contraseña, ver §Copias de
+seguridad `.ffbackup`.) Eso revela que ese nombre existe como cuenta SSO, y es
 un intercambio buscado: sin el mensaje, la persona se quedaría tecleando para siempre una
 contraseña que nunca se fijó. Es la misma postura que el `username_taken` del registro, que ya
 distingue "ese nombre está cogido" de cualquier otro error.

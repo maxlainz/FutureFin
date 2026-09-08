@@ -101,12 +101,13 @@ Consecuencias prácticas, en orden de sorpresa:
   de usuario y contraseña. Desde la 4.3.1 tienen otra puerta: con la opción `ha_sso_url` rellenada
   aparece el botón **«Entrar con Home Assistant»**, que es independiente de `sso` y funciona igual
   fuera del panel (ver «Entrar con Home Assistant desde fuera del panel»).
-- **Una cuenta SSO no puede exportar su `.ffbackup`.** La exportación cifra con una clave derivada
-  de la contraseña de la cuenta ([backups.md](backups.md) §Capa 1); sin contraseña no hay clave, y
-  el servidor responde el mismo `sso_account_no_password` en vez de generar un fichero que nadie
-  podría descifrar. La vía para llevarte datos fuera es **exportar desde una cuenta que sí tenga
-  contraseña** (por ejemplo, una creada por el login clásico), o usar la copia de seguridad de Home
-  Assistant, que se lo lleva todo.
+- **Una cuenta SSO sí puede exportar su `.ffbackup`** (desde la 5.0.0). Como no hay contraseña de
+  cuenta de la que derivar la clave, el modal de exportar te pide **crear una contraseña para ese
+  archivo** (con confirmación): solo protege ese fichero, no es una credencial de acceso y no se
+  guarda en ningún sitio. Apúntala — sin ella el backup es irrecuperable. Ver
+  [backups.md](backups.md) §Capa 1. Hasta la 4.15.x el servidor respondía `sso_account_no_password`
+  y la única salida era exportar desde otra cuenta o tirar de la copia de seguridad de Home
+  Assistant.
 
 ---
 

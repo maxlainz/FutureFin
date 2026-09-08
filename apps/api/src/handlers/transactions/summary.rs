@@ -360,7 +360,7 @@ pub(crate) async fn transactions_avg(
     path = "/v1/transactions/summary",
     tag = "transactions",
     params(
-        ("view" = Option<String>, Query, description = "`mine` | household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
         ("year" = Option<i32>, Query, description = "Año del mes seleccionado (default: último mes completo)."),
         ("month" = Option<u32>, Query, description = "Mes 1..12 (default: último mes completo)."),
         ("avg_window" = Option<String>, Query, description = "Ventana del promedio: `3`|`6`|`12`|`ytd`|`all`."),
@@ -909,7 +909,7 @@ pub struct CategorySeriesQuery {
     path = "/v1/transactions/category-series",
     tag = "transactions",
     params(
-        ("view" = Option<String>, Query, description = "`mine` | household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
         ("kind" = String, Query, description = "`expense` | `income`."),
         ("category_id" = Option<Uuid>, Query, description = "Limita a una categoría."),
         ("window_months" = Option<u32>, Query, description = "Ventana en meses (default 12, rango 1..=60; fuera de rango → 400 `window_months_out_of_range`)."),

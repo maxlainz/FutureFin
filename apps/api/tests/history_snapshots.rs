@@ -156,8 +156,17 @@ async fn capture_same_day_upserts_and_replaces_items() {
     assert_eq!(app.count_rows("history_snapshot_items").await, 2);
 }
 
+/// **Renombrado en 5.0.0.** La mitad de «excluye las filas compartidas» ya no se puede escribir:
+/// la migración `20260902200100_ledger_owner_not_null.sql` (D14) asignó al owner las filas sin
+/// dueño y dejó `assets.owner_user_id` en `NOT NULL`, así que el `INSERT … owner_user_id = NULL`
+/// que este test hacía por SQL crudo lo rechaza ahora la BASE — que es exactamente la garantía
+/// que la migración vino a dar, y más fuerte que la que este test daba.
+///
+/// Lo que SÍ sigue vivo, y por eso el test se queda: la captura fotografía el pasivo vencido que
+/// conserva saldo. Sin eso, el histórico registraría un patrimonio mejor que el que el Resumen
+/// enseña ese mismo día.
 #[tokio::test]
-async fn capture_excludes_shared_rows_but_keeps_expired_with_balance() {
+async fn capture_keeps_the_expired_liability_that_still_has_balance() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let asset_cat = app.create_category(&owner, "asset", "Cash").await;
@@ -172,16 +181,21 @@ async fn capture_excludes_shared_rows_but_keeps_expired_with_balance() {
         &owner.cookie,
     )
     .await;
-    // Asset compartido (owner_user_id NULL) — no hay ruta API que lo cree, se siembra por SQL.
-    sqlx::query(
+    // El activo «compartido» (`owner_user_id NULL`) que este test sembraba por SQL ya no es un
+    // estado alcanzable: la columna es NOT NULL desde 5.0.0. Se comprueba que la BASE lo rechaza
+    // — el mismo hecho que antes se comprobaba en la salida de la captura, ahora en su origen.
+    let shared = sqlx::query(
         "INSERT INTO assets (installation_id, category_id, name, current_value, owner_user_id)
          VALUES ($1, $2, 'Compartido', 99999, NULL)",
     )
     .bind(iid)
     .bind(Uuid::parse_str(&asset_cat).unwrap())
     .execute(&app.pool)
-    .await
-    .expect("seed shared asset");
+    .await;
+    assert!(
+        shared.is_err(),
+        "una fila del ledger sin dueño ya no se puede escribir ni por SQL (D14)"
+    );
 
     let today = Utc::now().date_naive();
     let past = (today - Duration::days(30)).format("%Y-%m-%d").to_string();
@@ -215,7 +229,7 @@ async fn capture_excludes_shared_rows_but_keeps_expired_with_balance() {
 
     let asset_snap = find_kind(&body["snapshots"], "asset");
     let a_items = asset_snap["items"].as_array().unwrap();
-    assert_eq!(a_items.len(), 1, "asset compartido debe excluirse");
+    assert_eq!(a_items.len(), 1, "solo el activo del capturador");
     assert_eq!(a_items[0]["label"], "Mío");
 
     let liab_snap = find_kind(&body["snapshots"], "liability");
@@ -596,20 +610,21 @@ async fn snapshot_mutations_do_not_touch_projection_cache() {
     )
     .await;
 
-    // Calentar la cache household (monthly) con un GET.
+    // Calentar la cache de la vista POR DEFECTO (monthly) con un GET. Desde 5.0.0 esa vista es
+    // `mine` (R2), que es además la que la SPA pide: es la entrada cuya supervivencia importa.
     let warm = app.get_with_cookie("/v1/projection/series", &owner.cookie).await;
     assert_eq!(warm.status, http::StatusCode::OK);
 
     let iid = installation_id(&app).await;
     let key = ProjectionCacheKey {
         installation_id: iid,
-        view: LedgerView::Household,
+        view: LedgerView::Mine,
         owner_user_id: Some(owner.user_id),
         density: Density::Monthly,
     };
     {
         let cache = app.state.projection_cache.read().await;
-        assert!(cache.contains_key(&key), "la entrada household debe estar caliente antes de las mutaciones");
+        assert!(cache.contains_key(&key), "la entrada por defecto debe estar caliente antes de las mutaciones");
     }
 
     // Mutaciones de snapshots: capture + backfill + delete.

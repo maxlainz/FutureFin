@@ -41,6 +41,9 @@ struct PendingUserRow {
     id: Uuid,
     username: String,
     birth_date: Option<NaiveDate>,
+    /// Espejo de `UserResponse::has_password` (5.0.0): un pendiente puede haber llegado por el
+    /// registro con contraseña o por la identidad delegada del add-on de Home Assistant.
+    has_password: bool,
 }
 
 #[utoipa::path(
@@ -67,7 +70,7 @@ pub async fn list_pending_users(
     }
 
     let rows: Vec<PendingUserRow> = sqlx::query_as(
-        r#"SELECT u.id, u.username, u.birth_date
+        r#"SELECT u.id, u.username, u.birth_date, (u.password_hash IS NOT NULL) AS has_password
            FROM users u
            WHERE NOT EXISTS (
                SELECT 1
@@ -88,6 +91,7 @@ pub async fn list_pending_users(
                 id: UserId(r.id),
                 username: r.username,
                 birth_date: r.birth_date,
+                has_password: r.has_password,
             })
             .collect(),
     ))

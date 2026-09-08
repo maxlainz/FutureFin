@@ -3,6 +3,8 @@
  * Ajustes → Jubilación; SettingsView usa los slugs de sub-tab).
  */
 
+import type { LedgerPersonScope } from "./ledger";
+
 export type TabId =
   | "summary"
   | "assets"
@@ -48,6 +50,35 @@ export const TABS: { id: TabId; label: string }[] = [
   { id: "projection", label: "Proyección" },
   { id: "settings", label: "Ajustes" },
 ];
+
+/**
+ * Pestañas visibles en el ámbito Hogar (F1, issue #207): el resto de la nav se pinta de solo
+ * lectura y con filas sin dueño visible (D9/D32) — el owner amplía la U10 original (regla de
+ * contenido) a navegación. Esto es una puerta de PRESENTACIÓN, no la frontera de seguridad: el
+ * servidor sigue siendo quien de verdad la impone (403 `not_row_owner` en toda mutación de una
+ * fila ajena, D23) — ocultar la pestaña solo evita que el usuario llegue a un sitio ya bloqueado.
+ */
+export const HOUSEHOLD_TAB_IDS: ReadonlySet<TabId> = new Set([
+  "summary",
+  "projection",
+  "settings",
+]);
+
+/** Pestañas visibles para un scope, en el orden de `TABS`. */
+export function tabsForScope(
+  scope: LedgerPersonScope,
+): { id: TabId; label: string }[] {
+  if (scope === "mine") return TABS;
+  return TABS.filter((t) => HOUSEHOLD_TAB_IDS.has(t.id));
+}
+
+/** `true` si `tab` se pinta en la nav de `scope` (ver `tabsForScope`). */
+export function isTabAvailableForScope(
+  tab: TabId,
+  scope: LedgerPersonScope,
+): boolean {
+  return scope === "mine" || HOUSEHOLD_TAB_IDS.has(tab);
+}
 
 export const TAB_PATH: Record<TabId, string> = {
   summary: "/resumen",

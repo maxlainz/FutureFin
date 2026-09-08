@@ -157,10 +157,141 @@ cualquier cliente generado a partir de ella nacía sin enviar credencial ninguna
 | POST | `/v1/auth/sso` | **SSO por proxy de confianza**. Identidad delegada a un proxy de confianza (add-on de Home Assistant). Sin cuerpo; la credencial es la cabecera `X-Remote-User-Id` (UUID) desde un peer autorizado. Devuelve el mismo `UserResponse` que el login y pone la misma cookie `ff_session`. **Se monta siempre** (la forma del router no depende del entorno): con `FUTUREFIN_TRUSTED_PROXY_AUTH` apagado → 401 `sso_disabled`; peer fuera de `FUTUREFIN_TRUSTED_PROXY_IPS` → 401 `sso_untrusted_peer`; cabecera ausente o no-UUID → 400 `sso_bad_identity`. El primer usuario que entra por aquí crea el hogar y queda owner; los siguientes quedan pendientes. |
 | GET | `/v1/auth/ha/start` | **4.3.1 — «Entrar con Home Assistant»**. Arranca el flujo de código de autorización contra HA como IdP. `?next=` opcional. **302** a `{FUTUREFIN_HA_SSO_URL}/auth/authorize?…` + cookie `ff_ha_state`. Se monta siempre; sin `FUTUREFIN_HA_SSO_URL` → **401 `ha_sso_disabled`** (este es el único error del flujo que sí sale como JSON, porque aquí el navegador todavía no está en mitad de una navegación venida de HA). |
 | GET | `/v1/auth/ha/callback` | **4.3.1**. Vuelta del navegador desde HA (`?code=&state=` o `?error=`). Éxito → **302** a la app + cookie `ff_session`; fallo → **302** a `{prefijo}/?ha_error=<código>`. **Nunca** devuelve un cuerpo JSON de error. |
-| GET | `/v1/auth/me` | Current user info |
+| GET | `/v1/auth/me` | Current user info. `UserResponse` = `{id, username, birth_date?, has_password}`. **`has_password` es aditivo (5.0.0, issue #213)**: `false` = cuenta de identidad delegada (`users.password_hash IS NULL`). Viaja también en `login`, `register` y `POST /v1/auth/sso`; la SPA lo usa para decidir qué contraseña pide el modal de exportar `.ffbackup`. |
 | PATCH | `/v1/auth/me` | Update `birth_date` |
+| GET | `/v1/auth/me/retirement-profile` | **5.0.0**. Perfil de jubilación **del usuario de la sesión**, ya resuelto (defaults + clamps), más su `birth_date`: `{profile: {...}, birth_date}`. |
+| PATCH | `/v1/auth/me/retirement-profile` | **5.0.0**. Merge campo a campo, **tri-estado** (omitir = no cambiar; `null` = borrar; **excepción**: `withdrawal_rule: null` equivale a omitir — la regla siempre existe y se vuelve a la de fábrica mandando `{"kind": "fixed_real"}`). Acepta también `birth_date` (misma columna que `PATCH /v1/auth/me`). **Cualquier rol puede editar el SUYO**, `viewer` incluido. Invalida la proyección (el perfil es input del motor). |
 
-- **Las cuentas SSO no tienen contraseña** (`users.password_hash` NULL desde `20260827120000_users_trusted_header_identity.sql`). `POST /v1/auth/login`, `POST /v1/auth/password` y `POST /v1/backup/user-export` las rechazan con **401 `sso_account_no_password`** — un 401 hablado a propósito: sin él, la persona se queda probando una contraseña que nunca existió. El login sigue pagando el Argon2id de descarte antes de responder, así que el reloj no delata nada.
+#### Perfil de jubilación por usuario (`/v1/auth/me/retirement-profile`) — **5.0.0**, D13
+
+Hasta 4.15.x la jubilación era un ajuste del HOGAR. Con proyecciones independientes por miembro
+(D9) pasa a ser de cada persona: columna `users.retirement_profile jsonb` (`NULL` = defaults),
+handler `handlers/retirement_profile.rs`, mismo patrón que `FireSettings` pieza por pieza
+(claves ausentes = defaults, `default_*`, `resolve_*` con clamps en LECTURA, `validate_*` con
+códigos estables, patchset campo a campo con `apply_to`/`is_empty`).
+
+**Modelo v2 (5.0.0, decisiones M2/M4/M5/M6/C3/C7 del owner)**: el ÉXITO define la fecha. El umbral
+vuelve al perfil como restricción, la pensión es un flujo de caja (no dimensiona ningún objetivo),
+el colchón de caja desaparece y el «puente hasta la pensión» deja de ser una estrategia para ser un
+ajuste de la tarjeta Pensión. Se retiran del perfil `target_basis`, `bridge_discount_basis`,
+`cash_buffer_months` y `target_basis_stored`.
+
+Forma (todas las claves opcionales en el wire):
+
+| Campo | Valores / cota | Nota |
+|---|---|---|
+| `strategy` | `asap` (default) · `retire_at_age` · `coast` · `partial` | **Cuatro** desde v2 (C7). `retire_at_age` exige `target_retirement_age`, y `coast` también salvo en modo `fixed_stop_age` (`target_retirement_age_required`); `partial` exige `partial_retirement` (`partial_retirement_required`) |
+| `target_retirement_age` | `[18, horizon_lifespan_age]` | `retirement_age_out_of_range`. Quién la EXIGE lo decide `requires_target_age(strategy, coast_mode)`, no la estrategia sola |
+| `fire_number_mode`, `fire_number_manual_amount`, `swr_pct`, `horizon_lifespan_age` | **MOVIDOS desde `fire_settings`** — mismos tipos, defaults y códigos | **`swr_pct` sube a `[0, 6]` en v2** (M5): el SWR ya no dimensiona un objetivo, es «el máximo que se vende en cualquier año» (`swr_out_of_range`) |
+| `success_threshold_pct` | `[80, 100]`, default **95** | **Load-bearing desde v2** (M2/C3) — entre V7 y v2 se «aceptaba y se ignoraba». Es la restricción que decide la fecha válida: el primer mes en que al menos ese % de los caminos llega al horizonte sin volver a trabajar. `100` = cero fallos de N. Fuera de rango: **400 `success_threshold_out_of_range`** (antes, un 200 silencioso) |
+| `coast_mode` | `fixed_retirement_age` (default) · `fixed_stop_age` | M10. Modo A: fijo la edad de jubilación y el solver busca el PRIMER mes en que puedo dejar de aportar. Modo B: fijo cuándo dejo de aportar y la fecha la decide el umbral — ahí `target_retirement_age` deja de ser obligatoria y `coast_stop_age` pasa a serlo (`coast_stop_age_required`) |
+| `coast_stop_age` | `[18, target_retirement_age` o `horizon]`, tri-estado | `coast_stop_age_out_of_range`. Dato en el modo B, LECTURA en el modo A |
+| `withdrawal_rule` | `{kind, pct?, start_pct?, end_pct?, band_pct?, adjust_pct?, spend_mode}` (+ `pct_source` **solo salida**) | Se sustituye ENTERA. **`pct` (`percent_of_balance`, `guardrails`) y `start_pct` (`hybrid`) son OPCIONALES desde 5.0.0/U4 y, ausentes, HEREDAN `swr_pct`** (ver abajo). Siguen siendo obligatorios `end_pct` en `hybrid` (< el `start_pct` **resuelto**) y `band_pct`+`adjust_pct` en `guardrails`. `pct` en `(0,20]`, banda/ajuste en `(0,50]`; el % EFECTIVO —heredado o no— es el que se acota |
+| `pension` | `{monthly_amount_today > 0, starts_at_age ∈ [50, horizon], indexed=true, fraction_while_partial ∈ [0,1], bridge_enabled=false, bridge_max_pct?, bridge_max_years?}` | Se sustituye ENTERA. **Es un flujo de caja** (M4): no descuenta ningún objetivo. `fraction_while_partial` sigue en `0` por defecto porque **por defecto no se supone que cobres pensión mientras trabajas a jornada reducida** — súbelo si tu régimen te la paga (no es una regla legal: es el supuesto conservador, B9) |
+| `pension.bridge_*` | `bridge_enabled` (default `false`), `bridge_max_pct ∈ (swr_pct, 20]`, `bridge_max_years ∈ [1, 20]` | **El puente (C2/C7): un ajuste, no una estrategia**, disponible con cualquiera. Encendido, el tope de la tasa inicial en el mes de jubilación es `bridge_max_pct` en vez del SWR mientras la pensión llegue dentro de `bridge_max_years`, y la fecha nunca es anterior a `pensión − años máximos`. **Al encenderlo sin números se rellenan `max(5, swr + 1)` % y 7 años** —derivados en LECTURA, así que mover el SWR mueve el tope—. Códigos: `bridge_max_pct_out_of_range`, `bridge_max_pct_not_above_swr`, `bridge_max_years_out_of_range` |
+| `partial_retirement` | `{starts_at_age? ∈ [18, horizon], income_monthly_today ≥ 0, expense_basis, mode}` | Se sustituye ENTERA. `mode`: `at_age` (default) · `asap` (M11). **`starts_at_age` es opcional desde v2**: con `asap` la calcula el solver; con `at_age` falta ⇒ `partial_start_age_required`. Debe empezar ANTES de `target_retirement_age` cuando las dos existen (`partial_not_before_retirement`) |
+| ~~`target_basis`~~, ~~`bridge_discount_basis`~~, ~~`cash_buffer_months`~~ | **retirados en v2** (M4/M6) | No se publican (ni como `null`) y no se aceptan como elección. **Un JSONB viejo que los conserve sigue cargando**: `RetirementProfile` no lleva `deny_unknown_fields`, así que las tres claves se ignoran solas y desaparecen en la primera escritura. La migración `20260906091500_drop_stored_success_threshold.sql` las borra del almacén. **Los cinco códigos que retira v2** (los dos que comparten nombre con un campo de arriba, más los tres que no tenían campo homónimo): `target_basis`, `bridge_discount_basis`, `bridge_discount_out_of_range`, `cash_buffer_out_of_range`, `pension_required_for_bridge` — ninguno debe seguir en `tests/fixtures/error-codes.json` (`error_codes_parity.rs::no_retired_code_survives_in_the_fixture`) |
+
+**Respuesta de las dos rutas** (`RetirementProfileResponse`): `{profile, birth_date}`.
+`target_basis_stored` murió con la base del objetivo (M4).
+
+**El literal `pension_bridge` sigue aceptándose como ALIAS de `asap`** (C7, aclaración del owner):
+
+- **Perfil ALMACENADO** con `"strategy":"pension_bridge"`: se lee como `asap` **con el puente
+  encendido** y sus defaults (`max(5, swr+1)` %, 7 años), y el ensamblado emite el aviso
+  `strategy_pension_bridge_migrated`. El literal **nunca se re-emite**. La primera escritura
+  materializa `bridge_enabled: true` en el JSONB (`RetirementProfilePatch::apply_to`) — sin eso, un
+  PATCH de cualquier otro campo habría dejado `strategy: "asap"` con el puente apagado y el plan de
+  esa persona habría cambiado sin que nada lo dijera.
+- **PATCH en vivo** con ese literal: aterriza en `asap` y **no** toca el puente (encenderlo es
+  `pension.bridge_enabled`). No se rechaza —un 400 rompería a quien reenvíe un perfil leído antes de
+  v2— y no es silencioso: la respuesta devuelve `strategy: "asap"`.
+- El error de una estrategia desconocida lista **las cuatro vivas**: el alias no es una opción que
+  ofrecer. Fuente única: `parse_retirement_strategy` + `RETIREMENT_STRATEGY_VARIANTS`.
+
+**Migración `20260906091500_drop_stored_success_threshold.sql`** (idempotente, sin DDL): borra del
+JSONB `success_threshold_pct` —el 95 que la promesa «se acepta y se ignora» de V7 dejó almacenado y
+que nadie leía— junto a `target_basis`, `bridge_discount_basis` y `cash_buffer_months`. El porqué
+del umbral: al volver a ser load-bearing, ese 95 muerto se leería como una elección explícita —
+idéntica al default de hoy, pero congelada el día que el default se mueva. Borrarla hace que **mande
+el default**. Test: `retirement_profile.rs::the_migration_drops_the_deprecated_threshold` (ejecuta
+el fichero de migración TAL CUAL, vía `include_str!`).
+
+**U4 — el porcentaje de retirada es ÚNICO (5.0.0, decisión del owner).** `swr_pct` es el tope de
+venta anual **y** es el porcentaje de las reglas de retirada basadas en saldo. Por eso
+`withdrawal_rule.pct` y `withdrawal_rule.start_pct` dejaron de ser obligatorios: ausentes se
+resuelven a `swr_pct` (mismo `Decimal`, mismos clamps) en **`resolve_withdrawal_rule`**, el
+resolvedor ÚNICO por el que pasan las cuatro superficies que consumen la regla — el perfil que
+publican `GET`/`PATCH`, el `PhasePlan` de `handlers/projection.rs`
+(`withdrawal_rule_to_engine`), `GET /v1/projection/bands` y el `profile_overrides` de
+`simulate_projection`. Con dos resolvedores, «único» valdría en el formulario y otra cosa en el
+chart.
+
+- **`withdrawal_rule.pct_source`** (`swr` | `explicit`) es **aditivo y solo de salida**: dice de
+  dónde salió el porcentaje. Se ignora en la entrada y **no se persiste** en el JSONB, así que la
+  herencia se resuelve en cada lectura — mover el `swr_pct` mueve el % de la regla. En
+  `fixed_real` **no viaja** (ausente, ni siquiera `null`): esa regla no tiene porcentaje, y
+  publicar uno sugeriría que hay un % en juego.
+- **Un valor explícito se sigue honrando y gana** (compatibilidad: el wire de 4.15.x y las tools
+  MCP no se rompen).
+- **Cómo se SUELTA un `pct` explícito**: `withdrawal_rule` se sustituye ENTERA, así que mandar el
+  objeto sin la clave `pct` ya la borra y el porcentaje vuelve a heredarse. No hay `clear_pct` ni
+  hace falta.
+- **Cota con `swr_pct = 0`**: la validación corre sobre el % EFECTIVO, así que una regla basada en
+  saldo sin `pct` propio da **400 `withdrawal_pct_out_of_range`**. Un plan que retira 0 % no es un
+  plan, y aceptarlo devolvería una simulación que no vende nada sin decir por qué.
+- Tests: `retirement_profile.rs::a_withdrawal_pct_left_out_inherits_the_swr_and_declares_it`,
+  `::a_hybrid_without_start_pct_compares_end_pct_against_the_swr` y —la prueba de que la herencia
+  llega al MOTOR y no solo al formulario—
+  `projection_strategies.rs::an_omitted_withdrawal_pct_reaches_the_engine_as_the_swr`.
+
+**S4 murió con `target_basis` (M4).** La regla «quitar la pensión suelta la base almacenada» existía
+porque la base del objetivo se derivaba de si había pensión; en v2 no hay base del objetivo que
+derivar. Lo que colgaba de la pensión y sigue colgando es el PUENTE, y no necesita regla propia:
+vive DENTRO del bloque, así que `PATCH {"pension": null}` se lo lleva.
+
+**El merge va sobre lo ALMACENADO, no sobre lo resuelto**, y no es un detalle de implementación: los
+defaults del puente (`max(5, swr+1)` %, 7 años) los pone `resolve_*` al LEER, así que mergear sobre
+el resuelto los persistiría como si el usuario los hubiera escrito — y mover el `swr_pct` dejaría de
+mover un tope que nadie eligió. Vale para cualquier campo derivado futuro.
+
+**Estado del perfil frente al motor**: los cuatro ejes movidos, las fases y las reglas de retirada
+se simulan (WP2/WP3/WP5); la proyección lee el perfil del solicitante y, en `household`, corre una
+simulación por miembro. La frase de WP4 que decía que «el motor todavía no simula las fases ni las
+reglas» dejó de ser cierta y se retira aquí para no propagarla.
+
+**Los bloques que la estrategia NO usa se conservan en el perfil, pero NO entran en la
+simulación.** El perfil es acumulativo a propósito —cambiar de estrategia y volver no pierde nada,
+y el `GET` resuelto sigue devolviendo cada bloque que el usuario llegó a rellenar—, así que un
+bloque guardado **no es una declaración de que esa fase se viva**: quien la declara es la
+estrategia. La puerta vive en UN solo sitio, el ensamblado del `PhasePlan`
+(`apps/api/src/handlers/projection.rs:2404`, `plan_uses_partial_phase`), y por eso la heredan sin
+repetirla `GET /v1/projection/series`, `GET /v1/projection/bands`, el bucle por miembro de
+`?view=household` y el `profile_overrides` de `simulate_projection` — las cuatro superficies
+construyen su input con `build_installation_projection_input`. Reparto exacto:
+
+- **`partial_retirement` → solo con `strategy: partial`.** Medido en vivo antes del arreglo: un
+  perfil `asap` que conservaba una media jornada de una prueba anterior se simulaba CON ella —
+  `warnings: ["partial_phase_capital_shrinking"]`, un `partial_retirement_month_index` y una curva
+  que no cruzaba el objetivo—, de una fase que la jubilación rediseñada ni siquiera enseña para
+  esa estrategia (U2), actuando sola sobre los números (U12).
+- **`target_retirement_age` → solo donde es trigger** (`retire_at_age`, `coast` en modo
+  `fixed_retirement_age`) y, como fin OPCIONAL de la media jornada, en `partial`. Ya tenía su
+  puerta (`wants_age_trigger`) y nunca filtró; ahora está pineado.
+- **`pension` entra con CUALQUIER estrategia, y es deliberado** (D15): es un ingreso con fecha que
+  esa persona cobrará gobierne quien gobierne el trigger. En v2 eso vale también para su **puente**
+  (C7), que por eso no es una estrategia. Fuera de `partial`,
+  `pension.fraction_while_partial` queda moot sola: sin fase parcial el bucle nunca entra en
+  `Phase::Partial`.
+
+El perfil ALMACENADO no se toca en ninguno de los casos. Tests:
+`projection_strategies.rs::a_stored_partial_block_does_not_reach_the_engine_under_asap`,
+`::a_stored_partial_block_does_not_reach_the_engine_under_retire_at_age` (los dos comparan la serie
+byte a byte contra el mismo perfil sin el bloque) y
+`::a_stored_target_retirement_age_does_not_retire_an_asap_plan`; que `partial` SÍ simula su fase lo
+pinea `::partial_publishes_the_270k_gap_of_the_issue_example`.
+
+- **Las cuentas SSO no tienen contraseña** (`users.password_hash` NULL desde `20260827120000_users_trusted_header_identity.sql`). `POST /v1/auth/login` y `POST /v1/auth/password` las rechazan con **401 `sso_account_no_password`** — un 401 hablado a propósito: sin él, la persona se queda probando una contraseña que nunca existió. El login sigue pagando el Argon2id de descarte antes de responder, así que el reloj no delata nada. **`POST /v1/backup/user-export` salió de esta lista en 5.0.0** (issue #213): el backup lleva ahora su propia contraseña y una cuenta sin contraseña puede exportar (ver §Backup).
 
 - **`current_password` incorrecta → 400 `current_password_invalid`, NO 401** (`handlers/auth.rs`).
   Es deliberado y load-bearing: la sesión es válida — lo que falla es un dato del formulario. Con un
@@ -192,7 +323,10 @@ cualquier cliente generado a partir de ella nacía sin enviar credencial ninguna
 **200** → el mismo `UserResponse` que `login` (`{id, username, birth_date?}`) + `Set-Cookie:
 ff_session` con el `Path` acotado al prefijo de la request (ver §Cookie en
 [`auth-and-membership.md`](auth-and-membership.md)) + el mismo warm-up en background de la
-proyección del hogar que hace `login` (se salta en silencio si el usuario está pending).
+proyección **del propio usuario** (`view=mine`, las dos densidades) que hace `login` (se salta en
+silencio si el usuario está pending). **Desde 5.0.0 calienta `mine`, no `household`**
+(`warm_up_mine_projection`): con el default de `view` invertido, calentar el hogar dejaría en la
+cache una entrada que nadie consulta — y el hogar cuesta ahora N simulaciones, no una.
 
 **Errores** — cinco códigos, todos con el prefijo `sso_`:
 
@@ -201,7 +335,7 @@ proyección del hogar que hace `login` (se salta en silencio si el usuario está
 | `sso_disabled` | 401 | `FUTUREFIN_TRUSTED_PROXY_AUTH` apagado (el default). |
 | `sso_untrusted_peer` | 401 | La IP del peer no está en `FUTUREFIN_TRUSTED_PROXY_IPS`. |
 | `sso_bad_identity` | 400 | `X-Remote-User-Id` ausente o no parsea como UUID. |
-| `sso_account_no_password` | 401 | *No lo devuelve este endpoint*: lo devuelven `login`, `password` y `user-export` cuando la cuenta es SSO. Se lista aquí porque es parte del mismo contrato. |
+| `sso_account_no_password` | 401 | *No lo devuelve este endpoint*: lo devuelven `login` y `password` cuando la cuenta es SSO (los **dos** call sites que quedan: `grep -c 'sso_account_no_password()' apps/api/src/handlers/auth.rs`). Se lista aquí porque es parte del mismo contrato. **`user-export` ya no**, desde 5.0.0 (issue #213). |
 | `sso_username_unavailable` | 409 | Se agotaron los seis candidatos de nombre (slug, `-2`..`-5`, `ha-<8 hex del id externo>`) sin encontrar uno libre. |
 
 - **Las dos primeras comprobaciones SON la frontera de seguridad entera.** Una cabecera de
@@ -342,7 +476,7 @@ contrario.
 | DELETE | `/v1/installation/members/{user_id}` | **owner-only** | Revoca el acceso → **204**. No miembro → 404. |
 
 - **Guardia `last_owner`** (PATCH y DELETE): degradar o expulsar al último `owner` devuelve **400**
-  con el prefijo `last_owner:`. El recuento (`owners_left_without`) va **dentro de la transacción y
+  con el prefijo `last_owner:`. El recuento (`lock_owner_ids`, `handlers/members.rs:185`/`:244`) va **dentro de la transacción y
   con `FOR UPDATE`** sobre las filas de la instalación — sin eso, dos owners degradándose a la vez
   dejarían el hogar sin ninguno.
 - **El DELETE conserva los datos de la persona.** Sus movimientos, snapshots, activos y reglas
@@ -405,11 +539,35 @@ sin destino, igual que borrarlo). La migración
 `20260901160000_allocation_rules_reenable_disabled_sinks.sql` reactivó retroactivamente los
 sumideros que ya estaban apagados (con el mismo espejo en el import de backups).
 
-**Plusvalía latente (4.4.0, Fase 6)** — `AssetResponse` gana cuatro campos, **todos sin `skip_serializing_if`: viajan siempre, con `null` explícito**: `unrealized_pnl` (Decimal-as-string), `unrealized_pnl_absent_reason`, `unrealized_pnl_pct` (Decimal-as-string, 1 decimal) y `unrealized_pnl_pct_absent_reason`. Base: la columna `assets.purchase_price` — **no** aportaciones, **no** snapshots, **no** coste medio ponderado. `pnl = current_value − purchase_price`, `pct = pnl/purchase_price × 100`. **Lo caro no es la resta, es la etiqueta**: no es rentabilidad (no anualiza ni descuenta las aportaciones posteriores a la compra, así que en un activo con reglas de reparto activas el número está inflado), y `purchase_price` es opcional, así que hay que distinguir tres estados — `NULL` ⇒ ambos `null` con `no_purchase_price`; `= 0` ⇒ el pnl es el valor entero y el porcentaje es `null` con `zero_purchase_price`; `> 0` ⇒ ambos. Presente en GET, POST y PATCH (los tres pasan por `row_to_response`); **no** aparece en `/v1/summary`. **Trampa conocida (issue #95)**: el `null` que el doc-comment del PATCH promete para **borrar** `purchase_price` es inalcanzable por HTTP —serde colapsa `null` presente y clave ausente en `None`, así que sale 400 `patch_empty`—; la vía viva es el flag `clear_purchase_price` de la tool MCP. Hay un test que fija ese 400 para que no se lea como descuido de esta feature.
+**Plusvalía latente (4.4.0, Fase 6)** — `AssetResponse` gana cuatro campos, **todos sin `skip_serializing_if`: viajan siempre, con `null` explícito**: `unrealized_pnl` (Decimal-as-string), `unrealized_pnl_absent_reason`, `unrealized_pnl_pct` (Decimal-as-string, 1 decimal) y `unrealized_pnl_pct_absent_reason`. Base: la columna `assets.purchase_price` — **no** aportaciones, **no** snapshots, **no** coste medio ponderado. `pnl = current_value − purchase_price`, `pct = pnl/purchase_price × 100`. **Lo caro no es la resta, es la etiqueta**: no es rentabilidad (no anualiza ni descuenta las aportaciones posteriores a la compra, así que en un activo con reglas de reparto activas el número está inflado), y `purchase_price` es opcional, así que hay que distinguir tres estados — `NULL` ⇒ ambos `null` con `no_purchase_price`; `= 0` ⇒ el pnl es el valor entero y el porcentaje es `null` con `zero_purchase_price`; `> 0` ⇒ ambos. Presente en GET, POST y PATCH (los tres pasan por `row_to_response`); **no** aparece en `/v1/summary`. **Tri-estado del PATCH** (issue #95, cerrado con `deserialize_double_option`; test `patch_null_clears.rs`): en `purchase_price` el `null` presente BORRA de verdad, la clave ausente no toca y un valor sustituye. Por MCP el JSON Schema no puede expresar ese tri-estado, así que el `null` se materializa con el flag `clear_purchase_price` de `update_asset`.
 
 **Objetivo resuelto**: `fetch_asset_resolved_targets` dejó su propio `match cap_kind` y llama a `allocation_rules::resolve_cap_ceiling_eur`, la misma función que el techo del ETA de `/v1/allocation-rules/goals` — el objetivo de la pantalla de activos y el de la ETA son el mismo número por construcción.
 
-Each `AssetResponse` row carries `owner_user_id: Option<Uuid>` (`null`/absent = shared row). It is **display data only** (used by the frontend snapshot-prompt trigger to know which assets are "mine" in household view), never a security boundary — scoping still happens via `?view=mine`. Serialized as a uuid string, omitted when `None` (`skip_serializing_if`).
+**Volatilidad anual (5.0.0)** — `annual_volatility_percent` (Decimal-as-string, `[0, 100]`, error
+`volatility_out_of_range`) en `AssetResponse`, `POST` y `PATCH`. Es la **desviación típica ANUAL**
+de los retornos (`"17"` = 17 %/año), no un rango ni un peor caso. `null` o `0` = activo
+determinista. **El camino Decimal del motor la ignora siempre** (D12): declararla no mueve ni un
+euro de la proyección de hoy — solo la leerá el Monte Carlo. El `CHECK` de columna es más laxo
+(`>= 0`) a propósito, para poder importar backups viejos.
+
+**Los TRES decimales opcionales del activo son tri-estado en el PATCH (5.0.0 WP5-2)**:
+`purchase_price`, `expected_annual_return_percent` y `annual_volatility_percent`. Omitir no toca ·
+`null` BORRA · un valor sustituye, todos por el mismo `merge_optional_decimal_patch_with`
+(validador por campo: `>= 0` el precio, `> −100` la rentabilidad, `[0, 100]` la volatilidad — las
+cotas se comprueban sobre el valor que va a la columna, no sobre el patchset). Los dos últimos eran
+`Option<Decimal>` hasta 4.15.x, así que `null` y clave ausente eran el mismo caso y **no había
+forma de volver a «rentabilidad no declarada» ni de devolver un activo al determinismo**: una
+volatilidad escrita por error solo se deshacía borrando y recreando el activo, con su histórico
+dentro. En MCP, `update_asset` gana `clear_expected_annual_return_percent` y
+`clear_annual_volatility_percent` (valor + `clear_*` a la vez → 400 `field_set_and_clear`).
+Tests: `patch_null_clears.rs::asset_return_and_volatility_are_tri_state`,
+`mcp_write.rs::update_asset_clears_the_return_and_the_volatility`.
+
+Each `AssetResponse` row carries `owner_user_id` (serializado como uuid string). Desde **5.0.0** la
+columna es `NOT NULL` (D14), así que viaja siempre; el `Option` del tipo se conserva por
+compatibilidad del contrato publicado. Es dato de display (el trigger del modal de snapshot) **y**,
+desde D21, quien puede editar la fila: una mutación sobre un activo ajeno es 403 `not_row_owner`.
+La LECTURA sigue siendo del hogar — `?view` nunca fue una frontera de autorización.
 
 ### Allocation rules (`/v1/allocation-rules/`)
 Cascade rules that route the monthly surplus (`income − expense − debt_service`) into assets, in priority order. Accepts `?view=mine` to scope by `owner_user_id`.
@@ -561,7 +719,86 @@ son 100.000 € de caja pero **78.618,1542 €** de deuda hoy. Además, en PATCH
 nuevos (el modelo se resuelve antes del bloque de derivación, a propósito).
 
 ### Summary (`/v1/summary/`)
-Aggregated net worth, financial health metrics, category breakdowns. Accepts `?view=mine`. `total_liabilities` and breakdowns use the 4.7.0 visibility predicate (plan vivo o saldo vivo — see Liabilities note above); el `net_return` solo resta el TIN de lo que DEVENGA (#121).
+Aggregated net worth, financial health metrics, category breakdowns. Accepts `?view=` (**default
+`mine` desde 5.0.0**, R2).
+
+**El SWR del umbral «runway indefinido» es del PERFIL, y en `household` es el MÍNIMO del hogar
+(5.0.0, D13/§D).** El SWR salió de `installation.fire_settings` en 5.0.0 y vive en
+`users.retirement_profile`: en `view=mine` se usa el del solicitante y punto. En `view=household`
+el runway se sirve sobre las filas de TODO el hogar, así que `household_min_swr_pct` (`summary.rs`)
+toma el **menor** `swr_pct` entre los perfiles de los miembros con fila en
+`installation_memberships`. El mínimo no es una preferencia estética: «indefinido» significa «esta
+cartera aguanta para siempre», y basta con que UN miembro considere insostenible esa tasa de
+retirada para que el hogar no pueda declararlo — con el máximo (o con el del solicitante) el más
+optimista del hogar firmaría por todos. Con un solo miembro coincide con el suyo y nada se mueve.
+Los perfiles se resuelven por el MISMO camino que cualquier otro (`resolve_retirement_profile`), no
+leyendo el JSONB crudo: una segunda interpretación del mismo dato es como divergen los defaults.
+ `total_liabilities` and breakdowns use the 4.7.0 visibility predicate (plan vivo o saldo vivo — see Liabilities note above); el `net_return` solo resta el TIN de lo que DEVENGA (#121).
+
+**`plan` — la tarjeta «Tu plan» del Resumen (5.0.0, modelo v2 «el éxito define la fecha», WP A7).**
+Objeto con `{strategy, jubilacion_month_index, required_savings_monthly, underfunded,
+absent_reason}` **+ el bloque del éxito** (`success_of_plan`, `success_threshold_pct`,
+`success_wilson_low`, `safe_date_month_index`, `needed_capital_today`, `plan_state`,
+`success_verdict`, `success_absent_reason`). `retirement_trigger` (la pareja disparador/D17 de
+4.15.x) se retiró: no tiene equivalente en el modelo v2, donde la fecha la decide siempre el
+umbral de éxito o es un dato de edad, nunca un cruce contra un objetivo.
+
+- **Ya NO hay dos lecturas.** Hasta WP6b el bloque del éxito llegaba por `attach_success`, una
+  llamada APARTE a `projection_bands_cached` (su propia cache, su propio HIT/MISS). Desde WP A7
+  `attach_success` **se retiró entero**: `success_of_plan`/`success_wilson_low`/
+  `safe_date_month_index`/`needed_capital_today` son NIVEL 1 del solve —se resuelven SÍNCRONOS,
+  dentro del mismo miss que resuelve la fecha (`retirement_solver::solve_plan_level1`)— y viajan
+  YA en el mismo objeto que pinta el chart: el mismo que sirve `/v1/projection/series`. Sale de la
+  entrada de cache de proyección del solicitante (las dos densidades; estas cifras son escalares
+  del plan y no dependen de la densidad) y, si no hay ninguna, se calcula por
+  `projection_series_cached` con `hybrid` — que es la densidad que la SPA pide primero, así que el
+  MISS **deja la cache caliente** y el GET de la serie que viene detrás es un HIT. Cero aritmética
+  propia en `plan_from_series` salvo una: `success_verdict` se computa llamando a la MISMA función
+  que usa `GET /v1/projection/bands` (`projection_bands::success_verdict`, reutilizada, no
+  reimplementada) sobre las tres cifras que la serie ya publica. Regresión:
+  `summary_plan.rs::the_success_kpi_comes_from_the_plan_not_from_a_second_draw` y
+  `::reading_the_summary_does_not_draw_bands` (el Resumen ya no deja ninguna entrada en
+  `bands_cache`: antes de WP A7 dejaba una).
+- **`required_savings_monthly` ES `contribution_required_monthly`** de `/v1/projection/series` —
+  el mismo número del mismo solve, con el nombre que se lee en un Resumen; `underfunded` es
+  `contribution_underfunded`. Los dos son `null` cuando la fecha la decide el UMBRAL y no una edad
+  (`retirement_date_basis != "target_age"`: `asap`, `coast` modo B, `partial`) — ahí no hay edad
+  contra la que resolver nada, y `null` no es `false`/`0`. **`disposable_monthly` se RETIRÓ en WP
+  A12**: era el margen de los solves deterministas de 4.15.x, no tiene equivalente en el modelo v2
+  —`/v1/projection/series` dejó de publicar los `disposable_*`, porque el ahorro que el coast libera
+  es «disponible» por DECISIÓN y no una cifra que el motor calcule— y sobrevivió una versión
+  valiendo SIEMPRE `null` solo porque la SPA lo declaraba obligatorio. Un campo que no puede tomar
+  ningún valor se lee como «no lo sabemos» cuando lo cierto es que esa pregunta ya no se hace.
+  Pinea su ausencia `openapi_contract.rs::the_plan_block_is_declared_in_the_document`.
+- **Sin fecha válida no hay éxito que publicar** (WP A12). Con `retirement_date_basis:
+  "not_reachable"` en la serie, `success_of_plan`, `success_wilson_low`, `success_threshold_pct` y
+  `success_verdict` van a `null` y `success_absent_reason` vale `not_reachable` — el mismo literal
+  que la serie y que `/v1/projection/bands`. La serie SÍ publica ahí un `success_of_plan`, pero
+  significa otra cosa (la mejor observación del solve, el mes que más cerca se quedó) y copiarlo
+  rotulaba un porcentaje junto a un plan que no ocurre. `plan_state` sigue siendo `"ready"`: el
+  plan está resuelto; lo que falta es su éxito.
+- **`plan_state`**: `"ready"` cuando el bloque de arriba viaja resuelto; `"absent"` cuando
+  `plan_absent_reason` de la serie está puesto (`birth_date_missing` — en el modelo v2 NINGUNA
+  estrategia resuelve plan sin fecha de nacimiento, ni `asap` — C5) o no hay serie que leer
+  (`absent_reason: "projection_unavailable"`), o en `view=household` (`absent_reason:
+  "household_aggregate"`: el hogar es la suma de N planes independientes y «el ahorro necesario
+  del hogar» no es una cifra que exista); `"pending"` es una condición TRANSITORIA del propio
+  servidor (`ApiError::Unavailable` de `heavy::run_projection_sim` — el semáforo de simulaciones
+  cerrado, que solo ocurre en un apagado ordenado) y **no** cubre un fallo del cálculo (un pánico
+  de la tarea sigue publicando `absent`/`projection_unavailable`: reintentar no lo arregla). En
+  `"absent"` **TODOS** los campos del bloque van a `null` A LA VEZ (los del plan y los del éxito;
+  sin contarlos, que el número caducó en cuanto el bloque creció).
+- **`success_absent_reason: "bands_unavailable"`** ya no significa «el sorteo aparte falló» (no
+  existe tal sorteo): es el caso patológico en que la serie resolvió plan pero la fracción de
+  éxito no se pudo representar. Distinto de `absent_reason` a propósito: «no sabemos tu
+  probabilidad» y «no sabemos tu plan» son dos situaciones muy distintas para quien lee el Resumen.
+- **Coste**: tras un login o cualquier warm-up es siempre un HIT (medido: 5–9 ms en release sobre
+  un hogar rico). Un MISS paga una proyección más los solves de la estrategia, que es exactamente
+  lo que el GET de la serie iba a pagar un instante después.
+- Es la **segunda excepción declarada** a «mine y household solo difieren en `view`» de
+  `context_fields.rs` (la primera es `/v1/projection/series`), y la excepción está ACOTADA a este
+  bloque: el resto del payload sigue siendo idéntico con un solo usuario. Tests:
+  `apps/api/tests/summary_plan.rs`.
 
 **Campos de contexto (4.4.0, Fase 5, issue #86)** — ninguno cambia una cifra; todos declaran de dónde sale:
 - **`view`** (raíz, `"household" | "mine"`) — eco de la vista aplicada (`LedgerView::as_str`). Reenviarlo como `?view=` reproduce la misma respuesta. Existe porque en una instalación de un solo usuario `?view=mine` y omitirlo devolvían payloads **byte a byte idénticos**.
@@ -570,7 +807,7 @@ Aggregated net worth, financial health metrics, category breakdowns. Accepts `?v
 - **`liabilities_by_type_tag[].type_tag` pasa de `String` a `Option<String>`** (breaking en lectura): los pasivos sin etiquetar van con **`null`** en vez del literal español `"(sin etiqueta)"`, que era texto de interfaz dentro de un campo de datos —indistinguible de un usuario que hubiera etiquetado un pasivo con ese nombre, e imposible de reenviar como filtro—. Mismo criterio que `category_id` en `CategoryMonthlySeriesEntry`. La SPA **no consume** este desglose (solo `LiabilityApi.type_tag`), así que el impacto es de API/MCP. La dimensión se escribe con `type_tag` en `POST`/`PATCH /v1/liabilities` — desde 4.4.0 también desde MCP.
 - **Unidades declaradas en el esquema, no en el nombre**: cada campo de `FinancialHealthMetrics` lleva la marca `**Unidad:**` en su doc-comment (y por tanto en OpenAPI y en la descripción de la tool). **No** se pusieron sufijos (`savings_rate_fraction`…): la unidad es propiedad del campo, constante en todas las respuestas, así que su sitio es el esquema y no 200 bytes repetidos en el endpoint más caliente de la app. Regla vigente: `_rate`/`_ratio` = **fracción** (`0.35` = 35 %); `_pct`/`_percent` = **porcentaje** (`3.5` = 3,5 %).
 
-Contrato pinneado en `apps/api/tests/context_fields.rs` (11 tests, camino HTTP — los campos los pone la core, no la tool).
+Contrato pinneado en `apps/api/tests/context_fields.rs` (**13** tests el 2026-09-03 — recuéntalos con `grep -c '#\[tokio::test\]' apps/api/tests/context_fields.rs`; camino HTTP — los campos los pone la core, no la tool).
 
 **`financial_health` sigue el toggle `fire_settings.savings_source`** (3 modos; gate `SavingsSource::uses_transactions()` = B o C). Con datos:
 - **Modo B (`transactions_avg`)**: `income_monthly_equivalent`, `expense_regular_monthly_equivalent`, `net_monthly_equivalent` (= `income_avg − expense_avg`) y `savings_rate` salen del promedio real 12m **crudo** (reforma 3.4.0: las cuotas de pasivo ya viven dentro de los movimientos — sin resta híbrida ni debt service re-sumado), no del presupuesto.
@@ -638,51 +875,557 @@ códigos se emiten como literales completos en cada sitio** porque `error_codes_
 fuente y uno compuesto con `format!` sería invisible para el catálogo.
 
 ### Projection (`/v1/projection/`)
-Net-worth series via `futurefin-engine`. Accepts `?view=mine` and `?months=N`. `N` fuera de
-**12–840** es **400 `months_out_of_range`** (desde 4.4.0; antes se clampaba en silencio y la
-respuesta afirmaba `horizon_basis: "months_override"` como si hubiera hecho caso al valor pedido).
+Net-worth series via `futurefin-engine`. Accepts `?view=` (**default `mine` desde 5.0.0**, R2) y
+`?months=N`. `N` fuera de **12–840** es **400 `months_out_of_range`** (desde 4.4.0; antes se
+clampaba en silencio y la respuesta afirmaba `horizon_basis: "months_override"` como si hubiera
+hecho caso al valor pedido).
+
+**`view=household` es un AGREGADO de N simulaciones, no una simulación con más filas (5.0.0, D9 /
+§D del plan de #207).** El handler corre **una simulación por miembro** de
+`installation_memberships` —cada una con SU perfil de jubilación, SU fecha de nacimiento y SUS
+filas (`LedgerView::Mine` atado a ese miembro)— al horizonte común `max(horizontes individuales)`
+(`horizon_basis: "household_max_lifespan"`), y suma. Regla por campo:
+
+| Campo | Agregación |
+|---|---|
+| `points[].net_worth` / `net_worth_liquid` / `contributed_capital` / `withdrawal*` | **Σ** por mes |
+| `points[].net_worth_real` | Σ y **DESPUÉS** deflactado (la inflación es de la instalación: sale lo mismo, con una sola división por punto) |
+| `asset_series[]` | **concatenadas** (ya vienen identificadas por `asset_id`; sumarlas destruiría la única desagregación que el chart necesita) |
+| `events[]`, `liabilities_negative_amortization[]` | concatenados, con el tope GLOBAL de 100 eventos |
+| `uncovered_deficit_total`, `unallocated_savings_total`, `starting_net_worth`, `monthly_delta_assumption` | **Σ** |
+| `assets_depleted_month_index` | **MÍNIMO** (el hogar se queda sin cartera cuando el PRIMERO se queda sin la suya); el detalle por persona en `members[]`. En la rejilla 0-based como el resto desde 5.0.0 (#210) |
+| El bloque **«plan»** entero (`retirement_date_basis`, `safe_date_*`, `success_*`, `needed_capital_*`, `contribution_*`, `coast_stop_month_index`, `partial_start_month_index`, `success_by_retirement_year`, `paths_used`, `seed`, `success_threshold_pct`) | `null` / `[]` + `plan_absent_reason: "household_aggregate"` (y `members[].plan_state: "household_not_solved"` por miembro). **El hogar no resuelve fecha por miembro** (5.0.0): cada solve estocástico cuesta segundos y el agregado corre N simulaciones. Lo que sí viaja por miembro es su fecha por EDAD, que es un dato y no una búsqueda |
+| `fire_number_classic_today` | `null` + `fire_number_classic_absent_reason: "household_aggregate"` |
+| `jubilacion_*`, `retirement_*`, `strategy`, `phase_transitions`, `pension_start_month_index`, `pension_absent_reason`, `partial_retirement_month_index` | `null` / `[]` + `jubilacion_absent_reason: "household_aggregate"` |
+| `compound_outpaces_true_savings_month_index` | `null` + `compound_outpaces_true_savings_absent_reason: "household_aggregate"` |
+| `savings_source`, `savings_*_basis`, `viewer_birth_date`, `show_age_mode`, `horizon_lifespan_age` | del **SOLICITANTE** (el fallback del promedio se decide por scope: no existe UN basis del hogar) |
+| `members[]` | una fila por miembro (ver abajo) |
+
+`members[]` = `{user_id, username, strategy, plan_state, jubilacion_month_index, jubilacion_age,
+retirement_month_index, partial_retirement_month_index, pension_start_month_index,
+assets_depleted_month_index, warnings[], horizon_months, series[]}`.
+
+**`plan_state` vale siempre `household_not_solved`** (5.0.0): el agregado NO resuelve el plan de
+nadie — N solves estocásticos por petición convertirían la vista más informativa en la más cara de
+la app. El literal es constante a propósito, porque el estado es una propiedad de la VISTA y no del
+miembro. Lo que sí viaja es `jubilacion_month_index` de quien tenga una fecha por EDAD
+(`retire_at_age`, `coast` modo A **con** fecha de nacimiento): es un DATO del perfil, no una
+búsqueda, así que no cuesta un solo sorteo y vale exactamente lo que su propia vista `mine`
+publica — `members[]` explica la suma, no la reinterpreta. Con `asap`/`partial`/`coast` modo B la
+fecha la decidiría el umbral, y ahí el índice es `null`: **nunca un 0 para decir «no aplica»**.
+Un usuario **pendiente de
+aprobación NO es del hogar** (la frontera es `installation_memberships`, la misma que decide el
+acceso) y un miembro sin datos aporta una serie plana de ceros y su fila, no un hueco. Vacío en
+`view=mine`. Tests: `apps/api/tests/projection_household_aggregate.rs`.
+
+- **`horizon_months`** = el horizonte PROPIO de esa persona (su DOB + su `horizon_lifespan_age`),
+  que puede ser MENOR que `months`: el agregado corre al común `max(horizontes)`, así que desde ahí
+  la curva de ese miembro describe años que no declaró vivir. Sin el campo, «su plan llega hasta
+  aquí» y «su plan se acaba aquí» se dibujan igual.
+- **`series[]`** (D32, 5.0.0 WP5-2) = `[{month_index, net_worth, net_worth_liquid}]`, **f64
+  chart-only (D4/I3)**, en la MISMA rejilla y con la MISMA decimación que `points[]` — la
+  decimación es una decisión del servidor por respuesta, no por serie. Lleva `month_index` propio
+  (y no dos arrays alineados por posición como `needed_capital_curve`) porque estas series se leen
+  por separado de `points`. Invariante testeado: **Σ `members[].series` == `points[]`** mes a mes,
+  en los dos campos. Dos importes y no siete a propósito: lo demás solo se lee del agregado.
+  Hasta WP5-1 este bloque decía «sin series por miembro»; D32 pide la línea fina por persona bajo
+  la suma en grueso, y una suma **no se puede desagregar en cliente**.
+- **Payload, medido** (2026-09-03; dos miembros, un activo + nómina + gasto cada uno, horizonte
+  derivado ~780 meses ⇒ 78 puntos hybrid, bytes sin gzip): `mine/hybrid` 21.009 ·
+  `household/hybrid` **34.161**, de los cuales `members[].series` **11.748** (~5,9 KB por miembro,
+  lineal con el hogar) y `points[]` 15.457 · `household/monthly` 300.724. Por eso la tool MCP
+  `get_projection` —que fuerza `hybrid`— deja `members[].series` **opt-in**
+  (`include_member_series`, default `false`), igual que `asset_series`; por HTTP viaja siempre.
+  Guardas: `projection_household_aggregate.rs::the_household_payload_stays_within_its_budget_at_hybrid_density`
+  y `mcp_http.rs::get_projection_household_omits_member_series_unless_asked`.
+
+`simulate_projection` **rechaza** `view=household` con **400 `household_not_simulable`**: un
+what-if mueve UN plan y el hogar tiene N. El rechazo vive en `simulate_projection_core`, no en la
+capa MCP, para que HTTP y MCP no puedan discrepar el día que haya ruta.
 
 Response (`ProjectionSeriesResponse`) includes:
 - `view` (4.4.0) — eco de la vista aplicada, `"household" | "mine"`. Aquí importa además porque el horizonte y la demografía (`viewer_birth_date`, `jubilacion_age`) son SIEMPRE del solicitante, también en `household`: sin este campo, dos respuestas con el mismo horizonte y distinto scope de patrimonio se leen igual.
 - `points[]` — `{month_index, net_worth, contributed_capital}` for months 0..=N. **`net_worth` y `contributed_capital` se serializan como `f64`** (no Decimal-as-string) por rendimiento: ~30 KB menos en JSON y evita ~5.000 `parseDisplayDecimal` cliente. Precisión <1 € en horizontes de 70 años.
-- `months`, `horizon_years`, `horizon_basis` — effective horizon (`lifespan_age` — hasta 4.8.0 `lifespan_90` — | `fallback_no_demographics` | `months_override`); al lado viaja **`horizon_lifespan_age`** (la edad límite configurada, `fire_settings.horizon_lifespan_age`, 85..=105 default 90 — 4.9.0/#149) y **`final_net_worth_real`** (Decimal-string: patrimonio del último mes en euros de HOY, paridad con `simulate_projection` — el «margen al final» nominal es `points[último].net_worth`, sin campo nuevo; «no llegó» ⟺ `assets_depleted_month_index != null` o `uncovered_deficit_total > 0`)
+- `months`, `horizon_years`, `horizon_basis` — effective horizon (`lifespan_age` — hasta 4.8.0 `lifespan_90` — | `fallback_no_demographics` | `months_override`); al lado viaja **`horizon_lifespan_age`** (la edad límite configurada, **`users.retirement_profile.horizon_lifespan_age`** desde 5.0.0 — era `fire_settings.horizon_lifespan_age`, 85..=105 default 90 — 4.9.0/#149) y **`final_net_worth_real`** (Decimal-string: patrimonio del último mes en euros de HOY, paridad con `simulate_projection` — el «margen al final» nominal es `points[último].net_worth`, sin campo nuevo; «no llegó» ⟺ `assets_depleted_month_index != null` o `uncovered_deficit_total > 0`)
 - `starting_net_worth`, `monthly_delta_assumption` — snapshot values at month 0 (Decimal-as-string para totales)
 - `drawdown_gain_basis` + `taxable_gain_ratio_today` (4.12.0, #178) — qué rigió la fiscalidad del DRENAJE (`cost_basis` | `declared_ratio` | `mixed`, según qué activos declaran `purchase_price`) y la `g₀` informativa de la cartera de hoy (`Σ max(0, v−coste)/Σ v` SOLO sobre los declarados; `null` sin ninguno). El objetivo y el umbral de Autonomía usan siempre el escalar — reparto de regímenes en financial-contracts §2.4. Dos-casos pineados en `context_fields.rs::projection_declares_what_governs_the_drawdown_taxation`.
 - `anchor_date_ymd`, `show_age_mode`, `use_age_on_x_axis`, `viewer_birth_date` — UI axis helpers
-- `jubilacion_month_index`, `jubilacion_date_ymd`, `jubilacion_age` — el cruce con el target FIRE en las tres lecturas. **Desde 4.8.0 el cruce compara la riqueza LÍQUIDA** (`points[].net_worth_liquid`: Σ activos vendibles, BRUTA — #143; `surplus_cash` retirado del término en 4.12.1/#175 — teorema: el cruce solo pudo irse MÁS TARDE con el cambio, nunca adelantarse, y en producción es invariante) contra un objetivo que, desde 4.10.0 (#170), se evalúa **MES A MES sobre la necesidad real** — `gross_up(need(k), tramos, g)/SWR + término_deuda(k)`, con la pensión plana restada DESPUÉS de inflar y el fiscal drag capturado (los tramos son nominales); `jubilacion_target_net_worth` sigue siendo la base a k=0 (inmóvil) y el objetivo **no es monótono por partida doble** (término de deuda decreciente + base súper-inflada con pensión): cruce por escaneo lineal. La jubilación es un **estado absorbente** (#141). La **fecha civil** (issue #6) es `anchor_date_ymd + N` meses **conservando el día del ancla** con recorte a fin de mes — exactamente `addMonthsCivil` (`apps/web/src/lib/dates.ts`), de modo que `jubilacion_age` (años cumplidos) coincide con la etiqueta «N a» del chart. Anclar al día 1 restaría un año cuando el cruce cae en el mes de cumpleaños. Los tres viajan como **`null` explícito** cuando no hay cruce (4.0.0: con `skip_serializing_if` no se distinguía «no se alcanza» de «esta versión no publica el campo»); `jubilacion_age` es además `null` sin fecha de nacimiento resuelta (independiente de `show_age_mode`). Pin: `jubilacion_civil_tests` en `handlers/projection.rs`.
-- `jubilacion_series_position`, `jubilacion_target_net_worth_nominal` (issue #82) — **`jubilacion_month_index` no indexa ninguna serie devuelta**, y durante versiones se documentó como si lo hiciera. Es un número de MES; `points` es de densidad híbrida (mensual 0..12, anual después) y `fire_target_series` es paralela **por posición** a `points`, así que con `density=hybrid` —la que fuerza la tool MCP `get_projection`— hay ~42 posiciones para 361 meses: indexar con el mes se salía del array, y caer en `[0]` presentaba el objetivo de HOY como el de dentro de décadas. Los dos campos nuevos cierran el agujero y son `null` ⟺ no hay cruce, como sus hermanos.
-  - `jubilacion_series_position`: la posición (base 0) dentro de `points` / `fire_target_series` / `asset_series[].values`. **Convención: el punto servido inmediatamente ANTERIOR o igual** — la última `p` con `points[p].month_index <= jubilacion_month_index`, así que el cruce cae en el segmento `[p, p+1)` (donde un chart pinta el marcador) y `points[p].month_index == jubilacion_month_index` ⟺ el mes es un punto servido (siempre con `density=monthly`). Se eligió «anterior» y no «siguiente» porque su error es **conservador**: infravalora el patrimonio del cruce en vez de inflarlo.
-  - `jubilacion_target_net_worth_nominal`: el objetivo FIRE **del mes del cruce, en euros nominales** — el número que hasta 4.3.1 era inobtenible desde la respuesta (solo viajaba la base en euros de hoy, y con inflación las dos difieren por factores de 1,5× y más). Se evalúa **exacto** con `fire_target_at_month_index(ft, jubilacion_month_index)`, el mismo helper del motor: no se interpola entre puntos ni se lee de `fire_target_series`. Pin: `projection_number_semantics.rs`.
+- `jubilacion_month_index`, `jubilacion_date_ymd`, `jubilacion_age`, `jubilacion_series_position` — **la fecha del PLAN, en cuatro lecturas** (5.0.0). Hasta 4.15.x era el mes en que el líquido cruzaba el objetivo determinista; desde el modelo v2 es el mes que decide el umbral de éxito sobre miles de caminos (`asap`, `coast` modo B, `partial`) o la EDAD que el usuario fijó (`retire_at_age`, `coast` modo A). Quién de los dos lo dice `retirement_date_basis`. La jubilación sigue siendo un **estado absorbente** (#141). La **fecha civil** (issue #6) es `anchor_date_ymd + N` meses **conservando el día del ancla** con recorte a fin de mes — exactamente `addMonthsCivil` (`apps/web/src/lib/dates.ts`), de modo que `jubilacion_age` (años cumplidos) coincide con la etiqueta «N a» del chart. Anclar al día 1 restaría un año cuando la fecha cae en el mes de cumpleaños. Los cuatro viajan como **`null` explícito** cuando no hay fecha (4.0.0: con `skip_serializing_if` no se distinguía «no se alcanza» de «esta versión no publica el campo»); `jubilacion_age` es además `null` sin fecha de nacimiento resuelta. **Jamás un 0 para rellenar el hueco**: un 0 se lee como «ya puedes jubilarte». Pin: `jubilacion_civil_tests` en `handlers/projection.rs`.
+  - `jubilacion_series_position` (issue #82): **`jubilacion_month_index` no indexa ninguna serie devuelta.** Es un número de MES; `points` es de densidad híbrida (mensual 0..12, anual después), así que con `density=hybrid` —la que fuerza la tool MCP `get_projection`— hay ~42 posiciones para 361 meses: indexar con el mes se sale del array, y caer en `[0]` presenta la cifra de HOY como la de dentro de décadas. **Convención: el punto servido inmediatamente ANTERIOR o igual** — la última `p` con `points[p].month_index <= jubilacion_month_index`, así que la fecha cae en el segmento `[p, p+1)` (donde un chart pinta el marcador). Se eligió «anterior» y no «siguiente» porque su error es **conservador**: infravalora el patrimonio en vez de inflarlo.
+  - **Retirados en 5.0.0**: `jubilacion_target_net_worth`, `jubilacion_target_net_worth_nominal`, `fire_target_series`, `fire_target_debt_component` y `liquid_crossing_month_index(_absent_reason)`. Los cinco describían un objetivo determinista que ya no decide nada — el motor recibe `fire_target: None` — y publicarlos invitaba a leerlos como el listón del plan. Lo que sustituye a la línea del chart es `needed_capital_curve`; al escalar de referencia, `needed_capital_today`; y el «25× tu gasto» de toda la vida sobrevive como escalar **informativo** en `fire_number_classic_today`.
 - `milestones[]` — next 3 net-worth milestones (1/2.5/5×10ⁿ thresholds), each with `target`, `reached_month_index`, `reached_date_ymd`. **Ojo**: `reached_date_ymd` ancla al **día 1** del mes (contrato ya publicado, se deja como está), a diferencia de `jubilacion_date_ymd`. Ambas coinciden siempre en año y mes; solo difieren en el día.
 - `compound_outpaces_true_savings_month_index` — primer **MES** (misma base que `points[].month_index`, **no** una posición de array) en que el rendimiento del patrimonio supera el ahorro mensual base — sin Próximos ni plan de amortización, que son puntuales o decrecientes y harían depender el cruce de un pago suelto. `null` = no cruza dentro del horizonte, **no** «no calculado». No tiene `*_series_position` porque la cifra no se lee de la serie.
 - `events[]` + `events_truncated` (4.4.0, Fase 5) — los **saltos** de la curva: un elemento `{month_index, date_ymd, title, amount, direction, overdue}` por cada Próximo **con `due_date`** — el VENCIDO incluido (4.11.0, #126): carga íntegro en el mes 0 con `overdue: true` y su `date_ymd` REAL (pasada), así que el mes señalado y la fecha mostrada dejan de coincidir a propósito y el flag es lo que lo declara —, `amount` como magnitud ≥ 0 y el signo en `direction` (`inflow` scope income | `outflow` scope expense), orden mes ASC + importe DESC, tope `PROJECTION_EVENTS_MAX = 100` (`events_truncated` marca el recorte, que se lleva los meses más lejanos). **Sin query nueva**: sale de los `planning_rows` ya cargados y **comparte la regla de mapeo fecha→mes** con `planning_monthly_cash_adjustments_from_flows`, así que el mes que señala es exactamente aquel en el que la curva salta. **No entran** los Próximos sin fecha (se reparten sobre 90 días naturales desde el día 1 del mes ancla — #126: producen una rampa idéntica todos los días del mes, no un escalón), ni los pasivos, ni las partidas de presupuesto con fecha de fin (cambian la PENDIENTE, no producen un escalón). Existe porque con `density=hybrid` —la que sirve la tool MCP— entre dos puntos consecutivos caben doce meses y una caída de decenas de miles de euros no tenía en la respuesta **nada** que la explicara. **Se descartó exponer `density` como parámetro de la tool**: `monthly` multiplica el payload por ~5 (841 puntos) y sigue sin decir POR QUÉ cayó, solo dónde; un evento son ~90 bytes y contesta la pregunta entera.
-- `fire_target_series: f64[]`, `asset_series[].values: f64[]` — arrays grandes paralelos a `points` (también `f64`).
+- `asset_series[].values: f64[]` — arrays grandes paralelos a `points` (también `f64`).
+- **Estrategia y fases (5.0.0)** — la jubilación no es «un cruce»: es lo que decide la ESTRATEGIA del perfil (`users.retirement_profile.strategy`) MÁS el umbral de éxito.
+  - `strategy` (`asap` | `retire_at_age` | `coast` | `partial`; `null` en `household`). **`pension_bridge` ya no es una estrategia** (C7): el puente es un ajuste de la tarjeta Pensión disponible con cualquiera. Un perfil guardado con ese literal se lee como `asap` + puente encendido y viaja `strategy_pension_bridge_migrated` en `warnings`.
+  - **`jubilacion_month_index` := el mes EFECTIVO de jubilación del motor** (R8): `ProjectionOutput::retirement_month_index`, traducido de mes del BUCLE (1-based) a la REJILLA publicada (0-based) con `engine_month_to_grid` (`k − 1`; el primer mes vivido como jubilado es el `k` del motor y su mes civil es `ancla + (k−1)`). Leerlo de la SALIDA y no del solve es lo que garantiza que la fecha, `phase_transitions` y la serie no puedan discrepar: los tres salen de la misma ejecución.
+  - `retirement_month_index` / `retirement_series_position` — el MISMO valor que `jubilacion_month_index` / `jubilacion_series_position`, con el nombre del motor. Viajan los dos porque `jubilacion_*` es el contrato publicado desde 1.x y `retirement_*` es el nombre del resto de las lecturas de fase. `safe_date_month_index` / `safe_date_series_position` son **la misma fecha una tercera vez**, con el vocabulario del modelo v2.
+  - `jubilacion_absent_reason` — por qué los `jubilacion_*`/`retirement_*` están vacíos **por construcción**: `household_aggregate` | `birth_date_missing` | `months_override`, los mismos literales que `plan_absent_reason` porque la causa es la misma. `null` ⟺ hay plan, y entonces un índice nulo significa «ningún mes del horizonte cumple el umbral» (`retirement_date_basis: "not_reachable"`), que es un RESULTADO y no un hueco.
+  - `phase_transitions[]` = `{phase: accumulating|partial|retired, month_index}` en la rejilla publicada — la fuente del carril de fases del chart (D29). El orden ES el dato: las fases son monótonas y la que no ocurre no aparece.
+  - `pension_start_month_index`, `partial_retirement_month_index` — rejilla 0-based: primer mes con pensión con fecha / primer mes de media jornada; `null` si esta simulación no atraviesa esa fase — porque el perfil no la declara, porque la ESTRATEGIA no usa el bloque que la declara (la media jornada solo entra con `strategy: partial`), o porque no se pudo resolver. **`pension_absent_reason`** (B4) distingue el último caso: `birth_date_missing` = hay pensión declarada y sin fecha de nacimiento no hay edad que convertir en mes. `null` ⟺ entró, o no hay ninguna declarada.
+  - **`assets_depleted_month_index` también va por `engine_month_to_grid` desde 5.0.0 (#210, breaking)**. Se publicó en meses del BUCLE desde 4.6.0/#119 y era el ÚNICO índice de la respuesta desplazado un mes respecto de `points[].month_index`: compararlos, o usarlo para buscar un punto, daba un mes de más. El mes civil no se mueve; cambia el nombre del mes. Vale también en `members[]` y en los dos lados de `simulate_projection`.
+  - `warnings[]` — literales cerrados: `birth_date_missing` / `target_retirement_age_missing` (falta el dato que la estrategia por edad necesita); `strategy_pension_bridge_migrated` (C7); `pension_unpaid_during_partial` (B9: la pensión empieza DENTRO de la media jornada y `fraction_while_partial` es 0 — el supuesto conservador por defecto, que se avisa en vez de cambiarse); `no_volatility_declared` (C5: ningún activo líquido declara σ, así que los miles de caminos son el MISMO camino y el éxito solo puede valer 0 o 1 — aviso, **no bloqueo**); `coast_not_reachable`, `partial_never_starts`, `partial_never_fully_retires`, `retire_at_age_underfunded` (del solve estocástico); `partial_phase_capital_shrinking` (del bucle). **Nunca un 500 en una lectura**; en `household` va vacío y los avisos viajan por miembro.
+  - **Un solo trigger, y SIEMPRE forzado**: el `PhasePlan` que sale del ensamblado lleva siempre `RetirementTrigger::AtMonth` y `crossing_is_reading_only: true`. El mes lo pone el plan (el umbral o la edad) o, sin plan, **`horizonte + 1`** — «no se jubila dentro del horizonte», que es la línea honesta y no una fecha inventada (C5). Consecuencia observable: **un `?months=` publica la trayectoria SIN jubilarse**, con `plan_absent_reason: "months_override"`. Pin: `projection_strategies.rs::the_engine_always_receives_a_forced_month`.
+  - `R` = `months_until_target_age(hoy, DOB, edad) + 1` (mes del bucle), definido sobre `age_completed_years` + `proj_add_months` — la aritmética que ya publica `jubilacion_age`—, lo que compra un invariante comprobable: **`jubilacion_age == target_retirement_age` exactamente**. Tests: `apps/api/tests/projection_age_strategy.rs`.
+  - La **regla de retirada** y su `spend_mode` se pasan desde el perfil (`withdrawal_rule_to_engine`, traducción total sin brazo comodín). Con `fixed_real` (el default) es bit-idéntico a 4.15.x; las otras tres se simulan desde WP2. **U4**: el `pct`/`start_pct` que llega al `PhasePlan` es el RESUELTO —`withdrawal_rule_to_engine` llama a `resolve_withdrawal_rule` con el `swr_pct` del perfil—, así que la herencia llega al motor y no solo al formulario (pin: `projection_strategies.rs::an_omitted_withdrawal_pct_reaches_the_engine_as_the_swr`).
+  - **La puerta de tasa inicial entra SIEMPRE que haya SWR** (C1/C2): `phase_plan.initial_rate = Some(InitialRateGate { swr_pct, bridge })`, con `bridge` solo si la pensión con fecha se resolvió y `bridge_enabled`. No es un ajuste opcional: es el modelo — el SWR dejó de dimensionar un objetivo y pasa a ser la tasa de retirada INICIAL máxima, evaluada UNA vez en el mes en que el hogar se jubila. `None` solo con `swr_pct <= 0`: una puerta con tope 0 tumbaría todos los caminos por F2.
+  - **S8 — el modo del número FIRE gobierna el GASTO que el bucle drena**, no solo un escalar: con `manual` el gasto de jubilación es `fire_number_manual_amount / 12` (bruto: los ingresos que persisten lo cubren en parte, igual que con el gasto del ledger) y con `current_income` es el ingreso regular de hoy. Con `annual_expense` (el default) sigue mandando el gasto de jubilación del ledger, y ni un hogar de 4.15.x ve moverse su serie. Hasta 4.15.x el modo solo dimensionaba un objetivo y el bucle drenaba siempre el gasto del ledger: un usuario que declaraba «quiero vivir con 40.000 € al año» veía ese número en la tarjeta y se simulaba gastando otra cosa.
+- `points[].withdrawal` / `withdrawal_shortfall` / `withdrawal_excess` (5.0.0, §B.8) — **flujos del MES**, no acumulados, serializados como `f64` como el resto de la serie y decimados por densidad igual que `net_worth`. `withdrawal` = los euros que salieron de los activos para cubrir el déficit (NETOS: el impuesto de la plusvalía se paga vendiendo de más, y ese exceso vive dentro del patrimonio); `withdrawal_shortfall` = `max(0, necesidad − permitido)` — **informativo**, no resta patrimonio, no cuenta como fracaso (D22/D24) y **no es** `uncovered_deficit_total`, que mide lo que los activos no pudieron vender; `withdrawal_excess` = el sobrante de la regla en modo `rule_is_spend`. Los dos últimos son **todo ceros con `fixed_real`** —que no tiene techo que recortar ni exceso que gastar—, y los llenan las otras tres reglas (WP2). Pin: `projection_number_semantics.rs::the_withdrawal_series_are_monthly_flows_and_the_positions_index_the_arrays`.
+- **`points[].unmet_need` (5.0.0, pase de correcciones de la revisión adversarial)** — **el gasto del MES que los activos no pudieron financiar**, neto y `≥ 0`: el incremento mensual de `uncovered_deficit_total`. Mismo tratamiento que sus vecinos (f64 chart-only, misma decimación por densidad); `0` en el índice 0 —que es el estado de hoy, no un mes simulado— y en todo mes que la cartera pagó entero. **No se publica en `members[].series`**, que sigue siendo mínima (patrimonio + líquido). **Son TRES magnitudes por mes y no dos**, y confundirlas fue el hallazgo B2 de la revisión: `withdrawal` es lo que se OBTUVO, `withdrawal_shortfall` lo que la REGLA rechazó y `unmet_need` lo que la CARTERA no pudo dar; su suma es la necesidad neta del mes (la identidad exacta —con el `withdrawal_excess` de `rule_is_spend` RESTANDO, porque es gasto discrecional que ya viaja dentro de `withdrawal`— está en [`engine.md`](engine.md), y la comprueba `crates/engine/tests/fuzz_invariants.rs` sobre 1.500 hogares aleatorios). Sin esta tercera columna cualquier cociente de cobertura miente **justo en el caso que importa** —la cartera agotada—, porque con `fixed_real` el recorte de la regla es cero por construcción: es la misma corrección que arregló `withdrawal_to_need_ratio_p50` en `/v1/projection/bands`. El motor conserva en su acumulador el operando literal de 4.15.0 —`after_tax(gross_up(n))` devuelve `n` solo hasta el redondeo a 28 dígitos—, así que su serie llega con una polvareda de ±1e-25 € **incluso en un hogar perfectamente solvente** (medido: 7 de 66 puntos en el arnés de `mcp_simulate`). **Lo que se publica va clampado a 0 Y redondeado a la escala monetaria** (`money_out`, 4 decimales), a diferencia de sus tres vecinos, que viajan crudos: es la única columna del punto cuyo SIGNO se lee como un veredicto —«este mes no se cubrió»—, y servir la polvareda encendería meses en rojo al azar. `> 0` significa euros de verdad. El motor no puede clamparla (movería el pin dorado); quien publica, sí. Pins: `projection_number_semantics.rs::unmet_need_is_non_negative_starts_at_zero_and_adds_up_to_the_uncovered_total` (incluida la identidad Σ mensual = `uncovered_deficit_total`) y su espejo solvente.
+- `members[]` (5.0.0, D9) — vacío en `mine`, una fila por miembro en `household`. Ver el bloque de agregación de arriba.
+- **EL BLOQUE «PLAN» (5.0.0, modelo de jubilación v2)** — todo `null`/vacío en `household` y siempre que haya `plan_absent_reason`. Lo resuelve `handlers/retirement_solver.rs`, **el único sitio de la API donde el sorteo elige un mes**, en DOS niveles cuya diferencia es observable:
+  - **Nivel 1 — viaja en la PRIMERA respuesta** porque la pantalla no significa nada sin él. Corre SÍNCRONO dentro del miss de proyección, bajo el mismo permiso de `heavy::run_projection_sim` que la serie (**≈ 2–5 s medidos en release**; en `debug` un orden de magnitud más). Publica la fecha, el éxito, el capital necesario hoy y el solve de la estrategia.
+  - **Nivel 2 — llega después**, en `tokio::spawn` bajo UN permiso del semáforo y deduplicado por `AppState::plan_inflight`: la curva de capital por edad, las fechas al 100 % y al 90 % y el éxito por año. Cuesta decenas de segundos, y mientras tanto `needed_capital_curve_state` vale `computing`. Se cose **al SERVIR**, sobre un CLON de la respuesta cacheada (`attach_plan_extras`, patrón `summary.rs::attach_success`): escribirlo dentro de la entrada haría que una respuesta guardada cambiara de contenido sin cambiar de clave.
+
+  | Campo | Nivel | Qué es |
+  |---|---|---|
+  | `retirement_date_basis` | 1 | **Quién decidió la fecha**: `success_threshold` (la decidió el UMBRAL) \| `target_age` (es un DATO del usuario; el umbral no la mueve, solo dice si se llega) \| `not_reachable` (**ningún mes del horizonte cumple**, y entonces `jubilacion_month_index` es `null` y `success_of_plan` describe el mejor intento observado). `null` ⟺ no hay plan |
+  | `success_threshold_pct` | 1 | El umbral del perfil ecoado (80..=100, default **95**). Una fecha sin su umbral no se puede comparar con otra |
+  | `safe_date_month_index` / `_series_position` / `_date_ymd` / `_age` | 1 | **La misma fecha que `jubilacion_*`**, con el vocabulario del modelo. Se derivan de la misma variable para que no puedan divergir |
+  | `safe_date_is_approximate` | 1 | `true` ⟺ **la CONFIRMACIÓN no cerró**: ni el mes que la búsqueda verificó ni los siguientes cumplieron con el presupuesto grande, y se publica el que más cerca quedó. La fecha se publica igual —«no lo sé» no es «no existe»— pero DICIÉNDOLO: tragarse este flag convertiría una fecha aproximada en una verificada |
+  | `safe_date_at_100_month_index`, `safe_date_at_90_month_index` | **2** | Las dos fechas de referencia («¿y si quisiera dormir del todo tranquilo?»). `null` mientras `needed_capital_curve_state` sea `computing`, y también si no se alcanzan |
+  | `success_of_plan` | 1 | **FRACCIÓN** (`"0.9600"` = 96 %) de caminos que aguantan hasta el horizonte jubilándose en la fecha publicada. Estimador puntual |
+  | `success_wilson_low` | 1 | **FRACCIÓN**: la cota inferior del intervalo de Wilson al 95 %. **Es el número contra el que se compara el umbral** por debajo de 100 (C3): estable frente a la semilla y a `N`, que es justo lo que el estimador puntual no era. Nunca llega a 1 |
+  | `success_sampling_error_pp` | 1 | **PUNTOS PORCENTUALES** (`"0.1534"` = 0,15 pp): la distancia del estimador a la cota de Wilson. **Nunca 0**, ni con cero fallos — una barra de 0 diría «100 % seguro» con una muestra finita |
+  | `paths_used`, `seed` | 1 | El `N` de la medición y la semilla, ecoada como **string** (un `u64` grande no sobrevive al `number` de JSON). Una probabilidad sin su `N` no se compara; un sorteo sin su semilla no se reproduce, y por tanto no es un resultado |
+  | `needed_capital_today` | 1 | **Capital necesario HOY en euros de HOY**, redondeado a cientos hacia arriba: el líquido con el que TU cartera cumpliría el umbral jubilándote ya. Es la cifra que sustituye al «objetivo FIRE» como número de referencia, y la MISMA en Jubilación, Resumen y Proyección. `null` ⟺ hay `needed_capital_absent_reason` (`no_liquid_assets` \| `threshold_unreachable` \| `month_beyond_horizon` \| `already_covered`) — **nunca un 0 €**. Los tres primeros son «este método no puede medirlo»; **`already_covered` es una RESPUESTA** —«no hace falta capital adicional hoy»: con la cartera dividida por 256 el plan sigue cumpliendo, así que la necesidad cae por debajo de `λ_min × tu líquido`— y quien la enseñe debe decirlo con palabras, no con un guion |
+  | `needed_capital_curve` | **2** | **PARALELA a `points[]`** (una entrada por punto) y en euros **NOMINALES** de cada mes. **Qué mide cada nodo (C9, 2026-09-07): «lo que necesitas TENER (líquido) a esa edad para jubilarte entonces al umbral»** — la acumulación hasta el mes anterior NO se sortea (es la línea determinista) y solo se sortea el tramo jubilado, así que todos los caminos llegan al nodo con esa misma cifra. **No** es el percentil de la cartera de hoy proyectada hasta esa edad, que es lo que publicaba antes y lo que hacía la curva crecer sin techo con el horizonte (medido en P9: 2,9 M€ → 93,5 M€ en euros de hoy entre el mes 1 y el 840). Nominal a propósito: la curva se dibuja CONTRA la trayectoria del patrimonio, que es nominal, así que un nodo en euros de hoy se compararía con la línea en el mes equivocado. Quien la quiera «en dinero de hoy» deflacta curva y línea a la vez con el MISMO factor. **NO tiene por qué CRUZAR la línea en la fecha** —en el modelo v2 la fecha la deciden los caminos que aguantan, no un cruce—; el nodo del mes del plan se evalúa para que la curva tenga una medición EN la fecha, no para forzar un cruce ahí. La rejilla evaluada es gruesa (cada cinco años **más el mes del plan**), así que **la mayoría de las posiciones son `null`**, y un `null` significa **«aquí no se midió» o «aquí no hace falta capital adicional hoy»** (motivo interno `already_covered` del solver — en el wire el nodo queda `null`, sin campo aparte —, lo normal a partir del mes en que la pensión cubre el gasto), jamás «aquí hacen falta 0 €» — y por eso no se interpola. En el mes 0 coincide exactamente con `needed_capital_today` (el factor de inflación en el índice 0 es 1) |
+  | `needed_capital_curve_state` | — | `ready` \| `computing` \| `unavailable`. **`computing` y `unavailable` no significan lo mismo**: uno dice «todavía no» y el otro «no se puede», y confundirlos enseña un hueco definitivo donde hay una cuenta corriendo |
+  | `contribution_required_monthly` | 1 | Aportación extra mensual mínima para que la fecha sea válida, **plana y nominal**, redondeada a decenas hacia arriba. Solo existe donde la fecha es un DATO (`retire_at_age`, `coast` modo A): con la fecha decidida por el umbral no hay «cuánto me falta para esa fecha». `"0.0000"` = no te falta nada, que es una respuesta; `null` con `contribution_underfunded: true` = **ni el techo llega** (y ahí NO se publica el techo como si fuera la respuesta, que es lo que hacía 4.15.x) |
+  | `contribution_required_search_ceiling` | 1 | El techo que la bisección estuvo dispuesta a explorar. No es «lo que el hogar puede aportar»: es la cota, y es lo que da sentido al infra-financiado |
+  | `contribution_underfunded` | 1 | `true` ⟺ ni el techo cumple el umbral. **No es un error**: la simulación existe, se jubila en la fecha pedida y se publica entera. `null` = la pregunta no se hizo — **nunca `false` para decir «no aplica»** |
+  | `coast_stop_month_index` | 1 | **`C`**: el primer mes en que se puede dejar de aportar (`coast` modo A, RESUELTO) o el que el usuario fijó (modo B, ecoado). `null` fuera de `coast`, o si no hay ninguno (y entonces viaja `coast_not_reachable`) |
+  | `partial_start_month_index` | 1 | **`S`**: el primer mes en que puede empezar la media jornada (modo «en cuanto pueda», RESUELTO) o el que el usuario fijó (modo edad, ecoado) |
+  | `success_by_retirement_year[]` | **2** | `{month_index, success}` por aniversario: la tira bajo el eje |
+  | `plan_absent_reason` | — | **Por qué no hay plan**: `birth_date_missing` (C5) \| `months_override` (`?months=` salta la cache, y con ella el plan: biseccionar sobre miles de caminos detrás de un parámetro de query pondría decenas de segundos de CPU ahí) \| `household_aggregate` (el hogar suma N planes; `members[].plan_state` dice `household_not_solved` por miembro). `null` ⟺ hay plan. **La serie determinista se publica igual**: un plan ausente no es una respuesta vacía, es una respuesta sin fecha |
+  | `fire_number_classic_today` | — | **El número FIRE CLÁSICO en euros de HOY** (`gross_up(gasto anual)/SWR` + término de deuda, evaluado en el índice 0). Es la referencia que todo el mundo conoce —«25 veces tu gasto»— y desde 5.0.0 **solo eso**: no dispara la jubilación, no dimensiona nada y no se compara con nada. La cifra que decide es `needed_capital_today`, que sale del sorteo y sí tiene en cuenta la volatilidad, la pensión y la secuencia de rentabilidades. `null` ⟺ hay `fire_number_classic_absent_reason` (`manual_amount_missing` \| `net_need_not_positive` \| `swr_not_positive` — **renombrado desde `fire_target_absent_reason`**: los literales y la causa son los mismos, pero lo que falta ya no es un objetivo que dispare nada) |
+
+  **La cache del plan es DIRECCIONADA POR CONTENIDO** (`AppState::plan_cache`, clave `PlanKey` = hash de `ProjectionInput` + volatilidades + umbral + caminos + semilla). **No entra en `invalidate_projection_by_*`** y no es un olvido: una entrada obsoleta es **inalcanzable**, nunca peligrosa — nadie puede volver a pedirla sin reconstruir exactamente el hogar que la produjo. Lo único que hay que evitar es que crezca, y de eso se ocupan el TTL (el de la proyección) y el tope LRU. `ProjectionCacheEntry.plan_key` es lo que permite que un **HIT** de la serie encuentre sus extras sin rehacer el ensamblado. La densidad **no** entra en la huella: es una decisión de serialización, así que `monthly` y `hybrid` comparten plan. Tests: `apps/api/tests/projection_plan_solve.rs`, `projection_cache.rs`.
+- **`uncovered_deficit_total` se CLAMPA a ≥ 0 al publicar** (5.0.0 WP5-2b). El motor lo acumula
+  como residuo de ventas brutas y puede salir con una cola de redondeo de orden −5e-25 (declarado
+  en `MonthSale::account`). Eso no es «medio cuatrillonésimo de euro descubierto», es cero. Se
+  corrige aquí y no en el motor: su aritmética la hashea el golden, y quien redondea para un
+  humano es la capa que serializa.
+- **Coste medido** (release, hogar rico: 4 activos, hipoteca francesa al 3 %, dos Próximos,
+  horizonte 840 meses, densidad mensual; media de 3). La parte DETERMINISTA de un MISS son
+  **5–100 ms** según la estrategia (`asap` 5 ms · `coast` 19 ms · `retire_at_age` 41 ms ·
+  `partial` con pensión y edad 100 ms) y un HIT son 1–3 ms. **Desde 5.0.0 el MISS paga además el
+  NIVEL 1 del plan**: ≈ 2–5 s de sorteos (`retirement_solver`, tabla de costes en el doc del
+  módulo). Un HIT sigue costando lo mismo — el plan viaja dentro de la respuesta cacheada— y el
+  nivel 2 no se espera nunca.
+  - **El nivel 1 se paga por DENSIDAD**, porque la cache de proyección es por `(instalación,
+    vista, usuario, densidad)` y cada MISS reconstruye su respuesta entera. El warm-up de login
+    calienta las dos, así que un login cuesta dos solves. La cache de PLAN (nivel 2) sí se
+    comparte entre densidades: su clave es el contenido, y la densidad no entra en la huella.
 - `points[].net_worth_liquid` (4.8.0, #143) — la riqueza **líquida** de cada punto (Σ activos `is_liquid`, BRUTA, sin restar principal — `surplus_cash` retirado del término en 4.12.1/#175), escalar por punto serializado como `f64` como sus vecinos. Es **la serie contra la que se decide el cruce FIRE** — `net_worth` (total) se sigue publicando y pintando, pero cruzar con él contaba la vivienda como si pudiera pagar la compra del mes. Emparejada con el término de deuda del objetivo (#142): quien no resta el principal en la base debe cubrir TODAS las cuotas pendientes en el objetivo (algebraicamente equivalente al par «NW neto vs base + interés restante»).
-- `fire_target_debt_component` (4.8.0, #142; Decimal-string, opcional) — el término de deuda del objetivo **en el mes 0**: Σ de todos los pagos de cuota pendientes (cuota + extra + comisión) + cola residual. `fire_target_series[p]` ya lo lleva dentro (la serie es base inflada + término decreciente); este escalar existe para que la vista Jubilación sume al objetivo del formulario el componente que la forma cerrada del cliente no modela. Con deuda viva **el objetivo deja de ser monótono** (base creciente + término decreciente; con inflación 0, estrictamente decreciente).
+- ~~`fire_target_debt_component`~~ (4.8.0, #142) — **retirado en 5.0.0** con el objetivo determinista. El término de deuda sigue existiendo dentro del motor (`FireTarget::debt_payments_remaining`) y entra en `fire_number_classic_today`, pero ya no viaja por separado: existía para que la vista Jubilación sumara al objetivo del formulario el componente que la forma cerrada del cliente no modela, y ese objetivo dejó de ser el listón del plan.
 - `net_recurring_monthly` / `net_cash_monthly` (semántica 4.8.0, #127) — convergen al **primer paso real del motor** (`first_month_allocation`): el servicio de deuda es el que se paga de verdad el mes 1 (`min(cuota, payoff)` + extra + comisión, no la cuota nominal) y `net_cash_monthly` incluye el tramo de Próximos del mes 1. Hasta 4.7.x se recalculaban aparte con la cuota nominal y las dos superficies publicaban dos «cajas del mes» distintas (300 € de brecha en el escenario del issue). Sin activos ya no hay atajo a ceros (el engine calcula la caja igual). Fallback a la fórmula nominal solo si el engine devuelve error.
 - `points[].net_worth_real` + `deflation_annual_inflation_percent` (4.4.0, Fase 6) — el patrimonio de cada punto **en euros de hoy**, servido en vez de rehecho por cada cliente, y la base con la que se calculó (Decimal-as-string; la asunción de la instalación, rango [−2, 50] desde 4.9.0 — con deflación el deflactor es > 1 y lo real queda POR ENCIMA de lo nominal). `net_worth_real` es un escalar por punto serializado como `f64` (`serialize_decimal_as_f64`), misma excepción chart-only que sus vecinos `net_worth`/`contributed_capital` — **no** un array nuevo. (En `GET /v1/projection/deflate`, en cambio, todo viaja como Decimal-as-string: ahí no hay chart que alimentar.) **Fórmula**: `net_worth / (1 + i/100)^(month_index/12)` vía `deflator_at_month_index`, con el exponente sacado del **`month_index`, jamás de la posición del array** — es literalmente el bug de v1.4.2, y con `density=hybrid` (la que fuerza la tool MCP) las dos lecturas divergen de verdad. **Se publica SIEMPRE, también con inflación 0** (donde el deflactor es exactamente `1` y el par sale como el mismo número): omitirlo dejaría al consumidor sin distinguir «no hay inflación» de «esta versión no publica el campo». Contraste deliberado: `milestones_real` sí queda vacío con inflación EXACTAMENTE 0, contrato previo intacto — con inflación negativa (#146) se publica, y los hitos reales llegan ANTES que los nominales. **Esto NO reabre el motor «real puro»** rechazado en v1.2.0 (`futurefin-failure-archaeology` §1 fila 3): el motor sigue simulando 100 % en nominal y esto es capa de presentación — la forma testable de esa afirmación es la igualdad de arriba, o sea cero información que el motor no haya producido ya.
 - `savings_source` + `savings_income_basis` / `savings_expense_basis` (v2.2.0; los `*_basis` sustituyen al escalar `savings_source_months_with_data` desde 3.9.0; su denominador se llama **`avg_months`** desde 4.0.0 — ver la nota de renombrado en §Summary) — fuente del ahorro **efectiva** (tras el fallback) que produjo `monthly_delta_assumption`, y de qué meses sale cada lado del promedio; mismo naming y semántica que en `/v1/summary`. Aditivos: los sirve `BuiltProjection` sin queries extra, para que el chart etiquete la base del Δ mensual sin pedir `/v1/summary`.
 
-**Estados de fallo (4.6.0, #119)** — la superficie HTTP publica lo que el motor ya calculaba: `assets_depleted_month_index` (primer mes cuyo déficit iguala o supera TODO lo drenable — la cartera se vacía ese mes; `null` = no se agota en el horizonte), `uncovered_deficit_total` (déficit acumulado no cubierto, Decimal-string; ya se restaba de `net_worth`), **`unallocated_savings_total`** (4.12.1, #175 — Decimal-string; ahorro que ninguna regla de la cascada absorbió, acumulado; NO entra en `net_worth` ni en `contributed_capital` — el modelo se niega a simular un euro sin destino declarado; `"0.0000"` es el caso normal: en producción es inalcanzable con activos vivos, sumidero indestructible #176) + **`unallocated_savings_reason`** (`null` = no hay sobrante varado; `"no_assets"` = el scope no tiene activos; `"no_sink"` = hay activos sin sumidero habilitado — residual, mismo vocabulario que `/v1/allocation-rules/resolution`), `liabilities_negative_amortization[]` (pasivos cuya cuota no cubre el devengo — la deuda CRECE; más estrecho que `payment_does_not_reduce_principal`: un `interest_only` congelado NO aparece) y `fire_target_absent_reason` (`manual_amount_missing` | `net_need_not_positive` | `swr_not_positive`, los mismos literales que `simulate_projection` — nota: el primero no tiene camino vivo por la API, la escritura lo rechaza antes). `simulate_projection` gana además `assets_depleted_month_index` en ambos lados y su delta.
+**Estados de fallo (4.6.0, #119)** — la superficie HTTP publica lo que el motor ya calculaba: `assets_depleted_month_index` (**el mes en que la cartera se quedó sin nada Y eso costó dinero**; `null` = no se agota en el horizonte, y **también el aterrizaje exacto** — ver la definición de dos condiciones justo debajo; **desde 5.0.0 va en la rejilla 0-based** como todos los demás `*_month_index`, ver arriba), `uncovered_deficit_total` (déficit acumulado no cubierto, Decimal-string; ya se restaba de `net_worth`), **`unallocated_savings_total`** (4.12.1, #175 — Decimal-string; ahorro que ninguna regla de la cascada absorbió, acumulado; NO entra en `net_worth` ni en `contributed_capital` — el modelo se niega a simular un euro sin destino declarado; `"0.0000"` es el caso normal: en producción es inalcanzable con activos vivos, sumidero indestructible #176) + **`unallocated_savings_reason`** (`null` = no hay sobrante varado; `"no_assets"` = el scope no tiene activos; `"no_sink"` = hay activos sin sumidero habilitado — residual, mismo vocabulario que `/v1/allocation-rules/resolution`), `liabilities_negative_amortization[]` (pasivos cuya cuota no cubre el devengo — la deuda CRECE; más estrecho que `payment_does_not_reduce_principal`: un `interest_only` congelado NO aparece) y **`fire_number_classic_absent_reason`** (`manual_amount_missing` | `net_need_not_positive` | `swr_not_positive` — **renombrado en 5.0.0** desde `fire_target_absent_reason`: mismos literales y misma causa, pero lo que falta es el escalar informativo y no un objetivo que dispare nada; nota: el primero no tiene camino vivo por la API, la escritura lo rechaza antes). `simulate_projection` gana además `assets_depleted_month_index` en ambos lados y su delta.
+
+**`assets_depleted_month_index` exige DOS condiciones** (pase de correcciones de la revisión
+adversarial del motor, y vale igual en `members[]` y en los dos lados de `simulate_projection`):
+
+1. Es el **PRIMER mes cuya VENTA dejó lo vendible a cero**, o no se pudo fundar. Lo decide la
+   venta, medida sobre los saldos **DESPUÉS** de vender — no el viejo predicado «venta bruta ≥
+   drenable», que comparaba dos cantidades calculadas por caminos distintos y que `Decimal` y
+   `f64` resolvían al revés justo en el aterrizaje exacto (en `f64`, **cero volteos de depleción
+   tras el arreglo; antes 60**).
+2. **Desde ese mes en adelante, alguna venta se quedó sin fundar.** Sin ella, un puente que se
+   vacía EXACTAMENTE el mes en que entra una pensión que cubre todo el gasto posterior —un plan
+   perfecto— se publicaba como «cartera agotada» con `uncovered_deficit_total = 0`. **Ese
+   aterrizaje exacto es hoy `null`**, no una ruina.
+
+El corolario también se arregló: hasta 4.15.0 se podía publicar `uncovered_deficit_total > 0`
+junto a «nunca agotado» por una cola de un ULP: **184 → 47 casos por 3.000** entradas sintéticas, y
+los 47 que quedan traen un descubierto **≤ 5,6e-23 €** — la cola de redondeo del acumulador, no
+euros (es la misma cola que el clamp de publicación de arriba acota por abajo).
 
 > La misma excepción f64 cubre los arrays por punto de `GET /v1/history/series` (`points[].net_worth/assets_total/liabilities_total`, `asset_series[].values`, `markers[].total`) y la curva fina de `/v1/history/cashflow` — misma justificación chart-only. **Desde 4.4.0 los del histórico usan su propio serializador** (`serialize_decimal_as_chart_f64` / `serialize_opt_decimal_as_chart_f64`, privados en `handlers/history.rs`), que además **recorta a 2 decimales** (`CHART_DP`); `handlers/projection.rs` conserva `serialize_decimal_as_f64` (`pub(crate)`) sin recorte para la proyección. El motivo del recorte: los valores del histórico nacen de una interpolación (`(v1 − v0) · días/días` para activos, amortización francesa para pasivos), así que arrastraban la escala completa de `rust_decimal` al JSON — `78012.333333333333333333333` son 25 caracteres por punto × ~290 puntos × 4 series. Ningún consumidor los usa a esa precisión (el chart posiciona píxeles, un agente cita euros) y los trece decimales sobrantes solo sugerían una exactitud que la interpolación no tiene. Es redondeo de **publicación**, como `money_out` y `round_ratio`: la interpolación y el anclaje siguen exactos.
 
 **`GET /v1/projection/deflate` (4.4.0, Fase 6)** — convierte un importe entre euros nominales de un mes futuro y euros de hoy, **en las dos direcciones a la vez** (`deflator`, `amount_in_today_euros`, `amount_in_month_euros`). Query: `amount` (con signo) y **exactamente uno** de `month_index` (0..840) o `date` — la guardia es literalmente `month_index.is_some() == date.is_some()`, así que **mandar los dos Y no mandar ninguno** dan el mismo `deflate_timing_ambiguous`; una fecha pasada `deflate_date_in_past`, un mes fuera de rango `deflate_month_out_of_range` (por cualquiera de las dos vías, también desde una `date` lejana). **No acepta `?view=`**: la inflación asumida es de la **instalación**, no de una persona, así que un scope aquí sería un parámetro que no significa nada. No simula: reusa el mismo `deflator_at_month_index` que produce `net_worth_real` y `milestones_real` (un solo deflactor para las tres superficies, pineado en `projection_deflation.rs::the_served_deflator_is_the_one_behind_milestones_real`). Core `deflate_amount_core`.
 
-**Cache server-side**: `AppState` mantiene un cache in-memory por `(installation_id, view, owner_user_id, density)` (`ProjectionCacheKey`, `state.rs`) con sliding TTL de 60 min. **`owner_user_id` es SIEMPRE `Some(_)`, también en `household` (4.0.0)**: hasta entonces solo viajaba en `mine`, y la respuesta de `household` lleva demografía del **solicitante** (`viewer_birth_date`, el horizonte derivado de su edad, `jubilacion_age`, el eje de edades), así que el primer miembro que pedía la proyección dejaba la suya cacheada para todo el hogar — un miembro recibía la fecha de nacimiento de otro y, con el orden inverso, un horizonte de 360 meses en vez de 648: si su cruce FIRE caía en el mes 400, la app le decía «no llegas a jubilarte». Regresión: `apps/api/tests/projection_cache.rs`. Hits sub-ms; el GET sin cache hace el cómputo full (~500 ms). Invalidación automática: cualquier mutación en assets/liabilities/budget/planning/allocation/installation/user.birth_date llama `state.invalidate_projection_by_installation(iid)`; las mutaciones de **transactions** invalidan **solo en los modos que usan transacciones** (`fire_settings.savings_source ∈ {transactions_avg, budget_income_real_expense}`, i.e. `SavingsSource::uses_transactions()`; ver sección Transactions). Logout llama `state.invalidate_projection_by_user(user_id)` (solo `view=mine`). Warm-up: `tokio::spawn` tras `POST /v1/auth/login` recomputa `view=household` para que el primer GET sea hit. Sin warm-up tras mutación (evita race condition de warm-ups concurrentes).
+**Cache server-side**: `AppState` mantiene TRES caches in-memory. El de la serie va por
+`(installation_id, view, owner_user_id, density)` (`ProjectionCacheKey`, `state.rs`); el de las
+bandas de Monte Carlo, por `(installation_id, user_id, paths, seed, threshold_pct)`
+(`BandsCacheKey`, 5.0.0 — ver §Projection bands); y el del **plan de jubilación**, por un hash del
+contenido (`PlanKey`, ver más abajo). **Las dos invalidaciones borran los dos primeros mapas y
+NUNCA el tercero.** El resto de esta nota describe el primero: con sliding TTL de 60 min. **`owner_user_id` es SIEMPRE `Some(_)`, también en `household` (4.0.0)**: hasta entonces solo viajaba en `mine`, y la respuesta de `household` lleva demografía del **solicitante** (`viewer_birth_date`, el horizonte derivado de su edad, `jubilacion_age`, el eje de edades), así que el primer miembro que pedía la proyección dejaba la suya cacheada para todo el hogar — un miembro recibía la fecha de nacimiento de otro y, con el orden inverso, un horizonte de 360 meses en vez de 648: si su cruce FIRE caía en el mes 400, la app le decía «no llegas a jubilarte». Regresión: `apps/api/tests/projection_cache.rs`. Hits sub-ms; el GET sin cache hace el cómputo full (~500 ms). Invalidación automática: cualquier mutación en assets/liabilities/budget/planning/allocation/installation/user.birth_date llama `state.invalidate_projection_by_installation(iid)`; las mutaciones de **transactions** invalidan **solo en los modos que usan transacciones** (`fire_settings.savings_source ∈ {transactions_avg, budget_income_real_expense}`, i.e. `SavingsSource::uses_transactions()`; ver sección Transactions). Logout llama `state.invalidate_projection_by_user(user_id)` (solo `view=mine`). Warm-up: `tokio::spawn` tras `POST /v1/auth/login` recomputa **`view=mine`** del usuario que entra (`warm_up_mine_projection`, renombrado en 5.0.0) para que el primer GET sea hit — desde R2 esa es la vista por defecto y la que pide la SPA; calentar `household` dejaría en la cache una entrada que nadie consulta y que además cuesta N simulaciones. Sin warm-up tras mutación (evita race condition de warm-ups concurrentes).
+
+**Cache del PLAN (`AppState::plan_cache`, 5.0.0 — WP A3)**: el tercer mapa, y el único que **no se
+invalida**. Guarda el **nivel 2** del plan de jubilación —las fechas al 100 % y al 90 %, la curva de
+capital necesario por edad, la tira de éxito por año y el fallo acumulado por edad—, que cuesta del
+orden de **25 s de CPU** y por eso se calcula en `tokio::spawn` mientras la serie ya se ha servido.
+Handler: `handlers/retirement_solver.rs`.
+
+- **La clave es el CONTENIDO**: `plan_fingerprint(input, volatilidades, umbral, caminos, semilla)`,
+  un `DefaultHasher` sobre `format!("{input:?}")` más el resto. El `input` que se hashea es el que
+  produce `plan_scenario` — el que ya lleva el mes forzado, el corte de aportaciones y el inicio de
+  la media jornada que el nivel 1 decidió—, no el del ensamblado: hashear el de antes del solve
+  metería `asap` y `retire_at_age` en la misma clave, porque solo se diferencian en el trigger.
+  El hash es de **proceso** (SipHash no está garantizado entre versiones de Rust) y da igual: la
+  cache muere con el proceso. Es la diferencia con `seed_for`, que sí necesita estabilidad entre
+  builds y por eso escribe su propio FNV-1a.
+- **Por qué no entra en `invalidate_projection_by_*`**: porque una entrada obsoleta aquí es
+  **inalcanzable, no obsoleta-y-servible**. Cambiar un activo, el umbral o la semilla produce otra
+  clave, así que no existe ninguna petición que pueda servirse de la vieja por error — que es
+  justo lo contrario de lo que pasaba con `ProjectionCacheKey` antes de llevar `owner_user_id`.
+  Un `retain` por instalación no compraría nada y además **no podría escribirse**: la clave no
+  lleva `installation_id`, y llevarlo la haría dejar de ser una huella del contenido. Lo único que
+  hay que evitar es que crezca: TTL (el mismo de la proyección) + **LRU** sobre `last_used` con
+  tope `PLAN_CACHE_MAX_ENTRIES` (256), los dos aplicados dentro de `plan_cache_insert`.
+- **Tres estados, no dos**: sin entrada = `unavailable` («no se puede»); `PlanCacheSlot::Pending` =
+  `computing` («todavía no»); `Done` = `ready`, o la razón del fallo. Confundir los dos primeros le
+  dice al usuario que no hay curva mientras se está calculando. El `Pending` se registra **antes**
+  de que responda la petición que lo lanzó, por eso `spawn_plan_extras` es `async` (mismo
+  razonamiento que hizo que `refresh_projection_after_mutation` dejara de ser un `spawn`).
+- **Se guarda también el fallo**: un nivel 2 que falló ocupa su entrada hasta el TTL, porque
+  reintentar veinticinco segundos de sorteos en cada GET sería peor que decir «no disponible».
+- **Deduplicación**: `AppState::plan_inflight` (`Mutex<HashSet<PlanKey>>`). Dos peticiones
+  concurrentes del mismo hogar producen la misma clave y lanzan **un** solo cálculo.
+- **`ProjectionCacheEntry.plan_key: Option<PlanKey>`** es lo que permite que un HIT de la serie
+  mire el nivel 2 sin rehacer el ensamblado entero. `None` = esta respuesta no tiene plan
+  (`?months=`, miembro del hogar sin solve, usuario sin fecha de nacimiento — los casos con
+  `plan_absent_reason`).
 
 **Compresión**: todos los endpoints pasan por `tower_http::compression::CompressionLayer::new().gzip(true)`. `/v1/projection/series` baja de ~260 KB a ~30 KB con `Content-Encoding: gzip`.
 
-**Densidad (`?density=hybrid`)**: con `?density=hybrid` el response decima los arrays grandes (`points`, `fire_target_series`, `asset_series[].values`) a un patrón mixto — mes 0..12 mensual + mes 24, 36, … **y siempre el último mes del horizonte** (`density_month_indices`, `handlers/projection.rs`). Ese último empujón es de 4.0.0 y no es cosmético: el bucle anual solo emitía múltiplos de 12, así que con un horizonte que no lo fuera la serie se cortaba antes de tiempo sin decir nada — con `?months=100&density=hybrid` el último punto era el mes 96 y los meses 97–100 no existían en `points`, ni en `fire_target_series`, ni en `asset_series[].values`, y desaparecía el punto que cualquiera lee como «patrimonio al final»; con `?months=19` se perdía el 32 % del horizonte pedido. Invisible desde la web (el horizonte derivado siempre es años × 12) pero alcanzable por `?months=N` y por la tool MCP `get_projection`, que **fuerza** `hybrid` — o sea, era el camino por defecto de un consumidor conversacional. Pin: `hybrid_density_always_includes_the_last_month_of_the_horizon`. Total ~82 puntos en lugar de ~841. JSON ~5 KB. El compute interno del engine es idéntico (840 meses); solo cambia la serialización. Cada densidad tiene su propia entry en el cache (`ProjectionCacheKey.density`). Milestones, FIRE crossover y compound marker se calculan sobre el array full (no decimado) para no perder precisión. El campo `density: "monthly" | "hybrid"` viaja en el response para que el cliente sepa qué tiene.
+**Densidad (`?density=hybrid`)**: con `?density=hybrid` el response decima los arrays grandes (`points`, `needed_capital_curve`, `asset_series[].values`) a un patrón mixto — mes 0..12 mensual + mes 24, 36, … **y siempre el último mes del horizonte** (`density_month_indices`, `handlers/projection.rs`). Ese último empujón es de 4.0.0 y no es cosmético: el bucle anual solo emitía múltiplos de 12, así que con un horizonte que no lo fuera la serie se cortaba antes de tiempo sin decir nada — con `?months=100&density=hybrid` el último punto era el mes 96 y los meses 97–100 no existían en `points`, ni en las series paralelas, ni en `asset_series[].values`, y desaparecía el punto que cualquiera lee como «patrimonio al final»; con `?months=19` se perdía el 32 % del horizonte pedido. Invisible desde la web (el horizonte derivado siempre es años × 12) pero alcanzable por `?months=N` y por la tool MCP `get_projection`, que **fuerza** `hybrid` — o sea, era el camino por defecto de un consumidor conversacional. Pin: `hybrid_density_always_includes_the_last_month_of_the_horizon`. Total ~82 puntos en lugar de ~841. JSON ~5 KB. El compute interno del engine es idéntico (840 meses); solo cambia la serialización. Cada densidad tiene su propia entry en el cache (`ProjectionCacheKey.density`). Milestones, FIRE crossover y compound marker se calculan sobre el array full (no decimado) para no perder precisión. El campo `density: "monthly" | "hybrid"` viaja en el response para que el cliente sepa qué tiene.
+
+### `simulate_projection` (tool MCP, sin ruta HTTP) — **el what-if bajo el modelo v2 (5.0.0, WP A8)**
+
+What-if puro: dos ensamblados, dos planes, dos simulaciones, cero escrituras y **cero entradas de
+cache** (`simulate_never_touches_the_projection_cache`). Core `simulate_projection_core`
+(`handlers/projection.rs`); la capa MCP solo parsea strings. `view=household` es 400
+`household_not_simulable` — ver arriba.
+
+**Los dos lados resuelven su fecha con el sorteo, y con las MISMAS condiciones.** Cada lado llama a
+`solve_plan_level1_with_budget` (`handlers/retirement_solver.rs`, la única frontera del sorteo)
+con:
+
+- **la misma semilla**: la estable del usuario, `resolve_seed(iid, user, None)` — la misma con la
+  que `GET /v1/projection/series` resuelve su plan y con la que `/v1/projection/bands` dibuja su
+  fan chart. Un `monte_carlo.seed` mueve el SORTEO del eje, **nunca** la fecha (mismo contrato que
+  `?seed=` en las bandas);
+- **el mismo presupuesto de caminos**, publicado por lado en `date_solved_with_paths`:
+  `PlanBudget::SEARCH_ONLY` (500) por defecto, y `PlanBudget::FULL` (500 + confirmación con 2.500)
+  cuando se pide el eje `monte_carlo`. Buscar con 500 en un lado y confirmar con 2.500 en el otro
+  haría que un delta comparase dos tamaños de muestra en vez de dos planes.
+
+Con el presupuesto COMPLETO el lado baseline publica, **cifra a cifra, el mismo plan que
+`GET /v1/projection/series`**: misma entrada, mismas volatilidades, mismo umbral, mismos caminos y
+misma semilla ⇒ la misma `plan_fingerprint`, o sea un HIT de la cache de plan por construcción y no
+una segunda búsqueda que podría contestar otra fecha. Con el presupuesto de BÚSQUEDA la fecha es la
+misma (la confirmación amplía la muestra, no la cambia de sitio) pero la **barra de error** no:
+`success_wilson_low` y `success_sampling_error_pp` son función de `N`. Pins:
+`mcp_simulate.rs::the_baseline_side_is_a_plan_cache_hit` (identidad completa con presupuesto
+completo), `::baseline_without_overrides_matches_get_projection_and_scenario` (la fecha y el
+capital, con el presupuesto por defecto) y `::both_sides_solve_the_date_with_the_same_seed_and_paths`.
+
+**Lo que se SIMULA es el escenario del plan.** Tras el solve, cada lado pasa por `plan_scenario`
+—la misma función que `run_member_projection`—, que aplica el mes forzado, el corte de aportaciones
+y el inicio de la media jornada. Sin eso el bucle recibiría `AtMonth(horizonte + 1)` y la línea
+describiría un hogar que no se jubila nunca.
+
+**El bloque del PLAN, por lado** (todo `null` cuando hay `plan_absent_reason`): `retirement_date_basis`
+(`success_threshold` | `target_age` | `not_reachable`), `safe_date_month_index` (**el mismo valor**
+que `jubilacion_month_index`, que se conserva), `success_of_plan`, `success_wilson_low`,
+`success_sampling_error_pp` (PUNTOS PORCENTUALES, 4 dp), `success_threshold_pct`, `success_verdict`
+(`green|amber|red`, misma regla que las bandas), `date_solved_with_paths`, `needed_capital_today` +
+`needed_capital_absent_reason`, `contribution_required_monthly` +
+`contribution_required_search_ceiling` + `contribution_underfunded`, `coast_stop_month_index`,
+`partial_start_month_index`, `plan_absent_reason`, `warnings`.
+
+- **`plan_absent_reason` en el what-if solo puede valer `birth_date_missing`.** La serie veta
+  además con `months_override` porque un horizonte a medida salta su cache y con ella el sorteo;
+  aquí no hay cache que saltar, así que `months` es parte de la pregunta y se resuelve con él.
+- `success_threshold_pct` viaja **por lado** porque `profile_overrides` lo mueve: sin él, un
+  `jubilacion_months_delta` negativo se leería como una mejora del plan cuando puede ser
+  simplemente un listón más bajo.
+
+**El eje `monte_carlo`, por lado** (ausente ⟺ no se pidió): `success_probability`,
+`sampling_error_pp` (1 dp, como en las bandas), `failures_by_kind` `[F1, F2, F3]`,
+`failure_probability_by_age[]` (**el mismo tipo `FailureProbabilityPoint` y la misma función
+`projection_bands::failure_points`**), `months_below_need_p50`, `withdrawal_to_need_ratio_p50`. El
+bloque compartido `monte_carlo` mantiene solo `paths`, `seed` (string) y `any_volatility_declared`.
+Cotas: `paths` 1..=`MCP_MAX_PATHS` (**2.500** desde 5.0.0; HTTP llega a 5.000).
+
+**Deltas del plan** (`null` en cuanto falta una de las dos columnas — restar contra un «no aplica»
+inventaría un número): `jubilacion_months_delta`, `success_of_plan_delta` (FRACCIÓN, 6 dp; **no
+necesita el eje `monte_carlo`**: sale del solve), `needed_capital_today_delta`,
+`contribution_required_monthly_delta`, `coast_stop_months_delta`. Los `bool` y el veredicto **no
+tienen delta**: se leen comparando las dos columnas.
+
+**Renombrados y retiradas de 5.0.0** (la tool es MCP-only y el catálogo se regenera, así que el
+cambio es de contrato, no de compatibilidad HTTP):
+
+| antes | ahora | por qué |
+|---|---|---|
+| `fire_target_base` | `fire_number_classic_today` | el objetivo dejó de disparar nada; lo que queda es el «25× tu gasto» informativo, y el nombre viejo describía un listón que ya no existe |
+| `fire_target_absent_reason` | `fire_number_classic_absent_reason` | mismos literales (`manual_amount_missing` / `net_need_not_positive` / `swr_not_positive`), misma causa |
+| `fire_target_base_delta` | `fire_number_classic_today_delta` | idem |
+| `required_contribution_*`, `underfunded` | `contribution_required_*`, `contribution_underfunded` | mismo vocabulario que el bloque «plan» de la serie |
+| `coast_fire_month_index`, `coast_fire_months_delta` | `coast_stop_month_index`, `coast_stop_months_delta` | idem |
+| `success_probability_delta` | `success_of_plan_delta` | el delta que importa sale del SOLVE y existe sin pedir el sorteo |
+| `retirement_trigger`, `liquid_crossing_month_index` | — | el cruce contra un objetivo determinista dejó de decidir; quién decidió la fecha lo dice `retirement_date_basis` |
+| `disposable_monthly(_delta)`, `coast_number`, `partial_gap_target(_delta)`, `pension_coverage_ratio(_delta)`, `bridge_effective_withdrawal_pct(_delta)`, `bridge_discount_annual_pct`, `partial_phase_capital_growing` | — | murieron con el objetivo, el descuento del puente y el colchón |
+| `never_retired_probability`, `success_given_retired`, `underfunded_probability` | — | con el mes de jubilación FORZADO, «no jubilarse nunca» dejó de ser un desenlace del sorteo; la infra-financiación es `contribution_underfunded` (plan) y `1 − success_of_plan` |
+
+**Los tres ejes que cambiaron de mecánica sin cambiar de nombre:**
+
+- **`income_pause`** — el retraso ya no sale de `futurefin_engine::retirement_delay_months` (dos
+  simulaciones deterministas): con la fecha forzada eso publicaba `0` en toda estrategia por edad y
+  `null` en las demás, o sea «la excedencia no te cuesta nada» dicho al revés y en silencio. Ahora
+  `income_pause.baseline_month_index` sale de **un solve extra** del MISMO escenario sin la pausa,
+  con la misma semilla y el mismo presupuesto; `paused_month_index` es `scenario.safe_date_month_index`.
+  Lo paga solo quien pide el eje.
+- **`income_growth_real_pct_annual`** — la «primera pasada» que decide dónde se corta el
+  crecimiento es también **un solve**, por lo mismo: una proyección sin plan no tiene fecha que
+  devolver, el corte caía en el horizonte y el escenario cobraba nómina cuarenta años jubilado.
+  `income_growth_stops_at_month_index` sigue publicándose porque el corte sigue siendo aproximado.
+- **`solve.extra_monthly_expense_keeping_date`** — se resuelve sobre el escenario del PLAN, así que
+  la fecha que mantiene fija es la que el solve eligió. Y como esa fecha **no depende del gasto**,
+  la bisección agota su techo y devuelve el máximo sobrante mensual: un SUELO honesto («al menos
+  esto»), no un infinito. Lo que **no** promete es que el éxito aguante ese gasto — la fecha no se
+  mueve, pero gastar más deja menos capital; para eso se simula `extra_monthly_expense` de verdad.
+
+**Coste**: dos solves por llamada (en paralelo, bajo el semáforo de `heavy::run_projection_sim`),
+más uno por cada eje que necesita su propia sonda (`income_pause`, `income_growth_real_pct_annual`).
+Con el presupuesto de búsqueda son ≈ 2,5 s por lado sobre el caso P9; el eje `monte_carlo` los sube
+al presupuesto completo y añade `2 · paths` simulaciones f64.
+
+### Projection bands (`GET /v1/projection/bands`) — **5.0.0, Monte Carlo del PLAN**
+
+Bandas de percentil del patrimonio y del líquido, éxito del plan con su intervalo y su veredicto, y
+fallo acumulado por edad con el reparto por motivo. Superficie HTTP de
+`futurefin_engine_stochastic::project_percentile_bands`; handler
+`apps/api/src/handlers/projection_bands.rs`, montado dentro de `projection_router()`.
+
+| Query | Cota | Default | Fuera de rango |
+|---|---|---|---|
+| `view` | `mine` \| `household` | `mine` | `household` → **400 `household_bands_unavailable`**; otro valor → 400 `invalid_view` |
+| `paths` | `1..=5000` (`HTTP_MAX_PATHS`) | **2500** (`DEFAULT_BANDS_PATHS`) | 400 `paths_out_of_range` (se rechaza, **no se clampa**) |
+| `seed` | `u64` en dígitos decimales | `seed_for(installation_id, user_id)` (D23) | 400 `invalid_seed` |
+
+**Las tres cotas cambiaron en 5.0.0** (eran 500 / 2.000, y el MCP 1.000). El default **se desacopló
+del `DEFAULT_PATHS` del crate**, que sigue en 500: 500 caminos bastan para BUSCAR (comparar un mes
+con el siguiente) y 2.500 son los que hacen falta para PUBLICAR — su cota de Wilson con cero fallos
+es 0,99847, o sea una barra de error de 0,15 pp, y dejan alcanzable un umbral del 99 %. El techo
+MCP (`MCP_MAX_PATHS`) es **2.500**, la mitad del de HTTP: un agente en bucle es el llamante que más
+fácil satura el semáforo, y la diferencia estadística con 5.000 (barra de 0,1534 pp frente a
+0,0768 pp) es dos órdenes de magnitud menor que el ancho de la banda.
+
+**`DEFAULT_BANDS_PATHS` ES `retirement_solver::SOLVE_CONFIRM_PATHS`** — la constante del solver se
+define como este símbolo, no como un 2.500 escrito aparte. Es load-bearing: ver §La identidad.
+
+**No acepta `density` ni `months`.** La densidad es **siempre `hybrid`** (arqueología §2.18, veto 22:
+el mismo motivo por el que `get_projection` no lo expone — servir la banda mensual multiplicaría el
+payload por cinco sin responder ninguna pregunta nueva) y el horizonte es el derivado del perfil: un
+horizonte a medida cambiaría la banda y no cabe en la clave del cache.
+
+**Por qué el hogar no tiene bandas.** Los percentiles **no suman**: el p90 del hogar no es el p90 de
+Ana más el p90 de Bea, y con el shock de mercado común de D11 los dos miembros ni siquiera son
+independientes. Sumar las dos bandas daría una demasiado ancha en el centro y demasiado estrecha en
+las colas sin que ningún campo lo dijera. Es la misma razón por la que `simulate_projection` rechaza
+el hogar (`household_not_simulable`): un plan es de una persona.
+
+**Se sortea EL PLAN, no el ensamblado en crudo.** El ensamblado es el MISMO que el de la serie
+(`build_installation_projection_input` con `LedgerView::Mine`, el perfil resuelto del solicitante y
+su fecha de nacimiento) y encima se aplica `retirement_solver::plan_scenario`, que fuerza el mes de
+jubilación del nivel 1 — el de `BuiltProjection::plan_level1` si el ensamblado ya lo trae, y si no
+el de un `solve_plan_level1` que el handler corre con `built.plan_profile`. Hasta 4.15.x la
+jubilación la decidía un CRUCE dentro de cada camino, así que cada camino se jubilaba en un mes
+distinto y «éxito» mezclaba dos preguntas —¿ocurre? ¿aguanta?— en una cifra. **El `?seed=` mueve el
+sorteo, jamás el solve**: la fecha del plan se resuelve siempre con la semilla estable.
+
+Las volatilidades viajan en `BuiltProjection::asset_volatility_percent`, un vector **paralelo a
+`input.assets`** rellenado en el mismo `map` que los construye (una σ descolocada produce bandas
+estrechas y creíbles: el peor fallo posible aquí; regresión
+`projection_bands.rs::the_volatility_vector_follows_the_asset_order`).
+
+**La identidad con la serie.** Con el sorteo por defecto —`paths = DEFAULT_BANDS_PATHS` y la semilla
+estable— `success_of_plan` de esta respuesta es, **bit a bit**, el `success_of_plan` del bloque
+«plan» de `GET /v1/projection/series`: mismo escenario, misma semilla, mismo `N`, y los caminos
+dependen solo de `(semilla, índice de camino)`. Con `?seed=` o `?paths=` se re-sortea (otro mercado
+u otro tamaño de muestra) y la identidad no aplica — pero la FECHA no se mueve. Pin:
+`projection_bands.rs::the_bands_success_equals_the_plan_success_for_the_default_draw`.
+
+Response (`ProjectionBandsResponse`):
+
+- `view` (siempre `"mine"`), `months`, `horizon_basis`, `anchor_date_ymd`, `paths`, `percentiles`
+  (fijo `[10,50,90]`), `strategy`, `computed_in_ms`, `model_note`.
+- **`seed` es un STRING de dígitos**, no un número: es un `u64` y `JSON.parse` lo redondea por
+  encima de 2^53 — una semilla que cambia en el ida y vuelta no reproduce nada. Se acepta también
+  como string en `?seed=`.
+- `points[]` — `month_index` (**misma rejilla que `points[]` de `/series`**) + `net_worth_p10/p50/p90`
+  y `net_worth_liquid_p10/p50/p90`, f64 con **2 decimales** (excepción chart-only D4/I3, misma
+  resolución que `/v1/history/series`: el valor viene de un `f64` y publicar sus 17 dígitos sería
+  precisión inventada sobre el percentil de una muestra). Las tres del líquido las omite la tool MCP
+  salvo con `include_liquid_bands`.
+- **`success_of_plan` = la fracción de caminos SIN NINGÚN FALLO** (fracción, string, 6 dp — la misma
+  política que `savings_rate`). Hay **tres motivos de fallo y solo tres**, y el bucle clasifica el
+  PRIMERO de cada camino: F1 cartera agotada, F2 tasa inicial de retirada por encima del tope, F3 la
+  regla por saldo no llega a la necesidad ordinaria.
+  **Un camino solo puede fallar estando JUBILADO o en media jornada** (`sim_core.rs`: «un mes
+  acumulando con déficit puede vaciar la cartera, pero eso no es un plan de jubilación que falla»).
+  Consecuencia, y desde WP A12 **se declara aquí en vez de mandar a otro endpoint**: un escenario
+  sin mes de jubilación no puede fallar, así que estos cuatro campos van a `null` con
+  `success_absent_reason` (abajo) en vez de publicar el `success_of_plan = 1` y el veredicto verde
+  que publicaban hasta entonces. `BANDS_MODEL_NOTE` lo dice también para el consumidor que solo ve
+  el JSON. Pins: `a_plan_with_no_reachable_date_draws_the_line_that_never_retires` (la trayectoria)
+  y `a_plan_without_a_reachable_date_publishes_null_success_with_its_reason` (el hueco).
+- `success_threshold_pct` (`80..=100`) — **el umbral del perfil, ecoado**, porque es la restricción
+  que decidió la fecha y el listón del veredicto. Un color sin su umbral no se puede auditar. (En la
+  primera vuelta de 5.0.0 —V7— el corte era fijo al 100 % y este campo no viajaba; el modelo v2 lo
+  devolvió al perfil como restricción load-bearing.)
+- `success_wilson_low` (fracción, string, 6 dp) — **cota inferior del intervalo de Wilson al 95 %**,
+  y **el número contra el que se compara el umbral** por debajo de 100 (C3). Wilson y no la
+  aproximación normal: con `p̂ = 1` la normal da barra exactamente cero y declararía «100 % seguro».
+- `success_sampling_error_pp` (string, **1 decimal**) — la distancia del punto a la cota, en puntos
+  porcentuales: la barra que se dibuja hacia abajo. **Nunca 0 con cero fallos** (0 de 2.500 son
+  0,1534 pp → `"0.2"`); el único 0 posible es el simétrico, con TODOS los caminos fallidos, donde la
+  cota vale 0 exacto porque una probabilidad no baja de cero. **La serie publica esta misma medición
+  con CUATRO decimales** (`retirement_solver::SAMPLING_ERROR_DP`): allí es una cifra auditable del
+  solve, aquí la barra de un gráfico. Misma medición, distinta precisión de publicación.
+- `success_verdict` ∈ `green` | `amber` | `red` (o `null`, ver `success_absent_reason`) — el
+  semáforo, con **la misma regla con la que el solver decidió la fecha** (`SuccessAt::meets`):
+  `verde ⟺ (umbral < 100 ⇒ wilson_low ≥ umbral/100; umbral = 100 ⇒ cero fallos)`;
+  `ámbar ⟺ no verde pero success_of_plan ≥ umbral/100` (el estimador puntual llega, el intervalo
+  no); `rojo` el resto. **Con umbral 100 no hay ámbar** (cumplir es «cero fallos», que es
+  exactamente `success = 1`). Y el verde depende del `N` **de este sorteo**: con cero fallos la cota
+  topa en `n/(n+1,96²)`, así que un umbral del 95 % exige al menos **73 caminos** y el del 99 %,
+  **381**. El plan no se resiente —se resuelve siempre con 500/2.500—, solo el color de un sorteo
+  pedido con pocos caminos.
+- `success_absent_reason` (string o `null`, **5.0.0 WP A12**) — **por qué no hay éxito que
+  publicar**, y con él las CUATRO cifras de arriba (`success_of_plan`, `success_wilson_low`,
+  `success_sampling_error_pp`, `success_verdict`) van a `null`. Dos literales alcanzables:
+  `not_reachable` (hay plan y ningún mes del horizonte cumple el umbral — el MISMO literal que
+  `retirement_date_basis` en la serie) y `birth_date_missing` (el `plan_absent_reason` del
+  ensamblado, propagado tal cual). Los otros dos `plan_absent_reason` **no llegan aquí**:
+  `months_override` necesita un `?months=` que este endpoint no acepta y `household_aggregate` un
+  `view=household` que es 400.
+
+  **El bug que cierra**: el motor solo clasifica fallos estando jubilado o en media jornada, así que
+  el escenario sin fecha —que se jubila en `horizonte + 1`— no puede fallar ni una vez, y la
+  respuesta publicaba `success_of_plan: "1"` con `success_verdict: "green"` sobre un plan que no
+  existe, más una nota pidiendo que se fuera a mirar `retirement_date_basis` a OTRO endpoint. Se
+  decide **antes del sorteo** (`PlanLevel1::forced_month` / `BuiltProjection::plan_absent_reason`),
+  no por el resultado: un plan perfecto y un plan que no ocurre dan el mismo `1`. Lo que **sí se
+  sigue publicando** son las bandas, `failures_by_kind`, `failure_probability_by_age`,
+  `months_below_need_p50` y `withdrawal_to_need_ratio_p50` — la trayectoria SIN jubilarse, donde un
+  0 significa «sin jubilación no hay fallo que contar», no «riesgo cero». Pins:
+  `projection_bands.rs::a_plan_without_a_reachable_date_publishes_null_success_with_its_reason` y
+  `::without_a_birth_date_the_bands_publish_the_same_reason_as_the_series`.
+- `failures_by_kind: [u32; 3]` — contadores del primer fallo de cada camino, en el orden
+  `[F1, F2, F3]` (los mismos índices que `KIND_*` del crate). Suma `paths − paths·success_of_plan`.
+  Se publican **crudos** porque F1, F2 y F3 tienen arreglos OPUESTOS (más capital / retrasar la
+  fecha / cambiar la regla) y una sola «probabilidad de ruina» los confundía.
+- `failure_probability_by_age[]` — `{month_index, age, probability, by_kind}` cada 5 años desde la
+  jubilación del plan. **Sustituye a `depletion_probability_by_age`**, que solo contaba F1: con la
+  puerta de tasa inicial y la regla por saldo dentro del bucle, el agotamiento dejó de ser el único
+  motivo (pin: `the_failure_curve_counts_more_than_depletion`, un plan `percent_of_balance` con
+  F3 = 100 % y F1 = 0).
+  **La última fila es siempre el HORIZONTE** y cierra al bit en `1 − success_of_plan`, así que el
+  último paso puede ser de menos de cinco años. **Ojo con su índice**: el horizonte del BUCLE es el
+  mes `months` y en la rejilla publicada eso es **`months − 1`** (`engine_month_to_grid`), un punto
+  antes del último de `points[]`. Con un plan sin fecha la tabla trae **una sola fila**, esa, y vale
+  `0` — que no dice «seguro», dice «plan que no ocurre».
+  `by_kind` es el reparto de la **ejecución entera**, repetido en todas las filas: `McOutcome`
+  clasifica el primer fallo de cada camino sobre todo el horizonte y no lo desglosa por mes, así que
+  es exacto solo en la última. Misma convención que
+  `retirement_solver::PlanExtras::failure_probability_by_age`, para que las dos tablas no signifiquen
+  cosas distintas con el mismo nombre.
+- `months_below_need_p50` y `withdrawal_to_need_ratio_p50` — **qué parte de su gasto cubrió el
+  hogar de verdad**. El RECORTE de la regla no es por sí solo un fracaso (D24) y por eso no entra en
+  `success_of_plan`, pero **estas dos cuentan el recorte Y el descubierto de la cartera**:
+  `months_below_need_p50` es la mediana entre caminos de los meses jubilados con
+  `withdrawal_shortfall > 0` **o** `unmet_need > 0`, y `withdrawal_to_need_ratio_p50` la mediana de
+  la cobertura de la necesidad ORDINARIA (`null` cuando ningún camino tiene meses jubilados con
+  denominador positivo). El numerador se corrigió en E9 (bug B2): descuenta el `withdrawal_excess`
+  de `rule_is_spend` y clampa la necesidad neta **mes a mes**, porque puede ser negativa desde que
+  la pensión supera el gasto.
+- `any_volatility_declared` (con `false` las tres bandas SON la línea determinista).
+- **Retirados en el modelo v2** (`assert_the_v1_fields_are_gone` los vigila): `success_probability`
+  (→ `success_of_plan`), `never_retired_probability`, `success_given_retired`,
+  `retirement_month_index_percentiles`, `underfunded_probability`, `depletion_probability_by_age`
+  (→ `failure_probability_by_age`), `retirement_trigger`. Los tres primeros existían porque la
+  jubilación era un SUCESO del camino; con el mes forzado del plan ya no lo es. El colchón de caja
+  se retiró en 5.0.0 (modelo v2, M6).
+
+**Cache propio** (`AppState::bands_cache`, `BandsCacheKey { installation_id, user_id, paths, seed,
+threshold_pct }`) con el TTL de la proyección. Sin `view` en la clave: solo existe una vista
+posible. **`threshold_pct` entró en 5.0.0** porque desde el modelo v2 la respuesta lleva el
+veredicto contra el umbral del perfil (`success_verdict`) y lo ecoa: dos umbrales describen dos
+respuestas distintas del mismo sorteo, y sin ese eje cambiar el umbral en Ajustes devolvía el
+veredicto anterior —verde donde tocaba ámbar— sin que ningún campo lo dijera (pin:
+`the_bands_cache_key_carries_the_threshold`). El handler resuelve el contexto **antes** de mirar la
+cache, porque el umbral está en la clave. Las DOS invalidaciones de la proyección
+—`invalidate_projection_by_installation` y `..._by_user`— borran **los dos mapas**: las bandas salen
+del mismo `ProjectionInput`, y una banda vieja junto a una línea nueva son dos cifras que se
+contradicen en la misma pantalla. (El tercer mapa, `plan_cache`, **no** entra en esas invalidaciones
+— ver §Cache del PLAN.)
+
+**El nivel 1 ya no se re-resuelve aquí (5.0.0, WP A12).** `build_installation_projection_input` no
+resuelve plan —solo lo hace `run_member_projection`, dentro del miss de la serie—, así que este
+endpoint llegaba SIEMPRE con `plan_level1` vacío y corría `solve_plan_level1` entero (2–5 s) para
+obtener exactamente el mismo resultado que la serie acababa de calcular con la misma entrada, el
+mismo perfil y la misma semilla estable; y la SPA pide las dos superficies al abrir Jubilación, así
+que era el caso normal. Ahora las dos consultan `AppState::level1_cache` (clave `Level1Key`, huella
+de los CINCO argumentos del solve: entrada **pre-solve**, volatilidades, semilla, `PlanSolveProfile`
+y `PlanBudget`), y la primera que llega paga por las dos. Es un tipo distinto de `PlanKey` a
+propósito: aquella se calcula sobre el escenario **post-solve** y por eso no sirve para preguntar
+antes de resolver — compartir tipo permitiría preguntarle a un mapa con la clave del otro. Como
+`plan_cache`, es direccionada por contenido y **no se invalida**: TTL + LRU.
+
+**Guardia de generación (5.0.0, WP A12)**: `AppState::projection_generation` lleva un contador por
+instalación; todo camino que inserte en `projection_cache` o en `bands_cache` captura la generación
+**antes** de computar y la presenta al insertar (`projection_cache_insert_if_current`,
+`bands_cache_insert_if_current`, los únicos métodos de inserción que existen), y las dos
+invalidaciones la incrementan. Cierra la carrera «computo lento → mutación invalida → mi inserción
+repuebla la cache con la foto vieja»: en 4.x la ventana era de ~500 ms, y desde que el nivel 1 vive
+dentro del mismo permiso es de segundos. El orden de locks —generación, luego el mapa, sostenidos
+los dos a la vez en ambos lados— es lo que hace que no exista el intervalo intermedio. Pin:
+`projection_cache.rs::a_mutation_during_a_compute_wins_over_the_stale_insert`.
+
+**Presupuesto de tiempo** (`crates/engine-stochastic/tests/timing_mc.rs`, release, caso P9 de
+840 meses): 100 caminos 20,5 ms · 500 caminos 104,2 ms · 1 000 caminos 204,1 ms · 2 000 caminos
+391,4 ms — los cuatro **medidos**. **2 500 → ≈ 500 ms y 5 000 → ≈ 1,0 s son DERIVADOS** de los
+~0,2 ms/camino que sostienen esos cuatro puntos (el coste es lineal en `paths`): el arnés recorre
+hoy `[100, 500, 1 000, 2 000]` y **nadie ha cronometrado todavía el default nuevo ni el techo**.
+Quien añada esas dos filas al arnés borra esta advertencia. Memoria: `2·paths·(horizonte+1)·8`
+bytes — 33,6 MB con el default de 2 500 caminos × 840 meses, 67,3 MB en el extremo de 5 000. El
+presupuesto se aplica **a priori**, acotando `paths`, y no con un `timeout`: `spawn_blocking` no se
+puede cancelar, así que un timeout solo liberaría al llamante mientras la CPU sigue ardiendo. Corre
+bajo el semáforo de simulaciones (`heavy::run_projection_sim`), **el solve y el sorteo bajo UN solo
+permiso**. Payload medido (`the_hybrid_payload_stays_within_the_context_budget`, que lo imprime):
+**19,3 KB** a densidad hybrid con las seis series (66 puntos), ~12,6 KB sin las del líquido, de los
+cuales **4,8 KB son `model_note`**; el presupuesto de contexto es 32 KB. Creció desde los 16,4 KB de
+la primera vuelta de 5.0.0 por la nota reescrita y el `by_kind` de cada fila de la curva.
+
+> **Coste del MISS, y por qué conviene mirarlo.** Mientras `build_installation_projection_input`
+> devuelva `plan_level1: None` —hoy lo rellena `run_member_projection`, no el ensamblado—, cada MISS
+> de bandas paga **un solve de plan entero** además del sorteo, y el solve DOMINA: medido en `debug`
+> sobre un hogar de un activo, `computed_in_ms` = **2.904 ms** con 120 caminos (el sorteo solo son
+> unos cientos de ms; el resto es la bisección). Bajo contención de la suite entera se han visto
+> MISSes de decenas de segundos. Una carga de la SPA que pida serie y bandas **resuelve el mismo
+> plan dos veces**. La salida barata es que el ensamblado —o la entrada de cache de proyección—
+> publique el nivel 1 ya resuelto: el handler lo usa en cuanto exista, sin tocar nada más.
+
+Tests: `apps/api/tests/projection_bands.rs` (recuéntalos: `grep -c '#\[tokio::test\]' apps/api/tests/projection_bands.rs`), más el eco de `view` en `context_fields.rs`, las cotas de `paths` en `query_param_validation.rs` y, para la invalidación por regla de ahorro, `projection_cache.rs::an_allocation_rule_mutation_drops_the_projection_and_the_bands`.
 
 **Two-phase loading en el cliente**: `App.tsx` dispara `?density=hybrid` y `?density=monthly` en paralelo. El hybrid suele llegar primero (JSON más pequeño) → se renderiza el chart con menos puntos. Cuando llega el monthly, se reemplaza dentro de `startTransition()` (sin bloquear inputs). Si ambos son cache hit, ambos llegan en <10 ms → el hybrid no añade latencia perceptible.
 
 ### Backup
 | Method | Path | Notes |
 |--------|------|-------|
-| POST | `/v1/backup/user-export` | Returns `.ffbackup` binary for the **current user only**. Body: `{password, ui_preferences?}`. Encrypted with the user's account password (Argon2id KDF → AES-256-GCM). Any role. |
+| POST | `/v1/backup/user-export` | Returns `.ffbackup` binary for the **current user only**. Body: `{password, ui_preferences?}`. Argon2id KDF → AES-256-GCM. **La contraseña del cuerpo significa dos cosas según la cuenta** (5.0.0, issue #213): con `password_hash` NOT NULL es la **contraseña de la cuenta**, el servidor la verifica (401 si no casa) y además alimenta el KDF — comportamiento de siempre; con `password_hash IS NULL` (identidad delegada del add-on de HA) es una **contraseña propia del archivo**, no se verifica contra nada —la sesión ya autenticó— y solo tiene que **no ir vacía** (422 `backup_password_empty`). Any role. |
 | POST | `/v1/backup/user-import/preview` | Body: `{file_b64, password}`. Returns counts of what would be imported. Write role required. |
 | POST | `/v1/backup/user-import` | Body: `{file_b64, password, confirm_replace: true}`. **Destructive**: replaces **all** `owner_user_id = current_user` user-scoped rows (`assets/liabilities/budget_entries/planning_flows/allocation_rules/history_snapshots/transactions/transaction_imports/categorization_rules/recurring_transaction_rules`) in a single transaction, then invalidates the projection cache. Write role required. Table order + re-link details: [`data-model.md`](data-model.md) §Per-user `.ffbackup`. |
+
+Los `.ffbackup` **antiguos siguen restaurándose con la contraseña de cuenta de entonces**: el import nunca verificó nada contra la cuenta —la contraseña es solo entrada del KDF (`import.rs`, junto a `decrypt_payload`)—, así que el cambio de 5.0.0 no toca ni una línea de ese lado ni invalida un solo fichero ya descargado. Regresión: `apps/api/tests/backup_user_roundtrip.rs::an_account_without_a_password_round_trips_with_a_backup_password`, `…cannot_export_with_an_empty_backup_password` y `an_account_with_a_password_still_has_it_verified_on_export`.
 
 The `.ffbackup` format is a versioned, encrypted binary container — see [`backup_user/crypto.rs`](../apps/api/src/handlers/backup_user/crypto.rs) for the frame layout and [`backup_user/schema.rs`](../apps/api/src/handlers/backup_user/schema.rs) for the payload schema + migration layer (`schema_version`).
 
@@ -713,18 +1456,21 @@ Response (`HistorySeriesResponse`) — los numéricos por punto en **f64 recorta
 - `window_truncated` (bool) — `true` ⟺ hay snapshots **anteriores** a la ventana emitida. Recortar sin decirlo sería exactamente el fallo que 4.3.1 arregló en el `window_months` fuera de rango.
 - `first_snapshot_date_ymd` / `first_snapshot_month_index` (opcionales) — el snapshot **más antiguo del scope**, esté dentro o fuera de la ventana (`month_index` menor que `-window_months` cuando `window_truncated`). Responden «¿desde cuándo hay datos?» sin obligar a repetir la llamada con la ventana máxima.
 - `points[]` — `{month_index: i32 ≤ 0 (contiguos k_min..=0, incluye el mes 0), net_worth: f64 | null, assets_total, liabilities_total}`; `net_worth = A − L` **solo si `liabilities_snapshotted`**, si no `null` en todos los puntos (`net_worth === null` ⇔ flag `false`, un único invariante). El consumidor que quiera un neto histórico tiene que mirar el flag; el que quiera activos ya los tiene en `assets_total`.
-- `asset_series[]` — `{asset_id (= source_item_id), asset_name, values: f64[] paralelo a points}`. Agrupado por `source_item_id` **entre usuarios** (valores sumados); nombre = el asset vivo si el id coincide, si no el label del snapshot más reciente que lo contiene; orden `asset_name ASC, asset_id ASC`. Solo los assets tienen serie por item (paridad con projection).
+- `asset_series[]` — `{asset_id, asset_name, values: f64[] paralelo a points}`. **Una serie por activo, no una por item de snapshot** (5.0.0): antes de emitirlas, los items de cada `(owner, kind)` se resuelven a una IDENTIDAD común (`resolve_item_identity`, `handlers/history.rs`) y `asset_id` es el id del **activo vivo** cuando lo hay — que es la clave por la que el chart junta pasado y futuro (`apps/web/src/lib/history-merge.ts`). Valores sumados **entre usuarios**; nombre = el asset vivo si el id coincide, si no el label del snapshot más reciente que lo contiene; orden `asset_name ASC, asset_id ASC`. Solo los assets tienen serie por item (paridad con projection).
+  - **Por qué hace falta resolver nada**: `source_item_id` es la clave de identidad entre snapshots, pero el servidor la genera (`Uuid::new_v4`) cuando el cliente no manda `item_id` — y la tool MCP `create_snapshot` **no lo expone**, así que N fotos de la misma cuenta llegaban como N items distintos, cada uno con su timeline. El LOCF de #130 los APILABA: en la instancia de demo (4 snapshots × 5 activos) la respuesta traía **25** series para 5 activos y `assets_total` saltaba 264.869,60 → 532.046,80 → 801.531,60 → 0 €. La leyenda del chart, que junta por `asset_id`, pintaba «Vivienda habitual» cuatro veces y «+19 más».
+  - **Regla** (siempre dentro del grupo `(owner, kind)`, jamás entre usuarios): los items se agrupan por su etiqueta más reciente (trim + minúsculas); el grupo se canoniza al id de la fila viva del owner cuyo nombre case, si es **exactamente una**; si no casa ninguna (activo borrado, backfill libre) al menor `source_item_id` del grupo — serie **solo-histórica**, una por nombre, cuyo id sigue sin estar en `/v1/assets` (el contrato de `chart-legend.ts` — «nunca se sufija y nunca veta» — no cambia). **Ambigüedad ⇒ no se toca nada**: si dos items del MISMO snapshot cayeran en la misma identidad, esa identidad se disuelve entera y cada id vuelve a ser el suyo (fusionarlos perdería una observación, y perder una observación es perder dinero). Dos activos vivos homónimos tampoco se fusionan nunca.
+  - Con datos bien formados — el camino de la SPA, que reenvía el `item_id` de `…/prefill` — cada grupo tiene un solo id y la resolución es un **no-op bit a bit**. Los mismos ids canonizados alimentan `points[].assets_total` / `liabilities_total` y la curva fina de `/v1/history/cashflow`, que comparten `accumulate_series`: el arreglo también endereza esos totales.
 - `markers[]` — uno por snapshot en scope: `{date_ymd, month_index, month_fraction = month_index + (día−1)/días_del_mes **redondeado a 4 decimales** (`MONTH_FRACTION_DP`; 1/10.000 de mes ≈ 4 minutos, y la rejilla más fina que existe es diaria ≈ 0,032 — lo que sobra es ruido de la división en f64), kind, source, owner_user_id, total (Σ items)}`. **`source` (4.4.0)**: `capture` (foto que la app tomó de los activos/pasivos vivos ese día) | `backfill` (valores tecleados a posteriori para una fecha pasada). No es cosmético: un backfill puede estar en CUALQUIER fecha, y sin este campo el ancla remota de un hogar se presenta igual que una foto real — a «¿cuándo empecé a ahorrar?» la serie contestaba con la fecha del ancla. Con `source` y `total` a la vista, un backfill de importe ~0 en una fecha remota se reconoce por lo que es.
 - 0 snapshots en scope → **200** con los tres arrays vacíos.
 
-Algoritmo: ancla = primero-de-mes del hoy civil; timelines por `(owner_user_id, kind)` (fechas ascendentes + vectores de observación paralelos por `source_item_id`); a cada timeline se le añade la observación virtual «hoy» con las filas vivas del owner (assets y liabilities no expiradas del scope, ambas con conjunto extra `owner_user_id IS NOT NULL` — las filas compartidas nunca participan), salvo que el último snapshot real sea de hoy. La interpolación vive en `crates/engine/src/history.rs` (`evaluate_timeline`): assets lineal en días civiles, liabilities amortización francesa corregida por residuo (exacta en ambos extremos; cuota `weekly → ×52/12`). Usuarios sin snapshots de un kind no tienen timeline → no aportan (household = suma de los usuarios que snapshotean). Como todo GET: nunca muta.
+Algoritmo: ancla = primero-de-mes del hoy civil; timelines por `(owner_user_id, kind)` (fechas ascendentes + vectores de observación paralelos por item, ya resuelto a su identidad — ver `asset_series[]`); a cada timeline se le añade la observación virtual «hoy» con las filas vivas del owner (assets y liabilities no expiradas del scope), salvo que el último snapshot real sea de hoy. **El filtro extra `owner_user_id IS NOT NULL` que estas dos queries llevaban se retiró en 5.0.0**: la migración `20260902200100_ledger_owner_not_null.sql` (D14) dejó la columna `NOT NULL`, así que era una tautología que se leía como una regla viva. La interpolación vive en `crates/engine/src/history.rs` (`evaluate_timeline`): assets lineal en días civiles, liabilities amortización francesa corregida por residuo (exacta en ambos extremos; cuota `weekly → ×52/12`). Usuarios sin snapshots de un kind no tienen timeline → no aportan (household = suma de los usuarios que snapshotean). Como todo GET: nunca muta.
 
 ### History cash-flow (`GET /v1/history/cashflow`) — v1.6.0
 Cash-flow histórico de las transacciones (tier-2 sobre los snapshots). Solo lectura, cualquier miembro. Acepta `?view=mine` vía `LedgerView`. **Nunca invalida la cache de proyección** (las transacciones no son inputs del engine). Sin cache; `spawn_blocking` solo en `resolution=daily`. Dos capas independientes en el mismo response:
 1. **`months[]`** — agregado mensual **firmado** por kind, **Decimal-string** (son KPIs, escala 2dp). Solo un `GROUP BY (mes, kind)` sobre la ventana, independiente de los snapshots: `expense`/`savings` conservan su signo real (≤0), `income` ≥0. **Dos netos desde 4.0.0** (auditoría MCP §6): `cash_delta = expense + income + savings` (variación de caja, **incluye** los traspasos a ahorro — un mes excelente con una aportación grande sale negativo) e `income_minus_expense = income + expense` (sin ahorro; **misma cifra** que `totals.net_actual` de `/v1/transactions/summary`, allí con magnitudes ≥0). El campo se llamaba `net` y colisionaba de nombre con `net_actual` significando otra cosa: un abril con 3.710,97 € movidos a inversión salía `net: -3075.26` y se leía como una pérdida. Regresión que ata las dos tools: `history_cashflow.rs::the_two_nets_differ_by_savings_and_one_matches_the_monthly_summary`. Contiguo `-window_months..=0` (incluye el mes 0 en curso), ascendente.
 2. **`fine`** (opcional) — la **curva fina** de patrimonio (`weekly`/`daily`) donde los deltas de cash-flow **moldean** los assets vinculados sin contradecir los snapshots (curva anclada, `crates/engine`). Presente **solo** si hay transacciones vinculadas a algún asset **y** snapshots que anclar; cuando falta (o el cálculo falla), `fine_absent_reason` dice cuál de los cuatro motivos fue y **el pasado queda idéntico a la serie de snapshots** de `/v1/history/series` — el tier-2 solo añade, nunca sustituye. Patas de cash-flow: pata cuenta (batch con `account_asset_id` → `delta = +amount`) y pata destino de ahorro (`kind='savings'` con `linked_asset_id` → `delta = −amount`); una savings importada aparece en ambas (partida doble). `fine` = `{resolution, grid:[{date_ymd, month_index, month_fraction}], asset_series:[{asset_id, asset_name, values: f64[]}], net_worth: f64[] | null}`, todo paralelo a `grid`; la rejilla fina termina **exacta en hoy** (empalma con el vivo). `month_fraction` es el mismo helper que los `markers[]` de `/history/series` (fuente única → la escala mes→px no puede divergir). **`fine.net_worth` es `null` cuando `liabilities_snapshotted` (issue #82, F1 — mismo invariante que `/v1/history/series`, cambio breaking) es `false`**: sin el pasivo del scope fotografiado entero (helper `liabilities_fully_snapshotted`, `all` por usuario) la resta no es un patrimonio neto, y antes de 4.4.0 este campo era exactamente `Σ activos` con nombre de neto — **peor** que la serie mensual, porque `CashflowResponse` ni siquiera publicaba el flag con el que sospechar de la cifra. `liabilities_snapshotted` (raíz, aditivo) se resuelve dentro de la rama `fine` (es donde se carga el scope de snapshots); sin capa fina vale `false` por defecto — lectura honesta, no hay serie de neto que cualificar. En ese caso `fine.asset_series` sigue disponible: es lo que el chart pinta cuando el pasado es «solo activos».
 
-Params: `view` (`mine` | omitido → household); `window_months` (i64, default 24, **rango 1..=120; fuera de rango es 400 `window_months_out_of_range`, NO se clampa** — `validate_window_months`, unificado en 4.3.1); `resolution` (`weekly` default | `daily`). **Gating de daily**: `resolution=daily` exige `window_months <= 6` → si no, **400** `daily_window_too_large`. Response `CashflowResponse {anchor_date_ymd, anchor_month_first_ymd, view, months, liabilities_snapshotted, fine?, fine_absent_reason}`; numéricos de `fine` en **f64 recortado a 2 decimales** (`CHART_DP`, misma excepción chart-only que projection/history-series) y `grid[].month_fraction` a 4 (`MONTH_FRACTION_DP`), `months[]` en Decimal-string.
+Params: `view` (`mine`, **el default desde 5.0.0** — omitido o vacío = `mine`; `household` hay que pedirlo); `window_months` (i64, default 24, **rango 1..=120; fuera de rango es 400 `window_months_out_of_range`, NO se clampa** — `validate_window_months`, unificado en 4.3.1); `resolution` (`weekly` default | `daily`). **Gating de daily**: `resolution=daily` exige `window_months <= 6` → si no, **400** `daily_window_too_large`. Response `CashflowResponse {anchor_date_ymd, anchor_month_first_ymd, view, months, liabilities_snapshotted, fine?, fine_absent_reason}`; numéricos de `fine` en **f64 recortado a 2 decimales** (`CHART_DP`, misma excepción chart-only que projection/history-series) y `grid[].month_fraction` a 4 (`MONTH_FRACTION_DP`), `months[]` en Decimal-string.
 
 **`fine_absent_reason` (4.4.0, Fase 5) — por qué falta `fine`**; `null` ⟺ `fine` viaja. Se decide en la MISMA expresión que produce `fine`, así que no pueden desincronizarse (nunca un `Some(fine)` con razón ni un `None` sin ella). Cuatro valores: `not_requested` (el llamante no la pidió — `include_curve` de la tool MCP; el GET HTTP la pide siempre), `window_too_large_for_curve`, `no_asset_linked_transactions` (ninguna transacción ligada a un activo, ni por cuenta de import ni por destino de ahorro: no hay nada que moldee la curva), `no_snapshots_to_anchor` (hay movimientos pero ningún snapshot al que anclar: sería una curva de deltas flotando en el vacío). Hasta 4.4.0 las tres últimas producían **exactamente la misma respuesta** —el campo simplemente no estaba— y «no tengo datos», «no me lo has pedido» y «te lo he recortado por tamaño» eran indistinguibles.
 
@@ -746,7 +1492,7 @@ Histórico de gasto mensual **per-user**: import de CSV bancario (MyInvestor/N26
 
 | Method | Path | Rol | Notas |
 |--------|------|-----|-------|
-| GET | `/v1/transactions?view=&month=&kind=&category_id=&uncategorized=&import_id=` | lectura | Listado, orden `op_date DESC`. **`uncategorized` desde 4.15.0 solo puede devolver filas sin `kind`** (importaciones sin clasificar): un `income`/`expense` siempre tiene categoría (`transactions_category_required_chk`) y `savings` nunca la lleva. El predicado SQL no cambia; cambia lo que puede existir. `month` = `YYYY-MM` (inválido → 400). **`uncategorized=true` (4.4.0, Fase 6)** filtra `category_id IS NULL`: hasta ahora `category_id` solo hacía igualdad de UUID, así que «enséñame lo que falta por clasificar» —la pregunta que abre cualquier sesión de limpieza— obligaba a paginar el ledger entero detectando la **ausencia** de una clave. Excluyente con `category_id` → 400 `category_filter_exclusive`. Excluye `savings` salvo `kind` explícito (un movimiento de ahorro sin categoría no es un hueco: es que la categoría no aplica). → **200** `[TransactionResponse]`. |
+| GET | `/v1/transactions?view=&month=&kind=&category_id=&uncategorized=&import_id=` | lectura | Listado, orden `op_date DESC`. **`uncategorized` desde 4.15.0 solo puede devolver filas sin `kind`** (importaciones sin clasificar): un `income`/`expense` siempre tiene categoría (`transactions_category_required_check`) y `savings` nunca la lleva. El predicado SQL no cambia; cambia lo que puede existir. `month` = `YYYY-MM` (inválido → 400). **`uncategorized=true` (4.4.0, Fase 6)** filtra `category_id IS NULL`: hasta ahora `category_id` solo hacía igualdad de UUID, así que «enséñame lo que falta por clasificar» —la pregunta que abre cualquier sesión de limpieza— obligaba a paginar el ledger entero detectando la **ausencia** de una clave. Excluyente con `category_id` → 400 `category_filter_exclusive`. Excluye `savings` salvo `kind` explícito (un movimiento de ahorro sin categoría no es un hueco: es que la categoría no aplica). → **200** `[TransactionResponse]`. |
 | POST | `/v1/transactions` | write | Alta manual (efectivo, `import_id NULL`, `source='manual'`). Body `{op_date, value_date?, concept, amount, kind, category_id?, linked_asset_id?, linked_liability_id?, notes?, recurrence?, idempotency_key?}` (`CreateTransactionRequest = CreateTransactionBody` aplanado con `#[serde(flatten)]` + el campo de idempotencia — el JSON no cambia de forma). **`recurrence: {}`** (opcional, marcador sin campos desde 3.2.0): crea además una regla recurrente-plantilla y deja esta transacción enlazada como instancia de origen (`recurring_rule_id`). Las reglas tienen **resolución mensual** — el legacy `day_of_month` (≤3.1.0) se **ignora** si un cliente viejo lo envía (breaking documentado en CHANGELOG 3.2.0). **Un alta con `op_date` pasada backfillea las instancias de todos los meses CERRADOS intermedios en el MISMO commit** (el mes en curso jamás; ya no depende de una llamada posterior a `/materialize`); `op_date` a más de 10 años atrás → **422** `recurrence_too_old`. **`idempotency_key` (Fase 3, issue #84, opt-in)**: 1..200 chars; misma clave + mismo cuerpo (huella del cuerpo YA VALIDADO, así que `"10"` y `"10.00"` son el mismo reintento) → devuelve la fila original **sin crear nada**, mismo `id`, mismo 201; misma clave + cuerpo distinto → **409** `idempotency_key_conflict` (gana el primero); clave reclamada DENTRO de la misma transacción que el INSERT (dos reintentos simultáneos: el perdedor deshace su INSERT y reproduce el del ganador). Caduca a las 24 h, poda perezosa en el propio POST. Ver [`data-model.md`](data-model.md) §`transaction_idempotency_keys`. 400: `invalid_kind`, `amount_zero`, `savings_no_category`, `category_scope_mismatch`, `linked_asset_not_found`, `linked_liability_not_found`, `idempotency_key_invalid`. Huella duplicada → **409**. → **201** `TransactionResponse` (incluye `recurring_rule_id?`). |
 | POST | `/v1/transactions/batch` | write | Alta manual multifila (1..=1000). Body `{transactions:[CreateTransactionRequest]}`. Cada item acepta `recurrence` (misma semántica que el alta simple, backfill de meses intermedios incluido; item con `op_date` a >10 años → **422** `recurrence_too_old`). Ordinal de huella se avanza dentro del batch. **`idempotency_key` por ítem se RECHAZA, no se ignora** (Fase 3, issue #84): cualquier ítem con la clave → **400** `idempotency_key_batch_unsupported` **antes** de tocar la BD (todo el lote, cero filas). **Pero desde 4.4.0 (Fase 6) el LOTE sí acepta una clave, en la RAÍZ del body** — la Fase 3 rechazaba toda idempotencia de lote porque «reproducir parcialmente» no tiene semántica, y el razonamiento que la reabre es que **el lote es UNA unidad atómica y por tanto lleva UNA clave**. `idempotency_key` en la raíz: 1..180 chars (20 menos que los 200 del alta individual, para el sufijo derivado). **Sin tabla ni columna nueva**: como `transaction_idempotency_keys` guarda UN `transaction_id` por fila y un lote crea N, se escribe **una fila por ítem** con la clave derivada `{clave}#b{i}` y, en todas, el hash del **lote entero** (marcador `batch-v1` + nº de ítems + los ítems ya validados y en orden). Las tres salidas: misma clave + mismo cuerpo → **los N movimientos originales, mismos ids, mismo orden, mismo 201**, sin insertar nada; misma clave + cuerpo distinto (un importe, el orden, el nº de ítems) → **409** `idempotency_key_conflict`, gana el primero; clave por ítem → sigue siendo 400. Las N claves se reclaman **en la misma transacción** que los N INSERT, así que «3 de 5» no puede ocurrir; si al reproducir falta alguna fila (un movimiento borrado — la FK es `ON DELETE CASCADE`) el replay es un 409 ruidoso, no medio lote. Ventana 24 h, poda perezosa en el propio POST (nunca en un GET, D5). Regresión: `apps/api/tests/transactions_batch_idempotency.rs`. → **201** `[TransactionResponse]`. |
 | GET | `/v1/transactions/months?view=` | lectura | Meses con datos (`GROUP BY YYYY-MM`), orden DESC; `is_complete=false` **solo** para el mes civil en curso de la instalación (no significa «faltan datos»: el mes no ha terminado). **Desde 4.4.0 el mes en curso viaja SIEMPRE**, aunque el `GROUP BY` no lo devuelva por estar vacío, con `txn_count: 0` — es el único mes en el que ese 0 puede darse. Antes desaparecía justo en el caso en que importa: la única rama que produce `is_complete = false` no se materializaba nunca en esa instalación, la descripción de la tool prometía un caso inalcanzable y, peor, el mes **sí** consumía su hueco en las series (`/v1/transactions/category-series` y `/v1/history/cashflow` lo cuentan igual) — una lista de meses que omite el mes que las series incluyen no sirve para orientar consultas, que es justo para lo que existe. Se inserta al frente (`insert(0)`), que conserva el orden porque en este agregado no hay fechas futuras. → **200** `[MonthEntry]`. |
@@ -758,7 +1504,7 @@ Histórico de gasto mensual **per-user**: import de CSV bancario (MyInvestor/N26
 | POST | `/v1/transactions/import/confirm` | write | Aplica el import. Body `{source, file_b64, file_sha256, decisions:[ImportDecision] (paralelo por índice a las filas), learn_rules=true, account_asset_id?, original_filename?}`. `file_sha256`/nº de filas deben coincidir con el preview → si no, 400 `preview_confirm_mismatch`. `decision.discard`/`force` por fila; solo la divisa base del hogar (`currency_mismatch`; configurable desde 3.10.0). `learn_rules` hace upsert de una regla por decisión categorizada — **nunca cuando la categoría es la de por defecto del scope** (4.15.0: cientos de reglas «X → Otros gastos» ganarían por precedencia a cualquier regla futura). **Desde 4.15.0 una decisión `income`/`expense` sin `category_id` es 400 `category_required`** (estricto a propósito: en el wizard la categoría se ve, rellenarla en silencio escondería la decisión; el alta manual, en cambio, resuelve a la de por defecto). Lote vacío → cabecera borrada, `import_id: null`. Doble-confirm concurrente → **409**. Post-commit corre el **pase de auto-conciliación** sobre todo el dataset del owner (la contrapartida puede venir de un lote anterior) — best-effort, reportado en `reconciled_pairs` (0 si falló). → **200** `ImportConfirmResponse {import_id?, imported, skipped_already_imported, discarded, rules_learned, reconciled_pairs}`. |
 | GET | `/v1/transactions/imports?view=` | lectura | Lotes de import (orden `created_at DESC, id DESC`), con `txn_count`, nombre de cuenta origen y **`possible_duplicate_of` (4.4.0, Fase 5)**: los otros lotes del mismo scope con el **mismo `original_filename` y la misma `account_asset_id`** — vacío en el caso normal, relación **simétrica** (si A lista a B, B lista a A). El doble import es el accidente clásico de esta pantalla: se sube el mismo extracto dos veces, la dedup por huella canónica salva los movimientos idénticos pero no los que difieren en un byte. El dato ya estaba en la respuesta —dos filas con el mismo nombre de fichero— pero exigía que el consumidor lo cruzara, y ninguno lo hacía. Es una **sospecha, no un veredicto** (`original_filename` NULL no agrupa; el mismo fichero en dos cuentas distintas no aparece; un extracto corregido sí). El cruce se hace **en Rust sobre la página ya cargada, sin query extra**, así que por la tool MCP paginada solo ve gemelos **dentro de la misma página** — precio deliberado de no meter un self-join en un listado. → **200** `[ImportBatchResponse]`. |
 | DELETE | `/v1/transactions/imports/{id}?confirm=true` | write | Deshace un import (transacciones en cascada). `confirm` debe ser `true` → si no, 400 `confirm_required`. Guardia id+installation+owner → **404** si no es tuyo. → **204**. |
-| PATCH | `/v1/transactions/{id}` | write | Edita una transacción (guardia owner → **404**). `op_date`/`amount`/`concept` son **editables en manuales e importadas** (ya no hay `immutable_field`). La diferencia está en la huella de dedup: en **manuales** se recomputa al cambiarlos (tomando un ordinal libre, liberando el anterior); en **importadas** queda **anclada** a la del CSV original y nunca se recomputa → un re-import del mismo archivo sigue detectando el duplicado pese a la edición. Campos `clear_*` para borrar opcionales. **Fase 1 (issue #82), API breaking**: poner y borrar el MISMO campo en la misma llamada es **400**, no un 200 con el `clear` ganando en silencio — `value_date_set_and_clear`, `category_set_and_clear`, `linked_asset_set_and_clear`, `linked_liability_set_and_clear`, `notes_set_and_clear` (mismo estilo por campo que el lote y que `cap_set_and_clear`, no el `rule_patch_conflict` de un código único). La guardia ya existía en el camino de lote y en el de reglas; el hueco era el PATCH individual, que comparten HTTP y la tool MCP `update_transaction`: un agente que armaba el patch desde plantilla creía recategorizar y dejaba el movimiento **sin categoría**, con los totales cuadrando y la atribución mintiendo. Huella duplicada tras recomputar (solo manuales) → **409**. **4.0.0 — mover la `op_date` de una INSTANCIA recurrente la DESVINCULA de su plantilla** (`recurring_rule_id = NULL`): antes el PATCH persistía y acto seguido la convergencia podaba la fila (su mes nuevo no era el de origen ni un mes activo, y el mes en curso nunca lo es), `load_txn` no la encontraba y la respuesta era un **500 sobre una mutación que sí había ocurrido**, con la edición reapareciendo revertida y con id nuevo. Desvincular es lo que la acción significa: deja de describir la recurrencia. **4.15.0 — `clear_category` en `income`/`expense` = «vuelve a la categoría por defecto del scope»** (`resolve_category_for_kind`), no `null`: la BD ya no admite un ingreso/gasto sin categoría (`transactions_category_required_chk`); solo `savings` queda a `null`. Mismo contrato en el lote (`PATCH /batch`, resuelto **por fila** con el kind efectivo) y en las tools MCP `update_transaction(s)`. **Breaking** (antes devolvía `category_id: null`). → **200** `TransactionResponse`. |
+| PATCH | `/v1/transactions/{id}` | write | Edita una transacción (guardia owner → **404**). `op_date`/`amount`/`concept` son **editables en manuales e importadas** (ya no hay `immutable_field`). La diferencia está en la huella de dedup: en **manuales** se recomputa al cambiarlos (tomando un ordinal libre, liberando el anterior); en **importadas** queda **anclada** a la del CSV original y nunca se recomputa → un re-import del mismo archivo sigue detectando el duplicado pese a la edición. Campos `clear_*` para borrar opcionales. **Fase 1 (issue #82), API breaking**: poner y borrar el MISMO campo en la misma llamada es **400**, no un 200 con el `clear` ganando en silencio — `value_date_set_and_clear`, `category_set_and_clear`, `linked_asset_set_and_clear`, `linked_liability_set_and_clear`, `notes_set_and_clear` (mismo estilo por campo que el lote y que `cap_set_and_clear`, no el `rule_patch_conflict` de un código único). La guardia ya existía en el camino de lote y en el de reglas; el hueco era el PATCH individual, que comparten HTTP y la tool MCP `update_transaction`: un agente que armaba el patch desde plantilla creía recategorizar y dejaba el movimiento **sin categoría**, con los totales cuadrando y la atribución mintiendo. Huella duplicada tras recomputar (solo manuales) → **409**. **4.0.0 — mover la `op_date` de una INSTANCIA recurrente la DESVINCULA de su plantilla** (`recurring_rule_id = NULL`): antes el PATCH persistía y acto seguido la convergencia podaba la fila (su mes nuevo no era el de origen ni un mes activo, y el mes en curso nunca lo es), `load_txn` no la encontraba y la respuesta era un **500 sobre una mutación que sí había ocurrido**, con la edición reapareciendo revertida y con id nuevo. Desvincular es lo que la acción significa: deja de describir la recurrencia. **4.15.0 — `clear_category` en `income`/`expense` = «vuelve a la categoría por defecto del scope»** (`resolve_category_for_kind`), no `null`: la BD ya no admite un ingreso/gasto sin categoría (`transactions_category_required_check`); solo `savings` queda a `null`. Mismo contrato en el lote (`PATCH /batch`, resuelto **por fila** con el kind efectivo) y en las tools MCP `update_transaction(s)`. **Breaking** (antes devolvía `category_id: null`). → **200** `TransactionResponse`. |
 | DELETE | `/v1/transactions/{id}` | write | Borra (guardia owner → **404**). → **204**. |
 | GET | `/v1/transactions/rules` | lectura | Reglas de categorización del usuario (orden `updated_at DESC`). → **200** `[RuleResponse]`. |
 | POST | `/v1/transactions/rules` | write | Crea regla. Body `{match_kind? (substring\|prefix\|exact), pattern, source?, assign_kind (requerido), assign_category_id?}`. `(source, pattern)` duplicado → **409 `rule_duplicate`**, tratando `source` ausente y `source` vacío como el mismo valor. Hasta 4.3.1 la promesa era falsa **sin `source`** (la constraint UNIQUE no atrapa `NULL`), que es el caso por defecto y el del reintento tras un timeout: dos llamadas idénticas creaban dos reglas contradictorias que luego «ganan por precedencia, no por acierto». Respaldo en BD: índice parcial `categorization_rules_unique_agnostic` (ver data-model.md). → **201** `RuleResponse`. |
@@ -903,7 +1649,17 @@ if !role_can_write(role.as_str()) { return Err(ApiError::Forbidden); }
 
 For any endpoint that accepts `?view=mine`, **do not** write two `match view { Household => sqlx::query_as("…installation_id = $1…"), Mine => sqlx::query_as("…installation_id = $1 AND owner_user_id = $2…") }` branches. Use the helpers in `handlers/person_view.rs`:
 
-**Desde 4.0.0 `resolve()` es falible.** Valores aceptados: `mine`, `household`, ausente o vacío. Cualquier otro → `400 invalid_view`. Antes el brazo comodín devolvía **household** (el hogar entero) en silencio, así que un cliente que escribiera `"MINE"` recibía datos de otros miembros creyendo haber pedido los suyos (auditoría MCP §4). No era un fallo de autorización — D2 sigue vigente: cualquier miembro puede pedir `household` a la cara — pero sí una respuesta sobre otra población que la pedida. **No reimplementes el parseo**: `projection.rs` tenía su propia copia del `match` y por eso se le escapó el arreglo; ahora delega como todos. Misma clase, arreglados a la vez: `resolution` de `/v1/history/cashflow` (`invalid_resolution`) y `density` de `/v1/projection/series` (`invalid_density`). Regresión: `apps/api/tests/query_param_validation.rs`.
+**El default es `mine` desde 5.0.0 (R2, breaking).** `resolve()` (`handlers/person_view.rs`) mapea
+ausente o vacío → **`Mine`**; `household` hay que pedirlo EXPLÍCITAMENTE; cualquier otro valor →
+`400 invalid_view`. El porqué: con la jubilación convertida en estrategia POR USUARIO (D9/D13), la
+simulación por defecto tiene que ser la del solicitante —su perfil, su fecha de nacimiento, sus
+filas—; servir el hogar entero por omisión mezclaba filas de dos personas bajo el perfil de una
+sola. Pin del default para las ocho superficies a la vez:
+`apps/api/tests/context_fields.rs::every_view_aware_response_echoes_the_view_it_applied`, que
+además exige que **omitirlo sea idéntico a pedir `view=mine`** (si algún día divergen, es que un
+handler se quedó con su propio default).
+
+**Desde 4.0.0 `resolve()` es falible.** Antes el brazo comodín devolvía **household** (el hogar entero) en silencio, así que un cliente que escribiera `"MINE"` recibía datos de otros miembros creyendo haber pedido los suyos (auditoría MCP §4). No era un fallo de autorización — D2 sigue vigente: cualquier miembro puede pedir `household` a la cara — pero sí una respuesta sobre otra población que la pedida. **No reimplementes el parseo**: `projection.rs` tenía su propia copia del `match` y por eso se le escapó el arreglo; ahora delega como todos. Misma clase, arreglados a la vez: `resolution` de `/v1/history/cashflow` (`invalid_resolution`) y `density` de `/v1/projection/series` (`invalid_density`). Regresión: `apps/api/tests/query_param_validation.rs`.
 
 ```rust
 let view = q.resolve()?; // Query<LedgerViewQuery> — falible desde 4.0.0
@@ -941,6 +1697,37 @@ distinguir «mine coincide con el hogar» de «el parámetro se ignoró», y en 
 Nada de esto es una frontera de autorización: sigue siendo un filtro, como dice el párrafo de
 arriba.
 
+## Dueño de la fila en las mutaciones (D21) — **5.0.0**
+
+`?view` es un filtro de LECTURA y sigue siéndolo (D2). Lo que cambia en 5.0.0 es la ESCRITURA: con
+proyecciones independientes por miembro (D9) cada fila del ledger pertenece a la simulación de UNA
+persona, así que editar la de otro no es «colaborar», es mover su plan sin que se entere.
+
+**Las cinco tablas** —`assets`, `liabilities`, `budget_entries`, `planning_flows`,
+`allocation_rules`— exigen en toda mutación (PATCH, DELETE, reorder) que
+`owner_user_id = usuario de la sesión`:
+
+- fila de otro miembro → **403 `not_row_owner`** (`ApiError::ForbiddenWith`, añadido para esto: el
+  `Forbidden` pelado no lleva código granular y el cliente no podría distinguirlo de un
+  permiso insuficiente);
+- fila inexistente → **404**, exactamente como antes;
+- **el rol `owner` NO salta la regla**: ser dueño de la instalación no es ser dueño de la fila;
+- **el alta atribuye siempre al usuario de la sesión**: no hay forma de crear a nombre de otro.
+
+Punto único: `person_view::require_row_owner` — los cinco módulos la llaman en vez de escribir el
+`if`. Se aplica también a los **previews** de `delete_asset` y `delete_liability`
+(`*_delete_effects`), que enseñan el contenido de la fila **y emiten el `confirm_token`** que la
+ejecuta; y a `allocation_rule_delete_effects`.
+
+**`POST /v1/allocation-rules/reorder` solo opera en `?view=mine`**: en `household` devuelve **400
+`household_read_only`**. Era la única mutación que tocaba filas ajenas por diseño (renumeraba de
+una vez las cascadas de todos los miembros). Es 400 y no 403 porque no falta un permiso: es una
+vista que no admite esta operación.
+
+Como el MCP reusa las mismas cores, las tools heredan la regla sin código propio (regresión:
+`mcp_write.rs::mcp_writes_cannot_touch_another_members_rows`). Tests HTTP:
+`apps/api/tests/ledger_ownership.rs`.
+
 ## Error mapping
 
 ### Wire shape (3.10.0)
@@ -962,9 +1749,11 @@ Every non-2xx response carries three fields, not two:
   the console / a folded «Detalles técnicos».
 
 Adding a coded error = prefix the message. `ApiError::BadRequest("swr_out_of_range: swr_pct must
-be between 0 and 4".into())`. Two variants exist purely to carry a code where the plain one could
-not: `NotFoundWith` (404 with body) and `ConflictWith` (409 with body — the bare `Conflict` comes
-from the automatic 23505 mapping and cannot know *what* collided).
+be between 0 and 6".into())` (the bound is `[0, 6]` since the v2 retirement profile, M5 — the
+message states the real bound rather than a number frozen in a doc, B8). Two variants exist purely
+to carry a code where the plain one could not: `NotFoundWith` (404 with body) and `ConflictWith`
+(409 with body — the bare `Conflict` comes from the automatic 23505 mapping and cannot know *what*
+collided).
 
 **Gate**: `apps/api/tests/error_codes_parity.rs` extracts every code from the source into
 `tests/fixtures/error-codes.json`, and `apps/web/src/lib/errorMessages.test.ts` fails if any lacks

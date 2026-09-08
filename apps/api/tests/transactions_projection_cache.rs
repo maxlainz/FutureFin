@@ -93,8 +93,8 @@ async fn mode_a_mutations_do_not_touch_projection_cache() {
     .await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
-    app.warm_household(&owner.cookie, &key).await;
+    let key = app.default_view_key(iid, owner.user_id);
+    app.warm_default_view(&owner.cookie, &key).await;
 
     // --- Batería de mutaciones de transacciones (modo A, default) ---
     // 1. Alta manual.
@@ -181,10 +181,10 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
     set_mode(&app, &owner.cookie, "transactions_avg").await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
 
     // 1. create
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let created = app
         .post_json_with_cookie(
             "/v1/transactions",
@@ -197,7 +197,7 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
     app.assert_invalidated(&key, "create").await;
 
     // 2. batch
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     app.post_json_with_cookie(
         "/v1/transactions/batch",
         json!({ "transactions": [
@@ -209,7 +209,7 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
     app.assert_invalidated(&key, "batch").await;
 
     // 3. patch
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     app.patch_json_with_cookie(
         &format!("/v1/transactions/{txn_id}"),
         json!({ "notes": "editada" }),
@@ -219,7 +219,7 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
     app.assert_invalidated(&key, "patch").await;
 
     // 4. import confirm
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let exp_cat = fallback_category(&app, &owner.cookie, "expense").await;
     let (b64, sha) = preview_csv(&app, &owner.cookie, "IMPORTADA", "-9", 15).await;
     let conf = app
@@ -234,13 +234,13 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
     app.assert_invalidated(&key, "import confirm").await;
 
     // 5. delete import (cascadea sus transacciones)
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     app.delete_with_cookie(&format!("/v1/transactions/imports/{import_id}?confirm=true"), &owner.cookie)
         .await;
     app.assert_invalidated(&key, "delete import").await;
 
     // 6. delete
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     app.delete_with_cookie(&format!("/v1/transactions/{txn_id}"), &owner.cookie).await;
     app.assert_invalidated(&key, "delete").await;
 
@@ -284,7 +284,7 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
     .execute(&app.pool)
     .await
     .expect("activate month");
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let mat = app
         .post_json_with_cookie("/v1/transactions/recurring/materialize", json!({}), &owner.cookie)
         .await;
@@ -302,7 +302,7 @@ async fn mode_b_each_mutation_invalidates_projection_cache() {
     // convierte esa instancia en movimiento real y el mes entra en el promedio: el ahorro que
     // usa el engine cambia sin que nada invalide. Con TTL deslizante, un usuario que mirase la
     // proyección una vez por hora se quedaba con la vieja indefinidamente.
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     app.delete_with_cookie(&format!("/v1/transactions/recurring/{rule_id}"), &owner.cookie)
         .await;
     app.assert_invalidated(&key, "borrar una regla recurrente").await;
@@ -325,15 +325,15 @@ async fn flipping_savings_source_invalidates_projection_cache() {
     .await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
 
     // A → B
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     set_mode(&app, &owner.cookie, "transactions_avg").await;
     app.assert_invalidated(&key, "flip A→B").await;
 
     // B → A
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     set_mode(&app, &owner.cookie, "budget").await;
     app.assert_invalidated(&key, "flip B→A").await;
 }
@@ -356,9 +356,9 @@ async fn mode_c_mutation_invalidates_projection_cache() {
     set_mode(&app, &owner.cookie, "budget_income_real_expense").await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let created = app
         .post_json_with_cookie(
             "/v1/transactions",
@@ -372,7 +372,7 @@ async fn mode_c_mutation_invalidates_projection_cache() {
 
     // PATCH: `patch_transaction_core` invalida de forma incondicional (no solo cuando cambian
     // importe/fecha), así que un cambio de categoría/notas también tira la cache en modo C.
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let patched = app
         .patch_json_with_cookie(
             &format!("/v1/transactions/{txn_id}"),
@@ -384,7 +384,7 @@ async fn mode_c_mutation_invalidates_projection_cache() {
     app.assert_invalidated(&key, "modo C patch").await;
 
     // DELETE: cierra la paridad con el modo B para las tres rutas más usadas desde el chat.
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     app.delete_with_cookie(&format!("/v1/transactions/{txn_id}"), &owner.cookie)
         .await;
     app.assert_invalidated(&key, "modo C delete").await;
@@ -412,14 +412,14 @@ async fn mode_b_replay_of_an_idempotent_create_does_not_invalidate() {
     set_mode(&app, &owner.cookie, "transactions_avg").await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
     let body = json!({
         "op_date": "2026-05-10", "concept": "Manual", "amount": "-25",
         "kind": "expense", "idempotency_key": "k-cache",
     });
 
     // El alta REAL invalida: el conjunto de transacciones cambió.
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let created = app
         .post_json_with_cookie("/v1/transactions", body.clone(), &owner.cookie)
         .await;
@@ -427,7 +427,7 @@ async fn mode_b_replay_of_an_idempotent_create_does_not_invalidate() {
     app.assert_invalidated(&key, "modo B create con clave").await;
 
     // El replay NO: devuelve la misma fila sin escribir, y la cache caliente sigue caliente.
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let replay = app
         .post_json_with_cookie("/v1/transactions", body, &owner.cookie)
         .await;
@@ -474,8 +474,8 @@ async fn creating_a_categorization_rule_never_invalidates_projection_cache() {
         .await;
 
         let iid = app.installation_id().await;
-        let key = app.household_key(iid, owner.user_id);
-        app.warm_household(&owner.cookie, &key).await;
+        let key = app.default_view_key(iid, owner.user_id);
+        app.warm_default_view(&owner.cookie, &key).await;
 
         let created = app
             .post_json_with_cookie(
@@ -534,10 +534,10 @@ async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
         assert_eq!(seeded.status, http::StatusCode::CREATED, "modo {mode}: {seeded:?}");
 
         let iid = app.installation_id().await;
-        let key = app.household_key(iid, owner.user_id);
+        let key = app.default_view_key(iid, owner.user_id);
 
         // 1. Crear la regla: NUNCA invalida, en ningún modo.
-        app.warm_household(&owner.cookie, &key).await;
+        app.warm_default_view(&owner.cookie, &key).await;
         let rule = app
             .post_json_with_cookie(
                 "/v1/transactions/rules",
@@ -589,7 +589,7 @@ async fn applying_a_rule_invalidates_cond_but_creating_it_still_does_not() {
         }
 
         // 4. Un backfill que no cambia nada (idempotente) no debe tirar la cache caliente.
-        app.warm_household(&owner.cookie, &key).await;
+        app.warm_default_view(&owner.cookie, &key).await;
         let again = app
             .post_json_with_cookie(
                 &format!("/v1/transactions/rules/{rule_id}/apply"),
@@ -643,8 +643,8 @@ async fn batch_patch_invalidates_once_for_the_whole_batch() {
     }
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
-    app.warm_household(&owner.cookie, &key).await;
+    let key = app.default_view_key(iid, owner.user_id);
+    app.warm_default_view(&owner.cookie, &key).await;
 
     let r = app
         .patch_json_with_cookie(
@@ -659,7 +659,7 @@ async fn batch_patch_invalidates_once_for_the_whole_batch() {
 
     // Y en modo A sigue sin invalidar: el contrato es COND, no incondicional.
     set_mode(&app, &owner.cookie, "budget").await;
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let r = app
         .patch_json_with_cookie(
             "/v1/transactions/batch",
@@ -710,8 +710,8 @@ async fn mode_a_reconcile_endpoints_do_not_touch_projection_cache() {
     let (a_id, b_id) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
-    app.warm_household(&owner.cookie, &key).await;
+    let key = app.default_view_key(iid, owner.user_id);
+    app.warm_default_view(&owner.cookie, &key).await;
 
     // Conciliar par + desconciliar + pase explícito: en modo A nada invalida.
     let r = app
@@ -769,10 +769,10 @@ async fn mode_b_reconcile_endpoints_invalidate_projection_cache() {
     let (a_id, b_id) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
 
     // 1. Conciliar par manual → invalida (cambia qué cuenta en el promedio 12m).
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let r = app
         .post_json_with_cookie(
             &format!("/v1/transactions/{a_id}/reconcile"),
@@ -784,7 +784,7 @@ async fn mode_b_reconcile_endpoints_invalidate_projection_cache() {
     app.assert_invalidated(&key, "reconcile pair").await;
 
     // 2. Desconciliar → invalida.
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let u = app
         .delete_with_cookie(&format!("/v1/transactions/{a_id}/reconcile"), &owner.cookie)
         .await;
@@ -792,7 +792,7 @@ async fn mode_b_reconcile_endpoints_invalidate_projection_cache() {
     app.assert_invalidated(&key, "unreconcile").await;
 
     // 3. Pase explícito sin pares nuevos (el rechazo bloquea el re-emparejado) → NO invalida.
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let p = app
         .post_json_with_cookie("/v1/transactions/reconcile", json!({}), &owner.cookie)
         .await;
@@ -862,7 +862,7 @@ async fn pair_left_behind(
     unlink_silently(app, &[&a_id, &b_id]).await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
     (iid, key)
 }
 
@@ -877,7 +877,7 @@ async fn mode_b_sweep_invalidates_when_it_recovers_a_pair() {
     let (_iid, key) = pair_left_behind(&app, &owner).await;
     set_mode(&app, &owner.cookie, "transactions_avg").await;
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let out = futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&app.state)
         .await
         .expect("sweep");
@@ -894,7 +894,7 @@ async fn mode_c_sweep_invalidates_when_it_recovers_a_pair() {
     let (_iid, key) = pair_left_behind(&app, &owner).await;
     set_mode(&app, &owner.cookie, "budget_income_real_expense").await;
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let out = futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&app.state)
         .await
         .expect("sweep");
@@ -912,7 +912,7 @@ async fn mode_a_sweep_does_not_touch_projection_cache() {
     let (_iid, key) = pair_left_behind(&app, &owner).await;
     // Sin set_mode: modo A es el default.
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let out = futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&app.state)
         .await
         .expect("sweep");
@@ -955,8 +955,8 @@ async fn mode_b_sweep_does_not_evict_a_hot_cache_when_it_finds_nothing() {
     set_mode(&app, &owner.cookie, "transactions_avg").await;
 
     let iid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
-    app.warm_household(&owner.cookie, &key).await;
+    let key = app.default_view_key(iid, owner.user_id);
+    app.warm_default_view(&owner.cookie, &key).await;
 
     let out = futurefin_api::handlers::transactions::reconcile::sweep_all_owners(&app.state)
         .await

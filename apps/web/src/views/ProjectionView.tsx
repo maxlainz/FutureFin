@@ -22,6 +22,7 @@ import {
 import {
   PROJECTION_FOCUS_STORAGE_KEY,
   PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY,
+  neededCapitalAtRetirement,
   projectionXTickLabel,
   resolveProjectionAxisAgeMode,
 } from "../lib/projection-chart";
@@ -89,11 +90,21 @@ export function ProjectionView({
     return pick;
   })();
   const axisAnchor = projectionSeries?.anchor_date_ymd?.trim() || null;
-  const jubilacionMiNo = projectionSeries?.jubilacion_month_index ?? null;
-  const jubilacionTargetNoPen =
-    projectionSeries?.jubilacion_target_net_worth != null
-      ? parseDisplayDecimal(projectionSeries.jubilacion_target_net_worth)
-      : null;
+  /**
+   * El mes que rotula el pseudo-hito «jubilación» de la tira de KPIs (modelo v2, C4).
+   *
+   * Con `success_threshold` es la FECHA VÁLIDA (`safe_date_month_index`): el mes en que jubilarse
+   * cumple tu umbral. Con cualquier otra base manda `jubilacion_month_index`, que es el mes en que
+   * esta simulación se jubila de verdad —la edad que pediste—; rotular ahí la fecha válida diría
+   * «te jubilas aquí» sobre un mes en el que el plan simulado no hace nada.
+   *
+   * Con `not_reachable`/`pending` los dos son `null` y el pseudo-hito no existe: no hay fecha que
+   * fingir.
+   */
+  const jubilacionMiNo =
+    (projectionSeries?.retirement_date_basis === "success_threshold"
+      ? projectionSeries?.safe_date_month_index
+      : projectionSeries?.jubilacion_month_index) ?? null;
 
   // Preferencia PERSISTIDA de «Vista cercana» (la memoria de escritorio)…
   const [focusModeStored, setFocusModeStored] = useState<boolean>(() => {
@@ -165,6 +176,43 @@ export function ProjectionView({
     // chart debe amplificar (> 1) en vez de fingir «sin ajuste».
     return n != null && Number.isFinite(n) ? n : 0;
   }, [installation?.installation.annual_inflation_assumption_percent]);
+
+  /**
+   * El tile «Capital necesario hoy» (modelo v2, M9/C4). Reemplaza a «Objetivo al jubilarte»: en v2
+   * no hay objetivo — hay el LÍQUIDO que, con tu mezcla de activos, sostiene el plan a tu umbral.
+   *
+   * **La cifra principal NO se toca con el toggle**: `needed_capital_today` viaja en euros de HOY
+   * por contrato, redondeada a cientos hacia arriba, y es la MISMA, al euro, en Jubilación,
+   * Resumen y Proyección. Deflactarla la haría discrepar de sus dos gemelas sin que nada fallara.
+   */
+  const neededToday = useMemo(() => {
+    const raw = projectionSeries?.needed_capital_today;
+    return raw != null ? parseDisplayDecimal(raw) : null;
+  }, [projectionSeries?.needed_capital_today]);
+
+  /** El umbral del perfil, que es el SUJETO de la cifra: «capital necesario» no significa nada sin
+   *  decir necesario *para qué*. Eco de la respuesta; sin él el subtítulo se queda en la base. */
+  const thresholdOutOfHundred = projectionSeries?.success_threshold_pct ?? null;
+
+  /**
+   * La SEGUNDA línea del tile: el capital necesario en la fecha válida, leído de la curva en
+   * `safe_date_series_position`. Esta sí sigue el toggle —es un importe de un mes futuro— y por
+   * eso la base viaja pegada al importe en vez de re-derivarse del estado del interruptor:
+   * «toggle activo con inflación 0» y «toggle apagado» dan el MISMO número con bases distintas.
+   *
+   * Ausente mientras el nivel 2 calcula la curva (`needed_capital_curve_state: "computing"`): la
+   * línea simplemente no se pinta, que es lo correcto — un importe inventado ahí sería una
+   * promesa que el sorteo aún no ha hecho.
+   */
+  const neededAtRetirement = useMemo(
+    () =>
+      neededCapitalAtRetirement(
+        projectionSeries,
+        inflationAdjusted,
+        projectionInflationPct,
+      ),
+    [projectionSeries, inflationAdjusted, projectionInflationPct],
+  );
 
   // Con el toggle de inflación activo (y inflación > 0), los hitos se expresan en euros de hoy: el
   // backend ya cruza los mismos umbrales (1M, 2.5M…) sobre el patrimonio deflactado, así que el
@@ -252,16 +300,39 @@ export function ProjectionView({
                 return (
                   <MetricCard
                     key={`${m.target}-${m.reached_month_index}`}
-                    label={isJubilacion ? "Jubilación" : "Hito"}
+                    label={isJubilacion ? "Capital necesario hoy" : "Hito"}
                     value={
                       isJubilacion
-                        ? jubilacionTargetNoPen !== null
-                          ? formatCurrencyNumber(
-                              jubilacionTargetNoPen,
-                              currencyIso,
-                            )
+                        ? neededToday !== null
+                          ? formatCurrencyNumber(neededToday, currencyIso)
                           : METRIC_DASH
                         : formatProjectionMilestoneCompactLabel(m.target)
+                    }
+                    helpId={isJubilacion ? "retirement.needed_capital" : undefined}
+                    // La tarjeta DECLARA su base en vez de dejar que el lector la adivine del
+                    // estado del interruptor, y añade la lectura de la curva en la fecha válida
+                    // cuando el nivel 2 ya la ha resuelto: «hoy harían falta X; el día que te
+                    // jubiles, Y». Sin importe no se declara base.
+                    detail={
+                      isJubilacion && neededToday !== null
+                        ? [
+                            thresholdOutOfHundred != null
+                              ? `en euros de hoy · para que aguanten ${thresholdOutOfHundred} de cada 100`
+                              : "en euros de hoy",
+                            neededAtRetirement.amount !== null
+                              ? `al jubilarte: ${formatCurrencyNumber(
+                                  neededAtRetirement.amount,
+                                  currencyIso,
+                                )} ${
+                                  neededAtRetirement.basis === "today"
+                                    ? "(euros de hoy)"
+                                    : "(euros de ese mes)"
+                                }`
+                              : null,
+                          ]
+                            .filter((l): l is string => l !== null)
+                            .join(" · ")
+                        : undefined
                     }
                     parenthetical={`~${projectionXTickLabel(
                       m.reached_month_index,

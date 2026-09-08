@@ -368,7 +368,8 @@ async fn quota_household_vs_mine_scoping() {
     )
     .await;
 
-    let hh = budget_snapshot(&app, &owner.cookie, "/v1/budget").await;
+    // `household` explícito desde 5.0.0 (R2).
+    let hh = budget_snapshot(&app, &owner.cookie, "/v1/budget?view=household").await;
     approx(parse_dec(&hh["totals"]["expense_regular_monthly_equivalent"]), 800.0);
 
     let mine = budget_snapshot(&app, &owner.cookie, "/v1/budget?view=mine").await;

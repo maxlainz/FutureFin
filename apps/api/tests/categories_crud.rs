@@ -238,10 +238,10 @@ async fn category_mutations_do_not_touch_the_projection_cache() {
     let a = cat(&app, &owner, "expense", "Comida").await;
     let b = cat(&app, &owner, "expense", "Ocio").await;
     let iid: Uuid = app.installation_id().await;
-    let key = app.household_key(iid, owner.user_id);
+    let key = app.default_view_key(iid, owner.user_id);
     app.settle_login_warmup(iid).await;
 
-    app.warm_household(&owner.cookie, &key).await;
+    app.warm_default_view(&owner.cookie, &key).await;
     let p = app
         .patch_json_with_cookie(
             &format!("/v1/categories/{a}"),

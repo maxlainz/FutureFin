@@ -65,7 +65,11 @@ import {
 } from "../lib/format";
 import { formatDateDm, formatDateDmy, todayYmdInTimeZone } from "../lib/dates";
 import { HELP_TEXTS } from "../lib/helpTexts";
-import { ledgerViewQs, type LedgerPersonScope } from "../lib/ledger";
+import {
+  ledgerViewAmp,
+  ledgerViewQs,
+  type LedgerPersonScope,
+} from "../lib/ledger";
 import { useIsMobile } from "../lib/responsive";
 import {
   AVG_WINDOWS,
@@ -139,7 +143,7 @@ export function GastosView({
   const today = todayYmdInTimeZone(calendarTz);
   const isMobile = useIsMobile();
   const viewSuffix = ledgerViewQs(ledgerPersonScope);
-  const viewAmp = ledgerPersonScope === "mine" ? "&view=mine" : "";
+  const viewAmp = ledgerViewAmp(ledgerPersonScope);
 
   const [incomeCategories, setIncomeCategories] = useState<CategoryRow[]>([]);
   const [expenseCategories, setExpenseCategories] = useState<CategoryRow[]>([]);
@@ -642,7 +646,20 @@ export function GastosView({
         : significantDeltaTone(totalDeltaBudget, kind, threshold);
     return (
       <div className="table-scroll bordered-top">
-        <table className="assets-table exp-comparison-table">
+        <table
+          className={`assets-table exp-comparison-table${
+            isMobile ? "" : " exp-comparison-table--fixed"
+          }`}
+        >
+          {isMobile ? null : (
+            <colgroup>
+              <col className="col-remainder" />
+              <col className="col-comparison-amount" />
+              <col className="col-comparison-amount" />
+              <col className="col-comparison-amount" />
+              <col className="col-comparison-amount" />
+            </colgroup>
+          )}
           <thead>
             <tr>
               <th>Categoría</th>
@@ -800,7 +817,13 @@ export function GastosView({
       >
         <td>{isMobile ? formatDateDm(t.op_date) : formatDateDmy(t.op_date)}</td>
         <td className="exp-concept-cell">
-          {t.concept}
+          {isMobile ? (
+            t.concept
+          ) : (
+            <span className="exp-concept-text" title={t.concept}>
+              {t.concept}
+            </span>
+          )}
           {refund ? (
             <>
               {" "}
@@ -959,12 +982,6 @@ export function GastosView({
                 : "Histórico de gasto mensual"}
         </p>
       </div>
-
-      {hasMembership && ledgerPersonScope === "mine" ? (
-        <div className="banner info-banner tight-banner">
-          <strong>Mío</strong> · solo tus movimientos
-        </div>
-      ) : null}
 
       {!hasMembership ? (
         <div className="banner info-banner">Sin acceso al hogar.</div>
@@ -1186,7 +1203,7 @@ export function GastosView({
                     ) : null}
                     <div className="exp-comparison-grid">
                       <div className="exp-comparison-col">
-                        <h4 className="subsection-title">Gastos</h4>
+                        <h4 className="panel-title">Gastos</h4>
                         {renderRefundsNote(summary.totals)}
                         {renderComparisonTable(
                           summary.expense_categories,
@@ -1200,7 +1217,7 @@ export function GastosView({
                         )}
                       </div>
                       <div className="exp-comparison-col">
-                        <h4 className="subsection-title">Ingresos</h4>
+                        <h4 className="panel-title">Ingresos</h4>
                         {renderComparisonTable(
                           summary.income_categories,
                           "income",
@@ -1279,7 +1296,22 @@ export function GastosView({
                       <p className="muted exp-movements-empty">Sin resultados.</p>
                     ) : (
                       <div className="table-scroll">
-                        <table className="assets-table exp-movements-table">
+                        <table
+                          className={`assets-table exp-movements-table${
+                            isMobile ? "" : " exp-movements-table--fixed"
+                          }`}
+                        >
+                          {isMobile ? null : (
+                            <colgroup>
+                              <col className="col-exp-date" />
+                              <col className="col-remainder" />
+                              <col className="col-exp-category" />
+                              <col className="col-exp-kind" />
+                              <col className="col-exp-amount" />
+                              <col className="col-exp-link" />
+                              {canEdit ? <col className="col-actions" /> : null}
+                            </colgroup>
+                          )}
                           <thead>
                             <tr>
                               {renderSortHeader("Fecha", "date")}
@@ -1723,7 +1755,7 @@ function EditTransactionModal({
             />
           </label>
           <label className="field">
-            <span>Fecha valor (opc.)</span>
+            <span>Fecha valor (opcional)</span>
             <input
               type="date"
               value={valueDate}
@@ -1791,7 +1823,7 @@ function EditTransactionModal({
         </div>
         <div className="asset-form-grid">
           <label className="field">
-            <span>Activo vinculado (opc.)</span>
+            <span>Activo vinculado (opcional)</span>
             <select
               value={linkedAssetId}
               onChange={(e) => setLinkedAssetId(e.target.value)}
@@ -1805,7 +1837,7 @@ function EditTransactionModal({
             </select>
           </label>
           <label className="field">
-            <span>Pasivo vinculado (opc.)</span>
+            <span>Pasivo vinculado (opcional)</span>
             <select
               value={linkedLiabilityId}
               onChange={(e) => setLinkedLiabilityId(e.target.value)}
@@ -1820,7 +1852,7 @@ function EditTransactionModal({
           </label>
         </div>
         <label className="field">
-          <span>Notas (opc.)</span>
+          <span>Notas (opcional)</span>
           <textarea
             value={notes}
             rows={2}

@@ -29,6 +29,7 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates/domain ./crates/domain
 COPY crates/engine ./crates/engine
+COPY crates/engine-stochastic ./crates/engine-stochastic
 COPY apps/api ./apps/api
 RUN cargo build --release -p futurefin-api --locked \
     # Manifiestos que consume el entrypoint: versión de la app y lista de migraciones

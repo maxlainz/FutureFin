@@ -10,7 +10,7 @@ description: >
   update a tool. Triggers: "add an MCP tool", "añadir una tool", "does this endpoint need a
   tool?", "the MCP is out of date", "el MCP se ha quedado atrás", "tools/list", "frozen catalog",
   "tools_list_returns_exactly_the_v1_catalog", "update the tool catalog", "new handler — MCP?",
-  "extract a *_core", "preview/confirm", "tool annotations", "68 tools". Do NOT use it for WHY
+  "extract a *_core", "preview/confirm", "tool annotations", "71 tools". Do NOT use it for WHY
   tools share core fns / live-role auth (futurefin-architecture-contract D14/D15), the catalog's
   per-tool semantics (.claude/api-routes.md §MCP), MCP env vars and the write toggle
   (futurefin-config-and-flags), how to run the MCP test suites (futurefin-validation-and-qa /
@@ -145,7 +145,7 @@ the blocking reason changes (noted per row).
 | `POST /v1/transactions/batch` (create) | **defer** | `create_transaction` loops fine; batch adds all-or-nothing tx semantics + shared fingerprint ordinals that complicate preview. **Sigue vigente en 3.8.0**: lo que se hizo tool-able fue el PATCH, no el POST | Real demand for >10-item batches from chat |
 | `POST /v1/transactions/rules` con `apply_to_existing` (el eje de backfill del body HTTP) | **omit** | En el momento del preview la regla todavía no existe, así que no hay nada que simular; y un `create_*` capaz de reescribir cientos de filas haría mentir a sus propias annotations, que es lo que el cliente MCP usa para decidir si pide permiso al humano. Desde el chat: `create_categorization_rule` → `apply_categorization_rule`, con un único gate de confirmación (3.8.0) | Que el SPA necesite el round-trip único también desde MCP, cosa que hoy no pasa |
 | `POST /v1/allocation-rules/reorder` | **omit** | Requires echoing the exact full id set; one missing id = 400; near-zero conversational value | UX rethink of the cascade |
-| `PATCH /v1/auth/me` (`birth_date`) | **defer** | Engine input but set-once identity data; marginal | Bundled into a future profile tool |
+| `PATCH /v1/auth/me` (`birth_date`) | **CERRADA 2026-09-03 (5.0.0)** — el eje ya está cubierto | El *revisit trigger* de esta fila era literalmente «bundled into a future profile tool». Esa tool existe: `update_retirement_profile` acepta `birth_date` + `clear_birth_date` (`mcp/server.rs:2376`, `:2379`), escribe **la misma columna** `users.birth_date` con **el mismo parser** que el endpoint (`retirement_profile.rs:1092` llama a `handlers::auth::parse_me_birth_patch`) y `get_retirement_profile` la devuelve. Y no es un extra: sin fecha de nacimiento las estrategias por edad degradan a `asap`, así que pedirla en otra pantalla era garantizar perfiles a medias | **Matiz honesto**: `PATCH /v1/auth/me` **sigue existiendo** (`routes/mod.rs:63`). Lo que se cubre es su eje `birth_date`; si algún día gana otro campo, esa parte vuelve a esta tabla |
 | `GET /v1/auth/me` | **covered de facto** por `get_settings` (2026-08-30) | Devuelve `{id, username, birth_date}` — exactamente el bloque `user` que `get_settings` obtiene de la misma `settings_user_core` (§3.3). Una tool dedicada duplicaría un subconjunto sin añadir capacidad | Que `GET /v1/auth/me` gane campos que `get_settings.user` no exponga |
 | `GET /v1/history/snapshots/prefill` | **defer** | Only meaningful as companion of snapshot backfill | Gap #3 below is implemented |
 | Full-body `PATCH /v1/installation` tool | **restricted** | `mcp_write_enabled` self-reference (§2.1); FIRE subset already covered by `update_fire_settings` (owner-only) | Only ever as explicit field-allowlist tool, never `PatchInstallationBody` passthrough |
@@ -224,6 +224,35 @@ sea cómoda. **Dos de las cuatro son ya la misma forma** («la core existe, el P
 el objeto entero, el chat necesita campo a campo»), así que esa vía está agotada como novedad: la
 quinta que la invoque no está argumentando nada, solo está aplicando un precedente — legítimo, pero
 dilo así.
+
+### 3.5 Evaluación del tren 5.0.0 (issue #207) — 68 → 71 tools
+
+La evaluación de §1 corrida sobre toda la superficie HTTP que la release movió. **Ninguna fila queda
+sin clasificar**; las tres tools nuevas y los cambios de contrato están abajo (V6/V7 son del WP-F:
+colchón derivado y umbral retirado; la última es de A9, el modelo v2 completo — **cero tools
+nuevas** en ninguna de las tres).
+
+| Superficie HTTP nueva o cambiada (5.0.0) | Resultado de paridad |
+|---|---|
+| `GET \| PATCH /v1/auth/me/retirement-profile` | **Dos tools nuevas**: `get_retirement_profile` (read-only, sin `require_mcp_write`, `identity()` a secas) y `update_retirement_profile` (preview/confirm). Comparten `get_retirement_profile_core` / `patch_retirement_profile_core` con el HTTP — cero SQL en `server.rs`, como manda §4 paso 1. **Own-user por construcción**: `NoParams` y `user_id` de la identidad, así que leer el plan de otro no es expresable en el esquema |
+| Auth de `update_retirement_profile` | **Por ROL, no owner-only** — y es deliberado: `require_mcp_write` aplica sus tres puertas (rol vivo → scope del token → `mcp_write_enabled`) y ninguna mira al dueño. El comentario que lo sostiene (`server.rs:5599-5601`): *un `viewer` que no puede fijar su propia edad de jubilación no puede ver su propia proyección, que es exactamente lo que un viewer sí puede hacer*. Contraste con `update_fire_settings`, que **sí** es owner-only y lo comprueba **en la core** (D14/#99) porque toca el hogar entero |
+| `confirm_token` de `update_retirement_profile` | **NO lo lleva, y el criterio es el de `two_phase`** (`server.rs:224-247` §«Dónde se usa y dónde no»): el token se exige solo donde *la confirmación destruye algo que la conversación no puede reconstruir* — cascadas sin cota y puertas de una sola dirección. Aquí el preview devuelve el before/after **íntegro** del perfil, así que deshacerlo es volver a llamar con los valores de `before`. Es el mismo argumento de `update_fire_settings`, y **son ya dos**: la frase de `server.rs:5539-5541` que llamaba a aquella «la única tool destructiva enteramente reversible desde su propio preview» quedó obsoleta el día que esta llegó |
+| `GET /v1/projection/bands?paths&seed` | **Tool nueva** `get_projection_bands` (read-only). Tres decisiones de superficie, todas medidas: **(a) mine-only** — `view=household` devuelve 400 `household_bands_unavailable` desde la **core**, no desde el handler, así que la tool hereda la conducta sin repetir la comprobación; **(b) sin `density`** (arqueología §2.18, veto 22): fuerza `hybrid` igual que `get_projection`; **(c) `paths` topa en 1.000 por MCP frente a 2.000 por HTTP** — el contexto de un modelo es más caro que el ancho de banda de un navegador |
+| `include_liquid_bands` (nuevo, `get_projection_bands`) | **Opt-in por TAMAÑO, no omisión.** No es una capacidad recortada: es la mitad exacta del payload. La respuesta completa mide **~16 KB** a densidad `hybrid` y las tres series del líquido son la mitad de los puntos (`server.rs:3032-3037`, `mcp_http.rs:357-362`). Sin el flag **la clave no existe** (no viaja `null`), pinneado en `mcp_http.rs:402-405`. Presupuesto: `projection_bands.rs::the_hybrid_payload_stays_within_the_context_budget` ≤ **32 000 bytes**, cuyo mensaje de fallo prescribe la salida correcta («quita las bandas del líquido antes de subir la cota») |
+| `include_member_series` (nuevo, `get_projection`) | **Misma categoría: opt-in por tamaño.** Medido el 2026-09-03 (`projection_household_aggregate.rs:449-452`): `mine/hybrid` **21 009 B**, `household/hybrid` **34 161 B**, de los cuales `members[].series` son **11 748 B** (~5,9 KB por miembro, lineal con el hogar). **Por HTTP viajan siempre**; solo la tool las oculta, igual que `asset_series`. Dos presupuestos distintos y a propósito: **32 KB** la tool (`mcp_http.rs:470`) y **68 KB** el HTTP (`projection_household_aggregate.rs:465`, deliberadamente ~2× lo medido) |
+| `simulate_projection`: `profile_overrides`, `income_growth_real_pct_annual`, `income_steps`, `income_pause`, `solve`, `monte_carlo` | **Tool actualizada** (§3.3 sigue: **no hay ruta HTTP** — `grep -rn 'simulate' apps/api/src/routes/mod.rs` sigue vacío y `simulate_projection_core` tiene un único caller). `profile_overrides` **delega** sus cotas en los params de la tool de escritura (`to_patch()`), así que una cota no puede divergir entre guardar y simular. **Cinco de los seis ejes llevan anti-no-op** (`profile_overrides_empty`/`_no_op`, `income_growth_no_op`, `income_step_delta_zero`, `solve_no_op`); **`monte_carlo` no lo lleva, y está declarado**: no mueve el escenario, lo **describe** — `{"monte_carlo": {"paths": 500}}` con el resto vacío es la pregunta legítima «¿qué probabilidad de éxito tiene mi plan tal cual está?» |
+| `update_fire_settings` pierde 4 campos | **Tool actualizada, y la pérdida es la paridad**: `fire_number_mode`, `fire_number_manual_amount`, `swr_pct` y `horizon_lifespan_age` se mudaron al perfil por usuario, así que dejarlos en una tool de ajustes del HOGAR habría sido servir una escritura que ya no existe. Comprobación acotada al struct, para que no la enmascare otra aparición del fichero:<br>`awk '/^pub struct UpdateFireSettingsParams \{/,/^\}/' apps/api/src/mcp/server.rs \| grep -cE 'fire_number_mode\|fire_number_manual_amount\|swr_pct\|horizon_lifespan_age'` → **0**.<br>El eje what-if no se pierde: vuelve por `profile_overrides` |
+| `assets`: volatilidad + tri-estado | **Dos tools actualizadas.** `create_asset` gana `annual_volatility_percent`; `update_asset` gana ese más `clear_annual_volatility_percent` y `clear_expected_annual_return_percent` (**con el sufijo `_percent`**: el nombre corto no existe). Un schema de tool no sabe expresar «omitir vs `null`», así que el tri-estado del PATCH viaja como `clear_*` — y hasta 4.15.x la tool **tenía la capacidad de romper un estado que no tenía la capacidad de reparar** (`mcp_write.rs:4175-4180`) |
+| D21 (403 `not_row_owner`) | **Heredado, sin trabajo de tool**: la comprobación vive en las cores, así que las dos superficies fallan igual — incluidos los previews de borrado, que antes enseñaban la fila ajena **y entregaban el `confirm_token`**. Lo que sí hubo que arreglar a mano fueron **dos descripciones que mentían**: las de activos decían «Sin owner-check: cualquier member edita cualquier activo del hogar», frase que D21 volvió falsa y que nadie había recontado |
+| Default de `?view` → `mine` | **Heredado por las tools con scope** (`resolve_view` llama a `LedgerViewQuery::resolve`), pero **NO es gratis**: cambia la respuesta de toda tool que omita `view`. Deriva detectada y **no arreglable desde documentación**: el doc-comment de `resolve_view` (`mcp/server.rs:125-127`) sigue diciendo «`"household"` u **omitido** → Household». Registrada en la tabla de erratas de `futurefin-docs-and-writing` §7 |
+| `GET /v1/summary` gana `plan` | **Heredado**: `get_summary` comparte `summary_core`, así que el objeto `plan` (con su `absent_reason: household_aggregate`) llega solo |
+| **U4** — `withdrawal_rule.pct` / `start_pct` pasan a OPCIONALES y heredan `swr_pct`; el perfil resuelto publica `pct_source` | **Una tool actualizada, dos heredan.** `update_retirement_profile` cambia su descripción (+78) y los doc-comments de `WithdrawalRuleParam.pct`/`.start_pct`/`.end_pct`; **`simulate_projection.profile_overrides` hereda sin tocar nada** porque reusa EXACTAMENTE ese tipo de parámetro (`ProfileOverrideParam.withdrawal_rule: Option<WithdrawalRuleParam>`) — es el mismo argumento que la fila de `profile_overrides` de arriba, y aquí paga solo. `get_retirement_profile` publica `pct_source` sin código propio (comparte `get_retirement_profile_core`). **`pct_source` es SOLO SALIDA**: no está en `WithdrawalRuleParam`, así que el `inputSchema` no se mueve y el `constraints_sha256_12` de las dos tools tampoco — el fixture cambia **una sola** entrada (`update_retirement_profile`, por la descripción). Ningún contador de §5 se mueve |
+| ~~**S4** — `PATCH {"pension": null}` suelta el `target_basis` almacenado~~ **— retirada ENTERA con el modelo v2**: `target_basis`/`target_basis_stored` murieron con la base del objetivo (M4, 2026-09-06); sin base que derivar, quitar la pensión ya no suelta nada. `grep -n target_basis_stored apps/api/src/handlers/retirement_profile.rs` solo devuelve el doc-comment que declara su ausencia | Descrita aquí tal como se evaluó en su momento (fila heredada, cero código en `server.rs`), pero la regla misma ya no existe — no reintroducir S4 pensando que es una omisión |
+| `POST /v1/backup/user-export`: la contraseña deja de ser la de la cuenta en cuentas sin contraseña (issue #213) | **n/a**. `/v1/backup/*` es una **omisión deliberada ya registrada** en §3.1 (categoría «Encrypted blob transport»): ninguna tool toca el backup, y el cambio no crea razón para que la haya — al contrario, un flujo cuyo secreto lo **crea la persona** al descargar el archivo es todavía menos conversable. `grep -c 'backup' apps/api/src/mcp/server.rs` → **0**, y debe seguir siéndolo. El código nuevo `backup_password_empty` viaja por la misma `ApiError` y vive en `error-codes.json` + `errorMessages.ts`, como el resto |
+| `UserResponse` gana `has_password` (aditivo, issue #213) | **n/a**. `UserResponse` es la respuesta de `login`/`register`/`/v1/auth/sso`/`GET /v1/auth/me`, y **las cuatro rutas están excluidas** en §3.1 (categorías «Session lifecycle» y «OAuth protocol»): un cliente MCP llega ya autenticado por Bearer, no hay tarro de cookies que llenar. El campo no aparece en ninguna respuesta de tool — `grep -c 'has_password' apps/api/src/mcp/server.rs` → **0** |
+| ~~**V6** — el colchón de caja se DERIVA del tope de la regla de ahorro; `GET /v1/projection/bands` gana cinco campos~~ **— retirado ENTERO antes de publicarse (decisión del propietario, 2026-09-06)**: la fila describe un diseño intermedio que nunca llegó a servirse por MCP. `buffer_source`/`buffer_target_amount`/`buffer_months_effective`/`buffer_source_rule_id`/`buffer_source_asset_name`/`buffer_inactive_reason` no existen en ningún lado — `grep -rn "buffer_source\|buffer_target_amount\|buffer_months_effective\|buffer_inactive_reason" apps/api/src/handlers/projection.rs apps/api/src/handlers/projection_bands.rs` sale vacío. `cash_buffer_months`/`clear_cash_buffer_months` SÍ llegaron al catálogo, pero como dos de los cinco parámetros DEPRECADOS de M4/M6 (fila A9, abajo), nunca como override activo | Descrita tal como se diseñó, no como se publicó — la caja es un activo más y la regla de ahorro decide cuánto se guarda, sin mecanismo de relleno aparte |
+| **V7** — `success_threshold_pct` deprecado e ignorado; sale de toda respuesta | **Un parámetro deprecado en DOS tools, y no se puede borrar.** `UpdateRetirementProfileParams` y `ProfileOverrideParam` son `deny_unknown_fields`, así que retirarlo del schema convertiría en **400** lo que hoy funciona: se queda, marcado deprecado en su `///`, se acepta y se descarta —sin validación, sin persistencia, fuera de toda salida—, y **pierde su `#[schemars(range)]`** porque ya no acota nada (con él, su fila de `schema_bounds_parity.rs` — pinear la cota de un parámetro que nadie lee sería congelar una promesa que el runtime no cumple). Del lado de la salida, `get_projection_bands`, `simulate_projection` (bloque `monte_carlo`), `get_summary` (`plan`) y `get_retirement_profile` dejan de publicarlo. **El fixture congelado se regeneró**: solo se mueven los dos `constraints_sha256_12` de esas tools; ninguna `description_sha256_12`, así que el presupuesto de descripciones **no cambia** |
+| **A9 (modelo v2 completo)** — `success_threshold_pct` vuelve a ser load-bearing (M2/C3, sustituye a la fila V7 de arriba); `coast_mode`/`coast_stop_age`/`clear_coast_stop_age` nuevos; el puente se muda DENTRO de `pension` (`bridge_enabled`/`bridge_max_pct`/`bridge_max_years`); `PartialRetirementParam.starts_at_age` pasa a opcional + `mode`; `target_basis`/`clear_target_basis`/`bridge_discount_basis`/`cash_buffer_months`/`clear_cash_buffer_months` pasan de vivos a DEPRECADOS; `strategy` pasa de 5 a 4 literales anunciados; el techo de `paths` en Monte Carlo sube de 1.000 a 2.500 en dos tools | **Dos tools actualizadas en su forma** (`update_retirement_profile`, `simulate_projection` vía `ProfileOverrideParam`/`MonteCarloParam`), **una en su ceiling** (`get_projection_bands.paths`), **dos solo en descripción** (`get_retirement_profile`, `get_summary`). Cero tools nuevas, cero retiradas. La política de deprecación es la MISMA que V7 acuñó, aplicada a los cinco ejes de M4/M6 a la vez: no se borran (`deny_unknown_fields`), pierden sus `#[schemars(range/regex/enum)]` y su `///` pasa a un one-liner «Ignorado desde 5.0.0 (modelo v2): …». El puente NO gana un parámetro nuevo suelto: se reubica dentro de `PensionParam`, porque en v2 es un ajuste de la pensión y no un eje independiente (C7) — mismo movimiento que hizo el propio modelo en el dominio. `strategy` pierde `pension_bridge` de su `enum` publicado pero el literal SIGUE resolviendo por escritura (alias en `parse_retirement_strategy`), así que esto es contrato de SCHEMA, no de comportamiento — nadie que ya mandara `pension_bridge` se rompe. El techo de `paths` (1.000→2.500) **cerraba una deriva que ya vivía en producción**: `resolve_paths(..., MCP_MAX_PATHS)` ya topaba en 2.500 en el runtime antes de este cambio, así que el schema venía MINTIENDO por debajo (prometía menos capacidad de la que la tool daba) — el incidente inverso al «default 15 cuando el real era 30» de CLAUDE.md, pero de la misma familia: schema y runtime deben ser el mismo número. Cinco filas nuevas en `schema_bounds_parity.rs` (`update_retirement_profile $.success_threshold_pct`, `$.coast_stop_age`, `$defs.PensionParam.bridge_max_years`; `simulate_projection $defs.MonteCarloParam.paths`; `get_projection_bands $.paths`), las tres primeras sustituyen/complementan la fila que V7 había retirado y las dos últimas cierran la deriva de Monte Carlo. El `swr_pct` (0–4→0–6) de las tres tools **no tiene fila posible**: viaja como string con solo un `pattern`, y el arnés de `schema_bounds_parity.rs` únicamente lee `minimum`/`maximum` numéricos — documentado en el propio fichero para que nadie busque una fila que no puede existir. Presupuesto de descripciones: las SEIS que hablan del plan se reescriben liberando antes de gastar (fuera buffer/basis/cruce/percentiles; dentro fecha válida, Wilson, capital necesario, umbral, puente, modos); margen medido ANTES: 94; DESPUÉS: `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"` → **71 23982 548** (margen 18). Tests: `mcp_http.rs::enumerated_params_publish_a_real_enum_in_the_json_schema` (strategy a 4 literales), `::get_projection_bands_matches_http_and_hides_the_liquid_bands_by_default` (el caso «HTTP sí, MCP no» se re-ancla de 2.000 a 3.000 caminos porque 2.000 ya cabe en el techo nuevo), `mcp_write.rs::update_retirement_profile_accepts_the_v2_axes_and_ignores_the_deprecated_ones` (nueva) |
 
 ### 3.4 View echo — object responses vs `list_*` envelopes (Fase 5, issue #86)
 
@@ -358,6 +387,17 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
    parsed with `parse_uuid_param`/`parse_date_param`/`parse_decimal_param`. A PATCH-style
    "omit vs null" tri-state cannot be expressed in the schema — model it as a `clear_*: bool`
    flag (precedents: `clear_expense_end_date`, `clear_cap`, `clear_purchase_price`).
+   **Retiring a param on a `deny_unknown_fields` struct is a stub, never a deletion**: deleting the
+   field turns a call that works today into a 400 for anyone still sending it; instead keep the
+   field, strip every `#[schemars(range/regex/enum)]` bound (it no longer constrains anything the
+   runtime reads), replace its `///` with a one-line "Ignorado desde `<version>` (`<motivo>`): …",
+   and stop referencing it in `to_patch()`/the core — it is deserialized and dropped, never
+   forwarded. Drop its `schema_bounds_parity.rs` row too (a pinned bound on a parameter nobody
+   reads freezes a promise the runtime doesn't keep). Two precedents, same policy: V7 did it first
+   for `success_threshold_pct` alone; A9 (5.0.0, this file's §3.5) applied it to all five params the
+   v2 model retired (`target_basis`, `clear_target_basis`, `bridge_discount_basis`,
+   `cash_buffer_months`, `clear_cash_buffer_months`) in the same PR that made `success_threshold_pct`
+   load-bearing again — proof the stub survives a model change in either direction, not just one.
 3. **Tool fn** inside the `#[tool_router] impl FutureFinMcp`, placed next to its thematic
    neighbors. Canonical body: `identity(&ctx)?` → a `run()` closure mapping params to the
    handler's body struct (fail early via `to_tool_outcome`) → async block: `require_mcp_write`
@@ -413,15 +453,15 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
 
 ## 5. Keeping it honest — verification and drift audit
 
-Reproducible counters (run from repo root; **expected values dated 2026-08-28, Fases 0–6 del tren
-4.4.0**):
+Reproducible counters (run from repo root; **valores medidos el 2026-09-03, rama `release/5.0.0`;
+entre paréntesis los de 2026-08-28, Fases 0–6 del tren 4.4.0**):
 
 ```bash
-grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 68 — total tools
-grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 28 — reads + simulate
-grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 40 — writes
-grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 40 — MUST equal writes
-grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 17 — preview/confirm (Fase 6: +3)
+grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 71 (68) — total tools
+grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 30 (28) — reads + simulate
+grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 41 (40) — writes
+grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 41 (40) — MUST equal writes
+grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 18 (17) — preview/confirm
 grep -c '= two_phase(' apps/api/src/mcp/server.rs                    # 8 — las que exigen token de dos fases
 #   (OJO 1: `grep -c 'confirm_token'` a secas da 47 — cuenta también el campo del schema y su prosa.
 #    OJO 2: el comando de esta línea fue `grep -c 'confirm_token.as_deref'` hasta la Fase 7, y hoy
@@ -432,16 +472,43 @@ grep -c '= two_phase(' apps/api/src/mcp/server.rs                    # 8 — las
 #    dos menciones en prosa son `[`two_phase`]`, con backticks). Alternativa igual de buena:
 #    `grep -c 'p\.confirm_token\.as_deref()'` → 8. **`server.rs` sigue prescribiendo el grep viejo**
 #    y no se puede arreglar desde documentación — reportado como deriva código↔contrato.)
-grep -c 'settled(&self.state.pool' apps/api/src/mcp/server.rs       # 40 — == escrituras: toda escritura cierra su fila de auditoría
-#   (el patrón lleva `&self.state.pool` a propósito: `grep -c 'settled('` da 41, contando la definición)
-grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs       # 18 — escrituras que publican el bloque `impact`
-#   (`grep -c 'impact_since('` da 19: cuenta también la definición)
+grep -c 'settled(&self.state.pool' apps/api/src/mcp/server.rs       # 41 (40) — == escrituras: toda escritura cierra su fila de auditoría
+#   (el patrón lleva `&self.state.pool` a propósito: `grep -c 'settled('` da 42, contando la definición)
+grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs       # 19 (18) — escrituras que publican el bloque `impact`
+#   (`grep -c 'impact_since('` da 20: cuenta también la definición)
 grep -c 'sqlx::query' apps/api/src/mcp/server.rs                   # 0 — EL invariante real
 grep -c 'sqlx::query' apps/api/src/mcp/auth.rs                     # 4 — gate + auditoría (4.4.0)
 ```
 
-Los ocho números son **68/28/40/40/17/8/40/18** a 2026-08-28 (Fases 0–6 del tren 4.4.0), recontados
-enteros ese día. Antes de la Fase 6: 52/21/31/31/14/7/31/15.
+Los ocho números son **71/30/41/41/18/8/41/19** a **2026-09-03** (5.0.0, issue #207), recontados
+enteros ese día. A 2026-08-28 (Fases 0–6 del tren 4.4.0): 68/28/40/40/17/8/40/18. Antes de la Fase 6:
+52/21/31/31/14/7/31/15. **`= two_phase(` es el único que no se movió** — las tres tools nuevas no
+acuñan token (§3.5), y eso es una decisión, no un olvido.
+
+**Presupuesto de descripciones — el fixture lo mide sin arrancar nada.** `mcp-catalog.json` guarda un
+`description_len` por tool además del hash, así que la terna sale de un comando y no de una memoria:
+
+```bash
+python3 -c "
+import json
+d = json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))
+L = [t['description_len'] for t in d['tools']]
+print(len(L), sum(L), max(L))"
+# 71 23906 545   ← 2026-09-03, tras U4/S4 (margen 94). Tope: TOTAL_BUDGET 24 000, PER_TOOL_MAX 600.
+```
+
+Historia del margen, que es lo que dice si cabe la siguiente tool: `52 21319 596` al cerrar la
+Fase 5 → `68 23975 596` en 4.12.1 → `68 23949 598` tras 4.15.0 (**51 caracteres de margen**, medidos
+antes de escribir, no los 25/126 que circulaban congelados) → **`70 23757 588`** tras WP4 (dos tools
+nuevas pagadas moviendo prosa duplicada al `instructions`, 243 de margen) → `70 23834 575` tras
+WP5-2 → `71 23793 545` con `get_projection_bands` dentro (207 de margen) → `71 23828 545` tras el
+pase de correcciones del motor (172) → **`71 23906 545`** hoy, tras U4/S4: **94 caracteres de
+margen**, y la regla de la herencia pagada en el `instructions` y en los doc-comments de los campos
+(que son schema, no descripción de tool) en vez de en las descripciones. Los
+~550 que hicieron sitio salieron de siete descripciones hacia el `instructions` —donde el cliente los
+lee una vez por sesión y no una vez por tool—, que es exactamente la salida que el mensaje de fallo
+del test prescribe. **La constante no se ha tocado nunca**, y ese es el punto: cuando no cabe, se
+mueve prosa; no se sube el techo.
 
 Invariant cross-checks: writes == `require_mcp_write` count (a write tool skipping the gate is
 a security bug); reads + writes == total; the frozen-catalog vec length == total. The doc-side
@@ -462,6 +529,40 @@ or — the finding — an unclassified gap, which means the parity contract was 
 it now and check what else that PR missed.
 
 ## Provenance and maintenance
+
+**Ampliada 2026-09-06 (A9 del tren 5.0.0, modelo v2 completo)**: §3.5 gana una fila (el modelo v2
+llega al catálogo: `success_threshold_pct` vuelve a ser load-bearing, sustituyendo la decisión V7 de
+abajo; `coast_mode`/`coast_stop_age`/`clear_coast_stop_age` nuevos; el puente se muda dentro de
+`pension`; cinco parámetros de M4/M6 pasan a stubs deprecados; `strategy` pasa de 5 a 4 literales
+anunciados; el techo de `paths` en Monte Carlo sube de 1.000 a 2.500 en dos tools, cerrando una
+deriva schema↔runtime que ya estaba viva) y §4 paso 2 gana el párrafo de la política de
+deprecación (un parámetro retirado de un struct `deny_unknown_fields` es un STUB, nunca un borrado).
+Cinco filas nuevas en `schema_bounds_parity.rs`. **Presupuesto de descripciones**: seis tools
+reescritas liberando antes de gastar; margen antes 94, después
+`python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
+→ `71 23982 548` (margen 18). **Ningún contador de §5 se mueve** (siguen 71/30/41/41/18/8/41/19).
+Fuentes: `apps/api/src/mcp/{server,schema_bounds_parity}.rs`,
+`apps/api/src/handlers/retirement_profile.rs`, `apps/api/tests/{mcp_http,mcp_write}.rs` y
+`apps/api/tests/fixtures/mcp-catalog.json`.
+
+**Ampliada 2026-09-05 (WP-F del tren 5.0.0, decisiones V6 y V7 del owner)**: §3.5 gana dos filas —el
+colchón derivado del tope de la regla (cinco campos de SALIDA en `get_projection_bands` y
+`simulate_projection`, cero cambios de `inputSchema`) y el `success_threshold_pct` deprecado e
+ignorado en las dos tools `deny_unknown_fields`, con la retirada de su `#[schemars(range)]` y de su
+fila en `mcp/schema_bounds_parity.rs`—. **Ningún contador se mueve y el presupuesto de descripciones
+tampoco**: `python3 -c "import json;d=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'));L=[t['description_len'] for t in d['tools']];print(len(L),sum(L),max(L))"`
+→ `71 23906 545` (idéntico antes y después; solo se movieron dos `constraints_sha256_12`).
+
+**Refrescada 2026-09-03 para el tren 5.0.0 (issue #207, rama `release/5.0.0`)**: §5 (los ocho
+contadores recontados —**71/30/41/41/18/8/41/19**— y el presupuesto de descripciones convertido en un
+comando sobre `description_len` del fixture, `71 23793 545` — **remedido a `71 23906 545` el
+2026-09-05**), **§3.5 nueva** (la evaluación de
+paridad del tren entero: tres tools nuevas, seis ejes de `simulate_projection`, los dos `include_*`
+opt-in por tamaño, `update_fire_settings` recortada y D21 heredado) y el cierre de la fila diferida
+`PATCH /v1/auth/me` de §3.1. Fuentes: `apps/api/src/mcp/server.rs`,
+`apps/api/src/handlers/{retirement_profile,projection,projection_bands,assets}.rs`,
+`apps/api/tests/{mcp_http,mcp_write,mcp_simulate,projection_bands,projection_household_aggregate}.rs`
+y `apps/api/tests/fixtures/mcp-catalog.json`.
 
 Written 2026-08-19 (post-3.5.0 train, branch `dev`), sourced from: full tool inventory and
 `git show 82a43cb` (the add-a-tool pattern), a route-by-route HTTP↔MCP coverage matrix over

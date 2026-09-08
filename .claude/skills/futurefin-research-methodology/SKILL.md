@@ -204,6 +204,23 @@ Observable in this repo's history — use these as prompts when looking for the 
   retirement age was the observation that condemned the flat FIRE target and produced the
   v1.2.0 moving-target model. When a UI control has implausibly small effect, suspect the
   model, not the UI.
+- **Una puerta de paridad nueva ILUMINA lo viejo, no solo protege lo nuevo** (5.0.0). La puerta que
+  compara el camino `Decimal` con el `f64` del motor
+  (`crates/engine-stochastic/tests/degeneration.rs`) se escribió para validar el camino estocástico,
+  y lo primero que encontró fue un **filo de navaja preexistente** que ninguna suite `Decimal` podía
+  ver: un llamante deducía «¿se vendió el techo entero?» comparando dos números en vez de leer el
+  booleano que el algoritmo ya conocía, y de esa rama colgaba qué era recorte informativo y qué era
+  descubierto que resta patrimonio. Coste medido: 8.138 € en un caso. Crónica:
+  `futurefin-failure-archaeology` §2.26. **Cuando montes un gate que compara dos implementaciones
+  del mismo modelo, espera que lo primero que falle sea un bug antiguo** — y no lo trates como ruido
+  del gate.
+- **Escribir el número ANTES convierte un test en una comprobación, no en una foto.**
+  `crates/engine/tests/phases_wp3.rs` lleva la disciplina de §2 al extremo: cada assert va precedido
+  del comentario con su aritmética a mano, y casi todos los casos corren con rentabilidad 0 %,
+  inflación 0 % y sin impuestos **a propósito** — no por realismo, sino para que cada euro de la
+  serie sea una suma que cabe en una línea y una discrepancia señale el mes exacto. Un test que
+  compara el motor consigo mismo solo pinea lo que el motor hace hoy; uno con el número escrito
+  antes comprueba que hace lo que se pidió.
 
 ## 5. Anti-patterns for AI sessions specifically
 
@@ -241,7 +258,11 @@ All historical claims verified 2026-07-02 against `CHANGELOG.md` (v1.0.6, v1.0.1
 v1.1.0, v1.2.0, v1.3.0, v1.4.0, v1.4.2) and the working tree. Re-verify before trusting:
 
 - Current version: `grep '^version' apps/api/Cargo.toml`
-- Single FIRE-target source of truth still exists: `grep -n "pub fn fire_target_at_month_index" crates/engine/src/projection.rs`
+- Single FIRE-target source of truth still exists: `grep -n "pub fn fire_target_at_month_index" crates/engine/src/projection.rs` (y desde 5.0.0 su gemelo consciente del plan **la llama** en vez de reimplementarla: `grep -n "fire_target_at_index_g(Some(ft), month_index)" crates/engine/src/target.rs`, 2 hits)
+- Los dos ejemplos de §4 añadidos el 2026-09-03 (rama `release/5.0.0`, issue #207):
+  `grep -n "fn every_case_degenerates_from_decimal_to_floating_point" crates/engine-stochastic/tests/degeneration.rs`,
+  `grep -n "pub cap_exhausted" crates/engine/src/tax.rs` (el booleano que sustituyó a la comparación
+  re-derivada) y `ls crates/engine/tests/phases_wp3.rs`
 - Parity fixture + both consumers: `ls apps/api/tests/fixtures/fire-parity.json apps/api/tests/fire_parity.rs apps/web/src/lib/fire.test.ts`
 - Cache smoke script: `ls scripts/smoke-projection-cache.sh`
 - Migration count (do not quote a stale number): `ls apps/api/migrations | wc -l`

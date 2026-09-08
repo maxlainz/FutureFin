@@ -19,6 +19,11 @@ use http::StatusCode;
 /// (`LedgerViewQuery::resolve`), así que lo que se prueba es que **todas** lo usen — no que cada
 /// una reimplemente la validación. `projection/series` está en la lista precisamente porque tenía
 /// su propia copia del `match` y por eso se le pasó por alto.
+///
+/// No es la lista completa de rutas GET con `view`: `/v1/transactions/category-series` también lo
+/// acepta pero exige además `kind` (obligatorio), así que no encaja en el bucle genérico de abajo
+/// sin parámetros extra por ruta; queda fuera a propósito. Fuente de verdad de qué handler declara
+/// el parámetro: `grep -rn '("view" = Option<String>, Query' apps/api/src/handlers/`.
 const VIEW_ROUTES: &[&str] = &[
     "/v1/summary",
     "/v1/assets",
@@ -27,7 +32,9 @@ const VIEW_ROUTES: &[&str] = &[
     "/v1/planning/flows",
     "/v1/allocation-rules",
     "/v1/allocation-rules/resolution",
+    "/v1/allocation-rules/goals",
     "/v1/projection/series",
+    "/v1/projection/bands",
     "/v1/history/series",
     "/v1/history/cashflow",
     "/v1/transactions",
@@ -36,6 +43,7 @@ const VIEW_ROUTES: &[&str] = &[
     "/v1/transactions/summary",
     "/v1/transactions/months",
     "/v1/transactions/imports",
+    "/v1/changes",
 ];
 
 /// `{error, code, message}` de una respuesta de error; falla con el cuerpo entero si no cuadra.
@@ -74,13 +82,30 @@ async fn known_views_and_absence_still_work_on_every_ledger_route() {
     // del contrato y tiene que seguir funcionando ahora que el comodín ya no lo cubre.
     for qs in ["", "?view=mine", "?view=household", "?view=%20mine%20"] {
         for route in VIEW_ROUTES {
-            let resp = app
-                .get_with_cookie(&format!("{route}{qs}"), &owner.cookie)
-                .await;
+            // `/v1/changes` exige `since` (obligatorio, aparte de `view`); sin él el handler
+            // devuelve 400 `date_required` antes incluso de llegar al resto — así que el bucle
+            // genérico necesita añadírselo solo a esta ruta.
+            let uri = if *route == "/v1/changes" {
+                let sep = if qs.is_empty() { '?' } else { '&' };
+                format!("{route}{qs}{sep}since=2020-01-01")
+            } else {
+                format!("{route}{qs}")
+            };
+            let resp = app.get_with_cookie(&uri, &owner.cookie).await;
+
+            // `/v1/projection/bands` es la única ruta cuya vista `household` está documentada
+            // como error propio (`household_bands_unavailable`): los percentiles p10/p50/p90 no
+            // se suman entre miembros, así que `household` no es «sin implementar todavía», es
+            // rechazado a propósito. El resto de rutas siguen sirviendo 200 con `household`.
+            if *route == "/v1/projection/bands" && qs == "?view=household" {
+                assert_bad_request(&resp, "household_bands_unavailable", &uri);
+                continue;
+            }
+
             assert_eq!(
                 resp.status,
                 StatusCode::OK,
-                "{route}{qs} debería seguir sirviendo: {resp:?}"
+                "{uri} debería seguir sirviendo: {resp:?}"
             );
         }
     }
@@ -185,6 +210,13 @@ async fn out_of_range_numeric_windows_are_rejected_not_clamped() {
             "/v1/transactions/category-series?kind=expense&window_months=61",
             "window_months_out_of_range",
         ),
+        // Caminos de Monte Carlo: 1–5.000 (5.0.0 — el techo subió desde 2.000 y el default,
+        // desde 500 hasta los 2.500 con los que se CONFIRMA la fecha del plan). Mismo criterio
+        // que sus vecinos: se rechaza, no se clampa. Servir 5.000 caminos a quien pidió 50.000
+        // sería contestar otra pregunta con cara de haber contestado la suya.
+        ("/v1/projection/bands?paths=0", "paths_out_of_range"),
+        ("/v1/projection/bands?paths=5001", "paths_out_of_range"),
+        ("/v1/projection/bands?paths=100000", "paths_out_of_range"),
     ] {
         let resp = app.get_with_cookie(uri, &owner.cookie).await;
         assert_bad_request(&resp, code, uri);
@@ -201,6 +233,11 @@ async fn out_of_range_numeric_windows_are_rejected_not_clamped() {
 /// Y los extremos EXACTOS del rango siguen siendo válidos: el rechazo es de lo que está fuera, no
 /// un off-by-one que se come el borde. (`months=840` recomputa la proyección entera, así que solo
 /// se prueba el borde inferior de la proyección; las ventanas son baratas en ambos bordes.)
+///
+/// **`paths=5000` sí se ejercita**, y es lo más caro de este fichero: es el borde que subió en
+/// 5.0.0 y el que un off-by-one dejaría fuera sin que nada más lo notara. Se paga aquí y no en
+/// `projection_bands.rs` a propósito — este owner tiene el ledger VACÍO (ni activos ni
+/// presupuesto), así que los 5.000 caminos son el bucle desnudo y no una cartera con cascada.
 #[tokio::test]
 async fn the_exact_bounds_of_every_numeric_window_still_work() {
     let app = TestApp::spawn().await;
@@ -208,6 +245,9 @@ async fn the_exact_bounds_of_every_numeric_window_still_work() {
 
     for uri in [
         "/v1/projection/series?months=12",
+        // Los dos bordes de `paths` (1..=5000).
+        "/v1/projection/bands?paths=1",
+        "/v1/projection/bands?paths=5000",
         "/v1/history/series?window_months=1",
         "/v1/history/series?window_months=1200",
         "/v1/history/cashflow?window_months=1",

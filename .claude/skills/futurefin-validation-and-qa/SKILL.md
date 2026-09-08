@@ -61,19 +61,24 @@ withdrawn in retirement); **gross-up** = inflating a net annual need to the pre-
 amount using progressive tax brackets; **installation** = the singleton row all data belongs
 to; **cascade** = the ordered allocation-rules pipeline distributing monthly surplus to assets.
 
-## 2. Test inventory (as of 2026-08-19, post-3.5.0)
+## 2. Test inventory (as of 2026-08-19, post-3.5.0; **fila del motor y crate estocástico al día a 2026-09-03**)
 
 Three suites. None share infrastructure; run all three before merging. Counts below are date-stamped,
 not authoritative — recount with the commands in "Provenance and maintenance".
 
 | Suite | Location | Needs | Command (from repo root) |
 |---|---|---|---|
-| Engine unit tests (**67** as of 2026-08-22) | `crates/engine/src/{projection.rs (32), history.rs (22), runway.rs (13)}` `mod tests` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
+| Engine (**199 unitarios + 46 en `tests/`** el 2026-09-03, tras el pase de correcciones de la revisión adversarial — el número se movió dos veces esa tarde; eran 67 el 2026-08-22) | `crates/engine/src/*.rs` `mod tests` **más seis binarios** en `crates/engine/tests/`: `golden_pins.rs`, `phases_wp3.rs`, `audit_dump.rs`, `timing.rs` (este todo `#[ignore]`) y, desde el pase de correcciones, `fuzz_invariants.rs` y `review_fixes.rs` | Nothing (pure `Decimal` math, no I/O) | `cargo test -p futurefin-engine` |
+| **Crate estocástico** (**89 tests + 8 `#[ignore]`**, remedido 2026-09-07 con el runner, tras E12) | `crates/engine-stochastic/` — **siete binarios**: `tests/degeneration.rs` (3, la **puerta de aceptación** del camino `f64`), `tests/monte_carlo.rs` (14, WP6a `ba6bdfe`), `tests/needed_capital.rs` (16, E7 + la curva condicionada C9), `tests/parallel_determinism.rs` (3, **la puerta del paralelismo**: mismo resultado bit a bit con 1/2/4/8 hilos, E12), `tests/solve_mc.rs` (11, E6), `tests/strategy_solves.rs` (13, E8), más 29 unitarios de `src/` y `tests/timing_mc.rs` (8, todo `#[ignore]`: mide, no afirma). **El colchón de caja y su familia `mc_cash_buffer_*` se RETIRARON ENTEROS con E3** (M6) — no hay test que reescribir, el mecanismo no existe: `grep -rn "cash_buffer\|CashBuffer" crates/engine-stochastic/` sale vacío | Nothing (opt-level 3 forzado en dev/test, ver `Cargo.toml` raíz) | `cargo test -p futurefin-engine-stochastic` (paso propio en CI, job `rust`; ~16 s medido — `parallel_determinism.rs` es el binario lento, ~11 s, porque compara dos ejecuciones completas de cinco casos) |
 | Backend integration (**43 files on 2026-08-27**; 33 files / 375 attributes on 2026-08-22) | `apps/api/tests/*.rs` | Postgres reachable via `TEST_DATABASE_URL` | See below |
 | Frontend Vitest (**368, 16 files, as of 2026-08-22**) | `apps/web/src/**/*.test.ts` | Node only (`environment: "node"`, no jsdom) | `npm test --workspace futurefin-web` |
 
 **Whole-workspace total: 498 on 2026-08-22** (`cargo test --workspace`), which is engine + the 57 API
-lib unit tests + integration. Ask the runner for totals; a `grep` of attributes is an approximation
+lib unit tests + integration. **Ese total está muy desfasado a 2026-09-03** y esta pasada no lo
+recontó entero (solo el motor): pídeselo al runner
+(`cargo test --workspace 2>&1 | grep "test result"`), y ojo — desde 5.0.0 el workspace incluye un
+crate más y **el «0 ignored» dejó de valer para el conjunto**: `timing.rs` aporta 7 `#[ignore]`
+deliberados. El «0 ignored» sigue siendo el contrato de `apps/api/tests/`. Ask the runner for totals; a `grep` of attributes is an approximation
 (loops generate tests on the frontend, and an attribute is not always an executed test).
 
 Plus API lib unit tests run by `cargo test --workspace` (no Postgres; count with
@@ -238,13 +243,13 @@ fix this table in the same change.
 
 | File | Tests | Covers |
 |---|---|---|
-| `smoke.rs` | 5 | health/ready, 401 unauth, register→login→me roundtrip, first-user bootstrap → owner |
+| `smoke.rs` | 11 (`grep -c '#\[tokio::test\]' apps/api/tests/smoke.rs`) | health/ready, 401 unauth, register→login→me roundtrip, first-user bootstrap → owner, y los añadidos de 5.0.0 |
 | `liabilities_purge.rs` | 5 | expired liabilities hidden from GET/summary but **persist in DB** (reads never mutate) |
 | `body_limits.rs` | 3 | 1 MiB global body cap → 413; `/backup/user-import` accepts up to 16 MiB; **4.4.0 (issue #85)**: `oversized_mcp_body_returns_413` — `/mcp` is a `route_service`, so `DefaultBodyLimit` never reaches it (rmcp reads the body itself, default 4 MiB); the documented "1 MiB global" invariant was false there until `with_max_request_body_bytes` fixed it explicitly. Test body is 2 MiB — above the global, below rmcp's old default |
 | `installation_patch.rs` | 5 | unknown `fire_number_mode` rejected; legacy `annual_expense_adjusted` alias accepted; valid mode change |
 | `unique_violation.rs` | 2 | duplicate username / duplicate category name → 409 via central `From<sqlx::Error>` |
 | `projection_marker.rs` | 1 | regression capture: stable marker + starting NW across the perf refactor (the template for capture-first) |
-| `fire_parity.rs` | 1 (×7 fixture cases) | server `jubilacion_target_net_worth` matches `fire-parity.json` ± 1 € |
+| `fire_parity.rs` | 1 (×**17** fixture cases — count with `python3 -c "import json;print(len(json.load(open('apps/api/tests/fixtures/fire-parity.json'))['cases']))"`, was ×7) | server `fire_number_classic_today` matches `fire-parity.json` ± 1 € (renamed from `jubilacion_target_net_worth` with the 5.0.0 v2 model, 2026-09-06 — same formula, informational only now) |
 | `projection_cache.rs` | 5 | cache hit faster than miss + identical body; invalidation on mutation; logout drops only `view=mine` entries; `density=hybrid` decimation (months 0–12 monthly, then 24,36,48…); monthly/hybrid cached as separate keys |
 | `history_snapshots.rs` | 20 | snapshot capture (copied terms) / same-day upsert / exclude shared+expired / backfill CRUD roundtrip with `year` filter + cascade / 400 validations (future, `duplicate_item_id`, terms-on-asset) / 409 date taken / 404 cross-user / 403 viewer on every mutation / GET never mutates / `snapshot_mutations_do_not_touch_projection_cache` (cache stays HIT — history is NOT a projection input) |
 | `history_series.rs` | 7 | `GET /v1/history/series`: empty→200, exact linear interpolation between two asset snapshots, join to live values (deleted asset→0 at k=0), amortization curve above the chord with exact endpoints, household sums two users + `?view=mine` filters, markers carry date/kind/total, single today snapshot. Numbers predicted before running |
@@ -388,6 +393,84 @@ startup path (a new guard, a new migration mode) means adding a step there in th
 
 ## 4. Golden / certified inventory
 
+### `crates/engine/tests/fixtures/pins-4.15.json` + `pins-5.0-outputs.json` — el arnés golden del motor (5.0.0)
+
+La red que hizo posible reescribir el bucle cinco veces en un tren sin una regresión silenciosa.
+`crates/engine/tests/golden_pins.rs` canonicaliza a **texto** todas las salidas del motor caso a caso
+—hasta el último dígito de cada `Decimal`, vía `Display`, **la escala incluida**— y las resume en un
+SHA-256 por caso. La batería es única y compartida (`crates/engine/tests/common/cases.rs`), también
+con `audit_dump.rs` y `timing.rs`.
+
+| Fixture | Qué hashea | Regla |
+|---|---|---|
+| `pins-4.15.json` | Lo que 4.15.0 ya publicaba: series `net_worth`/`liquid_worth`/`contributed_capital`/`per_asset_series` mes a mes, agotamiento, descubierto, no asignado, el `first_month_allocation` entero con su traza regla a regla, y el calendario de cada pasivo | **Su batería NO crece** (`projection_cases_all()`): añadirle un caso obligaría a regenerar el fichero que existe para no moverse |
+| `pins-5.0-outputs.json` | **Aditivo**: índices de fase, transiciones, las tres series `withdrawal*`, `disposable_cash` y las lecturas de puente/media jornada, sobre esa batería **más** los casos P14–P23 | Puede regenerarse cuando la canonicalización **CRECE**, y hay un test que lo demuestra (abajo) |
+
+**Qué puede y qué no puede regenerarse** (`UPDATE_ENGINE_PINS=1` / `UPDATE_ENGINE_PINS_5_0=1`,
+mismo patrón que `UPDATE_MCP_CATALOG=1`):
+
+- **`pins-4.15.json` no se regenera para hacer pasar un refactor.** Todo el tren 5.0.0 lo dejó
+  byte-idéntico. Si se mueve, la aritmética cambió, y entonces hace falta **entrada de CHANGELOG con
+  el delta medido** (`futurefin-change-control`). Un pin regenerado sin ella es un cambio de números
+  que nadie declaró — y en un `git diff` el fichero regenerado *por añadir un campo* y el regenerado
+  *por romper el drenaje* se ven exactamente igual.
+- Por eso el control de dos etapas: `the_5_0_canonicalization_grew_without_moving_the_old_fields`
+  rehashea **la capa vieja sola** contra los SHA-256 previos. Es lo que distingue «añadí campos» de
+  «moví números».
+- Y por eso los controles negativos: `the_hash_actually_notices_a_single_moved_decimal` y
+  `the_5_0_hash_notices_a_moved_withdrawal_and_a_moved_phase` mutan una salida a propósito. Un arnés
+  sin control negativo es un test que siempre pasa.
+- `the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery` impide que reordenar la batería
+  cambie el CSV del oráculo externo sin que el hash lo delate.
+
+**Regla operativa para cualquier PR que toque el motor**: `git diff --stat
+crates/engine/tests/fixtures/` **debe salir vacío** salvo que el cambio sea intencionadamente
+output-changing, y entonces el delta va en el CHANGELOG.
+
+### `crates/engine-stochastic/tests/degeneration.rs` — la puerta del camino `f64` (5.0.0)
+
+El test de aceptación de que el camino de coma flotante y el exacto son **la misma simulación**:
+sobre **todos** los casos de la batería compara `net_worth` y `liquid_worth` mes a mes en todo el
+horizonte y, **exactas**, **SEIS** decisiones discretas: `retirement_month_index`,
+`liquid_crossing_month_index`, `assets_depleted_month_index`, `phase_transitions` (las cuatro de
+antes de 5.0.0) y —desde E1, modelo de jubilación v2— `failure_month_index`/`failure_kind` (el
+veredicto F1/F2/F3 de un camino). Cota de contrato: **1 € por mes** (máximo medido 1,47e-7 € en P9
+a 840 meses).
+
+- **Ningún caso se excluye y ninguna cota se relaja «porque falla»**: cada fila imprime su máximo, su
+  mes y qué regla se le aplicó. La única cota relativa (1e-12) es para los casos sintéticos por
+  encima de `2^53 €`, donde el espaciado de los propios `f64` ya supera el euro — una cota imposible
+  no mide nada, solo obliga a desactivar el test— **y esos casos van marcados**.
+- **Las dos de E1 no admiten la holgura de ±1 mes** que se tolera a los índices de fase: el
+  veredicto de un camino es lo que Monte Carlo CUENTA para publicar la probabilidad de éxito, así
+  que un mes de holgura ahí es un mes de holgura en la fecha que la app publica.
+- Es la salvaguarda con la que se readmite la coma flotante (`futurefin-failure-archaeology` §2.9
+  scope note): el freezer de `crates/engine` sigue intacto y sin excepciones.
+- **Ya pagó su coste**: cazó un filo de navaja preexistente que ninguna suite `Decimal` podía ver
+  (`cap_exhausted`, 8.138 € en el caso P15 — §2.26 de la arqueología).
+- Re-verifica el número de decisiones con `grep -n "const EUR_TOLERANCE\|const REL_TOLERANCE" crates/engine-stochastic/tests/degeneration.rs`
+  y contando las columnas que el test imprime (`--nocapture`).
+
+### Qué evidencia exige un cambio en el modelo de jubilación v2
+
+Antes de tocar `crates/engine/src/{phases,target,withdrawal,solve}.rs` o
+`crates/engine-stochastic/src/{mc,solve_mc,needed_capital,strategy_solves}.rs`, la puerta es:
+
+1. **`pins-4.15.json` NO se mueve** — `git diff --stat crates/engine/tests/fixtures/pins-4.15.json`
+   vacío. Es la garantía de que el refactor por fases del tren 5.0.0 sigue intacto.
+2. **`pins-5.0-outputs.json` solo se regenera con la predicción ESCRITA antes de correr**
+   (`UPDATE_ENGINE_PINS_5_0=1`): la disciplina de `futurefin-research-methodology` — predecir el
+   número, correr, comparar — aplicada a un fixture, no solo a un test suelto.
+3. **La puerta de degeneración con sus SEIS decisiones** (arriba) sigue verde, incluidas las dos de
+   E1 sin la holgura de ±1 mes.
+4. **Los tests del `plan_cache`** (`apps/api/tests/projection_plan_solve.rs`): que una mutación
+   mueva la clave sin invalidar nada (`the_plan_cache_is_content_addressed_and_a_mutation_moves_the_key`),
+   que dos peticiones concurrentes no dupliquen el sorteo
+   (`two_concurrent_requests_solve_the_date_once`), y que subir el umbral nunca adelante la fecha
+   (`a_higher_threshold_never_moves_the_date_earlier`) — son las tres propiedades que, si un cambio
+   en el solver las rompe, lo hace en silencio (una fecha que se adelanta con un umbral más alto no
+   dispara ningún error, solo publica un número que contradice la definición del propio umbral).
+
 ### `apps/api/tests/fixtures/fire-parity.json` — the canonical cross-language fixture
 
 The FIRE target math is **deliberately duplicated**: the client (`apps/web/src/lib/fire.ts`)
@@ -396,8 +479,9 @@ source of truth. One JSON pins both:
 
 - Backend consumer: `apps/api/tests/fire_parity.rs` — for each case, PATCHes
   `fire_settings` on the installation, seeds an asset + budget entries reproducing `monthly`,
-  calls `GET /v1/projection/series`, asserts `jubilacion_target_net_worth` ≈
-  `expected_target_nw` ± 1 € (`null` must match `null`).
+  calls `GET /v1/projection/series`, asserts `fire_number_classic_today` ≈
+  `expected_target_nw` ± 1 € (`null` must match `null`). Renamed from `jubilacion_target_net_worth`
+  with the 5.0.0 v2 model (2026-09-06): same formula, now informational-only.
 - Frontend consumer: `apps/web/src/lib/fire.test.ts` — loads the same file via
   `readFileSync` (relative path `../../../api/tests/fixtures/fire-parity.json`), computes
   `grossUpNetAnnualFire(computeFireAnnualNeedNetEur(...)) / (swr/100)`, same ± 1 € tolerance.
@@ -537,11 +621,28 @@ guessed margin: it returns as soon as the entries appear.
 
 ### Engine unit test
 
-Add to `mod tests` in `crates/engine/src/projection.rs`. Use the existing builders
-`mk_asset`, `rule_fixed`, `rule_percent`, `rule_remainder`, `base_input` — do not
-hand-construct `ProjectionInput`. Assert exact `Decimal` values (pure math, no tolerance
-needed) and derive them by hand in a comment first (predict-then-measure). Run:
-`cargo test -p futurefin-engine -- <name>`.
+Add to `mod tests` **del módulo que estás tocando** (`crates/engine/src/{projection,phases,target,
+withdrawal,tax,history,runway,net_return,money}.rs` — desde 5.0.0 el motor son trece ficheros, y
+`sim.rs`/`sim_core.rs`/`solve.rs` no llevan `mod tests` propio a propósito: lo que los prueba son los
+pines dorados y `tests/phases_wp3.rs`). Use the existing builders `mk_asset`, `rule_fixed`,
+`rule_percent`, `rule_remainder`, `base_input` — do not hand-construct `ProjectionInput`. Assert
+exact `Decimal` values (pure math, no tolerance needed) and derive them by hand in a comment first
+(predict-then-measure). Run: `cargo test -p futurefin-engine -- <name>`.
+
+**Cuándo NO es un unit test lo que necesitas** (5.0.0):
+
+- **Semántica nueva de fases/reglas/solves** → `crates/engine/tests/phases_wp3.rs`, cuyo contrato es
+  que **cada assert lleva su número predicho a mano en el comentario que lo precede**. Casi todos sus
+  casos van con rentabilidad 0 %, inflación 0 % y sin impuestos: no por realismo, sino para que cada
+  euro de la serie sea una suma que cabe en una línea y una discrepancia señale el mes exacto. Los
+  caminos con fiscalidad, inflación y `powd` los cubren los pines.
+- **Un refactor que no debe cambiar números** → no escribas asserts nuevos: corre el golden
+  (§4) y exige `git diff --stat crates/engine/tests/fixtures/` **vacío**.
+- **Un caso límite que merece oráculo externo** → añádelo a `projection_cases_5_0()` en
+  `crates/engine/tests/common/cases.rs`; entra a la vez en el pin aditivo y en el CSV de
+  `audit_dump.rs`. **No lo añadas a `projection_cases_all()`**: esa batería es la que `pins-4.15.json`
+  hashea y crecer la obligaría a regenerar el fichero que existe para no moverse.
+- **Una medición de coste** → `crates/engine/tests/timing.rs`, en `--release` y con `#[ignore]`.
 
 ### Frontend test
 
@@ -577,10 +678,20 @@ test pure functions only; extract logic out of components to make it testable.
   `210000`) lived in exactly that hole. Before you write "covered by unit tests", `grep -c '#[test]'`
   the file.
 - **No property-based tests** on the engine (e.g. invariants like "cascade never allocates
-  more than the surplus", "NW series is deterministic under input permutation"). Labeled a
-  candidate direction — see `.claude/skills/futurefin-research-frontier/SKILL.md`.
-- **No load/performance tests.** The projection-cache tests assert relative hit/miss speed
-  only; there is no throughput or memory baseline.
+  more than the surplus", "NW series is deterministic under input permutation"). Sigue abierto —
+  compruébalo con `grep -rn proptest crates/ apps/ --include=Cargo.toml` (vacío el 2026-09-03) — y
+  es el ítem 1 de `.claude/skills/futurefin-research-frontier/SKILL.md`. **Lo que 5.0.0 sí cubrió de
+  ese hueco**: los pines dorados dan reproducibilidad bit a bit sobre una batería FIJA, y la puerta
+  de degeneración compara dos implementaciones del mismo modelo. Lo que sigue faltando es la
+  generación de entradas.
+- **No load/performance tests** en el sentido de throughput o memoria. **Matiz de 5.0.0**: sí hay un
+  **arnés de tiempos** del motor (`crates/engine/tests/timing.rs`, todo `#[ignore]` a propósito:
+  mide, no afirma — un test que falla porque una máquina va lenta enseña a ignorar el CI). Se corre
+  en `--release` y da ms por proyección, por bisección y por lote; sirvió para decidir cotas con
+  evidencia (28,5 ms → 12,6 ms tras el hoist de WP1a). Y la afirmación sobre la cache está
+  desfasada: `projection_cache.rs` ya no cronometra — **prueba el HIT envenenando la entrada** con
+  un centinela, porque el test de cronómetro era el más flaky del repo y tenía una rama de escape
+  por la que pasaba sin medir nada.
 
 ## When NOT to use this skill
 
@@ -626,6 +737,39 @@ the table**: Fases 2/3 of the same MCP-audit train (issues #83/#92) had already 
 but left unresolved (§ "Integration test files") — treat every count in this skill outside the
 Fase-5 additions as unverified until recounted. Re-verify volatile facts with:
 
+**Ampliada el 2026-09-03 para 5.0.0** (rama `release/5.0.0`, issue #207): la fila del motor y la del
+crate estocástico del §2, el arnés golden y la puerta de degeneración del §4, la receta de «cuándo NO
+es un unit test» del §5 y las dos filas de huecos del §6. **Esta pasada solo re-verificó lo del
+motor**; los contadores de `apps/api` y Vitest siguen sin recontar y el barrido de provenance del
+mismo día los midió así: `ls apps/api/tests/*.rs | wc -l` → **76** (esta ficha dice 62/44),
+`grep -rn '#[tokio::test]\|#[test]' apps/api/src | wc -l` → **112** (dice 91/57), casos de
+fire-parity → **17** (dice 7). Corrígelos en la pasada de API, con el comando.
+
+**Re-sincronizada el 2026-09-03 tras el pase de correcciones de la revisión adversarial** (commit
+`0668f37`, issue #207 cerrado): la fila del motor sube a 199 + 46 (dos binarios nuevos,
+`fuzz_invariants.rs` y `review_fixes.rs`), y la fila del crate estocástico deja de decir «1 en
+rojo» — la suite está VERDE entera (13 + 3 + 13 = 29 tests en ese momento). El mismo hallazgo de
+«suite en rojo» se repetía en otros cinco documentos (`futurefin-research-frontier`,
+`futurefin-projection-realism-campaign`, `futurefin-fire-domain-reference`,
+`.claude/financial-contracts.md`, `.claude/tests.md`) — todos corregidos en la misma pasada.
+
+**Reescrita 2026-09-06 para el modelo de jubilación v2 (E1–E9, WP D2)**: la fila del crate
+estocástico sube a **75 tests + 7 `#[ignore]`** — tres binarios nuevos (`needed_capital.rs` 9,
+`solve_mc.rs` 11, `strategy_solves.rs` 13) y 13 unitarios más de `src/` (26 en total). **El test
+`mc_cash_buffer_protects_and_the_drag_is_what_costs` (y toda su familia `mc_cash_buffer_*`) NO
+sobrevivió**: el mecanismo del colchón se retiró ENTERO del motor y del crate (E3, decisión M6) —
+no es una corrección más, es la desaparición del sujeto que el test medía. Un grep de la familia
+sale vacío por diseño, no por deriva: `grep -rn "mc_cash_buffer\|cash_buffer\|CashBuffer" crates/engine-stochastic/`.
+
+- Motor y crate estocástico (2026-09-03): `cargo test -p futurefin-engine 2>&1 | grep "test result"`
+  y `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`; sin compilar,
+  `grep -c '#\[test\]' crates/engine/src/*.rs | awk -F: '{s+=$2} END{print s}'` (**199** — usa el
+  glob, no una lista de ficheros) y `grep -c '#\[test\]' crates/engine/tests/*.rs crates/engine-stochastic/tests/*.rs`
+- Arnés golden intacto: `ls crates/engine/tests/fixtures/` (2) y los cuatro tests que lo sostienen,
+  `grep -n "fn golden_pins_match_4_15_0\|fn the_hash_actually_notices_a_single_moved_decimal\|fn the_5_0_canonicalization_grew_without_moving_the_old_fields\|fn the_audit_battery_is_the_ordered_prefix_of_the_pinned_battery" crates/engine/tests/golden_pins.rs` (4 hits)
+- Puerta de degeneración: `grep -n "const EUR_TOLERANCE\|const REL_TOLERANCE\|fn every_case_degenerates_from_decimal_to_floating_point" crates/engine-stochastic/tests/degeneration.rs` (3 hits)
+- Los dos crates de motor corren en CI y en `test-all.sh`: `grep -n "futurefin-engine" .github/workflows/ci.yml scripts/test-all.sh` (≥4 hits)
+- Los `#[ignore]` del motor son deliberados y solo los de tiempos: `grep -c '^#\[ignore' crates/engine/tests/timing.rs` (**7**)
 - Test file inventory: `ls apps/api/tests/` and `ls apps/web/src/lib/*.test.ts apps/web/src/api/*.test.ts`
 - Workspace total: `cargo test --workspace 2>&1 | grep "test result"` (**498 on 2026-08-22** — stale, do not trust without recounting; several files were added since)
 - **Fase 5 additions (2026-08-28)**: `grep -c '#\[tokio::test\]' apps/api/tests/context_fields.rs`
@@ -639,7 +783,9 @@ Fase-5 additions as unverified until recounted. Re-verify volatile facts with:
   `grep -c '#\[test\]' apps/api/src/ha_idp/mod.rs` (**11**) vs
   `grep -c '#\[test\]' apps/api/src/ha_idp/client.rs` (**0**, deliberate);
   no HTTP-mock crate crept in: `grep -rn "wiremock\|mockito\|httpmock" apps/api/Cargo.toml` (empty)
-- Engine test count: `cargo test -p futurefin-engine 2>&1 | grep "test result"` (**67 on 2026-08-22** = projection 32 + history 22 + runway 13; it was 61 = 27+21+13 on 2026-08-19)
+- ~~Engine test count~~ — **desfasada tres trenes**: decía **67 on 2026-08-22** (projection 32 + history 22 + runway 13; 61 = 27+21+13 on 2026-08-19). Hoy son **199 unitarios + 46 en `tests/`** (tras el pase de correcciones de la revisión adversarial, que sumó `fuzz_invariants.rs` y `review_fixes.rs`); ver la línea de 2026-09-03 más arriba, que además explica por qué el desglose de tres ficheros ya no vale.
+- **Crate estocástico verde entero (remedido 2026-09-07 tras E12)**: `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"` → 29 (unitarios) + 3 (`degeneration.rs`) + 14 (`monte_carlo.rs`) + 16 (`needed_capital.rs`) + 3 (`parallel_determinism.rs`) + 11 (`solve_mc.rs`) + 13 (`strategy_solves.rs`) = **89 tests, 0 fallos** (más 8 `#[ignore]` en `timing_mc.rs`, que miden y no afirman; ~16 s con el `opt-level = 3` forzado en dev/test). **Los números anteriores de esta línea —75 tests, seis binarios, 13 en `monte_carlo` y 9 en `needed_capital`— llevaban un día caducados** antes de E12: la curva condicionada (C9) añadió siete y nadie los recontó. Prefiere el comando al número. Los cinco solves, uno por binario:
+  `grep -n "fn valid_retirement_month\|fn needed_capital_today\|fn minimum_extra_contribution\|fn coast_stop_month\|fn earliest_partial_start" crates/engine-stochastic/src/{solve_mc,needed_capital,strategy_solves}.rs`
 - Integration attributes: `grep -rc "#\[tokio::test\]\|#\[test\]" apps/api/tests/*.rs | awk -F: '{s+=$2} END {print s}'` (**449 across 44 files on 2026-08-27**; 375 across 33 on 2026-08-22). Lib unit tests: `grep -rn '#\[tokio::test\]\|#\[test\]' apps/api/src | wc -l` (**84 on 2026-08-27**; 72 after 4.3.0, 57 on 2026-08-22)
 - Frontend Vitest total — always ask the runner, never count `it(`: `npm test --workspace futurefin-web 2>&1 | grep "Tests "` (**368 in 16 files on 2026-08-22**; `chart-gestures.test.ts` and `fire.test.ts` generate tests in loops, so the static `it(` count is lower)
 - Migration count: `ls apps/api/migrations/*.sql | wc -l` (**44 on 2026-08-27**; 42 on 2026-08-22; 40 on 2026-08-19)

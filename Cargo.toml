@@ -1,3 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["apps/api", "crates/domain", "crates/engine"]
+members = ["apps/api", "crates/domain", "crates/engine", "crates/engine-stochastic"]
+
+# El bucle mensual (Decimal) y el sorteo Monte Carlo (f64) son el 99 % del tiempo de los tests de
+# integración del API desde 5.0.0 (cada miss de proyección resuelve la fecha con ~15 sorteos). Sin
+# optimizar, un test que en release tarda 2 s tarda 40 s en dev. Estos dos crates se compilan con
+# opt-level 3 también en dev/test; el resto del workspace sigue en el perfil normal.
+[profile.dev.package.futurefin-engine]
+opt-level = 3
+[profile.dev.package.futurefin-engine-stochastic]
+opt-level = 3
+[profile.test.package.futurefin-engine]
+opt-level = 3
+[profile.test.package.futurefin-engine-stochastic]
+opt-level = 3

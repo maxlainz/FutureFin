@@ -10,9 +10,12 @@ import { stripBaseWith } from "./basePath";
 import {
   SETTINGS_SUBTAB_LABEL,
   SETTINGS_SUBTAB_SLUG,
+  TABS,
+  isTabAvailableForScope,
   settingsSubTabFromPathname,
   settingsSubTabPath,
   tabFromPathname,
+  tabsForScope,
 } from "./navigation";
 
 describe("settings sub-tabs", () => {
@@ -69,5 +72,31 @@ describe("settings sub-tabs", () => {
     expect(tabFromPathname(stripBaseWith(base, `${base}/resumen`))).toBe(
       "summary",
     );
+  });
+});
+
+// Ámbito Hogar solo enseña Resumen · Proyección · Ajustes (F1, issue #207): el resto se pinta de
+// solo lectura y sin dueño visible por fila — la nav deja de ofrecer un sitio ya bloqueado. Es
+// presentación, no la frontera de seguridad (el servidor sigue con el 403 `not_row_owner`, D23).
+describe("nav filtrada por ámbito (F1)", () => {
+  it("scope mine ve las nueve pestañas, sin cambios", () => {
+    expect(tabsForScope("mine")).toEqual(TABS);
+  });
+
+  it("scope household ve exactamente Resumen, Proyección y Ajustes, en ese orden", () => {
+    expect(tabsForScope("household").map((t) => t.id)).toEqual([
+      "summary",
+      "projection",
+      "settings",
+    ]);
+  });
+
+  it("isTabAvailableForScope: assets no disponible en household, sí en mine", () => {
+    expect(isTabAvailableForScope("assets", "household")).toBe(false);
+    expect(isTabAvailableForScope("assets", "mine")).toBe(true);
+  });
+
+  it("isTabAvailableForScope: settings disponible en household", () => {
+    expect(isTabAvailableForScope("settings", "household")).toBe(true);
   });
 });

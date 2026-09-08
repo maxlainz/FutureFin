@@ -213,6 +213,47 @@ fn error_codes_fixture_matches_the_source() {
     }
 }
 
+/// Códigos retirados por el perfil de jubilación v2 (WP A1/A11): el objetivo con descuento
+/// (`target_basis`, `bridge_discount_basis`, `bridge_discount_out_of_range`), el colchón de caja
+/// del motor (`cash_buffer_out_of_range`) y el puente que exigía pensión declarada por adelantado
+/// (`pension_required_for_bridge`) — el modelo v2 la hace opcional y valida el puente con sus
+/// propios campos (`bridge_max_pct`/`bridge_max_years`). Ninguno de los cinco debe reaparecer, ni
+/// en el fixture (una copia a mano lo resucitaría sin que el resto de este archivo se entere,
+/// porque compara contra el propio fixture) ni en el código fuente (que sería un código real sin
+/// traducir en la SPA sin que el resto de tests de este fichero lo note, porque un literal viejo
+/// que vuelve a aparecer sigue teniendo forma válida de código).
+const RETIRED_CODES: &[&str] = &[
+    "target_basis",
+    "bridge_discount_basis",
+    "bridge_discount_out_of_range",
+    "cash_buffer_out_of_range",
+    "pension_required_for_bridge",
+];
+
+#[test]
+fn no_retired_code_survives_in_the_fixture() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture_path()).expect("leer el fixture"))
+            .expect("el fixture es JSON válido");
+    let fixture_codes: BTreeSet<String> = fixture
+        .get("codes")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let source_codes = extract_codes();
+
+    for retired in RETIRED_CODES {
+        assert!(
+            !fixture_codes.contains(*retired),
+            "'{retired}' está retirado (modelo v2) pero sigue en tests/fixtures/error-codes.json"
+        );
+        assert!(
+            !source_codes.contains(*retired),
+            "'{retired}' está retirado (modelo v2) pero el código fuente lo sigue emitiendo"
+        );
+    }
+}
+
 #[test]
 fn every_code_is_lowercase_snake_and_specific() {
     for code in extract_codes() {

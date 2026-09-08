@@ -9,20 +9,128 @@ Espejo de [`frontend-structure.md`](frontend-structure.md) para el backend: qué
 Entry point: `main.rs` (bin); los módulos compartidos del crate se declaran en `lib.rs`.
 
 - `routes/mod.rs` — full route map; all routes under `/v1/` except `/health`, `/openapi.json`, `/mcp` y el protocolo OAuth. `DefaultBodyLimit` caps requests at 1 MiB globally, 16 MiB on `/backup/user-import*` — **pero `DefaultBodyLimit` actúa vía extractores y `/mcp` es un `route_service`**, así que su tope se fija aparte y explícitamente en `mcp::MCP_MAX_REQUEST_BODY_BYTES` (1 MiB; sin esa línea regía el default de rmcp, 4 MiB). Aquí viven también las **dos** capas CORS: la del API con `allow_credentials(true)` y la de `/mcp` sin credenciales — el `merge` de `mcp` va **después** del `.layer(...)` a propósito, porque `Router::layer` solo envuelve lo ya registrado.
-- `state.rs` — `AppState` (pool, cookie_secure, session_ttl_days, version)
+- `state.rs` — `AppState` (pool, cookie_secure, session_ttl_days, version) y **los TRES caches de
+  proyección**: `projection_cache` (`ProjectionCacheKey { installation_id, view, owner_user_id,
+  density }`), `bands_cache` (`BandsCacheKey { installation_id, user_id, paths, seed,
+  threshold_pct }`, las bandas de Monte Carlo) y, desde 5.0.0/WP A3, `plan_cache` (nivel 2 del
+  plan de jubilación, clave `PlanKey`). Los tres comparten TTL (`PROJECTION_CACHE_TTL`, 60 min
+  sliding) pero **no la política de invalidación**, y esa asimetría es el hecho que hay que saber:
+  - `projection_cache` y `bands_cache` se invalidan juntos —
+    `invalidate_projection_by_installation` y `invalidate_projection_by_user` borran los dos
+    mapas—, porque su clave nombra un HOGAR y el contenido cuelga de datos que pueden cambiar. Van
+    separados entre sí porque la clave de las bandas lleva ejes que la serie no tiene (`paths`,
+    `seed`, `threshold_pct`) y su contenido cuesta un orden de magnitud más; mezclarlos habría
+    hecho que un cambio de semilla tirara la serie determinista por el suelo. La clave de bandas
+    **no** lleva `view`: solo existe `mine` (§Projection bands de
+    [`api-routes.md`](api-routes.md)). `threshold_pct` entró en 5.0.0 porque el veredicto
+    (`success_verdict`) se calcula contra el umbral del perfil: sin ese eje, cambiarlo en Ajustes
+    devolvía el veredicto anterior.
+  - `plan_cache` **no se invalida nunca** y no es un olvido: su clave es un hash del CONTENIDO
+    (`retirement_solver::plan_fingerprint`), así que una mutación produce otra clave y la entrada
+    vieja queda **inalcanzable, no obsoleta-y-servible**. Lo único que hay que acotar es su tamaño:
+    TTL + LRU (`PLAN_CACHE_MAX_ENTRIES`), los dos dentro de `plan_cache_insert`.
+  - `ProjectionCacheEntry.plan_key: Option<PlanKey>` cose los dos: un HIT de la serie mira el
+    nivel 2 sin reconstruir el `ProjectionInput`. Es un **parámetro** de
+    `projection_cache_insert`, no un campo que se rellena luego, para que olvidarlo sea imposible
+    — una entrada sin clave publicaría `computing` para siempre y ningún tipo lo cazaría. `None`
+    es legítimo y hay que escribirlo: `?months=`, miembro del hogar sin solve, usuario sin fecha
+    de nacimiento.
 - `error.rs` — `ApiError` → `(StatusCode, JSON {error, code, message})` via `IntoResponse`, donde `code` es el **código estable** que sale del prefijo `snake_code:` del mensaje (desde 3.10.0; sin prefijo válido cae a la clase HTTP). Ese mismo `ErrorBody` es el que viaja en los errores de las tools MCP. `impl From<sqlx::Error>` detects SQLSTATE 23505 → `Conflict` (409), 23503 → `BadRequest`; handlers can just `?` any `sqlx::Error` without manual mapping.
 - `auth/` — password hashing (Argon2id)
 - `handlers/session.rs` — `require_session_user` reads cookie `ff_session` → validates against `sessions` table
 - `handlers/api_tokens.rs` — tokens de API por usuario (Bearer `ffp_…`, solo se persiste el SHA-256; CRUD `/v1/api-tokens` por cookie) + `require_api_token`, la credencial del servidor MCP
-- `mcp/` — servidor MCP embebido (`/mcp`, Streamable HTTP, rmcp 3.1): **68 tools** (28 de lectura+simulación, 40 de escritura) que llaman a las mismas core fns `*_core` que los handlers HTTP (cero deriva, Decimal-as-string intacto; la invalidación de cache vive dentro de las cores de mutación). Auth = middleware Bearer (`mcp/auth.rs`) con identidad y rol vivos por request; toda escritura pasa por `require_mcp_write`, que son **tres puertas en orden** — rol vivo → scope de la credencial (`api_tokens.scope`, `read_only` corta) → toggle `installation.mcp_write_enabled` (Ajustes → Integraciones) — y **cada llamada al gate abre una fila en `mcp_write_audit`** que la tool cierra con `settled(...)`. Las 17 con preview piden `confirm: true` (sin él devuelven un preview) y **8 de ellas exigen además el `confirm_token` de un solo uso que solo emite ese preview**; 18 escrituras publican además el bloque `impact`. Desde la Fase 6 el servidor declara también la capacidad **`prompts`** (3 flujos, `prompts/list` + `prompts/get`, sin tocar la BD). `FUTUREFIN_MCP_ENABLED=0` **no lo desmonta**: la ruta se monta igual y responde 404 JSON `mcp_disabled`. Los contadores no se cuentan a mano — los congela `every_write_tool_in_the_source_calls_require_mcp_write` (test de integración en `apps/api/tests/mcp_write.rs`, sin BD)
+- `mcp/` — servidor MCP embebido (`/mcp`, Streamable HTTP, rmcp 3.1): **71 tools** (30 de lectura+simulación, 41 de escritura; recuento vivo: `grep -c '#\[tool(' apps/api/src/mcp/server.rs`) que llaman a las mismas core fns `*_core` que los handlers HTTP (cero deriva, Decimal-as-string intacto; la invalidación de cache vive dentro de las cores de mutación). Auth = middleware Bearer (`mcp/auth.rs`) con identidad y rol vivos por request; toda escritura pasa por `require_mcp_write`, que son **tres puertas en orden** — rol vivo → scope de la credencial (`api_tokens.scope`, `read_only` corta) → toggle `installation.mcp_write_enabled` (Ajustes → Integraciones) — y **cada llamada al gate abre una fila en `mcp_write_audit`** que la tool cierra con `settled(...)`. Las **18** con preview piden `confirm: true` (sin él devuelven un preview) y **8 de ellas exigen además el `confirm_token` de un solo uso que solo emite ese preview**; **19** escrituras publican además el bloque `impact` (`grep -c 'p\.confirm\.unwrap_or(false)'`, `grep -c '= two_phase('` y `grep -c 'impact_since(&self.state'` sobre `server.rs`). Desde la Fase 6 el servidor declara también la capacidad **`prompts`** (3 flujos, `prompts/list` + `prompts/get`, sin tocar la BD). `FUTUREFIN_MCP_ENABLED=0` **no lo desmonta**: la ruta se monta igual y responde 404 JSON `mcp_disabled`. Los contadores no se cuentan a mano — los congela `every_write_tool_in_the_source_calls_require_mcp_write` (test de integración en `apps/api/tests/mcp_write.rs`, sin BD)
 - `handlers/changes.rs` — `GET /v1/changes`: qué se ha tocado desde una fecha, leyendo los `updated_at` que ya se mantienen en varias tablas. **No cubre borrados** (no hay tombstones) y la respuesta lo declara: no es una auditoría, es «qué ha cambiado de lo que sigue existiendo»
 - `handlers/installation.rs` — singleton installation, FIRE settings, `require_installation_member`
 - `handlers/membership.rs` — roles: `owner`, `member`, `viewer`; `role_can_write` used by handlers
-- `handlers/person_view.rs` — `LedgerView` enum (`Household` / `Mine`) **plus helpers** `scope_where(table_alias)`, `next_arg_index()`, `bind_scope_as`, `bind_scope_scalar`, `as_str()`. Use them instead of duplicating `match view { Household | Mine }` blocks — they enforce consistent placeholder ordering across both branches. `as_str()` es la etiqueta pública (`"household"` | `"mine"`) que las respuestas **ecoan**: existe desde 4.4.0 porque el eco vivía copiado en cuatro handlers como `if view == Mine { "mine" } else { "household" }`, y ese brazo `else` convertía cualquier variante nueva en `"household"` sin avisar. `resolve(as_str(v)) == v` está pinneado en `as_str_round_trips_through_resolve`.
+- `handlers/person_view.rs` — `LedgerView` enum (`Household` / `Mine`) **plus helpers** `scope_where(table_alias)`, `next_arg_index()`, `bind_scope_as`, `bind_scope_scalar`, `as_str()`. Use them instead of duplicating `match view { Household | Mine }` blocks — they enforce consistent placeholder ordering across both branches. `as_str()` es la etiqueta pública (`"household"` | `"mine"`) que las respuestas **ecoan**: existe desde 4.4.0 porque el eco vivía copiado en cuatro handlers como `if view == Mine { "mine" } else { "household" }`, y ese brazo `else` convertía cualquier variante nueva en `"household"` sin avisar. `resolve(as_str(v)) == v` está pinneado en `as_str_round_trips_through_resolve`. **Desde 5.0.0 el default de `resolve()` es `Mine`** (R2): ausente o vacío = el scope del solicitante, `household` explícito. Aquí también vive `require_row_owner` (D21). Y el ensamblado de la proyección (`build_installation_projection_input`, `handlers/projection.rs`) toma desde 5.0.0 **la fecha de nacimiento del usuario cuyo perfil simula** (parámetro `birth_date`, justo detrás de `retirement_profile`): es lo que convierte `target_retirement_age` en un mes del bucle, y en el agregado del hogar cada miembro pasa la SUYA — sin ese parámetro, una simulación por miembro heredaría la edad del solicitante.
+- `handlers/projection.rs` — el ensamblado del motor y todas sus lecturas. Dos cosas de 5.0.0
+  WP5-2b que hay que saber antes de tocarlo:
+  - **`compute_strategy_solves` se RETIRÓ en el modelo v2 (E4/A4)** — describía los solves
+    deterministas contra el objetivo (`required_contribution_monthly`, `coast_fire_month_index`)
+    que E4 se llevó del motor. Su papel de «único choque de decisión, para que dos llamantes no
+    publiquen dos respuestas distintas del mismo hogar» lo hereda
+    `retirement_solver::solve_plan_level1`/`solve_plan_level1_with_budget`: dos llamantes con
+    presupuestos DISTINTOS —`run_member_projection` (por miembro, el resultado se guarda en la
+    entrada de cache, D25) con el presupuesto completo (busca 500, confirma 2.500), y
+    `simulate_projection_core` (baseline y escenario del what-if) con
+    `solve_plan_level1_with_budget`, que en el escenario busca con 500 sin confirmar salvo que el
+    eje `monte_carlo` lo pida — la asimetría es a propósito (A8): el baseline es casi siempre un
+    HIT del `plan_cache`, así que solo el escenario paga el sorteo completo. Corre SIEMPRE dentro
+    de `heavy::run_projection_sim` (el mismo semáforo que ya limitaba las 26 proyecciones del
+    solve determinista).
+  - **`PlanFireTarget::new` se construye UNA vez por respuesta** y la serie del «número FIRE
+    clásico» (§2.4 de `financial-contracts.md`) la consulta una vez por punto vía `.at(i)`.
+    **Post-E4 (modelo v2) esto ya NO es una optimización de coste, es solo el patrón**: la
+    construcción convierte la escala de tramos una sola vez (5 elementos) y `.at(i)` delega en
+    `sim_core::fire_target_at_index_g` sin tabular nada — el objetivo dejó de tener una base con
+    puente que reconstruir (`build_bridge_table`/`O(P)` gross-ups murieron con `TargetBasis` en
+    E4). La forma de conveniencia `fire_target_at_month_index_with_plan` sigue existiendo para un
+    consultante puntual, pero cualquier lectura que recorra la serie entera debe seguir
+    construyendo el evaluador una vez y llamando `.at(i)`, no la función libre por punto.
+  - **`BuiltProjection::asset_volatility_percent` es un vector PARALELO a `input.assets`** (5.0.0
+    WP6b) y se rellena en el MISMO `map` que los construye. El motor `Decimal` lo ignora; es
+    entrada exclusiva de Monte Carlo, que **falla** si la longitud no cuadra. La alineación es una
+    propiedad de construcción a propósito: una σ descolocada produce bandas estrechas y creíbles —
+    el peor fallo posible en esa superficie — y ningún assert de tipo la cazaría. Regresión de
+    comportamiento: `projection_bands.rs::the_volatility_vector_follows_the_asset_order`.
+- `handlers/retirement_solver.rs` — **el ÚNICO sitio de la API donde el sorteo elige un mes**
+  (5.0.0, modelo v2, WP A3). Frontera entre `crates/engine-stochastic` y el ensamblado HTTP, y
+  deliberadamente la única: si `projection.rs`, `projection_bands.rs` y `simulate_projection`
+  decidieran cada uno su presupuesto de sorteos, la misma instalación publicaría tres fechas
+  distintas en tres pantallas. Cuatro cosas que hay que saber antes de tocarlo:
+  - **Se busca con `SOLVE_SEARCH_PATHS` (500) y se confirma con `SOLVE_CONFIRM_PATHS`.** El
+    segundo **es** `DEFAULT_BANDS_PATHS`, no un literal escrito aparte: esa identidad es la que
+    hace que la probabilidad que confirma la fecha y la que dibuja el fan chart salgan de **la
+    misma muestra**. Los dos están por encima de 381, el mínimo que exige el umbral máximo del
+    perfil por debajo de 100 (con cero fallos Wilson colapsa a `n/(n+z²)`); lo pinea
+    `the_budgets_can_reach_the_highest_profile_threshold`.
+  - **Dos niveles.** `solve_plan_level1` (síncrono, dentro del miss de proyección y bajo el mismo
+    permiso de `heavy::run_projection_sim`) resuelve la fecha, el éxito con su cota de Wilson y el
+    capital necesario hoy — 1,3–2,8 s por solve. `spawn_plan_extras` (`tokio::spawn`, deduplicado
+    por `plan_inflight`, UN permiso para los cinco cómputos) resuelve las fechas al 100 % y al
+    90 %, la curva de capital por edad (≈ 16 s), la tira anual de éxito (≈ 7 s) y el fallo
+    acumulado por edad. Meterlo todo en el nivel 1 sumaría ~25 s a un GET; publicar el nivel 1 en
+    segundo plano dejaría Jubilación sin fecha hasta un segundo sondeo.
+  - **`spawn_plan_extras` es `async` aunque solo lance una tarea**, y por la misma razón por la que
+    `refresh_projection_after_mutation` dejó de ser un `spawn`: el `Pending` tiene que estar en la
+    cache **antes** de que el llamante responda, o un lector que caiga en medio publica
+    `unavailable` («no se puede») donde la verdad es `computing` («todavía no»).
+  - **`plan_scenario` construye en UN sitio la entrada que el plan describe** (mes forzado, corte
+    de aportaciones, inicio de la media jornada), con las plantillas públicas del crate
+    (`retiring_at`/`stopping_at`/`partial_starting_at`). Lo que se pasa a `plan_fingerprint` y lo
+    que se pasa a `spawn_plan_extras` tiene que ser **ese mismo valor**, o la clave deja de
+    describir lo que hay dentro; hay un `debug_assert` que lo comprueba.
+  - **Las dos bases de los euros no son la misma y está declarado**: `needed_capital_today` va en
+    euros de HOY (se compara con la cartera de hoy) y `needed_capital_curve` en euros NOMINALES de
+    cada mes (se dibuja contra la trayectoria del patrimonio, que es nominal). Coinciden en `k = 1`
+    y divergen a partir de ahí. Los nodos sin cifra salen del vector de importes y su razón viaja
+    en `needed_capital_curve_absent`, para que la línea se pueda **partir** ahí en vez de
+    interpolar por encima de un hueco.
+- `handlers/projection_bands.rs` — **`GET /v1/projection/bands`** (5.0.0/WP6b): la superficie HTTP
+  de `futurefin_engine_stochastic::project_percentile_bands`, su cache propio y las conversiones
+  de frontera. Tres funciones que viven aquí a propósito y las usa también `projection.rs` (para el
+  eje `monte_carlo` de `simulate_projection`): `volatilities_f64` —la ÚNICA que produce `f64` para
+  el crate estocástico, de modo que las bandas y el what-if conviertan igual—, `probability_out`
+  —la única por la que sale un número de ese crate, y sale como PROBABILIDAD, nunca como euros— y
+  `success_verdict` —el semáforo contra el `success_threshold_pct` del PERFIL (no un corte fijo,
+  ver `financial-contracts.md` §2.7): verde exige `wilson_low ≥ umbral/100` (o `success == 1.0`
+  exacto con umbral 100), ámbar el estimador puntual sin el intervalo, rojo lo demás—. El handler
+  se monta dentro de `projection_router()`.
+- `handlers/summary.rs` — `summary_core` toma **`&AppState`, no `&PgPool`** desde 5.0.0 WP5-2b: el
+  bloque `plan` (D27) se lee de la cache de proyección y, si no hay entrada, se calcula por
+  `projection_series_cached`. Es deliberado que el Resumen dependa del estado: la alternativa era
+  una segunda fórmula para las mismas seis cifras, y dos superficies que contestan distinto a la
+  misma pregunta es el fallo que esta casa no publica. `plan_from_series` **copia campos y no hace
+  una sola cuenta**. Desde WP6b `attach_success` hace lo mismo con el KPI «Éxito del plan», leyendo
+  del cache de BANDAS por `projection_bands_cached` (caminos y semilla por defecto): el tile del
+  Resumen y el fan chart de Jubilación citan **la misma ejecución** de Monte Carlo. Si el sorteo
+  falla, el Resumen no se cae — tres `null` con `success_absent_reason`, y el resto del plan sigue
+  viajando.
 - `handlers/history.rs` — per-user net-worth **snapshots** under `/v1/history` (capture / backfill CRUD / interpolated series + `GET /v1/history/cashflow` tier-2). Manual snapshots of the user's asset + liability items; the engine (`history.rs`) reconstructs the past series between them. Snapshots are NOT projection inputs → their mutations do **not** invalidate the projection cache. **Cotas de publicación (4.4.0, Fase 5)**: `GET /v1/history/series` sin `window_months` devuelve los **últimos 120 meses** (`DEFAULT_HISTORY_WINDOW_MONTHS`), ya no todo el histórico — `1200` sigue siendo «todo», y la respuesta declara `window_months` / `window_truncated` / `first_snapshot_date_ymd`; los numéricos de chart se publican a **2 decimales** (`CHART_DP`) y `month_fraction` a **4** (`MONTH_FRACTION_DP`), redondeo de publicación como `money_out` — la interpolación sigue exacta. En `/v1/history/cashflow` la **curva fina** se acota a **36 meses** (`MAX_FINE_CURVE_WINDOW_MONTHS`) y pasarse **no es un 400**: llegan los `months[]` completos y `fine_absent_reason` dice por qué falta `fine` (`not_requested` | `window_too_large_for_curve` | `no_asset_linked_transactions` | `no_snapshots_to_anchor`).
 - `handlers/transactions/` — per-user **histórico de gasto mensual** under `/v1/transactions` (import CSV MyInvestor/N26, movimientos manuales, reglas de categorización, comparativa mes vs budget vs promedio ponderado, y **movimientos recurrentes**). Modules: `crud.rs`, `import.rs` (preview→confirm stateless, presets en `csv_presets.rs`), `reconcile.rs` (conciliación de transferencias, 3.5.0: pase automático determinista de importes opuestos a ≤5 días + par/desconciliación manual — un movimiento **conciliado** sigue visible pero queda fuera de TODOS los agregados de flujo), `rules.rs`, `aggregate.rs` (`GET /v1/transactions/aggregate`: suma/conteo agrupados por mes, categoría o kind **dentro de SQL** — el predicado de conciliadas va en la core, no en el modelo que lee las filas), `duplicates.rs` (`GET /v1/transactions/duplicates`: agrupa por la huella canónica que ya usa el dedup del import), `summary.rs` (incluye el helper `transactions_avg` que consumen los modos B y C, contando solo «meses reales»: los meses solo-recurrentes y las transferencias conciliadas se excluyen; desde el issue #5 la comparativa de la pestaña Movimientos usa **el mismo predicado de mes real**), `recurring.rs` (plantillas recurrentes + **convergencia**: desde 3.9.0 las instancias existen exactamente en los meses con datos reales, sin cursor), `schema.rs`. Las transacciones son inputs del engine **solo en los modos que usan transacciones** (`fire_settings.savings_source ∈ {transactions_avg (B), budget_income_real_expense (C)}`, gate `SavingsSource::uses_transactions()`; desde 3.9.0 las **ventanas del promedio son configurables por lado** — ingreso y gasto, meses + semántica): en esos casos las mutaciones invalidan la cache de proyección vía `invalidate_projection_if_savings_uses_transactions` (best-effort post-commit); con `savings_source = budget` (default, modo A) **ningún handler invalida** (contrato histórico intacto). `rules.rs` y los previews nunca invalidan; **el borrado de una regla recurrente SÍ invalida (COND, corrección 4.0.0)** — no cambia el conjunto pero sí su **clasificación**: el `ON DELETE SET NULL` convierte las instancias huérfanas en movimientos reales y puede activar un mes que el promedio ignoraba (regresión: `transactions_projection_cache.rs`).
 - `db.rs` — pool setup (`max=10, min=1, idle_timeout=10min, max_lifetime=30min`) + `sqlx::migrate!` runner. No more auto-repair loop; if a checksum mismatches in dev, fix manually via `DELETE FROM _sqlx_migrations WHERE version = X` and rerun.
-- **`tests/`** — integration tests against a real Postgres (schema-isolated per test). See [`.claude/tests.md`](.claude/tests.md).
+- **`tests/`** — integration tests against a real Postgres (schema-isolated per test). See [`tests.md`](tests.md).
 
 ## Cómo añadir un handler
 

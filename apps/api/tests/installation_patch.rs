@@ -1,5 +1,12 @@
 //! Fase 3.3 — `FireNumberMode` debe rechazar variantes desconocidas (no silenciar a default).
 //! Fase 3.4 (compat) — el alias `annual_expense_adjusted` se conserva para importar backups antiguos.
+//!
+//! **5.0.0**: `fire_number_mode` dejó de ser del hogar y pasó al perfil de jubilación de cada
+//! usuario (D13), así que los tres tests del modo se hacen contra
+//! `PATCH /v1/auth/me/retirement-profile`. Lo que prueban no ha cambiado —una variante
+//! desconocida se rechaza, el alias legado se acepta, un cambio válido se persiste—: solo la
+//! ruta. Se quedan en este fichero porque siguen siendo el pin del `Deserialize` a mano de
+//! `FireNumberMode`, que es lo que hace que un literal desconocido no caiga a default.
 
 mod common;
 
@@ -12,17 +19,8 @@ async fn patch_installation_unknown_fire_number_mode_returns_client_error() {
 
     let resp = app
         .patch_json_with_cookie(
-            "/v1/installation",
-            serde_json::json!({
-                "fire_settings": {
-                    "fire_number_mode": "foobar",
-                    "swr_pct": "3.5",
-                    "taxes_enabled": false,
-                    "tax_brackets": [],
-                    "fire_number_manual_amount": null,
-                    "fire_number_expense_adjustment_pct": null,
-                }
-            }),
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({"fire_number_mode": "foobar"}),
             &owner.cookie,
         )
         .await;
@@ -49,23 +47,14 @@ async fn patch_installation_accepts_legacy_annual_expense_adjusted_alias() {
     // El alias se mapea silenciosamente al modo actual (`annual_expense`). Soporte a backups antiguos.
     let resp = app
         .patch_json_with_cookie(
-            "/v1/installation",
-            serde_json::json!({
-                "fire_settings": {
-                    "fire_number_mode": "annual_expense_adjusted",
-                    "swr_pct": "3.5",
-                    "taxes_enabled": false,
-                    "tax_brackets": [],
-                    "fire_number_manual_amount": null,
-                    "fire_number_expense_adjustment_pct": null,
-                }
-            }),
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({"fire_number_mode": "annual_expense_adjusted"}),
             &owner.cookie,
         )
         .await;
     assert_eq!(resp.status, http::StatusCode::OK, "alias debe ser aceptado: {resp:?}");
     let body = resp.json();
-    assert_eq!(body["installation"]["fire_settings"]["fire_number_mode"], "annual_expense");
+    assert_eq!(body["profile"]["fire_number_mode"], "annual_expense");
 }
 
 #[tokio::test]
@@ -75,23 +64,14 @@ async fn patch_installation_accepts_valid_fire_mode_change() {
 
     let resp = app
         .patch_json_with_cookie(
-            "/v1/installation",
-            serde_json::json!({
-                "fire_settings": {
-                    "fire_number_mode": "current_income",
-                    "swr_pct": "3.5",
-                    "taxes_enabled": false,
-                    "tax_brackets": [],
-                    "fire_number_manual_amount": null,
-                    "fire_number_expense_adjustment_pct": null,
-                }
-            }),
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({"fire_number_mode": "current_income"}),
             &owner.cookie,
         )
         .await;
     assert_eq!(resp.status, http::StatusCode::OK, "{resp:?}");
     let body = resp.json();
-    assert_eq!(body["installation"]["fire_settings"]["fire_number_mode"], "current_income");
+    assert_eq!(body["profile"]["fire_number_mode"], "current_income");
 }
 
 #[tokio::test]

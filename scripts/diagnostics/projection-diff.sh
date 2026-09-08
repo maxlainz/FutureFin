@@ -105,14 +105,20 @@ fields = [
     ("starting_net_worth",            a.get("starting_net_worth"), b.get("starting_net_worth"), True),
     ("monthly_delta_assumption",      a.get("monthly_delta_assumption"), b.get("monthly_delta_assumption"), True),
     ("jubilacion_month_index",        a.get("jubilacion_month_index"), b.get("jubilacion_month_index"), True),
-    ("jubilacion_target_net_worth",   a.get("jubilacion_target_net_worth"), b.get("jubilacion_target_net_worth"), True),
+    # 5.0.0 (modelo v2): el objetivo determinista se retiró; el bloque «plan» es lo que hoy puede
+    # divergir en silencio entre dos respuestas (fecha válida, base, éxito y capital necesario hoy).
+    ("retirement_date_basis",         a.get("retirement_date_basis"), b.get("retirement_date_basis"), True),
+    ("safe_date_month_index",         a.get("safe_date_month_index"), b.get("safe_date_month_index"), True),
+    ("success_of_plan",               a.get("success_of_plan"), b.get("success_of_plan"), True),
+    ("needed_capital_today",          a.get("needed_capital_today"), b.get("needed_capital_today"), True),
+    ("needed_capital_curve_state",    a.get("needed_capital_curve_state"), b.get("needed_capital_curve_state"), True),
     ("compound_outpaces..._month_index",
                                       a.get("compound_outpaces_true_savings_month_index"),
                                       b.get("compound_outpaces_true_savings_month_index"), True),
     ("milestones (nominal)",          ms(a, "milestones"), ms(b, "milestones"), True),
     ("milestones_real (deflated)",    ms(a, "milestones_real"), ms(b, "milestones_real"), True),
     ("points_len",                    len(a.get("points", [])), len(b.get("points", [])), same_density),
-    ("fire_target_series_len",        len(a.get("fire_target_series", [])), len(b.get("fire_target_series", [])), same_density),
+    ("needed_capital_curve_len",      len(a.get("needed_capital_curve") or []), len(b.get("needed_capital_curve") or []), same_density),
     ("asset_series count",            len(a.get("asset_series", [])), len(b.get("asset_series", [])), True),
     ("last point month_index",        a["points"][-1]["month_index"] if a.get("points") else None,
                                       b["points"][-1]["month_index"] if b.get("points") else None, same_density),
@@ -123,11 +129,13 @@ bad = sum(row(*f) for f in fields)
 
 # Point-level check at SHARED month_index values. Hybrid indices are a strict
 # subset of monthly indices, and both densities serialize from the same
-# deterministic compute → net_worth/contributed_capital/fire_target must be
-# bit-identical (f64) at every shared index.
+# deterministic compute → net_worth/contributed_capital must be bit-identical (f64)
+# at every shared index. The needed-capital curve (5.0.0) is parallel to points[]
+# and comes from the SAME plan key in both densities, so its non-null values must
+# coincide at shared indices too; a null means "not measured here", never 0.
 def by_month(doc):
     pts = {p["month_index"]: p for p in doc.get("points", [])}
-    ft = doc.get("fire_target_series", [])
+    ft = doc.get("needed_capital_curve") or []
     ftm = {p["month_index"]: ft[i] for i, p in enumerate(doc.get("points", []))} if len(ft) == len(pts) else {}
     return pts, ftm
 
@@ -139,7 +147,7 @@ for m in shared:
         if pa[m][field] != pb[m][field]:
             mismatches.append((m, field, pa[m][field], pb[m][field]))
     if fta and ftb and fta.get(m) != ftb.get(m):
-        mismatches.append((m, "fire_target", fta.get(m), ftb.get(m)))
+        mismatches.append((m, "needed_capital_curve", fta.get(m), ftb.get(m)))
 print(f"\nShared month_index points: {len(shared)} "
       f"(A has {len(pa)}, B has {len(pb)})")
 if mismatches:
@@ -151,7 +159,7 @@ else:
     print("  same: all shared-index values identical")
 
 if not same_density:
-    print("\nNote: densities differ → points_len/fire_target_series_len (and the")
+    print("\nNote: densities differ → points_len/needed_capital_curve_len (and the")
     print("last serialized month_index) diffs are expected decimation artifacts.")
     print("Everything marked DIFF above is a real divergence: KPIs/milestones are")
     print("computed on the FULL series server-side and must be density-invariant")

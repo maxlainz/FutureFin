@@ -1,0 +1,177 @@
+{
+  "_doc": "Pin dorado del motor 4.15.0: SHA-256 del texto canónico de cada caso de tests/common/cases.rs (series net_worth, liquid_worth, contributed_capital y per_asset_series mes a mes con Decimal completo via Display, mas assets_depleted_month_index, uncovered_deficit_total, unallocated_savings_total, el first_month_allocation entero con su traza regla a regla, y el liability_amortization_schedule de cada pasivo). GENERADO: no editar a mano. El formato exacto del texto hasheado lo define render_projection_case / render_liability_case en tests/golden_pins.rs. Regenerar SOLO si el cambio del motor es intencionado: UPDATE_ENGINE_PINS=1 cargo test -p futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG (futurefin-change-control). Los escalares de cada caso no entran en el hash: estan para que un hash que se mueve tenga un titular legible en el diff. Los casos L* son calendarios de amortizacion y no tienen patrimonio: sus tres escalares de patrimonio son null y llevan en su lugar final_principal, total_interest y payoff_month_index.",
+  "engine_version": "4.15.0",
+  "hash_algo": "sha256 over the canonical text described in golden_pins.rs",
+  "cases": {
+    "L1_venc_saldo_vivo": {
+      "sha256": "a663b8bf8c6a7c17feb6c542c5e449de2aeed4b6191d4059b428a768844eccd5",
+      "horizon_months": 840,
+      "net_worth_last": null,
+      "liquid_worth_last": null,
+      "contributed_last": null,
+      "assets_depleted_month_index": null,
+      "final_principal": "32557.492372534196532699541379",
+      "total_interest": "12557.492372534196532699541379",
+      "payoff_month_index": null
+    },
+    "L2_cuota_bajo_interes": {
+      "sha256": "385612ffb97e5807a1cd6a1768eb2639b7a6165b36ef2c3e3da2f9606e550206",
+      "horizon_months": 120,
+      "net_worth_last": null,
+      "liquid_worth_last": null,
+      "contributed_last": null,
+      "assets_depleted_month_index": null,
+      "final_principal": "68825.815171008755380143319264",
+      "total_interest": "84825.81517100875538014331926",
+      "payoff_month_index": null
+    },
+    "L3_revolving": {
+      "sha256": "692740dda9545b01fd0e99bce9483b572a9072eb3dac90a56ae825aeba53bc41",
+      "horizon_months": 840,
+      "net_worth_last": null,
+      "liquid_worth_last": null,
+      "contributed_last": null,
+      "assets_depleted_month_index": null,
+      "final_principal": "10663039991.749317122184850622",
+      "total_interest": "10663034991.749317122184850622",
+      "payoff_month_index": null
+    },
+    "L4_sin_tin": {
+      "sha256": "fb8a937a6e2b111e241330033b6000dee716fa1a270250d4d9f23c7ca60ddd23",
+      "horizon_months": 840,
+      "net_worth_last": null,
+      "liquid_worth_last": null,
+      "contributed_last": null,
+      "assets_depleted_month_index": null,
+      "final_principal": "0",
+      "total_interest": "0",
+      "payoff_month_index": 200
+    },
+    "L5_bde_100k_3pct": {
+      "sha256": "38142ca657d2b7810a360f6a28c606bc685710feeb9adda4a691c4eeab236687",
+      "horizon_months": 840,
+      "net_worth_last": null,
+      "liquid_worth_last": null,
+      "contributed_last": null,
+      "assets_depleted_month_index": null,
+      "final_principal": "0",
+      "total_interest": "38862.966426882411466363707334",
+      "payoff_month_index": 278
+    },
+    "L6_interest_only_200": {
+      "sha256": "92c2be5c73f830ff04b4e20244bad63001e408784a8794602b01e8f7a90709bb",
+      "horizon_months": 120,
+      "net_worth_last": null,
+      "liquid_worth_last": null,
+      "contributed_last": null,
+      "assets_depleted_month_index": null,
+      "final_principal": "119633.30729672993087096728014",
+      "total_interest": "43633.30729672993087096728014",
+      "payoff_month_index": null
+    },
+    "P1_deficit_cronico": {
+      "sha256": "7653dd751b4b807fff09eeda125dba7310699c40ac67705e43ef97635a567281",
+      "horizon_months": 60,
+      "net_worth_last": "-60000",
+      "liquid_worth_last": "0",
+      "contributed_last": "0",
+      "assets_depleted_month_index": 20
+    },
+    "P2_fire_mes0": {
+      "sha256": "c90bf03380966e3b4bdcb91ccb359d20ae562f215e9aab06104410bcb5b836fe",
+      "horizon_months": 24,
+      "net_worth_last": "852000",
+      "liquid_worth_last": "852000",
+      "contributed_last": "0",
+      "assets_depleted_month_index": null
+    },
+    "P3_superavit_jubilacion": {
+      "sha256": "620ca1e2e42dae0904aeeb912a89968bba9900b779cce65421c0e18b65e65a87",
+      "horizon_months": 480,
+      "net_worth_last": "619787.18047982412985680687411",
+      "liquid_worth_last": "619787.18047982412985680687411",
+      "contributed_last": "0",
+      "assets_depleted_month_index": null
+    },
+    "P4_ret_menos100": {
+      "sha256": "8ffc627b8ce28e0426146867932b307e78b8a155dd6925a7ee55e85c4c19aa17",
+      "horizon_months": 6,
+      "net_worth_last": "0",
+      "liquid_worth_last": "0",
+      "contributed_last": "0",
+      "assets_depleted_month_index": null
+    },
+    "P5_flat_nominal_30y": {
+      "sha256": "27f0edd5d8c7bb499697a65fe608266fb068746b37bd33e9bb36e5dc934dbf0f",
+      "horizon_months": 360,
+      "net_worth_last": "1252187.4087558834653530769847",
+      "liquid_worth_last": "1252187.4087558834653530769847",
+      "contributed_last": "360000",
+      "assets_depleted_month_index": null
+    },
+    "P6_venc_saldo_vivo_proj": {
+      "sha256": "0a52278a568dad6e4292887c8fb896d645d2c3e4b0133f34ca8f395c203e1f13",
+      "horizon_months": 360,
+      "net_worth_last": "-22557.492372534196532699541379",
+      "liquid_worth_last": "10000",
+      "contributed_last": "0",
+      "assets_depleted_month_index": null
+    },
+    "P13_cash8k_denormal_g": {
+      "sha256": "8e4ade4235338152cac6e5509ae38b4d78f94df2f405ce4c9139e5f2d70c3fa6",
+      "horizon_months": 840,
+      "net_worth_last": "-724207.71094043099331783750114",
+      "liquid_worth_last": "0",
+      "contributed_last": "0",
+      "assets_depleted_month_index": 763
+    },
+    "P7_jubilado_pension_impuestos": {
+      "sha256": "b74575c29316860728990e15c150713139dfca2ec46c26a66d357d3c244408b9",
+      "horizon_months": 360,
+      "net_worth_last": "111064.18603700327424577859382",
+      "liquid_worth_last": "111064.18603700327424577859382",
+      "contributed_last": "0",
+      "assets_depleted_month_index": null
+    },
+    "P8_drenaje_g_mixta": {
+      "sha256": "1ae8e4cb6b509fb20ebf5a1fa20a233adac96133e55300679719fa3ec345fa4c",
+      "horizon_months": 120,
+      "net_worth_last": "-137240.94382315686700443074087",
+      "liquid_worth_last": "0",
+      "contributed_last": "0",
+      "assets_depleted_month_index": 29
+    },
+    "P9_hogar_realista": {
+      "sha256": "0d9dda54aa6dd051ef129da50f0f86aac89e8bc6960f94a2903e7565a2a6c8f7",
+      "horizon_months": 840,
+      "net_worth_last": "73668.687482746953258158662192",
+      "liquid_worth_last": "0",
+      "contributed_last": "0",
+      "assets_depleted_month_index": null
+    },
+    "P10_jubilacion_forzada": {
+      "sha256": "2993b6d94d1c813f0c0113ba73003f416948e6906adf91f5967cfc88a545d40b",
+      "horizon_months": 120,
+      "net_worth_last": "-96192.60298284186938621075181",
+      "liquid_worth_last": "0",
+      "contributed_last": "0",
+      "assets_depleted_month_index": 80
+    },
+    "P11_deflacion_negativa": {
+      "sha256": "24411bfaa1eac50c20e37b93e1389e1fd49a510d6ec8f18645ede8e352735440",
+      "horizon_months": 240,
+      "net_worth_last": "430614.44428881196439464350449",
+      "liquid_worth_last": "430614.44428881196439464350449",
+      "contributed_last": "20220.555946877844558918111961",
+      "assets_depleted_month_index": null
+    },
+    "P12_topes_de_cascada": {
+      "sha256": "4a96f7ffc569b03ee0832e8797d6853ad120e8c4bbf3db0bc78742ca48c1c4e1",
+      "horizon_months": 60,
+      "net_worth_last": "58268.290766488563399162956397",
+      "liquid_worth_last": "58268.290766488563399162956397",
+      "contributed_last": "53962.240818550397215452803394",
+      "assets_depleted_month_index": null
+    }
+  }
+}

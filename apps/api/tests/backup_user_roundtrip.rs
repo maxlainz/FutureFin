@@ -12,7 +12,7 @@ mod common;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chrono::{Datelike, NaiveDate};
-use common::{ResponseParts, TestApp};
+use common::{LoggedInOwner, ResponseParts, TestApp, TestConfig};
 use futurefin_api::handlers::backup_user::crypto::{encrypt_payload, frame_file};
 use futurefin_api::handlers::person_view::LedgerView;
 use futurefin_api::state::{Density, ProjectionCacheKey};
@@ -66,22 +66,43 @@ async fn create_liability(
     Uuid::parse_str(r.json()["id"].as_str().expect("liability id")).expect("liability uuid")
 }
 
-/// Calls the real export endpoint and returns the framed `.ffbackup` bytes, base64-encoded.
-async fn export_ffbackup_b64(app: &TestApp, cookie: &str) -> String {
+/// Llama al endpoint real de export y devuelve el `.ffbackup` enmarcado en base64.
+///
+/// Parametrizado por contraseña desde #213: en una cuenta con contraseña sigue siendo la de la
+/// cuenta, y en una cuenta sin contraseña es la del **archivo** — el mismo endpoint, dos
+/// significados, y los tests tienen que poder decir cuál están usando.
+async fn export_ffbackup_b64_with(app: &TestApp, cookie: &str, password: &str) -> String {
     let r = app
-        .post_json_with_cookie("/v1/backup/user-export", serde_json::json!({ "password": PW }), cookie)
+        .post_json_with_cookie(
+            "/v1/backup/user-export",
+            serde_json::json!({ "password": password }),
+            cookie,
+        )
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "export: status {:?}", r.status);
     B64.encode(&r.body)
 }
 
-async fn import_apply(app: &TestApp, cookie: &str, file_b64: &str) -> ResponseParts {
+async fn export_ffbackup_b64(app: &TestApp, cookie: &str) -> String {
+    export_ffbackup_b64_with(app, cookie, PW).await
+}
+
+async fn import_apply_with(
+    app: &TestApp,
+    cookie: &str,
+    file_b64: &str,
+    password: &str,
+) -> ResponseParts {
     app.post_json_with_cookie(
         "/v1/backup/user-import",
-        serde_json::json!({ "file_b64": file_b64, "password": PW, "confirm_replace": true }),
+        serde_json::json!({ "file_b64": file_b64, "password": password, "confirm_replace": true }),
         cookie,
     )
     .await
+}
+
+async fn import_apply(app: &TestApp, cookie: &str, file_b64: &str) -> ResponseParts {
+    import_apply_with(app, cookie, file_b64, PW).await
 }
 
 async fn import_preview(app: &TestApp, cookie: &str, file_b64: &str) -> ResponseParts {
@@ -519,19 +540,21 @@ async fn backup_import_invalidates_projection_cache() {
     create_asset(&app, &owner.cookie, &cat, "A", "10000").await;
 
     let iid = installation_id(&app).await;
+    // La vista por defecto es `mine` desde 5.0.0 (R2): es la entrada que puebla un GET sin
+    // parámetros y la que el import tiene que invalidar.
     let key = ProjectionCacheKey {
         installation_id: iid,
-        view: LedgerView::Household,
+        view: LedgerView::Mine,
         owner_user_id: Some(owner.user_id),
         density: Density::Monthly,
     };
 
-    // Warm the household cache.
+    // Warm the default-view cache.
     let r = app.get_with_cookie("/v1/projection/series", &owner.cookie).await;
     assert_eq!(r.status, http::StatusCode::OK);
     {
         let cache = app.state.projection_cache.read().await;
-        assert!(cache.contains_key(&key), "household projection should be cached after a GET");
+        assert!(cache.contains_key(&key), "default-view projection should be cached after a GET");
     }
 
     let backup = export_ffbackup_b64(&app, &owner.cookie).await;
@@ -1761,4 +1784,548 @@ async fn importing_a_pre_seed_backup_seeds_the_sink_with_the_owner_criteria() {
     assert_eq!(applied2.status, http::StatusCode::OK, "{applied2:?}");
     let rules2 = app.get_with_cookie("/v1/allocation-rules", &owner.cookie).await.json();
     assert_eq!(rules2.as_array().unwrap().len(), 1, "{rules2:?}");
+}
+
+// ---------------------------------------------------------------------------
+// schema_version 13 (5.0.0) — perfil de jubilación + volatilidad por activo
+// ---------------------------------------------------------------------------
+
+/// Round-trip v13: lo que 5.0.0 añade al fichero **vuelve** tal cual.
+///
+/// Los dos campos nuevos son de naturaleza distinta y por eso se prueban juntos: la volatilidad
+/// es una columna del activo (viaja en `assets[]`) y el perfil de jubilación es una fila de
+/// `users` (viaja en la raíz del payload). Un restore que perdiera cualquiera de los dos dejaría
+/// la proyección de esa persona describiendo otro plan sin decirlo.
+#[tokio::test]
+async fn v13_roundtrips_the_retirement_profile_and_the_asset_volatility() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let cat = app.create_category(&owner, "asset", "Indexados").await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            serde_json::json!({
+                "category_id": cat,
+                "name": "MSCI World",
+                "current_value": "10000",
+                "expected_annual_return_percent": "7",
+                "annual_volatility_percent": "17.5"
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+
+    // Los campos del modelo v2 (5.0.0): umbral de éxito, coast en modo B y el puente DENTRO de la
+    // pensión — nada de `cash_buffer_months`/`target_basis`, que ya no existen.
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({
+                "strategy": "retire_at_age",
+                "target_retirement_age": 60,
+                "swr_pct": "3.1",
+                "success_threshold_pct": 90,
+                "coast_mode": "fixed_stop_age",
+                "coast_stop_age": 58,
+                "pension": {
+                    "monthly_amount_today": "1100",
+                    "starts_at_age": 66,
+                    "bridge_enabled": true,
+                    "bridge_max_pct": "6",
+                    "bridge_max_years": 10
+                }
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    let file = export_ffbackup_b64(&app, &owner.cookie).await;
+
+    // El manifiesto declara la versión nueva, y el preview dice que el perfil se va a sustituir
+    // (un v13 con perfil propio SIEMPRE gana, tenga uno o no quien importa — B3).
+    let preview = import_preview(&app, &owner.cookie, &file).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(preview.json()["schema_version"], 13, "{preview:?}");
+    assert_eq!(preview.json()["retirement_profile"], "replaced", "{preview:?}");
+
+    // Se borra todo y se restaura.
+    let applied = import_apply(&app, &owner.cookie, &file).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "{applied:?}");
+
+    let assets = app.get_with_cookie("/v1/assets", &owner.cookie).await;
+    let a = assets.json();
+    let row = a
+        .as_array()
+        .expect("assets array")
+        .iter()
+        .find(|x| x["name"] == "MSCI World")
+        .expect("el activo vuelve");
+    assert_eq!(row["annual_volatility_percent"], "17.5000", "{row}");
+
+    let profile = app
+        .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
+        .await
+        .json();
+    let p = &profile["profile"];
+    assert_eq!(p["strategy"], "retire_at_age", "{profile}");
+    assert_eq!(p["target_retirement_age"], 60, "{profile}");
+    assert_eq!(p["swr_pct"], "3.1", "{profile}");
+    assert_eq!(p["success_threshold_pct"], 90, "{profile}");
+    assert_eq!(p["coast_mode"], "fixed_stop_age", "{profile}");
+    assert_eq!(p["coast_stop_age"], 58, "{profile}");
+    assert_eq!(p["pension"]["starts_at_age"], 66, "{profile}");
+    assert_eq!(p["pension"]["bridge_enabled"], true, "{profile}");
+    assert_eq!(p["pension"]["bridge_max_pct"], "6", "{profile}");
+    assert_eq!(p["pension"]["bridge_max_years"], 10, "{profile}");
+}
+
+/// Importar un fichero **v12** (escrito por 4.15.x) SIEMBRA el perfil con los cuatro ejes que
+/// aquel `fire_settings` llevaba dentro — pero solo si quien importa no tiene perfil propio, y
+/// **sin pasar por `resolve_retirement_profile`** (B3): lo que se guarda es el fichero acotado a
+/// las cotas de hoy, nunca una derivación congelada como si fuera una elección del usuario.
+///
+/// Tres cosas en un test: los ejes fuera de rango se siguen acotando (eso no cambia con el
+/// arreglo de B3 — el clamp sigue existiendo, solo que ahora vive a mano en
+/// `legacy_retirement_profile` en vez de en `resolve_retirement_profile`); lo que SÍ se deriva en
+/// lectura (`pct_source`) no llega ya congelado como «explicit»; y sin la siembra, restaurar un
+/// backup de 4.15.x devolvería a esa persona al SWR por defecto sin ningún aviso, mientras que
+/// sin la condición de «solo si no tiene perfil», restaurar un backup viejo pisaría la estrategia
+/// que configuró DESPUÉS de actualizar.
+#[tokio::test]
+async fn a_legacy_backup_seeds_an_unresolved_profile() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // Un v12 mínimo: el `fire_settings` de entonces, con los cuatro ejes DENTRO — dos de ellos
+    // FUERA de las cotas de hoy (el SWR tope subió a 6 %, el horizonte tope es 105 años), como
+    // podría traerlos un fichero de una versión con cotas más laxas o editado a mano.
+    let payload = serde_json::json!({
+        "user": {"username": "alice", "birth_date": "1990-01-01"},
+        "categories_used": [],
+        "assets": [],
+        "allocation_rules": [],
+        "liabilities": [],
+        "budget_entries": [],
+        "planning_flows": [],
+        "ui_preferences": {},
+        "installation_snapshot_informative": {
+            "base_currency": "EUR",
+            "calendar_tz": "UTC",
+            "show_age_mode": "dates",
+            "fire_settings": {
+                "fire_number_mode": "current_income",
+                "fire_number_manual_amount": null,
+                "swr_pct": "9",
+                "horizon_lifespan_age": 200,
+                "taxes_enabled": true,
+                "tax_brackets": [{"up_to": null, "pct": "19"}],
+                "savings_source": "budget"
+            }
+        }
+    });
+    let file = craft_ffbackup_b64(12, &payload, owner.user_id);
+
+    // El preview ya avisa de que va a sembrar: nadie tiene perfil todavía.
+    let preview = import_preview(&app, &owner.cookie, &file).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(preview.json()["retirement_profile"], "seeded_from_4x", "{preview:?}");
+
+    // 1) Usuario SIN perfil (columna NULL): se siembra con los cuatro ejes del fichero, acotados.
+    let applied = import_apply(&app, &owner.cookie, &file).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "{applied:?}");
+    let profile = app
+        .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
+        .await
+        .json();
+    let p = &profile["profile"];
+    assert_eq!(p["swr_pct"], "6", "el SWR se acota al techo de hoy: {profile}");
+    assert_eq!(
+        p["horizon_lifespan_age"], 105,
+        "el horizonte se acota al techo de hoy: {profile}"
+    );
+    assert_eq!(p["fire_number_mode"], "current_income", "{profile}");
+    // La estrategia no viene del fichero: es la de 4.15.x, que es `asap`.
+    assert_eq!(p["strategy"], "asap", "{profile}");
+    // Lo que SÍ se deriva en lectura no llega congelado como una elección explícita: con la
+    // regla por defecto (`fixed_real`, la única que un fichero ≤ v12 puede sembrar) ni siquiera
+    // se publica —esa regla no tiene porcentaje que resolver—, y si algún día lo hiciera, solo
+    // puede venir heredado del SWR, nunca marcado `explicit`.
+    match p["withdrawal_rule"].get("pct_source") {
+        None => {}
+        Some(v) if v.is_null() => {}
+        Some(v) => assert_eq!(
+            v, "swr",
+            "un pct_source sembrado desde un fichero legado nunca puede ser explicit: {profile}"
+        ),
+    }
+
+    // 2) El usuario configura SU plan después de actualizar…
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({"strategy": "retire_at_age", "target_retirement_age": 55, "swr_pct": "3.5"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    // …y volver a importar el MISMO fichero viejo NO se lo pisa — el preview lo anticipa.
+    let preview = import_preview(&app, &owner.cookie, &file).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(
+        preview.json()["retirement_profile"], "ignored_already_configured",
+        "{preview:?}"
+    );
+    let applied = import_apply(&app, &owner.cookie, &file).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "{applied:?}");
+    let profile = app
+        .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(profile["profile"]["strategy"], "retire_at_age", "{profile}");
+    assert_eq!(profile["profile"]["target_retirement_age"], 55, "{profile}");
+    assert_eq!(profile["profile"]["swr_pct"], "3.5", "{profile}");
+}
+
+/// El preview de importación dice, para las CUATRO combinaciones posibles, qué le va a pasar al
+/// perfil de jubilación de quien importa — ANTES de que la importación real lo cambie.
+#[tokio::test]
+async fn the_import_preview_says_what_will_happen_to_the_retirement_profile() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let bare_v12 = |fire_settings: serde_json::Value| {
+        serde_json::json!({
+            "user": {"username": "alice", "birth_date": null},
+            "categories_used": [],
+            "assets": [],
+            "allocation_rules": [],
+            "liabilities": [],
+            "budget_entries": [],
+            "planning_flows": [],
+            "ui_preferences": {},
+            "installation_snapshot_informative": {
+                "base_currency": "EUR",
+                "calendar_tz": "UTC",
+                "show_age_mode": "dates",
+                "fire_settings": fire_settings
+            }
+        })
+    };
+
+    // 1) Sin perfil propio y SIN ejes legados en el fichero: no hay nada que cambiar.
+    let file_bare = craft_ffbackup_b64(12, &bare_v12(serde_json::json!({})), owner.user_id);
+    let preview = import_preview(&app, &owner.cookie, &file_bare).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(preview.json()["retirement_profile"], "kept", "{preview:?}");
+
+    // 2) v ≤ 12 con ejes legados y SIN perfil propio: se va a sembrar.
+    let file_legacy = craft_ffbackup_b64(
+        12,
+        &bare_v12(serde_json::json!({
+            "fire_number_mode": "current_income",
+            "swr_pct": "3.25",
+            "horizon_lifespan_age": 95,
+            "taxes_enabled": true,
+            "tax_brackets": [{"up_to": null, "pct": "19"}]
+        })),
+        owner.user_id,
+    );
+    let preview = import_preview(&app, &owner.cookie, &file_legacy).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(preview.json()["retirement_profile"], "seeded_from_4x", "{preview:?}");
+
+    // 3) Configura SU plan…
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            serde_json::json!({"strategy": "retire_at_age", "target_retirement_age": 55}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+
+    // …y el MISMO fichero legado ahora se ignora: ya tiene perfil propio.
+    let preview = import_preview(&app, &owner.cookie, &file_legacy).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(
+        preview.json()["retirement_profile"], "ignored_already_configured",
+        "{preview:?}"
+    );
+
+    // 4) Un v13 con perfil EXPLÍCITO sustituye siempre, tenga uno o no quien importa.
+    let file_v13 = export_ffbackup_b64(&app, &owner.cookie).await;
+    let preview = import_preview(&app, &owner.cookie, &file_v13).await;
+    assert_eq!(preview.status, http::StatusCode::OK, "{preview:?}");
+    assert_eq!(preview.json()["retirement_profile"], "replaced", "{preview:?}");
+}
+
+/// **Exportar un perfil que llegó con el literal retirado `pension_bridge` no puede perder el
+/// puente** (A1's caveat, B3). `migrated_from_pension_bridge` es `#[serde(skip)]` — nunca viaja
+/// por el wire —, así que exportar el perfil TAL CUAL (con el flag transitorio solo en memoria)
+/// escribiría `strategy: "asap"` con `bridge_enabled` en lo que fuera que hubiera en la fila
+/// (normalmente `false`, porque nadie ha vuelto a escribir el perfil desde que llegó con ese
+/// literal). Una restauración posterior perdería el puente sin ningún aviso.
+///
+/// `stored_retirement_profile` en el export resuelve ESTE aspecto y solo este: enciende
+/// `bridge_enabled` y rellena sus defaults si faltan — el resto del perfil se sigue exportando
+/// sin resolver.
+#[tokio::test]
+async fn a_pension_bridge_profile_round_trips_with_the_bridge_on() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    // El JSONB que podía dejar una build de 5.0.0 anterior a que C7 convirtiera la estrategia en
+    // un alias: nadie ha vuelto a escribir este perfil desde entonces.
+    sqlx::query(r#"UPDATE users SET retirement_profile = $1::jsonb WHERE id = $2"#)
+        .bind(
+            r#"{"strategy":"pension_bridge","swr_pct":"3.5",
+                "pension":{"monthly_amount_today":"1200","starts_at_age":67,"indexed":true}}"#,
+        )
+        .bind(owner.user_id)
+        .execute(&app.pool)
+        .await
+        .expect("seed pension_bridge profile");
+
+    // Exportar no pasa por ningún GET/PATCH: es la lectura directa de `stored_retirement_profile`.
+    let file = export_ffbackup_b64(&app, &owner.cookie).await;
+
+    // El fichero se restaura sobre la MISMA cuenta (import es replace-only de lo propio).
+    let applied = import_apply(&app, &owner.cookie, &file).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "{applied:?}");
+
+    let profile = app
+        .get_with_cookie("/v1/auth/me/retirement-profile", &owner.cookie)
+        .await
+        .json();
+    let p = &profile["profile"];
+    assert_eq!(p["strategy"], "asap", "{profile}");
+    assert_eq!(
+        p["pension"]["bridge_enabled"], true,
+        "el puente sigue encendido tras el roundtrip: {profile}"
+    );
+    assert_eq!(p["pension"]["bridge_max_pct"], "5", "{profile}");
+    assert_eq!(p["pension"]["bridge_max_years"], 7, "{profile}");
+
+    // Y en el ALMACÉN, no solo en la lectura resuelta: el fichero materializó el puente de
+    // verdad, no un artefacto del clamp de lectura.
+    let stored: serde_json::Value =
+        sqlx::query_scalar("SELECT retirement_profile FROM users WHERE id = $1")
+            .bind(owner.user_id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("select profile");
+    assert_eq!(stored["strategy"], "asap", "{stored}");
+    assert_eq!(stored["pension"]["bridge_enabled"], true, "{stored}");
+}
+
+// ---------------------------------------------------------------------------
+// #213 — la contraseña del `.ffbackup` deja de ser la de la CUENTA en las cuentas que no tienen
+// ninguna (identidad delegada del add-on de Home Assistant).
+//
+// Lo que fijan estos tres tests, en orden de importancia:
+//  1. Una cuenta SIN contraseña **puede exportar e importar**: el backup lleva su propio secreto
+//     y la sesión ya autenticó a quien lo pide. Antes respondía 401 `sso_account_no_password` y
+//     el usuario del add-on se quedaba sin poder sacar sus datos.
+//  2. Ese secreto **tiene que existir**: cadena vacía ⇒ 422 `backup_password_empty`. Derivar una
+//     clave del vacío produciría un fichero que abre cualquiera y que el usuario cree cifrado.
+//  3. Las cuentas CON contraseña **no se relajan**: siguen verificándola contra el hash (401), y
+//     ahí la cadena vacía es un 401, no el 422 nuevo. La puerta se abrió para el que no tenía
+//     llave, no para todos.
+// ---------------------------------------------------------------------------
+
+/// UUID de identidad externa que usa el proxy de confianza en estos tests (mismo valor que
+/// `sso_login.rs`, por reconocibilidad).
+const SSO_EXTERNAL_ID: &str = "11111111-2222-3333-4444-555555555555";
+/// La contraseña **del archivo**: no es de ninguna cuenta y no existe en la base de datos.
+const BACKUP_PW: &str = "solo-este-archivo";
+
+/// `TestApp` con el SSO por cabeceras encendido y todo peer aceptado — la configuración del
+/// add-on de Home Assistant detrás de su Ingress.
+async fn sso_app() -> TestApp {
+    TestApp::spawn_with(TestConfig {
+        trusted_header_auth: true,
+        trusted_peers_any: true,
+        ..Default::default()
+    })
+    .await
+}
+
+/// Da de alta (y deja con sesión abierta) al PRIMER usuario por SSO: sin contraseña, dueño del
+/// hogar por el mismo camino que el primer registro por contraseña.
+async fn sso_owner(app: &TestApp) -> LoggedInOwner {
+    let r = app
+        .post_with_headers(
+            "/v1/auth/sso",
+            &[("x-remote-user-id", SSO_EXTERNAL_ID), ("x-remote-user-display-name", "María")],
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "alta por SSO: {r:?}");
+    let body = r.json();
+    assert_eq!(body["has_password"], false, "una cuenta SSO no tiene contraseña: {body}");
+    let cookie = r.session_cookie().expect("el SSO pone ff_session");
+    let user_id = Uuid::parse_str(body["id"].as_str().expect("id")).expect("uuid");
+    // Y en la base de datos tampoco: el 401 viejo salía de aquí.
+    let hash: Option<String> =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("user row");
+    assert!(hash.is_none(), "la cuenta SSO no guarda contraseña");
+    LoggedInOwner {
+        username: body["username"].as_str().expect("username").to_string(),
+        cookie,
+        user_id,
+    }
+}
+
+/// Una cuenta SIN contraseña exporta con una contraseña **propia del archivo** y la vuelve a
+/// importar: los mismos recuentos que el roundtrip de una cuenta con contraseña.
+#[tokio::test]
+async fn an_account_without_a_password_round_trips_with_a_backup_password() {
+    let app = sso_app().await;
+    let owner = sso_owner(&app).await;
+
+    let asset_cat = app.create_category(&owner, "asset", "Cash").await;
+    let liab_cat = app.create_category(&owner, "liability", "Loan").await;
+    let liab_exp_cat = app.create_category(&owner, "expense", "Cuotas").await;
+
+    let ua = create_asset(&app, &owner.cookie, &asset_cat, "A", "10000").await;
+    let ub = create_asset(&app, &owner.cookie, &asset_cat, "B", "5000").await;
+    let ul = create_liability(&app, &owner.cookie, &liab_cat, &liab_exp_cat, "L", "20000").await;
+
+    // Mismo material que `backup_v4_roundtrip_series_identical`: dos snapshots retroactivos
+    // (uno por kind) y la captura de hoy ⇒ 4 snapshots y 6 items.
+    let past = past_ymd(200);
+    let r = app
+        .post_json_with_cookie(
+            "/v1/history/snapshots",
+            serde_json::json!({
+                "kind": "asset",
+                "snapshot_date": past,
+                "items": [
+                    { "item_id": ua.to_string(), "label": "A", "value": "8000" },
+                    { "item_id": ub.to_string(), "label": "B", "value": "4000" }
+                ]
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "backfill asset: {r:?}");
+    let r = app
+        .post_json_with_cookie(
+            "/v1/history/snapshots",
+            serde_json::json!({
+                "kind": "liability",
+                "snapshot_date": past,
+                "items": [
+                    { "item_id": ul.to_string(), "label": "L", "value": "22000",
+                      "apr_percent": "3.5", "payment_amount": "500", "payment_frequency": "monthly" }
+                ]
+            }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "backfill liability: {r:?}");
+    let r = app
+        .post_json_with_cookie("/v1/history/snapshots/capture", serde_json::json!({}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "capture: {r:?}");
+
+    let series_before = app.get_with_cookie("/v1/history/series", &owner.cookie).await;
+    assert_eq!(series_before.status, http::StatusCode::OK, "series before: {series_before:?}");
+    let points_before = series_before.json()["points"].clone();
+
+    // El export ya NO pide la contraseña de la cuenta: la que va aquí no existe en ninguna parte.
+    let backup = export_ffbackup_b64_with(&app, &owner.cookie, BACKUP_PW).await;
+
+    // Se ensucia el estado vivo y se restaura desde el fichero.
+    let del = app.delete_with_cookie(&format!("/v1/assets/{ub}"), &owner.cookie).await;
+    assert_eq!(del.status, http::StatusCode::NO_CONTENT, "delete asset: {del:?}");
+
+    let applied = import_apply_with(&app, &owner.cookie, &backup, BACKUP_PW).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "import apply: {applied:?}");
+    let counts = &applied.json()["imported"];
+    assert_eq!(counts["assets"].as_u64(), Some(2), "assets count");
+    assert_eq!(counts["liabilities"].as_u64(), Some(1), "liabilities count");
+    assert_eq!(counts["snapshots"].as_u64(), Some(4), "snapshots count");
+    assert_eq!(counts["snapshot_items"].as_u64(), Some(6), "snapshot_items count");
+
+    let series_after = app.get_with_cookie("/v1/history/series", &owner.cookie).await;
+    assert_eq!(
+        series_after.json()["points"],
+        points_before,
+        "la serie histórica debe sobrevivir intacta al roundtrip de una cuenta sin contraseña"
+    );
+
+    // Y la contraseña del archivo es SOLO del archivo: no se ha fijado nada en la cuenta.
+    let hash: Option<String> =
+        sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+            .bind(owner.user_id)
+            .fetch_one(&app.pool)
+            .await
+            .expect("user row");
+    assert!(
+        hash.is_none(),
+        "exportar no puede fijarle una contraseña a una cuenta de identidad delegada"
+    );
+}
+
+/// Sin contraseña de cuenta y sin contraseña de archivo no hay nada de donde derivar la clave:
+/// 422 `backup_password_empty`, y ni un byte de fichero.
+#[tokio::test]
+async fn an_account_without_a_password_cannot_export_with_an_empty_backup_password() {
+    let app = sso_app().await;
+    let owner = sso_owner(&app).await;
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/backup/user-export",
+            serde_json::json!({ "password": "" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::UNPROCESSABLE_ENTITY, "{r:?}");
+    assert_eq!(r.json()["code"], "backup_password_empty", "{:?}", r.json());
+}
+
+/// La otra mitad del contrato: en una cuenta CON contraseña el export la sigue verificando
+/// contra el hash. Una contraseña equivocada —o vacía— es 401, nunca el 422 nuevo: ese camino
+/// es exclusivo de las cuentas sin contraseña.
+#[tokio::test]
+async fn an_account_with_a_password_still_has_it_verified_on_export() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let wrong = app
+        .post_json_with_cookie(
+            "/v1/backup/user-export",
+            serde_json::json!({ "password": "no es la mía" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(wrong.status, http::StatusCode::UNAUTHORIZED, "{wrong:?}");
+
+    let empty = app
+        .post_json_with_cookie(
+            "/v1/backup/user-export",
+            serde_json::json!({ "password": "" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(
+        empty.status,
+        http::StatusCode::UNAUTHORIZED,
+        "una cuenta con contraseña no entra por el camino del 422: {empty:?}"
+    );
+
+    // Y con la buena, sigue saliendo el fichero.
+    let ok = export_ffbackup_b64(&app, &owner.cookie).await;
+    assert!(!ok.is_empty(), "el export con la contraseña correcta sigue funcionando");
 }

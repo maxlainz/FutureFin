@@ -121,6 +121,205 @@ export function deflationFactorAt(monthIndex: number, annualPct: number): number
 }
 
 /**
+ * Tasa anual del deflactor del chart. Sale de la RESPUESTA
+ * (`deflation_annual_inflation_percent`, la misma con la que el servidor construyó
+ * `net_worth_real` y `milestones_real`) y solo cae a la de la instalación con un backend
+ * antiguo (< 4.6.0) que no publica el campo: re-obtenerla por otro canal era una vía de
+ * divergencia silenciosa (#136-4a).
+ *
+ * Extraída del memo inline del chart para que el tile de «Objetivo al jubilarte» use
+ * EXACTAMENTE la misma tasa que la línea que dibuja el objetivo — dos deflactores distintos
+ * en la misma pantalla son dos cifras que se contradicen sin que nada falle.
+ */
+export function resolveDeflationAnnualPct(
+  seriesPct: string | undefined,
+  installationInflationPct: number,
+): number {
+  const parsed = seriesPct !== undefined ? Number(seriesPct) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : installationInflationPct;
+}
+
+/**
+ * Base en la que está expresado un importe que se publica: euros de HOY o euros NOMINALES del
+ * mes al que se refiere. Viaja SIEMPRE pegada al importe (arqueología §2.26: una base que el
+ * consumidor re-deriva de una segunda comparación acaba discrepando del número que rotula).
+ */
+export type MoneyBasis = "today" | "nominal";
+
+/**
+ * La ÚNICA definición de la serie auxiliar «Capital necesario» del chart de Proyección (modelo v2,
+ * C4): rótulo, token de color y patrón de guion.
+ *
+ * Vive aquí —y no en la vista— porque la leyenda y la polilínea la leen los dos, y una leyenda que
+ * se escribe aparte es una leyenda que un día rotula una curva que ya no está. Hasta el modelo v2
+ * esa pareja vivía en `lib/plan-series.ts` junto a la curva `coast`; con `required_capital_path` y
+ * `coast_path` retirados de la respuesta, quedaba UNA serie y el módulo entero era un envoltorio.
+ */
+export const NEEDED_CAPITAL_SERIES = {
+  key: "needed_capital",
+  label: "Capital necesario",
+  /** Token con variante clara y oscura en `styles/theme.css`; nunca un hex. */
+  color: "var(--proj-required)",
+  dash: "6 4",
+} as const;
+
+/** Lo ÚNICO que la curva lee de la serie. Un `Pick` y no `ProjectionSeriesApi` entero para que el
+ *  test escriba un fixture de tres campos: lo que no se lee no puede cambiar el resultado. */
+export type NeededCurveSeries = Pick<
+  ProjectionSeriesApi,
+  "points" | "needed_capital_curve" | "needed_capital_curve_state"
+>;
+
+/**
+ * `needed_capital_curve` → los valores tal cual, paralelos a `series.points`.
+ *
+ * Es la curva REAL de capital necesario por edad (C4), no un objetivo descontado a una tasa
+ * escalar: cada punto es una bisección estocástica más del motor. Por eso se dibuja como curva y
+ * NO entra en la familia del retirado `fire_target_series`.
+ *
+ * **Contrato: NOMINAL, y esta función NO deflacta.** `needed_capital_curve` viaja en euros
+ * NOMINALES de cada mes (`api/types.ts`, doc del campo: «`amount_nominal` del nodo»), como el
+ * patrimonio y como `bandPoints`/`netWorthSeries` — el mismo par (llamante entrega nominal,
+ * componente deflacta una vez) que sigue todo lo demás que dibuja `MiniProjection`. Deflactar
+ * aquí Y otra vez en el componente fue exactamente el bug que esta función tuvo hasta el 5.0.0
+ * (issue #228 W12): con «En dinero de hoy» activo la curva se encogía dos veces y el objetivo
+ * publicado quedaba muy por debajo del real. Un llamante que necesite el importe DEFLACTADO
+ * (p.ej. `neededCapitalAtRetirement`, que no pasa por `MiniProjection` sino que consume el
+ * número directamente) aplica su propio deflactor DESPUÉS de llamar aquí, nunca dentro.
+ *
+ * Lo que el contrato NO promete es que la curva cruce la línea de patrimonio en la fecha válida:
+ * la fecha la decide el éxito camino a camino y la curva es otra pregunta (cuánto líquido hace
+ * falta para jubilarse en cada mes), así que la marca vertical y el cruce visual pueden no
+ * coincidir por diseño. (`needed_capital_today`, en cambio, SÍ declara euros de hoy y no pasa
+ * por aquí.)
+ *
+ * Tres reglas, todas ellas cosas que se rompen sin que nada falle:
+ *
+ *  1. **Estado antes que contenido.** Con `needed_capital_curve_state` distinto de `ready` no hay
+ *     curva, aunque llegara un array: el nivel 2 sigue resolviéndose y media curva no es media
+ *     respuesta. Un backend que no publique el estado se juzga solo por el array.
+ *  2. **Longitud exacta o nada.** Si el array no mide lo mismo que `points[]`, se descarta ENTERO:
+ *     media curva alineada y media desplazada es peor que ninguna, porque nada en pantalla dice
+ *     cuál de las dos mitades es la buena.
+ *  3. **Un `null` se conserva como `null`** (nunca 0): ese punto de la curva no está resuelto, y un
+ *     cero dibujaría «no necesitas nada» justo donde no se sabe. El trazado rompe la línea ahí.
+ */
+export function neededCurveForChart(
+  series: NeededCurveSeries | null | undefined,
+): (number | null)[] | null {
+  if (!series) return null;
+  const state = series.needed_capital_curve_state;
+  if (state !== undefined && state !== "ready") return null;
+  const raw = series.needed_capital_curve;
+  if (!Array.isArray(raw)) return null;
+  const points = series.points;
+  if (!Array.isArray(points) || points.length === 0) return null;
+  if (raw.length !== points.length) return null;
+  return raw.map((v) => (v == null || !Number.isFinite(v) ? null : v));
+}
+
+/** Un punto de la tira de éxito por año de jubilación: «si te fueras en 2036, N de cada 100». */
+export type SuccessStripPoint = {
+  /** MES de la rejilla (`month_index`), nunca una posición de array. */
+  monthIndex: number;
+  /** FRACCIÓN [0, 1]. */
+  success: number;
+};
+
+/**
+ * `success_by_retirement_year` → los puntos dibujables de la tira que va bajo el eje X.
+ *
+ * Devuelve `[]` —nunca una tira a medias— cuando el nivel 2 todavía no ha publicado nada. Y
+ * **descarta** los puntos que no puede colorear en vez de inventarlos:
+ *
+ *  - `success` no finito o fuera de `[0, 1]` no se pinta. No se clampa: un 1,4 no es «éxito
+ *    total», es un valor que este chart no sabe leer, y pintarlo de verde afirmaría lo contrario.
+ *  - Mes no finito, fuera (no hay eje donde ponerlo).
+ *  - Mes repetido: gana la PRIMERA aparición, y el orden de salida es por mes ascendente.
+ */
+export function successStripForChart(
+  series:
+    | Pick<ProjectionSeriesApi, "success_by_retirement_year">
+    | null
+    | undefined,
+): SuccessStripPoint[] {
+  const raw = series?.success_by_retirement_year;
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<number>();
+  const out: SuccessStripPoint[] = [];
+  for (const p of raw) {
+    if (p == null) continue;
+    const m = p.month_index;
+    const s = p.success;
+    if (typeof m !== "number" || !Number.isFinite(m)) continue;
+    if (typeof s !== "number" || !Number.isFinite(s) || s < 0 || s > 1) continue;
+    if (seen.has(m)) continue;
+    seen.add(m);
+    out.push({ monthIndex: m, success: s });
+  }
+  return out.sort((a, b) => a.monthIndex - b.monthIndex);
+}
+
+/** Lo que el tile «Capital necesario hoy» necesita de la serie para su SEGUNDA línea («al
+ *  jubilarte»). La primera línea es `needed_capital_today`, que ya viaja en euros de hoy y no
+ *  necesita nada de esto. */
+export type NeededCapitalAtRetirementSeries = Pick<
+  ProjectionSeriesApi,
+  | "points"
+  | "needed_capital_curve"
+  | "needed_capital_curve_state"
+  | "safe_date_series_position"
+  | "deflation_annual_inflation_percent"
+>;
+
+export type NeededCapitalAtRetirement = {
+  amount: number | null;
+  basis: MoneyBasis;
+};
+
+/**
+ * El capital necesario EN LA FECHA VÁLIDA: el valor de la curva en `safe_date_series_position`.
+ *
+ * `safe_date_series_position` es una POSICIÓN de `points[]` publicada por el servidor (convención:
+ * el punto servido inmediatamente anterior o igual al mes de la fecha válida) — la curva es
+ * paralela a `points[]`, así que aquí sí se indexa por posición, y solo por la que publica el
+ * servidor. Nunca se busca el mes a mano: con `density=hybrid` no hay punto propio para ese mes.
+ *
+ * `amount: null` (nunca 0) cuando no hay curva lista, no hay fecha válida, o ese nodo de la curva
+ * no está resuelto. La `basis` sale del pct EFECTIVO, así que «toggle activo con inflación 0» se
+ * rotula honestamente como euros de ese mes: el factor vale 1 y las dos bases coinciden, pero la
+ * que describe la cifra es la nominal.
+ *
+ * `neededCurveForChart` ya NO deflacta (contrato NOMINAL, ver su doc) — esta función es uno de
+ * los llamantes que sí necesita el importe deflactado (no pasa por `MiniProjection`, consume el
+ * número directamente), así que aplica su propio `deflationFactorAt` UNA vez, después de leer el
+ * nodo, con el `month_index` real de `series.points[pos]` — nunca con la posición.
+ */
+export function neededCapitalAtRetirement(
+  series: NeededCapitalAtRetirementSeries | null | undefined,
+  inflationAdjusted: boolean,
+  installationInflationPct: number,
+): NeededCapitalAtRetirement {
+  const deflation = resolveDeflationAnnualPct(
+    series?.deflation_annual_inflation_percent,
+    installationInflationPct,
+  );
+  const pct = inflationAdjusted && deflation !== 0 ? deflation : 0;
+  const basis: MoneyBasis = pct !== 0 ? "today" : "nominal";
+  const curve = neededCurveForChart(series);
+  const pos = series?.safe_date_series_position;
+  if (curve === null || pos == null || !Number.isFinite(pos)) {
+    return { amount: null, basis };
+  }
+  const raw = curve[pos];
+  const monthIndex = series?.points[pos]?.month_index;
+  if (raw == null || !Number.isFinite(raw) || monthIndex == null) {
+    return { amount: null, basis };
+  }
+  return { amount: raw * deflationFactorAt(monthIndex, pct), basis };
+}
+
+/**
  * Última POSICIÓN del array cuyo `month_index` no pasa de `maxMonth`.
  *
  * Existe porque con `density=hybrid` el servidor DIEZMA la serie (meses 0..12, 24, 36…): la
@@ -141,6 +340,68 @@ export function lastPointIndexAtOrBeforeMonth(
     last = i;
   }
   return last;
+}
+
+/** Una fila de flujos de retirada del tooltip. El importe ya viene DEFLACTADO: el tooltip pinta
+ *  euros de hoy o nominales según el toggle, y mezclar las dos bases en la misma caja sería la
+ *  forma más barata de contar una mentira. */
+export type WithdrawalTooltipRow = {
+  key: "withdrawal" | "shortfall" | "unmet" | "excess";
+  label: string;
+  amount: number;
+};
+
+/**
+ * Flujos de la retirada del mes hovered (5.0.0 §B.8 + pase de correcciones §F).
+ *
+ * Cuatro reglas, todas ellas cosas que se rompen sin que nada falle:
+ *
+ *  1. **Solo desde el mes de jubilación.** Antes son cero por construcción, y una fila de «0 €»
+ *     en cada punto del horizonte de acumulación es ruido, no información.
+ *  2. **Un mismo factor de deflactación para las cuatro**, el del patrimonio de arriba.
+ *  3. **«Recorte» y «No financiado» son cosas DISTINTAS y las dos pueden estar a la vez**:
+ *     `withdrawal_shortfall` es lo que la REGLA se negó a sacar (hay dinero, el techo no deja) y
+ *     `unmet_need` lo que la CARTERA no dio (no había de dónde vender). Fundirlas en una sola
+ *     fila —o enseñar solo la primera, como hasta el pase— convierte quedarse sin capital en un
+ *     problema de configuración de la regla.
+ *  4. **Un cero no se pinta** (umbral de medio euro, el redondeo de la divisa): «Recorte — 0 €»
+ *     afirma que se midió un recorte. La retirada sí se pinta aunque sea cero: ahí el cero es el
+ *     dato (ese mes no vendiste nada).
+ */
+export function buildWithdrawalTooltipRows(
+  point: {
+    month_index: number;
+    withdrawal?: number;
+    withdrawal_shortfall?: number;
+    unmet_need?: number;
+    withdrawal_excess?: number;
+  },
+  retirementMonthIndex: number | null | undefined,
+  deflationFactor: number,
+): WithdrawalTooltipRow[] {
+  if (retirementMonthIndex == null || !Number.isFinite(retirementMonthIndex)) return [];
+  if (point.month_index < retirementMonthIndex) return [];
+  const rows: WithdrawalTooltipRow[] = [];
+  const money = (v: number | undefined) =>
+    v === undefined || !Number.isFinite(v) ? null : v * deflationFactor;
+
+  const w = money(point.withdrawal);
+  if (w !== null) rows.push({ key: "withdrawal", label: "Retirada del mes", amount: w });
+  const short = money(point.withdrawal_shortfall);
+  if (short !== null && Math.abs(short) >= 0.5) {
+    rows.push({ key: "shortfall", label: "Recorte", amount: short });
+  }
+  // `unmet_need` es `≥ 0` por contrato: solo se pinta en positivo, y su ausencia (backend
+  // anterior al pase) no pinta nada — nunca un 0 que afirmaría «se financió todo».
+  const unmet = money(point.unmet_need);
+  if (unmet !== null && unmet >= 0.5) {
+    rows.push({ key: "unmet", label: "No financiado", amount: unmet });
+  }
+  const excess = money(point.withdrawal_excess);
+  if (excess !== null && Math.abs(excess) >= 0.5) {
+    rows.push({ key: "excess", label: "Exceso", amount: excess });
+  }
+  return rows;
 }
 
 export function buildProjectionMonthTickIndices(

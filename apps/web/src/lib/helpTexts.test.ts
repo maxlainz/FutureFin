@@ -25,6 +25,12 @@ for (const f of sourceFiles(SRC)) {
   const src = readFileSync(f, "utf8");
   if (f.endsWith("helpTexts.ts")) continue;
   for (const m of src.matchAll(/helpId="([^"]+)"/g)) used.add(m[1]);
+  // Forma de OBJETO (`helpId: "retirement.coast_month"`), no de prop JSX: desde 5.0.0 hay
+  // módulos puros que deciden qué tarjetas se pintan y con qué ayuda
+  // (`lib/retirement-tiles.ts`, tabla §C de #207). Sin este patrón el escáner los daba por
+  // huérfanos y la cobertura bidireccional empujaba a BORRAR textos que sí se usan — el fallo
+  // exacto que este test existe para impedir, del revés.
+  for (const m of src.matchAll(/helpId:\s*"([^"]+)"/g)) used.add(m[1]);
   // Acepta también la forma ternaria multilínea: HELP_TEXTS[cond ? "a" : "b"].
   for (const m of src.matchAll(/HELP_TEXTS\[([\s\S]{0,220}?)\]/g)) {
     // Solo cadenas con punto: los ids del catálogo lo llevan siempre, y así la condición
@@ -42,6 +48,37 @@ describe("catálogo de descripciones", () => {
   it("todo texto del catálogo se consume en alguna vista", () => {
     const orphans = Object.keys(HELP_TEXTS).filter((id) => !used.has(id));
     expect(orphans, `textos huérfanos: ${orphans.join(", ")}`).toEqual([]);
+  });
+
+  /**
+   * El modelo v2 (5.0.0) retiró tres conceptos ENTEROS: el patrimonio objetivo como disparador de
+   * la jubilación, su base (perpetuidad / puente descontado) y el colchón de caja. Los textos que
+   * los describían se borraron, pero el vocabulario sobrevive en la cabeza de quien escribe la
+   * siguiente entrada — y una ayuda que vuelva a prometer «el mes en que cruzas tu objetivo»
+   * describiría un mecanismo que ya no existe, delante del gráfico que no lo dibuja (issue #216,
+   * la mediana que se prometía y no se pintaba, es el precedente exacto).
+   *
+   * Se prohíben FRASES, no la palabra «objetivo»: «edad de jubilación objetivo» sigue siendo un
+   * campo vivo del plan.
+   */
+  it("ninguna ayuda resucita el objetivo, su base ni el colchón", () => {
+    const prohibidas = [
+      "colchón",
+      "patrimonio objetivo",
+      "objetivo fire",
+      "base del objetivo",
+      "cruce con el objetivo",
+      "cruce del objetivo",
+      "descuento del puente",
+    ];
+    const ofensas: string[] = [];
+    for (const [id, t] of Object.entries(HELP_TEXTS)) {
+      const texto = `${t.title} ${t.body}`.toLowerCase();
+      for (const frase of prohibidas) {
+        if (texto.includes(frase)) ofensas.push(`${id}: «${frase}»`);
+      }
+    }
+    expect(ofensas, `conceptos retirados en 5.0.0: ${ofensas.join(" · ")}`).toEqual([]);
   });
 
   it("cada texto tiene título corto y cuerpo con sustancia", () => {

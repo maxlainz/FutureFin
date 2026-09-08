@@ -4,20 +4,24 @@
  */
 
 import { useEffect } from "react";
-import { TABS, TAB_PATH, type TabId } from "../lib/navigation";
+import { TAB_PATH, tabsForScope, type TabId } from "../lib/navigation";
 import { appUrl } from "../lib/basePath";
 import { XIcon } from "./icons";
+import type { LedgerPersonScope } from "../lib/ledger";
 
 export function MobileNavDrawer({
   open,
   onClose,
   activeTab,
   navigate,
+  scope,
 }: {
   open: boolean;
   onClose: () => void;
   activeTab: TabId | null;
   navigate: (path: string) => void;
+  /** Ámbito de datos (Yo | Hogar): filtra qué pestañas se pintan (F1, `tabsForScope`). */
+  scope: LedgerPersonScope;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -60,7 +64,7 @@ export function MobileNavDrawer({
           </button>
         </div>
         <nav className="ff-mobile-drawer-nav" aria-label="Secciones">
-          {TABS.map((t) => (
+          {tabsForScope(scope).map((t) => (
             <a
               key={t.id}
               // Con prefijo (Ingress), el `href` crudo mandaría el Cmd-clic fuera del subpath.

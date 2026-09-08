@@ -131,8 +131,47 @@ export function liabilityDerivedPrincipalPreview(
 /** Hogar = todos los registros de la instalación; usuario actual = solo filas con tu `owner_user_id`. */
 export type LedgerPersonScope = "household" | "mine";
 
+/** Clave de `localStorage` donde persiste el ámbito elegido en la TopBar. */
+export const LEDGER_PERSON_SCOPE_STORAGE_KEY = "futurefin-ledger-person-scope";
+
+/**
+ * Ámbito inicial a partir de lo guardado en `localStorage`.
+ *
+ * **Default `mine` desde 5.0.0** (D9): la jubilación es una estrategia POR USUARIO, así que la
+ * vista natural de la app es la del miembro que ha entrado; el hogar pasa a ser un agregado
+ * informativo y de solo lectura. Un valor ausente, vacío o desconocido cae a `mine` — antes caía
+ * a `household`, y con proyecciones por miembro eso enseñaría de entrada números que no son los
+ * del usuario.
+ */
+export function resolveLedgerPersonScope(
+  stored: string | null | undefined,
+): LedgerPersonScope {
+  return stored?.trim() === "household" ? "household" : "mine";
+}
+
+/**
+ * D9/D32: en la vista **Hogar** la SPA no ofrece ninguna acción de escritura (los controles se
+ * ocultan, no se deshabilitan). El servidor además rechaza toda mutación de una fila ajena con
+ * 403 `not_row_owner` (D21), así que esto es UX, no la frontera de seguridad.
+ */
+export function isScopeReadOnly(scope: LedgerPersonScope): boolean {
+  return scope === "household";
+}
+
+/**
+ * Sufijo `?view=` de las lecturas del ledger. **Los dos ámbitos viajan explícitos**: en 5.0.0 el
+ * default del API pasa a ser `mine`, así que un `household` implícito (el `""` de antes) dejaría
+ * de significar «el hogar» sin que nadie lo notara — la respuesta llegaría filtrada al usuario y
+ * la vista Hogar mentiría en silencio. Explícito vale igual contra el API viejo, donde ausente y
+ * `household` ya resolvían lo mismo.
+ */
 export function ledgerViewQs(scope: LedgerPersonScope): string {
-  return scope === "mine" ? "?view=mine" : "";
+  return scope === "mine" ? "?view=mine" : "?view=household";
+}
+
+/** El mismo parámetro para encadenar detrás de otro (`…?window_months=1200&view=…`). */
+export function ledgerViewAmp(scope: LedgerPersonScope): string {
+  return `&${ledgerViewQs(scope).slice(1)}`;
 }
 
 /** Aporte mensual estimado (primer mes motor) leído de `contribution_nominal_monthly`. */

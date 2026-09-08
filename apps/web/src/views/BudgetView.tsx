@@ -22,7 +22,6 @@ import {
 } from "../lib/format";
 import {
   budgetCategoryMap,
-  type LedgerPersonScope,
   sortBudgetEntriesMacStyle,
 } from "../lib/ledger";
 import { useIsMobile } from "../lib/responsive";
@@ -49,7 +48,6 @@ export function BudgetView({
   installation,
   installationBusy,
   hasMembership,
-  ledgerPersonScope,
   canEdit,
   formError,
   budgetModalOpen,
@@ -109,7 +107,6 @@ export function BudgetView({
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
-  ledgerPersonScope: LedgerPersonScope;
   canEdit: boolean;
   formError: string | null;
   budgetModalOpen: boolean;
@@ -170,7 +167,6 @@ export function BudgetView({
    */
   onOpenCategorySettings?: () => void;
 }) {
-  const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
   const isMobile = useIsMobile();
 
@@ -249,15 +245,9 @@ export function BudgetView({
               ? "Sin acceso hasta aprobación."
               : budgetLoading
                 ? "Cargando…"
-                : `Mensual · ${currency}`}
+                : "Mensual"}
         </p>
       </div>
-
-      {hasMembership && ledgerPersonScope === "mine" ? (
-        <div className="banner info-banner tight-banner">
-          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
-        </div>
-      ) : null}
 
       {!installationBusy && !hasMembership ? (
         <div className="banner info-banner">Sin acceso al hogar.</div>
@@ -576,7 +566,7 @@ export function BudgetView({
               </label>
             </div>
             <label className="field">
-              <span>Notas (opc.)</span>
+              <span>Notas (opcional)</span>
               <textarea
                 value={budgetFormNotes}
                 onChange={(e) => setBudgetFormNotes(e.target.value)}
@@ -692,6 +682,11 @@ export function BudgetView({
             ) : (
               <div className="table-scroll table-scroll--budget-lines bordered-top">
                 <table className="assets-table assets-table--budget-lines">
+                  <colgroup>
+                    <col className="col-remainder" />
+                    <col className="col-budget-amount" />
+                    {!isMobile && canEdit ? <col className="col-actions" /> : null}
+                  </colgroup>
                   <thead>
                     <tr>
                       <th>Categoría</th>
@@ -810,6 +805,11 @@ export function BudgetView({
               ) : (
                 <div className="table-scroll table-scroll--budget-lines bordered-top">
                   <table className="assets-table assets-table--budget-lines">
+                    <colgroup>
+                      <col className="col-remainder" />
+                      <col className="col-budget-amount" />
+                      {!isMobile && canEdit ? <col className="col-actions" /> : null}
+                    </colgroup>
                     <thead>
                       <tr>
                         <th>Categoría</th>
