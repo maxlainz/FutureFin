@@ -5,6 +5,11 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.15.3
+
+- Mantenimiento interno: la interfaz se actualiza a React 19.3 y se empaqueta con una versión al día
+  de Vite. Tus cifras no se mueven; si notas algún detalle visual raro, repórtalo.
+
 ## 4.15.2
 
 - Mantenimiento interno: el add-on se compila con una versión al día de las herramientas de Rust.
