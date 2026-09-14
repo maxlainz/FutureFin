@@ -5,6 +5,12 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.15.1
+
+- Actualización de mantenimiento: la imagen del add-on pasa a construirse con **Node 24.21**. No
+  cambia nada de lo que ves ni de lo que guardas; son los parches al día de la herramienta con la
+  que se compila la interfaz.
+
 ## 4.15.0
 
 - En Movimientos, lo que antes se llamaba «Ahorro» pasa a llamarse **«Inversión»** (lo que mueves a
