@@ -4,6 +4,15 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.15.1] - 2026-09-14
+
+### Node 24.21 en la imagen
+
+- **La imagen se construye con Node 24.21** (antes 24.20). Cambia solo la etapa `web` del
+  `apps/api/Dockerfile` —la que compila `apps/web/dist/` con Vite—, así que el binario, el esquema y
+  el comportamiento de la aplicación son idénticos: la actualización trae los parches de la rama 24
+  de Node al artefacto que se publica. Sin acción por parte de quien actualiza (PR #236).
+
 ## [4.15.0] - 2026-09-02
 
 ### Ahorro es ingresos − gastos, las devoluciones netean en su categoría y todo movimiento tiene categoría
