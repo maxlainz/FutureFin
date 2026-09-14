@@ -4,6 +4,17 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.15.3] - 2026-09-14
+
+### React 19.3 y Vite 8.3 en la imagen
+
+- **La interfaz pasa a React 19.3.0** (antes 19.2.8, con `react-dom` y `scheduler` 0.28.0 en el mismo
+  salto) **y se empaqueta con Vite 8.3.0** (antes 8.2.2). Las dos son dependencias que sí entran en
+  `apps/web/dist/`, así que cambian los bytes de la imagen; el resto del grupo `npm-menores`
+  (`@types/node`, `@types/react`, `@types/react-dom`, `eslint`, `typescript-eslint`) es solo
+  tipos y lint y no viaja en la imagen. Ninguno de los ocho saltos cruza un major. Sin cambios de
+  comportamiento esperados ni acción por parte de quien actualiza (PR #238).
+
 ## [4.15.2] - 2026-09-14
 
 ### Toolchain de Rust al día en la imagen
