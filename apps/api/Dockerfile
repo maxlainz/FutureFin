@@ -23,7 +23,7 @@ RUN npm ci && npm run build:web \
     && test -n "$(ls -A apps/web/dist/assets)"
 
 # --- API (Rust): imagen `rust:bookworm` (stable); digest fija la snapshot exacta del toolchain ---
-FROM rust:bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS rust-builder
+FROM rust:bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS rust-builder
 ENV PATH=/usr/local/cargo/bin:$PATH
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
