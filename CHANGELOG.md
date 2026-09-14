@@ -4,6 +4,16 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [4.15.2] - 2026-09-14
+
+### Toolchain de Rust al día en la imagen
+
+- **El binario se compila con una snapshot más reciente de `rust:bookworm`** (digest `82150a5` →
+  `9a73a50`). Es la etapa `rust-builder` del `apps/api/Dockerfile`: mismo canal `stable`, misma
+  versión de las dependencias, solo la foto del toolchain con la que se construye el artefacto que se
+  publica. Sin cambios de comportamiento ni de esquema; sin acción por parte de quien actualiza
+  (PR #237).
+
 ## [4.15.1] - 2026-09-14
 
 ### Node 24.21 en la imagen

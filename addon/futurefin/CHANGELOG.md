@@ -5,6 +5,11 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 4.15.2
+
+- Mantenimiento interno: el add-on se compila con una versión al día de las herramientas de Rust.
+  Nada cambia en lo que ves ni en tus números.
+
 ## 4.15.1
 
 - Actualización de mantenimiento: la imagen del add-on pasa a construirse con **Node 24.21**. No
