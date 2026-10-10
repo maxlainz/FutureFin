@@ -187,8 +187,8 @@ export function MiniProjection({
    * Menos de dos paradas ⇒ la banda vuelve al acento plano de siempre.
    */
   bandGradient?: readonly RiskGradientStop[] | null;
-  /** Rótulos de los dos bordes de la banda en su extremo derecho («optimista (p90)» arriba,
-   *  «pesimista (p10)» abajo). Se omiten si los dos bordes quedan a menos de 14 px: dos textos
+  /** Rótulos de los dos bordes de la banda en su extremo derecho («p90» arriba, «p10» abajo;
+   *  qué son lo dice la ayuda de la banda). Se omiten si los dos bordes quedan a menos de 14 px: dos textos
    *  pisándose dicen menos que ninguno. */
   bandEdgeLabels?: { p10: string; p90: string } | null;
   /** Rótulo del hover, construido por el llamante a partir del MES bajo el cursor. Devolver

@@ -58,27 +58,25 @@ describe("householdPlanLines", () => {
       {
         userId: "u1",
         username: "Max",
-        text: "Max: A una edad fija — a los 55, M144.",
+        text: "Max · Edad fija · M144 (55 años)",
         tone: "ok",
       },
       {
         userId: "u2",
         username: "Mariona",
-        text:
-          "Mariona: Jornada reducida (Barista FIRE) — a los 60, M216 (hace jornada reducida desde M120).",
+        text: "Mariona · Barista FIRE · M216 (60 años) · jornada reducida desde M120",
         tone: "ok",
       },
     ]);
   });
 
-  it("una estrategia por umbral no tiene fecha en Hogar: se dice, y se manda a su vista Jubilación (B7)", () => {
+  it("una estrategia por umbral no tiene fecha en Hogar: la línea no finge una (B7)", () => {
     const [line] = householdPlanLines(
       [member({ username: "Ada", strategy: "asap" })],
       monthLabel,
     );
-    expect(line.text).toBe(
-      "Ada: Cuanto antes (FIRE clásico) — fecha válida: en su vista Jubilación.",
-    );
+    // Sin fecha, la línea no la finge ni la explica: nombre y estrategia (2026-10-10).
+    expect(line.text).toBe("Ada · FIRE clásico");
     expect(line.tone).toBe("ok");
   });
 
@@ -104,7 +102,7 @@ describe("householdPlanLines", () => {
       monthLabel,
     );
     expect(lines[0].text).toBe(
-      "Max: A una edad fija — a los 55, M144 — falta su edad de jubilación.",
+      "Max · Edad fija · M144 (55 años) · falta su edad de jubilación",
     );
     expect(lines[0].tone).toBe("warn");
     expect(lines[1].tone).toBe("danger");

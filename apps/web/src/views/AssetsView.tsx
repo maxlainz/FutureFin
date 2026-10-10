@@ -1,7 +1,5 @@
 import {
-  useCallback,
   useMemo,
-  useState,
   type Dispatch,
   type FormEvent,
   type SetStateAction,
@@ -41,10 +39,6 @@ import {
   groupRowsByCategoryOrdered,
   roundUpToHundred,
 } from "../lib/ledger";
-
-/** Bandera de `localStorage` del aviso único de reinterpretación CAGR (C6, 5.0.0). Módulo, no
- *  componente: es un literal fijo y así no se recrea en cada render. */
-const CAGR_NOTICE_STORAGE_KEY = "ff.assets.cagr-notice.v1";
 
 export function AssetsView({
   installation,
@@ -131,29 +125,6 @@ export function AssetsView({
 }) {
   const currencyIso = installation?.installation.base_currency ?? "";
   const isMobile = useIsMobile();
-
-  // ── C6 · aviso único de reinterpretación CAGR (5.0.0) ─────────────────────────────────────
-  //
-  // Desde 5.0.0 la rentabilidad declarada se lee como COMPUESTA (la anualizada que publica tu
-  // fondo, no la media aritmética de años sueltos): la cifra guardada NO se convierte — es la
-  // MISMA que ya tenías — pero el sorteo que la usa (Monte Carlo, WP6) ahora la interpreta de
-  // otro modo. Aviso de una sola vez, con su propia bandera de `localStorage`: no hay nada que
-  // el usuario tenga que corregir, solo algo que tiene que saber una vez.
-  const [cagrNoticeDismissed, setCagrNoticeDismissed] = useState<boolean>(() => {
-    try {
-      return window.localStorage.getItem(CAGR_NOTICE_STORAGE_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
-  const dismissCagrNotice = useCallback(() => {
-    setCagrNoticeDismissed(true);
-    try {
-      window.localStorage.setItem(CAGR_NOTICE_STORAGE_KEY, "1");
-    } catch {
-      /* sin storage, el aviso simplemente reaparece la próxima vez */
-    }
-  }, []);
 
   const assetMetricsReady = hasMembership && !assetsBusy;
   const assetsTotalVal = assetMetricsReady
@@ -247,19 +218,6 @@ export function AssetsView({
 
       {!installationBusy && !hasMembership ? (
         <div className="banner info-banner">Sin acceso al hogar.</div>
-      ) : null}
-
-      {/* C6 — aviso único, junto a la columna/formulario de rentabilidad: la cifra guardada no
-          cambia, cambia cómo la lee el sorteo. Se apaga solo (localStorage) y no vuelve. */}
-      {hasMembership && !cagrNoticeDismissed ? (
-        <div className="banner info-banner">
-          Desde 5.0.0 la rentabilidad que escribes se lee como compuesta (la anualizada que
-          publica tu fondo). Tus cifras no cambian; el sorteo es más fiel para los activos
-          volátiles.{" "}
-          <button type="button" className="btn ghost text" onClick={dismissCagrNotice}>
-            Entendido
-          </button>
-        </div>
       ) : null}
 
       {/* Política de ceros: el bloque entero, no tarjeta a tarjeta. Con activos se pintan las

@@ -151,39 +151,42 @@ export const HELP_TEXTS = {
     title: "Tu plan",
     body:
       "Tu estrategia de jubilación y adónde te lleva: la frase dice en qué mes te jubila la " +
-      "simulación, con qué edad y cuántos escenarios de cada 100 aguantan hasta el final del " +
-      "horizonte. Con «Cuanto antes» y con la jornada reducida esa fecha la resuelve el sorteo " +
-      "—el primer mes que cumple tu umbral de éxito—; con «A una edad fija» es la edad que " +
-      "elegiste, aguante o no, y entonces el color lo dice. Las dos cifras de al lado, el éxito y " +
-      "el capital necesario hoy, son las MISMAS del panel de Jubilación, copiadas del mismo " +
-      "sorteo y nunca recalculadas aquí. Sin tu fecha de nacimiento no hay fecha, ni éxito, ni " +
-      "capital: la tarjeta lo dice en vez de inventarlos. En la vista del hogar no hay un plan " +
-      "común: se enseña una frase por persona.",
+      "simulación y con qué edad, y debajo va tu estrategia con su hito secundario (el mes en " +
+      "que dejas de aportar, la jornada reducida o la pensión). En FIRE clásico y en Barista " +
+      "FIRE esa fecha la resuelve el sorteo —el primer mes que cumple tu umbral de éxito—; con " +
+      "Edad fija es la edad que elegiste, aguante o no, y entonces el color lo dice. Las dos " +
+      "cifras de al lado, el éxito y el capital necesario hoy, son las MISMAS del panel de " +
+      "Jubilación, copiadas del mismo sorteo y nunca recalculadas aquí. Sin tu fecha de " +
+      "nacimiento no hay fecha, ni éxito, ni capital: la tarjeta lo dice en vez de inventarlos. " +
+      "En la vista del hogar no hay un plan común: se enseña una línea por persona, sin cifras " +
+      "de éxito.",
   },
 
   "summary.success": {
     title: "Éxito del plan",
     body:
       "De cada 100 escenarios, en cuántos NO tendrías que volver a trabajar jubilándote en la " +
-      "fecha de tu plan. El color se compara con TU umbral de éxito —el de Jubilación → " +
-      "Retirada—, no con un listón fijo, y se juzga contra el suelo del intervalo del sorteo: " +
-      "verde cuando ese suelo ya cumple tu umbral, ámbar cuando el umbral cae dentro del " +
-      "intervalo, rojo cuando no llega. Es el MISMO sorteo que dibuja la sección Riesgo de " +
-      "Jubilación —no se recalcula aquí—, y allí está el detalle: por qué fallan los que fallan " +
-      "y cuánto se apretaron los que aguantan.",
+      "fecha de tu plan. Debajo va tu umbral de éxito —el de Jubilación → Retirada—, que es " +
+      "contra lo que se colorea, y no un listón fijo; se juzga contra el suelo del intervalo " +
+      "del sorteo: verde cuando ese suelo ya cumple tu umbral, ámbar cuando el umbral cae " +
+      "dentro del intervalo, rojo cuando no llega. Es el MISMO sorteo que dibuja la sección " +
+      "Riesgo de Jubilación —no se recalcula aquí—, y allí está el detalle: por qué fallan los " +
+      "que fallan y cuánto se apretaron los que aguantan.",
   },
 
   // --- Jubilación · plan y perfil -------------------------------------------
   "retirement.plan_sentence": {
     title: "Tu hito de jubilación",
     body:
-      "El resultado de tu plan en una frase: cuándo te jubila la simulación, con qué edad y " +
-      "cuántos escenarios de cada 100 aguantan hasta el final del horizonte. Qué manda depende de " +
-      "tu estrategia: en «Cuanto antes» y en la jornada reducida la fecha la resuelve el sorteo " +
-      "—es el primer mes que cumple tu umbral—; en «A una edad fija» la pones tú y lo que se " +
-      "resuelve es si aguanta; en «Coast FIRE» el hito incluye el mes en que puedes dejar de " +
-      "aportar. «Nunca» es una respuesta, no un dato que falte: significa que ningún mes del " +
-      "horizonte llega a tu umbral.",
+      "El resultado de tu plan en una línea: cuándo te jubila la simulación y con qué edad. Qué " +
+      "manda depende de tu estrategia: en FIRE clásico y en Barista FIRE la fecha la resuelve " +
+      "el sorteo —es el primer mes que cumple tu umbral—; en Edad fija la pones tú y la línea " +
+      "dice si llegas o cuánto te falta al mes; en Coast FIRE añade el mes en que puedes dejar " +
+      "de aportar, y en Barista FIRE el mes en que empieza la jornada reducida. Cuántos " +
+      "escenarios aguantan es la tarjeta «Éxito del plan», y las fechas al 100 % y al 90 % van " +
+      "bajo «Fecha válida». «Ninguna fecha llega a tu umbral» es una respuesta, no un dato que " +
+      "falte: ningún mes del horizonte cumple tu umbral, y la línea dice cuál se quedó más " +
+      "cerca.",
   },
   // ── Apartados del formulario de Jubilación (2026-09-13) ──────────────────────────────────
   // El `<?>` del TÍTULO de cada panel. Nacen de las frases que hasta hoy se pintaban en prosa
@@ -202,17 +205,21 @@ export const HELP_TEXTS = {
     body:
       "Las edades que fijan tu calendario, convertidas en meses concretos con tu fecha de " +
       "nacimiento — por eso sin ella el plan no puede resolver nada, y se guarda en tu cuenta, " +
-      "no aquí. En «Coast FIRE» y en «Jornada reducida» eliges además qué fijas tú y qué " +
-      "resuelve el plan: la edad de jubilación o la de dejar de aportar; empezar la fase a una " +
-      "edad o en cuanto puedas.",
+      "no aquí. En Coast FIRE y en Barista FIRE eliges además qué fijas tú y qué resuelve el " +
+      "plan: la edad de jubilación o la de dejar de aportar; empezar la jornada reducida a una " +
+      "edad o en cuanto tu plan pueda permitírsela.",
   },
   "retirement.section_spending": {
     title: "Gasto en jubilación",
     body:
-      "De dónde sale el gasto que tu plan tiene que cubrir: de tus partidas marcadas como de " +
-      "jubilación, de tus ingresos actuales si quieres mantener el nivel de vida, o de una cifra " +
-      "que escribes tú. No multiplica nada: es el dinero que hay que poner cada mes desde que te " +
-      "jubilas hasta el final del horizonte, y es lo que la cartera tiene que sostener.",
+      "De dónde sale el gasto que tu plan tiene que cubrir. «Gasto actual» usa tus partidas del " +
+      "presupuesto marcadas como de jubilación o, si tu fuente del ahorro (Ajustes → Plan) sale " +
+      "de tus movimientos, el promedio de tus gastos reales. «Ingresos actuales» mantiene tu " +
+      "nivel de vida: tus ingresos del presupuesto o, con esa misma fuente, su promedio real. " +
+      "«Manual» es una cifra anual que escribes tú, y es solo tuya, no del hogar. Debajo ves la " +
+      "cifra que sale, al mes y al año. No multiplica nada: es el dinero que hay que poner cada " +
+      "mes desde que te jubilas hasta el final del horizonte, y es lo que la cartera tiene que " +
+      "sostener.",
   },
   "retirement.section_withdrawal": {
     title: "Retirada",
@@ -226,47 +233,51 @@ export const HELP_TEXTS = {
   "retirement.strategy": {
     title: "Tu estrategia de jubilación",
     body:
-      "Qué le pides al plan y, con ello, qué te pregunta. «Cuanto antes» busca tu primera fecha " +
-      "válida. «A una edad fija» te jubila en la edad que pidas —aguante o no— y te dice cuántos " +
-      "escenarios lo soportan y cuánto tendrías que aportar para llegar a tu umbral. «Coast " +
-      "FIRE» resuelve cuándo puedes dejar de aportar. «Jornada reducida» mete una fase de menos " +
-      "ingreso antes del final. El puente hasta la pensión ya NO es una estrategia: es un ajuste " +
-      "de la tarjeta Pensión y funciona con las cuatro. Cambiarla cambia lo que te preguntamos " +
-      "aquí abajo y cómo se resuelve tu fecha: unas la fijas tú, otras la resuelve el sorteo. Es " +
-      "tuya, no del hogar: cada persona tiene la suya.",
+      "Qué le pides al plan y, con ello, qué te pregunta. FIRE clásico: ahorras todo lo que " +
+      "puedes y busca tu primera fecha válida. Edad fija: te jubila en la edad que pidas " +
+      "—aguante o no— y te dice cuántos escenarios lo soportan y cuánto tendrías que aportar " +
+      "para llegar a tu umbral. Coast FIRE: aportas fuerte, dejas de aportar y dejas crecer lo " +
+      "invertido; resuelve cuándo puedes parar. Barista FIRE: mete una fase de jornada reducida " +
+      "—menos trabajo y menos ingreso— antes del final. El puente hasta la pensión NO es una " +
+      "estrategia: es un ajuste de la tarjeta Pensión y funciona con las cuatro. Cambiarla " +
+      "cambia lo que te preguntamos aquí abajo y cómo se resuelve tu fecha: unas la fijas tú, " +
+      "otras la resuelve el sorteo. Es tuya, no del hogar: cada persona tiene la suya.",
   },
   "retirement.target_age": {
     title: "Edad de jubilación objetivo",
     body:
-      "La edad en la que dejas de trabajar en la simulación. En «A una edad fija» manda: te " +
+      "La edad en la que dejas de trabajar en la simulación. En Edad fija manda: te " +
       "jubilas ahí aunque los escenarios no acompañen, y entonces el éxito te dice a qué te " +
-      "expones y la aportación mínima cuánto costaría cumplir tu umbral. En «Coast FIRE» es la " +
-      "edad contra la que se resuelve cuándo puedes dejar de aportar. En la jornada reducida es " +
+      "expones y la aportación mínima cuánto costaría cumplir tu umbral. En Coast FIRE es la " +
+      "edad contra la que se resuelve cuándo puedes dejar de aportar. En Barista FIRE es " +
       "opcional y marca el fin de la fase; sin ella, la jubilación total llega cuando tu fecha " +
       "válida lo permite. Necesita tu fecha de nacimiento para convertirse en un mes concreto.",
   },
   "retirement.coast_mode": {
     title: "Qué fijas en Coast",
     body:
-      "En Coast FIRE hay dos preguntas y solo puedes contestar una: la otra la resuelve el plan. " +
-      "Si fijas tu edad de jubilación, se resuelve el PRIMER mes en que puedes dejar de aportar " +
-      "y aun así llegar a esa edad cumpliendo tu umbral. Si fijas la edad en que dejas de " +
-      "aportar, se resuelve tu fecha válida, salga donde salga. En los dos casos el plan que ves " +
-      "deja de aportar DE VERDAD desde ese mes —la línea, la banda y los escenarios corren sin " +
+      "En Coast FIRE hay dos preguntas y solo puedes contestar una: la otra la resuelve el " +
+      "plan. «Fijo la jubilación»: se resuelve el PRIMER mes en que puedes dejar de aportar y " +
+      "aun así llegar a esa edad cumpliendo tu umbral. «Fijo cuándo dejo de aportar»: se " +
+      "resuelve tu fecha válida, salga donde salga. En los dos casos el plan que ves deja de " +
+      "aportar DE VERDAD desde ese mes —la línea, la banda y los escenarios corren sin " +
       "aportaciones— y el ahorro que liberas es dinero disponible para gastar: no vuelve a la " +
       "cartera.",
   },
   "retirement.partial_mode": {
-    title: "Jornada reducida (Barista FIRE)",
+    title: "Barista FIRE: la jornada reducida",
     body:
       "Trabajar menos y cobrar menos durante una fase, antes de dejarlo del todo. Eliges cuándo " +
-      "empieza: a una edad que fijas tú, o en cuanto tu plan pueda permitírsela —el primer mes " +
-      "en el que la fase no deja tu cartera sin cubrir el gasto—. La jubilación total no es una " +
-      "edad aparte: es tu fecha válida calculada ya con la fase dentro, así que meter la fase " +
-      "puede retrasarla. El ingreso de la fase lo declaras en euros de hoy y se queda plano: no " +
-      "se actualiza con la inflación, y compra menos cuanto más dure. NO es la jubilación " +
-      "parcial de la Seguridad Social: aquí no hay cotización, ni porcentajes legales, ni " +
-      "contrato de relevo — solo cuánto ingresas y desde cuándo.",
+      "empieza: «A una edad» que fijas tú, o «En cuanto pueda» tu plan permitírsela —el primer " +
+      "mes en el que la fase no deja tu cartera sin cubrir el gasto—. La jubilación total no es " +
+      "una edad aparte: es tu fecha válida calculada ya con la fase dentro, así que meter la " +
+      "fase puede retrasarla. En el resultado, «Nunca» significa que tu plan no puede " +
+      "permitirse empezarla en ningún mes del horizonte, y «nunca te jubilas del todo» que la " +
+      "empieza pero de ahí no llega a ninguna fecha válida. El ingreso de la fase lo declaras " +
+      "en euros de hoy y se queda plano: no se actualiza con la inflación, y compra menos " +
+      "cuanto más dure. NO es la jubilación parcial de la Seguridad Social: aquí no hay " +
+      "cotización, ni porcentajes legales, ni contrato de relevo — solo cuánto ingresas y desde " +
+      "cuándo.",
   },
   "retirement.partial": {
     title: "Media jornada",
@@ -332,16 +343,18 @@ export const HELP_TEXTS = {
       "pero no es un fracaso: sale en la cobertura, no aquí. La tasa de " +
       "retirada es otra cosa y va aparte: es lo máximo que puedes sacar el PRIMER año, la puerta " +
       "que tu fecha tiene que pasar. Los porcentajes son BRUTOS: el impuesto de la venta va " +
-      "dentro.",
+      "dentro. Las reglas por saldo usan tu tasa de retirada salvo que alguien les haya fijado " +
+      "otro porcentaje por API: entonces lo ves bajo la regla («Fijado por API») y el control " +
+      "de la tasa no la mueve.",
   },
   "retirement.spend_mode": {
     title: "Cómo se aplica la regla",
     body:
-      "Dos lecturas de la misma regla. Como TECHO, retiras lo que necesitas y nunca más de lo " +
-      "que la regla permite: si tu gasto cabe, no vendes de más. Como GASTO, retiras lo que dice " +
-      "la regla haya o no necesidad, y ese es tu nivel de vida — con un buen año sacas más y con " +
-      "uno malo, menos. La condición es la misma en los dos y se mira solo en el mes en que te " +
-      "jubilas: si lo permitido no llega ahí a tu gasto ordinario, ese escenario cuenta como " +
+      "Dos lecturas de la misma regla. «Techo»: retiras lo que necesitas y nunca más de lo que " +
+      "la regla permite; si tu gasto cabe, no vendes de más. «Es mi gasto»: retiras lo que dice " +
+      "la regla haya o no necesidad, y ese es tu nivel de vida — con un buen año sacas más y " +
+      "con uno malo, menos. La condición es la misma en los dos y se mira solo en el mes en que " +
+      "te jubilas: si lo permitido no llega ahí a tu gasto ordinario, ese escenario cuenta como " +
       "fallido; lo que la regla recorte después no lo es. No mueve tu fecha por sí solo: cambia " +
       "cuánto sale de la cartera cada mes, y con ello cuántos escenarios aguantan.",
   },
@@ -377,21 +390,24 @@ export const HELP_TEXTS = {
       "tantos escenarios de cada 100 como pida tu umbral. Cada escenario llega a ese mes con su " +
       "propia historia —su racha buena o mala por el camino—, no con una media. Se busca a " +
       "saltos y se afina mes a mes, y el que se publica va confirmado con 2.500 caminos: no es " +
-      "una interpolación. Al lado tienes las fechas al 100 % y al 90 %, que acotan la tuya por " +
-      "arriba y por abajo. «Nunca» es un resultado, no un hueco: ningún mes del horizonte llega " +
-      "a tu umbral.",
+      "una interpolación. Debajo de la fecha, tu edad entonces y las fechas al 100 % y al 90 %, " +
+      "que acotan la tuya por arriba y por abajo. En el gráfico es la marca «Fecha válida»; con " +
+      "Edad fija la marca va en la edad que pediste («A los 55»), que es cuando esa simulación " +
+      "se jubila. «Nunca» es un resultado, no un hueco: ningún mes del horizonte llega a tu " +
+      "umbral.",
   },
   "retirement.required_contribution": {
     title: "Aportación mínima",
     body:
-      "Lo MÍNIMO que tendrías que aportar cada mes, además de lo que ya aportas, para cumplir tu " +
-      "umbral en la edad que pediste. No sale de despejar una fórmula: se prueba una cantidad, " +
-      "se sortean los escenarios enteros y se ajusta hasta dar con la más pequeña que cumple. Es " +
-      "una cifra PLANA —los mismos euros cada mes, sin subirla con la inflación—, así que sale " +
-      "algo más alta que si la subieras cada año. Y es un TECHO sobre lo que tu reparto " +
-      "invierte, no un importe que se aporte pase lo que pase: un mes con menos sobrante aporta " +
-      "lo que hay. El paréntesis es tu sobrante máximo, para que la cifra tenga denominador. «Ni " +
-      "ahorrándolo todo» significa que ni invirtiendo cada euro de sobrante llegas a esa edad.",
+      "Lo MÍNIMO que tendrías que aportar cada mes, además de lo que ya aportas, para cumplir " +
+      "tu umbral en la edad que pediste. No sale de despejar una fórmula: se prueba una " +
+      "cantidad, se sortean los escenarios enteros y se ajusta hasta dar con la más pequeña que " +
+      "cumple. Es una cifra PLANA —los mismos euros cada mes, sin subirla con la inflación—, " +
+      "así que sale algo más alta que si la subieras cada año. Y es un TECHO sobre lo que tu " +
+      "reparto invierte, no un importe que se aporte pase lo que pase: un mes con menos " +
+      "sobrante aporta lo que hay. Debajo, tu sobrante máximo al mes, para que la cifra tenga " +
+      "denominador. «Ya llegas» significa que con lo que ya aportas cumples el umbral a esa " +
+      "edad; «Ni ahorrándolo todo», que ni invirtiendo cada euro de sobrante llegas.",
   },
   "retirement.coast_month": {
     title: "Mes coast",
@@ -421,31 +437,34 @@ export const HELP_TEXTS = {
   "retirement.bands": {
     title: "Escenarios con volatilidad",
     body:
-      "Miles de futuros del mismo plan: cada mes el mercado sube o baja según la volatilidad que " +
-      "hayas declarado en tus activos. La línea sólida es tu patrimonio LÍQUIDO —lo que se " +
-      "puede vender: cartera, cuentas, fondos, sin tu vivienda—, la trayectoria central, y crece " +
-      "a la rentabilidad compuesta que declaras en cada activo. Es distinta del patrimonio TOTAL " +
-      "que ves en el Resumen y en la Proyección: aquí importa lo que financia tu jubilación, no " +
-      "lo que vale tu casa. La franja —también líquida— recoge del escenario 10 al 90: uno de " +
-      "cada diez queda por encima y " +
-      "uno de cada diez por debajo. No hay línea de mediana, y sus bordes no son futuros " +
-      "concretos: cada mes se ordena por separado. El color no es decorativo — dice qué parte de " +
-      "los escenarios ha fallado ya a esa edad. Con ingresos y gastos de por medio, el centro " +
-      "del sorteo se separa unos puntos de la línea a veinte o treinta años: es esperable, no un " +
-      "descuadre. La semilla es la misma en cada visita, así que las cifras no bailan.",
+      "Miles de futuros del mismo plan: cada mes el mercado sube o baja según la volatilidad " +
+      "que hayas declarado en tus activos. La línea sólida es tu patrimonio LÍQUIDO —lo que se " +
+      "puede vender: cartera, cuentas, fondos, sin tu vivienda—, la trayectoria central, y " +
+      "crece a la rentabilidad compuesta que declaras en cada activo. Es distinta del " +
+      "patrimonio TOTAL que ves en el Resumen y en la Proyección: aquí importa lo que financia " +
+      "tu jubilación, no lo que vale tu casa. La franja —también líquida— recoge del escenario " +
+      "10 al 90 (sus bordes, p10 y p90): uno de cada diez queda por encima y uno de cada diez " +
+      "por debajo. No hay línea de mediana, y sus bordes no son futuros concretos: cada mes se " +
+      "ordena por separado. El color no es decorativo — dice qué parte de los escenarios ha " +
+      "fallado ya a esa edad. Con ingresos y gastos de por medio, el centro del sorteo se " +
+      "separa unos puntos de la línea a veinte o treinta años: es esperable, no un descuadre. " +
+      "La semilla es la misma en cada visita, así que las cifras no bailan.",
   },
   "retirement.success": {
     title: "Éxito del plan",
     body:
       "De cada 100 escenarios, en cuántos NO tendrías que volver a trabajar jubilándote en la " +
       "fecha de tu plan: ninguno de los tres fallos ocurre —quedarte sin cartera un mes, " +
-      "pasarte del tope de retirada el primer año, o que la regla te deje por debajo de tu gasto " +
-      "ordinario—. Es el mismo sorteo con el que se resolvió la fecha, no un segundo cálculo. El " +
-      "color no lo pone un listón nuestro: se compara con TU umbral, y contra el suelo del " +
-      "intervalo en vez del número grande — verde cuando el suelo ya lo cumple, ámbar cuando el " +
-      "umbral cae dentro del intervalo (ni sí ni no), rojo cuando no llega. El «±» de al lado es " +
-      "esa incertidumbre, en puntos. Sin volatilidad declarada en tus activos todos los " +
-      "escenarios son el mismo y este número no mide nada.",
+      "pasarte del tope de retirada el primer año, o que la regla te deje por debajo de tu " +
+      "gasto ordinario—. Es el mismo sorteo con el que se resolvió la fecha, no un segundo " +
+      "cálculo. El color no lo pone un listón nuestro: se compara con TU umbral, y contra el " +
+      "suelo del intervalo en vez del número grande — verde cuando el suelo ya lo cumple, ámbar " +
+      "cuando el umbral cae dentro del intervalo (ni sí ni no), rojo cuando no llega. En «Las " +
+      "cifras del riesgo», la «Precisión del sorteo» es esa incertidumbre: el semiancho del " +
+      "intervalo de Wilson al 95 %, en puntos, y cuántos caminos se sortearon. Sin volatilidad " +
+      "declarada en tus activos todos los escenarios son el mismo y este número no mide nada; y " +
+      "sin fecha válida no hay éxito que medir: el sorteo describe tu patrimonio sin jubilarte, " +
+      "pero no hay plan al que ponerle una probabilidad.",
   },
   "retirement.failure_by_age": {
     title: "Escenarios que fallan por edad",
@@ -455,10 +474,11 @@ export const HELP_TEXTS = {
       "cubre el gasto de un mes, el primer año de jubilación exige sacar más de lo que tu tope " +
       "permite, o la regla de retirada te deja por debajo de tu gasto ordinario ya ese primer " +
       "mes. Los dos últimos se deciden EN la jubilación y no se vuelven a mirar; después, el " +
-      "único motivo posible es la cartera. Es acumulada, " +
-      "así que solo puede crecer con la edad: el 8 % a los 80 incluye a los que cayeron a los " +
-      "75. Es lo que TIÑE la banda del gráfico, y al pasar el ratón salen el porcentaje exacto y " +
-      "por cuál de los tres motivos.",
+      "único motivo posible es la cartera. Es acumulada, así que solo puede crecer con la edad: " +
+      "el 8 % a los 80 incluye a los que cayeron a los 75, y «Escenarios que fallan en algún " +
+      "momento» es ese total al final del horizonte. Es lo que TIÑE la banda del gráfico: la " +
+      "escala de debajo va de «ninguno» al rojo, con los cortes que pone tu umbral, y al pasar " +
+      "el ratón salen el porcentaje exacto y por cuál de los tres motivos.",
   },
   "retirement.coverage": {
     title: "Cobertura de tu gasto",

@@ -136,12 +136,15 @@ export const RETIREMENT_STRATEGIES: readonly RetirementStrategyApi[] = [
   "partial",
 ] as const;
 
-/** Nombres de producto (D33). No los inventes en la vista: viven aquí una sola vez. */
+/** Nombres de producto (D33), CORTOS desde 2026-10-10 («FIRE clásico · Edad fija · Coast FIRE ·
+ *  Barista FIRE»): son el nombre en la rejilla, la frase, el Resumen y las líneas del hogar. Qué
+ *  hace cada una lo dice el `<?>` del apartado (`retirement.strategy`) y, en el alta, el blurb de
+ *  abajo. No los inventes en la vista: viven aquí una sola vez. */
 export const RETIREMENT_STRATEGY_LABEL: Record<RetirementStrategyApi, string> = {
-  asap: "Cuanto antes (FIRE clásico)",
-  retire_at_age: "A una edad fija",
-  coast: "Ahorrar ahora y dejar crecer (Coast FIRE)",
-  partial: "Jornada reducida (Barista FIRE)",
+  asap: "FIRE clásico",
+  retire_at_age: "Edad fija",
+  coast: "Coast FIRE",
+  partial: "Barista FIRE",
 };
 
 /** Una frase por estrategia — lo que hace, no cómo se implementa. */
@@ -165,14 +168,14 @@ export const WITHDRAWAL_RULE_KIND_LABEL: Record<WithdrawalRuleKindApi, string> =
 
 /** Los dos modos de coast (M10). El modo decide QUÉ edad pide el formulario, no dos planes. */
 export const COAST_MODE_LABEL: Record<CoastModeApi, string> = {
-  fixed_retirement_age: "Fijo la edad a la que me jubilo",
-  fixed_stop_age: "Fijo la edad a la que dejo de aportar",
+  fixed_retirement_age: "Fijo la jubilación",
+  fixed_stop_age: "Fijo cuándo dejo de aportar",
 };
 
 /** Los dos modos de arranque de la jornada reducida (M11). */
 export const PARTIAL_MODE_LABEL: Record<PartialModeApi, string> = {
-  at_age: "A la edad que yo diga",
-  asap: "En cuanto el plan pueda permitírselo",
+  at_age: "A una edad",
+  asap: "En cuanto pueda",
 };
 
 // ---------------------------------------------------------------------------

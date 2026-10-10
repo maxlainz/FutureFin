@@ -370,18 +370,18 @@ function formatRuleOfThreePercent(paths: number): string {
 }
 
 /**
- * El SUBTÍTULO del tile de éxito: qué mide ese «87,0 %» y **contra qué listón** (C3).
+ * El SUBTÍTULO del tile de éxito: **solo valores**, nunca la explicación de la cifra (2026-10-10).
  *
- * El umbral vuelve al subtítulo —donde V7 lo había quitado— porque en el modelo v2 vuelve a ser
- * del usuario, y además es lo que DEFINE la fecha: sin él, el mismo 95,0 % es «justo lo que pedí»
- * para uno y «cinco puntos de más» para otro, y la tarjeta no distingue los dos casos.
+ * - **El umbral** («umbral 95,0 %»), siempre que se conozca: es el listón contra el que se colorea
+ *   la cifra, y sin él el mismo 95,0 % es «justo lo que pedí» para uno y «cinco puntos de más»
+ *   para otro.
+ * - **En el 100 % con muestra conocida**, el recuento exacto y la cota de la regla de tres
+ *   («0 de 2.500 fallan · riesgo ≤ 0,12 %»): es lo único que impide leer un 100 % muestral como
+ *   una certeza, y el owner cerró el umbral 100 % con esa condición explícita (§2.5). `paths` solo
+ *   viaja con las bandas (el bloque `plan` del Resumen no lo publica): sin él no se inventa un
+ *   denominador.
  *
- * En el 100 % la frase genérica sería una perífrasis de «no falla ninguno», así que se sustituye
- * por el recuento exacto MÁS la cota de la regla de tres: «0 de 2.500 escenarios fallan · el
- * riesgo real puede llegar al 0,12 %». Ese segundo trozo no es un adorno estadístico — es lo
- * único que impide leer un 100 % muestral como una certeza, y el owner cerró el umbral 100 % con
- * esa condición explícita (§2.5). `paths` solo viaja con las bandas (el bloque `plan` del Resumen
- * no lo publica): sin él se cae a la frase genérica en vez de inventar un denominador.
+ * Lo que la cifra mide («de los escenarios aguantan») se fue al `<?>`.
  *
  * `undefined` ⟺ no hay cifra que subtitular.
  */
@@ -392,17 +392,16 @@ export function successParenthetical(
 ): string | undefined {
   const n = scenariosPerHundred(probability);
   if (n == null) return undefined;
-  const bits =
-    n >= 100 && finite(paths) && paths > 0
-      ? [
-          `0 de ${formatCount(paths)} escenarios fallan`,
-          `el riesgo real puede llegar al ${formatRuleOfThreePercent(paths)}`,
-        ]
-      : ["de los escenarios aguantan"];
-  // El umbral va SIEMPRE que se conozca, también en el 100 %: es el listón que fija la fecha, y
-  // saber si el usuario pidió 100 o 95 cambia por completo cómo se lee un plan que aguanta todo.
+  // Solo VALORES (2026-10-10): qué significa la cifra y por qué la regla de tres viven en el
+  // `<?>` (`summary.success` / `retirement.success_threshold`).
+  const bits: string[] = [];
+  if (n >= 100 && finite(paths) && paths > 0) {
+    bits.push(`0 de ${formatCount(paths)} fallan`, `riesgo ≤ ${formatRuleOfThreePercent(paths)}`);
+  }
+  // El umbral va SIEMPRE que se conozca, también en el 100 %: es el listón contra el que se
+  // colorea la cifra, y saber si el usuario pidió 100 o 95 cambia cómo se lee.
   if (finite(thresholdPct)) bits.push(`umbral ${formatPercentDisplay(thresholdPct)}`);
-  return bits.join(" · ");
+  return bits.length > 0 ? bits.join(" · ") : undefined;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -413,8 +412,6 @@ export type RiskExtraRow = {
   key: string;
   label: string;
   value: string;
-  /** Segunda línea, cuando el número necesita su base para no leerse mal. */
-  detail?: string;
   /** Ayuda del catálogo, cuando la fila mide algo que su rótulo no puede explicar entero. La
    *  pinta la vista junto al rótulo; el escáner de `helpTexts.test.ts` ve esta forma de objeto. */
   helpId?: PlanHelpTextId;
@@ -482,15 +479,31 @@ export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
     return [
       {
         key: "success_absent",
-        label: "Sin éxito que auditar",
-        value: METRIC_DASH,
-        detail: successAbsentReasonEs(b.success_absent_reason),
+        label: "Sin éxito que medir",
+        value: successAbsentReasonEs(b.success_absent_reason),
         helpId: "retirement.success",
       },
     ];
   }
 
   const rows: RiskExtraRow[] = [];
+
+  // ── La precisión de la cifra de éxito, como VALOR (2026-10-10) ──────────────────────────
+  //
+  // Semiancho de Wilson y tamaño de la muestra, con los números del servidor y sin aritmética de
+  // cliente. Era una frase («Precisión del sorteo: … sobre N caminos (intervalo de Wilson al
+  // 95 %; …)»); lo que el intervalo significa vive en `retirement.success`.
+  rows.push({
+    key: "sampling_precision",
+    label: "Precisión del sorteo",
+    value: [
+      formatSamplingErrorPp(b.success_sampling_error_pp),
+      finite(b.paths) ? `${formatCount(b.paths)} caminos` : null,
+    ]
+      .filter((x): x is string => x != null)
+      .join(" · "),
+    helpId: "retirement.success",
+  });
 
   // ── Por qué falla el que falla (§2.4) ────────────────────────────────────────────────────
   //
@@ -520,15 +533,12 @@ export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
     key: "months_below_need",
     label: "Meses por debajo del gasto (mediana)",
     value: `${b.months_below_need_p50}`,
-    detail: "meses jubilados en que gastaste menos de lo que necesitabas",
     helpId: "retirement.coverage",
   });
   rows.push({
     key: "withdrawal_to_need",
     label: "Parte del gasto que la regla cubrió (mediana)",
     value: formatFractionAsPercent(b.withdrawal_to_need_ratio_p50),
-    detail:
-      "por el techo de la regla y por lo que la cartera no dio; 100 % = el gasto entero",
     helpId: "retirement.coverage",
   });
 
@@ -550,8 +560,6 @@ export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
       key: "failure_total",
       label: "Escenarios que fallan en algún momento",
       value: formatFractionAsPercent(String(failureLast.probability)),
-      detail:
-        "acumulado hasta el final del horizonte: es el mismo sorteo que colorea la banda del gráfico",
       helpId: "retirement.failure_by_age",
     });
   }
@@ -567,8 +575,6 @@ export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
       key: "success_wilson_low",
       label: "Con 95 % de confianza, al menos",
       value: formatFractionAsPercent(String(wilson)),
-      detail:
-        "límite inferior del intervalo sobre el éxito: es lo que se compara con tu umbral, no la cifra de arriba",
       helpId: "retirement.success_threshold",
     });
   }
@@ -620,16 +626,18 @@ export function showsRiskGradient(
 }
 
 /**
- * Pie del panel: coste, tamaño de la muestra y semilla. No es adorno — sin los caminos, la
- * probabilidad no tiene precisión declarada; sin la semilla, no se puede reproducir el sorteo.
- * `computed_in_ms: 0` es un HIT de cache y se dice así, en vez de fingir «0 ms de cálculo».
+ * Pie del panel: coste y semilla. No es adorno — sin la semilla no se puede reproducir el sorteo.
+ * Los caminos ya no van aquí: los dice la fila «Precisión del sorteo» (`buildRiskExtraRows`), y
+ * desde 2026-10-10 este es el ÚNICO sitio de la semilla (la fila «Semilla y caminos» del
+ * «Detalle del cálculo» la duplicaba). `computed_in_ms: 0` es un HIT de cache y se dice así, en
+ * vez de fingir «0 ms de cálculo».
  */
 export function riskFootnote(bands: ProjectionBandsApi): string {
   const time =
     bands.computed_in_ms > 0
       ? `Calculado en ${bands.computed_in_ms} ms`
       : "Resultado en cache";
-  return `${time} · ${bands.paths} caminos · semilla ${bands.seed}`;
+  return `${time} · semilla ${bands.seed}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -673,7 +681,7 @@ const SUCCESS_ABSENT_ES: Record<string, string> = {
   bands_unavailable: "no se pudieron sortear los escenarios",
   birth_date_missing: "falta tu fecha de nacimiento",
   months_override: "esta vista fija un horizonte propio",
-  not_reachable: "no hay ninguna fecha que llegue a tu umbral, así que no hay éxito que medir",
+  not_reachable: "ninguna fecha llega a tu umbral",
 };
 
 /**

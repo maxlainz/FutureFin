@@ -109,9 +109,9 @@ más que la cifra, y por eso la tabla de abajo es la que se mantiene al día.
 | Jubilación · APARTADOS del formulario (tabla `PLAN_CARD_HELP`, `lib/retirement-form.ts`) **(2026-09-13)** | Uno por apartado, colgado del `<h3>` del panel: `retirement.strategy` · `retirement.section_ages` **(nueva)** · `retirement.pension` · `retirement.section_spending` **(nueva)** · `retirement.section_withdrawal` **(nueva)** · `settings.horizon_age`. Más `retirement.bridge_settings`, en el rótulo de la sub-sección «El puente hasta la pensión» (`BRIDGE_SECTION_HELP`) |
 | Jubilación · CAMPOS con ayuda propia (tabla `PLAN_FIELD_HELP`, `lib/retirement-form.ts`) | Solo los que tienen texto SUYO, ocho: `retirement.target_age` · `retirement.coast_mode` **(v2)** · `retirement.partial_mode` **(v2)** · `retirement.partial` · `retirement.success_threshold` **(v2 — vuelve, con otro sujeto: ver §6.4)** · `settings.swr` · `retirement.withdrawal_rule` · `retirement.spend_mode`. Los catorce campos que COMPARTÍAN texto perdieron su icono: subió al apartado o a la sub-sección (§6.5) |
 | Jubilación · frase-hito (`RetirementView.tsx`, U1b) | `retirement.plan_sentence` (cabecera de «Resultado» — HelpPopover del panel, no de una tarjeta) **(5.0.0, U1b, #207)** |
-| Jubilación · resultado (`lib/retirement-tiles.ts`) | tiles FIJOS `retirement.needed_capital` **(v2)** y `retirement.success`; el tercero por estrategia — `retirement.safe_date` **(v2, `asap`)** · `retirement.required_contribution` (`retire_at_age`) · `retirement.coast_month` (`coast`) · `retirement.partial_mode` (`partial`); en «Detalle del cálculo», `retirement.fire_number_classic` **(v2)** y las dos cotas de `retirement.safe_date` (fechas al 100 % y al 90 %) |
-| Jubilación · Riesgo (`lib/risk-bands.ts`) | `retirement.bands` · `retirement.success` (fila del primer tipo de fallo) · `retirement.failure_by_age` **(v2)** · `retirement.coverage` (sus dos filas) · `retirement.success_threshold` (fila del suelo de Wilson) |
-| Proyección | `retirement.needed_capital` — el tile «Capital necesario hoy» de `ProjectionView.tsx` es la MISMA cifra, al euro, que el de Jubilación **(v2)** |
+| Jubilación · resultado (`lib/retirement-tiles.ts`) | tiles FIJOS `retirement.needed_capital` **(v2)** y `retirement.success`; el tercero por estrategia — `retirement.safe_date` **(v2, `asap`)** · `retirement.required_contribution` (`retire_at_age`) · `retirement.coast_month` (`coast`) · `retirement.partial_mode` (`partial`); en «Detalle del cálculo», `retirement.fire_number_classic` **(v2)** y —salvo en `asap`, donde son la sublínea de la tarjeta «Fecha válida» desde 2026-10-10— las dos cotas de `retirement.safe_date` (fechas al 100 % y al 90 %) |
+| Jubilación · Riesgo (`lib/risk-bands.ts`) | `retirement.bands` (en el TÍTULO del panel «Riesgo» desde 2026-10-10) · `retirement.success` (filas «Precisión del sorteo», «Sin éxito que medir» y la del primer tipo de fallo) · `retirement.failure_by_age` **(v2)** · `retirement.coverage` (sus dos filas) · `retirement.success_threshold` (fila del suelo de Wilson) |
+| Proyección | `retirement.needed_capital` — el tile «Capital necesario hoy» de `ProjectionView.tsx` es la MISMA cifra, al euro, que el de Jubilación **(v2)**, y desde 2026-10-10 la misma tarjeta: valor y estado salen de `neededCapitalTile` (`lib/retirement-tiles.ts`); debajo solo queda, además, el importe «al jubilarte» |
 | Ajustes → Plan | `settings.savings_source`, `settings.income_window`, `settings.expense_window`, `settings.window_mode`, `settings.inflation`, `settings.taxable_gain` |
 | Activos | `assets.expected_return` (reescrita en v2: es un CAGR) · `assets.volatility` **(5.0.0)** |
 | Movimientos | `expenses.expense_avg`, `expenses.income_avg`, `expenses.savings` **(4.15.0)**, `expenses.savings_rate` **(4.15.0)**, `expenses.refunds` **(4.15.0)** — `expenses.savings_transferred` y `expenses.transferred_rate` se **retiraron** en 4.15.0 |
@@ -313,9 +313,10 @@ en qué orden se caen, esta es la que hay que revisar.
   calcula y hoy falta, y lo cierto es que esa estrategia no hace esa pregunta.
 - **Lo que no cabe NO desaparece, baja a «Detalle del cálculo»** (`retirementDetailRows`): el
   número FIRE clásico (`retirement.fire_number_classic`), las fechas al 100 % y al 90 % (las dos
-  con `retirement.safe_date`, que es la cifra que acotan) y la semilla y los caminos del sorteo —
-  sin rótulo de ayuda: es la fila que hace auditable todo lo demás—, más los avisos de
-  `buildRetirementNotices`. La regla no cambia: **una fila del detalle no es una entrada nueva del
+  con `retirement.safe_date`, que es la cifra que acotan; en `asap` van bajo la tarjeta desde
+  2026-10-10) más los avisos de `buildRetirementNotices`. La fila «Semilla y caminos» se retiró el
+  2026-10-10: duplicaba el pie de «Las cifras del riesgo» (`riskFootnote`, la semilla) y la fila
+  «Precisión del sorteo» (los caminos). La regla no cambia: **una fila del detalle no es una entrada nueva del
   catálogo** mientras describa una cifra que ya tiene texto.
 - **El puente se mide correctamente desde U1b (fix S8)**: `pension_start_month_index −
   jubilacion_month_index`, los dos en la MISMA rejilla 0-based (mes 0 = hoy), nunca «meses desde
@@ -333,8 +334,9 @@ en qué orden se caen, esta es la que hay que revisar.
   un porcentaje). No es un campo declarativo del mismo tipo que `basis`/`totals.basis` (§7): no
   describe la PROCEDENCIA de un agregado, describe si un valor concreto fue TECLEADO o HEREDADO, y
   su lectura vive en la UI como texto derivado (`withdrawalPctNote`, `lib/retirement-form.ts`:
-  «Retira el X %: tu tasa de retirada» si `inherited`, «Regla al X %, fijado por API» si alguien
-  puso un `pct` explícito por HTTP/MCP) — no entra en `helpTexts.ts` por la misma razón que §7 da
+  desde 2026-10-10 solo «Fijado por API: X %» cuando alguien puso un `pct` explícito por
+  HTTP/MCP; heredado no hay nota —el porcentaje es el del slider— y la explicación vive en
+  `settings.swr` y `retirement.withdrawal_rule`) — no entra en `helpTexts.ts` por la misma razón que §7 da
   para `basis`: hoy solo tiene un consumidor (esa nota bajo el selector de regla), y si algún día
   gana una tarjeta propia, ese es el momento de darle entrada aquí.
 
@@ -495,6 +497,22 @@ describe (no hay entrada de histórico ni de proyección-como-serie en `helpText
 usan el chart, no tarjetas con popover).
 
 ## 8. Provenance and maintenance
+
+**Re-sincronizado el 2026-10-10 (Jubilación «pregunta–respuesta», rama `release/5.0.0`)**: cero
+entradas nuevas o retiradas (el recuento no cambia); se AMPLÍAN las que absorben la prosa que salió
+de la pantalla — `retirement.section_spending` (las tres fuentes del gasto y su dependencia del modo
+de ahorro, antes pegadas a la cifra derivada), `retirement.safe_date` (edad y cotas debajo de la
+fecha; las dos marcas del chart), `retirement.success` (la precisión del sorteo es su fila; «sin
+fecha no hay éxito que medir»), `retirement.required_contribution` (el sobrante de debajo; «Ya
+llegas»), `retirement.partial_mode` («Nunca» / «nunca te jubilas del todo»), `retirement.bands`
+(p10/p90), `retirement.failure_by_age` (la escala de color y el total acumulado),
+`retirement.withdrawal_rule` («Fijado por API»), `retirement.plan_sentence`, `summary.plan` y
+`summary.success` (la frase es una línea; dónde están el éxito, el umbral y las cotas). Los nombres
+CORTOS de estrategia (`RETIREMENT_STRATEGY_LABEL`: FIRE clásico · Edad fija · Coast FIRE · Barista
+FIRE) se propagan a todas las entradas que los citaban; el título de `retirement.partial_mode` pasa
+a «Barista FIRE: la jornada reducida». Verificación: `grep -n 'Cuanto antes\|A una edad fija'
+apps/web/src/lib/helpTexts.ts` → vacío (la señal buscada: los nombres viejos se retiraron), y
+`npx vitest run src/lib/helpTexts.test.ts` en `apps/web`.
 
 **Re-sincronizado el 2026-09-13 (informe del owner sobre Jubilación, rama `release/5.0.0`)**: nueva
 §6.5 — las explicaciones salen de la pantalla y entran en el catálogo. **+3 entradas**

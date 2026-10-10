@@ -27,8 +27,8 @@
  *     chart **no lo toca**. No es un olvido: la cifra es `needed_c(1)` (§2.7), una respuesta a
  *     «¿cuánto necesitaría si me jubilara ya?», y «ya» es hoy. Deflactarla otra vez la dividiría
  *     por un factor que ya está aplicado; multiplicarla por el nominal contestaría a una pregunta
- *     que nadie hace. Por eso el subtítulo lo dice en voz alta —«en euros de hoy»— en vez de
- *     confiar en que nadie mueva el toggle.
+ *     que nadie hace. La unidad la declara su `<?>` (`retirement.needed_capital`): desde
+ *     2026-10-10 los subtítulos solo llevan VALOR o ESTADO, nunca la explicación de la cifra.
  *  3. **Un plan que no está no se rellena.** Con `plan_absent_reason` las tarjetas fijas enseñan
  *     la RAZÓN, no un guion mudo ni un número viejo: «falta tu fecha de nacimiento» y «el hogar no
  *     resuelve un plan común» son estados distintos y se dicen distinto. Y con el plan resuelto
@@ -45,20 +45,10 @@
  */
 
 import type { ProjectionSeriesApi, RetirementStrategyApi } from "../api/types";
-import { formatMonthSpanEs } from "./duration";
 import { formatProjectionAxisYear, parseYmdComponents } from "./dates";
-import {
-  DISPLAY_NUMBER_LOCALE,
-  METRIC_DASH,
-  formatCurrencyOrDash,
-  formatPercentDisplay,
-  parseDisplayDecimal,
-} from "./format";
-import {
-  formatSamplingErrorPp,
-  formatSuccessPercent,
-  type PlanHelpTextId,
-} from "./risk-bands";
+import { METRIC_DASH, formatCurrencyOrDash, parseDisplayDecimal } from "./format";
+import { safeDateBoundsLine } from "./plan-sentence";
+import { formatSuccessPercent, type PlanHelpTextId } from "./risk-bands";
 
 /**
  * Los campos del bloque «plan» de la serie que la cabecera lee. Un `Pick` y no la respuesta entera
@@ -102,15 +92,17 @@ export type RetirementTileTone = "default" | "danger";
 /** Cuántas tarjetas caben en la cabecera de resultados. §4: **una frase de hito + 3 tarjetas**. */
 export const RETIREMENT_TILES_V2_CAP = 3;
 
-/** Una tarjeta de la cabecera: **una sola cifra** y un subtítulo COMPLETO (U7 prohíbe truncarlo —
- *  el subtítulo es donde vive la base de la cifra, y media base es peor que ninguna). */
+/** Una tarjeta de la cabecera: **una sola cifra** y, como mucho, una sublínea de VALOR («63 años»,
+ *  «100 %: 2074 · 90 %: 2050») o de ESTADO («ya puedes jubilarte», el motivo de una ausencia).
+ *  Lo que la cifra SIGNIFICA vive en su `<?>` (`helpId`), nunca en la sublínea (owner,
+ *  2026-10-10: «pregunta–respuesta»). */
 export type RetirementTileV2 = {
   /** Key de React y del test. Estable por tarjeta, nunca por posición. */
   key: string;
   label: string;
   value: string;
-  /** Texto completo, puede ser largo. `undefined` = no hay nada que añadir, y entonces la vista
-   *  reserva el slot igual (misma disciplina que el paréntesis de `MetricCard`). */
+  /** Valor o estado corto. `undefined` = no hay nada que añadir, y entonces la vista reserva el
+   *  slot igual (misma disciplina que el paréntesis de `MetricCard`). */
   subtitle?: string;
   tone: RetirementTileTone;
   helpId: PlanHelpTextId;
@@ -138,13 +130,6 @@ export type RetirementTilesV2Input = {
 
 function finite(n: unknown): n is number {
   return typeof n === "number" && Number.isFinite(n);
-}
-
-/** Un RECUENTO (caminos sorteados) con separador de millar español: ni dinero ni porcentaje. */
-function formatCount(n: number): string {
-  return new Intl.NumberFormat(DISPLAY_NUMBER_LOCALE, {
-    maximumFractionDigits: 0,
-  }).format(n);
 }
 
 /**
@@ -193,12 +178,10 @@ function planUnavailableReason(series: RetirementTileV2Series): string | null {
  * una RESPUESTA y no un fallo de medición: ni dividiendo la cartera por 256 el plan incumple el
  * umbral, o sea que no hace falta capital adicional hoy. Enseñarlo con el mismo «—» que
  * «sin activos líquidos» tiraría la única de las cuatro que es una buena noticia, así que el tile
- * pone estas dos palabras donde iría la cifra.
+ * pone estas dos palabras donde iría la cifra — sin subtítulo: qué significa lo dice su `<?>`
+ * (`retirement.needed_capital`).
  */
 const ALREADY_COVERED_VALUE = "Ya cubierto";
-
-/** Y su explicación, que va de subtítulo. Fuente única de la frase completa de más abajo. */
-const ALREADY_COVERED_SUBTITLE = "con lo que tienes hoy tu plan cumple el umbral";
 
 /**
  * Por qué falta `needed_capital_today` cuando el resto del plan SÍ está resuelto — la pregunta que
@@ -218,29 +201,67 @@ function neededCapitalAbsentReasonEs(
     case "month_beyond_horizon":
       return "la fecha cae fuera del horizonte";
     case "already_covered":
-      return `${ALREADY_COVERED_VALUE.toLowerCase()}: ${ALREADY_COVERED_SUBTITLE}`;
+      return ALREADY_COVERED_VALUE.toLowerCase();
     default:
       return "no disponible";
   }
 }
 
-/** «a los 55 años» a partir del resolutor inyectado; `null` sin fecha de nacimiento. */
+/** «55 años» a partir del resolutor inyectado; `null` sin fecha de nacimiento. */
 function ageBit(
   monthIndex: number,
   monthAge: RetirementTilesV2Input["monthAge"],
 ): string | null {
   const age = monthAge?.(monthIndex);
-  return finite(age) ? `a los ${age} años` : null;
+  return finite(age) ? `${age} años` : null;
 }
 
-/** «dentro de 7 años» / «ya» — un tramo desde hoy, no una fecha. */
-function withinBit(monthIndex: number, already: string): string {
-  return monthIndex <= 0 ? already : `dentro de ${formatMonthSpanEs(monthIndex)}`;
+/** El ESTADO «ya» cuando el hito es hoy; `null` en otro caso (el «dentro de N años» era una
+ *  explicación de la fecha que ya está en la cifra, y se retiró el 2026-10-10). */
+function alreadyBit(monthIndex: number, already: string): string | null {
+  return monthIndex <= 0 ? already : null;
 }
 
 function joinBits(bits: (string | null | undefined)[]): string | undefined {
   const kept = bits.filter((b): b is string => b != null && b !== "");
   return kept.length > 0 ? kept.join(" · ") : undefined;
+}
+
+/**
+ * La tarjeta «Capital necesario hoy», **la misma en Jubilación y en Proyección** (2026-10-10:
+ * Proyección tenía su propia sublínea explicativa, «en euros de hoy · para que aguanten N de cada
+ * 100», y la tarjeta gemela de Jubilación ya no la llevaba). Una sola función para que las dos no
+ * puedan volver a divergir: valor, y como sublínea solo el ESTADO de una ausencia.
+ *
+ * Con el plan resuelto pero sin esta CIFRA sola (`needed_capital_absent_reason`), la sublínea dice
+ * por qué. Y con `already_covered` ni siquiera hay guion: el hueco no es una medición que falló,
+ * es «no te hace falta nada más».
+ */
+export function neededCapitalTile(
+  series: RetirementTileV2Series,
+  currencyIso: string,
+): RetirementTileV2 {
+  const unavailable = planUnavailableReason(series);
+  const alreadyCovered =
+    !unavailable &&
+    series.needed_capital_today == null &&
+    series.needed_capital_absent_reason === "already_covered";
+  return {
+    key: "needed_capital",
+    label: "Capital necesario hoy",
+    value: unavailable
+      ? METRIC_DASH
+      : alreadyCovered
+        ? ALREADY_COVERED_VALUE
+        : formatCurrencyOrDash(series.needed_capital_today, currencyIso),
+    subtitle:
+      unavailable ??
+      (alreadyCovered || series.needed_capital_today != null
+        ? undefined
+        : neededCapitalAbsentReasonEs(series.needed_capital_absent_reason)),
+    tone: "default",
+    helpId: "retirement.needed_capital",
+  };
 }
 
 /**
@@ -266,41 +287,11 @@ export function buildRetirementTilesV2(
 ): RetirementTileV2[] {
   const { series, currencyIso } = input;
   if (!series) return [];
-  const money = (s: string | null | undefined) => formatCurrencyOrDash(s, currencyIso);
   const unavailable = planUnavailableReason(series);
   const tiles: RetirementTileV2[] = [];
 
-  // 1 · Capital necesario hoy — fija, primera, siempre en euros de HOY. Con el plan resuelto pero
-  // sin esta CIFRA sola (`needed_capital_absent_reason`), el subtítulo dice por qué en vez de
-  // repetir «en euros de hoy» junto a un guion mudo. Y con `already_covered` ni siquiera hay guion:
-  // el hueco no es una medición que falló, es «no te hace falta nada más».
-  const alreadyCovered =
-    !unavailable &&
-    series.needed_capital_today == null &&
-    series.needed_capital_absent_reason === "already_covered";
-  tiles.push({
-    key: "needed_capital",
-    label: "Capital necesario hoy",
-    value: unavailable
-      ? METRIC_DASH
-      : alreadyCovered
-        ? ALREADY_COVERED_VALUE
-        : money(series.needed_capital_today),
-    subtitle:
-      unavailable ??
-      (alreadyCovered
-        ? ALREADY_COVERED_SUBTITLE
-        : series.needed_capital_today == null
-          ? neededCapitalAbsentReasonEs(series.needed_capital_absent_reason)
-          : joinBits([
-              "en euros de hoy",
-              finite(series.success_threshold_pct)
-                ? `para que aguanten ${series.success_threshold_pct} de cada 100 escenarios`
-                : null,
-            ])),
-    tone: "default",
-    helpId: "retirement.needed_capital",
-  });
+  // 1 · Capital necesario hoy — fija, primera, siempre en euros de HOY.
+  tiles.push(neededCapitalTile(series, currencyIso));
 
   // 2 · Éxito del plan — fija, segunda.
   //
@@ -322,23 +313,9 @@ export function buildRetirementTilesV2(
     key: "success",
     label: "Éxito del plan",
     value: unavailable || noValidDate ? METRIC_DASH : formatSuccessPercent(series.success_of_plan),
-    subtitle:
-      unavailable ??
-      (noValidDate
-        ? joinBits([
-            "no hay ninguna fecha que llegue a tu umbral, así que no hay éxito que medir",
-            finite(series.success_threshold_pct)
-              ? `umbral ${formatPercentDisplay(series.success_threshold_pct)}`
-              : null,
-          ])
-        : joinBits([
-            finite(series.success_threshold_pct)
-              ? `umbral ${formatPercentDisplay(series.success_threshold_pct)}`
-              : null,
-            series.success_sampling_error_pp != null
-              ? formatSamplingErrorPp(series.success_sampling_error_pp)
-              : null,
-          ])),
+    // El umbral está en el formulario de al lado y la precisión del sorteo en «Las cifras del
+    // riesgo»: aquí solo el estado que cambia cómo se lee el guion.
+    subtitle: unavailable ?? (noValidDate ? "ninguna fecha llega a tu umbral" : undefined),
     tone: "default",
     helpId: "retirement.success",
   });
@@ -395,7 +372,6 @@ function safeDateTile(
       key: "safe_date",
       label: "Fecha válida",
       value: "Nunca",
-      subtitle: "ningún mes del horizonte llega a tu umbral de éxito",
       tone: "danger",
       helpId: "retirement.safe_date",
     };
@@ -415,9 +391,11 @@ function safeDateTile(
     key: "safe_date",
     label: "Fecha válida",
     value,
+    // VALOR: la edad y las dos fechas que acotan la del umbral («100 %: 2074 · 90 %: 2050»).
     subtitle: joinBits([
-      finite(age) ? `a los ${age} años` : null,
-      finite(mi) ? withinBit(mi, "ya puedes jubilarte") : null,
+      finite(age) ? `${age} años` : null,
+      finite(mi) ? alreadyBit(mi, "ya puedes jubilarte") : null,
+      safeDateBoundsLine(series, input.monthLabel),
     ]),
     tone: "default",
     helpId: "retirement.safe_date",
@@ -445,17 +423,15 @@ function requiredContributionTile(
   const money = (s: string | null | undefined) =>
     formatCurrencyOrDash(s, input.currencyIso);
   const ceiling = series.contribution_required_search_ceiling;
-  const ceilingBit = ceiling != null ? `de ${money(ceiling)}/mes de sobrante` : null;
+  // El denominador de la cifra, como VALOR: sin él no se sabe si es mucho o poco.
+  const ceilingBit = ceiling != null ? `sobrante: ${money(ceiling)}/mes` : null;
 
   if (series.contribution_underfunded === true) {
     return {
       key: "required_contribution",
       label: "Aportación mínima",
       value: "Ni ahorrándolo todo",
-      subtitle: joinBits([
-        "ni invirtiendo cada euro de tu sobrante llegas a esa edad",
-        ceilingBit,
-      ]),
+      subtitle: ceilingBit ?? undefined,
       tone: "danger",
       helpId: "retirement.required_contribution",
     };
@@ -469,7 +445,6 @@ function requiredContributionTile(
       key: "required_contribution",
       label: "Aportación mínima",
       value: "Ya llegas",
-      subtitle: "con lo que ya aportas, tu plan cumple el umbral a esa edad",
       tone: "default",
       helpId: "retirement.required_contribution",
     };
@@ -479,7 +454,7 @@ function requiredContributionTile(
     key: "required_contribution",
     label: "Aportación mínima",
     value: money(amount),
-    subtitle: joinBits(["al mes, además de lo que ya aportas", ceilingBit]),
+    subtitle: ceilingBit ?? undefined,
     tone: "default",
     helpId: "retirement.required_contribution",
   };
@@ -502,7 +477,6 @@ function coastTile(
       key: "coast_month",
       label: "Mes coast",
       value: "No puedes parar nunca",
-      subtitle: "ni aportando todos los meses llegas al umbral en tu edad objetivo",
       tone: "danger",
       helpId: "retirement.coast_month",
     };
@@ -516,7 +490,7 @@ function coastTile(
     value: input.monthLabel(mi),
     subtitle: joinBits([
       ageBit(mi, input.monthAge),
-      withinBit(mi, "ya puedes dejar de aportar"),
+      alreadyBit(mi, "ya puedes dejar de aportar"),
     ]),
     tone: "default",
     helpId: "retirement.coast_month",
@@ -542,7 +516,6 @@ function partialTile(
       key: "partial_start",
       label: "Inicio de la jornada reducida",
       value: "Nunca",
-      subtitle: "tu plan no puede permitirse empezar la jornada reducida en ningún mes",
       tone: "danger",
       helpId: "retirement.partial_mode",
     };
@@ -557,8 +530,8 @@ function partialTile(
     value: input.monthLabel(mi),
     subtitle: joinBits([
       ageBit(mi, input.monthAge),
-      withinBit(mi, "ya puedes empezarla"),
-      neverFull ? "pero nunca llegas a jubilarte del todo" : null,
+      alreadyBit(mi, "ya puedes empezarla"),
+      neverFull ? "nunca te jubilas del todo" : null,
     ]),
     tone: neverFull ? "danger" : "default",
     helpId: "retirement.partial_mode",
@@ -575,7 +548,6 @@ export type RetirementNoticeCode =
   | "partial_never_fully_retires"
   | "pension_unpaid_during_partial"
   | "no_volatility_declared"
-  | "strategy_pension_bridge_migrated"
   | "target_retirement_age_missing";
 
 export type RetirementNoticeTone = "danger" | "warn";
@@ -598,6 +570,11 @@ export type RetirementNotice = {
  * Sin ningún activo con σ el sorteo no dispersa, los 2.500 caminos son el mismo camino y el éxito
  * sale 0 % o 100 % por construcción. Ese 100 % es la lectura más cara de toda la pantalla, así que
  * el aviso dice explícitamente que no mide riesgo en vez de limitarse a describir la carencia.
+ *
+ * **Cada aviso es UNA línea con verbo** (2026-10-10); el porqué vive en el `<?>` de la cifra
+ * afectada. Y `strategy_pension_bridge_migrated` **no se traduce**: el servidor lo sigue emitiendo
+ * para los perfiles migrados desde «Puente hasta la pensión», pero un aviso de migración es código
+ * de un solo uso y el owner lo retiró de la SPA — el cambio vive en el CHANGELOG.
  */
 export function buildRetirementNotices(
   series: RetirementNoticeSeries | null | undefined,
@@ -613,64 +590,50 @@ export function buildRetirementNotices(
       tone: "danger",
       text:
         targetRetirementAge != null
-          ? `Con tu ahorro actual no llegas a los ${targetRetirementAge} años: ni invirtiendo todo tu sobrante alcanzas tu umbral de éxito a esa edad.`
-          : "Con tu ahorro actual no llegas a tu edad objetivo: ni invirtiendo todo tu sobrante alcanzas tu umbral de éxito a esa edad.",
+          ? `No llegas a los ${targetRetirementAge} ni invirtiendo todo tu sobrante.`
+          : "No llegas a tu edad objetivo ni invirtiendo todo tu sobrante.",
     });
   }
   if (warnings.has("coast_not_reachable")) {
     notices.push({
       code: "coast_not_reachable",
       tone: "warn",
-      text:
-        "No hay mes coast: ni aportando todos los meses llegas al umbral en tu edad objetivo. No puedes dejar de aportar y llegar.",
+      text: "No hay mes coast: no puedes dejar de aportar y llegar.",
     });
   }
   if (warnings.has("partial_never_starts")) {
     notices.push({
       code: "partial_never_starts",
       tone: "warn",
-      text:
-        "La jornada reducida no empieza en ningún mes del horizonte: con el ingreso que declaras, la fase falla desde el primer mes en que podría arrancar.",
+      text: "La jornada reducida no empieza en ningún mes del horizonte.",
     });
   }
   if (warnings.has("partial_never_fully_retires")) {
     notices.push({
       code: "partial_never_fully_retires",
       tone: "warn",
-      text:
-        "Empiezas la jornada reducida pero nunca te jubilas del todo: desde esa fase ningún mes del horizonte llega a tu umbral de éxito.",
+      text: "Tras la jornada reducida nunca te jubilas del todo.",
     });
   }
   if (warnings.has("pension_unpaid_during_partial")) {
     notices.push({
       code: "pension_unpaid_during_partial",
       tone: "warn",
-      text:
-        "Tu pensión empieza durante la jornada reducida y el plan no la cobra hasta la jubilación total: solo entra la fracción que declaraste para esa fase.",
+      text: "Tu pensión empieza en la jornada reducida: hasta el final solo cobras su fracción.",
     });
   }
   if (warnings.has("no_volatility_declared")) {
     notices.push({
       code: "no_volatility_declared",
       tone: "warn",
-      text:
-        "Sin volatilidad declarada el sorteo no dispersa: el éxito no mide riesgo. Declara la desviación típica de tus activos para que la cifra signifique algo.",
-    });
-  }
-  if (warnings.has("strategy_pension_bridge_migrated")) {
-    notices.push({
-      code: "strategy_pension_bridge_migrated",
-      tone: "warn",
-      text:
-        "Tu estrategia «Puente hasta la pensión» ahora es «Cuanto antes» con el puente activado: revísalo.",
+      text: "Sin volatilidad declarada, el éxito no mide riesgo.",
     });
   }
   if (warnings.has("target_retirement_age_missing")) {
     notices.push({
       code: "target_retirement_age_missing",
       tone: "warn",
-      text:
-        "Falta tu edad de jubilación objetivo: mientras tanto el plan se simula como «Cuanto antes».",
+      text: "Falta tu edad de jubilación: se simula como FIRE clásico.",
     });
   }
 
@@ -701,9 +664,8 @@ export type RetirementDetailRow = {
  *   seguir leyéndolo así.
  * - **Fecha al 100 % / al 90 %**: las dos fechas que ACOTAN la del umbral configurado («al 100 %
  *   serían ocho años más»). `null` con el plan resuelto es «nunca», que es un resultado; con el
- *   plan sin resolver la fila no se pinta, porque ahí `null` sí sería «todavía no se sabe».
- * - **Semilla y caminos**: sin ellos el éxito no tiene precisión declarada ni se puede reproducir
- *   el sorteo. Es la fila que hace auditable todo lo demás.
+ *   plan sin resolver la fila no se pinta, porque ahí `null` sí sería «todavía no se sabe». En
+ *   `asap` tampoco: ahí van bajo la tarjeta «Fecha válida».
  * - **Los avisos**, con su tono, en el orden de precedencia de `buildRetirementNotices`.
  */
 export function retirementDetailRows(
@@ -718,15 +680,16 @@ export function retirementDetailRows(
   if (series.fire_number_classic_today != null) {
     rows.push({
       key: "fire_number_classic",
-      label: "Número FIRE clásico (tu gasto anual ÷ tu tasa + lo que te queda de deuda, sin pensión)",
+      label: "Número FIRE clásico",
       value: money(series.fire_number_classic_today),
       helpId: "retirement.fire_number_classic",
     });
   }
 
   // Las dos cotas de la fecha. Solo con el plan resuelto: sin él, un «nunca» sería una afirmación
-  // sobre un sorteo que no ha terminado.
-  if (planReady) {
+  // sobre un sorteo que no ha terminado. Y no en `asap`: ahí ya son la sublínea de la tarjeta
+  // «Fecha válida» (2026-10-10), y dos veces la misma cifra en la misma pantalla es ruido.
+  if (planReady && series.strategy !== "asap") {
     const bound = (mi: number | null | undefined) =>
       finite(mi) ? monthLabel(mi) : "nunca";
     rows.push({
@@ -743,18 +706,8 @@ export function retirementDetailRows(
     });
   }
 
-  // Semilla y caminos: la identidad del resultado (D4 enmendada — cuando el sorteo fija el mes de
-  // un hito, la semilla y los caminos son parte de ese resultado, no metadatos).
-  if (series.seed != null || finite(series.paths_used)) {
-    rows.push({
-      key: "seed_and_paths",
-      label: "Semilla y caminos",
-      value: joinBits([
-        finite(series.paths_used) ? `${formatCount(series.paths_used)} caminos` : null,
-        series.seed != null ? `semilla ${series.seed}` : null,
-      ]) ?? METRIC_DASH,
-    });
-  }
+  // «Semilla y caminos» se retiró de aquí el 2026-10-10: duplicaba el pie de «Las cifras del
+  // riesgo» (`riskFootnote`), que es donde se lee junto a la precisión del sorteo.
 
   for (const n of buildRetirementNotices(series, targetRetirementAge)) {
     rows.push({ key: `notice:${n.code}`, label: "Aviso", value: n.text, tone: n.tone });

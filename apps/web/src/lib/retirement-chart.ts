@@ -24,7 +24,6 @@
  */
 
 import type { ProjectionSeriesApi } from "../api/types";
-import { scenariosPerHundred } from "./risk-bands";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // La línea PRINCIPAL del chart: LÍQUIDA, no total (decisión C11, issue #228)
@@ -272,14 +271,15 @@ export type ValidDateMark = {
  * El bloque «plan» → la marca vertical del chart y, cuando no la hay, la nota que lo explica.
  *
  * En v2 el chart ya no marca «el mes en que cruzaste un objetivo» —no hay objetivo—, marca **el
- * mes en que jubilarse cumple tu umbral**, y el rótulo lleva su éxito porque la fecha sin el éxito
- * es media respuesta. Las TRES bases —las tres que el servidor emite, ni una más— se rotulan
+ * mes en que jubilarse cumple tu umbral**. El rótulo es un NOMBRE corto (2026-10-10): el éxito de
+ * ese mes ya es el KPI «Éxito del plan» de la misma pantalla, y repetirlo en la marca era leer dos
+ * veces la misma cifra. Las TRES bases —las tres que el servidor emite, ni una más— se rotulan
  * distinto a propósito:
  *
  * | `retirement_date_basis` | marca | rótulo |
  * |---|---|---|
- * | `success_threshold` | `safe_date_month_index` | «Fecha válida · 95 de cada 100» |
- * | `target_age` | `jubilacion_month_index` | «A los 55, como pediste · 82 de cada 100» |
+ * | `success_threshold` | `safe_date_month_index` | «Fecha válida» |
+ * | `target_age` | `jubilacion_month_index` | «A los 55» |
  * | `not_reachable` | — | nota «sin fecha válida al 95 %» |
  *
  * Había una cuarta fila, `pending` → «Resolviendo tu fecha válida…», y se retiró en A12 con el
@@ -287,21 +287,13 @@ export type ValidDateMark = {
  *
  * Con `target_age` la marca va en la EDAD QUE PEDISTE, no en la fecha válida: es el mes en que el
  * plan simulado se jubila, y ponerla en la fecha válida marcaría un mes en el que esta simulación
- * no hace nada. La fecha válida de ese caso se lee al lado, en los tiles («para tu 95 %…»).
- *
- * El éxito se rotula con `scenariosPerHundred` —la MISMA función que la frase-hito y el tile de
- * éxito— para que la marca y la frase no puedan decir dos números distintos del mismo sorteo, ni
- * uno de ellos redondear un 0,999 a «100 de cada 100». Sin éxito publicado el
- * rótulo se queda en su primera mitad: nunca se inventa un «100 de cada 100».
+ * no hace nada.
  */
 export function chartValidDateMark(
   series: ValidDateMarkSeries | null | undefined,
 ): ValidDateMark {
   const basis = series?.retirement_date_basis;
   if (!series || basis == null) return { mark: null, note: null };
-
-  const n = scenariosPerHundred(series.success_of_plan);
-  const success = n == null ? "" : ` · ${n} de cada 100`;
 
   if (basis === "not_reachable") {
     const u = series.success_threshold_pct;
@@ -317,11 +309,10 @@ export function chartValidDateMark(
     const m = series.jubilacion_month_index;
     if (!finite(m)) return { mark: null, note: null };
     const age = series.jubilacion_age;
-    const head = finite(age) ? `A los ${age}, como pediste` : "Como pediste";
-    return { mark: { monthIndex: m, label: `${head}${success}` }, note: null };
+    return { mark: { monthIndex: m, label: finite(age) ? `A los ${age}` : "Edad pedida" }, note: null };
   }
   // `success_threshold`
   const m = series.safe_date_month_index;
   if (!finite(m)) return { mark: null, note: null };
-  return { mark: { monthIndex: m, label: `Fecha válida${success}` }, note: null };
+  return { mark: { monthIndex: m, label: "Fecha válida" }, note: null };
 }

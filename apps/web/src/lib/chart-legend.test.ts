@@ -46,13 +46,13 @@ describe("buildStructuralLegendItems", () => {
     const items = buildStructuralLegendItems({
       hasNeededCapital: true,
       hasHistory: false,
-      validDateMarkLabel: "Fecha válida · 95 de cada 100",
+      validDateMarkLabel: "Fecha válida",
     });
     expect(items.map((i) => i.label)).toEqual([
       "Patrimonio neto",
       "Capital aportado",
       "Capital necesario",
-      "Fecha válida · 95 de cada 100",
+      "Fecha válida",
     ]);
     // `mark` y no `line`: es un instante, no una serie, y la muestra lo dice.
     expect(items[3]!.swatch).toBe("mark");
@@ -110,7 +110,7 @@ describe("buildStructuralLegendItems", () => {
     const items = buildStructuralLegendItems({
       hasNeededCapital: true,
       hasHistory: true,
-      validDateMarkLabel: "Fecha válida · 95 de cada 100",
+      validDateMarkLabel: "Fecha válida",
     });
     expect(items.map((i) => i.key)).toEqual([
       "nw",

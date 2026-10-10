@@ -16,7 +16,7 @@
  */
 
 import type { SummaryPlanApi } from "../api/types";
-import { formatCurrencyAmount } from "./format";
+import { formatCurrencyAmount, formatPercentDisplay } from "./format";
 import {
   addMonthsCivil,
   ageCompletedYearsCivil,
@@ -30,7 +30,7 @@ import {
   type PlanSentenceTone,
 } from "./plan-sentence";
 import { RETIREMENT_STRATEGY_LABEL } from "./retirementProfile";
-import { scenariosPerHundred, summarySuccessTile } from "./risk-bands";
+import { summarySuccessTile } from "./risk-bands";
 
 /**
  * Avisos que el plan sabe leer. Literales cerrados del contrato (`warnings[]` de
@@ -120,9 +120,9 @@ const WARNING_STATUS: Array<{ warning: PlanWarning } & Omit<PlanStatus, "warning
  *
  * Los literales que no conoce se ignoran (un aviso nuevo del servidor nunca deja la tarjeta sin
  * estado; a lo sumo dice «En plan» hasta que alguien lo traduzca aquí). Eso incluye a propósito
- * `no_volatility_declared` y `strategy_pension_bridge_migrated`, que son informativos y viven en
- * «Riesgo» y en la tarjeta de Pensión: subirlos aquí llenaría de ámbar el Resumen de casi todo
- * el mundo.
+ * `no_volatility_declared`, que es informativo y vive en «Riesgo»: subirlo aquí llenaría de ámbar
+ * el Resumen de casi todo el mundo. Y `strategy_pension_bridge_migrated`, que la SPA ignora en
+ * todas partes desde 2026-10-10 (aviso de migración de un solo uso: va al CHANGELOG).
  */
 export function planStatusFromWarnings(
   warnings: readonly string[] | null | undefined,
@@ -334,8 +334,8 @@ function secondaryPhrase(parts: PlanSentenceParts): string | null {
  * La FORMA CORTA de la frase, cuando la serie no está cargada y solo hay `summary.plan`.
  *
  * `plan` publica cinco escalares del plan —fecha válida, éxito, umbral, capital y estado— y **no
- * publica edades ni hitos secundarios**, así que la frase corta dice exactamente eso y nada más:
- * fecha + éxito. Rellenar la edad con la guardada del perfil sería el bug B5 otra vez (rotular
+ * publica edades ni hitos secundarios**, así que la frase corta dice la fecha y nada más (el
+ * éxito es el KPI de al lado). Rellenar la edad con la guardada del perfil sería el bug B5 otra vez (rotular
  * una edad que el motor no leyó); inventar un hito secundario, peor.
  */
 function summaryShortSentence(
@@ -353,21 +353,20 @@ function summaryShortSentence(
       tone: copy?.tone ?? "warn",
     };
   }
-  const n = scenariosPerHundred(plan.success_of_plan);
   const mi = plan.safe_date_month_index ?? plan.jubilacion_month_index ?? null;
   if (mi == null) {
     const u = plan.success_threshold_pct;
     return {
       text:
         u == null
-          ? "Con tu plan no hay ninguna fecha que aguante tu umbral."
-          : `Con tu plan no hay ninguna fecha en la que aguanten ${u} de cada 100 escenarios.`,
+          ? "Ninguna fecha llega a tu umbral."
+          : `Ninguna fecha llega a tu umbral del ${formatPercentDisplay(u)}.`,
       tone: "danger",
     };
   }
-  const head = mi <= 0 ? "Con tu plan ya puedes jubilarte" : `Con tu plan te jubilas en ${monthLabel(mi)}`;
+  // UNA línea, como la frase larga (`planSentence`): el éxito es el KPI de al lado.
   return {
-    text: n == null ? `${head}.` : `${head}: aguantan ${n} de cada 100 escenarios.`,
+    text: mi <= 0 ? "Ya puedes jubilarte." : `Te jubilas en ${monthLabel(mi)}.`,
     tone: "ok",
   };
 }
@@ -459,7 +458,6 @@ export function planCardV2(input: PlanCardV2Input): PlanCardV2 {
             label: "Capital necesario hoy",
             value: formatCurrencyAmount(neededCapital, input.currencyIso),
             tone: "default",
-            parenthetical: "el líquido que sostendría tu plan si te jubilaras ya",
           },
     warning:
       status.warning == null || status.action == null

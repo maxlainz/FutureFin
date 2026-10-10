@@ -68,13 +68,12 @@ const card = (
 describe("título y subtítulo", () => {
   it("el título ES la frase del plan", () => {
     expect(card({ series: series({ safe_date_age: 52, jubilacion_age: 52 }) }).title).toBe(
-      "Con tu plan te jubilas en M144 (a los 52): aguantan 95 de cada 100 escenarios. " +
-        "Al 100 %, nunca; al 90 %, nunca.",
+      "Te jubilas en M144 (52 años).",
     );
   });
 
   it("el subtítulo es la estrategia sola cuando no hay hito secundario", () => {
-    expect(card({ series: series() }).subtitle).toBe("Cuanto antes (FIRE clásico)");
+    expect(card({ series: series() }).subtitle).toBe("FIRE clásico");
     expect(
       card({
         series: series({
@@ -84,25 +83,25 @@ describe("título y subtítulo", () => {
         }),
         targetRetirementAge: 55,
       }).subtitle,
-    ).toBe("A una edad fija");
+    ).toBe("Edad fija");
   });
 
   it("«Coast FIRE» añade cuándo dejas de aportar", () => {
     expect(
       card({ series: series({ strategy: "coast", coast_stop_month_index: 84 }) }).subtitle,
-    ).toBe("Ahorrar ahora y dejar crecer (Coast FIRE) · dejas de aportar en M84");
+    ).toBe("Coast FIRE · dejas de aportar en M84");
   });
 
-  it("«Media jornada» añade desde cuándo", () => {
+  it("«Barista FIRE» añade desde cuándo", () => {
     expect(
       card({ series: series({ strategy: "partial", partial_start_month_index: 120 }) }).subtitle,
-    ).toBe("Jornada reducida (Barista FIRE) · desde M120");
+    ).toBe("Barista FIRE · desde M120");
   });
 
   it("una pensión con fecha se anuncia en cualquier estrategia (el puente ya no es una)", () => {
     expect(
       card({ series: series({ strategy: "asap", pension_start_month_index: 264 }) }).subtitle,
-    ).toBe("Cuanto antes (FIRE clásico) · pensión desde M264");
+    ).toBe("FIRE clásico · pensión desde M264");
   });
 
   it("sin estrategia (el agregado del hogar) el subtítulo lo dice, no queda vacío", () => {
@@ -123,12 +122,10 @@ describe("procedencia: la frase de la serie, el estado del plan", () => {
       }),
       targetRetirementAge: 55,
     });
-    expect(c.title).toBe(
-      "Puedes dejar de aportar en M192 y jubilarte a los 55 con 95 de cada 100.",
-    );
+    expect(c.title).toBe("Dejas de aportar en M192; te jubilas a los 55.");
   });
 
-  it("sin serie, la FORMA CORTA de `plan`: fecha y éxito, sin edad inventada (B5)", () => {
+  it("sin serie, la FORMA CORTA de `plan`: la fecha, sin edad inventada (B5)", () => {
     const c = card({
       plan: plan({
         safe_date_month_index: 144,
@@ -137,9 +134,9 @@ describe("procedencia: la frase de la serie, el estado del plan", () => {
       }),
       targetRetirementAge: 52,
     });
-    expect(c.title).toBe("Con tu plan te jubilas en M144: aguantan 95 de cada 100 escenarios.");
+    expect(c.title).toBe("Te jubilas en M144.");
     expect(c.title).not.toContain("52");
-    expect(c.subtitle).toBe("Cuanto antes (FIRE clásico)");
+    expect(c.subtitle).toBe("FIRE clásico");
   });
 
   it("la forma corta dice «calculando» mientras el nivel 1 del solve corre", () => {
@@ -165,7 +162,7 @@ describe("procedencia: la frase de la serie, el estado del plan", () => {
       plan: plan({ absent_reason: "household_aggregate", jubilacion_month_index: null }),
       series: series({ jubilacion_month_index: 60, safe_date_month_index: 60 }),
     });
-    expect(c.title).toContain("Con tu plan te jubilas en M60");
+    expect(c.title).toBe("Te jubilas en M60.");
   });
 });
 
@@ -260,7 +257,7 @@ describe("estado y aviso — la precedencia de siempre, con los literales de v2"
         safe_date_month_index: null,
       }),
     });
-    expect(c.title).toContain("no alcanza ninguna fecha válida");
+    expect(c.title).toContain("sin fecha válida");
     expect(c.tone).toBe("ok");
   });
 });
@@ -284,7 +281,7 @@ describe("«Éxito del plan» — se rotula, jamás se recalcula", () => {
       label: "Éxito del plan",
       value: "87,0 %",
       tone: "warn",
-      parenthetical: "de los escenarios aguantan · umbral 95,0 %",
+      parenthetical: "umbral 95,0 %",
       detail: undefined,
     });
   });
@@ -332,13 +329,9 @@ describe("«Éxito del plan» — se rotula, jamás se recalcula", () => {
       }),
     });
     expect(c.success?.value).toBe("—");
-    expect(c.success?.detail).toBe(
-      "no hay ninguna fecha que llegue a tu umbral, así que no hay éxito que medir",
-    );
+    expect(c.success?.detail).toBe("ninguna fecha llega a tu umbral");
     expect(c.success?.tone).toBe("default");
-    expect(c.title).toBe(
-      "Con tu plan no hay ninguna fecha en la que aguanten 95 de cada 100 escenarios.",
-    );
+    expect(c.title).toBe("Ninguna fecha llega a tu umbral del 95,0 %.");
     expect(c.title).not.toContain("0 de cada 100");
     // El TONO es el del estado, y el estado de un plan sin fecha no es «En plan» (verde).
     expect(c.tone).toBe("danger");
@@ -358,7 +351,7 @@ describe("«Éxito del plan» — se rotula, jamás se recalcula", () => {
       }),
     });
     expect(c.tone).toBe("danger");
-    expect(c.title).toContain("no hay ninguna fecha");
+    expect(c.title).toContain("Ninguna fecha llega a tu umbral");
   });
 });
 
@@ -372,8 +365,9 @@ describe("«Capital necesario hoy» — el segundo KPI del modelo v2", () => {
       label: "Capital necesario hoy",
       value: formatCurrencyAmount("412300", "EUR"),
       tone: "default",
-      parenthetical: "el líquido que sostendría tu plan si te jubilaras ya",
     });
+    // Sin sublínea explicativa (2026-10-10): qué es lo dice la ayuda `retirement.needed_capital`.
+    expect(c.neededCapital?.parenthetical).toBeUndefined();
   });
 
   it("sin cifra no se pinta el KPI: un guion se leería como «tu plan no necesita capital»", () => {
@@ -396,7 +390,7 @@ describe("modo de eje «edades»", () => {
       series: series({ jubilacion_age: 52, safe_date_age: 52 }),
       ageMode: "ages",
     });
-    expect(c.title).toContain("Con tu plan te jubilas en M144: aguantan 95 de cada 100");
-    expect(c.title).not.toContain("(a los 52)");
+    expect(c.title).toBe("Te jubilas en M144.");
+    expect(c.title).not.toContain("52");
   });
 });

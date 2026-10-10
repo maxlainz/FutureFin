@@ -34,7 +34,6 @@ import { formatDeltaCurrency } from "../lib/expenses";
 import { formatDateDmy } from "../lib/dates";
 import { planCardV2, resolvePlanMilestoneCivil } from "../lib/plan-card";
 import { householdPlanLines } from "../lib/household-plan-lines";
-import { summarySuccessTile } from "../lib/risk-bands";
 import { TAB_PATH, settingsSubTabPath } from "../lib/navigation";
 
 type LedgerPersonScope = "household" | "mine";
@@ -254,17 +253,6 @@ export function SummaryView({
     hasMembership &&
     (ledgerPersonScope === "household" ? householdLines.length > 0 : cardV2 != null);
 
-  /**
-   * KPI «Éxito del plan» (D28). Sale de `summary.plan.success_*` — el MISMO sorteo de Monte
-   * Carlo que dibuja la sección «Riesgo» de Jubilación, servido desde su cache: aquí no se pide
-   * `/v1/projection/bands` ni se recalcula nada. Si hubiera un segundo sorteo, el tile y el
-   * abanico contarían dos éxitos distintos del mismo plan.
-   *
-   * `null` = el backend no publica el bloque; entonces no se pinta tarjeta ninguna (un guion
-   * mudo se leería como «tu plan no tiene éxito medible»).
-   */
-  const successTile = summarySuccessTile(summary?.plan);
-
   const goToPlanAction = (target: "account" | "retirement") => {
     navigate(target === "account" ? settingsSubTabPath("general") : TAB_PATH.retirement);
   };
@@ -327,7 +315,8 @@ export function SummaryView({
           secundario (subtítulo) y, a la derecha, el KPI «Éxito del plan». El aviso, si lo hay,
           va debajo. En Hogar el agregado no tiene plan propio: la tarjeta se sustituye por una
           lista de FRASES, una por miembro, con el punto de color de su línea del chart — sin
-          cifras ni tarjetas por persona (las KPI agregadas de arriba no cambian). */}
+          cifras ni tarjetas por persona, y sin KPI de éxito: el hogar no tiene plan propio y su
+          «—» con la razón se retiró el 2026-10-10 (las KPI agregadas de arriba no cambian). */}
       {!nothingYet && showPlanPanel ? (
         <section className="panel">
           <div className="panel-head-row">
@@ -360,21 +349,6 @@ export function SummaryView({
                   </li>
                 ))}
               </ul>
-              {/* El hogar no tiene plan propio: el KPI se conserva con guion + su razón
-                  («solo en tu vista «Yo»»), nunca oculto — un hueco mudo se leería como
-                  «no medible» en vez de «esta vista no tiene sujeto». */}
-              {successTile ? (
-                <div className="metric-grid summary-success-grid">
-                  <MetricCard
-                    label="Éxito del plan"
-                    helpId="summary.success"
-                    value={successTile.value}
-                    parenthetical={successTile.parenthetical}
-                    detail={successTile.detail}
-                    tone={successTile.tone}
-                  />
-                </div>
-              ) : null}
             </>
           ) : cardV2 ? (
             <>

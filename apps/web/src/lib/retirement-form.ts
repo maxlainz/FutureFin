@@ -205,7 +205,8 @@ export type WithdrawalPctNoteInput = {
 };
 
 /**
- * La línea bajo el selector de regla: **el porcentaje que va a retirar y su procedencia**.
+ * La línea bajo el selector de regla, **solo cuando la regla retira un porcentaje que el slider no
+ * mueve** (2026-10-10: antes también repetía el heredado, con su explicación en prosa).
  *
  * Existe porque la pantalla tiene UN solo porcentaje editable (el SWR) y la regla puede estar
  * retirando otro: cuando alguien fija `withdrawal_rule.pct` por API o por MCP, mover el slider
@@ -226,9 +227,10 @@ export function withdrawalPctNote(input: WithdrawalPctNoteInput): string | null 
   const inherited = written == null || pctSource === "swr";
   const effective = effectiveWithdrawalPct(rule, swrPct);
   if (effective == null) return null;
-  return inherited
-    ? `Retira el ${formatPercentAmount(effective)}: lo máximo que sacas el primer año sobre tu líquido.`
-    : `Regla al ${formatPercentAmount(effective)}, fijado por API.`;
+  // Heredado no hay nada que decir: el porcentaje es el del slider de al lado, y qué significa lo
+  // dice su `<?>` (`settings.swr`). Solo un porcentaje ESCRITO por API/MCP es un estado que la
+  // pantalla no enseña por otra vía.
+  return inherited ? null : `Fijado por API: ${formatPercentAmount(effective)}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────

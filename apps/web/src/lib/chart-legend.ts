@@ -78,7 +78,7 @@ export function buildStructuralLegendItems(opts: {
   /** #136-5a: `false` = modo euros de hoy, donde la línea «aportado» está retirada (su cifra
    *  correcta no es computable desde la serie servida). Default `true` (nominal). */
   hasContributed?: boolean;
-  /** Rótulo de la marca vertical de la fecha válida («Fecha válida · 95 de cada 100»). Ausente o
+  /** Rótulo de la marca vertical de la fecha válida («Fecha válida», «A los 55»). Ausente o
    *  vacío ⇒ no hay marca que rotular: sin fecha válida la leyenda no reserva su hueco. */
   validDateMarkLabel?: string | null;
 }): ChartLegendItem[] {

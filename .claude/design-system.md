@@ -404,12 +404,15 @@ cálculo» (el abanico vive en el chart único, ver §`MiniProjection` arriba). 
 el umbral de éxito y le quitó el colchón — hoy son estas piezas, y ni una más:
 
 1. **El KPI «Éxito del plan»**, cuyo valor es «87,0 %» —un porcentaje con un decimal, como todo
-   porcentaje de la casa— y cuyo subtítulo lleva el umbral del perfil, no un sujeto genérico: «de
-   los 95 exigidos» o el mismo umbral con la precisión de Wilson al lado.
-2. **La precisión del sorteo** (`formatSamplingErrorPp`): el semiancho de Wilson en PUNTOS
-   PORCENTUALES («±1,2 pp»), o la cota de la regla de tres con cero fallos — **nunca confundida con
-   un `%`**: una barra de error en pp es una magnitud distinta de un porcentaje, y formatearla con
-   el símbolo `%` multiplicaría la confusión por su propia escala.
+   porcentaje de la casa—. En Jubilación **sin subtítulo** desde 2026-10-10 (el umbral está en el
+   formulario de al lado; la precisión, en la fila de abajo); en el Resumen, el subtítulo lleva
+   solo VALORES: «umbral 95,0 %» y, al 100 % con muestra conocida, «0 de 2500 fallan · riesgo
+   ≤ 0,12 %».
+2. **La precisión del sorteo** (`formatSamplingErrorPp`), como FILA rótulo/valor de
+   `buildRiskExtraRows` («Precisión del sorteo · ±1,2 pp · 2500 caminos»; hasta 2026-10-10 era una
+   frase suelta en la vista): el semiancho de Wilson en PUNTOS PORCENTUALES — **nunca confundido
+   con un `%`**: una barra de error en pp es una magnitud distinta de un porcentaje, y formatearla
+   con el símbolo `%` multiplicaría la confusión por su propia escala.
 3. **Los fallos por tipo** (F1/F2/F3), solo cuando ha fallado alguien — si nadie falla, las tres
    filas no se pintan (un `0 de 0` no informa).
 4. **La cobertura de tu gasto, corregida** (`months_below_need_p50`/`withdrawal_to_need_ratio_p50`):
@@ -459,11 +462,13 @@ Otras reglas del bloque que siguen vigentes:
 Clases que sobreviven (todas en `App.css`, cero color propio salvo `--ff-warn`):
 `.metric-card--warn` (tono ámbar del KPI, misma construcción que `--danger`; consumidor dinámico vía
 `successVerdictTone`, no un literal `tone="warn"` en el JSX — no lo busques así),
-`.risk-extra-rows`/`.risk-extra-row`/`-head`/`-label`/`-value`/`-detail` y `.risk-footnote`
-(procedencia: ms, caminos y semilla; `overflow-wrap: anywhere` porque la semilla es un entero de 20
-dígitos que no cabe a 360px). **`.risk-fan-note` se retiró** con `RiskFanChart.tsx` — la nota
-«Bandas puntuales» vive ahora como fila de `retirementDetailRows`, con el `HelpPopover` de
-`retirement.bands`. `.retirement-buffer-line`/`.retirement-basis-reset` quedaron HUÉRFANAS con el
+`.risk-extra-rows`/`.risk-extra-row`/`-head`/`-label`/`-value` y `.risk-footnote`
+(procedencia: ms y semilla —los caminos están en «Precisión del sorteo»—; `overflow-wrap: anywhere`
+porque la semilla es un entero de 20 dígitos que no cabe a 360px). **`.risk-extra-detail` se
+retiró el 2026-10-10**: las filas son rótulo + valor, y su segunda línea explicativa vive en el
+`<?>` del rótulo. **`.risk-fan-note` se retiró** con `RiskFanChart.tsx`, y la fila «Cómo leer la
+banda» que la sustituyó, el 2026-10-10: el `HelpPopover` de `retirement.bands` cuelga ahora del
+TÍTULO del panel «Riesgo». `.retirement-buffer-line`/`.retirement-basis-reset` quedaron HUÉRFANAS con el
 modelo v2 (ver §Reglas para añadir UI nueva, la nota del freezer de `App.css`) — no se citen como
 vivas.
 
@@ -589,7 +594,47 @@ volver a tenerlo— porque re-añadir uno es el error natural al tocar un campo 
 **Qué se queda en prosa, y es lo único que se queda**: VALORES (la cifra derivada del gasto, el
 valor del deslizador) y ESTADOS (`obligatorio · sin guardar`, la nota del porcentaje fijado por
 API, los avisos y banners). Una explicación, nunca. Regla de bolsillo: si el texto sería el mismo
-mañana con otros datos, es explicación y va al `<?>`.
+mañana con otros datos, es explicación y va al `<?>`. **Desde 2026-10-10 la regla vale también
+para el RESULTADO** (ver §Pregunta–respuesta, abajo).
+
+### Pregunta–respuesta: Jubilación y «Tu plan» (2026-10-10)
+
+El owner, tras probar la demo: «poco más que pregunta–respuesta; asume que el usuario entiende».
+Cada campo = rótulo + control; cada resultado = cifra. Lo que se aplicó, y lo que hay que respetar
+al tocar esta pantalla:
+
+- **Nombres cortos de estrategia**, una sola fuente (`RETIREMENT_STRATEGY_LABEL`,
+  `lib/retirementProfile.ts`): «FIRE clásico · Edad fija · Coast FIRE · Barista FIRE». Los modos,
+  igual de cortos: «Fijo la jubilación / Fijo cuándo dejo de aportar», «A una edad / En cuanto
+  pueda», «Techo / Es mi gasto». El asistente de alta conserva su blurb bajo el nombre corto.
+- **La frase-hito es UNA línea** (`lib/plan-sentence.ts`): «Te jubilas en 2066 (63 años).». El
+  éxito es su tarjeta; las fechas al 100/90 % son la sublínea de VALOR de «Fecha válida»
+  («63 años · 100 %: 2074 · 90 %: 2050», `safeDateBoundsLine`). Las líneas por miembro del hogar
+  son valores separados por « · ».
+- **Sublínea de tarjeta = valor o estado**, nunca la explicación de la cifra: «63 años», «sobrante:
+  1.800 €/mes», «ya puedes jubilarte», el motivo de una ausencia. «en euros de hoy · para que
+  aguanten N de cada 100», «dentro de N años», «al mes, además de lo que ya aportas» se fueron al
+  `<?>` de su tarjeta.
+- **Filas rótulo/valor** en «Las cifras del riesgo» y «Detalle del cálculo»; los rótulos no llevan
+  fórmulas («Número FIRE clásico», no «… (tu gasto anual ÷ …)»).
+- **Rótulos del chart = nombres**: «p10»/«p90» en los bordes de la banda, «Fecha válida» / «A los
+  55» en la marca. La escala de color es «Escenarios que fallan · ninguno · 5 % · 10 % o más» con su
+  `<?>`, sin frase.
+- **Avisos: UNA línea con verbo**; el porqué, en el `<?>` de la cifra afectada.
+- **Cero banners transitorios.** Un aviso de migración o de «esto cambió en la versión X» es código
+  de un solo uso: va al CHANGELOG, no a la pantalla (retirados el aviso CAGR de Activos, el del
+  gasto manual que venía del hogar —B10— y el de `strategy_pension_bridge_migrated`, que el servidor
+  sigue emitiendo y la SPA ignora). No reintroducir una bandera de `localStorage` para «ya lo vi».
+
+### Espaciado de banners (2026-10-10)
+
+Una regla para toda la app, en `App.css` junto a `.banner`: **debajo 1rem** (el ritmo de
+`.panel`), **encima 0,75rem cuando sigue a un bloque que no es banner** (`* + .banner`; en flujo de
+bloque colapsa con el margen del vecino, así que solo se nota donde el vecino no trae margen) y
+**0,5rem entre banners hermanos** (`.banner + .banner` / `.banner:has(+ .banner)`). En un
+contenedor flex/grid los márgenes no colapsan: el hueco lo pone el `gap` y los banners van sin
+margen (`.app-global-errors`, `gap: 0.5rem` + `margin-bottom: 1rem` del contenedor). No pongas
+márgenes ad hoc a un banner concreto.
 
 **Esto es una EXCEPCIÓN declarada a §Paneles de Ajustes — norma de texto (4.0.6)**, que sigue
 vigente en Ajustes: allí un panel puede llevar su `<p class="muted">` de 1–2 frases y la ayuda de
@@ -750,8 +795,9 @@ una tabla viva: sin consumidor solo podía envejecer. Registrado en `futurefin-f
 > `lib/retirement-tiles.ts`), así que ya no hace falta una segunda rejilla aparte de la banda
 > superior: son las MISMAS `.metric-grid.retirement-tiles-grid` (`auto-fit`,
 > `minmax(min(100%, 15rem), 1fr)`). La variante existe solo para que el subtítulo pueda ENVOLVER
-> (`white-space: normal`, sin recorte): ahí vive la BASE de la cifra («de 658 €/mes de sobrante · es
-> TODO tu sobrante y no basta»), y U7 prohíbe truncarla — media base es peor que ninguna. Los
+> (`white-space: normal`, sin recorte): ahí vive el VALOR que acompaña a la cifra («sobrante:
+> 658 €/mes», «63 años · 100 %: 2074 · 90 %: 2050»), y U7 prohíbe truncarlo. **Desde 2026-10-10 ya
+> no lleva explicaciones** (§Pregunta–respuesta): lo que la cifra significa vive en su `<?>`. Los
 > avisos que antes vivían en `.retirement-strategy-notices` se repartieron por tono: el rojo
 > (D17, `underfunded`) sube a un `.error-banner` sobre las tarjetas; el resto baja a
 > «Detalle del cálculo» como filas de `retirementDetailRows`.

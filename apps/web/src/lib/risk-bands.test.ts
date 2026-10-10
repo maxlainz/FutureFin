@@ -248,34 +248,32 @@ describe("semáforo de éxito", () => {
   // C3 — el umbral VUELVE al subtítulo (V7 lo había quitado): en el modelo v2 es del usuario y es
   // lo que DEFINE la fecha. Sin él, el mismo 95,0 % es «justo lo que pedí» para uno y «cinco
   // puntos de más» para otro, y la tarjeta no distingue los dos casos.
-  it("el subtítulo dice de QUÉ es el porcentaje y contra qué listón", () => {
-    expect(successParenthetical("0.870000", 95)).toBe(
-      "de los escenarios aguantan · umbral 95,0 %",
-    );
+  // 2026-10-10 — el subtítulo lleva VALORES, no la explicación: «de los escenarios aguantan» se
+  // fue al `<?>` (`summary.success`).
+  it("el subtítulo dice contra qué listón se colorea, sin explicar la cifra", () => {
+    expect(successParenthetical("0.870000", 95)).toBe("umbral 95,0 %");
   });
 
-  it("el verbo es «aguantar»: el éxito ya no es solo «no agotar el capital»", () => {
-    // §2.4: un camino falla por cartera vacía (F1), por tasa inicial (F2) o por regla corta (F3).
-    // Nombrar solo la primera describiría un tercio del contrato.
+  it("no vuelve a explicar lo que mide: eso vive en la ayuda", () => {
     const s = successParenthetical("0.870000", 95)!;
-    expect(s).toContain("aguantan");
-    expect(s).not.toContain("agotan");
+    expect(s).not.toContain("aguantan");
+    expect(s).not.toContain("escenarios");
   });
 
-  it("sin umbral conocido el subtítulo no se lo inventa", () => {
-    expect(successParenthetical("0.870000")).toBe("de los escenarios aguantan");
-    expect(successParenthetical("0.870000", null)).toBe("de los escenarios aguantan");
+  it("sin umbral conocido el subtítulo no se lo inventa: no hay subtítulo", () => {
+    expect(successParenthetical("0.870000")).toBeUndefined();
+    expect(successParenthetical("0.870000", null)).toBeUndefined();
   });
 
   // §2.5 / S5 — «100 %» es «0 fallos de N», y eso NO es certeza. La regla de tres publica la cota
   // del riesgo real y es la condición con la que el owner aceptó el umbral 100.
   it("en el 100 % publica el recuento exacto Y la cota de la regla de tres", () => {
     expect(successParenthetical("1", 100, 2500)).toBe(
-      "0 de 2500 escenarios fallan · el riesgo real puede llegar al 0,12 % · umbral 100,0 %",
+      "0 de 2500 fallan · riesgo ≤ 0,12 % · umbral 100,0 %",
     );
     // Recuento con la tipografía española de la casa: `es-ES` no agrupa a cuatro dígitos («2500»)
     // y sí a cinco («20.000»). Es un recuento, no un importe: nada de símbolo.
-    expect(successParenthetical("1", null, 20000)).toContain("0 de 20.000 escenarios fallan");
+    expect(successParenthetical("1", null, 20000)).toContain("0 de 20.000 fallan");
   });
 
   it("la cota de la regla de tres es 3/N, y no se redondea hasta desaparecer", () => {
@@ -286,18 +284,14 @@ describe("semáforo de éxito", () => {
     expect(successParenthetical("1", null, 10000)).toContain("0,03 %");
   });
 
-  it("sin tamaño de muestra (el Resumen no lo publica) cae a la frase genérica", () => {
-    expect(successParenthetical("1", 95)).toBe("de los escenarios aguantan · umbral 95,0 %");
-    expect(successParenthetical("1", 95, null)).toBe(
-      "de los escenarios aguantan · umbral 95,0 %",
-    );
-    expect(successParenthetical("1", 95, 0)).toBe("de los escenarios aguantan · umbral 95,0 %");
+  it("sin tamaño de muestra (el Resumen no lo publica) se queda en el umbral", () => {
+    expect(successParenthetical("1", 95)).toBe("umbral 95,0 %");
+    expect(successParenthetical("1", 95, null)).toBe("umbral 95,0 %");
+    expect(successParenthetical("1", 95, 0)).toBe("umbral 95,0 %");
   });
 
   it("un 99,99 % NO es el 100 % y por tanto no presume de cero fallos", () => {
-    expect(successParenthetical("0.999900", 95, 2500)).toBe(
-      "de los escenarios aguantan · umbral 95,0 %",
-    );
+    expect(successParenthetical("0.999900", 95, 2500)).toBe("umbral 95,0 %");
   });
 
   it("sin probabilidad no hay subtítulo que inventar", () => {
@@ -397,6 +391,16 @@ describe("filas que hacen auditable el éxito", () => {
   const byKey = (over: Partial<ProjectionBandsApi> = {}) =>
     Object.fromEntries(rowsOf(over).map((r) => [r.key, r]));
 
+  // 2026-10-10 — la precisión del sorteo era una frase suelta en la vista; ahora es una fila
+  // rótulo/valor y su significado (Wilson al 95 %) vive en `retirement.success`.
+  it("la precisión del sorteo es un VALOR corto: semiancho y caminos", () => {
+    const row = byKey()["sampling_precision"]!;
+    expect(row.label).toBe("Precisión del sorteo");
+    expect(row.value).toBe("±1,2 pp · 2500 caminos");
+    expect(row.helpId).toBe("retirement.success");
+    expect(row.value).not.toMatch(/Wilson|regla de tres/);
+  });
+
   // §2.4 — por qué falla el que falla. Sin esto, el éxito es un número sin causa.
   it("desglosa los fallos por tipo, con el orden fijo F1/F2/F3 y su denominador", () => {
     const rows = byKey({ failures_by_kind: [120, 30, 5], paths: 2500 });
@@ -448,7 +452,10 @@ describe("filas que hacen auditable el éxito", () => {
     expect(rows["withdrawal_to_need"]!.label).toBe(
       "Parte del gasto que la regla cubrió (mediana)",
     );
-    expect(rows["withdrawal_to_need"]!.detail).toContain("la cartera no dio");
+    // Las DOS causas (regla y cartera) las declara la ayuda `retirement.coverage`, no una
+    // segunda línea bajo la cifra (2026-10-10): la fila es rótulo + valor.
+    expect(rows["withdrawal_to_need"]!.helpId).toBe("retirement.coverage");
+    expect(rows["withdrawal_to_need"]).not.toHaveProperty("detail");
   });
 
   // V5: la tabla «agotar a los 65/70/…» se fue con el degradado de la banda, que dice lo mismo con
@@ -487,7 +494,7 @@ describe("filas que hacen auditable el éxito", () => {
     const row = byKey()["success_wilson_low"]!;
     expect(row.label).toBe("Con 95 % de confianza, al menos");
     expect(row.value).toBe("85,6 %");
-    expect(row.detail).toContain("se compara con tu umbral");
+    expect(row).not.toHaveProperty("detail");
     expect(row.helpId).toBe("retirement.success_threshold");
   });
 
@@ -531,10 +538,9 @@ describe("filas que hacen auditable el éxito", () => {
       const rows = noDate();
       expect(rows).toHaveLength(1);
       expect(rows[0]!.key).toBe("success_absent");
-      expect(rows[0]!.label).toBe("Sin éxito que auditar");
-      expect(rows[0]!.detail).toContain("no hay ninguna fecha que llegue a tu umbral");
-      // Ni un porcentaje, ni un recuento: el valor es un guion CON su motivo al lado.
-      expect(rows[0]!.value).toBe("—");
+      expect(rows[0]!.label).toBe("Sin éxito que medir");
+      // Ni un porcentaje, ni un recuento: el valor ES el motivo, en una línea.
+      expect(rows[0]!.value).toBe("ninguna fecha llega a tu umbral");
       expect(rows.some((r) => /%/.test(r.value))).toBe(false);
     });
 
@@ -548,6 +554,7 @@ describe("filas que hacen auditable el éxito", () => {
         "withdrawal_to_need",
         "failure_total",
         "success_wilson_low",
+        "sampling_precision",
       ]) {
         expect(keys, gone).not.toContain(gone);
       }
@@ -561,12 +568,12 @@ describe("filas que hacen auditable el éxito", () => {
 
     it("la otra razón alcanzable (sin fecha de nacimiento) tiene su propia frase", () => {
       const rows = noDate({ success_absent_reason: "birth_date_missing" });
-      expect(rows[0]!.detail).toBe("falta tu fecha de nacimiento");
+      expect(rows[0]!.value).toBe("falta tu fecha de nacimiento");
     });
 
     it("una razón futura no se traduce a una frase inventada", () => {
       const rows = noDate({ success_absent_reason: "algo_nuevo" as never });
-      expect(rows[0]!.detail).toBe("no disponible");
+      expect(rows[0]!.value).toBe("no disponible");
     });
   });
 
@@ -582,10 +589,10 @@ describe("filas que hacen auditable el éxito", () => {
 });
 
 describe("pie del panel", () => {
-  it("declara coste, caminos y semilla como STRING", () => {
+  it("declara coste y semilla como STRING (los caminos van en «Precisión del sorteo»)", () => {
     const note = riskFootnote(bandsFixture());
     expect(note).toContain("55 ms");
-    expect(note).toContain("2500 caminos");
+    expect(note).not.toContain("caminos");
     // La semilla es un u64: si alguien la pasara por `Number` perdería dígitos y el sorteo
     // dejaría de reproducirse. El pie tiene que enseñarla entera.
     expect(note).toContain("12345678901234567890");
@@ -631,7 +638,7 @@ describe("KPI «Éxito del plan» del Resumen", () => {
       absent_reason: null,
     })!;
     expect(tile.value).toBe("96,0 %");
-    expect(tile.parenthetical).toBe("de los escenarios aguantan · umbral 95,0 %");
+    expect(tile.parenthetical).toBe("umbral 95,0 %");
     expect(tile.tone).toBe("default");
     expect(tile.detail).toBeUndefined();
   });
@@ -780,9 +787,7 @@ describe("KPI «Éxito del plan» del Resumen", () => {
     })!;
     expect(tile.value).toBe("—");
     expect(tile.value).not.toMatch(/%/);
-    expect(tile.detail).toBe(
-      "no hay ninguna fecha que llegue a tu umbral, así que no hay éxito que medir",
-    );
+    expect(tile.detail).toBe("ninguna fecha llega a tu umbral");
     // Ni alarma ni calma: nada se ha roto (no ha llegado a empezar) y nada aguanta.
     expect(tile.tone).toBe("default");
     // Sin cifra no hay sujeto que subtitular en el paréntesis.

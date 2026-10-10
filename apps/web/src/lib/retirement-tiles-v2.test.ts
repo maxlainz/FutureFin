@@ -19,6 +19,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildRetirementTilesV2,
+  neededCapitalTile,
   retirementDetailRows,
   RETIREMENT_TILES_V2_CAP,
   type RetirementTileV2Series,
@@ -104,13 +105,13 @@ describe("las dos tarjetas FIJAS", () => {
     }
   });
 
-  it("«Capital necesario hoy» va en euros de HOY y lo dice, con el umbral como recuento", () => {
+  // 2026-10-10 — «en euros de hoy · para que aguanten N de cada 100» era la EXPLICACIÓN de la
+  // cifra: vive en su `<?>` (`retirement.needed_capital`), y la tarjeta es rótulo + cifra.
+  it("«Capital necesario hoy» es rótulo + cifra: la explicación vive en su ayuda", () => {
     const t = tile(input(), "needed_capital")!;
     expect(t.label).toBe("Capital necesario hoy");
     expect(t.value).toBe(eur("620.000"));
-    expect(t.subtitle).toBe(
-      "en euros de hoy · para que aguanten 95 de cada 100 escenarios",
-    );
+    expect(t.subtitle).toBeUndefined();
     expect(t.helpId).toBe("retirement.needed_capital");
   });
 
@@ -156,7 +157,8 @@ describe("las dos tarjetas FIJAS", () => {
     )!;
     expect(t.value).toBe("Ya cubierto");
     expect(t.value).not.toBe("—");
-    expect(t.subtitle).toBe("con lo que tienes hoy tu plan cumple el umbral");
+    // Qué significa «Ya cubierto» lo dice la ayuda; la tarjeta no lo repite debajo.
+    expect(t.subtitle).toBeUndefined();
     // Sigue siendo la primera tarjeta y sigue apuntando a la misma ayuda: lo que cambia es lo que
     // dice, no dónde está.
     expect(t.label).toBe("Capital necesario hoy");
@@ -175,23 +177,23 @@ describe("las dos tarjetas FIJAS", () => {
       "needed_capital",
     )!;
     expect(t.value).toBe("—");
-    expect(t.subtitle).not.toBe("con lo que tienes hoy tu plan cumple el umbral");
+    expect(t.subtitle).toBe("falta tu fecha de nacimiento");
   });
 
-  it("«Éxito del plan» lleva el umbral y la precisión del sorteo en el subtítulo", () => {
+  // 2026-10-10 — el umbral está en el formulario de al lado y la precisión del sorteo es una
+  // fila de «Las cifras del riesgo» (`buildRiskExtraRows`): la tarjeta es rótulo + cifra.
+  it("«Éxito del plan» es rótulo + cifra, sin umbral ni precisión debajo", () => {
     const t = tile(input(), "success")!;
     expect(t.label).toBe("Éxito del plan");
     // Los topes anti-mentira de `scenariosPerHundred` cuantizan a unidades de «de cada 100»:
-    // 0,952 se imprime «95,0 %», y la precisión real la declara el «±1,2 pp» de al lado.
+    // 0,952 se imprime «95,0 %».
     expect(t.value).toBe("95,0 %");
-    expect(t.subtitle).toBe("umbral 95,0 % · ±1,2 pp");
+    expect(t.subtitle).toBeUndefined();
     expect(t.helpId).toBe("retirement.success");
   });
 
-  it("sin precisión publicada el subtítulo se queda en el umbral, sin «±0,0 pp»", () => {
-    expect(tile(input({ success_sampling_error_pp: null }), "success")?.subtitle).toBe(
-      "umbral 95,0 %",
-    );
+  it("sin precisión publicada tampoco aparece un «±0,0 pp»", () => {
+    expect(tile(input({ success_sampling_error_pp: null }), "success")?.subtitle).toBeUndefined();
   });
 
   // A12 — el caso que rotulaba un porcentaje junto a un plan que no ocurre. Con `not_reachable`
@@ -217,11 +219,9 @@ describe("las dos tarjetas FIJAS", () => {
       expect(t.value).not.toContain("68");
     });
 
-    it("el subtítulo dice por qué falta, y conserva el umbral del perfil", () => {
+    it("el subtítulo dice por qué falta, como ESTADO de una línea", () => {
       const t = tile(noDate(), "success")!;
-      expect(t.subtitle).toBe(
-        "no hay ninguna fecha que llegue a tu umbral, así que no hay éxito que medir · umbral 95,0 %",
-      );
+      expect(t.subtitle).toBe("ninguna fecha llega a tu umbral");
     });
 
     it("sin color: el semáforo de un plan sin fecha es la ausencia de semáforo", () => {
@@ -233,7 +233,7 @@ describe("las dos tarjetas FIJAS", () => {
       // llegue al umbral — y es justo la cifra que dice cuánto falta.
       const t = tile(noDate(), "needed_capital")!;
       expect(t.value).toBe(eur("620.000"));
-      expect(t.subtitle).toContain("en euros de hoy");
+      expect(t.subtitle).toBeUndefined();
     });
   });
 
@@ -307,12 +307,36 @@ describe("the_third_tile_follows_the_strategy", () => {
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 describe("«Fecha válida» (asap)", () => {
-  it("el AÑO como cifra y la edad + el tramo en el subtítulo", () => {
-    const t = tile(input({ strategy: "asap" }), "safe_date")!;
+  it("el AÑO como cifra y, debajo, VALORES: la edad y las fechas al 100 % y al 90 %", () => {
+    const t = tile(
+      input({
+        strategy: "asap",
+        safe_date_at_100_month_index: 300,
+        safe_date_at_90_month_index: 150,
+      }),
+      "safe_date",
+    )!;
     expect(t.label).toBe("Fecha válida");
     expect(t.value).toBe("2043");
-    expect(t.subtitle).toBe("a los 55 años · dentro de 17 años");
+    // Las dos cotas salieron de la frase (2026-10-10): eran la mitad de su segunda oración.
+    expect(t.subtitle).toBe("55 años · 100 %: M300 · 90 %: M150");
+    // Ni el «dentro de N años» ni ninguna explicación: la fecha ya está en la cifra.
+    expect(t.subtitle).not.toContain("dentro de");
     expect(t.helpId).toBe("retirement.safe_date");
+  });
+
+  it("una cota `null` es «nunca», y una que la respuesta no trae no se pinta", () => {
+    expect(tile(input({ strategy: "asap" }), "safe_date")?.subtitle).toBe(
+      "55 años · 100 %: nunca · 90 %: nunca",
+    );
+    const { safe_date_at_100_month_index: _a, safe_date_at_90_month_index: _b, ...rest } =
+      series({ strategy: "asap" });
+    void _a;
+    void _b;
+    const t = buildRetirementTilesV2({ ...input(), series: rest as RetirementTileV2Series }).find(
+      (x) => x.key === "safe_date",
+    );
+    expect(t?.subtitle).toBe("55 años");
   });
 
   it("not_reachable_prints_nunca", () => {
@@ -329,7 +353,8 @@ describe("«Fecha válida» (asap)", () => {
     // «Nunca» y no un 0, ni un guion: ningún mes del horizonte cumple el umbral, y eso es una
     // respuesta.
     expect(t.value).toBe("Nunca");
-    expect(t.subtitle).toContain("ningún mes del horizonte");
+    // Qué significa «Nunca» lo dice la ayuda; debajo no hay nada que añadir.
+    expect(t.subtitle).toBeUndefined();
     expect(t.tone).toBe("danger");
   });
 
@@ -342,16 +367,16 @@ describe("«Fecha válida» (asap)", () => {
   it("sin edad resoluble no la inventa", () => {
     expect(
       tile(input({ strategy: "asap", safe_date_age: null }), "safe_date")?.subtitle,
-    ).toBe("dentro de 17 años");
+    ).toBe("100 %: nunca · 90 %: nunca");
   });
 
-  it("una fecha válida que ya llegó no se anuncia como «dentro de 0 meses»", () => {
+  it("una fecha válida que ya llegó dice el ESTADO «ya puedes jubilarte»", () => {
     expect(
       tile(
         input({ strategy: "asap", safe_date_month_index: 0, safe_date_age: 38 }),
         "safe_date",
       )?.subtitle,
-    ).toBe("a los 38 años · ya puedes jubilarte");
+    ).toBe("38 años · ya puedes jubilarte · 100 %: nunca · 90 %: nunca");
   });
 });
 
@@ -373,9 +398,8 @@ describe("«Aportación mínima» (retire_at_age)", () => {
     const t = contrib()!;
     expect(t.label).toBe("Aportación mínima");
     expect(t.value).toBe(eur("300"));
-    expect(t.subtitle).toBe(
-      `al mes, además de lo que ya aportas · de ${eur("1800")}/mes de sobrante`,
-    );
+    // El denominador como VALOR; «al mes, además de lo que ya aportas» vive en la ayuda.
+    expect(t.subtitle).toBe(`sobrante: ${eur("1800")}/mes`);
     expect(t.tone).toBe("default");
     expect(t.helpId).toBe("retirement.required_contribution");
   });
@@ -383,7 +407,7 @@ describe("«Aportación mínima» (retire_at_age)", () => {
   it("cero es «ya llegas», nunca un «0 €» que se leería como «no ahorres»", () => {
     const t = contrib({ contribution_required_monthly: "0.0000" })!;
     expect(t.value).toBe("Ya llegas");
-    expect(t.subtitle).toContain("con lo que ya aportas");
+    expect(t.subtitle).toBeUndefined();
     expect(t.tone).toBe("default");
   });
 
@@ -396,7 +420,8 @@ describe("«Aportación mínima» (retire_at_age)", () => {
     expect(t.value).toBe("Ni ahorrándolo todo");
     expect(t.value).not.toContain("1800");
     expect(t.tone).toBe("danger");
-    expect(t.subtitle).toContain("ni invirtiendo cada euro");
+    // El denominador sigue debajo: es lo que dice cuánto se probó.
+    expect(t.subtitle).toBe(`sobrante: ${eur("1800")}/mes`);
   });
 
   it("`contribution_underfunded: false` es «llegas», no «no aplica»", () => {
@@ -406,27 +431,27 @@ describe("«Aportación mínima» (retire_at_age)", () => {
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 describe("«Mes coast» (coast)", () => {
-  it("el mes del eje, con la edad y el tramo", () => {
+  it("el mes del eje, con la edad como valor", () => {
     const t = tile(input({ strategy: "coast", coast_stop_month_index: 84 }), "coast_month")!;
     expect(t.label).toBe("Mes coast");
     expect(t.value).toBe("M84");
-    expect(t.subtitle).toBe("a los 37 años · dentro de 7 años");
+    expect(t.subtitle).toBe("37 años");
     expect(t.helpId).toBe("retirement.coast_month");
   });
 
   it("un mes coast ya alcanzado no se anuncia como un plazo futuro", () => {
     expect(
       tile(input({ strategy: "coast", coast_stop_month_index: 0 }), "coast_month")?.subtitle,
-    ).toBe("a los 30 años · ya puedes dejar de aportar");
+    ).toBe("30 años · ya puedes dejar de aportar");
   });
 
-  it("sin edad resoluble el subtítulo se queda en el tramo", () => {
+  it("sin edad resoluble no hay subtítulo (nunca una edad inventada)", () => {
     expect(
       tile(
         input({ strategy: "coast", coast_stop_month_index: 84 }, { monthAge: undefined }),
         "coast_month",
       )?.subtitle,
-    ).toBe("dentro de 7 años");
+    ).toBeUndefined();
   });
 
   it("`coast_not_reachable` dice «No puedes parar nunca», no un guion", () => {
@@ -439,21 +464,21 @@ describe("«Mes coast» (coast)", () => {
       "coast_month",
     )!;
     expect(t.value).toBe("No puedes parar nunca");
-    expect(t.subtitle).toContain("ni aportando todos los meses");
+    expect(t.subtitle).toBeUndefined();
     expect(t.tone).toBe("danger");
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 describe("«Inicio de la jornada reducida» (partial)", () => {
-  it("el mes de arranque de la fase, con edad y tramo", () => {
+  it("el mes de arranque de la fase, con la edad como valor", () => {
     const t = tile(
       input({ strategy: "partial", partial_start_month_index: 120 }),
       "partial_start",
     )!;
     expect(t.label).toBe("Inicio de la jornada reducida");
     expect(t.value).toBe("M120");
-    expect(t.subtitle).toBe("a los 40 años · dentro de 10 años");
+    expect(t.subtitle).toBe("40 años");
     expect(t.helpId).toBe("retirement.partial_mode");
   });
 
@@ -481,7 +506,7 @@ describe("«Inicio de la jornada reducida» (partial)", () => {
       "partial_start",
     )!;
     expect(t.value).toBe("M120");
-    expect(t.subtitle).toContain("nunca llegas a jubilarte del todo");
+    expect(t.subtitle).toBe("40 años · nunca te jubilas del todo");
     expect(t.tone).toBe("danger");
   });
 });
@@ -543,13 +568,11 @@ describe("retirementDetailRows — lo que la cabecera ya no lleva", () => {
     expect(retirementDetailRows({ ...input(), series: null })).toEqual([]);
   });
 
-  it("el número FIRE clásico, con su rótulo completo y su ayuda", () => {
+  it("el número FIRE clásico, con su rótulo corto y su ayuda (la fórmula vive en ella)", () => {
     const r = retirementDetailRows(
       input({ fire_number_classic_today: "900000.0000" }),
     ).find((x) => x.key === "fire_number_classic")!;
-    expect(r.label).toBe(
-      "Número FIRE clásico (tu gasto anual ÷ tu tasa + lo que te queda de deuda, sin pensión)",
-    );
+    expect(r.label).toBe("Número FIRE clásico");
     expect(r.value).toBe(eur("900.000"));
     expect(r.helpId).toBe("retirement.fire_number_classic");
   });
@@ -563,7 +586,11 @@ describe("retirementDetailRows — lo que la cabecera ya no lleva", () => {
   it("las dos cotas de la fecha: al 100 % y al 90 %", () => {
     const by = Object.fromEntries(
       retirementDetailRows(
-        input({ safe_date_at_100_month_index: 300, safe_date_at_90_month_index: 168 }),
+        input({
+          strategy: "retire_at_age",
+          safe_date_at_100_month_index: 300,
+          safe_date_at_90_month_index: 168,
+        }),
       ).map((r) => [r.key, r]),
     );
     expect(by["safe_date_100"]!.label).toBe("Fecha al 100 %");
@@ -574,10 +601,18 @@ describe("retirementDetailRows — lo que la cabecera ya no lleva", () => {
 
   it("con el plan resuelto, una cota ausente es «nunca» — un resultado, no un hueco", () => {
     const by = Object.fromEntries(
-      retirementDetailRows(input()).map((r) => [r.key, r.value]),
+      retirementDetailRows(input({ strategy: "retire_at_age" })).map((r) => [r.key, r.value]),
     );
     expect(by["safe_date_100"]).toBe("nunca");
     expect(by["safe_date_90"]).toBe("nunca");
+  });
+
+  it("en `asap` las cotas NO bajan aquí: ya son la sublínea de «Fecha válida»", () => {
+    const ks = retirementDetailRows(
+      input({ strategy: "asap", safe_date_at_100_month_index: 300 }),
+    ).map((r) => r.key);
+    expect(ks).not.toContain("safe_date_100");
+    expect(ks).not.toContain("safe_date_90");
   });
 
   it("con el plan SIN resolver las cotas no se pintan: ahí `null` sí es «todavía no se sabe»", () => {
@@ -588,18 +623,10 @@ describe("retirementDetailRows — lo que la cabecera ya no lleva", () => {
     }
   });
 
-  it("semilla y caminos: sin ellos el éxito no tiene precisión declarada ni se reproduce", () => {
-    const r = retirementDetailRows(input()).find((x) => x.key === "seed_and_paths")!;
-    expect(r.label).toBe("Semilla y caminos");
-    // La semilla es un u64 y viaja como STRING: pasarla por `Number` perdería dígitos y el sorteo
-    // dejaría de reproducirse.
-    expect(r.value).toBe("2500 caminos · semilla 12345678901234567890");
-  });
-
-  it("sin sorteo (fecha por edad) no hay fila de semilla", () => {
-    expect(
-      retirementDetailRows(input({ seed: null, paths_used: null })).map((r) => r.key),
-    ).not.toContain("seed_and_paths");
+  it("«Semilla y caminos» ya no está aquí: la semilla vive en el pie de «Las cifras del riesgo»", () => {
+    // 2026-10-10: la fila duplicaba `riskFootnote` (semilla) y la fila «Precisión del sorteo»
+    // (caminos) de `buildRiskExtraRows`. Quedan uno de cada.
+    expect(retirementDetailRows(input()).map((r) => r.key)).not.toContain("seed_and_paths");
   });
 
   it("los avisos bajan aquí, con su tono y en su orden de precedencia", () => {
@@ -647,5 +674,36 @@ describe("retirementDetailRows — lo que la cabecera ya no lleva", () => {
       }),
     );
     expect(new Set(rows.map((r) => r.key)).size).toBe(rows.length);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 2026-10-10 — Proyección pinta «Capital necesario hoy» con `neededCapitalTile`, la MISMA función
+// que la cabecera de Jubilación. Tenía su propia sublínea («en euros de hoy · para que aguanten N
+// de cada 100»); este test impide que las dos tarjetas vuelvan a divergir.
+describe("neededCapitalTile — la tarjeta gemela de Proyección", () => {
+  const cases: Partial<RetirementTileV2Series>[] = [
+    {},
+    { needed_capital_today: null, needed_capital_absent_reason: "already_covered" },
+    { needed_capital_today: null, needed_capital_absent_reason: "no_liquid_assets" },
+    { plan_absent_reason: "birth_date_missing" },
+  ];
+  it("es idéntica a la primera tarjeta de Jubilación en todos los estados", () => {
+    for (const over of cases) {
+      const s = series(over);
+      expect(neededCapitalTile(s, EUR), JSON.stringify(over)).toEqual(
+        buildRetirementTilesV2(input(over))[0],
+      );
+    }
+  });
+
+  it("sin ausencia no hay sublínea; con ella, el ESTADO", () => {
+    expect(neededCapitalTile(series(), EUR).subtitle).toBeUndefined();
+    expect(
+      neededCapitalTile(
+        series({ needed_capital_today: null, needed_capital_absent_reason: "no_liquid_assets" }),
+        EUR,
+      ).subtitle,
+    ).toBe("sin activos líquidos que escalar");
   });
 });

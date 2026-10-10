@@ -8,6 +8,7 @@ import type {
   ProjectionSeriesApi,
 } from "../api/types";
 import { MetricCard } from "../components/MetricCard";
+import { neededCapitalTile } from "../lib/retirement-tiles";
 import { Switch } from "../components/Switch";
 import {
   METRIC_DASH,
@@ -184,15 +185,15 @@ export function ProjectionView({
    * **La cifra principal NO se toca con el toggle**: `needed_capital_today` viaja en euros de HOY
    * por contrato, redondeada a cientos hacia arriba, y es la MISMA, al euro, en Jubilación,
    * Resumen y Proyección. Deflactarla la haría discrepar de sus dos gemelas sin que nada fallara.
+   *
+   * Valor y estado salen de `neededCapitalTile` (`lib/retirement-tiles.ts`), la MISMA función que
+   * pinta la tarjeta de Jubilación (2026-10-10): aquí la sublínea decía «en euros de hoy · para que
+   * aguanten N de cada 100», que es la explicación de la cifra y vive en su `<?>`.
    */
-  const neededToday = useMemo(() => {
-    const raw = projectionSeries?.needed_capital_today;
-    return raw != null ? parseDisplayDecimal(raw) : null;
-  }, [projectionSeries?.needed_capital_today]);
-
-  /** El umbral del perfil, que es el SUJETO de la cifra: «capital necesario» no significa nada sin
-   *  decir necesario *para qué*. Eco de la respuesta; sin él el subtítulo se queda en la base. */
-  const thresholdOutOfHundred = projectionSeries?.success_threshold_pct ?? null;
+  const neededTile = useMemo(
+    () => (projectionSeries ? neededCapitalTile(projectionSeries, currencyIso) : null),
+    [projectionSeries, currencyIso],
+  );
 
   /**
    * La SEGUNDA línea del tile: el capital necesario en la fecha válida, leído de la curva en
@@ -303,22 +304,18 @@ export function ProjectionView({
                     label={isJubilacion ? "Capital necesario hoy" : "Hito"}
                     value={
                       isJubilacion
-                        ? neededToday !== null
-                          ? formatCurrencyNumber(neededToday, currencyIso)
-                          : METRIC_DASH
+                        ? (neededTile?.value ?? METRIC_DASH)
                         : formatProjectionMilestoneCompactLabel(m.target)
                     }
                     helpId={isJubilacion ? "retirement.needed_capital" : undefined}
-                    // La tarjeta DECLARA su base en vez de dejar que el lector la adivine del
-                    // estado del interruptor, y añade la lectura de la curva en la fecha válida
-                    // cuando el nivel 2 ya la ha resuelto: «hoy harían falta X; el día que te
-                    // jubiles, Y». Sin importe no se declara base.
+                    // Debajo, solo VALOR o ESTADO (2026-10-10): el motivo de una ausencia —el
+                    // mismo que en Jubilación— y la lectura de la curva en la fecha válida cuando
+                    // el nivel 2 ya la ha resuelto, con su base pegada al importe porque esa sí
+                    // sigue el interruptor.
                     detail={
-                      isJubilacion && neededToday !== null
+                      isJubilacion
                         ? [
-                            thresholdOutOfHundred != null
-                              ? `en euros de hoy · para que aguanten ${thresholdOutOfHundred} de cada 100`
-                              : "en euros de hoy",
+                            neededTile?.subtitle ?? null,
                             neededAtRetirement.amount !== null
                               ? `al jubilarte: ${formatCurrencyNumber(
                                   neededAtRetirement.amount,
@@ -331,7 +328,7 @@ export function ProjectionView({
                               : null,
                           ]
                             .filter((l): l is string => l !== null)
-                            .join(" · ")
+                            .join(" · ") || undefined
                         : undefined
                     }
                     parenthetical={`~${projectionXTickLabel(

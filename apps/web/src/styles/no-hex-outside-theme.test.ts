@@ -161,9 +161,10 @@ const RGBA_ZERO_EXCEPTIONS: ReadonlySet<string> = new Set([
   // menos. Que haya que tocar esto en cada movimiento —también hacia ARRIBA— es el precio
   // deliberado de cerrar la excepción por file+línea en vez de por patrón. La tanda de
   // «decluter» (2026-09-13) las empuja de 2396/2397 a 2431/2432: el segmentado, los controles
-  // subrayados y sus comentarios suman 35 líneas por encima.
-  "App.css:2431",
-  "App.css:2432",
+  // subrayados y sus comentarios suman 35 líneas por encima. La regla general de espaciado de
+  // banners (2026-10-10, `.banner` y `.app-global-errors`) las baja a 2473/2474.
+  "App.css:2473",
+  "App.css:2474",
 ]);
 
 function rgbaZeroHits(): Hit[] {

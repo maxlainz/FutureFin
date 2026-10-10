@@ -410,10 +410,26 @@
   border-radius: 0;
 }
 
+/* Los avisos globales: el hueco entre ellos lo pone el `gap` (0,5rem, el
+   mismo que entre banners hermanos en flujo) y el de debajo el propio
+   contenedor. Antes cada banner traía además su `margin-bottom` de 1rem,
+   que en flex no colapsa: 1,45rem entre dos avisos y 1rem en el resto
+   de la app. */
 .app-global-errors {
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
+  gap: 0.5rem;
+}
+
+/* Con `:has` en la lista: `.banner:has(+ .banner)` de más abajo tiene la
+   misma especificidad y, al ir después, ganaría. */
+.app-global-errors > .banner,
+.app-global-errors > .banner:has(+ .banner) {
+  margin: 0;
+}
+
+.app-global-errors:not(:empty) {
+  margin-bottom: 1rem;
 }
 
 .app-main {
@@ -1086,10 +1102,36 @@
 .banner {
   padding: 0.55rem 0.8rem;
   border-radius: 0.5rem;
-  margin-bottom: 1rem;
+  margin: 0 0 1rem;
   border: 1px solid var(--ff-line-soft);
   background: var(--ff-paper);
   color: var(--ff-ink);
+}
+
+/* Espaciado de banners — UNA regla para toda la app (2026-10-10).
+
+   - Debajo: 1rem hasta el bloque siguiente, el mismo ritmo que `.panel`.
+   - Encima, cuando sigue a un bloque que no es un banner: 0,75rem. En
+     flujo de bloque colapsa con el margen inferior del vecino (tras un
+     panel o una cabecera manda el suyo), así que solo se nota donde el
+     vecino no trae margen: una nota `muted tight`, el slot de altura
+     reservada de «Resultado» o la rejilla de dos columnas de
+     Jubilación — los tres sitios donde el banner quedaba a 0 px.
+   - Entre banners hermanos: 0,5rem, siempre el mismo.
+
+   Dentro de un contenedor flex/grid los márgenes no colapsan: ahí el
+   contenedor pone el hueco con `gap` y los banners van sin margen
+   (`.app-global-errors`, abajo). */
+* + .banner {
+  margin-top: 0.75rem;
+}
+
+.banner + .banner {
+  margin-top: 0;
+}
+
+.banner:has(+ .banner) {
+  margin-bottom: 0.5rem;
 }
 
 .error-banner {
@@ -4340,13 +4382,12 @@ fieldset.retirement-config-stack {
   color: var(--ff-ink);
 }
 
-.risk-extra-detail {
-  font-size: 0.74rem;
-  line-height: 1.3;
-  color: var(--ff-muted);
-}
+/* `.risk-extra-detail` (la segunda línea explicativa bajo una fila) se
+   retiró el 2026-10-10: las filas son rótulo + valor y lo que explicaban
+   vive en el `<?>` de su rótulo. */
 
-/* Pie del panel: coste, caminos y semilla. Letra pequeña de verdad —es
+/* Pie del panel: coste y semilla (los caminos van en la fila «Precisión
+   del sorteo»). Letra pequeña de verdad —es
    procedencia, no una cifra del plan— y `overflow-wrap` porque la
    semilla es un entero de 20 dígitos que no cabe a 360px. */
 .risk-footnote {

@@ -407,16 +407,16 @@ describe("U4 — la nota del porcentaje de la regla", () => {
     expect(withdrawalPctNote({ rule: rule(), swrPct: "3.5", pctSource: null })).toBeNull();
   });
 
-  it("sin porcentaje propio, la regla hereda el SWR y dice QUÉ es el SWR en v2", () => {
-    // Ya no es «tu tasa de retirada» a secas: en el modelo v2 el SWR es el tope de la TASA
-    // INICIAL, medida en la fecha de jubilación sobre el patrimonio líquido (C1).
+  it("sin porcentaje propio, la regla hereda el SWR y no hay nota: el slider ya lo enseña", () => {
+    // 2026-10-10: la nota repetía el porcentaje del slider con su explicación en prosa. Qué es
+    // el SWR en v2 (el tope de la tasa INICIAL, C1) lo dice la ayuda `settings.swr`.
     expect(
       withdrawalPctNote({
         rule: rule({ kind: "percent_of_balance" }),
         swrPct: "3.5",
         pctSource: "swr",
       }),
-    ).toBe("Retira el 3,5 %: lo máximo que sacas el primer año sobre tu líquido.");
+    ).toBeNull();
   });
 
   it("la híbrida mira `start_pct`, no `pct`", () => {
@@ -426,7 +426,7 @@ describe("U4 — la nota del porcentaje de la regla", () => {
         swrPct: "3.5",
         pctSource: "explicit",
       }),
-    ).toBe("Regla al 5,0 %, fijado por API.");
+    ).toBe("Fijado por API: 5,0 %");
   });
 
   it("un porcentaje ESCRITO se anuncia como fijado por API aunque el backend no publique la procedencia", () => {
@@ -438,7 +438,7 @@ describe("U4 — la nota del porcentaje de la regla", () => {
         swrPct: "3",
         pctSource: null,
       }),
-    ).toBe("Regla al 4,0 %, fijado por API.");
+    ).toBe("Fijado por API: 4,0 %");
   });
 
   it("un servidor que dice «lo heredé» manda sobre la heurística del valor", () => {
@@ -448,6 +448,6 @@ describe("U4 — la nota del porcentaje de la regla", () => {
         swrPct: "3",
         pctSource: "swr",
       }),
-    ).toBe("Retira el 3,0 %: lo máximo que sacas el primer año sobre tu líquido.");
+    ).toBeNull();
   });
 });

@@ -46,7 +46,7 @@ describe("infra-financiado — el único rojo", () => {
   });
 
   it("nombra la edad objetivo cuando se conoce", () => {
-    expect(notices({ contribution_underfunded: true }, 55)[0]!.text).toContain("55 años");
+    expect(notices({ contribution_underfunded: true }, 55)[0]!.text).toContain("a los 55");
   });
 
   it("sin edad conocida el rojo sigue saliendo, sin inventarse una cifra", () => {
@@ -115,24 +115,26 @@ describe("los avisos del modelo v2", () => {
     const n = notices({ warnings: ["no_volatility_declared"] })[0]!;
     expect(n.code).toBe("no_volatility_declared");
     expect(n.tone).toBe("warn");
-    expect(n.text).toContain("el sorteo no dispersa");
     expect(n.text).toContain("no mide riesgo");
+    // Por qué (sin σ los caminos no se dispersan) lo dice la ayuda del éxito: el aviso es UNA
+    // línea con verbo (2026-10-10).
+    expect(n.text).not.toContain("dispersa");
   });
 
-  it("la migración de «Puente hasta la pensión» pide REVISARLO, no solo lo informa", () => {
-    // C7: el literal `pension_bridge` dejó de ser estrategia y lo guardado migró solo. Callarlo
-    // cambiaría el plan de alguien sin decírselo.
-    const n = notices({ warnings: ["strategy_pension_bridge_migrated"] })[0]!;
-    expect(n.code).toBe("strategy_pension_bridge_migrated");
-    expect(n.text).toContain("«Puente hasta la pensión»");
-    expect(n.text).toContain("«Cuanto antes»");
-    expect(n.text).toContain("revísalo");
+  it("la migración de «Puente hasta la pensión» NO se avisa: era código de un solo uso", () => {
+    // C7 migró `pension_bridge` a «FIRE clásico» + puente, y el servidor sigue emitiendo el
+    // literal. El owner retiró el banner (2026-10-10): el cambio vive en el CHANGELOG, y la SPA
+    // ignora el literal en todas partes.
+    expect(codes({ warnings: ["strategy_pension_bridge_migrated"] })).toEqual([]);
   });
 
-  it("la edad objetivo que falta: el plan degrada a «Cuanto antes» y se dice", () => {
+  it("la edad objetivo que falta: el plan degrada a FIRE clásico y se dice", () => {
     expect(codes({ warnings: ["target_retirement_age_missing"] })).toEqual([
       "target_retirement_age_missing",
     ]);
+    expect(notices({ warnings: ["target_retirement_age_missing"] })[0]!.text).toContain(
+      "FIRE clásico",
+    );
   });
 });
 
@@ -197,14 +199,16 @@ describe("precedencia y forma", () => {
         "partial_never_fully_retires",
         "pension_unpaid_during_partial",
         "no_volatility_declared",
-        "strategy_pension_bridge_migrated",
         "target_retirement_age_missing",
       ],
     });
-    expect(all).toHaveLength(8);
+    expect(all).toHaveLength(7);
     for (const n of all) {
       expect(["danger", "warn"], n.code).toContain(n.tone);
-      expect(n.text.length, n.code).toBeGreaterThan(40);
+      expect(n.text.length, n.code).toBeGreaterThan(30);
+      // UNA línea con verbo (2026-10-10): el porqué vive en la ayuda de la cifra afectada.
+      expect(n.text.length, `${n.code}: ya no es una línea`).toBeLessThanOrEqual(90);
+      expect(n.text.split(". ").length, `${n.code}: más de una oración`).toBe(1);
     }
     // Los códigos son keys de React en el «Detalle»: no puede haber dos iguales.
     expect(new Set(all.map((n) => n.code)).size).toBe(all.length);

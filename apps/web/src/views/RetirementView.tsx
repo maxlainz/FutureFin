@@ -148,12 +148,10 @@ import {
 } from "../lib/retirement-chart";
 import {
   buildRiskExtraRows,
-  formatSamplingErrorPp,
   riskFootnote,
   scenariosPerHundred,
   showsNoVolatilityNotice,
   showsRiskGradient,
-  successAbsentReasonEs,
 } from "../lib/risk-bands";
 import {
   failureKindsAtMonth,
@@ -287,7 +285,6 @@ export function RetirementView({
   user,
   calendarTz,
   scopeReadOnly,
-  householdMemberCount,
   onSaveRetirementProfile,
   onSelectMineScope,
   navigate,
@@ -319,10 +316,6 @@ export function RetirementView({
   calendarTz: string;
   /** Vista Hogar (D9/D32): agregado de solo lectura — el plan se edita desde la vista «Yo». */
   scopeReadOnly: boolean;
-  /** Nº de miembros del hogar (`GET /v1/installation/members`, carga de `App.tsx`). `null` =
-   *  aún no ha llegado. Solo alimenta el aviso B10 (el gasto manual pre-5.0.0 venía del HOGAR;
-   *  con un único miembro nunca hubo ambigüedad que revisar). */
-  householdMemberCount: number | null;
   /** Guarda un PATCH mínimo y devuelve el perfil YA resuelto por el servidor. */
   onSaveRetirementProfile: (
     patch: RetirementProfilePatchApi,
@@ -549,56 +542,6 @@ export function RetirementView({
     [onSaveRetirementProfile],
   );
 
-  // ── B10 · el gasto manual venía del HOGAR en 4.x, ahora es solo tuyo ──────────────────────
-  //
-  // `fire_number_mode: "manual"` era, antes de 5.0.0, un campo de `fire_settings` (owner-only,
-  // compartido por todo el hogar); con D13 pasó a `RetirementProfile` (personal, uno por
-  // usuario). Un hogar de 2+ personas que ya tenía un importe manual guardado se encuentra, sin
-  // avisarle, con que la cifra que veía como «la del hogar» ahora es solo la suya — y puede ser
-  // la MISMA cifra copiada a cada miembro por la migración, no lo que cada uno querría declarar
-  // por separado. Con un único miembro no hubo agregación que deshacer: el aviso no aplica.
-  //
-  // Bandera de localStorage por instalación+usuario (aceptable per WP): no hay endpoint que
-  // registre «ya lo revisé», así que se apaga en cuanto el usuario TOCA el campo — editarlo es
-  // la señal de que ya lo ha mirado, se quede como estaba o no.
-  const manualAmountMigrationKey = useMemo(() => {
-    const instId = installation?.installation.id;
-    const uid = user?.id;
-    return instId && uid
-      ? `ff.retirement.fire-number-manual-migrated.v1.${instId}.${uid}`
-      : null;
-  }, [installation?.installation.id, user?.id]);
-
-  const [manualAmountMigrationAcked, setManualAmountMigrationAcked] = useState(false);
-  useEffect(() => {
-    if (!manualAmountMigrationKey) {
-      setManualAmountMigrationAcked(false);
-      return;
-    }
-    try {
-      setManualAmountMigrationAcked(
-        window.localStorage.getItem(manualAmountMigrationKey) === "1",
-      );
-    } catch {
-      setManualAmountMigrationAcked(false);
-    }
-  }, [manualAmountMigrationKey]);
-
-  const ackManualAmountMigration = useCallback(() => {
-    setManualAmountMigrationAcked(true);
-    if (!manualAmountMigrationKey) return;
-    try {
-      window.localStorage.setItem(manualAmountMigrationKey, "1");
-    } catch {
-      /* sin storage, el aviso simplemente reaparece la próxima vez */
-    }
-  }, [manualAmountMigrationKey]);
-
-  const showManualAmountMigrationNotice =
-    profileDraft.fire_number_mode === "manual" &&
-    (householdMemberCount ?? 0) > 1 &&
-    !manualAmountMigrationAcked;
-
   // ── Stale-while-revalidate: lo último bueno se sigue pintando (W13) ───────────────────────
   //
   // El informe del owner (2026-09-07): «durante el cálculo la GUI parpadea constantemente… si
@@ -797,12 +740,12 @@ export function RetirementView({
   );
   /**
    * TODOS los avisos suben al panel de resultado, cada uno con su piel: el rojo de D17 como
-   * `error-banner` y los ámbar —`strategy_pension_bridge_migrated`, `no_volatility_declared`,
-   * `coast_not_reachable`…— como `info-banner`.
+   * `error-banner` y los ámbar —`no_volatility_declared`, `coast_not_reachable`…— como
+   * `info-banner`. (`strategy_pension_bridge_migrated` ya no: aviso de migración de un solo uso,
+   * retirado de la SPA el 2026-10-10 — va al CHANGELOG.)
    *
    * Antes solo subía el rojo y el resto se leía en el «Detalle» plegado, que es donde nadie mira
-   * cuando la cifra de arriba le acaba de cambiar sola: un perfil migrado desde la estrategia
-   * retirada `pension_bridge` (C7) tiene que enterarse en la primera pantalla, no al desplegar.
+   * cuando la cifra de arriba le acaba de cambiar sola.
    * Como contrapartida, las filas `notice:` de `retirementDetailRows` se filtran abajo: contarlo
    * dos veces en la misma pantalla es ruido.
    */
@@ -1507,22 +1450,15 @@ export function RetirementView({
               inputMode="decimal"
               placeholder="p. ej. 24000"
               value={profileDraft.fire_number_manual_amount ?? ""}
-              onChange={(e) => {
-                ackManualAmountMigration();
+              onChange={(e) =>
                 patchDraft((p) => ({
                   ...p,
                   fire_number_manual_amount: typedDecimalOrNull(e.target.value),
-                }));
-              }}
+                }))
+              }
               onBlur={() => queueProfileSave(0)}
             />
             {missing ? <RequiredHint /> : null}
-            {/* B10 — el importe manual venía del HOGAR en 4.x; con 5.0.0 es solo tuyo. */}
-            {showManualAmountMigrationNotice ? (
-              <p className="muted tight">
-                Este importe venía del hogar en 4.x y ahora es solo tuyo: revísalo.
-              </p>
-            ) : null}
           </label>
         );
 
@@ -1707,8 +1643,8 @@ export function RetirementView({
               </span>
               {(
                 [
-                  ["ceiling", "Techo: retiro como mucho la regla"],
-                  ["rule_is_spend", "La regla es mi gasto"],
+                  ["ceiling", "Techo"],
+                  ["rule_is_spend", "Es mi gasto"],
                 ] as const
               ).map(([mode, text]) => (
                 <label className="field checkbox-field" key={mode}>
@@ -1828,25 +1764,18 @@ export function RetirementView({
     }
   };
 
-  /** «1.250 €/mes · 15.000 €/año · del presupuesto» — la cifra que el modo elegido DERIVA, con
-   *  su procedencia pegada. Sin la procedencia, dos hogares con el mismo número creen estar
-   *  mirando lo mismo cuando uno lee su presupuesto y el otro su histórico real. */
+  /** «1.250 €/mes · 15.000 €/año» — la cifra que el modo elegido DERIVA, como VALOR. De qué
+   *  sale (presupuesto o promedio real, según tu modo de ahorro) lo dice el `<?>` del apartado
+   *  (`retirement.section_spending`) desde 2026-10-10: pegado a la cifra era prosa. */
   function derivedSpendLine(): string {
-    if (!spendBaseReady) return "Calculando la base…";
+    if (!spendBaseReady) return "Calculando…";
     const usingIncome = profileDraft.fire_number_mode === "current_income";
     const monthly = parseDisplayDecimal(String((usingIncome ? fireIncomeM : fireExpenseM) ?? ""));
-    if (monthly == null || !Number.isFinite(monthly)) return "Sin base declarada todavía.";
-    const source = usingIncome
-      ? savingsAvgActive
-        ? "promedio de tus ingresos reales"
-        : "de tus ingresos del presupuesto"
-      : savingsAvgActive
-        ? "promedio de tus gastos reales"
-        : "de tus partidas de jubilación del presupuesto";
+    if (monthly == null || !Number.isFinite(monthly)) return "Sin base declarada.";
     return `${formatCurrencyNumber(monthly, currencyIso)}/mes · ${formatCurrencyNumber(
       monthly * 12,
       currencyIso,
-    )}/año · ${source}`;
+    )}/año`;
   }
 
   /**
@@ -1960,11 +1889,9 @@ export function RetirementView({
            invitaba justo a lo contrario: comparar el «ahorro necesario» de dos personas con
            edades objetivo distintas, que no es una comparación. */
         <section className="panel">
+          {/* Sin párrafo de «vista agregada · solo lectura»: lo dice el banner de la barra de
+              ámbito, y aquí era la misma explicación por segunda vez (2026-10-10). */}
           <h3 className="panel-title">Planes del hogar</h3>
-          <p className="muted tight">
-            Vista agregada · solo lectura. El plan de jubilación es de cada persona: el hogar no
-            tiene una estrategia propia.
-          </p>
           {memberLines.length > 0 ? (
             <ul className="household-plan-lines bordered-top">
               {/* B7 — cada línea lleva el TONO de esa persona. Sin él, un miembro
@@ -2009,8 +1936,8 @@ export function RetirementView({
               Sin banner de alta (F5: con una estrategia ya elegida, «Elige tu estrategia» es un
               cartel que sobra — y el flag de `localStorage` que lo descartaba nunca miraba el
               perfil, así que reaparecía en cada navegador nuevo) y sin acordeón «Avanzado» (F10:
-              «un cajón de sastre mal explicado»). Cada panel abre con una frase de QUÉ hace y
-              qué implica tocarlo; los campos son exactamente los mismos de la tabla U2.
+              «un cajón de sastre mal explicado»). Cada panel es rótulo + controles; lo que hace y
+              qué implica tocarlo vive en el `<?>` de su título (tabla U2 para los campos).
 
               Hasta aquí los seis temas eran tarjetas con borde DENTRO de un panel «Tu plan»: una
               caja dentro de otra caja, un anidamiento que no existe en ninguna otra pantalla
@@ -2148,8 +2075,7 @@ export function RetirementView({
 
             {installationInflationPct <= 0 ? (
               <div className="banner info-banner">
-                Con la inflación a 0 %, tu gasto de jubilación se queda plano en dinero de hoy:
-                la fecha que ves puede ser optimista frente a lo que costará vivir entonces.{" "}
+                Con la inflación al 0 %, tu fecha puede ser optimista.{" "}
                 <a
                   href={appUrl(settingsSubTabPath("plan"))}
                   onClick={(e) => {
@@ -2221,7 +2147,15 @@ export function RetirementView({
               las cifras de debajo son su lectura: separarlos en dos paneles habría partido una
               sola idea en dos. El título sube al panel; el `<h4>` interior desaparece. */}
           <section className="panel">
-            <h3 className="panel-title">Riesgo</h3>
+            {/* La ayuda de la banda cuelga del TÍTULO del panel (2026-10-10): antes era una fila
+                «Cómo leer la banda» con su párrafo dentro de «Detalle del cálculo». */}
+            <h3 className="panel-title label-with-help">
+              Riesgo
+              <HelpPopover
+                title={HELP_TEXTS["retirement.bands"].title}
+                body={HELP_TEXTS["retirement.bands"].body}
+              />
+            </h3>
 
             {/* U5 — UN gráfico: patrimonio, capital necesario, banda de escenarios, la marca de
                 tu fecha y los hitos del plan, todos sobre el mismo eje y hasta el horizonte.
@@ -2278,7 +2212,7 @@ export function RetirementView({
                      «En dinero de hoy» mueve el eje entero. */
                   yAxis={{ currencyIso }}
                   bandGradient={gradientStops}
-                  bandEdgeLabels={{ p10: "pesimista (p10)", p90: "optimista (p90)" }}
+                  bandEdgeLabels={{ p10: "p10", p90: "p90" }}
                   hoverLabel={chartHoverLabel}
                 />
                 <ChartLegend
@@ -2352,12 +2286,9 @@ export function RetirementView({
                 {gradientStops.length > 1 ? (
                   <p className="retirement-risk-scale">
                     <span className="label-with-help">
-                      <strong>Banda 10–90 %</strong>
+                      <strong>Escenarios que fallan</strong>
                       <HelpFor id={RESULT_HELP.failureByAge.helpId} />
                     </span>{" "}
-                    · el color dice qué parte de los escenarios ya ha fallado a esa edad —se
-                    quedaron sin dinero, se pasaron de tasa inicial o su regla no cubrió el
-                    gasto:{" "}
                     {(
                       [
                         [0, "ninguno"],
@@ -2421,8 +2352,7 @@ export function RetirementView({
                       su desglose justo cuando más hace falta explicarlo. */}
                   {noVolatilityInRiskBlock ? (
                     <div className="banner info-banner">
-                      Sin volatilidad declarada: la banda es la línea y el éxito no mide riesgo.
-                      Añade la volatilidad anual a tus activos.{" "}
+                      Sin volatilidad declarada, el éxito no mide riesgo.{" "}
                       <a
                         href={appUrl(TAB_PATH.assets)}
                         onClick={(e) => {
@@ -2432,43 +2362,16 @@ export function RetirementView({
                           navigate(TAB_PATH.assets);
                         }}
                       >
-                        Ir a Activos
+                        Añade la volatilidad a tus activos
                       </a>
                       .
                     </div>
                   ) : null}
                   {/* El KPI «Éxito del plan» ya vive en la CABECERA (`buildRetirementTilesV2`,
-                      tile #2, siempre presente). Aquí no se repite la tarjeta: repetirla es
-                      cómo la misma pantalla acaba enseñando dos cifras del mismo sorteo. Lo que
-                      queda es lo que la cabecera no lleva — la precisión, las filas de detalle y
-                      la nota de coste/semilla. */}
-                  {/* La PRECISIÓN de la cifra de al lado, con los números del servidor y sin
-                      aritmética de cliente: el semiancho de Wilson y el tamaño de la muestra.
-                      Sin ella, un 95,0 % se lee como exacto cuando lo que hay es un intervalo —
-                      y con 0 fallos ni siquiera hay intervalo, sino la cota de la regla de tres
-                      que la propia tarjeta ya cita en su subtítulo.
-
-                      Con `success_absent_reason` (A12) no hay cifra que acotar: el sorteo publica
-                      `success_sampling_error_pp: null` y la línea de siempre imprimiría «Precisión
-                      del sorteo: — sobre 2500 caminos», un guion mudo que se lee como «el dato no
-                      ha llegado» cuando lo cierto es que la pregunta no tiene respuesta. Se
-                      sustituye por el MOTIVO, que es lo único que se puede afirmar. */}
-                  {shownBands.success_absent_reason != null ? (
-                    <p className="muted tight">
-                      Sin éxito que medir:{" "}
-                      {successAbsentReasonEs(shownBands.success_absent_reason)}. Los{" "}
-                      {shownBands.paths} caminos sorteados describen tu patrimonio sin
-                      jubilarte: la banda sigue siendo tuya, pero no hay ningún plan al que
-                      ponerle una probabilidad.
-                    </p>
-                  ) : (
-                    <p className="muted tight">
-                      Precisión del sorteo:{" "}
-                      {formatSamplingErrorPp(shownBands.success_sampling_error_pp)} sobre{" "}
-                      {shownBands.paths} caminos (intervalo de Wilson al 95 %; con cero
-                      fallos, la cota de la regla de tres).
-                    </p>
-                  )}
+                      tile #2): aquí no se repite. Lo que queda es lo que la cabecera no lleva —la
+                      precisión del sorteo, las filas de detalle y el pie de coste/semilla—, todo
+                      como filas rótulo/valor de `buildRiskExtraRows` (2026-10-10: la precisión y
+                      el «sin éxito que medir» eran dos frases sueltas aquí). */}
                   {/* Lo que hace AUDITABLE el número grande: por qué falla el que falla, cuánto
                       se apretó el cinturón el que aguantó. Antes vivían en el «Detalle»
                       plegado, que es donde nadie mira cuando la cifra de arriba no le cuadra. */}
@@ -2492,9 +2395,6 @@ export function RetirementView({
                             </span>
                             <span className="risk-extra-value">{r.value}</span>
                           </div>
-                          {r.detail ? (
-                            <span className="risk-extra-detail">{r.detail}</span>
-                          ) : null}
                         </div>
                       ))}
                     </div>
@@ -2540,23 +2440,6 @@ export function RetirementView({
                       </div>
                     </div>
                   ))}
-                  {shownBands ? (
-                    <div className="risk-extra-row">
-                      <div className="risk-extra-head">
-                        <span className="label-with-help risk-extra-label">
-                          Cómo leer la banda
-                          <HelpPopover
-                            title={HELP_TEXTS["retirement.bands"].title}
-                            body={HELP_TEXTS["retirement.bands"].body}
-                          />
-                        </span>
-                      </div>
-                      <span className="risk-extra-detail">
-                        Bandas puntuales: cada mes se ordena por separado, así que el borde de la
-                        banda no es un futuro concreto.
-                      </span>
-                    </div>
-                  ) : null}
                 </div>
               </details>
             </section>

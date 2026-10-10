@@ -43,7 +43,7 @@ import type {
   RetirementStrategyApi,
 } from "../api/types";
 import type { CoastModeApi } from "../api/types";
-import { formatCurrencyAmount } from "./format";
+import { formatCurrencyAmount, formatPercentDisplay } from "./format";
 import { RETIREMENT_STRATEGY_LABEL } from "./retirementProfile";
 import { scenariosPerHundred } from "./risk-bands";
 
@@ -211,12 +211,11 @@ function meetsThresholdOf(s: PlanSentenceSeries): boolean | null {
  *  qué falta el plan. La frase estaba escrita y no se podía leer nunca. */
 const ABSENT_ES: Record<PlanAbsentReason, { text: string; tone: PlanSentenceTone }> = {
   birth_date_missing: {
-    text:
-      "Falta tu fecha de nacimiento para situar la pensión y el horizonte: sin ella no hay fecha válida.",
+    text: "Falta tu fecha de nacimiento.",
     tone: "danger",
   },
   months_override: {
-    text: "Esta simulación usa un horizonte forzado, así que no resuelve tu fecha válida.",
+    text: "Horizonte forzado: sin fecha válida.",
     tone: "warn",
   },
   // **El literal del hogar es `household_aggregate`** (A12). La tabla decía
@@ -225,21 +224,24 @@ const ABSENT_ES: Record<PlanAbsentReason, { text: string; tone: PlanSentenceTone
   // la vista caía al genérico «Tu plan no tiene fecha válida», que además dice otra cosa — el
   // hogar no es que no llegue, es que no tiene UN plan.
   household_aggregate: {
-    text: "El hogar no resuelve una fecha: mira la de cada persona en su vista «Yo».",
+    text: "El hogar no tiene plan propio.",
     tone: "warn",
   },
 };
 
 /**
- * La oración del plan, una por estrategia (modelo v2, §4 del documento del modelo).
+ * La oración del plan, una por estrategia (modelo v2, §4 del documento del modelo). **UNA línea
+ * corta, nunca una explicación** (owner, 2026-10-10: «pregunta–respuesta»): el éxito, el umbral y
+ * las fechas al 100/90 % son cifras de las tarjetas de al lado, y lo que significan vive en el
+ * `<?>` de «Resultado» (`retirement.plan_sentence`).
  *
  * | Estrategia | Frase |
  * |---|---|
- * | `asap` | «Con tu plan te jubilas en 2043 (a los 55): aguantan 95 de cada 100 escenarios. Al 100 % sería 2051; al 90 %, 2040.» |
- * | `retire_at_age` | «A los 55, como pediste: aguantan 82 de cada 100 escenarios (tu umbral es 95). Para llegar harían falta 300 € más al mes.» |
- * | `coast` A | «Puedes dejar de aportar en 2031 (a los 41) y jubilarte a los 55 con 95 de cada 100.» |
- * | `coast` B | «Dejando de aportar a los 41, te jubilas en 2047 (a los 57) con 95 de cada 100.» |
- * | `partial` | «Puedes pasar a jornada reducida en 2031 (a los 41) y jubilarte del todo en 2045 (a los 55) con 95 de cada 100.» |
+ * | `asap` | «Te jubilas en 2043 (55 años).» |
+ * | `retire_at_age` | «A los 55: te faltan 300 €/mes.» · «A los 55: llegas.» |
+ * | `coast` A | «Dejas de aportar en 2031 (41 años); te jubilas a los 55.» |
+ * | `coast` B | «Dejas de aportar a los 41; te jubilas en 2047 (57 años).» |
+ * | `partial` | «Jornada reducida en 2031 (41 años); jubilación total en 2045 (55 años).» |
  *
  * Y dos estados que ganan a la estrategia, en este orden: **el bloque «plan» ausente**
  * (`plan_absent_reason`, con `birth_date_missing` a la cabeza) y **`not_reachable`** (ningún mes
@@ -321,13 +323,9 @@ export function planSentence(input: PlanSentenceInput): PlanSentence {
 
   const done = (text: string, tone: PlanSentenceTone): PlanSentence => ({ text, tone, parts });
 
-  /** «2043 (a los 55)» — sin edad publicada, solo la fecha; en modo edades el rótulo ya la lleva. */
+  /** «2043 (55 años)» — sin edad publicada, solo la fecha; en modo edades el rótulo ya la lleva. */
   const when = (mi: number, age: number | null): string =>
-    age != null && !ages ? `${label(mi)} (a los ${age})` : label(mi);
-
-  /** « con 95 de cada 100» — vacío cuando no hay sorteo que citar. */
-  const withScenarios =
-    outOfHundred == null ? "" : ` con ${outOfHundred} de cada 100`;
+    age != null && !ages ? `${label(mi)} (${age} años)` : label(mi);
 
   /** El tono base de una frase que SÍ tiene fecha: rojo si no se llega ni ahorrándolo todo,
    *  ámbar si el plan no cumple su umbral, verde si lo cumple (o no hay con qué juzgarlo). */
@@ -338,7 +336,7 @@ export function planSentence(input: PlanSentenceInput): PlanSentence {
   if (absentReason != null) {
     const copy = ABSENT_ES[absentReason];
     if (copy) return done(copy.text, copy.tone);
-    return done("Tu plan no tiene fecha válida.", "warn");
+    return done("Sin fecha válida.", "warn");
   }
   // La rama `basis === "pending"` («Calculando tu fecha…») se retiró en A12: **el servidor nunca
   // emitió ese literal**. El nivel 1 del solve se resuelve en línea, dentro del permiso de la
@@ -346,58 +344,44 @@ export function planSentence(input: PlanSentenceInput): PlanSentence {
   // llega tarde es el nivel 2 (`needed_capital_curve_state`), y no cambia ni una palabra de esta
   // frase — solo la curva del chart.
   if (basis === "not_reachable") {
-    const u = threshold ?? 95;
-    const horizon = idx(s.horizon_lifespan_age);
-    const head = horizon != null
-      ? `Con tu plan no hay ninguna fecha en la que aguanten ${u} de cada 100 escenarios hasta los ${horizon} años.`
-      : `Con tu plan no hay ninguna fecha en la que aguanten ${u} de cada 100 escenarios hasta el final de tu horizonte.`;
+    const head = `Ninguna fecha llega a tu umbral del ${formatPercentDisplay(threshold ?? 95)}`;
     const best = bestRetirementYear(s.success_by_retirement_year);
-    if (best == null) return done(head, "danger");
-    const bestN = scenariosPerHundred(best.success);
-    if (bestN == null) return done(head, "danger");
-    return done(`${head} Lo más cerca: ${label(best.month_index)} con ${bestN} de cada 100.`, "danger");
+    const bestN = best == null ? null : scenariosPerHundred(best.success);
+    if (best == null || bestN == null) return done(`${head}.`, "danger");
+    return done(
+      `${head}; lo más cerca: ${label(best.month_index)}, ${bestN} de cada 100.`,
+      "danger",
+    );
   }
 
   switch (strategy) {
     // ── «Jubilarme a una edad»: la edad manda y el sorteo la juzga ────────────────────────────
     case "retire_at_age": {
       if (requestedAge == null) {
-        return done("Falta tu edad de jubilación objetivo.", "warn");
+        return done("Falta tu edad de jubilación.", "warn");
       }
-      const head =
-        outOfHundred == null
-          ? `A los ${requestedAge}, como pediste.`
-          : threshold == null
-            ? `A los ${requestedAge}, como pediste: aguantan ${outOfHundred} de cada 100 escenarios.`
-            : `A los ${requestedAge}, como pediste: aguantan ${outOfHundred} de cada 100 escenarios (tu umbral es ${threshold}).`;
-
+      const head = `A los ${requestedAge}`;
       if (underfunded === true) {
-        return done(
-          `${head} Ni ahorrando todo tu sobrante llegas a los ${requestedAge}.`,
-          "danger",
-        );
+        return done(`${head}: no llegas ni ahorrándolo todo.`, "danger");
       }
       if (meets === false) {
         const extra = s.contribution_required_monthly;
         if (extra != null) {
-          return done(
-            `${head} Para llegar harían falta ${formatCurrencyAmount(extra, currency)} más al mes.`,
-            "warn",
-          );
+          return done(`${head}: te faltan ${formatCurrencyAmount(extra, currency)}/mes.`, "warn");
         }
-        return done(head, "warn");
+        return done(`${head}: no llegas a tu umbral.`, "warn");
       }
-      // Ya llega: la fecha válida al lado dice cuánto margen hay («podrías incluso a los 47»).
+      // Ya llega: la fecha válida al lado dice cuánto margen hay («podrías a los 47»).
       if (safeMi != null && jubMi != null && safeMi < jubMi) {
         const safeAge = idx(s.safe_date_age);
         return done(
           safeAge != null
-            ? `${head} Ya llegas: podrías incluso a los ${safeAge}.`
-            : `${head} Ya llegas: podrías incluso en ${label(safeMi)}.`,
+            ? `${head}: llegas (podrías a los ${safeAge}).`
+            : `${head}: llegas (podrías en ${label(safeMi)}).`,
           "ok",
         );
       }
-      return done(`${head} Ya llegas.`, "ok");
+      return done(`${head}: llegas.`, "ok");
     }
 
     // ── «Coast FIRE»: el hito es el mes en que dejas de aportar ───────────────────────────────
@@ -405,13 +389,13 @@ export function planSentence(input: PlanSentenceInput): PlanSentence {
       if (warned.has("coast_not_reachable")) {
         return done(
           requestedAge != null
-            ? `Ni aportando hasta el final llegas a los ${requestedAge} con tu umbral.`
-            : "Ni aportando hasta el final llegas a tu edad objetivo con tu umbral.",
+            ? `No llegas a los ${requestedAge} ni aportando siempre.`
+            : "No llegas a tu edad objetivo ni aportando siempre.",
           "danger",
         );
       }
       if (coastMi == null) {
-        return done("Todavía no hay ningún mes en el que puedas dejar de aportar.", "warn");
+        return done("Aún no puedes dejar de aportar.", "warn");
       }
       const mode =
         input.coastMode ?? (basis === "target_age" ? "fixed_retirement_age" : "fixed_stop_age");
@@ -422,80 +406,61 @@ export function planSentence(input: PlanSentenceInput): PlanSentence {
         const stop =
           coastAge != null && !ages ? `a los ${coastAge}` : `en ${label(coastMi)}`;
         if (retMi == null) {
-          return done(
-            `Dejando de aportar ${stop}, tu plan no alcanza ninguna fecha válida.`,
-            "danger",
-          );
+          return done(`Dejas de aportar ${stop}; sin fecha válida.`, "danger");
         }
-        return done(
-          `Dejando de aportar ${stop}, te jubilas en ${when(retMi, retAge)}${withScenarios}.`,
-          dateTone,
-        );
+        return done(`Dejas de aportar ${stop}; te jubilas en ${when(retMi, retAge)}.`, dateTone);
       }
       // Modo A: tú fijas la edad de jubilación y el solve resuelve cuándo puedes parar.
       const tail =
         requestedAge != null
-          ? `jubilarte a los ${requestedAge}`
+          ? `; te jubilas a los ${requestedAge}`
           : retMi != null
-            ? `jubilarte en ${label(retMi)}`
-            : "jubilarte igual";
+            ? `; te jubilas en ${label(retMi)}`
+            : "";
       if (coastMi <= 0) {
-        return done(`Ya puedes dejar de aportar y ${tail}${withScenarios}.`, dateTone);
+        return done(`Ya puedes dejar de aportar${tail}.`, dateTone);
       }
-      return done(
-        `Puedes dejar de aportar en ${when(coastMi, coastAge)} y ${tail}${withScenarios}.`,
-        dateTone,
-      );
+      return done(`Dejas de aportar en ${when(coastMi, coastAge)}${tail}.`, dateTone);
     }
 
-    // ── «Jornada reducida» (Barista FIRE): dos hitos en una frase ─────────────────────────────
+    // ── «Barista FIRE» (jornada reducida): dos hitos en una línea ────────────────────────────
     case "partial": {
       if (warned.has("partial_never_starts")) {
-        return done(
-          "Tu plan no puede permitirse la jornada reducida en ningún mes del horizonte.",
-          "danger",
-        );
+        return done("No puedes permitirte la jornada reducida.", "danger");
       }
       if (warned.has("partial_never_fully_retires")) {
         return done(
           partialMi != null
-            ? `Pasas a jornada reducida en ${when(partialMi, ageAt(partialMi))}, pero no llegas a jubilarte del todo dentro del horizonte.`
-            : "Empiezas la jornada reducida, pero no llegas a jubilarte del todo dentro del horizonte.",
+            ? `Jornada reducida en ${when(partialMi, ageAt(partialMi))}; nunca te jubilas del todo.`
+            : "Nunca te jubilas del todo.",
           "danger",
         );
       }
       if (partialMi == null) {
-        if (retMi == null) return done("Tu plan no alcanza ninguna fecha válida.", "danger");
-        return done(
-          `Sin fase de jornada reducida: te jubilas en ${when(retMi, retAge)}${withScenarios}.`,
-          dateTone,
-        );
+        if (retMi == null) return done("Sin fecha válida.", "danger");
+        return done(`Sin jornada reducida: te jubilas en ${when(retMi, retAge)}.`, dateTone);
       }
       if (retMi == null) {
         return done(
-          `Pasas a jornada reducida en ${when(partialMi, ageAt(partialMi))}, pero tu plan no alcanza ninguna fecha válida.`,
+          `Jornada reducida en ${when(partialMi, ageAt(partialMi))}; sin fecha válida.`,
           "danger",
         );
       }
       return done(
-        `Puedes pasar a jornada reducida en ${when(partialMi, ageAt(partialMi))} y jubilarte del todo en ${when(retMi, retAge)}${withScenarios}.`,
+        `Jornada reducida en ${when(partialMi, ageAt(partialMi))}; jubilación total en ${when(retMi, retAge)}.`,
         dateTone,
       );
     }
 
     // ── `asap` y el plan sin estrategia declarada: manda la fecha válida ──────────────────────
     default: {
-      if (retMi == null) return done("Tu plan no alcanza ninguna fecha válida.", "danger");
-      const head =
-        retMi <= 0
-          ? outOfHundred == null
-            ? "Con tu plan ya puedes jubilarte."
-            : `Con tu plan ya puedes jubilarte: aguantan ${outOfHundred} de cada 100 escenarios.`
-          : outOfHundred == null
-            ? `Con tu plan te jubilas en ${when(retMi, retAge)}.`
-            : `Con tu plan te jubilas en ${when(retMi, retAge)}: aguantan ${outOfHundred} de cada 100 escenarios.`;
-      const alt = alternativeDates(s, label);
-      return done(alt == null ? head : `${head} ${alt}`, dateTone);
+      if (retMi == null) return done("Sin fecha válida.", "danger");
+      // Las fechas al 100 % y al 90 % ya no van aquí: son la sublínea de VALOR de la tarjeta
+      // «Fecha válida» (`safeDateBoundsLine`).
+      return done(
+        retMi <= 0 ? "Ya puedes jubilarte." : `Te jubilas en ${when(retMi, retAge)}.`,
+        dateTone,
+      );
     }
   }
 }
@@ -517,37 +482,27 @@ function bestRetirementYear(
 }
 
 /**
- * «Al 100 % sería 2051; al 90 %, 2040.» — las dos fechas que acotan la del umbral configurado.
+ * «100 %: 2051 · 90 %: 2040» — las dos fechas que acotan la del umbral configurado, como VALOR
+ * (la sublínea de la tarjeta «Fecha válida», `lib/retirement-tiles.ts`).
  *
  * Un índice `null` es **«nunca»** y así se dice (el contrato lo define como «no se alcanza ni al
- * final del horizonte», no como «todavía no calculado»). Sin ninguna de las dos, no hay segunda
- * oración: media frase sobre una alternativa que no existe no aporta nada.
+ * final del horizonte», no como «todavía no calculado»). Un campo AUSENTE de la respuesta no se
+ * pinta; sin ninguno de los dos, `null`.
  */
-function alternativeDates(
-  s: PlanSentenceSeries,
+export function safeDateBoundsLine(
+  s: Pick<PlanSentenceSeries, "safe_date_at_100_month_index" | "safe_date_at_90_month_index">,
   label: (monthIndex: number) => string,
 ): string | null {
-  const has100 = "safe_date_at_100_month_index" in s;
-  const has90 = "safe_date_at_90_month_index" in s;
-  if (!has100 && !has90) return null;
-  const mi100 = idx(s.safe_date_at_100_month_index);
-  const mi90 = idx(s.safe_date_at_90_month_index);
-  const first = has100
-    ? mi100 != null
-      ? `Al 100 % sería ${label(mi100)}`
-      : "Al 100 %, nunca"
-    : null;
-  const second = has90
-    ? mi90 != null
-      ? `al 90 %, ${label(mi90)}`
-      : "al 90 %, nunca"
-    : null;
-  if (first == null && second == null) return null;
-  if (first == null) {
-    // Sin la del 100 %, la del 90 % abre la oración y hay que capitalizarla.
-    return `Al 90 %, ${mi90 != null ? label(mi90) : "nunca"}.`;
-  }
-  return second == null ? `${first}.` : `${first}; ${second}.`;
+  const bit = (key: keyof typeof s, pct: string): string | null => {
+    if (!(key in s)) return null;
+    const mi = idx(s[key]);
+    return `${pct}: ${mi != null ? label(mi) : "nunca"}`;
+  };
+  const bits = [
+    bit("safe_date_at_100_month_index", "100 %"),
+    bit("safe_date_at_90_month_index", "90 %"),
+  ].filter((b): b is string => b != null);
+  return bits.length === 0 ? null : bits.join(" · ");
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -615,8 +570,7 @@ const MEMBER_WARNING_SUFFIX: Array<{
  * que sí llega es lo determinista: si su estrategia impone una edad, el motor la simuló con ese
  * mes forzado y `jubilacion_month_index` existe; si su fecha la fijaría el sorteo, **no hay
  * ninguna** — y decir «no cruza el objetivo en el horizonte» sería mentir sobre un plan que
- * nadie ha resuelto. Por eso la frase dice que la fecha válida se resuelve en su propia vista
- * Jubilación, en vez de rotular un mes que nadie calculó para ella.
+ * nadie ha resuelto. Por eso, sin mes efectivo, la línea simplemente no lleva fecha.
  *
  * ## Qué dice, en orden
  *
@@ -626,8 +580,7 @@ const MEMBER_WARNING_SUFFIX: Array<{
  *    cuál por umbral.
  * 2. **Su fecha por edad**, si el motor la fijó (`jubilacion_month_index` con `jubilacion_age`) —
  *    nunca una edad inventada (B5): sin `jubilacion_age` se rotula el MES, y sin
- *    `jubilacion_month_index` se manda a su vista Jubilación en vez de un guion o un
- *    «calculando» que nadie va a resolver aquí.
+ *    `jubilacion_month_index` no se pinta fecha (ni un guion ni un «calculando»).
  * 3. **Su jornada reducida**, si la tiene (`partial_retirement_month_index`) — es un hecho
  *    determinista suyo, no una cifra del sorteo, así que viaja aunque no haya fecha efectiva.
  *
@@ -657,28 +610,23 @@ export function memberPlanSentence(
     }
   }
 
-  const extras: string[] = [];
-  if (partialMi != null) {
-    extras.push(`hace jornada reducida desde ${monthLabel(partialMi)}`);
-  }
-  const extraTail = extras.length === 0 ? "" : ` (${extras.join(" y ")})`;
-
-  const head = strategyLabel != null ? `${name}: ${strategyLabel}` : name;
-
-  let dateBit: string;
-  if (mi == null) {
-    // Sin mes efectivo la fecha la fijaría el sorteo, y el hogar no lo corre (D9): su fecha
-    // válida se resuelve en SU vista, nunca aquí.
-    dateBit = "fecha válida: en su vista Jubilación";
-  } else if (mi <= 0) {
-    dateBit = "ya puede jubilarse";
-  } else if (age != null) {
-    dateBit = `a los ${age}, ${monthLabel(mi)}`;
-  } else {
+  // UNA línea de valores separados por « · » (owner, 2026-10-10): nombre, estrategia con su
+  // nombre corto, el mes por edad si el motor lo fijó, la jornada reducida si la hay y el estado.
+  // Sin mes efectivo la fecha la fijaría el sorteo, y el hogar no lo corre (D9): no se pinta nada
+  // en su lugar — ni un mes inventado ni una explicación.
+  let dateBit: string | null = null;
+  if (mi != null) {
+    if (mi <= 0) dateBit = "ya puede jubilarse";
+    else if (age != null) dateBit = `${monthLabel(mi)} (${age} años)`;
     // Sin `jubilacion_age` se rotula el MES, nunca una edad inventada (B5).
-    dateBit = monthLabel(mi);
+    else dateBit = monthLabel(mi);
   }
-
-  const body = `${head} — ${dateBit}${extraTail}`;
-  return { text: `${body}${suffix == null ? "" : ` — ${suffix}`}.`, tone };
+  const bits = [
+    name,
+    strategyLabel,
+    dateBit,
+    partialMi != null ? `jornada reducida desde ${monthLabel(partialMi)}` : null,
+    suffix,
+  ].filter((b): b is string => b != null && b !== "");
+  return { text: bits.join(" · "), tone };
 }

@@ -229,11 +229,12 @@ describe("chartValidDateMark", () => {
     ...over,
   });
 
-  it("success_threshold: marca en la fecha válida, rótulo con su éxito", () => {
+  // 2026-10-10 — el rótulo es un NOMBRE: el éxito de ese mes ya es el KPI «Éxito del plan».
+  it("success_threshold: marca en la fecha válida, rótulo corto", () => {
     const got = chartValidDateMark(plan());
     expect(got.mark).toEqual({
       monthIndex: 243,
-      label: "Fecha válida · 95 de cada 100",
+      label: "Fecha válida",
     });
     expect(got.note).toBeNull();
   });
@@ -251,7 +252,7 @@ describe("chartValidDateMark", () => {
     );
     expect(got.mark).toEqual({
       monthIndex: 243,
-      label: "A los 55, como pediste · 82 de cada 100",
+      label: "A los 55",
     });
     expect(got.note).toBeNull();
   });
@@ -264,7 +265,7 @@ describe("chartValidDateMark", () => {
         success_of_plan: 0.82,
       }),
     );
-    expect(got.mark?.label).toBe("Como pediste · 82 de cada 100");
+    expect(got.mark?.label).toBe("Edad pedida");
   });
 
   it("not_reachable: sin marca y con la nota que dice el umbral", () => {
@@ -293,16 +294,13 @@ describe("chartValidDateMark", () => {
 
   // Los dos topes anti-mentira los pone `scenariosPerHundred`, la MISMA función que la frase-hito
   // y el tile de éxito: un 0,999 no puede rotularse «100 de cada 100» en la marca y «99» al lado.
-  it("un éxito de 0,999 se rotula 99, nunca 100", () => {
-    expect(chartValidDateMark(plan({ success_of_plan: 0.999 }))?.mark?.label).toBe(
-      "Fecha válida · 99 de cada 100",
-    );
-    expect(chartValidDateMark(plan({ success_of_plan: 1 }))?.mark?.label).toBe(
-      "Fecha válida · 100 de cada 100",
-    );
+  it("el rótulo no repite el éxito, sea cual sea (lo dice la tarjeta de al lado)", () => {
+    for (const p of [0.999, 1, 0.5]) {
+      expect(chartValidDateMark(plan({ success_of_plan: p }))?.mark?.label).toBe("Fecha válida");
+    }
   });
 
-  it("sin éxito publicado el rótulo se queda en su primera mitad", () => {
+  it("sin éxito publicado el rótulo es el mismo", () => {
     expect(chartValidDateMark(plan({ success_of_plan: null }))?.mark?.label).toBe(
       "Fecha válida",
     );
