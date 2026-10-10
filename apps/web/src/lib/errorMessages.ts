@@ -308,6 +308,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Esa regla no asigna ningún tipo, así que no se puede aplicar a los movimientos que ya tienes. Edítala primero.",
   apply_to_existing_invalid:
     "Elige a qué aplicar la regla: a nada, solo a lo que no tenga categoría, o a todo.",
+  apply_to_invalid:
+    "Elige si el cambio se aplica a todos los movimientos de la recurrencia o solo a los futuros.",
   recurring_rule_kind_invalid:
     "El tipo del movimiento recurrente no es válido. Elige gasto, ingreso o inversión.",
   recurring_rule_concept_empty:

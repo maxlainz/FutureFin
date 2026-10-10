@@ -11,6 +11,7 @@
     "amount_sign_mismatch",
     "amount_zero",
     "apply_to_existing_invalid",
+    "apply_to_invalid",
     "apr_forbidden_for_model",
     "apr_out_of_range",
     "apr_percent_set_and_clear",

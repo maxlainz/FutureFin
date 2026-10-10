@@ -6,6 +6,8 @@
 //!   invalida; borrar una regla recurrente NO (sus instancias sobreviven).
 //! - Modo C (`budget_income_real_expense`): paridad con B — create/patch/delete invalidan.
 //! - Flip A↔B vía PATCH /v1/installation invalida (el propio PATCH de installation refresca).
+//! - PATCH de una plantilla recurrente (5.0.0): `apply_to: all` invalida en B/C (reescribe
+//!   instancias); `future` no invalida en ningún modo (no toca `transactions`).
 //! - Crear una **regla de categorización** no invalida en NINGÚN modo: solo hace INSERT y afecta a
 //!   imports futuros (el backfill retroactivo es otra ruta, con su propia invalidación COND).
 
@@ -971,4 +973,93 @@ async fn mode_b_sweep_does_not_evict_a_hot_cache_when_it_finds_nothing() {
         app.cache_contains(&key).await,
         "un barrido que no enlaza nada no debe tirar la cache caliente"
     );
+}
+
+// ---------------------------------------------------------------------------
+// PATCH de plantilla recurrente (5.0.0): `all` invalida COND, `future` nunca
+// ---------------------------------------------------------------------------
+
+/// `apply_to: "future"` cambia SOLO `recurring_transaction_rules`: ni el conjunto de
+/// `transactions`, ni sus importes, ni su `recurring_rule_id` (que es lo que hace invalidar al
+/// borrado). Y ninguna lectura del engine mira la tabla de plantillas — el promedio de B/C y el
+/// summary leen `transactions`. Así que no invalida en NINGÚN modo: desalojar una cache caliente
+/// sería pagar un recompute por una petición que no movió un número.
+///
+/// `apply_to: "all"` reescribe importes/clasificación de movimientos que el promedio cuenta (un
+/// mes real cuenta entero, recurrentes incluidas) → invalida en B y C, nunca en A.
+#[tokio::test]
+async fn recurring_rule_patch_invalidates_only_with_all_and_only_in_modes_b_and_c() {
+    for (mode, all_invalidates) in [
+        ("budget", false),
+        ("transactions_avg", true),
+        ("budget_income_real_expense", true),
+    ] {
+        let app = TestApp::spawn().await;
+        let owner = app.register_and_login_owner("alice").await;
+        let cat = app.create_category(&owner, "asset", "Cash").await;
+        app.post_json_with_cookie(
+            "/v1/assets",
+            json!({ "category_id": cat, "name": "X", "current_value": "10000" }),
+            &owner.cookie,
+        )
+        .await;
+        set_mode(&app, &owner.cookie, mode).await;
+
+        // Regla con origen en M-2 + un movimiento real en M-1: la instancia de M-1 vive en un
+        // mes REAL, así que su importe entra en el promedio de B/C.
+        let today = server_today(&app, &owner.cookie).await;
+        let (oy, om) = shift_month(today.year(), today.month(), -2);
+        let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
+        let real = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                json!({ "op_date": NaiveDate::from_ymd_opt(m1y, m1m, 12).unwrap().format("%Y-%m-%d").to_string(),
+                        "concept": "Real", "amount": "-30", "kind": "expense" }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(real.status, http::StatusCode::CREATED, "{real:?}");
+        let rec = app
+            .post_json_with_cookie(
+                "/v1/transactions",
+                json!({ "op_date": NaiveDate::from_ymd_opt(oy, om, 10).unwrap().format("%Y-%m-%d").to_string(),
+                        "concept": "Gimnasio", "amount": "-40", "kind": "expense", "recurrence": {} }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(rec.status, http::StatusCode::CREATED, "{rec:?}");
+        let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
+        let url = format!("/v1/transactions/recurring/{rule_id}");
+
+        let iid = app.installation_id().await;
+        let key = app.default_view_key(iid, owner.user_id);
+
+        // future: nunca invalida.
+        app.warm_default_view(&owner.cookie, &key).await;
+        let r = app
+            .patch_json_with_cookie(&url, json!({"apply_to": "future", "amount": "-45"}), &owner.cookie)
+            .await;
+        assert_eq!(r.status, http::StatusCode::OK, "{mode}: {r:?}");
+        assert_eq!(r.json()["instances_updated"], 0);
+        assert!(
+            app.cache_contains(&key).await,
+            "modo {mode}: `future` no cambia ninguna fila de transactions y NO debe invalidar"
+        );
+
+        // all: invalida solo en los modos que usan transacciones.
+        app.warm_default_view(&owner.cookie, &key).await;
+        let r = app
+            .patch_json_with_cookie(&url, json!({"apply_to": "all", "amount": "-50"}), &owner.cookie)
+            .await;
+        assert_eq!(r.status, http::StatusCode::OK, "{mode}: {r:?}");
+        assert!(r.json()["instances_updated"].as_i64().unwrap() >= 2, "{mode}: {}", r.json());
+        if all_invalidates {
+            app.assert_invalidated(&key, &format!("PATCH recurrente all (modo {mode})")).await;
+        } else {
+            assert!(
+                app.cache_contains(&key).await,
+                "modo A: las transacciones no son inputs del engine; `all` NO debe invalidar"
+            );
+        }
+    }
 }

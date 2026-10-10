@@ -10,7 +10,7 @@ description: >
   update a tool. Triggers: "add an MCP tool", "añadir una tool", "does this endpoint need a
   tool?", "the MCP is out of date", "el MCP se ha quedado atrás", "tools/list", "frozen catalog",
   "tools_list_returns_exactly_the_v1_catalog", "update the tool catalog", "new handler — MCP?",
-  "extract a *_core", "preview/confirm", "tool annotations", "71 tools". Do NOT use it for WHY
+  "extract a *_core", "preview/confirm", "tool annotations", "72 tools". Do NOT use it for WHY
   tools share core fns / live-role auth (futurefin-architecture-contract D14/D15), the catalog's
   per-tool semantics (.claude/api-routes.md §MCP), MCP env vars and the write toggle
   (futurefin-config-and-flags), how to run the MCP test suites (futurefin-validation-and-qa /
@@ -225,7 +225,7 @@ el objeto entero, el chat necesita campo a campo»), así que esa vía está ago
 quinta que la invoque no está argumentando nada, solo está aplicando un precedente — legítimo, pero
 dilo así.
 
-### 3.5 Evaluación del tren 5.0.0 (issue #207) — 68 → 71 tools
+### 3.5 Evaluación del tren 5.0.0 (issue #207) — 68 → 72 tools
 
 La evaluación de §1 corrida sobre toda la superficie HTTP que la release movió. **Ninguna fila queda
 sin clasificar**; las tres tools nuevas y los cambios de contrato están abajo (V6/V7 son del WP-F:
@@ -237,6 +237,7 @@ nuevas** en ninguna de las tres).
 | `GET \| PATCH /v1/auth/me/retirement-profile` | **Dos tools nuevas**: `get_retirement_profile` (read-only, sin `require_mcp_write`, `identity()` a secas) y `update_retirement_profile` (preview/confirm). Comparten `get_retirement_profile_core` / `patch_retirement_profile_core` con el HTTP — cero SQL en `server.rs`, como manda §4 paso 1. **Own-user por construcción**: `NoParams` y `user_id` de la identidad, así que leer el plan de otro no es expresable en el esquema |
 | Auth de `update_retirement_profile` | **Por ROL, no owner-only** — y es deliberado: `require_mcp_write` aplica sus tres puertas (rol vivo → scope del token → `mcp_write_enabled`) y ninguna mira al dueño. El comentario que lo sostiene (`server.rs:5599-5601`): *un `viewer` que no puede fijar su propia edad de jubilación no puede ver su propia proyección, que es exactamente lo que un viewer sí puede hacer*. Contraste con `update_fire_settings`, que **sí** es owner-only y lo comprueba **en la core** (D14/#99) porque toca el hogar entero |
 | `confirm_token` de `update_retirement_profile` | **NO lo lleva, y el criterio es el de `two_phase`** (`server.rs:224-247` §«Dónde se usa y dónde no»): el token se exige solo donde *la confirmación destruye algo que la conversación no puede reconstruir* — cascadas sin cota y puertas de una sola dirección. Aquí el preview devuelve el before/after **íntegro** del perfil, así que deshacerlo es volver a llamar con los valores de `before`. Es el mismo argumento de `update_fire_settings`, y **son ya dos**: la frase de `server.rs:5539-5541` que llamaba a aquella «la única tool destructiva enteramente reversible desde su propio preview» quedó obsoleta el día que esta llegó |
+| `PATCH /v1/transactions/recurring/{id}` (2026-10-10, plantillas recurrentes editables con alcance «Todos» / «Solo futuros») | **Tool nueva** `update_recurring_rule` (escritura, `deny_unknown_fields`, parámetros espejo del body con `clear_*` tri-estado). Comparte `update_recurring_rule_core` con el handler — cero SQL en `server.rs`. **Preview/confirm SOLO con `apply_to = "all"`, y CON `confirm_token`**: `all` reescribe un nº no acotado de movimientos (hasta 10 años de instancias, incluidas las que el usuario retocó a mano) y lo que pisa no viaja en el preview, así que es una cascada de tamaño no acotado en el sentido de `two_phase` — mismo criterio que `apply_categorization_rule`. El recuento del preview sale de la MISMA core con `dry_run = true` (valida, escribe y cuenta dentro de una transacción que se deshace), así que el preview falla con el mismo código que la confirmación. `future` toca UNA fila (la plantilla) y la respuesta trae el `before` íntegro: se aplica directo, sin preview — el criterio de `update_retirement_profile`/`update_fire_settings`. Sin `impact` (como `update_transaction`). Presupuesto: la regla `*_set_and_clear` de `update_transaction` se mudó al `instructions` (transversal) para pagar la descripción nueva |
 | `GET /v1/projection/bands?paths&seed` | **Tool nueva** `get_projection_bands` (read-only). Tres decisiones de superficie, todas medidas: **(a) mine-only** — `view=household` devuelve 400 `household_bands_unavailable` desde la **core**, no desde el handler, así que la tool hereda la conducta sin repetir la comprobación; **(b) sin `density`** (arqueología §2.18, veto 22): fuerza `hybrid` igual que `get_projection`; **(c) `paths` topa en 1.000 por MCP frente a 2.000 por HTTP** — el contexto de un modelo es más caro que el ancho de banda de un navegador |
 | `include_liquid_bands` (nuevo, `get_projection_bands`) | **Opt-in por TAMAÑO, no omisión.** No es una capacidad recortada: es la mitad exacta del payload. La respuesta completa mide **~16 KB** a densidad `hybrid` y las tres series del líquido son la mitad de los puntos (`server.rs:3032-3037`, `mcp_http.rs:357-362`). Sin el flag **la clave no existe** (no viaja `null`), pinneado en `mcp_http.rs:402-405`. Presupuesto: `projection_bands.rs::the_hybrid_payload_stays_within_the_context_budget` ≤ **32 000 bytes**, cuyo mensaje de fallo prescribe la salida correcta («quita las bandas del líquido antes de subir la cota») |
 | `include_member_series` (nuevo, `get_projection`) | **Misma categoría: opt-in por tamaño.** Medido el 2026-09-03 (`projection_household_aggregate.rs:449-452`): `mine/hybrid` **21 009 B**, `household/hybrid` **34 161 B**, de los cuales `members[].series` son **11 748 B** (~5,9 KB por miembro, lineal con el hogar). **Por HTTP viajan siempre**; solo la tool las oculta, igual que `asset_series`. Dos presupuestos distintos y a propósito: **32 KB** la tool (`mcp_http.rs:470`) y **68 KB** el HTTP (`projection_household_aggregate.rs:465`, deliberadamente ~2× lo medido) |
@@ -453,16 +454,16 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
 
 ## 5. Keeping it honest — verification and drift audit
 
-Reproducible counters (run from repo root; **valores medidos el 2026-09-03, rama `release/5.0.0`;
-entre paréntesis los de 2026-08-28, Fases 0–6 del tren 4.4.0**):
+Reproducible counters (run from repo root; **valores medidos el 2026-10-10, rama `release/5.0.0`
+(tras `update_recurring_rule`); entre paréntesis los de 2026-09-03**):
 
 ```bash
-grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 71 (68) — total tools
-grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 30 (28) — reads + simulate
-grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 41 (40) — writes
-grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 41 (40) — MUST equal writes
-grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 18 (17) — preview/confirm
-grep -c '= two_phase(' apps/api/src/mcp/server.rs                    # 8 — las que exigen token de dos fases
+grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 72 (71) — total tools
+grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 30 (30) — reads + simulate
+grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 42 (41) — writes
+grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 42 (41) — MUST equal writes
+grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 19 (18) — preview/confirm
+grep -c '= two_phase(' apps/api/src/mcp/server.rs                    # 9 (8) — las que exigen token de dos fases
 #   (OJO 1: `grep -c 'confirm_token'` a secas da 47 — cuenta también el campo del schema y su prosa.
 #    OJO 2: el comando de esta línea fue `grep -c 'confirm_token.as_deref'` hasta la Fase 7, y hoy
 #    da **10**, no 8: el propio doc-comment de `DeleteWithTokenParams` en `server.rs` menciona esa
@@ -470,18 +471,19 @@ grep -c '= two_phase(' apps/api/src/mcp/server.rs                    # 8 — las
 #    mismo. Es la trampa de todo contador auto-referencial: el comando que un comentario recomienda
 #    deja de funcionar en cuanto el comentario lo escribe literal. `= two_phase(` no la tiene (las
 #    dos menciones en prosa son `[`two_phase`]`, con backticks). Alternativa igual de buena:
-#    `grep -c 'p\.confirm_token\.as_deref()'` → 8. **`server.rs` sigue prescribiendo el grep viejo**
+#    `grep -c 'p\.confirm_token\.as_deref()'` → 9 (8 hasta `update_recurring_rule`). **`server.rs` sigue prescribiendo el grep viejo**
 #    y no se puede arreglar desde documentación — reportado como deriva código↔contrato.)
-grep -c 'settled(&self.state.pool' apps/api/src/mcp/server.rs       # 41 (40) — == escrituras: toda escritura cierra su fila de auditoría
+grep -c 'settled(&self.state.pool' apps/api/src/mcp/server.rs       # 42 (41) — == escrituras: toda escritura cierra su fila de auditoría
 #   (el patrón lleva `&self.state.pool` a propósito: `grep -c 'settled('` da 42, contando la definición)
-grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs       # 19 (18) — escrituras que publican el bloque `impact`
+grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs       # 19 (19) — escrituras que publican el bloque `impact`
 #   (`grep -c 'impact_since('` da 20: cuenta también la definición)
 grep -c 'sqlx::query' apps/api/src/mcp/server.rs                   # 0 — EL invariante real
 grep -c 'sqlx::query' apps/api/src/mcp/auth.rs                     # 4 — gate + auditoría (4.4.0)
 ```
 
-Los ocho números son **71/30/41/41/18/8/41/19** a **2026-09-03** (5.0.0, issue #207), recontados
-enteros ese día. A 2026-08-28 (Fases 0–6 del tren 4.4.0): 68/28/40/40/17/8/40/18. Antes de la Fase 6:
+Los ocho números son **72/30/42/42/19/9/42/19** a **2026-10-10** (5.0.0, `update_recurring_rule`:
+la primera tool nueva desde el tren de #207 que SÍ acuña token, con `apply_to = "all"`). A 2026-09-03
+(issue #207): 71/30/41/41/18/8/41/19, recontados enteros ese día. A 2026-08-28 (Fases 0–6 del tren 4.4.0): 68/28/40/40/17/8/40/18. Antes de la Fase 6:
 52/21/31/31/14/7/31/15. **`= two_phase(` es el único que no se movió** — las tres tools nuevas no
 acuñan token (§3.5), y eso es una decisión, no un olvido.
 
@@ -494,7 +496,7 @@ import json
 d = json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))
 L = [t['description_len'] for t in d['tools']]
 print(len(L), sum(L), max(L))"
-# 71 23906 545   ← 2026-09-03, tras U4/S4 (margen 94). Tope: TOTAL_BUDGET 24 000, PER_TOOL_MAX 600.
+# 72 23982 548   ← 2026-10-10, con update_recurring_rule (margen 18). Tope: TOTAL_BUDGET 24 000, PER_TOOL_MAX 600.
 ```
 
 Historia del margen, que es lo que dice si cabe la siguiente tool: `52 21319 596` al cerrar la
@@ -529,6 +531,14 @@ or — the finding — an unclassified gap, which means the parity contract was 
 it now and check what else that PR missed.
 
 ## Provenance and maintenance
+
+**Ampliada 2026-10-10 (plantillas recurrentes editables, rama `release/5.0.0`)**: §3.5 gana la fila
+de `PATCH /v1/transactions/recurring/{id}` → tool nueva `update_recurring_rule` (preview con token
+solo en `apply_to = "all"`). Contadores de §5 recontados: **72/30/42/42/19/9/42/19**. Presupuesto:
+antes `71 23994 548` (margen 6, tras A12 — ver `.claude/mcp-catalog.md`),
+después `72 23982 548` (margen 18) — se pagó mudando la regla `*_set_and_clear` de la descripción de
+`update_transaction` al `instructions` del servidor. Fuentes: `apps/api/src/mcp/server.rs`,
+`apps/api/src/handlers/transactions/recurring.rs`, `apps/api/tests/{mcp_http,mcp_write,mcp_confirm_and_impact}.rs`.
 
 **Ampliada 2026-09-06 (A9 del tren 5.0.0, modelo v2 completo)**: §3.5 gana una fila (el modelo v2
 llega al catálogo: `success_threshold_pct` vuelve a ser load-bearing, sustituyendo la decisión V7 de

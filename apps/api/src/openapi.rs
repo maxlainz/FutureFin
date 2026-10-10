@@ -103,6 +103,7 @@ use crate::handlers::transactions::reconcile::{
 #[allow(unused_imports)]
 use crate::handlers::transactions::recurring::{
     __path_delete_recurring_rule, __path_list_recurring_rules, __path_materialize_recurring,
+    __path_patch_recurring_rule,
 };
 #[allow(unused_imports)]
 use crate::handlers::transactions::rules::{
@@ -236,6 +237,7 @@ impl utoipa::Modify for SecurityAddon {
         apply_rule,
         list_recurring_rules,
         materialize_recurring,
+        patch_recurring_rule,
         delete_recurring_rule,
         reconcile_now,
         reconcile_pair,
@@ -395,6 +397,8 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::transactions::RecurrenceSpec,
         crate::handlers::transactions::RecurringRuleResponse,
         crate::handlers::transactions::MaterializeResponse,
+        crate::handlers::transactions::PatchRecurringRuleBody,
+        crate::handlers::transactions::UpdateRecurringRuleResponse,
         crate::handlers::transactions::ReconcileRunResponse,
         crate::handlers::transactions::ReconcilePairBody,
         crate::handlers::transactions::ReconcilePairResponse,

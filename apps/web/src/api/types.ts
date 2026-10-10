@@ -1751,16 +1751,48 @@ export type RecurringRuleApi = {
   linked_asset_id?: string;
   linked_liability_id?: string;
   notes?: string;
-  /** YYYY-MM-DD del último mes materializado. */
+  /** YYYY-MM-DD: primer día del mes en que arrancó la regla (ancla de la convergencia). */
   origin_month: string;
   created_at: string;
   updated_at: string;
+};
+
+/**
+ * Alcance de `PATCH /v1/transactions/recurring/{id}` (5.0.0): `all` = la plantilla y todos sus
+ * movimientos ya materializados; `future` = solo la plantilla (lo ya apuntado no cambia).
+ */
+export type RecurringApplyTo = "all" | "future";
+
+/** Body de `PATCH /v1/transactions/recurring/{id}`. Sin fechas: el mes de origen no se mueve. */
+export type PatchRecurringRuleRequest = {
+  apply_to: RecurringApplyTo;
+  concept?: string;
+  /** Decimal-string FIRMADO (negativo = cargo), con el signo del `kind` efectivo. */
+  amount?: string;
+  kind?: TransactionKindApi;
+  category_id?: string;
+  clear_category?: boolean;
+  linked_asset_id?: string;
+  clear_linked_asset?: boolean;
+  linked_liability_id?: string;
+  clear_linked_liability?: boolean;
+  notes?: string;
+  clear_notes?: boolean;
+};
+
+/** Respuesta del PATCH: la plantilla editada (aplanada) + alcance + instancias reescritas. */
+export type PatchRecurringRuleResponse = RecurringRuleApi & {
+  apply_to: RecurringApplyTo;
+  /** Siempre 0 con `future`. */
+  instances_updated: number;
 };
 
 /** Respuesta de `POST /v1/transactions/recurring/materialize`. */
 export type RecurringMaterializeResponse = {
   rules_processed: number;
   materialized: number;
+  /** Instancias podadas (meses que dejaron de tener movimientos reales, 3.9.0). */
+  pruned: number;
 };
 
 /**

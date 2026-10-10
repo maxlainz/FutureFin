@@ -72,6 +72,7 @@ use crate::handlers::transactions::reconcile::{
 };
 use crate::handlers::transactions::recurring::{
     delete_recurring_rule_core, list_recurring_rules_core, materialize_recurring_core,
+    update_recurring_rule_core, RecurringApplyTo,
 };
 use crate::handlers::transactions::rules::{
     apply_categorization_rule_core, create_categorization_rule_core, delete_rule_core,
@@ -241,7 +242,8 @@ fn preview_payload(
 /// el mismo contador que fija `every_write_tool_in_the_source_calls_require_mcp_write` en
 /// `mcp_write.rs`), solo en aquellas cuya confirmación destruye algo que la conversación no
 /// puede reconstruir: cascadas de tamaño no acotado (`delete_import`, `delete_asset`,
-/// `delete_liability`, `apply_categorization_rule`, `materialize_recurring`) y puertas de un solo
+/// `delete_liability`, `apply_categorization_rule`, `materialize_recurring` y, desde 5.0.0,
+/// `update_recurring_rule` con `apply_to = "all"`) y puertas de un solo
 /// sentido (`unreconcile_transfer`, `delete_snapshot` — un snapshot es un registro del pasado, no
 /// se recaptura — y, desde la Fase 6, `delete_allocation_rule`: recrear la regla no restaura su
 /// prioridad, y mientras tanto TODO el sobrante mensual se ha ido por otro sitio). Los borrados de
@@ -1469,7 +1471,7 @@ pub struct UpdateTransactionParams {
     #[serde(default)]
     #[schemars(regex(pattern = UUID_STRING))]
     pub category_id: Option<String>,
-    /// true = quitar la categoría.
+    /// true = income/expense vuelve a la categoría POR DEFECTO de su scope; savings, sin categoría.
     #[serde(default)]
     pub clear_category: Option<bool>,
     #[serde(default)]
@@ -2099,6 +2101,59 @@ pub struct DeleteRecurringRuleParams {
     /// Sin confirm=true la tool NO borra: devuelve un preview de la plantilla.
     #[serde(default)]
     pub confirm: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateRecurringRuleParams {
+    /// UUID de la plantilla (de list_recurring_rules).
+    #[schemars(regex(pattern = UUID_STRING))]
+    pub id: String,
+    /// "all" = la plantilla Y todos sus movimientos ya materializados (incluido el de origen);
+    /// "future" = solo la plantilla: lo ya apuntado no cambia y los meses que se materialicen
+    /// después usan los valores nuevos. Si el usuario no lo ha dicho, PREGÚNTASELO.
+    #[schemars(extend("enum" = ["all", "future"]))]
+    pub apply_to: String,
+    #[serde(default)]
+    pub concept: Option<String>,
+    /// Importe firmado como string decimal (nunca 0; ingreso positivo, gasto/inversión negativo).
+    #[serde(default)]
+    #[schemars(regex(pattern = DECIMAL_SIGNED))]
+    pub amount: Option<String>,
+    /// "expense" | "income" | "savings".
+    #[serde(default)]
+    #[schemars(extend("enum" = ["expense", "income", "savings"]))]
+    pub kind: Option<String>,
+    #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
+    pub category_id: Option<String>,
+    /// true = income/expense vuelve a la categoría POR DEFECTO de su scope; savings, sin categoría.
+    #[serde(default)]
+    pub clear_category: Option<bool>,
+    #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
+    pub linked_asset_id: Option<String>,
+    #[serde(default)]
+    pub clear_linked_asset: Option<bool>,
+    #[serde(default)]
+    #[schemars(regex(pattern = UUID_STRING))]
+    pub linked_liability_id: Option<String>,
+    #[serde(default)]
+    pub clear_linked_liability: Option<bool>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub clear_notes: Option<bool>,
+    /// Solo con apply_to="all": sin confirm=true NO escribe y devuelve un preview con la plantilla
+    /// actual, el nº de movimientos que se reescribirían y el confirm_token. Con "future" se
+    /// aplica directamente (solo cambia la plantilla, y la respuesta trae el `before`).
+    #[serde(default)]
+    pub confirm: Option<bool>,
+    /// Token del preview (`confirm_token`), obligatorio junto a confirm=true con apply_to="all":
+    /// un solo uso, 10 minutos, y ligado a los efectos EXACTOS que se enseñaron.
+    #[serde(default)]
+    #[schemars(length(min = 1, max = 200))]
+    pub confirm_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -3910,7 +3965,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_transaction",
-        description = "Corrige o recategoriza un movimiento PROPIO («eso era comida, no ocio»): cualquier campo es opcional y los flags clear_* ponen a null. Movimientos de otro usuario → not_found. En las importadas la huella de dedup queda anclada al CSV original. Poner un campo y borrarlo en la MISMA llamada es error, no «gana el clear»: `category_id` + `clear_category` → 400 `category_set_and_clear`, y lo mismo para `value_date`, `linked_asset`, `linked_liability` y `notes`.",
+        description = "Corrige o recategoriza un movimiento PROPIO («eso era comida, no ocio»): cualquier campo es opcional y los flags clear_* ponen a null. Movimientos de otro usuario → not_found. En las importadas la huella de dedup queda anclada al CSV original.",
         annotations(title = "Editar movimiento", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_transaction(
@@ -5467,6 +5522,139 @@ impl FutureFinMcp {
             delete_rule_core(&self.state.pool, id.installation_id, id.user_id, rule_id).await?;
             Ok((
                 serde_json::json!({"id": rule_id, "deleted": true}),
+                vec![rule_id],
+            ))
+        })
+        .await
+    }
+
+    #[tool(
+        name = "update_recurring_rule",
+        description = "Edita una plantilla recurrente PROPIA. `apply_to`: \"future\" = solo la plantilla (lo ya apuntado no cambia); \"all\" = también TODOS sus movimientos ya materializados, con preview + confirm_token. Sin fechas.",
+        annotations(title = "Editar recurrente", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn update_recurring_rule(
+        &self,
+        Parameters(p): Parameters<UpdateRecurringRuleParams>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let id = identity(&ctx)?;
+        let run = || -> Result<(Uuid, RecurringApplyTo, crate::handlers::transactions::schema::PatchRecurringRuleBody), ApiError> {
+            let rule_id = parse_uuid_param("id", &p.id)?;
+            let apply_to = RecurringApplyTo::parse(Some(&p.apply_to))?;
+            let body = crate::handlers::transactions::schema::PatchRecurringRuleBody {
+                apply_to: Some(apply_to.as_str().to_string()),
+                concept: p.concept.clone(),
+                amount: p
+                    .amount
+                    .as_deref()
+                    .map(|a| parse_decimal_param("amount", a))
+                    .transpose()?,
+                kind: p.kind.clone(),
+                category_id: parse_opt_uuid_param("category_id", &p.category_id)?,
+                clear_category: p.clear_category,
+                linked_asset_id: parse_opt_uuid_param("linked_asset_id", &p.linked_asset_id)?,
+                clear_linked_asset: p.clear_linked_asset,
+                linked_liability_id: parse_opt_uuid_param(
+                    "linked_liability_id",
+                    &p.linked_liability_id,
+                )?,
+                clear_linked_liability: p.clear_linked_liability,
+                notes: p.notes.clone(),
+                clear_notes: p.clear_notes,
+            };
+            Ok((rule_id, apply_to, body))
+        };
+        let (rule_id, apply_to, body) = match run() {
+            Ok(v) => v,
+            Err(e) => return to_tool_outcome(e),
+        };
+        let audit = match require_mcp_write(&self.state.pool, &id, "update_recurring_rule").await {
+            Ok(a) => a,
+            Err(e) => return to_tool_outcome(e),
+        };
+        settled(&self.state.pool, audit, async {
+            // `before` vía la core de listado (cero SQL propio); 404 si no es suya.
+            let before = list_recurring_rules_core(&self.state.pool, id.installation_id, id.user_id)
+                .await?
+                .into_iter()
+                .find(|r| r.id == rule_id)
+                .ok_or(ApiError::NotFound)?;
+            if apply_to == RecurringApplyTo::All {
+                // Dos fases CON token: `all` reescribe N movimientos (radio no acotado: hasta 10
+                // años de instancias, incluidas las que el usuario retocó a mano), y lo que pisa
+                // NO viaja en el preview — la conversación no puede reconstruirlo. Mismo criterio
+                // que `apply_categorization_rule`. El recuento sale de la MISMA core en dry-run
+                // (valida y cuenta dentro de una transacción que se deshace), así que el preview
+                // falla con el mismo código que fallaría la confirmación.
+                let dry = update_recurring_rule_core(
+                    &self.state,
+                    id.installation_id,
+                    id.user_id,
+                    rule_id,
+                    body.clone(),
+                    true,
+                )
+                .await?;
+                // Sin la plantilla del dry-run: su `updated_at` es el `now()` de la transacción
+                // deshecha y cambiaría entre preview y confirmación (token siempre `stale`).
+                let effects = serde_json::json!({
+                    "entity": before,
+                    "side_effects": {
+                        "apply_to": "all",
+                        "instances_to_update": dry.instances_updated,
+                        "overwrites_manual_edits_of_instances": true,
+                        "moves_projection_in_modes_b_and_c": dry.instances_updated > 0,
+                        "note": "se reescriben, en los campos del patch, la plantilla y TODOS sus movimientos ya materializados, incluido el de origen; un retoque manual previo de esos campos en una instancia se pierde",
+                    },
+                });
+                if let Some(preview) = two_phase(
+                    &self.state.pool,
+                    &id,
+                    "update_recurring_rule",
+                    p.confirm.unwrap_or(false),
+                    p.confirm_token.as_deref(),
+                    &serde_json::json!({
+                        "id": rule_id,
+                        "apply_to": "all",
+                        "concept": p.concept,
+                        "amount": p.amount,
+                        "kind": p.kind,
+                        "category_id": p.category_id,
+                        "clear_category": p.clear_category,
+                        "linked_asset_id": p.linked_asset_id,
+                        "clear_linked_asset": p.clear_linked_asset,
+                        "linked_liability_id": p.linked_liability_id,
+                        "clear_linked_liability": p.clear_linked_liability,
+                        "notes": p.notes,
+                        "clear_notes": p.clear_notes,
+                    }),
+                    &effects,
+                )
+                .await?
+                {
+                    return Ok((preview, vec![]));
+                }
+            }
+            let out = update_recurring_rule_core(
+                &self.state,
+                id.installation_id,
+                id.user_id,
+                rule_id,
+                body,
+                false,
+            )
+            .await?;
+            Ok((
+                serde_json::json!({
+                    "rule": out.rule,
+                    "apply_to": out.apply_to,
+                    "instances_updated": out.instances_updated,
+                    "before": before,
+                }),
+                // La core devuelve el recuento, no los ids de las instancias (enumerarlos aquí
+                // sería SQL propio en `mcp/`, D14): se registra la PLANTILLA, que nombra el
+                // conjunto afectado.
                 vec![rule_id],
             ))
         })
@@ -7178,10 +7366,13 @@ impl ServerHandler for FutureFinMcp {
                 `mcp_write_disabled` — explícaselo al usuario, no reintentes). Las destructivas piden \
                 `confirm: true` y sin él devuelven un preview. Las de radio no acotado o sin vuelta atrás \
                 (delete_import, delete_asset, delete_liability, delete_snapshot, delete_allocation_rule, \
-                apply_categorization_rule, unreconcile_transfer, materialize_recurring) exigen ADEMÁS el `confirm_token` que solo el \
+                apply_categorization_rule, unreconcile_transfer, materialize_recurring y \
+                update_recurring_rule con apply_to=all) exigen ADEMÁS el `confirm_token` que solo el \
                 preview emite: un solo uso, 10 minutos, y ligado a los efectos exactos que se enseñaron — \
                 si cambian entre el preview y la confirmación hay que volver a previsualizar. No hay forma \
-                de confirmarlas a ciegas, y es deliberado. Las escrituras que mueven el motor devuelven \
+                de confirmarlas a ciegas, y es deliberado. En las ediciones con flags `clear_*`, poner un \
+                campo y borrarlo en la MISMA llamada es error por campo (`category_id` + `clear_category` → \
+                `category_set_and_clear`, y así con cada par), no «gana el clear». Las escrituras que mueven el motor devuelven \
                 además `impact` con el antes/después de patrimonio neto, ahorro mensual esperado, \
                 rentabilidad neta real y ratio deuda/activos: cuéntale al usuario la consecuencia de su \
                 acción en vez de decir solo «hecho», sin volver a llamar a get_summary. La fecha de \

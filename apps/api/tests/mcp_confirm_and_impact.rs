@@ -944,3 +944,99 @@ async fn borrar_una_cuota_derivada_como_partida_remite_al_pasivo() {
     }
     assert_eq!(app.count_rows("liabilities").await, 1);
 }
+
+/// `update_recurring_rule` (5.0.0). `future` cambia solo la plantilla y se aplica directo (lo
+/// que pisa —la plantilla vieja— viaja entero en `before`). `all` reescribe N movimientos que el
+/// preview no puede enseñar uno a uno, así que es de dos fases CON token: el preview cuenta las
+/// instancias con la misma core en dry-run (sin escribir), y el token caduca si el conjunto
+/// cambia entre el preview y la confirmación.
+#[tokio::test]
+async fn update_recurring_rule_future_aplica_directo_y_all_exige_token() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner.cookie).await;
+    let rec = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({"op_date": "2026-06-15", "concept": "Gimnasio", "amount": "-40",
+                   "kind": "expense", "recurrence": {}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(rec.status, http::StatusCode::CREATED, "{rec:?}");
+    let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
+    let origin_id = Uuid::parse_str(rec.json()["id"].as_str().unwrap()).unwrap();
+    let amount_of_origin = || async {
+        sqlx::query_scalar::<_, rust_decimal::Decimal>("SELECT amount FROM transactions WHERE id = $1")
+            .bind(origin_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap()
+    };
+
+    // future: sin preview, la respuesta trae la plantilla nueva y la vieja.
+    let out = ok_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_recurring_rule",
+                json!({"id": rule_id, "apply_to": "future", "amount": "-45"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["rule"]["amount"], "-45.0000", "{out}");
+    assert_eq!(out["before"]["amount"], "-40.0000", "{out}");
+    assert_eq!(out["instances_updated"], 0, "{out}");
+    assert_eq!(amount_of_origin().await, rust_decimal::Decimal::new(-40, 0), "origen intacto");
+
+    // all sin confirm: preview con token y recuento, sin escribir nada.
+    let args = json!({"id": rule_id, "apply_to": "all", "amount": "-50"});
+    let preview = ok_json(&mcp_post(&app, &token, tool_call("update_recurring_rule", args.clone())).await);
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert!(preview["confirm_token"].is_string(), "{preview}");
+    assert_eq!(preview["effects"]["side_effects"]["instances_to_update"], 1, "{preview}");
+    assert_eq!(preview["effects"]["entity"]["amount"], "-45.0000", "la plantilla ACTUAL: {preview}");
+    assert_eq!(amount_of_origin().await, rust_decimal::Decimal::new(-40, 0), "el preview no escribe");
+    let rule_amount: rust_decimal::Decimal = sqlx::query_scalar(
+        "SELECT amount FROM recurring_transaction_rules WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(&rule_id).unwrap())
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(rule_amount, rust_decimal::Decimal::new(-45, 0), "el dry-run se deshizo");
+
+    // confirm a ciegas: rechazado.
+    let mut blind = args.clone();
+    blind["confirm"] = json!(true);
+    let envelope = mcp_post(&app, &token, tool_call("update_recurring_rule", blind)).await;
+    assert_eq!(error_code(&envelope), "confirm_token_required", "{envelope}");
+
+    // preview → confirm: reescribe la instancia.
+    let (_, envelope) = preview_then_confirm(&app, &token, "update_recurring_rule", args).await;
+    let done = ok_json(&envelope);
+    assert_eq!(done["instances_updated"], 1, "{done}");
+    assert_eq!(done["apply_to"], "all", "{done}");
+    assert_eq!(amount_of_origin().await, rust_decimal::Decimal::new(-50, 0));
+
+    // Validación de la core, también por MCP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_recurring_rule",
+            json!({"id": rule_id, "apply_to": "nunca", "notes": "x"}),
+        ),
+    )
+    .await;
+    assert_eq!(error_code(&envelope), "apply_to_invalid", "{envelope}");
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_recurring_rule", json!({"id": rule_id, "apply_to": "future"})),
+    )
+    .await;
+    assert_eq!(error_code(&envelope), "patch_empty", "{envelope}");
+}

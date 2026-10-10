@@ -44,14 +44,15 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `{error, code, message}` (el `ErrorBody` del API, con su código estable); **solo el 401** añade
   `WWW-Authenticate` (ver la nota del challenge en la sección OAuth).
 - **Tools de lectura — 29**, más `simulate_projection`, que tiene bullet propio: **30 con
-  `read_only_hint = true`** de las 71 del catálogo. Diecinueve se enumeran aquí (las 10 iniciales en
+  `read_only_hint = true`** de las 72 del catálogo. Diecinueve se enumeran aquí (las 10 iniciales en
   este bullet, las 9 del issue #2 en el siguiente), la vigésima es `get_allocation_resolution` (bullet
   de la cascada, más abajo) y las **siete de la Fase 6** tienen bloque propio al final de la sección.
   **Los contadores no se cuentan a mano**: los congela
   `mcp_write.rs::every_write_tool_in_the_source_calls_require_mcp_write` (un `#[test]` sin BD que
-  trocea `server.rs`), y son los mismos de `futurefin-mcp-parity` §5 — **71 tools / 30 lectura /
-  41 escritura / 18 con preview-confirm / 8 con `confirm_token` / 19 con `impact`** (5.0.0/WP4:
-  `get_retirement_profile` y `update_retirement_profile`; WP6b: `get_projection_bands`). Verificación de
+  trocea `server.rs`), y son los mismos de `futurefin-mcp-parity` §5 — **72 tools / 30 lectura /
+  42 escritura / 19 con preview-confirm / 9 con `confirm_token` / 19 con `impact`** (5.0.0/WP4:
+  `get_retirement_profile` y `update_retirement_profile`; WP6b: `get_projection_bands`;
+  2026-10-10: `update_recurring_rule`). Verificación de
   un vistazo:
   `grep -c '#\[tool(' apps/api/src/mcp/server.rs` y
   `grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs`.
@@ -335,7 +336,7 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
 - **`apply_categorization_rule` (3.8.0, auditoría MCP)**: backfill de una regla sobre el histórico —
   `id`, `apply_to_existing` (`uncategorized` default | `all`), `from_month`, `confirm`, y
   **desde la Fase 3 (issue #84) `confirm_token`** (obligatorio junto a `confirm: true`: el lote
-  puede tocar cientos de movimientos, así que entra en las **8** tools con confirmación en dos fases (`grep -c '= two_phase(' apps/api/src/mcp/server.rs`; eran 7 hasta que la Fase 6 añadió `delete_allocation_rule`, y el bloque `confirm_token` de más abajo ya decía 8 mientras esta línea decía 7) —
+  puede tocar cientos de movimientos, así que entra en las tools con confirmación en dos fases — **9** a 2026-10-10 (`grep -c '= two_phase(' apps/api/src/mcp/server.rs`; eran 7 hasta que la Fase 6 añadió `delete_allocation_rule`, 8 hasta `update_recurring_rule`; el bloque `confirm_token` de más abajo llegó a decir 8 mientras esta línea decía 7) —
   ver el bloque `confirm_token` más abajo). Sin `confirm` devuelve preview con `would_match` /
   `already_correct` / `would_change_kind` /
   `skipped_by_source` / `matched_by_other_rule` / `skipped_reconciled` / `by_current_category` /
@@ -790,7 +791,7 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `materialize_recurring`/`reconcile_transfers`, el parseo de parámetros corre ANTES del gate de
   escritura; exige `confirm` + `confirm_token`, es una puerta de un solo sentido). Preview/confirm
   del catálogo: **11 → 14** con este tren y **→ 17** con la Fase 6 (`delete_allocation_rule`,
-  `delete_category`, `update_installation_settings`); de ellas, **8 exigen además `confirm_token`** —
+  `delete_category`, `update_installation_settings`) — **19** desde 2026-10-10 con `update_recurring_rule`; de ellas, **8 exigen además `confirm_token`** (9 desde `update_recurring_rule` con `apply_to = "all"`) —
   cascadas de tamaño no acotado (`delete_import`, `delete_asset`, `delete_liability`,
   `apply_categorization_rule`, `materialize_recurring`) y puertas de un solo sentido
   (`unreconcile_transfer`, `delete_snapshot` y, desde la Fase 6, `delete_allocation_rule`: recrear
@@ -827,7 +828,7 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   guardias del PATCH viven en la **core** (`rule_patch_empty`, `rule_patch_conflict`): el `clear_*`
   ya no gana en silencio sobre el campo puesto. Catálogo total tras el tren 4.4.0 completo: **68 tools de entonces** (28 con
   `read_only_hint = true` + 40 de escritura) — cifra **histórica**, no un recuento vivo: hoy son
-  **71 (30 + 41)**. El comando que lo recuenta
+  **72 (30 + 42)**. El comando que lo recuenta
   (`grep -c '#\[tool(' apps/api/src/mcp/server.rs`) vive en §catálogo, junto a su valor actual —
   aquí solo estorbaría, porque una medición fechada con un comando vivo al lado se lee como si el
   comando devolviera ese número. Congelado
@@ -1264,6 +1265,38 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `grep -n "disposable_monthly\|coast_number\b\|partial_gap_target\|partial_phase_capital_growing\|pension_coverage_ratio\|bridge_effective_withdrawal_pct\|bridge_discount_annual_pct" apps/api/src/handlers/projection.rs`
   sale vacío. El contrato completo, en prosa y verbatim, es `const SIMULATE_MODEL_NOTE` —léelo
   antes de fiarte de ningún resumen, incluido este.
+- **5.0.0 — `update_recurring_rule` (2026-10-10): las plantillas recurrentes pasan a ser
+  editables**, espejo de `PATCH /v1/transactions/recurring/{id}` y sobre la MISMA core
+  (`update_recurring_rule_core`, `handlers/transactions/recurring.rs`). Parámetros: `id`,
+  `apply_to` (**obligatorio**, `all` | `future`), `concept`, `amount` (firmado), `kind`,
+  `category_id`/`clear_category`, `linked_asset_id`/`clear_linked_asset`,
+  `linked_liability_id`/`clear_linked_liability`, `notes`/`clear_notes`, `confirm`,
+  `confirm_token`; `deny_unknown_fields`. Sin fechas: el `origin_month` no se mueve.
+  - **`future`**: solo la plantilla; lo ya materializado no cambia y los meses que se materialicen
+    después usan los valores nuevos. Se aplica **directo**, sin preview: toca UNA fila y la
+    respuesta trae `before` (la plantilla anterior, íntegra), así que deshacerlo es volver a
+    llamar con esos valores — el criterio de `two_phase` para `update_retirement_profile`.
+  - **`all`**: la plantilla Y todos sus movimientos ya materializados (incluido el de origen)
+    reciben **solo los campos del patch**, en la misma transacción SQL. Es una **cascada de tamaño
+    no acotado** (hasta 10 años de instancias) que además pisa retoques manuales que el preview no
+    puede enseñar fila a fila → **preview + `confirm_token`**, como `apply_categorization_rule`.
+    El preview trae `entity` (la plantilla ACTUAL) y `side_effects.instances_to_update`, contado
+    por la MISMA core con `dry_run = true` (valida y escribe dentro de una transacción que se
+    deshace: el preview falla con el mismo código que fallaría la confirmación). La huella de los
+    efectos no lleva la plantilla del dry-run — su `updated_at` sería el `now()` de la transacción
+    deshecha y el token caducaría siempre.
+  - Salida (confirmada o `future`): `{rule, apply_to, instances_updated, before}`;
+    `instances_updated` es 0 en `future`. `target_ids` de la auditoría = el id de la plantilla.
+  - Cache: `all` invalida COND (B/C); `future` nunca (no toca `transactions`). Huella de dedup de
+    las instancias en `all`: se recomputa al cambiar `amount`/`concept` (política de los manuales).
+    Contrato completo en [`api-routes.md`](api-routes.md) §Transactions.
+  - Presupuesto de descripciones: la regla `*_set_and_clear` que `update_transaction` repetía en su
+    descripción se mudó al `instructions` (párrafo ESCRITURA), donde cubre a todas las tools con
+    `clear_*`; con eso cabe la tool nueva. Mismo comando de arriba → **72 23982 548** (margen 18).
+  - Tests: `mcp_confirm_and_impact.rs::update_recurring_rule_future_aplica_directo_y_all_exige_token`,
+    `mcp_write.rs::every_write_tool_rejects_a_viewer_and_the_disabled_toggle` (fila de
+    `write_probe`), los contadores de `every_write_tool_in_the_source_calls_require_mcp_write` y el
+    fixture regenerado.
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
   mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,

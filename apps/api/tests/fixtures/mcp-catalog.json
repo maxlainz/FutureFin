@@ -1,6 +1,6 @@
 {
   "_doc": "Contrato de entrada de las tools MCP. GENERADO — no editar a mano: UPDATE_MCP_CATALOG=1 cargo test -p futurefin-api --test mcp_http -- tools_list_freezes_the_input_contract. `description_sha256_12` son los 6 primeros bytes del SHA-256 de la descripción publicada. `constraints` son las restricciones del inputSchema por posición ($ = raíz, $.x = propiedad, $.x[] = items, $defs.T.x = anidado), y `constraints_sha256_12` su hash: cubren additionalProperties, enum, pattern, type, required y las cotas numéricas y de longitud a cada nivel.",
-  "tool_count": 71,
+  "tool_count": 72,
   "tools": [
     {
       "constraints": {
@@ -1615,6 +1615,51 @@
     },
     {
       "constraints": {
+        "$": "additionalProperties=false required=[\"apply_to\",\"id\"] type=\"object\"",
+        "$.amount": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]",
+        "$.apply_to": "enum=[\"all\",\"future\"] type=\"string\"",
+        "$.category_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.clear_category": "type=[\"boolean\",\"null\"]",
+        "$.clear_linked_asset": "type=[\"boolean\",\"null\"]",
+        "$.clear_linked_liability": "type=[\"boolean\",\"null\"]",
+        "$.clear_notes": "type=[\"boolean\",\"null\"]",
+        "$.concept": "type=[\"null\",\"string\"]",
+        "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.confirm_token": "maxLength=200 minLength=1 type=[\"null\",\"string\"]",
+        "$.id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=\"string\"",
+        "$.kind": "enum=[\"expense\",\"income\",\"savings\"] type=[\"null\",\"string\"]",
+        "$.linked_asset_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.linked_liability_id": "pattern=\"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$\" type=[\"null\",\"string\"]",
+        "$.notes": "type=[\"null\",\"string\"]"
+      },
+      "constraints_sha256_12": "e3a00f77ab47",
+      "description_len": 205,
+      "description_sha256_12": "7af138fa6ac1",
+      "name": "update_recurring_rule",
+      "properties": [
+        "amount",
+        "apply_to",
+        "category_id",
+        "clear_category",
+        "clear_linked_asset",
+        "clear_linked_liability",
+        "clear_notes",
+        "concept",
+        "confirm",
+        "confirm_token",
+        "id",
+        "kind",
+        "linked_asset_id",
+        "linked_liability_id",
+        "notes"
+      ],
+      "required": [
+        "apply_to",
+        "id"
+      ]
+    },
+    {
+      "constraints": {
         "$": "additionalProperties=false type=\"object\"",
         "$.birth_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]",
         "$.bridge_discount_basis": "type=[\"null\",\"string\"]",
@@ -1745,8 +1790,8 @@
         "$.op_date": "pattern=\"^\\\\d{4}-\\\\d{2}-\\\\d{2}$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "a02b114fe676",
-      "description_len": 460,
-      "description_sha256_12": "50ed9a35466d",
+      "description_len": 243,
+      "description_sha256_12": "65b87e530fbe",
       "name": "update_transaction",
       "properties": [
         "amount",

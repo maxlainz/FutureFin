@@ -1426,6 +1426,9 @@ export function GastosView({
             onClose={() => setRecurringOpen(false)}
             currencyIso={currencyIso}
             onChanged={() => void handleMutated()}
+            canEdit={canEdit}
+            incomeCategories={incomeCategories}
+            expenseCategories={expenseCategories}
           />
           <EditTransactionModal
             today={today}

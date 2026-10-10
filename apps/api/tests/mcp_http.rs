@@ -226,6 +226,7 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "update_installation_settings",
             "update_liability",
             "update_planning_flow",
+            "update_recurring_rule",
             "update_retirement_profile",
             "update_snapshot",
             "update_transaction",
@@ -2615,7 +2616,7 @@ fn catalog_fixture_path() -> std::path::PathBuf {
 
 /// Congela el **contrato de entrada** de TODAS las tools, no sólo sus nombres.
 /// (Sin contar cuántas son: el número quedó obsoleto dos veces — `52` describía la Fase 5 y el
-/// catálogo lleva 71 desde 5.0.0. Cuéntalas con
+/// catálogo lleva 72 desde 5.0.0. Cuéntalas con
 /// `jq '.tools | length' apps/api/tests/fixtures/mcp-catalog.json`.)
 ///
 /// `tools_list_returns_exactly_the_v1_catalog` (arriba) compara un `Vec<String>` de nombres y
@@ -3040,6 +3041,8 @@ async fn every_decimal_uuid_and_date_param_carries_its_pattern() {
     const SIGNED_PARAMS: &[(&str, &str)] = &[
         ("create_transaction", "amount"),
         ("update_transaction", "amount"),
+        // 5.0.0: la plantilla recurrente lleva el mismo importe firmado que su movimiento.
+        ("update_recurring_rule", "amount"),
         ("list_transactions", "min_amount"),
         ("list_transactions", "max_amount"),
         // Fase 6: la agregación comparte los filtros del listado, así que comparte su signo.

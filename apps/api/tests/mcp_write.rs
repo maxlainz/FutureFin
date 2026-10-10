@@ -2287,6 +2287,8 @@ fn write_probe(name: &str) -> Option<serde_json::Value> {
         "delete_budget_entry" => json!({"id": ID}),
         "update_allocation_rule" => json!({"id": ID, "enabled": true}),
         "delete_recurring_rule" => json!({"id": ID}),
+        // 5.0.0: con "future" no hay preview, así que la llamada llega al gate sin token.
+        "update_recurring_rule" => json!({"id": ID, "apply_to": "future", "notes": "probe"}),
         "delete_snapshot" => json!({"id": ID}),
         "delete_import" => json!({"id": ID}),
         "update_fire_settings" => json!({"taxes_enabled": true}),
@@ -2362,11 +2364,11 @@ async fn every_write_tool_rejects_a_viewer_and_the_disabled_toggle() {
     let writes = write_tool_names(&catalog);
     assert_eq!(
         writes.len(),
-        41,
-        "contador de futurefin-mcp-parity §5: 41 tools de escritura (31 hasta la Fase 5; la \
+        42,
+        "contador de futurefin-mcp-parity §5: 42 tools de escritura (31 hasta la Fase 5; la \
          Fase 6 añade create_batch, create_snapshot, update_snapshot, create_allocation_rule, \
          delete_allocation_rule, update_category, delete_category, confirm_transfer_match y \
-         update_installation_settings; 5.0.0 añade update_retirement_profile). Si has añadido o \
+         update_installation_settings; 5.0.0 añade update_retirement_profile y update_recurring_rule). Si has añadido o \
          retirado una, actualiza el contador \
          AQUÍ, en la skill mcp-parity, en .claude/mcp-catalog.md y en .claude/backend-structure.md a la vez: {writes:?}"
     );
@@ -2509,13 +2511,13 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     const SRC: &str = include_str!("../src/mcp/server.rs");
     let blocks = tool_blocks();
 
-    // Contadores de futurefin-mcp-parity §5 (71 / 30 / 41 / 41, a 2026-09-03, WP6b de 5.0.0:
-    // `get_projection_bands` — la primera tool nueva que NO es de escritura desde WP4).
+    // Contadores de futurefin-mcp-parity §5 (72 / 30 / 42 / 42, a 2026-10-10, 5.0.0:
+    // `update_recurring_rule` — la plantilla recurrente pasa a ser editable).
     let read_only = blocks.iter().filter(|b| b.read_only).count();
     let writes = blocks.iter().filter(|b| !b.read_only).count();
-    assert_eq!(blocks.len(), 71, "total de tools (§5 de futurefin-mcp-parity)");
+    assert_eq!(blocks.len(), 72, "total de tools (§5 de futurefin-mcp-parity)");
     assert_eq!(read_only, 30, "tools de lectura + simulate (§5)");
-    assert_eq!(writes, 41, "tools de escritura (§5)");
+    assert_eq!(writes, 42, "tools de escritura (§5)");
     assert_eq!(
         read_only + writes,
         blocks.len(),
@@ -2523,14 +2525,14 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     );
     assert_eq!(
         SRC.matches("require_mcp_write(&self.state.pool").count(),
-        41,
+        42,
         "el nº de llamadas al gate debe ser EXACTAMENTE el nº de escrituras: una escritura \
          sin gate es un fallo de seguridad (viewer escribiendo, o escritura con el \
          kill-switch apagado); una llamada de más es una lectura que ya no lo es"
     );
     assert_eq!(
         SRC.matches("p.confirm.unwrap_or(false)").count(),
-        18,
+        19,
         "tools con preview/confirm (§5). Toda destructiva nueva debería sumar aquí. Subió de 11 \
          a 14 en la Fase 3 (issue #84): `materialize_recurring`, `reconcile_transfers` y \
          `unreconcile_transfer` eran destructivas SIN preview — dos de ellas irreversibles —, así \
@@ -2540,26 +2542,28 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
          a propósito: cuatro son altas (`create_*`), `update_snapshot` edita en sitio, y \
          `confirm_transfer_match` ya tiene su preview en OTRA tool — `suggest_transfer_matches` \
          es literalmente la fase 1, y el `match_id` que emite es lo que acota el espacio de \
-         acciones alcanzables"
+         acciones alcanzables. 5.0.0 suma `update_recurring_rule` (preview solo con \
+         apply_to=all)"
     );
-    // Las 8 que además exigen el token de un solo uso del preview (Fase 3). El `confirm`
+    // Las 9 que además exigen el token de un solo uso del preview (Fase 3; la 9.ª, 5.0.0). El `confirm`
     // booleano lo escribe el propio modelo, así que por sí solo nunca fue un control: sólo el
     // token demuestra que hubo un preview, y va ligado a la huella de los efectos.
     assert_eq!(
         SRC.matches("p.confirm_token.as_deref()").count(),
-        8,
+        9,
         "tools con confirmación en dos fases: las de cascada de tamaño no acotado \
          (delete_import, delete_asset, delete_liability, apply_categorization_rule, \
          materialize_recurring) y las puertas de un solo sentido (unreconcile_transfer, \
          delete_snapshot, y desde la Fase 6 delete_allocation_rule: borrar la regla redirige el \
-         sobrante mensual y recrearla no restaura su prioridad). Los borrados de UNA fila cuyo \
+         sobrante mensual y recrearla no restaura su prioridad; 5.0.0 update_recurring_rule con \
+         apply_to=all, que reescribe un nº no acotado de movimientos). Los borrados de UNA fila cuyo \
          contenido entero viaja en el preview NO llevan token a propósito: encarecerlos a dos \
          viajes convierte la ceremonia en ruido"
     );
     // Y la auditoría: cada gate abre una fila, y `settled` es el ÚNICO sitio donde se cierra.
     assert_eq!(
         SRC.matches("settled(&self.state.pool, audit").count(),
-        41,
+        42,
         "toda escritura cierra su fila de auditoría con `settled`; sin él la fila se queda en \
          `attempted` y el log calla el desenlace de justo las llamadas que fallaron"
     );
