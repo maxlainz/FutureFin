@@ -319,7 +319,7 @@ describe("«Fecha válida» (asap)", () => {
     expect(t.label).toBe("Fecha válida");
     expect(t.value).toBe("2043");
     // Las dos cotas salieron de la frase (2026-10-10): eran la mitad de su segunda oración.
-    expect(t.subtitle).toBe("55 años · 100 %: M300 · 90 %: M150");
+    expect(t.subtitle).toBe("55 años · 100 %: M300 · 90 %: M150");
     // Ni el «dentro de N años» ni ninguna explicación: la fecha ya está en la cifra.
     expect(t.subtitle).not.toContain("dentro de");
     expect(t.helpId).toBe("retirement.safe_date");
@@ -327,7 +327,7 @@ describe("«Fecha válida» (asap)", () => {
 
   it("una cota `null` es «nunca», y una que la respuesta no trae no se pinta", () => {
     expect(tile(input({ strategy: "asap" }), "safe_date")?.subtitle).toBe(
-      "55 años · 100 %: nunca · 90 %: nunca",
+      "55 años · 100 %: nunca · 90 %: nunca",
     );
     const { safe_date_at_100_month_index: _a, safe_date_at_90_month_index: _b, ...rest } =
       series({ strategy: "asap" });
@@ -367,7 +367,7 @@ describe("«Fecha válida» (asap)", () => {
   it("sin edad resoluble no la inventa", () => {
     expect(
       tile(input({ strategy: "asap", safe_date_age: null }), "safe_date")?.subtitle,
-    ).toBe("100 %: nunca · 90 %: nunca");
+    ).toBe("100 %: nunca · 90 %: nunca");
   });
 
   it("una fecha válida que ya llegó dice el ESTADO «ya puedes jubilarte»", () => {
@@ -376,7 +376,7 @@ describe("«Fecha válida» (asap)", () => {
         input({ strategy: "asap", safe_date_month_index: 0, safe_date_age: 38 }),
         "safe_date",
       )?.subtitle,
-    ).toBe("38 años · ya puedes jubilarte · 100 %: nunca · 90 %: nunca");
+    ).toBe("38 años · ya puedes jubilarte · 100 %: nunca · 90 %: nunca");
   });
 });
 

@@ -496,11 +496,12 @@ export function safeDateBoundsLine(
   const bit = (key: keyof typeof s, pct: string): string | null => {
     if (!(key in s)) return null;
     const mi = idx(s[key]);
-    return `${pct}: ${mi != null ? label(mi) : "nunca"}`;
+    // Espacios duros: la sublínea del KPI es estrecha y «100 %: 2074» se partía en tres líneas.
+    return `${pct}:\u00a0${mi != null ? label(mi) : "nunca"}`;
   };
   const bits = [
-    bit("safe_date_at_100_month_index", "100 %"),
-    bit("safe_date_at_90_month_index", "90 %"),
+    bit("safe_date_at_100_month_index", "100\u00a0%"),
+    bit("safe_date_at_90_month_index", "90\u00a0%"),
   ].filter((b): b is string => b != null);
   return bits.length === 0 ? null : bits.join(" · ");
 }
