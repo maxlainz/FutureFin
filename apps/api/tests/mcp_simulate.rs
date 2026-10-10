@@ -203,7 +203,7 @@ async fn seed_with_real_movements(app: &TestApp, owner: &LoggedInOwner) {
         let r = app
             .post_json_with_cookie(
                 "/v1/transactions",
-                json!({ "op_date": "2026-06-10", "concept": concept, "amount": amount,
+                json!({ "op_date": tenth_of_last_month(), "concept": concept, "amount": amount,
                         "kind": kind, "category_id": cat }),
                 &owner.cookie,
             )
@@ -1140,7 +1140,7 @@ async fn sim_kpis_match_summary_financial_health_in_all_three_modes() {
         let r = app
             .post_json_with_cookie(
                 "/v1/transactions",
-                json!({ "op_date": "2026-06-10", "concept": concept, "amount": amount,
+                json!({ "op_date": tenth_of_last_month(), "concept": concept, "amount": amount,
                         "kind": kind, "category_id": cat }),
                 &owner.cookie,
             )
@@ -2419,7 +2419,7 @@ async fn the_bridge_override_can_only_move_the_date_earlier_when_the_pension_is_
     let token = create_token(&app, &owner).await;
 
     // `P − 15 años` en la rejilla publicada, con la pensión a los 67 y el owner nacido en 1990.
-    const SUELO_15Y: u64 = 184;
+    let suelo_15y: u64 = months_from_this_month_to(2057, 1) - 180;
     let pension = json!({"starts_at_age": 67, "monthly_amount_today": "1200", "indexed": true});
     let con_puente = |base: serde_json::Value, pct: &str, years: u64| {
         let mut p = pension.clone();
@@ -2447,8 +2447,8 @@ async fn the_bridge_override_can_only_move_the_date_earlier_when_the_pension_is_
         .as_u64()
         .expect("fecha sin puente");
     assert!(
-        natural < SUELO_15Y,
-        "el arnés tiene que ejercer el caso «pensión lejos»: fecha natural {natural} < suelo {SUELO_15Y}: {lejos_sin}"
+        natural < suelo_15y,
+        "el arnés tiene que ejercer el caso «pensión lejos»: fecha natural {natural} < suelo {suelo_15y}: {lejos_sin}"
     );
 
     let lejos_con = tool_json(
@@ -2464,7 +2464,7 @@ async fn the_bridge_override_can_only_move_the_date_earlier_when_the_pension_is_
     );
     assert_eq!(
         lejos_con["scenario"]["safe_date_month_index"].as_u64(),
-        Some(SUELO_15Y),
+        Some(suelo_15y),
         "con la fecha natural muy por delante de la pensión, el puente la empuja a su suelo `P − 15 años`: {lejos_con}"
     );
 
@@ -2502,8 +2502,8 @@ async fn the_bridge_override_can_only_move_the_date_earlier_when_the_pension_is_
         .as_u64()
         .expect("fecha cara sin puente");
     assert!(
-        natural_caro > SUELO_15Y,
-        "el arnés tiene que ejercer el caso «pensión cerca»: {natural_caro} > {SUELO_15Y}: {cerca_sin}"
+        natural_caro > suelo_15y,
+        "el arnés tiene que ejercer el caso «pensión cerca»: {natural_caro} > {suelo_15y}: {cerca_sin}"
     );
 
     let mut caro_con = caro.clone();
@@ -2524,7 +2524,28 @@ async fn the_bridge_override_can_only_move_the_date_earlier_when_the_pension_is_
         "con la pensión dentro de la ventana, el tope del 6,5 % adelanta la fecha: {con_puente_caro} vs {natural_caro}: {cerca_con}"
     );
     assert!(
-        con_puente_caro >= SUELO_15Y,
-        "…pero nunca por debajo del suelo `P − 15 años`: {con_puente_caro} < {SUELO_15Y}: {cerca_con}"
+        con_puente_caro >= suelo_15y,
+        "…pero nunca por debajo del suelo `P − 15 años`: {con_puente_caro} < {suelo_15y}: {cerca_con}"
     );
+}
+
+/// Meses enteros desde el mes en curso (índice 0 de la rejilla publicada) hasta `(year, month)`.
+/// Los índices de mes de los tests van calculados desde HOY, nunca escritos: el suelo del puente
+/// estuvo escrito como `184` y valió exactamente un mes (en octubre de 2026 ya era 183).
+fn months_from_this_month_to(year: i32, month: u32) -> u64 {
+    use chrono::Datelike;
+    let today = chrono::Utc::now().date_naive();
+    let months = (i64::from(year) - i64::from(today.year())) * 12
+        + (i64::from(month) - i64::from(today.month()));
+    u64::try_from(months).expect("la fecha objetivo está en el futuro")
+}
+
+/// `YYYY-MM-10` del mes anterior al actual: un mes CERRADO que cae dentro de cualquier ventana de
+/// calendario (3 o 12 meses) sea cual sea el día de hoy. Las siembras llevaban «2026-06-10» y el
+/// 10 de octubre de 2026 ya no caían en la ventana de 3 meses del override.
+fn tenth_of_last_month() -> String {
+    use chrono::Datelike;
+    let today = chrono::Utc::now().date_naive();
+    let (y, m) = if today.month() == 1 { (today.year() - 1, 12) } else { (today.year(), today.month() - 1) };
+    format!("{y:04}-{m:02}-10")
 }
