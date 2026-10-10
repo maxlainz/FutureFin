@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import {
   PLAN_CARD_COPY,
+  PLAN_CARD_HELP,
   PLAN_FIELD_HELP,
   fractionFromPercent,
   missingRequiredPlanFields,
@@ -300,17 +301,69 @@ describe("cableado campo → ayuda", () => {
     }
   });
 
-  it("los campos nuevos del modelo v2 están cableados: ninguno se queda sin ayuda", () => {
+  /**
+   * 2026-09-13 — **un `<?>` por texto distinto, en el sitio más alto que lo gobierna.** Antes
+   * cada campo llevaba el suyo, y como varios compartían entrada del catálogo la pantalla
+   * pintaba el MISMO icono hasta cuatro veces en el mismo apartado (los cuatro de «Pensión»,
+   * los tres del puente, los cuatro de la regla de retirada). El texto no se perdió: subió al
+   * título del apartado o al de su sub-sección. Este test fija las dos mitades de esa regla —
+   * quién conserva icono propio y quién NO debe volver a tenerlo—, porque re-añadir uno es el
+   * error natural al tocar un campo sin mirar su vecino.
+   */
+  it("los campos con ayuda PROPIA la conservan", () => {
     for (const id of [
       "success_threshold_pct",
       "coast_mode",
-      "coast_stop_age",
       "partial_mode",
+      "target_retirement_age",
+      "partial_income",
+      "swr_pct",
+      "withdrawal_rule_kind",
+      "spend_mode",
+      // El interruptor del puente recupera el suyo al retirarse el rótulo de su sub-columna:
+      // pasó a ser lo más alto que gobierna esos tres campos (2026-09-13).
       "bridge_enabled",
-      "bridge_max_pct",
-      "bridge_max_years",
     ] as const) {
       expect(PLAN_FIELD_HELP[id], `${id} sin ayuda`).toBeDefined();
+    }
+  });
+
+  it("los campos que COMPARTÍAN texto ya no repiten el icono", () => {
+    // Cada uno con el sitio al que subió su ayuda, para que el que lo revierta sepa adónde mirar.
+    const subieron = {
+      coast_stop_age: "comparte `retirement.coast_mode` con el campo del modo",
+      partial_start_age: "comparte `retirement.partial` con el ingreso de la fase",
+      partial_expense_basis: "comparte `retirement.partial` con el ingreso de la fase",
+      pension_amount: "sube al título del apartado «Pensión»",
+      pension_start_age: "sube al título del apartado «Pensión»",
+      pension_indexed: "sube al título del apartado «Pensión»",
+      pension_fraction_while_partial: "sube al título del apartado «Pensión»",
+      bridge_max_pct: "comparte `retirement.bridge_settings` con el interruptor del puente",
+      bridge_max_years: "comparte `retirement.bridge_settings` con el interruptor del puente",
+      hybrid_end_pct: "comparte `retirement.withdrawal_rule` con el selector de regla",
+      guardrails_band_pct: "comparte `retirement.withdrawal_rule` con el selector de regla",
+      guardrails_adjust_pct: "comparte `retirement.withdrawal_rule` con el selector de regla",
+      horizon_lifespan_age: "sube al título del apartado «Horizonte»",
+    } as const;
+    for (const [id, donde] of Object.entries(subieron)) {
+      expect(
+        PLAN_FIELD_HELP[id as keyof typeof PLAN_FIELD_HELP],
+        `${id} vuelve a duplicar un icono: su ayuda ${donde}`,
+      ).toBeUndefined();
+    }
+  });
+
+  it("los seis apartados tienen `<?>`, y su id existe en el catálogo", () => {
+    expect(Object.keys(PLAN_CARD_HELP).sort()).toEqual([
+      "ages",
+      "horizon",
+      "pension",
+      "spending",
+      "strategy",
+      "withdrawal",
+    ]);
+    for (const [card, entry] of Object.entries(PLAN_CARD_HELP)) {
+      expect(HELP_TEXTS[entry.helpId], `${card} apunta a un texto inexistente`).toBeDefined();
     }
   });
 
@@ -321,19 +374,18 @@ describe("cableado campo → ayuda", () => {
   });
 });
 
-describe("PLAN_CARD_COPY — la frase de cada tarjeta", () => {
-  it("todas las tarjetas tienen título corto y una frase con sustancia acabada en punto", () => {
-    // No juzga prosa: caza la tarjeta que alguien añade sin frase. Una tarjeta con título y sin
-    // frase deja el formulario igual de mudo que antes de V3, con un separador más.
+describe("PLAN_CARD_COPY — el título de cada apartado", () => {
+  // La FRASE de cada apartado se fue al catálogo el 2026-09-13 (ver `PLAN_CARD_HELP`), y con ella
+  // los guardas que fijaban su contenido, que hoy viven en `helpTexts.test.ts`. Aquí queda lo que
+  // sigue siendo de esta tabla: que hay seis y que ninguno se queda sin rótulo.
+  it("todos los apartados tienen un título corto", () => {
     for (const [card, copy] of Object.entries(PLAN_CARD_COPY)) {
       expect(copy.title.length, `${card}: título vacío`).toBeGreaterThan(2);
       expect(copy.title.length, `${card}: título demasiado largo`).toBeLessThanOrEqual(28);
-      expect(copy.blurb.length, `${card}: frase demasiado corta`).toBeGreaterThan(40);
-      expect(copy.blurb.endsWith("."), `${card}: la frase no acaba en punto`).toBe(true);
     }
   });
 
-  it("son SEIS tarjetas: el umbral volvió a «Retirada», no abrió una tarjeta «Riesgo»", () => {
+  it("son SEIS apartados: el umbral volvió a «Retirada», no abrió uno «Riesgo»", () => {
     expect(Object.keys(PLAN_CARD_COPY).sort()).toEqual([
       "ages",
       "horizon",
@@ -342,37 +394,6 @@ describe("PLAN_CARD_COPY — la frase de cada tarjeta", () => {
       "strategy",
       "withdrawal",
     ]);
-  });
-
-  it("la frase de «Horizonte» ya NO dice que alargarlo no mueve tu fecha", () => {
-    // Era cierto mientras la fecha era un cruce de capital contra un objetivo. En v2 la fecha
-    // válida es el primer mes cuyo éxito **hasta el horizonte** cumple el umbral, así que alargar
-    // el horizonte la RETRASA. Es la mentira más cara de las cuatro que el modelo v2 dejó atrás:
-    // invita a subir la edad límite «por si acaso» y a no entender por qué se va la fecha.
-    const { blurb } = PLAN_CARD_COPY.horizon;
-    expect(blurb).not.toMatch(/no mueve tu fecha/i);
-    expect(blurb, "y tiene que decir lo contrario, no callarse").toMatch(/retrasa/i);
-  });
-
-  it("«Retirada» explica las DOS cifras que deciden la fecha: umbral y tasa", () => {
-    const { blurb } = PLAN_CARD_COPY.withdrawal;
-    expect(blurb).toMatch(/umbral/i);
-    expect(blurb).toMatch(/escenarios/i);
-    expect(blurb).toMatch(/primer año/i);
-  });
-
-  it("«Pensión» dice qué hace el puente, y que en ese tramo no hay aportaciones", () => {
-    const { blurb } = PLAN_CARD_COPY.pension;
-    expect(blurb).toMatch(/puente/i);
-    expect(blurb).toMatch(/aportaciones/i);
-  });
-
-  it("ninguna frase promete un OBJETIVO que el modelo v2 ya no tiene", () => {
-    for (const [card, copy] of Object.entries(PLAN_CARD_COPY)) {
-      expect(copy.blurb, card).not.toMatch(
-        /multiplica tu objetivo|dimensiona el objetivo|mueve el objetivo/i,
-      );
-    }
   });
 });
 

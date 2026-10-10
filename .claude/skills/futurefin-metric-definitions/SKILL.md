@@ -106,7 +106,8 @@ más que la cifra, y por eso la tabla de abajo es la que se mantiene al día.
 | Vista | Ids |
 |---|---|
 | Resumen · salud financiera | `summary.savings`, `summary.liquid_assets`, `summary.runway`, `summary.net_worth`, `summary.net_return`, `summary.plan` **(5.0.0)**, `summary.success` **(5.0.0)** |
-| Jubilación · plan y perfil (cableado como TABLA en `lib/retirement-form.ts`, `PLAN_FIELD_HELP`) | `retirement.strategy` (cuelga del `<h4>` de la tarjeta «Estrategia») · `retirement.target_age` · `retirement.coast_mode` **(v2)** · `retirement.partial_mode` **(v2)** · `retirement.partial` · `retirement.pension` · `retirement.bridge_settings` **(v2)** · `retirement.success_threshold` **(v2 — vuelve, con otro sujeto: ver §6.4)** · `retirement.withdrawal_rule` · `retirement.spend_mode` · `settings.swr` y `settings.horizon_age`, que hoy cuelgan de este formulario y no de Ajustes |
+| Jubilación · APARTADOS del formulario (tabla `PLAN_CARD_HELP`, `lib/retirement-form.ts`) **(2026-09-13)** | Uno por apartado, colgado del `<h3>` del panel: `retirement.strategy` · `retirement.section_ages` **(nueva)** · `retirement.pension` · `retirement.section_spending` **(nueva)** · `retirement.section_withdrawal` **(nueva)** · `settings.horizon_age`. Más `retirement.bridge_settings`, en el rótulo de la sub-sección «El puente hasta la pensión» (`BRIDGE_SECTION_HELP`) |
+| Jubilación · CAMPOS con ayuda propia (tabla `PLAN_FIELD_HELP`, `lib/retirement-form.ts`) | Solo los que tienen texto SUYO, ocho: `retirement.target_age` · `retirement.coast_mode` **(v2)** · `retirement.partial_mode` **(v2)** · `retirement.partial` · `retirement.success_threshold` **(v2 — vuelve, con otro sujeto: ver §6.4)** · `settings.swr` · `retirement.withdrawal_rule` · `retirement.spend_mode`. Los catorce campos que COMPARTÍAN texto perdieron su icono: subió al apartado o a la sub-sección (§6.5) |
 | Jubilación · frase-hito (`RetirementView.tsx`, U1b) | `retirement.plan_sentence` (cabecera de «Resultado» — HelpPopover del panel, no de una tarjeta) **(5.0.0, U1b, #207)** |
 | Jubilación · resultado (`lib/retirement-tiles.ts`) | tiles FIJOS `retirement.needed_capital` **(v2)** y `retirement.success`; el tercero por estrategia — `retirement.safe_date` **(v2, `asap`)** · `retirement.required_contribution` (`retire_at_age`) · `retirement.coast_month` (`coast`) · `retirement.partial_mode` (`partial`); en «Detalle del cálculo», `retirement.fire_number_classic` **(v2)** y las dos cotas de `retirement.safe_date` (fechas al 100 % y al 90 %) |
 | Jubilación · Riesgo (`lib/risk-bands.ts`) | `retirement.bands` · `retirement.success` (fila del primer tipo de fallo) · `retirement.failure_by_age` **(v2)** · `retirement.coverage` (sus dos filas) · `retirement.success_threshold` (fila del suelo de Wilson) |
@@ -380,6 +381,53 @@ sigue siendo un campo vivo—, y existe porque el vocabulario retirado sobrevive
 escribe la siguiente entrada. El precedente exacto es el issue #216: una ayuda que prometía una
 línea de mediana que el chart llevaba semanas sin dibujar.
 
+### 6.5 — Las explicaciones dejan la pantalla y se van al `<?>` (2026-09-13)
+
+Informe del owner sobre Jubilación: «hay mucho plain text, y ya tenemos un mecanismo para dar
+explicaciones `<?>`, usémoslo». No fue copy: movió prosa AL catálogo y cambió dónde cuelga el icono.
+
+**Tres entradas nuevas y una regla de nombres.** `retirement.section_ages`,
+`retirement.section_spending` y `retirement.section_withdrawal` describen un **apartado**, no una
+cifra. Es la excepción que §6.2 avisa que se paga cara —`retirement.assumptions` murió por describir
+un CONTENEDOR—, y por eso llevan prefijo propio: `section_` dice, desde el id, que su vida es la del
+apartado. La diferencia con `assumptions` es material: aquel describía un **acordeón**, un mecanismo
+de UI; estos describen un **tema del plan** (qué se te pregunta y qué implica contestarlo). Si un día
+desaparecen será porque el plan dejó de preguntar eso. Los otros tres apartados **no** estrenaron id:
+reutilizan la entrada que ya describía su tema entero —`retirement.strategy`, `retirement.pension`,
+`settings.horizon_age`— con la sustancia de su frase fundida dentro.
+
+**Nueve `<small>` de ayuda se fundieron en la entrada que les correspondía.** Cinco ya estaban
+dichas (el umbral, la tasa, el coast que deja de aportar, el año sabático); cuatro añadieron algo
+que el catálogo no decía y hoy vive ahí: que hasta que entra la pensión la paga entero tu capital,
+qué significa el 0 % de pensión durante la media jornada, que el suelo de la híbrida va por debajo
+de tu tasa, y **las dos cotas del puente**.
+
+**Y ahí saltó un número falso, que es por lo que esta skill es una puerta.** Al pasar la cota del
+puente al catálogo escribí «entre 5 y 15 años» de memoria. El código dice `MIN_BRIDGE_YEARS = 1` y
+`MAX_BRIDGE_YEARS = 20` (`lib/retirementProfile.ts`), y el `<small>` que se estaba retirando los
+interpolaba VIVOS (`{MIN_BRIDGE_YEARS}`/`{MAX_BRIDGE_YEARS}`), así que nunca pudo mentir. **Mover un
+texto dinámico a un catálogo estático convierte un valor en una afirmación**: el día que la cota
+cambie, el `<small>` se habría actualizado solo y la entrada no. Regla: si el texto que mudas
+interpola una constante, cítala verificada y deja escrito de dónde sale.
+
+**Un `<?>` por texto distinto, en el sitio más alto que lo gobierna.** Catorce campos compartían
+entrada con un vecino y pintaban el mismo icono hasta cuatro veces en el mismo apartado (los cuatro
+de «Pensión», los tres del puente, los cuatro de la regla de retirada). El icono sube al título del
+apartado o al rótulo de su sub-sección; el campo solo lo conserva si el texto es suyo.
+`retirement-form.test.ts` fija las dos mitades —quién lo conserva y quién no debe volver a tenerlo.
+
+**Los guardas de contenido se mudan con el texto.** Los tres que vivían en `retirement-form.test.ts`
+sobre las frases (el horizonte que RETRASA la fecha, las dos cifras de «Retirada», el puente sin
+aportaciones) están hoy en `helpTexts.test.ts`, y la lista de frases prohibidas del guarda del
+objetivo hereda las tres suyas. Un guarda que se queda mirando el sitio del que el texto se fue no
+protege nada y parece que sí.
+
+**Y la trampa del escáner, dos veces en la misma sesión.** `PLAN_CARD_HELP` tuvo que declararse como
+`{ helpId: "…" }` y no como `Record<PlanCardId, HelpTextId>`: con el id suelto como valor, el
+escáner de §5 no lo ve y las seis entradas se leen como huérfanas. Y el comentario que explicaba eso
+**escribía el patrón literal**, así que el escáner se contó a sí mismo y el test falló pidiendo un
+texto para el id `…`. Es el mismo error que CLAUDE.md llama «comandos que se cuentan a sí mismos».
+
 ## 7. Campos declarativos que no son texto de ayuda: `basis` y las marcas de unidad (4.4.0)
 
 La Fase 5 del tren MCP (issue #86) añadió dos campos **declarativos** — no cambian ninguna cifra,
@@ -447,6 +495,26 @@ describe (no hay entrada de histórico ni de proyección-como-serie en `helpText
 usan el chart, no tarjetas con popover).
 
 ## 8. Provenance and maintenance
+
+**Re-sincronizado el 2026-09-13 (informe del owner sobre Jubilación, rama `release/5.0.0`)**: nueva
+§6.5 — las explicaciones salen de la pantalla y entran en el catálogo. **+3 entradas**
+(`retirement.section_ages`, `retirement.section_spending`, `retirement.section_withdrawal`, con el
+prefijo `section_` que declara que describen un apartado y no una cifra); **reescritas sin cambiar
+de id** `retirement.strategy`, `retirement.pension`, `retirement.partial`,
+`retirement.bridge_settings` (gana sus dos cotas, verificadas contra `lib/retirementProfile.ts` —
+1 a 20 años, 20 % de tasa: el número que escribí de memoria era falso),
+`retirement.withdrawal_rule` (el suelo de la híbrida) y `settings.horizon_age` (alargarlo RETRASA la
+fecha). El mapa de vistas de §6 parte la fila de Jubilación en DOS: apartados (`PLAN_CARD_HELP`) y
+campos con ayuda propia (`PLAN_FIELD_HELP`, que baja de 22 a 8 cableados). Tres guardas de contenido
+se mudan de `retirement-form.test.ts` a `helpTexts.test.ts` con el texto que vigilan. Verificación:
+
+```bash
+cd apps/web && npx vitest run src/lib/helpTexts.test.ts src/lib/retirement-form.test.ts
+grep -c '^  "' src/lib/helpTexts.ts              # 54 el 2026-09-13
+grep -c 'helpId:' src/lib/retirement-form.ts     # 18 = 8 campos + 6 apartados + 1 puente + 3 tipos
+grep -c '<small className="muted"' src/views/RetirementView.tsx   # 1 — y es un ESTADO, no una ayuda
+```
+
 
 **Re-sincronizado el 2026-09-06 con el MODELO v2 de jubilación (WP W8, rama `release/5.0.0`)**: se
 retiran **diez** entradas de Jubilación y nacen **ocho** (listas completas en §6.4); se reescriben

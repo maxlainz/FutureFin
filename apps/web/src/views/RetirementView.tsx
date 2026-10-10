@@ -94,15 +94,11 @@ import { savingsSourceUsesTransactions } from "../lib/fire";
 import {
   COAST_MODE_LABEL,
   HORIZON_LIFESPAN_AGE_OPTIONS,
-  MAX_BRIDGE_PCT,
-  MAX_BRIDGE_YEARS,
   MAX_SUCCESS_THRESHOLD_PCT,
   MAX_SWR_PCT,
-  MIN_BRIDGE_YEARS,
   MIN_SUCCESS_THRESHOLD_PCT,
   PARTIAL_MODE_LABEL,
   RETIREMENT_STRATEGIES,
-  RETIREMENT_STRATEGY_BLURB,
   RETIREMENT_STRATEGY_LABEL,
   WITHDRAWAL_RULE_KIND_LABEL,
   buildRetirementProfilePatch,
@@ -127,12 +123,12 @@ import {
   planCardGroups,
   planFieldsContextFromProfile,
   requiredPlanFields,
-  type PlanCardId,
   type PlanFieldDescriptor,
   type PlanFieldId,
 } from "../lib/plan-fields";
 import {
   PLAN_CARD_COPY,
+  PLAN_CARD_HELP,
   PLAN_FIELD_HELP,
   fractionFromPercent,
   missingRequiredPlanFields,
@@ -248,23 +244,22 @@ const BRIDGE_FIELD_IDS: ReadonlySet<PlanFieldId> = new Set<PlanFieldId>([
 ]);
 
 /**
- * Las tarjetas que ocupan el ANCHO ENTERO de la columna del plan (W13).
+ * Campo que NO se convierte en fila «rótulo a la izquierda · control a la derecha» (2026-09-13).
  *
- * `strategy` y `spending` ya lo hacían: su contenido es una rejilla de radio-cards que en media
- * columna quedaba ilegible. **`pension` se suma** por la razón del owner —era la tarjeta que peor
- * aprovechaba el ancho— y porque es la única que contiene dos sub-temas (la pensión y su puente):
- * a media anchura los apilaba en una columna larguísima de siete controles.
+ * La tarjeta ancha se lee como una lista de ajustes (`App.css`, §La tarjeta ancha se lee como una
+ * LISTA DE AJUSTES), y eso le quita a cada control el ancho sobrante que el owner leyó como huecos
+ * vacíos. El criterio de la excepción: **el campo cuyo contenido es una rejilla o una pila propia**
+ * —las tres rejillas de modos (`coast_mode`, `partial_mode`, `fire_number_mode`) y la pila de radios
+ * de `spend_mode`—, porque ahí el ancho no es aire: es lo que hace que el nombre y la frase de cada
+ * opción quepan en una línea.
  *
- * El criterio, para la siguiente: una tarjeta va ancha si su contenido es una rejilla propia o si
- * tiene DOS sub-temas que se leen mejor en paralelo. `ages`, `withdrawal` y `horizon` traen uno a
- * tres campos de un mismo tema y se emparejan bien de dos en dos — a ancho completo dejarían una
- * banda de aire a la derecha de cada campo.
+ * No escribas aquí el nombre de esas clases: `design-system.md` cuenta sus consumidores con un
+ * `grep -c` sobre este fichero, y un comentario que las nombra se cuenta a sí mismo.
+ *
+ * Va como CLASE declarada y no como un `:has()` en el CSS para que el criterio se lea donde se
+ * decide, que es aquí.
  */
-const WIDE_PLAN_CARDS: ReadonlySet<PlanCardId> = new Set<PlanCardId>([
-  "strategy",
-  "pension",
-  "spending",
-]);
+const BLOCK_FIELD = "field retirement-field--block";
 
 /** Marca de campo obligatorio sin rellenar (U2). No es un error del servidor: es el dato que la
  *  estrategia elegida necesita para poder simularse como se ha pedido. */
@@ -1129,13 +1124,7 @@ export function RetirementView({
                 saveBirthDate(e.target.value);
               }}
             />
-            {missing ? (
-              <RequiredHint />
-            ) : (
-              <small className="muted">
-                Se guarda en tu cuenta: convierte las edades del plan en meses concretos.
-              </small>
-            )}
+            {missing ? <RequiredHint /> : null}
           </label>
         );
 
@@ -1146,7 +1135,7 @@ export function RetirementView({
       // desaparece (`lib/plan-fields.ts`) en vez de quedarse en gris.
       case "coast_mode":
         return (
-          <div className="field" key={f.id}>
+          <div className={BLOCK_FIELD} key={f.id}>
             <span className="label-with-help field-label-text">
               {f.label}
               {fieldHelp(f.id)}
@@ -1171,11 +1160,6 @@ export function RetirementView({
                     onChange={() => patchDraft((p) => ({ ...p, coast_mode: mode }))}
                   />
                   <span className="retirement-mode-name">{COAST_MODE_LABEL[mode]}</span>
-                  <span className="retirement-mode-sub">
-                    {mode === "fixed_retirement_age"
-                      ? "el plan resuelve cuándo puedes dejar de aportar"
-                      : "el plan resuelve a qué fecha te lleva"}
-                  </span>
                 </label>
               ))}
             </div>
@@ -1200,13 +1184,7 @@ export function RetirementView({
               }}
               onBlur={() => queueProfileSave(0)}
             />
-            {missing ? (
-              <RequiredHint />
-            ) : (
-              <small className="muted">
-                Desde esa edad no entra ni un euro más: lo que haya, crece solo.
-              </small>
-            )}
+            {missing ? <RequiredHint /> : null}
           </label>
         );
 
@@ -1236,7 +1214,7 @@ export function RetirementView({
       // ── M11 · los dos modos de la jornada reducida ────────────────────────────────────────
       case "partial_mode":
         return (
-          <div className="field" key={f.id}>
+          <div className={BLOCK_FIELD} key={f.id}>
             <span className="label-with-help field-label-text">
               {f.label}
               {fieldHelp(f.id)}
@@ -1280,11 +1258,6 @@ export function RetirementView({
                     }
                   />
                   <span className="retirement-mode-name">{PARTIAL_MODE_LABEL[mode]}</span>
-                  <span className="retirement-mode-sub">
-                    {mode === "at_age"
-                      ? "tú pones la edad de inicio"
-                      : "el plan busca el primer mes que se lo puede permitir"}
-                  </span>
                 </label>
               ))}
             </div>
@@ -1351,7 +1324,6 @@ export function RetirementView({
               }
               onBlur={() => queueProfileSave(0)}
             />
-            <small className="muted">En euros de hoy. Vacío = año sabático.</small>
           </label>
         );
 
@@ -1380,7 +1352,7 @@ export function RetirementView({
             {pension ? (
               <div className="field-row">
                 <label className="field">
-                  <span>Pensión mensual (euros de hoy)</span>
+                  <span>Pensión mensual</span>
                   <input
                     inputMode="decimal"
                     placeholder="p. ej. 1200"
@@ -1435,9 +1407,6 @@ export function RetirementView({
               ariaLabel="Activar el puente hasta la pensión"
               label={pension?.bridge_enabled === true ? "Activado" : "Desactivado"}
             />
-            <p className="muted tight">
-              Jubilación anticipada: sin sueldo no hay aportaciones; se vende hasta la pensión.
-            </p>
           </div>
         );
 
@@ -1460,15 +1429,7 @@ export function RetirementView({
               }
               onBlur={() => queueProfileSave(0)}
             />
-            {missing ? (
-              <RequiredHint />
-            ) : (
-              <small className="muted">
-                Mayor que tu tasa de retirada ({formatPercentAmount(profileDraft.swr_pct)}) y
-                hasta {formatPercentAmount(String(MAX_BRIDGE_PCT))}: si no la supera no es un
-                puente, es la misma tasa.
-              </small>
-            )}
+            {missing ? <RequiredHint /> : null}
           </label>
         );
 
@@ -1490,20 +1451,13 @@ export function RetirementView({
               }}
               onBlur={() => queueProfileSave(0)}
             />
-            {missing ? (
-              <RequiredHint />
-            ) : (
-              <small className="muted">
-                Entre {MIN_BRIDGE_YEARS} y {MAX_BRIDGE_YEARS}. Tu fecha nunca cae más de estos
-                años antes de la primera paga.
-              </small>
-            )}
+            {missing ? <RequiredHint /> : null}
           </label>
         );
 
       case "fire_number_mode":
         return (
-          <div className="field" key={f.id}>
+          <div className={BLOCK_FIELD} key={f.id}>
             {/* Sin rótulo propio: el `<h4>` de la tarjeta ya dice «Gasto en jubilación», y
                 repetirlo dos líneas más abajo es el ruido que V3 vino a quitar. El
                 `aria-label` del radiogroup se queda: ahí sí hace falta el nombre. */}
@@ -1514,11 +1468,11 @@ export function RetirementView({
             >
               {(
                 [
-                  ["annual_expense", "Gasto actual", "tus partidas de jubilación"],
-                  ["current_income", "Ingresos actuales", "mantener tu nivel de vida"],
-                  ["manual", "Manual", "una cifra que decides tú"],
+                  ["annual_expense", "Gasto actual"],
+                  ["current_income", "Ingresos actuales"],
+                  ["manual", "Manual"],
                 ] as const
-              ).map(([mode, name, blurb]) => (
+              ).map(([mode, name]) => (
                 <label
                   key={mode}
                   className={`retirement-mode-card ${
@@ -1533,7 +1487,6 @@ export function RetirementView({
                     onChange={() => patchDraft((p) => ({ ...p, fire_number_mode: mode }))}
                   />
                   <span className="retirement-mode-name">{name}</span>
-                  <span className="retirement-mode-sub">{blurb}</span>
                 </label>
               ))}
             </div>
@@ -1604,12 +1557,6 @@ export function RetirementView({
             <span className="retirement-slider-value">
               {formatPercentDisplay(profileDraft.success_threshold_pct)}
             </span>
-            <small className="muted">
-              de tus escenarios tienen que aguantar hasta el horizonte.
-              {profileDraft.success_threshold_pct >= MAX_SUCCESS_THRESHOLD_PCT
-                ? " Al 100 % no puede fallar ni uno de los caminos sorteados."
-                : ""}
-            </small>
           </label>
         );
 
@@ -1642,9 +1589,6 @@ export function RetirementView({
             <span className="retirement-slider-value">
               {formatPercentAmount(profileDraft.swr_pct)}
             </span>
-            <small className="muted">
-              lo máximo que sacas el primer año sobre tu líquido.
-            </small>
           </label>
         );
 
@@ -1716,9 +1660,6 @@ export function RetirementView({
               }
               onBlur={() => queueProfileSave(0)}
             />
-            <small className="muted">
-              El suelo del latch: tiene que quedar por debajo de tu tasa de retirada.
-            </small>
           </label>
         );
 
@@ -1754,7 +1695,7 @@ export function RetirementView({
 
       case "spend_mode":
         return (
-          <div className="field" key={f.id}>
+          <div className={BLOCK_FIELD} key={f.id}>
             <div
               className="retirement-radio-stack"
               role="radiogroup"
@@ -1825,9 +1766,6 @@ export function RetirementView({
               }
               onBlur={() => queueProfileSave(0)}
             />
-            <small className="muted">
-              0 % = no cobras nada de pensión mientras dure la media jornada.
-            </small>
           </label>
         );
 
@@ -1929,16 +1867,17 @@ export function RetirementView({
     if (bridge.length === 0 || own.length === 0) {
       return fields.map((f) => renderField(f));
     }
+    /* Sin rótulos de sub-columna (2026-09-13, «decluter»). Llevaban uno en versalita cada una
+       —«TU PENSIÓN» y «EL PUENTE HASTA LA PENSIÓN»—, y el segundo REPETÍA palabra por palabra
+       el rótulo del interruptor que tenía justo debajo: el mismo texto dos veces seguidas en
+       cinco centímetros. Cada sub-columna abre ahora con su propio control de encendido, que
+       es lo que de verdad la titula —la casilla «Cuento con una pensión» y el interruptor
+       «Puente hasta la pensión»—, y el `<?>` del puente vuelve a colgar de ese interruptor,
+       que es hoy lo más alto que gobierna esos tres campos. */
     return (
-      <div className="retirement-card-cols">
-        <div className="retirement-card-col">
-          <h5 className="retirement-subcard-title">Tu pensión</h5>
-          {own.map((f) => renderField(f))}
-        </div>
-        <div className="retirement-card-col">
-          <h5 className="retirement-subcard-title">El puente hasta la pensión</h5>
-          {bridge.map((f) => renderField(f))}
-        </div>
+      <div className="retirement-subcols">
+        <div className="retirement-subcol">{own.map((f) => renderField(f))}</div>
+        <div className="retirement-subcol">{bridge.map((f) => renderField(f))}</div>
       </div>
     );
   };
@@ -2066,44 +2005,35 @@ export function RetirementView({
            («no-op en escritorio»), y evita que un ancho concreto quede clavado en un `@media`. */
         <div className="retirement-layout">
           <div className="retirement-col retirement-col--plan">
-          {/* ── 2 · «Tu plan»: una tarjeta por tema, todo a la vista (V3) ───────────────────
+          {/* ── 2 · El plan: UN APARTADO, UN PANEL (2026-09-13) ─────────────────────────────
               Sin banner de alta (F5: con una estrategia ya elegida, «Elige tu estrategia» es un
               cartel que sobra — y el flag de `localStorage` que lo descartaba nunca miraba el
               perfil, así que reaparecía en cada navegador nuevo) y sin acordeón «Avanzado» (F10:
-              «un cajón de sastre mal explicado»). Cada tarjeta abre con una frase de QUÉ hace y
-              qué implica tocarla; los campos son exactamente los mismos de la tabla U2. */}
-          <section className="panel">
-            <h3 className="panel-title">Tu plan</h3>
+              «un cajón de sastre mal explicado»). Cada panel abre con una frase de QUÉ hace y
+              qué implica tocarlo; los campos son exactamente los mismos de la tabla U2.
 
-            {retirementProfile == null ? (
-              <p className="muted tight bordered-top">
+              Hasta aquí los seis temas eran tarjetas con borde DENTRO de un panel «Tu plan»: una
+              caja dentro de otra caja, un anidamiento que no existe en ninguna otra pantalla
+              (Ajustes son doce paneles hermanos, y la columna «Resultado» separa sus bloques con
+              filete). El envoltorio se fue con su título: los seis títulos ya dicen qué es cada
+              cosa, y el indicador «Guardado» de la cabecera es el que ata el conjunto. */}
+          {retirementProfile == null ? (
+            <section className="panel">
+              <p className="muted tight">
                 {retirementProfileBusy ? "Cargando…" : "Sin datos."}
               </p>
-            ) : (
-              <div className="retirement-card-grid bordered-top">
-                {cardGroups.map(({ card, fields }) => (
-                  <section
-                    key={card}
-                    className={`retirement-card${
-                      WIDE_PLAN_CARDS.has(card) ? " retirement-card--wide" : ""
-                    }`}
-                  >
-                    <h4
-                      className={`panel-title${
-                        card === "strategy" ? " label-with-help" : ""
-                      }`}
-                    >
+            </section>
+          ) : (
+            cardGroups.map(({ card, fields }) => (
+                  <section key={card} className="panel retirement-plan-panel">
+                    {/* 2026-09-13: los SEIS títulos llevan su `<?>`, no solo «Estrategia». Lo
+                        que antes era un párrafo permanente bajo el título vive ahora dentro del
+                        popover (`PLAN_CARD_HELP` → catálogo), que es el mecanismo que la app ya
+                        tenía para explicar sin gastar pantalla. */}
+                    <h3 className="panel-title label-with-help">
                       {PLAN_CARD_COPY[card].title}
-                      {/* La ayuda de la estrategia colgaba del `<h3>` del panel; su sitio es el
-                          título de la tarjeta que gobierna. Misma clave, mismo texto. */}
-                      {card === "strategy" ? (
-                        <HelpPopover
-                          title={HELP_TEXTS["retirement.strategy"].title}
-                          body={HELP_TEXTS["retirement.strategy"].body}
-                        />
-                      ) : null}
-                    </h4>
-                    <p className="retirement-card-blurb">{PLAN_CARD_COPY[card].blurb}</p>
+                      <HelpFor id={PLAN_CARD_HELP[card].helpId} />
+                    </h3>
                     <div className="stack retirement-config-stack">
                       {card === "strategy" ? (
                         <div
@@ -2127,9 +2057,6 @@ export function RetirementView({
                               />
                               <span className="retirement-mode-name">
                                 {RETIREMENT_STRATEGY_LABEL[st]}
-                              </span>
-                              <span className="retirement-mode-sub">
-                                {RETIREMENT_STRATEGY_BLURB[st]}
                               </span>
                             </label>
                           ))}
@@ -2157,10 +2084,8 @@ export function RetirementView({
                       ) : null}
                     </div>
                   </section>
-                ))}
-              </div>
-            )}
-          </section>
+            ))
+          )}
           </div>
 
           <div className="retirement-col retirement-col--result">
@@ -2287,11 +2212,22 @@ export function RetirementView({
               ) : null}
             </div>
 
+          </section>
+
+          {/* ── 4 · «Riesgo»: el gráfico Y su lectura compacta ──────────────────────────────
+              Un panel hermano, no un bloque con filete dentro de «Resultado» (2026-09-13). El
+              gráfico ES la imagen del riesgo en el modelo v2 —la banda teñida por la parte de
+              escenarios que ya ha fallado, la tira de éxito y la curva de capital necesario—, y
+              las cifras de debajo son su lectura: separarlos en dos paneles habría partido una
+              sola idea en dos. El título sube al panel; el `<h4>` interior desaparece. */}
+          <section className="panel">
+            <h3 className="panel-title">Riesgo</h3>
+
             {/* U5 — UN gráfico: patrimonio, capital necesario, banda de escenarios, la marca de
                 tu fecha y los hitos del plan, todos sobre el mismo eje y hasta el horizonte.
                 Antes eran dos charts con ejes X distintos que el usuario emparejaba a ojo. */}
             {chartReady ? (
-              <div className="retirement-chart-block bordered-top">
+              <div className="retirement-chart-block">
                 <div className="retirement-chart-toolbar">
                   <Switch
                     variant="chart"
@@ -2454,15 +2390,21 @@ export function RetirementView({
               </div>
             ) : hasMembership ? (
               <div
-                className="ff-chart-skeleton ff-chart-skeleton--mini bordered-top"
+                className="ff-chart-skeleton ff-chart-skeleton--mini"
                 aria-hidden
                 style={{ minHeight: 260 }}
               />
             ) : null}
 
-            {/* ── Riesgo, en compacto ───────────────────────────────────────────────────── */}
-            <div className="retirement-risk-block bordered-top">
-              <h4 className="panel-title">Riesgo</h4>
+            {/* ── La lectura compacta del riesgo: PLEGADA de serie (2026-09-13) ──────────────
+                Owner: «en el módulo de riesgo, todo el texto debajo del gráfico debería ser
+                colapsable y colapsado por defecto». El gráfico ya dice el riesgo —la banda
+                teñida por la parte de escenarios que ha fallado, la tira de éxito— y estas
+                cifras son su desglose: quien quiera el detalle lo abre. `<details>` nativo, sin
+                estado propio: el navegador recuerda nada y el plegado no viaja al perfil, que es
+                justo lo que se quiere de un detalle de lectura. */}
+            <details className="retirement-risk-block bordered-top">
+              <summary className="details-trigger">Las cifras del riesgo</summary>
               {projectionBandsError ? (
                 <div className="banner error-banner">{projectionBandsError}</div>
               ) : !shownBands ? (
@@ -2562,15 +2504,22 @@ export function RetirementView({
                   <p className="risk-footnote">{riskFootnote(shownBands)}</p>
                 </>
               )}
-            </div>
+            </details>
 
-            {/* ── «Detalle del cálculo» ─────────────────────────────────────────────────────
-                No es un cajón de sastre: son las lecturas de SEGUNDO orden —las que matizan una
-                cifra de arriba en vez de responder una pregunta propia— más los avisos. Que
-                estén plegadas no las hace opcionales; que estén fuera de la cabecera es lo que
-                permite leer la cabecera de un vistazo. */}
-            {planDetailRows.length > 0 || shownBands ? (
-              <details className="retirement-detail bordered-top">
+          </section>
+
+          {/* ── 5 · «Detalle del cálculo» ───────────────────────────────────────────────────
+              No es un cajón de sastre: son las lecturas de SEGUNDO orden —las que matizan una
+              cifra de arriba en vez de responder una pregunta propia— más los avisos. Que estén
+              plegadas no las hace opcionales; que estén fuera de la cabecera es lo que permite
+              leer la cabecera de un vistazo. Panel propio desde 2026-09-13: su `<summary>` pasa a
+              ser el TÍTULO del panel —plegado, el panel entero es esa línea—, y quien le da ese
+              tamaño es `.retirement-detail-panel > .retirement-detail > summary` en `App.css`:
+              añadir aquí la clase `panel-title` no habría bastado, la pisa por especificidad la
+              regla `.retirement-detail > summary`. */}
+          {planDetailRows.length > 0 || shownBands ? (
+            <section className="panel retirement-detail-panel">
+              <details className="retirement-detail">
                 <summary className="details-trigger">Detalle del cálculo</summary>
                 <div className="risk-extra-rows">
                   {planDetailRows.map((r) => (
@@ -2610,8 +2559,8 @@ export function RetirementView({
                   ) : null}
                 </div>
               </details>
-            ) : null}
-          </section>
+            </section>
+          ) : null}
           </div>
         </div>
       )}

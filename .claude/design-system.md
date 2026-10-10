@@ -162,7 +162,7 @@ Reglas de presentación de toda cifra y texto del UI (los helpers viven en
 
 ## Layout
 
-- **Ancho de contenido**: `max-width: 66rem` (`app-main`). Antes era ancho completo; ahora el contenido se centra. **Dos pestañas se salen del tope, y por motivos distintos**: Proyección es full-bleed (`.app-main--projection-fullbleed` — además convierte `<main>` en un flex con `overflow: hidden` para que el chart ocupe el viewport) y **Jubilación** usa `.app-main--wide` (W13, 2026-09-07), que **solo** suelta el `max-width`: la página sigue siendo scroll vertical normal. Una vista se lleva `--wide` cuando su contenido son DOS columnas que a 66 rem caerían por debajo de ~500 px cada una; si lo que necesita es que un chart ocupe la ventana, lo suyo es el full-bleed, no esto.
+- **Ancho de contenido**: `max-width: 66rem` (`app-main`), **sin excepciones desde 2026-09-13 salvo una**: Proyección, que es full-bleed (`.app-main--projection-fullbleed` — además convierte `<main>` en un flex con `overflow: hidden` para que el chart ocupe el viewport). Jubilación tuvo la suya —`.app-main--wide`, W13— entre el 2026-09-07 y el 2026-09-13: sus dos columnas no cabían en 66 rem **mientras cada apartado llevaba un párrafo, cada campo su `<small>` y cada botón de modo su sub-rótulo**. Sacada esa prosa a los `<?>`, el mismo plan cabe en columnas de 504 px y la clase se retiró. La lección: antes de darle a una vista su propio ancho, mira si lo que no cabe es el contenido o la prosa que lo rodea.
 - **KPIs**:
   - Tile con borde + paper, radius `--ff-radius-kpi`, `align-self: stretch` para alinear en altura.
   - **Slot del paréntesis siempre presente** — `MetricCard` renderiza un `<div>` con `&nbsp;` cuando no hay valor, para que dos KPIs en la misma fila tengan baseline alineada. La info adicional de una KPI va **siempre en la prop `parenthetical`, nunca en `suffix`**.
@@ -522,46 +522,169 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 > excepción viva. La lección general: una rejilla dentro de una tarjeta se reparte por el ancho de su
 > CONTENEDOR (`auto-fit`), nunca por el del viewport.
 >
-> **Las rejillas de radio-cards viven en tarjetas ANCHAS.** Estrategia y modo del objetivo caen
-> dentro de una `.retirement-card`, y a media fila una radio-card de ~7 rem no cabe con su nombre en
-> una línea. Por eso «Estrategia» y «Gasto en jubilación» llevan `.retirement-card--wide`
-> (`grid-column: 1 / -1`). Si añades una tercera rejilla de radio-cards, su tarjeta va ancha también.
+> **Las rejillas de radio-cards necesitan el ancho del panel.** Desde 2026-09-13 cada apartado del
+> plan ES un panel a ancho de columna (ver §Un apartado, un panel) y `.retirement-card--wide` /
+> `WIDE_PLAN_CARDS` **ya no existen**: no los cites. Lo que sí sobrevive de la lección es la
+> excepción de campo: el `.field` cuyo contenido es una rejilla o una pila de radios no se convierte
+> en fila rótulo/control, se marca con `BLOCK_FIELD` (`retirement-field--block`,
+> `RetirementView.tsx`).
 
-### Tarjetas de configuración (`.retirement-card*`) — 5.0.0, V3 de la tercera vuelta de UX
+### Un apartado, un panel (`.retirement-plan-panel`) — 5.0.0 V3, reescrito el 2026-09-13
 
-Sustituyen al acordeón «Avanzado» de U12, que el owner leyó como «un cajón de sastre mal explicado»
-(F10) y al que pidió «no tener miedo a hacer cuadros para cada cosa (pensión, gasto tras
-jubilación…) en vez de macrobloques confusos» (F9). El formulario de Jubilación es ahora **una
-tarjeta por TEMA, todo a la vista**: Estrategia · Edades · Pensión · Gasto en jubilación · Retirada ·
+Nacieron en V3 como sustitutas del acordeón «Avanzado» de U12, que el owner leyó como «un cajón de
+sastre mal explicado» (F10) y al que pidió «no tener miedo a hacer cuadros para cada cosa (pensión,
+gasto tras jubilación…) en vez de macrobloques confusos» (F9). El formulario de Jubilación es **un
+apartado por TEMA, todo a la vista**: Estrategia · Edades · Pensión · Gasto en jubilación · Retirada ·
 Horizonte.
 
-- `.retirement-card-grid`: `repeat(auto-fit, minmax(min(100%, 24rem), 1fr))`, `gap: 1rem`, sin
-  breakpoint. **El mínimo subió de 21 rem a 24 rem con la maquetación en dos columnas (W13)**: el
-  plan ya no ocupa la página entera sino una columna de ~600 px (1280) a ~780 px (1600), y con 21 rem
-  esa columna daba DOS tarjetas por fila de ~360 px — con lo que las rejillas de tres modos que viven
-  dentro caían a ~105 px por opción. A 24 rem la columna del plan es de UNA tarjeta hasta bien pasados
-  los 1600 px, y la página apilada (por debajo de ~1100 px) sigue dando dos.
-- `.retirement-card`: borde `--ff-line-soft`, radio `--ff-radius-kpi`, fondo
-  `color-mix(in oklch, var(--ff-paper) 60%, var(--ff-bg))` — un escalón por debajo del panel que las
-  contiene, para que se lean como subdivisiones y no como paneles hermanos.
-- `.retirement-card--wide`: `grid-column: 1 / -1`. **Tres tarjetas desde W13** — las dos de
-  radio-cards (ver arriba) y **«Pensión»**, que el owner señaló por desaprovechar el ancho y que es
-  la única con DOS sub-temas. El criterio, escrito como dato en `WIDE_PLAN_CARDS`
-  (`RetirementView.tsx`): va ancha si su contenido es una rejilla propia o si tiene dos sub-temas que
-  se leen mejor en paralelo. `ages`, `withdrawal` y `horizon` traen uno a tres campos de un mismo
-  tema y se emparejan bien de dos en dos.
-- `.retirement-card-cols` / `.retirement-card-col` / `.retirement-subcard-title` (W13): las dos
-  sub-columnas de «Pensión» — la pensión y su puente. **`flex-direction: row-reverse` + `wrap`**: el
-  DOM va pensión → puente (el orden correcto apilado, y el de tabulación) y en una sola línea el
-  `row-reverse` deja el puente a la IZQUIERDA, que es donde lo pidió el owner. Al envolver, cada uno
-  se lleva su línea y vuelve el orden del DOM. Cero media queries: el corte (~33 rem de tarjeta) lo
-  fija `flex: 1 1 16rem`, y lo decide el ancho REAL de la tarjeta. `.retirement-card-col .field-row`
-  añade `flex-wrap: wrap` con base 9 rem para que un par de campos en fila se apile dentro de una
-  sub-columna estrecha (la regla global `.field-row` la comparten todos los formularios y no se
-  toca).
-- `.retirement-card-blurb`: la frase de qué hace la tarjeta, 0,78 rem `--ff-ink-soft`. **No es
-  decoración**: el copy de cada una (`PLAN_CARD_COPY`, `lib/retirement-form.ts`) dice qué cambia y
-  qué implica cambiarlo, nunca «aquí van las edades» — un título más no habría arreglado nada.
+**Lo que cambió el 2026-09-13** (informe del owner: «estos tiles dentro de tiles no los usamos en
+ningún lado, preferiría que cada apartado fueran tiles diferentes»): los seis temas eran
+`.retirement-card` —cajas con borde, fondo un escalón por debajo y radio de KPI— **dentro** de un
+panel «Tu plan». Era el único anidamiento de ese tipo en la app: Ajustes son doce paneles hermanos
+(`grep -c 'className="panel"' apps/web/src/views/SettingsView.tsx`) y la propia columna «Resultado»
+separaba sus bloques con filete, no con cajas. Hoy **cada apartado es un `.panel` hermano** dentro de
+`.retirement-col--plan`, y el envoltorio se fue con su título: los seis títulos ya dicen qué es cada
+cosa y el indicador «Guardado» de la cabecera ata el conjunto. Se retiraron `.retirement-card`,
+`.retirement-card-grid` y `.retirement-card--wide`; el título de cada apartado subió de `<h4>` a
+`<h3 class="panel-title">`, que es la única escala de títulos que hay (P6).
+
+**Lo que NO se movió, y por qué**: las radio-cards de «Estrategia» y «Gasto en jubilación» siguen
+siendo cajas. No son apartados, son **controles**: ahí el borde hace el papel del borde de un input
+—«esto se pulsa, y una está elegida»— y sin él las cuatro estrategias serían texto suelto sin estado
+seleccionado. Los `MetricCard` de «Resultado» tampoco: la banda de KPIs dentro de un panel es el
+idioma de toda la app (Resumen, Proyección, Movimientos).
+
+- `.retirement-plan-panel`: **solo maquetación** (`flex` column, `gap: 0.6rem`, `min-width: 0`). La
+  piel —borde, fondo, radio, sombra, padding— la pone `.panel`, y el hueco entre apartados el `gap`
+  de `.retirement-col`. Si le añades `background` o `border`, has vuelto al tile dentro del tile.
+- `.retirement-subcols` / `.retirement-subcol` / `.retirement-subcol-title` (W13; antes
+  `.retirement-card-col*`): las dos sub-columnas de «Pensión» — la pensión y su puente.
+  **`flex-direction: row-reverse` + `wrap`**: el DOM va pensión → puente (el orden correcto apilado,
+  y el de tabulación) y en una sola línea el `row-reverse` deja el puente a la IZQUIERDA, que es
+  donde lo pidió el owner. Al envolver, cada uno se lleva su línea y vuelve el orden del DOM. Cero
+  media queries: el corte (~33 rem de panel) lo fija `flex: 1 1 16rem`, y lo decide el ancho REAL del
+  panel. `.retirement-subcol .field-row` añade `flex-wrap: wrap` con base 9 rem para que un par de
+  campos en fila se apile dentro de una sub-columna estrecha (la regla global `.field-row` la
+  comparten todos los formularios y no se toca).
+- **Ni un párrafo bajo el título: el `<?>`** (2026-09-13 — «hay mucho plain text, y ya tenemos un
+  mecanismo para dar explicaciones `<?>`, usémoslo»). `.retirement-plan-blurb` se retiró con la
+  frase que pintaba. Las seis frases **no se perdieron**: viven en el catálogo
+  (`lib/helpTexts.ts`) y las pinta el `HelpPopover` del título, cableado por `PLAN_CARD_HELP`
+  (`lib/retirement-form.ts`); `PLAN_CARD_COPY` se queda solo con los títulos. Tres apartados
+  estrenaron entrada —`retirement.section_ages`, `…_spending`, `…_withdrawal`— y los otros tres
+  reutilizan la que ya describía su tema entero, con la sustancia de su frase fundida dentro
+  (`retirement.strategy`, `retirement.pension`, `settings.horizon_age`). Con ellas se fueron
+  **nueve `<small>`** de ayuda bajo campos, cuyo contenido ya estaba —o se fundió— en la entrada
+  correspondiente.
+
+**Un `<?>` por texto distinto, en el sitio más alto que lo gobierna** (2026-09-13). No es solo
+que la prosa se mude al popover: es que **deja de haber un icono por campo**. Varios campos
+compartían entrada del catálogo y la pantalla pintaba el MISMO texto hasta cuatro veces en el mismo
+apartado — los cuatro de «Pensión», los tres del puente, los cuatro de la regla de retirada. Hoy
+ese `<?>` cuelga del título del apartado, o del rótulo de su sub-sección (`BRIDGE_SECTION_HELP`
+para «El puente hasta la pensión»), y el campo solo conserva icono propio si su texto es SUYO.
+`retirement-form.test.ts` fija las dos mitades de la regla —quién lo conserva y quién no debe
+volver a tenerlo— porque re-añadir uno es el error natural al tocar un campo sin mirar a su vecino.
+
+**Qué se queda en prosa, y es lo único que se queda**: VALORES (la cifra derivada del gasto, el
+valor del deslizador) y ESTADOS (`obligatorio · sin guardar`, la nota del porcentaje fijado por
+API, los avisos y banners). Una explicación, nunca. Regla de bolsillo: si el texto sería el mismo
+mañana con otros datos, es explicación y va al `<?>`.
+
+**Esto es una EXCEPCIÓN declarada a §Paneles de Ajustes — norma de texto (4.0.6)**, que sigue
+vigente en Ajustes: allí un panel puede llevar su `<p class="muted">` de 1–2 frases y la ayuda de
+un campo puede ir en `<small>`. Jubilación tiene seis apartados con doce controles a la vista y esa
+plantilla la convertía en un muro; Ajustes son paneles cortos que se leen de uno en uno. Si algún
+día Ajustes se armoniza también, esta excepción desaparece y la norma cambia — no al revés.
+
+**Segunda pasada del mismo día (2026-09-13, tarde).** Seis ajustes más, todos del mismo informe:
+
+- **El botón de modo pierde su sub-rótulo.** «Cuanto antes / en la primera fecha que aguante» pasa a
+  ser solo el nombre: las frases ya estaban, una a una, en el `<?>` del apartado que gobierna cada
+  rejilla. Con ello `min-height` baja de 4,5 rem —una reserva para el texto— a **2,75 rem**, que es
+  el área táctil mínima del design system, y `align-content` pasa a `center`. `.retirement-mode-sub`
+  **sigue viva**: la usa el asistente de alta (`OnboardingWizard.tsx`), donde el usuario elige
+  estrategia sin ningún `<?>` cerca y la frase sí se gana el sitio.
+- **Los tres KPI del resultado caben en una fila**: `.metric-grid.retirement-tiles-grid` baja su
+  mínimo de 15 rem a **11 rem**. A 15 rem solo entraban dos en la columna del resultado y la tercera
+  se iba sola, con media fila vacía debajo — el mismo agujero que esta tanda vino a quitar.
+- **El deslizador deja de ser una fila rótulo/control**: el valor sube a la derecha del RÓTULO y la
+  barra ocupa el ancho entero debajo. Como control de 16 rem con el valor colgando en una segunda
+  línea, dejaba una celda vacía al lado y se leía como un descuido.
+- **«Pensión» deja de ir del revés**: `.retirement-subcols` vuelve a `row`. W13 había puesto
+  `row-reverse` para dejar el puente a la izquierda; el puente es un AJUSTE de la pensión —no existe
+  sin ella— y leerlo primero pone la consecuencia antes que la causa. Ahora el orden visual, el del
+  DOM y el de tabulación coinciden, y no hay truco que mantener.
+- **«Gasto en jubilación» sube al segundo puesto** de `PLAN_CARD_ORDER`, justo tras «Estrategia». No
+  es preferencia de lectura: el gasto es el numerador de todo lo demás y moverlo un 10 % mueve la
+  fecha más que cualquier otro campo de la pantalla.
+- **Las cifras del riesgo van plegadas de serie** (`<details class="retirement-risk-block">`): el
+  gráfico ya dice el riesgo, y su desglose numérico es para quien lo busque.
+
+**Y un defecto de espaciado que venía de W13**, encontrado midiendo y no mirando:
+`.retirement-subcol .field-row > .field` llevaba `flex: 1 1 9rem`, pensado como ANCHO para las dos
+sub-columnas de «Pensión». En ≤720 px la regla global `.field-row` pasa a `flex-direction: column`
+(bp:struct 720) y ese `flex-basis` se convierte en un **ALTO**: cada campo se estiraba a 144 px para
+un rótulo y un input que suman 69, y el apartado abría dos huecos de 75 px en móvil. Corregido con
+un `flex: 0 0 auto` dentro del mismo breakpoint. **La lección es general: un `flex-basis` solo
+significa lo que crees mientras la dirección no cambie** — si una regla global voltea el eje en
+móvil, toda base escrita para el otro eje cambia de significado en silencio.
+
+**La columna «Resultado» se partió igual**: era UN panel con tres bloques separados por filete y hoy
+son tres paneles hermanos — **Resultado** (la frase-hito, los avisos y los KPI), **Riesgo** (el
+gráfico Y su lectura compacta: el gráfico ES la imagen del riesgo en v2 —banda teñida por fallo, tira
+de éxito, curva de capital necesario— y las cifras son su lectura, así que separarlos habría partido
+una idea en dos; el `<h4>Riesgo</h4>` interior subió a título de panel) y **Detalle del cálculo**.
+Este último es el único `<details>` que es un panel entero, así que su `<summary>` pasa a ser el
+título de la sección: `.retirement-detail-panel > .retirement-detail > summary` le da el tamaño y la
+tinta de un `.panel-title`. **No basta con añadirle la clase `panel-title` en el TSX**: la pisa por
+especificidad `.retirement-detail > summary`. Fuera de ese panel, `.details-trigger` sigue siendo
+deliberadamente menor — es una puerta dentro de una sección, no un título.
+
+#### El panel ancho se lee como una LISTA DE AJUSTES (2026-09-13 — informe del owner)
+
+«El menú de mi plan deja muchos huecos vacíos… está un tanto fea, aunque la jerarquía de información
+es buena.» El aire no venía de la jerarquía, venía de la geometría, y eran **tres** huecos distintos:
+
+1. **El control estirado.** `.field` es un flex-column: en el panel de 695 px que da la columna del
+   plan a 1512 px, el input de «Edad de jubilación» medía **664 px** para escribir `55` — hoy 104 —,
+   y el `<select>` de la regla igual.
+2. **La media fila.** Con `auto-fit` la rejilla de tarjetas partía la columna del plan a partir de
+   ~1.728 px y las tarjetas anchas rompían la fila. Se resolvió primero con una rejilla de una
+   sola columna y, el mismo día, retirando la rejilla entera con el panel que la contenía.
+3. **La celda vacía.** `.retirement-mode-grid` fijaba `repeat(3, 1fr)` y un radiogroup de DOS
+   opciones —`coast_mode`, `partial_mode`— dejaba la tercera pista sin nada; la de estrategia, al
+   revés, repartía sus CUATRO opciones en 3 + 1.
+
+La respuesta, en una regla por hueco:
+
+- **El panel es una lista**: rótulo a la izquierda, control a la derecha con el ancho que de verdad
+  pide (`input[inputmode="numeric"]` 6,5 rem, `decimal` 10 rem, `date` 11 rem, `<select>` y `range`
+  la pista entera de 16 rem), la marca «obligatorio» **bajo el rótulo** y el valor del slider bajo
+  su slider. Filete `--ff-line-soft` entre filas: ata cada par cuando los separa medio panel. (La
+  columna de la izquierda alojaba también la frase de ayuda del campo; desde 2026-09-13 esa frase
+  vive en el `<?>` y ahí solo queda la marca.)
+- **El corte lo decide `@container (min-width: 30rem)`, no un `@media`.** Es la doctrina que W13 ya
+  dejó escrita —«el reparto lo decide el ancho REAL del contenedor»— con la herramienta que la expresa
+  directamente. Son contenedores `.retirement-plan-panel` y `.retirement-subcol`, así que las dos
+  sub-columnas de «Pensión» (~325 px dentro de un panel de 695 px) se quedan apiladas, que es lo
+  correcto, y estrenan filas solas cuando la página va a una columna y el panel crece. **Primer
+  uso de `@container` en la app**: si añades otro, este es el precedente.
+- **La excepción es una clase, no un `:has()`**: `BLOCK_FIELD` (`retirement-field--block`,
+  `RetirementView.tsx`) marca el campo cuyo contenido es una rejilla o una pila propia —las tres
+  `retirement-mode-grid` y el `retirement-radio-stack` de `spend_mode`—, que se queda apilado porque
+  ahí el ancho no es aire: es lo que hace que el nombre y la frase de cada opción quepan en una
+  línea. Va como clase para que el criterio se lea donde se decide.
+- **`.retirement-mode-grid` pasa a `auto-fit`** con mínimo 9 rem: las pistas vacías colapsan, así que
+  N opciones ocupan N fracciones iguales. `.retirement-strategy-grid` conserva su mínimo de 15 rem
+  para el caso estrecho y **fija `repeat(2, 1fr)` dentro del `@container`**: con cuatro opciones
+  fijas, la única repartición sin resto es 2 × 2.
+
+**Y el orden dentro del apartado** (mismo informe, el owner abrió la puerta explícitamente): «Media
+jornada» preguntaba «Edad de jubilación total» **antes** que su fase, cuando esa edad ES el fin de la
+fase (`targetAgeLabel`). Hoy el orden de `ages` es cronológico —qué fijas → cuándo empieza → cuándo
+acaba → y solo después el ingreso y el gasto de la fase, que no son edades— y lo fija la tabla U2 de
+`lib/plan-fields.ts`, con su test.
 
 **Qué desapareció con el acordeón** y por qué no vuelve: la línea «Supuestos: retirada 3,5 % · … ·
 umbral 95,0 %» (`.retirement-advanced-summary-text`, `lib/assumptions-line.ts`) existía como
@@ -640,7 +763,7 @@ una tabla viva: sin consumidor solo podía envejecer. Registrado en `futurefin-f
 > o lo estás forzando en silencio. **La solución era correcta para el problema equivocado**: el
 > owner no quería que le enunciaran lo escondido, quería que no se escondiera nada («idealmente
 > Avanzado desaparece si la información se organiza y jerarquiza bien»). Con las tarjetas por tema
-> (§Tarjetas de configuración) los 13 campos están a la vista, así que no hay nada que enunciar y la
+> (§Un apartado, un panel) los 13 campos están a la vista, así que no hay nada que enunciar y la
 > línea se quedó sin sujeto. Se fueron el `<details>`, `.retirement-advanced*`,
 > `.retirement-advanced-link` y el módulo `lib/assumptions-line.ts` con su test. **Antes de proponer
 > otro acordeón de configuración, lee `futurefin-failure-archaeology` §3.**
@@ -695,8 +818,53 @@ cualquier pantalla que revalide:
   `space-between`, que con tres hijos dejaría el interrogante flotando en medio: la modificadora
   `.retirement-result-head` agrupa a la izquierda y manda el indicador al borde.
 
-**3 · La tarjeta «Pensión»**: ver §Tarjetas de configuración (`.retirement-card-cols`, el
+**3 · El panel «Pensión»**: ver §Un apartado, un panel (`.retirement-subcols`, el
 `row-reverse` que deja el puente a la izquierda sin invertir el DOM).
+
+## Menos cajas: segmentado, controles subrayados y ayuda sin borde (2026-09-13, «decluter»)
+
+El recuento que abrió esto: **34 rectángulos con borde en una sola pantalla** de Jubilación —9 paneles
++ 9 botones de modo + 16 controles—, más 8 disparadores de ayuda que también eran círculos con filete.
+Tres cambios, y **dos de ellos son globales**: si tocas un formulario de cualquier vista, esto te
+afecta.
+
+**1 · Los radiogroups de opciones son un CONTROL SEGMENTADO** (`.retirement-mode-grid` +
+`.retirement-mode-card`). Antes cada opción llevaba su propio borde y radio: nueve rectángulos de los
+que solo tres estaban elegidos, y el borde pesaba igual en los seis que no. Ahora la rejilla es UNA
+caja (`border` + `border-radius` + `overflow: hidden`, `gap: 0`) y cada opción se separa de su vecina
+con un filete interno (`border-left`/`border-top` + `margin` negativo de 1px, que funde el filete de
+los cantos con el borde exterior). «Elegida» pasa a decirse con relleno (18 % de acento, antes 14 %):
+sin bordes propios, el relleno es lo único que distingue. **El DOM no cambia** —siguen siendo
+`<label>` con su `<input type="radio" class="sr-only">`—, así que foco, teclado y lector de pantalla
+se comportan igual: esto es piel, no control. El `outline` de foco pasa a `offset: -2px`, hacia
+dentro, porque hacia fuera pisaba a la opción vecina.
+
+**2 · Los controles van SUBRAYADOS, no encajonados** (`.field input`, `.field select`) — **global,
+toda la app**. Una línea inferior en `--ff-line` (no `--ff-line-soft`: sin fondo ni resto de borde, el
+suave no se leía como campo editable), sin radio, sin fondo. Al enfocar, la línea engorda a 2px y se
+tiñe de acento, compensando el px en el `padding-bottom` para que el texto no salte. **Tres
+exclusiones que no son cosmética**: `checkbox` y `radio` pintan su propia caja nativa y un `border: 0`
+se la come; `range` no tiene borde que sustituir y la línea le dibujaría un raíl falso bajo el suyo.
+Si añades un tipo de control, pregúntate primero si su caja ES el control. Y donde el campo va topado
+y alineado a la derecha (las edades e importes de Jubilación), el TEXTO también va a la derecha: sin
+caja, un valor pegado a la izquierda de una línea que sigue hacia la derecha se lee como un campo a
+medio rellenar.
+
+**3 · El disparador de ayuda pierde su círculo** (`.help-popover__trigger`) — **global**. Era un
+borde más por cada `<?>`. El glifo en `--ff-muted` ya dice «aquí hay ayuda», y al pasar por encima o
+enfocarlo recupera el acento. El área de click no encoge: el `padding` sustituye al borde.
+
+**Y los filetes entre filas de la lista de ajustes se retiraron**: los puse cuando la columna del plan
+medía 695 px y el control quedaba a medio panel del rótulo; con la vuelta al ancho estándar están a un
+palmo y la línea pasó de atar a ser una reja.
+
+**Lo que NO se hizo, y por qué.** El encargo incluía «dejar solo los 6 interrogantes de apartado».
+No es construible sin pérdida: los 9 que cuelgan de campos apuntan a **nueve entradas distintas del
+catálogo** (`retirement.target_age`, `coast_mode`, `partial_mode`, `partial`, `success_threshold`,
+`settings.swr`, `withdrawal_rule`, `spend_mode`, `bridge_settings`), y quitar su único punto de acceso
+las deja huérfanas — el test bidireccional de `helpTexts.test.ts` obligaría a BORRAR nueve
+explicaciones vivas para que el catálogo siga cerrado. Se hizo lo que cumple la intención sin quemar
+documentación: quitarles el borde, que es lo que los hacía pesar.
 
 ## Iconografía
 
@@ -763,6 +931,10 @@ sobra»). TODO panel de Ajustes sigue esta plantilla; si añades uno nuevo, cóp
    título, sin separador. El detalle largo vive en el `HelpPopover` del campo, no en prosa
    suelta (precedente: los tres modos de «Fuente del ahorro» — en pantalla solo la descripción
    del modo ELEGIDO; la comparativa completa está en `settings.savings_source`).
+   **Excepción declarada: Jubilación** (2026-09-13). Allí NO hay descripción bajo el título ni
+   `<small>` de ayuda: toda explicación vive en el `<?>` del título del apartado. El motivo es de
+   densidad, no de estilo — seis apartados con doce controles a la vista convertían esta
+   plantilla en un muro de texto. Ver §Un apartado, un panel.
 3. **Controles** después, separados con `bordered-top`. La ayuda de un campo concreto va en
    `<small className="muted">` dentro de su `label.field`.
 4. **Estados**: `Cargando…` / `Sin datos.` / `Solo lectura.` (cortos, canónicos). Valor
@@ -918,11 +1090,13 @@ D27 original (`.plan-card-grid`/`.plan-card`/`.plan-card-figures`) **se retiró 
 - El acordeón «Avanzado» y su línea «Supuestos» **ya no existen**: `grep -c "^export const ADVANCED_SECTION_LABEL" apps/web/src/lib/retirement-form.ts` (**0**) y `grep -c "^\.retirement-advanced" apps/web/src/App.css` (**0**) — anclados a la DECLARACIÓN, porque los dos nombres siguen citados en los comentarios que explican su retirada; y `ls apps/web/src/lib/assumptions-line.ts` debe FALLAR
 
 **Añadido en la tercera vuelta de UX de Jubilación (V1–V7; feedback F2 y F5–F10 del owner,
-2026-09-05, rama `release/5.0.0`)**: §Tarjetas de configuración, las cuatro props nuevas de
+2026-09-05, rama `release/5.0.0`)**: §Un apartado, un panel, las cuatro props nuevas de
 `MiniProjection`, la §Riesgo compacto reescrita, la norma de títulos P6 y la variante descartada del
 color. Re-verify with:
 
-- Las seis tarjetas y su copy: `grep -n "PLAN_CARD_ORDER" -A 8 apps/web/src/lib/plan-fields.ts` (seis ids, `risk` NO está) y `grep -c "^    blurb:" apps/web/src/lib/retirement-form.ts` (**6** — anclado a la indentación de las entradas, para no contar también la declaración del tipo)
+- Los seis apartados tienen `<?>`: `grep -c "helpId:" apps/web/src/lib/retirement-form.ts` (**18** = 8 de `PLAN_FIELD_HELP` + 6 de `PLAN_CARD_HELP` + 1 del puente + las 3 anotaciones de tipo de las tres tablas) y `grep -n "PLAN_CARD_ORDER" -A 8 apps/web/src/lib/plan-fields.ts` (seis ids, `risk` NO está)
+- Ya no hay frases bajo el título: `grep -c "^    blurb:" apps/web/src/lib/retirement-form.ts` (**0** — anclado a la indentación de una entrada de tabla: un `grep -c "blurb"` a secas da 2, que son los dos comentarios que cuentan su retirada) y `grep -c "retirement-plan-blurb" apps/web/src/views/RetirementView.tsx` (**0**)
+- Ni `<small>` de ayuda en Jubilación: `grep -c '<small className="muted"' apps/web/src/views/RetirementView.tsx` (**1** — el único superviviente es `rulePctNote`, que es un ESTADO: dice que el porcentaje lo fijó la API, no explica el campo)
 - Las cuatro props nuevas del chart: `grep -n "yAxis?:\|bandGradient?:\|bandEdgeLabels?:\|hoverLabel?:" apps/web/src/components/charts/MiniProjection.tsx` (4 aciertos)
 - La invariante «sin ellas, byte a byte»: `grep -n "const padLeft = yAxis" apps/web/src/components/charts/MiniProjection.tsx` (degrada a `padX`)
 - El degradado usa `userSpaceOnUse` y el id prefijado: `grep -n "gradientUnits=\"userSpaceOnUse\"\|ff-risk-" apps/web/src/components/charts/MiniProjection.tsx`
@@ -946,10 +1120,14 @@ Proyección y el Resumen conservan el total. Re-verify with:
 y sin parpadeo, `.app-main--wide`, las sub-columnas de «Pensión» y la retirada de `bp:strategy 1023`.
 Re-verify with:
 
-- La vista pide ancho completo y NO el full-bleed de Proyección: `grep -n "app-main--wide" apps/web/src/App.tsx apps/web/src/App.css`
+- Jubilación usa el ancho ESTÁNDAR: `grep -c "app-main--wide" apps/web/src/App.tsx` (**0**) — en `App.css` quedan solo los dos comentarios que cuentan su retirada. La única vista fuera del tope es Proyección: `grep -c "app-main--projection-fullbleed" apps/web/src/App.tsx` (**1**)
 - La rejilla de dos columnas no estrena breakpoint: `grep -n "retirement-layout" -A 4 apps/web/src/App.css` (un `auto-fit`, ningún `@media`)
 - `bp:strategy` ya no existe como media query: `grep -c "bp:strategy" apps/web/src/App.css` (**1** — solo la nota que cuenta su retirada; si sube a 2, alguien la ha reintroducido)
 - La latch de datos es pura y está testeada: `grep -n "export function nextLastGood" apps/web/src/lib/stale-data.ts` y `grep -c "it(" apps/web/src/lib/stale-data.test.ts`
 - `retirementMetricsReady` ya NO mira los flags de carga: `grep -n "const retirementMetricsReady" -A 1 apps/web/src/views/RetirementView.tsx` (sin `projectionBusy`)
 - El sondeo del nivel 2 para en `ready`/`unavailable`: `grep -n "shouldPollNeededCurve" apps/web/src/App.tsx apps/web/src/lib/stale-data.ts`
-- «Pensión» es tarjeta ancha y se parte en dos: `grep -n "WIDE_PLAN_CARDS\|retirement-card-cols" apps/web/src/views/RetirementView.tsx`
+- «Pensión» se parte en dos sub-columnas: `grep -n "retirement-subcols" apps/web/src/views/RetirementView.tsx`
+- No queda ni una tarjeta dentro de un panel: `grep -c "retirement-card" apps/web/src/views/RetirementView.tsx` (**0**) y `grep -c "^\.retirement-card" apps/web/src/App.css` (**0** — la única mención que queda en el CSS es dentro del comentario que cuenta su retirada)
+- Cada apartado del plan es un panel hermano: `grep -c "panel retirement-plan-panel" apps/web/src/views/RetirementView.tsx` (**1**, el `map` los emite todos) y `grep -c 'className="panel"' apps/web/src/views/RetirementView.tsx` (**4**: hogar, «sin datos», Resultado y Riesgo)
+- La lista de ajustes se gobierna por contenedor y no por viewport: `grep -c "^@container" apps/web/src/App.css` (**1** — un solo bloque; si aparece un segundo, documéntalo aquí) y `grep -c "container-type" apps/web/src/App.css` (**1**, la regla que declara los dos contenedores)
+- Las excepciones al formato de fila están declaradas: `grep -c "BLOCK_FIELD" apps/web/src/views/RetirementView.tsx` (**5** = la constante + sus cuatro campos)

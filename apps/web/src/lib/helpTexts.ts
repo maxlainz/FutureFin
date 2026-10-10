@@ -185,6 +185,44 @@ export const HELP_TEXTS = {
       "aportar. «Nunca» es una respuesta, no un dato que falte: significa que ningún mes del " +
       "horizonte llega a tu umbral.",
   },
+  // ── Apartados del formulario de Jubilación (2026-09-13) ──────────────────────────────────
+  // El `<?>` del TÍTULO de cada panel. Nacen de las frases que hasta hoy se pintaban en prosa
+  // bajo el título (`PLAN_CARD_COPY.blurb`, retirado): el owner pidió usar el mecanismo que ya
+  // existe en vez de llenar la pantalla de texto. Tres apartados estrenan entrada; los otros
+  // tres reutilizan la que ya describía su tema entero — «Estrategia» → `retirement.strategy`,
+  // «Pensión» → `retirement.pension`, «Horizonte» → `settings.horizon_age`— con la sustancia de
+  // su frase fundida dentro.
+  //
+  // Describen un APARTADO y no una cifra, que es la excepción que §6.4 de la skill avisa que se
+  // paga cara: una entrada de CONTENEDOR vive lo que viva el contenedor. Aquí el contenedor es un
+  // tema del plan —lo que se le pregunta al usuario—, no un acordeón: si un día desaparece, es
+  // porque el plan dejó de preguntar eso, y entonces el texto sobra de verdad.
+  "retirement.section_ages": {
+    title: "Edades",
+    body:
+      "Las edades que fijan tu calendario, convertidas en meses concretos con tu fecha de " +
+      "nacimiento — por eso sin ella el plan no puede resolver nada, y se guarda en tu cuenta, " +
+      "no aquí. En «Coast FIRE» y en «Jornada reducida» eliges además qué fijas tú y qué " +
+      "resuelve el plan: la edad de jubilación o la de dejar de aportar; empezar la fase a una " +
+      "edad o en cuanto puedas.",
+  },
+  "retirement.section_spending": {
+    title: "Gasto en jubilación",
+    body:
+      "De dónde sale el gasto que tu plan tiene que cubrir: de tus partidas marcadas como de " +
+      "jubilación, de tus ingresos actuales si quieres mantener el nivel de vida, o de una cifra " +
+      "que escribes tú. No multiplica nada: es el dinero que hay que poner cada mes desde que te " +
+      "jubilas hasta el final del horizonte, y es lo que la cartera tiene que sostener.",
+  },
+  "retirement.section_withdrawal": {
+    title: "Retirada",
+    body:
+      "Cuánto sacas y con cuánta seguridad. Son dos cifras y las dos deciden tu fecha: el umbral " +
+      "es la parte de los escenarios que tiene que aguantar hasta el horizonte, y la tasa es lo " +
+      "máximo que sacas el primer año sobre tu líquido. La fecha válida es el primer mes en que " +
+      "se cumplen las dos. La regla de debajo no decide la fecha: decide cuánto sale de la " +
+      "cartera cada mes una vez jubilado.",
+  },
   "retirement.strategy": {
     title: "Tu estrategia de jubilación",
     body:
@@ -193,8 +231,9 @@ export const HELP_TEXTS = {
       "escenarios lo soportan y cuánto tendrías que aportar para llegar a tu umbral. «Coast " +
       "FIRE» resuelve cuándo puedes dejar de aportar. «Jornada reducida» mete una fase de menos " +
       "ingreso antes del final. El puente hasta la pensión ya NO es una estrategia: es un ajuste " +
-      "de la tarjeta Pensión y funciona con las cuatro. Es tuya, no del hogar: cada persona " +
-      "tiene la suya.",
+      "de la tarjeta Pensión y funciona con las cuatro. Cambiarla cambia lo que te preguntamos " +
+      "aquí abajo y cómo se resuelve tu fecha: unas la fijas tú, otras la resuelve el sorteo. Es " +
+      "tuya, no del hogar: cada persona tiene la suya.",
   },
   "retirement.target_age": {
     title: "Edad de jubilación objetivo",
@@ -234,7 +273,8 @@ export const HELP_TEXTS = {
     body:
       "Los datos de la fase: cuándo empieza, cuánto ingresas en ella y con qué gasto se compara " +
       "(el de jubilación, salvo que elijas tu gasto regular de hoy). El ingreso va en euros de " +
-      "hoy y se queda PLANO —no sube con la inflación—, y 0 € es un año sabático. El hueco hasta " +
+      "hoy y se queda PLANO —no sube con la inflación—, y dejarlo vacío, o a 0 €, es un año " +
+      "sabático. El hueco hasta " +
       "tu gasto lo cubres vendiendo cartera; el mes en que no llegue, ese escenario cuenta como " +
       "fallido. La fase no tiene fin propio: termina cuando llega la jubilación total. No es la " +
       "jubilación parcial de la Seguridad Social.",
@@ -247,8 +287,11 @@ export const HELP_TEXTS = {
       "reglas de ahorro reparten el sobrante; si falta, se vende cartera. No dimensiona nada por " +
       "adelantado: lo que cambia su fecha es cuántos años tiene que pagar tu capital antes de " +
       "que llegue. Indexada sube cada año con tu inflación; sin indexar se queda plana y compra " +
-      "menos con los años. En esta misma tarjeta vive el puente, que es el permiso para sacar " +
-      "más de tu tasa durante esos años.",
+      "menos con los años. Hasta el mes en que arranca, ese gasto lo paga entero tu capital. En " +
+      "este mismo apartado vive el puente —el permiso para sacar más de tu tasa durante esos " +
+      "años, un tramo en el que no hay aportaciones— y, con jornada reducida, qué fracción de " +
+      "la pensión cobras mientras dure la fase: 0 % significa que durante la media jornada no " +
+      "cobras nada de pensión.",
   },
   "retirement.bridge_settings": {
     title: "Puente hasta la pensión",
@@ -259,8 +302,9 @@ export const HELP_TEXTS = {
       "de lo que puedes sacar el primer año pasa a ser la tasa del puente en lugar de tu tasa de " +
       "retirada. Durante el puente no hay otro tope: si aguanta o no lo dicen las mismas reglas " +
       "que el resto del plan. Con el puente activado tu fecha válida nunca cae antes de la " +
-      "pensión menos esos años. Viene apagado, y apagado la pensión sigue entrando igual el mes " +
-      "que le toca.",
+      "pensión menos esos años. La tasa del puente tiene que ser MAYOR que tu tasa de retirada " +
+      "—si no la supera no es un puente, es la misma tasa— y como mucho 20 %; los años, entre 1 " +
+      "y 20. Viene apagado, y apagado la pensión sigue entrando igual el mes que le toca.",
   },
   "retirement.success_threshold": {
     title: "Umbral de éxito",
@@ -279,7 +323,8 @@ export const HELP_TEXTS = {
       "Cuánto sacas de tu patrimonio cada mes una vez jubilado. «Gasto fijo» retira lo que " +
       "necesitas, indexado, sin techo. «Un % del saldo» retira ese porcentaje de tu líquido del " +
       "mes anterior: nunca se agota, pero tu nivel de vida sube y baja con el mercado. " +
-      "«Híbrida» empieza alta y baja al llegar a un saldo. «Con bandas» recorta o sube la " +
+      "«Híbrida» empieza alta y baja al llegar a un saldo, y ese suelo tiene que quedar por " +
+      "debajo de tu tasa de retirada. «Con bandas» recorta o sube la " +
       "retirada al salirse de su banda. Con las tres reglas por saldo hay una condición dura, y se " +
       "comprueba UNA vez: si el mes en que te jubilas lo que la regla permite no cubre tu gasto " +
       "ordinario, ese escenario cuenta como fallido — el fracaso que este plan mide es tener que " +
@@ -494,8 +539,10 @@ export const HELP_TEXTS = {
   "settings.horizon_age": {
     title: "Edad límite del horizonte",
     body:
-      "Hasta qué edad simula la proyección (85 a 105; de serie, 90). Subirla revela la cola de " +
-      "longevidad: en una pareja de 65, la probabilidad de que al menos uno pase de los 95 ronda " +
+      "Hasta qué edad tiene que durar el dinero (85 a 105; de serie, 90). Alargarlo RETRASA tu " +
+      "fecha: se valida contando los escenarios que llegan al final, así que cuantos más años " +
+      "tengan que aguantar, más tarde llega el primer mes que cumple tu umbral. Subirlo revela " +
+      "la cola de longevidad: en una pareja de 65, la probabilidad de que al menos uno pase de los 95 ronda " +
       "el 25 %, y un plan que «llega justo» a los 90 puede no llegar a los 95. Dos avisos: el " +
       "horizonte total está topado a 70 años vista (si eres joven, subir la edad puede no " +
       "cambiar nada), y el margen al final se lee en la propia curva — lo que te queda en el " +

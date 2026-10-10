@@ -144,11 +144,14 @@ describe("tarjeta «Edades» — el calendario del plan", () => {
     ).toEqual(["coast_mode", "target_retirement_age"]);
   });
 
+  // El orden es cronológico (2026-09-13): qué fijas → cuándo empieza la fase → cuándo acaba (la
+  // edad objetivo ES su fin, ver `targetAgeLabel`) → y solo después lo que pasa dentro de la fase,
+  // que no son edades.
   it("«Media jornada» modo A añade la fase entera, gasto de la fase incluido", () => {
     expect(cardIds("ages", ctx({ strategy: "partial", partialMode: "at_age" }))).toEqual([
-      "target_retirement_age",
       "partial_mode",
       "partial_start_age",
+      "target_retirement_age",
       "partial_income",
       "partial_expense_basis",
     ]);
@@ -205,8 +208,8 @@ describe("media jornada — el modo decide si se pregunta la edad de inicio (M11
     // El ingreso sigue siendo obligatorio: sin él la fase no se puede simular en ningún modo.
     expect(req("partial_income", b)).toBe(true);
     expect(cardIds("ages", b)).toEqual([
-      "target_retirement_age",
       "partial_mode",
+      "target_retirement_age",
       "partial_income",
       "partial_expense_basis",
     ]);
@@ -273,8 +276,11 @@ describe("fecha de nacimiento — solo cuando falta, obligatoria en más casos q
       const f = planFields(c).find((x) => x.id === "birth_date");
       expect(f, `${strategy}: falta birth_date`).toBeDefined();
       expect(f?.required, strategy).toBe(required[strategy]);
-      // Va la PRIMERA: es el dato que hace que todo lo demás signifique algo.
-      expect(ids(c)[0]).toBe("birth_date");
+      // Va la primera DE SU APARTADO: es el dato que convierte en meses las edades que se
+      // preguntan justo debajo. Dejó de ser la primera del formulario entero el 2026-09-13, al
+      // subir «Gasto en jubilación» al segundo puesto (`PLAN_CARD_ORDER`): lo que la fecha de
+      // nacimiento gobierna son las EDADES, no el gasto.
+      expect(planFields(c).filter((x) => x.card === "ages")[0]?.id).toBe("birth_date");
       expect(f?.card, strategy).toBe("ages");
     }
   });
@@ -777,8 +783,8 @@ describe("planCardGroups — qué tarjetas se pintan de verdad", () => {
   it("con «Cuanto antes» y fecha de nacimiento conocida, «Edades» desaparece entera", () => {
     expect(cardsPainted(ctx({ strategy: "asap", hasBirthDate: true }))).toEqual([
       "strategy",
-      "pension",
       "spending",
+      "pension",
       "withdrawal",
       "horizon",
     ]);
@@ -1015,9 +1021,9 @@ describe("planFieldsContextFromProfile — una sola derivación para todos los c
   it("el perfil por defecto produce exactamente la lista mínima", () => {
     const c = planFieldsContextFromProfile(profile(), true);
     expect(ids(c)).toEqual([
+      "fire_number_mode",
       "pension_amount",
       "pension_start_age",
-      "fire_number_mode",
       "success_threshold_pct",
       "swr_pct",
       "withdrawal_rule_kind",

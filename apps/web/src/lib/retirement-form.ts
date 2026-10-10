@@ -269,99 +269,61 @@ export function withdrawalPctNote(input: WithdrawalPctNoteInput): string | null 
 export const PLAN_FIELD_HELP: Partial<Record<PlanFieldId, { helpId: HelpTextId }>> = {
   target_retirement_age: { helpId: "retirement.target_age" },
   coast_mode: { helpId: "retirement.coast_mode" },
-  coast_stop_age: { helpId: "retirement.coast_mode" },
   partial_mode: { helpId: "retirement.partial_mode" },
-  partial_start_age: { helpId: "retirement.partial" },
   partial_income: { helpId: "retirement.partial" },
-  pension_amount: { helpId: "retirement.pension" },
-  pension_start_age: { helpId: "retirement.pension" },
   success_threshold_pct: { helpId: "retirement.success_threshold" },
   swr_pct: { helpId: "settings.swr" },
   withdrawal_rule_kind: { helpId: "retirement.withdrawal_rule" },
-  hybrid_end_pct: { helpId: "retirement.withdrawal_rule" },
-  guardrails_band_pct: { helpId: "retirement.withdrawal_rule" },
-  guardrails_adjust_pct: { helpId: "retirement.withdrawal_rule" },
   spend_mode: { helpId: "retirement.spend_mode" },
-  pension_indexed: { helpId: "retirement.pension" },
-  pension_fraction_while_partial: { helpId: "retirement.pension" },
+  // Vuelve a la tabla de CAMPOS el 2026-09-13: al retirar el rótulo en versalita de la
+  // sub-columna, el interruptor pasó a ser lo más alto que gobierna el puente. La regla no
+  // cambia —un `<?>` por texto distinto, en el sitio más alto—, cambia cuál es ese sitio.
   bridge_enabled: { helpId: "retirement.bridge_settings" },
-  bridge_max_pct: { helpId: "retirement.bridge_settings" },
-  bridge_max_years: { helpId: "retirement.bridge_settings" },
-  partial_expense_basis: { helpId: "retirement.partial" },
-  horizon_lifespan_age: { helpId: "settings.horizon_age" },
 };
 
 /**
- * Título y FRASE de cada tarjeta de configuración (V3 de la tercera vuelta de UX, F9/F10;
- * reescritas por el modelo v2 — «el éxito define la fecha», C1–C8).
+ * El `<?>` del TÍTULO de cada apartado (2026-09-13).
  *
- * Sustituye a `ADVANCED_SECTION_LABEL`, que solo tenía rótulos porque el acordeón «Avanzado» los
- * usaba como separadores. El owner pidió lo contrario de un separador: «cada cuadro abre con una
- * frase de qué hace». Por eso ninguna frase describe el CONTROL —eso ya lo dice el rótulo del
- * campo— sino **qué cambia y qué implica cambiarlo**: una tarjeta que solo dijera «aquí van las
- * edades» habría dejado el formulario exactamente igual de mudo, con un título más.
+ * Sustituye a `PLAN_CARD_COPY.blurb`, que pintaba la misma frase en prosa bajo el título: el owner
+ * pidió usar el mecanismo que ya existe —«ya tenemos un mecanismo para dar explicaciones `<?>`»—
+ * en vez de llenar la pantalla de texto plano. Tres apartados estrenaron entrada de catálogo
+ * (`retirement.section_*`); los otros tres reutilizan la que ya describía su tema ENTERO, con la
+ * sustancia de su frase fundida dentro.
  *
- * Las frases son el contrato de esta pantalla y `retirement-form.test.ts` las fija: título corto,
- * frase de más de 40 caracteres acabada en punto, una entrada por tarjeta. Ese test no juzga
- * prosa: caza la entrada que alguien añade sin frase al meter una tarjeta nueva… y desde el
- * modelo v2 caza también una frase concreta, porque **cuatro de las seis afirmaban cosas que en
- * v2 son FALSAS**:
- *
- *  - «Horizonte»: decía «alargarlo no mueve tu fecha de jubilación». Era cierto cuando la fecha
- *    era un cruce de capital contra un objetivo; con v2 la fecha válida es el primer mes cuyo
- *    éxito **hasta el horizonte** cumple el umbral, así que alargar el horizonte la RETRASA. Es la
- *    mentira más cara de las cuatro —invita a subir la edad límite «por si acaso» y a no entender
- *    por qué se va la fecha—, y por eso tiene su propio test.
- *  - «Retirada»: hablaba de un porcentaje que «dimensiona el objetivo». No hay objetivo (C1/M4);
- *    hay un umbral y una tasa inicial, y la fecha es la primera en que se cumplen las dos.
- *  - «Gasto en jubilación»: «es el número que multiplica tu objetivo». Tampoco: es el gasto que el
- *    bucle drena mes a mes.
- *  - «Pensión»: «la edad a la que empieza mueve el objetivo». La pensión es un flujo de caja; lo
- *    que mueve es cuánto tiene que poner tu capital antes de que entre — y, con el puente
- *    activado, cuánto se te deja sacar en ese tramo.
- *
- * `PLAN_FIELD_HELP` no se toca: la ayuda POR CAMPO sigue colgando de su rótulo, y una frase de
- * tarjeta no la sustituye — explican cosas de tamaño distinto.
+ * **Forma de objeto a propósito.** El escáner de cobertura de `helpTexts.test.ts` reconoce tres
+ * patrones, y uno de ellos es la clave `helpId` seguida de dos puntos y el id entrecomillado; una
+ * tabla `Record<PlanCardId, HelpTextId>` con el id suelto como valor sería invisible para él y las
+ * seis entradas se leerían como HUÉRFANAS. Es la misma trampa que documenta la skill
+ * `futurefin-metric-definitions` §5 — y no escribas aquí el patrón literal: el escáner lee ESTE
+ * fichero y se contaría a sí mismo (comprobado: lo hizo).
  */
-export const PLAN_CARD_COPY: Record<PlanCardId, { title: string; blurb: string }> = {
-  strategy: {
-    title: "Estrategia",
-    blurb:
-      "Elige qué dispara tu jubilación. Cambiarla cambia lo que te preguntamos aquí abajo y cómo " +
-      "se resuelve tu fecha: unas la fijas tú, otras la resuelve el sorteo.",
-  },
-  ages: {
-    title: "Edades",
-    blurb:
-      "Las edades que fijan tu calendario, convertidas en meses con tu fecha de nacimiento. En " +
-      "«Coast FIRE» y en «Jornada reducida» eliges además qué fijas tú y qué resuelve el plan: la " +
-      "edad de jubilación o la de dejar de aportar; empezar la fase a una edad o en cuanto puedas.",
-  },
-  pension: {
-    title: "Pensión",
-    blurb:
-      "Una renta con fecha: entra en tu plan como un ingreso más el mes en que empieza, y hasta " +
-      "entonces lo paga tu capital. Si activas el puente, la cartera puede pagar más que tu tasa " +
-      "durante unos años hasta que entre la pensión; no hay aportaciones en ese tramo.",
-  },
-  spending: {
-    title: "Gasto en jubilación",
-    blurb:
-      "De dónde sale el gasto que tu plan tiene que cubrir. No multiplica ningún objetivo: es el " +
-      "dinero que hay que poner cada mes desde que te jubilas hasta el final del horizonte.",
-  },
-  withdrawal: {
-    title: "Retirada",
-    blurb:
-      "Cuánto sacas y con cuánta seguridad. El umbral es la parte de los escenarios que tiene que " +
-      "aguantar hasta el horizonte; la tasa es lo máximo que sacas el primer año sobre tu " +
-      "líquido: la fecha válida es la primera en que las dos se cumplen.",
-  },
-  horizon: {
-    title: "Horizonte",
-    blurb:
-      "Hasta qué edad tiene que durar el dinero. Alargarlo RETRASA tu fecha: se valida contando " +
-      "los escenarios que llegan al final, así que cuantos más años tengan que aguantar, más " +
-      "tarde llega el primer mes que cumple tu umbral.",
-  },
+export const PLAN_CARD_HELP: Record<PlanCardId, { helpId: HelpTextId }> = {
+  strategy: { helpId: "retirement.strategy" },
+  ages: { helpId: "retirement.section_ages" },
+  pension: { helpId: "retirement.pension" },
+  spending: { helpId: "retirement.section_spending" },
+  withdrawal: { helpId: "retirement.section_withdrawal" },
+  horizon: { helpId: "settings.horizon_age" },
+};
+
+
+/**
+ * El TÍTULO de cada apartado del formulario (V3 de la tercera vuelta de UX, F9/F10).
+ *
+ * **Perdió su frase el 2026-09-13**: `blurb` pintaba bajo cada título un párrafo de qué hace el
+ * apartado y qué implica tocarlo. Seis párrafos permanentes en pantalla eran el bulto del texto
+ * plano que el owner señaló, y la app ya tiene un mecanismo para explicar sin ocupar sitio. Las
+ * seis frases NO se perdieron: viven en el catálogo (`lib/helpTexts.ts`), cableadas por
+ * `PLAN_CARD_HELP`, y las que decían algo que el catálogo no decía se fundieron dentro de la
+ * entrada que ya describía ese tema. Los guardas que fijaban su contenido —el horizonte que
+ * RETRASA la fecha, las dos cifras de «Retirada», el puente sin aportaciones— se mudaron con
+ * ellas a `helpTexts.test.ts`, que es donde hoy vive el texto.
+ */
+export const PLAN_CARD_COPY: Record<PlanCardId, { title: string }> = {
+  strategy: { title: "Estrategia" },
+  ages: { title: "Edades" },
+  pension: { title: "Pensión" },
+  spending: { title: "Gasto en jubilación" },
+  withdrawal: { title: "Retirada" },
+  horizon: { title: "Horizonte" },
 };

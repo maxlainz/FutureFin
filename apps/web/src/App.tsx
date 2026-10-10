@@ -3899,15 +3899,14 @@ export default function App() {
             className={
               activeTab === "projection"
                 ? "app-main app-main--projection-fullbleed"
-                : activeTab === "retirement"
-                  ? // W13: Jubilación pasa a dos columnas (plan a la izquierda, resultado a la
-                    // derecha) y necesita el ancho real de la ventana; con el tope de 66rem las
-                    // dos columnas caían a ~500px y ninguna cabía. Es un `max-width: none`, NO el
-                    // full-bleed de Proyección: esa vista además convierte `<main>` en un flex
-                    // con `overflow: hidden` para que el chart ocupe el viewport, y aquí la
-                    // página tiene que seguir siendo scroll vertical normal.
-                    "app-main app-main--wide"
-                  : "app-main"
+                : // Jubilación usa el ancho ESTÁNDAR, como el resto de la app (2026-09-13).
+                  // Tuvo el suyo propio entre W13 y hoy: las dos columnas no cabían en 66rem
+                  // mientras cada apartado llevaba un párrafo y cada campo su `<small>`. Sacada
+                  // esa prosa a los `<?>`, el mismo plan cabe en columnas de 504px y el motivo
+                  // desapareció. La nota de su retirada está en `App.css`, junto a
+                  // `.retirement-layout` — no escribas aquí el nombre de la clase: el design
+                  // system cuenta sus consumidores con un `grep -c` sobre ESTE fichero.
+                  "app-main"
             }
           >
         {/* Aviso de ámbito (D9/D32): el Hogar es un agregado informativo. Va en TODAS las

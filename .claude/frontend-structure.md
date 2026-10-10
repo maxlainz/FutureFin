@@ -504,10 +504,12 @@ src/
 │   │                             #   + `<ul class="household-plan-lines">` (una frase por miembro,
 │   │                             #   `lib/household-plan-lines.ts`) + «Cambia a «Yo»» (`.retirement-scope-link`,
 │   │                             #   prop `onSelectMineScope`). Nada de tarjetas ni cifras — U10.
-│   │                             #   3. **«Tu plan»** (oculto en Hogar): `.retirement-card-grid` con
-│   │                             #   `planCardGroups(fieldCtx)` — una `<section class="retirement-card">` por tema
-│   │                             #   (`strategy`/`ages`/`pension`/`spending`/`withdrawal`/`horizon`, **seis**
-│   │                             #   tarjetas, sin `risk`), con `<h4 class="panel-title">` + la frase de
+│   │                             #   3. **El plan** (oculto en Hogar): SIN panel envoltorio desde 2026-09-13 —
+│   │                             #   `planCardGroups(fieldCtx)` emite una `<section class="panel
+│   │                             #   retirement-plan-panel">` HERMANA por tema
+│   │                             #   (`strategy`/`spending`/`ages`/`pension`/`withdrawal`/`horizon` — ese ORDEN
+│   │                             #   desde 2026-09-13: el gasto es el factor de mayor influencia—, **seis**
+│   │                             #   paneles, sin `risk`), con `<h3 class="panel-title">` + la frase de
 │   │                             #   `PLAN_CARD_COPY` + sus campos. «Estrategia» pinta **CUATRO** radio-cards
 │   │                             #   (`asap`/`retire_at_age`/`coast`/`partial` — `pension_bridge` ya no es una);
 │   │                             #   «Pensión» lleva el interruptor del PUENTE (`bridge_enabled`, con
@@ -544,9 +546,10 @@ src/
 │   │                             #
 │   │                             #   **W13 (informe del owner, 2026-09-07) — dos columnas y stale-while-revalidate.**
 │   │                             #   (a) La página se envuelve en `.retirement-layout` con dos `.retirement-col`
-│   │                             #   (plan | resultado): `auto-fit` a partir de ~1.100 px, apiladas por debajo con el
-│   │                             #   plan primero, y `<main>` pasa a `.app-main--wide` (suelta el `max-width: 66rem`
-│   │                             #   — NO es el full-bleed de Proyección). En Hogar no hay layout: el agregado sigue
+│   │                             #   (plan | resultado): `auto-fit` a partir de ~1.040 px, apiladas por debajo con el
+│   │                             #   plan primero. `<main>` usa el ancho ESTÁNDAR de la app desde 2026-09-13 (tuvo
+│   │                             #   uno propio entre W13 y esa fecha, mientras la pantalla llevaba prosa dentro).
+│   │                             #   En Hogar no hay layout: el agregado sigue
 │   │                             #   siendo un panel único. (b) **La vista ya no se apaga al recargar**: dos latches
 │   │                             #   `nextLastGood` (`lib/stale-data.ts`) sobre `projectionSeries`/`projectionBands`
 │   │                             #   producen `shownSeries`/`shownBands`, que son los que consumen TODOS los memos
@@ -555,7 +558,7 @@ src/
 │   │                             #   dice ahora `metricsRefreshing`, cuya única consecuencia visible es el punto
 │   │                             #   `.retirement-refreshing` junto al título «Resultado». Las latches se aplican
 │   │                             #   sobre `ref`s DURANTE el render (un efecto pintaría primero el hueco) y se vacían
-│   │                             #   al cambiar de ámbito. (c) La tarjeta «Pensión» entra en `WIDE_PLAN_CARDS` y se
+│   │                             #   al cambiar de ámbito. (c) La tarjeta «Pensión» se
 │   │                             #   parte en dos sub-columnas (`renderPensionCard`: DOM pensión → puente,
 │   │                             #   `row-reverse` en CSS para dejar el puente a la izquierda sin tocar el orden de
 │   │                             #   tabulación); `BRIDGE_FIELD_IDS` es la única lista de qué campo cae en cuál.

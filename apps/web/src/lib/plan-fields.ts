@@ -111,13 +111,22 @@ export type PlanCardId =
   | "withdrawal"
   | "horizon";
 
-/** Orden de lectura de las tarjetas: primero QUÉ dispara la jubilación, luego CUÁNDO, con QUÉ
- *  rentas, CUÁNTO se gasta, CÓMO se saca y HASTA cuándo tiene que durar. */
+/**
+ * Orden de lectura de los apartados: primero QUÉ dispara la jubilación, luego CUÁNTO se gasta,
+ * después CUÁNDO, con QUÉ rentas, CÓMO se saca y HASTA cuándo tiene que durar.
+ *
+ * **«Gasto en jubilación» subió al segundo puesto el 2026-09-13** (owner: «gasto debería ir justo
+ * debajo de estrategia; es el factor número uno en influencia»). Y es literal, no una preferencia
+ * de lectura: el gasto es el numerador de todo lo demás — el capital necesario, la fecha válida y
+ * el número FIRE clásico salen de él, y moverlo un 10 % mueve la fecha más que cualquier otro
+ * campo de esta pantalla. Estaba cuarto, detrás de dos apartados de calendario que solo tienen
+ * sentido una vez sabes cuánto hay que sostener.
+ */
 export const PLAN_CARD_ORDER: readonly PlanCardId[] = [
   "strategy",
+  "spending",
   "ages",
   "pension",
-  "spending",
   "withdrawal",
   "horizon",
 ];
@@ -213,10 +222,10 @@ function targetAgeLabel(s: RetirementStrategyApi): string {
  * |---|---|---|---|
  * | `birth_date` | edades | **solo si falta** | sí con pensión declarada o en `retire_at_age`/`coast`/`partial` (C5) |
  * | `coast_mode` | edades | `coast` | no (tiene default) |
- * | `target_retirement_age` | edades | `retire_at_age`; `coast` **modo A**; `partial` | sí salvo en `partial` |
- * | `coast_stop_age` | edades | `coast` **modo B** | sí |
  * | `partial_mode` | edades | `partial` | no (tiene default) |
  * | `partial_start_age` | edades | `partial` **modo A** (`at_age`) | sí |
+ * | `target_retirement_age` | edades | `retire_at_age`; `coast` **modo A**; `partial` | sí salvo en `partial` |
+ * | `coast_stop_age` | edades | `coast` **modo B** | sí |
  * | `partial_income` | edades | `partial` | sí |
  * | `partial_expense_basis` | edades | `partial` | no |
  * | `pension_amount`, `pension_start_age` | pensión | siempre (la casilla vive ahí) | sí con pensión declarada |
@@ -267,6 +276,12 @@ export function planFields(ctx: PlanFieldsContext): PlanFieldDescriptor[] {
   /** Coast modo B: el usuario fija la parada y la fecha de jubilación sale del sorteo. */
   const coastFixesStop = isCoast && ctx.coastMode === "fixed_stop_age";
 
+  // ── Gasto en jubilación ──────────────────────────────────────────────────────────────────
+  f("fire_number_mode", "spending", false, "Cómo se calcula el gasto de jubilación");
+  if (ctx.fireNumberMode === "manual") {
+    f("fire_number_manual_amount", "spending", true, "Gasto anual manual");
+  }
+
   // ── Edades ───────────────────────────────────────────────────────────────────────────────
   // La fecha de nacimiento solo aparece cuando FALTA: pedirla otra vez a quien ya la tiene es
   // ruido, y su sitio natural es «Tu cuenta».
@@ -277,6 +292,18 @@ export function planFields(ctx: PlanFieldsContext): PlanFieldDescriptor[] {
   if (isCoast) {
     f("coast_mode", "ages", false, "Qué fijas tú");
   }
+  // «Media jornada» pregunta su fase ANTES que la edad de jubilación total (2026-09-13): la fase
+  // empieza antes, y la edad objetivo es su FIN (`targetAgeLabel`). Abrir la tarjeta por el final
+  // obligaba a leer «Edad de jubilación total» sin que nada hubiera dicho todavía que hay una fase
+  // intermedia, y dejaba las dos edades que ACOTAN la fase separadas por el modo. Ahora van: qué
+  // fijas → cuándo empieza → cuándo acaba → y solo después qué pasa dentro (ingreso y gasto), que
+  // no son edades y cierran la tarjeta.
+  if (isPartial) {
+    f("partial_mode", "ages", false, "Cuándo empieza la media jornada");
+    if (ctx.partialMode === "at_age") {
+      f("partial_start_age", "ages", true, "Edad de inicio de la media jornada");
+    }
+  }
   if (ctx.strategy === "retire_at_age" || (isCoast && !coastFixesStop) || isPartial) {
     f("target_retirement_age", "ages", !isPartial, targetAgeLabel(ctx.strategy));
   }
@@ -284,10 +311,6 @@ export function planFields(ctx: PlanFieldsContext): PlanFieldDescriptor[] {
     f("coast_stop_age", "ages", true, "Edad en que dejo de aportar");
   }
   if (isPartial) {
-    f("partial_mode", "ages", false, "Cuándo empieza la media jornada");
-    if (ctx.partialMode === "at_age") {
-      f("partial_start_age", "ages", true, "Edad de inicio de la media jornada");
-    }
     f("partial_income", "ages", true, "Ingreso mensual en media jornada");
     f("partial_expense_basis", "ages", false, "Gasto durante la media jornada");
   }
@@ -312,12 +335,6 @@ export function planFields(ctx: PlanFieldsContext): PlanFieldDescriptor[] {
       f("bridge_max_pct", "pension", true, "Tasa máxima durante el puente");
       f("bridge_max_years", "pension", true, "Años máximos de puente");
     }
-  }
-
-  // ── Gasto en jubilación ──────────────────────────────────────────────────────────────────
-  f("fire_number_mode", "spending", false, "Cómo se calcula el gasto de jubilación");
-  if (ctx.fireNumberMode === "manual") {
-    f("fire_number_manual_amount", "spending", true, "Gasto anual manual");
   }
 
   // ── Retirada ─────────────────────────────────────────────────────────────────────────────

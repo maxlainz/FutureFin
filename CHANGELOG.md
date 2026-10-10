@@ -553,6 +553,98 @@ modelo decía medir, y el owner decidió las tres con los números delante (C9�
   rejilla de estrategias se reparte por el ancho real de su tarjeta (antes fijaba cinco columnas, una por una
   estrategia que ya no existe).
 
+### El formulario del plan deja de desperdiciar el ancho (2026-09-13)
+
+Cuatro informes del owner sobre «Tu plan» en Jubilación, el mismo día. El primero: «deja muchos huecos vacíos…
+está un tanto fea, aunque la jerarquía de información es buena» — **tres** huecos con tres causas distintas,
+ninguna de jerarquía, y ya puestos una pregunta que iba en orden inverso. El segundo: «estos tiles dentro de
+tiles no los usamos en ningún lado, preferiría que cada apartado fueran tiles diferentes». Y el
+tercero, sobre lo que quedó: «hay mucho plain text, y ya tenemos un mecanismo para dar explicaciones
+`<?>`, usémoslo». Y el cuarto, de remate, sobre el orden de los apartados, el texto que quedaba dentro de
+los botones y «los formatos y espaciados/márgenes».
+
+- **Un apartado, un panel.** Los seis temas del plan eran tarjetas con borde **dentro** de un panel «Tu plan»:
+  una caja dentro de otra caja, el único anidamiento de ese tipo en la app —Ajustes son doce paneles hermanos y
+  la propia columna «Resultado» separaba sus bloques con filete, no con cajas—. Hoy cada apartado es un panel
+  hermano, y el envoltorio se fue con su título: los seis títulos ya dicen qué es cada cosa y el indicador
+  «Guardado» de la cabecera ata el conjunto. **La columna «Resultado» se partió igual**, en tres paneles —
+  «Resultado» (la frase, los avisos y los KPI), «Riesgo» (el gráfico y su lectura compacta) y «Detalle del
+  cálculo» —, que hasta aquí eran tres bloques separados por filete dentro de uno. Siguen siendo cajas las
+  opciones de «Estrategia» y «Gasto en jubilación»: no son apartados, son controles, y ahí el borde hace el
+  papel del borde de un input — «esto se pulsa, y una está elegida».
+- **Cada apartado se lee como una LISTA DE AJUSTES**: rótulo a la izquierda, control a la derecha con el ancho
+  que de verdad pide — una edad no ocupa lo mismo que un desplegable de reglas. Hasta aquí un campo estiraba
+  su control a todo lo ancho: en la columna del plan a 1.512 px el apartado mide 695 px y el input de «Edad de
+  jubilación» medía **664 px para escribir dos dígitos** (hoy 104). La frase de ayuda acompaña al rótulo,
+  el valor del deslizador va bajo su deslizador, y un filete fino separa las filas. **El corte lo decide el
+  ancho REAL del contenedor y no el del viewport** —primer uso de `@container` en la app—, así que las dos
+  sub-columnas de «Pensión» se quedan apiladas dentro de un panel ancho y estrenan filas solas cuando la
+  página va a una columna. El campo cuyo contenido es una rejilla de opciones no se convierte en fila: ahí el
+  ancho no es aire.
+- **Un apartado por fila, siempre.** La rejilla de tarjetas partía la columna del plan a partir de ~1.728 px
+  y, como «Estrategia», «Pensión» y «Gasto en jubilación» ocupaban la fila entera, la tarjeta corta que las
+  precedía se quedaba con **media fila vacía** al lado y la última pareja dejaba un hueco del alto de la más
+  larga. Una rejilla no empaqueta cajas de alturas distintas: subir el mínimo por pista solo movía a qué ancho
+  aparecía el agujero. La rejilla acabó retirándose entera con el panel que la contenía; el ancho lo aprovecha
+  ahora la fila de cada campo.
+- **Las rejillas de opciones se reparten sin celdas vacías.** Las de DOS opciones —«Qué fijas tú» de Coast
+  FIRE, «Cuándo empieza la media jornada»— vivían en una rejilla de tres columnas y dejaban la tercera en
+  blanco; las CUATRO estrategias caían en 3 + 1 a algunos anchos. Ahora dos opciones son dos mitades, tres son
+  tres tercios y las cuatro estrategias van dos y dos.
+- **Las explicaciones salen de la pantalla y entran en el `<?>`.** Bajo cada título había un párrafo
+  permanente y bajo nueve campos un `<small>` de ayuda: la pantalla explicaba en voz alta cosas que
+  ya tenía un sitio donde decirlas. Hoy cada apartado lleva su interrogante en el título y ahí vive
+  la frase; las nueve ayudas de campo se fundieron en la entrada del catálogo que les tocaba —y
+  cuatro de ellas **añadieron** algo que el catálogo no decía—. **Y deja de haber un icono por
+  campo**: catorce campos compartían texto con un vecino y la pantalla pintaba el MISMO
+  interrogante hasta cuatro veces en el mismo apartado (los cuatro de «Pensión», los tres del
+  puente, los cuatro de la regla); ahora cuelga del título del apartado, o del rótulo de «El puente
+  hasta la pensión», y el campo solo conserva el suyo si el texto es suyo. En prosa se quedan los
+  VALORES y los ESTADOS —la cifra derivada del gasto, «obligatorio · sin guardar», los avisos—,
+  nunca una explicación. Con el hueco recuperado los apartados se aprietan: la columna del plan
+  mide un 13 % menos. Es una **excepción declarada** a la norma de texto de los paneles de Ajustes,
+  que allí sigue vigente.
+- **El botón de modo se queda con su nombre.** «Cuanto antes / en la primera fecha que aguante» pasa a ser
+  solo «Cuanto antes»: esas frases ya estaban, una a una, dentro del interrogante del apartado que gobierna
+  cada rejilla. El botón baja de una caja reservada para dos líneas a la altura táctil mínima. En el asistente
+  de alta la frase se queda: allí eliges estrategia sin ningún interrogante cerca.
+- **Menos superficie en todo lo demás**: los tres KPI del resultado caben ahora en una fila (antes la tercera
+  se iba sola, con media fila vacía debajo), y el deslizador deja de ser una fila rótulo/control — su valor
+  sube a la derecha del rótulo y la barra ocupa el ancho entero debajo.
+- **«Pensión» deja de leerse al revés**: primero tu pensión, y a su derecha el puente hasta ella. El puente es
+  un ajuste de la pensión —no existe sin ella—, así que enseñarlo primero ponía la consecuencia antes que la
+  causa. Vuelven a coincidir el orden visual, el del documento y el de tabulación.
+- **«Gasto en jubilación» sube justo debajo de «Estrategia»**. No es preferencia de lectura: el gasto es el
+  numerador de todo lo demás —el capital necesario, la fecha válida, el número FIRE clásico— y moverlo un 10 %
+  mueve tu fecha más que cualquier otro campo de la pantalla. Estaba cuarto, detrás de dos apartados de
+  calendario que solo tienen sentido cuando ya sabes cuánto hay que sostener.
+- **Las cifras del riesgo van plegadas de serie**: el gráfico ya dice el riesgo —la banda teñida por la parte
+  de escenarios que ha fallado, la tira de éxito—, y su desglose numérico queda a un clic.
+- **Y un hueco en móvil que venía de la versión anterior**: en «Pensión», los campos que van en pareja se
+  estiraban a 144 px de alto para un rótulo y un campo que suman 69. La causa: el ancho mínimo escrito para
+  las dos sub-columnas se convertía en un ALTO cuando la pareja se apila en pantalla estrecha. Medido y
+  corregido.
+- **Menos cajas.** Una pantalla de Jubilación tenía **34 rectángulos con borde** —paneles, botones de opción
+  y controles— más ocho círculos de ayuda. Los radiogroups pasan a ser un **control segmentado**: una sola caja
+  con divisiones dentro, y la opción elegida se dice con relleno en vez de con borde. Los campos de formulario
+  dejan la caja y se quedan con **una línea inferior** que se tiñe y engorda al escribir — esto vale para toda
+  la app, no solo aquí. Y el interrogante de ayuda pierde su círculo: el glifo basta. Casillas, radios y
+  deslizadores se quedan como estaban, porque ahí la caja ES el control. Resultado: de 34 rectángulos a 18, y la
+  pantalla encoge otro 10 %.
+- **Y Jubilación vuelve al ancho del resto de la app.** Tenía el suyo propio desde el 7 de septiembre porque
+  sus dos columnas no cabían en el tope estándar: caían por debajo de 500 px y ninguna funcionaba. Esa razón
+  era cierta **con la prosa dentro** — un párrafo por apartado, un `<small>` por campo, un sub-rótulo por
+  botón—; sacada al interrogante y apretadas las superficies, el mismo plan que pedía 732 px de columna cabe
+  hoy en 504. Medido con el caso más cargado (Coast FIRE + pensión con puente + guardarraíles): la página
+  ocupa lo mismo de alto que a ancho completo, sigue en dos columnas desde ~1.040 px, las cuatro estrategias
+  siguen en dos filas, «Pensión» sigue partida en dos y ningún rótulo ni desplegable se corta. Cambiar de
+  pestaña ya no mueve el contenido de sitio. La lección queda escrita: **antes de darle a una vista su propio
+  ancho, mira si lo que no cabe es el contenido o la prosa que lo rodea.**
+- **«Media jornada» pregunta en orden cronológico**: qué fijas tú → cuándo empieza la fase → cuándo acaba → y
+  solo después el ingreso y el gasto de esa fase, que no son edades. El apartado abría por «Edad de jubilación
+  total», que es precisamente el FINAL de la fase, sin que nada hubiera dicho todavía que hay una fase
+  intermedia.
+
 ### Los once hallazgos de la revisión adversarial (B1–B11)
 
 Todos **silenciosos**: números creíbles, ninguna excepción, ningún test en rojo.

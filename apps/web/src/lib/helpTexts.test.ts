@@ -70,6 +70,11 @@ describe("catálogo de descripciones", () => {
       "cruce con el objetivo",
       "cruce del objetivo",
       "descuento del puente",
+      // Las tres que vigilaba `retirement-form.test.ts` sobre las frases de apartado: se mudan
+      // aquí con el texto (2026-09-13), porque aquí es donde el texto vive ahora.
+      "multiplica tu objetivo",
+      "dimensiona el objetivo",
+      "mueve el objetivo",
     ];
     const ofensas: string[] = [];
     for (const [id, t] of Object.entries(HELP_TEXTS)) {
@@ -79,6 +84,36 @@ describe("catálogo de descripciones", () => {
       }
     }
     expect(ofensas, `conceptos retirados en 5.0.0: ${ofensas.join(" · ")}`).toEqual([]);
+  });
+
+  /**
+   * Los tres guardas que vivían en `retirement-form.test.ts` sobre `PLAN_CARD_COPY.blurb`
+   * (2026-09-13). Las frases de apartado dejaron de pintarse en prosa y pasaron al `<?>` del
+   * título, así que su contenido se comprueba donde ahora vive: el catálogo. No juzgan estilo —
+   * cazan que alguien reescriba una entrada y se lleve por delante el hecho que la frase
+   * existía para decir.
+   */
+  it("«Horizonte» dice que alargarlo RETRASA tu fecha, no lo contrario", () => {
+    // Era cierto mientras la fecha era un cruce de capital contra un objetivo. En v2 la fecha
+    // válida es el primer mes cuyo éxito HASTA EL HORIZONTE cumple el umbral, así que alargar el
+    // horizonte la retrasa. Es la mentira más cara de las que el modelo v2 dejó atrás: invita a
+    // subir la edad límite «por si acaso» y a no entender por qué se va la fecha.
+    const { body } = HELP_TEXTS["settings.horizon_age"];
+    expect(body).not.toMatch(/no mueve tu fecha/i);
+    expect(body, "y tiene que decir lo contrario, no callarse").toMatch(/retrasa/i);
+  });
+
+  it("«Retirada» explica las DOS cifras que deciden la fecha: umbral y tasa", () => {
+    const { body } = HELP_TEXTS["retirement.section_withdrawal"];
+    expect(body).toMatch(/umbral/i);
+    expect(body).toMatch(/escenarios/i);
+    expect(body).toMatch(/primer año/i);
+  });
+
+  it("«Pensión» dice qué hace el puente, y que en ese tramo no hay aportaciones", () => {
+    const { body } = HELP_TEXTS["retirement.pension"];
+    expect(body).toMatch(/puente/i);
+    expect(body).toMatch(/aportaciones/i);
   });
 
   it("cada texto tiene título corto y cuerpo con sustancia", () => {

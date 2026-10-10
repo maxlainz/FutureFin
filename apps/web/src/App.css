@@ -1198,21 +1198,49 @@
   accent-color: var(--ff-accent);
 }
 
-.field input,
+/* CONTROLES SUBRAYADOS, no encajonados (2026-09-13, «decluter»).
+   Cada input era una caja completa con borde, radio y fondo propio:
+   en una pantalla de formulario eso son quince o veinte rectángulos
+   que pesan lo mismo que los paneles que los contienen. Con una sola
+   línea inferior el control sigue diciendo «aquí se escribe» y deja
+   de competir con la estructura.
+
+   **Las tres exclusiones no son cosmética.** Casillas y radios pintan
+   su propia caja nativa y un `border: 0` se la come; el `range` no
+   tiene borde que sustituir y la línea le dibujaría un raíl falso
+   bajo el suyo. Si añades un tipo de control nuevo, pregúntate
+   primero si su caja ES el control.
+
+   El `border-bottom` usa `--ff-line` y no `--ff-line-soft`: al perder
+   el fondo y el resto del borde, el contraste que quedaba era
+   demasiado tenue para leerse como un campo editable. */
+.field input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
 .field select {
   font: inherit;
-  padding: 0.5rem 0.7rem;
-  border: 1px solid var(--ff-line-soft);
-  border-radius: var(--ff-radius-input);
-  background: var(--ff-paper);
+  padding: 0.5rem 0.15rem;
+  border: 0;
+  border-bottom: 1px solid var(--ff-line);
+  border-radius: 0;
+  background: transparent;
   color: var(--ff-ink);
+}
+
+/* Al escribir, la línea se engorda y se tiñe: es la única señal de
+   «este es el campo activo» que queda cuando no hay caja. El
+   `outline` de foco sigue donde estaba (regla de accesibilidad), con
+   `offset` para que no se pegue al texto. */
+.field input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus,
+.field select:focus {
+  border-bottom-color: var(--ff-accent);
+  border-bottom-width: 2px;
+  padding-bottom: calc(0.5rem - 1px);
 }
 
 .field input:focus-visible,
 .field select:focus-visible,
 .hh-select:focus-visible {
   outline: 2px solid var(--ff-accent);
-  outline-offset: 0;
+  outline-offset: 2px;
 }
 
 .field input::placeholder {
@@ -1746,10 +1774,18 @@
   align-items: center;
   flex-shrink: 0;
 }
+/* Sin borde desde 2026-09-13 («decluter»). Cada disparador era un
+   círculo con su propio filete: ocho cajitas más en una pantalla que
+   ya tenía treinta y cuatro, y compitiendo en peso con los controles
+   de verdad. El glifo en `--ff-muted` basta para que se lea como
+   «aquí hay ayuda», y al pasar por encima o enfocarlo recupera el
+   acento. El área de click NO encoge: el `padding` sustituye al
+   espacio que ocupaba el borde. */
 .help-popover__trigger {
   background: none;
-  border: 1px solid var(--ff-line-soft);
-  padding: 0;
+  border: 0;
+  padding: 0 0.1rem;
+  color: var(--ff-muted);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -1762,7 +1798,6 @@
 .help-popover__trigger:hover,
 .help-popover__trigger[aria-expanded="true"] {
   color: var(--ff-accent);
-  border-color: var(--ff-accent);
 }
 .help-popover__panel {
   position: absolute;
@@ -2741,7 +2776,7 @@
 }
 
 .retirement-config-stack {
-  gap: 0.875rem;
+  gap: 0.7rem;
 }
 
 fieldset.retirement-config-stack {
@@ -2751,46 +2786,91 @@ fieldset.retirement-config-stack {
   min-inline-size: 0;
 }
 
+/* `auto-fit` y NO `repeat(3, 1fr)`: con tres pistas fijas un radiogroup de DOS opciones
+   —`coast_mode`, `partial_mode`— dejaba la tercera celda literalmente vacía, y era uno de los
+   huecos que el owner señaló (2026-09-13). Con `auto-fit` las pistas sin contenido colapsan, así
+   que N opciones ocupan N fracciones iguales del ancho real: dos mitades, tres tercios. El mínimo
+   de 9rem solo decide cuándo se envuelve en pantallas estrechas. */
+/* CONTROL SEGMENTADO (2026-09-13, «decluter»). Antes cada opción era
+   una caja con su borde: nueve rectángulos en la pantalla de los que
+   solo tres estaban elegidos, y el borde gritaba igual en los seis
+   que no. Ahora la rejilla es UNA caja y las opciones se separan con
+   un filete interno.
+
+   `gap: 0` + `overflow: hidden` es lo que deja el redondeo limpio en
+   las esquinas sin tocar el radio de cada opción. El DOM no cambia
+   —siguen siendo `<label>` con su `<input type="radio" class="sr-only">`
+   dentro—, así que el foco, el teclado y el lector de pantalla se
+   comportan exactamente igual que antes: esto es piel, no control. */
 .retirement-mode-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+  gap: 0;
+  border: 1px solid var(--ff-line-soft);
+  border-radius: 0.7rem;
+  overflow: hidden;
+  background: var(--ff-paper);
 }
 
-/* Cinco tarjetas de estrategia (D26): mismo lenguaje visual que las tres del modo del objetivo,
-   pero con `auto-fit` porque cinco no caben en la rejilla fija de 3. El `minmax(min(100%, …))`
-   es el patrón sancionado del design system: no-op en escritorio (el contenedor siempre supera
-   los 15rem) y en móvil colapsa solo, sin abrir un breakpoint nuevo. */
+/* Las CUATRO tarjetas de estrategia (D26, tras la retirada de «Puente hasta la pensión» en C7):
+   mismo lenguaje visual que los modos, pero con un mínimo MAYOR — a 9rem cuatro opciones caben en
+   una fila de ~165px y el nombre no entra en una línea. A 15rem se reparten dos y dos. El
+   `minmax(min(100%, …))` es el patrón sancionado del design system: en móvil colapsa solo, sin
+   abrir un breakpoint nuevo. */
 .retirement-strategy-grid {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
 }
 
+/* El `min-height` de 4,5rem existía para que la caja no bailara con
+   un sub-rótulo de una o dos líneas. **Los sub-rótulos se fueron el
+   2026-09-13** (owner: «el texto dentro del botón de modo también se
+   debe reducir o poner en `<?>`») — y ya estaban dichos, uno por uno,
+   en el `<?>` del apartado que gobierna cada rejilla. Sin ellos el
+   botón es un nombre: una línea, y `min-height` pasa a ser el área
+   táctil mínima (2,75rem ≈ 44px, la regla del design system), no una
+   reserva de texto. */
 .retirement-mode-card {
   display: grid;
   gap: 0.15rem;
-  align-content: start;
-  min-height: 4.5rem;
-  border: 1px solid var(--ff-line-soft);
-  border-radius: 0.7rem;
-  background: var(--ff-paper);
-  padding: 0.65rem 0.7rem;
+  align-content: center;
+  min-height: 2.75rem;
+  /* Sin borde ni radio propios: los pone el segmentado que las
+     contiene. El único filete es el que separa una opción de su
+     vecina, y `-1px` de margen lo funde con el borde exterior para
+     que no salga doble en los cantos. */
+  border-left: 1px solid var(--ff-line-soft);
+  margin-left: -1px;
+  /* …y el mismo truco arriba, para el segmentado que ENVUELVE (las
+     cuatro estrategias van en 2×2): sin esto las dos filas se tocaban
+     sin línea entre ellas. En una sola fila este borde cae justo
+     sobre el del contenedor y no se ve. */
+  border-top: 1px solid var(--ff-line-soft);
+  margin-top: -1px;
+  background: transparent;
+  padding: 0.5rem 0.7rem;
   cursor: pointer;
   transition: box-shadow 120ms ease, background-color 120ms ease, border-color 120ms ease;
 }
 
 .retirement-mode-card:hover {
-  border-color: color-mix(in oklch, var(--ff-accent) 30%, var(--ff-line-soft));
+  background: color-mix(in oklch, var(--ff-accent) 6%, transparent);
 }
 
+/* Dentro de un segmentado, «elegida» es la que está PINTADA: sin
+   bordes propios que resaltar, el relleno es lo único que distingue,
+   y por eso sube del 14 % al 18 % de acento. El halo de 2px se fue
+   con el borde — dentro de una caja única dibujaba un rectángulo
+   flotando sobre otro. */
 .retirement-mode-card.is-active {
-  background: color-mix(in oklch, var(--ff-accent) 14%, var(--ff-paper));
-  border-color: var(--ff-accent);
-  box-shadow: 0 0 0 2px color-mix(in oklch, var(--ff-accent) 25%, transparent);
+  background: color-mix(in oklch, var(--ff-accent) 18%, var(--ff-paper));
 }
 
+/* `outline-offset: -2px` (hacia DENTRO): con el offset positivo de
+   antes el foco se salía de la caja del segmentado y pisaba a la
+   opción vecina. */
 .retirement-mode-card:focus-within {
   outline: 2px solid var(--ff-accent);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 .retirement-mode-name {
@@ -4428,8 +4508,14 @@ fieldset.retirement-config-stack {
    `.metric-value-parenthetical` se queda como está — lo necesitan
    las bandas `nowrap` con scroll, que aquí no aplican porque esta
    rejilla envuelve. */
+/* 11rem y no 15rem desde 2026-09-13: son TRES tarjetas
+   (`RETIREMENT_TILES_V2_CAP`) y a 15rem solo caben dos en la columna
+   del resultado (~695px a 1512px), así que la tercera se iba sola a
+   una fila y dejaba media vacía — el mismo agujero que esta pasada
+   vino a quitar. A 11rem entran las tres, y con un subtítulo que
+   ENVUELVE (regla de debajo) el ancho menor no recorta nada. */
 .metric-grid.retirement-tiles-grid {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
   margin-top: 0.75rem;
   margin-bottom: 0.75rem;
 }
@@ -4523,57 +4609,206 @@ fieldset.retirement-config-stack {
   line-height: 1.3;
 }
 
-/* ---- V3 · tarjetas de configuración de «Tu plan» ----
-   `auto-fit`, sin breakpoint: reparte por el ancho REAL del
-   contenedor, que desde W13 ya no es el de la página (el plan vive
-   en una columna de ~600px a 1280px y de ~780px a 1600px).
+/* ---- V3 · los apartados de «Tu plan» ----
+   UN APARTADO, UN PANEL (2026-09-13, informe del owner: «estos tiles
+   dentro de tiles no los usamos en ningún lado»). Nacieron como
+   `.retirement-card`: cajas con borde propio, fondo un escalón por
+   debajo y radio de KPI, metidas DENTRO de un panel «Tu plan». Era el
+   único anidamiento de ese tipo en la app —Ajustes son doce paneles
+   hermanos, y la propia columna «Resultado» separa sus bloques con
+   filete— y el envoltorio se fue con su título: los seis títulos ya
+   dicen qué es cada cosa, y el indicador «Guardado» de la cabecera es
+   el que ata el conjunto.
 
-   El mínimo sube de 21rem a 24rem con la maquetación en dos
-   columnas: con 21rem, la columna del plan a 1600px daba DOS
-   tarjetas por fila de ~360px, y las rejillas de tres modos que
-   viven dentro (`.retirement-mode-grid`) caían a ~105px por
-   opción. A 24rem la columna del plan es de UNA tarjeta hasta bien
-   pasados los 1600px, y la página apilada (por debajo de ~1100px)
-   sigue dando dos, que es donde U1 quería dos. */
-.retirement-card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr));
-  gap: 1rem;
-}
-
-.retirement-card {
+   Aquí solo queda la MAQUETACIÓN: la piel (borde, fondo, radio,
+   sombra, padding) la pone `.panel` y el hueco entre paneles el `gap`
+   de `.retirement-col`. */
+.retirement-plan-panel {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
-  padding: 0.85rem 0.9rem;
-  border: 1px solid var(--ff-line-soft);
-  border-radius: var(--ff-radius-kpi);
-  background: color-mix(in oklch, var(--ff-paper) 60%, var(--ff-bg));
   min-width: 0;
-}
-
-/* Las tarjetas que ocupan la fila entera (`WIDE_PLAN_CARDS`, en
-   `RetirementView.tsx`, que es donde está el criterio escrito):
-   las dos cuyo contenido es una rejilla de radio-cards —a media
-   fila cada opción caería a ~7rem y el nombre no cabría en una
-   línea— y, desde W13, «Pensión», que es la única con DOS
-   sub-temas (la pensión y su puente) y la que el owner señaló por
-   desaprovechar el ancho. */
-.retirement-card--wide {
-  grid-column: 1 / -1;
 }
 
 /* La tarjeta es un flex-column con `gap`, así que el margen inferior
    del `.panel-title` sumaría un segundo hueco bajo el título. */
-.retirement-card > .panel-title {
+.retirement-plan-panel > .panel-title {
   margin-bottom: 0;
 }
 
-.retirement-card-blurb {
-  margin: 0;
-  font-size: 0.78rem;
-  line-height: 1.35;
-  color: var(--ff-ink-soft);
+/* `.retirement-plan-blurb` (la frase bajo el título de cada apartado)
+   se RETIRÓ el 2026-09-13. El owner: «hay mucho plain text, y ya
+   tenemos un mecanismo para dar explicaciones `<?>`, usémoslo». Las
+   seis frases no se perdieron: viven en el catálogo
+   (`lib/helpTexts.ts`) y las pinta el HelpPopover del título, cableado
+   por `PLAN_CARD_HELP`. Con ellas se fueron nueve `<small>` de ayuda
+   bajo campos; lo que queda en prosa son VALORES y ESTADOS (la cifra
+   derivada del gasto, «obligatorio · sin guardar», los avisos), nunca
+   explicaciones.
+
+   El espacio recuperado se reinvierte en apretar la pantalla —era la
+   otra mitad del encargo: «con el espacio ganado podemos encoger
+   algunas superficies y que no sea tan abrumador»—, de ahí los tres
+   ajustes de abajo. */
+.retirement-plan-panel {
+  padding-block: 0.85rem;
+}
+
+/* ---- El panel ancho se lee como una LISTA DE AJUSTES ----
+   (2026-09-13, informe del owner: «deja muchos huecos vacíos… está
+   un tanto fea, aunque la jerarquía de información es buena»)
+
+   El aire no venía de la jerarquía, venía de la geometría. Un
+   `.field` es un flex-column que estira su control: en el panel de
+   695px que da la columna del plan a 1512px, el input de «Edad de
+   jubilación» medía 664px para escribir `55` (medido; hoy 104), y lo
+   mismo el `<select>` de la regla. Un apartado de un solo campo
+   —Edades, Horizonte, Pensión sin marcar— gastaba una franja entera
+   en una línea.
+
+   El panel ancho pasa a ser una lista: RÓTULO a la izquierda,
+   CONTROL a la derecha con el ancho que de verdad pide (una edad no
+   necesita 16rem, un `<select>` sí), la frase de ayuda bajo el
+   rótulo y un filete `--ff-line-soft` entre filas para atar cada par
+   cuando los separan 40 cm de panel.
+
+   **El corte lo decide `@container`, no un `@media`.** Es la misma
+   doctrina que W13 dejó escrita —«el reparto lo decide el ancho REAL
+   del contenedor, que en dos columnas ya no es el del viewport»—,
+   aquí con la herramienta que la expresa directamente en vez de con
+   un `flex-basis`.
+
+   El umbral es **28rem** desde 2026-09-13: con la página de vuelta al
+   ancho estándar (66rem) el panel mide 469px — 29,3rem —, y a 30rem
+   la lista se habría apagado justo donde hace falta. Por debajo
+   —móvil, o la página en una sola columna estrecha— los campos
+   vuelven solos a apilarse, que es lo que quieren ahí.
+
+   La pista del control es de **17rem**, y la fija el `<select>` más
+   largo («Bandas de seguridad (guardrails)»: 255px con su flecha), no
+   un redondeo. A 16rem entraba por 1px, que no es margen, es suerte;
+   a 17rem sobran 17px y ningún rótulo de la pantalla se parte en dos
+   líneas (medido campo a campo).
+
+   `.retirement-subcol` es contenedor por derecho propio: las dos
+   sub-columnas de «Pensión» miden 223px dentro de un panel de 469px,
+   así que sus campos se quedan apilados —correcto— y solo estrenan
+   filas cuando la página va a una columna y el panel crece. */
+.retirement-plan-panel,
+.retirement-subcol {
+  container-type: inline-size;
+}
+
+@container (min-width: 28rem) {
+  /* Las cuatro estrategias, DOS Y DOS. Con `auto-fit` el número de
+     pistas lo decidía el ancho y en una tarjeta de ~810px salían
+     tres: la cuarta se iba sola a la fila de abajo y dejaba una
+     celda vacía — el mismo agujero que `auto-fit` arregla en los
+     radiogroups de dos opciones, aquí al revés. Con cuatro opciones
+     fijas, la única repartición sin resto es 2×2 (o 1×4 cuando no
+     caben dos, que es lo que hace la regla base). */
+  .retirement-strategy-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* `.retirement-field--block` (marcado en `RetirementView.tsx`) es la
+     salida declarada: el campo cuyo contenido es una rejilla de modos
+     o una pila de radios se queda apilado, porque ahí el ancho no es
+     aire, es lo que hace legibles las opciones. */
+  .retirement-config-stack > .field:not(.checkbox-field):not(.retirement-field--block),
+  .retirement-subcol > .field:not(.checkbox-field):not(.retirement-field--block) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(7rem, 17rem);
+    column-gap: 1rem;
+    row-gap: 0.2rem;
+    align-items: center;
+  }
+
+  .retirement-config-stack
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > span:first-child,
+  .retirement-subcol
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > span:first-child {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .retirement-config-stack
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > :is(input, select),
+  .retirement-subcol
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > :is(input, select) {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  /* La frase de ayuda y la marca «obligatorio» acompañan al RÓTULO,
+     no al control: son lo que explica la pregunta. */
+  .retirement-config-stack
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > small,
+  .retirement-subcol
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > small {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  /* Un deslizador no es un control estrecho: la fila rótulo/control lo
+     dejaba en 16rem con su valor colgando en una segunda línea y una
+     celda vacía al lado. Aquí la fila se lee como una cabecera —
+     RÓTULO a la izquierda, VALOR a la derecha— y la barra ocupa el
+     ancho entero debajo, que es el patrón canónico de un slider y el
+     que mejor usa el ancho recuperado. */
+  .retirement-config-stack
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > .retirement-slider-value {
+    grid-column: 2;
+    grid-row: 1;
+    text-align: right;
+  }
+
+  .retirement-config-stack
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > input[type="range"] {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+  }
+
+  /* Cada control pide su ancho. Sin esto el input de una edad se
+     estiraba a las 16rem de la pista y volvíamos al hueco de
+     partida, ahora dentro del propio control. */
+  /* `text-align: right` va con el subrayado, no es un capricho: sin
+     caja, un valor pegado a la izquierda de una línea que sigue hacia
+     la derecha se lee como un campo a medio rellenar. Alineado al
+     final, el número y el final de su línea coinciden. */
+  .retirement-config-stack > .field > input[inputmode="numeric"],
+  .retirement-subcol > .field > input[inputmode="numeric"] {
+    max-width: 6.5rem;
+    justify-self: end;
+    text-align: right;
+  }
+
+  .retirement-config-stack > .field > input[inputmode="decimal"],
+  .retirement-subcol > .field > input[inputmode="decimal"] {
+    max-width: 10rem;
+    justify-self: end;
+    text-align: right;
+  }
+
+  .retirement-config-stack > .field > input[type="date"],
+  .retirement-subcol > .field > input[type="date"] {
+    max-width: 11rem;
+    justify-self: end;
+  }
+
+  /* SIN filete entre filas desde 2026-09-13. Lo puse cuando la columna
+     medía 695px y el control quedaba a medio panel del rótulo; con la
+     vuelta al ancho estándar están a un palmo y la línea pasó de atar
+     a ser una reja. El hueco del `gap` basta. */
 }
 
 /* Disparador de un `<details>` de SEGUNDO orden («Detalle del
@@ -4587,6 +4822,21 @@ fieldset.retirement-config-stack {
   font-size: 0.82rem;
   font-weight: 600;
   color: var(--ff-ink-soft);
+}
+
+/* …salvo cuando el `<details>` ES el panel (2026-09-13). «Detalle
+   del cálculo» dejó de ser un bloque con filete dentro de
+   «Resultado» y pasó a panel hermano, así que su `<summary>` ya no
+   es una puerta dentro de una sección: es el TÍTULO de la sección, y
+   plegado el panel entero es esa línea. En 0,82rem y `--ff-ink-soft`
+   parecía un panel a medio pintar al lado de «Resultado» y
+   «Riesgo». La regla vive aquí —y no cambiando las clases del
+   `<summary>`— porque `.retirement-detail > summary` la pisaría por
+   especificidad, y P6 exige que el tamaño se declare en un sitio
+   donde se vea. */
+.retirement-detail-panel > .retirement-detail > summary {
+  font-size: 0.95rem;
+  color: var(--ff-ink);
 }
 
 /* ---- V2/V5 · el gráfico de riesgo dice el riesgo ----
@@ -4871,9 +5121,11 @@ fieldset.retirement-config-stack {
 
    Tres cosas, en el orden del informe:
      1 · que la recarga no parpadee ni mueva la altura;
-     2 · dos columnas a ancho completo (datos | resultado);
-     3 · la tarjeta «Pensión» al ancho de su columna, con el
-         puente a la izquierda.
+     2 · dos columnas (datos | resultado) — a ancho completo
+         entonces, dentro del ancho estándar desde 2026-09-13;
+     3 · la tarjeta «Pensión» partida en dos sub-columnas — con el
+         puente a la izquierda entonces, a la DERECHA desde
+         2026-09-13, que es el orden que pidió el owner al verlo.
    ============================================================ */
 
 /* ---- 1 · Alturas estables y un solo indicio de recarga ----
@@ -4983,16 +5235,18 @@ fieldset.retirement-config-stack {
   }
 }
 
-/* ---- 2 · Dos columnas a ancho completo ----
-
-   `.app-main--wide` suelta el tope de 66rem SOLO en esta pestaña.
-   No reusa `.app-main--projection-fullbleed` a propósito: ese
-   convierte `<main>` en un flex con `overflow: hidden` para que el
-   chart ocupe el viewport, y aquí la página tiene que seguir
-   siendo scroll vertical normal. */
-.app-main--wide {
-  max-width: none;
-}
+/* ---- 2 · Dos columnas, dentro del ancho estándar ---- */
+/* `.app-main--wide` (2026-09-07, W13) se RETIRÓ el 2026-09-13.
+   Existía porque «con el tope de 66rem las dos columnas caían a
+   ~500px y ninguna cabía» — y era verdad ENTONCES: cada apartado
+   llevaba un párrafo, cada campo su `<small>`, cada botón de modo su
+   sub-rótulo, y los controles se estiraban a lo ancho. Esa razón se
+   disolvió al sacar la prosa a los `<?>` y apretar las superficies:
+   el mismo plan que pedía 732px de columna cabe hoy en 504px. El
+   owner lo pidió de vuelta al ancho estándar —«¿podríamos probar a
+   devolverlo a una página de ancho estándar como el resto?»— y la
+   medición lo confirmó. Si alguien vuelve a meter prosa permanente
+   en esta pantalla, esto es lo primero que se rompe. */
 
 /* La rejilla de la página. SIN breakpoint nuevo: `auto-fit` con
    `minmax(min(100%, 34rem), 1fr)` da dos columnas a partir de
@@ -5006,7 +5260,7 @@ fieldset.retirement-config-stack {
    fondo vacío de varios cientos de píxeles. */
 .retirement-layout {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 34rem), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 31rem), 1fr));
   gap: 1rem;
   align-items: start;
 }
@@ -5018,7 +5272,10 @@ fieldset.retirement-config-stack {
 .retirement-col {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  /* 0,75rem y no 1rem desde 2026-09-13: sin la frase bajo cada título
+     los apartados son mucho más cortos, y con el hueco de antes la
+     columna se leía como una lista de cajas sueltas. */
+  gap: 0.75rem;
   min-width: 0;
 }
 
@@ -5030,31 +5287,34 @@ fieldset.retirement-config-stack {
   margin-bottom: 0;
 }
 
-/* ---- 3 · La tarjeta «Pensión» usa su columna entera ----
+/* ---- 3 · El panel «Pensión» se parte en dos sub-columnas ----
 
-   Dos sub-columnas cuando caben, apiladas cuando no. El truco es
-   `row-reverse` + `wrap`: el DOM va pensión → puente (que es el
-   orden correcto apilado, y el de tabulación), y en una sola línea
-   `row-reverse` deja el puente a la IZQUIERDA, como pidió el
-   owner. Al envolver, cada uno se lleva su línea y vuelve el orden
-   del DOM. Cero media queries: el reparto lo decide el ancho
-   REAL de la tarjeta, que en dos columnas ya no es el del viewport.
+   Dos sub-columnas cuando caben, apiladas cuando no.
+
+   **`row`, no `row-reverse` (2026-09-13).** W13 invirtió la fila para
+   dejar el puente a la izquierda; el owner lo leyó luego al revés y
+   con razón: «primero se debería definir si habrá pensión, y [luego]
+   si se puentea hasta ella. así no tiene sentido». El puente es un
+   AJUSTE de la pensión —no existe sin ella, y su interruptor solo
+   aparece con una pensión declarada—, así que leerlo antes obliga a
+   entender la consecuencia antes que la causa. Ahora el orden visual
+   y el del DOM coinciden, que es además el de tabulación: ya no hay
+   truco que mantener.
 
    `flex: 1 1 16rem` es lo que fija el punto de corte (~33rem de
-   tarjeta): por debajo, dos columnas de campos con `<select>`s y
+   panel): por debajo, dos columnas de campos con `<select>`s y
    sufijos dentro no caben sin desbordar. */
-.retirement-card-cols {
+.retirement-subcols {
   display: flex;
-  flex-direction: row-reverse;
   flex-wrap: wrap;
   gap: 0.75rem 1.25rem;
 }
 
-.retirement-card-col {
+.retirement-subcol {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
-  flex: 1 1 16rem;
+  flex: 1 1 13.5rem;
   min-width: 0;
 }
 
@@ -5064,24 +5324,30 @@ fieldset.retirement-config-stack {
    dejan cada input en ~7rem y el rótulo en tres líneas. `wrap` +
    una base de 9rem lo resuelve sin tocar la regla global, que la
    comparten todos los formularios de la app. */
-.retirement-card-col .field-row {
+.retirement-subcol .field-row {
   flex-wrap: wrap;
 }
 
-.retirement-card-col .field-row > .field {
+.retirement-subcol .field-row > .field {
   flex: 1 1 9rem;
 }
 
-/* Rótulo de una sub-columna. Tiene clase propia —y no un `<h5>`
-   pelado— porque la norma de títulos (P6) prohíbe que un elemento
-   sin clase decida su tamaño. Es un rótulo, no un título de
-   sección: por eso va en small-caps y en `--ff-muted`, un peldaño
-   por debajo del `.panel-title` de la tarjeta que lo contiene. */
-.retirement-subcard-title {
-  margin: 0;
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--ff-muted);
+/* …pero SOLO mientras la fila sea una fila. En ≤720px la regla global
+   `.field-row` pasa a `flex-direction: column` (bp:struct 720), y ahí
+   `flex-basis: 9rem` deja de ser un ANCHO y se convierte en un ALTO:
+   cada campo se estiraba a 144px para un rótulo y un input que suman
+   69, y el apartado «Pensión» abría dos huecos de 75px en móvil.
+   Medido el 2026-09-13; el defecto venía de W13, cuando esta regla se
+   escribió pensando solo en el caso de dos columnas. */
+@media (max-width: 720px) { /* bp:struct 720 */
+  .retirement-subcol .field-row > .field {
+    flex: 0 0 auto;
+  }
 }
+
+/* `.retirement-subcol-title` (el rótulo en versalita de cada
+   sub-columna de «Pensión») se RETIRÓ el 2026-09-13: los dos que
+   había eran ruido —el del puente repetía palabra por palabra el
+   rótulo del interruptor que tenía debajo—, y hoy cada sub-columna
+   abre con su propio control de encendido, que es lo que la titula
+   de verdad. */

@@ -159,9 +159,11 @@ const RGBA_ZERO_EXCEPTIONS: ReadonlySet<string> = new Set([
   // (retiradas: sus seis consumidores migraron a `.panel-title`/`.donut-card-title`) y
   // reescribieron `.assets-table--budget-lines` a `table-layout: fixed`, un neto de 8 líneas
   // menos. Que haya que tocar esto en cada movimiento —también hacia ARRIBA— es el precio
-  // deliberado de cerrar la excepción por file+línea en vez de por patrón.
-  "App.css:2396",
-  "App.css:2397",
+  // deliberado de cerrar la excepción por file+línea en vez de por patrón. La tanda de
+  // «decluter» (2026-09-13) las empuja de 2396/2397 a 2431/2432: el segmentado, los controles
+  // subrayados y sus comentarios suman 35 líneas por encima.
+  "App.css:2431",
+  "App.css:2432",
 ]);
 
 function rgbaZeroHits(): Hit[] {
