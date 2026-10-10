@@ -109,6 +109,10 @@ pub struct PlanningFlowResponse {
     pub notes: Option<String>,
     pub sort_index: i32,
     pub show_in_chart: bool,
+    /// Interruptor de la pestaña «Simulación» (5.0.0). SIEMPRE serializado. `false` = el flujo
+    /// sigue existiendo y se lista, pero NO entra en la proyección ni en ningún KPI (totales
+    /// `upcoming_*` del Resumen, tramo `planning` de la resolución de reparto, eventos del chart).
+    pub enabled: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -137,6 +141,10 @@ pub struct CreatePlanningFlowBody {
     pub sort_index: Option<i32>,
     #[serde(default)]
     pub show_in_chart: Option<bool>,
+    /// Omitido = `true` (el alta nace encendida). `false` = se crea apagado: listado, pero fuera
+    /// de la proyección y de todo KPI.
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -171,6 +179,10 @@ pub struct PatchPlanningFlowBody {
     pub sort_index: Option<i32>,
     #[serde(default)]
     pub show_in_chart: Option<bool>,
+    /// Encender/apagar el flujo en la simulación. Omitido = sin cambio. Cuenta para `patch_empty`
+    /// como cualquier otro campo, e invalida la cache de proyección (es un input del motor).
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, FromRow)]
@@ -187,6 +199,7 @@ struct PlanningFlowJoinRow {
     notes: Option<String>,
     sort_index: i32,
     show_in_chart: bool,
+    enabled: bool,
     /// `NOT NULL` desde la migración 5.0.0 (D14). Lo lee la puerta de D21 del PATCH.
     owner_user_id: Uuid,
 }
@@ -347,6 +360,7 @@ fn row_to_response(r: PlanningFlowJoinRow) -> Result<PlanningFlowResponse, ApiEr
         notes: r.notes,
         sort_index: r.sort_index,
         show_in_chart: r.show_in_chart,
+        enabled: r.enabled,
     })
 }
 
@@ -387,7 +401,7 @@ pub(crate) async fn list_planning_flows_core(
         r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
                   p.expected_amount, p.amount_basis, p.due_date,
                   p.window_start_date, p.window_end_date, p.notes, p.sort_index,
-                  p.show_in_chart, p.owner_user_id
+                  p.show_in_chart, p.enabled, p.owner_user_id
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE {scope}
@@ -493,9 +507,9 @@ pub(crate) async fn create_planning_flow_core(
         r#"INSERT INTO planning_flows (
                installation_id, category_id, title, expected_amount, amount_basis, due_date,
                window_start_date, window_end_date, notes, sort_index, owner_user_id,
-               show_in_chart
+               show_in_chart, enabled
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
            RETURNING id"#,
     )
     .bind(iid)
@@ -510,6 +524,7 @@ pub(crate) async fn create_planning_flow_core(
     .bind(sort_index)
     .bind(user_id)
     .bind(show_in_chart)
+    .bind(body.enabled.unwrap_or(true))
     .fetch_one(&state.pool)
     .await?;
 
@@ -517,7 +532,7 @@ pub(crate) async fn create_planning_flow_core(
         r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
                   p.expected_amount, p.amount_basis, p.due_date,
                   p.window_start_date, p.window_end_date, p.notes, p.sort_index,
-                  p.show_in_chart, p.owner_user_id
+                  p.show_in_chart, p.enabled, p.owner_user_id
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE p.id = $1"#,
@@ -580,6 +595,7 @@ pub(crate) async fn patch_planning_flow_core(
         && body.notes.is_none()
         && body.sort_index.is_none()
         && body.show_in_chart.is_none()
+        && body.enabled.is_none()
     {
         return Err(ApiError::BadRequest(
             "patch_empty: provide at least one field to update".into(),
@@ -590,7 +606,7 @@ pub(crate) async fn patch_planning_flow_core(
         r#"SELECT p.id, p.category_id, c.scope AS scope, p.title,
                   p.expected_amount, p.amount_basis, p.due_date,
                   p.window_start_date, p.window_end_date, p.notes, p.sort_index,
-                  p.show_in_chart, p.owner_user_id
+                  p.show_in_chart, p.enabled, p.owner_user_id
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE p.id = $1 AND p.installation_id = $2"#,
@@ -688,8 +704,9 @@ pub(crate) async fn patch_planning_flow_core(
                notes = $8,
                sort_index = $9,
                show_in_chart = $10,
+               enabled = $11,
                updated_at = now()
-           WHERE id = $11 AND installation_id = $12 AND owner_user_id = $13
+           WHERE id = $12 AND installation_id = $13 AND owner_user_id = $14
            RETURNING planning_flows.id,
                      planning_flows.category_id,
                      (
@@ -706,6 +723,7 @@ pub(crate) async fn patch_planning_flow_core(
                      planning_flows.notes,
                      planning_flows.sort_index,
                      planning_flows.show_in_chart,
+                     planning_flows.enabled,
                      planning_flows.owner_user_id"#,
     )
     .bind(new_cat)
@@ -718,6 +736,7 @@ pub(crate) async fn patch_planning_flow_core(
     .bind(&new_notes)
     .bind(new_sort)
     .bind(new_show_in_chart)
+    .bind(body.enabled.unwrap_or(current.enabled))
     .bind(id)
     .bind(iid)
     .bind(user_id)

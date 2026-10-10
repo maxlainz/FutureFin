@@ -469,3 +469,32 @@ fn the_plan_block_is_declared_in_the_document() {
         );
     }
 }
+
+/// El interruptor de «Simulación» (5.0.0): `PlanningFlowResponse.enabled` se serializa SIEMPRE
+/// (un cliente generado no debe tratar su ausencia como «encendido» por defecto), y los dos
+/// cuerpos de escritura lo aceptan como opcional.
+#[test]
+fn planning_flows_declare_the_enabled_toggle() {
+    let doc = doc();
+    let schemas = &doc["components"]["schemas"];
+    let resp = &schemas["PlanningFlowResponse"];
+    assert_eq!(
+        resp["properties"]["enabled"]["type"], "boolean",
+        "PlanningFlowResponse.enabled debe ser boolean: {resp}"
+    );
+    let required: Vec<&str> = resp["required"]
+        .as_array()
+        .expect("required")
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(required.contains(&"enabled"), "PlanningFlowResponse.enabled debe ser obligatorio");
+    for body in ["CreatePlanningFlowBody", "PatchPlanningFlowBody"] {
+        assert!(
+            !schemas[body]["properties"]["enabled"].is_null(),
+            "{body}.enabled no está declarado"
+        );
+        let req = schemas[body]["required"].to_string();
+        assert!(!req.contains("\"enabled\""), "{body}.enabled debe ser opcional: {req}");
+    }
+}

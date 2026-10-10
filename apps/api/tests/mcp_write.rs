@@ -780,6 +780,120 @@ async fn planning_flow_update_and_due_date_tristate() {
     tool_error(&envelope, "bad_request");
 }
 
+/// Interruptor de «Simulación» (5.0.0) por MCP: `update_planning_flow {enabled:false}` saca el
+/// flujo de `get_summary` (`upcoming_*`) y de `get_projection` (`events`) sin borrarlo
+/// —`list_planning_flows` lo sigue devolviendo, con `enabled: false`, y el one-liner lo dice—, y
+/// `{enabled:true}` lo devuelve. Las dos puertas de escritura (rol vivo y `mcp_write_enabled`)
+/// cortan el toggle igual que cualquier otra escritura.
+#[tokio::test]
+async fn update_planning_flow_toggles_the_flow_out_of_summary_and_projection() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner).await;
+    let cat = app.create_category(&owner, "expense", "Grandes gastos").await;
+    let due = futurefin_engine::add_months_signed(chrono::Utc::now().date_naive(), 4)
+        .format("%Y-%m-%d")
+        .to_string();
+
+    let flow = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_planning_flow",
+                json!({"title": "Reforma", "category_id": cat, "expected_amount": "5000", "due_date": due}),
+            ),
+        )
+        .await,
+    );
+    let flow_id = flow["id"].as_str().unwrap().to_string();
+    assert!(!flow["summary"].as_str().unwrap().contains("apagado"), "{flow}");
+
+    let summary_out = |v: &serde_json::Value| {
+        v["financial_health"]["upcoming_outflows_total"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+    };
+    let events_len = |v: &serde_json::Value| v["events"].as_array().map(|a| a.len()).unwrap_or(0);
+
+    let s = tool_json(&mcp_post(&app, &token, tool_call("get_summary", json!({}))).await);
+    assert_eq!(summary_out(&s), 5000.0, "{s}");
+    let p = tool_json(&mcp_post(&app, &token, tool_call("get_projection", json!({}))).await);
+    assert_eq!(events_len(&p), 1, "{}", p["events"]);
+
+    // --- Apagar ------------------------------------------------------------------------------
+    let off = tool_json(
+        &mcp_post(&app, &token, tool_call("update_planning_flow", json!({"id": flow_id, "enabled": false})))
+            .await,
+    );
+    assert!(off["summary"].as_str().unwrap().ends_with("(apagado)"), "{off}");
+    let s = tool_json(&mcp_post(&app, &token, tool_call("get_summary", json!({}))).await);
+    assert_eq!(summary_out(&s), 0.0, "apagado, no cuenta: {s}");
+    assert_eq!(s["financial_health"]["upcoming_flows_count"], 0, "{s}");
+    let p = tool_json(&mcp_post(&app, &token, tool_call("get_projection", json!({}))).await);
+    assert_eq!(events_len(&p), 0, "{}", p["events"]);
+    let listed = tool_json(&mcp_post(&app, &token, tool_call("list_planning_flows", json!({}))).await);
+    assert_eq!(listed["planning_flows"][0]["enabled"], false, "sigue listado: {listed}");
+
+    // --- Puertas de escritura: viewer y toggle de la instalación -----------------------------
+    let viewer = app.register_and_approve_member(&owner, "vera", "viewer").await;
+    let viewer_token = create_token_for(&app, &viewer.cookie).await;
+    tool_error(
+        &mcp_post(
+            &app,
+            &viewer_token,
+            tool_call("update_planning_flow", json!({"id": flow_id, "enabled": true})),
+        )
+        .await,
+        "forbidden",
+    );
+    let r = app
+        .patch_json_with_cookie("/v1/installation", json!({"mcp_write_enabled": false}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK);
+    let body = tool_error(
+        &mcp_post(&app, &token, tool_call("update_planning_flow", json!({"id": flow_id, "enabled": true})))
+            .await,
+        "bad_request",
+    );
+    assert!(body["message"].as_str().unwrap().starts_with("mcp_write_disabled"), "{body}");
+    let listed = tool_json(&mcp_post(&app, &token, tool_call("list_planning_flows", json!({}))).await);
+    assert_eq!(listed["planning_flows"][0]["enabled"], false, "ninguna puerta lo encendió: {listed}");
+    let r = app
+        .patch_json_with_cookie("/v1/installation", json!({"mcp_write_enabled": true}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK);
+
+    // --- Encender: vuelve -------------------------------------------------------------------
+    let on = tool_json(
+        &mcp_post(&app, &token, tool_call("update_planning_flow", json!({"id": flow_id, "enabled": true})))
+            .await,
+    );
+    assert!(!on["summary"].as_str().unwrap().contains("apagado"), "{on}");
+    let s = tool_json(&mcp_post(&app, &token, tool_call("get_summary", json!({}))).await);
+    assert_eq!(summary_out(&s), 5000.0, "{s}");
+    let p = tool_json(&mcp_post(&app, &token, tool_call("get_projection", json!({}))).await);
+    assert_eq!(events_len(&p), 1, "{}", p["events"]);
+
+    // Y el alta acepta nacer apagada.
+    let born_off = tool_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "create_planning_flow",
+                json!({"title": "Coche", "category_id": cat, "expected_amount": "9000", "enabled": false}),
+            ),
+        )
+        .await,
+    );
+    assert!(born_off["summary"].as_str().unwrap().ends_with("(apagado)"), "{born_off}");
+    let s = tool_json(&mcp_post(&app, &token, tool_call("get_summary", json!({}))).await);
+    assert_eq!(summary_out(&s), 5000.0, "el apagado no suma: {s}");
+}
+
 // ---------------------------------------------------------------------------
 // Tramo 2 — assets / liabilities / budget / allocation / delete_recurring_rule
 // ---------------------------------------------------------------------------

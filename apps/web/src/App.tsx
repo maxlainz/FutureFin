@@ -3294,6 +3294,37 @@ export default function App() {
     }
   }
 
+  /**
+   * Interruptor de «Simulación» (5.0.0): PATCH solo con `enabled`, OPTIMISTA — la fila cambia
+   * en el acto y la respuesta del servidor la sustituye. No pasa por `loadPlanningPage`: su
+   * estado de carga vaciaría la tabla y los KPIs en cada clic. Si falla, se revierte la fila y
+   * el error sale en la banda de la vista.
+   */
+  async function togglePlanningFlow(id: string, enabled: boolean) {
+    setPlanningError(null);
+    const setRowEnabled = (value: boolean) =>
+      setPlanningFlows((rows) =>
+        rows.map((r) => (r.id === id ? { ...r, enabled: value } : r)),
+      );
+    setRowEnabled(enabled);
+    try {
+      const res = await fetch(apiUrl(`/v1/planning/flows/${encodeURIComponent(id)}`), {
+        ...defaultFetchInit,
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      });
+      if (!res.ok) {
+        throw await apiErrorFromResponse(res);
+      }
+      const updated = (await res.json()) as PlanningFlowApiRow;
+      setPlanningFlows((rows) => rows.map((r) => (r.id === id ? updated : r)));
+    } catch (e: unknown) {
+      setRowEnabled(!enabled);
+      setPlanningError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function deletePlanningFlowRow(id: string) {
     setPlanningSaving(true);
     setPlanningError(null);
@@ -4300,6 +4331,7 @@ export default function App() {
             planningSaving={planningSaving}
             submitPlanningFlowForm={(e) => void submitPlanningFlowForm(e)}
             deletePlanningFlowRow={(id) => setPendingDelete({ kind: "planning", id })}
+            togglePlanningFlow={(id, enabled) => void togglePlanningFlow(id, enabled)}
             beginEditPlanningFlow={(row) => {
               beginEditPlanningFlow(row);
               setPlanningModalOpen(true);

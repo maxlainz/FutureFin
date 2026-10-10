@@ -634,34 +634,37 @@ export const HELP_TEXTS = {
       "tasa de ahorro saldrían inflados.",
   },
 
-  // --- Próximos ------------------------------------------------------------
+  // --- Simulación (antes «Próximos») ----------------------------------------
   "upcoming.inflows": {
     title: "Entradas (suma)",
     body:
       "Suma de tus entradas previstas puntuales: importes totales en euros, sin ventana " +
       "temporal — una del mes que viene y una a diez años suman igual. Las recurrentes no " +
-      "entran aquí: son euros al mes y tienen su propia tarjeta.",
+      "entran aquí: son euros al mes y tienen su propia tarjeta. Las que tengas apagadas " +
+      "tampoco cuentan.",
   },
   "upcoming.outflows": {
     title: "Salidas (suma)",
     body:
       "Suma de tus salidas previstas puntuales: importes totales en euros, sin ventana " +
-      "temporal. Las recurrentes no entran aquí: son euros al mes y tienen su propia tarjeta.",
+      "temporal. Las recurrentes no entran aquí: son euros al mes y tienen su propia tarjeta. " +
+      "Las que tengas apagadas tampoco cuentan.",
   },
   "upcoming.net": {
     title: "Neto planificado",
     body:
       "Entradas menos salidas puntuales, en euros totales. No incluye los flujos recurrentes: " +
-      "su neto es una cifra al mes y se muestra aparte para no mezclar magnitudes. Los Próximos " +
-      "mueven la caja de tu proyección —y con ella tu fecha de jubilación—, pero no cuentan como " +
-      "gasto ordinario: la regla de retirada y el tope del primer año se miden sin ellos.",
+      "su neto es una cifra al mes y se muestra aparte para no mezclar magnitudes. Los flujos " +
+      "encendidos mueven la caja de tu proyección —y con ella tu fecha de jubilación—, pero no " +
+      "cuentan como gasto ordinario: la regla de retirada y el tope del primer año se miden sin " +
+      "ellos. Los apagados siguen en la lista pero no entran ni aquí ni en la proyección.",
   },
   "upcoming.recurring_net": {
     title: "Recurrentes (neto /mes)",
     body:
       "Entradas menos salidas de tus flujos recurrentes, en euros AL MES mientras cada periodo " +
       "esté vigente. Es un ritmo mensual, no un total: por eso no se suma con las tarjetas de " +
-      "al lado.",
+      "al lado. Los apagados no cuentan.",
   },
 } as const satisfies Record<string, HelpText>;
 

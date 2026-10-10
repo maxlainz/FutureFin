@@ -128,8 +128,8 @@ la versión anterior es la única copia que una 4.x podría volver a leer (ver e
 ### 3. Filas «de nadie»: el reasignado de propietario
 
 Si tu instalación es antigua puede tener filas sin dueño: activos, deudas, líneas de presupuesto,
-Próximos o reglas de reparto creados antes de febrero de 2026, o importados de un backup muy viejo.
-La migración se las asigna al **propietario más antiguo de la instalación** y deja el campo
+flujos de Simulación (la pestaña que antes se llamaba «Próximos») o reglas de reparto creados
+antes de febrero de 2026, o importados de un backup muy viejo. La migración se las asigna al **propietario más antiguo de la instalación** y deja el campo
 obligatorio para siempre.
 
 **Qué verá un hogar con filas así**: esas filas aparecen ahora en el «Yo» de esa persona, entran en
@@ -149,6 +149,10 @@ Si el reparto no te encaja, cámbialo después desde la app: son filas normales,
   con su importe manual, y la edad límite del horizonte. No se pierden — **se mudan a la pestaña
   Jubilación**, ahora que son de cada persona. En `Ajustes → Plan` siguen la inflación, el modo de
   edad, los tramos de IRPF y la fuente del ahorro, que son del hogar.
+- **La pestaña «Próximos» pasa a llamarse «Simulación»**, y cada flujo lleva un interruptor:
+  apagado, el flujo sigue en la lista (en gris) pero deja de contar en la proyección y en todas
+  las cifras, y lo vuelves a encender cuando quieras. Todos tus flujos llegan **encendidos**, así
+  que nada se mueve al actualizar. Los enlaces guardados a `/proximos` siguen funcionando.
 - **El `.ffbackup` sube a la versión 13.** Los ficheros antiguos (v1 a v12) **siguen importándose**
   sin problema; al importar uno de la 4.x, tus ajustes de jubilación de entonces siembran tu plan
   nuevo — pero **solo si todavía no tienes uno**, para que restaurar un backup viejo no te pise la

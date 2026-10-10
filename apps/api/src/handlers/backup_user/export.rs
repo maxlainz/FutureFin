@@ -902,10 +902,11 @@ async fn fetch_planning_flows(
         bool,
         Option<String>,
         i32,
+        bool,
     )> = sqlx::query_as(
         r#"SELECT c.scope, c.name AS cat_name, p.title, p.expected_amount, p.amount_basis,
                   p.due_date, p.window_start_date, p.window_end_date,
-                  p.show_in_chart, p.notes, p.sort_index
+                  p.show_in_chart, p.notes, p.sort_index, p.enabled
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
            WHERE p.installation_id = $1 AND p.owner_user_id = $2
@@ -929,6 +930,7 @@ async fn fetch_planning_flows(
             show_in_chart: r.8,
             notes: r.9,
             sort_index: r.10,
+            enabled: r.11,
         })
         .collect())
 }

@@ -129,7 +129,8 @@ pub struct FinancialHealthMetrics {
     /// `runway_months` es `null`. Con gasto 0 el runway tampoco existe pero este campo es `false`
     /// (no hay base). Con `swr_pct = 0` nunca es `true`.
     pub runway_is_indefinite: bool,
-    /// Σ de `expected_amount` de los Próximos **PUNTUALES** (`amount_basis = one_off`) del scope
+    /// Σ de `expected_amount` de los flujos de «Simulación» **PUNTUALES** y encendidos
+    /// (`amount_basis = one_off`, `enabled = true`) del scope
     /// cuya categoría es de scope `income`. **Sin ventana temporal y sin anualizar**: entra igual
     /// un cobro previsto para el mes que viene que uno con `due_date` a dieciséis años, y entran
     /// también los que **no tienen fecha**. No es un flujo mensual ni comparable con
@@ -169,8 +170,10 @@ pub struct FinancialHealthMetrics {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub upcoming_coverage_ratio: Option<Decimal>,
-    /// Nº de Próximos (entradas + salidas) del scope, **puntuales Y recurrentes** — cuenta todo
-    /// lo que existe, no solo lo que suma en los totales en €. `0` ⟺ no hay ningún Próximo.
+    /// Nº de flujos de «Simulación» (entradas + salidas) ENCENDIDOS del scope, **puntuales Y
+    /// recurrentes** — cuenta todo lo que entra en la simulación, no solo lo que suma en los
+    /// totales en €. Los apagados (`enabled = false`, 5.0.0) no cuentan en este ni en ningún
+    /// `upcoming_*`. `0` ⟺ no hay ningún flujo encendido.
     pub upcoming_flows_count: i64,
     /// `due_date` **más lejana** entre los Próximos contados, `YYYY-MM-DD`. `null` cuando ninguno
     /// tiene fecha (o no hay ninguno). Es la ventana que los totales de arriba NO declaran: sin
@@ -364,8 +367,9 @@ async fn load_breakdown_lines(
     Ok((assets, liabilities_cat, liabilities_tag))
 }
 
-/// Agregado de Próximos por scope. **Sin ventana temporal**: suma todos los `planning_flows` del
-/// scope, con y sin `due_date`. La misma query devuelve ahora el recuento y la fecha máxima, que
+/// Agregado de los flujos de «Simulación» (antes «Próximos») por scope. **Sin ventana temporal**:
+/// suma todos los `planning_flows` ENCENDIDOS del scope, con y sin `due_date` — un flujo apagado
+/// (`enabled = false`, 5.0.0) no entra ni en los totales ni en los recuentos. La misma query devuelve ahora el recuento y la fecha máxima, que
 /// son lo que permite leer los totales sin inventarse un horizonte (ver `upcoming_*` en
 /// [`FinancialHealthMetrics`]); no añade ninguna consulta, solo dos columnas al `GROUP BY` que ya
 /// existía.
@@ -382,7 +386,7 @@ async fn planning_flow_totals_in_out(
                   COUNT(*)::bigint AS flow_count, MAX(p.due_date) AS last_due_date
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
-           WHERE {scope_where}
+           WHERE {scope_where} AND p.enabled
            GROUP BY c.scope, (p.amount_basis = 'per_month')"#
     );
     let rows: Vec<PlanningScopeAgg> = view

@@ -247,7 +247,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   amount_sign_mismatch:
     "El signo del importe no cuadra con el tipo: los ingresos van en positivo, y los gastos y los traspasos a inversión en negativo.",
   op_date_in_future:
-    "No puedes apuntar un movimiento con fecha futura. Si es algo que aún no ha pasado, va en «Próximos».",
+    "No puedes apuntar un movimiento con fecha futura. Si es algo que aún no ha pasado, va en «Simulación».",
   batch_empty: "No has seleccionado ningún movimiento. Elige al menos uno.",
   batch_too_large:
     "Has seleccionado demasiados movimientos de una vez. Divídelos en tandas más pequeñas.",
@@ -418,7 +418,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   apr_percent_set_and_clear:
     "No se puede fijar el TIN y borrarlo a la vez. Manda solo uno de los dos.",
 
-  // ── Presupuesto y próximos ────────────────────────────────────────────────────────────
+  // ── Presupuesto y simulación ──────────────────────────────────────────────────────────
   budget_entry_category_scope_unsupported:
     "Esta línea está enganchada a una categoría que ya no es de ingreso ni de gasto. Asígnale una válida.",
   planning_flow_category_scope_unsupported:

@@ -2252,13 +2252,17 @@ pub(crate) async fn build_installation_projection_input(
         .fetch_all(pool)
         .await?;
 
+    // Solo los flujos ENCENDIDOS (5.0.0, interruptor de «Simulación»). Este SELECT es el único
+    // lector de `planning_flows` del motor: de `planning_rows` salen el ajuste de caja (y con él
+    // el tramo `planning` de la resolución de reparto), los eventos del chart y el baseline de
+    // milestones, así que un flujo apagado no llega a ninguno.
     let plan_scope = view.scope_where("p");
     let plan_sql = format!(
         r#"SELECT c.scope AS scope, p.expected_amount, p.amount_basis, p.due_date,
                   p.window_start_date, p.window_end_date, p.title
            FROM planning_flows p
            JOIN categories c ON c.id = p.category_id
-           WHERE {plan_scope}"#
+           WHERE {plan_scope} AND p.enabled"#
     );
     let planning_rows: Vec<PlanningFlowProjRow> = view
         .bind_scope_as(sqlx::query_as(&plan_sql), iid, session_user_id)

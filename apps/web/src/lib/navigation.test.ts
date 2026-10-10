@@ -11,6 +11,7 @@ import {
   SETTINGS_SUBTAB_LABEL,
   SETTINGS_SUBTAB_SLUG,
   TABS,
+  TAB_PATH,
   isTabAvailableForScope,
   settingsSubTabFromPathname,
   settingsSubTabPath,
@@ -72,6 +73,35 @@ describe("settings sub-tabs", () => {
     expect(tabFromPathname(stripBaseWith(base, `${base}/resumen`))).toBe(
       "summary",
     );
+  });
+});
+
+// «Próximos» pasó a llamarse «Simulación» (5.0.0). El id interno `upcoming` no cambia; la ruta
+// canónica es /simulacion y /proximos queda como alias de LECTURA (como /gastos → /movimientos).
+describe("pestaña Simulación (antes Próximos)", () => {
+  it("la etiqueta visible es «Simulación» y la ruta canónica /simulacion", () => {
+    expect(TABS.find((t) => t.id === "upcoming")?.label).toBe("Simulación");
+    expect(TAB_PATH.upcoming).toBe("/simulacion");
+    expect(tabFromPathname("/simulacion")).toBe("upcoming");
+  });
+
+  it("/proximos sigue resolviendo a la pestaña (alias de lectura)", () => {
+    expect(tabFromPathname("/proximos")).toBe("upcoming");
+    expect(tabFromPathname("/proximos/")).toBe("upcoming");
+  });
+
+  it("el orden de las pestañas no cambia", () => {
+    expect(TABS.map((t) => t.label)).toEqual([
+      "Resumen",
+      "Activos",
+      "Pasivos",
+      "Presupuesto",
+      "Movimientos",
+      "Simulación",
+      "Jubilación",
+      "Proyección",
+      "Ajustes",
+    ]);
   });
 });
 

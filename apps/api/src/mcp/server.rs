@@ -1370,11 +1370,14 @@ fn parse_date_param(name: &str, raw: &str) -> Result<chrono::NaiveDate, ApiError
     })
 }
 
-/// El one-liner de un Próximo para el `summary` de create/update_planning_flow. La unidad va en
+/// El one-liner de un flujo de «Simulación» (antes «Próximo») para el `summary` de create/update_planning_flow. La unidad va en
 /// el texto (#148): un `per_month` se lee `800 €/mes · 2026-09-01 → sin fin`, nunca como total.
 fn planning_flow_summary(f: &crate::handlers::planning::PlanningFlowResponse) -> String {
     use crate::handlers::planning::PlanningAmountBasis;
-    match f.amount_basis {
+    // Un flujo apagado (5.0.0) no entra en la simulación: el one-liner lo dice, para que el
+    // `impact` a cero de un apagado no se lea como «no ha pasado nada».
+    let off = if f.enabled { "" } else { " (apagado)" };
+    let line = match f.amount_basis {
         PlanningAmountBasis::PerMonth => format!(
             "{} · {} €/mes ({}) · {} → {}",
             f.title,
@@ -1392,7 +1395,8 @@ fn planning_flow_summary(f: &crate::handlers::planning::PlanningFlowResponse) ->
             f.direction,
             f.due_date.map(|d| format!(" · {d}")).unwrap_or_default(),
         ),
-    }
+    };
+    format!("{line}{off}")
 }
 
 // ---------------------------------------------------------------------------
@@ -1533,6 +1537,9 @@ pub struct CreatePlanningFlowParams {
     /// Mostrar como marcador en el chart (requiere due_date; solo one_off).
     #[serde(default)]
     pub show_in_chart: Option<bool>,
+    /// Omitido = true. false = se crea APAGADO: listado, pero fuera de la proyección y de todo KPI.
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1583,6 +1590,9 @@ pub struct UpdatePlanningFlowParams {
     pub notes: Option<String>,
     #[serde(default)]
     pub show_in_chart: Option<bool>,
+    /// false = apagar (sigue listado, pero sale de la proyección y de todo KPI); true = encender.
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -3398,8 +3408,8 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_planning_flows",
-        description = "Próximos: entradas y salidas previstas fuera del presupuesto. amount_basis da la unidad: one_off = TOTAL en € (fecha opcional); per_month = €/MES durante [window_start_date, window_end_date] (end ausente = sin fin).",
-        annotations(title = "Próximos", read_only_hint = true, open_world_hint = false)
+        description = "«Simulación»: entradas y salidas previstas fuera del presupuesto (enabled=false: apagado, no cuenta). amount_basis da la unidad: one_off = TOTAL en € (fecha opcional); per_month = €/MES durante [window_start_date, window_end_date] (end ausente = sin fin).",
+        annotations(title = "Simulación", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_planning_flows(
         &self,
@@ -4242,8 +4252,8 @@ impl FutureFinMcp {
 
     #[tool(
         name = "create_planning_flow",
-        description = "Añade un «Próximo»: puntual (TOTAL en €, fecha opcional) o recurrente con amount_basis=per_month (€/MES durante la ventana; sin fin si falta window_end_date). Alimenta la proyección; simulate_projection enseña el impacto sin escribir.",
-        annotations(title = "Crear próximo", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+        description = "Añade un flujo a «Simulación»: puntual (TOTAL en €, fecha opcional) o recurrente con amount_basis=per_month (€/MES durante la ventana). simulate_projection lo prueba sin escribir.",
+        annotations(title = "Crear flujo de simulación", read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
     )]
     async fn create_planning_flow(
         &self,
@@ -4275,6 +4285,7 @@ impl FutureFinMcp {
                 notes: p.notes.clone(),
                 sort_index: None,
                 show_in_chart: p.show_in_chart,
+                enabled: p.enabled,
             })
         };
         let body = match run() {
@@ -4304,8 +4315,8 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_planning_flow",
-        description = "Edita un «Próximo»: todo opcional; clear_due_date borra la fecha (y desmarca show_in_chart); clear_window_start/clear_window_end borran la ventana. amount_basis exige fecha y ventana coherentes en la misma llamada. Alimenta la proyección.",
-        annotations(title = "Editar próximo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        description = "Edita un flujo de «Simulación»: todo opcional; enabled lo apaga/enciende; clear_due_date borra la fecha (y desmarca show_in_chart); clear_window_start/clear_window_end borran la ventana. amount_basis exige fecha y ventana coherentes en la misma llamada.",
+        annotations(title = "Editar flujo de simulación", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_planning_flow(
         &self,
@@ -4375,6 +4386,7 @@ impl FutureFinMcp {
                     notes: p.notes.clone(),
                     sort_index: None,
                     show_in_chart: p.show_in_chart,
+                    enabled: p.enabled,
                 },
             ))
         };
@@ -5936,8 +5948,8 @@ impl FutureFinMcp {
 
     #[tool(
         name = "delete_planning_flow",
-        description = "Borra una entrada de «Próximos». El preview devuelve el flujo. Mueve la proyección entera.",
-        annotations(title = "Borrar próximo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+        description = "Borra un flujo de «Simulación» (¿solo apartarlo? enabled=false). El preview devuelve el flujo.",
+        annotations(title = "Borrar flujo de simulación", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn delete_planning_flow(
         &self,
@@ -7256,8 +7268,13 @@ impl ServerHandler for FutureFinMcp {
                 `pct` es lo que lo re-acopla al SWR. Y `pension: null` suelta también el \
                 `target_basis` que estuviera fijado, para que se vuelva a derivar: un puente \
                 hacia una pensión que ya no existe no describe nada. Y toda \
-                fila del ledger (activos, pasivos, presupuesto, próximos, reglas) tiene dueño: \
-                editar la de otro miembro es 403 `not_row_owner`, también para el owner.\n\nREINTENTOS. \
+                fila del ledger (activos, pasivos, presupuesto, flujos de simulación, reglas) tiene \
+                dueño: editar la de otro miembro es 403 `not_row_owner`, también para el \
+                owner.\n\nSIMULACIÓN. Los planning flows (pestaña «Simulación», antes «Próximos») \
+                llevan `enabled`: `false` = el flujo sigue listado pero NO entra en la proyección \
+                ni en ningún KPI (`upcoming_*` de get_summary, tramo `planning` de \
+                get_allocation_resolution, `events`). Para apartar un flujo sin perderlo, \
+                update_planning_flow con enabled=false, no delete.\n\nREINTENTOS. \
                 Si una escritura se corta (timeout, red) y no puedes descartar que llegara, no la \
                 repitas a ciegas: las tools que admiten `idempotency_key` la usan para \
                 deduplicar.\n\nUNIDADES. Los importes son strings decimales \

@@ -10,16 +10,17 @@ import { EmptyState } from "../components/EmptyState";
 import { MetricCard } from "../components/MetricCard";
 import { Modal, ModalFormError } from "../components/Modal";
 import { PlanningDirectionChart } from "../components/charts/PlanningDirectionChart";
+import { Switch } from "../components/Switch";
 import { PlusIcon, RowEditIcon, RowTrashIcon } from "../components/icons";
 import { formatDateDmy, todayYmdInTimeZone } from "../lib/dates";
 import {
   METRIC_DASH,
   formatCurrencyAmount,
   formatCurrencyNumber,
-  parseDisplayDecimal,
 } from "../lib/format";
 import { budgetCategoryMap } from "../lib/ledger";
 import { useIsMobile } from "../lib/responsive";
+import { computeUpcomingKpis } from "../lib/upcoming-kpis";
 import type { BudgetScopeToggle } from "./BudgetView";
 
 const PLANNING_DIRECTION_LABEL: Record<PlanningFlowDirectionApi, string> = {
@@ -65,6 +66,7 @@ export function UpcomingView({
   submitPlanningFlowForm,
   deletePlanningFlowRow,
   beginEditPlanningFlow,
+  togglePlanningFlow,
   onOpenCategorySettings,
 }: {
   installation: InstallationAccess | null;
@@ -104,6 +106,8 @@ export function UpcomingView({
   submitPlanningFlowForm: (e: FormEvent) => void;
   deletePlanningFlowRow: (id: string) => void;
   beginEditPlanningFlow: (row: PlanningFlowApiRow) => void;
+  /** Enciende/apaga el flujo en la simulación (PATCH `enabled`, optimista). */
+  togglePlanningFlow: (id: string, enabled: boolean) => void;
   /**
    * Lleva a `Ajustes → Categorías`. Única salida cuando no queda ninguna categoría de ingreso
    * ni de gasto donde anotar un movimiento previsto.
@@ -140,19 +144,12 @@ export function UpcomingView({
       ? planningIncomeCategories
       : planningExpenseCategories;
 
-  // #148: los totales en € suman SOLO puntuales — el expected_amount de un recurrente son
-  // €/MES y mezclarlo aquí sería un error de magnitud (el mismo que se arregló en /v1/summary).
-  const planningInflowSum = planningFlows
-    .filter((f) => f.direction === "inflow" && f.amount_basis !== "per_month")
-    .reduce((acc, f) => acc + (parseDisplayDecimal(f.expected_amount) ?? 0), 0);
-  const planningOutflowSum = planningFlows
-    .filter((f) => f.direction === "outflow" && f.amount_basis !== "per_month")
-    .reduce((acc, f) => acc + (parseDisplayDecimal(f.expected_amount) ?? 0), 0);
-  const recurringRows = planningFlows.filter((f) => f.amount_basis === "per_month");
-  const recurringMonthlyNet = recurringRows.reduce((acc, f) => {
-    const amt = parseDisplayDecimal(f.expected_amount) ?? 0;
-    return acc + (f.direction === "inflow" ? amt : -amt);
-  }, 0);
+  // Solo los flujos ENCENDIDOS cuentan (5.0.0), y los totales en € suman SOLO puntuales (#148):
+  // las dos reglas viven en `computeUpcomingKpis`, espejo del agregado del servidor.
+  const kpis = computeUpcomingKpis(planningFlows);
+  const planningInflowSum = kpis.inflowSum;
+  const planningOutflowSum = kpis.outflowSum;
+  const recurringMonthlyNet = kpis.recurringMonthlyNet;
 
   const planningWorkspaceSub = installationBusy
     ? "Cargando…"
@@ -170,27 +167,12 @@ export function UpcomingView({
     planningIncomeCategories.length === 0 &&
     planningExpenseCategories.length === 0;
 
-  const flowsNetTotal = !planningLoading
-    ? planningFlows.reduce((acc, f) => {
-        if (f.amount_basis === "per_month") {
-          return acc; // €/mes: su neto va en la tarjeta «Recurrentes», no en este total en €.
-        }
-        const amt = parseDisplayDecimal(f.expected_amount) ?? 0;
-        return (
-          acc +
-          (f.direction === "inflow"
-            ? amt
-            : f.direction === "outflow"
-              ? -amt
-              : 0)
-        );
-      }, 0)
-    : null;
+  const flowsNetTotal = !planningLoading ? kpis.netTotal : null;
 
   return (
     <div className="workspace">
       <div className="workspace-header">
-        <h2 className="workspace-title">Próximos</h2>
+        <h2 className="workspace-title">Simulación</h2>
         <p className="workspace-sub">{planningWorkspaceSub}</p>
       </div>
 
@@ -223,7 +205,7 @@ export function UpcomingView({
                 : METRIC_DASH
             }
           />
-          {recurringRows.length > 0 ? (
+          {kpis.recurringCount > 0 ? (
             <MetricCard
               label="Recurrentes (neto /mes)"
               helpId="upcoming.recurring_net"
@@ -494,7 +476,7 @@ export function UpcomingView({
             <EmptyState
               embedded
               title="Sin movimientos previstos"
-              description="Aquí apuntas lo puntual que ya sabes que llega: la paga extra, el seguro del coche, una reforma. FutureFin lo coloca en la proyección en su fecha."
+              description="Aquí apuntas lo que ya sabes que llega: la paga extra, el seguro del coche, una reforma. FutureFin lo coloca en la proyección en su fecha, y puedes apagar cualquiera para ver tu plan sin él."
               actionLabel={canEdit ? "Añadir movimiento previsto" : undefined}
               onAction={canEdit ? openNewPlanningModal : undefined}
             />
@@ -504,6 +486,9 @@ export function UpcomingView({
             <table className="assets-table">
               <thead>
                 <tr>
+                  <th className="upcoming-toggle-cell">
+                    <span className="sr-only">En la simulación</span>
+                  </th>
                   {isMobile ? null : <th>Dirección</th>}
                   {isMobile ? null : <th>Categoría</th>}
                   <th>Título</th>
@@ -525,7 +510,14 @@ export function UpcomingView({
                   return (
                     <tr
                       key={row.id}
-                      className={rowTappable ? "row-tappable" : undefined}
+                      className={
+                        [
+                          rowTappable ? "row-tappable" : "",
+                          row.enabled ? "" : "planning-row--disabled",
+                        ]
+                          .filter(Boolean)
+                          .join(" ") || undefined
+                      }
                       role={rowTappable ? "button" : undefined}
                       tabIndex={rowTappable ? 0 : undefined}
                       onClick={
@@ -542,6 +534,21 @@ export function UpcomingView({
                           : undefined
                       }
                     >
+                      {/* El switch vive en la fila: en móvil la fila entera abre el editor, así
+                          que la celda corta la propagación (clic y teclado) para que encender o
+                          apagar no abra el modal. El viewer ve el estado, no lo cambia. */}
+                      <td
+                        className="upcoming-toggle-cell"
+                        onClick={(e) => e.stopPropagation()}
+                        onKeyDown={(e) => e.stopPropagation()}
+                      >
+                        <Switch
+                          checked={row.enabled}
+                          onChange={(next) => togglePlanningFlow(row.id, next)}
+                          ariaLabel={`Incluir en la simulación: ${row.title}`}
+                          disabled={!canEdit || planningSaving}
+                        />
+                      </td>
                       {isMobile ? null : (
                         <td>{PLANNING_DIRECTION_LABEL[row.direction]}</td>
                       )}
@@ -553,7 +560,10 @@ export function UpcomingView({
                             {PLANNING_DIRECTION_LABEL[row.direction]} · {categoryLabel}{" "}
                             · {rowPeriodLabel(row)}
                             {row.amount_basis === "per_month" ? " · /mes" : null}
-                            {rowIsOverdue(row) ? " · vencido, carga este mes" : null}
+                            {rowIsOverdue(row) && row.enabled
+                              ? " · vencido, carga este mes"
+                              : null}
+                            {row.enabled ? null : " · apagado"}
                           </span>
                         ) : null}
                       </td>
@@ -575,7 +585,7 @@ export function UpcomingView({
                       {isMobile ? null : (
                         <td>
                           {rowPeriodLabel(row)}
-                          {rowIsOverdue(row) ? (
+                          {rowIsOverdue(row) && row.enabled ? (
                             <span
                               className={
                                 row.direction === "outflow"

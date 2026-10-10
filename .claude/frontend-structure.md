@@ -344,7 +344,7 @@ src/
 │   │                             #   el pasado son ACTIVOS y el chart lo etiqueta así (leyenda «Activos (histórico)» + tooltip)
 │   ├── snapshot-tracker.ts       # trigger del modal: EditLog (Map<assetId, epochMs>), SNAPSHOT_EDIT_WINDOW_MS, pruneEditLog,
 │   │                             #   liquidCoverageComplete (todos los activos líquidos editados dentro de la ventana rodante ~1h)
-│   ├── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH (incl. expenses → «Movimientos», slug canónico /movimientos + alias de lectura /gastos en tabFromPathname), SETTINGS_SUBTAB_* (incl. history → «Histórico»/historico), tabFromPathname, settingsSubTabPath
+│   ├── navigation.ts             # tab ↔ URL map: TABS, TAB_PATH (incl. expenses → «Movimientos», slug canónico /movimientos + alias de lectura /gastos en tabFromPathname; upcoming → «Simulación», slug canónico /simulacion + alias de lectura /proximos, 5.0.0), SETTINGS_SUBTAB_* (incl. history → «Histórico»/historico), tabFromPathname, settingsSubTabPath
 │   ├── expenses.ts               # pure helpers de la pestaña «Movimientos»: month labels (monthLabelEs/monthShortLabelEs), defaultSelectedMonth,
 │   │                             #   categoriesForKind (savings→[]), ImportRowDraft + initialDraftForRow/buildConfirmDecisions/summarizeDecisions/rowMatchesFilter,
 │   │                             #   ImportBatchSummary + summarizeImportBatch (agregado de la tanda multi-archivo del wizard, 4.13.0),
@@ -488,7 +488,7 @@ src/
 │   ├── ManualCashEntryModal.tsx  # alta manual de efectivo: grid multifila (magnitud + kind fija el signo) + checkbox «Repetir cada mes» por fila (→ recurrence:{}) → POST /v1/transactions/batch
 │   ├── RecurringRulesModal.tsx   # modal «Recurrentes» (botón en la toolbar de Movimientos): lista GET /v1/transactions/recurring y permite «Detener» (DELETE) cada regla
 │   │                             #   (conserva las instancias ya materializadas). Patrón ManualCashEntryModal: fetch al abrir, toda la lógica de presentación aquí (nada en lib/)
-│   ├── UpcomingView.tsx          # Planning
+│   ├── UpcomingView.tsx          # Pestaña «Simulación» (antes «Próximos», id interno `upcoming`): planning flows con interruptor por fila (`Switch`, PATCH `enabled` optimista vía `togglePlanningFlow` en App.tsx; fila apagada `.planning-row--disabled`); KPIs en lib/upcoming-kpis.ts (solo encendidos); los marcadores `show_in_chart` de ProjectionNetWorthChart también ignoran los apagados
 │   ├── RetirementView.tsx        # 5.0.0 — **rediseñada tres veces**: U1b (segunda revisión de UX, U0–U12), la
 │   │                             #   TERCERA vuelta (V1–V7, feedback F2/F5–F10) y el **modelo de jubilación v2**
 │   │                             #   (2026-09-06, decisiones M1–M13/C1–C8, WP W4). Las versiones WP7
@@ -671,7 +671,7 @@ Ajustes. Es, otra vez, presentación y no la frontera de seguridad.
 
 | Vista | Boolean consumido | Qué desaparece en solo lectura |
 |---|---|---|
-| Activos, Pasivos, Presupuesto, reglas de asignación, Próximos | prop `canEdit={canEditLedger}` | Alta, edición, borrado, reordenación |
+| Activos, Pasivos, Presupuesto, reglas de asignación, Simulación | prop `canEdit={canEditLedger}` | Alta, edición, borrado, reordenación; en Simulación también el interruptor de cada flujo (el viewer lo ve deshabilitado) |
 | Movimientos (`GastosView`) | prop `canEdit={canEditLedger}` | Igual, **más** el materialize de recurrentes en silencio al montar (`if (!hasMembership \|\| !canEdit …) return`) |
 | Histórico (`HistorySettingsPanel` vía `SettingsView`) | prop `canEditHistory={canEditLedger}` + `scopeReadOnly` (mensaje) | Alta, edición, borrado de snapshots |
 | Jubilación (`RetirementView`) | prop `scopeReadOnly` → deriva su PROPIO `canEditProfile = hasMembership && !scopeReadOnly` (sin exigir `role === "owner"`: el perfil es dato personal) | Todo el bloque de perfil (tarjetas de estrategia + formulario contextual); se sustituye por un panel «Solo lectura» |

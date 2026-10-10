@@ -540,7 +540,7 @@ export function AssetsView({
                           {!isMobile && showContribution ? (
                             <th
                               className="num"
-                              title="Aporte estimado del primer mes (suma de reglas de Presupuesto → Asignación del sobrante que apuntan a este activo). Incluye flujos puntuales de Próximos. Cero si todas las reglas anteriores agotan el sobrante antes de llegar a este activo."
+                              title="Aporte estimado del primer mes (suma de reglas de Presupuesto → Asignación del sobrante que apuntan a este activo). Incluye flujos puntuales encendidos de Simulación. Cero si todas las reglas anteriores agotan el sobrante antes de llegar a este activo."
                             >
                               Aporte
                             </th>

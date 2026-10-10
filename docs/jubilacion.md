@@ -80,7 +80,7 @@ probabilidad de que el mercado tuviera alguna vez un mal año — que a treinta 
 
 Tu **necesidad ordinaria** del mes —la que F1 compara cada mes, y F2 y F3 el mes de tu
 jubilación— es tu gasto más cualquier retirada
-extra, menos tus ingresos (pensión incluida): **sin deuda y sin «Próximos»**. Esas dos partidas
+extra, menos tus ingresos (pensión incluida): **sin deuda y sin los flujos de «Simulación»**. Esas dos partidas
 mueven tu caja y, con ella, tu fecha, pero no son gasto ordinario — igual que la cuota de un
 préstamo no entra en lo que tu tasa de retirada tiene que cubrir.
 

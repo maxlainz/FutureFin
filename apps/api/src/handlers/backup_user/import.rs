@@ -860,8 +860,8 @@ async fn insert_payload(
             r#"INSERT INTO planning_flows (
                    id, installation_id, owner_user_id, category_id, title, expected_amount,
                    amount_basis, due_date, window_start_date, window_end_date,
-                   show_in_chart, notes, sort_index
-               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)"#,
+                   show_in_chart, notes, sort_index, enabled
+               ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"#,
         )
         .bind(Uuid::new_v4())
         .bind(iid)
@@ -876,6 +876,7 @@ async fn insert_payload(
         .bind(p.show_in_chart)
         .bind(p.notes.as_deref())
         .bind(p.sort_index)
+        .bind(p.enabled)
         .execute(&mut **tx)
         .await?;
         planning_flows += 1;

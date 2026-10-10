@@ -2329,3 +2329,92 @@ async fn an_account_with_a_password_still_has_it_verified_on_export() {
     let ok = export_ffbackup_b64(&app, &owner.cookie).await;
     assert!(!ok.is_empty(), "el export con la contraseña correcta sigue funcionando");
 }
+
+// ---------------------------------------------------------------------------
+// v13 (5.0.0) — interruptor de «Simulación» en los planning flows
+// ---------------------------------------------------------------------------
+
+/// Un flujo APAGADO sale apagado del export y vuelve apagado del import. Sin esto, restaurar un
+/// backup reencendería en silencio todo lo que el usuario había apartado de la simulación, y la
+/// proyección cambiaría sin que nadie tocara nada.
+#[tokio::test]
+async fn v13_roundtrip_preserves_a_disabled_planning_flow() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let exp_cat = app.create_category(&owner, "expense", "Grandes gastos").await;
+
+    for (title, enabled) in [("Coche", false), ("IRPF", true)] {
+        let r = app
+            .post_json_with_cookie(
+                "/v1/planning/flows",
+                serde_json::json!({
+                    "category_id": exp_cat,
+                    "title": title,
+                    "expected_amount": "900",
+                    "enabled": enabled,
+                }),
+                &owner.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::CREATED, "create {title}: {r:?}");
+        assert_eq!(r.json()["enabled"], enabled, "el alta respeta `enabled`: {r:?}");
+    }
+
+    let backup = export_ffbackup_b64(&app, &owner.cookie).await;
+    let applied = import_apply(&app, &owner.cookie, &backup).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "v13 import: {applied:?}");
+
+    let rows = app.get_with_cookie("/v1/planning/flows", &owner.cookie).await.json();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    for r in rows {
+        let expected = r["title"] != "Coche";
+        assert_eq!(r["enabled"], expected, "el roundtrip debe conservar `enabled`: {r:?}");
+    }
+}
+
+/// Un v13 escrito antes de que existiera la columna no lleva `enabled`: el flujo se restaura
+/// ENCENDIDO, que es exactamente como se comportaba cuando se exportó (campo aditivo, sin bump).
+#[tokio::test]
+async fn v13_without_the_enabled_field_imports_the_flow_enabled() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+
+    let payload = serde_json::json!({
+        "user": { "username": "alice", "birth_date": null },
+        "categories_used": [
+            { "scope": "expense", "name": "Grandes gastos", "sort_index": 0 }
+        ],
+        "assets": [],
+        "allocation_rules": [],
+        "liabilities": [],
+        "budget_entries": [],
+        "planning_flows": [{
+            "category_ref": { "scope": "expense", "name": "Grandes gastos" },
+            "title": "IRPF",
+            "expected_amount": "900.0000",
+            "amount_basis": "one_off",
+            "due_date": "2027-06-30",
+            "show_in_chart": false,
+            "sort_index": 0
+        }],
+        "ui_preferences": {},
+        "installation_snapshot_informative": installation_snapshot_json(),
+        "retirement_profile": null,
+        "snapshots": [],
+        "transaction_imports": [],
+        "transactions": [],
+        "categorization_rules": [],
+        "recurring_transaction_rules": [],
+        "transfer_match_rejections": []
+    });
+    let b64 = craft_ffbackup_b64(13, &payload, owner.user_id);
+
+    let applied = import_apply(&app, &owner.cookie, &b64).await;
+    assert_eq!(applied.status, http::StatusCode::OK, "v13 import: {applied:?}");
+
+    let rows = app.get_with_cookie("/v1/planning/flows", &owner.cookie).await.json();
+    let rows = rows.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["enabled"], true, "sin el campo, el flujo nace encendido: {:?}", rows[0]);
+}

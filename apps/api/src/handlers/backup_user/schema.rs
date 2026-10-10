@@ -282,6 +282,16 @@ pub struct BackupPlanningFlow {
     #[serde(default)]
     pub notes: Option<String>,
     pub sort_index: i32,
+    /// Interruptor de «Simulación» (5.0.0). Aditivo con default `true`, SIN bump de
+    /// schema_version (mismo patrón que `expense_category_ref`): un v12/v13 escrito antes de que
+    /// existiera la columna no lleva el campo → el flujo se restaura ENCENDIDO, que es exactamente
+    /// el comportamiento que tenía cuando se exportó.
+    #[serde(default = "default_planning_flow_enabled")]
+    pub enabled: bool,
+}
+
+fn default_planning_flow_enabled() -> bool {
+    true
 }
 
 /// A history snapshot exported inside a `.ffbackup` (schema_version ≥ 4).
@@ -1413,6 +1423,7 @@ fn payload_v11_to_v12(p: BackupPayloadV11) -> BackupPayloadV12 {
                 show_in_chart: f.show_in_chart,
                 notes: f.notes,
                 sort_index: f.sort_index,
+                enabled: true,
             })
             .collect(),
         ui_preferences: p.ui_preferences,

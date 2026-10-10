@@ -1297,6 +1297,27 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     `mcp_write.rs::every_write_tool_rejects_a_viewer_and_the_disabled_toggle` (fila de
     `write_probe`), los contadores de `every_write_tool_in_the_source_calls_require_mcp_write` y el
     fixture regenerado.
+- **5.0.0 — interruptor `enabled` de los planning flows (2026-10-10; la pestaña de la SPA pasa de
+  «Próximos» a «Simulación»)**. `create_planning_flow` y `update_planning_flow` ganan
+  `enabled: Option<bool>` (alta: omitido = `true`; update: omitido = sin cambio), `list_planning_flows`
+  lo publica en cada fila (hereda el campo de `list_planning_flows_core`, cero código propio) y el
+  one-liner `planning_flow_summary` añade « (apagado)». Apagado = el flujo sigue listado pero no
+  entra en `get_projection` (`events`, curva), `get_summary` (`upcoming_*`),
+  `get_allocation_resolution` (`planning_component`) ni `simulate_projection`/`get_projection_bands`
+  (todas leen la misma SELECT de la core, filtrada con `AND p.enabled`). Contrato HTTP completo en
+  [`api-routes.md`](api-routes.md) §Planning. La semántica transversal va en un párrafo nuevo
+  **SIMULACIÓN** del `instructions` (y «próximos» → «flujos de simulación» en el de dueños de fila);
+  las cuatro descripciones de planning pasan a nombrar la pestaña «Simulación» y los títulos de las
+  annotations a «Simulación» / «Crear|Editar|Borrar flujo de simulación». Ningún contador de §5 de
+  `futurefin-mcp-parity` se mueve (72/30/42/42/19/9/42/19). **Presupuesto**: para pagar el
+  `enabled` y el renombrado se retiraron de las descripciones de planning frases redundantes con
+  los doc-comments del schema o con el bloque `impact` («sin fin si falta window_end_date»,
+  «Alimenta la proyección», «Mueve la proyección entera» — esta última además era ya falsa para un
+  flujo apagado). Mismo comando → **72 23986 548** (margen 14). Tests:
+  `mcp_write.rs::update_planning_flow_toggles_the_flow_out_of_summary_and_projection` (toggle por MCP
+  saca y devuelve el flujo de `get_summary`/`get_projection`, viewer → `forbidden`,
+  `mcp_write_enabled = false` → `mcp_write_disabled`) y el fixture regenerado (solo cambian las
+  entradas de las cuatro tools de planning).
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
   mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,

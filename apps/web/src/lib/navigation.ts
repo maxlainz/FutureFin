@@ -45,7 +45,7 @@ export const TABS: { id: TabId; label: string }[] = [
   { id: "liabilities", label: "Pasivos" },
   { id: "budget", label: "Presupuesto" },
   { id: "expenses", label: "Movimientos" },
-  { id: "upcoming", label: "Próximos" },
+  { id: "upcoming", label: "Simulación" },
   { id: "retirement", label: "Jubilación" },
   { id: "projection", label: "Proyección" },
   { id: "settings", label: "Ajustes" },
@@ -86,7 +86,7 @@ export const TAB_PATH: Record<TabId, string> = {
   liabilities: "/pasivos",
   budget: "/presupuesto",
   expenses: "/movimientos",
-  upcoming: "/proximos",
+  upcoming: "/simulacion",
   projection: "/proyeccion",
   retirement: "/jubilacion",
   settings: "/ajustes",
@@ -138,6 +138,9 @@ export function tabFromPathname(pathname: string): TabId | null {
   // Alias de lectura del renombrado «Gastos» → «Movimientos»: la ruta canónica es
   // /movimientos (la escribe la navegación), pero /gastos sigue resolviendo a la pestaña.
   if (p === "/gastos") return "expenses";
+  // Ídem para «Próximos» → «Simulación» (5.0.0): canónica /simulacion, /proximos sigue
+  // resolviendo para que un enlace guardado no caiga en la pestaña por defecto.
+  if (p === "/proximos") return "upcoming";
   const ids = Object.keys(TAB_PATH) as TabId[];
   for (const id of ids) {
     if (TAB_PATH[id] === p) return id;

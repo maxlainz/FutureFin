@@ -5392,3 +5392,17 @@ fieldset.retirement-config-stack {
    rótulo del interruptor que tenía debajo—, y hoy cada sub-columna
    abre con su propio control de encendido, que es lo que la titula
    de verdad. */
+
+/* Simulación (antes «Próximos», 5.0.0): interruptor por flujo. La celda del switch es tan
+   estrecha como el control; la fila apagada se atenúa con tokens (sigue legible y el switch
+   conserva su contraste, porque el apagado se puede volver a encender desde ahí mismo). */
+.upcoming-toggle-cell {
+  width: 1%;
+  white-space: nowrap;
+}
+.planning-row--disabled td:not(.upcoming-toggle-cell) {
+  color: var(--ff-muted);
+}
+.planning-row--disabled td:not(.upcoming-toggle-cell) .chip {
+  opacity: 0.6;
+}

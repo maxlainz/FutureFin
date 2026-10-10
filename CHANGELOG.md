@@ -401,7 +401,8 @@ distintas y con pensiones que empiezan en años distintos.
   del mes anterior a la fecha.
 - **Avisos que faltaban**: sin fecha de nacimiento la tarjeta «Edades» lo dice y enlaza a donde se pone
   (B11); sin volatilidad declarada, el bloque de Riesgo avisa de que el sorteo no tiene varianza; y
-  Activos enseña **una vez** el aviso de que las rentabilidades guardadas ahora se leen como CAGR (C6).
+  las rentabilidades guardadas se leen ahora como CAGR (C6) — Activos enseñaba **una vez** un aviso para
+  decirlo, retirado el 10-oct con el resto de avisos de un solo uso: lo dice esta entrada, no la pantalla.
 - **El catálogo de ayudas se reescribió con el modelo**: nacen `retirement.safe_date`,
   `retirement.needed_capital`, `retirement.success_threshold`, `retirement.bridge_settings`,
   `retirement.coast_mode`, `retirement.partial_mode`, `retirement.failure_by_age`; mueren las diez que
@@ -645,6 +646,109 @@ los botones y «los formatos y espaciados/márgenes».
   total», que es precisamente el FINAL de la fase, sin que nada hubiera dicho todavía que hay una fase
   intermedia.
 
+### La pantalla se calla: pregunta–respuesta, cero avisos de un solo uso, recurrentes editables (2026-10-10)
+
+Tercera ronda del owner sobre la demo, retomando 5.0.0 tras un mes. Cuatro puntos; las dudas se le
+consultaron antes de tocar nada y lo que sigue son sus decisiones, no las de la sesión.
+
+- **Jubilación es pregunta–respuesta.** «Sigue teniendo demasiado texto a primera vista; hagamos uso de los
+  iconos de info para meterlo todo ahí; la UX debería ser poco más que pregunta-respuesta; asume que el usuario
+  entiende.» La regla, escrita en `design-system.md` §Pregunta–respuesta: un campo es su rótulo y su control;
+  un resultado es su cifra; **toda explicación vive en el `<?>`**. En prosa solo sobreviven VALORES y ESTADOS.
+  Lo que salió de la pantalla y a dónde fue: las sublíneas de los KPIs del Resultado («en euros de hoy · para
+  que aguanten N de cada 100», «umbral N % · ±x pp», «dentro de 39 años y 3 meses») → a la ayuda de cada tarjeta;
+  «Retira el 3 %: lo máximo que sacas el primer año…» → `retirement.withdrawal_rule`; la fuente del gasto
+  derivado («de tus partidas de jubilación del presupuesto») → `retirement.section_spending`, que ahora
+  describe las tres fuentes; la frase del degradado («el color dice qué parte de los escenarios…») →
+  `retirement.failure_by_age`; las cuatro líneas de detalle de «Las cifras del riesgo» que repetían su propio
+  `<?>` se **borran**; «Cómo leer la banda» y su párrafo, fuera (el `<?>` de `retirement.bands` cuelga del
+  título del panel); bordes de la banda «pesimista (p10)» → «p10»; marca «Fecha válida · 99 de cada 100» →
+  «Fecha válida». Lo que se queda bajo un KPI es un dato: «63 años · 100 %: 2074 · 90 %: 2050», «ya puedes
+  jubilarte», los motivos de ausencia. Los avisos condicionales pasan a **una línea con verbo** («No llegas a
+  los 55 ni invirtiendo todo tu sobrante.»). **La frase de resultado es una línea** —«Te jubilas en 2066 (63
+  años).»— en todas las variantes (`plan-sentence.ts`); las cotas al 100 % y al 90 % bajan como sublínea de
+  valor de «Fecha válida» (`safeDateBoundsLine`). **Nombres cortos** y una sola fuente
+  (`RETIREMENT_STRATEGY_LABEL`): FIRE clásico · Edad fija · Coast FIRE · Barista FIRE — sustituye la decisión
+  del 2-sep de «nombres en español con FIRE entre paréntesis»; «Techo / Es mi gasto», «Fijo la jubilación /
+  Fijo cuándo dejo de aportar», «A una edad / En cuanto pueda». El asistente de alta conserva sus blurbs bajo el
+  nombre corto. **Misma regla en «Tu plan» del Resumen** (frase de una línea, KPIs sin sublínea explicativa; en
+  Hogar desaparece el KPI vacío «— (solo en tu vista Yo)») **y en Proyección**: su tile «Capital necesario hoy»
+  era la misma cifra con otra sublínea y pasa a ser literalmente la misma tarjeta (`neededCapitalTile`, con
+  test que las compara en cuatro estados). Vitest 1294.
+- **Cero avisos de un solo uso.** «No quiero código de un solo uso en una app que solo uso yo prácticamente;
+  si hay cambios así, al CHANGELOG; nada de banners transitorios.» Retirados enteros, con su estado y sus
+  claves de `localStorage`: el aviso CAGR de Activos (`ff.assets.cagr-notice.v1`), el «este importe venía del
+  hogar en 4.x y ahora es solo tuyo» de Jubilación (`ff.retirement.fire-number-manual-migrated.v1.*`, y con él
+  el prop `householdMemberCount` que solo lo alimentaba) y el banner con el que la SPA pintaba el aviso
+  `strategy_pension_bridge_migrated` (el API lo sigue emitiendo para clientes MCP; la SPA lo ignora y el test
+  que lo esperaba comprueba ahora que no sale). Lo que esos tres decían está en esta entrada: la rentabilidad
+  es CAGR (C6), el importe manual es por persona (§Breaking) y `pension_bridge` se lee como asap + puente (C7).
+- **Los banners se pegaban al contenido de abajo.** Causa: `.banner` solo tenía margen inferior. El «Sin datos.»
+  que sigue a `.retirement-layout` quedaba a **0 px** de las columnas porque los paneles de columna fuerzan
+  `margin-bottom: 0`; en el panel Resultado la nota «Tus cambios aún no están en estas cifras…» acababa a ras
+  del primer aviso; y en `.app-global-errors` el margen del banner no colapsaba con el `gap` del flex (1,45 rem
+  entre dos errores). Regla única para toda la app: 1 rem debajo, 0,75 rem encima cuando sigue a un bloque,
+  0,5 rem entre hermanos, y la pila global con `gap` y sin márgenes propios.
+- **Las plantillas recurrentes de Movimientos se editan.** «Los movimientos recurrentes deben poder editarse,
+  con popup de todos, solo eventos futuros, cancelar.» Hasta aquí la plantilla solo se podía borrar y recrear
+  («no hay PATCH de plantilla», decía `api-routes.md`). Nuevo `PATCH /v1/transactions/recurring/{id}` con
+  `apply_to` obligatorio: **`all`** reescribe plantilla e instancias ya materializadas (incluida la de origen)
+  en una sola transacción con la plantilla bloqueada (`FOR UPDATE`), solo los campos que vienen en el patch;
+  **`future`** toca solo la plantilla. Campos: concepto, importe, tipo, categoría, vínculos a activo/pasivo,
+  notas (tri-estado por `clear_*`); sin fechas (la resolución es mensual y `origin_month` no se mueve). Mismas
+  validaciones que el PATCH de una transacción (signo↔kind cuando viene `amount`, `savings_no_category`,
+  `category_scope_mismatch`, `clear_category` en income/expense = categoría por defecto como en 4.15.0, los
+  `*_set_and_clear` por campo); código nuevo `apply_to_invalid`. Dos decisiones con su evidencia: la **huella
+  de dedup de cada instancia se recalcula** cuando cambian importe o concepto (las instancias son `manual` y
+  nacen con `compute_fingerprint(manual, op_date, amount, concept)`; el PATCH individual la recomputa; el
+  restore también) — si no, una instancia de 45 € llevaría la huella de 40 € y un alta manual idéntica
+  chocaría; y un par conciliado cuyo importe cambia **se rompe sin registrar rechazo** y la conciliación corre
+  de nuevo tras el commit. **Cache de proyección**: `future` no cambia ninguna fila de `transactions` —ni el
+  conjunto, ni importes, ni `recurring_rule_id`, que es justo lo que obliga a invalidar al DELETE— y **no
+  invalida en ningún modo**; `all` invalida solo en B/C (regresión en `transactions_projection_cache.rs`, los
+  tres modos). Respuesta: la plantilla + `apply_to` + `instances_updated` (0 en `future`). **MCP en paridad**:
+  tool `update_recurring_rule` sobre la misma core; `future` se aplica directo y devuelve `before` (una fila,
+  reversible — criterio de `update_retirement_profile`); `all` exige preview + `confirm_token` (reescribe un
+  número no acotado de movimientos y pisa retoques manuales que el preview no puede enseñar fila a fila: la
+  «cascada de tamaño no acotado» de `apply_categorization_rule`), con el dry-run ejecutando la misma core dentro
+  de una transacción que se deshace para que el preview falle con el mismo código que fallaría la confirmación.
+  El catálogo pasa a **72 tools** (`grep -c '#\[tool(' apps/api/src/mcp/server.rs`, el comando de la casa) y el presupuesto
+  quedaba a 6 caracteres del tope: la regla `*_set_and_clear` sale de la descripción de `update_transaction` y
+  entra en el párrafo ESCRITURA del `instructions`, donde vale para todas las tools con `clear_*`. En la SPA,
+  el modal «Recurrentes» gana Editar por fila y, al guardar, el diálogo **«Todos · Solo futuros · Cancelar»**;
+  envía solo los campos cambiados (`lib/recurring-patch.ts`) para que «Todos» no pise retoques manuales. De
+  paso, dos erratas: el schema de `update_transaction.clear_category` decía «quitar la categoría» (falso desde
+  4.15.0) y `RecurringMaterializeResponse` no declaraba `pruned`.
+- **«Próximos» se llama «Simulación» y cada flujo tiene un interruptor.** «Renombraría la pestaña a
+  simulación, y en cada elemento simulado le pondría un toggle on-off.» La pestaña (`/simulacion`; `/proximos`
+  queda como alias de lectura, igual que `/gastos`) lista los flujos planificados, que son lo único simulado de
+  la app; «Movimientos» sigue siendo el libro real. Migración `20261010120000_planning_flows_enabled.sql`:
+  `planning_flows.enabled BOOLEAN NOT NULL DEFAULT true` — sin pérdida de datos, todo lo existente arranca
+  encendido. **Apagado = no existe para ninguna cifra, pero sigue listado** (en gris, con « · apagado» en
+  móvil): el filtro `AND p.enabled` vive en los DOS únicos lectores que alimentan números —la SELECT del motor
+  (`build_installation_projection_input`, de la que salen el ajuste de caja, el componente `planning` de la
+  resolución de reparto, los eventos del chart, el baseline de hitos, el agregado del hogar y el Monte Carlo) y
+  `planning_flow_totals_in_out` (todos los `upcoming_*` del Resumen, recuentos incluidos)—; los KPIs de la
+  pestaña se calculan en cliente (`lib/upcoming-kpis.ts`) solo con los encendidos, y los marcadores
+  `show_in_chart` del gráfico de Proyección, que también se calculan en cliente, omiten los apagados (si no,
+  pintaban un escalón que no existía). Cambiar `enabled` es cambiar un input del motor: invalida la cache en
+  las dos direcciones; `{}` sigue siendo `patch_empty`; solo el dueño de la fila puede tocarlo (403) y el viewer
+  ve el interruptor deshabilitado. Test que lo fija de punta a punta: con tres flujos apagados (sin fecha, con
+  fecha, mensual) la serie de patrimonio es **idéntica** a la de antes de crearlos. Backup `.ffbackup`:
+  `enabled` entra en la v13 como campo aditivo con default `true` (5.0.0 no se ha publicado, así que la v13 se
+  completa en sitio, sin bump); un v13 exportado antes importa encendido. MCP: `create_planning_flow` y
+  `update_planning_flow` ganan `enabled`, `list_planning_flows` lo publica, el resumen dice «(apagado)», párrafo
+  SIMULACIÓN en `instructions`; para pagarlo salieron de las descripciones frases que repetían el schema
+  («Alimenta la proyección», «Mueve la proyección entera» —ya falsa para un flujo apagado—); presupuesto a
+  23.986 de 24.000 (margen 14: la próxima tool libera espacio antes de entrar). El interruptor es la primera
+  celda de la fila (`components/Switch.tsx`) y corta la propagación para que en móvil no abra el editor. Un
+  flujo apagado sigue siendo una fila: bloquea el borrado de su categoría y sale en `GET /v1/changes`.
+- **Dos tests rojos solo por el calendario** (`mcp_simulate.rs`, encontrados al correr la suite tras un mes):
+  la siembra de movimientos llevaba `2026-06-10` y el 10 de octubre ya no caía en la ventana de 3 meses del
+  override (`window_months` 0); y el suelo del puente `P − 15 años` estaba escrito como `184`, que valía
+  exactamente un mes (en octubre era 183). Ahora se siembra el día 10 del mes pasado y el suelo se calcula desde
+  hoy con el owner de test nacido el 1990-01-01. Los índices de mes de los tests se calculan, no se escriben.
+
 ### Los once hallazgos de la revisión adversarial (B1–B11)
 
 Todos **silenciosos**: números creíbles, ninguna excepción, ningún test en rojo.
@@ -836,7 +940,9 @@ Y sigue en pie, del pase de contrato de la primera vuelta:
 - **`installation.fire_settings` pierde cuatro claves** (`fire_number_mode`,
   `fire_number_manual_amount`, `swr_pct`, `horizon_lifespan_age`): viven en el perfil por usuario. La
   migración `20260902200000_users_retirement_profile.sql` las copia al perfil de cada miembro antes de
-  retirarlas, así que el upgrade no mueve un número.
+  retirarlas, así que el upgrade no mueve un número. **Ojo con el importe manual del gasto**: en 4.x era
+  del hogar y desde 5.0.0 es de cada persona — cada miembro arranca con la copia del valor del hogar y debe
+  revisarlo en Jubilación → Gasto (la SPA no lo avisa en pantalla: nada de banners transitorios).
 - **El default de `?view` pasa de `household` a `mine`** (R2), en HTTP y en MCP. Un cliente que quiera
   la conducta de 4.15.x añade `?view=household`.
 - **`GET /v1/projection/series?view=household` es un AGREGADO, no una simulación** (D9): una simulación

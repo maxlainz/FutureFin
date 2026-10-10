@@ -381,10 +381,10 @@ export type FinancialHealthMetrics = {
    *  instalación aplicado a `liquid_assets_total`. En ese caso `runway_months` viene `null`.
    *  Con `swr_pct = 0` nunca es `true`. */
   runway_is_indefinite?: boolean;
-  /** Σ de los Próximos PUNTUALES (€, sin ventana ni anualizar) — los recurrentes van aparte. */
+  /** Σ de los flujos PUNTUALES encendidos de «Simulación» (€, sin ventana ni anualizar) — los recurrentes van aparte. */
   upcoming_inflows_total: string;
   upcoming_outflows_total: string;
-  /** **€/MES** (#148): Σ de los Próximos recurrentes por scope, sin mirar sus ventanas.
+  /** **€/MES** (#148): Σ de los flujos recurrentes encendidos de «Simulación» por scope, sin mirar sus ventanas.
    *  Jamás se suma con los totales en €. Ausente en backends < 4.11.0. */
   upcoming_recurring_monthly_inflow?: string;
   upcoming_recurring_monthly_outflow?: string;
@@ -581,6 +581,9 @@ export type PlanningFlowApiRow = {
   notes: string | null;
   sort_index: number;
   show_in_chart: boolean;
+  /** Interruptor de «Simulación» (5.0.0), SIEMPRE presente. `false` = listado pero fuera de la
+   *  proyección y de todo KPI (cliente y servidor). */
+  enabled: boolean;
 };
 
 export type ProjectionPointApi = {

@@ -751,7 +751,9 @@ export function ProjectionNetWorthChart({
         direction: PlanningFlowDirectionApi;
       }> = [];
       for (const f of planningFlows) {
-        if (!f.show_in_chart || !f.due_date) continue;
+        // Un flujo apagado en «Simulación» (5.0.0) no mueve la curva: marcarlo señalaría un
+        // escalón que no existe.
+        if (!f.enabled || !f.show_in_chart || !f.due_date) continue;
         const d = parseYmdComponents(f.due_date);
         if (!d) continue;
         const mi = (d.y - anchor.y) * 12 + (d.m - anchor.m);
