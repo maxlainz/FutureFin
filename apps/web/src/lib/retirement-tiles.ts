@@ -64,6 +64,7 @@ export type RetirementTileV2Series = Pick<
   | "safe_date_age"
   | "safe_date_at_100_month_index"
   | "safe_date_at_90_month_index"
+  | "needed_capital_curve_state"
   | "success_of_plan"
   | "success_wilson_low"
   | "success_sampling_error_pp"
@@ -689,7 +690,13 @@ export function retirementDetailRows(
   // Las dos cotas de la fecha. Solo con el plan resuelto: sin él, un «nunca» sería una afirmación
   // sobre un sorteo que no ha terminado. Y no en `asap`: ahí ya son la sublínea de la tarjeta
   // «Fecha válida» (2026-10-10), y dos veces la misma cifra en la misma pantalla es ruido.
-  if (planReady && series.strategy !== "asap") {
+  // Y tampoco mientras el nivel 2 esté en vuelo: el contrato publica `null` en las dos cotas
+  // hasta que aterriza, y «nunca» durante esos segundos sería una mentira (2026-10-10).
+  if (
+    planReady &&
+    series.strategy !== "asap" &&
+    series.needed_capital_curve_state !== "computing"
+  ) {
     const bound = (mi: number | null | undefined) =>
       finite(mi) ? monthLabel(mi) : "nunca";
     rows.push({

@@ -322,6 +322,20 @@ describe("«Fecha válida» (asap)", () => {
     expect(t.subtitle).toBe("55 años · 100 %: M300 · 90 %: M150");
     // Ni el «dentro de N años» ni ninguna explicación: la fecha ya está en la cifra.
     expect(t.subtitle).not.toContain("dentro de");
+  });
+
+  it("no dice «nunca» mientras el nivel 2 está en vuelo: las cotas se omiten hasta que aterrizan", () => {
+    const t = tile(
+      input({
+        strategy: "asap",
+        safe_date_at_100_month_index: null,
+        safe_date_at_90_month_index: null,
+        needed_capital_curve_state: "computing",
+      }),
+      "safe_date",
+    )!;
+    expect(t.subtitle).toBe("55 años");
+    expect(t.subtitle).not.toContain("nunca");
     expect(t.helpId).toBe("retirement.safe_date");
   });
 

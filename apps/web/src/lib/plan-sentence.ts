@@ -490,10 +490,18 @@ function bestRetirementYear(
  * pinta; sin ninguno de los dos, `null`.
  */
 export function safeDateBoundsLine(
-  s: Pick<PlanSentenceSeries, "safe_date_at_100_month_index" | "safe_date_at_90_month_index">,
+  s: Pick<PlanSentenceSeries, "safe_date_at_100_month_index" | "safe_date_at_90_month_index"> & {
+    needed_capital_curve_state?: string | null;
+  },
   label: (monthIndex: number) => string,
 ): string | null {
-  const bit = (key: keyof typeof s, pct: string): string | null => {
+  // Las dos cotas son de NIVEL 2: el contrato las publica como `null` mientras
+  // `needed_capital_curve_state` sea `computing`, y ese `null` no significa «nunca».
+  if (s.needed_capital_curve_state === "computing") return null;
+  const bit = (
+    key: "safe_date_at_100_month_index" | "safe_date_at_90_month_index",
+    pct: string,
+  ): string | null => {
     if (!(key in s)) return null;
     const mi = idx(s[key]);
     // Espacios duros: la sublínea del KPI es estrecha y «100 %: 2074» se partía en tres líneas.
