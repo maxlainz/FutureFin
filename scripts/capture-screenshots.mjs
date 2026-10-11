@@ -36,7 +36,7 @@ const VIEWS = [
   { slug: "pasivos", path: "/pasivos", label: "Pasivos" },
   { slug: "presupuesto", path: "/presupuesto", label: "Presupuesto" },
   { slug: "movimientos", path: "/movimientos", label: "Movimientos" },
-  { slug: "proximos", path: "/proximos", label: "Próximos" },
+  { slug: "simulacion", path: "/simulacion", label: "Simulación" },
   { slug: "jubilacion", path: "/jubilacion", label: "Jubilación" },
   { slug: "proyeccion", path: "/proyeccion", label: "Proyección" },
   { slug: "ajustes", path: "/ajustes/general", label: "Ajustes" },
