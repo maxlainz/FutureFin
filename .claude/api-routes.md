@@ -1419,9 +1419,12 @@ presupuesto se aplica **a priori**, acotando `paths`, y no con un `timeout`: `sp
 puede cancelar, así que un timeout solo liberaría al llamante mientras la CPU sigue ardiendo. Corre
 bajo el semáforo de simulaciones (`heavy::run_projection_sim`), **el solve y el sorteo bajo UN solo
 permiso**. Payload medido (`the_hybrid_payload_stays_within_the_context_budget`, que lo imprime):
-**19,3 KB** a densidad hybrid con las seis series (66 puntos), ~12,6 KB sin las del líquido, de los
-cuales **4,8 KB son `model_note`**; el presupuesto de contexto es 32 KB. Creció desde los 16,4 KB de
-la primera vuelta de 5.0.0 por la nota reescrita y el `by_kind` de cada fila de la curva.
+**19.822 B (~19,4 KB)** a densidad hybrid con las seis series (66 puntos, remedido 2026-10-11 tras
+«solo SWR»), ~13,1 KB sin las del líquido, de los cuales **5.274 B (~5,2 KB) son `model_note`**; el
+presupuesto de contexto es 32 KB. Creció desde los 16,4 KB de la primera vuelta de 5.0.0 por la nota
+reescrita y el `by_kind` de cada fila de la curva; «solo SWR» quitó dos lecturas de cobertura y la
+nota volvió a crecer unas líneas al explicar los dos motivos de fallo. Re-mide con
+`cargo test -p futurefin-api --test projection_bands the_hybrid_payload -- --nocapture`.
 
 > **Coste del MISS, y por qué conviene mirarlo.** Mientras `build_installation_projection_input`
 > devuelva `plan_level1: None` —hoy lo rellena `run_member_projection`, no el ensamblado—, cada MISS

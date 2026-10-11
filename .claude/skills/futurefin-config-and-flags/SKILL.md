@@ -396,7 +396,7 @@ proyección y invalidada por **las mismas** mutaciones que la serie — incluida
 **reglas de ahorro** (que mueven la cascada y con ella la trayectoria; el colchón derivado que 5.0.0 llegó a diseñar se retiró antes de publicarse).
 
 **Opt-in por TAMAÑO, no por omisión** (los dos son axes de respuesta, no de configuración):
-`include_liquid_bands` en la tool `get_projection_bands` (la respuesta completa pesa 16,4 KB y la
+`include_liquid_bands` en la tool `get_projection_bands` (la respuesta completa pesa ~19,4 KB —19.822 B el 2026-10-11, `the_hybrid_payload_stays_within_the_context_budget` lo imprime— y la
 mitad son esas tres series) e `include_member_series` en `get_projection` (~5,9 KB por miembro). Por
 HTTP viajan siempre; solo la superficie MCP los pide.
 
