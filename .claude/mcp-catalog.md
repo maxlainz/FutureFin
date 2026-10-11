@@ -105,8 +105,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   lleva el mes de jubilación que fijó el solver de nivel 1, el mismo en los `paths` caminos—, así
   que la fecha es un DATO y lo único que mide el sorteo es si ESE plan se rompe. Bandas puntuales
   p10/p50/p90 del patrimonio (y del líquido con `include_liquid_bands`), `success_of_plan` con su
-  veredicto de semáforo, `failures_by_kind` (los TRES motivos y solo tres: F1 cartera agotada, F2
-  tasa inicial excedida, F3 regla insuficiente) y `failure_probability_by_age` (cuándo se rompe).
+  veredicto de semáforo, `failures_by_kind` (`[F1, F2]`: los DOS motivos y solo dos — F1 cartera
+  agotada, F2 tasa inicial excedida; hasta el 2026-10-10 había un tercero, F3, que se retiró con las
+  reglas de retirada por saldo) y `failure_probability_by_age` (cuándo se rompe).
   Params: `view` (solo `mine`; `household` es 400 `household_bands_unavailable`), `paths`
   (1–**2 500**, default **2 500** — el mismo `DEFAULT_BANDS_PATHS` que usa el solver para
   confirmar la fecha, no un número aparte), `seed` (string de dígitos) e `include_liquid_bands`.
@@ -127,7 +128,7 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     modelo aquí. Con el flag apagado las tres claves **desaparecen**; no se sirve un `0` que se
     leería como «sin líquido». Por HTTP viajan siempre.
 
-  **ÉXITO = CERO fallos F1/F2/F3 en el camino (E9, sustituye a la definición D20/D22 «el plan
+  **ÉXITO = CERO fallos F1/F2 en el camino (E9, sustituye a la definición D20/D22 «el plan
   OCURRE y AGUANTA»)**: con el mes de jubilación FORZADO por el solver, «no jubilarse nunca» dejó
   de ser un desenlace posible del sorteo, así que la pregunta que separaban
   `never_retired_probability` y `success_given_retired` murió con el disparador variable —**los dos
@@ -138,10 +139,10 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   decidió la fecha — **ya no hay corte fijo al 100 %** (V7, retirada): con umbral 100 «cumple» es
   «cero fallos de N», y ahí no existe el ámbar.
 
-  El RECORTE de la regla sigue **sin ser fracaso** y sigue viajando aparte, pero
-  `months_below_need_p50` y `withdrawal_to_need_ratio_p50` cuentan **el recorte Y el gasto que la
-  cartera no pudo financiar** (corregido en E9, bug B2: el exceso sobre la necesidad ya no infla el
-  cociente). Y la **última fila de `failure_probability_by_age` es SIEMPRE el horizonte** —el
+  **Ya no hay «recorte de la regla» que viaje aparte** («solo SWR», 2026-10-10): sin reglas por
+  saldo, un mes jubilado por debajo del gasto ES un fallo F1, así que `months_below_need_p50` y
+  `withdrawal_to_need_ratio_p50` se retiraron de la respuesta (no se relajaron; pin de ausencia en
+  `openapi_contract.rs` y `mcp_simulate.rs`). La **última fila de `failure_probability_by_age` es SIEMPRE el horizonte** —el
   cierre vale `1 − success_of_plan`—, así que el paso hasta ella puede ser de menos de cinco años.
   **El colchón de caja se retiró en 5.0.0 (modelo v2) antes de publicarse**: no hay campos
   `buffer_*` que leer.
@@ -451,9 +452,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     sobra se mueve a un campo de procedencia o al `instructions`. Medida barata, del fixture
     generado (que publica `description_len` por tool):
     `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
-    → hoy `68 23975 596` (medido en `feat/175-176-fin-del-surplus-cash`, 4.12.1: la muerte de
+    → **hoy (2026-10-10) `72 23984 548`**, margen 16 (histórico: `68 23975 596` medido en `feat/175-176-fin-del-surplus-cash`, 4.12.1: la muerte de
     `surplus_cash` movió las descripciones de `delete_asset` y `get_allocation_resolution` y el
-    total subió +101 sobre los `23874` de la ronda anterior); era `52 21319 596` al cerrar la Fase 5.
+    total subió +101 sobre los `23874` de la ronda anterior; era `52 21319 596` al cerrar la Fase 5).
     **La Fase 6 gastó casi todo el margen**: las 16 tools nuevas llevaron el crudo a **28.884**
     (+4.884 sobre el tope) y el arreglo fue el que la propia guardia prescribe. **4.15.0 volvió a
     medir antes de escribir**: el margen real era **5** caracteres (`68 23995 596`), no los 25/126
@@ -988,7 +989,12 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     margen tengo AHORA?», no «¿cuánto puedo subir mi nivel de vida para siempre?». Con un trigger
     por EDAD —que no depende del gasto— la respuesta es el máximo sobrante mensual, un **SUELO**
     honesto («al menos esto»), no un infinito.
-  - **Los KPIs del PLAN viajan por LADO y con sus deltas.** `SimKpis` gana
+  - **Los KPIs del PLAN viajan por LADO y con sus deltas.** *(HISTORIA WP5-2b: la lista de campos
+    que sigue es la de aquel momento; `disposable_monthly`, `coast_number`, `partial_gap_target`,
+    `pension_coverage_ratio`, `bridge_effective_withdrawal_pct` y `bridge_discount_annual_pct`
+    murieron después (M4/E4 y «solo SWR»). La lista vigente es el struct `SimKpis` de
+    `apps/api/src/handlers/projection.rs` — `grep -n 'struct SimKpis' -A80` — y el fixture
+    `tests/fixtures/mcp-catalog.json`.)* `SimKpis` ganó
     `required_contribution_monthly`, `required_contribution_search_ceiling`, `underfunded`,
     `disposable_monthly`, `coast_fire_month_index`, `coast_number`, `partial_gap_target`,
     `partial_phase_capital_growing`, `partial_retirement_month_index`, `pension_start_month_index`,
@@ -1029,7 +1035,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   Evaluación de paridad: **tool añadida** para `GET /v1/projection/bands`; **tool actualizada**
   para el eje. Ninguna omisión nueva.
   - **`get_projection_bands`** — su bullet propio está arriba, en la lista de lecturas.
-  - **`simulate_projection` gana `monte_carlo: {paths ≤ 1000, seed?}`**: los dos lados publican
+  - **`simulate_projection` gana `monte_carlo: {paths ≤ 1000, seed?}`** (*HISTORIA de WP6b: el techo
+    es hoy 2.500 y las cifras de abajo se mudaron — la forma vigente es la de la entrada «modelo v2»
+    más abajo y `SIMULATE_MODEL_NOTE`*): los dos lados publicaban
     `success_probability`, `success_verdict`, `underfunded_probability` y `months_below_need_p50`
     —y, desde el pase de correcciones de abajo, `never_retired_probability`,
     `success_given_retired` y `buffer_inactive_reason`—,
@@ -1059,22 +1067,26 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   nuevas, tres contratos que crecen.** Evaluación de paridad: **tres tools actualizadas**
   (`get_projection`, `get_projection_bands`, `simulate_projection`); ninguna omisión nueva y
   **ningún contador se mueve** (recuéntalos con los dos `grep` del bullet de lecturas, no de
-  memoria). Lo que un modelo lee distinto a partir de aquí:
+  memoria). **Ojo: esta entrada es del pase de correcciones de septiembre; los campos
+  `never_retired_probability`, `success_given_retired` y `buffer_*` que nombra se retiraron después
+  (modelo v2, M6) y no existen — lo vigente está en la entrada del modelo v2 y en
+  `SIMULATE_MODEL_NOTE`.** Lo que un modelo lee distinto a partir de aquí:
   - **`get_projection` gana `points[].unmet_need`** — el gasto del MES que los activos no pudieron
     financiar, neto y `≥ 0` (f64 y misma decimación `hybrid` que sus vecinos; `0` en el índice 0).
-    **Son TRES magnitudes por mes y no dos**: `withdrawal` es lo que se OBTUVO,
-    `withdrawal_shortfall` lo que la REGLA rechazó y `unmet_need` lo que la CARTERA no pudo dar —
-    su suma es la necesidad neta del mes. Confundir las dos últimas es el error caro, porque con
-    `fixed_real` el recorte es **cero por construcción** y un modelo que solo lo mirara concluiría
-    «cubre todo su gasto» de un hogar sin cartera. **No viaja en `members[].series`**, que sigue
+    **Son DOS magnitudes por mes** (desde el 2026-10-10, «solo SWR»): `withdrawal` es lo que se
+    OBTUVO y `unmet_need` lo que la CARTERA no pudo dar — su suma es la necesidad neta del mes.
+    (*HISTORIA*: hasta esa fecha había una tercera, `withdrawal_shortfall`, lo que rechazaba la
+    regla por saldo; con `fixed_real` valía cero por construcción y un modelo que solo la mirara
+    concluía «cubre todo su gasto» de un hogar sin cartera — la columna que importa siempre fue
+    `unmet_need`. Ausencia: `! grep -qE 'withdrawal_shortfall|withdrawal_excess' apps/web/src/api/types.ts`.) **No viaja en `members[].series`**, que sigue
     siendo mínima (patrimonio + líquido).
   - **`assets_depleted_month_index` exige ahora DOS condiciones** —cartera a cero tras la VENTA **y**
     alguna venta posterior sin fundar—, en `get_projection` (raíz y `members[]`) y en los dos lados
     de `simulate_projection`. Un aterrizaje exacto sobre una pensión que cubre todo el gasto
     posterior es **`null`**, no «cartera agotada»: antes se publicaba como ruina con
     `uncovered_deficit_total = 0`. El campo sigue en la rejilla 0-based de #210.
-  - **`get_projection_bands`** — la definición de éxito, sus dos caras, las dos lecturas de
-    cobertura y el cierre en el horizonte de `depletion_probability_by_age` están en su bullet
+  - **`get_projection_bands`** — la definición de éxito y el cierre en el horizonte de
+    `failure_probability_by_age` (antes `depletion_probability_by_age`) están en su bullet
     propio, arriba; `buffer_inactive_reason` dice por qué NO se simuló el colchón, y es `null` ⟺
     `buffer_active: true`. **Sus motivos cambiaron en 5.0.0/V6** (ver el bullet del colchón
     derivado, abajo): hoy son `no_capped_rule` | `cap_is_zero` | `no_safe_liquid_asset` |
@@ -1107,8 +1119,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     `jq '[.tools[].description_len] | add' apps/api/tests/fixtures/mcp-catalog.json` (**23 828** el
     2026-09-03, margen 172; el «23 793» de tres párrafos más arriba describe el momento de WP6b y
     no el de hoy).
-- **5.0.0 / U4 + S4 (issue #207) — cero tools nuevas, una tool con descripción nueva y un campo de
-  salida más.** Evaluación de paridad: **`update_retirement_profile` actualizada** (descripción +
+- **5.0.0 / U4 + S4 (issue #207) — HISTORIA, sustituida el 2026-10-10 («solo SWR»): `withdrawal_rule`,
+  `WithdrawalRuleParam` y `pct_source` ya no existen en ninguna tool (ver la entrada «solo SWR»,
+  más abajo). — cero tools nuevas, una tool con descripción nueva y un campo de salida más.** Evaluación de paridad: **`update_retirement_profile` actualizada** (descripción +
   dos doc-comments de `WithdrawalRuleParam`, que `simulate_projection.profile_overrides` **hereda**
   por compartir ese mismo tipo de parámetro); `get_retirement_profile` y `simulate_projection`
   cambian **sin código propio** porque comparten cores. Ninguna omisión nueva; **ningún contador se
@@ -1249,8 +1262,8 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   (`contribution_required_monthly`, `coast_stop_month_index`, `partial_start_month_index`…) y
   `warnings[]`. **`monte_carlo` (el eje opt-in) ya NO lleva estas cifras**: hoy es solo un SORTEO
   SUPLEMENTARIO con su propio `paths`/`seed`, que añade `success_probability` (con su
-  `_absent_reason`), `failures_by_kind`, `failure_probability_by_age` y
-  `months_below_need_p50`/`withdrawal_to_need_ratio_p50` — la respuesta `MonteCarloKpis` en sí
+  `_absent_reason`), `failures_by_kind`, `failure_probability_by_age`
+  (`months_below_need_p50`/`withdrawal_to_need_ratio_p50` se retiraron el 2026-10-10, «solo SWR») — la respuesta `MonteCarloKpis` en sí
   misma solo tiene tres campos: `paths`, `seed`, `any_volatility_declared`
   (`grep -n "struct MonteCarloKpis" -A 12 apps/api/src/handlers/projection.rs`). `never_retired_probability`,
   `success_given_retired` y `buffer_inactive_reason` (los tres del «pase de correcciones» de
@@ -1318,6 +1331,22 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   saca y devuelve el flujo de `get_summary`/`get_projection`, viewer → `forbidden`,
   `mcp_write_enabled = false` → `mcp_write_disabled`) y el fixture regenerado (solo cambian las
   entradas de las cuatro tools de planning).
+- **5.0.0 — «solo SWR» (2026-10-10): `withdrawal_rule` sale de dos tools.** Evaluación de paridad:
+  **dos tools actualizadas** (`update_retirement_profile` y `simulate_projection.profile_overrides`
+  perdían el parámetro porque compartían el tipo `WithdrawalRuleParam`, borrado), **tres que cambian
+  sin código propio** (`get_retirement_profile`, `get_projection_bands` y el bloque `monte_carlo` de
+  `simulate_projection` pierden `withdrawal_rule`/`pct_source` y `months_below_need_p50` /
+  `withdrawal_to_need_ratio_p50`; `failures_by_kind` pasa a `[F1, F2]`). Ninguna omisión nueva y
+  **cero altas o bajas**: los contadores no se mueven (72/30/42/42/19/9/42/19 — recuéntalos con los
+  `grep` del bullet de lecturas y los de `futurefin-mcp-parity` §5). Ambos structs son
+  `deny_unknown_fields`: mandar `withdrawal_rule` por MCP es ahora un error de la tool que nombra el
+  campo (por HTTP, en cambio, el PATCH lo ignora como clave desconocida; sola ⇒ `patch_empty`).
+  `get_projection` pierde `points[].withdrawal_shortfall`/`withdrawal_excess` (no viajaban por MCP
+  más que como parte del punto) y el `instructions` se reescribe («SOLO SWR…»: dos motivos de fallo,
+  jubilado se vende lo que el gasto indexado necesita). **Presupuesto**: `72 23986 548` → **`72 23984
+  548`** (margen 16), medido con
+  `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`.
+  Fixture `mcp-catalog.json` regenerado (`git diff release/5.0.0 -- apps/api/tests/fixtures/mcp-catalog.json` lista qué entradas se movieron).
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
   mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,

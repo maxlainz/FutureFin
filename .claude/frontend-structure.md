@@ -68,7 +68,7 @@ src/
 │                                 #   — un `grep` de cualquiera de los tres en este fichero sale vacío salvo una
 │                                 #   nota histórica en un doc-comment). `ProjectionBandsApi` pierde TODO `buffer_*`
 │                                 #   y gana `failure_probability_by_age: FailureProbabilityPointApi[]` (sustituye a
-│                                 #   `depletion_probability_by_age`, con `by_kind` por F1/F2/F3) y `success_verdict:
+│                                 #   `depletion_probability_by_age`, con `by_kind: [F1, F2]`) y `success_verdict:
 │                                 #   "green"|"amber"|"red"` contra el umbral del perfil. `SummaryPlanApi` gana
 │                                 #   `needed_capital_today`/`safe_date_month_index`/`plan_state` y pierde
 │                                 #   `never_retired_probability`/`success_given_retired`.
@@ -101,9 +101,9 @@ src/
 │   ├── ledger.scope.test.ts      # 5.0.0 — los cuatro helpers de scope de arriba (`grep -c 'it(' apps/web/src/lib/ledger.scope.test.ts`)
 │   ├── retirementProfile.ts      # 5.0.0 (D13, issue #207): perfil de jubilación POR USUARIO en cliente. Tres
 │   │                             #   responsabilidades y ninguna más — (1) defaults/clamps en LECTURA
-│   │                             #   (normalizeRetirementProfile/normalizeWithdrawalRule), espejo de
+│   │                             #   (`normalizeRetirementProfile`), espejo de
 │   │                             #   `resolve_retirement_profile` (`apps/api/src/handlers/retirement_profile.rs`);
-│   │                             #   (2) guarda de validez en ESCRITURA (retirementProfileIssue/withdrawalRuleIssue),
+│   │                             #   (2) guarda de validez en ESCRITURA (`retirementProfileIssue`),
 │   │                             #   MISMOS códigos estables que el servidor, para que el autosave nunca prometa
 │   │                             #   «Guardado automático» sobre un valor que el PATCH iba a rechazar con 400; (3)
 │   │                             #   PATCH MÍNIMO tri-estado (buildRetirementProfilePatch/isEmptyRetirementProfilePatch)
@@ -184,19 +184,21 @@ src/
 │   ├── plan-fields.ts            # 5.0.0 (U2/U12 de #207; reagrupada por V3 de la tercera vuelta de UX): ÚNICA fuente
 │   │                             #   de qué campos del plan se ven por estrategia, y **en qué TARJETA caen**. Los dos
 │   │                             #   grupos («plan»/«avanzado») y las seis secciones del acordeón desaparecieron: hoy
-│   │                             #   el eje es el TEMA — `PlanCardId` = strategy · ages · pension · spending ·
-│   │                             #   withdrawal · horizon, en `PLAN_CARD_ORDER`. **No hay tarjeta `risk`**: tras V6
+│   │                             #   el eje es el TEMA — `PlanCardId` = strategy · spending · ages · pension ·
+│   │                             #   horizon (**cinco** desde «solo SWR», 2026-10-10: «Retirada» se retiró con las reglas
+│   │                             #   de retirada), en `PLAN_CARD_ORDER`. **No hay tarjeta `risk`**: tras V6
 │   │                             #   (colchón derivado) y V7 (umbral retirado) se quedó sin un solo campo, y una
-│   │                             #   tarjeta vacía no se pinta — **el modelo v2 devolvió el umbral (C3), pero a la
-│   │                             #   tarjeta `withdrawal`** (`success_threshold_pct` va primero, antes de `swr_pct`),
-│   │                             #   no a una `risk` resucitada: el colchón sigue fuera y una tarjeta con un solo
+│   │                             #   tarjeta vacía no se pinta — **el modelo v2 devolvió el umbral (C3), pero a una
+│   │                             #   tarjeta de formulario, no a una `risk` resucitada** (primero a `withdrawal`; desde
+│   │                             #   «solo SWR» abre `horizon`, «Horizonte y exigencia», y `swr_pct` cierra `spending`): el colchón sigue fuera y una tarjeta con un solo
 │   │                             #   campo seguía sin justificarse. Ni una condición de visibilidad cambió con V3: es
 │   │                             #   la misma tabla ordenada por otro criterio. `planCardGroups(ctx)` da las tarjetas
 │   │                             #   a pintar (nunca una vacía; `strategy` es la excepción — su contenido es el
 │   │                             #   radiogroup, no campos). Un campo irrelevante para la estrategia NO EXISTE en la
-│   │                             #   lista (U2), y U4 se impone en negativo: no hay ids de pct/start_pct/
-│   │                             #   guardrails_pct, el único porcentaje es swr_pct. **`PlanFieldId` tiene 24 ids**
-│   │                             #   desde el modelo v2 (`target_basis`/`bridge_discount_basis` murieron; nacieron
+│   │                             #   lista (U2), y U4 se impone en negativo: no hay más porcentaje de
+│   │                             #   retirada que `swr_pct`. **`PlanFieldId` tiene 20 ids** (recuento: ver el comando
+│   │                             #   de la sección de re-verificación; eran 24 con las reglas de retirada, que se
+│   │                             #   llevaron cuatro) desde el modelo v2 (`target_basis`/`bridge_discount_basis` murieron; nacieron
 │   │                             #   `success_threshold_pct`, `coast_mode`, `coast_stop_age`, `partial_mode`,
 │   │                             #   `bridge_enabled`, `bridge_max_pct`, `bridge_max_years`). `onboarding-plan.ts` se
 │   │                             #   construye desde esta misma tabla para no discrepar sobre qué pide cada
@@ -257,12 +259,10 @@ src/
 │   │                             #   (nunca lo confundas con `retirementProfileIssue`: esa valida lo que el servidor
 │   │                             #   aceptaría, esta valida si la estrategia está completa — un «A una edad fija» sin
 │   │                             #   fecha de nacimiento se guarda bien y el motor lo degrada a «Cuanto antes», que es
-│   │                             #   justo el caso que hay que impedir). También **U4**: `withdrawalPctNote` — la
-│   │                             #   nota bajo el selector de regla («Retira el X %: tu tasa de retirada» / «Regla al
-│   │                             #   X %, fijado por API»), y `PLAN_FIELD_HELP` — la tabla campo → `helpId` como
+│   │                             #   justo el caso que hay que impedir). También `PLAN_FIELD_HELP` — la tabla campo → `helpId` como
 │   │                             #   DATO (no una prop de ayuda repartida por el JSX), con la forma de objeto que el
 │   │                             #   escáner de `helpTexts.test.ts` reconoce. Y **V3**: `PLAN_CARD_COPY` — título y
-│   │                             #   FRASE de cada una de las seis tarjetas de configuración (sustituye a
+│   │                             #   título de cada una de las cinco tarjetas de configuración (sustituye a
 │   │                             #   `ADVANCED_SECTION_LABEL`, que solo tenía rótulos porque el acordeón los usaba de
 │   │                             #   separador). Ninguna frase describe el control: dicen qué cambia y qué implica
 │   │                             #   cambiarlo. Test: retirement-form.test.ts
@@ -291,7 +291,7 @@ src/
 │   │                             #   pineado en test —; con un umbral del 80 % el rojo empieza en el 20 %, no en el
 │   │                             #   10 %: pedir menos éxito ensancha lo que cuenta como zona roja. Y
 │   │                             #   **`failureProbabilityAtMonth`** (renombrada de `depletionProbabilityAtMonth`:
-│   │                             #   ahora es F1+F2+F3 acumulado, no solo agotamiento) + **`failureKindsAtMonth`**
+│   │                             #   ahora es F1+F2 acumulado, no solo agotamiento) + **`failureKindsAtMonth`**
 │   │                             #   (el reparto por motivo del hover). Plana antes de la 1.ª muestra, lineal entre
 │   │                             #   muestras, plana después; `null` si no hay ninguna. La misma función colorea
 │   │                             #   **y** rotula el hover: si fueran dos, el tinte y el número podrían discrepar y
@@ -507,17 +507,18 @@ src/
 │   │                             #   3. **El plan** (oculto en Hogar): SIN panel envoltorio desde 2026-09-13 —
 │   │                             #   `planCardGroups(fieldCtx)` emite una `<section class="panel
 │   │                             #   retirement-plan-panel">` HERMANA por tema
-│   │                             #   (`strategy`/`spending`/`ages`/`pension`/`withdrawal`/`horizon` — ese ORDEN
-│   │                             #   desde 2026-09-13: el gasto es el factor de mayor influencia—, **seis**
-│   │                             #   paneles, sin `risk`), con `<h3 class="panel-title">` + la frase de
+│   │                             #   (`strategy`/`spending`/`ages`/`pension`/`horizon` — ese ORDEN
+│   │                             #   desde 2026-09-13: el gasto es el factor de mayor influencia—, **cinco**
+│   │                             #   paneles desde «solo SWR» (2026-10-10; eran seis con «Retirada»), sin `risk`), con `<h3 class="panel-title">` + la frase de
 │   │                             #   `PLAN_CARD_COPY` + sus campos. «Estrategia» pinta **CUATRO** radio-cards
 │   │                             #   (`asap`/`retire_at_age`/`coast`/`partial` — `pension_bridge` ya no es una);
 │   │                             #   «Pensión» lleva el interruptor del PUENTE (`bridge_enabled`, con
-│   │                             #   `withBridgeEnabled` rellenando sus dos números al encenderlo); «Retirada» lleva
-│   │                             #   `success_threshold_pct` PRIMERO (slider 80–100) y luego `swr_pct`; «Edades»
+│   │                             #   `withBridgeEnabled` rellenando sus dos números al encenderlo); «Gasto en jubilación» cierra con `swr_pct`
+│   │                             #   (el deslizador SWR es su ÚLTIMO campo) y «Horizonte y exigencia» abre con
+│   │                             #   `success_threshold_pct` (slider 80–100); «Edades»
 │   │                             #   lleva `coast_mode`/`coast_stop_age`/`partial_mode` según la estrategia. **Sin
 │   │                             #   banner de alta** (F5) y **sin enlace a Avanzado**. Un `renderField(f)` único
-│   │                             #   (963–1738 en el fichero actual) pinta los **24** ids de `PlanFieldId`.
+│   │                             #   pinta los ids de `PlanFieldId` (20 hoy; ver el comando de re-verificación).
 │   │                             #   4. **«Resultado»**: la FRASE-hito (`sentence`, `lib/plan-sentence.ts`, coloreada
 │   │                             #   por `sentence.tone`, filete lateral — NUNCA color de texto; branches por
 │   │                             #   estrategia + estados `pending`/`not_reachable`/`plan_absent_reason`) → banner
@@ -530,10 +531,10 @@ src/
 │   │                             #   `successStrip`/`successStripCutoffs` del modelo v2; toggles «En dinero de hoy»
 │   │                             #   + «Banda 10–90 %») → la ESCALA del color (`.retirement-risk-scale`, cortes por
 │   │                             #   `riskCutoffsForThreshold`) → **Riesgo compacto** («Éxito del plan» en `87,0 %`
-│   │                             #   con su precisión de Wilson en pp, fallos por tipo, cobertura corregida — **sin
-│   │                             #   línea de colchón**, retirada con el mecanismo en M6) →
+│   │                             #   con su precisión de Wilson en pp, fallos por tipo (F1/F2) — **sin filas de
+│   │                             #   cobertura** (se fueron con «solo SWR») **ni línea de colchón** (retirada en M6)) →
 │   │                             #   **«Detalle del cálculo»** plegado (`<summary class="details-trigger">`:
-│   │                             #   número FIRE clásico, fechas al 100 %/90 %, semilla y caminos, + `riskExtraRows`
+│   │                             #   número FIRE clásico, fechas al 100 %/90 %, + `riskExtraRows`; la semilla vive en el pie de «Las cifras del riesgo»
 │   │                             #   + avisos no-danger).
 │   │                             #
 │   │                             #   Autosave de 420 ms (`queueProfileSave`) con doble guarda: `retirementProfileIssue`
@@ -574,12 +575,12 @@ src/
 │   │                                #   viewBox tiene que seguir casando con la caja medida; `xTickBaselineY` unifica
 │   │                                #   la fila de etiquetas X (años y «Hoy»), que antes se calculaba dos veces.
 │   │                                #   Sin fases ni marcas la tira mide 0 y la geometría es la de 4.15.x. Tooltip:
-│   │                                #   «Retirada del mes» / «Recorte» / «No financiado» / «Exceso» solo desde
+│   │                                #   «Retirada del mes» / «No financiado» solo desde
 │   │                                #   retirement_month_index, deflactados con el MISMO factor que el patrimonio; el
 │   │                                #   modelo (qué filas, con qué umbral) vive PURO en `buildWithdrawalTooltipRows`
-│   │                                #   (lib/projection-chart.ts) con test. «Recorte» = lo que la REGLA rechazó;
-│   │                                #   «No financiado» (`unmet_need`, pase de correcciones §F) = lo que la CARTERA no
-│   │                                #   dio — dos filas distintas y pueden salir las dos. Leyenda: una entrada por
+│   │                                #   (lib/projection-chart.ts) con test. «No financiado» (`unmet_need`) = lo que la
+│   │                                #   CARTERA no dio. «Recorte» y «Exceso» se retiraron con las reglas por saldo
+│   │                                #   («solo SWR», 2026-10-10). Leyenda: una entrada por
 │   │                                #   miembro en Hogar, con su línea fina ya pintada (`lib/member-lines.ts`).
 │   │                                #   **Modelo v2 (2026-09-06, C4): sin objetivo FIRE que dibujar, sin
 │   │                                #   `required_capital_path`/`coast_path`/`plan-series.ts` (borrado).** La serie
@@ -789,12 +790,12 @@ la misma entrada de cache.
   son absolutos: `riskCutoffsForThreshold(success_threshold_pct)` los deriva del umbral del perfil
   —con 95 % (default) o cualquier umbral ≥ 90 %, pixel-idénticos a los fijos de antes (5 %/10 %);
   con un umbral del 80 %, el rojo empieza en el 20 %—. El tooltip del hover sale de
-  `failureProbabilityAtMonth` + `failureKindsAtMonth` (F1/F2/F3, la MISMA función que colorea) y
+  `failureProbabilityAtMonth` + `failureKindsAtMonth` (F1/F2, la MISMA función que colorea) y
   reparte el motivo entre paréntesis. Sin volatilidad declarada NO se colorea: teñir de verde una
   banda de ancho cero diría «ningún escenario falla» sobre un sorteo que no existe.
-- **helpIds** (§helpTexts.ts, 20 claves `retirement.*`): `retirement.bands`, `retirement.success`,
+- **helpIds** (§helpTexts.ts; recuento de las `retirement.*`: `grep -c '^  "retirement\.' apps/web/src/lib/helpTexts.ts`): `retirement.bands`, `retirement.success`,
   `retirement.failure_by_age` (sustituye a `retirement.depletion_by_age`: el color de la banda **y**
-  la fila acumulada del Detalle, ahora F1+F2+F3), `retirement.coverage`, `retirement.needed_capital`,
+  la fila acumulada del Detalle, ahora F1+F2), `retirement.needed_capital`,
   `retirement.safe_date`, `retirement.success_threshold`, `retirement.bridge_settings`,
   `retirement.coast_mode`, `retirement.partial_mode`, `retirement.fire_number_classic` y
   `summary.success`. **`retirement.target_basis`/`retirement.bridge_discount`/
@@ -1030,7 +1031,7 @@ Comandos de re-verificación VIGENTES para el modelo v2 (todos confirmados 2026-
 - Cuatro estrategias, no cinco: `grep -n "export type RetirementStrategyApi" -A 6 apps/web/src/api/types.ts`
 - El alias de entrada se pliega y no se reemite: `grep -n 'if (v === "pension_bridge")' apps/web/src/lib/retirementProfile.ts`
 - El puente vive dentro de la pensión: `grep -n "bridge_enabled\|bridge_max_pct\|bridge_max_years" apps/web/src/api/types.ts | head -5`
-- 24 ids de campo (no 20): `grep -n "^export type PlanFieldId" -A 30 apps/web/src/lib/plan-fields.ts`
+- 20 ids de campo (eran 24 con las reglas de retirada): `grep -n "^export type PlanFieldId" -A 25 apps/web/src/lib/plan-fields.ts | grep -c '^[0-9]*-  | "'` → 20
 - Umbral load-bearing de nuevo: `grep -n "success_threshold_pct" apps/web/src/lib/plan-fields.ts apps/web/src/lib/retirementProfile.ts | head -5`
 - Sin tile «Objetivo», tres fijas: `grep -n "RETIREMENT_TILES_V2_CAP\|needed_capital\|\"success\"" apps/web/src/lib/retirement-tiles.ts | head -6`
 - Cortes de color por umbral, no fijos: `grep -n "export function riskCutoffsForThreshold" -A 8 apps/web/src/lib/risk-gradient.ts`
@@ -1060,7 +1061,7 @@ solves de WP5-2b, series auxiliares discontinuas del chart, tarjeta «Plan» ley
 - `RetirementProfileApi` shape: `grep -n "export type RetirementProfileApi" -A 20 apps/web/src/api/types.ts`
 - Retirement-profile save wiring: `grep -n "saveRetirementProfilePatch\|loadRetirementProfile" apps/web/src/App.tsx`
 - Asset volatility field: `grep -n "annual_volatility_percent" apps/web/src/api/types.ts apps/web/src/views/AssetsView.tsx`
-- `.retirement-radio-stack` has live consumers: `grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` (≥1; it was defined in `App.css` with zero consumers before `9ae5c24`)
+- `.retirement-radio-stack` ya no existe (su último consumidor, el selector `spend_mode`, se retiró con «solo SWR», 2026-10-10, y la regla CSS se borró): `grep -rn "retirement-radio-stack" apps/web/src` debe imprimir vacío
 - Test counts (don't cite the raw number without re-running): `grep -c 'it(' apps/web/src/lib/retirementProfile.test.ts apps/web/src/lib/ledger.scope.test.ts apps/web/src/lib/member-lines.test.ts apps/web/src/lib/asset-form.test.ts`
 - WP7 3a — tira de fases y tarjeta «Plan»: `ls apps/web/src/lib/phase-strip.ts apps/web/src/lib/plan-card.ts`
 - La tira NO indexa arrays (invariante monthly ≡ hybrid): `grep -n "los mismos tramos con la serie mensual y con la decimada" apps/web/src/lib/phase-strip.test.ts`
@@ -1142,7 +1143,7 @@ nota de arriba. `.plan-card-grid`/`.plan-card`/`.plan-card-figures` **sí se ret
 - El histórico resuelve identidad al leer (U4-api): `grep -n "fn resolve_item_identity" apps/api/src/handlers/history.rs`
 - El backup sin contraseña exporta con contraseña propia (U7, issue #213):
   `grep -n "has_password\|backup_password_empty" apps/api/src/handlers/auth.rs apps/api/src/handlers/backup_user/export.rs`
-- El pct de retirada se resuelve en un único sitio (U0): `grep -n "fn resolve_withdrawal_rule" apps/api/src/handlers/retirement_profile.rs`
+- La retirada ya no tiene regla que resolver (el perfil no lleva `withdrawal_rule`, «solo SWR»): `grep -c "withdrawal_rule" apps/web/src/api/types.ts` → 0; en `apps/api/src/handlers/retirement_profile.rs` solo quedan comentarios y el test «a_stored_withdrawal_rule_is_ignored…» (un backup viejo carga y la clave se ignora)
 - La CSS del trío D27 original **se retiró de `App.css`** en el pase U5b (ya no solo «sin
   consumidor en el árbol»): `grep -n "^\.plan-card {\|^\.plan-card-grid {\|^\.plan-card-figures {"
   apps/web/src/App.css` debe imprimir vacío — las tres REGLAS ya no existen; los únicos hits que
@@ -1159,8 +1160,8 @@ acordeón; y las retiradas de `assumptions-line.ts`, `retirement-intro.ts`, `bui
 
 - Los dos módulos retirados no existen: `ls apps/web/src/lib/assumptions-line.ts apps/web/src/lib/retirement-intro.ts` debe FALLAR los dos
 - El módulo del color existe con test: `ls apps/web/src/lib/risk-gradient.ts apps/web/src/lib/risk-gradient.test.ts`
-- Seis tarjetas y ninguna `risk`: `grep -n "PLAN_CARD_ORDER" -A 8 apps/web/src/lib/plan-fields.ts`
-- Los dos ids retirados no vuelven a la unión: `grep -c '"cash_buffer_months"\|"success_threshold_pct"' apps/web/src/lib/plan-fields.ts` (**0**)
+- Cinco tarjetas y ninguna `risk`: `grep -n "PLAN_CARD_ORDER" -A 8 apps/web/src/lib/plan-fields.ts`
+- (Historia, V6/V7; SUPERADA por el modelo v2: `success_threshold_pct` ya vuelve a estar en la unión.) `cash_buffer_months` no vuelve: `grep -c '"cash_buffer_months"' apps/web/src/lib/plan-fields.ts` → 0
 - Un solo renderer de campo en la vista: `grep -c "const renderField = \|const renderPlanField = \|const renderAdvancedField = " apps/web/src/views/RetirementView.tsx` (**1**)
 - El umbral desapareció del perfil y de las bandas: `grep -c "^  success_threshold_pct" apps/web/src/api/types.ts` (**0** — anclado a la DECLARACIÓN del campo: el nombre sigue citado en el comentario que explica su retirada, y un grep que se cuenta a sí mismo es deriva silenciosa) y `grep -c "success_threshold_pct" apps/web/src/lib/retirementProfile.ts` (**0**)
 - La SPA solo escribe el colchón para SOLTARLO: `grep -n "cash_buffer_months: null" apps/web/src/views/RetirementView.tsx` (un acierto, el «Volver al tope de tu regla»)

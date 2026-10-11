@@ -7,9 +7,9 @@
  * esconde uno que sí (y el plan se calcula con un default que nadie eligió). Los dos son
  * silenciosos, así que la única defensa es recorrer la tabla entera.
  *
- * Se recorren **las 4 estrategias × los 25 campos × los dos estados de pensión × los dos modos de
- * coast × los dos de media jornada × los dos del puente × las cuatro familias de regla × los dos
- * estados de fecha de nacimiento**, y además se fijan explícitamente las listas por estrategia: un
+ * Se recorren **las 4 estrategias × los 20 campos × los dos estados de pensión × los dos modos de
+ * coast × los dos de media jornada × los dos del puente × los dos estados de fecha de
+ * nacimiento**, y además se fijan explícitamente las listas por estrategia: un
  * cambio de la tabla tiene que ser un test rojo, no un descubrimiento en producción.
  *
  * **Qué cambió con el modelo v2** (C1–C8), y por qué cada cambio tiene su propio `it`:
@@ -19,7 +19,8 @@
  *    estrategia no puede ver.
  *  - **El puente dejó de ser una estrategia** (C7): son tres campos de la tarjeta Pensión,
  *    disponibles en cualquier estrategia y solo con pensión declarada.
- *  - **`success_threshold_pct` VUELVE** (C3) y vuelve el primero de «Retirada». El `describe` que
+ *  - **`success_threshold_pct` VUELVE** (C3); desde «solo SWR» (2026-10-10) abre «Horizonte y
+ *    exigencia», y «Retirada» ya no existe (el SWR cierra «Gasto en jubilación»). El `describe` que
  *    afirmaba que no volvía está invertido a propósito: `cash_buffer_months` sigue sin volver
  *    (M6 retiró el mecanismo entero), el umbral sí.
  *  - **`target_basis` y `bridge_discount_basis` mueren**: no hay objetivo que dimensionar (C1/M4),
@@ -38,7 +39,6 @@ import type {
   PartialRetirementApi,
   RetirementProfileApi,
   RetirementStrategyApi,
-  WithdrawalRuleKindApi,
 } from "../api/types";
 import {
   isFieldVisible,
@@ -62,19 +62,15 @@ const STRATEGIES: readonly RetirementStrategyApi[] = [
   "coast",
   "partial",
 ];
-const RULE_KINDS: readonly WithdrawalRuleKindApi[] = [
-  "fixed_real",
-  "percent_of_balance",
-  "hybrid",
-  "guardrails",
-];
 const COAST_MODES: readonly CoastModeApi[] = ["fixed_retirement_age", "fixed_stop_age"];
 const PARTIAL_MODES: readonly PartialModeApi[] = ["at_age", "asap"];
 
-/** Los 25 ids del catálogo, listados a mano: si alguien añade uno sin tocar este array, el test
+/** Los 20 ids del catálogo, listados a mano: si alguien añade uno sin tocar este array, el test
  *  de exhaustividad de abajo lo caza. Eran 20 antes del modelo v2 (−2 muertos: `target_basis`,
  *  `bridge_discount_basis`; +7 nuevos: los dos modos, las dos edades que abren, los tres del
- *  puente y el umbral). */
+ *  puente y el umbral) y 25 hasta «solo SWR» (2026-10-10), que se llevó los cinco de la regla de
+ *  retirada: `withdrawal_rule_kind`, `hybrid_end_pct`, `guardrails_band_pct`,
+ *  `guardrails_adjust_pct` y `spend_mode`. */
 const ALL_FIELD_IDS: readonly PlanFieldId[] = [
   "birth_date",
   "coast_mode",
@@ -95,11 +91,6 @@ const ALL_FIELD_IDS: readonly PlanFieldId[] = [
   "fire_number_manual_amount",
   "success_threshold_pct",
   "swr_pct",
-  "withdrawal_rule_kind",
-  "hybrid_end_pct",
-  "guardrails_band_pct",
-  "guardrails_adjust_pct",
-  "spend_mode",
   "horizon_lifespan_age",
 ];
 
@@ -108,7 +99,6 @@ function ctx(over: Partial<PlanFieldsContext> = {}): PlanFieldsContext {
     strategy: "asap",
     hasPension: false,
     hasBirthDate: true,
-    ruleKind: "fixed_real",
     fireNumberMode: "annual_expense",
     coastMode: "fixed_retirement_age",
     partialMode: "at_age",
@@ -500,27 +490,37 @@ describe("tarjeta «Gasto en jubilación» — siempre, y su importe solo en man
     expect(req("fire_number_manual_amount", ctx({ fireNumberMode: "manual" }))).toBe(true);
   });
 
-  it("la tarjeta son exactamente esos dos campos, nunca más", () => {
-    expect(cardIds("spending", ctx())).toEqual(["fire_number_mode"]);
+  it("la tarjeta son el modo, el importe manual si aplica y el SWR el ÚLTIMO", () => {
+    // «Solo SWR» (2026-10-10): la tasa de retirada cierra la tarjeta — gasto y tasa son las dos
+    // mitades de la misma puerta, la de la tasa inicial del mes de jubilación.
+    expect(cardIds("spending", ctx())).toEqual(["fire_number_mode", "swr_pct"]);
     expect(cardIds("spending", ctx({ fireNumberMode: "manual" }))).toEqual([
       "fire_number_mode",
       "fire_number_manual_amount",
+      "swr_pct",
     ]);
+  });
+
+  it("el SWR está en las cuatro estrategias, en «Gasto», y nunca es obligatorio", () => {
+    for (const c of everyContext()) {
+      const f = planFields(c).find((x) => x.id === "swr_pct");
+      expect(f?.card, JSON.stringify(c)).toBe("spending");
+      expect(f?.required, JSON.stringify(c)).toBe(false);
+      expect(f?.label).toBe("Tasa de retirada (SWR)");
+    }
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-describe("tarjeta «Retirada» — el umbral primero, y U4: UN solo porcentaje de retirada", () => {
+describe("tarjeta «Horizonte y exigencia» — el umbral primero, el horizonte después", () => {
   it("el umbral es el PRIMER campo de la tarjeta, en cualquier contexto", () => {
     // Va arriba porque en v2 es la restricción que DECIDE la fecha válida, no un corte de
     // semáforo: es el campo que más mueve el resultado de esta pantalla.
-    for (const strategy of STRATEGIES) {
-      for (const ruleKind of RULE_KINDS) {
-        const c = ctx({ strategy, ruleKind, hasPension: true, bridgeEnabled: true });
-        expect(cardIds("withdrawal", c)[0], `${strategy}/${ruleKind}`).toBe(
-          "success_threshold_pct",
-        );
-      }
+    for (const c of everyContext()) {
+      expect(cardIds("horizon", c), JSON.stringify(c)).toEqual([
+        "success_threshold_pct",
+        "horizon_lifespan_age",
+      ]);
     }
   });
 
@@ -532,72 +532,37 @@ describe("tarjeta «Retirada» — el umbral primero, y U4: UN solo porcentaje d
       expect(
         planFields(c).find((f) => f.id === "success_threshold_pct")?.card,
         strategy,
-      ).toBe("withdrawal");
+      ).toBe("horizon");
     }
   });
 
-  it("no existe ningún `withdrawal_pct` ni `hybrid_start_pct`: el porcentaje ES `swr_pct`", () => {
-    for (const ruleKind of RULE_KINDS) {
-      const list = ids(ctx({ ruleKind })) as string[];
-      expect(list).toContain("swr_pct");
-      expect(list).not.toContain("withdrawal_pct");
-      expect(list).not.toContain("hybrid_start_pct");
-      expect(list).not.toContain("guardrails_pct");
-    }
-  });
-
-  it("cada familia de regla añade SOLO sus parámetros propios", () => {
-    const expected: Record<WithdrawalRuleKindApi, PlanFieldId[]> = {
-      fixed_real: ["success_threshold_pct", "swr_pct", "withdrawal_rule_kind"],
-      percent_of_balance: [
-        "success_threshold_pct",
-        "swr_pct",
-        "withdrawal_rule_kind",
-        "spend_mode",
-      ],
-      hybrid: [
-        "success_threshold_pct",
-        "swr_pct",
-        "withdrawal_rule_kind",
-        "hybrid_end_pct",
-        "spend_mode",
-      ],
-      guardrails: [
-        "success_threshold_pct",
-        "swr_pct",
-        "withdrawal_rule_kind",
-        "guardrails_band_pct",
-        "guardrails_adjust_pct",
-        "spend_mode",
-      ],
-    };
-    for (const ruleKind of RULE_KINDS) {
-      expect(cardIds("withdrawal", ctx({ ruleKind })), ruleKind).toEqual(expected[ruleKind]);
-    }
-  });
-
-  it("«Cómo se aplica la regla» no existe con gasto fijo: no hay techo del que hablar", () => {
-    expect(isFieldVisible("spend_mode", ctx({ ruleKind: "fixed_real" }))).toBe(false);
-    for (const ruleKind of RULE_KINDS.filter((k) => k !== "fixed_real")) {
-      expect(isFieldVisible("spend_mode", ctx({ ruleKind })), ruleKind).toBe(true);
+  it("el horizonte aparece en las cuatro estrategias y va el ÚLTIMO", () => {
+    for (const strategy of STRATEGIES) {
+      const c = ctx({ strategy, hasPension: true });
+      expect(isFieldVisible("horizon_lifespan_age", c)).toBe(true);
+      expect(ids(c)[ids(c).length - 1]).toBe("horizon_lifespan_age");
     }
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-describe("tarjeta «Horizonte» — un campo, siempre", () => {
-  it("aparece en las cuatro estrategias y con cualquier regla, y va el ÚLTIMO", () => {
-    for (const strategy of STRATEGIES) {
-      for (const ruleKind of RULE_KINDS) {
-        const c = ctx({ strategy, ruleKind });
-        expect(isFieldVisible("horizon_lifespan_age", c)).toBe(true);
-        expect(ids(c)[ids(c).length - 1]).toBe("horizon_lifespan_age");
-      }
+describe("«solo SWR» — ni regla de retirada ni modo de gasto (2026-10-10)", () => {
+  it("ningún contexto pinta un campo de regla, ni existe la tarjeta «Retirada»", () => {
+    const retirados = [
+      "withdrawal_rule_kind",
+      "withdrawal_pct",
+      "hybrid_start_pct",
+      "hybrid_end_pct",
+      "guardrails_pct",
+      "guardrails_band_pct",
+      "guardrails_adjust_pct",
+      "spend_mode",
+    ];
+    for (const c of everyContext()) {
+      const list = ids(c) as string[];
+      for (const id of retirados) expect(list, `${id} @ ${JSON.stringify(c)}`).not.toContain(id);
     }
-  });
-
-  it("es lo único que lleva", () => {
-    expect(cardIds("horizon", ctx())).toEqual(["horizon_lifespan_age"]);
+    expect(PLAN_CARD_ORDER as readonly string[]).not.toContain("withdrawal");
   });
 });
 
@@ -608,11 +573,9 @@ describe("lo que el modelo v2 devolvió y lo que sigue sin volver", () => {
     // de semáforo fijo al 100 % (V7). En v2 es la restricción que decide la fecha válida y es del
     // usuario otra vez: 80–100, default 95.
     for (const strategy of STRATEGIES) {
-      for (const ruleKind of RULE_KINDS) {
-        for (const hasPension of [false, true]) {
-          const list = ids(ctx({ strategy, ruleKind, hasPension })) as string[];
-          expect(list, `${strategy}/${ruleKind}`).toContain("success_threshold_pct");
-        }
+      for (const hasPension of [false, true]) {
+        const list = ids(ctx({ strategy, hasPension })) as string[];
+        expect(list, strategy).toContain("success_threshold_pct");
       }
     }
   });
@@ -620,11 +583,9 @@ describe("lo que el modelo v2 devolvió y lo que sigue sin volver", () => {
   it("`cash_buffer_months` sigue sin salir en NINGÚN contexto (V6/M6)", () => {
     // Aquí no hubo indulto: M6 retiró el COLCHÓN como mecanismo del motor, no solo su campo.
     for (const strategy of STRATEGIES) {
-      for (const ruleKind of RULE_KINDS) {
-        for (const hasPension of [false, true]) {
-          const list = ids(ctx({ strategy, ruleKind, hasPension })) as string[];
-          expect(list, `${strategy}/${ruleKind}`).not.toContain("cash_buffer_months");
-        }
+      for (const hasPension of [false, true]) {
+        const list = ids(ctx({ strategy, hasPension })) as string[];
+        expect(list, strategy).not.toContain("cash_buffer_months");
       }
     }
   });
@@ -637,41 +598,38 @@ describe("lo que el modelo v2 devolvió y lo que sigue sin volver", () => {
     }
   });
 
-  it("tampoco existe una tarjeta «Riesgo»: el umbral vive en «Retirada», junto a la tasa", () => {
+  it("tampoco existe una tarjeta «Riesgo»: el umbral vive en «Horizonte y exigencia»", () => {
     expect(PLAN_CARD_ORDER as readonly string[]).not.toContain("risk");
     expect(
       planFields(ctx()).find((f) => f.id === "success_threshold_pct")?.card,
-    ).toBe("withdrawal");
+    ).toBe("horizon");
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-/** 4 estrategias × 2 pensiones × 2 fechas de nacimiento × 4 reglas × 2 modos de coast × 2 de
- *  media jornada × 2 del puente × 3 modos de gasto = 1.536 contextos. */
+/** 4 estrategias × 2 pensiones × 2 fechas de nacimiento × 2 modos de coast × 2 de media jornada
+ *  × 2 del puente × 3 modos de gasto = 384 contextos. */
 function* everyContext(): Generator<PlanFieldsContext> {
   for (const strategy of STRATEGIES) {
     for (const hasPension of [false, true]) {
       for (const hasBirthDate of [false, true]) {
-        for (const ruleKind of RULE_KINDS) {
-          for (const coastMode of COAST_MODES) {
-            for (const partialMode of PARTIAL_MODES) {
-              for (const bridgeEnabled of [false, true]) {
-                for (const fireNumberMode of [
-                  "annual_expense",
-                  "manual",
-                  "current_income",
-                ] as const) {
-                  yield ctx({
-                    strategy,
-                    hasPension,
-                    hasBirthDate,
-                    ruleKind,
-                    coastMode,
-                    partialMode,
-                    bridgeEnabled,
-                    fireNumberMode,
-                  });
-                }
+        for (const coastMode of COAST_MODES) {
+          for (const partialMode of PARTIAL_MODES) {
+            for (const bridgeEnabled of [false, true]) {
+              for (const fireNumberMode of [
+                "annual_expense",
+                "manual",
+                "current_income",
+              ] as const) {
+                yield ctx({
+                  strategy,
+                  hasPension,
+                  hasBirthDate,
+                  coastMode,
+                  partialMode,
+                  bridgeEnabled,
+                  fireNumberMode,
+                });
               }
             }
           }
@@ -682,7 +640,7 @@ function* everyContext(): Generator<PlanFieldsContext> {
 }
 
 describe("invariantes sobre TODO el producto cartesiano", () => {
-  it("`isFieldVisible` coincide con `planFields` para los 25 ids en todos los contextos", () => {
+  it("`isFieldVisible` coincide con `planFields` para los 20 ids en todos los contextos", () => {
     for (const c of everyContext()) {
       const list = new Set(planFields(c).map((f) => f.id));
       for (const id of ALL_FIELD_IDS) {
@@ -691,8 +649,8 @@ describe("invariantes sobre TODO el producto cartesiano", () => {
     }
   });
 
-  it("ningún id se repite, y todos salen del catálogo cerrado de 25", () => {
-    expect(new Set(ALL_FIELD_IDS).size).toBe(25);
+  it("ningún id se repite, y todos salen del catálogo cerrado de 20", () => {
+    expect(new Set(ALL_FIELD_IDS).size).toBe(20);
     const known = new Set<string>(ALL_FIELD_IDS);
     for (const c of everyContext()) {
       const list = planFields(c).map((f) => f.id);
@@ -701,7 +659,7 @@ describe("invariantes sobre TODO el producto cartesiano", () => {
     }
   });
 
-  it("los 25 ids del catálogo son alcanzables: ninguno es letra muerta", () => {
+  it("los 20 ids del catálogo son alcanzables: ninguno es letra muerta", () => {
     // El reverso del test anterior. Un id que la unión declara pero la tabla nunca produce es un
     // token huérfano que «parece vivo» y acaba usándose para otra cosa (precedente: `--proj-jub`).
     const seen = new Set<string>();
@@ -785,7 +743,6 @@ describe("planCardGroups — qué tarjetas se pintan de verdad", () => {
       "strategy",
       "spending",
       "pension",
-      "withdrawal",
       "horizon",
     ]);
   });
@@ -794,7 +751,7 @@ describe("planCardGroups — qué tarjetas se pintan de verdad", () => {
     expect(cardsPainted(ctx({ strategy: "asap", hasBirthDate: false }))).toContain("ages");
   });
 
-  it("«Media jornada» con pensión pinta las seis", () => {
+  it("«Media jornada» con pensión pinta las cinco", () => {
     expect(
       cardsPainted(ctx({ strategy: "partial", hasPension: true })),
     ).toEqual([...PLAN_CARD_ORDER]);
@@ -806,7 +763,6 @@ describe("requiredPlanFields — lo que el asistente de alta y el autosave pregu
   const rest: Omit<PlanFieldsContext, "strategy"> = {
     hasPension: false,
     hasBirthDate: true,
-    ruleKind: "fixed_real",
     fireNumberMode: "annual_expense",
     coastMode: "fixed_retirement_age",
     partialMode: "at_age",
@@ -887,17 +843,12 @@ describe("requiredPlanFields — lo que el asistente de alta y el autosave pregu
     ]);
   });
 
-  it("nunca devuelve un supuesto con default (los de «Retirada» y «Horizonte»)", () => {
+  it("nunca devuelve un supuesto con default (el SWR, el umbral y el horizonte)", () => {
     for (const strategy of STRATEGIES) {
-      for (const ruleKind of RULE_KINDS) {
-        const c = ctx({ strategy, ruleKind, hasPension: true });
-        const supuestos = new Set<string>([
-          ...cardIds("withdrawal", c),
-          ...cardIds("horizon", c),
-        ]);
-        for (const id of requiredPlanFields(strategy, { ...rest, ruleKind, hasPension: true })) {
-          expect(supuestos.has(id), id).toBe(false);
-        }
+      const c = ctx({ strategy, hasPension: true });
+      const supuestos = new Set<string>(["swr_pct", ...cardIds("horizon", c)]);
+      for (const id of requiredPlanFields(strategy, { ...rest, hasPension: true })) {
+        expect(supuestos.has(id), id).toBe(false);
       }
     }
   });
@@ -917,15 +868,6 @@ describe("planFieldsContextFromProfile — una sola derivación para todos los c
       success_threshold_pct: 95,
       coast_mode: "fixed_retirement_age",
       coast_stop_age: null,
-      withdrawal_rule: {
-        kind: "fixed_real",
-        pct: null,
-        start_pct: null,
-        end_pct: null,
-        band_pct: null,
-        adjust_pct: null,
-        spend_mode: "ceiling",
-      },
       pension: null,
       partial_retirement: null,
       ...over,
@@ -1004,16 +946,15 @@ describe("planFieldsContextFromProfile — una sola derivación para todos los c
     ).toBe(true);
   });
 
-  it("copia la regla, el modo del gasto y la fecha de nacimiento sin tocarlos", () => {
+  it("copia el modo del gasto y la fecha de nacimiento sin tocarlos", () => {
     const p = profile({
       strategy: "partial",
       partial_retirement: partial(),
       fire_number_mode: "manual",
-      withdrawal_rule: { ...profile().withdrawal_rule, kind: "guardrails" },
     });
     const c = planFieldsContextFromProfile(p, false);
     expect(c.strategy).toBe("partial");
-    expect(c.ruleKind).toBe("guardrails");
+    expect(c).not.toHaveProperty("ruleKind");
     expect(c.fireNumberMode).toBe("manual");
     expect(c.hasBirthDate).toBe(false);
   });
@@ -1022,11 +963,10 @@ describe("planFieldsContextFromProfile — una sola derivación para todos los c
     const c = planFieldsContextFromProfile(profile(), true);
     expect(ids(c)).toEqual([
       "fire_number_mode",
+      "swr_pct",
       "pension_amount",
       "pension_start_age",
       "success_threshold_pct",
-      "swr_pct",
-      "withdrawal_rule_kind",
       "horizon_lifespan_age",
     ]);
   });

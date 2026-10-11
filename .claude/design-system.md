@@ -280,8 +280,8 @@ claro qué representa cada cosa» (F6), «los tiles no muestran nada que la grá
   una de las **dos excepciones sancionadas** a los helpers canónicos (ver §Formateo de importes en
   charts). Los valores ya vienen deflactados, así que «En dinero de hoy» mueve el eje entero.
 - **`bandGradient?: RiskGradientStop[]`** — el relleno de la banda por probabilidad de FALLO
-  acumulada ([`lib/risk-gradient.ts`](../apps/web/src/lib/risk-gradient.ts), F1+F2+F3 desde el
-  modelo v2 — antes solo agotamiento). `<linearGradient>` con **`gradientUnits="userSpaceOnUse"`
+  acumulada ([`lib/risk-gradient.ts`](../apps/web/src/lib/risk-gradient.ts), F1+F2 desde el
+  modelo v2 — antes solo agotamiento; F3 se retiró con las reglas de retirada, 2026-10-10). `<linearGradient>` con **`gradientUnits="userSpaceOnUse"`
   obligatorio**: con el default (`objectBoundingBox`) el degradado se estiraría a la caja del
   `path` —que no empieza en `monthStart` ni acaba en `monthEnd`— y el mapeo mes→color se
   desplazaría sin que nada fallara. Los `<stop>` llevan `style={{ stopColor }}` porque el valor es
@@ -293,7 +293,7 @@ claro qué representa cada cosa» (F6), «los tiles no muestran nada que la grá
   plot, con halo (`.proj-mini-band-label`, `paint-order: stroke`). Se omiten **los dos** si los
   bordes distan < 14 px: media etiqueta rotularía el borde equivocado.
 - **`hoverLabel?: (month) => string | null`** — el porcentaje exacto por edad, con el reparto por
-  motivo (F1/F2/F3) entre paréntesis. Rect captor `fill="none" pointerEvents="all"` el ÚLTIMO del
+  motivo (F1/F2) entre paréntesis. Rect captor `fill="none" pointerEvents="all"` el ÚLTIMO del
   SVG, crosshair `--proj-crosshair` y texto con halo. Lo construye el llamante desde
   `failureProbabilityAtMonth`/`failureKindsAtMonth` (`lib/risk-gradient.ts`, renombradas de
   `depletionProbabilityAtMonth` con el modelo v2), **la misma función que colorea**: un tooltip
@@ -401,7 +401,7 @@ HTML normal —nunca dentro de un `<svg>`— con `flex-wrap` real.
 Desde U1b la sección «Riesgo» de Jubilación ya no es un panel con su propio chart: es un bloque
 **compacto** dentro del panel «Resultado», con todo lo de segundo orden plegado en «Detalle del
 cálculo» (el abanico vive en el chart único, ver §`MiniProjection` arriba). El modelo v2 le devolvió
-el umbral de éxito y le quitó el colchón — hoy son estas piezas, y ni una más:
+el umbral de éxito y le quitó el colchón; «solo SWR» (2026-10-10) le quitó además la cobertura — hoy son estas piezas, y ni una más:
 
 1. **El KPI «Éxito del plan»**, cuyo valor es «87,0 %» —un porcentaje con un decimal, como todo
    porcentaje de la casa—. En Jubilación **sin subtítulo** desde 2026-10-10 (el umbral está en el
@@ -413,16 +413,19 @@ el umbral de éxito y le quitó el colchón — hoy son estas piezas, y ni una m
    frase suelta en la vista): el semiancho de Wilson en PUNTOS PORCENTUALES — **nunca confundido
    con un `%`**: una barra de error en pp es una magnitud distinta de un porcentaje, y formatearla
    con el símbolo `%` multiplicaría la confusión por su propia escala.
-3. **Los fallos por tipo** (F1/F2/F3), solo cuando ha fallado alguien — si nadie falla, las tres
-   filas no se pintan (un `0 de 0` no informa).
-4. **La cobertura de tu gasto, corregida** (`months_below_need_p50`/`withdrawal_to_need_ratio_p50`):
-   se pintan con **todas** las reglas, `fixed_real` incluida.
-5. **El aviso «sin volatilidad declarada»**, intacto.
+3. **Los fallos por tipo** (F1 sin dinero · F2 tasa inicial), solo cuando ha fallado alguien — si
+   nadie falla, las filas no se pintan (un `0 de 0` no informa).
+4. **El aviso «sin volatilidad declarada»**, intacto.
+
+(Hasta 2026-10-10 había una quinta pieza, la cobertura del gasto —meses por debajo de la
+necesidad y fracción pagada—; se retiró con las reglas de retirada por saldo, que eran lo único que
+la hacía distinta de «todo cubierto».)
 
 **No hay línea de colchón**: el mecanismo se retiró ENTERO del motor y del crate estocástico (M6),
 no solo de este bloque — no hay nada que derivar ni que soltar con un PATCH. **No hay tarjeta
-«Riesgo»** en `PLAN_CARD_ORDER`: el umbral volvió al perfil (C3), pero a la tarjeta «Retirada»
-—`success_threshold_pct` es su primer campo—, no a una tarjeta `risk` resucitada.
+«Riesgo»** en `PLAN_CARD_ORDER`: el umbral volvió al perfil (C3), pero a una tarjeta del formulario —hoy
+«Horizonte y exigencia», donde `success_threshold_pct` es el primer campo—, no a una tarjeta `risk`
+resucitada.
 
 **Lo que se fue con la tercera vuelta de UX, y sigue sin volver:**
 
@@ -430,7 +433,7 @@ no solo de este bloque — no hay nada que derivar ni que soltar con un PATCH. *
   `App.css`). El owner: «los tiles de riesgo son inútiles: no muestran nada que la gráfica no
   muestre. Si la gráfica estuviera bien hecha no harían falta» (F7). Se cumplió la condición: el
   degradado de la banda dice lo mismo edad a edad y con más resolución, y el hover da el número
-  exacto (con el modelo v2, además por MOTIVO: F1/F2/F3). Lo único que el color NO puede rotular
+  exacto (con el modelo v2, además por MOTIVO: F1/F2). Lo único que el color NO puede rotular
   —el total acumulado al final del horizonte, porque su última parada cae en el borde del plot—
   vive en «Detalle del cálculo». **Si alguien propone volver a tabular el fallo, la pregunta es qué
   dice esa tabla que el color y el hover no digan ya.**
@@ -539,16 +542,16 @@ los helpers canónicos. Fuera de charts, la regla no tiene excepciones.
 Nacieron en V3 como sustitutas del acordeón «Avanzado» de U12, que el owner leyó como «un cajón de
 sastre mal explicado» (F10) y al que pidió «no tener miedo a hacer cuadros para cada cosa (pensión,
 gasto tras jubilación…) en vez de macrobloques confusos» (F9). El formulario de Jubilación es **un
-apartado por TEMA, todo a la vista**: Estrategia · Edades · Pensión · Gasto en jubilación · Retirada ·
-Horizonte.
+apartado por TEMA, todo a la vista**: Estrategia · Gasto en jubilación · Edades · Pensión · Horizonte y
+exigencia (cinco desde «solo SWR», 2026-10-10: «Retirada» se retiró con las reglas de retirada).
 
 **Lo que cambió el 2026-09-13** (informe del owner: «estos tiles dentro de tiles no los usamos en
-ningún lado, preferiría que cada apartado fueran tiles diferentes»): los seis temas eran
+ningún lado, preferiría que cada apartado fueran tiles diferentes»): los temas eran
 `.retirement-card` —cajas con borde, fondo un escalón por debajo y radio de KPI— **dentro** de un
 panel «Tu plan». Era el único anidamiento de ese tipo en la app: Ajustes son doce paneles hermanos
 (`grep -c 'className="panel"' apps/web/src/views/SettingsView.tsx`) y la propia columna «Resultado»
 separaba sus bloques con filete, no con cajas. Hoy **cada apartado es un `.panel` hermano** dentro de
-`.retirement-col--plan`, y el envoltorio se fue con su título: los seis títulos ya dicen qué es cada
+`.retirement-col--plan`, y el envoltorio se fue con su título: los títulos ya dicen qué es cada
 cosa y el indicador «Guardado» de la cabecera ata el conjunto. Se retiraron `.retirement-card`,
 `.retirement-card-grid` y `.retirement-card--wide`; el título de cada apartado subió de `<h4>` a
 `<h3 class="panel-title">`, que es la única escala de títulos que hay (P6).
@@ -573,11 +576,11 @@ idioma de toda la app (Resumen, Proyección, Movimientos).
   comparten todos los formularios y no se toca).
 - **Ni un párrafo bajo el título: el `<?>`** (2026-09-13 — «hay mucho plain text, y ya tenemos un
   mecanismo para dar explicaciones `<?>`, usémoslo»). `.retirement-plan-blurb` se retiró con la
-  frase que pintaba. Las seis frases **no se perdieron**: viven en el catálogo
+  frase que pintaba. Las frases **no se perdieron**: viven en el catálogo
   (`lib/helpTexts.ts`) y las pinta el `HelpPopover` del título, cableado por `PLAN_CARD_HELP`
-  (`lib/retirement-form.ts`); `PLAN_CARD_COPY` se queda solo con los títulos. Tres apartados
-  estrenaron entrada —`retirement.section_ages`, `…_spending`, `…_withdrawal`— y los otros tres
-  reutilizan la que ya describía su tema entero, con la sustancia de su frase fundida dentro
+  (`lib/retirement-form.ts`); `PLAN_CARD_COPY` se queda solo con los títulos. Dos apartados
+  estrenaron entrada —`retirement.section_ages`, `…_spending`; un tercero, `…_withdrawal`, murió con la
+  tarjeta «Retirada»— y los otros tres reutilizan la que ya describía su tema entero, con la sustancia de su frase fundida dentro
   (`retirement.strategy`, `retirement.pension`, `settings.horizon_age`). Con ellas se fueron
   **nueve `<small>`** de ayuda bajo campos, cuyo contenido ya estaba —o se fundió— en la entrada
   correspondiente.
@@ -585,7 +588,7 @@ idioma de toda la app (Resumen, Proyección, Movimientos).
 **Un `<?>` por texto distinto, en el sitio más alto que lo gobierna** (2026-09-13). No es solo
 que la prosa se mude al popover: es que **deja de haber un icono por campo**. Varios campos
 compartían entrada del catálogo y la pantalla pintaba el MISMO texto hasta cuatro veces en el mismo
-apartado — los cuatro de «Pensión», los tres del puente, los cuatro de la regla de retirada. Hoy
+apartado — los cuatro de «Pensión», los tres del puente, los cuatro de la regla de retirada (que ya no existe). Hoy
 ese `<?>` cuelga del título del apartado, o del rótulo de su sub-sección (`BRIDGE_SECTION_HELP`
 para «El puente hasta la pensión»), y el campo solo conserva icono propio si su texto es SUYO.
 `retirement-form.test.ts` fija las dos mitades de la regla —quién lo conserva y quién no debe
@@ -606,7 +609,7 @@ al tocar esta pantalla:
 - **Nombres cortos de estrategia**, una sola fuente (`RETIREMENT_STRATEGY_LABEL`,
   `lib/retirementProfile.ts`): «FIRE clásico · Edad fija · Coast FIRE · Barista FIRE». Los modos,
   igual de cortos: «Fijo la jubilación / Fijo cuándo dejo de aportar», «A una edad / En cuanto
-  pueda», «Techo / Es mi gasto». El asistente de alta conserva su blurb bajo el nombre corto.
+  pueda». El asistente de alta conserva su blurb bajo el nombre corto.
 - **La frase-hito es UNA línea** (`lib/plan-sentence.ts`): «Te jubilas en 2066 (63 años).». El
   éxito es su tarjeta; las fechas al 100/90 % son la sublínea de VALOR de «Fecha válida»
   («63 años · 100 %: 2074 · 90 %: 2050», `safeDateBoundsLine`). Las líneas por miembro del hogar
@@ -638,7 +641,7 @@ márgenes ad hoc a un banner concreto.
 
 **Esto es una EXCEPCIÓN declarada a §Paneles de Ajustes — norma de texto (4.0.6)**, que sigue
 vigente en Ajustes: allí un panel puede llevar su `<p class="muted">` de 1–2 frases y la ayuda de
-un campo puede ir en `<small>`. Jubilación tiene seis apartados con doce controles a la vista y esa
+un campo puede ir en `<small>`. Jubilación tiene cinco apartados con muchos controles a la vista y esa
 plantilla la convertía en un muro; Ajustes son paneles cortos que se leen de uno en uno. Si algún
 día Ajustes se armoniza también, esta excepción desaparece y la norma cambia — no al revés.
 
@@ -717,7 +720,7 @@ La respuesta, en una regla por hueco:
   uso de `@container` en la app**: si añades otro, este es el precedente.
 - **La excepción es una clase, no un `:has()`**: `BLOCK_FIELD` (`retirement-field--block`,
   `RetirementView.tsx`) marca el campo cuyo contenido es una rejilla o una pila propia —las tres
-  `retirement-mode-grid` y el `retirement-radio-stack` de `spend_mode`—, que se queda apilado porque
+  `retirement-mode-grid`—, que se queda apilado porque
   ahí el ancho no es aire: es lo que hace que el nombre y la frase de cada opción quepan en una
   línea. Va como clase para que el criterio se lea donde se decide.
 - **`.retirement-mode-grid` pasa a `auto-fit`** con mínimo 9 rem: las pistas vacías colapsan, así que
@@ -822,7 +825,7 @@ una tabla viva: sin consumidor solo podía envejecer. Registrado en `futurefin-f
 > caso «guardado» se queda en tinta muted a propósito (misma regla que el verde sin piel: el estado
 > normal no se tiñe).
 >
-> **`.retirement-radio-stack`** (radios nativos en línea, `<label class="field checkbox-field">` por opción, `role="radiogroup"` en el contenedor): existía en `App.css` **sin ningún consumidor** antes de 5.0.0. `9ae5c24` le dio dos —la base del objetivo (`perpetuity`/`bridge_to_pension`) y el `kind` de la regla de retirada—, y el **modelo de jubilación v2 (2026-09-06) se llevó el primero con el objetivo**: hoy queda UNO, el `spend_mode` de la regla de retirada en `RetirementView.tsx` (cuenta viva: `grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx`; si algún día imprime 0, la clase se retira de `App.css` como sus vecinas huérfanas). No lo confundas con el segmented: aquí el foco/tabulación son los `<input>` nativos, no un `role="group"` de botones.
+> **`.retirement-radio-stack`** (radios nativos en línea, `<label class="field checkbox-field">` por opción, `role="radiogroup"` en el contenedor): existía en `App.css` **sin ningún consumidor** antes de 5.0.0. `9ae5c24` le dio dos —la base del objetivo (`perpetuity`/`bridge_to_pension`) y el `kind` de la regla de retirada—, y el **modelo de jubilación v2 (2026-09-06) se llevó el primero con el objetivo**: quedó UNO, el `spend_mode` de la regla de retirada, y **«solo SWR» (2026-10-10) se lo llevó**: la clase ya no tiene consumidor y su regla CSS se borró de `App.css` (verificado: `grep -rn "retirement-radio-stack" apps/web/src` → vacío; esta nota es el único rastro, junto a la de `frontend-structure.md`). Si la necesitas otra vez, se redefine. No lo confundas con el segmented: aquí el foco/tabulación son los `<input>` nativos, no un `role="group"` de botones.
 
 ### Jubilación en dos columnas y sin parpadeo (W13 — informe del owner, 2026-09-07)
 
@@ -907,7 +910,7 @@ palmo y la línea pasó de atar a ser una reja.
 **Lo que NO se hizo, y por qué.** El encargo incluía «dejar solo los 6 interrogantes de apartado».
 No es construible sin pérdida: los 9 que cuelgan de campos apuntan a **nueve entradas distintas del
 catálogo** (`retirement.target_age`, `coast_mode`, `partial_mode`, `partial`, `success_threshold`,
-`settings.swr`, `withdrawal_rule`, `spend_mode`, `bridge_settings`), y quitar su único punto de acceso
+`settings.swr`, `bridge_settings` y —entonces, retiradas el 2026-10-10 con las reglas de retirada— `withdrawal_rule` y `spend_mode`), y quitar su único punto de acceso
 las deja huérfanas — el test bidireccional de `helpTexts.test.ts` obligaría a BORRAR nueve
 explicaciones vivas para que el catálogo siga cerrado. Se hizo lo que cumple la intención sin quemar
 documentación: quitarles el borde, que es lo que los hacía pesar.
@@ -979,7 +982,7 @@ sobra»). TODO panel de Ajustes sigue esta plantilla; si añades uno nuevo, cóp
    del modo ELEGIDO; la comparativa completa está en `settings.savings_source`).
    **Excepción declarada: Jubilación** (2026-09-13). Allí NO hay descripción bajo el título ni
    `<small>` de ayuda: toda explicación vive en el `<?>` del título del apartado. El motivo es de
-   densidad, no de estilo — seis apartados con doce controles a la vista convertían esta
+   densidad, no de estilo — cinco apartados con muchos controles a la vista (seis, hasta «solo SWR») convertían esta
    plantilla en un muro de texto. Ver §Un apartado, un panel.
 3. **Controles** después, separados con `bordered-top`. La ayuda de un campo concreto va en
    `<small className="muted">` dentro de su `label.field`.
@@ -1087,7 +1090,7 @@ cifras del plan en el Resumen), de la rama `release/5.0.0`, issue #207. Re-verif
 - Segmentado de la TopBar: `grep -n "ff-topbar-scope" apps/web/src/App.css apps/web/src/App.tsx`
 - Banner de ámbito, primer hijo de `<main>`: `grep -n "app-scope-banner" apps/web/src/App.css apps/web/src/App.tsx`
 - Banner de alta de Jubilación **retirado** (F5): `grep -c "retirement-intro-banner" apps/web/src/App.css apps/web/src/views/RetirementView.tsx` (**0** en los dos) y `ls apps/web/src/lib/retirement-intro.ts` debe FALLAR
-- `.retirement-radio-stack` tiene consumidores (cero antes de `9ae5c24`): `grep -c "retirement-radio-stack" apps/web/src/views/RetirementView.tsx` (≥1)
+- `.retirement-radio-stack` ya no existe (último consumidor retirado con «solo SWR», 2026-10-10): `grep -rn "retirement-radio-stack" apps/web/src` → vacío
 - Excepción de solo lectura en Movimientos: `grep -n "disabled={!canEdit" apps/web/src/views/GastosView.tsx`
 - Anclas actuales del freezer: `grep -n 'App.css:' apps/web/src/styles/no-hex-outside-theme.test.ts` — deben casar con `grep -n "rgba(0, 0, 0," apps/web/src/App.css`
 - Tira de fases (clases y tokens): `grep -n "projection-phase-band\|projection-phase-label\|projection-phase-mark-label" apps/web/src/App.css apps/web/src/views/ProjectionNetWorthChart.tsx apps/web/src/components/charts/MiniProjection.tsx`
@@ -1140,9 +1143,9 @@ D27 original (`.plan-card-grid`/`.plan-card`/`.plan-card-figures`) **se retiró 
 `MiniProjection`, la §Riesgo compacto reescrita, la norma de títulos P6 y la variante descartada del
 color. Re-verify with:
 
-- Los seis apartados tienen `<?>`: `grep -c "helpId:" apps/web/src/lib/retirement-form.ts` (**18** = 8 de `PLAN_FIELD_HELP` + 6 de `PLAN_CARD_HELP` + 1 del puente + las 3 anotaciones de tipo de las tres tablas) y `grep -n "PLAN_CARD_ORDER" -A 8 apps/web/src/lib/plan-fields.ts` (seis ids, `risk` NO está)
+- Los cinco apartados tienen `<?>`: `grep -c "helpId:" apps/web/src/lib/retirement-form.ts` (**14** el 2026-10-11 = 7 de `PLAN_FIELD_HELP` incluido el puente + 5 de `PLAN_CARD_HELP` + las 2 anotaciones de tipo de las dos tablas) y `grep -n "PLAN_CARD_ORDER" -A 8 apps/web/src/lib/plan-fields.ts` (cinco ids, `risk` NO está)
 - Ya no hay frases bajo el título: `grep -c "^    blurb:" apps/web/src/lib/retirement-form.ts` (**0** — anclado a la indentación de una entrada de tabla: un `grep -c "blurb"` a secas da 2, que son los dos comentarios que cuentan su retirada) y `grep -c "retirement-plan-blurb" apps/web/src/views/RetirementView.tsx` (**0**)
-- Ni `<small>` de ayuda en Jubilación: `grep -c '<small className="muted"' apps/web/src/views/RetirementView.tsx` (**1** — el único superviviente es `rulePctNote`, que es un ESTADO: dice que el porcentaje lo fijó la API, no explica el campo)
+- Ni `<small>` de ayuda en Jubilación: `grep -c '<small className="muted"' apps/web/src/views/RetirementView.tsx` (**0** desde «solo SWR»: el único superviviente era `rulePctNote`, un ESTADO —«fijado por API»—, que se fue con las reglas de retirada)
 - Las cuatro props nuevas del chart: `grep -n "yAxis?:\|bandGradient?:\|bandEdgeLabels?:\|hoverLabel?:" apps/web/src/components/charts/MiniProjection.tsx` (4 aciertos)
 - La invariante «sin ellas, byte a byte»: `grep -n "const padLeft = yAxis" apps/web/src/components/charts/MiniProjection.tsx` (degrada a `padX`)
 - El degradado usa `userSpaceOnUse` y el id prefijado: `grep -n "gradientUnits=\"userSpaceOnUse\"\|ff-risk-" apps/web/src/components/charts/MiniProjection.tsx`

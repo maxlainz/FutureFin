@@ -86,7 +86,7 @@ exception: it names a mechanism CI asserts, and it deliberately stops short of "
 
 | Claim you might be tempted to write | Minimum evidence required first |
 |---|---|
-| "Monte Carlo / percentile bands" | Engine module + tests proving seeded reproducibility AND zero-volatility degeneration to the deterministic series (item 6). **Estado 2026-09-03, tras el pase de correcciones de la revisión adversarial (commit `0668f37`, issue #207): CLAIMABLE.** La suite del crate estocástico está VERDE entera — 29 tests, 0 fallos (`cargo test -p futurefin-engine-stochastic 2>&1 \| grep "test result"` → 13 unitarios + 3 de `degeneration.rs` + 13 de `monte_carlo.rs`). Los tests que sostienen el claim: reproducibilidad por semilla (`mc_same_seed_bit_identical`), degeneración a la serie determinista con σ = 0 (`mc_zero_volatility_degenerates_to_deterministic`, más la puerta de aceptación `every_case_degenerates_from_decimal_to_floating_point` de `degeneration.rs`, que corre TODA la batería del motor, no un caso suelto), que no jubilarse nunca no cuenta como éxito (`mc_never_retiring_is_not_a_success`) y que la cobertura cuenta la necesidad que la cartera no pudo fundar, no solo lo que la regla rechazó (`mc_coverage_counts_the_need_the_portfolio_could_not_fund`). El test que fallaba —`mc_cash_buffer_changes_the_band_under_sequence_risk`, una predicción falsada, no un test flaky— no se relajó: el modelo del colchón tenía dos bugs (relleno anticipativo, colchón sin filtro de liquidez) y, corregidos, el test se rehízo como `mc_cash_buffer_protects_and_the_drag_is_what_costs`. Sigue habiendo letra pequeña que cualquier claim público debe llevar: sin autocorrelación entre meses, sin correlación imperfecta entre activos (un solo shock de mercado por mes), sin colas gruesas ni bootstrap histórico — declarado en el doc del módulo `mc`, no oculto |
+| "Monte Carlo / percentile bands" | Engine module + tests proving seeded reproducibility AND zero-volatility degeneration to the deterministic series (item 6). **Estado 2026-09-03, tras el pase de correcciones de la revisión adversarial (commit `0668f37`, issue #207): CLAIMABLE.** La suite del crate estocástico está VERDE entera — 29 tests, 0 fallos (`cargo test -p futurefin-engine-stochastic 2>&1 \| grep "test result"` → 13 unitarios + 3 de `degeneration.rs` + 13 de `monte_carlo.rs`). (**Corrección 2026-10-11**: el recuento y la lista de esta celda son los del 2026-09-03 y envejecieron. `mc_never_retiring_is_not_a_success` ya no existía ni en `release/5.0.0` — se fue con E9, cuando el mes forzado uniforme hizo imposible «no jubilarse nunca» dentro del sorteo; lo que hoy fija la definición de éxito es `mc_success_is_zero_failures_and_the_kinds_add_up` (éxito = cero fallos F1/F2, y `failures_by_kind` suma exactamente los caminos fallidos) junto con `mc_readings_are_the_same_for_every_trigger_now`. `mc_coverage_counts_the_need_the_portfolio_could_not_fund` se borró con «solo SWR» (2026-10-10), y los `mc_cash_buffer_*` con E3. Recuento estático de hoy, no un número congelado: `grep -c '#\[test\]' crates/engine-stochastic/src/*.rs crates/engine-stochastic/tests/*.rs \| awk -F: '{s+=$2} END{print s}'` → 94; verde o rojo solo lo dice `cargo test`.) Los tests que sostienen el claim: reproducibilidad por semilla (`mc_same_seed_bit_identical`), degeneración a la serie determinista con σ = 0 (`mc_zero_volatility_degenerates_to_deterministic`, más la puerta de aceptación `every_case_degenerates_from_decimal_to_floating_point` de `degeneration.rs`, que corre TODA la batería del motor, no un caso suelto). El test que fallaba —`mc_cash_buffer_changes_the_band_under_sequence_risk`, una predicción falsada, no un test flaky— no se relajó: el modelo del colchón tenía dos bugs (relleno anticipativo, colchón sin filtro de liquidez) y, corregidos, el test se rehízo como `mc_cash_buffer_protects_and_the_drag_is_what_costs`. Sigue habiendo letra pequeña que cualquier claim público debe llevar: sin autocorrelación entre meses, sin correlación imperfecta entre activos (un solo shock de mercado por mes), sin colas gruesas ni bootstrap histórico — declarado en el doc del módulo `mc`, no oculto |
 | "Deterministic / bit-exact projections" | **Parcialmente ganada en 5.0.0, y conviene decir por qué mitad.** Lo que existe y corre en CI son los **pines dorados** (`crates/engine/tests/golden_pins.rs`): hashean en SHA-256 el texto canónico de TODAS las salidas del motor por caso contra dos fixtures, y su control negativo (`the_hash_actually_notices_a_single_moved_decimal`) demuestra que la red no es decorativa. Eso prueba **reproducibilidad entre ejecuciones y entre versiones** sobre una batería fija. Lo que sigue sin existir es el **replay genérico** que esta fila pide —dos ejecuciones del mismo input arbitrario `assert_eq!`-idénticas, sobre entradas generadas, no fijadas—: eso es el ítem 1 (`prop_replay_bit_identical`). Reclama «reproducible sobre una batería pineada», no «bit-exacto para cualquier entrada». Contexto de CI: (`cargo test -p futurefin-engine --locked` — CI runs engine tests **and, since 4.0.0, the Postgres integration ones too** — job `integration`, `cargo test --workspace --locked` against a service Postgres; this parenthesis claimed the opposite until the Fase-7 sweep) |
 | "Property-tested engine invariants" | proptest suite merged and green (item 1), named properties listed in the CHANGELOG entry |
 | "Tax-aware withdrawals" | Engine drawdown tax model + regenerated parity fixture with both suites green (item 7) |
@@ -113,7 +113,7 @@ gates through `futurefin-mcp-parity` when executed.
 | 5 | Liability interest accrual (`RepaymentModel` + `apr_percent`) | 1 | High | — | — | **✅ Done — shipped 4.2.0** |
 | 6 | Monte Carlo percentile bands (seeded) | 1 | Med | High | High | **✅ Entregado 5.0.0** (crate `engine-stochastic` + puerta de degeneración + capa MC, WP6) — suite verde (29 tests, 0 fallos) tras el pase de correcciones de la revisión adversarial, reclamable |
 | 7 | Tax-aware drawdown path | 1 | Med | Med–High | Med | **✅ Entregado 4.10.0/#140 + 4.12.0/#178**; lo que queda abierto es la ORDENACIÓN tax-aware del drenaje |
-| 8 | Variable/dynamic SWR strategies | 1 | Low–Med | Med | Med | **✅ Entregado en 5.0.0** como reglas de retirada (4 reglas × 2 modos, Guyton-Klinger incluido) |
+| 8 | Variable/dynamic SWR strategies | 1 | Low–Med | Med | Med | **ABIERTO otra vez** — se implementó en 5.0.0-dev (4 reglas × 2 modos, Guyton-Klinger) y se **retiró antes de publicar** (2026-10-10, decisión «solo SWR»); mira la arqueología antes de reintroducirlo |
 | 9 | Multi-currency correctness | — | Low | High | Med | Demoted — see inventory |
 | 10 | MCP catalog context budget: descriptions done, `inputSchema` next | 3 | Med | Low | Low | Do next |
 
@@ -185,9 +185,10 @@ enum, que es la disciplina que el propio motor ya usa):
   == el primer mes de `Retired` en `phase_transitions`. Hay ya un test-ejemplo
   (`golden_pins.rs::the_phase_readings_agree_with_the_series_they_describe`); la versión property
   lo generalizaría a cualquier plan.
-- **I8 — el recorte no toca el balance.** `withdrawal_shortfall` puede ser cualquier cosa sin mover
-  `net_worth` ni `uncovered_deficit_total`. Es la separación de magnitudes de D22/D24, y es
-  exactamente el tipo de invariante que un test de ejemplo no cubre en todo su dominio.
+- **I8 — lo vendido más lo no financiado es la necesidad.** `withdrawal + unmet_need = need_net`
+  mes a mes. (HISTORIA — sustituido el 2026-10-10 (solo SWR): este ítem era «el recorte de la regla
+  no toca el balance» sobre `withdrawal_shortfall`, serie que ya no existe; la identidad que
+  sobrevive es la de arriba, y la ejercita `crates/engine/tests/fuzz_invariants.rs`.)
 - **I9 — monotonía de las fases.** `phase_transitions` es estrictamente creciente en mes y nunca
   retrocede de `Retired` a `Partial` ni a `Accumulating`.
 - **I10 — identidad del techo de aportación.** En un mes con sobrante > 0:
@@ -305,7 +306,7 @@ golden (`crates/engine/tests/golden_pins.rs` + los dos fixtures), y conviene no 
 (`SimAsset` does; check remaining structs) and the encrypted user-backup layer
 (`apps/api/src/handlers/backup_user/`) already ships `schema_version` + `app_version`
 (`export.rs:71`) — the manifest pattern to copy. **Ojo 5.0.0**: el input ganó `PhasePlan` (fases,
-pensión, regla de retirada, base del objetivo), así que un artefacto que no lo serialice entero no
+pensión, base del objetivo), así que un artefacto que no lo serialice entero no
 reproduce nada — y el `engine_version` del fixture golden es el patrón de versionado a copiar.
 
 **First three steps in this repo:**
@@ -441,7 +442,10 @@ is a tracked, tested simplification for a future release, not a gap in this one.
   `mc_cash_buffer_protects_and_the_drag_is_what_costs`, que separa el LASTRE de tener el colchón
   fuera del mercado (−7,9 pp) de la PROTECCIÓN de gastar de una reserva sin riesgo (+3,9 pp): con
   la cuenta a su rentabilidad real (0 %) el colchón sigue costando neto (−3,5 pp); al retorno de la
-  cartera, protege (+3,9 pp).
+  cartera, protege (+3,9 pp). (**Después**: el colchón entero se retiró en E3 del modelo v2 —la
+  caja es un activo más— y los dos `mc_cash_buffer_*` se borraron con él; la medición sobrevive en
+  `futurefin-fire-domain-reference` §4b como HISTORIA. Los recuentos de esta viñeta son del
+  2026-09-03.)
 - **Reclamable en público desde este pase** (tabla de claims, más arriba en este documento): la
   evidencia que la regla pide es la suite commiteada y verde, y ya lo está. **Comprueba el estado
   tú antes de citarlo**: `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"`.
@@ -455,10 +459,13 @@ covarianzas, y el sesgo es conservador); semilla estable por usuario
 jamás, porque quien nunca drena nunca se agota — medido en un hogar que cruza en el mes 655 de 840,
 0,960 publicado frente a 0,940 entre los que sí llegan a jubilarse, con el 33,1 % de los caminos
 sin jubilarse contando como éxito (hasta +6,8 pp de sesgo con SWR 6 %). Ahora `success_probability`
-exige jubilarse dentro del horizonte (o un trigger por edad) **y** no agotar la cartera;
-`never_retired_probability` y `success_given_retired` se publican al lado para separar «¿ocurre?»
-de «¿aguanta?». El recorte de una regla de retirada sigue publicado aparte y **sin contar como
-fracaso** (D22/D24 se mantiene en esa mitad). Las divergencias que todo esto acepta están
+exigía jubilarse dentro del horizonte (o un trigger por edad) **y** no agotar la cartera, con
+`never_retired_probability` y `success_given_retired` al lado para separar «¿ocurre?» de
+«¿aguanta?» — **HISTORIA desde E9 (modelo v2, 2026-09-06)**: todo plan se sortea con un mes de
+jubilación FORZADO, «no jubilarse nunca» dejó de ser un desenlace posible y los dos campos se
+retiraron; hoy éxito = cero fallos F1/F2 en el camino (`futurefin-fire-domain-reference` §4b). (HISTORIA — sustituido el 2026-10-10 (solo SWR): aquí había una frase sobre el recorte de una regla
+de retirada publicado aparte y sin contar como fracaso; las reglas ya no existen y los fallos son
+dos, F1 y F2.) Las divergencias que todo esto acepta están
 registradas en `financial-contracts.md` §4.
 
 **El «gated behind item 4» de esta sección ya no aplica**: item 4 (estrés determinista) sigue sin
@@ -538,26 +545,27 @@ capital-gains math already exists per asset: `SimAsset.purchase_price` (basis).
 today's model by exactly the hand-computed amount (±1 month), and disabling taxes reproduces the
 current series bit-exactly.
 
-### 8. Variable/dynamic SWR strategies — **✅ ENTREGADO en 5.0.0 (WP2)**
+### 8. Variable/dynamic SWR strategies — **ABIERTO otra vez (retirado antes de publicar, 2026-10-10)**
 
-Entregado, y con un nombre distinto del que esta sección usaba: no es un «SWR variable» —el SWR
-sigue dimensionando SOLO el objetivo— sino una **regla de retirada** por perfil
-(`RetirementProfile::withdrawal_rule` × `spend_mode`), simulada en el bucle
-(`crates/engine/src/withdrawal.rs`). Cuatro reglas: `fixed_real` (default, = el drenaje de 4.15.0),
-`percent_of_balance`, `hybrid` y **`guardrails`** (Guyton-Klinger 2006, con sus dos omisiones
-declaradas). Semántica en `futurefin-fire-domain-reference` §4b; contrato en
-`financial-contracts.md` §2.5.
+Historia corta: se implementó en 5.0.0-dev como **reglas de retirada** (`withdrawal_rule` ×
+`spend_mode`: `fixed_real`, `percent_of_balance`, `hybrid`, `guardrails` —Guyton-Klinger 2006—
+× `ceiling`/`rule_is_spend`) y se **retiró entero antes de publicar** por decisión del owner
+(«solo SWR»): el modelo de retirada vigente es la puerta de tasa inicial (F2) y, jubilado, vender lo
+que pide el gasto indexado. La medición que lo decidió —el modo de gasto no movía la fecha, ni F2,
+ni el capital necesario, ni el número FIRE; el % de la regla era siempre el SWR salvo por API; y el
+puente de pensión quedaba **neutralizado** bajo reglas por saldo porque F3 (con % heredado) ⊇ F2 en R
+y no miraba el puente— está en `futurefin-failure-archaeology` §1 fila 25 y §2.28 («Reglas de
+retirada por saldo y modo de gasto (5.0.0-dev), retiradas antes de publicar»).
 
-**La advertencia de esta sección era correcta y hay que conservarla, no borrarla**: sobre un camino
-determinista con rentabilidad > SWR la regla de prosperity dispara **todos los años** (ratchet), así
-que los guardarraíles **solo tienen sentido pleno con el ítem 6**. Eso va dicho en el `helpTexts` de
-la regla, donde lo lee el usuario, no solo aquí. Y sí hay UI: las cinco tarjetas de estrategia con
-formulario contextual (D26) — lo que esta línea desaconsejaba («do not build UI for it») se hizo a
-propósito, con la regla degenerando a los números de hoy por defecto.
+**Quien quiera reintroducir un SWR variable o guardarraíles debe leer esa entrada PRIMERO** y
+demostrar, con el mapa semántico de por medio, (a) que mueve una cifra que el usuario ve (fecha,
+capital necesario, probabilidad de éxito) y no solo la venta de meses de déficit, y (b) que no
+neutraliza el puente de pensión. El aviso técnico sigue en pie: sobre un camino determinista con
+rentabilidad > SWR la regla de prosperity dispara todos los años (ratchet), así que los guardarraíles
+solo tienen sentido pleno con el ítem 6 (Monte Carlo, ya entregado).
 
-**Lo que sigue abierto en esta dirección**: reglas basadas en CAPE u otra señal externa (exigirían
-un dato que la instalación no tiene), y medir el valor de cada regla con Monte Carlo — que es
-literalmente para lo que el ítem 6 existe.
+**Lo que sigue abierto en esta dirección**: todo — reglas por saldo, guardarraíles y reglas basadas en
+CAPE u otra señal externa (exigirían un dato que la instalación no tiene).
 
 ### 9. Multi-currency correctness — demoted
 
@@ -771,15 +779,17 @@ en otros cinco documentos (`futurefin-projection-realism-campaign`,
   `cargo test -p futurefin-engine-stochastic 2>&1 | grep "test result"` — **este último es el que
   decide si «Monte Carlo» es reclamable**: commiteada el 2026-09-03 en `ba6bdfe` y, tras el pase de
   correcciones de la revisión adversarial (`0668f37`, issue #207 cerrado), con **29 tests, 0
-  fallos** — reclamable hoy.
+  fallos** ese día — reclamable. El recuento de hoy (94 `#[test]` el 2026-10-11, por grep) no
+  sustituye a correr el comando.
 - **La puerta de degeneración es la evidencia de la mitad ya hecha**:
   `grep -n "const EUR_TOLERANCE\|fn every_case_degenerates_from_decimal_to_floating_point" crates/engine-stochastic/tests/degeneration.rs` (2 hits).
 - **El arnés golden es la mitad de «recomputable» del ítem 3**:
   `ls crates/engine/tests/fixtures/` (dos fixtures) y
   `grep -n "fn the_hash_actually_notices_a_single_moved_decimal" crates/engine/tests/golden_pins.rs`
   (el control negativo, sin el cual el pin sería decorativo).
-- **El ítem 8 está entregado**: `grep -n "enum WithdrawalRule" crates/engine/src/phases.rs` y
-  `grep -n "fn review_guardrails" crates/engine/src/withdrawal.rs`.
+- **El ítem 8 está abierto (retirado antes de publicar)**: ausencia, imprime OK si no queda rastro:
+  `! git grep -qE "enum WithdrawalRule|fn review_guardrails" -- crates apps && echo "OK: reglas de retirada retiradas"`;
+  y la única función viva de `withdrawal.rs`: `grep -n "fn monthly_allowance" crates/engine/src/withdrawal.rs`.
 - **El ítem 7 está entregado en su mitad fiscal, abierto en la de ORDENACIÓN**:
   `grep -n "fn gross_up_mixed_monthly" crates/engine/src/tax.rs` (existe ⇒ el drenaje tributa) y
   `grep -n -A6 "fn drain_order_g" crates/engine/src/sim_core.rs` (el orden sigue sin mirar la

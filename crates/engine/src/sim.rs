@@ -14,8 +14,8 @@
 //! # Por qué tipos MIRROR y no los públicos hechos genéricos
 //!
 //! Hacer genérico `PhasePlan` (con `M = Decimal` por defecto) habría ahorrado estas ~200 líneas,
-//! pero cambia la INFERENCIA de todos sus usos: `WithdrawalRule::FixedReal` deja de tener un tipo
-//! deducible por sí solo, y `apps/api` construye esos valores en decenas de sitios. La regla del
+//! pero cambia la INFERENCIA de todos sus usos: un literal como `PhasePlan::classic(..)` deja de
+//! tener un tipo deducible por sí solo, y `apps/api` construye esos valores en decenas de sitios. La regla del
 //! WP era que ningún ítem público del motor cambiara de forma. Los mirrors la cumplen sin
 //! discusión, y las conversiones son exhaustivas campo a campo: **olvidar un campo es un error de
 //! compilación**, no una divergencia silenciosa.
@@ -33,11 +33,11 @@ use rust_decimal::Decimal;
 use crate::money::MoneyOps;
 use crate::phases::{
     EngineWarning, ExpenseBasis, IncomePause, PartialPhase, PathFailure, PensionSchedule, Phase,
-    PhasePlan, RetirementTrigger, SpendMode, WithdrawalRule,
+    PhasePlan, RetirementTrigger,
 };
 use crate::projection::{
     AllocationCap, AllocationKind, AllocationRule, AllocationSkipReason, EarlyRepaymentEffect,
-    EngineError, FireNeed, FireTarget, FirstMonthAllocation, ProjectionInput,
+    FireNeed, FireTarget, FirstMonthAllocation, ProjectionInput,
     ProjectionLiabilityInput, ProjectionOutput, RepaymentModel, RuleOutcome, SimAsset,
 };
 use crate::tax::TaxBracket;
@@ -135,15 +135,6 @@ impl<M: MoneyOps> IncomePauseG<M> {
     }
 }
 
-/// Catálogo de reglas de retirada, en el tipo del núcleo. Gemelo de [`WithdrawalRule`].
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum WithdrawalRuleG<M> {
-    FixedReal,
-    PercentOfBalance { pct: M },
-    Hybrid { start_pct: M, end_pct: M },
-    Guardrails { pct: M, band_pct: M, adjust_pct: M },
-}
-
 /// El puente como tope de tasa inicial, en el tipo del núcleo. Gemelo de [`crate::BridgeCap`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BridgeCapG<M> {
@@ -191,8 +182,6 @@ pub struct PhasePlanG<M> {
     pub retirement_trigger: RetirementTrigger,
     pub partial: Option<PartialPhaseG<M>>,
     pub pension: Option<PensionScheduleG<M>>,
-    pub withdrawal: WithdrawalRuleG<M>,
-    pub spend_mode: SpendMode,
     pub income_retirement_monthly: M,
     pub expense_retirement_monthly: M,
     pub extra_monthly_withdrawal: M,
@@ -204,12 +193,6 @@ pub struct PhasePlanG<M> {
 }
 
 impl<M: MoneyOps> PhasePlanG<M> {
-    /// Puerta de entrada de las dos funciones que simulan: lo que el motor no sabe ejecutar NO
-    /// se ejecuta. Hoy solo rechaza PARÁMETROS imposibles de una regla de retirada.
-    pub(crate) fn ensure_supported(&self) -> Result<(), EngineError> {
-        crate::withdrawal::validate_rule(self.withdrawal)
-    }
-
     /// Techo de aportación EFECTIVO del mes `k` (1-based). `None` = sin techo. El corte de
     /// `contributions_stop_month` manda sobre el techo constante.
     pub(crate) fn contribution_cap_at(&self, k: u32) -> Option<M> {
@@ -425,8 +408,6 @@ pub struct SimOutput<M> {
     pub liquid_crossing_month_index: Option<u32>,
     pub phase_transitions: Vec<(Phase, u32)>,
     pub withdrawal: Vec<M>,
-    pub withdrawal_shortfall: Vec<M>,
-    pub withdrawal_excess: Vec<M>,
     pub unmet_need: Vec<M>,
     /// **Necesidad ORDINARIA del mes** (E1): `max(0, gasto + retirada extra − ingresos)`, con la
     /// pensión con fecha ya dentro de los ingresos y SIN servicio de deuda ni «Próximos».
@@ -455,8 +436,6 @@ impl<M: MoneyOps> From<&PhasePlan> for PhasePlanG<M> {
             retirement_trigger: p.retirement_trigger,
             partial: p.partial.map(PartialPhase::to_generic),
             pension: p.pension.map(PensionSchedule::to_generic),
-            withdrawal: p.withdrawal.to_generic(),
-            spend_mode: p.spend_mode,
             income_retirement_monthly: M::from_decimal(p.income_retirement_monthly),
             expense_retirement_monthly: M::from_decimal(p.expense_retirement_monthly),
             extra_monthly_withdrawal: M::from_decimal(p.extra_monthly_withdrawal),
@@ -610,8 +589,6 @@ impl From<SimOutput<Decimal>> for ProjectionOutput {
             liquid_crossing_month_index: o.liquid_crossing_month_index,
             phase_transitions: o.phase_transitions,
             withdrawal: o.withdrawal,
-            withdrawal_shortfall: o.withdrawal_shortfall,
-            withdrawal_excess: o.withdrawal_excess,
             unmet_need: o.unmet_need,
             pension_start_month_index: o.pension_start_month_index,
             partial_retirement_month_index: o.partial_retirement_month_index,
@@ -675,32 +652,6 @@ impl PartialPhase {
             start_month: self.start_month,
             income_monthly: M::from_decimal(self.income_monthly),
             expense_basis: self.expense_basis,
-        }
-    }
-}
-
-/// Gemelo de [`WithdrawalRule`] — la conversión que el mirror del plan usa, expuesta aparte
-/// porque los tests del módulo de reglas validan la regla PÚBLICA.
-impl WithdrawalRule {
-    pub(crate) fn to_generic<M: MoneyOps>(self) -> WithdrawalRuleG<M> {
-        match self {
-            WithdrawalRule::FixedReal => WithdrawalRuleG::FixedReal,
-            WithdrawalRule::PercentOfBalance { pct } => WithdrawalRuleG::PercentOfBalance {
-                pct: M::from_decimal(pct),
-            },
-            WithdrawalRule::Hybrid { start_pct, end_pct } => WithdrawalRuleG::Hybrid {
-                start_pct: M::from_decimal(start_pct),
-                end_pct: M::from_decimal(end_pct),
-            },
-            WithdrawalRule::Guardrails {
-                pct,
-                band_pct,
-                adjust_pct,
-            } => WithdrawalRuleG::Guardrails {
-                pct: M::from_decimal(pct),
-                band_pct: M::from_decimal(band_pct),
-                adjust_pct: M::from_decimal(adjust_pct),
-            },
         }
     }
 }

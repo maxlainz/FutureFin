@@ -160,7 +160,7 @@ cualquier cliente generado a partir de ella nacía sin enviar credencial ninguna
 | GET | `/v1/auth/me` | Current user info. `UserResponse` = `{id, username, birth_date?, has_password}`. **`has_password` es aditivo (5.0.0, issue #213)**: `false` = cuenta de identidad delegada (`users.password_hash IS NULL`). Viaja también en `login`, `register` y `POST /v1/auth/sso`; la SPA lo usa para decidir qué contraseña pide el modal de exportar `.ffbackup`. |
 | PATCH | `/v1/auth/me` | Update `birth_date` |
 | GET | `/v1/auth/me/retirement-profile` | **5.0.0**. Perfil de jubilación **del usuario de la sesión**, ya resuelto (defaults + clamps), más su `birth_date`: `{profile: {...}, birth_date}`. |
-| PATCH | `/v1/auth/me/retirement-profile` | **5.0.0**. Merge campo a campo, **tri-estado** (omitir = no cambiar; `null` = borrar; **excepción**: `withdrawal_rule: null` equivale a omitir — la regla siempre existe y se vuelve a la de fábrica mandando `{"kind": "fixed_real"}`). Acepta también `birth_date` (misma columna que `PATCH /v1/auth/me`). **Cualquier rol puede editar el SUYO**, `viewer` incluido. Invalida la proyección (el perfil es input del motor). |
+| PATCH | `/v1/auth/me/retirement-profile` | **5.0.0**. Merge campo a campo, **tri-estado** (omitir = no cambiar; `null` = borrar). `withdrawal_rule` **ya no existe** (decisión «solo SWR», 2026-10-10): el cuerpo no lleva `deny_unknown_fields`, así que mandarla no rompe —la clave se ignora como cualquier desconocida— y un cuerpo que SOLO la trae es **400 `patch_empty`**, no un 200 que finja haber guardado una regla. Acepta también `birth_date` (misma columna que `PATCH /v1/auth/me`). **Cualquier rol puede editar el SUYO**, `viewer` incluido. Invalida la proyección (el perfil es input del motor). |
 
 #### Perfil de jubilación por usuario (`/v1/auth/me/retirement-profile`) — **5.0.0**, D13
 
@@ -186,10 +186,10 @@ Forma (todas las claves opcionales en el wire):
 | `success_threshold_pct` | `[80, 100]`, default **95** | **Load-bearing desde v2** (M2/C3) — entre V7 y v2 se «aceptaba y se ignoraba». Es la restricción que decide la fecha válida: el primer mes en que al menos ese % de los caminos llega al horizonte sin volver a trabajar. `100` = cero fallos de N. Fuera de rango: **400 `success_threshold_out_of_range`** (antes, un 200 silencioso) |
 | `coast_mode` | `fixed_retirement_age` (default) · `fixed_stop_age` | M10. Modo A: fijo la edad de jubilación y el solver busca el PRIMER mes en que puedo dejar de aportar. Modo B: fijo cuándo dejo de aportar y la fecha la decide el umbral — ahí `target_retirement_age` deja de ser obligatoria y `coast_stop_age` pasa a serlo (`coast_stop_age_required`) |
 | `coast_stop_age` | `[18, target_retirement_age` o `horizon]`, tri-estado | `coast_stop_age_out_of_range`. Dato en el modo B, LECTURA en el modo A |
-| `withdrawal_rule` | `{kind, pct?, start_pct?, end_pct?, band_pct?, adjust_pct?, spend_mode}` (+ `pct_source` **solo salida**) | Se sustituye ENTERA. **`pct` (`percent_of_balance`, `guardrails`) y `start_pct` (`hybrid`) son OPCIONALES desde 5.0.0/U4 y, ausentes, HEREDAN `swr_pct`** (ver abajo). Siguen siendo obligatorios `end_pct` en `hybrid` (< el `start_pct` **resuelto**) y `band_pct`+`adjust_pct` en `guardrails`. `pct` en `(0,20]`, banda/ajuste en `(0,50]`; el % EFECTIVO —heredado o no— es el que se acota |
 | `pension` | `{monthly_amount_today > 0, starts_at_age ∈ [50, horizon], indexed=true, fraction_while_partial ∈ [0,1], bridge_enabled=false, bridge_max_pct?, bridge_max_years?}` | Se sustituye ENTERA. **Es un flujo de caja** (M4): no descuenta ningún objetivo. `fraction_while_partial` sigue en `0` por defecto porque **por defecto no se supone que cobres pensión mientras trabajas a jornada reducida** — súbelo si tu régimen te la paga (no es una regla legal: es el supuesto conservador, B9) |
 | `pension.bridge_*` | `bridge_enabled` (default `false`), `bridge_max_pct ∈ (swr_pct, 20]`, `bridge_max_years ∈ [1, 20]` | **El puente (C2/C7): un ajuste, no una estrategia**, disponible con cualquiera. Encendido, el tope de la tasa inicial en el mes de jubilación es `bridge_max_pct` en vez del SWR mientras la pensión llegue dentro de `bridge_max_years`, y la fecha nunca es anterior a `pensión − años máximos`. **Al encenderlo sin números se rellenan `max(5, swr + 1)` % y 7 años** —derivados en LECTURA, así que mover el SWR mueve el tope—. Códigos: `bridge_max_pct_out_of_range`, `bridge_max_pct_not_above_swr`, `bridge_max_years_out_of_range` |
 | `partial_retirement` | `{starts_at_age? ∈ [18, horizon], income_monthly_today ≥ 0, expense_basis, mode}` | Se sustituye ENTERA. `mode`: `at_age` (default) · `asap` (M11). **`starts_at_age` es opcional desde v2**: con `asap` la calcula el solver; con `at_age` falta ⇒ `partial_start_age_required`. Debe empezar ANTES de `target_retirement_age` cuando las dos existen (`partial_not_before_retirement`) |
+| ~~`withdrawal_rule`~~ | **retirado el 2026-10-10 («solo SWR»)** | No se publica (ni como `null`), no se acepta en el PATCH (se ignora; sola ⇒ `patch_empty`) y no llega al motor. El modelo de retirada es ÚNICAMENTE la puerta de tasa inicial sobre `swr_pct` (o `bridge_max_pct` con el puente) y, jubilado, la venta de lo que el gasto indexado necesita. Un JSONB que la conserve sigue cargando (`RetirementProfile` sin `deny_unknown_fields`) y la clave no se re-emite; la migración `20261010130000_drop_stored_withdrawal_rule.sql` la borra del almacén. Códigos retirados con ella: `withdrawal_pct_out_of_range`, `withdrawal_pct_required`, `withdrawal_band_out_of_range`, `hybrid_end_pct_not_below_start`, `withdrawal_rule_kind`, `spend_mode` |
 | ~~`target_basis`~~, ~~`bridge_discount_basis`~~, ~~`cash_buffer_months`~~ | **retirados en v2** (M4/M6) | No se publican (ni como `null`) y no se aceptan como elección. **Un JSONB viejo que los conserve sigue cargando**: `RetirementProfile` no lleva `deny_unknown_fields`, así que las tres claves se ignoran solas y desaparecen en la primera escritura. La migración `20260906091500_drop_stored_success_threshold.sql` las borra del almacén. **Los cinco códigos que retira v2** (los dos que comparten nombre con un campo de arriba, más los tres que no tenían campo homónimo): `target_basis`, `bridge_discount_basis`, `bridge_discount_out_of_range`, `cash_buffer_out_of_range`, `pension_required_for_bridge` — ninguno debe seguir en `tests/fixtures/error-codes.json` (`error_codes_parity.rs::no_retired_code_survives_in_the_fixture`) |
 
 **Respuesta de las dos rutas** (`RetirementProfileResponse`): `{profile, birth_date}`.
@@ -217,33 +217,28 @@ idéntica al default de hoy, pero congelada el día que el default se mueva. Bor
 el default**. Test: `retirement_profile.rs::the_migration_drops_the_deprecated_threshold` (ejecuta
 el fichero de migración TAL CUAL, vía `include_str!`).
 
-**U4 — el porcentaje de retirada es ÚNICO (5.0.0, decisión del owner).** `swr_pct` es el tope de
-venta anual **y** es el porcentaje de las reglas de retirada basadas en saldo. Por eso
-`withdrawal_rule.pct` y `withdrawal_rule.start_pct` dejaron de ser obligatorios: ausentes se
-resuelven a `swr_pct` (mismo `Decimal`, mismos clamps) en **`resolve_withdrawal_rule`**, el
-resolvedor ÚNICO por el que pasan las cuatro superficies que consumen la regla — el perfil que
-publican `GET`/`PATCH`, el `PhasePlan` de `handlers/projection.rs`
-(`withdrawal_rule_to_engine`), `GET /v1/projection/bands` y el `profile_overrides` de
-`simulate_projection`. Con dos resolvedores, «único» valdría en el formulario y otra cosa en el
-chart.
+**«Solo SWR» (2026-10-10, decisión cerrada del owner) — no hay regla de retirada que elegir.**
+`swr_pct` es la tasa de retirada INICIAL máxima: en el mes de jubilación R, el gasto ordinario
+anual neto de rentas y pensión tiene que caber en `swr_pct` % × líquido(R−1) —o en
+`bridge_max_pct` si el puente aplica— (fallo **F2**, `initial_rate_exceeded`, evaluado solo en R);
+y desde ahí se vende cada mes lo que el gasto indexado necesita (`gross_up(need_net)`, el antiguo
+camino `fixed_real`, el drenaje de 4.15.x). Quedan dos motivos de fallo: **F1**
+(`portfolio_depleted`) y **F2**. Re-verificación (ausencias explícitas):
+`! git grep -qE "withdrawal_rule|resolve_withdrawal_rule|pct_source" -- apps/api/src/handlers/projection.rs apps/api/src/handlers/projection_bands.rs && echo "OK: la regla no llega al motor"`
+y `the_migration_drops_the_stored_withdrawal_rule` / `a_patch_with_only_the_retired_withdrawal_rule_is_patch_empty`
+en `apps/api/tests/retirement_profile.rs`.
 
-- **`withdrawal_rule.pct_source`** (`swr` | `explicit`) es **aditivo y solo de salida**: dice de
-  dónde salió el porcentaje. Se ignora en la entrada y **no se persiste** en el JSONB, así que la
-  herencia se resuelve en cada lectura — mover el `swr_pct` mueve el % de la regla. En
-  `fixed_real` **no viaja** (ausente, ni siquiera `null`): esa regla no tiene porcentaje, y
-  publicar uno sugeriría que hay un % en juego.
-- **Un valor explícito se sigue honrando y gana** (compatibilidad: el wire de 4.15.x y las tools
-  MCP no se rompen).
-- **Cómo se SUELTA un `pct` explícito**: `withdrawal_rule` se sustituye ENTERA, así que mandar el
-  objeto sin la clave `pct` ya la borra y el porcentaje vuelve a heredarse. No hay `clear_pct` ni
-  hace falta.
-- **Cota con `swr_pct = 0`**: la validación corre sobre el % EFECTIVO, así que una regla basada en
-  saldo sin `pct` propio da **400 `withdrawal_pct_out_of_range`**. Un plan que retira 0 % no es un
-  plan, y aceptarlo devolvería una simulación que no vende nada sin decir por qué.
-- Tests: `retirement_profile.rs::a_withdrawal_pct_left_out_inherits_the_swr_and_declares_it`,
-  `::a_hybrid_without_start_pct_compares_end_pct_against_the_swr` y —la prueba de que la herencia
-  llega al MOTOR y no solo al formulario—
-  `projection_strategies.rs::an_omitted_withdrawal_pct_reaches_the_engine_as_the_swr`.
+> **HISTORIA — sustituido el 2026-10-10 (solo SWR).** Entre U4 (5.0.0-dev) y esa fecha el perfil
+> llevaba `withdrawal_rule {kind, pct?, start_pct?, end_pct?, band_pct?, adjust_pct?, spend_mode}`
+> con cuatro reglas (`fixed_real`, `percent_of_balance`, `hybrid`, `guardrails`) y dos modos de
+> gasto (`ceiling`, `rule_is_spend`). U4 hizo que `pct`/`start_pct` ausentes heredaran `swr_pct`
+> en un resolvedor único (`resolve_withdrawal_rule`) y publicó `pct_source` (`swr` | `explicit`)
+> solo de salida. Por qué se retiró todo (medido): el modo de gasto no movía la fecha, ni la tasa
+> inicial, ni el capital necesario; el % de la regla era siempre el SWR salvo por API; y con el %
+> heredado el fallo de la regla (F3, `rule_below_need`) contenía al de la tasa inicial en R **sin
+> mirar el puente**, así que lo neutralizaba. Los tests de aquella herencia
+> (`a_withdrawal_pct_left_out_inherits_the_swr_and_declares_it`,
+> `an_omitted_withdrawal_pct_reaches_the_engine_as_the_swr`) se fueron con ella.
 
 **S4 murió con `target_basis` (M4).** La regla «quitar la pensión suelta la base almacenada» existía
 porque la base del objetivo se derivaba de si había pensión; en v2 no hay base del objetivo que
@@ -255,8 +250,9 @@ defaults del puente (`max(5, swr+1)` %, 7 años) los pone `resolve_*` al LEER, a
 el resuelto los persistiría como si el usuario los hubiera escrito — y mover el `swr_pct` dejaría de
 mover un tope que nadie eligió. Vale para cualquier campo derivado futuro.
 
-**Estado del perfil frente al motor**: los cuatro ejes movidos, las fases y las reglas de retirada
-se simulan (WP2/WP3/WP5); la proyección lee el perfil del solicitante y, en `household`, corre una
+**Estado del perfil frente al motor**: los cuatro ejes movidos, las fases y la puerta de tasa
+inicial se simulan (WP2/WP3/WP5; las reglas de retirada que también se simulaban se retiraron el
+2026-10-10, «solo SWR»); la proyección lee el perfil del solicitante y, en `household`, corre una
 simulación por miembro. La frase de WP4 que decía que «el motor todavía no simula las fases ni las
 reglas» dejó de ser cierta y se retira aquí para no propagarla.
 
@@ -986,11 +982,11 @@ Response (`ProjectionSeriesResponse`) includes:
   - `warnings[]` — literales cerrados: `birth_date_missing` / `target_retirement_age_missing` (falta el dato que la estrategia por edad necesita); `strategy_pension_bridge_migrated` (C7); `pension_unpaid_during_partial` (B9: la pensión empieza DENTRO de la media jornada y `fraction_while_partial` es 0 — el supuesto conservador por defecto, que se avisa en vez de cambiarse); `no_volatility_declared` (C5: ningún activo líquido declara σ, así que los miles de caminos son el MISMO camino y el éxito solo puede valer 0 o 1 — aviso, **no bloqueo**); `coast_not_reachable`, `partial_never_starts`, `partial_never_fully_retires`, `retire_at_age_underfunded` (del solve estocástico); `partial_phase_capital_shrinking` (del bucle). **Nunca un 500 en una lectura**; en `household` va vacío y los avisos viajan por miembro.
   - **Un solo trigger, y SIEMPRE forzado**: el `PhasePlan` que sale del ensamblado lleva siempre `RetirementTrigger::AtMonth` y `crossing_is_reading_only: true`. El mes lo pone el plan (el umbral o la edad) o, sin plan, **`horizonte + 1`** — «no se jubila dentro del horizonte», que es la línea honesta y no una fecha inventada (C5). Consecuencia observable: **un `?months=` publica la trayectoria SIN jubilarse**, con `plan_absent_reason: "months_override"`. Pin: `projection_strategies.rs::the_engine_always_receives_a_forced_month`.
   - `R` = `months_until_target_age(hoy, DOB, edad) + 1` (mes del bucle), definido sobre `age_completed_years` + `proj_add_months` — la aritmética que ya publica `jubilacion_age`—, lo que compra un invariante comprobable: **`jubilacion_age == target_retirement_age` exactamente**. Tests: `apps/api/tests/projection_age_strategy.rs`.
-  - La **regla de retirada** y su `spend_mode` se pasan desde el perfil (`withdrawal_rule_to_engine`, traducción total sin brazo comodín). Con `fixed_real` (el default) es bit-idéntico a 4.15.x; las otras tres se simulan desde WP2. **U4**: el `pct`/`start_pct` que llega al `PhasePlan` es el RESUELTO —`withdrawal_rule_to_engine` llama a `resolve_withdrawal_rule` con el `swr_pct` del perfil—, así que la herencia llega al motor y no solo al formulario (pin: `projection_strategies.rs::an_omitted_withdrawal_pct_reaches_the_engine_as_the_swr`).
+  - **No hay regla de retirada que pasar** (decisión «solo SWR», 2026-10-10): el `PhasePlan` ya no tiene `withdrawal`/`spend_mode`, y jubilado el bucle vende cada mes `gross_up(need_net)` — el antiguo camino `fixed_real`, bit-idéntico a 4.15.x. *HISTORIA — sustituido el 2026-10-10 (solo SWR)*: hasta esa fecha el ensamblado traducía `withdrawal_rule` del perfil (`withdrawal_rule_to_engine`, con el `pct` RESUELTO por U4) y el motor simulaba además `percent_of_balance`, `hybrid` y `guardrails`.
   - **La puerta de tasa inicial entra SIEMPRE que haya SWR** (C1/C2): `phase_plan.initial_rate = Some(InitialRateGate { swr_pct, bridge })`, con `bridge` solo si la pensión con fecha se resolvió y `bridge_enabled`. No es un ajuste opcional: es el modelo — el SWR dejó de dimensionar un objetivo y pasa a ser la tasa de retirada INICIAL máxima, evaluada UNA vez en el mes en que el hogar se jubila. `None` solo con `swr_pct <= 0`: una puerta con tope 0 tumbaría todos los caminos por F2.
   - **S8 — el modo del número FIRE gobierna el GASTO que el bucle drena**, no solo un escalar: con `manual` el gasto de jubilación es `fire_number_manual_amount / 12` (bruto: los ingresos que persisten lo cubren en parte, igual que con el gasto del ledger) y con `current_income` es el ingreso regular de hoy. Con `annual_expense` (el default) sigue mandando el gasto de jubilación del ledger, y ni un hogar de 4.15.x ve moverse su serie. Hasta 4.15.x el modo solo dimensionaba un objetivo y el bucle drenaba siempre el gasto del ledger: un usuario que declaraba «quiero vivir con 40.000 € al año» veía ese número en la tarjeta y se simulaba gastando otra cosa.
-- `points[].withdrawal` / `withdrawal_shortfall` / `withdrawal_excess` (5.0.0, §B.8) — **flujos del MES**, no acumulados, serializados como `f64` como el resto de la serie y decimados por densidad igual que `net_worth`. `withdrawal` = los euros que salieron de los activos para cubrir el déficit (NETOS: el impuesto de la plusvalía se paga vendiendo de más, y ese exceso vive dentro del patrimonio); `withdrawal_shortfall` = `max(0, necesidad − permitido)` — **informativo**, no resta patrimonio, no cuenta como fracaso (D22/D24) y **no es** `uncovered_deficit_total`, que mide lo que los activos no pudieron vender; `withdrawal_excess` = el sobrante de la regla en modo `rule_is_spend`. Los dos últimos son **todo ceros con `fixed_real`** —que no tiene techo que recortar ni exceso que gastar—, y los llenan las otras tres reglas (WP2). Pin: `projection_number_semantics.rs::the_withdrawal_series_are_monthly_flows_and_the_positions_index_the_arrays`.
-- **`points[].unmet_need` (5.0.0, pase de correcciones de la revisión adversarial)** — **el gasto del MES que los activos no pudieron financiar**, neto y `≥ 0`: el incremento mensual de `uncovered_deficit_total`. Mismo tratamiento que sus vecinos (f64 chart-only, misma decimación por densidad); `0` en el índice 0 —que es el estado de hoy, no un mes simulado— y en todo mes que la cartera pagó entero. **No se publica en `members[].series`**, que sigue siendo mínima (patrimonio + líquido). **Son TRES magnitudes por mes y no dos**, y confundirlas fue el hallazgo B2 de la revisión: `withdrawal` es lo que se OBTUVO, `withdrawal_shortfall` lo que la REGLA rechazó y `unmet_need` lo que la CARTERA no pudo dar; su suma es la necesidad neta del mes (la identidad exacta —con el `withdrawal_excess` de `rule_is_spend` RESTANDO, porque es gasto discrecional que ya viaja dentro de `withdrawal`— está en [`engine.md`](engine.md), y la comprueba `crates/engine/tests/fuzz_invariants.rs` sobre 1.500 hogares aleatorios). Sin esta tercera columna cualquier cociente de cobertura miente **justo en el caso que importa** —la cartera agotada—, porque con `fixed_real` el recorte de la regla es cero por construcción: es la misma corrección que arregló `withdrawal_to_need_ratio_p50` en `/v1/projection/bands`. El motor conserva en su acumulador el operando literal de 4.15.0 —`after_tax(gross_up(n))` devuelve `n` solo hasta el redondeo a 28 dígitos—, así que su serie llega con una polvareda de ±1e-25 € **incluso en un hogar perfectamente solvente** (medido: 7 de 66 puntos en el arnés de `mcp_simulate`). **Lo que se publica va clampado a 0 Y redondeado a la escala monetaria** (`money_out`, 4 decimales), a diferencia de sus tres vecinos, que viajan crudos: es la única columna del punto cuyo SIGNO se lee como un veredicto —«este mes no se cubrió»—, y servir la polvareda encendería meses en rojo al azar. `> 0` significa euros de verdad. El motor no puede clamparla (movería el pin dorado); quien publica, sí. Pins: `projection_number_semantics.rs::unmet_need_is_non_negative_starts_at_zero_and_adds_up_to_the_uncovered_total` (incluida la identidad Σ mensual = `uncovered_deficit_total`) y su espejo solvente.
+- `points[].withdrawal` (5.0.0, §B.8) — **flujo del MES**, no acumulado, serializado como `f64` como el resto de la serie y decimado por densidad igual que `net_worth`: los euros que salieron de los activos para cubrir el déficit (NETOS: el impuesto de la plusvalía se paga vendiendo de más, y ese exceso vive dentro del patrimonio). Pin: `projection_number_semantics.rs::the_withdrawal_series_are_monthly_flows_and_the_positions_index_the_arrays`. *HISTORIA — sustituido el 2026-10-10 (solo SWR)*: el punto llevaba dos columnas más, `withdrawal_shortfall` (lo que la REGLA rechazaba, informativo) y `withdrawal_excess` (el sobrante de `rule_is_spend`); todo ceros con `fixed_real`, se retiraron con las reglas. Ausencia: `! grep -qE 'withdrawal_shortfall|withdrawal_excess' apps/web/src/api/types.ts && echo OK`.
+- **`points[].unmet_need` (5.0.0, pase de correcciones de la revisión adversarial)** — **el gasto del MES que los activos no pudieron financiar**, neto y `≥ 0`: el incremento mensual de `uncovered_deficit_total`. Mismo tratamiento que sus vecinos (f64 chart-only, misma decimación por densidad); `0` en el índice 0 —que es el estado de hoy, no un mes simulado— y en todo mes que la cartera pagó entero. **No se publica en `members[].series`**, que sigue siendo mínima (patrimonio + líquido). **Son DOS magnitudes por mes** (eran tres hasta el 2026-10-10, con el recorte de la regla): `withdrawal` es lo que se OBTUVO y `unmet_need` lo que la CARTERA no pudo dar; la identidad `withdrawal + unmet_need = need_net` la comprueba `crates/engine/tests/fuzz_invariants.rs` sobre hogares aleatorios (detalle en [`engine.md`](engine.md)). Sin esta columna, cualquier lectura de «cuánto gasto se cubrió» mentiría **justo en el caso que importa** —la cartera agotada—. El motor conserva en su acumulador el operando literal de 4.15.0 —`after_tax(gross_up(n))` devuelve `n` solo hasta el redondeo a 28 dígitos—, así que su serie llega con una polvareda de ±1e-25 € **incluso en un hogar perfectamente solvente** (medido: 7 de 66 puntos en el arnés de `mcp_simulate`). **Lo que se publica va clampado a 0 Y redondeado a la escala monetaria** (`money_out`, 4 decimales), a diferencia de sus tres vecinos, que viajan crudos: es la única columna del punto cuyo SIGNO se lee como un veredicto —«este mes no se cubrió»—, y servir la polvareda encendería meses en rojo al azar. `> 0` significa euros de verdad. El motor no puede clamparla (movería el pin dorado); quien publica, sí. Pins: `projection_number_semantics.rs::unmet_need_is_non_negative_starts_at_zero_and_adds_up_to_the_uncovered_total` (incluida la identidad Σ mensual = `uncovered_deficit_total`) y su espejo solvente.
 - `members[]` (5.0.0, D9) — vacío en `mine`, una fila por miembro en `household`. Ver el bloque de agregación de arriba.
 - **EL BLOQUE «PLAN» (5.0.0, modelo de jubilación v2)** — todo `null`/vacío en `household` y siempre que haya `plan_absent_reason`. Lo resuelve `handlers/retirement_solver.rs`, **el único sitio de la API donde el sorteo elige un mes**, en DOS niveles cuya diferencia es observable:
   - **Nivel 1 — viaja en la PRIMERA respuesta** porque la pantalla no significa nada sin él. Corre SÍNCRONO dentro del miss de proyección, bajo el mismo permiso de `heavy::run_projection_sim` que la serie (**≈ 2–5 s medidos en release**; en `debug` un orden de magnitud más). Publica la fecha, el éxito, el capital necesario hoy y el solve de la estrategia.
@@ -1165,9 +1161,10 @@ que `jubilacion_month_index`, que se conserva), `success_of_plan`, `success_wils
   simplemente un listón más bajo.
 
 **El eje `monte_carlo`, por lado** (ausente ⟺ no se pidió): `success_probability`,
-`sampling_error_pp` (1 dp, como en las bandas), `failures_by_kind` `[F1, F2, F3]`,
+`sampling_error_pp` (1 dp, como en las bandas), `failures_by_kind` `[F1, F2]`,
 `failure_probability_by_age[]` (**el mismo tipo `FailureProbabilityPoint` y la misma función
-`projection_bands::failure_points`**), `months_below_need_p50`, `withdrawal_to_need_ratio_p50`. El
+`projection_bands::failure_points`**). `months_below_need_p50` y `withdrawal_to_need_ratio_p50`
+se retiraron el 2026-10-10 («solo SWR»; pin de ausencia en `mcp_simulate.rs`). El
 bloque compartido `monte_carlo` mantiene solo `paths`, `seed` (string) y `any_volatility_declared`.
 Cotas: `paths` 1..=`MCP_MAX_PATHS` (**2.500** desde 5.0.0; HTTP llega a 5.000).
 
@@ -1284,9 +1281,12 @@ Response (`ProjectionBandsResponse`):
   precisión inventada sobre el percentil de una muestra). Las tres del líquido las omite la tool MCP
   salvo con `include_liquid_bands`.
 - **`success_of_plan` = la fracción de caminos SIN NINGÚN FALLO** (fracción, string, 6 dp — la misma
-  política que `savings_rate`). Hay **tres motivos de fallo y solo tres**, y el bucle clasifica el
-  PRIMERO de cada camino: F1 cartera agotada, F2 tasa inicial de retirada por encima del tope, F3 la
-  regla por saldo no llega a la necesidad ordinaria.
+  política que `savings_rate`). Hay **dos motivos de fallo y solo dos** (prioridad F1 > F2 el mes
+  que coinciden), y el bucle clasifica el PRIMERO de cada camino: F1 cartera agotada
+  (`portfolio_depleted`), F2 tasa inicial de retirada por encima del tope (`initial_rate_exceeded`,
+  juzgada solo en el mes de jubilación). *HISTORIA — sustituido el 2026-10-10 (solo SWR)*: había un
+  tercero, F3 (`rule_below_need`, la regla por saldo no llegaba a la necesidad ordinaria), que se
+  retiró con las reglas.
   **Un camino solo puede fallar estando JUBILADO o en media jornada** (`sim_core.rs`: «un mes
   acumulando con déficit puede vaciar la cartera, pero eso no es un plan de jubilación que falla»).
   Consecuencia, y desde WP A12 **se declara aquí en vez de mandar a otro endpoint**: un escenario
@@ -1332,20 +1332,21 @@ Response (`ProjectionBandsResponse`):
   existe, más una nota pidiendo que se fuera a mirar `retirement_date_basis` a OTRO endpoint. Se
   decide **antes del sorteo** (`PlanLevel1::forced_month` / `BuiltProjection::plan_absent_reason`),
   no por el resultado: un plan perfecto y un plan que no ocurre dan el mismo `1`. Lo que **sí se
-  sigue publicando** son las bandas, `failures_by_kind`, `failure_probability_by_age`,
-  `months_below_need_p50` y `withdrawal_to_need_ratio_p50` — la trayectoria SIN jubilarse, donde un
+  sigue publicando** son las bandas, `failures_by_kind` y `failure_probability_by_age` — la
+  trayectoria SIN jubilarse, donde un
   0 significa «sin jubilación no hay fallo que contar», no «riesgo cero». Pins:
   `projection_bands.rs::a_plan_without_a_reachable_date_publishes_null_success_with_its_reason` y
   `::without_a_birth_date_the_bands_publish_the_same_reason_as_the_series`.
-- `failures_by_kind: [u32; 3]` — contadores del primer fallo de cada camino, en el orden
-  `[F1, F2, F3]` (los mismos índices que `KIND_*` del crate). Suma `paths − paths·success_of_plan`.
-  Se publican **crudos** porque F1, F2 y F3 tienen arreglos OPUESTOS (más capital / retrasar la
-  fecha / cambiar la regla) y una sola «probabilidad de ruina» los confundía.
+- `failures_by_kind: [u32; 2]` — contadores del primer fallo de cada camino, en el orden
+  `[F1, F2]` (los mismos índices que `KIND_PORTFOLIO_DEPLETED` / `KIND_INITIAL_RATE_EXCEEDED` del
+  crate). Suma `paths − paths·success_of_plan`. Se publican **crudos** porque F1 y F2 tienen
+  arreglos OPUESTOS (más capital o menos gasto / retrasar la fecha) y una sola «probabilidad de
+  ruina» los confundía. (Hasta el 2026-10-10 era `[u32; 3]` con F3.)
 - `failure_probability_by_age[]` — `{month_index, age, probability, by_kind}` cada 5 años desde la
   jubilación del plan. **Sustituye a `depletion_probability_by_age`**, que solo contaba F1: con la
-  puerta de tasa inicial y la regla por saldo dentro del bucle, el agotamiento dejó de ser el único
-  motivo (pin: `the_failure_curve_counts_more_than_depletion`, un plan `percent_of_balance` con
-  F3 = 100 % y F1 = 0).
+  puerta de tasa inicial dentro del bucle, el agotamiento dejó de ser el único motivo (pin:
+  `the_failure_curve_counts_more_than_depletion`, un plan con `swr_pct: 1` y σ = 0 cuya cartera no
+  se agota: F1 = 0 y F2 = todos los caminos).
   **La última fila es siempre el HORIZONTE** y cierra al bit en `1 − success_of_plan`, así que el
   último paso puede ser de menos de cinco años. **Ojo con su índice**: el horizonte del BUCLE es el
   mes `months` y en la rejilla publicada eso es **`months − 1`** (`engine_month_to_grid`), un punto
@@ -1356,15 +1357,14 @@ Response (`ProjectionBandsResponse`):
   es exacto solo en la última. Misma convención que
   `retirement_solver::PlanExtras::failure_probability_by_age`, para que las dos tablas no signifiquen
   cosas distintas con el mismo nombre.
-- `months_below_need_p50` y `withdrawal_to_need_ratio_p50` — **qué parte de su gasto cubrió el
-  hogar de verdad**. El RECORTE de la regla no es por sí solo un fracaso (D24) y por eso no entra en
-  `success_of_plan`, pero **estas dos cuentan el recorte Y el descubierto de la cartera**:
-  `months_below_need_p50` es la mediana entre caminos de los meses jubilados con
-  `withdrawal_shortfall > 0` **o** `unmet_need > 0`, y `withdrawal_to_need_ratio_p50` la mediana de
-  la cobertura de la necesidad ORDINARIA (`null` cuando ningún camino tiene meses jubilados con
-  denominador positivo). El numerador se corrigió en E9 (bug B2): descuenta el `withdrawal_excess`
-  de `rule_is_spend` y clampa la necesidad neta **mes a mes**, porque puede ser negativa desde que
-  la pensión supera el gasto.
+- ~~`months_below_need_p50`~~ y ~~`withdrawal_to_need_ratio_p50`~~ — **retirados el 2026-10-10
+  («solo SWR»)**; `openapi_contract.rs` vigila que no vuelvan a declararse. Medían el recorte de una
+  regla por saldo; sin reglas, un mes jubilado por debajo del gasto ES un fallo F1, así que sus
+  medianas solo podían valer «0 meses / 100 %» con un éxito ≥ 50 % — cualquier plan que cumpla un
+  umbral 80–100. Lo que dice cuándo y por qué se rompe el plan es `failure_probability_by_age` y
+  `failures_by_kind`. *HISTORIA*: contaban los meses con `withdrawal_shortfall > 0` o
+  `unmet_need > 0` y la cobertura de la necesidad ordinaria, con el numerador corregido en E9 (bug
+  B2) para descontar el `withdrawal_excess` de `rule_is_spend`.
 - `any_volatility_declared` (con `false` las tres bandas SON la línea determinista).
 - **Retirados en el modelo v2** (`assert_the_v1_fields_are_gone` los vigila): `success_probability`
   (→ `success_of_plan`), `never_retired_probability`, `success_given_retired`,

@@ -32,39 +32,43 @@ números, no una regla de tres.
 
 ![Proyección de patrimonio](docs/img/proyeccion-claro.png)
 
-### Cuándo llegas a tu objetivo
+### Cuándo puedes jubilarte
 
-Dile cuánto quieres gastar al año cuando dejes de trabajar y con qué tasa de retirada, y verás en
-qué año se cruzan tu patrimonio y tu objetivo. El objetivo **crece con la inflación** que configures
-—no es lo mismo 30.000 € al año hoy que dentro de veinte— y, si quieres, descuenta el IRPF del
-ahorro por tramos.
+Dile cuánto quieres gastar al año cuando dejes de trabajar y con qué tasa de retirada (SWR), y
+FutureFin te da la **primera fecha en la que el plan aguanta**: la que cumplen, como mínimo, el
+umbral de escenarios que tú fijas (95 de cada 100 de serie) hasta la edad que elijas. No es el
+cruce de dos líneas, es una pregunta de probabilidad. El gasto **crece con la inflación** que
+configures —no es lo mismo 30.000 € al año hoy que dentro de veinte— y, si quieres, se descuenta el
+IRPF del ahorro por tramos. Aparte, el número FIRE clásico (gasto ÷ tasa de retirada) sigue ahí como
+referencia.
 
 ![Plan de jubilación](docs/img/jubilacion-oscuro.png)
 
 ### Tu jubilación, a tu manera
 
-El cruce de patrimonio y objetivo es una forma de jubilarse, no la única. Eliges **una de cinco
-estrategias** y la simulación entera se adapta:
+La fecha que aguanta es una forma de jubilarse, no la única. Eliges **una estrategia** y
+la simulación entera se adapta:
 
-- **Cuanto antes (FIRE clásico)** — te vas el mes en que el capital llega.
-- **A una edad fija** — te vas a los 55 pase lo que pase, y el plan te dice **cuánto tienes que
-  ahorrar** para llegar y cuánto te sobra. Si no llegas, te lo dice en rojo en vez de dibujar una
-  curva optimista.
-- **Ahorrar ahora y dejar crecer (Coast FIRE)** — el mes a partir del cual puedes dejar de aportar.
-- **Media jornada** — una fase intermedia con menos ingreso, cubriendo el hueco con el capital.
-- **Puente hasta la pensión** — declaras tu pensión pública **con la edad a la que empieza**, y el
-  objetivo deja de ser «capital para siempre» y pasa a ser «capital hasta que llegue, más lo que
-  ella no cubra».
+- **FIRE clásico** — te vas el primer mes en que el plan aguanta con el umbral que has pedido.
+- **Edad fija** — te vas a los 55 pase lo que pase, y el plan te dice **cuánto tienes que ahorrar**
+  para llegar con ese umbral. Si no llegas, te lo dice en rojo en vez de dibujar una curva
+  optimista.
+- **Coast FIRE** — el mes a partir del cual puedes dejar de aportar y llegar igual.
+- **Barista FIRE** — una fase intermedia con menos ingreso, cubriendo el hueco con el capital.
 
-Y decides **cómo sale el dinero** una vez jubilado: gasto fijo indexado, un porcentaje del saldo,
-una regla híbrida o una con bandas (Guyton-Klinger). Cada plan es de **cada persona**: en un hogar
-compartido, cada cual tiene el suyo.
+Si cobrarás una **pensión pública**, la declaras **con la edad a la que empieza** y entra como un
+ingreso más desde ese mes. Un **puente** opcional (cualquier estrategia) sube el tope de la tasa de
+retirada del primer año mientras llega la pensión, dentro de los límites que tú pones.
+
+Y una sola regla para **cómo sale el dinero**: tu tasa de retirada (SWR) decide si el primer año
+cabe, y desde ahí cada año se retira tu gasto ajustado a la inflación. Cada plan es de **cada
+persona**: en un hogar compartido, cada cual tiene el suyo.
 
 ### Y si los mercados no se portan como la media
 
 Declara la **volatilidad** de cada activo y FutureFin corre cientos de veces el mismo plan —el mismo
 motor, tus mismos datos— sorteando cada mes: una **banda de escenarios** p10/p50/p90, la
-**probabilidad de que la cartera aguante** el horizonte entero, y la de agotarse a cada edad.
+**probabilidad de que la cartera aguante** el horizonte entero, y la de fallar a cada edad.
 
 Con los supuestos declarados en la propia respuesta, no en una nota al pie: el sorteo es
 paramétrico y no un histórico, los meses son independientes, y con un shock común la diversificación
@@ -177,7 +181,7 @@ Más detalle en [docs/instalacion.md](docs/instalacion.md).
 | [Instalación](docs/instalacion.md) | Poner en marcha la app, volúmenes, primer usuario, subpath |
 | [Home Assistant](docs/home-assistant.md) | El add-on: panel, opciones, SSO, backups, MCP |
 | [Actualizar](docs/actualizar.md) | Subir de versión, volver atrás, migrar desde 2.x |
-| [Tu plan de jubilación](docs/jubilacion.md) | Las cinco estrategias, la pensión con fecha, las reglas de retirada y la sección «Riesgo» |
+| [Tu plan de jubilación](docs/jubilacion.md) | Las estrategias, la pensión con fecha, la tasa de retirada y la sección «Riesgo» |
 | [Configuración](docs/configuracion.md) | Variables de entorno y ajustes de la instalación |
 | [Copias de seguridad](docs/backups.md) | Las tres capas de respaldo y cómo restaurar |
 | [Conectar Claude](docs/mcp.md) | El servidor MCP, tokens y permisos |

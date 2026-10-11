@@ -31,7 +31,7 @@
 //! de siempre.
 
 use crate::money::MoneyOps;
-use crate::phases::{EngineWarning, Phase, SpendMode};
+use crate::phases::{EngineWarning, Phase};
 use crate::projection::{
     add_months, month_first_calendar, month_window, AllocationKind, AllocationSkipReason,
     EarlyRepaymentEffect, EngineError, RepaymentModel,
@@ -362,26 +362,26 @@ fn shrink_basis_g<M: MoneyOps>(basis: M, v_post: M, v_pre: M) -> M {
     }
 }
 
-/// Lo que UNA venta mensual dejó tras de sí, con **las tres magnitudes de B.1.5 ya separadas**
-/// (D22/D24, hallazgo B2 de la revisión adversarial):
+/// Lo que UNA venta mensual dejó tras de sí, con **las dos magnitudes ya separadas**:
 ///
 /// - `net_obtained` — euros que de verdad salieron de los activos y se gastaron.
-/// - `undrained` — la parte de la venta INTENTADA que los activos no pudieron fundar, en euros
-///   de gasto. Es la ÚNICA que resta patrimonio (deuda implícita del hogar).
-/// - `shortfall` / `excess` — la distancia entre lo que la regla permitió y el gasto declarado.
-///   **Informativas**: no tocan el balance, no cuentan como fracaso.
+/// - `undrained` — la parte de la necesidad que los activos no pudieron fundar, en euros de
+///   gasto. Es la que resta patrimonio (deuda implícita del hogar).
+///
+/// Hasta el 2026-10-10 había una tercera y una cuarta (`shortfall`, lo que la REGLA de retirada
+/// rechazaba, y `excess`, lo vendido de más bajo `rule_is_spend`). Se fueron con las reglas por
+/// saldo y el modo de gasto (decisión «solo SWR»): sin techo, la venta ES la necesidad y las dos
+/// eran cero por construcción.
 #[derive(Debug, Clone, Copy)]
 struct MonthSale<M> {
     net_obtained: M,
-    /// `None` = **no hubo venta** (mes de superávit sin regla que gastar), y entonces no se
-    /// acumula NADA — ni siquiera un cero.
+    /// `None` = **no hubo venta** (mes de superávit), y entonces no se acumula NADA — ni
+    /// siquiera un cero.
     ///
     /// La distinción no es estética: `Decimal` conserva la ESCALA, y sumar un cero de escala 0 a
     /// un acumulador de escala 18 devuelve el operando, no la suma — el mismo VALOR con otro
     /// `Display`, que es justo lo que el pin dorado hashea.
     undrained: Option<M>,
-    shortfall: M,
-    excess: M,
     /// **La venta dejó la cartera vendible a cero.** Lo dice la VENTA, no una comparación entre
     /// dos cantidades calculadas por separado: hasta la revisión adversarial esto era
     /// `target_gross >= drainable` ANTES de vender, un filo de navaja que `Decimal` y `f64`
@@ -391,21 +391,12 @@ struct MonthSale<M> {
     /// suma de lo vendible es cero EXACTO en los dos tipos (`x − x = 0`).
     depleted_portfolio: bool,
     /// **La venta no pudo fundar el bruto que perseguía.** Es la señal de FALLO real, y la
-    /// publica el paseo (`und_gross > 0`, `!cap_exhausted`, `net_shortfall > 0`), nunca una
-    /// resta de dos netos: `undrained` puede salir ±1e-24 por cola de redondeo y no distingue.
+    /// publica el paseo (`und_gross > 0`, `net_shortfall > 0`), nunca una resta de dos netos:
+    /// `undrained` puede salir ±1e-24 por cola de redondeo y no distingue.
     ///
     /// Sin ella, vaciar la cartera con un aterrizaje EXACTO cuyo gasto posterior está cubierto
     /// (el puente que acaba justo cuando entra la pensión) se publicaba como «cartera agotada».
     unfunded_sale: bool,
-    /// **El NETO que la REGLA de retirada permitió este mes** (E1). `None` ⟺ no había techo
-    /// (`fixed_real`, o mes no jubilado): entonces no hay nada que comparar y F3 no aplica.
-    ///
-    /// No es `attempted_net`, y la distinción es de dinero: `attempted_net` vale `need_net`
-    /// cuando el techo NO ata, así que un mes con un «Próximo» que cubre la caja (necesidad neta
-    /// pequeña, necesidad ordinaria grande) publicaría un intentado por debajo de la ordinaria
-    /// con una regla que permitía de sobra — F3 se encendería por un ingreso puntual, que es
-    /// justo lo que C1 excluye del veredicto.
-    rule_allowance_net: Option<M>,
 }
 
 impl<M: MoneyOps> MonthSale<M> {
@@ -413,58 +404,9 @@ impl<M: MoneyOps> MonthSale<M> {
         Self {
             net_obtained: M::zero(),
             undrained: None,
-            shortfall: M::zero(),
-            excess: M::zero(),
             depleted_portfolio: false,
             unfunded_sale: false,
-            rule_allowance_net: None,
         }
-    }
-
-    /// Reparte el resultado de la venta entre las tres magnitudes.
-    ///
-    /// `attempted_net` = el neto que la venta intentada pretendía obtener; `target_is_need` = esa
-    /// venta ERA la necesidad (sin techo, o con un techo que no ataba).
-    ///
-    /// `literal_undrained` = el descubierto que la propia venta PUBLICA como operando (el
-    /// `net_shortfall_monthly` del paseo mixto). Cuando existe se acumula TAL CUAL: 4.15.0 hacía
-    /// `undrained_cumulative += dd.net_shortfall_monthly`, y re-derivarlo como
-    /// `need − (need − s)` no devuelve `s` en `Decimal` — ni el mismo dígito 28 ni la misma
-    /// ESCALA, que es lo que el `Display` del pin dorado hashea (`0` frente a `0.0000`).
-    fn account(
-        &mut self,
-        need_net: M,
-        attempted_net: M,
-        obtained_net: M,
-        target_is_need: bool,
-        forced_by_rule: bool,
-        sold: bool,
-        literal_undrained: Option<M>,
-    ) {
-        self.net_obtained = obtained_net;
-        // DESCUBIERTO. Lo que los activos no pudieron fundar de la venta intentada, **acotado por
-        // la necesidad real**: bajo `rule_is_spend`, la parte discrecional de una venta que la
-        // cartera no cubre no es deuda — nadie se endeuda para gastar de más. Con el objetivo =
-        // necesidad se conserva la expresión LITERAL de 4.15.0 (sin `min` ni `max`), que es lo
-        // que mantiene el pin dorado bit a bit.
-        self.undrained = sold.then(|| match literal_undrained {
-            Some(u) => u,
-            None if target_is_need => need_net - obtained_net,
-            None => (attempted_net.min(need_net) - obtained_net).max(M::zero()),
-        });
-        // RECORTE DE LA REGLA: la necesidad que el techo dejó fuera. NO crece cuando la cartera
-        // se agota — eso es el descubierto.
-        self.shortfall = if target_is_need {
-            M::zero()
-        } else {
-            (need_net - attempted_net).max(M::zero())
-        };
-        // SOBRANTE: solo existe cuando la regla ES el gasto y permitió más de lo necesario.
-        self.excess = if forced_by_rule {
-            (obtained_net - need_net).max(M::zero())
-        } else {
-            M::zero()
-        };
     }
 }
 
@@ -538,60 +480,13 @@ fn mixed_segments_g<M: MoneyOps>(
         .collect()
 }
 
-/// Los mismos tramos con la capacidad del ÚLTIMO con material ampliada en `bound`.
+/// **La venta del mes**: vende, sobre los activos en el orden de [`drain_order_g`], el bruto que
+/// la necesidad NETA del mes pide, asienta la base de coste (#120) y devuelve las magnitudes.
 ///
-/// Sirve para **tasar un bruto que la cartera no puede fundar**, que es justo lo que la vía
-/// escalar hace gratis (una `g` única pone precio a cualquier bruto). El tramo marginal es el
-/// que la venta vaciaría al final, así que su `g` es la del euro siguiente. Cuando todas las `g`
-/// coinciden, el paseo sobre estos tramos devuelve `after_tax_monthly(bruto, g)` dígito a dígito.
-fn extend_marginal_g<M: MoneyOps>(segments: &[MixedSegment<M>], bound: M) -> Vec<MixedSegment<M>> {
-    let mut v = segments.to_vec();
-    if let Some(j) = v.iter().rposition(|s| s.capacity_monthly > M::zero()) {
-        v[j].capacity_monthly = v[j].capacity_monthly + bound.max(M::zero());
-    }
-    v
-}
-
-/// **Lo que NETEA vender `gross`** con la fiscalidad del mes, tase o no la cartera ese bruto.
-/// Es la operación que la vía escalar escribe como `after_tax_monthly` y la mixta como un paseo
-/// por tramos; una sola definición para que el presupuesto del mes (`rule_is_spend`) y el
-/// reparto de magnitudes de la venta no puedan discrepar.
-fn net_of_gross_g<M: MoneyOps>(
-    gross: M,
-    values: &[M],
-    gains: &[M],
-    effective_uniform: Option<M>,
-    liquid: &[bool],
-    rates: &[Option<M>],
-    brackets: &[TaxBracketG<M>],
-    taxes_enabled: bool,
-) -> M {
-    if gross <= M::zero() {
-        return M::zero();
-    }
-    match effective_uniform {
-        Some(g) => crate::tax::after_tax_monthly_g(gross, brackets, taxes_enabled, g),
-        None => {
-            let order = drain_order_g(liquid, rates);
-            let segments = mixed_segments_g(&order, values, gains);
-            crate::tax::mixed_drawdown_for_gross_cap(
-                gross,
-                &extend_marginal_g(&segments, gross),
-                brackets,
-                taxes_enabled,
-            )
-            .net_monthly
-        }
-    }
-}
-
-/// **La venta del mes** (5.0.0 WP2): decide el bruto a vender, lo vende sobre los activos en el
-/// orden de [`drain_order_g`], asienta la base de coste (#120) y devuelve las tres magnitudes.
-///
-/// Dos razones para vender, y pueden darse a la vez: **la necesidad** (`need_net > 0`, como en
-/// 4.15.0) y **la regla como gasto** (`rule_is_spend`, R7). El techo `allowed_gross` es **BRUTO**
-/// (R9): topa la VENTA, no los euros que llegan al bolsillo. Con `fixed_real` es `None` y esta
-/// función ejecuta, operando a operando, la rama de déficit de 4.15.0.
+/// Es, operando a operando, la rama de déficit de 4.15.0 (la antigua regla `fixed_real`). Hasta
+/// el 2026-10-10 llevaba además un techo bruto de la regla de retirada y la venta forzada de
+/// `rule_is_spend`; se retiraron con la decisión «solo SWR» y el camino que queda es el que
+/// TODOS los casos dorados ya ejercitaban.
 #[allow(clippy::too_many_arguments)]
 fn execute_month_sale_g<M: MoneyOps>(
     values: &mut [M],
@@ -603,53 +498,14 @@ fn execute_month_sale_g<M: MoneyOps>(
     brackets: &[TaxBracketG<M>],
     taxes_enabled: bool,
     need_net: M,
-    allowed_gross: Option<M>,
-    spend_mode: SpendMode,
     watch_depletion: bool,
-    spend_from_cash: M,
 ) -> MonthSale<M> {
     let mut out = MonthSale::empty();
 
-    // Objetivo BRUTO forzado por la regla: solo en `rule_is_spend` y solo si hay techo.
-    let forced_gross = match spend_mode {
-        SpendMode::RuleIsSpend => allowed_gross,
-        SpendMode::Ceiling => None,
-    };
-    match forced_gross {
-        // Techo no positivo (cartera vacía bajo `percent_of_balance`): no se vende nada, pero el
-        // recorte sigue siendo la necesidad entera. La regla permitió CERO neto, y eso es un dato
-        // (F3 lo compara contra la necesidad ordinaria), no una ausencia.
-        Some(a) if a <= M::zero() => {
-            out.shortfall = need_net.max(M::zero());
-            out.rule_allowance_net = Some(M::zero());
-            return out;
-        }
-        Some(_) => {}
-        // Sin venta forzada y sin necesidad no hay nada que hacer: es el mes de superávit de
-        // 4.15.0, donde la rama de déficit ni se rozaba.
-        //
-        // **Pero el permitido de la regla sigue existiendo** y F3 lo necesita: un mes puede no
-        // tener déficit de CAJA (un «Próximo» lo tapó) y tener necesidad ordinaria por encima de
-        // lo que la regla deja sacar. Se tasa solo si hay techo — con `fixed_real` (el camino de
-        // 4.15.0 y el de los pines) no se ejecuta ni una operación de más.
-        None if need_net <= M::zero() => {
-            if let Some(a) = allowed_gross.filter(|a| *a > M::zero()) {
-                let (gains, uniform) =
-                    month_gains_g(values, basis, basis_declared, scalar_gain_ratio);
-                out.rule_allowance_net = Some(net_of_gross_g(
-                    a,
-                    values,
-                    &gains,
-                    uniform,
-                    liquid,
-                    rates,
-                    brackets,
-                    taxes_enabled,
-                ));
-            }
-            return out;
-        }
-        None => {}
+    // Sin necesidad no hay nada que hacer: es el mes de superávit de 4.15.0, donde la rama de
+    // déficit ni se rozaba.
+    if need_net <= M::zero() {
+        return out;
     }
 
     // Cortocircuito de `g` uniforme (sobre lo VENDIBLE): camino LITERAL de 4.11.0, operando a
@@ -661,49 +517,8 @@ fn execute_month_sale_g<M: MoneyOps>(
     if let Some(g_scalar) = effective_uniform {
         // #140 fase 1: lo que falta se cubre VENDIENDO, y la venta tributa — el bruto a drenar es
         // gross_up_monthly(neto). Con `taxes_enabled = false` es la identidad.
-        //
-        // 5.0.0 WP2: sobre ese bruto se aplica el techo de la regla. `target_is_need` distingue
-        // «la venta ERA la necesidad» (el camino de 4.15.0) de «la venta la fijó la regla».
-        let (target_gross, target_is_need, forced_spend_net) = match forced_gross {
-            // **El gasto de la regla se financia PRIMERO con la caja del mes** (R7 corregida por
-            // la revisión adversarial): vender un fondo para gastar euros que la nómina ya puso
-            // sobre la mesa —y reinvertir esos euros en el MISMO fondo— realiza plusvalía por
-            // nada. Medido: 3.991,72 €/año de impuesto donde el hecho económico costaba 373,11
-            // (×10,7). El techo sigue siendo BRUTO, así que la caja se descuenta en NETO y lo
-            // que queda se vuelve a grossear.
-            Some(a) => {
-                let spend_net =
-                    crate::tax::after_tax_monthly_g(a, brackets, taxes_enabled, g_scalar);
-                // El permitido de la regla, en neto: ya está tasado, no se vuelve a tasar.
-                out.rule_allowance_net = Some(spend_net);
-                let to_sell_net = spend_net - spend_from_cash.max(M::zero());
-                let gross = if to_sell_net <= M::zero() {
-                    M::zero()
-                } else {
-                    crate::tax::gross_up_monthly_g(to_sell_net, brackets, taxes_enabled, g_scalar)
-                };
-                (gross, false, Some(spend_net))
-            }
-            None => {
-                let need_gross =
-                    crate::tax::gross_up_monthly_g(need_net, brackets, taxes_enabled, g_scalar);
-                // El permitido de la regla se tasa SIEMPRE que haya techo, ate o no: cuando no
-                // ata, `attempted_net` pasa a ser la necesidad y dejaría de decir qué permitía la
-                // regla — el operando que F3 necesita.
-                if let Some(a) = allowed_gross {
-                    out.rule_allowance_net = Some(crate::tax::after_tax_monthly_g(
-                        a,
-                        brackets,
-                        taxes_enabled,
-                        g_scalar,
-                    ));
-                }
-                match allowed_gross {
-                    Some(a) if a < need_gross => (a, false, None),
-                    _ => (need_gross, true, None),
-                }
-            }
-        };
+        let target_gross =
+            crate::tax::gross_up_monthly_g(need_net, brackets, taxes_enabled, g_scalar);
         let mut drawn_net = M::zero();
         if target_gross > M::zero() {
             let mut taken = vec![M::zero(); values.len()];
@@ -741,159 +556,19 @@ fn execute_month_sale_g<M: MoneyOps>(
                 }
             }
         }
-        // El gasto de la regla es UNO, lo pague la caja o la venta: el intentado es el neto
-        // entero y lo obtenido incluye la parte de caja. Solo así `withdrawal` sigue siendo «lo
-        // que el hogar gastó» y el sobrante de la regla no se parte en dos.
-        let (attempted_net, obtained_net) = match forced_spend_net {
-            Some(spend_net) => (spend_net, spend_from_cash.max(M::zero()) + drawn_net),
-            None if target_is_need => (need_net, drawn_net),
-            None => (
-                crate::tax::after_tax_monthly_g(target_gross, brackets, taxes_enabled, g_scalar),
-                drawn_net,
-            ),
-        };
-        out.account(
-            need_net,
-            attempted_net,
-            obtained_net,
-            target_is_need,
-            forced_gross.is_some(),
-            target_gross > M::zero() || forced_spend_net.is_some(),
-            // Vía escalar: 4.15.0 acumulaba `need_assets_net − after_tax(drawn_gross)`, que es
-            // exactamente `need_net − obtained_net`. La expresión literal ya la escribe
-            // `account`, así que aquí no hay operando que publicar.
-            None,
-        );
+        out.net_obtained = drawn_net;
+        // Vía escalar: 4.15.0 acumulaba `need_assets_net − after_tax(drawn_gross)`, que es
+        // exactamente `need_net − drawn_net`, y solo si hubo venta.
+        out.undrained = (target_gross > M::zero()).then(|| need_net - drawn_net);
     } else {
         // Vía MIXTA (#178): el solver por tramos decide venta bruta Y reparto a la vez — la base
         // agregada `Σ g_i·venta_i` atraviesa los tramos progresivos y ninguna `g` escalar puede
         // representarla. El orden es EL MISMO de `drain_from_assets_g`.
         let order = drain_order_g(liquid, rates);
         let segments = mixed_segments_g(&order, values, &gains);
-        // **El precio del bruto que la cartera NO puede fundar.** La vía escalar tasa cualquier
-        // bruto con su `g` única, también uno por encima de lo vendible: por eso
-        // `attempted_net = after_tax(techo)` existe siempre allí. Aquí no hay `g` única, así que
-        // se extiende la capacidad del ÚLTIMO tramo con material (el marginal, el que la venta
-        // vaciaría al final) por el bruto que se está tasando. Es la generalización EXACTA de la
-        // vía escalar: si todas las `g` coinciden, el paseo sobre estos tramos devuelve
-        // `after_tax_monthly(bruto, g)` dígito a dígito.
-        //
-        // Sin esto, un techo por encima de la capacidad NO ataba (se comparaba contra
-        // `dd.gross_monthly`, que el paseo ya había recortado a la capacidad) y el rechazo de la
-        // regla se contabilizaba como DESCUBIERTO: 916 € de patrimonio en el caso `b1` de la
-        // revisión, con la venta byte a byte idéntica a la de la vía escalar.
-        let extended = |bound: M| -> Vec<MixedSegment<M>> { extend_marginal_g(&segments, bound) };
-        // ¿ATA el techo? Se decide como en la vía escalar: contra lo que la NECESIDAD pide, no
-        // contra lo que la cartera da. `attempted_net(a) < need_net` ⟺ `a < need_gross`, porque
-        // el neto es monótono creciente en el bruto.
-        let binding = match (forced_gross, allowed_gross) {
-            (Some(a), _) => Some((a, None)),
-            (None, Some(a)) => {
-                let w = crate::tax::mixed_drawdown_for_gross_cap(
-                    a,
-                    &extended(a),
-                    brackets,
-                    taxes_enabled,
-                );
-                // Mismo criterio que la vía escalar: el permitido de la regla se publica ate o no
-                // el techo. Aquí ya estaba calculado — decidir si ata EXIGE tasarlo.
-                out.rule_allowance_net = Some(w.net_monthly);
-                (w.net_monthly < need_net).then_some((a, Some(w.net_monthly)))
-            }
-            (None, None) => None,
-        };
-        let (per_segment, obtained_net, attempted_net, target_is_need, literal_undrained, unfunded) =
-            match binding {
-                Some((a, precomputed_net)) => {
-                    // El neto que la regla PERMITIÓ, tasado sobre el tramo marginal extendido. Ya no
-                    // se cae a `need_net` cuando la capacidad no llega: esa caída era justo la que
-                    // convertía el recorte de la regla en descubierto.
-                    let attempted_net = match precomputed_net {
-                        Some(n) => n,
-                        None => {
-                            crate::tax::mixed_drawdown_for_gross_cap(
-                                a,
-                                &extended(a),
-                                brackets,
-                                taxes_enabled,
-                            )
-                            .net_monthly
-                        }
-                    };
-                    if forced_gross.is_some() {
-                        // `rule_is_spend`: el intentado ES el permitido de la regla (el gasto que
-                        // la regla manda), lo pague la caja o la venta.
-                        out.rule_allowance_net = Some(attempted_net);
-                    }
-                    // **La caja del mes paga primero** (fix D, gemelo de la vía escalar): el bruto a
-                    // vender es el que grossea el neto que la caja NO cubre.
-                    let to_sell_net = match forced_gross {
-                        Some(_) => attempted_net - spend_from_cash.max(M::zero()),
-                        None => attempted_net,
-                    };
-                    let sell_gross = if forced_gross.is_some() {
-                        if to_sell_net <= M::zero() {
-                            M::zero()
-                        } else {
-                            crate::tax::gross_up_mixed_monthly(
-                                to_sell_net,
-                                &extended(a),
-                                brackets,
-                                taxes_enabled,
-                            )
-                            .gross_monthly
-                        }
-                    } else {
-                        a
-                    };
-                    let w = crate::tax::mixed_drawdown_for_gross_cap(
-                        sell_gross,
-                        &segments,
-                        brackets,
-                        taxes_enabled,
-                    );
-                    // **Lo dice el paseo, no una comparación** (WP5.5): `w.gross_monthly >= a` era
-                    // exacto en `Decimal` y un filo de navaja en aritmética aproximada.
-                    let unfunded = sell_gross > M::zero() && !w.cap_exhausted;
-                    let obtained = if forced_gross.is_some() {
-                        spend_from_cash.max(M::zero()) + w.net_monthly
-                    } else {
-                        w.net_monthly
-                    };
-                    (
-                        w.per_segment_monthly,
-                        obtained,
-                        attempted_net,
-                        false,
-                        None,
-                        unfunded,
-                    )
-                }
-                None => {
-                    let dd = crate::tax::gross_up_mixed_monthly(
-                        need_net,
-                        &segments,
-                        brackets,
-                        taxes_enabled,
-                    );
-                    // El descubierto sale NETO por construcción del solver — sin segunda llamada.
-                    let obtained = need_net - dd.net_shortfall_monthly;
-                    let unfunded = dd.net_shortfall_monthly > M::zero();
-                    (
-                        dd.per_segment_monthly,
-                        obtained,
-                        need_net,
-                        true,
-                        // El OPERANDO de 4.15.0, no su reconstrucción: el bucle hacía
-                        // `undrained_cumulative += dd.net_shortfall_monthly`.
-                        Some(dd.net_shortfall_monthly),
-                        unfunded,
-                    )
-                }
-            };
-        out.unfunded_sale = unfunded;
+        let dd = crate::tax::gross_up_mixed_monthly(need_net, &segments, brackets, taxes_enabled);
         for (pos, &i) in order.iter().enumerate() {
-            let take = per_segment[pos];
+            let take = dd.per_segment_monthly[pos];
             if take > M::zero() {
                 values[i] = values[i] - take;
                 // #120: b' = b·v_post/v_pre, mismas guardas que la vía escalar.
@@ -903,21 +578,20 @@ fn execute_month_sale_g<M: MoneyOps>(
                 }
             }
         }
+        // El descubierto sale NETO por construcción del solver — sin segunda llamada.
+        out.unfunded_sale = dd.net_shortfall_monthly > M::zero();
         // Agotamiento (#119) medido DESPUÉS de vender, igual que en la vía escalar: la venta no
         // se pudo fundar, o lo vendible quedó a cero.
         if watch_depletion {
             let left: M = M::sum_of(values.iter().map(|v| (*v).max(M::zero())));
             out.depleted_portfolio = out.unfunded_sale || left <= M::zero();
         }
-        out.account(
-            need_net,
-            attempted_net,
-            obtained_net,
-            target_is_need,
-            forced_gross.is_some(),
-            true,
-            literal_undrained,
-        );
+        out.net_obtained = need_net - dd.net_shortfall_monthly;
+        // El OPERANDO de 4.15.0, no su reconstrucción: el bucle hacía
+        // `undrained_cumulative += dd.net_shortfall_monthly`. Re-derivarlo como
+        // `need − (need − s)` no devuelve `s` en `Decimal` — ni el mismo dígito 28 ni la misma
+        // ESCALA, que es lo que el `Display` del pin dorado hashea.
+        out.undrained = Some(dd.net_shortfall_monthly);
     }
 
     out
@@ -1121,9 +795,6 @@ pub(crate) fn first_month_allocation_g<M: MoneyOps>(
     if input.horizon_months < 1 {
         return Err(EngineError::InvalidHorizon);
     }
-    // Mismas puertas que el bucle: esta función RESUELVE EL MES 1 igual que él, así que no puede
-    // aceptar un plan que él rechaza.
-    input.phase_plan.ensure_supported()?;
     if input.planning_monthly_cash_adjustment.len() != input.horizon_months as usize {
         return Err(EngineError::InvalidPlanningAdjustments);
     }
@@ -1291,8 +962,6 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
     if input.horizon_months < 1 {
         return Err(EngineError::InvalidHorizon);
     }
-    // Lo que este motor no sabe simular no se simula (ver `PhasePlanG::ensure_supported`).
-    input.phase_plan.ensure_supported()?;
     let plan: &PhasePlanG<M> = &input.phase_plan;
     if input.planning_monthly_cash_adjustment.len() != input.horizon_months as usize {
         return Err(EngineError::InvalidPlanningAdjustments);
@@ -1362,32 +1031,21 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
     // simulado: cero por definición, como el resto de series.
     let mut withdrawal_series: Vec<M> = Vec::with_capacity(input.horizon_months as usize + 1);
     withdrawal_series.push(M::zero());
-    // Las otras dos magnitudes de B.1.5, con la misma base de índice: el recorte de la regla y el
-    // sobrante que `rule_is_spend` gasta. Ninguna de las dos toca el balance.
-    let mut shortfall_series: Vec<M> = Vec::with_capacity(input.horizon_months as usize + 1);
-    shortfall_series.push(M::zero());
-    let mut excess_series: Vec<M> = Vec::with_capacity(input.horizon_months as usize + 1);
-    excess_series.push(M::zero());
     // **Necesidad NO cubierta del mes** (fix F de la revisión adversarial): el incremento del
-    // descubierto, mes a mes. Existe porque las lecturas de cobertura de Monte Carlo sumaban
-    // `withdrawal + shortfall` como «necesidad» y ese denominador ignora justo lo que el hogar
-    // no pudo vender: con `fixed_real` el recorte es CERO por construcción y el cociente salía
-    // 1,0 («la regla cubrió el 100 %») en caminos que cubrían el 8,8 %.
+    // descubierto, mes a mes. Es el operando de F1 y la lectura de «meses por debajo del gasto»
+    // de Monte Carlo.
     let mut unmet_series: Vec<M> = Vec::with_capacity(input.horizon_months as usize + 1);
     unmet_series.push(M::zero());
     // **Necesidad ORDINARIA** del mes (E1): gasto + retirada extra − ingresos, sin deuda ni
-    // «Próximos». Es lo que juzgan la puerta de tasa inicial y la regla por saldo, y el crate
+    // «Próximos». Es lo que juzga la puerta de tasa inicial, y el crate
     // estocástico la necesita mes a mes; no se refleja en `ProjectionOutput` porque la API no
     // publica esta serie.
     let mut ordinary_need_series: Vec<M> = Vec::with_capacity(input.horizon_months as usize + 1);
     ordinary_need_series.push(M::zero());
     // **El veredicto de ESTE camino** (E1): latches monótonos, fijados la primera vez que uno de
-    // los tres motivos se cumple. `None` = el camino aguanta hasta el horizonte.
+    // los dos motivos se cumple. `None` = el camino aguanta hasta el horizonte.
     let mut failure_month_index: Option<u32> = None;
     let mut failure_kind: Option<crate::phases::PathFailure> = None;
-    // Estado de la regla de retirada (§B.2). Vive FUERA del bucle porque `hybrid` y `guardrails`
-    // tienen memoria: un latch que no se recuerda no es un latch.
-    let mut planner = crate::withdrawal::WithdrawalPlanner::new(plan.withdrawal);
 
     let start_month_first = month_first_calendar(input.ref_date);
 
@@ -1522,9 +1180,9 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
                 .retirement_trigger
                 .forced_month()
                 .map_or(false, |s| k >= s);
-        // El PRIMER mes jubilado, `R`: el ancla de las reglas de retirada y el único mes en que
-        // se evalúa la puerta de tasa inicial (E1/C1 — el SWR es una tasa INICIAL, no una
-        // comprobación mensual sobre el saldo vivo).
+        // El PRIMER mes jubilado, `R`: el único mes en que se evalúa la puerta de tasa inicial
+        // (E1/C1 — el SWR es una tasa INICIAL, no una comprobación mensual sobre el saldo vivo).
+        // Hasta el 2026-10-10 era además el ancla de las reglas de retirada por saldo.
         //
         // Hasta E1 aquí se emitía `RetireAtAgeUnderfunded` comparando `L(R−1)` con el objetivo
         // del mes. Ese aviso murió con el objetivo como criterio: «me jubilo por edad y no
@@ -1614,8 +1272,8 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         // Lo que NO entra, y es la mitad de la definición: el **servicio de deuda** (una cuota se
         // extingue; capitalizarla al SWR pide capital para un gasto que se acaba) y el
         // **`planning_adj`** de «Próximos» (un ingreso o un gasto puntual no describe el tren de
-        // vida). Es la magnitud que juzgan la puerta de tasa inicial (F2) y la regla por saldo
-        // (F3) — nunca `need_assets_net`, que es un déficit de CAJA y sí lleva las dos cosas.
+        // vida). Es la magnitud que juzga la puerta de tasa inicial (F2) — nunca
+        // `need_assets_net`, que es un déficit de CAJA y sí lleva las dos cosas.
         let ordinary_need = (expense + retirement_withdrawal - income).max(M::zero());
 
         // **PUERTA DE TASA INICIAL** (F2, C1/C2): se evalúa UNA vez, en `R`, contra el líquido
@@ -1623,8 +1281,7 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         // (`initial_rate: None`, el default de los dos constructores) no se ejecuta ni una
         // comparación: los pines de 4.15.0 no pueden moverse.
         //
-        // `12 · monthly_allowance(tope, L(R−1))` ES `tope/100 · L(R−1)`, por la MISMA función que
-        // topa las reglas por saldo (una sola escritura de la fórmula). El `<` lo decide el TIPO
+        // `12 · monthly_allowance(tope, L(R−1))` ES `tope/100 · L(R−1)`. El `<` lo decide el TIPO
         // (`MoneyOps::strictly_below`), como el resto de booleanos publicados del bucle: es un
         // veredicto colgando de una comparación entre dos cantidades que `Decimal` y `f64`
         // calculan por caminos distintos.
@@ -1639,20 +1296,6 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
 
         let net_cash_month = income - expense - debt_service + planning_adj - retirement_withdrawal;
 
-        // REGLA DE RETIRADA (§B.2). El ancla de la fase jubilada (`L(R−1)`, `f(R−1)`) se fija el
-        // PRIMER mes jubilado con los MISMOS escalares que el cruce acaba de usar, y el techo del
-        // mes se pide UNA sola vez: `hybrid` y `guardrails` tienen memoria.
-        //
-        // `None` = sin techo. Lo es con `fixed_real` y lo es mientras el hogar no se ha jubilado.
-        // **La media jornada NO pasa por la regla**: las reglas se anclan en `L(R−1)`, que en la
-        // fase parcial todavía no existe.
-        let allowed_gross = if in_retirement {
-            planner.anchor_retirement(k, liquid_prev, expense_factor);
-            planner.allowed_gross(k, liquid_prev, expense_factor)
-        } else {
-            None
-        };
-
         // La necesidad NETA del mes: lo que la caja no cubre. Misma expresión y mismo valor que
         // el `need_assets_net` que 4.15.0 calculaba dentro de la rama de déficit.
         let need_assets_net = if net_cash_month <= M::zero() {
@@ -1665,35 +1308,9 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         // por request y nadie lee la traza aquí.
         //
         // **La venta ya no vive en un `else`**: baja a `execute_month_sale_g`, DESPUÉS del
-        // reparto. Hasta 4.15.0 las dos ramas eran excluyentes, así que bajarla no mueve un
-        // dígito de ningún caso de 4.15.0. Quien necesita ese orden es `rule_is_spend` (R7).
-        // **El gasto de la regla se paga primero con la caja del mes** (`rule_is_spend`; fix D de
-        // la revisión adversarial). Se decide AQUÍ, antes de la cascada, porque lo que hay que
-        // evitar es comprar y vender el MISMO fondo el mismo mes: reinvertir el sobrante para
-        // acto seguido venderlo realiza plusvalía por nada — 3.991,72 €/año de impuesto frente a
-        // 373,11 € del hecho económico en el hogar medido por la revisión (×10,7).
-        //
-        // El techo de la regla es BRUTO, así que el presupuesto se compara en NETO. La `g` se lee
-        // sobre la cartera ANTES de la aportación, que es justo la cartera de la que se vendería.
-        let spend_from_cash = match (plan.spend_mode, allowed_gross) {
-            (SpendMode::RuleIsSpend, Some(a)) if a > M::zero() && net_cash_month > M::zero() => {
-                let (gains_now, uniform_now) =
-                    month_gains_g(&values, &basis, &basis_declared, input.taxable_gain_ratio);
-                let spend_net = net_of_gross_g(
-                    a,
-                    &values,
-                    &gains_now,
-                    uniform_now,
-                    &liquid,
-                    &rates,
-                    &input.tax_brackets,
-                    input.taxes_enabled,
-                );
-                net_cash_month.min(spend_net).max(M::zero())
-            }
-            _ => M::zero(),
-        };
-        let investable = net_cash_month - spend_from_cash;
+        // reparto. Las dos ramas siguen siendo excluyentes (un mes con superávit no tiene
+        // necesidad que vender), así que el orden no mueve un dígito de ningún caso de 4.15.0.
+        let investable = net_cash_month;
 
         if investable > M::zero() {
             // **Techo de aportación** (§B.7): la cascada solo ve `min(sobrante, c)`; el resto es
@@ -1736,8 +1353,7 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
             }
         }
 
-        // La venta del mes: la necesidad (topada por la regla) y/o —en `rule_is_spend`— el gasto
-        // que la regla ES. Devuelve las TRES magnitudes de B.1.5 ya separadas.
+        // La venta del mes: la necesidad neta, grosseada por la fiscalidad del mes.
         let sale = execute_month_sale_g(
             &mut values,
             &mut basis,
@@ -1748,22 +1364,19 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
             &input.tax_brackets,
             input.taxes_enabled,
             need_assets_net,
-            allowed_gross,
-            plan.spend_mode,
             assets_depleted_month_index.is_none(),
-            spend_from_cash,
         );
         if sale.depleted_portfolio && assets_depleted_month_index.is_none() {
             assets_depleted_month_index = Some(k);
         }
         // La confirmación mira el mes del candidato y todos los siguientes. `unfunded_sale` lo
-        // publica el paseo (`und_gross > 0` / `!cap_exhausted` / `net_shortfall > 0`): una resta
+        // publica el paseo (`und_gross > 0` / `net_shortfall > 0`): una resta
         // de netos no serviría, porque el redondeo la deja en ±1e-24 sin que falte un euro.
         if sale.unfunded_sale && assets_depleted_month_index.is_some() {
             depletion_confirmed = true;
         }
-        // Solo el descubierto RESTA patrimonio (D22/D24): el recorte y el sobrante de la regla
-        // son lecturas. `None` = no hubo venta este mes y el acumulador NO se toca.
+        // El descubierto RESTA patrimonio. `None` = no hubo venta este mes y el acumulador NO se
+        // toca.
         if let Some(undrained_month) = sale.undrained {
             undrained_cumulative = undrained_cumulative + undrained_month;
         }
@@ -1772,25 +1385,24 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         let unmet_month = sale.undrained.unwrap_or_else(M::zero).max(M::zero());
 
         // -------------------------------------------------------------------------------------
-        // **EL VEREDICTO DE ESTE CAMINO** (E1, M3 + C1, C10). Tres motivos, prioridad F1 > F2 > F3
+        // **EL VEREDICTO DE ESTE CAMINO** (E1, M3 + C1, C10). Dos motivos, prioridad F1 > F2
         // dentro del mismo mes, y un latch monótono que se fija la PRIMERA vez.
         //
         // Solo se evalúa en meses de jubilación o de media jornada, y durante la media jornada
-        // solo F1 (supuesto S1): las reglas de retirada se anclan en `L(R−1)`, que todavía no
-        // existe, y la tasa inicial es una propiedad de la fecha de jubilación. Un mes ACUMULANDO
-        // con déficit puede vaciar la cartera —y `assets_depleted_month_index` lo marca—, pero
-        // eso no es un plan de jubilación que falla: es un hogar que gasta más de lo que gana
-        // hoy, y su remedio es otro.
+        // solo F1 (supuesto S1): la tasa inicial es una propiedad de la fecha de jubilación. Un
+        // mes ACUMULANDO con déficit puede vaciar la cartera —y `assets_depleted_month_index` lo
+        // marca—, pero eso no es un plan de jubilación que falla: es un hogar que gasta más de lo
+        // que gana hoy, y su remedio es otro.
         //
-        // **F2 y F3 se deciden solo en `R`** (C10): los dos son propiedades de la FECHA. Después
-        // manda F1 mes a mes, y el recorte de la regla viaja como lectura informativa
-        // (`withdrawal_shortfall`), nunca como fracaso.
+        // **F2 se decide solo en `R`** (C10). Después manda F1 mes a mes. (Hubo un F3, «la regla
+        // por saldo permite menos que el gasto», también solo en `R`; se retiró con las reglas
+        // el 2026-10-10 — con el % heredado del SWR contenía a F2 y neutralizaba el puente.)
         // -------------------------------------------------------------------------------------
         if failure_month_index.is_none() && matches!(phase, Phase::Retired | Phase::Partial) {
             // **F1 — la cartera no pudo cubrir la necesidad.** DOS operandos, y ninguno sobra:
-            // `unfunded_sale` lo publica el paseo (`und_gross > 0` / `!cap_exhausted`), que es
+            // `unfunded_sale` lo publica el paseo (`und_gross > 0` / `net_shortfall > 0`), que es
             // quien sabe si la venta se quedó corta, y `unmet_month` acota el fallo a la
-            // NECESIDAD (bajo `rule_is_spend` una venta discrecional sin fundar no es hambre).
+            // NECESIDAD descubierta.
             //
             // Sin el primero, el `unmet > 0` literal marca como fallido cualquier camino con la
             // cola de redondeo de `after_tax(gross_up(n))`. Medido sobre la batería: 6 de los 25
@@ -1799,38 +1411,10 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
             // quedarse sin cartera. Un camino marcado así hunde el éxito del plan a cero sin que
             // falte un céntimo.
             let f1 = sale.unfunded_sale && M::strictly_below(M::zero(), unmet_month);
-            // **F3 — la regla por saldo permite menos que el gasto ordinario.** Solo con techo
-            // (`fixed_real` devuelve `None`: el permitido ES la necesidad) y **solo en `R`, el
-            // primer mes jubilado** (C10), la MISMA marca que usa la puerta F2 de arriba.
-            //
-            // Mes a mes era un problema de BARRERA, no una medición del plan: con una regla por
-            // saldo el permitido sigue al líquido, que en Monte Carlo pasea con ~17 % de
-            // volatilidad frente a una deriva de ~0,8 %/año, así que sobre 840 meses la
-            // probabilidad de tocar la barrera alguna vez tiende a 1 por la varianza y no por la
-            // salud del plan. Medido sobre la demo sintética con «3,5 % del saldo» +
-            // `rule_is_spend`: el capital necesario hoy salía **2,52 M€** (620 k€ con
-            // `fixed_real`), los 67 fallos de 2.500 caminos eran TODOS F3 y el primero caía
-            // siempre antes de la pensión (mediana: mes 293). Con F3 solo en `R` el mismo hogar
-            // pide 860 k€, y F2 y F3 pasan a ser la misma pregunta en el mes de jubilación —
-            // bruta la de F2 (`12·necesidad ≤ SWR·L(R−1)`), neta la de F3
-            // (`after_tax(regla(L(R−1))) ≥ necesidad`)—. Después de `R` manda F1 mes a mes.
-            //
-            // Retirar F3 del todo NO era la alternativa: colapsaría al suelo de F2 y el modo
-            // porcentual sería infalible por construcción (una fracción del saldo nunca lo vacía,
-            // así que F1 tampoco puede firmar).
-            //
-            // `is_first_retired_month` implica `Phase::Retired`, así que no hace falta
-            // comprobarlo aparte: la fase parcial no pasa por la regla (S1).
-            let f3 = is_first_retired_month
-                && sale
-                    .rule_allowance_net
-                    .is_some_and(|allowed| M::strictly_below(allowed, ordinary_need));
             let kind = if f1 {
                 Some(crate::phases::PathFailure::PortfolioDepleted)
             } else if initial_rate_exceeded {
                 Some(crate::phases::PathFailure::InitialRateExceeded)
-            } else if f3 {
-                Some(crate::phases::PathFailure::RuleBelowNeed)
             } else {
                 None
             };
@@ -1869,8 +1453,6 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         let nw = nw_fn(&values, &principals, undrained_cumulative);
         net_series.push(nw);
         withdrawal_series.push(sale.net_obtained);
-        shortfall_series.push(sale.shortfall);
-        excess_series.push(sale.excess);
         // El descubierto del mes, clampado a 0 al PUBLICAR: el operando literal de 4.15.0 puede
         // salir ±1e-24 por cola de redondeo y una serie publicada no lleva números negativos
         // que nadie puede explicar. El acumulador (`uncovered_deficit_total`) conserva el
@@ -1941,10 +1523,6 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         liquid_crossing_month_index,
         phase_transitions,
         withdrawal: withdrawal_series,
-        // Con `fixed_real` estas dos siguen siendo cero mes a mes —el permitido ES la necesidad—,
-        // pero ahora por el camino general, no por un `vec![0]` que fingía calcularlas.
-        withdrawal_shortfall: shortfall_series,
-        withdrawal_excess: excess_series,
         unmet_need: unmet_series,
         ordinary_need: ordinary_need_series,
         pension_start_month_index,

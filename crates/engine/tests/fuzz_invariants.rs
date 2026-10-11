@@ -20,14 +20,20 @@
 //! | # | Invariante |
 //! |---|---|
 //! | 1 | Longitudes: toda serie mide `horizon + 1`, y el mes 0 de las series de FLUJO es cero |
-//! | 2 | Las tres magnitudes del mes cierran: `retirada + recorte + descubierto − sobrante = necesidad` |
+//! | 2 | Las magnitudes del mes cierran: `retirada + descubierto = necesidad` |
 //! | 3 | Balance: `NW(k) = Σ activos(k) − descubierto acumulado(k)` (sin pasivos por construcción) |
-//! | 4 | Signos: ninguna de las tres magnitudes publicadas es negativa |
+//! | 4 | Signos: ninguna de las magnitudes publicadas es negativa |
 //! | 5 | `uncovered_deficit_total > 1e-12 ⇒ assets_depleted_month_index` existe |
-//! | 6 | Agotamiento ⇒ alguna necesidad quedó sin cubrir en ese mes o después (modo `ceiling`) |
+//! | 6 | Agotamiento ⇒ alguna necesidad quedó sin cubrir en ese mes o después |
 //! | 7 | Determinismo: dos ejecuciones de la MISMA entrada dan el mismo `Display`, dígito a dígito |
 //! | 8 | La necesidad ORDINARIA no lleva deuda ni «Próximos»: `ordinaria ≤ neta + deuda + max(0, próximo)` |
-//! | 9 | El veredicto del camino: los dos latches se fijan a la vez, en rango, y en el PRIMER mes (F3 solo puede firmar en `R`) |
+//! | 9 | El veredicto del camino: los dos latches se fijan a la vez, en rango, y en el PRIMER mes (F2 solo puede firmar en `R`, y F1 le gana) |
+//!
+//! Hasta el 2026-10-10 la identidad 2 tenía cuatro términos (`retirada + recorte + descubierto −
+//! sobrante`) y el generador sorteaba cuatro reglas de retirada × dos modos de gasto, con un F3
+//! («la regla por saldo permite menos que el gasto») en el veredicto. Las reglas por saldo, el modo
+//! de gasto y F3 se retiraron (decisión «solo SWR»); en su lugar el generador sortea la PUERTA de
+//! tasa inicial (F2), que antes este arnés no ejercitaba.
 //!
 //! # El generador
 //!
@@ -36,19 +42,19 @@
 //! Los hogares se sortean SIN pasivos, SIN flujos puntuales y SIN inflación, y con la jubilación
 //! forzada en el mes 1. No es pereza: así la necesidad neta del mes es una CONSTANTE que el test
 //! conoce (`max(0, gasto_jubilado − ingreso_jubilado − pensión)`), y el invariante 2 —el que de
-//! verdad ata las tres magnitudes— se puede comprobar sin reimplementar el bucle dentro del test.
+//! verdad ata las magnitudes— se puede comprobar sin reimplementar el bucle dentro del test.
 //! Lo que sí se sortea es todo lo que decide RAMA: número de activos, base de coste declarada o
-//! no (vía escalar contra paseo mixto), liquidez, rentabilidades, impuestos y escala, reglas de
-//! retirada, modo de gasto, cascada y pensión con fecha.
+//! no (vía escalar contra paseo mixto), liquidez, rentabilidades, impuestos y escala, la puerta
+//! de tasa inicial, cascada y pensión con fecha.
 
 #[path = "common/cases.rs"]
 mod cases;
 
 use cases::es_tax_brackets_2025_26;
 use futurefin_engine::{
-    project_net_worth_series, simulate, AllocationCap, AllocationKind, AllocationRule, PathFailure,
-    PensionSchedule, PhasePlan, ProjectionInput, ProjectionOutput, SimAsset, SimInput, SimOutput,
-    SpendMode, WithdrawalRule,
+    project_net_worth_series, simulate, AllocationCap, AllocationKind, AllocationRule,
+    InitialRateGate, PathFailure, PensionSchedule, PhasePlan, ProjectionInput, ProjectionOutput,
+    SimAsset, SimInput, SimOutput,
 };
 use rust_decimal::Decimal;
 use uuid::Uuid;
@@ -156,26 +162,15 @@ fn gen_case(seed: u64, i: u64) -> ProjectionInput {
     let income_ret = r.money(3_000);
     let expense_ret = r.money(4_000);
     let mut plan = PhasePlan::forced_at(1, income_ret, expense_ret, Decimal::ZERO);
-    plan.withdrawal = match r.upto(4) {
-        0 => WithdrawalRule::FixedReal,
-        1 => WithdrawalRule::PercentOfBalance {
-            pct: Decimal::new(r.upto(200) as i64 + 1, 1),
-        },
-        2 => WithdrawalRule::Hybrid {
-            start_pct: Decimal::new(r.upto(100) as i64 + 20, 1),
-            end_pct: Decimal::new(r.upto(100) as i64 + 1, 1),
-        },
-        _ => WithdrawalRule::Guardrails {
-            pct: Decimal::new(r.upto(150) as i64 + 5, 1),
-            band_pct: Decimal::from(r.upto(40) as u32 + 5),
-            adjust_pct: Decimal::from(r.upto(40) as u32 + 5),
-        },
-    };
-    plan.spend_mode = if r.one_in(3) {
-        SpendMode::RuleIsSpend
-    } else {
-        SpendMode::Ceiling
-    };
+    // La PUERTA de tasa inicial (F2) en la mitad de los hogares, con un SWR entre 0,1 % y 8 %:
+    // jubilados en el mes 1, `R = 1` y `L(R−1)` es el líquido de partida, así que el veredicto es
+    // calculable desde la entrada.
+    if r.one_in(2) {
+        plan.initial_rate = Some(InitialRateGate {
+            swr_pct: Decimal::new(r.upto(80) as i64 + 1, 1),
+            bridge: None,
+        });
+    }
     // Pensión con fecha, plana (sin IPC en este arnés, «indexada» y «plana» coinciden) y siempre
     // desde el mes 1 del bucle (índice 0): así entra en la necesidad de TODOS los meses y la
     // constante que el test conoce sigue siendo una constante.
@@ -244,8 +239,6 @@ fn render(o: &ProjectionOutput) -> String {
         .chain(&o.liquid_worth)
         .chain(&o.contributed_capital)
         .chain(&o.withdrawal)
-        .chain(&o.withdrawal_shortfall)
-        .chain(&o.withdrawal_excess)
         .chain(&o.unmet_need)
     {
         let _ = write!(s, "{v},");
@@ -280,8 +273,6 @@ fn check(
         ("liquid_worth", &out.liquid_worth),
         ("contributed_capital", &out.contributed_capital),
         ("withdrawal", &out.withdrawal),
-        ("withdrawal_shortfall", &out.withdrawal_shortfall),
-        ("withdrawal_excess", &out.withdrawal_excess),
         ("unmet_need", &out.unmet_need),
         ("disposable_cash", &out.disposable_cash),
     ] {
@@ -291,7 +282,7 @@ fn check(
         if serie[0] != Decimal::ZERO
             && matches!(
                 label,
-                "withdrawal" | "withdrawal_shortfall" | "withdrawal_excess" | "unmet_need"
+                "withdrawal" | "unmet_need"
             )
         {
             return fail(format!("{label}[0] = {} y tiene que ser 0", serie[0]));
@@ -306,21 +297,15 @@ fn check(
         }
     }
 
-    // (2) LAS TRES MAGNITUDES CIERRAN, mes a mes:
-    //     retirada + recorte + descubierto − sobrante = necesidad.
-    //     El sobrante resta porque es gasto DISCRECIONAL: euros que la regla mandó gastar por
-    //     encima de la necesidad y que por tanto ya están dentro de `withdrawal`.
+    // (2) LAS MAGNITUDES CIERRAN, mes a mes: retirada + descubierto = necesidad.
     let need = need_net_of(input);
     for k in 1..=h {
-        let closed = out.withdrawal[k] + out.withdrawal_shortfall[k] + out.unmet_need[k]
-            - out.withdrawal_excess[k];
+        let closed = out.withdrawal[k] + out.unmet_need[k];
         if (closed - need).abs() > EPS {
             return fail(format!(
-                "mes {k}: {} + {} + {} − {} = {closed} ≠ necesidad {need}",
+                "mes {k}: {} + {} = {closed} ≠ necesidad {need}",
                 out.withdrawal[k],
-                out.withdrawal_shortfall[k],
                 out.unmet_need[k],
-                out.withdrawal_excess[k]
             ));
         }
     }
@@ -348,8 +333,6 @@ fn check(
     for k in 0..=h {
         for (label, v) in [
             ("retirada", out.withdrawal[k]),
-            ("recorte", out.withdrawal_shortfall[k]),
-            ("sobrante", out.withdrawal_excess[k]),
             ("descubierto", out.unmet_need[k]),
         ] {
             if v < Decimal::ZERO {
@@ -369,15 +352,15 @@ fn check(
         ));
     }
 
-    // (6) Y EL AGOTAMIENTO IMPLICA NECESIDAD SIN CUBRIR desde ese mes en adelante — modo
-    //     `ceiling`, donde toda venta persigue la necesidad. Sin esto, un puente que se vacía
+    // (6) Y EL AGOTAMIENTO IMPLICA NECESIDAD SIN CUBRIR desde ese mes en adelante — toda venta
+    //     persigue la necesidad. Sin esto, un puente que se vacía
     //     justo cuando entra una pensión que cubre el gasto posterior salía como «cartera
     //     agotada» con cero euros sin cubrir.
     if let Some(d) = out.assets_depleted_month_index {
         if d < 1 || d as usize > h {
             return fail(format!("mes de agotamiento {d} fuera del horizonte"));
         }
-        if input.phase_plan.spend_mode == SpendMode::Ceiling && need > Decimal::ZERO {
+        if need > Decimal::ZERO {
             let after: Decimal = out.unmet_need[d as usize..=h].iter().copied().sum();
             if after <= Decimal::ZERO {
                 return fail(format!(
@@ -403,7 +386,7 @@ fn check(
     //     términos son cero y la desigualdad se aprieta hasta la IGUALDAD con la constante que
     //     el test conoce: la necesidad ordinaria ES la neta. Un mes con deuda o con un Próximo
     //     que las separe vive en `phases_wp3.rs`
-    //     (`f3_ignores_the_mortgage_and_looks_at_the_ordinary_need`).
+    //     (`f2_ignores_the_mortgage_and_looks_at_the_ordinary_need`).
     if sim.ordinary_need.len() != h + 1 {
         return fail(format!(
             "longitud de ordinary_need: {} ≠ {}",
@@ -444,36 +427,40 @@ fn check(
             out.failure_month_index, out.failure_kind
         ));
     }
-    if out.failure_kind == Some(PathFailure::InitialRateExceeded) {
-        return fail("ningún caso del arnés declara puerta de tasa inicial".into());
-    }
-    let rule_has_ceiling = input.phase_plan.withdrawal != WithdrawalRule::FixedReal;
     let first_f1 = (1..=h).find(|k| out.unmet_need[*k] > EPS);
-    // Con techo, «la regla permitió menos que la necesidad ordinaria» ⟺ hubo recorte: en este
-    // arnés la necesidad ordinaria y la neta coinciden (ver (8)), y el recorte ES su diferencia
-    // contra lo que la regla permitió.
-    //
-    // **Y solo cuenta en `R`, el primer mes jubilado** (C10): F3 es una propiedad de la FECHA,
-    // como F2. Un recorte del mes 13 es una lectura informativa (`withdrawal_shortfall`), no un
-    // fracaso — antes de C10 este arnés lo trataba como fallo y su rama `None` lo cazaba, que es
-    // exactamente lo que dejó de ser cierto.
-    let first_f3 = rule_has_ceiling
-        .then(|| out.retirement_month_index)
-        .flatten()
-        .filter(|r| (*r as usize) <= h && out.withdrawal_shortfall[*r as usize] > EPS)
-        .map(|r| r as usize);
+    // F2 —la tasa inicial— solo se juzga en `R`, que en este arnés es el mes 1 (jubilación forzada
+    // desde el primer mes). Su veredicto es calculable desde la ENTRADA: `12·necesidad` contra
+    // `SWR/100 · L(0)`, con `L(0)` el líquido de partida. En el filo exacto (a menos de `EPS`) el
+    // arnés no opina: ahí manda el redondeo del motor y no hay respuesta «correcta» que exigir.
+    let liquid0: Decimal = input
+        .assets
+        .iter()
+        .filter(|a| a.is_liquid)
+        .map(|a| a.value)
+        .sum();
+    let f2 = input.phase_plan.initial_rate.and_then(|g| {
+        let cap = g.swr_pct * liquid0.max(Decimal::ZERO) / Decimal::ONE_HUNDRED;
+        let ask = Decimal::from(12) * need;
+        if (ask - cap).abs() <= EPS {
+            None // filo: indeterminado a propósito
+        } else {
+            Some(ask > cap && g.swr_pct > Decimal::ZERO)
+        }
+    });
+    let first_f2 = matches!(f2, Some(true)).then_some(1usize).filter(|_| h >= 1);
     match out.failure_month_index {
         Some(m) => {
             if m < 1 || m as usize > h {
                 return fail(format!("mes de fallo {m} fuera del horizonte"));
             }
-            let expected = match (first_f1, first_f3) {
+            let expected = match (first_f1, first_f2) {
                 (Some(a), Some(b)) => a.min(b),
                 (Some(a), None) => a,
                 (None, Some(b)) => b,
+                (None, None) if f2.is_none() && input.phase_plan.initial_rate.is_some() => m as usize,
                 (None, None) => {
                     return fail(format!(
-                        "fallo publicado en el mes {m} sin descubierto ni recorte que lo explique"
+                        "fallo publicado en el mes {m} sin descubierto ni tasa inicial que lo explique"
                     ))
                 }
             };
@@ -481,22 +468,23 @@ fn check(
             // latch que se moviera publicaría un mes posterior.
             if m as usize > expected {
                 return fail(format!(
-                    "el fallo se publica en el mes {m} y el primer mes roto es el {expected}:                      el latch no es monótono"
+                    "el fallo se publica en el mes {m} y el primer mes roto es el {expected}: \
+                     el latch no es monótono"
                 ));
             }
             let kind_ok = match out.failure_kind {
                 Some(PathFailure::PortfolioDepleted) => out.unmet_need[m as usize] > EPS,
-                Some(PathFailure::RuleBelowNeed) => {
-                    out.withdrawal_shortfall[m as usize] > EPS && out.unmet_need[m as usize] <= EPS
+                // F2 solo firma en `R` (= 1) y pierde contra F1 en el mismo mes.
+                Some(PathFailure::InitialRateExceeded) => {
+                    m == 1 && f2 != Some(false) && out.unmet_need[1] <= EPS
                 }
-                _ => false,
+                None => false,
             };
             if !kind_ok {
                 return fail(format!(
-                    "mes {m}: el motivo {:?} no cuadra con descubierto {} y recorte {}",
+                    "mes {m}: el motivo {:?} no cuadra con descubierto {} y puerta {f2:?}",
                     out.failure_kind,
                     out.unmet_need[m as usize],
-                    out.withdrawal_shortfall[m as usize]
                 ));
             }
         }
@@ -507,10 +495,10 @@ fn check(
                     out.unmet_need[k]
                 ));
             }
-            if let Some(k) = first_f3 {
+            if first_f2.is_some() {
                 return fail(format!(
-                    "la regla recortó {} € en el mes {k} —que es `R`— y el camino «no falla»",
-                    out.withdrawal_shortfall[k]
+                    "12·necesidad supera el SWR del líquido de partida ({liquid0}) en `R` y el \
+                     camino «no falla»"
                 ));
             }
         }
@@ -525,8 +513,7 @@ fn random_households_satisfy_the_accounting_identities() {
     for seed in [0x5EED_0001u64, 0x5EED_0002, 0x5EED_0003] {
         let mut simulated = 0u64;
         let mut with_depletion = 0u64;
-        let mut with_cut = 0u64;
-        let mut with_excess = 0u64;
+        let mut with_f2 = 0u64;
         for i in 0..CASES {
             let input = gen_case(seed, i);
             // Se llama al NÚCLEO y se convierte, en vez de a `project_net_worth_series`: es la
@@ -548,11 +535,8 @@ fn random_households_satisfy_the_accounting_identities() {
             if out.assets_depleted_month_index.is_some() {
                 with_depletion += 1;
             }
-            if out.withdrawal_shortfall.iter().any(|v| *v > Decimal::ZERO) {
-                with_cut += 1;
-            }
-            if out.withdrawal_excess.iter().any(|v| *v > Decimal::ZERO) {
-                with_excess += 1;
+            if out.failure_kind == Some(PathFailure::InitialRateExceeded) {
+                with_f2 += 1;
             }
 
             // (7) DETERMINISMO: la misma entrada, dos veces, el mismo `Display`.
@@ -566,10 +550,10 @@ fn random_households_satisfy_the_accounting_identities() {
 
         // Control de vida del generador: un arnés que no ejercita ninguna rama interesante pasa
         // siempre y no prueba nada. Estas cotas son holgadas a propósito — miden que el sorteo
-        // sigue produciendo hogares que se arruinan, que recortan y que gastan de más.
+        // sigue produciendo hogares que se arruinan y hogares que fallan por la tasa inicial.
         println!(
             "[fuzz_invariants] semilla {seed:#x}: {simulated}/{CASES} simulados · \
-             {with_depletion} con agotamiento · {with_cut} con recorte · {with_excess} con sobrante"
+             {with_depletion} con agotamiento · {with_f2} con fallo F2"
         );
         assert!(
             simulated >= CASES * 9 / 10,
@@ -580,12 +564,8 @@ fn random_households_satisfy_the_accounting_identities() {
             "semilla {seed:#x}: solo {with_depletion} hogares se agotan — el generador se ha vuelto plácido"
         );
         assert!(
-            with_cut >= CASES / 25,
-            "semilla {seed:#x}: solo {with_cut} hogares sufren recorte de la regla"
-        );
-        assert!(
-            with_excess >= CASES / 50,
-            "semilla {seed:#x}: solo {with_excess} hogares gastan por encima de la necesidad"
+            with_f2 >= CASES / 50,
+            "semilla {seed:#x}: solo {with_f2} hogares fallan por la tasa inicial — la puerta no se ejercita"
         );
     }
 }
@@ -631,7 +611,7 @@ fn the_harness_notices_a_single_broken_identity() {
             Box::new(move |o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| o.withdrawal[0] = cent),
         ),
         (
-            "las tres magnitudes no cierran",
+            "las magnitudes no cierran",
             Box::new(move |o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| o.withdrawal[1] += cent),
         ),
         (
@@ -641,8 +621,11 @@ fn the_harness_notices_a_single_broken_identity() {
         (
             "un signo negativo",
             Box::new(move |o: &mut ProjectionOutput, _s: &mut SimOutput<Decimal>| {
-                o.withdrawal_shortfall[1] = -cent;
-                o.withdrawal[1] += cent;
+                // La identidad (2) sigue cerrando: lo que se le quita al descubierto se le suma
+                // a la retirada.
+                let old = o.unmet_need[1];
+                o.unmet_need[1] = -cent;
+                o.withdrawal[1] += old + cent;
             }),
         ),
         (

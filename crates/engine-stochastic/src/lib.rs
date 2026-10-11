@@ -15,7 +15,7 @@
 //!
 //! **Ninguna salida de este crate se publica como un KPI monetario.** Lo que sale son magnitudes
 //! ESTADÍSTICAS —probabilidad de éxito (con su intervalo de Wilson), percentiles de una banda,
-//! fallo acumulado por edad ([`McOutcome::cumulative_failure_by_age`], E9: F1/F2/F3, no solo
+//! fallo acumulado por edad ([`McOutcome::cumulative_failure_by_age`], E9: F1/F2, no solo
 //! agotamiento)— y ahí un error relativo de 1e-15 no cambia ninguna decisión. El patrimonio, el
 //! objetivo FIRE, la aportación necesaria y cualquier cifra en euros de la app salen del camino
 //! `Decimal` del motor, que es exacto y sigue siendo el único que la API publica como dinero.
@@ -89,7 +89,7 @@ pub use mc::{
 pub use solve_mc::{
     retiring_at, success_at_month, success_at_month_from, success_by_retirement_month,
     valid_retirement_month, RetirementDateSolve, SuccessAt, BRACKET_STEP_MONTHS,
-    KIND_INITIAL_RATE_EXCEEDED, KIND_PORTFOLIO_DEPLETED, KIND_RULE_BELOW_NEED, MAX_ANNUAL_DRAWS,
+    KIND_INITIAL_RATE_EXCEEDED, KIND_PORTFOLIO_DEPLETED, MAX_ANNUAL_DRAWS,
     MAX_BRACKET_DRAWS, MAX_CONFIRMATION_ADVANCES, MAX_MONTHLY_BISECTION_DRAWS, WILSON_Z_95,
 };
 pub use strategy_solves::{
@@ -213,10 +213,6 @@ impl MoneyOps for F64Money {
     #[inline]
     fn one() -> Self {
         F64Money(1.0)
-    }
-    #[inline]
-    fn max_value() -> Self {
-        F64Money(f64::MAX)
     }
 
     #[inline]

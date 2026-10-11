@@ -266,7 +266,13 @@ pub fn gross_up_mixed_monthly<M: MoneyOps>(
 
 /// Resultado del paseo DIRECTO (5.0.0 WP2): dado un techo BRUTO, qué se vende de cada tramo y
 /// qué netea. Es el gemelo de [`MixedDrawdown`] con la flecha al revés — allí se conoce el neto
-/// que hace falta, aquí el bruto que la regla de retirada permite (§B.2 del plan de #207).
+/// que hace falta, aquí un bruto dado.
+///
+/// **Solo de test desde el 2026-10-10.** Su consumidor en el bucle era el techo BRUTO de las
+/// reglas de retirada por saldo, retiradas con la decisión «solo SWR». Se conserva como el
+/// mapa DIRECTO contra el que los tests verifican [`gross_up_mixed_monthly`] —el inverso que el
+/// bucle sí ejecuta— (ida y vuelta exacta), no como superficie del motor.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct MixedGrossDrawdown<M> {
     /// Bruto realmente vendido: el techo, o menos si las capacidades no llegan.
@@ -293,7 +299,8 @@ pub struct MixedGrossDrawdown<M> {
 /// **Paseo DIRECTO por el mapa lineal a trozos** (5.0.0 WP2): vende exactamente `gross_cap`
 /// (o todo lo que haya, si es menos) sobre `segments` en su orden, y devuelve lo que netea.
 ///
-/// Por qué existe: las reglas de retirada de 5.0.0 ponen un techo **BRUTO** (R9 — el `pct` es
+/// Por qué existió (hasta el 2026-10-10 lo consumía el bucle; hoy solo los tests, ver
+/// [`MixedGrossDrawdown`]): las reglas de retirada de 5.0.0 ponían un techo **BRUTO** (R9 — el `pct` era
 /// bruto de impuestos, como el SWR). Con `g` uniforme el neto de un bruto es
 /// [`after_tax_monthly`] y no hace falta nada más; con `g` heterogénea por activo (#178) la base
 /// imponible es `Σ g_i·venta_i` y el neto depende del REPARTO, así que hay que recorrer el mismo
@@ -314,6 +321,7 @@ pub struct MixedGrossDrawdown<M> {
 /// `gross_cap ≤ 0` ⇒ no se vende nada. Un tipo efectivo ≥ 100 % sobre un tramo (que la API no
 /// permite: los `pct` están acotados) haría el neto marginal negativo; el resultado se publica
 /// clampado a 0 porque **vender no puede costarle dinero al hogar** en este modelo.
+#[cfg(test)]
 pub fn mixed_drawdown_for_gross_cap<M: MoneyOps>(
     gross_cap_monthly: M,
     segments: &[MixedSegment<M>],

@@ -89,37 +89,8 @@ export type RetirementStrategyApi =
   | "coast"
   | "partial";
 
-/** Catálogo de reglas de retirada (D6). */
-export type WithdrawalRuleKindApi =
-  | "fixed_real"
-  | "percent_of_balance"
-  | "hybrid"
-  | "guardrails";
-
-/** Qué relación tiene la regla con el gasto declarado (D5). */
-export type SpendModeApi = "ceiling" | "rule_is_spend";
-
 /** Base de gasto de la fase de media jornada (D10). */
 export type PartialExpenseBasisApi = "retirement" | "regular";
-
-/**
- * Regla de retirada + su modo de gasto. Los `pct` son BRUTOS de impuestos (como el SWR).
- * En el PATCH viaja ENTERA, nunca campo a campo: qué `pct` son obligatorios depende de `kind`.
- */
-export type WithdrawalRuleApi = {
-  kind: WithdrawalRuleKindApi;
-  /** `percent_of_balance` y `guardrails`: % anual del líquido. */
-  pct: string | null;
-  /** `hybrid`: % de partida. */
-  start_pct: string | null;
-  /** `hybrid`: % al que se baja tras el latch (estrictamente menor que `start_pct`). */
-  end_pct: string | null;
-  /** `guardrails`: banda alrededor de la tasa inicial que dispara el ajuste. */
-  band_pct: string | null;
-  /** `guardrails`: cuánto se recorta/sube la retirada al tocar una banda. */
-  adjust_pct: string | null;
-  spend_mode: SpendModeApi;
-};
 
 /**
  * Pensión pública (u otra renta vitalicia) CON FECHA (D3/D8): su inicio es un flujo de caja más
@@ -135,7 +106,7 @@ export type PensionPlanApi = {
   fraction_while_partial: string;
   /** Puente activo (C2/C7): en el mes de jubilación, si faltan ≤ `bridge_max_years` para que
    *  empiece la pensión, el tope de la tasa inicial es `bridge_max_pct` en vez del SWR (nunca un
-   *  tope mensual: F1/F3 juzgan el resto). Disponible en CUALQUIER estrategia. Default `false`. */
+   *  tope mensual: a partir de ahí solo cuenta F1). Disponible en CUALQUIER estrategia. Default `false`. */
   bridge_enabled: boolean;
   /** % ANUAL (Decimal-string), estrictamente MAYOR que el SWR — si no fuera mayor no sería un
    *  puente, sería la misma tasa. `null` con `bridge_enabled: false`; default al activarlo: `max(5, swr + 1)` como string decimal. */
@@ -191,7 +162,6 @@ export type RetirementProfileApi = {
    *  `fixed_retirement_age` el mes de parada lo resuelve el servidor, `coast_stop_month_index`
    *  en la serie). */
   coast_stop_age: number | null;
-  withdrawal_rule: WithdrawalRuleApi;
   pension: PensionPlanApi | null;
   partial_retirement: PartialRetirementApi | null;
 };
@@ -218,7 +188,6 @@ export type RetirementProfilePatchApi = {
   /** Tri-estado: `null` suelta la edad de parada fija (solo tiene sentido con `coast_mode:
    *  "fixed_stop_age"`, pero el servidor la conserva aunque no aplique — igual que hoy). */
   coast_stop_age?: number | null;
-  withdrawal_rule?: WithdrawalRuleApi;
   pension?: PensionPlanApi | null;
   partial_retirement?: PartialRetirementApi | null;
   /** Misma columna que `PATCH /v1/auth/me`: `null` la borra, `"YYYY-MM-DD"` la fija. */
@@ -450,7 +419,7 @@ export type SummaryPlanApi = {
 
   // ── modelo v2 — «el éxito define la fecha» (sustituye al KPI D25/D28 de WP6b) ─────────────
   /**
-   * FRACCIÓN [0,1]: éxito del plan EN SU FECHA VÁLIDA — caminos que no fallan (F1/F2/F3) de N.
+   * FRACCIÓN [0,1]: éxito del plan EN SU FECHA VÁLIDA — caminos que no fallan (F1/F2) de N.
    *
    * **Es EXACTAMENTE el número del fan chart** de `GET /v1/projection/bands` (`success_of_plan`
    * ahí) — el mismo cache de plan, los mismos caminos, la misma semilla. Nunca se recalcula
@@ -617,30 +586,14 @@ export type ProjectionPointApi = {
    * el mes 0. No es el gasto (el ingreso de la fase lo cubre primero) ni la venta BRUTA (el
    * impuesto de la plusvalía se paga vendiendo de más y ese exceso sigue dentro del patrimonio).
    * Es un flujo del MES, no un acumulado, y se decima por densidad igual que `net_worth`.
-   *
-   * **5.0.0, pase de correcciones §D**: en modo `rule_is_spend` la regla financia su gasto
-   * PRIMERO con el superávit del mes, y ese trozo cuenta aquí — antes se vendía cartera para
-   * gastar un dinero que ya estaba en la cuenta y el churn fiscal aparecía de la nada.
    */
   withdrawal?: number;
-  /**
-   * f64 (5.0.0): recorte de la regla de retirada, `max(0, necesidad − permitido)`. **Informativo**
-   * (D22/D24): no resta patrimonio, no cuenta como fracaso y NO es `uncovered_deficit_total`
-   * (eso mide lo que los activos no pudieron vender). Todo ceros mientras la regla sea
-   * `fixed_real`, que no tiene techo.
-   */
-  withdrawal_shortfall?: number;
-  /** f64 (5.0.0): exceso de la regla sobre la necesidad en modo `rule_is_spend` (se vende y se
-   *  gasta). Todo ceros con `fixed_real` / `ceiling`. */
-  withdrawal_excess?: number;
   /**
    * f64 (5.0.0, pase de correcciones §F): **gasto del mes que los activos NO pudieron
    * financiar**, neto y `≥ 0`.
    *
-   * Es la OTRA mitad de quedarse corto, y no se puede confundir con su vecina:
-   * `withdrawal_shortfall` es lo que la REGLA rechazó sacar (hay dinero, el techo no deja);
-   * `unmet_need` es lo que la CARTERA no dio (no había de dónde vender). Un mes puede tener las
-   * dos, una, o ninguna. Sumar las dos NO da «lo que faltó»: son cortes distintos del mismo mes.
+   * Es lo que la CARTERA no dio (no había de dónde vender): un mes con `unmet_need > 0` es un
+   * fallo F1 (cartera agotada).
    *
    * Ausente en backends anteriores al pase — la fila del tooltip simplemente no se pinta, que es
    * lo correcto: un `0 €` afirmaría que se financió todo.
@@ -902,7 +855,7 @@ export type ProjectionSeriesApi = {
   safe_date_at_100_month_index?: number | null;
   /** El mismo mes evaluado AL 90 %. Junto al de arriba acota la fecha configurada entre las dos. */
   safe_date_at_90_month_index?: number | null;
-  /** FRACCIÓN [0,1]: éxito real del plan EN SU FECHA VÁLIDA (caminos sin fallo F1/F2/F3 de N).
+  /** FRACCIÓN [0,1]: éxito real del plan EN SU FECHA VÁLIDA (caminos sin fallo F1/F2 de N).
    *  Es la cifra base, antes de aplicar Wilson. `null` sin fecha válida. */
   success_of_plan?: number | null;
   /** FRACCIÓN [0,1]: límite INFERIOR del intervalo de Wilson al 95 % sobre `success_of_plan`
@@ -1055,8 +1008,8 @@ export type ProjectionBandPointApi = {
 
 /**
  * Un punto del fallo ACUMULADO por edad (modelo v2, sustituye a `DepletionProbabilityPointApi`):
- * cuenta las TRES formas de fallo del camino (F1 cartera agotada, F2 tasa inicial superada, F3
- * recorte de regla bajo la necesidad ordinaria), no solo el agotamiento de cartera.
+ * cuenta las DOS formas de fallo del camino (F1 cartera agotada, F2 tasa inicial superada), no solo
+ * el agotamiento de cartera.
  * `age: null` ⟺ el usuario no tiene fecha de nacimiento (la fila sigue existiendo: la cifra es
  * real aunque no se pueda rotular con una edad).
  */
@@ -1066,9 +1019,9 @@ export type FailureProbabilityPointApi = {
   /** FRACCIÓN [0,1]: probabilidad ACUMULADA de haber fallado por CUALQUIER motivo hasta este mes.
    *  `null` = ese punto de la rejilla no se resolvió (nivel 2 aún en marcha). */
   probability: number | null;
-  /** Desglose `[F1, F2, F3]` de esa misma fracción acumulada, mismo orden que
+  /** Desglose `[F1, F2]` de esa misma fracción acumulada, mismo orden que
    *  `ProjectionBandsApi.failures_by_kind`. `null` a la vez que `probability`. */
-  by_kind: [number, number, number] | null;
+  by_kind: [number, number] | null;
 };
 
 /** `green` | `amber` | `red`: verde ⟺ `success_wilson_low` cumple `success_threshold_pct`; ámbar
@@ -1097,7 +1050,7 @@ export type ProjectionBandsApi = {
   /** Fijo `[10, 50, 90]`, en el orden de los campos de `points[]`. */
   percentiles: number[];
   points: ProjectionBandPointApi[];
-  /** FRACCIÓN [0,1]: éxito real del plan EN SU FECHA VÁLIDA — caminos sin fallo (F1/F2/F3) de N.
+  /** FRACCIÓN [0,1]: éxito real del plan EN SU FECHA VÁLIDA — caminos sin fallo (F1/F2) de N.
    *  Es la cifra base, antes de Wilson; sustituye a la vieja `success_probability` (redefinida en
    *  el modelo v2 — «el éxito define la fecha», C1-C8).
    *
@@ -1119,13 +1072,12 @@ export type ProjectionBandsApi = {
    *  `null` a la vez que `success_of_plan` — un `"0"` ahí afirmaría una medición sin error. */
   success_sampling_error_pp: string | null;
   /** Conteo de caminos fallidos por tipo, en orden fijo `[F1 cartera agotada, F2 tasa inicial
-   *  superada, F3 recorte de regla bajo la necesidad ordinaria]`. La suma es ≤ `paths` — los
-   *  caminos con éxito no cuentan en ninguna casilla.
+   *  superada]`. La suma es ≤ `paths` — los caminos con éxito no cuentan en ninguna casilla.
    *
-   *  **Con `success_absent_reason` puesto vale `[0, 0, 0]`**, y ese cero significa «sin
+   *  **Con `success_absent_reason` puesto vale `[0, 0]`**, y ese cero significa «sin
    *  jubilación no hay fallo que contar», nunca «riesgo cero». Léelo siempre con esa etiqueta
    *  delante (ver `success_absent_reason`). */
-  failures_by_kind: [number, number, number];
+  failures_by_kind: [number, number];
   /** Veredicto del semáforo, decidido por el SERVIDOR contra `success_threshold_pct` (C3): verde
    *  ⟺ `success_wilson_low` cumple el umbral; ámbar ⟺ el umbral cae dentro del intervalo de
    *  Wilson; rojo el resto. La SPA nunca lo recalcula. `null` a la vez que `success_of_plan`: el
@@ -1145,8 +1097,7 @@ export type ProjectionBandsApi = {
    * las dos superficies no nombren de dos maneras la misma situación).
    *
    * **Con este campo puesto, los ceros del resto de la respuesta cambian de significado.**
-   * `failures_by_kind`, `failure_probability_by_age`, `months_below_need_p50` y
-   * `withdrawal_to_need_ratio_p50` siguen viajando porque describen la trayectoria del patrimonio
+   * `failures_by_kind` y `failure_probability_by_age` siguen viajando porque describen la trayectoria del patrimonio
    * **sin jubilarse**, que es una respuesta legítima; pero sus ceros dicen «sin jubilación no hay
    * fallo que contar», NUNCA «riesgo cero». Pintarlos como tranquilizadores es exactamente el
    * bug que A12 vino a cerrar, y por eso `buildRiskExtraRows` (`lib/risk-bands.ts`) no emite ni
@@ -1156,21 +1107,11 @@ export type ProjectionBandsApi = {
    * falta nada» de «este servidor no publica el motivo».
    */
   success_absent_reason: "not_reachable" | "birth_date_missing" | null;
-  /** Fallo ACUMULADO por edad — sustituye a `depletion_probability_by_age`: cuenta las TRES
-   *  formas de fallo (F1–F3), no solo el agotamiento de cartera. Vacío ⟺ ningún camino se jubila
+  /** Fallo ACUMULADO por edad — sustituye a `depletion_probability_by_age`: cuenta las DOS
+   *  formas de fallo (F1–F2), no solo el agotamiento de cartera. Vacío ⟺ ningún camino se jubila
    *  dentro del horizonte. Con `success_absent_reason` trae UNA sola fila, la del horizonte, y
    *  vale 0 — el mismo cero de `failures_by_kind`, con la misma lectura. */
   failure_probability_by_age: FailureProbabilityPointApi[];
-  /** Mediana de MESES jubilados en que **se gastó menos de lo necesario**. **5.0.0, pase de
-   *  correcciones §F**: cuenta las dos formas de quedarse corto —el techo de la regla y lo que
-   *  la cartera no pudo pagar—, así que ya **no** es 0 por construcción con `fixed_real`: esa
-   *  regla no tiene techo, pero su cartera sí se puede quedar sin nada. */
-  months_below_need_p50: number;
-  /** FRACCIÓN (Decimal-string): qué parte de la necesidad se pagó DE VERDAD. `1` = entera.
-   *  `null` cuando ningún camino tiene meses jubilados con necesidad positiva. Misma corrección
-   *  §F: incluye el descubierto, no solo el recorte de la regla (un caso medido pasó de `1,0` a
-   *  `0,0865` al dejar de ignorar lo que la cartera no financió). */
-  withdrawal_to_need_ratio_p50: string | null;
   /** `false` ⟺ **ningún activo declara volatilidad**: las tres bandas SON la línea determinista,
    *  y la UI tiene que decirlo en vez de dibujar un abanico plano que se lee como certeza. */
   any_volatility_declared: boolean;

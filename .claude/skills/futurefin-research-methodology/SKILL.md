@@ -261,8 +261,9 @@ v1.1.0, v1.2.0, v1.3.0, v1.4.0, v1.4.2) and the working tree. Re-verify before t
 - Single FIRE-target source of truth still exists: `grep -n "pub fn fire_target_at_month_index" crates/engine/src/projection.rs` (y desde 5.0.0 su gemelo consciente del plan **la llama** en vez de reimplementarla: `grep -n "fire_target_at_index_g(Some(ft), month_index)" crates/engine/src/target.rs`, 2 hits)
 - Los dos ejemplos de §4 añadidos el 2026-09-03 (rama `release/5.0.0`, issue #207):
   `grep -n "fn every_case_degenerates_from_decimal_to_floating_point" crates/engine-stochastic/tests/degeneration.rs`,
-  `grep -n "pub cap_exhausted" crates/engine/src/tax.rs` (el booleano que sustituyó a la comparación
-  re-derivada) y `ls crates/engine/tests/phases_wp3.rs`
+  `grep -n -B3 "pub cap_exhausted" crates/engine/src/tax.rs` (el booleano que sustituyó a la comparación
+  re-derivada; desde el 2026-10-10 vive en `MixedGrossDrawdown`, que es `#[cfg(test)]`: el ejemplo
+  sigue valiendo como historia de método, pero ya no gobierna nada en el bucle) y `ls crates/engine/tests/phases_wp3.rs`
 - Parity fixture + both consumers: `ls apps/api/tests/fixtures/fire-parity.json apps/api/tests/fire_parity.rs apps/web/src/lib/fire.test.ts`
 - Cache smoke script: `ls scripts/smoke-projection-cache.sh`
 - Migration count (do not quote a stale number): `ls apps/api/migrations | wc -l`

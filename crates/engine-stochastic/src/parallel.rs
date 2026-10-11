@@ -15,8 +15,9 @@
 //! llamante en orden de índice (`p = 0, 1, 2, …`); toda reducción posterior (sumas, conteos,
 //! ordenaciones, percentiles) se hace secuencialmente sobre ellos, exactamente como antes. Los conteos son enteros
 //! y los percentiles son un índice entero sobre una muestra ordenada con un orden total, así que
-//! ninguno de los dos podría moverse aunque quisiera; las únicas sumas de `f64` del pliegue
-//! —cobertura y `months_below`— se hacen dentro de UN camino, nunca entre caminos.
+//! ninguno de los dos podría moverse aunque quisiera. (Hasta el 2026-10-10 el pliegue tenía
+//! además dos sumas de `f64` —cobertura y `months_below`—, siempre dentro de UN camino; se
+//! retiraron con las reglas de retirada por saldo.)
 //!
 //! Guardián: `tests/parallel_determinism.rs`, que compara **todas** las salidas con `==` exacto
 //! (`f64::to_bits`) entre 1, 2, 4 y 8 hilos.

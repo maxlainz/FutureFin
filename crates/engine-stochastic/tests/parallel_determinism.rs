@@ -27,10 +27,10 @@
 //!
 //! Cinco casos de la del motor, elegidos para cubrir los caminos que más pliegan: **P9** (el hogar
 //! realista de cinco activos, dos pasivos y cascada con topes), **P13** (`g` denormal — el caso que
-//! existe para que la aritmética se vea), **P18** (puente de pensión), **P15**
-//! (`percent_of_balance` con techo: la regla por SALDO, que hace que cada camino retire una
-//! cantidad distinta y que la cobertura sea una suma no trivial) y **P17** (guardrails con
-//! impuestos ES).
+//! existe para que la aritmética se vea), **P18** (puente de pensión), **P8** (drenaje con `g`
+//! mixta: la venta por el paseo por tramos) y **P20** (media jornada). Hasta el 2026-10-10 los dos
+//! últimos eran P15 (`percent_of_balance`) y P17 (guardrails), que se retiraron de la batería con
+//! las reglas de retirada por saldo.
 
 #[path = "../../engine/tests/common/cases.rs"]
 mod cases;
@@ -68,8 +68,8 @@ const CASES: [&str; 5] = [
     "P9_hogar_realista",
     "P13_cash8k_denormal_g",
     "P18_pension_bridge",
-    "P15_percent_of_balance_ceiling",
-    "P17_guardrails_taxes_es",
+    "P8_drenaje_g_mixta",
+    "P20_partial_media_jornada",
 ];
 
 /// Volatilidades alineadas con los activos del caso, por posición y con magnitudes realistas
@@ -139,8 +139,6 @@ fn outcomes_are_bit_identical(what: &str, a: &McOutcome, b: &McOutcome) {
         half_width_pp,
         failures_by_kind,
         cumulative_failure_by_age,
-        months_below_need_p50,
-        withdrawal_to_need_ratio_p50,
         any_volatility_declared,
     } = a;
 
@@ -188,15 +186,6 @@ fn outcomes_are_bit_identical(what: &str, a: &McOutcome, b: &McOutcome) {
         same_bits(&format!("{what}: cumulative_failure_by_age[{i}].p"), *p1, *p2);
     }
 
-    assert_eq!(
-        *months_below_need_p50, b.months_below_need_p50,
-        "{what}: months_below_need_p50"
-    );
-    match (withdrawal_to_need_ratio_p50, b.withdrawal_to_need_ratio_p50) {
-        (None, None) => {}
-        (Some(x), Some(y)) => same_bits(&format!("{what}: withdrawal_to_need_ratio_p50"), *x, y),
-        (x, y) => panic!("{what}: withdrawal_to_need_ratio_p50 {x:?} != {y:?}"),
-    }
     assert_eq!(
         *any_volatility_declared, b.any_volatility_declared,
         "{what}: any_volatility_declared"

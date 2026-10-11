@@ -1076,7 +1076,7 @@ pub struct SimulateParams {
     #[serde(default)]
     pub liability_overrides: Option<Vec<LiabilityOverrideParam>>,
     /// **Tu PLAN de jubilación como escenario** (5.0.0): estrategia, edad objetivo, modo y
-    /// objetivo manual del número FIRE, base del objetivo, regla de retirada, pensión con fecha,
+    /// objetivo manual del gasto de jubilación, SWR, umbral, pensión con fecha y su puente,
     /// media jornada… Mismos campos, mismos valores y mismas cotas que `update_retirement_profile`
     /// — lo que simulas aquí es exactamente lo que pasaría al guardarlo, y **no se persiste nada**.
     /// «¿Y si me jubilo a los 55?» es `{"strategy": "retire_at_age", "target_retirement_age": 55}`.
@@ -1095,8 +1095,8 @@ pub struct SimulateParams {
     /// (`date_solved_with_paths` pasa de 500 a 2.500): con el eje, el lado `baseline` coincide,
     /// cifra a cifra, con `GET /v1/projection/series`. Añade además, POR LADO, un bloque
     /// suplementario con SU PROPIO sorteo de `paths` caminos: `success_probability` (fracción SIN
-    /// ningún fallo F1/F2/F3), `sampling_error_pp` (Wilson, en puntos porcentuales),
-    /// `failures_by_kind`, `failure_probability_by_age` y `months_below_need_p50`. `null`/vacío ⟺
+    /// ningún fallo F1/F2), `sampling_error_pp` (Wilson, en puntos porcentuales),
+    /// `failures_by_kind` y `failure_probability_by_age`. `null`/vacío ⟺
     /// no se pidió el eje. Sin bandas puntuales (usa get_projection_bands para eso);
     /// `success_of_plan_delta` en `deltas` viaja SIEMPRE, con o sin este eje — es del solve de
     /// fecha, no de este bloque.
@@ -1215,9 +1215,6 @@ pub struct ProfileOverrideParam {
     /// `pension.bridge_max_pct`/`pension.bridge_max_years`.
     #[serde(default)]
     pub bridge_discount_basis: Option<String>,
-    /// Regla de retirada COMPLETA (sustituye a la actual).
-    #[serde(default)]
-    pub withdrawal_rule: Option<WithdrawalRuleParam>,
     /// Bloque de pensión COMPLETO (sustituye al actual; el puente vive dentro, ver `PensionParam`).
     #[serde(default)]
     pub pension: Option<PensionParam>,
@@ -1277,7 +1274,6 @@ impl ProfileOverrideParam {
             target_basis: self.target_basis.clone(),
             clear_target_basis: self.clear_target_basis,
             bridge_discount_basis: self.bridge_discount_basis.clone(),
-            withdrawal_rule: self.withdrawal_rule.clone(),
             pension: self.pension.clone(),
             clear_pension: self.clear_pension,
             partial_retirement: self.partial_retirement.clone(),
@@ -2319,48 +2315,6 @@ pub struct UpdateFireSettingsParams {
 // Perfil de jubilación por usuario (5.0.0, D13)
 // ---------------------------------------------------------------------------
 
-/// Regla de retirada del perfil. Se sustituye ENTERA (no campo a campo): qué `pct` son
-/// obligatorios depende de `kind`, así que un merge parcial permitiría estados que nadie
-/// escribió («guardrails con el pct del percent_of_balance anterior»).
-#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct WithdrawalRuleParam {
-    /// "fixed_real" (retira la necesidad declarada indexada, sin techo — la conducta de 4.15.x)
-    /// | "percent_of_balance" (pct % del líquido) | "hybrid" (start_pct hasta que el saldo
-    /// permite bajar a end_pct) | "guardrails" (Guyton-Klinger).
-    #[schemars(extend("enum" = ["fixed_real", "percent_of_balance", "hybrid", "guardrails"]))]
-    pub kind: String,
-    /// % anual BRUTO de impuestos (0 < pct <= 20), string decimal, para percent_of_balance y
-    /// guardrails. OPCIONAL: omitido HEREDA tu swr_pct — el porcentaje de retirada es ÚNICO, el
-    /// mismo que dimensiona el objetivo FIRE. Mándalo solo para desacoplarlo a propósito;
-    /// omitirlo otra vez lo vuelve a acoplar. La respuesta lo dice en pct_source (swr|explicit).
-    #[serde(default)]
-    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
-    pub pct: Option<String>,
-    /// hybrid: % de partida (0 < pct <= 20). OPCIONAL igual que pct: omitido hereda tu swr_pct.
-    #[serde(default)]
-    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
-    pub start_pct: Option<String>,
-    /// hybrid: % al que se baja tras el latch. OBLIGATORIO (no hereda nada) y estrictamente
-    /// MENOR que el start_pct RESUELTO — o sea que si omites start_pct, menor que tu swr_pct.
-    #[serde(default)]
-    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
-    pub end_pct: Option<String>,
-    /// guardrails: banda alrededor de la tasa inicial que dispara el ajuste (0 < pct <= 50).
-    #[serde(default)]
-    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
-    pub band_pct: Option<String>,
-    /// guardrails: cuánto se recorta/sube la retirada al tocar una banda (0 < pct <= 50).
-    #[serde(default)]
-    #[schemars(regex(pattern = DECIMAL_NON_NEGATIVE))]
-    pub adjust_pct: Option<String>,
-    /// "ceiling" (default: la regla es un TECHO, se retira min(necesidad, regla)) |
-    /// "rule_is_spend" (la regla ES el gasto: se retira lo que dice, haya necesidad o no).
-    #[serde(default)]
-    #[schemars(extend("enum" = ["ceiling", "rule_is_spend"]))]
-    pub spend_mode: Option<String>,
-}
-
 /// Pensión pública (u otra renta vitalicia) CON FECHA. Es un FLUJO: entra como ingreso desde su
 /// mes y baja lo que hay que vender, y por eso mueve la fecha válida (5.0.0: no hay objetivo que
 /// descontar). Como override del what-if SUSTITUYE a la pensión entera: `monthly_amount_today` y
@@ -2480,9 +2434,6 @@ pub struct UpdateRetirementProfileParams {
     /// `pension.bridge_max_pct`/`pension.bridge_max_years`.
     #[serde(default)]
     pub bridge_discount_basis: Option<String>,
-    /// Regla de retirada COMPLETA (sustituye a la actual).
-    #[serde(default)]
-    pub withdrawal_rule: Option<WithdrawalRuleParam>,
     /// Bloque de pensión COMPLETO (sustituye al actual; el puente vive dentro, ver `PensionParam`).
     #[serde(default)]
     pub pension: Option<PensionParam>,
@@ -2555,27 +2506,6 @@ impl UpdateRetirementProfileParams {
             }
         }
 
-        let withdrawal_rule = match &self.withdrawal_rule {
-            None => None,
-            Some(w) => Some(rp::WithdrawalRule {
-                kind: parse_enum_param(&Some(w.kind.clone()))
-                    .map_err(|e| ApiError::BadRequest(format!("withdrawal_rule_kind: {e}")))?
-                    .expect("kind es obligatorio en el schema"),
-                pct: w.pct.as_deref().map(|v| parse_decimal_param("withdrawal_rule.pct", v)).transpose()?,
-                start_pct: w.start_pct.as_deref().map(|v| parse_decimal_param("withdrawal_rule.start_pct", v)).transpose()?,
-                end_pct: w.end_pct.as_deref().map(|v| parse_decimal_param("withdrawal_rule.end_pct", v)).transpose()?,
-                band_pct: w.band_pct.as_deref().map(|v| parse_decimal_param("withdrawal_rule.band_pct", v)).transpose()?,
-                adjust_pct: w.adjust_pct.as_deref().map(|v| parse_decimal_param("withdrawal_rule.adjust_pct", v)).transpose()?,
-                spend_mode: parse_enum_param(&w.spend_mode)
-                    .map_err(|e| ApiError::BadRequest(format!("spend_mode: {e}")))?
-                    .unwrap_or_default(),
-                // Derivado, nunca de entrada (U4): lo rellena `resolve_withdrawal_rule` al
-                // resolver el perfil. Aquí va `None` para que un `pct` omitido se herede del
-                // `swr_pct`, que es exactamente la conducta del PATCH HTTP.
-                pct_source: None,
-            }),
-        };
-
         let pension = match &self.pension {
             None => None,
             Some(p) => Some(rp::PensionPlan {
@@ -2642,7 +2572,6 @@ impl UpdateRetirementProfileParams {
                 .map(|v| parse_decimal_param("swr_pct", v))
                 .transpose()?,
             horizon_lifespan_age: self.horizon_lifespan_age,
-            withdrawal_rule,
             pension: tri(pension, self.clear_pension, "pension")?,
             partial_retirement: tri(
                 partial_retirement,
@@ -3194,8 +3123,8 @@ impl FutureFinMcp {
             // `include_member_series`: las bandas del LÍQUIDO son la mitad exacta de los puntos
             // —~8 KB de los ~17 KB de la respuesta— y responden a una sola pregunta, «cómo se
             // vacía la hucha», que casi nunca es la que trae al modelo aquí. Se dejan opt-in y
-            // no se retiran: con una regla de retirada con techo son la única forma de ver por
-            // qué el recorte aparece cuando aparece.
+            // no se retiran: son la única forma de ver cómo se vacía el líquido en los caminos
+            // que fallan por F1.
             if !p.include_liquid_bands.unwrap_or(false) {
                 for pt in out.points.iter_mut() {
                     pt.net_worth_liquid_p10 = None;
@@ -5862,7 +5791,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "get_retirement_profile",
-        description = "Plan de jubilación del usuario —estrategia (asap/retire_at_age/coast/partial), edad objetivo, SWR, modo FIRE, regla de retirada, pensión con fecha y puente, media jornada, y el umbral que decide la fecha (80–100, default 95)— más su fecha de nacimiento: sin ella las estrategias por edad no se resuelven. PERSONAL; lo del hogar está en get_settings.",
+        description = "Plan de jubilación del usuario —estrategia (asap/retire_at_age/coast/partial), edad objetivo, SWR (la tasa de retirada inicial), modo del gasto, pensión con fecha y puente, media jornada, y el umbral que decide la fecha (80–100, default 95)— más su fecha de nacimiento: sin ella las estrategias por edad no se resuelven. PERSONAL; lo del hogar está en get_settings.",
         annotations(title = "Plan de jubilación", read_only_hint = true, open_world_hint = false)
     )]
     async fn get_retirement_profile(
@@ -5882,7 +5811,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_retirement_profile",
-        description = "Cambia el plan de jubilación (y fecha de nacimiento): 4 estrategias (asap/retire_at_age/coast/partial); umbral que decide la fecha (80–100); modos de coast y media jornada; puente hasta la pensión (`pension.bridge_*`, apagado, cualquier estrategia). Merge campo a campo: omitido no cambia, `clear_*` borra; `withdrawal_rule`/`pension`/`partial_retirement` se sustituyen ENTEROS. Personal: cada rol, el suyo. Ver impacto: simulate_projection.",
+        description = "Cambia el plan de jubilación (y fecha de nacimiento): 4 estrategias (asap/retire_at_age/coast/partial); umbral que decide la fecha (80–100); modos de coast y media jornada; puente hasta la pensión (`pension.bridge_*`, apagado, cualquier estrategia). Merge campo a campo: omitido no cambia, `clear_*` borra; `pension`/`partial_retirement` se sustituyen ENTEROS. Personal: cada rol, el suyo. Ver impacto: simulate_projection.",
         annotations(title = "Configurar jubilación", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_retirement_profile(
@@ -7256,18 +7185,14 @@ impl ServerHandler for FutureFinMcp {
                 el hogar comparte —divisa, calendario, inflación asumida, impuestos y tramos, fuente \
                 del ahorro y sus ventanas— vive en get_settings / update_fire_settings y lo edita \
                 SOLO el owner. El plan de JUBILACIÓN es de cada persona (get_retirement_profile / \
-                update_retirement_profile): estrategia, edad objetivo, SWR, modo del objetivo FIRE, \
-                edad límite del horizonte, regla de retirada, pensión con fecha, media jornada, \
-                colchón y umbral de éxito. Cualquier rol edita el SUYO y nadie el de otro. EL \
-                PORCENTAJE DE RETIRADA ES ÚNICO: `swr_pct` dimensiona el objetivo FIRE Y es el % \
-                de las reglas basadas en saldo, así que `withdrawal_rule.pct` \
-                (`percent_of_balance`, `guardrails`) y `start_pct` (`hybrid`) son OPCIONALES y \
-                omitidos lo heredan; el perfil devuelve `withdrawal_rule.pct_source` = `swr` \
-                (heredado) o `explicit` (escrito a mano), y en `fixed_real` no viaja porque esa \
-                regla no tiene porcentaje. Como la regla se sustituye entera, volver a omitir el \
-                `pct` es lo que lo re-acopla al SWR. Y `pension: null` suelta también el \
-                `target_basis` que estuviera fijado, para que se vuelva a derivar: un puente \
-                hacia una pensión que ya no existe no describe nada. Y toda \
+                update_retirement_profile): estrategia, edad objetivo, SWR, modo del gasto de \
+                jubilación, edad límite del horizonte, pensión con fecha (y su puente), media \
+                jornada y umbral de éxito. Cualquier rol edita el SUYO y nadie el de otro. SOLO \
+                SWR: no hay regla de retirada que elegir. `swr_pct` es la tasa de retirada \
+                INICIAL máxima —en el mes en que te jubilas, tu gasto ordinario anual neto de \
+                rentas y pensión tiene que caber en `swr_pct` % del líquido (o en \
+                `bridge_max_pct` si el puente aplica)— y desde ahí se vende cada mes lo que el \
+                gasto indexado necesita. Y toda \
                 fila del ledger (activos, pasivos, presupuesto, flujos de simulación, reglas) tiene \
                 dueño: editar la de otro miembro es 403 `not_row_owner`, también para el \
                 owner.\n\nSIMULACIÓN. Los planning flows (pestaña «Simulación», antes «Próximos») \
@@ -7307,24 +7232,19 @@ impl ServerHandler for FutureFinMcp {
                 —y el eje opt-in `monte_carlo` de `simulate_projection`— contestan «¿qué \
                 probabilidad tiene mi plan?» sorteando miles de caminos del MISMO motor que dibuja \
                 la línea determinista, sobre el escenario que el SOLVER ya fijó: la fecha es un \
-                DATO de la simulación, no algo que decida el sorteo. Un camino FALLA por tres \
-                motivos y solo tres —`failures_by_kind`, en este orden fijo—: F1 la cartera se \
-                queda sin cubrir el gasto; F2 la tasa de retirada INICIAL del mes en que te jubilas \
-                supera el tope (el SWR, o el del puente); F3, en ESE MISMO mes, con una regla por \
-                saldo: lo que la regla permite con el líquido de entrada se queda por debajo de \
-                la necesidad ordinaria (después solo juzga F1). Tienen arreglos \
-                OPUESTOS: F1 pide más capital o menos gasto, F2 pide retrasar la fecha, F3 pide \
-                cambiar la regla. LA FECHA la decide el UMBRAL de tu perfil (80–100, default 95) \
+                DATO de la simulación, no algo que decida el sorteo. Un camino FALLA por dos \
+                motivos y solo dos —`failures_by_kind` = [F1, F2]—: F1 la cartera se queda sin \
+                cubrir el gasto de un mes; F2 la tasa de retirada INICIAL del mes en que te \
+                jubilas supera el tope (el SWR, o el del puente), y solo se juzga en ese mes. \
+                Tienen arreglos OPUESTOS: F1 pide más capital o menos gasto, F2 pide retrasar la \
+                fecha. LA FECHA la decide el UMBRAL de tu perfil (80–100, default 95) \
                 sobre la cota INFERIOR del intervalo de Wilson (`success_wilson_low` con \
                 `success_sampling_error_pp` al lado), no sobre el estimador puntual — nunca cites \
                 `success_of_plan`/`success_probability` sola: cítala junto a `success_wilson_low` \
                 y `failures_by_kind`. `retirement_date_basis: \"not_reachable\"` significa que \
                 NINGÚN mes del horizonte cumple el umbral, aunque el éxito de la línea muestre \
-                1,0 — esa cifra describe el mejor intento observado, no una fecha que exista. El \
-                RECORTE de una regla de retirada NO es fracaso y viaja aparte \
-                (`months_below_need_p50`, `withdrawal_to_need_ratio_p50`, que cuentan el recorte \
-                de la regla Y el gasto que la cartera no pudo financiar): son dos preguntas \
-                distintas y mezclarlas da un diagnóstico falso. La última fila de \
+                1,0 — esa cifra describe el mejor intento observado, no una fecha que exista. La \
+                última fila de \
                 `failure_probability_by_age` es SIEMPRE el horizonte —la ruina total del plan—, \
                 así que el paso hasta ella puede ser menor de cinco años. Las bandas son PUNTUALES: cada \
                 percentil se calcula mes a mes sobre los caminos de ESE mes, así que la curva p50 \

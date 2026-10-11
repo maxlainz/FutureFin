@@ -187,7 +187,7 @@ fn success_at_month_retires_every_path_in_k() {
         "el recuento del solve y el de `run_path` sobre `retiring_at` tienen que ser el mismo"
     );
     assert_eq!(s.failures, 0, "el hogar holgado no falla en ningún camino");
-    assert_eq!(s.by_kind, [0, 0, 0]);
+    assert_eq!(s.by_kind, [0, 0]);
 }
 
 /// **La barra de error es Wilson, y con cero fallos NO es cero.**
@@ -244,15 +244,15 @@ fn the_error_bar_is_wilson_and_is_not_zero_with_zero_failures() {
     // umbral es INALCANZABLE aunque no falle ni un camino — y eso no es un fallo del solver, es lo
     // que significa medir con pocas muestras.
     assert!(
-        !SuccessAt::new(1, 60, 0, [0; 3]).meets(95),
+        !SuccessAt::new(1, 60, 0, [0; 2]).meets(95),
         "60 caminos no dan para el 95 %"
     );
-    assert!(SuccessAt::new(1, 73, 0, [0; 3]).meets(95));
-    assert!(!SuccessAt::new(1, 380, 0, [0; 3]).meets(99));
-    assert!(SuccessAt::new(1, 381, 0, [0; 3]).meets(99));
+    assert!(SuccessAt::new(1, 73, 0, [0; 2]).meets(95));
+    assert!(!SuccessAt::new(1, 380, 0, [0; 2]).meets(99));
+    assert!(SuccessAt::new(1, 381, 0, [0; 2]).meets(99));
     // Los presupuestos del plan (500 buscando, 2.500 confirmando) cubren el rango 80–100 entero.
-    assert!(SuccessAt::new(1, 500, 0, [0; 3]).meets(99));
-    assert!(SuccessAt::new(1, 500, 0, [0; 3]).meets(100));
+    assert!(SuccessAt::new(1, 500, 0, [0; 2]).meets(99));
+    assert!(SuccessAt::new(1, 500, 0, [0; 2]).meets(100));
 }
 
 /// **La regla del umbral**: Wilson por debajo de 100, cero fallos en 100.
@@ -576,7 +576,7 @@ fn at_a_hundred_the_rule_is_zero_failures_and_the_rule_of_three_is_published() {
         solve.success, solve.rule_of_three_upper, solve.half_width_pp
     );
     assert_eq!(solve.success, 1.0);
-    assert_eq!(solve.failures_by_kind, [0, 0, 0]);
+    assert_eq!(solve.failures_by_kind, [0, 0]);
     assert_eq!(solve.rule_of_three_upper, Some(3.0 / 300.0));
     assert!(
         solve.half_width_pp > 0.0,
@@ -584,7 +584,7 @@ fn at_a_hundred_the_rule_is_zero_failures_and_the_rule_of_three_is_published() {
     );
 
     // Y un solo fallo tumba el 100 % por mucho que el estimador puntual redondee a uno.
-    let almost = SuccessAt::new(month, 2_500, 1, [1, 0, 0]);
+    let almost = SuccessAt::new(month, 2_500, 1, [1, 0]);
     assert!(almost.success > 0.999);
     assert!(!almost.meets(100));
     assert!(almost.meets(99), "wilson_low = {}", almost.wilson_low);

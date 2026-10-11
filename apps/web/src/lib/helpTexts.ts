@@ -166,7 +166,7 @@ export const HELP_TEXTS = {
     title: "Éxito del plan",
     body:
       "De cada 100 escenarios, en cuántos NO tendrías que volver a trabajar jubilándote en la " +
-      "fecha de tu plan. Debajo va tu umbral de éxito —el de Jubilación → Retirada—, que es " +
+      "fecha de tu plan. Debajo va tu umbral de éxito —el de Jubilación → Horizonte y exigencia—, que es " +
       "contra lo que se colorea, y no un listón fijo; se juzga contra el suelo del intervalo " +
       "del sorteo: verde cuando ese suelo ya cumple tu umbral, ámbar cuando el umbral cae " +
       "dentro del intervalo, rojo cuando no llega. Es el MISMO sorteo que dibuja la sección " +
@@ -193,7 +193,7 @@ export const HELP_TEXTS = {
   // bajo el título (`PLAN_CARD_COPY.blurb`, retirado): el owner pidió usar el mecanismo que ya
   // existe en vez de llenar la pantalla de texto. Tres apartados estrenan entrada; los otros
   // tres reutilizan la que ya describía su tema entero — «Estrategia» → `retirement.strategy`,
-  // «Pensión» → `retirement.pension`, «Horizonte» → `settings.horizon_age`— con la sustancia de
+  // «Pensión» → `retirement.pension`, «Horizonte y exigencia» → `settings.horizon_age`— con la sustancia de
   // su frase fundida dentro.
   //
   // Describen un APARTADO y no una cifra, que es la excepción que §6.4 de la skill avisa que se
@@ -212,23 +212,16 @@ export const HELP_TEXTS = {
   "retirement.section_spending": {
     title: "Gasto en jubilación",
     body:
-      "De dónde sale el gasto que tu plan tiene que cubrir. «Gasto actual» usa tus partidas del " +
-      "presupuesto marcadas como de jubilación o, si tu fuente del ahorro (Ajustes → Plan) sale " +
-      "de tus movimientos, el promedio de tus gastos reales. «Ingresos actuales» mantiene tu " +
-      "nivel de vida: tus ingresos del presupuesto o, con esa misma fuente, su promedio real. " +
-      "«Manual» es una cifra anual que escribes tú, y es solo tuya, no del hogar. Debajo ves la " +
-      "cifra que sale, al mes y al año. No multiplica nada: es el dinero que hay que poner cada " +
-      "mes desde que te jubilas hasta el final del horizonte, y es lo que la cartera tiene que " +
-      "sostener.",
-  },
-  "retirement.section_withdrawal": {
-    title: "Retirada",
-    body:
-      "Cuánto sacas y con cuánta seguridad. Son dos cifras y las dos deciden tu fecha: el umbral " +
-      "es la parte de los escenarios que tiene que aguantar hasta el horizonte, y la tasa es lo " +
-      "máximo que sacas el primer año sobre tu líquido. La fecha válida es el primer mes en que " +
-      "se cumplen las dos. La regla de debajo no decide la fecha: decide cuánto sale de la " +
-      "cartera cada mes una vez jubilado.",
+      "De dónde sale el gasto que tu plan tiene que cubrir, y la tasa que decide si tu cartera " +
+      "puede con él. «Gasto actual» usa tus partidas del presupuesto marcadas como de " +
+      "jubilación o, si tu fuente del ahorro (Ajustes → Plan) sale de tus movimientos, el " +
+      "promedio de tus gastos reales. «Ingresos actuales» mantiene tu nivel de vida: tus " +
+      "ingresos del presupuesto o, con esa misma fuente, su promedio real. «Manual» es una " +
+      "cifra anual que escribes tú, y es solo tuya, no del hogar. Debajo ves la cifra que sale, " +
+      "al mes y al año. Al final, la tasa de retirada: el primer año jubilado ese gasto —menos " +
+      "tus rentas y tu pensión— tiene que caber en ese porcentaje de tu cartera líquida, o la " +
+      "fecha no vale. Gasto y tasa son las dos mitades de esa misma puerta. Después, cada mes " +
+      "se vende lo que pide tu gasto, que sube con la inflación, hasta el final del horizonte.",
   },
   "retirement.strategy": {
     title: "Tu estrategia de jubilación",
@@ -311,8 +304,8 @@ export const HELP_TEXTS = {
       "sin aportaciones, el gasto sale entero de tu capital. Activarlo cambia UNA cosa: si al " +
       "jubilarte falta menos que los años máximos que fijes para que entre la pensión, el tope " +
       "de lo que puedes sacar el primer año pasa a ser la tasa del puente en lugar de tu tasa de " +
-      "retirada. Durante el puente no hay otro tope: si aguanta o no lo dicen las mismas reglas " +
-      "que el resto del plan. Con el puente activado tu fecha válida nunca cae antes de la " +
+      "retirada. Durante el puente no hay otro tope: si aguanta o no lo dice la cartera, igual " +
+      "que en el resto del plan. Con el puente activado tu fecha válida nunca cae antes de la " +
       "pensión menos esos años. La tasa del puente tiene que ser MAYOR que tu tasa de retirada " +
       "—si no la supera no es un puente, es la misma tasa— y como mucho 20 %; los años, entre 1 " +
       "y 20. Viene apagado, y apagado la pensión sigue entrando igual el mes que le toca.",
@@ -327,36 +320,6 @@ export const HELP_TEXTS = {
       "93,8 %, y es esa cota la que manda. Al 100 % la exigencia es que no falle NI UN escenario " +
       "y se publica hasta dónde puede llegar el riesgo que no se ve: cero fallos de 2.500 " +
       "caminos siguen siendo compatibles con un 0,12 % de fallo real. De serie, 95 %.",
-  },
-  "retirement.withdrawal_rule": {
-    title: "Regla de retirada",
-    body:
-      "Cuánto sacas de tu patrimonio cada mes una vez jubilado. «Gasto fijo» retira lo que " +
-      "necesitas, indexado, sin techo. «Un % del saldo» retira ese porcentaje de tu líquido del " +
-      "mes anterior: nunca se agota, pero tu nivel de vida sube y baja con el mercado. " +
-      "«Híbrida» empieza alta y baja al llegar a un saldo, y ese suelo tiene que quedar por " +
-      "debajo de tu tasa de retirada. «Con bandas» recorta o sube la " +
-      "retirada al salirse de su banda. Con las tres reglas por saldo hay una condición dura, y se " +
-      "comprueba UNA vez: si el mes en que te jubilas lo que la regla permite no cubre tu gasto " +
-      "ordinario, ese escenario cuenta como fallido — el fracaso que este plan mide es tener que " +
-      "volver a trabajar. Lo que la regla recorte después, en un año malo, baja tu nivel de vida " +
-      "pero no es un fracaso: sale en la cobertura, no aquí. La tasa de " +
-      "retirada es otra cosa y va aparte: es lo máximo que puedes sacar el PRIMER año, la puerta " +
-      "que tu fecha tiene que pasar. Los porcentajes son BRUTOS: el impuesto de la venta va " +
-      "dentro. Las reglas por saldo usan tu tasa de retirada salvo que alguien les haya fijado " +
-      "otro porcentaje por API: entonces lo ves bajo la regla («Fijado por API») y el control " +
-      "de la tasa no la mueve.",
-  },
-  "retirement.spend_mode": {
-    title: "Cómo se aplica la regla",
-    body:
-      "Dos lecturas de la misma regla. «Techo»: retiras lo que necesitas y nunca más de lo que " +
-      "la regla permite; si tu gasto cabe, no vendes de más. «Es mi gasto»: retiras lo que dice " +
-      "la regla haya o no necesidad, y ese es tu nivel de vida — con un buen año sacas más y " +
-      "con uno malo, menos. La condición es la misma en los dos y se mira solo en el mes en que " +
-      "te jubilas: si lo permitido no llega ahí a tu gasto ordinario, ese escenario cuenta como " +
-      "fallido; lo que la regla recorte después no lo es. No mueve tu fecha por sí solo: cambia " +
-      "cuánto sale de la cartera cada mes, y con ello cuántos escenarios aguantan.",
   },
 
   // --- Jubilación · resultado -----------------------------------------------
@@ -454,9 +417,8 @@ export const HELP_TEXTS = {
     title: "Éxito del plan",
     body:
       "De cada 100 escenarios, en cuántos NO tendrías que volver a trabajar jubilándote en la " +
-      "fecha de tu plan: ninguno de los tres fallos ocurre —quedarte sin cartera un mes, " +
-      "pasarte del tope de retirada el primer año, o que la regla te deje por debajo de tu " +
-      "gasto ordinario—. Es el mismo sorteo con el que se resolvió la fecha, no un segundo " +
+      "fecha de tu plan: no ocurre ninguno de los dos fallos —quedarte sin cartera un mes, o " +
+      "que tu gasto del primer año no quepa en tu tasa de retirada—. Es el mismo sorteo con el que se resolvió la fecha, no un segundo " +
       "cálculo. El color no lo pone un listón nuestro: se compara con TU umbral, y contra el " +
       "suelo del intervalo en vez del número grande — verde cuando el suelo ya lo cumple, ámbar " +
       "cuando el umbral cae dentro del intervalo (ni sí ni no), rojo cuando no llega. En «Las " +
@@ -470,27 +432,14 @@ export const HELP_TEXTS = {
     title: "Escenarios que fallan por edad",
     body:
       "Qué parte de los escenarios ha fallado YA a esa edad, contando desde el mes en que te " +
-      "jubilas. Fallar es tener que volver a trabajar, y pasa por tres motivos: la cartera no " +
-      "cubre el gasto de un mes, el primer año de jubilación exige sacar más de lo que tu tope " +
-      "permite, o la regla de retirada te deja por debajo de tu gasto ordinario ya ese primer " +
-      "mes. Los dos últimos se deciden EN la jubilación y no se vuelven a mirar; después, el " +
-      "único motivo posible es la cartera. Es acumulada, así que solo puede crecer con la edad: " +
-      "el 8 % a los 80 incluye a los que cayeron a los 75, y «Escenarios que fallan en algún " +
-      "momento» es ese total al final del horizonte. Es lo que TIÑE la banda del gráfico: la " +
-      "escala de debajo va de «ninguno» al rojo, con los cortes que pone tu umbral, y al pasar " +
-      "el ratón salen el porcentaje exacto y por cuál de los tres motivos.",
-  },
-  "retirement.coverage": {
-    title: "Cobertura de tu gasto",
-    body:
-      "Qué parte de tu gasto de jubilación se pagó DE VERDAD, y en cuántos meses te quedaste por " +
-      "debajo. Cuentan las dos formas de quedarse corto: lo que la regla de retirada se negó a " +
-      "sacar y lo que la cartera ya no pudo pagar. Arriba se cuenta lo que cubrió tu necesidad, " +
-      "nunca lo que sacaste de más: un mes generoso de una regla por saldo no compensa uno " +
-      "corto, y por eso la cifra no pasa del 100 %. Son medianas entre escenarios, así que " +
-      "describen el caso central: si más de la mitad de tus escenarios aguanta, aquí verás cero " +
-      "meses y el gasto entero. Sirven para medir el daño de los que no aguantan — quedarse " +
-      "corto un mes ya cuenta como fallo en el éxito de arriba.",
+      "jubilas. Fallar es tener que volver a trabajar, y pasa por dos motivos: la cartera no " +
+      "cubre el gasto de un mes, o el primer año de jubilación tu gasto no cabe en tu tasa de " +
+      "retirada (o en la del puente). El segundo se decide EN la jubilación y no se vuelve a " +
+      "mirar; después, el único motivo posible es la cartera. Es acumulada, así que solo puede " +
+      "crecer con la edad: el 8 % a los 80 incluye a los que cayeron a los 75, y «Escenarios " +
+      "que fallan en algún momento» es ese total al final del horizonte. Es lo que TIÑE la " +
+      "banda del gráfico: la escala de debajo va de «ninguno» al rojo, con los cortes que pone " +
+      "tu umbral, y al pasar el ratón salen el porcentaje exacto y por cuál de los dos motivos.",
   },
 
   // --- Retirado en 5.0.0 con el objetivo (modelo v2) -------------------------
@@ -499,7 +448,7 @@ export const HELP_TEXTS = {
   // `retirement.coast_number`, `retirement.partial_gap`, `retirement.bridge` y
   // `retirement.depletion_by_age` describían cifras que ya no existen: el capital objetivo dejó
   // de disparar la jubilación (la fecha la decide el éxito), el colchón dejó de ser un ajuste y
-  // el agotamiento de cartera pasó a ser uno de los tres fallos. Se BORRAN, no se comentan: un
+  // el agotamiento de cartera pasó a ser uno de los fallos. Se BORRAN, no se comentan: un
   // texto sin superficie sigue describiendo una métrica que quizá cambió, y nadie se entera.
   // --- Ajustes · Proyección -------------------------------------------------
   "settings.savings_source": {
@@ -537,13 +486,15 @@ export const HELP_TEXTS = {
   "settings.swr": {
     title: "Tasa de retirada (SWR)",
     body:
-      "Lo MÁXIMO que te dejas sacar el primer año de jubilación, sobre el patrimonio líquido con " +
-      "el que llegues a ella. Es una puerta sobre la fecha, no un límite mes a mes: si el año de " +
-      "gasto que necesitas no cabe en ese porcentaje de tu capital, ese escenario cuenta como " +
-      "fallido y esa fecha no vale. Bajarla te obliga a llegar con más capital y retrasa tu " +
-      "fecha; subirla la adelanta y sube el riesgo, con 6 % como máximo. Es BRUTA: el impuesto " +
-      "de la venta va dentro. Y es también la tasa de las reglas que retiran un porcentaje del " +
-      "saldo mientras no pongas otra.",
+      "La tasa INICIAL máxima de retirada. El primer año de jubilación, tu gasto ordinario —ya " +
+      "restadas tus rentas y la pensión que cobres— tiene que caber en este porcentaje del " +
+      "patrimonio líquido con el que te jubilas (o en la tasa del puente, si lo activas y la " +
+      "pensión llega a tiempo); si no cabe, ese escenario cuenta como fallido y esa fecha no " +
+      "vale. Es una puerta sobre la fecha, no un tope mes a mes: una vez jubilado, cada mes se " +
+      "vende lo que pide tu gasto, que sube con la inflación, y desde ahí solo falla si la " +
+      "cartera se agota. Tampoco fija un capital que alcanzar. Bajarla te exige llegar con más " +
+      "capital y retrasa tu fecha; subirla la adelanta y sube el riesgo, con 6 % como máximo. " +
+      "Es BRUTA: el impuesto de la venta va dentro.",
   },
   "settings.taxable_gain": {
     title: "Plusvalía gravable de la retirada",
@@ -557,9 +508,11 @@ export const HELP_TEXTS = {
       "siendo ganancia, por eso su valor de serie es 1.",
   },
   "settings.horizon_age": {
-    title: "Edad límite del horizonte",
+    title: "Horizonte y exigencia",
     body:
-      "Hasta qué edad tiene que durar el dinero (85 a 105; de serie, 90). Alargarlo RETRASA tu " +
+      "Hasta cuándo y con qué seguridad tiene que aguantar tu plan. El umbral de éxito, arriba, " +
+      "dice cuántos escenarios de cada 100 tienen que llegar al final; la edad límite, hasta " +
+      "qué edad tiene que durar el dinero (85 a 105; de serie, 90). Alargar el horizonte RETRASA tu " +
       "fecha: se valida contando los escenarios que llegan al final, así que cuantos más años " +
       "tengan que aguantar, más tarde llega el primer mes que cumple tu umbral. Subirlo revela " +
       "la cola de longevidad: en una pareja de 65, la probabilidad de que al menos uno pase de los 95 ronda " +
@@ -656,7 +609,7 @@ export const HELP_TEXTS = {
       "Entradas menos salidas puntuales, en euros totales. No incluye los flujos recurrentes: " +
       "su neto es una cifra al mes y se muestra aparte para no mezclar magnitudes. Los flujos " +
       "encendidos mueven la caja de tu proyección —y con ella tu fecha de jubilación—, pero no " +
-      "cuentan como gasto ordinario: la regla de retirada y el tope del primer año se miden sin " +
+      "cuentan como gasto ordinario: el tope del primer año (tu tasa de retirada) se mide sin " +
       "ellos. Los apagados siguen en la lista pero no entran ni aquí ni en la proyección.",
   },
   "upcoming.recurring_net": {

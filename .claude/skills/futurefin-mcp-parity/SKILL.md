@@ -25,7 +25,8 @@ Bearer-authenticated wrapper over the same `*_core` fn its HTTP handler uses. De
 rot silently — an endpoint gains a field, a handler changes semantics, a new feature ships
 HTTP-only — unless something forces the question at merge time. This skill is that something.
 
-Volatile facts date-stamped **2026-08-28, Fases 0–6 del tren 4.4.0** (**68 tools**; recount con
+**Contadores vigentes a 2026-10-10: 72 tools** (`grep -c '#\[tool(' apps/api/src/mcp/server.rs`; los ocho de §5).
+Volatile facts date-stamped **2026-08-28, Fases 0–6 del tren 4.4.0** (**68 tools** entonces; recount con
 los comandos de §5 antes de fiarte de cualquier número de aquí). **La Fase 6 (issue #87) es la
 primera del tren que mueve los contadores**: 52 → **68 / 28 lectura / 40 escritura / 17 preview /
 8 `confirm_token` / 18 `impact`**, con 16 altas y cero bajas. Las Fases 0–5 no movieron ninguno
@@ -248,7 +249,7 @@ nuevas** en ninguna de las tres).
 | D21 (403 `not_row_owner`) | **Heredado, sin trabajo de tool**: la comprobación vive en las cores, así que las dos superficies fallan igual — incluidos los previews de borrado, que antes enseñaban la fila ajena **y entregaban el `confirm_token`**. Lo que sí hubo que arreglar a mano fueron **dos descripciones que mentían**: las de activos decían «Sin owner-check: cualquier member edita cualquier activo del hogar», frase que D21 volvió falsa y que nadie había recontado |
 | Default de `?view` → `mine` | **Heredado por las tools con scope** (`resolve_view` llama a `LedgerViewQuery::resolve`), pero **NO es gratis**: cambia la respuesta de toda tool que omita `view`. Deriva detectada y **no arreglable desde documentación**: el doc-comment de `resolve_view` (`mcp/server.rs:125-127`) sigue diciendo «`"household"` u **omitido** → Household». Registrada en la tabla de erratas de `futurefin-docs-and-writing` §7 |
 | `GET /v1/summary` gana `plan` | **Heredado**: `get_summary` comparte `summary_core`, así que el objeto `plan` (con su `absent_reason: household_aggregate`) llega solo |
-| **U4** — `withdrawal_rule.pct` / `start_pct` pasan a OPCIONALES y heredan `swr_pct`; el perfil resuelto publica `pct_source` | **Una tool actualizada, dos heredan.** `update_retirement_profile` cambia su descripción (+78) y los doc-comments de `WithdrawalRuleParam.pct`/`.start_pct`/`.end_pct`; **`simulate_projection.profile_overrides` hereda sin tocar nada** porque reusa EXACTAMENTE ese tipo de parámetro (`ProfileOverrideParam.withdrawal_rule: Option<WithdrawalRuleParam>`) — es el mismo argumento que la fila de `profile_overrides` de arriba, y aquí paga solo. `get_retirement_profile` publica `pct_source` sin código propio (comparte `get_retirement_profile_core`). **`pct_source` es SOLO SALIDA**: no está en `WithdrawalRuleParam`, así que el `inputSchema` no se mueve y el `constraints_sha256_12` de las dos tools tampoco — el fixture cambia **una sola** entrada (`update_retirement_profile`, por la descripción). Ningún contador de §5 se mueve |
+| **U4** (HISTORIA — sustituido el 2026-10-10 (solo SWR): `withdrawal_rule` ya no existe en ninguna tool) — `withdrawal_rule.pct` / `start_pct` pasan a OPCIONALES y heredan `swr_pct`; el perfil resuelto publica `pct_source` | **Una tool actualizada, dos heredan.** `update_retirement_profile` cambia su descripción (+78) y los doc-comments de `WithdrawalRuleParam.pct`/`.start_pct`/`.end_pct`; **`simulate_projection.profile_overrides` hereda sin tocar nada** porque reusa EXACTAMENTE ese tipo de parámetro (`ProfileOverrideParam.withdrawal_rule: Option<WithdrawalRuleParam>`) — es el mismo argumento que la fila de `profile_overrides` de arriba, y aquí paga solo. `get_retirement_profile` publica `pct_source` sin código propio (comparte `get_retirement_profile_core`). **`pct_source` es SOLO SALIDA**: no está en `WithdrawalRuleParam`, así que el `inputSchema` no se mueve y el `constraints_sha256_12` de las dos tools tampoco — el fixture cambia **una sola** entrada (`update_retirement_profile`, por la descripción). Ningún contador de §5 se mueve |
 | ~~**S4** — `PATCH {"pension": null}` suelta el `target_basis` almacenado~~ **— retirada ENTERA con el modelo v2**: `target_basis`/`target_basis_stored` murieron con la base del objetivo (M4, 2026-09-06); sin base que derivar, quitar la pensión ya no suelta nada. `grep -n target_basis_stored apps/api/src/handlers/retirement_profile.rs` solo devuelve el doc-comment que declara su ausencia | Descrita aquí tal como se evaluó en su momento (fila heredada, cero código en `server.rs`), pero la regla misma ya no existe — no reintroducir S4 pensando que es una omisión |
 | `POST /v1/backup/user-export`: la contraseña deja de ser la de la cuenta en cuentas sin contraseña (issue #213) | **n/a**. `/v1/backup/*` es una **omisión deliberada ya registrada** en §3.1 (categoría «Encrypted blob transport»): ninguna tool toca el backup, y el cambio no crea razón para que la haya — al contrario, un flujo cuyo secreto lo **crea la persona** al descargar el archivo es todavía menos conversable. `grep -c 'backup' apps/api/src/mcp/server.rs` → **0**, y debe seguir siéndolo. El código nuevo `backup_password_empty` viaja por la misma `ApiError` y vive en `error-codes.json` + `errorMessages.ts`, como el resto |
 | `UserResponse` gana `has_password` (aditivo, issue #213) | **n/a**. `UserResponse` es la respuesta de `login`/`register`/`/v1/auth/sso`/`GET /v1/auth/me`, y **las cuatro rutas están excluidas** en §3.1 (categorías «Session lifecycle» y «OAuth protocol»): un cliente MCP llega ya autenticado por Bearer, no hay tarro de cookies que llenar. El campo no aparece en ninguna respuesta de tool — `grep -c 'has_password' apps/api/src/mcp/server.rs` → **0** |
@@ -426,7 +427,7 @@ convention, which forced a conscious arm in the annotations test). Steps, in ord
    ```bash
    python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"
    ```
-   (today: `68 23949 598` after 4.15.0 — **51 characters from the ceiling**; it was `68 23995 596` — **5 from the ceiling** — right before 4.15.0, not the 126 this line used to claim: **re-measure, never trust the frozen number**; `52 21319 596` right after Fase 5;
+   (today, 2026-10-10: `72 23984 548` — **16 characters from the ceiling**; `68 23949 598` after 4.15.0 — 51; it was `68 23995 596` — **5 from the ceiling** — right before 4.15.0, not the 126 this line used to claim: **re-measure, never trust the frozen number**; `52 21319 596` right after Fase 5;
    before Fase 5: 37,214 total, one description at 3,821, 26 tools over 600 chars). **Read that
    margin before you start**: Fase 6's 16 tools took the raw total to 28,884 (+4,884 over budget)
    and bringing it back was real work, not a trim. The next tool has to buy its description out of
@@ -497,7 +498,8 @@ import json
 d = json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))
 L = [t['description_len'] for t in d['tools']]
 print(len(L), sum(L), max(L))"
-# 72 23986 548   ← 2026-10-10, tras el interruptor `enabled` de planning (margen 14; 23982/18 con
+# 72 23984 548   ← 2026-10-10, tras retirar `withdrawal_rule` de dos tools («solo SWR»; margen 16; antes
+#                  72 23986 con el interruptor `enabled` de planning, margen 14, y 23982/18 con
 #                  update_recurring_rule justo antes). Tope: TOTAL_BUDGET 24 000, PER_TOOL_MAX 600.
 ```
 
@@ -537,9 +539,22 @@ it now and check what else that PR missed.
 **Ampliada 2026-10-10 (interruptor `enabled` de planning, «Próximos» → «Simulación», rama
 `release/5.0.0`)**: §3.5 gana la fila de `planning_flows.enabled` (dos tools con parámetro nuevo,
 una que hereda, párrafo SIMULACIÓN en el `instructions`). Contadores sin cambios
-(72/30/42/42/19/9/42/19); presupuesto `72 23986 548` (margen 14). Fuentes:
+(72/30/42/42/19/9/42/19); presupuesto `72 23986 548` (margen 14; hoy `72 23984 548`, ver abajo). Fuentes:
 `apps/api/src/mcp/server.rs`, `apps/api/src/handlers/planning.rs`, `apps/api/tests/mcp_write.rs`,
 `apps/api/tests/fixtures/mcp-catalog.json`.
+
+**Ampliada 2026-10-10 («solo SWR», rama `release/5.0.0`)**: se retiran las reglas de retirada del
+producto y con ellas el parámetro `withdrawal_rule` de **dos** tools —`update_retirement_profile` y
+`simulate_projection` (`profile_overrides`)—, que lo compartían por el mismo tipo
+(`WithdrawalRuleParam`, borrado). **Cero tools añadidas o retiradas**: los contadores no se mueven
+(`grep -c '#\[tool(' apps/api/src/mcp/server.rs`). Los parámetros son `deny_unknown_fields`, así que
+mandar `withdrawal_rule` ahora es error de la tool, no un ignorado (aceptable: no estaba publicado).
+El `instructions` se reescribe («SOLO SWR…», dos motivos de fallo) y las salidas de
+`get_projection_bands` y del bloque `monte_carlo` de `simulate_projection` pierden
+`months_below_need_p50` y `withdrawal_to_need_ratio_p50` (y `failures_by_kind` pasa a `[F1, F2]`).
+Presupuesto: `72 23986 548` → **`72 23984 548`** (margen 16; el comando de arriba). El fixture
+`mcp-catalog.json` se regenera. La fila de **U4** de §3.5 (abajo) es HISTORIA — sustituido el
+2026-10-10 (solo SWR).
 
 **Ampliada 2026-10-10 (plantillas recurrentes editables, rama `release/5.0.0`)**: §3.5 gana la fila
 de `PATCH /v1/transactions/recurring/{id}` → tool nueva `update_recurring_rule` (preview con token
@@ -876,12 +891,12 @@ Re-verify before trusting:
 - Context budget (Fase 5) still respected — the test fails only if the total goes UP, never down:
   `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_http tool_descriptions_stay_within_the_context_budget`,
   and the exact fixture snapshot: `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
-  (`68 23949 598` today after 4.15.0, **51 from the ceiling** — it was 5 just before; `52 21319 596` at the close of Fase 5;
+  (`72 23984 548` today, 2026-10-10 — **16 from the ceiling**; `68 23949 598` after 4.15.0, 51 — it was 5 just before; `52 21319 596` at the close of Fase 5;
   `37214`/`3821`/26-over-600 before Fase 5 — none of these lives anywhere but this skill and the
   CHANGELOG, so don't freeze any of them into the guard's constant).
 - View echo on the 7 enveloped listings, and the content parity that replaces byte parity for them:
   `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_http list_tools_echo_the_applied_view_and_keep_content_parity`;
-  the 5 still on byte parity: `… --test mcp_http new_read_tools_match_http_endpoints`.
+  the 11 still on byte parity (recuéntalas con el `sed … | grep -oE` de §3.4): `… --test mcp_http new_read_tools_match_http_endpoints`.
 - `type_tag` writable via MCP:
   `TEST_DATABASE_URL=… cargo test -p futurefin-api --test mcp_write liability_type_tag_is_writable_and_reaches_the_summary_breakdown`.
 - The 11 Fase-5 context fields (`basis`, `upcoming_flows_count`, `window_truncated`,

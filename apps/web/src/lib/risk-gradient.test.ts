@@ -27,7 +27,7 @@ import {
 const pt = (
   month_index: number,
   probability: number | null,
-  by_kind: [number, number, number] | null = null,
+  by_kind: [number, number] | null = null,
   age: number | null = null,
 ): FailureProbabilityPointApi => ({ month_index, age, probability, by_kind });
 
@@ -157,45 +157,45 @@ describe("failureProbabilityAtMonth — plana fuera, lineal dentro", () => {
     expect(failureProbabilityAtMonth([pt(240, null)], 240)).toBeNull();
   });
 
-  it("cuenta las TRES formas de fallo, no solo agotar la cartera", () => {
-    // El campo es `failure_probability_by_age` y su `probability` ya suma F1+F2+F3: aquí no se
+  it("cuenta las DOS formas de fallo, no solo agotar la cartera", () => {
+    // El campo es `failure_probability_by_age` y su `probability` ya suma F1+F2: aquí no se
     // recompone nada desde `by_kind`. Un plan que falla al 100 % por tasa inicial (F2) en el mes
     // de jubilación tiene que salir rojo, no verde por no haber agotado nada.
-    const soloF2 = [pt(240, 1, [0, 2500, 0]), pt(360, 1, [0, 2500, 0])];
+    const soloF2 = [pt(240, 1, [0, 2500]), pt(360, 1, [0, 2500])];
     expect(failureProbabilityAtMonth(soloF2, 300)).toBe(1);
   });
 });
 
 describe("failureKindsAtMonth — el desglose del hover, sin interpolar", () => {
   const points = [
-    pt(240, 0.02, [50, 0, 0]),
-    pt(300, 0.1, [200, 30, 20]),
-    pt(360, 0.2, [400, 60, 40]),
+    pt(240, 0.02, [50, 0]),
+    pt(300, 0.1, [200, 30]),
+    pt(360, 0.2, [400, 60]),
   ];
 
   it("devuelve el desglose de la muestra más cercana, tal cual", () => {
-    expect(failureKindsAtMonth(points, 300)).toEqual([200, 30, 20]);
-    expect(failureKindsAtMonth(points, 310)).toEqual([200, 30, 20]);
-    expect(failureKindsAtMonth(points, 350)).toEqual([400, 60, 40]);
-    expect(failureKindsAtMonth(points, 0)).toEqual([50, 0, 0]);
-    expect(failureKindsAtMonth(points, 9999)).toEqual([400, 60, 40]);
+    expect(failureKindsAtMonth(points, 300)).toEqual([200, 30]);
+    expect(failureKindsAtMonth(points, 310)).toEqual([200, 30]);
+    expect(failureKindsAtMonth(points, 350)).toEqual([400, 60]);
+    expect(failureKindsAtMonth(points, 0)).toEqual([50, 0]);
+    expect(failureKindsAtMonth(points, 9999)).toEqual([400, 60]);
   });
 
-  it("NO interpola: el trío que enseña es de una muestra real", () => {
-    // A mitad de camino entre [50,0,0] y [200,30,20], una interpolación daría [125,15,10] — un
+  it("NO interpola: el par que enseña es de una muestra real", () => {
+    // A mitad de camino entre [50,0] y [200,30], una interpolación daría [125,15] — un
     // desglose que no cuadraría con la acumulada que el tooltip enseña al lado.
     const mid = failureKindsAtMonth(points, 270);
-    expect(mid).toEqual([50, 0, 0]);
-    expect(mid).not.toEqual([125, 15, 10]);
+    expect(mid).toEqual([50, 0]);
+    expect(mid).not.toEqual([125, 15]);
   });
 
-  it("en un empate gana la muestra ANTERIOR: las tres series son acumuladas", () => {
+  it("en un empate gana la muestra ANTERIOR: las dos series son acumuladas", () => {
     // El mes 270 equidista de 240 y 300. La anterior no atribuye a este mes fallos que aún no han
     // ocurrido; la posterior sí lo haría.
-    expect(failureKindsAtMonth(points, 270)).toEqual([50, 0, 0]);
+    expect(failureKindsAtMonth(points, 270)).toEqual([50, 0]);
   });
 
-  it("sin desglose publicado es `null`, no un trío de ceros", () => {
+  it("sin desglose publicado es `null`, no un par de ceros", () => {
     expect(failureKindsAtMonth([pt(240, 0.02), pt(300, 0.1)], 260)).toBeNull();
     expect(failureKindsAtMonth([], 100)).toBeNull();
     expect(failureKindsAtMonth(null, 100)).toBeNull();
@@ -203,8 +203,17 @@ describe("failureKindsAtMonth — el desglose del hover, sin interpolar", () => 
   });
 
   it("salta las muestras sin desglose y usa la más cercana que sí lo tiene", () => {
-    const conHueco = [pt(240, 0.02), pt(300, 0.1, [200, 30, 20])];
-    expect(failureKindsAtMonth(conHueco, 245)).toEqual([200, 30, 20]);
+    const conHueco = [pt(240, 0.02), pt(300, 0.1, [200, 30])];
+    expect(failureKindsAtMonth(conHueco, 245)).toEqual([200, 30]);
+  });
+
+  it("un desglose de tres casillas (backend anterior a «solo SWR») se trata como ausente", () => {
+    const viejo = [
+      { month_index: 240, age: null, probability: 0.1, by_kind: [80, 10, 10] },
+    ] as unknown as FailureProbabilityPointApi[];
+    expect(failureKindsAtMonth(viejo, 240)).toBeNull();
+    // La acumulada sí se sigue leyendo: es la misma cifra con cualquier desglose.
+    expect(failureProbabilityAtMonth(viejo, 240)).toBe(0.1);
   });
 });
 

@@ -2265,9 +2265,8 @@ export function ProjectionNetWorthChart({
           ) : null}
           {/* Flujos de la RETIRADA (5.0.0, §B.8 + pase de correcciones §F). El modelo —qué filas
               existen, con qué umbral y con qué rótulo— vive PURO y testeado en
-              `buildWithdrawalTooltipRows`; aquí solo se formatea. «Recorte» (lo que la REGLA
-              rechazó) y «No financiado» (lo que la CARTERA no dio) son filas distintas a
-              propósito: fundirlas convertiría quedarse sin capital en un problema de la regla. */}
+              `buildWithdrawalTooltipRows`; aquí solo se formatea. «No financiado» es lo que la
+              CARTERA no dio ese mes: un mes así no puede verse idéntico a uno normal. */}
           {buildWithdrawalTooltipRows(
             pts[hover]!,
             series.retirement_month_index,

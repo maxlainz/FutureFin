@@ -147,8 +147,8 @@ export function OnboardingWizard({
   const savePlan = () =>
     run(async () => {
       // Un único PATCH mínimo (S12): fecha de nacimiento + estrategia + solo los esenciales que
-      // esa estrategia exige (`buildOnboardingPlanPatch`). El SWR, la inflación, la regla de
-      // retirada y el resto de supuestos se quedan en su default — se afinan luego desde
+      // esa estrategia exige (`buildOnboardingPlanPatch`). El SWR, la inflación, el umbral de
+      // éxito y el resto de supuestos se quedan en su default — se afinan luego desde
       // Ajustes → Plan / Jubilación, no aquí.
       await onSaveRetirementProfile(buildOnboardingPlanPatch(planState));
     }, 3);
@@ -233,7 +233,7 @@ export function OnboardingWizard({
           <section>
             <p>
               Con tu fecha de nacimiento y cómo quieres jubilarte, FutureFin ya puede calcular tu
-              plan. Todo lo demás —tasa de retirada, regla de retirada, pensión indexada…— se
+              plan. Todo lo demás —tasa de retirada, umbral de éxito, pensión indexada…— se
               afina luego desde Jubilación; aquí basta con lo esencial.
             </p>
             <label className="field">

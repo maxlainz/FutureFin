@@ -281,8 +281,8 @@ async fn build_payload(
 /// La corrección materializa aquí, en el struct que se va a serializar, exactamente lo que
 /// `resolve_retirement_profile` habría derivado para el puente —`bridge_enabled = true`, y sus
 /// dos números si faltan, con los MISMOS defaults del owner (`default_bridge_pct`/
-/// `DEFAULT_BRIDGE_YEARS`, C7) — y nada más: no se resuelve el resto del perfil (clamps,
-/// `withdrawal_rule.pct_source`…), que se sigue exportando tal cual el usuario lo dejó. El
+/// `DEFAULT_BRIDGE_YEARS`, C7) — y nada más: no se resuelve el resto del perfil (clamps…),
+/// que se sigue exportando tal cual el usuario lo dejó. El
 /// fichero resultante ya no necesita el alias para restaurar el puente: `strategy: "asap"` +
 /// `pension.bridge_enabled: true` es un perfil v2 perfectamente normal, y el import de hoy —sin
 /// tocar una línea— lo guarda tal cual llega.

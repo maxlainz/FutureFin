@@ -121,16 +121,6 @@ describe("simulación por estrategias", () => {
     expect(frase).toContain("Yo");
     expect(messageForError("household_not_simulable", 400)).toBe(frase);
   });
-
-  it("«el motor aún no hace eso» no culpa a los datos del usuario", () => {
-    const frase = ERROR_MESSAGES.engine_feature_unavailable;
-    expect(frase).toBeTruthy();
-    expect(frase).not.toBe(ERROR_MESSAGES.engine_rejected_input);
-    expect(frase).not.toBe(ERROR_MESSAGES.bad_request);
-    // La distinción es el valor del código: `engine_rejected_input` pide revisar los datos.
-    expect(frase).not.toMatch(/[Rr]evisa/);
-    expect(messageForError("engine_feature_unavailable", 400)).toBe(frase);
-  });
 });
 
 describe("messageForError", () => {

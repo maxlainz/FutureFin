@@ -2,7 +2,7 @@
 
 Desde la **5.0.0**, la jubilación de FutureFin no es un objetivo que tu patrimonio persigue: es un
 plan que **el éxito decide**. Cada persona de la instalación elige su estrategia, su edad, su
-pensión y cómo piensa sacar el dinero — y la simulación resuelve, sorteando miles de futuros
+pensión y la tasa a la que piensa retirar — y la simulación resuelve, sorteando miles de futuros
 posibles, la primera fecha en la que ese plan aguanta sin que tengas que volver a trabajar.
 
 Todo vive en la pestaña **Jubilación**, es tuyo y no del hogar, y se guarda solo: cambias un campo,
@@ -18,7 +18,7 @@ Si acabas de crear tu cuenta, el asistente de bienvenida te pide lo mínimo para
 fecha de nacimiento, tu estrategia y el dato esencial que esa estrategia y su modo necesitan (una
 edad objetivo, la edad en que dejas de aportar, o el ingreso de la media jornada). Tu tasa de
 retirada se queda en su valor por defecto (3,5 %) hasta que la ajustes aquí, en la tarjeta
-«Retirada»; la inflación anual, en el suyo (2,5 %), vive en `Ajustes → Plan` porque es del hogar,
+«Gasto en jubilación»; la inflación anual, en el suyo (2,5 %), vive en `Ajustes → Plan` porque es del hogar,
 no de una persona.
 
 ---
@@ -56,36 +56,35 @@ un resultado.
 
 ## Qué cuenta como fallar
 
-Un futuro del sorteo («un escenario») falla —tiene que volver a trabajar— por una de tres vías, y
+Un futuro del sorteo («un escenario») falla —tiene que volver a trabajar— por una de dos vías, y
 solo una a la vez:
 
 | | Cuándo | Ejemplo |
 |---|---|---|
 | **F1 — sin dinero** | En algún mes de jubilación (total o de media jornada) la cartera no cubre lo que necesitas ese mes. | El líquido se agota en un año malo. |
 | **F2 — tasa inicial excesiva** | En el mes en que te jubilas del todo, lo que necesitas para el año que empieza supera el tope vigente sobre tu líquido: tu tasa de retirada, o la tasa del puente si lo tienes activado y tu pensión llega dentro de los años máximos que fijaste. | Te jubilas necesitando sacar el 6 % el primer año con una tasa del 4 %. |
-| **F3 — la regla no cubre el gasto** | **En el mes en que te jubilas del todo**, con una regla que retira un % del saldo («Un % del saldo», «Híbrida» o «Con bandas»), lo que la regla te deja sacar con el líquido con el que entras no llega a tu gasto ordinario. | Te jubilas con 600.000 € y una regla del 3 %: 1.500 €/mes para un gasto de 2.000. |
 
-La prioridad, dentro de un mismo mes, es **F1 > F2 > F3**: si te quedas sin dinero no importa si
-además te pasaste de tasa. Con la regla de serie, «Gasto fijo», solo pueden ocurrir F1 y F2, porque
-esa regla no tiene techo que recortar. **Durante la media jornada solo actúa F1**: la puerta de
-tasa inicial es de la jubilación total, no de la fase parcial.
+La prioridad, dentro de un mismo mes, es **F1 > F2**: si te quedas sin dinero no importa si además
+te pasaste de tasa. **Durante la media jornada solo actúa F1**: la puerta de tasa inicial es de la
+jubilación total, no de la fase parcial.
 
-**F2 y F3 se comprueban una sola vez, el mes en que te jubilas; a partir de ahí el único motivo es
-F1.** Las dos preguntan lo mismo —«¿da tu cartera para el nivel de vida que declaras, el día que
-dejas de trabajar?»— y son la condición que tu fecha tiene que pasar. Que una regla por saldo te
-recorte el gasto diez años después no dice que tu plan fuera malo: dice que aquel año fue malo, y
-eso se lee en la **cobertura**, no en el éxito. Juzgarlo mes a mes no medía tu plan, medía la
-probabilidad de que el mercado tuviera alguna vez un mal año — que a treinta años es prácticamente
-1, por buena que sea tu cartera.
+**F2 se comprueba una sola vez, el mes en que te jubilas; a partir de ahí el único motivo es F1.**
+F2 pregunta «¿da tu cartera para el nivel de vida que declaras, el día que dejas de trabajar?» y es
+la condición que tu fecha tiene que pasar; F1 pregunta, cada mes después, si el dinero sigue
+llegando. Juzgar la tasa mes a mes no mediría tu plan: mediría la probabilidad de que el mercado
+tuviera alguna vez un mal año — que a treinta años es prácticamente 1, por buena que sea tu
+cartera.
 
-Tu **necesidad ordinaria** del mes —la que F1 compara cada mes, y F2 y F3 el mes de tu
+Tu **necesidad ordinaria** del mes —la que F1 compara cada mes, y F2 el mes de tu
 jubilación— es tu gasto más cualquier retirada
 extra, menos tus ingresos (pensión incluida): **sin deuda y sin los flujos de «Simulación»**. Esas dos partidas
 mueven tu caja y, con ella, tu fecha, pero no son gasto ordinario — igual que la cuota de un
 préstamo no entra en lo que tu tasa de retirada tiene que cubrir.
 
-Y lo que **no** cuenta como fallo: que una regla por saldo te recorte el gasto en un año malo **y
-aun así te deje cubierto**. Bajar de nivel de vida no es fallar; quedarte corto, sí.
+Y lo que **no** cuenta como fallo: que tu tasa del año diez, mirada sobre el saldo que te quede
+entonces, sea más alta que la del primer año. Tu retirada no se recalcula sobre el saldo: es tu
+gasto de cada año, ajustado a la inflación (ver [Cómo se retira el dinero](#cómo-se-retira-el-dinero-solo-tu-tasa-de-retirada)).
+Lo único que cuenta después de jubilarte es si el dinero llega.
 
 ---
 
@@ -94,7 +93,7 @@ aun así te deje cubierto**. Bajar de nivel de vida no es fallar; quedarte corto
 La tarjeta «Estrategia» tiene cuatro opciones. Cambiarla cambia qué te pregunta el resto de «Tu
 plan» y cómo se resuelve tu fecha.
 
-### Cuanto antes (FIRE clásico)
+### FIRE clásico
 
 > Ahorras todo lo que puedes y te jubilas en la primera fecha en la que tu plan aguanta hasta el
 > final con el nivel de éxito que exijas.
@@ -103,7 +102,7 @@ No necesita ni edad objetivo ni pensión: solo tu fecha de nacimiento, para pode
 éxito y capital. Publica tu fecha válida, el éxito con el que llega, las fechas al 100 % y al 90 %,
 y —de lectura— cuánto se apretó el cinturón la mediana de los escenarios que aguantan.
 
-### A una edad fija
+### Edad fija
 
 > Eliges la edad y el plan te dice cuánto tienes que aportar cada mes para llegar a ella con tu
 > nivel de éxito.
@@ -120,7 +119,7 @@ Aquí **manda la edad**: te jubilas ese mes, aguante o no. Publica dos cosas má
   sobrante aporta lo que hay. Si ni invirtiendo cada euro de tu sobrante llegas, la tarjeta lo dice
   con todas las letras —«Ni ahorrándolo todo»— en vez de fingir una cifra.
 
-### Ahorrar ahora y dejar crecer (Coast FIRE)
+### Coast FIRE
 
 > Aportas fuerte y luego dejas de aportar. Puedes fijar la edad de jubilación —y el plan te dice
 > cuándo puedes dejar de ahorrar— o fijar la edad a la que dejas de ahorrar y ver a qué fecha te
@@ -138,12 +137,12 @@ disponible para gastar — no vuelve a la cartera. Si no existe tal mes (ni apor
 o, en modo B, parar ahí no llega a tu umbral, el aviso lo dice sin rodeos: no puedes dejar de
 aportar y llegar.
 
-### Jornada reducida (Barista FIRE)
+### Barista FIRE
 
 > Bajas de jornada a una edad —o en cuanto el plan pueda permitírsela— y cubres el hueco con tu
 > capital hasta la jubilación total.
 
-En el selector de estrategias se llama **«Jornada reducida (Barista FIRE)»**; sus campos (más
+En el selector de estrategias se llama **«Barista FIRE»**; sus campos (más
 abajo) siguen llamándose «media jornada» — es la misma fase con dos nombres. Declaras el
 **ingreso mensual** de la fase (en euros de hoy, **plano**: no sube con la inflación — un 0 € es un
 año sabático) y con qué gasto se compara. Dos modos:
@@ -166,8 +165,8 @@ Actívalo y cambia UNA cosa: si al jubilarte falta menos que los años máximos 
 entre tu pensión, el tope de lo que puedes sacar el primer año pasa de tu tasa de retirada a la
 **tasa del puente** —más alta— mientras dure ese tramo. Es jubilación anticipada de verdad: sin
 sueldo, sin aportaciones, el gasto sale entero de tu capital hasta que llega la pensión. No hay
-ningún otro tope durante el puente: si aguanta o no lo decide, mes a mes, la misma regla que el
-resto del plan (F1). Al activarlo, FutureFin rellena sus dos números con un default —la tasa, `max(5,
+ningún otro tope durante el puente: si aguanta o no lo decide, mes a mes, la misma comprobación
+que el resto del plan (F1). Al activarlo, FutureFin rellena sus dos números con un default —la tasa, `max(5,
 tu tasa de retirada + 1)` %; los años, 7— y puedes cambiarlos (la tasa hasta el 20 %, los años
 hasta 20).
 
@@ -175,34 +174,30 @@ hasta 20).
 
 ## Las tarjetas y sus campos
 
-«Tu plan» tiene **seis tarjetas** y, entre todas, **25 campos posibles** — pero nunca ves los 25 a
-la vez: solo aparece el campo que tu estrategia y su modo necesitan. Un campo que no ves es un
+«Tu plan» tiene **cinco tarjetas** —Estrategia, Gasto en jubilación, Edades, Pensión y Horizonte
+y exigencia, en ese orden— y, entre todas, **20 campos posibles** (`PlanFieldId` en `apps/web/src/lib/plan-fields.ts`) — pero nunca ves los 20 a la vez: solo aparece el campo que tu estrategia y su modo necesitan. Un campo que no ves es un
 campo que la simulación no está mirando; una tarjeta que se quedaría vacía tampoco se pinta.
 
 | Campo | Tarjeta | ¿Cuándo se ve? | ¿Obligatorio? |
 |---|---|---|---|
-| Fecha de nacimiento | Edades | Solo si te falta | Sí, con pensión declarada o en «A una edad», «Coast» o «Media jornada» |
-| Qué fijas tú | Edades | Estrategia Coast | No (trae default) |
-| Edad de jubilación objetivo (o «edad de jubilación total» en Media jornada) | Edades | «A una edad»; Coast modo A; Media jornada | Sí, salvo en Media jornada |
-| Edad en que dejo de aportar | Edades | Coast modo B | Sí |
-| Cuándo empieza la media jornada | Edades | Media jornada | No (trae default) |
-| Edad de inicio de la media jornada | Edades | Media jornada, modo A | Sí |
-| Ingreso mensual en media jornada | Edades | Media jornada | Sí |
-| Gasto durante la media jornada | Edades | Media jornada | No |
-| Pensión mensual / Edad de inicio de la pensión | Pensión | Siempre visible (la casilla vive ahí) | Sí, en cuanto declaras pensión |
-| Pensión indexada a la inflación | Pensión | Con pensión declarada | No |
-| Pensión cobrada durante la media jornada | Pensión | Media jornada y pensión | No |
-| Puente hasta la pensión (el interruptor) | Pensión | Con pensión declarada, cualquier estrategia | No |
-| Tasa máxima / Años máximos del puente | Pensión | Con pensión **y** puente activado | Sí |
 | Cómo se calcula el gasto de jubilación | Gasto en jubilación | Siempre | No |
 | Gasto anual manual | Gasto en jubilación | Modo «Manual» | Sí |
-| Umbral de éxito | Retirada | Siempre, el primero | No (default 95) |
-| Tasa de retirada | Retirada | Siempre | No (default 3,5 %) |
-| Regla de retirada | Retirada | Siempre | No |
-| Baja al… | Retirada | Regla «Híbrida» | No |
-| Banda / Ajuste | Retirada | Regla «Con bandas» | No |
-| Cómo se aplica la regla | Retirada | Regla ≠ «Gasto fijo» | No |
-| Edad límite del horizonte | Horizonte | Siempre | No (default 90) |
+| Tasa de retirada (SWR) | Gasto en jubilación | Siempre, el último | No (default 3,5 %) |
+| Fecha de nacimiento | Edades | Solo si te falta | Sí, con pensión declarada o en «Edad fija», «Coast FIRE» o «Barista FIRE» |
+| Qué fijas tú | Edades | Estrategia Coast FIRE | No (trae default) |
+| Edad de jubilación objetivo (o «edad de jubilación total» en Barista FIRE) | Edades | «Edad fija»; Coast FIRE modo A; Barista FIRE | Sí, salvo en Barista FIRE |
+| Edad en que dejo de aportar | Edades | Coast FIRE modo B | Sí |
+| Cuándo empieza la media jornada | Edades | Barista FIRE | No (trae default) |
+| Edad de inicio de la media jornada | Edades | Barista FIRE, modo A | Sí |
+| Ingreso mensual en media jornada | Edades | Barista FIRE | Sí |
+| Gasto durante la media jornada | Edades | Barista FIRE | No |
+| Pensión mensual / Edad de inicio de la pensión | Pensión | Siempre visible (la casilla vive ahí) | Sí, en cuanto declaras pensión |
+| Pensión indexada a la inflación | Pensión | Con pensión declarada | No |
+| Pensión cobrada durante la media jornada | Pensión | Barista FIRE y pensión | No |
+| Puente hasta la pensión (el interruptor) | Pensión | Con pensión declarada, cualquier estrategia | No |
+| Tasa máxima / Años máximos del puente | Pensión | Con pensión **y** puente activado | Sí |
+| Umbral de éxito | Horizonte y exigencia | Siempre, el primero | No (default 95) |
+| Edad límite del horizonte | Horizonte y exigencia | Siempre | No (default 90) |
 
 La **fecha de nacimiento es obligatoria** por dos motivos, no solo uno: las estrategias por edad la
 necesitan para tener un mes contra el que resolver nada, y **cualquier pensión declarada
@@ -241,7 +236,7 @@ desde el primer mes de jubilación, aunque fuera a tardar veinte años en llegar
 
 Cuánto gasta tu plan cada mes jubilado lo fija uno de tres modos, en la tarjeta «Gasto en
 jubilación» — y ese gasto (más las retiradas extra, menos tus ingresos y tu pensión) es exactamente
-la necesidad ordinaria que F1, F2 y F3 comparan:
+la necesidad ordinaria que F1 y F2 comparan:
 
 - **Gasto actual** — tus partidas de jubilación del presupuesto.
 - **Ingresos actuales** — para mantener tu nivel de vida.
@@ -256,6 +251,30 @@ entre tu tasa de retirada —25 veces el gasto solo si tu tasa es el 4 % clásic
 tasa, otro múltiplo— sin restar la pensión que declares. No decide nada: tu fecha y tu capital
 salen de contar escenarios, no de esta división, y por eso casi nunca coinciden. Vive en «Detalle
 del cálculo».
+
+---
+
+## Cómo se retira el dinero: solo tu tasa de retirada
+
+FutureFin tiene **un único modelo de retirada**, y cabe en una frase: *en el momento en que tu tasa
+de retirada llega al gasto que tendrás jubilado, estás jubilado; de ahí en adelante, cada año se
+retira esa cantidad ajustada a la inflación.*
+
+En la práctica son dos piezas:
+
+1. **La puerta del primer año (F2).** El mes en que te jubilas del todo, tu gasto ordinario anual
+   —ya restadas las rentas que sigas cobrando y la pensión— tiene que caber en tu **tasa de
+   retirada** sobre el patrimonio líquido con el que llegas. Con una tasa del 3,5 % y 600.000 € de
+   líquido caben 21.000 € al año; si tu gasto neto es de 24.000 €, ese mes todavía no es tu fecha.
+   Con el puente activado y la pensión a la vista, el tope es la tasa del puente en vez de la tuya.
+2. **Jubilado, se vende lo que el gasto necesita.** Cada mes se vende de la cartera exactamente lo
+   necesario para pagar tu gasto de ese mes —indexado a la inflación—, impuestos incluidos. No se
+   recalcula sobre el saldo ni se recorta en los años malos: si un mes la cartera ya no llega, ese
+   escenario falla (F1).
+
+Lo que **no** hay, y es deliberado: reglas que retiren un porcentaje del saldo cada año (con o sin
+bandas que suban o bajen la retirada) ni un «modo» que convierta esa regla en tu gasto. Las versiones
+de desarrollo de la 5.0.0 las tuvieron y se retiraron antes de publicarla — el apéndice dice por qué.
 
 ---
 
@@ -314,11 +333,11 @@ con el estado del cálculo (cifras de ejemplo, inventadas):
 
 | Estrategia / estado | Frase |
 |---|---|
-| Cuanto antes | «Con tu plan te jubilas en 2043 (a los 55): aguantan 95 de cada 100 escenarios. Al 100 % sería 2051; al 90 %, 2040.» |
-| A una edad, ya llegas | «A los 55, como pediste: aguantan 82 de cada 100 escenarios (tu umbral es 95). Para llegar harían falta 300 € más al mes.» |
-| Coast, modo A | «Puedes dejar de aportar en 2031 (a los 41) y jubilarte a los 55 con 95 de cada 100.» |
-| Coast, modo B | «Dejando de aportar a los 41, te jubilas en 2047 (a los 57) con 95 de cada 100.» |
-| Media jornada | «Puedes pasar a jornada reducida en 2031 (a los 41) y jubilarte del todo en 2045 (a los 55) con 95 de cada 100.» |
+| FIRE clásico | «Con tu plan te jubilas en 2043 (a los 55): aguantan 95 de cada 100 escenarios. Al 100 % sería 2051; al 90 %, 2040.» |
+| Edad fija, ya llegas | «A los 55, como pediste: aguantan 82 de cada 100 escenarios (tu umbral es 95). Para llegar harían falta 300 € más al mes.» |
+| Coast FIRE, modo A | «Puedes dejar de aportar en 2031 (a los 41) y jubilarte a los 55 con 95 de cada 100.» |
+| Coast FIRE, modo B | «Dejando de aportar a los 41, te jubilas en 2047 (a los 57) con 95 de cada 100.» |
+| Barista FIRE | «Puedes pasar a jornada reducida en 2031 (a los 41) y jubilarte del todo en 2045 (a los 55) con 95 de cada 100.» |
 
 Y tres estados ganan a la estrategia, en este orden: que falte un dato imprescindible —empezando
 por la fecha de nacimiento—, que el cálculo siga en marcha («Calculando tu fecha…») y que ningún
@@ -331,8 +350,8 @@ Como mucho tres, nunca más, una cifra por tarjeta:
 
 1. **Capital necesario hoy** — siempre.
 2. **Éxito del plan** — siempre, con tu umbral en el subtítulo.
-3. **La de tu estrategia** — «Fecha válida» (Cuanto antes), «Aportación mínima» (A una edad),
-   «Mes coast» (Coast), «Inicio de la jornada reducida» (Media jornada). Si el plan no está
+3. **La de tu estrategia** — «Fecha válida» (FIRE clásico), «Aportación mínima» (Edad fija),
+   «Mes coast» (Coast FIRE), «Inicio de la jornada reducida» (Barista FIRE). Si el plan no está
    resuelto, no hay tercera tarjeta: repetir la misma razón tres veces no ayuda.
 
 ### El gráfico
@@ -346,11 +365,11 @@ Un único gráfico, con un único eje de importes:
   magnitud que la curva de capital necesario y que el éxito del sorteo, así que las tres se leen
   juntas sin traducir.
 - **Una banda p10–p90** —también líquida, ocho de cada diez futuros caen dentro—, teñida por edad
-  con la probabilidad ACUMULADA de fallo (F1, F2 o F3 juntos): verde donde no falla ninguno, ámbar en
+  con la probabilidad ACUMULADA de fallo (F1 o F2 juntos): verde donde no falla ninguno, ámbar en
   cuanto empiezan a fallar, rojo desde el 10 % — o desde el complemento de tu umbral si pides más
   de un 90 % de éxito: con un umbral del 80 %, el rojo empieza en el 20 %. El corte ámbar va a la
   mitad del rojo. Pasa el ratón por encima y ves el porcentaje exacto y, entre paréntesis, cuánto
-  es F1, cuánto F2 y cuánto F3 en ese punto.
+  es F1 y cuánto F2 en ese punto.
 - **La curva de capital necesario**, discontinua.
 - **Una marca vertical** en tu fecha válida, con el éxito con el que llega.
 - **Una tira bajo el eje**, con el éxito si te jubilaras en cada año («si te fueras en 2036: 78 de
@@ -369,14 +388,9 @@ Debajo del gráfico, un bloque compacto con lo que hace **auditable** el «Éxit
   («±1,2 pp»), o la cota de la regla de tres con cero fallos; y, en claro, el límite inferior de
   Wilson («con 95 % de confianza, al menos un 93,8 %») — es justo lo que se compara con tu umbral,
   no el número grande de la cabecera.
-- Los **fallos por tipo** —cuántos escenarios cayeron por F1, F2 o F3, sobre el total— cuando ha
-  fallado alguien; si no ha fallado nadie, las tres filas no se pintan.
-- La **cobertura de tu gasto, corregida** — qué parte de tu gasto se pagó de verdad (nunca por
-  encima del 100 %) y en cuántos meses te quedaste corto, contando las DOS formas de quedarte
-  corto: lo que la regla se negó a sacar y lo que la cartera ya no pudo pagar. Antes esta cifra
-  solo miraba lo primero, así que con una regla que no recorta nunca —«Gasto fijo»— siempre daba el
-  gasto entero cubierto; hoy también cuenta el descubierto.
-- Cuántos escenarios **fallan en algún momento** del horizonte, por cualquiera de los tres
+- Los **fallos por tipo** —cuántos escenarios cayeron por F1 y cuántos por F2, sobre el total—
+  cuando ha fallado alguien; si no ha fallado nadie, las filas no se pintan.
+- Cuántos escenarios **fallan en algún momento** del horizonte, por cualquiera de los dos
   motivos — el total que el color de la banda no puede rotular en un solo punto.
 - El coste, el número de caminos y la semilla del sorteo, para que se pueda auditar y reproducir.
 
@@ -436,7 +450,7 @@ resuelve la suya en su vista «Yo».
 
 ## Lo que el modelo NO hace (todavía)
 
-Siete carencias, declaradas y con su issue, en vez de calladas:
+Seis carencias, declaradas y con su issue, en vez de calladas:
 
 | No hace | Por qué importa | Issue |
 |---|---|---|
@@ -444,7 +458,6 @@ Siete carencias, declaradas y con su issue, en vez de calladas:
 | Los activos con volatilidad se mueven con correlación 1 entre ellos | Diversificar entre dos activos volátiles no reduce el riesgo del sorteo tanto como debería en la realidad | #217 |
 | El horizonte se fija por edad, sin ponderar por mortalidad | Un plan que «llega justo» a tu edad límite no dice qué pasa si vives más — y en una pareja de 65 años, que uno de los dos pase de los 95 no es tan raro | #218 |
 | La vista Hogar no resuelve fecha ni banda de escenarios por miembro | Cada persona sortea la suya en su vista «Yo»; el hogar solo suma lo determinista | #219 |
-| La regla «Con bandas» (Guyton-Klinger) no aplica su regla de inflación | El guardarraíl de subir o bajar la retirada existe; el ajuste por inflación que lo acompaña en la literatura, no | #220 |
 | Sin avisos legales sobre pensión anticipada o media jornada | Jubilarte antes de tiempo o reducir jornada tiene consecuencias legales sobre tu pensión pública real que este plan no modela | #221 |
 | El excedente en jubilación sigue tus reglas de ahorro sin publicar su coste fiscal | Reinvertir el sobrante tiene un coste en impuestos que el plan no enseña, y hace que los tres modos de gasto acaben pareciendo el mismo «gasto de hoy» por dentro | #227 |
 
@@ -478,7 +491,17 @@ de 2026 lo retiró. Ninguno se fue por descuido: cada uno tenía una razón.
 - **«Puente hasta la pensión» como una estrategia más.** El selector tenía cinco estrategias, y
   esta era la quinta, con su propio disparador; hoy son cuatro, y el puente vive como un ajuste de
   la tarjeta Pensión disponible en cualquiera de ellas. Un perfil guardado con la estrategia
-  `pension_bridge` migra solo a «Cuanto antes» con el puente activado, con un aviso.
+  `pension_bridge` migra solo a «FIRE clásico» con el puente activado, con un aviso.
+- **Las reglas de retirada por saldo y el «modo de gasto».** Las versiones de desarrollo de la
+  5.0.0 dejaban elegir cómo sacar el dinero —gasto fijo, un % del saldo, una híbrida o una con
+  bandas al estilo Guyton-Klinger— y si esa regla era un techo a tu gasto o tu gasto mismo. Se
+  retiraron antes de publicar (decisión del 10 de octubre de 2026) porque, medido: el modo no movía
+  tu fecha, ni tu capital necesario, ni tu número FIRE; el porcentaje de la regla era siempre tu
+  tasa de retirada; y con ese porcentaje, el fallo propio de la regla anulaba el puente hasta la
+  pensión sin mirarlo. Lo que queda es [solo tu tasa de retirada](#cómo-se-retira-el-dinero-solo-tu-tasa-de-retirada).
+  Las filas «La regla no cubre el gasto», «Parte del gasto que la regla cubrió» y «Meses por debajo
+  del gasto» del bloque Riesgo se fueron con ellas: sin regla, un mes por debajo de tu gasto ya es
+  un fallo F1.
 - **Los percentiles del cruce por camino.** Antes se guardaba en qué mes cruzaba el objetivo cada
   camino individual del sorteo; sin objetivo que cruzar, la pregunta deja de tener sentido, y lo
   que queda es el éxito por fecha que ya cuenta esta página.

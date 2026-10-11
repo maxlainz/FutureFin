@@ -14,9 +14,10 @@
 //! ignora en silencio: un plan aceptado y no simulado publicaría un patrimonio plausible y
 //! equivocado, que es justo la clase de fallo que esta casa no publica.
 //!
-//! **WP2 añadió las reglas de retirada**: las cuatro de [`WithdrawalRule`] y los dos
-//! [`SpendMode`] se simulan de verdad, y su aritmética vive en
-//! [`crate::withdrawal`](../withdrawal/index.html).
+//! **«Solo SWR» (2026-10-10)**: WP2 había añadido cuatro reglas de retirada × dos modos de
+//! gasto; se retiraron antes de publicar 5.0.0. Jubilado, el hogar vende cada mes lo que su gasto
+//! indexado necesita (el drenaje de 4.15.0) y el SWR es solo la puerta de tasa INICIAL
+//! ([`InitialRateGate`]). Porqué y mediciones: `futurefin-failure-archaeology`.
 
 use rust_decimal::Decimal;
 
@@ -53,52 +54,6 @@ impl RetirementTrigger {
             RetirementTrigger::AtMonth(s) => Some(s),
         }
     }
-}
-
-/// Cómo se relaciona la regla de retirada con el gasto declarado (D5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpendMode {
-    /// La regla es un TECHO: se retira `min(necesidad, permitido)`, y solo en meses con déficit.
-    Ceiling,
-    /// La regla ES el gasto del patrimonio: se retira `permitido` todos los meses jubilados (R7).
-    RuleIsSpend,
-}
-
-/// Catálogo de reglas de retirada (D6). **Las cuatro se simulan desde WP2**
-/// (`crates/engine/src/withdrawal.rs`, §B.2 del plan de #207); lo que el motor rechaza ahora son
-/// los PARÁMETROS imposibles (un porcentaje ≤ 0, un ajuste ≥ 100 %) con
-/// [`EngineError::InvalidWithdrawalRule`]. Rechazar es la única salida honesta: aceptar una regla
-/// y simular otra publicaría números creíbles de un plan que nadie configuró.
-///
-/// Los `pct` son **BRUTOS de impuestos**, igual que el SWR (R9): el techo se aplica a la VENTA,
-/// no a los euros que llegan al bolsillo.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WithdrawalRule {
-    /// «Gasto fijo en euros de hoy» (R1): el permitido ES la necesidad del mes, indexada por el
-    /// gasto del bucle y sin techo. Es el drenaje de 4.15.0, bit a bit.
-    ///
-    /// Con esta regla los dos [`SpendMode`] COINCIDEN, y no por casualidad: el permitido se define
-    /// como el déficit del mes, así que en un mes sin déficit no hay nada que gastar del
-    /// patrimonio (`RuleIsSpend` retiraría un importe no positivo, que no es una retirada). Es la
-    /// propiedad que mantiene 4.15.0 bit-idéntico bajo cualquiera de los dos modos, y tiene test
-    /// propio (`under_fixed_real_both_spend_modes_are_the_same_simulation`).
-    FixedReal,
-    /// `pct/100 · líquido(k−1) / 12`: porcentaje anual del líquido de cierre del mes anterior.
-    PercentOfBalance { pct: Decimal },
-    /// `start_pct` hasta el latch de §B.2 (`end_pct·L(k−1) ≥ start_pct·L(R−1)·f(k−1)/f(R−1)`),
-    /// luego `end_pct` para siempre.
-    Hybrid {
-        start_pct: Decimal,
-        end_pct: Decimal,
-    },
-    /// Guyton-Klinger 2006, **solo capital-preservation y prosperity**: la regla de la ventana de
-    /// 15 años y el salto de inflación tras un recorte NO están implementados y se declara así en
-    /// [`crate::withdrawal`]. Omitirlas deja un modelo más reactivo — la dirección prudente.
-    Guardrails {
-        pct: Decimal,
-        band_pct: Decimal,
-        adjust_pct: Decimal,
-    },
 }
 
 /// Qué gasto rige durante la fase parcial (D10). WP3.
@@ -194,7 +149,7 @@ pub struct InitialRateGate {
 /// Con una pensión con fecha a pocos años vista, exigir el SWR de una perpetuidad es exigir
 /// capital para un gasto que la pensión va a cubrir. El puente sube el tope de `R` a `max_pct`
 /// **solo** si la pensión llega dentro de `max_years` años. No hay tope mensual DURANTE el
-/// puente: lo que quede después lo juzga F1 mes a mes (F3, como F2, es una propiedad de `R`).
+/// puente: lo que quede después lo juzga F1 mes a mes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BridgeCap {
     /// Tasa inicial máxima ANUAL en % mientras el puente aplica (típicamente > `swr_pct`).
@@ -205,13 +160,17 @@ pub struct BridgeCap {
 
 /// **Por qué falla UN camino** (5.0.0 E1, decisión M3 del owner corregida por C1).
 ///
-/// El veredicto de un camino es binario —falla o no—, y su MOTIVO tiene tres formas que no
+/// El veredicto de un camino es binario —falla o no—, y su MOTIVO tiene dos formas que no
 /// comparten remedio. Se evalúan solo en meses de jubilación (o de media jornada, y ahí solo
-/// F1: supuesto S1, las reglas de retirada se anclan en `L(R−1)`, que durante la media jornada
-/// todavía no existe), con prioridad F1 > F2 > F3 dentro del mismo mes.
+/// F1: supuesto S1, la tasa inicial es una propiedad de la fecha de jubilación total), con
+/// prioridad F1 > F2 dentro del mismo mes.
 ///
-/// **Dos de los tres se deciden UNA vez, en `R`** (C10, 2026-09-07): F2 y F3 son propiedades de
-/// la FECHA de jubilación, no del mes. Después de `R` el único motivo vivo es F1.
+/// **F2 se decide UNA vez, en `R`** (C10, 2026-09-07): es una propiedad de la FECHA de
+/// jubilación, no del mes. Después de `R` el único motivo vivo es F1.
+///
+/// **Hubo un F3** (`rule_below_need`, «la regla por saldo permite menos que el gasto»); se fue
+/// con las reglas de retirada por saldo en la decisión «solo SWR» del 2026-10-10. Con `% heredado
+/// del SWR` F3 contenía a F2 en `R` y no miraba el puente, así que lo neutralizaba.
 ///
 /// **El veredicto de un camino no es el veredicto del PLAN.** El plan se juzga con la proporción
 /// de caminos sin fallo (`crates/engine-stochastic`) contra el umbral del perfil; un camino
@@ -224,15 +183,6 @@ pub enum PathFailure {
     /// **F2** — la tasa de retirada INICIAL supera el tope ([`InitialRateGate`]) en el primer
     /// mes jubilado. No se vuelve a evaluar: es una propiedad de la FECHA, no del mes.
     InitialRateExceeded,
-    /// **F3** — con una regla por saldo (`percent_of_balance`, `hybrid`, `guardrails`), lo que
-    /// la regla PERMITE con el líquido de entrada se queda por debajo de la necesidad ordinaria:
-    /// el hogar tendría que recortar su nivel de vida ya desde el primer mes. No aplica a
-    /// `fixed_real`, donde el permitido ES la necesidad por construcción.
-    ///
-    /// **Se evalúa SOLO en `R`** (C10), como F2. Mes a mes era un problema de barrera —el
-    /// permitido sigue al líquido, que pasea con la volatilidad de la cartera— y no una medición
-    /// del plan: el recorte posterior es una LECTURA (`withdrawal_shortfall`), no un fracaso.
-    RuleBelowNeed,
 }
 
 impl PathFailure {
@@ -242,7 +192,6 @@ impl PathFailure {
         match self {
             PathFailure::PortfolioDepleted => "portfolio_depleted",
             PathFailure::InitialRateExceeded => "initial_rate_exceeded",
-            PathFailure::RuleBelowNeed => "rule_below_need",
         }
     }
 }
@@ -288,9 +237,6 @@ pub struct PhasePlan {
     /// de 4.15.0 sigue viajando dentro de `income_retirement_monthly` y de
     /// `FireNeed::ExpenseMinusPension`.
     pub pension: Option<PensionSchedule>,
-    /// WP2 salvo `FixedReal`.
-    pub withdrawal: WithdrawalRule,
-    pub spend_mode: SpendMode,
     /// Ingreso que PERSISTE tras la jubilación (rentas, pensión sin fecha declarada). Sustituye a
     /// `income_regular_monthly` desde el primer mes jubilado. Plano (#139).
     pub income_retirement_monthly: Decimal,
@@ -339,7 +285,7 @@ pub struct PhasePlan {
 }
 
 impl PhasePlan {
-    /// El plan que el handler construye HOY: jubilación por cruce, `fixed_real` con techo, sin
+    /// El plan de 4.15.0: jubilación por cruce, sin
     /// fase parcial ni pensión con fecha, sin retirada extra. Bit-idéntico a 4.15.0.
     pub fn classic(
         income_retirement_monthly: Decimal,
@@ -349,8 +295,6 @@ impl PhasePlan {
             retirement_trigger: RetirementTrigger::LiquidCrossing,
             partial: None,
             pension: None,
-            withdrawal: WithdrawalRule::FixedReal,
-            spend_mode: SpendMode::Ceiling,
             income_retirement_monthly,
             expense_retirement_monthly,
             extra_monthly_withdrawal: Decimal::ZERO,
@@ -381,11 +325,12 @@ impl PhasePlan {
         }
     }
 
-    // **5.0.0 WP5.5 — los tres helpers de comportamiento se mudaron al gemelo genérico**
-    // (`crate::sim::PhasePlanG`): `ensure_supported`, `contribution_cap_at` y
-    // `partial_expense_basis_monthly` son lo que EJECUTA el núcleo, y el núcleo ya no habla
-    // `Decimal`. Este tipo se queda como lo que siempre fue de cara afuera: la forma pública del
-    // plan, la que `apps/api` construye.
+    // **5.0.0 WP5.5 — los helpers de comportamiento se mudaron al gemelo genérico**
+    // (`crate::sim::PhasePlanG`): `contribution_cap_at` y `partial_expense_basis_monthly` son lo
+    // que EJECUTA el núcleo, y el núcleo ya no habla `Decimal`. (Hubo un tercero,
+    // `ensure_supported`, que solo validaba la regla de retirada; se fue con ellas el 2026-10-10.)
+    // Este tipo se queda como lo que siempre fue de cara afuera: la forma pública del plan, la que
+    // `apps/api` construye.
 }
 
 /// Avisos del motor. WP3 le puso tres variantes y el modelo v2 le quitó dos, las dos por la
@@ -428,7 +373,6 @@ impl EngineWarning {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::projection::EngineError;
     use crate::sim::PhasePlanG;
 
     /// **WP5.5**: el COMPORTAMIENTO del plan vive en el gemelo genérico (es lo que el núcleo
@@ -443,9 +387,8 @@ mod tests {
         assert_eq!(p.retirement_trigger, RetirementTrigger::LiquidCrossing);
         assert_eq!(p.retirement_trigger.forced_month(), None);
         assert_eq!(p.extra_monthly_withdrawal, Decimal::ZERO);
-        assert_eq!(p.spend_mode, SpendMode::Ceiling);
         assert!(p.partial.is_none() && p.pension.is_none());
-        assert_eq!(g(&p).ensure_supported(), Ok(()));
+        assert!(p.initial_rate.is_none());
     }
 
     #[test]
@@ -453,63 +396,6 @@ mod tests {
         let p = PhasePlan::forced_at(37, Decimal::ZERO, Decimal::from(2_000), Decimal::from(400));
         assert_eq!(p.retirement_trigger.forced_month(), Some(37));
         assert_eq!(p.extra_monthly_withdrawal, Decimal::from(400));
-        assert_eq!(g(&p).ensure_supported(), Ok(()));
-    }
-
-    /// Lo no implementado FALLA, no se ignora. Sin este control negativo, `ensure_supported`
-    /// sería decorativo y WP3 podría entregar un plan que el motor simula a medias.
-    ///
-    /// **WP2 movió la frontera**: las cuatro reglas se aceptan (se simulan), y lo que se rechaza
-    /// son los parámetros imposibles. Las fases de WP3 siguen fuera.
-    #[test]
-    fn unsupported_rules_and_phases_are_rejected() {
-        let base = PhasePlan::classic(Decimal::ZERO, Decimal::from(2_000));
-
-        for rule in [
-            WithdrawalRule::PercentOfBalance {
-                pct: Decimal::from(4),
-            },
-            WithdrawalRule::Hybrid {
-                start_pct: Decimal::from(5),
-                end_pct: Decimal::from(3),
-            },
-            WithdrawalRule::Guardrails {
-                pct: Decimal::from(5),
-                band_pct: Decimal::from(20),
-                adjust_pct: Decimal::from(10),
-            },
-        ] {
-            let mut p = base.clone();
-            p.withdrawal = rule;
-            assert_eq!(g(&p).ensure_supported(), Ok(()), "{rule:?} se simula desde WP2");
-        }
-
-        // Un porcentaje que no es un porcentaje: error TIPADO, no una simulación creativa.
-        let mut p = base.clone();
-        p.withdrawal = WithdrawalRule::PercentOfBalance { pct: Decimal::ZERO };
-        assert_eq!(
-            g(&p).ensure_supported(),
-            Err(EngineError::InvalidWithdrawalRule),
-            "un 0 % de retirada no es una regla, es una división del plan por cero"
-        );
-
-        // **WP3 movió la frontera otra vez**: las dos fases se simulan y ya no se rechazan.
-        let mut p = base.clone();
-        p.partial = Some(PartialPhase {
-            start_month: 12,
-            income_monthly: Decimal::from(1_000),
-            expense_basis: ExpenseBasis::Retirement,
-        });
-        assert_eq!(g(&p).ensure_supported(), Ok(()));
-
-        let mut p = base;
-        p.pension = Some(PensionSchedule {
-            start_index: 240,
-            monthly_today: Decimal::from(1_200),
-            indexed: true,
-            fraction_while_partial: Decimal::ZERO,
-        });
-        assert_eq!(g(&p).ensure_supported(), Ok(()));
     }
 
     /// La rejilla de la pensión es 0-based y el corte es `i ≥ start_index` — no `>`.
@@ -599,7 +485,6 @@ mod tests {
             PathFailure::InitialRateExceeded.code(),
             "initial_rate_exceeded"
         );
-        assert_eq!(PathFailure::RuleBelowNeed.code(), "rule_below_need");
     }
 
     fn d(m: i64, s: u32) -> Decimal {

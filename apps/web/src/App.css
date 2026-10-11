@@ -2798,17 +2798,6 @@
   font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-.retirement-radio-stack {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem 1rem;
-  align-items: center;
-}
-
-.retirement-radio-stack .field-label-text {
-  flex: 1 0 100%;
-}
-
 /* «Volver a la derivada» (5.0.0, D13): vive FUERA del radiogroup —un botón enfocable entre radios
    rompe la navegación con flechas—, así que hereda el `align-items: stretch` del `.field` y sin
    esto ocuparía todo el ancho como si fuera la acción principal del panel. Es una salida. */
@@ -4725,11 +4714,11 @@ fieldset.retirement-config-stack {
    —móvil, o la página en una sola columna estrecha— los campos
    vuelven solos a apilarse, que es lo que quieren ahí.
 
-   La pista del control es de **17rem**, y la fija el `<select>` más
-   largo («Bandas de seguridad (guardrails)»: 255px con su flecha), no
-   un redondeo. A 16rem entraba por 1px, que no es margen, es suerte;
-   a 17rem sobran 17px y ningún rótulo de la pantalla se parte en dos
-   líneas (medido campo a campo).
+   La pista del control es de **17rem**. La fijó el `<select>` más
+   largo de entonces —el de la regla de retirada, 255px con su
+   flecha—, que se retiró con «solo SWR» (2026-10-10); el valor se
+   conserva sin volver a medir: con menos controles anchos solo
+   puede sobrar sitio, y bajarlo es una decisión visual aparte.
 
    `.retirement-subcol` es contenedor por derecho propio: las dos
    sub-columnas de «Pensión» miden 223px dentro de un panel de 469px,

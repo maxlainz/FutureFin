@@ -53,8 +53,9 @@
 //! - **`checked_mul` / `checked_div` / `checked_add` existen porque el motor es una función pura
 //!   que no puede panicar**: los desbordes de `Decimal` (#208, #209, `AssetValueOverflow`) tienen
 //!   cada uno su degradación declarada, y esas degradaciones son parte del contrato.
-//! - **`max_value` existe por un solo sitio**: el techo de la retirada de Guyton-Klinger satura
-//!   en vez de panicar («sin límite práctico»).
+//! - **Sin `max_value`**: existió para saturar el techo de retirada de los guardarraíles
+//!   («sin límite práctico»); se fue con las reglas por saldo (decisión «solo SWR», 2026-10-10) y
+//!   un método de trait sin llamador es exactamente lo que clippy no caza.
 
 use core::cmp::Ordering;
 use core::fmt::Debug;
@@ -86,9 +87,6 @@ pub trait MoneyOps:
     fn zero() -> Self;
     /// El uno del tipo.
     fn one() -> Self;
-    /// El mayor valor representable. Único uso: saturar el techo de retirada de los
-    /// guardarraíles.
-    fn max_value() -> Self;
 
     /// Conversión desde el tipo canónico del dominio. En `Decimal` es la identidad; en un tipo
     /// aproximado, el punto donde la precisión se pierde — y donde debe declararse cuánta.
@@ -209,10 +207,6 @@ impl MoneyOps for Decimal {
     #[inline]
     fn one() -> Self {
         Decimal::ONE
-    }
-    #[inline]
-    fn max_value() -> Self {
-        Decimal::MAX
     }
     #[inline]
     fn from_decimal(d: Decimal) -> Self {

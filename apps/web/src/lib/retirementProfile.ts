@@ -43,9 +43,6 @@ import type {
   RetirementProfileApi,
   RetirementProfilePatchApi,
   RetirementStrategyApi,
-  SpendModeApi,
-  WithdrawalRuleApi,
-  WithdrawalRuleKindApi,
 } from "../api/types";
 import { parseDisplayDecimal } from "./format";
 
@@ -61,14 +58,11 @@ export type PartialModeApi = PartialRetirementApi["mode"];
 export const MIN_PROFILE_AGE = 18;
 /** Edad mínima a la que se puede declarar que empieza una pensión. */
 export const MIN_PENSION_AGE = 50;
-/** Techo de los `pct` de las reglas de retirada (%), BRUTO de impuestos como el SWR. */
-export const MAX_WITHDRAWAL_PCT = 20;
-/** Techo de la banda y del ajuste de `guardrails` (%). */
-export const MAX_GUARDRAIL_PCT = 50;
 /**
  * Techo del SWR (%). **6 desde el modelo v2** (era 4): el SWR dejó de ser «la tasa que fija el
- * objetivo» —ese objetivo ya no existe— y pasó a ser el TOPE de venta ordinaria anual, que es una
- * palanca que el usuario sí puede querer subir. La cota de abajo sigue siendo 0.
+ * objetivo» —ese objetivo ya no existe— y pasó a ser la TASA INICIAL máxima de retirada (la
+ * puerta del mes de jubilación), que es una palanca que el usuario sí puede querer subir. La cota
+ * de abajo sigue siendo 0.
  */
 export const MAX_SWR_PCT = 6;
 /** Cotas de la edad límite del horizonte (siguen viviendo en `installation.rs`, reusadas aquí). */
@@ -89,12 +83,10 @@ export const MAX_SUCCESS_THRESHOLD_PCT = 100;
 export const DEFAULT_SUCCESS_THRESHOLD_PCT = 95;
 
 /**
- * Techo del puente (%). **Es el mismo que el de las reglas de retirada, y a propósito**: durante
- * el puente el tope de la tasa inicial deja de ser el SWR y pasa a ser este porcentaje, así que
- * las dos magnitudes miden lo mismo (cuánto se puede vender al año) y compartir cota es lo que
- * impide que una acabe permitiendo lo que la otra prohíbe.
+ * Techo del puente (%) — espejo de `MAX_BRIDGE_PCT` en `retirement_profile.rs`. Durante el puente
+ * el tope de la tasa inicial deja de ser el SWR y pasa a ser este porcentaje.
  */
-export const MAX_BRIDGE_PCT = MAX_WITHDRAWAL_PCT;
+export const MAX_BRIDGE_PCT = 20;
 /** Años máximos de antelación sobre el inicio de la pensión durante los que aplica el puente. */
 export const MIN_BRIDGE_YEARS = 1;
 export const MAX_BRIDGE_YEARS = 20;
@@ -159,13 +151,6 @@ export const RETIREMENT_STRATEGY_BLURB: Record<RetirementStrategyApi, string> = 
     "Bajas de jornada a una edad (o en cuanto el plan pueda permitírselo) y cubres el hueco con tu capital hasta la jubilación total. No es la jubilación parcial legal española: es una decisión tuya sobre tu plan, sin trámite ni cotización asociada.",
 };
 
-export const WITHDRAWAL_RULE_KIND_LABEL: Record<WithdrawalRuleKindApi, string> = {
-  fixed_real: "Gasto fijo en euros de hoy",
-  percent_of_balance: "Un % del saldo cada año",
-  hybrid: "Híbrida (empiezo alto y bajo)",
-  guardrails: "Con bandas (Guyton-Klinger)",
-};
-
 /** Los dos modos de coast (M10). El modo decide QUÉ edad pide el formulario, no dos planes. */
 export const COAST_MODE_LABEL: Record<CoastModeApi, string> = {
   fixed_retirement_age: "Fijo la jubilación",
@@ -181,97 +166,6 @@ export const PARTIAL_MODE_LABEL: Record<PartialModeApi, string> = {
 // ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
-
-/**
- * De dónde salió el porcentaje de la regla de retirada (5.0.0 U4, `PctSource` del servidor).
- *
- * Vive AQUÍ y no en `api/types.ts` por la misma razón que el resto del perfil: es un campo del
- * bloque personal, y el cliente lo lee **defensivamente** — un backend anterior a U4 no lo
- * publica, y ausencia NO es `"swr"`.
- */
-export type PctSourceApi = "swr" | "explicit";
-
-/**
- * Una regla de retirada tal y como la publica el servidor tras U4: con el porcentaje ya
- * resuelto y la procedencia al lado. El campo se declara aquí (y no en `api/types.ts`) porque
- * `WithdrawalRuleApi` es el cuerpo que el formulario ESCRIBE, y el formulario no escribe
- * `pct_source` jamás: lo decide el servidor.
- */
-export type WithdrawalRuleWithSourceApi = WithdrawalRuleApi & {
-  pct_source?: PctSourceApi | null;
-};
-
-/**
- * `pct_source` leído sin creerse nada: `null` cuando el backend no lo publica (anterior a U4) o
- * cuando el literal no es de los dos conocidos.
- *
- * **El sesgo importa**: sin `pct_source` el cliente NO puede concluir que un `pct` guardado se
- * hereda del SWR, así que lo trata como explícito y lo conserva. Al revés —dar por heredado lo
- * que no lo es— el formulario borraría en silencio un porcentaje que alguien fijó por API.
- */
-export function withdrawalPctSource(
-  rule: WithdrawalRuleApi | WithdrawalRuleWithSourceApi | null | undefined,
-): PctSourceApi | null {
-  const raw = (rule as WithdrawalRuleWithSourceApi | null | undefined)?.pct_source;
-  return raw === "swr" || raw === "explicit" ? raw : null;
-}
-
-/**
- * El porcentaje que la regla usa de verdad, en el `kind` que tiene uno (U4). `null` en
- * `fixed_real`, que no retira un porcentaje sino la necesidad declarada.
- *
- * Espejo de `resolve_withdrawal_rule`: `percent_of_balance`/`guardrails` usan `pct`, `hybrid`
- * usa `start_pct`, y el que falte hereda `swr_pct`.
- */
-export function effectiveWithdrawalPct(
-  rule: WithdrawalRuleApi,
-  swrPct: string,
-): string | null {
-  switch (rule.kind) {
-    case "fixed_real":
-      return null;
-    case "hybrid":
-      return rule.start_pct ?? swrPct;
-    default:
-      return rule.pct ?? swrPct;
-  }
-}
-
-/**
- * **El resolvedor único del porcentaje de retirada en cliente (U4)** — espejo exacto de
- * `resolve_withdrawal_rule` (`apps/api/src/handlers/retirement_profile.rs`).
- *
- * Rellena con `swr_pct` el porcentaje que la regla necesita y que nadie escribió. Se usa para
- * VALIDAR (la guarda tiene que juzgar lo que el motor va a retirar, no lo que hay tecleado) y
- * jamás para construir el PATCH: el formulario no manda `pct` ni `start_pct` nunca — ese es el
- * punto entero de U4, un solo porcentaje editable y es el SWR.
- */
-export function resolveWithdrawalRule(
-  rule: WithdrawalRuleApi,
-  swrPct: string,
-): WithdrawalRuleApi {
-  switch (rule.kind) {
-    case "fixed_real":
-      return rule;
-    case "hybrid":
-      return rule.start_pct == null ? { ...rule, start_pct: swrPct } : rule;
-    default:
-      return rule.pct == null ? { ...rule, pct: swrPct } : rule;
-  }
-}
-
-/** La regla de retirada de quien no ha tocado nada: exactamente el drenaje de 4.15.x. */
-export function defaultWithdrawalRuleApi(): WithdrawalRuleApi {
-  return {
-    kind: "fixed_real",
-    pct: null,
-    start_pct: null,
-    end_pct: null,
-    band_pct: null,
-    adjust_pct: null,
-    spend_mode: "ceiling",
-  };
-}
 
 /**
  * El perfil de quien no ha tocado nada: cruce por éxito (`asap`), SWR 3,5 %, horizonte a 90 y el
@@ -293,7 +187,6 @@ export function defaultRetirementProfileApi(): RetirementProfileApi {
     success_threshold_pct: DEFAULT_SUCCESS_THRESHOLD_PCT,
     coast_mode: "fixed_retirement_age",
     coast_stop_age: null,
-    withdrawal_rule: defaultWithdrawalRuleApi(),
     pension: null,
     partial_retirement: null,
   };
@@ -332,18 +225,6 @@ export function parsePartialMode(v: unknown): PartialModeApi {
   return pick(v, ["at_age", "asap"] as const, "at_age");
 }
 
-export function parseWithdrawalRuleKind(v: unknown): WithdrawalRuleKindApi {
-  return pick(
-    v,
-    ["fixed_real", "percent_of_balance", "hybrid", "guardrails"] as const,
-    "fixed_real",
-  );
-}
-
-export function parseSpendMode(v: unknown): SpendModeApi {
-  return pick(v, ["ceiling", "rule_is_spend"] as const, "ceiling");
-}
-
 export function parsePartialExpenseBasis(v: unknown): PartialExpenseBasisApi {
   return pick(v, ["retirement", "regular"] as const, "retirement");
 }
@@ -376,41 +257,6 @@ function clampDecimalString(
   const n = parseDisplayDecimal(String(v));
   if (n === null) return fallback;
   return String(Math.min(max, Math.max(min, n)));
-}
-
-/** `pct` opcional de una regla: `null` se conserva (la regla no lo usa); un valor se acota. */
-function clampOptionalPct(v: unknown, max: number): string | null {
-  if (v == null || String(v).trim() === "") return null;
-  const n = parseDisplayDecimal(String(v));
-  if (n === null) return null;
-  return String(Math.min(max, Math.max(0, n)));
-}
-
-export function normalizeWithdrawalRule(raw: unknown): WithdrawalRuleWithSourceApi {
-  const base: WithdrawalRuleWithSourceApi = defaultWithdrawalRuleApi();
-  if (!raw || typeof raw !== "object") return base;
-  const r = raw as Partial<WithdrawalRuleApi>;
-  const source = withdrawalPctSource(raw as WithdrawalRuleWithSourceApi);
-  // **U4, y es la línea que hace que el formulario tenga UN solo porcentaje**: el servidor
-  // publica la regla ya RESUELTA —`pct`/`start_pct` rellenos con el `swr_pct` y `pct_source:
-  // "swr"` al lado—, así que leerla tal cual dejaría el borrador con un porcentaje heredado
-  // dentro. A la siguiente escritura ese valor viajaría de vuelta como si alguien lo hubiera
-  // fijado, y mover el slider del SWR ya no movería la regla: el porcentaje se habría
-  // congelado sin que nadie lo decidiera. Se suelta aquí, en la LECTURA, para que el borrador
-  // diga la verdad («no lo he fijado») y el porcentaje siga colgando del SWR.
-  const inherited = source === "swr";
-  return {
-    kind: parseWithdrawalRuleKind(r.kind),
-    pct: inherited ? null : clampOptionalPct(r.pct, MAX_WITHDRAWAL_PCT),
-    start_pct: inherited ? null : clampOptionalPct(r.start_pct, MAX_WITHDRAWAL_PCT),
-    end_pct: clampOptionalPct(r.end_pct, MAX_WITHDRAWAL_PCT),
-    band_pct: clampOptionalPct(r.band_pct, MAX_GUARDRAIL_PCT),
-    adjust_pct: clampOptionalPct(r.adjust_pct, MAX_GUARDRAIL_PCT),
-    spend_mode: parseSpendMode(r.spend_mode),
-    // La procedencia se CONSERVA aunque el valor se haya soltado: es lo que permite a la vista
-    // decir «regla al X %, fijado por API» sin volver a preguntárselo al servidor.
-    ...(source != null ? { pct_source: source } : {}),
-  };
 }
 
 /**
@@ -567,7 +413,6 @@ export function normalizeRetirementProfile(
           ),
     coast_mode: parseCoastMode(raw.coast_mode),
     coast_stop_age: coastStopAge,
-    withdrawal_rule: normalizeWithdrawalRule(raw.withdrawal_rule),
     pension,
     partial_retirement: partial,
   };
@@ -575,8 +420,7 @@ export function normalizeRetirementProfile(
 
 /**
  * El puente RESUELTO: los dos números que el motor va a usar de verdad (o `null` si no hay
- * puente). Mismo papel que `resolveWithdrawalRule` para la regla de retirada — la guarda tiene
- * que juzgar **lo que se va a aplicar**, no lo que hay tecleado, y el PATCH tiene que mandar lo
+ * puente). La guarda tiene que juzgar **lo que se va a aplicar**, no lo que hay tecleado, y el PATCH tiene que mandar lo
  * que la pantalla estaba enseñando.
  *
  * Un campo vacío se trata como ausente (no como cero): es el estado natural justo después de
@@ -647,15 +491,6 @@ function decimalOrZero(v: string | null | undefined): number | null {
 function decimalStringForWire(v: string | null | undefined): string {
   const t = String(v ?? "").trim();
   return t === "" ? "0" : t;
-}
-
-/** Un `pct` obligatorio de la regla: ausente, ilegible o fuera de `(0, max]`. */
-function pctIssue(v: string | null, max: number, rangeCode: string): string | null {
-  if (v == null || String(v).trim() === "") return "withdrawal_pct_required";
-  const n = parseDisplayDecimal(v);
-  if (n === null) return "decimal_invalid";
-  if (n <= 0 || n > max) return rangeCode;
-  return null;
 }
 
 /**
@@ -795,49 +630,7 @@ export function retirementProfileIssue(p: RetirementProfileApi): string | null {
     }
   }
 
-  // U4 — se juzga el porcentaje EFECTIVO, no el escrito: `pct`/`start_pct` ausentes heredan
-  // `swr_pct` (ya comprobado arriba contra `MAX_SWR_PCT`). Consecuencia declarada, la misma que
-  // el servidor: con `swr_pct = 0` una regla basada en saldo y sin porcentaje propio es
-  // `withdrawal_pct_out_of_range` — un plan que retira 0 % no es un plan.
-  return withdrawalRuleIssue(resolveWithdrawalRule(p.withdrawal_rule, p.swr_pct));
-}
-
-/**
- * Cada `kind` exige SUS campos y no los de otro (espejo de `validate_withdrawal_rule`).
- *
- * **Corre sobre la regla YA RESUELTA** (`resolveWithdrawalRule`), igual que en Rust: `pct` y
- * `start_pct` no llegan aquí ausentes para los `kind` que los usan. Lo que sigue vivo de
- * `withdrawal_pct_required` son el `end_pct` de la híbrida y la banda/ajuste de las bandas, que
- * **no heredan nada** — no son porcentajes de retirada, son el suelo del latch y la reacción de
- * la regla.
- */
-export function withdrawalRuleIssue(r: WithdrawalRuleApi): string | null {
-  switch (r.kind) {
-    case "fixed_real":
-      return null;
-    case "percent_of_balance":
-      return pctIssue(r.pct, MAX_WITHDRAWAL_PCT, "withdrawal_pct_out_of_range");
-    case "hybrid": {
-      const s = pctIssue(r.start_pct, MAX_WITHDRAWAL_PCT, "withdrawal_pct_out_of_range");
-      if (s) return s;
-      const e = pctIssue(r.end_pct, MAX_WITHDRAWAL_PCT, "withdrawal_pct_out_of_range");
-      if (e) return e;
-      const start = parseDisplayDecimal(r.start_pct ?? "");
-      const end = parseDisplayDecimal(r.end_pct ?? "");
-      if (start === null || end === null) return "decimal_invalid";
-      if (end >= start) return "hybrid_end_pct_not_below_start";
-      return null;
-    }
-    case "guardrails": {
-      const p = pctIssue(r.pct, MAX_WITHDRAWAL_PCT, "withdrawal_pct_out_of_range");
-      if (p) return p;
-      for (const v of [r.band_pct, r.adjust_pct]) {
-        const issue = pctIssue(v, MAX_GUARDRAIL_PCT, "withdrawal_band_out_of_range");
-        if (issue) return issue;
-      }
-      return null;
-    }
-  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -856,18 +649,6 @@ function sameDecimal(a: string | null, b: string | null): boolean {
 /** Como `sameDecimal`, pero donde la cadena vacía significa cero (ingreso parcial, fracción). */
 function sameDecimalZeroDefault(a: string | null, b: string | null): boolean {
   return decimalOrZero(a) === decimalOrZero(b);
-}
-
-function sameWithdrawalRule(a: WithdrawalRuleApi, b: WithdrawalRuleApi): boolean {
-  return (
-    a.kind === b.kind &&
-    a.spend_mode === b.spend_mode &&
-    sameDecimal(a.pct, b.pct) &&
-    sameDecimal(a.start_pct, b.start_pct) &&
-    sameDecimal(a.end_pct, b.end_pct) &&
-    sameDecimal(a.band_pct, b.band_pct) &&
-    sameDecimal(a.adjust_pct, b.adjust_pct)
-  );
 }
 
 function samePension(a: PensionPlanApi | null, b: PensionPlanApi | null): boolean {
@@ -956,9 +737,6 @@ export function buildRetirementProfilePatch(
   if (before.coast_stop_age !== after.coast_stop_age) {
     patch.coast_stop_age = after.coast_stop_age;
   }
-  if (!sameWithdrawalRule(before.withdrawal_rule, after.withdrawal_rule)) {
-    patch.withdrawal_rule = withdrawalRuleForWire(after.withdrawal_rule);
-  }
   if (!samePension(before.pension, after.pension)) {
     patch.pension = after.pension ? pensionForWire(after.pension, after.swr_pct) : null;
   }
@@ -974,27 +752,6 @@ export function buildRetirementProfilePatch(
   }
 
   return patch;
-}
-
-/**
- * La regla lista para el wire: **sin `pct_source`** (U4).
- *
- * La procedencia la decide el SERVIDOR y solo él; reenviarla convertiría una lectura en una
- * orden. Los porcentajes heredados ya vienen sueltos de `normalizeWithdrawalRule`, así que lo
- * que queda en `pct`/`start_pct` cuando llega aquí es lo que alguien fijó de verdad por API —
- * y eso SÍ viaja: borrarlo porque el formulario no sabe editarlo sería perder el dato del
- * usuario en la primera pulsación de un campo vecino.
- */
-export function withdrawalRuleForWire(rule: WithdrawalRuleApi): WithdrawalRuleApi {
-  return {
-    kind: rule.kind,
-    pct: rule.pct,
-    start_pct: rule.start_pct,
-    end_pct: rule.end_pct,
-    band_pct: rule.band_pct,
-    adjust_pct: rule.adjust_pct,
-    spend_mode: rule.spend_mode,
-  };
 }
 
 /** `true` cuando el PATCH no nombra nada: el servidor lo rechazaría con `patch_empty`. */

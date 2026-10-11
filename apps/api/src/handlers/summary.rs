@@ -527,7 +527,7 @@ pub struct SummaryPlan {
 
     // ---- Modelo v2 — «el éxito define la fecha» (sustituye al KPI D25/D28 de WP6b) ------------
     /// **FRACCIÓN** [0,1] (`0.96` = 96 %): éxito del plan EN SU FECHA — caminos que no fallan
-    /// (F1/F2/F3, ver `financial-contracts.md` §2.5) de los `paths_used` de la serie. Estimador
+    /// (F1/F2, ver `financial-contracts.md` §2.5) de los `paths_used` de la serie. Estimador
     /// puntual, no la cota de Wilson (`success_wilson_low`, al lado).
     ///
     /// **Es EXACTAMENTE el número del fan chart** de `GET /v1/projection/bands` con el sorteo por

@@ -2,7 +2,7 @@
  * Tests de la sección «Riesgo» (5.0.0, modelo v2 §2.4/§2.5, issue #207). Fijan las cuatro cosas
  * que aquí se rompen en silencio —la alineación por mes con dos densidades, la deflactación de las
  * CUATRO series a la vez, el redondeo de la probabilidad y el SUJETO de cada cifra (éxito =
- * aguantar las tres formas de fallo; cobertura = regla Y descubierto)— más las traducciones de
+ * aguantar las dos formas de fallo, F1 y F2)— más las traducciones de
  * veredicto, de umbral y de `null` a copy.
  *
  * Y una quinta que el modelo v2 estrena: **«pp» no es «%»**. El semiancho de Wilson viaja en
@@ -78,12 +78,10 @@ function bandsFixture(over: Partial<ProjectionBandsApi> = {}): ProjectionBandsAp
     success_threshold_pct: 95,
     success_wilson_low: 0.856,
     success_sampling_error_pp: "1.2000",
-    failures_by_kind: [0, 0, 0],
+    failures_by_kind: [0, 0],
     success_verdict: "amber",
     success_absent_reason: null,
     failure_probability_by_age: [],
-    months_below_need_p50: 0,
-    withdrawal_to_need_ratio_p50: null,
     any_volatility_declared: true,
     strategy: "asap",
     computed_in_ms: 55,
@@ -366,9 +364,9 @@ describe("permiso para teñir la banda de riesgo", () => {
           success_wilson_low: null,
           success_sampling_error_pp: null,
           success_verdict: null,
-          failures_by_kind: [0, 0, 0],
+          failures_by_kind: [0, 0],
           failure_probability_by_age: [
-            { month_index: 599, age: 85, probability: 0, by_kind: [0, 0, 0] },
+            { month_index: 599, age: 85, probability: 0, by_kind: [0, 0] },
           ],
         }),
       ),
@@ -402,60 +400,45 @@ describe("filas que hacen auditable el éxito", () => {
   });
 
   // §2.4 — por qué falla el que falla. Sin esto, el éxito es un número sin causa.
-  it("desglosa los fallos por tipo, con el orden fijo F1/F2/F3 y su denominador", () => {
-    const rows = byKey({ failures_by_kind: [120, 30, 5], paths: 2500 });
+  it("desglosa los fallos por tipo, con el orden fijo F1/F2 y su denominador", () => {
+    const rows = byKey({ failures_by_kind: [120, 30], paths: 2500 });
     expect(rows["failure_kind_1"]!.label).toBe("Se quedan sin dinero");
     expect(rows["failure_kind_1"]!.value).toBe("120 de 2500");
     expect(rows["failure_kind_2"]!.label).toBe("Tasa inicial por encima del tope");
     expect(rows["failure_kind_2"]!.value).toBe("30 de 2500");
-    expect(rows["failure_kind_3"]!.label).toBe("La regla no cubre el gasto");
-    expect(rows["failure_kind_3"]!.value).toBe("5 de 2500");
+    // «Solo SWR» (2026-10-10): la tercera causa —la regla de retirada— no existe.
+    expect(rows["failure_kind_3"]).toBeUndefined();
   });
 
-  it("con fallos, las TRES casillas salen aunque alguna sea cero: el desglose tiene que sumar", () => {
-    const rows = byKey({ failures_by_kind: [120, 0, 0], paths: 2500 });
+  it("con fallos, las DOS casillas salen aunque una sea cero: el desglose tiene que sumar", () => {
+    const rows = byKey({ failures_by_kind: [120, 0], paths: 2500 });
     expect(rows["failure_kind_2"]!.value).toBe("0 de 2500");
-    expect(rows["failure_kind_3"]!.value).toBe("0 de 2500");
   });
 
-  it("sin ningún fallo no hay desglose: tres «0 de 2500» son ruido, no información", () => {
-    const rows = byKey({ failures_by_kind: [0, 0, 0] });
+  it("sin ningún fallo no hay desglose: dos «0 de 2500» son ruido, no información", () => {
+    const rows = byKey({ failures_by_kind: [0, 0] });
     expect(rows["failure_kind_1"]).toBeUndefined();
     expect(rows["failure_kind_2"]).toBeUndefined();
-    expect(rows["failure_kind_3"]).toBeUndefined();
   });
 
   it("un fallo por tasa inicial (F2) es visible aunque nadie agote la cartera", () => {
     // El caso que el modelo v1 no sabía contar: el dinero sigue ahí y el plan ha fallado igual.
-    const rows = byKey({ failures_by_kind: [0, 400, 0], paths: 2500 });
+    const rows = byKey({ failures_by_kind: [0, 400], paths: 2500 });
     expect(rows["failure_kind_2"]!.value).toBe("400 de 2500");
   });
 
-  // §F: las dos filas de cobertura ya no miden solo el recorte de la REGLA — incluyen el gasto que
-  // la cartera no pudo financiar. Con `fixed_real` eso es justo el caso interesante (la regla no
-  // recorta nunca, así que todo lo que se vea ahí es cartera), y esconderlas era esconder el peor
-  // escenario posible. Este test es el que impide volver a esconderlas.
-  it("publica la cobertura con TODAS las reglas, `fixed_real` incluida", () => {
-    const rows = byKey({
-      months_below_need_p50: 31,
-      withdrawal_to_need_ratio_p50: "0.086500",
-    });
-    expect(rows["months_below_need"]!.value).toBe("31");
-    expect(rows["withdrawal_to_need"]!.value).toBe("8,6 %");
+  it("un `failures_by_kind` de tres casillas (backend anterior a «solo SWR») no se desglosa", () => {
+    // Con otra forma el orden fijo ya no está garantizado: mejor ninguna fila que una mal rotulada.
+    const rows = byKey({ failures_by_kind: [120, 30, 5] as unknown as [number, number] });
+    expect(rows["failure_kind_1"]).toBeUndefined();
   });
 
-  it("la cobertura declara sus DOS causas y cuelga de su propia ayuda", () => {
-    const rows = byKey();
-    expect(rows["months_below_need"]!.helpId).toBe("retirement.coverage");
-    // El rótulo ya no habla de «recorte»: el recorte es solo una de las dos causas.
-    expect(rows["months_below_need"]!.label).not.toContain("recorte");
-    expect(rows["withdrawal_to_need"]!.label).toBe(
-      "Parte del gasto que la regla cubrió (mediana)",
-    );
-    // Las DOS causas (regla y cartera) las declara la ayuda `retirement.coverage`, no una
-    // segunda línea bajo la cifra (2026-10-10): la fila es rótulo + valor.
-    expect(rows["withdrawal_to_need"]!.helpId).toBe("retirement.coverage");
-    expect(rows["withdrawal_to_need"]).not.toHaveProperty("detail");
+  // «Solo SWR» (2026-10-10): las dos filas de cobertura se fueron. Sin reglas, un mes por debajo
+  // del gasto ES un fallo F1, y sus medianas valían 0 meses y 100 % en cualquier plan proponible.
+  it("ya no hay filas de cobertura: el servidor dejó de publicar sus medianas", () => {
+    const rows = byKey({ failures_by_kind: [120, 30], paths: 2500 });
+    expect(rows["months_below_need"]).toBeUndefined();
+    expect(rows["withdrawal_to_need"]).toBeUndefined();
   });
 
   // V5: la tabla «agotar a los 65/70/…» se fue con el degradado de la banda, que dice lo mismo con
@@ -464,9 +447,9 @@ describe("filas que hacen auditable el éxito", () => {
   it("publica el fallo TOTAL: el último punto de la rejilla acumulada", () => {
     const rows = byKey({
       failure_probability_by_age: [
-        { month_index: 240, age: 70, probability: 0, by_kind: [0, 0, 0] },
-        { month_index: 300, age: 75, probability: 0.106, by_kind: [200, 30, 35] },
-        { month_index: 360, age: 80, probability: 0.223, by_kind: [400, 60, 97] },
+        { month_index: 240, age: 70, probability: 0, by_kind: [0, 0] },
+        { month_index: 300, age: 75, probability: 0.106, by_kind: [200, 30] },
+        { month_index: 360, age: 80, probability: 0.223, by_kind: [400, 60] },
       ],
     });
     expect(rows["failure_total"]!.value).toBe("22,3 %");
@@ -484,7 +467,7 @@ describe("filas que hacen auditable el éxito", () => {
     ).toBeUndefined();
     // Con probabilidad sí sale, aunque sea 0: un cero medido no es un hueco.
     expect(
-      total([{ month_index: 240, age: 70, probability: 0, by_kind: [0, 0, 0] }])!.value,
+      total([{ month_index: 240, age: 70, probability: 0, by_kind: [0, 0] }])!.value,
     ).toBe("0,0 %");
   });
 
@@ -510,9 +493,9 @@ describe("filas que hacen auditable el éxito", () => {
   });
 
   // A12 — el caso que este bloque existe para no contar mal. El servidor sigue publicando
-  // `failures_by_kind`, la rejilla acumulada y las dos de cobertura (describen la trayectoria SIN
-  // jubilarse), pero valen 0: pintadas como siempre dirían «cero fallos, cobertura entera, 0 %
-  // fallan», o sea un plan impecable que no existe.
+  // `failures_by_kind` y la rejilla acumulada (describen la trayectoria SIN jubilarse), pero valen
+  // 0: pintadas como siempre dirían «cero fallos, 0 % fallan», o sea un plan impecable que no
+  // existe.
   describe("sin fecha de jubilación no hay éxito que auditar", () => {
     const noDate = (over: Partial<ProjectionBandsApi> = {}) =>
       buildRiskExtraRows({
@@ -524,12 +507,10 @@ describe("filas que hacen auditable el éxito", () => {
           success_verdict: null,
           // Exactamente lo que llega por el cable en ese caso: ceros de un sorteo que no pudo
           // clasificar ni un fallo, más una rejilla de una sola fila valiendo 0.
-          failures_by_kind: [0, 0, 0],
+          failures_by_kind: [0, 0],
           failure_probability_by_age: [
-            { month_index: 599, age: 85, probability: 0, by_kind: [0, 0, 0] },
+            { month_index: 599, age: 85, probability: 0, by_kind: [0, 0] },
           ],
-          months_below_need_p50: 0,
-          withdrawal_to_need_ratio_p50: "1",
           ...over,
         }),
       });
@@ -549,9 +530,6 @@ describe("filas que hacen auditable el éxito", () => {
       for (const gone of [
         "failure_kind_1",
         "failure_kind_2",
-        "failure_kind_3",
-        "months_below_need",
-        "withdrawal_to_need",
         "failure_total",
         "success_wilson_low",
         "sampling_precision",
@@ -563,7 +541,7 @@ describe("filas que hacen auditable el éxito", () => {
     it("con fallos contados de un plan sin fecha tampoco los desglosa: son de otra pregunta", () => {
       // Defensivo: aunque el sorteo trajera contadores, sin fecha no clasifican el plan del
       // usuario y desglosarlos daría una causa a un fracaso que no es el suyo.
-      expect(noDate({ failures_by_kind: [120, 30, 5] })).toHaveLength(1);
+      expect(noDate({ failures_by_kind: [120, 30] })).toHaveLength(1);
     });
 
     it("la otra razón alcanzable (sin fecha de nacimiento) tiene su propia frase", () => {
@@ -579,9 +557,9 @@ describe("filas que hacen auditable el éxito", () => {
 
   it("todas las claves son únicas (son keys de React)", () => {
     const rows = rowsOf({
-      failures_by_kind: [120, 30, 5],
+      failures_by_kind: [120, 30],
       failure_probability_by_age: [
-        { month_index: 240, age: 70, probability: 0.1, by_kind: [100, 30, 20] },
+        { month_index: 240, age: 70, probability: 0.1, by_kind: [100, 30] },
       ],
     });
     expect(new Set(rows.map((r) => r.key)).size).toBe(rows.length);

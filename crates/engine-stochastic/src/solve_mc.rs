@@ -50,9 +50,8 @@
 //!
 //! # El criterio de fallo de UN camino, y el del PLAN
 //!
-//! Un camino **falla** ⟺ `SimOutput::failure_month_index.is_some()`. Los tres motivos (F1
-//! cartera agotada, F2 tasa inicial excedida, F3 la regla por saldo no llega a la necesidad
-//! ordinaria) los clasifica el bucle del motor, no este módulo: aquí solo se CUENTAN
+//! Un camino **falla** ⟺ `SimOutput::failure_month_index.is_some()`. Los dos motivos (F1
+//! cartera agotada, F2 tasa inicial excedida) los clasifica el bucle del motor, no este módulo: aquí solo se CUENTAN
 //! ([`SuccessAt::by_kind`]). La puerta F2 solo existe si el `PhasePlan` trae
 //! `initial_rate: Some(..)`; sin ella ningún camino puede fallar por tasa inicial, y eso es una
 //! propiedad de la entrada que arma el handler, no un default de este crate.
@@ -145,8 +144,8 @@ pub const MAX_CONFIRMATION_ADVANCES: u32 = 12;
 pub const KIND_PORTFOLIO_DEPLETED: usize = 0;
 /// Posición de `PathFailure::InitialRateExceeded` (F2) en [`SuccessAt::by_kind`].
 pub const KIND_INITIAL_RATE_EXCEEDED: usize = 1;
-/// Posición de `PathFailure::RuleBelowNeed` (F3) en [`SuccessAt::by_kind`].
-pub const KIND_RULE_BELOW_NEED: usize = 2;
+// Hubo un tercero, `KIND_RULE_BELOW_NEED = 2` (F3, la regla de retirada por saldo por debajo
+// del gasto). Se retiró el 2026-10-10 con las reglas (decisión «solo SWR»).
 
 /// El índice de un motivo de fallo en [`SuccessAt::by_kind`]. Vive aquí —y no como un `as usize`
 /// suelto— para que el orden del vector de contadores esté escrito UNA vez.
@@ -154,7 +153,6 @@ fn kind_index(kind: PathFailure) -> usize {
     match kind {
         PathFailure::PortfolioDepleted => KIND_PORTFOLIO_DEPLETED,
         PathFailure::InitialRateExceeded => KIND_INITIAL_RATE_EXCEEDED,
-        PathFailure::RuleBelowNeed => KIND_RULE_BELOW_NEED,
     }
 }
 
@@ -196,8 +194,8 @@ pub struct SuccessAt {
     /// honesto es el intervalo entero.
     pub rule_of_three_upper: Option<f64>,
     /// Fallos por motivo, en el orden [`KIND_PORTFOLIO_DEPLETED`],
-    /// [`KIND_INITIAL_RATE_EXCEEDED`], [`KIND_RULE_BELOW_NEED`]. Suma [`Self::failures`].
-    pub by_kind: [u32; 3],
+    /// [`KIND_INITIAL_RATE_EXCEEDED`]. Suma [`Self::failures`].
+    pub by_kind: [u32; 2],
 }
 
 impl SuccessAt {
@@ -207,7 +205,7 @@ impl SuccessAt {
     /// `paths == 0` no es «todo falla»: es «no se midió». Como la firma no tiene sitio para un
     /// `None`, se devuelve todo a cero y [`Self::meets`] es `false` — y el camino que llega aquí
     /// desde un solve no existe, porque `PathEngine::new` rechaza `paths = 0` antes de sortear.
-    pub fn new(month: u32, paths: u32, failures: u32, by_kind: [u32; 3]) -> Self {
+    pub fn new(month: u32, paths: u32, failures: u32, by_kind: [u32; 2]) -> Self {
         debug_assert!(failures <= paths);
         debug_assert_eq!(by_kind.iter().sum::<u32>(), failures);
         if paths == 0 {
@@ -385,7 +383,7 @@ impl Draws {
     fn at(&mut self, month: u32) -> Result<SuccessAt, McError> {
         self.engine.sim.phase_plan.retirement_trigger = RetirementTrigger::AtMonth(month);
         let mut failures = 0u32;
-        let mut by_kind = [0u32; 3];
+        let mut by_kind = [0u32; 2];
         for_each_path(
             &self.engine,
             self.paths,
@@ -527,7 +525,7 @@ pub struct RetirementDateSolve {
     /// Fallos por motivo del mes devuelto, en el orden de [`SuccessAt::by_kind`]. Sin fecha, los
     /// de la mejor observación: es lo que dice POR QUÉ no hay fecha (todo F2 ⇒ la tasa inicial no
     /// da; todo F1 ⇒ la cartera no aguanta el horizonte).
-    pub failures_by_kind: [u32; 3],
+    pub failures_by_kind: [u32; 2],
     /// **El mejor par `(mes, éxito)` OBSERVADO** durante el solve, elegido por `wilson_low` y con
     /// el mes más temprano deshaciendo empates.
     ///
@@ -804,7 +802,7 @@ fn no_date(best: &Best, draws_search: u32, draws_confirm: u32) -> RetirementDate
         date_is_approximate: false,
         draws_search,
         draws_confirm,
-        failures_by_kind: b.map_or([0; 3], |s| s.by_kind),
+        failures_by_kind: b.map_or([0; 2], |s| s.by_kind),
         best_effort: best.pair(),
     }
 }
@@ -821,7 +819,7 @@ mod tests {
     /// `low = 0,99846572` ⇒ barra hacia abajo **0,1534 pp**.
     #[test]
     fn wilson_with_zero_failures_is_derived_by_hand() {
-        let s = SuccessAt::new(120, 2_500, 0, [0; 3]);
+        let s = SuccessAt::new(120, 2_500, 0, [0; 2]);
         assert_eq!(s.success, 1.0);
         assert!(
             (s.wilson_low - 0.998_465_7).abs() < 1e-6,
@@ -841,7 +839,7 @@ mod tests {
     fn with_zero_failures_wilson_is_n_over_n_plus_z_squared() {
         let z2 = WILSON_Z_95 * WILSON_Z_95;
         for n in [1u32, 60, 73, 120, 381, 500, 2_500, 5_000] {
-            let s = SuccessAt::new(1, n, 0, [0; 3]);
+            let s = SuccessAt::new(1, n, 0, [0; 2]);
             let closed = f64::from(n) / (f64::from(n) + z2);
             assert!(
                 (s.wilson_low - closed).abs() < 1e-12,
@@ -851,12 +849,12 @@ mod tests {
             assert!(s.half_width_pp > 0.0, "n = {n}: la barra nunca es 0");
         }
         // `n ≥ z²·u/(1−u)`: 73 para el 95 %, 381 para el 99 %.
-        assert!(!SuccessAt::new(1, 72, 0, [0; 3]).meets(95));
-        assert!(SuccessAt::new(1, 73, 0, [0; 3]).meets(95));
-        assert!(!SuccessAt::new(1, 380, 0, [0; 3]).meets(99));
-        assert!(SuccessAt::new(1, 381, 0, [0; 3]).meets(99));
+        assert!(!SuccessAt::new(1, 72, 0, [0; 2]).meets(95));
+        assert!(SuccessAt::new(1, 73, 0, [0; 2]).meets(95));
+        assert!(!SuccessAt::new(1, 380, 0, [0; 2]).meets(99));
+        assert!(SuccessAt::new(1, 381, 0, [0; 2]).meets(99));
         // Y el 100 % no depende de `N` en absoluto: es «cero fallos».
-        assert!(SuccessAt::new(1, 1, 0, [0; 3]).meets(100));
+        assert!(SuccessAt::new(1, 1, 0, [0; 2]).meets(100));
     }
 
     #[test]
@@ -901,10 +899,10 @@ mod tests {
 
     #[test]
     fn the_threshold_rule_is_wilson_below_a_hundred_and_zero_failures_at_a_hundred() {
-        let clean = SuccessAt::new(1, 300, 0, [0; 3]);
+        let clean = SuccessAt::new(1, 300, 0, [0; 2]);
         assert!(clean.meets(100));
         assert!(clean.meets(95));
-        let one = SuccessAt::new(1, 300, 1, [1, 0, 0]);
+        let one = SuccessAt::new(1, 300, 1, [1, 0]);
         assert!(!one.meets(100), "un fallo de 300 no es el 100 %");
         assert!(one.success > 0.99);
         assert!(one.meets(95), "wilson_low = {}", one.wilson_low);

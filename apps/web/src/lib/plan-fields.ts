@@ -20,9 +20,17 @@
  *  2. **El puente dejó de ser una estrategia y pasó a ser un ajuste de la tarjeta Pensión** (C7):
  *     tres campos (`bridge_enabled` + dos números) disponibles en CUALQUIER estrategia, y solo
  *     cuando hay pensión declarada — sin pensión no hay nada a lo que hacer de puente.
- *  3. **Vuelve `success_threshold_pct`** (C3), y vuelve el PRIMERO de la tarjeta «Retirada»: en v2
- *     el umbral no es un corte de semáforo, es **la restricción que decide la fecha válida**. Es,
- *     de largo, el campo que más mueve el resultado de esta pantalla, así que va arriba.
+ *  3. **Vuelve `success_threshold_pct`** (C3): en v2 el umbral no es un corte de semáforo, es **la
+ *     restricción que decide la fecha válida**. Desde el 2026-10-10 abre la tarjeta «Horizonte y
+ *     exigencia»: el horizonte dice HASTA CUÁNDO tiene que aguantar el plan y el umbral CON QUÉ
+ *     SEGURIDAD — las dos mitades de la misma exigencia.
+ *
+ * **«Solo SWR» (decisión del owner, 2026-10-10).** Las reglas de retirada por saldo
+ * (`percent_of_balance`, `hybrid`, `guardrails`) y el modo de gasto se retiraron del producto: el
+ * único modelo de retirada es la puerta de la tasa inicial (el SWR) y, una vez jubilado, cada mes
+ * se vende lo que pide el gasto indexado. Con eso la tarjeta «Retirada» se quedó sin nada propio y
+ * desapareció: el SWR cierra «Gasto en jubilación» (gasto y tasa son las dos mitades de la misma
+ * puerta) y el umbral abre «Horizonte y exigencia».
  *
  * Con el modelo v2 murieron `target_basis` y `bridge_discount_basis`: la pensión es un flujo de
  * caja (C1/M4), no descuenta ningún objetivo, y no queda ninguna «base del objetivo» que elegir.
@@ -44,7 +52,6 @@ import type {
   PartialRetirementApi,
   RetirementProfileApi,
   RetirementStrategyApi,
-  WithdrawalRuleKindApi,
 } from "../api/types";
 
 /** Modo de la fase de media jornada (M11), con el mismo literal que el wire. Se declara aquí
@@ -83,21 +90,14 @@ export type PlanFieldId =
   | "fire_number_manual_amount"
   | "success_threshold_pct"
   | "swr_pct"
-  | "withdrawal_rule_kind"
-  | "hybrid_end_pct"
-  | "guardrails_band_pct"
-  | "guardrails_adjust_pct"
-  | "spend_mode"
   | "horizon_lifespan_age";
 
 /**
- * Las tarjetas por tema (V3). **Seis, no siete**: la lista del owner incluía «Riesgo», y sigue sin
- * existir aunque el umbral haya vuelto — su sitio es la tarjeta «Retirada», junto a la tasa, y por
- * el mismo motivo por el que vuelve: las dos cifras deciden JUNTAS la fecha válida (el umbral dice
- * cuántos escenarios tienen que aguantar; la tasa, cuánto se saca el primer año), y separarlas en
- * dos cuadros habría obligado a explicar en cada uno la mitad que faltaba. Lo que el owner quería
- * leer bajo el nombre «Riesgo» sigue en la página: es el bloque homónimo del panel «Resultado»,
- * con el éxito, la banda coloreada y el desglose de fallos.
+ * Las tarjetas por tema (V3). **Cinco desde «solo SWR» (2026-10-10)**: «Retirada» desapareció al
+ * retirarse las reglas de retirada — el SWR pasó a cerrar «Gasto en jubilación» y el umbral de
+ * éxito a abrir «Horizonte y exigencia». «Riesgo» sigue sin ser una tarjeta del formulario: lo que
+ * el owner quería leer bajo ese nombre es el bloque homónimo del panel «Resultado», con el éxito,
+ * la banda coloreada y el desglose de fallos.
  *
  * `strategy` es la excepción a «una tarjeta son sus campos»: su contenido no sale de esta tabla,
  * es el radiogroup de las CUATRO estrategias (C7 retiró «Puente hasta la pensión» del selector),
@@ -108,12 +108,11 @@ export type PlanCardId =
   | "ages"
   | "pension"
   | "spending"
-  | "withdrawal"
   | "horizon";
 
 /**
  * Orden de lectura de los apartados: primero QUÉ dispara la jubilación, luego CUÁNTO se gasta,
- * después CUÁNDO, con QUÉ rentas, CÓMO se saca y HASTA cuándo tiene que durar.
+ * después CUÁNDO, con QUÉ rentas y HASTA cuándo (y con qué seguridad) tiene que durar.
  *
  * **«Gasto en jubilación» subió al segundo puesto el 2026-09-13** (owner: «gasto debería ir justo
  * debajo de estrategia; es el factor número uno en influencia»). Y es literal, no una preferencia
@@ -127,7 +126,6 @@ export const PLAN_CARD_ORDER: readonly PlanCardId[] = [
   "spending",
   "ages",
   "pension",
-  "withdrawal",
   "horizon",
 ];
 
@@ -167,7 +165,6 @@ export type PlanFieldsContext = {
   hasPension: boolean;
   /** El usuario tiene fecha de nacimiento en «Tu cuenta». */
   hasBirthDate: boolean;
-  ruleKind: WithdrawalRuleKindApi;
   /** Modo del número FIRE: decide si el importe manual entra en el formulario. */
   fireNumberMode: FireNumberModeApi;
   /** M10: `fixed_retirement_age` (A) pregunta la edad de jubilación; `fixed_stop_age` (B)
@@ -193,7 +190,7 @@ export type PlanFieldsContextWithoutStrategy = Omit<PlanFieldsContext, "strategy
  *  - **Con una pensión declarada, tampoco**: la pensión entra en el bucle a una EDAD, y sin fecha
  *    de nacimiento no se sabe si ya se cobra en la fecha válida. El servidor lo dice con todas las
  *    letras — `plan_absent_reason: "birth_date_missing"` deja el bloque «plan» entero sin publicar
- *    y `pension_absent_reason` explica que la pensión no participa. Un plan «Cuanto antes» con
+ *    y `pension_absent_reason` explica que la pensión no participa. Un plan «FIRE clásico» con
  *    pensión y sin fecha de nacimiento se guardaba tan tranquilo y salía sin fecha, sin éxito y
  *    sin capital necesario: exactamente el hueco silencioso que `required` existe para tapar.
  */
@@ -207,8 +204,8 @@ function needsBirthDate(ctx: PlanFieldsContext): boolean {
 }
 
 /**
- * Rótulo de la edad objetivo. En «Media jornada» **no** es «la edad a la que me jubilo» sino el
- * fin de la fase parcial, y llamarla igual que en «A una edad fija» hacía que el mismo campo
+ * Rótulo de la edad objetivo. En «Barista FIRE» **no** es «la edad a la que me jubilo» sino el
+ * fin de la fase parcial, y llamarla igual que en «Edad fija» hacía que el mismo campo
  * significara dos cosas en la misma pantalla (U2).
  */
 function targetAgeLabel(s: RetirementStrategyApi): string {
@@ -235,11 +232,8 @@ function targetAgeLabel(s: RetirementStrategyApi): string {
  * | `bridge_max_pct`, `bridge_max_years` | pensión | hay pensión **y** el puente está activado | sí |
  * | `fire_number_mode` | gasto | siempre | no |
  * | `fire_number_manual_amount` | gasto | modo `manual` | sí |
- * | `success_threshold_pct` | retirada | siempre, **la primera** | no |
- * | `swr_pct`, `withdrawal_rule_kind` | retirada | siempre | no |
- * | `hybrid_end_pct` | retirada | regla `hybrid` | no |
- * | `guardrails_band_pct`, `guardrails_adjust_pct` | retirada | regla `guardrails` | no |
- * | `spend_mode` | retirada | regla ≠ `fixed_real` | no |
+ * | `swr_pct` | gasto | siempre, **el último** | no |
+ * | `success_threshold_pct` | horizonte | siempre, **el primero** | no |
  * | `horizon_lifespan_age` | horizonte | siempre | no |
  *
  * **Por qué el modo va ANTES que su edad.** En `coast` y en `partial` la pregunta «¿qué fijas
@@ -249,7 +243,7 @@ function targetAgeLabel(s: RetirementStrategyApi): string {
  * **la resuelve el sorteo**, y un campo «Edad de jubilación objetivo» ahí anunciaría un control
  * sobre algo que el usuario acaba de delegar.
  *
- * **Por qué el puente vive en «Pensión» y no en «Retirada»** (C7). Sus dos números son una tasa y
+ * **Por qué el puente vive en «Pensión» y no junto al SWR** (C7). Sus dos números son una tasa y
  * unos años, que suenan a retirada; pero el puente no existe sin una pensión a la que llegar —su
  * ventana se mide hacia atrás desde el inicio de la pensión— y ponerlo junto al SWR habría dejado
  * un ajuste huérfano visible sin pensión declarada. Los dos números son `required` cuando el
@@ -257,10 +251,10 @@ function targetAgeLabel(s: RetirementStrategyApi): string {
  * `null` que llegue de otra vía (API, MCP, un perfil a medias) es un puente sin tope, y eso no se
  * puede simular como se pidió.
  *
- * **U4 en la tabla**: no existe `withdrawal_pct` ni `hybrid_start_pct`. El porcentaje de la
- * regla es `swr_pct`, el mismo que topa la tasa inicial en la fecha; la híbrida solo añade el
- * «baja al X %» (`hybrid_end_pct`) y las bandas su banda y su ajuste. Enseñar dos porcentajes de
- * retirada obligaba a explicar cuál mandaba, y la respuesta honesta era «depende de la pantalla».
+ * **Por qué el SWR cierra «Gasto en jubilación»** («solo SWR», 2026-10-10). La puerta de la tasa
+ * inicial compara dos cifras: el gasto ordinario del primer año jubilado (neto de rentas y
+ * pensión) y el SWR % de la cartera líquida con la que te jubilas. Son las dos mitades de la
+ * misma condición, y se leen juntas.
  */
 export function planFields(ctx: PlanFieldsContext): PlanFieldDescriptor[] {
   const out: PlanFieldDescriptor[] = [];
@@ -281,6 +275,8 @@ export function planFields(ctx: PlanFieldsContext): PlanFieldDescriptor[] {
   if (ctx.fireNumberMode === "manual") {
     f("fire_number_manual_amount", "spending", true, "Gasto anual manual");
   }
+  // El SWR cierra la tarjeta: es la otra mitad de la puerta de la tasa inicial.
+  f("swr_pct", "spending", false, "Tasa de retirada (SWR)");
 
   // ── Edades ───────────────────────────────────────────────────────────────────────────────
   // La fecha de nacimiento solo aparece cuando FALTA: pedirla otra vez a quien ya la tiene es
@@ -292,7 +288,7 @@ export function planFields(ctx: PlanFieldsContext): PlanFieldDescriptor[] {
   if (isCoast) {
     f("coast_mode", "ages", false, "Qué fijas tú");
   }
-  // «Media jornada» pregunta su fase ANTES que la edad de jubilación total (2026-09-13): la fase
+  // «Barista FIRE» pregunta su fase ANTES que la edad de jubilación total (2026-09-13): la fase
   // empieza antes, y la edad objetivo es su FIN (`targetAgeLabel`). Abrir la tarjeta por el final
   // obligaba a leer «Edad de jubilación total» sin que nada hubiera dicho todavía que hay una fase
   // intermedia, y dejaba las dos edades que ACOTAN la fase separadas por el modo. Ahora van: qué
@@ -337,22 +333,10 @@ export function planFields(ctx: PlanFieldsContext): PlanFieldDescriptor[] {
     }
   }
 
-  // ── Retirada ─────────────────────────────────────────────────────────────────────────────
+  // ── Horizonte y exigencia ────────────────────────────────────────────────────────────────
   // El umbral va el PRIMERO: en v2 es la restricción que decide la fecha válida, no un corte de
-  // semáforo. La tasa viene detrás porque las dos se leen juntas (ver `PLAN_CARD_COPY`).
-  f("success_threshold_pct", "withdrawal", false, "Umbral de éxito");
-  f("swr_pct", "withdrawal", false, "Tasa de retirada");
-  f("withdrawal_rule_kind", "withdrawal", false, "Regla de retirada");
-  if (ctx.ruleKind === "hybrid") f("hybrid_end_pct", "withdrawal", false, "Baja al");
-  if (ctx.ruleKind === "guardrails") {
-    f("guardrails_band_pct", "withdrawal", false, "Banda");
-    f("guardrails_adjust_pct", "withdrawal", false, "Ajuste");
-  }
-  if (ctx.ruleKind !== "fixed_real") {
-    f("spend_mode", "withdrawal", false, "Cómo se aplica la regla");
-  }
-
-  // ── Horizonte ────────────────────────────────────────────────────────────────────────────
+  // semáforo — y el horizonte, detrás, dice hasta cuándo tiene que cumplirse.
+  f("success_threshold_pct", "horizon", false, "Umbral de éxito");
   f("horizon_lifespan_age", "horizon", false, "Edad límite del horizonte");
 
   return out;
@@ -425,7 +409,6 @@ export function planFieldsContextFromProfile(
     strategy: profile.strategy,
     hasPension: profile.pension != null,
     hasBirthDate,
-    ruleKind: profile.withdrawal_rule.kind,
     fireNumberMode: profile.fire_number_mode,
     coastMode: profile.coast_mode,
     partialMode: profile.partial_retirement?.mode ?? "at_age",

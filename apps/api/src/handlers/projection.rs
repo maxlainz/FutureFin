@@ -13,8 +13,7 @@ use futurefin_engine::gross_up_net_annual_fire;
 use crate::handlers::retirement_profile::{
     requires_target_age, resolve_retirement_profile, CoastMode as ProfileCoastMode,
     PartialExpenseBasis, PartialStartMode as ProfilePartialStartMode, RetirementProfile,
-    RetirementStrategy, SpendMode as ProfileSpendMode,
-    WithdrawalRule as ProfileWithdrawalRule, WithdrawalRuleKind as ProfileWithdrawalRuleKind,
+    RetirementStrategy,
 };
 /// **El plan lo resuelve el SORTEO, y solo aquí** (5.0.0, modelo v2). Este módulo no bisecciona
 /// nada: construye el `PlanSolveProfile`, llama a `solve_plan_level1` dentro del mismo permiso de
@@ -51,7 +50,6 @@ use futurefin_engine::{
     AllocationKind, AllocationRule, BridgeCap, EngineError, ExpenseBasis as EngineExpenseBasis,
     FireTarget, InitialRateGate, PartialPhase, PensionSchedule, Phase, PhasePlan, PlanFireTarget,
     ProjectionInput, ProjectionLiabilityInput, RepaymentModel, SimAsset,
-    SpendMode as EngineSpendMode, WithdrawalRule as EngineWithdrawalRule,
 };
 use rust_decimal::MathematicalOps;
 use rust_decimal::prelude::ToPrimitive;
@@ -269,29 +267,14 @@ pub struct ProjectionPoint {
     #[serde(serialize_with = "serialize_decimal_as_f64")]
     #[schema(value_type = f64)]
     pub withdrawal: Decimal,
-    /// **Recorte de la regla de retirada**: `max(0, necesidad − permitido)` (D22/D24). Es
-    /// INFORMATIVO — no resta patrimonio, no cuenta como fracaso y **no es**
-    /// `uncovered_deficit_total`, que mide lo que los activos no pudieron vender. Todo ceros
-    /// mientras la regla sea `fixed_real` (no tiene techo): lo llena WP2.
-    #[serde(serialize_with = "serialize_decimal_as_f64")]
-    #[schema(value_type = f64)]
-    pub withdrawal_shortfall: Decimal,
-    /// **Exceso de la regla sobre la necesidad** en modo `rule_is_spend` (se vende y se gasta).
-    /// Todo ceros con `fixed_real` / `ceiling`, por la misma razón. Lo llena WP2.
-    #[serde(serialize_with = "serialize_decimal_as_f64")]
-    #[schema(value_type = f64)]
-    pub withdrawal_excess: Decimal,
     /// **Gasto del mes que los activos NO pudieron financiar**, neto y `≥ 0`: el incremento
-    /// mensual de `uncovered_deficit_total`. **El recorte de la REGLA es `withdrawal_shortfall`,
-    /// no esto** — son dos magnitudes distintas y confundirlas fue el hallazgo B2 de la revisión
-    /// adversarial del motor.
+    /// mensual de `uncovered_deficit_total`.
     ///
-    /// Es la tercera columna del mes y la que faltaba: `withdrawal` es lo que se obtuvo,
-    /// `withdrawal_shortfall` lo que la regla rechazó y `unmet_need` lo que la CARTERA no dio;
-    /// su suma es la necesidad neta del mes. Sin ella, cualquier cociente de cobertura miente en
-    /// el caso que más importa —la cartera agotada— porque con `fixed_real` el recorte es cero
-    /// por construcción. `0` en el mes 0 (estado de hoy, no un mes simulado) y en todo mes que
-    /// la cartera pudo pagar entero.
+    /// `withdrawal` es lo que se obtuvo y `unmet_need` lo que la CARTERA no dio; su suma es la
+    /// necesidad neta del mes. `0` en el mes 0 (estado de hoy, no un mes simulado) y en todo mes
+    /// que la cartera pudo pagar entero. (Hasta el 2026-10-10 el punto llevaba dos columnas más,
+    /// `withdrawal_shortfall` y `withdrawal_excess`, para el recorte y el exceso de una regla de
+    /// retirada por saldo; se retiraron con las reglas — decisión «solo SWR».)
     ///
     /// El motor conserva en el acumulador el operando literal de 4.15.0 —`after_tax(gross_up(n))`
     /// devuelve `n` solo hasta el redondeo a 28 dígitos—, así que su serie llega con una polvareda
@@ -1641,44 +1624,6 @@ pub(crate) fn months_until_target_age(today: NaiveDate, birth: NaiveDate, age: u
     m
 }
 
-/// Regla de retirada del PERFIL → regla del MOTOR. Traducción total y sin brazo comodín: si
-/// mañana el catálogo del perfil gana una variante, esto deja de compilar — que es exactamente
-/// lo que debe pasar, en vez de mapearla en silencio a `fixed_real` y simular otra cosa.
-///
-/// **U4 — el porcentaje de retirada es el SWR del perfil cuando la regla no trae uno propio.**
-/// La herencia no se hace aquí: se delega en `resolve_withdrawal_rule`, el resolvedor único del
-/// módulo del perfil, para que lo que simula el motor sea exactamente lo que publica
-/// `GET /v1/auth/me/retirement-profile`. Llamarlo aquí es además una red: los perfiles que
-/// llegan ya vienen resueltos (todos los caminos pasan por `resolve_retirement_profile`), y
-/// como el resolvedor es idempotente, volver a pasarlo no mueve un valor explícito y sí evita
-/// que un futuro camino sin resolver mande un `pct` ausente al motor.
-///
-/// Un `pct` que siga ausente tras resolver solo puede venir de una fila escrita fuera de la API
-/// con un `kind` que no lo usa: se traduce a `0`, que hace que el motor no retire nada y sea
-/// evidente en la serie. Inventar un default «razonable» publicaría un plan que nadie configuró.
-fn withdrawal_rule_to_engine(
-    rule: &ProfileWithdrawalRule,
-    swr_pct: Decimal,
-) -> EngineWithdrawalRule {
-    let rule = &crate::handlers::retirement_profile::resolve_withdrawal_rule(rule, swr_pct);
-    let z = Decimal::ZERO;
-    match rule.kind {
-        ProfileWithdrawalRuleKind::FixedReal => EngineWithdrawalRule::FixedReal,
-        ProfileWithdrawalRuleKind::PercentOfBalance => EngineWithdrawalRule::PercentOfBalance {
-            pct: rule.pct.unwrap_or(z),
-        },
-        ProfileWithdrawalRuleKind::Hybrid => EngineWithdrawalRule::Hybrid {
-            start_pct: rule.start_pct.unwrap_or(z),
-            end_pct: rule.end_pct.unwrap_or(z),
-        },
-        ProfileWithdrawalRuleKind::Guardrails => EngineWithdrawalRule::Guardrails {
-            pct: rule.pct.unwrap_or(z),
-            band_pct: rule.band_pct.unwrap_or(z),
-            adjust_pct: rule.adjust_pct.unwrap_or(z),
-        },
-    }
-}
-
 /// Literal público de una estrategia del perfil. Se deriva del `Serialize` del enum para que no
 /// haya dos listas de strings que puedan divergir.
 pub(crate) fn strategy_label(s: RetirementStrategy) -> String {
@@ -1781,17 +1726,12 @@ pub(crate) const CURVE_STATE_COMPUTING: &str = "computing";
 pub(crate) const CURVE_STATE_UNAVAILABLE: &str = "unavailable";
 
 pub(crate) fn map_engine_err(e: EngineError) -> ApiError {
-    match e {
-        // 5.0.0: el `PhasePlan` pidió algo que este motor todavía no ejecuta (una regla de
-        // retirada ≠ `fixed_real`, o una fase de WP3). No es un input INVÁLIDO —el perfil que lo
-        // produjo es legítimo y está validado—, es una capacidad que aún no existe, así que
-        // merece su propio código: `engine_rejected_input` mandaría al usuario a corregir unos
-        // datos que están bien.
-        EngineError::UnsupportedWithdrawalRule | EngineError::UnsupportedPhase => {
-            ApiError::BadRequest(format!("engine_feature_unavailable: {e}"))
-        }
-        _ => ApiError::BadRequest(format!("engine_rejected_input: {e}")),
-    }
+    // Todo rechazo del motor es un 400 con el mismo código estable: el motor es una función pura
+    // que solo falla por un input que no puede simular. Hasta el 2026-10-10 había un segundo
+    // código, `engine_feature_unavailable`, para las variantes «capacidad que aún no existe»
+    // (`UnsupportedPhase`, `UnsupportedWithdrawalRule`); WP3 y la decisión «solo SWR» dejaron a
+    // las dos sin productor y el código se retiró con ellas.
+    ApiError::BadRequest(format!("engine_rejected_input: {e}"))
 }
 
 // `fire_crossover_month` MURIÓ en WP5-2b (5.0.0). Escaneaba la serie líquida contra
@@ -2388,7 +2328,7 @@ pub(crate) async fn build_installation_projection_input(
     // Estrategia del perfil → `PhasePlan` (5.0.0, modelo de jubilación v2)
     // -----------------------------------------------------------------------------------------
     // El perfil ENTERO se traduce aquí: mes forzado (cuando lo hay), fase parcial, pensión con
-    // fecha, puerta de tasa inicial y regla de retirada. Es el único punto del API donde una
+    // fecha y puerta de tasa inicial. Es el único punto del API donde una
     // decisión del usuario se convierte en un mes del bucle — y por eso todas las edades se
     // convierten con `months_until_target_age`, la misma aritmética civil que publica
     // `jubilacion_age`: derivarlas con una resta de años × 12 haría que la respuesta dijera «te
@@ -2564,14 +2504,6 @@ pub(crate) async fn build_installation_projection_input(
     // que el modelo ya no usa. Deja de ser un eje binario del ensamblado y pasa a ser una
     // constante; qué decidió la fecha se lee en `retirement_date_basis`.
     phase_plan.crossing_is_reading_only = true;
-    phase_plan.withdrawal = withdrawal_rule_to_engine(
-        &retirement_profile.withdrawal_rule,
-        retirement_profile.swr_pct,
-    );
-    phase_plan.spend_mode = match retirement_profile.withdrawal_rule.spend_mode {
-        ProfileSpendMode::Ceiling => EngineSpendMode::Ceiling,
-        ProfileSpendMode::RuleIsSpend => EngineSpendMode::RuleIsSpend,
-    };
     phase_plan.partial = partial;
     phase_plan.pension = pension;
     phase_plan.contributions_stop_month = coast_stop_month;
@@ -3627,8 +3559,6 @@ pub(crate) async fn compute_projection_series_response(
     let mut agg_contributed: Vec<Decimal> = Vec::new();
     let mut agg_liquid: Vec<Decimal> = Vec::new();
     let mut agg_withdrawal: Vec<Decimal> = Vec::new();
-    let mut agg_shortfall: Vec<Decimal> = Vec::new();
-    let mut agg_excess: Vec<Decimal> = Vec::new();
     let mut agg_unmet: Vec<Decimal> = Vec::new();
     let mut uncovered_deficit_total = Decimal::ZERO;
     let mut unallocated_savings_total = Decimal::ZERO;
@@ -3644,8 +3574,6 @@ pub(crate) async fn compute_projection_series_response(
         add_series_into(&mut agg_contributed, &r.output.contributed_capital);
         add_series_into(&mut agg_liquid, &r.output.liquid_worth);
         add_series_into(&mut agg_withdrawal, &r.output.withdrawal);
-        add_series_into(&mut agg_shortfall, &r.output.withdrawal_shortfall);
-        add_series_into(&mut agg_excess, &r.output.withdrawal_excess);
         // El motor ya clampa esta serie a 0 mes a mes; la suma de no-negativos lo sigue siendo,
         // así que el agregado del hogar no necesita un segundo clamp (a diferencia del TOTAL,
         // que conserva el operando literal de 4.15.0 y sí se clampa al publicar).
@@ -3673,8 +3601,6 @@ pub(crate) async fn compute_projection_series_response(
         agg_contributed = vec![Decimal::ZERO; series_len];
         agg_liquid = vec![Decimal::ZERO; series_len];
         agg_withdrawal = vec![Decimal::ZERO; series_len];
-        agg_shortfall = vec![Decimal::ZERO; series_len];
-        agg_excess = vec![Decimal::ZERO; series_len];
         agg_unmet = vec![Decimal::ZERO; series_len];
     }
 
@@ -3704,9 +3630,7 @@ pub(crate) async fn compute_projection_series_response(
                 // hacerlo una vez deja una sola división por punto y una sola cifra que auditar.
                 net_worth_real: *nw * deflator_at_month_index(inflation_annual_percent, i),
                 withdrawal: series_at(&agg_withdrawal, idx),
-                withdrawal_shortfall: series_at(&agg_shortfall, idx),
-                withdrawal_excess: series_at(&agg_excess, idx),
-                // **A la escala monetaria, y aquí sí** (a diferencia de las tres columnas de
+                // **A la escala monetaria, y aquí sí** (a diferencia de las columnas de
                 // arriba, que son geometría de chart y viajan tal cual). Esta es la única
                 // columna del punto cuyo SIGNO se lee como un veredicto —«este mes no se
                 // cubrió»—, y el acumulador del motor conserva el operando literal de 4.15.0:
@@ -4558,7 +4482,7 @@ pub(crate) struct SimKpis {
     /// "not_reachable"`, y **nunca un 0**, que se leería como «ya puedes».
     pub safe_date_month_index: Option<u32>,
     /// **Éxito del plan**, FRACCIÓN en `[0, 1]` (`0.96` = 96 %). Estimador puntual: la fracción de
-    /// caminos que, jubilándose en la fecha de este lado, no se rompen por F1/F2/F3 hasta el
+    /// caminos que, jubilándose en la fecha de este lado, no se rompen por F1/F2 hasta el
     /// horizonte. Sin fecha alcanzable describe la MEJOR observación del solve, no una fecha.
     #[serde(with = "rust_decimal::serde::str_option")]
     pub success_of_plan: Option<Decimal>,
@@ -4663,29 +4587,22 @@ pub(crate) struct SimKpis {
     /// falta nada» de «este servidor no publica el motivo».
     pub success_probability_absent_reason: Option<&'static str>,
     /// **Fallos por motivo, contando el PRIMER fallo de cada camino**, en el orden fijo
-    /// `[F1 cartera agotada, F2 tasa inicial excedida, F3 la regla no llega a la necesidad]`.
-    /// Son CONTADORES, no probabilidades. Distinguirlos importa porque los arreglos son opuestos:
-    /// F1 pide más capital o menos gasto, F2 pide retrasar la fecha, F3 pide cambiar la regla.
+    /// `[F1 cartera agotada, F2 tasa inicial excedida]`. Son CONTADORES, no probabilidades.
+    /// Distinguirlos importa porque los arreglos son opuestos: F1 pide más capital o menos gasto,
+    /// F2 pide retrasar la fecha.
     ///
-    /// **F2 y F3 solo pueden firmar en el mes de jubilación**; a partir de ahí el único motivo
-    /// vivo es F1.
-    pub failures_by_kind: Option<[u32; 3]>,
+    /// **F2 solo puede firmar en el mes de jubilación**; a partir de ahí el único motivo vivo es
+    /// F1. (Hasta el 2026-10-10 había un tercer contador, F3, para las reglas de retirada por
+    /// saldo; se retiró con ellas.)
+    pub failures_by_kind: Option<[u32; 2]>,
     /// **Cuándo se rompe el plan de este lado**: probabilidad ACUMULADA de fallo cada cinco años
     /// desde la jubilación, cerrando siempre en el horizonte. Mismo tipo, misma rejilla y mismo
     /// `by_kind` que `GET /v1/projection/bands` — la tabla la construye una sola función
     /// (`projection_bands::failure_points`). Vacío ⟺ no se pidió el eje.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub failure_probability_by_age: Vec<FailureProbabilityPoint>,
-    /// Mediana entre caminos del NÚMERO de meses jubilados en que el hogar no cubrió su gasto:
-    /// cuenta el recorte de la regla (`withdrawal_shortfall`) **y** el gasto que la cartera no
-    /// pudo financiar (`unmet_need`). Contar solo el recorte lo dejaba en 0 por construcción con
-    /// `fixed_real`, también en los caminos que se quedaban sin cartera.
-    pub months_below_need_p50: Option<u32>,
-    /// Mediana entre caminos de qué FRACCIÓN de su necesidad ordinaria cubrió el hogar de verdad
-    /// sobre los meses jubilados (`1` = entera). `null` cuando ningún camino tiene meses jubilados
-    /// con necesidad positiva — o cuando no se pidió el eje.
-    #[serde(with = "rust_decimal::serde::str_option")]
-    pub withdrawal_to_need_ratio_p50: Option<Decimal>,
+    // `months_below_need_p50` y `withdrawal_to_need_ratio_p50` se retiraron el 2026-10-10 con
+    // las reglas de retirada por saldo (mismo motivo que en `GET /v1/projection/bands`).
 }
 
 #[derive(Debug, Serialize)]
@@ -4830,9 +4747,6 @@ pub(crate) struct SimSeries {
     /// con su mismo redondeo de publicación). Viaja porque es la
     /// única columna que dice DÓNDE deja de cubrirse el plan: `assets_depleted_month_index` da un
     /// mes y `uncovered_deficit_total` un total, y entre los dos no se ve el perfil del hueco.
-    ///
-    /// **No es el recorte de la regla** (`withdrawal_shortfall`, que no viaja aquí): con
-    /// `fixed_real` el recorte es cero por construcción y esta serie sigue siendo la que se llena.
     pub baseline_unmet_need: Vec<f64>,
     /// Lo mismo del lado escenario. Restarlas punto a punto es legítimo: los dos lados comparten
     /// rejilla, ancla y horizonte.
@@ -5185,8 +5099,6 @@ fn sim_kpis(
         success_probability_absent_reason: None,
         failures_by_kind: None,
         failure_probability_by_age: Vec::new(),
-        months_below_need_p50: None,
-        withdrawal_to_need_ratio_p50: None,
     }
 }
 
@@ -5198,17 +5110,16 @@ fn sim_kpis(
 /// porque el plan mejore, sino porque el motor capitaliza en NOMINAL y solo el objetivo FIRE crece
 /// con la inflación — bajarla sube la rentabilidad real de todos los activos y congela el objetivo
 /// a la vez, gratis, en el mismo movimiento. Lo mismo, en pequeño, con `swr_pct`.
-const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario \u{2212} baseline. QUI\u{c9}N DECIDE LA FECHA (5.0.0): el \u{c9}XITO. `safe_date_month_index` (= `jubilacion_month_index`, el mismo valor con el nombre de siempre) es el primer mes en que, jubil\u{e1}ndote ah\u{ed}, al menos `success_threshold_pct` de los caminos sorteados AGUANTA hasta el horizonte sin que tengas que volver a trabajar. `retirement_date_basis` dice qui\u{e9}n la decidi\u{f3}: `success_threshold` (el umbral), `target_age` (la edad que fijaste \u{2014} el umbral no la mueve, solo mide si llegas) o `not_reachable` (ning\u{fa}n mes cumple; entonces la fecha es null y el \u{e9}xito describe el mejor intento observado, JAM\u{c1}S un mes 0). El cruce contra un objetivo determinista dej\u{f3} de existir: el motor recibe `fire_target: None`. UN CAMINO FALLA por tres motivos y solo tres, contados en `failures_by_kind` con el eje `monte_carlo`: F1 la cartera se queda sin cubrir el gasto del mes; F2 la tasa de retirada INICIAL del mes en que te jubilas supera el tope; F3 en el MES DE JUBILACI\u{d3}N, lo que una regla por saldo permite con el l\u{ed}quido de entrada no llega a la necesidad ordinaria \u{2014}igual que F2, se juzga UNA vez y no se vuelve a preguntar: despu\u{e9}s manda F1, y el recorte de la regla es una lectura (`withdrawal_shortfall`), no un fracaso\u{2014}. Tienen arreglos OPUESTOS: F1 pide m\u{e1}s capital o menos gasto, F2 pide retrasar la fecha, F3 pide cambiar la regla. EL SWR YA NO DIMENSIONA NING\u{da}N OBJETIVO: es ese tope inicial \u{2014}el gasto anual \u{ed}ntegro del primer a\u{f1}o jubilado sobre el L\u{cd}QUIDO del mes anterior\u{2014}, evaluado UNA vez. `success_of_plan` y `success_wilson_low` son FRACCIONES (0.96 = 96 %) y `success_sampling_error_pp` va en PUNTOS PORCENTUALES; por debajo de 100 el umbral se compara contra la cota de WILSON, y \u{ab}100 %\u{bb} significa CERO fallos de `date_solved_with_paths` caminos, que con una muestra finita NO es certeza \u{2014} por eso la barra de error nunca es 0. LOS DOS LADOS SE RESUELVEN IGUAL: misma semilla estable y mismo n\u{fa}mero de caminos, publicado por lado en `date_solved_with_paths`; por defecto 500 (basta para un DELTA y cuesta un quinto), y con el eje `monte_carlo` los dos suben a 2.500, que es el presupuesto con el que `GET /v1/projection/series` confirma \u{2014} ah\u{ed} el lado baseline publica, cifra a cifra, el MISMO plan que esa respuesta. Sin fecha de nacimiento no hay plan: `plan_absent_reason: birth_date_missing` por lado, todo el bloque a null y la l\u{ed}nea de patrimonio publicada igual, SIN jubilaci\u{f3}n. LA PENSI\u{d3}N ES UN FLUJO DE CAJA, no un objetivo: entra como ingreso desde `pension_start_month_index` y no descuenta ni dimensiona nada. EL PUENTE es un AJUSTE de la pensi\u{f3}n disponible con cualquier estrategia (`profile_overrides.pension.bridge_enabled`), no una estrategia: sube el tope de la tasa inicial a `bridge_max_pct` cuando la pensi\u{f3}n llega dentro de `bridge_max_years`, y a cambio la fecha nunca es anterior a P \u{2212} esos a\u{f1}os; durante \u{e9}l no hay aportaciones (sin sueldo la cascada no tiene excedente). NO EXISTEN ya, y quien los busque no los va a encontrar: base del objetivo, descuento del puente y colch\u{f3}n de caja \u{2014} el colch\u{f3}n se retir\u{f3} entero (la caja es un activo y la regla de ahorro decide cu\u{e1}nto se guarda). `fire_number_classic_today` es el \u{ab}25\u{d7} tu gasto\u{bb} de toda la vida y desde 5.0.0 SOLO eso: informativo, no dispara nada y no se compara con nada \u{2014} la cifra de referencia es `needed_capital_today` (euros de HOY, a cientos hacia arriba), el capital con el que TU cartera cumplir\u{ed}a el umbral jubil\u{e1}ndote ya. YA JUBILADO manda `withdrawal_rule`: por defecto `fixed_real` = la necesidad declarada, indexada y SIN techo. Su `spend_mode` cambia el drenaje: `ceiling` retira min(necesidad, regla) y `rule_is_spend` retira lo que dice la regla haya o no necesidad \u{2014} ah\u{ed} la pensi\u{f3}n va aparte y lo que se saca de m\u{e1}s es `withdrawal_excess`. TRES magnitudes por mes y no dos: lo que se obtuvo (`withdrawal`), lo que la REGLA rechaz\u{f3} (`withdrawal_shortfall`: informativo, no resta patrimonio ni es un fracaso, y cero por construcci\u{f3}n con `fixed_real`) y lo que la CARTERA no pudo dar (`unmet_need`, en `series` por lado). `assets_depleted_month_index` exige DOS condiciones \u{2014}cartera a cero Y alguna venta posterior sin fundar\u{2014}, as\u{ed} que un aterrizaje exacto sobre una pensi\u{f3}n que cubre todo el gasto es null. LA RENTABILIDAD QUE DECLARAS ES COMPUESTA (CAGR): la l\u{ed}nea determinista es la MEDIANA de los caminos, ni techo ni suelo, y la media aritm\u{e9}tica queda por encima \u{2014} esa diferencia no es un error, es el coste de la volatilidad. Sin volatilidad declarada el sorteo degenera: el \u{e9}xito solo puede valer 1 o 0 y `any_volatility_declared` lo dice. EL PLAN ES UN EJE: `profile_overrides` cambia estrategia, edad objetivo, UMBRAL (`success_threshold_pct`, 80\u{2013}100), modo de coast y su edad de parada, modo de media jornada, regla de retirada, pensi\u{f3}n con su puente y modo/importe manual del gasto de jubilaci\u{f3}n sobre un CLON del perfil (mismas cotas que guardarlo; nada se persiste). OJO al leer su delta: bajar el umbral adelanta la fecha Y baja el \u{e9}xito, y eso no es mejorar el plan, es cambiar el list\u{f3}n \u{2014} por eso `success_threshold_pct` viaja por lado. `income_pause` multiplica el ingreso GANADO durante su ventana \u{2014}la pensi\u{f3}n con fecha NO se pausa\u{2014} y publica en `income_pause` la fecha del plan con y sin la pausa y su diferencia, resuelta con un solve extra contra el MISMO escenario sin el eje; con \u{ab}no llega\u{bb} en cualquiera de los dos, `retirement_delay_months` es null en vez de un retraso inventado. `solve: {extra_monthly_expense_keeping_date: true}` responde \u{ab}\u{bf}cu\u{e1}nto m\u{e1}s puedo gastar sin mover la fecha?\u{bb} subiendo solo el gasto REGULAR (no el de jubilaci\u{f3}n): mantiene FIJA la fecha que el plan decidi\u{f3}, que en el modelo v2 no depende del gasto, as\u{ed} que la respuesta es el m\u{e1}ximo sobrante mensual \u{2014} un SUELO honesto (\u{ab}al menos esto\u{bb}), no un infinito, y no una promesa de que el \u{e9}xito aguante ese gasto. `view=household` no se simula (400 `household_not_simulable`): el agregado del hogar es informativo y no es el plan de nadie. El motor capitaliza en euros NOMINALES; la inflaci\u{f3}n indexa el GASTO mes a mes (regular y de jubilaci\u{f3}n, eje (k\u{2212}1)/12: el mes 1 cobra el gasto declarado tal cual) y deja los INGRESOS planos a prop\u{f3}sito. Bajar `annual_inflation_percent` abarata TODO el gasto futuro y sube la rentabilidad real de los activos a la vez: puede adelantar la jubilaci\u{f3}n a\u{f1}os sin que nada del plan haya mejorado \u{2014} l\u{e9}elo como un cambio de supuesto. Admite negativos hasta \u{2212}2. Los ejes de CAJA (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`, `income_growth_real_pct_annual`, `income_steps`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, y `net_recurring_monthly` y `savings_rate` salen con delta 0 EXACTO por dise\u{f1}o. `income_growth_real_pct_annual` a\u{f1}ade `ingreso \u{b7} ((1+g)^((k\u{2212}1)/12) \u{2212} 1)` al mes k y solo mientras el escenario NO est\u{e1} jubilado; el corte se calcula con un SOLVE del mismo escenario sin el eje, as\u{ed} que es aproximado: si el sueldo extra adelanta la fecha, los meses entre `scenario.safe_date_month_index` y `scenario.income_growth_stops_at_month_index` llevan una n\u{f3}mina que un jubilado no cobrar\u{ed}a \u{2014} esa diferencia es la ventana, y los dos n\u{fa}meros viajan para poder medirla. Los `income_steps` NO se recortan en la jubilaci\u{f3}n: el mes lo nombra el llamante. `final_net_worth` est\u{e1} en euros nominales del \u{fa}ltimo mes; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null. `liability_overrides` amortiza deuda: el importe sale de la caja del mes Y baja el principal a la vez, as\u{ed} que el efecto instant\u{e1}neo sobre el patrimonio es CERO salvo por la compensaci\u{f3}n por reembolso anticipado (default 2 % del extra, techo legal a tipo fijo de la Ley 5/2019 art. 23; `early_repayment_fee_pct: \"0\"` la quita): esa comisi\u{f3}n sale de la caja y NO amortiza. No se modela la ca\u{ed}da al 1,5 % tras el a\u{f1}o 10, ni los topes de tipo variable (0,25 %/0,15 %), ni el l\u{ed}mite de la p\u{e9}rdida financiera del prestamista: si tu pr\u{e9}stamo es variable o veterano, pasa el % que te aplique. `early_repayment_effect: \"reduce_payment\"` baja la cuota en vez de acortar el plazo \u{2014} con una amortizaci\u{f3}n PUNTUAL el mes de extinci\u{f3}n se conserva EXACTAMENTE; con amortizaci\u{f3}n extra RECURRENTE puede adelantarse algo (nunca atrasarse). Lo que se gana est\u{e1} en `liability_total_interest_delta` (negativo = inter\u{e9}s que ya no se devenga; comp\u{e1}ralo con `liability_early_repayment_fee_total_delta`, el coste) y en que la cuota liberada vuelve sola a la cascada, no en un salto de patrimonio el d\u{ed}a que amortizas. Si el pasivo no devenga intereses (`fixed_payments`, o sin TIN), amortizar antes no mejora nada y el escenario lo dir\u{e1} con deltas a cero.";
+const SIMULATE_MODEL_NOTE: &str = "What-if sin persistir: se simulan dos veces los MISMOS datos (baseline y escenario) con el mismo horizonte, ancla y calendario; los deltas son escenario \u{2212} baseline. QUI\u{c9}N DECIDE LA FECHA (5.0.0): el \u{c9}XITO. `safe_date_month_index` (= `jubilacion_month_index`, el mismo valor con el nombre de siempre) es el primer mes en que, jubil\u{e1}ndote ah\u{ed}, al menos `success_threshold_pct` de los caminos sorteados AGUANTA hasta el horizonte sin que tengas que volver a trabajar. `retirement_date_basis` dice qui\u{e9}n la decidi\u{f3}: `success_threshold` (el umbral), `target_age` (la edad que fijaste \u{2014} el umbral no la mueve, solo mide si llegas) o `not_reachable` (ning\u{fa}n mes cumple; entonces la fecha es null y el \u{e9}xito describe el mejor intento observado, JAM\u{c1}S un mes 0). El cruce contra un objetivo determinista dej\u{f3} de existir: el motor recibe `fire_target: None`. UN CAMINO FALLA por dos motivos y solo dos, contados en `failures_by_kind` ([F1, F2]) con el eje `monte_carlo`: F1 la cartera se queda sin cubrir el gasto del mes; F2 la tasa de retirada INICIAL del mes en que te jubilas supera el tope \u{2014}se juzga UNA vez, en ese mes; despu\u{e9}s manda F1\u{2014}. Tienen arreglos OPUESTOS: F1 pide m\u{e1}s capital o menos gasto, F2 pide retrasar la fecha. EL SWR YA NO DIMENSIONA NING\u{da}N OBJETIVO: es ese tope inicial \u{2014}el gasto anual \u{ed}ntegro del primer a\u{f1}o jubilado sobre el L\u{cd}QUIDO del mes anterior\u{2014}, evaluado UNA vez. `success_of_plan` y `success_wilson_low` son FRACCIONES (0.96 = 96 %) y `success_sampling_error_pp` va en PUNTOS PORCENTUALES; por debajo de 100 el umbral se compara contra la cota de WILSON, y \u{ab}100 %\u{bb} significa CERO fallos de `date_solved_with_paths` caminos, que con una muestra finita NO es certeza \u{2014} por eso la barra de error nunca es 0. LOS DOS LADOS SE RESUELVEN IGUAL: misma semilla estable y mismo n\u{fa}mero de caminos, publicado por lado en `date_solved_with_paths`; por defecto 500 (basta para un DELTA y cuesta un quinto), y con el eje `monte_carlo` los dos suben a 2.500, que es el presupuesto con el que `GET /v1/projection/series` confirma \u{2014} ah\u{ed} el lado baseline publica, cifra a cifra, el MISMO plan que esa respuesta. Sin fecha de nacimiento no hay plan: `plan_absent_reason: birth_date_missing` por lado, todo el bloque a null y la l\u{ed}nea de patrimonio publicada igual, SIN jubilaci\u{f3}n. LA PENSI\u{d3}N ES UN FLUJO DE CAJA, no un objetivo: entra como ingreso desde `pension_start_month_index` y no descuenta ni dimensiona nada. EL PUENTE es un AJUSTE de la pensi\u{f3}n disponible con cualquier estrategia (`profile_overrides.pension.bridge_enabled`), no una estrategia: sube el tope de la tasa inicial a `bridge_max_pct` cuando la pensi\u{f3}n llega dentro de `bridge_max_years`, y a cambio la fecha nunca es anterior a P \u{2212} esos a\u{f1}os; durante \u{e9}l no hay aportaciones (sin sueldo la cascada no tiene excedente). NO EXISTEN ya, y quien los busque no los va a encontrar: base del objetivo, descuento del puente y colch\u{f3}n de caja \u{2014} el colch\u{f3}n se retir\u{f3} entero (la caja es un activo y la regla de ahorro decide cu\u{e1}nto se guarda). `fire_number_classic_today` es el \u{ab}25\u{d7} tu gasto\u{bb} de toda la vida y desde 5.0.0 SOLO eso: informativo, no dispara nada y no se compara con nada \u{2014} la cifra de referencia es `needed_capital_today` (euros de HOY, a cientos hacia arriba), el capital con el que TU cartera cumplir\u{ed}a el umbral jubil\u{e1}ndote ya. YA JUBILADO no hay regla que elegir: cada mes se vende, grosseado por los impuestos, lo que el gasto declarado e indexado necesita, sin techo. Dos magnitudes por mes: lo que se obtuvo (`withdrawal`) y lo que la CARTERA no pudo dar (`unmet_need`, en `series` por lado). `assets_depleted_month_index` exige DOS condiciones \u{2014}cartera a cero Y alguna venta posterior sin fundar\u{2014}, as\u{ed} que un aterrizaje exacto sobre una pensi\u{f3}n que cubre todo el gasto es null. LA RENTABILIDAD QUE DECLARAS ES COMPUESTA (CAGR): la l\u{ed}nea determinista es la MEDIANA de los caminos, ni techo ni suelo, y la media aritm\u{e9}tica queda por encima \u{2014} esa diferencia no es un error, es el coste de la volatilidad. Sin volatilidad declarada el sorteo degenera: el \u{e9}xito solo puede valer 1 o 0 y `any_volatility_declared` lo dice. EL PLAN ES UN EJE: `profile_overrides` cambia estrategia, edad objetivo, UMBRAL (`success_threshold_pct`, 80\u{2013}100), modo de coast y su edad de parada, modo de media jornada, SWR, pensi\u{f3}n con su puente y modo/importe manual del gasto de jubilaci\u{f3}n sobre un CLON del perfil (mismas cotas que guardarlo; nada se persiste). OJO al leer su delta: bajar el umbral adelanta la fecha Y baja el \u{e9}xito, y eso no es mejorar el plan, es cambiar el list\u{f3}n \u{2014} por eso `success_threshold_pct` viaja por lado. `income_pause` multiplica el ingreso GANADO durante su ventana \u{2014}la pensi\u{f3}n con fecha NO se pausa\u{2014} y publica en `income_pause` la fecha del plan con y sin la pausa y su diferencia, resuelta con un solve extra contra el MISMO escenario sin el eje; con \u{ab}no llega\u{bb} en cualquiera de los dos, `retirement_delay_months` es null en vez de un retraso inventado. `solve: {extra_monthly_expense_keeping_date: true}` responde \u{ab}\u{bf}cu\u{e1}nto m\u{e1}s puedo gastar sin mover la fecha?\u{bb} subiendo solo el gasto REGULAR (no el de jubilaci\u{f3}n): mantiene FIJA la fecha que el plan decidi\u{f3}, que en el modelo v2 no depende del gasto, as\u{ed} que la respuesta es el m\u{e1}ximo sobrante mensual \u{2014} un SUELO honesto (\u{ab}al menos esto\u{bb}), no un infinito, y no una promesa de que el \u{e9}xito aguante ese gasto. `view=household` no se simula (400 `household_not_simulable`): el agregado del hogar es informativo y no es el plan de nadie. El motor capitaliza en euros NOMINALES; la inflaci\u{f3}n indexa el GASTO mes a mes (regular y de jubilaci\u{f3}n, eje (k\u{2212}1)/12: el mes 1 cobra el gasto declarado tal cual) y deja los INGRESOS planos a prop\u{f3}sito. Bajar `annual_inflation_percent` abarata TODO el gasto futuro y sube la rentabilidad real de los activos a la vez: puede adelantar la jubilaci\u{f3}n a\u{f1}os sin que nada del plan haya mejorado \u{2014} l\u{e9}elo como un cambio de supuesto. Admite negativos hasta \u{2212}2. Los ejes de CAJA (`extra_monthly_savings`, `extra_monthly_cash_adjustment`, `one_off_expense`, `income_growth_real_pct_annual`, `income_steps`) NO tocan ingreso ni gasto: mueven `net_cash_monthly`, y `net_recurring_monthly` y `savings_rate` salen con delta 0 EXACTO por dise\u{f1}o. `income_growth_real_pct_annual` a\u{f1}ade `ingreso \u{b7} ((1+g)^((k\u{2212}1)/12) \u{2212} 1)` al mes k y solo mientras el escenario NO est\u{e1} jubilado; el corte se calcula con un SOLVE del mismo escenario sin el eje, as\u{ed} que es aproximado: si el sueldo extra adelanta la fecha, los meses entre `scenario.safe_date_month_index` y `scenario.income_growth_stops_at_month_index` llevan una n\u{f3}mina que un jubilado no cobrar\u{ed}a \u{2014} esa diferencia es la ventana, y los dos n\u{fa}meros viajan para poder medirla. Los `income_steps` NO se recortan en la jubilaci\u{f3}n: el mes lo nombra el llamante. `final_net_worth` est\u{e1} en euros nominales del \u{fa}ltimo mes; para comparar poder adquisitivo usa `final_net_worth_real`, y solo cuando `deltas.real_delta_absent_reason` es null. `liability_overrides` amortiza deuda: el importe sale de la caja del mes Y baja el principal a la vez, as\u{ed} que el efecto instant\u{e1}neo sobre el patrimonio es CERO salvo por la compensaci\u{f3}n por reembolso anticipado (default 2 % del extra, techo legal a tipo fijo de la Ley 5/2019 art. 23; `early_repayment_fee_pct: \"0\"` la quita): esa comisi\u{f3}n sale de la caja y NO amortiza. No se modela la ca\u{ed}da al 1,5 % tras el a\u{f1}o 10, ni los topes de tipo variable (0,25 %/0,15 %), ni el l\u{ed}mite de la p\u{e9}rdida financiera del prestamista: si tu pr\u{e9}stamo es variable o veterano, pasa el % que te aplique. `early_repayment_effect: \"reduce_payment\"` baja la cuota en vez de acortar el plazo \u{2014} con una amortizaci\u{f3}n PUNTUAL el mes de extinci\u{f3}n se conserva EXACTAMENTE; con amortizaci\u{f3}n extra RECURRENTE puede adelantarse algo (nunca atrasarse). Lo que se gana est\u{e1} en `liability_total_interest_delta` (negativo = inter\u{e9}s que ya no se devenga; comp\u{e1}ralo con `liability_early_repayment_fee_total_delta`, el coste) y en que la cuota liberada vuelve sola a la cascada, no en un salto de patrimonio el d\u{ed}a que amortizas. Si el pasivo no devenga intereses (`fixed_payments`, o sin TIN), amortizar antes no mejora nada y el escenario lo dir\u{e1} con deltas a cero.";
 
 /// Nota de modelo de `GET /v1/projection/series` (P6, 5.0.0).
 ///
 /// Dice **quién decide qué**, que es lo que la versión de 4.15.x no decía: hasta 5.0.0 la
-/// jubilación era un cruce y el SWR parecía gobernarlo todo. Ahora hay tres piezas distintas —la
-/// estrategia elige el disparador y la base del objetivo, el SWR solo dimensiona ese objetivo, y
-/// la regla de retirada gobierna lo que sale de la cartera— y confundirlas produce lecturas
-/// plausibles y falsas. Es constante y no un `format!` para que sea la MISMA cadena en cada
+/// jubilación era un cruce y el SWR parecía gobernarlo todo. Ahora hay piezas distintas —la
+/// estrategia elige el disparador, el éxito decide la fecha y el SWR es solo la tasa de retirada
+/// INICIAL que la fecha tiene que respetar— y confundirlas produce lecturas plausibles y falsas. Es constante y no un `format!` para que sea la MISMA cadena en cada
 /// respuesta (un `model_note` que cambia entre llamadas es ruido en la cache y en el diff).
-const PROJECTION_MODEL_NOTE: &str = "Motor mensual en euros NOMINALES: presupuesto regular sin las cuotas derivadas de pasivos, servicio de deuda por mes, ajustes por Próximos y crecimiento compuesto por activo. El GASTO (regular y de jubilación) se indexa a la inflación de la instalación con el eje (k−1)/12 —el mes 1 cobra el gasto declarado tal cual— y los INGRESOS quedan planos a propósito. LA FECHA LA DECIDE EL ÉXITO, no un cruce: `jubilacion_month_index` es el primer mes en que, jubilándote ahí, al menos `success_threshold_pct` de miles de caminos sorteados AGUANTA hasta el horizonte sin que tengas que volver a trabajar. `retirement_date_basis` dice quién la decidió: `success_threshold` (el umbral), `target_age` (la edad que fijaste — el umbral no la mueve, solo mide si llegas) o `not_reachable` (ningún mes del horizonte cumple; entonces la fecha es null y `success_of_plan` describe el mejor intento observado, JAMÁS un mes 0). UN CAMINO FALLA por tres motivos y solo tres: F1 la cartera se queda sin cubrir el gasto del mes; F2 la tasa de retirada INICIAL del mes en que te jubilas supera el tope —el SWR, o el del puente si la pensión llega dentro de sus años máximos—; F3 en el MES DE JUBILACIÓN, lo que una regla por saldo permite con el líquido de entrada no llega a la necesidad ordinaria. F2 y F3 se juzgan UNA vez, en ese mes: después manda F1 mes a mes, y lo que la regla recorte más adelante viaja como lectura (`withdrawal_shortfall`), nunca como fracaso. El SWR ya NO dimensiona ningún objetivo: es ese tope inicial, evaluado UNA vez. `success_of_plan` y `success_wilson_low` son FRACCIONES (0.96 = 96 %) y `success_sampling_error_pp` va en PUNTOS PORCENTUALES. El umbral se compara contra la cota de Wilson por debajo de 100; «100 %» significa CERO fallos de `paths_used` caminos, que con una muestra finita no es certeza — por eso la barra de error nunca es 0. Sin `paths_used` y sin `seed` la cifra no es reproducible y por tanto no es un resultado. `needed_capital_today` (euros de HOY, redondeado a cientos hacia arriba) es el capital con el que TU cartera cumpliría el umbral jubilándote ya: es la cifra de referencia, no el número FIRE. `needed_capital_curve` es la pregunta por edad, y es OTRA: lo que necesitas TENER (líquido) a esa edad para jubilarte entonces al umbral, suponiendo que llegas ahí por la trayectoria central de tu plan. No es el percentil de tu cartera de hoy proyectada hasta esa edad. Va en euros NOMINALES de cada mes y PARALELA a `points[]` — se dibuja contra la trayectoria del patrimonio, que también es nominal, pero NO tiene por qué cruzarla en la fecha: la fecha la deciden los caminos que aguantan, no un cruce. Sus posiciones `null` significan «aquí no se midió» (la rejilla es de cinco en cinco años más el mes del plan) o «aquí no hace falta capital adicional hoy» (`already_covered`, el motivo normal a partir del mes en que la pensión cubre el gasto: con la cartera dividida por 256 el plan sigue cumpliendo y no hay frontera que medir), JAMÁS «aquí hacen falta 0 €». Llega en segundo plano: mientras `needed_capital_curve_state` sea `computing` todavía se está calculando, y `unavailable` es otra cosa («no se puede»). `fire_number_classic_today` es el «25× tu gasto» de toda la vida y desde 5.0.0 SOLO eso: informativo, no dispara nada y no se compara con nada. TRES magnitudes por mes y no dos: `withdrawal` es lo que se obtuvo, `withdrawal_shortfall` lo que la REGLA rechazó (informativo: no resta patrimonio ni cuenta como fracaso; cero por construcción con `fixed_real`, que no tiene techo) y `unmet_need` lo que la CARTERA no pudo dar — su suma es la necesidad neta, y `uncovered_deficit_total` es la suma de la tercera en todo el horizonte. `withdrawal_excess` es lo que se retira de más en modo `rule_is_spend`. `assets_depleted_month_index` exige DOS condiciones: que la venta dejara la cartera a cero Y que alguna venta posterior se quedara sin fundar — un puente que se vacía EXACTAMENTE el mes en que entra una pensión que cubre todo el gasto es null, no una ruina. SIN PLAN NO HAY FECHA, y `plan_absent_reason` dice por qué: `birth_date_missing` (sin ella no hay edad que convertir en mes), `months_override` (pedir un horizonte a medida salta la cache y con ella el sorteo) o `household_aggregate` (el hogar suma N planes y no tiene uno; cada `members[].plan_state` dice `household_not_solved`). En esos casos la serie de patrimonio se publica ENTERA y describe una trayectoria SIN jubilarse: léela como tal, no como un plan. Con `view=household` la curva es la SUMA de una simulación independiente por miembro, cada una con su estrategia: una lectura INFORMATIVA del conjunto, no el plan de nadie. El hogar no resuelve fecha por miembro (`members[].plan_state: household_not_solved`); lo que sí viaja por persona es su fecha por EDAD, que es un dato y no una búsqueda.";
+const PROJECTION_MODEL_NOTE: &str = "Motor mensual en euros NOMINALES: presupuesto regular sin las cuotas derivadas de pasivos, servicio de deuda por mes, ajustes por Próximos y crecimiento compuesto por activo. El GASTO (regular y de jubilación) se indexa a la inflación de la instalación con el eje (k−1)/12 —el mes 1 cobra el gasto declarado tal cual— y los INGRESOS quedan planos a propósito. LA FECHA LA DECIDE EL ÉXITO, no un cruce: `jubilacion_month_index` es el primer mes en que, jubilándote ahí, al menos `success_threshold_pct` de miles de caminos sorteados AGUANTA hasta el horizonte sin que tengas que volver a trabajar. `retirement_date_basis` dice quién la decidió: `success_threshold` (el umbral), `target_age` (la edad que fijaste — el umbral no la mueve, solo mide si llegas) o `not_reachable` (ningún mes del horizonte cumple; entonces la fecha es null y `success_of_plan` describe el mejor intento observado, JAMÁS un mes 0). UN CAMINO FALLA por dos motivos y solo dos: F1 la cartera se queda sin cubrir el gasto del mes; F2 la tasa de retirada INICIAL del mes en que te jubilas supera el tope —el SWR, o el del puente si la pensión llega dentro de sus años máximos—. F2 se juzga UNA vez, en ese mes: después manda F1 mes a mes. Ya jubilado no hay regla de retirada que elegir: cada mes se vende lo que el gasto indexado necesita. El SWR ya NO dimensiona ningún objetivo: es ese tope inicial, evaluado UNA vez. `success_of_plan` y `success_wilson_low` son FRACCIONES (0.96 = 96 %) y `success_sampling_error_pp` va en PUNTOS PORCENTUALES. El umbral se compara contra la cota de Wilson por debajo de 100; «100 %» significa CERO fallos de `paths_used` caminos, que con una muestra finita no es certeza — por eso la barra de error nunca es 0. Sin `paths_used` y sin `seed` la cifra no es reproducible y por tanto no es un resultado. `needed_capital_today` (euros de HOY, redondeado a cientos hacia arriba) es el capital con el que TU cartera cumpliría el umbral jubilándote ya: es la cifra de referencia, no el número FIRE. `needed_capital_curve` es la pregunta por edad, y es OTRA: lo que necesitas TENER (líquido) a esa edad para jubilarte entonces al umbral, suponiendo que llegas ahí por la trayectoria central de tu plan. No es el percentil de tu cartera de hoy proyectada hasta esa edad. Va en euros NOMINALES de cada mes y PARALELA a `points[]` — se dibuja contra la trayectoria del patrimonio, que también es nominal, pero NO tiene por qué cruzarla en la fecha: la fecha la deciden los caminos que aguantan, no un cruce. Sus posiciones `null` significan «aquí no se midió» (la rejilla es de cinco en cinco años más el mes del plan) o «aquí no hace falta capital adicional hoy» (`already_covered`, el motivo normal a partir del mes en que la pensión cubre el gasto: con la cartera dividida por 256 el plan sigue cumpliendo y no hay frontera que medir), JAMÁS «aquí hacen falta 0 €». Llega en segundo plano: mientras `needed_capital_curve_state` sea `computing` todavía se está calculando, y `unavailable` es otra cosa («no se puede»). `fire_number_classic_today` es el «25× tu gasto» de toda la vida y desde 5.0.0 SOLO eso: informativo, no dispara nada y no se compara con nada. Dos magnitudes por mes: `withdrawal` es lo que se obtuvo y `unmet_need` lo que la CARTERA no pudo dar — su suma es la necesidad neta, y `uncovered_deficit_total` es la suma de la segunda en todo el horizonte. `assets_depleted_month_index` exige DOS condiciones: que la venta dejara la cartera a cero Y que alguna venta posterior se quedara sin fundar — un puente que se vacía EXACTAMENTE el mes en que entra una pensión que cubre todo el gasto es null, no una ruina. SIN PLAN NO HAY FECHA, y `plan_absent_reason` dice por qué: `birth_date_missing` (sin ella no hay edad que convertir en mes), `months_override` (pedir un horizonte a medida salta la cache y con ella el sorteo) o `household_aggregate` (el hogar suma N planes y no tiene uno; cada `members[].plan_state` dice `household_not_solved`). En esos casos la serie de patrimonio se publica ENTERA y describe una trayectoria SIN jubilarse: léela como tal, no como un plan. Con `view=household` la curva es la SUMA de una simulación independiente por miembro, cada una con su estrategia: una lectura INFORMATIVA del conjunto, no el plan de nadie. El hogar no resuelve fecha por miembro (`members[].plan_state: household_not_solved`); lo que sí viaja por persona es su fecha por EDAD, que es un dato y no una búsqueda.";
 
 /// Cotas del eje P11 `income_growth_real_pct_annual` (% REAL anual, 5.0.0).
 ///
@@ -6125,9 +6036,6 @@ pub(crate) async fn simulate_projection_core(
                 // rejilla, misma traducción a la rejilla publicada y el mismo `by_kind` repetido
                 // por fila. Dos copias significarían dos cosas con el mismo nombre.
                 k.failure_probability_by_age = failure_points(out, ctx.today, ctx.birth_date);
-                k.months_below_need_p50 = Some(out.months_below_need_p50);
-                k.withdrawal_to_need_ratio_p50 =
-                    out.withdrawal_to_need_ratio_p50.and_then(probability_out);
             };
             apply(&mut baseline, &b_out, absent_of(&baseline_built));
             apply(&mut scenario, &s_out, absent_of(&scenario_built));
@@ -7159,8 +7067,11 @@ mod density_tail_tests {
 mod engine_error_mapping_tests {
     use super::*;
 
-    /// Las dos variantes de «capacidad que aún no existe» son 400 `engine_feature_unavailable`,
-    /// y el resto 400 `engine_rejected_input`.
+    /// Todo rechazo del motor es 400 `engine_rejected_input`. Hasta el 2026-10-10 existía un
+    /// segundo código, `engine_feature_unavailable`, para las variantes «capacidad que aún no
+    /// existe» (`UnsupportedPhase`, `UnsupportedWithdrawalRule`); las dos se quedaron sin
+    /// productor (WP3 y «solo SWR») y el código se retiró con ellas — `RETIRED_CODES` en
+    /// `tests/error_codes_parity.rs` vigila que no vuelva.
     ///
     /// **5.0.0**: el 422 `bridge_discount_out_of_range` desapareció con el descuento del puente —
     /// el modelo v2 no descuenta nada (M4/C2: el puente es un tope de tasa inicial, no un
@@ -7168,20 +7079,6 @@ mod engine_error_mapping_tests {
     /// rama de mapeo tampoco.
     #[test]
     fn el_resto_del_mapeo_no_se_mueve() {
-        for e in [
-            EngineError::UnsupportedWithdrawalRule,
-            EngineError::UnsupportedPhase,
-        ] {
-            let mapped = map_engine_err(e);
-            assert_eq!(mapped.status(), axum::http::StatusCode::BAD_REQUEST);
-            assert!(
-                mapped
-                    .sanitised_message()
-                    .starts_with("engine_feature_unavailable: "),
-                "{}",
-                mapped.sanitised_message()
-            );
-        }
         let mapped = map_engine_err(EngineError::InvalidHorizon);
         assert_eq!(mapped.status(), axum::http::StatusCode::BAD_REQUEST);
         assert!(

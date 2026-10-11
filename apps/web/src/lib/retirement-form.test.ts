@@ -16,10 +16,8 @@ import {
   missingRequiredPlanFields,
   percentFromFraction,
   saveIndicatorLabel,
-  withdrawalPctNote,
 } from "./retirement-form";
 import { HELP_TEXTS } from "./helpTexts";
-import { defaultWithdrawalRuleApi } from "./retirementProfile";
 import type { RetirementProfileApi } from "../api/types";
 
 /** Perfil v2 completo, escrito a mano: lo que este fichero prueba es el contrato contra
@@ -34,7 +32,6 @@ const base = (over: Partial<RetirementProfileApi> = {}): RetirementProfileApi =>
   success_threshold_pct: 95,
   coast_mode: "fixed_retirement_age",
   coast_stop_age: null,
-  withdrawal_rule: defaultWithdrawalRuleApi(),
   pension: null,
   partial_retirement: null,
   ...over,
@@ -281,7 +278,7 @@ describe("U2 — qué obligatorio falta", () => {
     expect(
       missingRequiredPlanFields({
         profile: base(),
-        required: ["success_threshold_pct", "swr_pct", "horizon_lifespan_age", "spend_mode"],
+        required: ["success_threshold_pct", "swr_pct", "horizon_lifespan_age"],
         birthDate: null,
       }),
     ).toEqual([]);
@@ -318,8 +315,6 @@ describe("cableado campo → ayuda", () => {
       "target_retirement_age",
       "partial_income",
       "swr_pct",
-      "withdrawal_rule_kind",
-      "spend_mode",
       // El interruptor del puente recupera el suyo al retirarse el rótulo de su sub-columna:
       // pasó a ser lo más alto que gobierna esos tres campos (2026-09-13).
       "bridge_enabled",
@@ -340,10 +335,7 @@ describe("cableado campo → ayuda", () => {
       pension_fraction_while_partial: "sube al título del apartado «Pensión»",
       bridge_max_pct: "comparte `retirement.bridge_settings` con el interruptor del puente",
       bridge_max_years: "comparte `retirement.bridge_settings` con el interruptor del puente",
-      hybrid_end_pct: "comparte `retirement.withdrawal_rule` con el selector de regla",
-      guardrails_band_pct: "comparte `retirement.withdrawal_rule` con el selector de regla",
-      guardrails_adjust_pct: "comparte `retirement.withdrawal_rule` con el selector de regla",
-      horizon_lifespan_age: "sube al título del apartado «Horizonte»",
+      horizon_lifespan_age: "sube al título del apartado «Horizonte y exigencia»",
     } as const;
     for (const [id, donde] of Object.entries(subieron)) {
       expect(
@@ -353,14 +345,13 @@ describe("cableado campo → ayuda", () => {
     }
   });
 
-  it("los seis apartados tienen `<?>`, y su id existe en el catálogo", () => {
+  it("los cinco apartados tienen `<?>`, y su id existe en el catálogo", () => {
     expect(Object.keys(PLAN_CARD_HELP).sort()).toEqual([
       "ages",
       "horizon",
       "pension",
       "spending",
       "strategy",
-      "withdrawal",
     ]);
     for (const [card, entry] of Object.entries(PLAN_CARD_HELP)) {
       expect(HELP_TEXTS[entry.helpId], `${card} apunta a un texto inexistente`).toBeDefined();
@@ -372,12 +363,21 @@ describe("cableado campo → ayuda", () => {
     expect(cableados).not.toContain("target_basis");
     expect(cableados).not.toContain("bridge_discount_basis");
   });
+
+  it("ni los de la regla de retirada, que se fueron con «solo SWR» (2026-10-10)", () => {
+    const cableados = Object.keys(PLAN_FIELD_HELP);
+    expect(cableados).not.toContain("withdrawal_rule_kind");
+    expect(cableados).not.toContain("spend_mode");
+    const ayudas = Object.values(PLAN_FIELD_HELP).map((e) => e!.helpId as string);
+    expect(ayudas).not.toContain("retirement.withdrawal_rule");
+    expect(ayudas).not.toContain("retirement.spend_mode");
+  });
 });
 
 describe("PLAN_CARD_COPY — el título de cada apartado", () => {
   // La FRASE de cada apartado se fue al catálogo el 2026-09-13 (ver `PLAN_CARD_HELP`), y con ella
   // los guardas que fijaban su contenido, que hoy viven en `helpTexts.test.ts`. Aquí queda lo que
-  // sigue siendo de esta tabla: que hay seis y que ninguno se queda sin rótulo.
+  // sigue siendo de esta tabla: que hay cinco y que ninguno se queda sin rótulo.
   it("todos los apartados tienen un título corto", () => {
     for (const [card, copy] of Object.entries(PLAN_CARD_COPY)) {
       expect(copy.title.length, `${card}: título vacío`).toBeGreaterThan(2);
@@ -385,69 +385,18 @@ describe("PLAN_CARD_COPY — el título de cada apartado", () => {
     }
   });
 
-  it("son SEIS apartados: el umbral volvió a «Retirada», no abrió uno «Riesgo»", () => {
+  it("son CINCO apartados: «Retirada» se fue con «solo SWR» y el umbral no abrió uno «Riesgo»", () => {
     expect(Object.keys(PLAN_CARD_COPY).sort()).toEqual([
       "ages",
       "horizon",
       "pension",
       "spending",
       "strategy",
-      "withdrawal",
     ]);
   });
-});
 
-describe("U4 — la nota del porcentaje de la regla", () => {
-  const rule = (over: Partial<ReturnType<typeof defaultWithdrawalRuleApi>> = {}) => ({
-    ...defaultWithdrawalRuleApi(),
-    ...over,
-  });
-
-  it("«Gasto fijo» no retira un porcentaje: no hay nota", () => {
-    expect(withdrawalPctNote({ rule: rule(), swrPct: "3.5", pctSource: null })).toBeNull();
-  });
-
-  it("sin porcentaje propio, la regla hereda el SWR y no hay nota: el slider ya lo enseña", () => {
-    // 2026-10-10: la nota repetía el porcentaje del slider con su explicación en prosa. Qué es
-    // el SWR en v2 (el tope de la tasa INICIAL, C1) lo dice la ayuda `settings.swr`.
-    expect(
-      withdrawalPctNote({
-        rule: rule({ kind: "percent_of_balance" }),
-        swrPct: "3.5",
-        pctSource: "swr",
-      }),
-    ).toBeNull();
-  });
-
-  it("la híbrida mira `start_pct`, no `pct`", () => {
-    expect(
-      withdrawalPctNote({
-        rule: rule({ kind: "hybrid", start_pct: "5", end_pct: "3" }),
-        swrPct: "3.5",
-        pctSource: "explicit",
-      }),
-    ).toBe("Fijado por API: 5,0 %");
-  });
-
-  it("un porcentaje ESCRITO se anuncia como fijado por API aunque el backend no publique la procedencia", () => {
-    // El caso real: backend anterior a U4, `pct` 4 % y SWR 3 %. Decir «tu tasa de retirada»
-    // aquí sería mentir sobre la cifra que el slider mueve.
-    expect(
-      withdrawalPctNote({
-        rule: rule({ kind: "guardrails", pct: "4", band_pct: "20", adjust_pct: "10" }),
-        swrPct: "3",
-        pctSource: null,
-      }),
-    ).toBe("Fijado por API: 4,0 %");
-  });
-
-  it("un servidor que dice «lo heredé» manda sobre la heurística del valor", () => {
-    expect(
-      withdrawalPctNote({
-        rule: rule({ kind: "percent_of_balance", pct: "3" }),
-        swrPct: "3",
-        pctSource: "swr",
-      }),
-    ).toBeNull();
+  it("el horizonte se titula «Horizonte y exigencia»: el umbral de éxito lo abre", () => {
+    expect(PLAN_CARD_COPY.horizon.title).toBe("Horizonte y exigencia");
+    expect(PLAN_CARD_COPY.spending.title).toBe("Gasto en jubilación");
   });
 });

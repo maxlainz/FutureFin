@@ -262,7 +262,7 @@ fn advance_five_percent(c: Decimal) -> Decimal {
 /// # La rejilla, dicha explícitamente
 ///
 /// `planning_monthly_cash_adjustment` es **0-based**: el índice `i` es el mes `i+1` del bucle
-/// (`sim_core.rs:1496`, `planning_adj = input.planning_monthly_cash_adjustment[(k − 1) as usize]`).
+/// (`sim_core.rs`, la lectura `planning_adj = input.planning_monthly_cash_adjustment[(k − 1) as usize]`).
 /// La aportación cubre los meses del BUCLE `1..=r−1` —se aporta mientras se trabaja y se deja de
 /// aportar al jubilarse— o sea los **índices `0..=r−2`**, que es lo que escribe el `..upto` de
 /// abajo con `upto = r − 1`.
@@ -273,7 +273,7 @@ fn advance_five_percent(c: Decimal) -> Decimal {
 /// ingreso regular cambiaría también `ordinary_need` (`gasto − ingreso`) y con ella la puerta de
 /// tasa inicial, que es justo el criterio que el solve está midiendo: el hogar «necesitaría menos»
 /// por aportar más, y la respuesta saldría demasiado optimista. Los «Próximos» están fuera de
-/// `ordinary_need` a propósito (`sim_core.rs:1610-1619`).
+/// `ordinary_need` a propósito (donde `sim_core.rs` calcula `ordinary_need`).
 pub fn contributing_extra(input: &ProjectionInput, extra: Decimal, r: u32) -> ProjectionInput {
     let mut scenario = input.clone();
     let upto = (r.saturating_sub(1) as usize).min(scenario.planning_monthly_cash_adjustment.len());
@@ -759,9 +759,10 @@ pub struct PartialSolve {
 /// fase — con una jubilación total dentro del horizonte, un `S` se juzgaría por lo que pase
 /// DESPUÉS de la media jornada, que es otra pregunta (y la que responde la fecha anidada).
 ///
-/// Durante `Phase::Partial` el motor solo puede fallar por **F1** (cartera agotada): F3 está
-/// restringida a `Phase::Retired` y la puerta de tasa inicial (F2) se evalúa en el primer mes
-/// jubilado, que con `AtMonth(H+1)` no llega nunca (`sim_core.rs:1785-1812`, supuesto S1). Así que
+/// Durante `Phase::Partial` el motor solo puede fallar por **F1** (cartera agotada): la puerta de
+/// tasa inicial (F2) se evalúa en el primer mes
+/// jubilado, que con `AtMonth(H+1)` no llega nunca (el veredicto `failure_kind` al cierre del bucle de
+/// `sim_core.rs`, supuesto S1). Así que
 /// el criterio dice exactamente lo que parece: **la media jornada no se come la cartera**.
 ///
 /// # Las fases

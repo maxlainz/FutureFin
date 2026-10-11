@@ -13,8 +13,8 @@
  * Qué campo hace falta por estrategia lo decide `requiredPlanFields`/`planFields`
  * (`lib/plan-fields.ts`, U2/U12) — la ÚNICA fuente de verdad de la casa sobre visibilidad y
  * obligatoriedad. `onboardingPlanFields` es un envoltorio fino sobre ella, con el contexto de
- * quien todavía no tiene NADA configurado (sin pensión, regla de retirada por defecto, modo del
- * objetivo por defecto). Duplicar esa tabla aquí sería exactamente el fallo que U12 existe para
+ * quien todavía no tiene NADA configurado (sin pensión, modo del gasto por defecto, puente
+ * apagado). Duplicar esa tabla aquí sería exactamente el fallo que U12 existe para
  * impedir: este asistente y el formulario de Jubilación discreparían sobre qué pide cada
  * estrategia.
  *
@@ -121,8 +121,8 @@ export function emptyOnboardingPlanState(): OnboardingPlanState {
 // Qué campos pide cada estrategia — envoltorio sobre `lib/plan-fields.ts`
 // ---------------------------------------------------------------------------
 
-/** Contexto de quien llega al asistente sin nada configurado todavía: sin pensión, con la regla
- *  de retirada por defecto, el modo del gasto por defecto y el puente apagado. Ninguno de esos
+/** Contexto de quien llega al asistente sin nada configurado todavía: sin pensión, con el modo
+ *  del gasto por defecto y el puente apagado. Ninguno de esos
  *  ejes hace obligatorio ningún campo, así que ninguno cambia lo que este paso pregunta; están
  *  porque la tabla es total y quien la llame tiene que decidirlos. Lo que SÍ lo cambia va aparte,
  *  en `OnboardingPlanContext`. */
@@ -133,7 +133,6 @@ const ONBOARDING_FIELDS_BASE_CONTEXT: Omit<
   // La fecha de nacimiento se pide FUERA de esta tabla (ver `strategyNeedsBirthDate` más abajo):
   // con `hasBirthDate: true` la tabla nunca añade el campo `birth_date` a la lista.
   hasBirthDate: true,
-  ruleKind: "fixed_real",
   fireNumberMode: "annual_expense",
   bridgeEnabled: false,
 };
@@ -201,7 +200,7 @@ function contextOf(state: OnboardingPlanState): OnboardingPlanContext {
  *  - **y, desde el modelo v2, tampoco un plan con pensión declarada** (C5): la pensión entra en el
  *    bucle a una edad, y sin fecha de nacimiento el servidor no publica ni fecha, ni éxito, ni
  *    capital necesario (`plan_absent_reason: "birth_date_missing"`). Por eso el segundo argumento
- *    existe: «Cuanto antes» sin pensión sigue sin necesitarla, «Cuanto antes» CON pensión sí.
+ *    existe: «FIRE clásico» sin pensión sigue sin necesitarla, «FIRE clásico» CON pensión sí.
  *
  * `asap` sin pensión no la necesita — el campo se enseña igual (es más fácil rellenarla ahora que
  * volver a «Tu cuenta» luego), pero no bloquea «Continuar».
@@ -390,7 +389,7 @@ export function validateOnboardingPlan(
     } else {
       // Coherente con la edad de jubilación total SI las dos están presentes — en la práctica
       // solo ocurre si el usuario había escrito una edad total con otra estrategia y luego
-      // cambió a «Media jornada» sin borrarla; el estado conserva ambas (ver docblock del tipo).
+      // cambió a «Barista FIRE» sin borrarla; el estado conserva ambas (ver docblock del tipo).
       const totalAge = parseAge(state.targetRetirementAge);
       if (totalAge !== null && age >= totalAge) {
         issues.push({
@@ -477,9 +476,8 @@ export function validateOnboardingPlan(
 /**
  * El cuerpo EXACTO de `PATCH /v1/auth/me/retirement-profile` para este paso: `birth_date` (si se
  * ha escrito), `strategy` y, según la estrategia Y SU MODO, `coast_mode` + una de las dos edades,
- * o el bloque `partial_retirement`/`pension` completo — nunca los dos bloques a la vez, nunca
- * `withdrawal_rule` (la regla de retirada se queda en su default `fixed_real`, igual que el SWR,
- * el umbral de éxito y la inflación se quedan en el suyo: este asistente no los pregunta).
+ * o el bloque `partial_retirement`/`pension` completo — nunca los dos bloques a la vez (el SWR,
+ * el umbral de éxito y la inflación se quedan en su default: este asistente no los pregunta).
  *
  * **`coast_mode` viaja siempre que la estrategia sea `coast`**, incluso en su modo A, que es el
  * default del servidor: mandar el default explícito cuesta un campo y evita el fallo que este

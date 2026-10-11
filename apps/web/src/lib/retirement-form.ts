@@ -13,11 +13,10 @@
  * de React.
  */
 
-import type { RetirementProfileApi, WithdrawalRuleApi } from "../api/types";
+import type { RetirementProfileApi } from "../api/types";
 import type { PlanCardId, PlanFieldId } from "./plan-fields";
 import type { HelpTextId } from "./helpTexts";
-import { DISPLAY_NUMBER_LOCALE, formatPercentAmount, parseDisplayDecimal } from "./format";
-import { effectiveWithdrawalPct, type PctSourceApi } from "./retirementProfile";
+import { DISPLAY_NUMBER_LOCALE, parseDisplayDecimal } from "./format";
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // S3 — la fracción de pensión durante la media jornada se EDITA en porcentaje
@@ -134,8 +133,8 @@ export type MissingPlanFieldsInput = {
  * Es lo que apaga el autosave (U2: «una estrategia que no tiene su dato NO se guarda hasta que
  * lo tiene») y lo que pone el «obligatorio» junto al campo. Se calcula aparte de
  * `retirementProfileIssue` porque contestan preguntas distintas: aquella dice si el servidor
- * ACEPTARÍA el PATCH; esta, si la estrategia está completa. Un plan «A una edad fija» sin fecha
- * de nacimiento se guarda perfectamente y el motor lo degrada a «Cuanto antes» — precisamente el
+ * ACEPTARÍA el PATCH; esta, si la estrategia está completa. Un plan «Edad fija» sin fecha
+ * de nacimiento se guarda perfectamente y el motor lo degrada a «FIRE clásico» — precisamente el
  * caso que hay que impedir, y que ninguna validación del servidor puede cazar.
  *
  * **Vacío no es cero**, y hay dos campos donde eso importa y por eso NO se declaran vacíos
@@ -193,47 +192,6 @@ export function missingRequiredPlanFields(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// U4 — qué porcentaje retira de verdad la regla, y de dónde salió
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-export type WithdrawalPctNoteInput = {
-  rule: WithdrawalRuleApi;
-  /** El SWR del perfil: el porcentaje que la regla hereda cuando no tiene uno propio. */
-  swrPct: string;
-  /** `pct_source` del servidor. `null` = backend anterior a U4, o literal desconocido. */
-  pctSource: PctSourceApi | null;
-};
-
-/**
- * La línea bajo el selector de regla, **solo cuando la regla retira un porcentaje que el slider no
- * mueve** (2026-10-10: antes también repetía el heredado, con su explicación en prosa).
- *
- * Existe porque la pantalla tiene UN solo porcentaje editable (el SWR) y la regla puede estar
- * retirando otro: cuando alguien fija `withdrawal_rule.pct` por API o por MCP, mover el slider
- * deja de mover la regla. Callarlo dejaba al usuario ajustando un control que su plan ignora.
- *
- * La decisión se toma por el **valor**, no por `pct_source`: un porcentaje presente es uno que
- * alguien escribió (`normalizeWithdrawalRule` suelta los heredados en la lectura), y un backend
- * anterior a U4 no publica procedencia ninguna — dar por heredado lo que no lo es haría que la
- * nota dijera «tu tasa de retirada» sobre un 4 % con el SWR al 3. `pctSource` solo se mira para
- * el caso contrario: un servidor que SÍ dice «esto lo heredé» manda sobre la heurística.
- *
- * `null` en `fixed_real`: esa regla no retira un porcentaje, retira la necesidad declarada.
- */
-export function withdrawalPctNote(input: WithdrawalPctNoteInput): string | null {
-  const { rule, swrPct, pctSource } = input;
-  if (rule.kind === "fixed_real") return null;
-  const written = rule.kind === "hybrid" ? rule.start_pct : rule.pct;
-  const inherited = written == null || pctSource === "swr";
-  const effective = effectiveWithdrawalPct(rule, swrPct);
-  if (effective == null) return null;
-  // Heredado no hay nada que decir: el porcentaje es el del slider de al lado, y qué significa lo
-  // dice su `<?>` (`settings.swr`). Solo un porcentaje ESCRITO por API/MCP es un estado que la
-  // pantalla no enseña por otra vía.
-  return inherited ? null : `Fijado por API: ${formatPercentAmount(effective)}`;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
 // El cableado campo → ayuda, como DATO
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -275,8 +233,6 @@ export const PLAN_FIELD_HELP: Partial<Record<PlanFieldId, { helpId: HelpTextId }
   partial_income: { helpId: "retirement.partial" },
   success_threshold_pct: { helpId: "retirement.success_threshold" },
   swr_pct: { helpId: "settings.swr" },
-  withdrawal_rule_kind: { helpId: "retirement.withdrawal_rule" },
-  spend_mode: { helpId: "retirement.spend_mode" },
   // Vuelve a la tabla de CAMPOS el 2026-09-13: al retirar el rótulo en versalita de la
   // sub-columna, el interruptor pasó a ser lo más alto que gobierna el puente. La regla no
   // cambia —un `<?>` por texto distinto, en el sitio más alto—, cambia cuál es ese sitio.
@@ -304,7 +260,6 @@ export const PLAN_CARD_HELP: Record<PlanCardId, { helpId: HelpTextId }> = {
   ages: { helpId: "retirement.section_ages" },
   pension: { helpId: "retirement.pension" },
   spending: { helpId: "retirement.section_spending" },
-  withdrawal: { helpId: "retirement.section_withdrawal" },
   horizon: { helpId: "settings.horizon_age" },
 };
 
@@ -318,7 +273,7 @@ export const PLAN_CARD_HELP: Record<PlanCardId, { helpId: HelpTextId }> = {
  * seis frases NO se perdieron: viven en el catálogo (`lib/helpTexts.ts`), cableadas por
  * `PLAN_CARD_HELP`, y las que decían algo que el catálogo no decía se fundieron dentro de la
  * entrada que ya describía ese tema. Los guardas que fijaban su contenido —el horizonte que
- * RETRASA la fecha, las dos cifras de «Retirada», el puente sin aportaciones— se mudaron con
+ * RETRASA la fecha, el puente sin aportaciones— se mudaron con
  * ellas a `helpTexts.test.ts`, que es donde hoy vive el texto.
  */
 export const PLAN_CARD_COPY: Record<PlanCardId, { title: string }> = {
@@ -326,6 +281,6 @@ export const PLAN_CARD_COPY: Record<PlanCardId, { title: string }> = {
   ages: { title: "Edades" },
   pension: { title: "Pensión" },
   spending: { title: "Gasto en jubilación" },
-  withdrawal: { title: "Retirada" },
-  horizon: { title: "Horizonte" },
+  // «y exigencia» desde «solo SWR» (2026-10-10): el umbral de éxito abre ahora este apartado.
+  horizon: { title: "Horizonte y exigencia" },
 };

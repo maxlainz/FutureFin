@@ -393,7 +393,7 @@ ya no existen (`grep -c "VERDICT_GREEN_FLOOR_PCT\|VERDICT_AMBER_MARGIN_PP" apps/
 → 0). **Cache propia**, por `(instalación, usuario, paths, semilla, threshold_pct)` — el umbral
 entró en la clave con el modelo v2, porque el veredicto ahora depende de él —, con el TTL de la
 proyección y invalidada por **las mismas** mutaciones que la serie — incluidas las de
-**reglas de ahorro**, que desde 5.0.0 mueven también el colchón derivado.
+**reglas de ahorro** (que mueven la cascada y con ella la trayectoria; el colchón derivado que 5.0.0 llegó a diseñar se retiró antes de publicarse).
 
 **Opt-in por TAMAÑO, no por omisión** (los dos son axes de respuesta, no de configuración):
 `include_liquid_bands` en la tool `get_projection_bands` (la respuesta completa pesa 16,4 KB y la
@@ -606,7 +606,7 @@ sigue prohibido: era eso, y no la edad en sí, lo que 1.0.6 retiró.
 El segundo plano de configuración que 5.0.0 introduce: **el hogar guarda los supuestos compartidos
 (inflación, impuestos, fuente del ahorro y sus ventanas, divisa, zona horaria); la persona guarda su
 plan de jubilación**. Rutas `GET | PATCH /v1/auth/me/retirement-profile`
-(`apps/api/src/handlers/retirement_profile.rs:929-934`; `/v1/me` no existe — `me` cuelga de
+(`retirement_profile_router`, `apps/api/src/handlers/retirement_profile.rs:1098-1103`; `/v1/me` no existe — `me` cuelga de
 `/v1/auth`). Tools MCP `get_retirement_profile` / `update_retirement_profile`.
 
 Tres diferencias de gobierno frente a §5, y las tres importan:
@@ -644,7 +644,6 @@ solas (no hacía falta migrarlas para poder LEER; la migración de abajo es limp
 | `swr_pct` | decimal string | `3.5` | `[0, 6]` — **PORCENTAJE** (sube de 4 a 6, M5: el SWR deja de dimensionar un objetivo y pasa a ser el techo de venta ordinaria anual) | `swr_out_of_range` | No |
 | `success_threshold_pct` | `u32` | **`95`** (C3) | `[80, 100]` — **vuelve al perfil como RESTRICCIÓN**: decide la fecha de jubilación, no un adorno del semáforo | `success_threshold_out_of_range` | No |
 | `horizon_lifespan_age` | `u32` | `90` | `[85, 105]` | `horizon_lifespan_age_out_of_range` | No |
-| `withdrawal_rule` | objeto | ver abajo | ver abajo | ver abajo | No — se sustituye **entero**, nunca campo a campo |
 | `pension` | objeto? | ausente | ver abajo (incluye el puente) | ver abajo | **Sí** |
 | `partial_retirement` | objeto? | ausente | ver abajo | ver abajo | **Sí** |
 | `birth_date` (no es del perfil) | `YYYY-MM-DD` | — | misma columna `users.birth_date` y **el mismo parser** que `PATCH /v1/auth/me` | los de `auth::validate_birth_date` | **Sí** |
@@ -656,15 +655,17 @@ la migración `20260906091500_drop_stored_success_threshold.sql` borra además e
 que la decisión V7 (anterior a v2) dejó almacenado e ignorado — para que el default 95 mande sin
 competir con un 95 fantasma que nadie eligió.
 
-`withdrawal_rule` (objeto anidado): `kind` (`fixed_real` default \| `percent_of_balance` \| `hybrid`
-\| `guardrails`), `spend_mode` (`ceiling` default \| `rule_is_spend`), y los porcentajes **brutos de
-impuestos** `pct` / `start_pct` / `end_pct` en `(0, 20]` y `band_pct` / `adjust_pct` en `(0, 50]` —
-el mínimo es **exclusivo**, el máximo inclusivo. **U4 se conserva**: `pct`/`start_pct` son
-OPCIONALES y, ausentes, heredan `swr_pct` (`pct_source: swr | explicit` en la respuesta). Qué exige
-cada `kind`: `percent_of_balance` → `pct` (o hereda); `hybrid` → `start_pct` + `end_pct` con
-`end < start` (`hybrid_end_pct_not_below_start`); `guardrails` → `pct` + `band_pct` + `adjust_pct`;
-`fixed_real` → nada. Faltar un valor requerido sin herencia es `withdrawal_pct_required`; salirse,
-`withdrawal_pct_out_of_range` o `withdrawal_band_out_of_range`.
+**Sin `withdrawal_rule` (HISTORIA — sustituido el 2026-10-10, «solo SWR»)**: el perfil tuvo un objeto
+`withdrawal_rule` (`kind` × `spend_mode`, porcentajes brutos, herencia U4 del SWR, `pct_source`) y sus
+seis códigos 400 (`withdrawal_pct_out_of_range`, `withdrawal_pct_required`,
+`withdrawal_band_out_of_range`, `hybrid_end_pct_not_below_start`, `withdrawal_rule_kind`,
+`spend_mode`). Se retiró entero antes de publicar: el modelo de retirada es solo la puerta de tasa
+inicial (`swr_pct`, o `bridge_max_pct` con el puente) y, jubilado, se vende lo que pide el gasto
+indexado. Un PATCH que mande `withdrawal_rule` lo ignora como clave desconocida (solo, es 400
+`patch_empty`); un JSONB almacenado que la traiga carga, la clave se ignora y no se re-emite, y la
+migración `20261010130000_drop_stored_withdrawal_rule.sql` la borra de lo almacenado. Qué se midió y
+por qué: `futurefin-failure-archaeology` «Reglas de retirada por saldo y modo de gasto (5.0.0-dev),
+retiradas antes de publicar».
 
 `pension` (con el PUENTE dentro, C2/C7): `monthly_amount_today` (**requerido**, > 0,
 `pension_amount_not_positive`), `starts_at_age` (**requerido**, `[50, horizon]`,
@@ -698,14 +699,14 @@ grep -nE 'pub(\(crate\))? const (MIN|MAX|DEFAULT)_[A-Z_]+' apps/api/src/handlers
                                                             apps/api/src/handlers/installation.rs
 ```
 
-Salida el 2026-09-06 (**16** líneas — 12 antes del modelo v2, +4: `MIN/MAX_SUCCESS_THRESHOLD_PCT`
-vuelven load-bearing y se suman `DEFAULT_SUCCESS_THRESHOLD_PCT`/`DEFAULT_BRIDGE_YEARS`):
-`MIN_PROFILE_AGE 18` · `MIN_PENSION_AGE 50` · `MAX_WITHDRAWAL_PCT 20` · `MAX_GUARDRAIL_PCT 50` ·
-`MAX_SWR_PCT 6` (subido de 4) · `MIN/MAX/DEFAULT_SUCCESS_THRESHOLD_PCT 80/100/95` ·
-`MAX_BRIDGE_PCT` (= `MAX_WITHDRAWAL_PCT`, 20) · `MIN/MAX_BRIDGE_YEARS 1/20` ·
-`DEFAULT_BRIDGE_YEARS 7` (todas en `retirement_profile.rs`, `pub(crate)`), más
-`MIN/MAX_HORIZON_LIFESPAN_AGE 85/105` y `MIN/MAX_AVG_WINDOW_MONTHS 1/60` de `installation.rs`
-(estas cuatro últimas `pub`, sin `(crate)` — por eso el patrón del grep cubre las dos formas).
+Salida el 2026-10-10 (**14** líneas; eran 16 antes de retirar las reglas de retirada, que se llevaron
+`MAX_WITHDRAWAL_PCT` y `MAX_GUARDRAIL_PCT` — su sola existencia en un grep sería deriva):
+`MIN_PROFILE_AGE 18` · `MIN_PENSION_AGE 50` · `MAX_SWR_PCT 6` (subido de 4) ·
+`MIN/MAX/DEFAULT_SUCCESS_THRESHOLD_PCT 80/100/95` · `MAX_BRIDGE_PCT 20` (ya un literal propio, no
+alias de ninguna cota de reglas) · `MIN/MAX_BRIDGE_YEARS 1/20` · `DEFAULT_BRIDGE_YEARS 7` (todas en
+`retirement_profile.rs`, `pub(crate)`), más `MIN/MAX_HORIZON_LIFESPAN_AGE 85/105` (`pub(crate)`) y
+`MIN/MAX_AVG_WINDOW_MONTHS 1/60` (`pub`) de `installation.rs` (el patrón del grep cubre las dos
+formas).
 `MAX_CASH_BUFFER_MONTHS` desapareció con el colchón.
 
 Bandas de Monte Carlo (`GET /v1/projection/bands`, y el mismo default de confirmación que usa el
@@ -908,7 +909,7 @@ auditing for drift (all confirmed working on 2026-08-28):
   `None | Some("") | Some("mine")`: `grep -n "fn resolve" -A 9 apps/api/src/handlers/person_view.rs`
 - **Perfil de jubilación (§5.1), modelo v2 (2026-09-06)**: cotas
   `grep -nE 'pub(\(crate\))? const (MIN|MAX|DEFAULT)_[A-Z_]+' apps/api/src/handlers/retirement_profile.rs apps/api/src/handlers/installation.rs`
-  (**16** líneas); el alias retirado sigue vivo `grep -n "PENSION_BRIDGE_ALIAS\|parse_retirement_strategy" -A 3 apps/api/src/handlers/retirement_profile.rs`;
+  (**14** líneas el 2026-10-10; eran 16 hasta que «solo SWR» retiró `MAX_WITHDRAWAL_PCT` y `MAX_GUARDRAIL_PCT`); el alias retirado sigue vivo `grep -n "PENSION_BRIDGE_ALIAS\|parse_retirement_strategy" -A 3 apps/api/src/handlers/retirement_profile.rs`;
   el puente por default `grep -n "fn default_bridge_pct" -A 6 apps/api/src/handlers/retirement_profile.rs`;
   ruta `grep -n 'me/retirement-profile' apps/api/src/handlers/retirement_profile.rs`; que
   `fire_settings` ya no lleva los cuatro ejes
@@ -916,7 +917,12 @@ auditing for drift (all confirmed working on 2026-08-28):
   (**2**, las dos doc-comments); espejo en el cliente
   `grep -nE 'const (MIN|MAX|DEFAULT)_[A-Z_]+' apps/web/src/lib/retirementProfile.ts`; **ausencia de
   `target_basis`/`bridge_discount_basis`/`cash_buffer_months`** (un grep vacío es la señal
-  correcta): `grep -rn "target_basis\|bridge_discount_basis\|cash_buffer_months" apps/api/src/handlers/retirement_profile.rs apps/web/src/lib/retirementProfile.ts` → 0 líneas
+  correcta): `grep -rn "target_basis\|bridge_discount_basis\|cash_buffer_months" apps/api/src/handlers/retirement_profile.rs apps/web/src/lib/retirementProfile.ts` → solo comentarios que declaran la ausencia y el test de «claves muertas» (`retirement_profile.rs:1317-1325`); sin ellos, 0:
+  `grep -rn "target_basis\|bridge_discount_basis\|cash_buffer_months" apps/api/src/handlers/retirement_profile.rs apps/web/src/lib/retirementProfile.ts | grep -vE '^[^:]+:[0-9]+:\s*(//|\*|/\*)' | grep -vE ':(1317|1318|1325):'`;
+  **ausencia de la regla de retirada («solo SWR», 2026-10-10)**: `withdrawal_rule`/`pct_source` solo
+  aparecen en comentarios y en el test `a_stored_withdrawal_rule_is_ignored_and_never_re_emitted` —
+  `grep -rnE 'withdrawal_rule|pct_source|spend_mode|MAX_WITHDRAWAL_PCT|MAX_GUARDRAIL_PCT' apps/api/src/handlers/retirement_profile.rs apps/web/src/lib/retirementProfile.ts | grep -vE '^[^:]+:[0-9]+:\s*(//|\*|/\*)'`
+  → solo las líneas del test (1586-1597 hoy)
 - **Bandas (§4), modelo v2**: `grep -nE 'const (DEFAULT_BANDS_PATHS|HTTP_MAX_PATHS|MCP_MAX_PATHS|BANDS_PERCENTILES)' apps/api/src/handlers/projection_bands.rs`
   (2.500/5.000/2.500/`[10,50,90]`); **ausencia del corte fijo** `grep -c "VERDICT_GREEN_FLOOR_PCT\|VERDICT_AMBER_MARGIN_PP" apps/api/src/handlers/projection_bands.rs`
   → **0** (retirados con V7; el veredicto vive en `fn success_verdict` contra `threshold_pct`); y
@@ -925,7 +931,7 @@ auditing for drift (all confirmed working on 2026-08-28):
   y `grep -n 'fn assert_volatility_percent' -A 10 apps/api/src/handlers/assets.rs`
 - **Canal `:dev` (§1.3)**: `grep -n 'inputs:' -A 12 .github/workflows/dev-image.yml` (los dos inputs
   y sus defaults) y `grep -n 'dev|dev-' .github/workflows/dev-image.yml` (la validación de la etiqueta)
-- **5.0.0 no añade env vars**: `git diff main..HEAD -- .env.example apps/api/docker-entrypoint.sh addon/futurefin/ | wc -c` → **0**
+- **5.0.0 no añade env vars**: `git diff main..HEAD -- .env.example apps/api/docker-entrypoint.sh addon/futurefin/config.yaml | wc -c` → **0** (el `addon/futurefin/CHANGELOG.md` SÍ cambia en la rama: entradas del bump, no configuración — por eso el comando ya no pasa el directorio entero)
 - Installation validation bounds: `grep -n "normalize_currency\|validate_show_age_mode\|validate_annual_inflation\|normalize_calendar_tz\|swr_pct\|from(99u32)" apps/api/src/handlers/installation.rs`
 - fire_settings defaults + legacy alias: `grep -n "default_fire_settings\|annual_expense_adjusted" -A 8 apps/api/src/handlers/installation.rs`
 - `savings_source` enum + reader + conditional cache gating: `grep -n "enum SavingsSource\|savings_source\|projection_savings_source" apps/api/src/handlers/installation.rs apps/api/src/handlers/transactions/mod.rs`

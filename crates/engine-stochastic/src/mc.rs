@@ -106,7 +106,7 @@ use futurefin_engine::{
 };
 
 use crate::{
-    F64Money, SuccessAt, KIND_INITIAL_RATE_EXCEEDED, KIND_PORTFOLIO_DEPLETED, KIND_RULE_BELOW_NEED,
+    F64Money, SuccessAt, KIND_INITIAL_RATE_EXCEEDED, KIND_PORTFOLIO_DEPLETED,
 };
 
 // =================================================================================================
@@ -132,7 +132,7 @@ pub const DEFAULT_PERCENTILES: [u8; 3] = [10, 50, 90];
 ///
 /// Renombrada desde `DEPLETION_STEP_MONTHS` en E9 (modelo v2, McOutcome v2): la tabla ya no mide
 /// solo agotamiento de cartera (F1), mide CUALQUIER fallo del camino (F1 cartera agotada / F2
-/// tasa inicial excedida / F3 la regla no llega a la necesidad). El valor —60— no cambia.
+/// tasa inicial excedida). El valor —60— no cambia.
 pub const FAILURE_STEP_MONTHS: u32 = 60;
 
 /// **La configuración de una ejecución de Monte Carlo.**
@@ -771,10 +771,10 @@ pub struct McOutcome {
     /// Bandas puntuales de `liquid_worth`, con la misma forma y la misma advertencia.
     pub liquid_worth: Vec<Vec<f64>>,
     /// **Éxito v2 (E9, modelo de jubilación v2)**: fracción de caminos SIN fallo, es decir con
-    /// `failure_month_index.is_none()` — **ningún fallo F1/F2/F3 en el camino**. Los tres motivos
-    /// (F1 cartera agotada, F2 tasa inicial excedida, F3 la regla por saldo no llega a la
-    /// necesidad ordinaria) los clasifica el bucle del motor (`crates/engine`); aquí solo se
-    /// CUENTAN.
+    /// `failure_month_index.is_none()` — **ningún fallo F1/F2 en el camino**. Los dos motivos
+    /// (F1 cartera agotada, F2 tasa inicial excedida) los clasifica el bucle del motor
+    /// (`crates/engine`); aquí solo se CUENTAN. (Hasta el 2026-10-10 había un F3, la regla de
+    /// retirada por saldo por debajo de la necesidad; se retiró con las reglas.)
     ///
     /// Ya **no depende de si el hogar se jubila**: con la API v2 todo plan se sortea con
     /// `RetirementTrigger::AtMonth` — un mes forzado que decide el llamante (el solver
@@ -796,18 +796,17 @@ pub struct McOutcome {
     /// [`crate::SuccessAt::half_width_pp`] — misma cifra, misma fórmula.
     pub half_width_pp: f64,
     /// Fallos por motivo, contando el PRIMER fallo de cada camino, en el orden
-    /// [`PathFailure::PortfolioDepleted`] (F1) / [`PathFailure::InitialRateExceeded`] (F2) /
-    /// [`PathFailure::RuleBelowNeed`] (F3) — los mismos índices que
-    /// [`crate::KIND_PORTFOLIO_DEPLETED`]/[`crate::KIND_INITIAL_RATE_EXCEEDED`]/
-    /// [`crate::KIND_RULE_BELOW_NEED`] de `solve_mc`, para que las dos capas no diverjan en el
-    /// orden. Suma exactamente `paths − paths·`[`Self::success_probability`].
-    pub failures_by_kind: [u32; 3],
-    /// Fracción ACUMULADA de caminos con ALGÚN fallo (F1, F2 o F3) en `(mes, p)`, cada
+    /// [`PathFailure::PortfolioDepleted`] (F1) / [`PathFailure::InitialRateExceeded`] (F2) — los
+    /// mismos índices que [`crate::KIND_PORTFOLIO_DEPLETED`]/[`crate::KIND_INITIAL_RATE_EXCEEDED`]
+    /// de `solve_mc`, para que las dos capas no diverjan en el orden. Suma exactamente
+    /// `paths − paths·`[`Self::success_probability`].
+    pub failures_by_kind: [u32; 2],
+    /// Fracción ACUMULADA de caminos con ALGÚN fallo (F1 o F2) en `(mes, p)`, cada
     /// [`FAILURE_STEP_MONTHS`] meses desde el ancla. `p` es la fracción de caminos con
     /// `failure_month_index ≤ mes`. El caller traduce meses a edades.
     ///
     /// **Sustituye a `depletion_probability_by_age`** (que solo contaba F1): con la puerta de
-    /// tasa inicial (F2) y la regla por saldo (F3) dentro del bucle, «agotamiento» dejó de ser el
+    /// tasa inicial (F2) dentro del bucle, «agotamiento» dejó de ser el
     /// único motivo por el que un camino deja de cumplir el plan.
     ///
     /// El ancla es el mes de jubilación FORZADO del plan
@@ -818,24 +817,15 @@ pub struct McOutcome {
     /// va **vacío**. La última fila es SIEMPRE el horizonte (cierra ahí aunque no sea múltiplo del
     /// paso), y esa fila coincide, al bit, con `1 − `[`Self::success_probability`].
     pub cumulative_failure_by_age: Vec<(u32, f64)>,
-    /// Mediana, entre los caminos, del número de meses jubilados con recorte
-    /// (`withdrawal_shortfall > 0`). Con `fixed_real` es 0 por construcción.
-    pub months_below_need_p50: u32,
-    /// Mediana, entre los caminos, de la cobertura de la necesidad ORDINARIA sobre los meses
-    /// jubilados: `Σ max(0, w − excess) / Σ max(0, w + s + u − excess)`, cada término clampado a
-    /// `≥ 0` **mes a mes** antes de sumar. `1.0` = la cubrió entera. `None` si ningún camino tiene
-    /// meses jubilados con denominador positivo.
-    ///
-    /// **Corregida en E9 (bug B2)**: hasta este cambio el numerador era `Σ w` sin más, y bajo
-    /// `rule_is_spend` (D5) `withdrawal` incluye el EXCESO sobre la necesidad
-    /// (`withdrawal_excess`, D24) — la regla ES el gasto y vende `permitido` aunque sobre. Un mes
-    /// con superávit inflaba la cobertura por encima de 1,0 sin que nada lo dijera. La identidad
-    /// del motor (`fuzz_invariants.rs`, `crates/engine`) es
-    /// `withdrawal + withdrawal_shortfall + unmet_need − withdrawal_excess = need_net`, así que
-    /// `w + s + u − excess` ES `need_net` exactamente — y **puede ser negativo** desde el mes en
-    /// que la pensión supera el gasto (need_net negativo), lo que exige el clamp mes a mes en vez
-    /// de uno solo al final.
-    pub withdrawal_to_need_ratio_p50: Option<f64>,
+    // **Retiradas el 2026-10-10** (decisión «solo SWR»): `months_below_need_p50` (mediana de
+    // meses jubilados con recorte o descubierto) y `withdrawal_to_need_ratio_p50` (mediana de la
+    // cobertura de la necesidad). Las dos nacieron para leer el recorte de una regla de retirada
+    // por saldo. Sin reglas, un mes por debajo del gasto es un mes con necesidad sin fundar, y eso
+    // ES F1: cualquier camino que lo tenga ya falló. Así que `months_below > 0` en la mediana
+    // exigía que más de la mitad de los caminos fallaran (éxito < 50 %), y la cobertura mediana
+    // valía 1,0 en cuanto el éxito pasaba del 50 % — las dos eran constantes en todo plan que la
+    // app puede llegar a proponer (umbral 80–100 %). Lo que sí dice algo, cuándo y por qué fallan
+    // los caminos, ya viaja en `failures_by_kind` y `cumulative_failure_by_age`.
     /// ¿Algún activo declaró volatilidad? Con `false` todas las bandas coinciden con la línea
     /// determinista y la UI debe decirlo («sin volatilidad declarada: la banda es la línea»).
     pub any_volatility_declared: bool,
@@ -928,8 +918,6 @@ pub fn project_percentile_bands(
     let mut retired_at: Vec<Option<u32>> = Vec::with_capacity(n);
     let mut failure_month: Vec<Option<u32>> = Vec::with_capacity(n);
     let mut failure_kind: Vec<Option<PathFailure>> = Vec::with_capacity(n);
-    let mut months_below: Vec<f64> = Vec::with_capacity(n);
-    let mut coverage_ratios: Vec<f64> = Vec::with_capacity(n);
 
     // **Lo que un camino aporta al resultado**, recogido dentro del propio camino (E12). Todo lo
     // que aquí se calcula es INTRA-camino: dos vectores de muestras, cuatro escalares y dos sumas
@@ -942,10 +930,6 @@ pub fn project_percentile_bands(
         retired_at: Option<u32>,
         failure_month: Option<u32>,
         failure_kind: Option<PathFailure>,
-        months_below: u32,
-        /// `Σ w_net` y `Σ need_net` de los meses jubilados; `None` si el camino no aporta
-        /// cobertura (sin jubilación, o con denominador no positivo).
-        coverage: Option<f64>,
     }
 
     let digest = |_p: u32, out: &SimOutput<F64Money>| -> PathDigest {
@@ -956,45 +940,12 @@ pub fn project_percentile_bands(
             "un camino fallido sin motivo (o un motivo sin fallo) rompería `failures_by_kind`"
         );
 
-        // Las dos magnitudes del RECORTE (D24), sobre los meses JUBILADOS de este camino. Fuera
-        // de la jubilación el motor no aplica techo alguno, así que el recorte solo puede vivir
-        // ahí; se acota explícitamente de todos modos para que la lectura no dependa de eso.
-        let (mut below, mut sum_w, mut sum_need) = (0u32, 0.0f64, 0.0f64);
-        if let Some(r) = out.retirement_month_index {
-            for k in (r as usize)..len {
-                let w = out.withdrawal[k].0;
-                let s = out.withdrawal_shortfall[k].0;
-                // **La necesidad no cubierta entra en el denominador** (hallazgo #4 de la
-                // revisión). Con `fixed_real` el recorte `s` es CERO por construcción —el
-                // permitido ES la necesidad—, así que `Σw / Σ(w+s)` valía 1,0 siempre, también
-                // en los caminos que se quedaban sin cartera en el mes 35 de 400 y cubrían el
-                // 8,65 % de lo que necesitaban. Lo que faltaba estaba en la otra magnitud.
-                let u = out.unmet_need[k].0;
-                if s + u > 0.0 {
-                    below += 1;
-                }
-                // **B2**: bajo `rule_is_spend` (D5) `withdrawal` incluye el EXCESO sobre la
-                // necesidad (`withdrawal_excess`, D24) — la regla ES el gasto y vende `permitido`
-                // aunque sobre. Sin descontarlo, un mes con superávit inflaba la cobertura. La
-                // identidad del motor es `w + s + u − excess = need_net`
-                // (`fuzz_invariants.rs:385`), y `need_net` puede ser NEGATIVO desde el mes en que
-                // la pensión supera el gasto: se clampa a `≥ 0` MES A MES, no una sola vez al
-                // final, para que un mes de superávit no reste cobertura a los demás.
-                let e = out.withdrawal_excess[k].0;
-                let w_net = (w - e).max(0.0);
-                let need_net = (w + s + u - e).max(0.0);
-                sum_w += w_net;
-                sum_need += need_net;
-            }
-        }
         PathDigest {
             net_worth: out.net_worth.iter().map(|m| m.0).collect(),
             liquid_worth: out.liquid_worth.iter().map(|m| m.0).collect(),
             retired_at: out.retirement_month_index,
             failure_month: out.failure_month_index,
             failure_kind: out.failure_kind,
-            months_below: below,
-            coverage: (sum_need > 0.0).then(|| sum_w / sum_need),
         }
     };
 
@@ -1014,10 +965,6 @@ pub fn project_percentile_bands(
             retired_at.push(d.retired_at);
             failure_month.push(d.failure_month);
             failure_kind.push(d.failure_kind);
-            months_below.push(f64::from(d.months_below));
-            if let Some(c) = d.coverage {
-                coverage_ratios.push(c);
-            }
         },
     )?;
 
@@ -1050,7 +997,7 @@ pub fn project_percentile_bands(
     // ------------------------------------------------------------------------------------------
     let n_f = n as f64;
     // **Éxito v2 (E9, modelo de jubilación v2)**: un camino falla ⟺ `failure_month_index.is_some()`
-    // — ningún fallo F1/F2/F3 en el camino. Ya no depende de si el hogar se jubila: con la API v2
+    // — ningún fallo F1/F2 en el camino. Ya no depende de si el hogar se jubila: con la API v2
     // todo plan trae `RetirementTrigger::AtMonth` (el mes forzado que decide el solver externo o
     // el llamante), así que «no jubilarse nunca» dejó de ser un desenlace posible del sorteo. Las
     // lecturas que D22/D24 separaban para esa pregunta (`never_retired_probability`,
@@ -1061,7 +1008,7 @@ pub fn project_percentile_bands(
 
     // Fallos por motivo: el PRIMER (y único, por construcción del bucle) motivo de cada camino
     // fallido, en el orden común con `solve_mc::SuccessAt::by_kind`.
-    let mut failures_by_kind = [0u32; 3];
+    let mut failures_by_kind = [0u32; 2];
     for kind in failure_kind.iter().flatten() {
         failures_by_kind[kind_index(*kind)] += 1;
     }
@@ -1129,12 +1076,6 @@ pub fn project_percentile_bands(
         }
     }
 
-    sort_total(&mut months_below);
-    let months_below_need_p50 = percentile_of_sorted(&months_below, 50) as u32;
-    sort_total(&mut coverage_ratios);
-    let withdrawal_to_need_ratio_p50 =
-        (!coverage_ratios.is_empty()).then(|| percentile_of_sorted(&coverage_ratios, 50));
-
     Ok(McOutcome {
         seed: config.seed,
         paths: config.paths,
@@ -1147,23 +1088,19 @@ pub fn project_percentile_bands(
         half_width_pp,
         failures_by_kind,
         cumulative_failure_by_age,
-        months_below_need_p50,
-        withdrawal_to_need_ratio_p50,
         any_volatility_declared,
     })
 }
 
 /// El índice de un [`PathFailure`] en [`McOutcome::failures_by_kind`] — los MISMOS índices que
-/// [`crate::KIND_PORTFOLIO_DEPLETED`]/[`crate::KIND_INITIAL_RATE_EXCEEDED`]/
-/// [`crate::KIND_RULE_BELOW_NEED`] de `solve_mc`, para que las dos capas cuenten en el mismo
-/// orden. Se escribe aquí (y no se importa de `solve_mc`, que lo mantiene privado) porque es un
-/// `match` de tres líneas sobre un enum exhaustivo: si `PathFailure` ganara una variante, el
+/// [`crate::KIND_PORTFOLIO_DEPLETED`]/[`crate::KIND_INITIAL_RATE_EXCEEDED`] de `solve_mc`, para
+/// que las dos capas cuenten en el mismo orden. Se escribe aquí (y no se importa de `solve_mc`,
+/// que lo mantiene privado) porque es un `match` de dos líneas sobre un enum exhaustivo: si `PathFailure` ganara una variante, el
 /// compilador obligaría a actualizar las DOS copias, y eso es más barato que acoplar los módulos.
 fn kind_index(kind: PathFailure) -> usize {
     match kind {
         PathFailure::PortfolioDepleted => KIND_PORTFOLIO_DEPLETED,
         PathFailure::InitialRateExceeded => KIND_INITIAL_RATE_EXCEEDED,
-        PathFailure::RuleBelowNeed => KIND_RULE_BELOW_NEED,
     }
 }
 

@@ -609,7 +609,7 @@ async fn a_whatif_without_a_reachable_date_publishes_null_monte_carlo_with_its_r
         }
         // La trayectoria sin jubilarse sigue publicándose entera.
         assert!(
-            k["failures_by_kind"].as_array().is_some_and(|a| a.len() == 3),
+            k["failures_by_kind"].as_array().is_some_and(|a| a.len() == 2),
             "{lado}: el reparto por motivo sigue viajando: {sim}"
         );
     }

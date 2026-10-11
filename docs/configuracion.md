@@ -153,7 +153,7 @@ propia proyección.
 
 Guarda tu **estrategia** (cuanto antes · a una edad fija · coast · media jornada), tu edad objetivo,
 tu **tasa de retirada segura (SWR)**, el modo del objetivo anual y su importe manual, la **edad
-límite del horizonte**, la **regla de retirada** y cómo se aplica, la **pensión pública con su
+límite del horizonte**, la **pensión pública con su
 fecha** —con el puente hasta ella como un ajuste suyo (activarlo, tasa máxima, años máximos), no una
 estrategia aparte—, la fase de **media jornada** y el umbral de éxito de los escenarios.
 

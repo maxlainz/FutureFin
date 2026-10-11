@@ -526,7 +526,8 @@ color of the semáforo.
 `success_of_plan` (serie/Resumen) answer "does the sorteado plan break?", never "does the household
 actually retire?". With `retirement_date_basis: "not_reachable"` the simulated scenario is "never
 retire within the horizon" — which, for a household still accumulating, almost never fails any of
-F1/F2/F3 (there's no withdrawal phase to fail in). A 100 %-green KPI in that state means "this
+F1/F2 (there's no withdrawal phase to fail in; the third failure F3 was retired with the
+balance-based withdrawal rules on 2026-10-10, «solo SWR»). A 100 %-green KPI in that state means "this
 never-retiring plan doesn't break", not "you reach your goal". The two fields answer different
 questions and neither implies the other:
 
@@ -538,6 +539,15 @@ curl -s ".../v1/projection/series" | jq '{basis: .retirement_date_basis, success
 If `basis` is `not_reachable` or `pending`, the success percentage is not answering the question
 the user is asking on screen. `BANDS_MODEL_NOTE` in `projection_bands.rs` says this in the wire
 itself — read it before building any UI that colors a tile without also checking the basis.
+
+**Which surface still shows a number there (WP A12, 5.0.0).** The two endpoints no longer agree on
+purpose: `GET /v1/projection/bands` publishes `success_of_plan` / `success_verdict` as **`null`** with
+`success_absent_reason` when the plan has no valid month (`projection_bands.rs`, module doc and
+`ProjectionBandsResponse::success_absent_reason`), while `GET /v1/projection/series` keeps a
+best-effort `success_of_plan` describing the closest attempt (`handlers/projection.rs`, doc of
+`jubilacion_month_index`). So the «100 % en verde» trap of this section can only come from the
+series/Resumen side today; a green tile fed by the bands in that state is a SPA bug, not this trap
+(the SPA reads `success_absent_reason` in `lib/risk-bands.ts`).
 
 ## Where the evidence lives
 

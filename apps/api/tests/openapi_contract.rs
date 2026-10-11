@@ -402,6 +402,9 @@ fn the_plan_block_is_declared_in_the_document() {
         "buffer_source_asset_name",
         "never_retired_probability",
         "retirement_month_index_percentiles",
+        // «Solo SWR» (2026-10-10): las dos lecturas del recorte de una regla de retirada.
+        "months_below_need_p50",
+        "withdrawal_to_need_ratio_p50",
     ] {
         assert!(
             bandas[k].is_null(),
@@ -430,19 +433,32 @@ fn the_plan_block_is_declared_in_the_document() {
         );
     }
 
-    // `points[]` de la serie: la TERCERA magnitud del mes. `withdrawal` es lo que se obtuvo,
-    // `withdrawal_shortfall` lo que la REGLA rechazó y `unmet_need` lo que la CARTERA no dio —
-    // un cliente que no sepa que existe la tercera lee un plan agotado como un plan cubierto.
+    // `points[]` de la serie: las dos magnitudes del mes. `withdrawal` es lo que se obtuvo y
+    // `unmet_need` lo que la CARTERA no dio — un cliente que no sepa que existe la segunda lee un
+    // plan agotado como un plan cubierto.
     let punto_serie = &doc["components"]["schemas"]["ProjectionPoint"]["properties"];
-    for k in [
-        "withdrawal",
-        "withdrawal_shortfall",
-        "withdrawal_excess",
-        "unmet_need",
-    ] {
+    for k in ["withdrawal", "unmet_need"] {
         assert!(
             !punto_serie[k].is_null(),
             "ProjectionPoint.{k} no está declarado"
+        );
+    }
+    // Retiradas con las reglas de retirada por saldo («solo SWR», 2026-10-10).
+    for k in ["withdrawal_shortfall", "withdrawal_excess"] {
+        assert!(
+            punto_serie[k].is_null(),
+            "ProjectionPoint.{k} se retiró y no debería seguir declarado"
+        );
+    }
+    let perfil = &doc["components"]["schemas"]["RetirementProfile"]["properties"];
+    assert!(
+        !perfil["swr_pct"].is_null() && perfil["withdrawal_rule"].is_null(),
+        "RetirementProfile publica swr_pct y ya no withdrawal_rule: {perfil}"
+    );
+    for dead in ["WithdrawalRule", "WithdrawalRuleKind", "PctSource", "SpendMode"] {
+        assert!(
+            doc["components"]["schemas"][dead].is_null(),
+            "el schema {dead} se retiró con las reglas de retirada"
         );
     }
     // Es un NÚMERO, como el resto de importes del punto (excepción chart-only D4/I3), no un

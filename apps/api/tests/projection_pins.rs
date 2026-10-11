@@ -170,14 +170,12 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
     assert_eq!(fases.len(), 1, "sin jubilación solo hay acumulación: {fases:?}");
     assert_eq!(fases[0]["phase"], "accumulating");
     assert_eq!(fases[0]["month_index"], 0);
-    // Las tres series de retirada existen en cada punto y, con `fixed_real`, recorte y exceso
-    // son cero SIEMPRE (la regla no tiene techo): si alguna vez dejan de serlo sin que cambie
-    // la regla, es que el motor está recortando por su cuenta.
+    // La serie de retirada existe en cada punto (las de recorte y exceso de una regla de
+    // retirada por saldo se retiraron el 2026-10-10 con las reglas).
     let pts = s["points"].as_array().expect("points");
     for p in pts {
         assert!(p["withdrawal"].is_number(), "falta withdrawal: {p}");
-        assert_eq!(p["withdrawal_shortfall"], 0.0, "fixed_real no recorta: {p}");
-        assert_eq!(p["withdrawal_excess"], 0.0, "ceiling no gasta de más: {p}");
+        assert!(p.get("withdrawal_shortfall").is_none(), "retirada: {p}");
     }
     // Y la retirada es 0 antes de jubilarse y > 0 después (el déficit de 1.200 €/mes que el
     // patrimonio ya pinea desde la otra cara).

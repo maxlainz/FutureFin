@@ -1,5 +1,5 @@
 {
-  "_doc": "Pin ADITIVO de las salidas nuevas del motor 5.0.0 (WP1b, seccion B.8 del plan de la issue #207): SHA-256 del texto canonico de retirement_month_index, liquid_crossing_month_index, pension_start_month_index, partial_retirement_month_index, phase_transitions y las tres series withdrawal / withdrawal_shortfall / withdrawal_excess mes a mes con el Decimal completo via Display, mas el recuento de warnings. Cubre los casos de PROYECCION de tests/common/cases.rs (los L* son calendarios de amortizacion y no tienen fases). Vive APARTE de pins-4.15.json a proposito: aquel demuestra que las salidas de 4.15.0 no se movieron y dejaria de poder demostrarlo si creciera con cada lectura nueva. GENERADO: no editar a mano. Regenerar SOLO si el cambio es intencionado: UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG (futurefin-change-control). Cubre projection_cases_all() (los casos de 4.15.0) MAS projection_cases_5_0() (P14-P17: el techo numerico de la issue #209 y las tres reglas de retirada nuevas; P18-P23: pension con fecha, objetivo puente, media jornada, cruce como lectura, techo de aportacion y pausa de ingresos; P24-P25: los dos reproductores minimos de bit-identidad con 4.15.0 del pase de correcciones — la ESCALA del descubierto en la via mixta y la AGRUPACION del servicio de deuda). En los casos con fixed_real withdrawal_shortfall y withdrawal_excess son cero por construccion — el permitido ES la necesidad — y ahi es donde este pin demuestra que WP2 no movio la semantica de 4.15.0. WP3 AMPLIO la canonicalizacion con partial_phase_capital_growing y la serie disposable_cash mes a mes: por eso el sha256 de los 17 casos anteriores cambio SIN que cambiara ningun numero suyo, y quien lo demuestra es el test the_5_0_canonicalization_grew_without_moving_the_old_fields (rehashea la capa vieja sola contra los SHA-256 de antes de WP3). E1 (modelo de jubilacion v2) la amplio otra vez con failure_month_index y failure_kind — el veredicto de ESTE camino (F1 cartera sin fundar la necesidad, F2 tasa inicial por encima del tope, F3 regla por saldo por debajo del gasto ordinario)— y retiro el aviso retire_at_age_underfunded, que solo P21 tenia. E4 ENCOGIO la capa WP3: bridge_effective_withdrawal_pct, pension_coverage_ratio y partial_gap_target salieron de ProjectionOutput con el objetivo puente (decision M4 del modelo v2), asi que el sha256 de TODOS los casos se movio sin que se moviera un numero de la capa WP2. Y dos casos si movieron numeros, a proposito: P18 (cruce 145 -> 262) y P19 (cruce 121 -> 306), porque su objetivo dejo de descontar la pension con fecha; la derivacion a mano esta en the_5_0_cases_are_anchored_by_hand_derived_numbers.",
+  "_doc": "Pin ADITIVO de las salidas nuevas del motor 5.0.0 (WP1b, seccion B.8 del plan de la issue #207): SHA-256 del texto canonico de retirement_month_index, liquid_crossing_month_index, pension_start_month_index, partial_retirement_month_index, phase_transitions y las tres series withdrawal / withdrawal_shortfall / withdrawal_excess mes a mes con el Decimal completo via Display, mas el recuento de warnings. Cubre los casos de PROYECCION de tests/common/cases.rs (los L* son calendarios de amortizacion y no tienen fases). Vive APARTE de pins-4.15.json a proposito: aquel demuestra que las salidas de 4.15.0 no se movieron y dejaria de poder demostrarlo si creciera con cada lectura nueva. GENERADO: no editar a mano. Regenerar SOLO si el cambio es intencionado: UPDATE_ENGINE_PINS_5_0=1 cargo test -p futurefin-engine --test golden_pins, y documentar el delta en el CHANGELOG (futurefin-change-control). Cubre projection_cases_all() (los casos de 4.15.0) MAS projection_cases_5_0() (P14: el techo numerico de la issue #209; P15-P17, las tres reglas de retirada por saldo, se retiraron el 2026-10-10 con la decision solo SWR; P18-P23: pension con fecha, objetivo puente, media jornada, cruce como lectura, techo de aportacion y pausa de ingresos; P24-P25: los dos reproductores minimos de bit-identidad con 4.15.0 del pase de correcciones — la ESCALA del descubierto en la via mixta y la AGRUPACION del servicio de deuda). En los casos con fixed_real withdrawal_shortfall y withdrawal_excess son cero por construccion — el permitido ES la necesidad — y ahi es donde este pin demuestra que WP2 no movio la semantica de 4.15.0. WP3 AMPLIO la canonicalizacion con partial_phase_capital_growing y la serie disposable_cash mes a mes: por eso el sha256 de los 17 casos anteriores cambio SIN que cambiara ningun numero suyo, y quien lo demuestra es el test the_5_0_canonicalization_grew_without_moving_the_old_fields (rehashea la capa vieja sola contra los SHA-256 de antes de WP3). E1 (modelo de jubilacion v2) la amplio otra vez con failure_month_index y failure_kind — el veredicto de ESTE camino (F1 cartera sin fundar la necesidad, F2 tasa inicial por encima del tope; hubo un F3, regla por saldo por debajo del gasto ordinario, retirado con las reglas)— y retiro el aviso retire_at_age_underfunded, que solo P21 tenia. E4 ENCOGIO la capa WP3: bridge_effective_withdrawal_pct, pension_coverage_ratio y partial_gap_target salieron de ProjectionOutput con el objetivo puente (decision M4 del modelo v2), asi que el sha256 de TODOS los casos se movio sin que se moviera un numero de la capa WP2. Y dos casos si movieron numeros, a proposito: P18 (cruce 145 -> 262) y P19 (cruce 121 -> 306), porque su objetivo dejo de descontar la pension con fecha; la derivacion a mano esta en the_5_0_cases_are_anchored_by_hand_derived_numbers. SOLO SWR (2026-10-10): las series withdrawal_shortfall y withdrawal_excess salieron de ProjectionOutput con las reglas de retirada por saldo y el modo de gasto; el texto canonico las conserva como ceros literales (valian 0 en todos los casos supervivientes por construccion), asi que el sha256 de los 22 casos que quedan es BYTE A BYTE el anterior y solo desaparecieron P15-P17.",
   "engine_version": "5.0.0",
   "hash_algo": "sha256 over the canonical text described in golden_pins.rs",
   "cases": {
@@ -184,45 +184,6 @@
       "warnings": "",
       "failure_month_index": null,
       "failure_kind": ""
-    },
-    "P15_percent_of_balance_ceiling": {
-      "sha256": "d7b6d37e40cf05885b8dd8c392ed795b3fc1153e3608d37d38335c3b4c3b7529",
-      "retirement_month_index": 1,
-      "liquid_crossing_month_index": null,
-      "withdrawal_total": "518684.06099389898756237092108",
-      "phases": "accumulating@0|retired@1",
-      "pension_start_month_index": null,
-      "partial_retirement_month_index": null,
-      "disposable_cash_total": "0",
-      "warnings": "",
-      "failure_month_index": 1,
-      "failure_kind": "rule_below_need"
-    },
-    "P16_hybrid_rule_is_spend": {
-      "sha256": "6179b91b246219cb9603150321e36c24df74bc713ff1bb93e677bbd22991750e",
-      "retirement_month_index": 1,
-      "liquid_crossing_month_index": null,
-      "withdrawal_total": "733393.33558285015878468468257",
-      "phases": "accumulating@0|retired@1",
-      "pension_start_month_index": null,
-      "partial_retirement_month_index": null,
-      "disposable_cash_total": "0",
-      "warnings": "",
-      "failure_month_index": null,
-      "failure_kind": ""
-    },
-    "P17_guardrails_taxes_es": {
-      "sha256": "2055d6b54c62824026b05ec691dc783158affd8abc5985ddec70ad032a9c3a27",
-      "retirement_month_index": 1,
-      "liquid_crossing_month_index": null,
-      "withdrawal_total": "986541.8052190908357567812119",
-      "phases": "accumulating@0|retired@1",
-      "pension_start_month_index": null,
-      "partial_retirement_month_index": null,
-      "disposable_cash_total": "0",
-      "warnings": "",
-      "failure_month_index": 1,
-      "failure_kind": "rule_below_need"
     },
     "P18_pension_bridge": {
       "sha256": "94ba2d0fd43f69d28e3cf3cb82e2e3e5ecbefbd1adcddda0cc4b5e6d93478d3a",

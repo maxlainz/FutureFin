@@ -11,8 +11,11 @@ description: >
   `postgres:*` runtime base, a `VOLUME` in the Dockerfile, SIGTERM to the postmaster, a `/dev/tcp`
   healthcheck fallback), of the 4.0.0 removal of the external-database mode (making the
   container honour `DATABASE_URL` again, re-adding the one-shot automigration), a `density`
-  parameter on the `get_projection` MCP tool, evaluating the withdrawal-rule failure F3
-  (`RuleBelowNeed`) month by month instead of only in the first retired month, or renaming a field
+  parameter on the `get_projection` MCP tool, balance-based withdrawal rules (`percent_of_balance`,
+  `hybrid`, `guardrails`/Guyton-Klinger), a spend mode (`ceiling`/`rule_is_spend`) or the
+  withdrawal-rule failure F3 (`RuleBelowNeed`) — all retired before publishing 5.0.0 by the
+  «solo SWR» decision; the older entry on evaluating F3 month by month is kept as superseded
+  history — or renaming a field
   to disambiguate it from a same-named field elsewhere instead of declaring its basis/mode.
   Also load it when you hit a symptom that "smells historical": backup export 500s, projection
   numbers that look plausible but shift with inflation toggles, chart deflation wrong only at some
@@ -67,7 +70,8 @@ Vocabulary used below (defined once):
 | 21 | Binding the Streamable HTTP `Mcp-Session-Id` to the Bearer credential | Not a removal — a **deliberate non-addition**, reasoned in full in the code so it doesn't get re-proposed as an obvious hardening. Today it buys nothing: the Bearer middleware runs before the MCP protocol on *every* request, identity is re-resolved live (D14), and a stolen session id without a valid token never gets past 401. It also has a named trigger to revisit — see §2.17 | v4.4.0; `apps/api/src/mcp/mod.rs` module doc-comment |
 | 22 | Exposing `density` as a `get_projection` MCP-tool parameter | Would multiply the payload ~5× (`density=monthly`) and still would not say WHY the curve fell, only WHERE — the fix for "why" is naming the events that moved it, not serving more points | Fase 5, issue #86, v4.4.0; `apps/api/src/handlers/projection.rs` (`ProjectionEvent` doc-comment) — see §2.18 |
 | 23 | Renaming the four homonymous fields shared by `get_budget.totals` and `get_summary.financial_health` | Same names describe genuinely different bases (plan vs plan-or-actual, by `savings_source` mode) on purpose; renaming is breaking over six fields the SPA and both MCP surfaces read by name, and it would not have made either number more legible — what was missing was declaring the base, not renaming the field | Fase 5, issue #86, v4.4.0; `apps/api/src/handlers/budget.rs` (`BudgetTotalsResponse::basis` doc-comment) — see §2.19 |
-| 24 | **F3 (`RuleBelowNeed`) evaluada mes a mes con latch** — «con una regla por saldo, lo que la regla permite queda por debajo de la necesidad ordinaria», comprobado en CADA mes `Retired` | Era un problema de **BARRERA**, no una medición del plan: el permitido sigue a `L(k−1)`, que pasea con ~17 % de volatilidad frente a una deriva de ~0,8 %/año, así que sobre cientos de meses la probabilidad de tocarla alguna vez tiende a 1 por la varianza y no por la salud del plan. Bajo `rule_is_spend` una regla porcentual NO puede disparar F1 (una fracción del saldo nunca lo vacía), así que la barrera era el único veredicto posible y decidía sola. Medido sobre la demo sintética con «3,5 % del saldo»: capital necesario hoy **2,52 M€** frente a **620 k€** con `fixed_real`, **67 fallos de 2.500 caminos, todos F3**, y el primero siempre antes de la pensión (mediana: mes 293); el hogar de prueba de `mc_percent_of_balance_never_ruins_but_cuts_the_spending` fallaba en el 94,9 % de los caminos sin que la cartera llegara nunca a cero. Sustituida por **F3 solo en `R`**, el primer mes jubilado: con `R` fijo, F2 y F3 son la misma pregunta en dos unidades (bruta y neta) y después manda F1 mes a mes — el mismo hogar pide **860 k€**. **Retirarla del todo NO era la alternativa**: colapsaría al suelo de F2 y el modo porcentual sería infalible por construcción | Retirada **2026-09-07**, decisión C10 del owner (5.0.0, paquete E11); `crates/engine/src/sim_core.rs` (bloque «EL VEREDICTO DE ESTE CAMINO»), regresiones `crates/engine/tests/phases_wp3.rs::f3_fires_only_in_the_first_retired_month_never_after` y `crates/engine-stochastic/tests/monte_carlo.rs::mc_f3_is_a_property_of_the_plan_not_of_the_draw` |
+| 24 | **F3 (`RuleBelowNeed`) evaluada mes a mes con latch** — «con una regla por saldo, lo que la regla permite queda por debajo de la necesidad ordinaria», comprobado en CADA mes `Retired` | Era un problema de **BARRERA**, no una medición del plan: el permitido sigue a `L(k−1)`, que pasea con ~17 % de volatilidad frente a una deriva de ~0,8 %/año, así que sobre cientos de meses la probabilidad de tocarla alguna vez tiende a 1 por la varianza y no por la salud del plan. Bajo `rule_is_spend` una regla porcentual NO puede disparar F1 (una fracción del saldo nunca lo vacía), así que la barrera era el único veredicto posible y decidía sola. Medido sobre la demo sintética con «3,5 % del saldo»: capital necesario hoy **2,52 M€** frente a **620 k€** con `fixed_real`, **67 fallos de 2.500 caminos, todos F3**, y el primero siempre antes de la pensión (mediana: mes 293); el hogar de prueba de `mc_percent_of_balance_never_ruins_but_cuts_the_spending` fallaba en el 94,9 % de los caminos sin que la cartera llegara nunca a cero. Sustituida por **F3 solo en `R`**, el primer mes jubilado: con `R` fijo, F2 y F3 son la misma pregunta en dos unidades (bruta y neta) y después manda F1 mes a mes — el mismo hogar pide **860 k€**. **Retirarla del todo NO era la alternativa**: colapsaría al suelo de F2 y el modo porcentual sería infalible por construcción | Retirada **2026-09-07**, decisión C10 del owner (5.0.0, paquete E11); `crates/engine/src/sim_core.rs` (bloque «EL VEREDICTO DE ESTE CAMINO»), regresiones `crates/engine/tests/phases_wp3.rs::f3_fires_only_in_the_first_retired_month_never_after` y `crates/engine-stochastic/tests/monte_carlo.rs::mc_f3_is_a_property_of_the_plan_not_of_the_draw` — **SUSTITUIDA 2026-10-10**: F3 entera se retiró con las reglas por saldo (fila 25); las dos regresiones citadas ya no existen (`f3_fires_only_in_the_first_retired_month_never_after` y `mc_f3_is_a_property_of_the_plan_not_of_the_draw` se borraron con ella). La medición de esta fila sigue siendo la evidencia de por qué una puerta de saldo evaluada mes a mes es una barrera, no un veredicto |
+| 25 | **Reglas de retirada por saldo y modo de gasto** (5.0.0-dev): `WithdrawalRule::{PercentOfBalance, Hybrid, Guardrails}` (Guyton-Klinger), `SpendMode::{Ceiling, RuleIsSpend}` («Techo» / «Es mi gasto»), el fallo F3 (`RuleBelowNeed`), `pct_source` y la herencia U4 del SWR al % de la regla | Medido con el mapa semántico: el modo no movía la fecha, ni F2/F3, ni el capital necesario (salvo las bandas vía F1), ni el número FIRE — solo la venta en meses de déficit y una lectura de cobertura; el % de la regla era siempre el SWR (U4) salvo por API; y con el % heredado F3 ⊇ F2 en `R`, así que **neutralizaba el puente de pensión** (F3 no miraba `bridge_max_pct`). Detalle en §2.28 | Retiradas **2026-10-10**, decisión «solo SWR» del owner, antes de publicar 5.0.0; migración `20261010130000_drop_stored_withdrawal_rule.sql`; contrato vigente en `futurefin-fire-domain-reference` |
 
 
 ## 2. Detailed entries
@@ -274,7 +278,10 @@ Vocabulary used below (defined once):
   ENTERO (base `bridge_to_pension`, `futurefin-fire-domain-reference` §4b), y desde ella solo el
   hueco que no cubra. Eso es precisamente lo que una columna plana no podía expresar y lo que el
   toggle `persists_after_retirement` —que **sigue vivo y sin cambios** para rentas y pensiones sin
-  calendario— restaba desde el cruce aunque llegara veinte años después. No se resucita ninguna
+  calendario— restaba desde el cruce aunque llegara veinte años después. (**Matiz posterior, E4 del modelo v2,
+  2026-09-06**: la base `bridge_to_pension` se retiró y la pensión con fecha ya no cambia ningún
+  objetivo — es un FLUJO que el bucle cobra desde su mes, y el puente sobrevive como tope de la tasa
+  inicial, F2. La readmisión sigue en pie por la misma razón: lo que importa es la FECHA.) No se resucita ninguna
   columna: es JSONB en el perfil, con handler, cotas y tools MCP. Lo que sigue rechazado es
   **derivar** la pensión de cotizaciones (falsa precisión: `financial-contracts.md` §3.11).
 
@@ -674,6 +681,11 @@ Vocabulary used below (defined once):
   proteger lo nuevo, es **iluminar lo viejo**.
 - **Status**: cerrado en WP5.5; la puerta es
   `crates/engine-stochastic/tests/degeneration.rs::every_case_degenerates_from_decimal_to_floating_point`.
+- **Desde el 2026-10-10 (solo SWR)** el filo ya no está en el bucle: el único consumidor de
+  `mixed_drawdown_for_gross_cap` era el tope bruto de la regla de retirada, que se retiró (§2.28), y
+  la función con su `MixedGrossDrawdown::cap_exhausted` quedó `#[cfg(test)]` en
+  `crates/engine/src/tax.rs` como mapa directo que verifica `gross_up_mixed_monthly`. P15, el caso
+  que lo destapó, salió de la batería con las reglas. La lección sigue intacta.
 
 ### 2.27 Un golden de 19 casos no demuestra bit-identidad — el fuzz diferencial sí (revisión adversarial, issue #207, 5.0.0)
 
@@ -692,6 +704,56 @@ Vocabulary used below (defined once):
 - **Lección transferible**: un golden pineado prueba que lo que ya conoces no se movió; solo un
   fuzz diferencial contra la versión anterior prueba que nada nuevo se movió tampoco.
 - **Status**: cerrado; pines `P24_undrained_scale`/`P25_debt_service_assoc`.
+
+### 2.28 Reglas de retirada por saldo y modo de gasto (5.0.0-dev), retiradas antes de publicar (decisión «solo SWR», 2026-10-10)
+
+- **Síntoma**: el formulario de Jubilación tenía una tarjeta «Retirada» con cuatro reglas
+  (`fixed_real`, `percent_of_balance`, `hybrid`, `guardrails` à la Guyton-Klinger), dos modos
+  («Techo» = `ceiling`, «Es mi gasto» = `rule_is_spend`) y un tercer motivo de fallo, F3
+  (`RuleBelowNeed`), con tres magnitudes además de la retirada (`withdrawal_shortfall`, `unmet_need`,
+  `withdrawal_excess`; cerraban la identidad, pero nadie distinguía el recorte de la regla del
+  descubierto de la cartera) y dos lecturas de cobertura en Riesgo. Nadie sabía decir qué cambiaba al
+  tocar el modo.
+- **Medición** (mapa semántico del owner): el modo **no movía** la fecha, ni F2 ni F3, ni el capital
+  necesario (salvo las bandas a través de F1), ni el número FIRE — solo la venta en meses de déficit
+  y la lectura de cobertura; con la regla de base, `fixed_real × ceiling ≡ fixed_real × rule_is_spend`
+  (había un test que lo probaba). El % de la regla era **siempre** el SWR (herencia U4, `pct_source`)
+  salvo que alguien lo fijara por API. Y con el % heredado, **F3 ⊇ F2 en `R`**: F3 no miraba el
+  puente, así que con cualquier regla por saldo **el puente de pensión quedaba neutralizado** — el
+  tope `bridge_max_pct` de F2 nunca llegaba a decidir. Antecedente (fila 24): F3 mes a mes pedía
+  2,52 M€ de capital necesario frente a 620 k€ con `fixed_real`; F3 solo en `R`, 860 k€.
+- **Medianas que solo medían constantes**: sin reglas, un mes por debajo del gasto ES un fallo F1,
+  así que `months_below_need_p50` y `withdrawal_to_need_ratio_p50` valían 0 y 100 % siempre que el
+  éxito fuera ≥ 50 % — para cualquier plan que cumpla un umbral de 80–100. Se fueron con las reglas.
+- **Decisión** (owner, cita literal): «Solo SWR: en el momento en que el SWR llegue al gasto tras la
+  jubilación estás jubilado; de ahí en adelante cada año se retira esa cantidad ajustada a la
+  inflación.» El modelo es la puerta de tasa inicial (F2 en `R`, con el tope del puente cuando la
+  pensión llega dentro de `bridge_max_years`) y, jubilado, `gross_up(need_net)` cada mes — el antiguo
+  camino `fixed_real`, el drenaje de 4.15.0. Quedan F1 y F2 (prioridad F1 > F2).
+- **Qué salió**: `WithdrawalRule`, `SpendMode`, `PathFailure::RuleBelowNeed`, `WithdrawalPlanner`/
+  `allowed_gross`, `forced_gross`, `spend_from_cash`, `excess`, `rule_allowance_net`,
+  `withdrawal_shortfall`/`withdrawal_excess` del motor y del wire, `KIND_RULE_BELOW_NEED`
+  (`failures_by_kind` pasa a `[F1, F2]`), los códigos `withdrawal_pct_*`/`withdrawal_band_out_of_range`/
+  `hybrid_end_pct_not_below_start`/`withdrawal_rule_kind`/`spend_mode` y `engine_feature_unavailable`
+  (siete en `apps/api/tests/fixtures/error-codes.json`; el último porque `EngineError::UnsupportedPhase`
+  se quedó sin productor y se fue con `InvalidWithdrawalRule`/`UnsupportedWithdrawalRule`), el parámetro
+  `withdrawal_rule` de dos tools MCP, y la clave del JSONB (migración DATA-CHANGING e idempotente
+  `20261010130000_drop_stored_withdrawal_rule.sql`; el perfil sigue SIN `deny_unknown_fields`, así
+  que un backup viejo con la clave carga y la ignora —
+  `retirement_profile.rs::a_stored_withdrawal_rule_is_ignored_and_never_re_emitted`). Los casos
+  dorados `P15_percent_of_balance_ceiling`, `P16_hybrid_rule_is_spend` y `P17_guardrails_taxes_es`
+  salieron de `pins-5.0-outputs.json` (25 → 22 casos); todo superviviente es byte-idéntico.
+- **Si alguien quiere volver a meter un SWR variable o guardarraíles**: es una dirección abierta
+  (`futurefin-research-frontier`), no un veto — pero tiene que contestar antes las tres mediciones de
+  arriba: qué decisión mueve el modo, de dónde sale el % si no es el SWR, y cómo convive su fallo
+  con el puente sin anularlo.
+- **Status**: retirado 2026-10-10, antes de publicar. Comprobación de ausencia (busca los
+  IDENTIFICADORES, no los literales JSON: los literales `"withdrawal_rule"`/`"rule_is_spend"`
+  sobreviven a propósito en los tests que prueban que un backup viejo se ignora —
+  `retirement_profile.rs` y `retirementProfile.test.ts`—, y la versión anterior de este grep, que
+  buscaba los literales, los encontraba y nunca imprimía OK):
+  `git grep -nE "RuleBelowNeed|SpendMode|PercentOfBalance|RuleIsSpend|WithdrawalRule|WithdrawalPlanner|KIND_RULE_BELOW_NEED|withdrawalPctNote" -- 'crates/*/src' apps/api/src apps/web/src | grep -vE ":[0-9]+:\s*(//|\*)" || echo "OK: solo SWR"`
+  → `OK: solo SWR` el 2026-10-11.
 
 ## 3. Designs that were tried and replaced
 
@@ -716,6 +778,7 @@ Vocabulary used below (defined once):
 | Temptation | Read first |
 |---|---|
 | Add a retirement age / target-age setting | §2.2 |
+| Reintroducir una regla de retirada por saldo, guardarraíles, un «modo de gasto» o un tercer motivo de fallo | §1 filas 24–25 + §2.28 — el modo no movía ninguna decisión, el % era siempre el SWR, y el fallo de la regla neutralizaba el puente de pensión |
 | Añadir un trigger de jubilación por EDAD **fuera de una estrategia** (un ajuste global, un segundo disparador que conviva con el cruce) | §2.2 + su scope note de 5.0.0 — la edad se readmitió como trigger de `retire_at_age`/`coast` y de nada más; el invariante es **un solo trigger por simulación** (`crossing_is_reading_only`), y lo que v1.0.6 mató fue justo la coexistencia ambigua |
 | Meter `f64` en `crates/engine` (o «añadir una excepción» al freezer para un método numérico) | §2.9 + su scope note de 5.0.0 — la coma flotante vive en `crates/engine-stochastic`, sobre el MISMO bucle vía `MoneyOps`, y de ahí no sale un euro. Si de verdad hace falta, la conversación es de diseño: `futurefin-architecture-contract` + `futurefin-proof-and-analysis-toolkit` Recipe 5 |
 | **Duplicar** el bucle en coma flotante «porque el genérico se resiste» | §2.26 y `futurefin-proof-and-analysis-toolkit` Recipe 7 — dos bucles divergen en silencio al primer cambio de modelo; era la salida de emergencia declarada del plan y no hizo falta |
@@ -765,8 +828,9 @@ Vocabulary used below (defined once):
 - **Triaging a live bug right now** (reproduce → isolate → fix): use
   `.claude/skills/futurefin-debugging-playbook/SKILL.md` — it owns symptom→triage tables. Come
   back here only to check whether your suspect design was already tried and rejected.
-- **Forward-looking ideas** (stochastic returns, tax-aware withdrawal, variable SWR — all
-  currently unimplemented): `.claude/skills/futurefin-research-frontier/SKILL.md`.
+- **Forward-looking ideas** (tax-aware withdrawal ordering, variable SWR — this one built in
+  5.0.0-dev and retired before publishing, §2.28; stochastic returns are no longer an idea, they
+  ship in `crates/engine-stochastic`): `.claude/skills/futurefin-research-frontier/SKILL.md`.
 - **Current invariants and why the architecture is shaped this way**:
   `.claude/skills/futurefin-architecture-contract/SKILL.md` (this skill owns the incidents that
   *produced* the invariants, not their normative statement).
@@ -777,6 +841,18 @@ Vocabulary used below (defined once):
   `.claude/skills/futurefin-fire-domain-reference/SKILL.md`.
 
 ## 6. Provenance and maintenance
+
+**Ampliado 2026-10-10 para la decisión «solo SWR»** (rama `wip/solo-swr`, sobre `release/5.0.0`,
+sin publicar; verificado el 2026-10-11): §1 fila 25 y §2.28 nuevas; fila 24 marcada SUSTITUIDA (sus
+dos regresiones se borraron); §2.26 anota que `cap_exhausted` ya solo vive en tests. Re-verificar:
+el grep de ausencia de §2.28 (imprime `OK: solo SWR` mientras nadie las reintroduzca — **la primera
+versión no lo imprimía nunca**, porque buscaba literales que los tests de compatibilidad conservan),
+`ls apps/api/migrations/20261010130000_drop_stored_withdrawal_rule.sql` (existe),
+`grep -n "#\[cfg(test)\]" -A2 crates/engine/src/tax.rs | grep -c "pub fn mixed_drawdown_for_gross_cap\|pub struct MixedGrossDrawdown"`
+(2: las dos piezas del mapa directo, solo en tests), las dos regresiones de la fila 24 ausentes
+`grep -rn "fn f3_fires_only_in_the_first_retired_month_never_after\|fn mc_f3_is_a_property_of_the_plan_not_of_the_draw" crates/`
+(vacío) y los tres casos dorados fuera
+`grep -c "P15_\|P16_\|P17_" crates/engine/tests/fixtures/pins-5.0-outputs.json` (0).
 
 **Ampliado 2026-09-06 para el modelo de jubilación v2** (WP D2, panel adversarial 2026-09-06,
 rama `release/5.0.0`): §3 gana cuatro filas de diseños rechazados por el panel (objetivo como

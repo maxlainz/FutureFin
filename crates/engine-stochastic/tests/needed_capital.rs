@@ -264,7 +264,7 @@ fn the_needed_capital_today_is_the_curve_at_month_one() {
 ///   λ_min = 1/256          ⇒  L(0) = 1.000.000/256 = 3.906,25 €
 ///   necesidad TOTAL        =  120 meses × 5 € = 600 € nominales, contra una cartera que además
 ///                             compone al 5 % anual
-///   F2 no existe (sin puerta), F3 tampoco (`fixed_real` no tiene techo)
+///   F2 no existe (sin puerta)
 /// ```
 ///
 /// Para agotar 3.906 € con 600 € de retiradas haría falta perder ~85 % en diez años: a σ = 8 %
@@ -305,8 +305,8 @@ fn already_covered_household() -> ProjectionInput {
 ///                       λ* = 600.000 / 10.000 = 60 EXACTO  ⇒  capital = 600.000 € clavados
 ///   k ≥ 61 (índice ≥ 60): la pensión (2.500) cubre el gasto (2.000) ⇒ necesidad = 0
 ///                       F2 compara 0 > 4 % · L, que es falso para CUALQUIER λ; sin necesidad no
-///                       hay venta, así que F1 tampoco; `fixed_real` no tiene techo, así que F3
-///                       tampoco  ⇒  éxito 1 con la cartera dividida por 256  ⇒  ya cubierto
+///                       hay venta, así que F1 tampoco
+///                       ⇒  éxito 1 con la cartera dividida por 256  ⇒  ya cubierto
 /// ```
 fn pension_household() -> ProjectionInput {
     let mut input = base_input(
@@ -559,7 +559,7 @@ fn a_household_already_covered_publishes_no_amount_not_a_tiny_one() {
 
     let stats = today.success_at_lambda.expect("la afirmación viaja medida");
     assert_eq!(stats.paths, 100, "la medición publicada es la de BÚSQUEDA");
-    assert_eq!(stats.by_kind, [0, 0, 0], "ningún camino falla ni con λ = 1/256");
+    assert_eq!(stats.by_kind, [0, 0], "ningún camino falla ni con λ = 1/256");
     assert_eq!(stats.success, 1.0);
 
     // Y el suelo que el bug publicaba existe y es un número respetable: la cartera dividida por
@@ -755,8 +755,7 @@ fn the_curve_uses_the_scaled_liquid_so_late_nodes_are_not_zero() {
 /// ```
 ///
 /// F1 no compite en el tramo jubilado: retirar el 4 % de 600.000 € durante 120 meses de una cartera
-/// al 5 % con `s(10 años) = 0,538` no la agota en ningún camino de la muestra. Y F3 tampoco, que
-/// `fixed_real` no tiene techo. Por tanto, **condicionado**, `éxito(λ, 361)` es un ESCALÓN exacto en
+/// al 5 % con `s(10 años) = 0,538` no la agota en ningún camino de la muestra. Por tanto, **condicionado**, `éxito(λ, 361)` es un ESCALÓN exacto en
 /// `λ_b`: todos los caminos llegan al cierre del mes 360 con el MISMO líquido.
 fn prefix_household() -> ProjectionInput {
     let mut input = base_input(
@@ -794,7 +793,7 @@ fn prefix_household() -> ProjectionInput {
 ///    publicado (redondeo a cientos hacia arriba) **entre 600.000 y 600.200 €**.
 /// 2. **`draws_search == 14`** = 1 sondeo en `λ = 1` (falla: 432.194 < 600.000) + 1 en `λ = 2`
 ///    (cumple: 864.388 ≥ 600.000) + 12 de bisección.
-/// 3. **El escalón es limpio**: éxito 1,0 exacto y `by_kind == [0, 0, 0]` en el `λ` publicado —
+/// 3. **El escalón es limpio**: éxito 1,0 exacto y `by_kind == [0, 0]` en el `λ` publicado —
 ///    ningún camino falla, porque todos llegan al mismo sitio.
 /// 4. **La definición ANTERIOR era ≥ 3× esta.** Con el sorteo desde el mes 1:
 ///    - en el propio `λ*` el éxito es `P(L(360) ≥ 600.000) = 0,5` —600.000 es la MEDIANA de las
@@ -840,7 +839,7 @@ fn the_curve_node_is_conditional_on_reaching_it_not_on_todays_dispersion() {
     let stats = node.success_at_lambda.expect("la medición viaja");
     assert_eq!(
         (stats.success, stats.by_kind),
-        (1.0, [0, 0, 0]),
+        (1.0, [0, 0]),
         "con la acumulación fijada, el escalón es limpio: todos los caminos llegan al mismo sitio"
     );
     println!(
@@ -1002,7 +1001,7 @@ fn the_deterministic_prefix_consumes_the_same_random_numbers() {
 /// PREDICCIONES escritas antes de correr (aritmética en [`pension_household`]):
 /// - Los nodos 61 y 120 son `already_covered`: desde el índice 60 la pensión (2.500) cubre el gasto
 ///   (2.000), la necesidad ordinaria es 0, F2 compara `0 > 4 % · L` —falso para cualquier `λ`—, sin
-///   necesidad no hay venta (F1) y `fixed_real` no tiene techo (F3). Fijar la acumulación no cambia
+///   necesidad no hay venta (F1). Fijar la acumulación no cambia
 ///   nada de eso: lo que decide es la PENSIÓN, no la dispersión.
 /// - Ni `λ` ni importes en esos dos nodos, y `draws_search == 9` en cada uno (sondeo de partida +
 ///   ocho halvings).
@@ -1032,7 +1031,7 @@ fn nodes_after_the_valid_date_stay_null_when_already_covered() {
         );
         let stats = node.success_at_lambda.expect("la afirmación viaja medida");
         assert_eq!(stats.month, node.month);
-        assert_eq!(stats.by_kind, [0, 0, 0]);
+        assert_eq!(stats.by_kind, [0, 0]);
     }
 
     let heir = curve[2];

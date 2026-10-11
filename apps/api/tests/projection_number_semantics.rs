@@ -472,14 +472,14 @@ async fn the_withdrawal_series_are_monthly_flows_and_the_positions_index_the_arr
     );
 }
 
-/// **`unmet_need`: la tercera magnitud del mes** (pase de correcciones de la revisión
+/// **`unmet_need`: la segunda magnitud del mes** (pase de correcciones de la revisión
 /// adversarial, hallazgo B2/#4).
 ///
-/// `withdrawal` es lo que se obtuvo, `withdrawal_shortfall` lo que la REGLA rechazó y
-/// `unmet_need` lo que la CARTERA no pudo dar. Confundir las dos últimas es el fallo que este
-/// campo existe para hacer imposible: con la regla por defecto (`fixed_real`, sin techo) el
-/// recorte es **cero por construcción**, así que un hogar que se queda sin cartera publicaba
-/// ceros en todas las columnas de retirada y su único rastro era un escalar al final.
+/// `withdrawal` es lo que se obtuvo y `unmet_need` lo que la CARTERA no pudo dar. Sin esta
+/// columna, un hogar que se queda sin cartera publicaba ceros en todas las columnas de retirada y
+/// su único rastro era un escalar al final. (Hasta el 2026-10-10 había una tercera,
+/// `withdrawal_shortfall`, para el recorte de una regla de retirada por saldo; se retiró con las
+/// reglas.)
 ///
 /// El hogar: 500 € de ingreso contra 2.500 € de gasto y una hucha de 3.000 € al 0 %. El
 /// descubierto empieza a los dos meses y no para.
@@ -493,7 +493,7 @@ async fn the_withdrawal_series_are_monthly_flows_and_the_positions_index_the_arr
 ///    un veredicto, y servir la polvareda encendería meses en rojo al azar.
 /// 3. **Σ mensual = `uncovered_deficit_total`**: la serie es la descomposición del escalar, no
 ///    otra cuenta. Sin esta identidad las dos cifras podrían derivar sin que nada avisara.
-/// 4. `withdrawal_shortfall` es **todo ceros** en el mismo hogar: son magnitudes distintas.
+/// 4. Las columnas retiradas (`withdrawal_shortfall`, `withdrawal_excess`) ya no viajan.
 #[tokio::test]
 async fn unmet_need_is_non_negative_starts_at_zero_and_adds_up_to_the_uncovered_total() {
     let app = TestApp::spawn().await;
@@ -542,11 +542,9 @@ async fn unmet_need_is_non_negative_starts_at_zero_and_adds_up_to_the_uncovered_
         );
         algun_positivo |= u > 0.0;
         suma += u;
-        assert_eq!(
-            p["withdrawal_shortfall"].as_f64(),
-            Some(0.0),
-            "con `fixed_real` la REGLA no recorta nunca — si esto deja de ser cero, las dos \
-             magnitudes se han vuelto a mezclar: {p}"
+        assert!(
+            p.get("withdrawal_shortfall").is_none() && p.get("withdrawal_excess").is_none(),
+            "las columnas de la regla de retirada se retiraron («solo SWR»): {p}"
         );
     }
     assert!(

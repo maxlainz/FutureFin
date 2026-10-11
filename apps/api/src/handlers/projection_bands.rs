@@ -97,8 +97,8 @@
 //! adivinando por el resultado: un plan real con éxito 1 y un plan que no ocurre son
 //! indistinguibles mirando solo la salida del sorteo.
 //!
-//! Lo que **se sigue publicando** son las bandas de percentiles, `failures_by_kind`,
-//! `failure_probability_by_age`, `months_below_need_p50` y `withdrawal_to_need_ratio_p50`: son la
+//! Lo que **se sigue publicando** son las bandas de percentiles, `failures_by_kind` y
+//! `failure_probability_by_age`: son la
 //! trayectoria del patrimonio **sin jubilación**, que es una respuesta legítima a «¿qué pasa si no
 //! me jubilo?». Sus ceros hay que leerlos con esa etiqueta puesta —«sin jubilación no hay fallo
 //! que contar», no «riesgo cero»—, y por eso `success_absent_reason` viaja en la misma respuesta.
@@ -361,7 +361,7 @@ pub struct FailureProbabilityPoint {
     /// Años cumplidos en ese mes. `null` ⟺ el usuario no tiene fecha de nacimiento: la tabla se
     /// sigue publicando por meses, porque la cifra existe aunque no se pueda rotular con una edad.
     pub age: Option<u32>,
-    /// Fracción de caminos con **algún fallo** (F1, F2 o F3) en ese mes o antes — es acumulada,
+    /// Fracción de caminos con **algún fallo** (F1 o F2) en ese mes o antes — es acumulada,
     /// así que crece monótonamente. `0.12` = 12 de cada 100 escenarios.
     ///
     /// **La última fila es siempre el HORIZONTE** y cierra, al bit, en `1 − success_of_plan`: es
@@ -379,8 +379,8 @@ pub struct FailureProbabilityPoint {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub probability: Option<Decimal>,
-    /// **El reparto por motivo `[F1 cartera agotada, F2 tasa inicial excedida, F3 la regla no
-    /// llega a la necesidad]` de la EJECUCIÓN ENTERA — no del tramo hasta este mes.**
+    /// **El reparto por motivo `[F1 cartera agotada, F2 tasa inicial excedida]` de la EJECUCIÓN
+    /// ENTERA — no del tramo hasta este mes.**
     ///
     /// Se repite igual en todas las filas y es deliberado, no un descuido de serialización:
     /// `McOutcome` clasifica el PRIMER fallo de cada camino sobre todo el horizonte y no lo
@@ -394,7 +394,7 @@ pub struct FailureProbabilityPoint {
     /// [`crate::handlers::retirement_solver::PlanExtras::failure_probability_by_age`], para que la
     /// tabla de esta respuesta y la del bloque «plan» de la serie no signifiquen dos cosas
     /// distintas con el mismo nombre.
-    pub by_kind: [u32; 3],
+    pub by_kind: [u32; 2],
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -429,11 +429,11 @@ pub struct ProjectionBandsResponse {
     /// **El éxito DEL PLAN: la fracción de caminos en los que el plan no se rompe** (E9, modelo
     /// v2). Estimador puntual, `1 − fallos/paths`. `0.87` = 87 de cada 100 escenarios.
     ///
-    /// Un camino «se rompe» cuando el bucle le anota un fallo, y hay **tres motivos y solo tres**
+    /// Un camino «se rompe» cuando el bucle le anota un fallo, y hay **dos motivos y solo dos**
     /// (ver [`Self::failures_by_kind`]): F1 la cartera se agota, F2 la tasa inicial de retirada
-    /// excede el tope, F3 la regla por saldo no llega a la necesidad ordinaria **con el líquido
-    /// con el que se entra en la jubilación**. F2 y F3 se juzgan en ese mes y solo en ese mes;
-    /// después manda F1.
+    /// excede el tope **con el líquido con el que se entra en la jubilación**. F2 se juzga en ese
+    /// mes y solo en ese mes; después manda F1. (Hasta el 2026-10-10 había un F3 para las reglas
+    /// de retirada por saldo; se retiró con ellas.)
     ///
     /// **Ya no mide «¿ocurre el plan?»**, y por eso desaparecieron `never_retired_probability` y
     /// `success_given_retired`: en la v2 la fecha de jubilación es un DATO del plan —la misma en
@@ -534,8 +534,7 @@ pub struct ProjectionBandsResponse {
     ///   vocabulario para el mismo hecho.
     ///
     /// **Lo demás de la respuesta sigue viajando**: las bandas de percentiles,
-    /// [`Self::failures_by_kind`], [`Self::failure_probability_by_age`],
-    /// [`Self::months_below_need_p50`] y [`Self::withdrawal_to_need_ratio_p50`] describen la
+    /// [`Self::failures_by_kind`] y [`Self::failure_probability_by_age`] describen la
     /// trayectoria del patrimonio **sin jubilarse**, que es una respuesta legítima. Sus ceros se
     /// leen con esa etiqueta: «sin jubilación no hay fallo que contar», no «riesgo cero».
     ///
@@ -545,18 +544,19 @@ pub struct ProjectionBandsResponse {
     #[schema(value_type = Option<String>)]
     pub success_absent_reason: Option<&'static str>,
     /// **Fallos por motivo, contando el PRIMER fallo de cada camino**, en el orden fijo
-    /// `[F1 cartera agotada, F2 tasa inicial excedida, F3 la regla no llega a la necesidad]` —
-    /// los mismos índices que `KIND_PORTFOLIO_DEPLETED`/`KIND_INITIAL_RATE_EXCEEDED`/
-    /// `KIND_RULE_BELOW_NEED` del crate, para que las dos capas no diverjan en el orden.
+    /// `[F1 cartera agotada, F2 tasa inicial excedida]` — los mismos índices que
+    /// `KIND_PORTFOLIO_DEPLETED`/`KIND_INITIAL_RATE_EXCEEDED` del crate, para que las dos capas no
+    /// diverjan en el orden. (Era un array de tres hasta el 2026-10-10: el tercero contaba F3, el
+    /// fallo de las reglas de retirada por saldo, retirado con ellas.)
     ///
     /// Suma exactamente `paths − paths·success_of_plan`. Son **contadores**, no probabilidades:
     /// dividir entre `paths` es cosa de quien los lee, y publicarlos crudos es lo que permite
     /// distinguir «se me acabó el dinero» de «retiré demasiado el primer año» — dos problemas con
     /// arreglos opuestos que una sola probabilidad de ruina confundía.
     ///
-    /// **F2 y F3 se deciden en el mes de jubilación**, así que sus contadores describen la FECHA;
-    /// solo F1 puede firmar más tarde.
-    pub failures_by_kind: [u32; 3],
+    /// **F2 se decide en el mes de jubilación**, así que su contador describe la FECHA; solo F1
+    /// puede firmar más tarde.
+    pub failures_by_kind: [u32; 2],
     /// **Cuándo se rompe el plan**: probabilidad acumulada de fallo cada cinco años desde la
     /// jubilación del plan, cerrando siempre en el horizonte. Ver [`FailureProbabilityPoint`].
     ///
@@ -570,27 +570,11 @@ pub struct ProjectionBandsResponse {
     /// **Vacía** solo si el llamante trae un `ProjectionInput` legacy por CRUCE en el que ningún
     /// camino se jubila: ahí no hay ancla que valga, y una tabla inventada sería peor que un hueco.
     pub failure_probability_by_age: Vec<FailureProbabilityPoint>,
-    /// Mediana entre caminos del **NÚMERO DE MESES jubilados en que el hogar no cubrió su
-    /// gasto**: cuenta el recorte de la regla (`withdrawal_shortfall > 0`) **y** el gasto que la
-    /// cartera no pudo financiar (`unmet_need > 0`).
-    ///
-    /// Contar solo el recorte lo dejaba en `0` por construcción con `fixed_real` —la regla sin
-    /// techo no recorta nunca—, también en los caminos que se quedaban sin cartera en el mes 35
-    /// de 400: el mes sin dinero no aparecía en ninguna cifra publicada.
-    pub months_below_need_p50: u32,
-    /// Mediana entre caminos de **qué FRACCIÓN de su necesidad ordinaria cubrió el hogar de
-    /// verdad** sobre los meses jubilados. `1` = la cubrió entera. `null` cuando ningún camino
-    /// tiene meses jubilados con necesidad positiva.
-    ///
-    /// **Corregida en E9 (bug B2)**: el numerador descuenta el `withdrawal_excess` de
-    /// `rule_is_spend` —la regla ES el gasto y vende lo permitido aunque sobre—, y el denominador
-    /// es la necesidad neta, clampada mes a mes porque **puede ser negativa** desde que la pensión
-    /// supera el gasto. Sin esas dos correcciones el cociente pasaba de 1,0 por arriba en los
-    /// meses con superávit y valía 1,0 exacto en caminos que cubrían el 8,65 % de lo que
-    /// necesitaban.
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub withdrawal_to_need_ratio_p50: Option<Decimal>,
+    // `months_below_need_p50` y `withdrawal_to_need_ratio_p50` viajaban aquí hasta el
+    // 2026-10-10. Medían el recorte de una regla de retirada por saldo; sin reglas, un mes por
+    // debajo del gasto ES un fallo F1, y sus medianas solo podían salir de «0 meses / 100 %» con
+    // un éxito por debajo del 50 % — fuera de cualquier umbral aceptable (80–100). Lo que sí
+    // dice cuándo y por qué se rompe el plan es `failure_probability_by_age` y `failures_by_kind`.
     /// `false` ⟺ **ningún activo declara volatilidad**: entonces las tres bandas coinciden entre
     /// sí y con la línea determinista, y la UI debe decirlo («sin volatilidad declarada: la banda
     /// es la línea») en vez de dibujar un abanico plano que se lee como certeza.
@@ -610,7 +594,7 @@ pub struct ProjectionBandsResponse {
 /// Vive en la respuesta y no solo en la documentación por la misma razón que
 /// `PROJECTION_MODEL_NOTE`: un consumidor conversacional lee el JSON, no el repositorio, y una
 /// probabilidad de ruina sin sus supuestos es un número que parece cierto.
-pub(crate) const BANDS_MODEL_NOTE: &str = "Monte Carlo sobre el MISMO bucle que la línea determinista, con los factores de crecimiento sorteados. QUÉ SE SORTEA: EL PLAN, no el hogar en crudo — el escenario lleva ya el MES DE JUBILACIÓN que el solver fijó, el mismo en los `paths` caminos, así que la fecha es un DATO y lo único que se mide aquí es si ese plan se ROMPE. MODELO: un shock de mercado COMÚN por mes (un solo z~N(0,1) que viven todos los activos a la vez), escalado por la volatilidad de cada uno: factor = m·exp(σz) con σ = annual_volatility_percent/100/√12 y m el multiplicador mensual determinista. La rentabilidad que declaraste es COMPUESTA (CAGR), así que m es la MEDIANA del factor sorteado y la línea determinista es la CENTRAL de la banda, ni techo ni suelo; la media aritmética queda por encima, y esa diferencia no es un error, es el coste de la volatilidad. σ = 0 ⇒ el camino determinista exacto. PUNTUAL QUIERE DECIR PUNTUAL: cada percentil se calcula mes a mes sobre los caminos de ESE mes, así que la curva p50 NO es una simulación real y no cumple ninguna identidad contable — no la cites como «tu patrimonio probable» punto a punto. ÉXITO = la fracción de caminos SIN NINGÚN FALLO, y hay tres motivos y solo tres, que viajan contados aparte en `failures_by_kind`: F1 la cartera se agota, F2 la tasa inicial de retirada excede el tope del perfil, F3 la regla por saldo no llega a la necesidad ordinaria con el líquido de entrada. F2 y F3 se juzgan EN EL MES DE JUBILACIÓN y solo ahí —después manda F1, y el recorte que la regla haga más adelante viaja como lectura en `months_below_need_p50`, no como fallo—. Distinguirlos importa porque tienen arreglos OPUESTOS: F1 pide más capital o menos gasto, F2 pide retrasar la fecha, F3 pide cambiar la regla. UN CAMINO SOLO PUEDE FALLAR ESTANDO JUBILADO (o en media jornada): antes de la fecha, quedarse sin cartera es un problema de caja de hoy y no un plan de jubilación que se rompe. Consecuencia que se declara AQUÍ y no hay que ir a buscar a otro endpoint: si el escenario sorteado no lleva mes de jubilación —porque ningún mes cumple el umbral, o porque no hay plan que resolver— el sorteo no puede contar ni un fallo, así que `success_of_plan`, `success_wilson_low`, `success_sampling_error_pp` y `success_verdict` viajan a NULL y `success_absent_reason` dice por qué (`not_reachable`, o el mismo literal que `plan_absent_reason` de la serie). No hay un 100 % que desmentir: un hueco se publica como hueco. Lo que sí se sigue publicando son las bandas, `failures_by_kind` y `failure_probability_by_age`, porque describen la trayectoria SIN jubilarse — y ahí un 0 significa «sin jubilación no hay fallo que contar», no «riesgo cero». EL UMBRAL ES UNA RESTRICCIÓN, no un adorno del color: `success_threshold_pct` (80–100, tu perfil) es lo que decidió la FECHA, y el veredicto se mide contra él con la MISMA regla — por debajo de 100 se compara la cota inferior del intervalo de WILSON al 95 % (`success_wilson_low`), no el estimador puntual; en 100 se exige cero fallos de N. Verde = cumple; ámbar = el estimador puntual llega y el intervalo no; rojo = ni el puntual. Con umbral 100 no hay ámbar: o no se rompe ni un camino, o es rojo. N IMPORTA: `paths` viaja al lado porque una probabilidad sin su tamaño de muestra no se compara con nada, y `success_sampling_error_pp` es la barra hacia abajo — NUNCA cero, tampoco con cero fallos (0 de 2.500 son 0,15 pp). Y «100 %» no significa «seguro»: significa «ningún fallo en N caminos DE ESTE MODELO». SEMILLA estable por usuario: las mismas cifras hoy y dentro de un año, salvo que cambies los datos. Con el sorteo por defecto estas cifras son EXACTAMENTE las del plan que publica `/v1/projection/series`; si pasas `seed` o `paths` estás mirando otro mercado u otro tamaño de muestra, y entonces la fecha del plan NO se mueve — solo cambia la medición de su riesgo. `failure_probability_by_age` dice CUÁNDO se rompe: acumulada, cada cinco años desde la jubilación, y cierra SIEMPRE en el horizonte (esa última fila es 1 − éxito, y el paso hasta ella puede ser menor de cinco años; sin fecha de jubilación trae una sola fila valiendo 0, que es el caso de `success_absent_reason`). Su `by_kind` es el reparto de la ejecución ENTERA, exacto solo en esa última fila. El RECORTE de una regla de retirada no es por sí solo un fracaso y viaja aparte, en `months_below_need_p50` y `withdrawal_to_need_ratio_p50`, que cuentan el recorte de la regla Y el gasto que la cartera no pudo financiar. LO QUE NO SE MODELA, dicho para que nadie lo suponga: colas gruesas (el shock es log-normal, así que la probabilidad de ruina es OPTIMISTA en la cola), autocorrelación o reversión a la media (los meses son independientes: sin ciclos), correlación imperfecta entre activos (con un shock común la correlación es exactamente 1 y una cartera diversificada NO se beneficia aquí de su diversificación: el modelo es conservador en ese eje), bootstrap histórico (el sorteo es paramétrico: nada de esto es «lo que pasó entre 1929 y 1964»), volatilidad de la inflación, de los ingresos, del gasto o del tipo de la deuda (solo los activos sortean), y rebalanceo (cada activo compone por su cuenta). Los importes de las bandas son NOMINALES, como la serie. El patrimonio, el capital necesario y la aportación en EUROS siguen saliendo del camino exacto en Decimal: de aquí solo salen probabilidades, contadores y percentiles.";
+pub(crate) const BANDS_MODEL_NOTE: &str = "Monte Carlo sobre el MISMO bucle que la línea determinista, con los factores de crecimiento sorteados. QUÉ SE SORTEA: EL PLAN, no el hogar en crudo — el escenario lleva ya el MES DE JUBILACIÓN que el solver fijó, el mismo en los `paths` caminos, así que la fecha es un DATO y lo único que se mide aquí es si ese plan se ROMPE. MODELO: un shock de mercado COMÚN por mes (un solo z~N(0,1) que viven todos los activos a la vez), escalado por la volatilidad de cada uno: factor = m·exp(σz) con σ = annual_volatility_percent/100/√12 y m el multiplicador mensual determinista. La rentabilidad que declaraste es COMPUESTA (CAGR), así que m es la MEDIANA del factor sorteado y la línea determinista es la CENTRAL de la banda, ni techo ni suelo; la media aritmética queda por encima, y esa diferencia no es un error, es el coste de la volatilidad. σ = 0 ⇒ el camino determinista exacto. PUNTUAL QUIERE DECIR PUNTUAL: cada percentil se calcula mes a mes sobre los caminos de ESE mes, así que la curva p50 NO es una simulación real y no cumple ninguna identidad contable — no la cites como «tu patrimonio probable» punto a punto. ÉXITO = la fracción de caminos SIN NINGÚN FALLO, y hay dos motivos y solo dos, que viajan contados aparte en `failures_by_kind` ([F1, F2]): F1 la cartera no puede cubrir el gasto de un mes; F2 la tasa inicial de retirada —el gasto ordinario del primer año jubilado sobre el líquido con el que entras— excede el tope del perfil (el SWR, o el del puente). F2 se juzga EN EL MES DE JUBILACIÓN y solo ahí; después manda F1. Distinguirlos importa porque tienen arreglos OPUESTOS: F1 pide más capital o menos gasto, F2 pide retrasar la fecha. YA JUBILADO no hay regla que elegir: cada mes se vende lo que el gasto indexado necesita. UN CAMINO SOLO PUEDE FALLAR ESTANDO JUBILADO (o en media jornada): antes de la fecha, quedarse sin cartera es un problema de caja de hoy y no un plan de jubilación que se rompe. Consecuencia que se declara AQUÍ y no hay que ir a buscar a otro endpoint: si el escenario sorteado no lleva mes de jubilación —porque ningún mes cumple el umbral, o porque no hay plan que resolver— el sorteo no puede contar ni un fallo, así que `success_of_plan`, `success_wilson_low`, `success_sampling_error_pp` y `success_verdict` viajan a NULL y `success_absent_reason` dice por qué (`not_reachable`, o el mismo literal que `plan_absent_reason` de la serie). No hay un 100 % que desmentir: un hueco se publica como hueco. Lo que sí se sigue publicando son las bandas, `failures_by_kind` y `failure_probability_by_age`, porque describen la trayectoria SIN jubilarse — y ahí un 0 significa «sin jubilación no hay fallo que contar», no «riesgo cero». EL UMBRAL ES UNA RESTRICCIÓN, no un adorno del color: `success_threshold_pct` (80–100, tu perfil) es lo que decidió la FECHA, y el veredicto se mide contra él con la MISMA regla — por debajo de 100 se compara la cota inferior del intervalo de WILSON al 95 % (`success_wilson_low`), no el estimador puntual; en 100 se exige cero fallos de N. Verde = cumple; ámbar = el estimador puntual llega y el intervalo no; rojo = ni el puntual. Con umbral 100 no hay ámbar: o no se rompe ni un camino, o es rojo. N IMPORTA: `paths` viaja al lado porque una probabilidad sin su tamaño de muestra no se compara con nada, y `success_sampling_error_pp` es la barra hacia abajo — NUNCA cero, tampoco con cero fallos (0 de 2.500 son 0,15 pp). Y «100 %» no significa «seguro»: significa «ningún fallo en N caminos DE ESTE MODELO». SEMILLA estable por usuario: las mismas cifras hoy y dentro de un año, salvo que cambies los datos. Con el sorteo por defecto estas cifras son EXACTAMENTE las del plan que publica `/v1/projection/series`; si pasas `seed` o `paths` estás mirando otro mercado u otro tamaño de muestra, y entonces la fecha del plan NO se mueve — solo cambia la medición de su riesgo. `failure_probability_by_age` dice CUÁNDO se rompe: acumulada, cada cinco años desde la jubilación, y cierra SIEMPRE en el horizonte (esa última fila es 1 − éxito, y el paso hasta ella puede ser menor de cinco años; sin fecha de jubilación trae una sola fila valiendo 0, que es el caso de `success_absent_reason`). Su `by_kind` es el reparto de la ejecución ENTERA, exacto solo en esa última fila. LO QUE NO SE MODELA, dicho para que nadie lo suponga: colas gruesas (el shock es log-normal, así que la probabilidad de ruina es OPTIMISTA en la cola), autocorrelación o reversión a la media (los meses son independientes: sin ciclos), correlación imperfecta entre activos (con un shock común la correlación es exactamente 1 y una cartera diversificada NO se beneficia aquí de su diversificación: el modelo es conservador en ese eje), bootstrap histórico (el sorteo es paramétrico: nada de esto es «lo que pasó entre 1929 y 1964»), volatilidad de la inflación, de los ingresos, del gasto o del tipo de la deuda (solo los activos sortean), y rebalanceo (cada activo compone por su cuenta). Los importes de las bandas son NOMINALES, como la serie. El patrimonio, el capital necesario y la aportación en EUROS siguen saliendo del camino exacto en Decimal: de aquí solo salen probabilidades, contadores y percentiles.";
 
 /// Traduce un [`McError`] a la respuesta HTTP. Las tres variantes de configuración son 400 con
 /// código estable; el fallo del motor reusa `map_engine_err`, que ya publica los códigos que el
@@ -1035,10 +1019,6 @@ fn assemble_bands_response(
         success_absent_reason: absent_reason,
         failures_by_kind: outcome.failures_by_kind,
         failure_probability_by_age,
-        months_below_need_p50: outcome.months_below_need_p50,
-        withdrawal_to_need_ratio_p50: outcome
-            .withdrawal_to_need_ratio_p50
-            .and_then(probability_out),
         any_volatility_declared: outcome.any_volatility_declared,
         strategy,
         computed_in_ms,
@@ -1201,7 +1181,7 @@ mod tests {
                 (1, 0),
                 (1, 1),
             ] {
-                let s = SuccessAt::new(1, paths, failures, [failures, 0, 0]);
+                let s = SuccessAt::new(1, paths, failures, [failures, 0]);
                 let green = success_verdict(s.success, s.wilson_low, threshold) == VERDICT_GREEN;
                 assert_eq!(
                     green,
@@ -1224,7 +1204,7 @@ mod tests {
     fn the_verdict_has_three_regions_below_a_hundred() {
         const T: u32 = 95;
         // VERDE: cero fallos de 2.500 ⇒ wilson_low = 0,998466 ≥ 0,95.
-        let clean = SuccessAt::new(1, 2_500, 0, [0, 0, 0]);
+        let clean = SuccessAt::new(1, 2_500, 0, [0, 0]);
         assert!(clean.wilson_low >= 0.95, "wilson_low = {}", clean.wilson_low);
         assert_eq!(
             success_verdict(clean.success, clean.wilson_low, T),
@@ -1233,7 +1213,7 @@ mod tests {
 
         // ÁMBAR: el puntual llega (0,96 ≥ 0,95) y el intervalo no (0,9522… con 100 fallos de
         // 2.500 sí llega, así que hace falta una muestra más pequeña para separarlos).
-        let borderline = SuccessAt::new(1, 200, 6, [6, 0, 0]);
+        let borderline = SuccessAt::new(1, 200, 6, [6, 0]);
         assert!(
             borderline.success >= 0.95,
             "el puntual tiene que llegar: {}",
@@ -1250,7 +1230,7 @@ mod tests {
         );
 
         // ROJO: ni el puntual.
-        let bad = SuccessAt::new(1, 2_500, 500, [400, 50, 50]);
+        let bad = SuccessAt::new(1, 2_500, 500, [400, 100]);
         assert!(bad.success < 0.95, "{}", bad.success);
         assert_eq!(success_verdict(bad.success, bad.wilson_low, T), VERDICT_RED);
     }
@@ -1264,7 +1244,7 @@ mod tests {
     #[test]
     fn the_hundred_percent_threshold_has_no_amber_band() {
         for n in [1u32, 7, 24, 499, 500, 2_500, 5_000] {
-            let clean = SuccessAt::new(1, n, 0, [0, 0, 0]);
+            let clean = SuccessAt::new(1, n, 0, [0, 0]);
             assert_eq!(clean.success, 1.0, "n/n debe ser exactamente 1 con n = {n}");
             assert_eq!(
                 success_verdict(clean.success, clean.wilson_low, 100),
@@ -1284,7 +1264,7 @@ mod tests {
             );
 
             if n > 1 {
-                let one_short = SuccessAt::new(1, n, 1, [1, 0, 0]);
+                let one_short = SuccessAt::new(1, n, 1, [1, 0]);
                 let v = success_verdict(one_short.success, one_short.wilson_low, 100);
                 assert_eq!(
                     v, VERDICT_RED,
@@ -1299,7 +1279,7 @@ mod tests {
     #[test]
     fn the_same_sample_changes_colour_with_the_threshold() {
         // 25 fallos de 2.500: puntual 0,99, wilson_low ≈ 0,9856.
-        let s = SuccessAt::new(1, 2_500, 25, [25, 0, 0]);
+        let s = SuccessAt::new(1, 2_500, 25, [25, 0]);
         assert_eq!(success_verdict(s.success, s.wilson_low, 80), VERDICT_GREEN);
         assert_eq!(success_verdict(s.success, s.wilson_low, 95), VERDICT_GREEN);
         assert_eq!(
@@ -1343,7 +1323,7 @@ mod tests {
     /// y se redondea a un decimal de punto porcentual.
     #[test]
     fn the_sampling_error_survives_the_rounding_to_one_decimal() {
-        let clean = SuccessAt::new(1, 2_500, 0, [0, 0, 0]);
+        let clean = SuccessAt::new(1, 2_500, 0, [0, 0]);
         let published = sampling_error_out(clean.half_width_pp);
         assert!(
             published > Decimal::ZERO,
@@ -1351,7 +1331,7 @@ mod tests {
         );
         assert_eq!(published.scale(), SAMPLING_ERROR_DP, "un decimal");
         // Y con 500 caminos la barra es CUATRO veces mayor: es lo que justifica el default nuevo.
-        let small = SuccessAt::new(1, 500, 0, [0, 0, 0]);
+        let small = SuccessAt::new(1, 500, 0, [0, 0]);
         assert!(
             small.half_width_pp > clean.half_width_pp * 3.0,
             "500 caminos: {} pp frente a {} pp con 2.500",
@@ -1362,7 +1342,7 @@ mod tests {
         // probabilidad no baja de cero— y la barra hacia abajo vale 0. No es un fallo del cálculo
         // ni «medición sin error»: es que toda la incertidumbre está del otro lado. Se pinea para
         // que nadie lo lea como el bug que la aproximación normal sí tiene con `p̂ = 1`.
-        let all_fail = SuccessAt::new(1, 2_500, 2_500, [2_500, 0, 0]);
+        let all_fail = SuccessAt::new(1, 2_500, 2_500, [2_500, 0]);
         assert_eq!(all_fail.success, 0.0);
         assert_eq!(all_fail.wilson_low, 0.0, "la cota no puede ser negativa");
         assert_eq!(sampling_error_out(all_fail.half_width_pp), Decimal::ZERO);

@@ -107,9 +107,8 @@ async fn settle_plan_extras(app: &TestApp, cookie: &str) -> Value {
 /// camino: es justo lo que hace falta para que el bug tuviera algo grande que publicar.
 ///
 /// Derivado a mano: con `necesidad ordinaria = max(0, 1.000 − 3.000) = 0` en TODOS los meses,
-/// ninguno de los tres motivos de fallo puede dispararse — F2 compara `12·0 > SWR% · L`, que es
-/// falso para cualquier cartera; sin necesidad no hay venta, así que F1 tampoco; y `fixed_real` no
-/// tiene techo, así que F3 tampoco. El éxito es 1 con la cartera dividida por 256, o sea que **no
+/// ninguno de los dos motivos de fallo puede dispararse — F2 compara `12·0 > SWR% · L`, que es
+/// falso para cualquier cartera; sin necesidad no hay venta, así que F1 tampoco. El éxito es 1 con la cartera dividida por 256, o sea que **no
 /// hay frontera `λ*` que biseccionar**.
 async fn household_already_covered(app: &TestApp, name: &str) -> LoggedInOwner {
     let owner = app.register_and_login_owner(name).await;

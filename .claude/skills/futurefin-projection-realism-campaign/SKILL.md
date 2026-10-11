@@ -24,12 +24,12 @@ An executable campaign, not an essay. Facts verified against the repo as of **20
 
 Jargon used below (one-line definitions — full math in `.claude/skills/futurefin-fire-domain-reference/SKILL.md`):
 - **FIRE target**: net worth needed to retire = `gross_up(annual_net_need) / (SWR/100)`.
-- **SWR**: safe withdrawal rate, % of portfolio withdrawn per year (`fire_settings.swr_pct`, default 3.5).
+- **SWR**: safe withdrawal rate, % of portfolio withdrawn per year (`users.retirement_profile.swr_pct` desde 5.0.0 —antes `fire_settings.swr_pct`—, default 3.5; desde «solo SWR» es la puerta de tasa INICIAL del mes de jubilación, F2).
 - **Gross-up**: inflating an annual net need through Spanish capital-gains tax brackets so the after-tax withdrawal equals the need.
 - **Nominal vs real**: nominal = euros of the moment; real = today-euros (deflated). The engine is **all-nominal**; only the FIRE target grows with inflation (v1.2.0 model).
 - **Cascade**: ordered allocation rules (`fixed`/`percent`/`remainder`, optional caps) that split each month's surplus across assets.
 - **Jubilación crossing**: first month where the LIQUID worth of month k−1 ≥ the FIRE target at that same index. **Dejó de ser el único disparador el 2026-09-03**: desde 5.0.0 lo elige la estrategia del usuario (cruce o EDAD), con un solo trigger por simulación — ver el camino vallado #2, reescrito.
-- **Estrategia / fase / regla de retirada** (5.0.0): los tres ejes nuevos del motor. Semántica completa en `futurefin-fire-domain-reference` §4b; contrato en `financial-contracts.md` §2.5.
+- **Estrategia / fase / puerta de tasa inicial** (5.0.0): los tres ejes del motor (la regla de retirada por saldo, el cuarto, se retiró antes de publicar el 2026-10-10: «solo SWR»). Semántica completa en `futurefin-fire-domain-reference` §4b; contrato en `financial-contracts.md` §2.5.
 
 ## Campaign charter
 
@@ -81,10 +81,10 @@ tres equivocados el 2026-09-03; se sustituyen por sus comandos:
 ```bash
 cargo test -p futurefin-engine 2>&1 | grep "test result"   # total autoritativo del motor
 grep -c '#\[test\]' crates/engine/src/*.rs | awk -F: '{s+=$2} END{print s}'
-                    # 199 el 2026-09-03 (eran 195 unas horas antes, en la misma rama: pídeselo al
+                    # 177 el 2026-10-11 tras «solo SWR» (199 el 2026-09-03; eran 195 unas horas antes: pídeselo al
                     # runner). OJO: el glob, no la lista de cuatro ficheros que esta
                     # página usaba — se dejaba fuera money/phases/withdrawal/target/solve/tax
-grep -c '#\[test\]' apps/api/src/handlers/projection.rs   # 26 el 2026-09-03 (decía 24)
+grep -c '#\[test\]' apps/api/src/handlers/projection.rs   # 27 el 2026-10-11 (26 el 2026-09-03; decía 24)
 python3 -c "import json;print(len(json.load(open('apps/api/tests/fixtures/fire-parity.json'))['cases']))"
                     # 17 el 2026-09-03. Esta página decía 6 y otras tres fichas decían 7
 ```
@@ -202,10 +202,10 @@ quien nunca drena nunca se agota (medido: 0,960 publicado frente a 0,940 entre l
 jubilarse, en un hogar que cruza en el mes 655 de 840, con el 33,1 % de los caminos sin jubilarse
 contando como éxito — hasta +6,8 pp de sesgo con SWR 6 %). Hoy `success_probability` exige
 jubilarse dentro del horizonte (o un trigger por edad) **y** no agotar la cartera;
-`never_retired_probability` y `success_given_retired` se publican al lado. **El recorte de una
-regla de retirada sigue sin ser fracaso** y viaja aparte (`withdrawal_shortfall`): es la separación
-de magnitudes de `financial-contracts.md` §2.5, y confundirlas fue un hallazgo de la revisión
-adversarial, no una sutileza.
+`never_retired_probability` y `success_given_retired` se publican al lado. (HISTORIA — sustituido
+el 2026-10-10 (solo SWR): aquí decía que el recorte de una regla de retirada no era fracaso y
+viajaba aparte en `withdrawal_shortfall`; sin reglas no hay recorte que separar y los fallos son
+dos, F1 y F2. La separación de magnitudes que sobrevive es `withdrawal + unmet_need = need_net`.)
 
 **La puerta de aceptación pre-registrada, y sigue siendo la de esta sección**: (1) misma entrada +
 misma semilla ⇒ mismo resultado bit a bit; (2) con σ = 0 las bandas **son** la serie determinista;
@@ -238,28 +238,25 @@ por índice). Eso sí es un ítem vivo.
 - **Obligations**: derive the gross-withdrawal formula from embedded-gain fraction `g = (value − basis)/value` and the existing bracket math (reuse `gross_up_net_annual_fire`'s closed-form approach — see `futurefin-proof-and-analysis-toolkit` for the closed-form-vs-iteration recipe); decide basis tracking per asset (`purchase_price` exists on `SimAsset`, `projection.rs:32`); state the interaction with drain ordering (#7) — tax-aware ordering is a separate, later decision.
 - **Acceptance test**: hand-computed case (single asset, one bracket, known g) matches engine drain to < 0,01 €; with `taxes_enabled = false` output is bit-identical to today's; fire-parity fixture regenerated ONLY if the target-side formula changed (it should not).
 
-### (e) Variable / dynamic SWR — **✅ ENTREGADO en 5.0.0 (WP2)**
+### (e) Variable / dynamic SWR — **ABIERTO otra vez (implementado en 5.0.0-dev y retirado antes de publicar, 2026-10-10)**
 
-Entregado como **reglas de retirada**, no como «SWR variable»: el SWR sigue dimensionando SOLO el
-objetivo, y lo que se retira cada mes jubilado lo decide `withdrawal_rule` ×`spend_mode`
-(`crates/engine/src/withdrawal.rs`; semántica en `futurefin-fire-domain-reference` §4b). Cuatro
-reglas —`fixed_real`, `percent_of_balance`, `hybrid`, `guardrails`— × dos modos —`ceiling`,
-`rule_is_spend`—.
+HISTORIA — sustituido el 2026-10-10 (solo SWR). Se entregó como **reglas de retirada**
+(`withdrawal_rule` × `spend_mode`: `fixed_real`, `percent_of_balance`, `hybrid`, `guardrails`
+—Guyton-Klinger 2006, con la *portfolio management rule* y la *inflation rule* omitidas y
+declaradas— × `ceiling`/`rule_is_spend`) y el owner lo retiró entero («Solo SWR»). Lo que midió el
+mapa semántico: el modo de gasto no movía la fecha, ni F2/F3, ni el capital necesario, ni el número
+FIRE; el % de la regla era siempre el SWR salvo por API; y con el % heredado F3 ⊇ F2 en el mes de
+jubilación, así que **el puente de pensión quedaba neutralizado**. Detalle y medidas:
+`futurefin-failure-archaeology` «Reglas de retirada por saldo y modo de gasto (5.0.0-dev), retiradas
+antes de publicar».
 
-- **La regla publicada elegida es Guyton-Klinger (2006)**, citada, y con sus omisiones **declaradas**:
-  la *portfolio management rule* (ventana de 15 años) y la *inflation rule* NO están implementadas,
-  y omitirlas deja el modelo **más reactivo** — la dirección prudente
-  (`financial-contracts.md` §4).
-- **El test de aceptación pre-registrado se cumplió tal cual**: con `fixed_real` —la regla por
-  defecto, que es el drenaje de 4.15.0— los números de hoy salen **exactos**, y quien lo demuestra
-  es el pin dorado `pins-4.15.json` **byte-idéntico**. Los dos `spend_mode` coinciden bajo
-  `fixed_real` por construcción, con test propio
-  (`under_fixed_real_both_spend_modes_are_the_same_simulation`).
-- **La advertencia de esta sección era correcta y sigue en pie**: sobre un camino determinista con
-  rentabilidad > SWR, la regla de prosperity de los guardarraíles dispara **todos los años**
-  (ratchet). No es un bug — es lo que la regla dice sobre un camino sin volatilidad — pero significa
-  que los guardarraíles **solo tienen sentido pleno con (b)**. Va dicho en el `helpTexts` de la
-  regla, no solo aquí.
+Estado hoy: el SWR dimensiona la puerta de tasa inicial (F2) y, jubilado, se vende lo que pide el
+gasto indexado (`gross_up(need_net)`, el drenaje de 4.15.0). Un SWR variable o unos guardarraíles son
+de nuevo una dirección ABIERTA, pero **reintroducirlos exige leer esa entrada de arqueología
+primero** y demostrar que (1) mueven una cifra que el usuario ve y (2) no neutralizan el puente. Si
+alguna vez vuelven, la advertencia de esta sección sigue en pie: sobre un camino determinista con
+rentabilidad > SWR la regla de prosperity de los guardarraíles dispara todos los años (ratchet), así
+que solo tienen sentido pleno medidos con Monte Carlo ((b), ya entregado).
 
 **Gate P2**: an item may move from candidate → in-progress only when its obligations doc + pre-registered acceptance test exist in the PR/branch. If while implementing you discover the acceptance test was wrong, STOP, rewrite the prediction, and note the miss (research-methodology lifecycle) — do not quietly fit the test to the code.
 
@@ -330,7 +327,7 @@ agotar nunca»). La misma afirmación de «suite en rojo» estaba repetida en ot
 `.claude/financial-contracts.md`, `futurefin-validation-and-qa`), todos corregidos en la misma
 pasada.
 
-- Engine test count — **usa el GLOB**: `grep -c '#\[test\]' crates/engine/src/*.rs | awk -F: '{s+=$2} END{print s}'` (**199** el 2026-09-03, y 195 unas horas antes en la misma rama). La lista de cuatro ficheros que aquí vivía (`{projection,history,runway,net_return}`) daba **139** y se dejaba fuera los seis módulos que 5.0.0 creó. Handler: `grep -c '#\[test\]' apps/api/src/handlers/projection.rs` (**26** el 2026-09-03; decía 24). Total autoritativo, siempre del runner: `cargo test -p futurefin-engine 2>&1 | grep "test result"`.
+- Engine test count — **usa el GLOB**: `grep -c '#\[test\]' crates/engine/src/*.rs | awk -F: '{s+=$2} END{print s}'` (**177** el 2026-10-11, tras retirar las reglas de retirada; **199** el 2026-09-03, y 195 unas horas antes en la misma rama). La lista de cuatro ficheros que aquí vivía (`{projection,history,runway,net_return}`) daba **139** y se dejaba fuera los seis módulos que 5.0.0 creó. Handler: `grep -c '#\[test\]' apps/api/src/handlers/projection.rs` (**27** el 2026-10-11; 26 el 2026-09-03; decía 24). Total autoritativo, siempre del runner: `cargo test -p futurefin-engine 2>&1 | grep "test result"`.
 - Parity case count: `python3 -c "import json;print(len(json.load(open('apps/api/tests/fixtures/fire-parity.json'))['cases']))"` (**17** el 2026-09-03; tolerance `_tolerance_eur: 1.0`). Esta línea decía **7** y antes **6** — tercera vez que el mismo contador se queda corto en esta ficha.
 - ~~Negative-return clamp still present~~: `grep -n "p <= Decimal::ZERO" crates/engine/src/projection.rs` daba **vacío** y nadie lo notó — el patrón no existe en el motor. Lo que hay que comprobar hoy es lo contrario: `grep -n 'annual_factor <= M::zero()' crates/engine/src/sim_core.rs` (el único clamp, a pérdida total) y `grep -n 'fn negative_return_composes_downward' crates/engine/src/projection.rs` (el test que fija que compone). **Un grep de provenance que sale vacío es la señal, no el ruido.**
 - ~~Handler still forces no explicit withdrawal/age~~ — **VACÍO desde 5.0.0 WP1b, y el hecho que
@@ -338,8 +335,9 @@ pasada.
   `retirement_monthly_withdrawal`, `income/expense_retirement_monthly`) los absorbió `PhasePlan`, y
   el handler **sí** fuerza un mes con las estrategias por edad. Lo vigente:
   `grep -n "crossing_is_reading_only = \|retirement_trigger = " apps/api/src/handlers/projection.rs`
-  (**3 hits** el 2026-09-03: el flag del plan y las dos ramas que resuelven el literal que la
-  respuesta publica).
+  (**1 hit** el 2026-10-11: el flag del plan, incondicional desde el modelo v2. Decía «3 hits» del
+  2026-09-03 — las dos ramas que resolvían el literal `retirement_trigger` se fueron con él del
+  wire, `futurefin-architecture-contract` D24).
 - Liability interest (rows 11/14/15) — **el grep viejo (`principals\[i\] -= pay`) ya no existe**: 4.2.0 sustituyó el bloque de resta por el helper único. Vigente: `grep -n "fn liability_month\|fn liability_active\|enum RepaymentModel" crates/engine/src/{projection,sim_core}.rs` (tres hits; desde 5.0.0 WP5.5 la recurrencia vive en el núcleo genérico y el enum en la superficie pública) y `grep -c '#\[test\]' crates/engine/src/projection.rs` (**44** a 2026-08-25). Que `fixed_payments` siga siendo la recurrencia 1:1 de antes lo prueba el pin: `grep -n "pre_4_2_0\|liability_pin_input" crates/engine/src/projection.rs`.
 - Horizon basis strings: `grep -n "lifespan_90\|fallback_no_demographics\|months_override" apps/api/src/handlers/projection.rs`.
 - Undated planning spread: `grep -n "PLANNING_UNDATED_SPREAD_DAYS" apps/api/src/handlers/projection.rs` (90).

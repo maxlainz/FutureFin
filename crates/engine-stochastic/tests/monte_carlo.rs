@@ -27,11 +27,11 @@ mod cases;
 
 use cases::{projection_cases_5_0, projection_cases_all, ProjCase};
 use futurefin_engine::{
-    project_net_worth_series, PhasePlan, ProjectionInput, SimAsset, SpendMode, WithdrawalRule,
+    project_net_worth_series, PhasePlan, ProjectionInput, SimAsset,
 };
 use futurefin_engine_stochastic::{
     project_percentile_bands, run_path, seed_for, simulate_f64, McConfig, McOutcome,
-    KIND_INITIAL_RATE_EXCEEDED, KIND_PORTFOLIO_DEPLETED, KIND_RULE_BELOW_NEED, WILSON_Z_95,
+    WILSON_Z_95,
 };
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
@@ -243,14 +243,13 @@ fn mc_zero_volatility_degenerates_to_deterministic() {
         // el determinista, así que la expectativa se lee de él en los dos términos.
         // **E9 (McOutcome v2)**: el éxito ya no se reconstruye a mano comparando jubilación y
         // agotamiento por separado — se lee DIRECTAMENTE de `failure_month_index` (ningún fallo
-        // F1/F2/F3), la MISMA fuente que usa `project_percentile_bands`. Con σ=0 los `paths`
+        // F1/F2), la MISMA fuente que usa `project_percentile_bands`. Con σ=0 los `paths`
         // caminos son el determinista, así que el éxito es EXACTAMENTE 0 o 1 y coincide con él.
         //
         // La comparación vieja (jubilación + `assets_depleted_month_index`) dejó de ser
-        // equivalente en cuanto F2/F3 entraron en el bucle: P15/P17 fallan por
-        // `rule_below_need` (F3, un techo permanente bajo la necesidad) SIN agotar nunca la
-        // cartera, así que la vieja fórmula los habría marcado «éxito» y la nueva —correcta—
-        // los marca fallo.
+        // equivalente en cuanto F2 (y, hasta el 2026-10-10, F3) entraron en el bucle: un camino
+        // puede fallar por la tasa inicial SIN agotar nunca la cartera, y la vieja fórmula lo
+        // habría marcado «éxito».
         let expected = if det.failure_month_index.is_none() { 1.0 } else { 0.0 };
         assert_eq!(
             out.success_probability, expected,
@@ -283,8 +282,9 @@ fn mc_zero_volatility_degenerates_to_deterministic() {
         );
         checked += 1;
     }
+    // 23 hasta el 2026-10-10: P15–P17 salieron de la batería con las reglas de retirada por saldo.
     assert!(
-        checked >= 23,
+        checked >= 22,
         "la batería del motor no puede encogerse sin que este test lo diga: {checked} casos"
     );
 }
@@ -520,38 +520,6 @@ fn ruin_probability(withdrawal_pct: f64, paths: u32) -> (f64, McOutcome) {
     (1.0 - out.success_probability, out)
 }
 
-/// **La fórmula de cobertura ANTERIOR al fix de B2**, congelada aquí SOLO para que los tests que
-/// endurecen la corrección puedan imprimir «antes → después» con el mismo sorteo. No es parte del
-/// crate — es `Σw / Σ(w+s+u)`, sin descontar `withdrawal_excess` del numerador ni del denominador.
-fn old_style_coverage_ratio_p50(
-    input: &ProjectionInput,
-    vols: &[Option<f64>],
-    config: &McConfig,
-) -> Option<f64> {
-    let mut ratios: Vec<f64> = Vec::with_capacity(config.paths as usize);
-    for p in 0..config.paths {
-        let out = run_path(input, vols, config, p).expect("un camino suelto no falla");
-        let (mut sum_w, mut sum_need) = (0.0f64, 0.0f64);
-        if let Some(r) = out.retirement_month_index {
-            for k in (r as usize)..out.withdrawal.len() {
-                let w = out.withdrawal[k].0;
-                let s = out.withdrawal_shortfall[k].0;
-                let u = out.unmet_need[k].0;
-                sum_w += w;
-                sum_need += w + s + u;
-            }
-        }
-        if sum_need > 0.0 {
-            ratios.push(sum_w / sum_need);
-        }
-    }
-    if ratios.is_empty() {
-        return None;
-    }
-    ratios.sort_by(f64::total_cmp);
-    Some(ratios[ratios.len().div_ceil(2) - 1])
-}
-
 /// **La tabla del issue #207, reproducida dentro de la app.**
 ///
 /// El issue trae, calculados FUERA de FutureFin: con 6,5 % de media y 17 % de desviación típica,
@@ -603,18 +571,13 @@ fn mc_success_probability_of_the_issue_table() {
         "\n[issue #207] 1.000.000 € · 6,5 % media · 17 % sd · 35 años · {paths} caminos\n\
          [issue #207]   retirada 3 % ({:>7.2} €/mes): ruina = {:>6.2} %   (issue: 7-10 %, exigido 2-12 %)\n\
          [issue #207]   retirada 4 % ({:>7.2} €/mes): ruina = {:>6.2} %   (issue: 18-23 %, exigido 7-22 %)\n\
-         [issue #207]   éxito 3 % = {:.3}   éxito 4 % = {:.3}\n\
-         [issue #207]   meses con recorte (p50): {} / {}   ratio retirada:necesidad (p50): {:?} / {:?}",
+         [issue #207]   éxito 3 % = {:.3}   éxito 4 % = {:.3}",
         1_000_000.0 * 0.03 / 12.0,
         ruin3 * 100.0,
         1_000_000.0 * 0.04 / 12.0,
         ruin4 * 100.0,
         out3.success_probability,
         out4.success_probability,
-        out3.months_below_need_p50,
-        out4.months_below_need_p50,
-        out3.withdrawal_to_need_ratio_p50,
-        out4.withdrawal_to_need_ratio_p50,
     );
 
     assert!(
@@ -632,19 +595,9 @@ fn mc_success_probability_of_the_issue_table() {
         "retirar más no puede arruinar menos: {ruin4} ≤ {ruin3}"
     );
 
-    // Con `fixed_real` la regla NO recorta nunca (`withdrawal_shortfall ≡ 0`, la separación de
-    // D22/D24), pero la NECESIDAD NO CUBIERTA sí existe cuando la cartera se acaba, y desde el
-    // pase de correcciones cuenta: `months_below_need_p50` mide meses con `recorte + descubierto
-    // > 0`. El camino mediano al 3 % no se arruina y no tiene ninguno; al 4 % la mediana tampoco
-    // (la ruina está en el 12-30 %), así que ambos siguen en 0 — lo que cambia es que ahora
-    // cuentan por la razón correcta, y el caso que lo demuestra es
-    // `mc_coverage_counts_the_need_the_portfolio_could_not_fund`.
-    assert_eq!(out3.months_below_need_p50, 0);
-    assert_eq!(out4.months_below_need_p50, 0);
-
     // La tabla de FALLO acumulado (E9: `cumulative_failure_by_age`, sustituye a
     // `depletion_probability_by_age`) arranca en la jubilación (mes 1) y avanza de 5 en 5 años.
-    // Con `fixed_real` (el default de `single_asset_retiree`) el único motivo posible es F1
+    // Sin puerta de tasa inicial (`single_asset_retiree` no declara ninguna) el único motivo posible es F1
     // (`PortfolioDepleted`), así que estos números no cambian frente a la vieja tabla de
     // agotamiento — es la MISMA cuenta, leída de la fuente nueva.
     assert_eq!(out4.cumulative_failure_by_age[0].0, 1);
@@ -674,212 +627,12 @@ fn mc_success_probability_of_the_issue_table() {
     );
 }
 
-/// **`percent_of_balance` no puede AGOTAR la cartera, y con la regla calibrada al permitido de `R`
-/// tampoco puede romper el plan: lo que hace es RECORTAR, y eso se mide aparte.**
-///
-/// Con la regla como GASTO (`rule_is_spend`), la retirada del mes es `pct/100 · líquido(k−1)/12`,
-/// que es una FRACCIÓN de la cartera: mientras quede algo, se retira menos que todo, así que F1
-/// (`PortfolioDepleted`) **no puede firmar nunca** aquí — se mide sobre
-/// [`McOutcome::failures_by_kind`], no reconstruyendo el agotamiento a mano.
-///
-/// **Y desde C10 (2026-09-07) tampoco puede romperlo F3.** F3 (`RuleBelowNeed`, «el permitido no
-/// llega a la necesidad ordinaria») se juzga UNA vez, en `R`, y este hogar está calibrado
-/// EXACTAMENTE al 4 % del capital inicial (`permitido(mes 1) == necesidad` al euro), así que pasa
-/// — y ya no se vuelve a preguntar. Resultado: los 1.000 caminos tienen éxito.
-///
-/// **Este test es la medición que condenó la forma anterior.** Con F3 mes a mes, el permitido
-/// seguía a `L(k−1)`, que pasea con un 17 % de volatilidad frente a una deriva de ~0,8 %/año: el
-/// primer shock negativo dentro de los primeros meses bastaba para cruzar la barrera y marcar el
-/// camino para siempre. Medido con esta misma semilla: **éxito 0,051 — 949 de 1.000 caminos
-/// fallaban por `RuleBelowNeed`**, ninguno por los otros dos motivos, y la cartera no llegaba a
-/// cero en ninguno. Eso no medía la salud del plan, medía la probabilidad de tocar una barrera
-/// sobre 420 meses, que tiende a 1 por la varianza. En la demo sintética el mismo mecanismo pedía
-/// 2,52 M€ de capital necesario hoy (620 k€ con `fixed_real`; 860 k€ con F3 solo en `R`).
-///
-/// Lo que la regla sí hace es **recortar el gasto**, y eso NO desaparece: se sigue midiendo en la
-/// otra dimensión (D24), meses por debajo de la necesidad y ratio retirada:necesidad (corregido en
-/// B2, más abajo). Las dos cifras son BYTE a byte las mismas antes y después de C10 —70 meses de
-/// recorte y 0,9793 de cobertura—, que es la prueba de que lo que se movió es el VEREDICTO y no la
-/// simulación.
-///
-/// La otra mitad del contrato —que F3 sí firma cuando la regla no llega YA en `R`— la mide
-/// [`mc_f3_is_a_property_of_the_plan_not_of_the_draw`], justo debajo.
-#[test]
-fn mc_percent_of_balance_never_ruins_but_cuts_the_spending() {
-    let capital = Decimal::from(1_000_000);
-    let monthly =
-        Decimal::from(1_000_000) / Decimal::from(100) * Decimal::from(4) / Decimal::from(12);
-    let mut input = single_asset_retiree(capital, monthly, Decimal::try_from(6.5).unwrap(), 420);
-    input.phase_plan.withdrawal = WithdrawalRule::PercentOfBalance {
-        pct: Decimal::from(4),
-    };
-    input.phase_plan.spend_mode = SpendMode::RuleIsSpend;
-
-    let config = McConfig {
-        seed: 207,
-        paths: 1_000,
-        percentiles: vec![10, 50, 90],
-        threads: None,
-    };
-    let out = project_percentile_bands(&input, &[Some(17.0)], &config).expect("no falla");
-
-    println!(
-        "\n[percent_of_balance] 4 % del saldo, regla = gasto · 35 años · 1.000 caminos\n\
-         [percent_of_balance]   éxito del PLAN = {}   fallos por motivo = {:?} (F1/F2/F3)\n\
-         [percent_of_balance]   meses con recorte (p50) = {} de 420\n\
-         [percent_of_balance]   ratio retirada:necesidad (p50) = {:?}\n\
-         [percent_of_balance]   líquido final p10/p50/p90 = {:.0} / {:.0} / {:.0} €",
-        out.success_probability,
-        out.failures_by_kind,
-        out.months_below_need_p50,
-        out.withdrawal_to_need_ratio_p50,
-        out.liquid_worth[0][420],
-        out.liquid_worth[1][420],
-        out.liquid_worth[2][420],
-    );
-
-    // **La cartera nunca se agota** — F1 no puede firmar bajo una regla porcentual, sea cual sea
-    // `spend_mode`: mientras quede saldo, se retira una FRACCIÓN de él, nunca su totalidad.
-    assert_eq!(
-        out.failures_by_kind[KIND_PORTFOLIO_DEPLETED], 0,
-        "F1 (`PortfolioDepleted`) no puede firmar bajo una regla porcentual: siempre queda algo"
-    );
-    assert_eq!(
-        out.failures_by_kind[KIND_INITIAL_RATE_EXCEEDED], 0,
-        "este `PhasePlan` no declara `initial_rate`: F2 no puede firmar"
-    );
-    // **Y F3 tampoco, desde C10**: el permitido del mes 1 ES la necesidad al euro, así que la
-    // única comparación que se hace —la de `R`— la pasa, y los shocks posteriores ya no juzgan
-    // nada. Con F3 mes a mes esto valía 949 de 1.000.
-    assert_eq!(
-        out.failures_by_kind[KIND_RULE_BELOW_NEED], 0,
-        "F3 se juzga SOLO en `R`, y en `R` el permitido llega: un shock del mes 40 no jubila mal \
-         a nadie retroactivamente"
-    );
-    assert_eq!(
-        out.success_probability, 1.0,
-        "sin F1 posible, sin puerta de tasa inicial y con F3 superada en `R`, no queda motivo por \
-         el que este plan pueda romperse: éxito medido {}",
-        out.success_probability
-    );
-    // Y sin embargo hay recorte: la mediana de los caminos pasa meses por debajo de la necesidad.
-    assert!(
-        out.months_below_need_p50 > 0,
-        "sin recorte, esta regla sería gratis — y no lo es"
-    );
-    let ratio = out
-        .withdrawal_to_need_ratio_p50
-        .expect("hay meses jubilados con necesidad");
-    assert!(
-        (0.0..=1.0).contains(&ratio),
-        "el ratio retirada:necesidad vive en [0,1]: {ratio}"
-    );
-
-    // **B2, endurecido.** Bajo `rule_is_spend` la regla vende `permitido` TODOS los meses
-    // jubilados, también cuando `permitido` (4 % del saldo CRECIENTE) supera la necesidad fija —y
-    // con una deriva de ~8,0 % anual (CAGR 6,5 % + prima de varianza) contra una retirada del 4 %,
-    // el saldo tiende a CRECER durante los 35 años, así que esos meses de excedente abundan. Antes
-    // del fix, ese exceso contaba en el numerador Y en el denominador (`Σw / Σ(w+s+u)`), y en esos
-    // meses la razón daba exactamente 1,0 igual que si la necesidad se hubiera cubierto entera —
-    // inflando la mediana agregada. El argumento del mediante (`(x+E)/(y+E) > x/y` para `x<y,
-    // E>0`) dice que la cifra vieja tiene que quedar POR ENCIMA de la nueva; se mide para dar el
-    // número, no solo el signo.
-    //
-    // Predicción (antes de correr): con esta semilla y 1.000 caminos, el `withdrawal_to_need_ratio_p50`
-    // ANTIGUO rondaba 0,98–0,99 (casi «cobertura total», por el exceso sin descontar). Medido:
-    // **0,9888 → 0,9793** — baja, como predice el argumento del mediante, aunque poco en términos
-    // absolutos porque el hogar mediano pasa la mayoría de los meses con excedente (solo 70 de 420
-    // tienen recorte de verdad).
-    let ratio_old = old_style_coverage_ratio_p50(&input, &[Some(17.0)], &config)
-        .expect("hay meses jubilados con necesidad");
-    println!(
-        "[percent_of_balance]   cobertura p50 — ANTES del fix B2 = {ratio_old:.4}   DESPUÉS = {ratio:.4}"
-    );
-    assert!(
-        ratio < ratio_old,
-        "B2: el exceso de `rule_is_spend` inflaba la cobertura antes del fix — antes {ratio_old:.4}, \
-         después {ratio:.4} (se esperaba que bajara)"
-    );
-}
-
-/// **F3 es una propiedad del PLAN, no del sorteo** (C10) — la otra mitad de
-/// [`mc_percent_of_balance_never_ruins_but_cuts_the_spending`].
-///
-/// Desde que F3 se juzga solo en `R` y este laboratorio se jubila en el mes 1, la comparación se
-/// hace contra `L(0)`, que es el capital declarado: **el mismo número en los 1.000 caminos, antes
-/// de que el sorteo haya movido un euro**. Así que el veredicto es binario y determinista — o
-/// fallan todos, o no falla ninguno—, y eso es exactamente lo que se quería: la regla de retirada
-/// se juzga contra la cartera con la que te jubilas, no contra la que el mercado te deje después.
-///
-/// Predicho: 1.000.000 € y una regla al 4 % ⇒ permitido en `R` = `1.000.000 × 0,04 / 12 =
-/// 3.333,33 €/mes`. Con una necesidad de **3.400 €** la regla NO llega ⇒ los 1.000 caminos fallan
-/// por `RuleBelowNeed` en el mes 1 (`success = 0`, reparto `[0, 0, 1.000]`), y con **3.300 €** sí
-/// llega ⇒ ninguno falla. Y las dos cifras no se mueven al cambiar la semilla: el mismo plan da el
-/// mismo veredicto con otro mercado.
-#[test]
-fn mc_f3_is_a_property_of_the_plan_not_of_the_draw() {
-    let run = |monthly_expense: i64, seed: u64| {
-        let mut input = single_asset_retiree(
-            Decimal::from(1_000_000),
-            Decimal::from(monthly_expense),
-            Decimal::try_from(6.5).unwrap(),
-            420,
-        );
-        input.phase_plan.withdrawal = WithdrawalRule::PercentOfBalance {
-            pct: Decimal::from(4),
-        };
-        input.phase_plan.spend_mode = SpendMode::RuleIsSpend;
-        let config = McConfig {
-            seed,
-            paths: 1_000,
-            percentiles: vec![50],
-            threads: None,
-        };
-        project_percentile_bands(&input, &[Some(17.0)], &config).expect("no falla")
-    };
-
-    // (a) La regla no llega YA en `R`: 3.333,33 < 3.400 ⇒ fallan los 1.000, en el mes 1.
-    let short = run(3_400, 207);
-    println!(
-        "[F3 en R] necesidad 3.400 > permitido 3.333,33 · éxito = {}   reparto = {:?}",
-        short.success_probability, short.failures_by_kind
-    );
-    assert_eq!(short.success_probability, 0.0);
-    assert_eq!(
-        short.failures_by_kind,
-        [0, 0, 1_000],
-        "el motivo es F3 y solo F3: la cartera no se agota y no hay puerta de tasa inicial"
-    );
-    let first = *short
-        .cumulative_failure_by_age
-        .first()
-        .expect("hay fecha de jubilación, así que hay tabla");
-    assert_eq!(
-        first,
-        (1, 1.0),
-        "y el fallo está fechado EN `R`: la primera fila de la curva ya es el 100 %"
-    );
-
-    // (b) Un plan con 100 € menos de gasto pasa la misma comparación y no falla NUNCA, ni con la
-    //     volatilidad del 17 % durante 35 años: después de `R` solo podría firmar F1, y una
-    //     fracción del saldo jamás lo vacía.
-    let ok = run(3_300, 207);
-    println!(
-        "[F3 en R] necesidad 3.300 < permitido 3.333,33 · éxito = {}   reparto = {:?}",
-        ok.success_probability, ok.failures_by_kind
-    );
-    assert_eq!(ok.success_probability, 1.0);
-    assert_eq!(ok.failures_by_kind, [0, 0, 0]);
-
-    // (c) Y el veredicto NO depende del mercado sorteado: otra semilla, mismos dos resultados.
-    //     Es lo que separa «una propiedad del plan» de «una barrera que la varianza acaba tocando».
-    assert_eq!(run(3_400, 4_242).failures_by_kind, [0, 0, 1_000]);
-    assert_eq!(run(3_300, 4_242).failures_by_kind, [0, 0, 0]);
-}
-
-// =================================================================================================
-// 6. Semilla estable (D23)
-// =================================================================================================
+// `mc_percent_of_balance_never_ruins_but_cuts_the_spending` y
+// `mc_f3_is_a_property_of_the_plan_not_of_the_draw` vivían aquí: medían la regla
+// `percent_of_balance` como gasto y su fallo F3. Se retiraron el 2026-10-10 con las reglas de
+// retirada por saldo, el modo de gasto y F3 (decisión «solo SWR»). Su medición —2,52 M€ de
+// capital necesario con F3 mes a mes frente a 620 k€ con el gasto fijo— está en
+// `futurefin-failure-archaeology`.
 
 /// **La semilla de un usuario no cambia nunca.** Dos pares de identificadores pineados: si el
 /// hash cambiara, todas las bandas de todos los usuarios cambiarían a la vez y nadie sabría por
@@ -983,19 +736,22 @@ fn mc_readings_are_the_same_for_every_trigger_now() {
 // 8. Las dos lecturas que la segunda revisión adversarial (D20) corrigió
 // =================================================================================================
 
-/// **La cobertura cuenta la necesidad que la CARTERA no pudo fundar, no solo la que la regla
-/// rechazó.**
+// `mc_coverage_counts_the_need_the_portfolio_could_not_fund` vivía aquí y medía
+// `withdrawal_to_need_ratio_p50` / `months_below_need_p50`. Las dos lecturas se retiraron el
+// 2026-10-10 con las reglas de retirada por saldo: sin reglas, un mes por debajo del gasto ES un
+// fallo F1, así que sus medianas solo podían ser distintas de «0 meses / 100 %» con un éxito por
+// debajo del 50 % — fuera de cualquier umbral que la app acepta (80–100).
+
+/// **La ruina es F1 y solo F1, y el éxito es 0 cuando ningún camino sobrevive.**
 ///
-/// El hogar: 100.000 € al 4 % con σ = 15 %, 3.000 €/mes de gasto, 400 meses. Se arruina en el mes
-/// 35 (mediana) y pasa 364 de los 400 meses con la cartera vacía. Con `fixed_real` la regla NO
-/// recorta nunca (`withdrawal_shortfall ≡ 0` por construcción: el permitido ES la necesidad), así
-/// que el denominador `Σ(w + s)` era `Σ w` y el cociente salía **1,0 en los 1.000 caminos** — «la
-/// regla cubrió el 100 % de la necesidad» sobre hogares que cubrieron el 8,8 %.
-///
-/// Lo que faltaba estaba en la tercera magnitud, `unmet_need`, que el motor no publicaba mes a
-/// mes. Ahora sí, y el cociente es `Σ w / Σ (w + recorte + descubierto)`.
+/// El hogar del laboratorio de cobertura que se retiró el 2026-10-10 (100.000 € al 4 % con
+/// σ = 15 %, 3.000 €/mes, 400 meses) se arruina en TODOS los caminos. La métrica de cobertura se
+/// fue con las reglas por saldo; la aserción que viajaba con ella —«ningún camino sobrevive»— se
+/// queda aquí, y gana el reparto por motivo: `single_asset_retiree` no lleva puerta de tasa inicial
+/// (`PhasePlan::classic` → `initial_rate: None`), así que F2 es imposible y los 1.000 fallos tienen
+/// que ser F1 (cartera agotada), ni uno más ni uno menos.
 #[test]
-fn mc_coverage_counts_the_need_the_portfolio_could_not_fund() {
+fn mc_ruin_is_portfolio_depletion_and_only_that() {
     let input = single_asset_retiree(
         Decimal::from(100_000),
         Decimal::from(3_000),
@@ -1009,40 +765,17 @@ fn mc_coverage_counts_the_need_the_portfolio_could_not_fund() {
         threads: None,
     };
     let out = project_percentile_bands(&input, &[Some(15.0)], &config).expect("no falla");
-    let ratio = out
-        .withdrawal_to_need_ratio_p50
-        .expect("hay meses jubilados");
     println!(
-        "\n[cobertura] 100.000 € al 4 %/15 % · 3.000 €/mes · 400 meses · 1.000 caminos\n\
-         [cobertura]   éxito = {:.4}   cobertura p50 = {ratio:.4}   meses por debajo p50 = {}",
-        out.success_probability, out.months_below_need_p50
+        "\n[ruina=F1] 100.000 € al 4 %/15 % · 3.000 €/mes · 400 meses · 1.000 caminos\n\
+         [ruina=F1]   éxito = {:.4}   fallos por motivo (F1, F2) = {:?}",
+        out.success_probability, out.failures_by_kind
     );
-
     assert_eq!(out.success_probability, 0.0, "ningún camino sobrevive");
-    assert!(
-        (0.05..0.15).contains(&ratio),
-        "la cobertura real ronda el 8,8 %, no el 100 %: medido {ratio}"
-    );
-    assert!(
-        out.months_below_need_p50 > 300,
-        "el camino mediano pasa la mayor parte del horizonte sin cubrir su gasto: {}",
-        out.months_below_need_p50
-    );
-
-    // **B2, endurecido — el reverso de `mc_percent_of_balance_never_ruins_but_cuts_the_spending`.**
-    // Este hogar usa `fixed_real` (el default de `single_asset_retiree`), donde `withdrawal_excess`
-    // es CERO por construcción: el permitido ES la necesidad, así que nunca hay «sobrante» que
-    // reclasificar. El fix de B2 solo resta cuando `excess > 0`; aquí no debe mover ni un bit.
-    let ratio_old = old_style_coverage_ratio_p50(&input, &[Some(15.0)], &config)
-        .expect("hay meses jubilados");
-    println!(
-        "[cobertura]   con `fixed_real` el exceso es CERO por construcción — ANTES = {ratio_old:.4}   \
-         DESPUÉS = {ratio:.4}"
-    );
     assert_eq!(
-        ratio, ratio_old,
-        "B2 no debe mover nada bajo `fixed_real`: el exceso es cero por construcción, y sin embargo \
-         antes {ratio_old} ≠ después {ratio}"
+        out.failures_by_kind,
+        [1_000, 0],
+        "sin puerta de tasa inicial toda la ruina es F1: {:?}",
+        out.failures_by_kind
     );
 }
 
@@ -1080,7 +813,7 @@ fn mc_success_is_zero_failures_and_the_kinds_add_up() {
         out.success_probability, 1.0,
         "colchón amplio y sin volatilidad: nadie puede fallar"
     );
-    assert_eq!(out.failures_by_kind, [0, 0, 0]);
+    assert_eq!(out.failures_by_kind, [0, 0]);
 
     // (b) El laboratorio de ruina del issue #207 al 4 %: aquí SÍ hay fallos, y tienen que sumar.
     let (ruin, out2) = ruin_probability(4.0, 500);
@@ -1088,13 +821,13 @@ fn mc_success_is_zero_failures_and_the_kinds_add_up() {
     let failures_counted: u32 = out2.failures_by_kind.iter().sum();
     println!(
         "[éxito=fallos suman] ruina = {ruin:.4} (500 caminos)   fallos contados = {failures_counted}   \
-         por motivo = {:?} (F1/F2/F3)",
+         por motivo = {:?} (F1/F2)",
         out2.failures_by_kind
     );
     assert!(failures_counted > 0, "al 4 % tiene que haber ruina de sobra");
     assert_eq!(
         failures_counted, failures_expected,
-        "los tres motivos deben sumar exactamente los caminos fallidos, sea cual sea la mezcla"
+        "los motivos deben sumar exactamente los caminos fallidos, sea cual sea la mezcla"
     );
 }
 

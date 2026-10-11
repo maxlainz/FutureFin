@@ -1890,7 +1890,7 @@ async fn v13_roundtrips_the_retirement_profile_and_the_asset_volatility() {
 /// Tres cosas en un test: los ejes fuera de rango se siguen acotando (eso no cambia con el
 /// arreglo de B3 — el clamp sigue existiendo, solo que ahora vive a mano en
 /// `legacy_retirement_profile` en vez de en `resolve_retirement_profile`); lo que SÍ se deriva en
-/// lectura (`pct_source`) no llega ya congelado como «explicit»; y sin la siembra, restaurar un
+/// lectura (el puente del alias) no llega congelado; y sin la siembra, restaurar un
 /// backup de 4.15.x devolvería a esa persona al SWR por defecto sin ningún aviso, mientras que
 /// sin la condición de «solo si no tiene perfil», restaurar un backup viejo pisaría la estrategia
 /// que configuró DESPUÉS de actualizar.
@@ -1949,18 +1949,8 @@ async fn a_legacy_backup_seeds_an_unresolved_profile() {
     assert_eq!(p["fire_number_mode"], "current_income", "{profile}");
     // La estrategia no viene del fichero: es la de 4.15.x, que es `asap`.
     assert_eq!(p["strategy"], "asap", "{profile}");
-    // Lo que SÍ se deriva en lectura no llega congelado como una elección explícita: con la
-    // regla por defecto (`fixed_real`, la única que un fichero ≤ v12 puede sembrar) ni siquiera
-    // se publica —esa regla no tiene porcentaje que resolver—, y si algún día lo hiciera, solo
-    // puede venir heredado del SWR, nunca marcado `explicit`.
-    match p["withdrawal_rule"].get("pct_source") {
-        None => {}
-        Some(v) if v.is_null() => {}
-        Some(v) => assert_eq!(
-            v, "swr",
-            "un pct_source sembrado desde un fichero legado nunca puede ser explicit: {profile}"
-        ),
-    }
+    // «Solo SWR» (2026-10-10): el perfil ya no lleva regla de retirada que sembrar ni derivar.
+    assert!(p.get("withdrawal_rule").is_none(), "{profile}");
 
     // 2) El usuario configura SU plan después de actualizar…
     let r = app

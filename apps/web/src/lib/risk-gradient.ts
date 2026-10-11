@@ -11,7 +11,7 @@
  *
  * ## Qué se cuenta como fallo (modelo v2, §2.4)
  *
- * Ya no es «agotar el capital» a secas. Un camino falla —tiene que **volver a trabajar**— por tres
+ * Ya no es «agotar el capital» a secas. Un camino falla —tiene que **volver a trabajar**— por dos
  * vías, y `failure_probability_by_age` las suma en su `probability` y las desglosa en su
  * `by_kind`:
  *
@@ -19,7 +19,9 @@
  * |---|---|---|
  * | F1 | la cartera no cubre la necesidad de un mes jubilado | `[0]` |
  * | F2 | la tasa inicial del mes de jubilación supera el tope (SWR o puente) | `[1]` |
- * | F3 | el permitido de una regla por saldo no cubre la necesidad ordinaria | `[2]` |
+ *
+ * (F3 —el permitido de una regla por saldo bajo la necesidad ordinaria— se fue con las reglas de
+ * retirada: «solo SWR», 2026-10-10.)
  *
  * Colorear solo con F1 —lo que hacía `depletion_probability_by_age`— pintaba de verde un plan que
  * el motor da por fallido en el primer mes por tasa inicial. El desglose no tiñe nada: viaja al
@@ -120,8 +122,8 @@ export type RiskGradientInput = {
 type Sample = {
   month: number;
   p: number;
-  /** Desglose F1/F2/F3 de esa misma acumulada. `null` = el servidor no lo publicó. */
-  byKind: readonly [number, number, number] | null;
+  /** Desglose F1/F2 de esa misma acumulada. `null` = el servidor no lo publicó. */
+  byKind: readonly [number, number] | null;
 };
 
 function finite(n: unknown): n is number {
@@ -156,8 +158,8 @@ function samplesOf(
       month: pt.month_index,
       p,
       byKind:
-        Array.isArray(bk) && bk.length === 3 && bk.every((n) => finite(n))
-          ? [bk[0], bk[1], bk[2]]
+        Array.isArray(bk) && bk.length === 2 && bk.every((n) => finite(n))
+          ? [bk[0], bk[1]]
           : null,
     });
   }
@@ -166,7 +168,7 @@ function samplesOf(
 }
 
 /**
- * Probabilidad acumulada de haber FALLADO (F1, F2 o F3) en un MES cualquiera.
+ * Probabilidad acumulada de haber FALLADO (F1 o F2) en un MES cualquiera.
  *
  * Plana antes de la primera muestra (la rejilla del servidor arranca en la jubilación: el tramo
  * de acumulación no tiene muestra propia y su fallo es el de la primera, no una rampa inventada),
@@ -180,7 +182,7 @@ function samplesOf(
  *
  * Se llamó `depletionProbabilityAtMonth` hasta el modelo v2, cuando el sujeto dejó de ser «agotar
  * el capital» para ser «volver a trabajar» (§2.4). La aritmética es la misma; el nombre viejo
- * describía una de las tres causas y se leía como si fueran todas.
+ * describía una de las causas y se leía como si fueran todas.
  */
 export function failureProbabilityAtMonth(
   points: readonly FailureProbabilityPointApi[] | null | undefined,
@@ -205,13 +207,13 @@ export function failureProbabilityAtMonth(
 }
 
 /**
- * El desglose `[F1, F2, F3]` de la muestra MÁS CERCANA a un mes, para el hover.
+ * El desglose `[F1, F2]` de la muestra MÁS CERCANA a un mes, para el hover.
  *
- * **No se interpola**, a diferencia de la probabilidad: interpolar tres acumuladas por separado
- * daría un trío que no suma la acumulada que el tooltip enseña justo al lado, y una descomposición
+ * **No se interpola**, a diferencia de la probabilidad: interpolar dos acumuladas por separado
+ * daría un par que no suma la acumulada que el tooltip enseña justo al lado, y una descomposición
  * que no cuadra es peor que ninguna. Lo que se enseña es una muestra REAL, la de al lado.
  *
- * Empate de distancia → gana la muestra ANTERIOR: las tres series son acumuladas, así que la
+ * Empate de distancia → gana la muestra ANTERIOR: las dos series son acumuladas, así que la
  * anterior nunca atribuye a este mes fallos que todavía no han ocurrido.
  *
  * `null` ⟺ no hay ninguna muestra con desglose (backend que solo publica la acumulada, o rejilla
@@ -220,7 +222,7 @@ export function failureProbabilityAtMonth(
 export function failureKindsAtMonth(
   points: readonly FailureProbabilityPointApi[] | null | undefined,
   month: number,
-): readonly [number, number, number] | null {
+): readonly [number, number] | null {
   if (!finite(month)) return null;
   const s = samplesOf(points).filter((x) => x.byKind != null);
   if (s.length === 0) return null;

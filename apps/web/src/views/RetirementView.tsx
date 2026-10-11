@@ -9,8 +9,8 @@
  *
  *  1. **Cabecera**: el título y UN solo indicador de guardado (S6). Antes había seis pies
  *     «Guardado automático.», uno por panel, que podían contradecirse entre sí.
- *  2. **«Tu plan»** (configuración): una TARJETA POR TEMA —Estrategia · Edades · Pensión · Gasto
- *     en jubilación · Retirada · Horizonte—, cada una con su frase de qué hace, y **solo los
+ *  2. **«Tu plan»** (configuración): una TARJETA POR TEMA —Estrategia · Gasto en jubilación ·
+ *     Edades · Pensión · Horizonte y exigencia—, cada una con su `<?>` de qué hace, y **solo los
  *     campos que la estrategia elegida Y SU MODO usan**. La tabla U2 vive en
  *     `lib/plan-fields.ts` y aquí no se re-decide nada.
  *  3. **«Resultado»**: la FRASE del plan (`lib/plan-sentence.ts`), los avisos, tres tarjetas
@@ -38,10 +38,10 @@
  *
  * Cinco invariantes que este archivo no puede romper:
  *
- *  - **Un solo porcentaje de retirada** (U4). El slider es `swr_pct` —el tope de la tasa inicial
- *    en la fecha— y el formulario **jamás** manda `withdrawal_rule.pct` ni `start_pct`: el
- *    servidor los hereda del SWR y publica de dónde salieron (`pct_source`). Su mínimo es 0,1 %
- *    y no 0: un plan que retira el 0 % no es un plan.
+ *  - **Un solo porcentaje de retirada** («solo SWR», 2026-10-10). El slider es `swr_pct` —el
+ *    tope de la tasa inicial en la fecha— y no hay reglas de retirada ni modo de gasto: una vez
+ *    jubilado, cada mes se vende lo que pide el gasto indexado. Su mínimo es 0,1 % y no 0: un
+ *    plan que retira el 0 % no es un plan.
  *  - **Todo por MES** (`month_index`), nunca por posición de `points[]`: con `density=hybrid` la
  *    posición 13 es el mes 24. La única excepción es `safe_date_series_position`, que es una
  *    posición **publicada por el servidor** y solo se usa como tal.
@@ -76,7 +76,6 @@ import type {
   RetirementStrategyApi,
   SummaryResponse,
   UserResponse,
-  WithdrawalRuleKindApi,
 } from "../api/types";
 import { HelpPopover } from "../components/HelpPopover";
 import { Switch } from "../components/Switch";
@@ -100,7 +99,6 @@ import {
   PARTIAL_MODE_LABEL,
   RETIREMENT_STRATEGIES,
   RETIREMENT_STRATEGY_LABEL,
-  WITHDRAWAL_RULE_KIND_LABEL,
   buildRetirementProfilePatch,
   defaultRetirementProfileApi,
   isEmptyRetirementProfilePatch,
@@ -109,7 +107,6 @@ import {
   normalizeRetirementProfile,
   retirementProfileIssue,
   withBridgeEnabled,
-  withdrawalPctSource,
 } from "../lib/retirementProfile";
 import { messageForError } from "../lib/errorMessages";
 import {
@@ -134,7 +131,6 @@ import {
   missingRequiredPlanFields,
   percentFromFraction,
   saveIndicatorLabel,
-  withdrawalPctNote,
 } from "../lib/retirement-form";
 import {
   NO_LAST_GOOD,
@@ -247,9 +243,8 @@ const BRIDGE_FIELD_IDS: ReadonlySet<PlanFieldId> = new Set<PlanFieldId>([
  * La tarjeta ancha se lee como una lista de ajustes (`App.css`, §La tarjeta ancha se lee como una
  * LISTA DE AJUSTES), y eso le quita a cada control el ancho sobrante que el owner leyó como huecos
  * vacíos. El criterio de la excepción: **el campo cuyo contenido es una rejilla o una pila propia**
- * —las tres rejillas de modos (`coast_mode`, `partial_mode`, `fire_number_mode`) y la pila de radios
- * de `spend_mode`—, porque ahí el ancho no es aire: es lo que hace que el nombre y la frase de cada
- * opción quepan en una línea.
+ * —las tres rejillas de modos (`coast_mode`, `partial_mode`, `fire_number_mode`)—, porque ahí el
+ * ancho no es aire: es lo que hace que el nombre y la frase de cada opción quepan en una línea.
  *
  * No escribas aquí el nombre de esas clases: `design-system.md` cuenta sus consumidores con un
  * `grep -c` sobre este fichero, y un comentario que las nombra se cuenta a sí mismo.
@@ -416,7 +411,7 @@ export function RetirementView({
     }
     // U2 — la guarda nueva: una estrategia a la que le falta un dato NO se guarda. El servidor
     // aceptaría el PATCH y degradaría el plan en silencio (una edad objetivo ausente se simula
-    // como «Cuanto antes»), que es exactamente lo que no puede pasar sin que se vea.
+    // como «FIRE clásico»), que es exactamente lo que no puede pasar sin que se vea.
     if (blockedBySomeRequired) {
       setProfileIssue(null);
       return;
@@ -674,14 +669,8 @@ export function RetirementView({
     (!configuredSavingsUsesTransactions || summary != null);
 
   // ── Resultado: frase, tarjetas y avisos ───────────────────────────────────────────────────
-  const rule = profileDraft.withdrawal_rule;
   const pension = profileDraft.pension;
   const partial = profileDraft.partial_retirement;
-  const rulePctNote = withdrawalPctNote({
-    rule,
-    swrPct: profileDraft.swr_pct,
-    pctSource: withdrawalPctSource(rule),
-  });
 
   const sentence = useMemo(
     () =>
@@ -929,8 +918,9 @@ export function RetirementView({
    * tooltip alimentado por otro cálculo podría contradecir al tinte y nadie lo notaría.
    *
    * El desglose por causa va entre paréntesis y NO se interpola (`failureKindsAtMonth` devuelve
-   * la muestra real más cercana): tres acumuladas interpoladas por separado darían un trío que
-   * no suma la cifra que el propio tooltip enseña justo delante.
+   * la muestra real más cercana): dos acumuladas interpoladas por separado darían un par que
+   * no suma la cifra que el propio tooltip enseña justo delante. Dos causas, no tres, desde
+   * «solo SWR» (2026-10-10): la de la regla de retirada se fue con las reglas.
    */
   const chartHoverLabel = useMemo(() => {
     if (gradientStops.length < 2 || !shownBands) return null;
@@ -944,7 +934,7 @@ export function RetirementView({
           ? ""
           : ` (sin dinero ${formatPercentDisplay(kinds[0] * 100)}, tasa ${formatPercentDisplay(
               kinds[1] * 100,
-            )}, regla ${formatPercentDisplay(kinds[2] * 100)})`;
+            )})`;
       return `${monthLabel(mi)} · ${formatPercentDisplay(p * 100)} de los escenarios ya han fallado${breakdown}`;
     };
   }, [gradientStops, shownBands, monthLabel]);
@@ -1462,12 +1452,12 @@ export function RetirementView({
           </label>
         );
 
-      // ── Supuestos con default: umbral, retirada, pensión fina y horizonte ───────────────
+      // ── Supuestos con default: umbral, tasa, pensión fina y horizonte ───────────────────
       //
       // Antes vivían en el acordeón «Avanzado»; desde V3 caen en la tarjeta de su tema
       // (`lib/plan-fields.ts`) y comparten switch con el resto.
       //
-      // El UMBRAL va el primero de «Retirada» porque en v2 **es la restricción que decide la
+      // El UMBRAL abre «Horizonte y exigencia» porque en v2 **es la restricción que decide la
       // fecha válida**, no un corte de semáforo: mover este slider mueve la fecha, el capital
       // necesario y el color de la banda a la vez.
       case "success_threshold_pct":
@@ -1504,9 +1494,8 @@ export function RetirementView({
               {fieldHelp(f.id)}
             </span>
             {/* El slider trabaja en DÉCIMAS de punto (`value = pct · 10`) para poder pisar los
-                0,1 sin `step` fraccionario. El mínimo es 1 —0,1 %— y NO 0: un plan que retira
-                el 0 % no es un plan, y con la regla por saldo el servidor lo rechaza
-                (`withdrawal_pct_out_of_range`) sin que nada en pantalla lo explique. */}
+                0,1 sin `step` fraccionario. El mínimo es 1 —0,1 %— y NO 0: con una tasa
+                inicial del 0 % ningún gasto cabe y ninguna fecha valdría. */}
             <input
               type="range"
               min={1}
@@ -1526,144 +1515,6 @@ export function RetirementView({
               {formatPercentAmount(profileDraft.swr_pct)}
             </span>
           </label>
-        );
-
-      case "withdrawal_rule_kind":
-        return (
-          <label className="field" key={f.id}>
-            <span className="label-with-help">
-              {f.label}
-              {fieldHelp(f.id)}
-            </span>
-            <select
-              value={rule.kind}
-              onChange={(e) => {
-                const kind = e.target.value as WithdrawalRuleKindApi;
-                // B8 — al cambiar de regla se SUELTAN los subcampos de la anterior. Sin esto, el
-                // `end_pct` de la híbrida o la banda de las bandas viajaban en el PATCH de una
-                // regla que no los usa: el servidor los guarda, la pantalla no los enseña, y al
-                // volver a aquella regla reaparecía un número que nadie recordaba haber puesto.
-                // `spend_mode` vuelve a `ceiling` en `fixed_real` por el mismo motivo: esa regla
-                // no tiene modo que aplicar (`lib/plan-fields.ts` ni siquiera pinta el campo).
-                patchDraft((p) => ({
-                  ...p,
-                  withdrawal_rule: {
-                    ...p.withdrawal_rule,
-                    kind,
-                    end_pct: kind === "hybrid" ? p.withdrawal_rule.end_pct : null,
-                    band_pct: kind === "guardrails" ? p.withdrawal_rule.band_pct : null,
-                    adjust_pct: kind === "guardrails" ? p.withdrawal_rule.adjust_pct : null,
-                    spend_mode:
-                      kind === "fixed_real" ? "ceiling" : p.withdrawal_rule.spend_mode,
-                  },
-                }));
-              }}
-            >
-              {(
-                ["fixed_real", "percent_of_balance", "hybrid", "guardrails"] as const
-              ).map((k) => (
-                <option key={k} value={k}>
-                  {WITHDRAWAL_RULE_KIND_LABEL[k]}
-                </option>
-              ))}
-            </select>
-            {/* Un porcentaje fijado por API o MCP no se edita aquí (U4: la pantalla tiene uno
-                solo y es el SWR), pero callarlo dejaría al usuario moviendo un slider que su
-                regla ignora. La frase la decide `withdrawalPctNote`, con su test. */}
-            {rulePctNote ? <small className="muted">{rulePctNote}</small> : null}
-          </label>
-        );
-
-      case "hybrid_end_pct":
-        return (
-          <label className="field" key={f.id}>
-            <span className="label-with-help">
-              {f.label} (%)
-              {fieldHelp(f.id)}
-            </span>
-            <input
-              inputMode="decimal"
-              placeholder="p. ej. 3"
-              value={rule.end_pct ?? ""}
-              onChange={(e) =>
-                patchDraft((p) => ({
-                  ...p,
-                  withdrawal_rule: {
-                    ...p.withdrawal_rule,
-                    end_pct: typedDecimalOrNull(e.target.value),
-                  },
-                }))
-              }
-              onBlur={() => queueProfileSave(0)}
-            />
-          </label>
-        );
-
-      case "guardrails_band_pct":
-      case "guardrails_adjust_pct": {
-        const isBand = f.id === "guardrails_band_pct";
-        return (
-          <label className="field" key={f.id}>
-            <span className="label-with-help">
-              {f.label} (%)
-              {fieldHelp(f.id)}
-            </span>
-            <input
-              inputMode="decimal"
-              placeholder={isBand ? "p. ej. 20" : "p. ej. 10"}
-              value={(isBand ? rule.band_pct : rule.adjust_pct) ?? ""}
-              onChange={(e) =>
-                patchDraft((p) => ({
-                  ...p,
-                  withdrawal_rule: {
-                    ...p.withdrawal_rule,
-                    ...(isBand
-                      ? { band_pct: typedDecimalOrNull(e.target.value) }
-                      : { adjust_pct: typedDecimalOrNull(e.target.value) }),
-                  },
-                }))
-              }
-              onBlur={() => queueProfileSave(0)}
-            />
-          </label>
-        );
-      }
-
-      case "spend_mode":
-        return (
-          <div className={BLOCK_FIELD} key={f.id}>
-            <div
-              className="retirement-radio-stack"
-              role="radiogroup"
-              aria-label="Cómo se aplica la regla"
-            >
-              <span className="label-with-help field-label-text">
-                {f.label}
-                {fieldHelp(f.id)}
-              </span>
-              {(
-                [
-                  ["ceiling", "Techo"],
-                  ["rule_is_spend", "Es mi gasto"],
-                ] as const
-              ).map(([mode, text]) => (
-                <label className="field checkbox-field" key={mode}>
-                  <input
-                    type="radio"
-                    name="spend_mode"
-                    checked={rule.spend_mode === mode}
-                    onChange={() =>
-                      patchDraft((p) => ({
-                        ...p,
-                        withdrawal_rule: { ...p.withdrawal_rule, spend_mode: mode },
-                      }))
-                    }
-                  />
-                  <span>{text}</span>
-                </label>
-              ))}
-            </div>
-          </div>
         );
 
       case "pension_indexed":

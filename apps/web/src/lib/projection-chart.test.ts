@@ -238,20 +238,18 @@ describe("thinTicksFromEnd — diezmado de los ticks visibles", () => {
 });
 
 /**
- * Filas de flujos de retirada del tooltip (5.0.0 §B.8 + pase de correcciones §F).
+ * Filas de flujos de retirada del tooltip (5.0.0 §B.8 + pase de correcciones §F; «solo SWR»,
+ * 2026-10-10).
  *
- * Lo que estos tests fijan no es el formato: es que **«Recorte» y «No financiado» son cosas
- * distintas y pueden estar las dos a la vez**. Hasta el pase el tooltip solo enseñaba el
- * recorte de la REGLA, así que un mes en que la cartera no dio para pagar el gasto se veía
- * idéntico a un mes normal — quedarse sin capital parecía un problema de configuración.
+ * Lo que estos tests fijan no es el formato: es que un mes en que la cartera no dio para pagar el
+ * gasto («No financiado») **no se ve idéntico a un mes normal**. «Recorte» y «Exceso» se fueron
+ * con las reglas de retirada: el servidor ya no publica esos campos y el tooltip no los inventa.
  */
 describe("buildWithdrawalTooltipRows — flujos del mes jubilado", () => {
   const point = {
     month_index: 300,
     withdrawal: 2000,
-    withdrawal_shortfall: 150,
     unmet_need: 400,
-    withdrawal_excess: 0,
   };
 
   it("antes de la jubilación no pinta ninguna fila", () => {
@@ -261,29 +259,16 @@ describe("buildWithdrawalTooltipRows — flujos del mes jubilado", () => {
     expect(buildWithdrawalTooltipRows(point, undefined, 1)).toEqual([]);
   });
 
-  it("«No financiado» va DESPUÉS de «Recorte» y no lo sustituye", () => {
+  it("«No financiado» va DESPUÉS de la retirada del mes", () => {
     const rows = buildWithdrawalTooltipRows(point, 300, 1);
-    expect(rows.map((r) => r.key)).toEqual(["withdrawal", "shortfall", "unmet"]);
-    expect(rows.map((r) => r.label)).toEqual([
-      "Retirada del mes",
-      "Recorte",
-      "No financiado",
-    ]);
-    expect(rows.find((r) => r.key === "unmet")!.amount).toBe(400);
-  });
-
-  it("un descubierto sin recorte se enseña igual (es la mitad que faltaba)", () => {
-    const rows = buildWithdrawalTooltipRows(
-      { month_index: 300, withdrawal: 1000, withdrawal_shortfall: 0, unmet_need: 900 },
-      300,
-      1,
-    );
     expect(rows.map((r) => r.key)).toEqual(["withdrawal", "unmet"]);
+    expect(rows.map((r) => r.label)).toEqual(["Retirada del mes", "No financiado"]);
+    expect(rows.find((r) => r.key === "unmet")!.amount).toBe(400);
   });
 
   it("un cero no se pinta: afirmaría que se midió un descubierto", () => {
     const rows = buildWithdrawalTooltipRows(
-      { month_index: 300, withdrawal: 0, withdrawal_shortfall: 0, unmet_need: 0 },
+      { month_index: 300, withdrawal: 0, unmet_need: 0 },
       300,
       1,
     );
@@ -292,32 +277,25 @@ describe("buildWithdrawalTooltipRows — flujos del mes jubilado", () => {
   });
 
   it("un backend sin `unmet_need` no pinta la fila (nunca un 0 tranquilizador)", () => {
+    const rows = buildWithdrawalTooltipRows({ month_index: 300, withdrawal: 1000 }, 300, 1);
+    expect(rows.map((r) => r.key)).toEqual(["withdrawal"]);
+  });
+
+  it("los campos retirados de las reglas no pintan nada aunque un backend viejo los mande", () => {
     const rows = buildWithdrawalTooltipRows(
-      { month_index: 300, withdrawal: 1000, withdrawal_shortfall: 200 },
+      { ...point, withdrawal_shortfall: 150, withdrawal_excess: 90 } as typeof point,
       300,
       1,
     );
-    expect(rows.map((r) => r.key)).toEqual(["withdrawal", "shortfall"]);
+    expect(rows.map((r) => r.key)).toEqual(["withdrawal", "unmet"]);
   });
 
-  it("las cuatro filas comparten el MISMO deflactor del patrimonio de arriba", () => {
+  it("las dos filas comparten el MISMO deflactor del patrimonio de arriba", () => {
     const f = deflationFactorAt(300, 2.5);
-    const rows = buildWithdrawalTooltipRows(
-      { ...point, withdrawal_excess: 90 },
-      300,
-      f,
-    );
-    expect(rows.map((r) => r.key)).toEqual([
-      "withdrawal",
-      "shortfall",
-      "unmet",
-      "excess",
-    ]);
+    const rows = buildWithdrawalTooltipRows(point, 300, f);
     for (const [key, nominal] of [
       ["withdrawal", 2000],
-      ["shortfall", 150],
       ["unmet", 400],
-      ["excess", 90],
     ] as const) {
       expect(rows.find((r) => r.key === key)!.amount).toBeCloseTo(nominal * f, 9);
     }

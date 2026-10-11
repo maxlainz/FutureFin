@@ -4,7 +4,7 @@
 //! el modo del objetivo, el importe manual, el SWR y la edad límite del horizonte, y todo el
 //! mundo compartía los cuatro. Con proyecciones independientes por miembro (D9) eso deja de
 //! tener sentido: dos personas del mismo hogar pueden querer jubilarse a edades distintas, con
-//! reglas de retirada distintas y con pensiones que empiezan en años distintos.
+//! SWR distintos y con pensiones que empiezan en años distintos.
 //!
 //! Este módulo es el mismo patrón que `FireSettings` (`handlers/installation.rs`), pieza por
 //! pieza y a propósito — es el patrón que el repo ya sabe mantener:
@@ -27,13 +27,13 @@
 //! Reglas de RESOLUCIÓN que no son defaults sino derivaciones, y que por eso viven en
 //! `resolve_retirement_profile` y no en el `Default`:
 //!
-//! * **U4 — el porcentaje de retirada es ÚNICO.** `swr_pct` dimensiona el objetivo FIRE **y** es
-//!   el porcentaje de las reglas de retirada basadas en saldo: `withdrawal_rule.pct`
-//!   (`percent_of_balance`, `guardrails`) y `withdrawal_rule.start_pct` (`hybrid`) son
-//!   **opcionales** y, ausentes, se resuelven a `swr_pct`. El perfil publicado dice de dónde sale
-//!   el número (`withdrawal_rule.pct_source`: `swr` | `explicit`). Un porcentaje explícito se
-//!   sigue honrando y gana. El resolvedor es uno solo —[`resolve_withdrawal_rule`]— porque con
-//!   dos, «único» valdría en el formulario y no en el chart.
+//! * **«Solo SWR» (2026-10-10) — no hay regla de retirada que elegir.** `swr_pct` es la tasa de
+//!   retirada INICIAL máxima: en el mes en que el hogar se jubila, su gasto ordinario anual (neto
+//!   de rentas y pensión) tiene que caber en `swr_pct % × líquido` —o en `bridge_max_pct` si el
+//!   puente aplica—, y desde ahí se vende cada mes lo que el gasto indexado necesita. Hasta esa
+//!   fecha el perfil llevaba además `withdrawal_rule` (cuatro reglas × dos modos de gasto, con
+//!   `pct_source` y la herencia U4 del SWR); se retiró entero y la migración
+//!   `20261010130000_drop_stored_withdrawal_rule.sql` borra la clave del JSONB.
 //! * **C7 — el puente NO es una estrategia, es un ajuste de la pensión.** `pension.bridge_enabled`
 //!   está disponible con CUALQUIER estrategia y viene apagado. Al encenderlo sin números, el
 //!   resolvedor rellena `bridge_max_pct = max(5, swr + 1)` y `bridge_max_years = 7`: el puente sin
@@ -66,8 +66,8 @@
 //! desde `installation.fire_settings` al perfil de cada usuario, para que el upgrade no mueva
 //! un número; `20260906091500_drop_stored_success_threshold.sql` limpia las cuatro claves que v2
 //! retira. Ninguna de las dos es necesaria para LEER un perfil viejo: el struct no lleva
-//! `deny_unknown_fields`, así que un JSONB con `target_basis`, `bridge_discount_basis` o
-//! `cash_buffer_months` sigue cargando y esas claves se ignoran solas.
+//! `deny_unknown_fields`, así que un JSONB con `target_basis`, `bridge_discount_basis`,
+//! `cash_buffer_months` o `withdrawal_rule` sigue cargando y esas claves se ignoran solas.
 
 use crate::error::ApiError;
 use crate::handlers::installation::{
@@ -101,12 +101,6 @@ pub(crate) const MIN_PROFILE_AGE: u32 = 18;
 /// española arranca antes; permitir 30 convertiría el bloque `pension` en «una renta cualquiera»,
 /// que ya existe como partida de presupuesto con `persists_after_retirement`.
 pub(crate) const MIN_PENSION_AGE: u32 = 50;
-/// Techo de los `pct` de las reglas de retirada (%). Es BRUTO de impuestos, igual que el SWR.
-/// Un 20 % anual agota cualquier cartera; por encima el número deja de describir un plan.
-pub(crate) const MAX_WITHDRAWAL_PCT: Decimal = Decimal::from_parts(20, 0, 0, false, 0);
-/// Techo de la banda y del ajuste de `guardrails` (%). 50 % es ya un régimen extremo (Guyton-
-/// Klinger usa 20 % de banda y 10 % de ajuste); por encima la regla no reacciona, oscila.
-pub(crate) const MAX_GUARDRAIL_PCT: Decimal = Decimal::from_parts(50, 0, 0, false, 0);
 /// Techo del SWR (%). Era 4 desde `FireSettings`; **sube a 6 en 5.0.0** (decisión de integración
 /// del plan v2, bajo M5): el SWR deja de dimensionar un objetivo y pasa a ser «el máximo que se
 /// vende en cualquier año», con la fecha decidida por el éxito. Un 5–6 % es un régimen agresivo
@@ -123,10 +117,11 @@ pub(crate) const MAX_SUCCESS_THRESHOLD_PCT: u32 = 100;
 /// la semilla, sin converger al subir N). 95 sobre el límite inferior de Wilson es estable.
 pub(crate) const DEFAULT_SUCCESS_THRESHOLD_PCT: u32 = 95;
 
-/// Techo de la tasa inicial del puente (%). Es el MISMO techo que el de cualquier retirada
-/// ([`MAX_WITHDRAWAL_PCT`]) y se nombra aparte porque se lee en otro sitio: el puente es una tasa
-/// inicial mayor con fecha límite (C2), no una regla distinta.
-pub(crate) const MAX_BRIDGE_PCT: Decimal = MAX_WITHDRAWAL_PCT;
+/// Techo de la tasa inicial del puente (%). Es BRUTO de impuestos, igual que el SWR: un 20 %
+/// anual agota cualquier cartera, y por encima el número deja de describir un plan. (Hasta el
+/// 2026-10-10 era el mismo techo que el de los `pct` de las reglas de retirada por saldo,
+/// `MAX_WITHDRAWAL_PCT`; las reglas se retiraron y la cota se quedó con el puente.)
+pub(crate) const MAX_BRIDGE_PCT: Decimal = Decimal::from_parts(20, 0, 0, false, 0);
 /// Años máximos del puente: mínimo 1 (menos de un año no es un puente, es un mes de caja).
 pub(crate) const MIN_BRIDGE_YEARS: u32 = 1;
 /// Años máximos del puente: 20. Más allá, «puente hasta la pensión» describe la jubilación entera
@@ -312,69 +307,6 @@ pub(crate) fn requires_target_age(strategy: RetirementStrategy, coast_mode: Coas
     }
 }
 
-/// Catálogo de reglas de retirada (D6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum WithdrawalRuleKind {
-    /// «Gasto fijo en euros de hoy»: se retira la necesidad declarada indexada, sin techo. Es
-    /// EXACTAMENTE el drenaje de 4.15.x, y por eso es el default.
-    #[default]
-    FixedReal,
-    /// `pct` % del líquido del mes anterior, anualizado.
-    PercentOfBalance,
-    /// `start_pct` hasta que el saldo permite bajar a `end_pct` (latch).
-    Hybrid,
-    /// Guyton-Klinger 2006 (capital-preservation + prosperity), sin la regla de los 15 años ni
-    /// el salto de inflación — divergencia declarada en `financial-contracts.md`.
-    Guardrails,
-}
-
-impl<'de> Deserialize<'de> for WithdrawalRuleKind {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Error;
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "fixed_real" => Ok(Self::FixedReal),
-            "percent_of_balance" => Ok(Self::PercentOfBalance),
-            "hybrid" => Ok(Self::Hybrid),
-            "guardrails" => Ok(Self::Guardrails),
-            _ => Err(D::Error::unknown_variant(
-                &s,
-                &["fixed_real", "percent_of_balance", "hybrid", "guardrails"],
-            )),
-        }
-    }
-}
-
-/// Qué relación tiene la regla con el gasto declarado (D5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum SpendMode {
-    /// La regla es un TECHO: se retira `min(necesidad, regla)`.
-    #[default]
-    Ceiling,
-    /// La regla ES el gasto: se retira lo que dice la regla, haya o no necesidad.
-    RuleIsSpend,
-}
-
-impl<'de> Deserialize<'de> for SpendMode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Error;
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "ceiling" => Ok(Self::Ceiling),
-            "rule_is_spend" => Ok(Self::RuleIsSpend),
-            _ => Err(D::Error::unknown_variant(&s, &["ceiling", "rule_is_spend"])),
-        }
-    }
-}
-
 /// Base de gasto de la fase de media jornada (D10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, Default)]
 #[serde(rename_all = "snake_case")]
@@ -404,87 +336,6 @@ impl<'de> Deserialize<'de> for PartialExpenseBasis {
 // ---------------------------------------------------------------------------
 // Bloques del perfil
 // ---------------------------------------------------------------------------
-
-/// Procedencia del porcentaje de retirada de una regla (U4, 5.0.0). Se PUBLICA en el perfil
-/// resuelto; **no se acepta como entrada** (`skip_deserializing`) ni se persiste en el JSONB:
-/// es una derivación, no un dato del usuario.
-///
-/// Apunta al porcentaje que dimensiona la retirada de cada `kind`: `pct` en
-/// `percent_of_balance` y `guardrails`, `start_pct` en `hybrid`. En `fixed_real` **no viaja**
-/// (ausente, ni siquiera `null`): esa regla no tiene porcentaje, y publicar uno sugeriría que
-/// hay un % en juego que nadie usa.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PctSource {
-    /// El porcentaje se HEREDÓ de `swr_pct` porque el usuario no escribió ninguno.
-    Swr,
-    /// El usuario escribió ese porcentaje a mano y manda sobre el SWR.
-    Explicit,
-}
-
-/// Regla de retirada + su modo de gasto. Los `pct` son BRUTOS de impuestos (R9), igual que el
-/// SWR: lo que se vende de la cartera antes de pasar por el gross-up.
-///
-/// **U4 — el porcentaje de retirada es ÚNICO** (decisión del owner, 5.0.0): `swr_pct` dimensiona
-/// el objetivo FIRE **y** es el porcentaje de las reglas basadas en saldo. Por eso `pct`
-/// (`percent_of_balance`, `guardrails`) y `start_pct` (`hybrid`) son **opcionales**: ausentes se
-/// resuelven a `swr_pct` (mismo `Decimal`, mismos clamps) en `resolve_withdrawal_rule`, y el
-/// perfil publicado dice de dónde salió el número en [`WithdrawalRule::pct_source`]. Un valor
-/// explícito se sigue honrando —el wire de 4.15.x y las tools MCP no se rompen— y gana sobre el
-/// SWR.
-///
-/// **Cómo se SUELTA un porcentaje explícito**: el PATCH sustituye `withdrawal_rule` ENTERA (ver
-/// [`RetirementProfilePatch`]), así que mandar el objeto sin la clave `pct` ya la borra y el
-/// porcentaje vuelve a heredarse. No hace falta —ni existe— un `clear_pct`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-#[serde(default)]
-pub struct WithdrawalRule {
-    pub kind: WithdrawalRuleKind,
-    /// `percent_of_balance` y `guardrails`: % anual del líquido. **Opcional**: ausente hereda
-    /// `swr_pct` (U4).
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub pct: Option<Decimal>,
-    /// `hybrid`: % de partida. **Opcional**: ausente hereda `swr_pct` (U4).
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub start_pct: Option<Decimal>,
-    /// `hybrid`: % al que se baja tras el latch (estrictamente menor que `start_pct`).
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub end_pct: Option<Decimal>,
-    /// `guardrails`: banda alrededor de la tasa inicial que dispara el ajuste.
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub band_pct: Option<Decimal>,
-    /// `guardrails`: cuánto se recorta/sube la retirada al tocar una banda.
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub adjust_pct: Option<Decimal>,
-    pub spend_mode: SpendMode,
-    /// **Solo salida** (U4): de dónde sale el porcentaje que dimensiona esta regla —`swr`
-    /// (heredado de `swr_pct`) o `explicit` (escrito a mano)—. Lo rellena
-    /// `resolve_withdrawal_rule`; se ignora en la entrada y no se guarda en el JSONB, así que
-    /// **ausente** significa «esta regla no tiene porcentaje» (`fixed_real`) o «este objeto no
-    /// ha pasado por el resolvedor».
-    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
-    pub pct_source: Option<PctSource>,
-}
-
-impl Default for WithdrawalRule {
-    fn default() -> Self {
-        WithdrawalRule {
-            kind: WithdrawalRuleKind::FixedReal,
-            pct: None,
-            start_pct: None,
-            end_pct: None,
-            band_pct: None,
-            adjust_pct: None,
-            spend_mode: SpendMode::Ceiling,
-            pct_source: None,
-        }
-    }
-}
 
 /// Pensión pública (u otra renta vitalicia) **con fecha** (D3/D8, M4). Desde v2 es un FLUJO DE
 /// CAJA y nada más: no descuenta ningún objetivo, no dimensiona ningún capital. Lo único que
@@ -569,9 +420,10 @@ pub struct PartialRetirement {
 /// `{}` —o `NULL`— es el perfil por defecto.
 ///
 /// **Sin `deny_unknown_fields`, y eso es contrato**: un JSONB escrito por 5.0.0-WP5 con
-/// `target_basis`, `bridge_discount_basis` o `cash_buffer_months` sigue cargando y esas tres
-/// claves se ignoran solas. La migración las borra para dejar el almacén limpio, pero LEER nunca
-/// dependió de que la migración hubiera corrido.
+/// `target_basis`, `bridge_discount_basis` o `cash_buffer_months` —o por 5.0.0-dev antes del
+/// 2026-10-10 con `withdrawal_rule`— sigue cargando y esas claves se ignoran solas. Las
+/// migraciones las borran para dejar el almacén limpio, pero LEER nunca dependió de que la
+/// migración hubiera corrido.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct RetirementProfile {
     pub strategy: RetirementStrategy,
@@ -603,7 +455,6 @@ pub struct RetirementProfile {
     /// horizonte]`.
     pub coast_stop_age: Option<u32>,
 
-    pub withdrawal_rule: WithdrawalRule,
     pub pension: Option<PensionPlan>,
     pub partial_retirement: Option<PartialRetirement>,
 
@@ -653,7 +504,6 @@ struct RetirementProfileWire {
     success_threshold_pct: u32,
     coast_mode: CoastMode,
     coast_stop_age: Option<u32>,
-    withdrawal_rule: WithdrawalRule,
     pension: Option<PensionPlan>,
     partial_retirement: Option<PartialRetirement>,
 }
@@ -674,7 +524,6 @@ impl Default for RetirementProfileWire {
             success_threshold_pct: d.success_threshold_pct,
             coast_mode: d.coast_mode,
             coast_stop_age: d.coast_stop_age,
-            withdrawal_rule: d.withdrawal_rule,
             pension: d.pension,
             partial_retirement: d.partial_retirement,
         }
@@ -697,7 +546,6 @@ impl<'de> Deserialize<'de> for RetirementProfile {
             success_threshold_pct,
             coast_mode,
             coast_stop_age,
-            withdrawal_rule,
             pension,
             partial_retirement,
         } = w;
@@ -711,7 +559,6 @@ impl<'de> Deserialize<'de> for RetirementProfile {
             success_threshold_pct,
             coast_mode,
             coast_stop_age,
-            withdrawal_rule,
             pension,
             partial_retirement,
             migrated_from_pension_bridge: strategy.migrated,
@@ -732,76 +579,10 @@ pub(crate) fn default_retirement_profile() -> RetirementProfile {
         success_threshold_pct: DEFAULT_SUCCESS_THRESHOLD_PCT,
         coast_mode: CoastMode::FixedRetirementAge,
         coast_stop_age: None,
-        withdrawal_rule: WithdrawalRule::default(),
         pension: None,
         partial_retirement: None,
         migrated_from_pension_bridge: false,
     }
-}
-
-/// Clampa un `pct` de regla de retirada al `[0, max]`.
-///
-/// El suelo es **0 y no un épsilon**: la cota de ESCRITURA es `(0, max]` y la impone
-/// `validate_retirement_profile`. Aquí solo hay que impedir que un valor imposible llegue al
-/// motor, y un `0` colado por una vía no validada significa «esta regla no retira nada» — que
-/// es una lectura honesta y acotada. Inventar un mínimo positivo para «arreglarlo» pondría en
-/// el perfil un número que el usuario nunca escribió.
-fn clamp_pct(v: Option<Decimal>, max: Decimal) -> Option<Decimal> {
-    v.map(|p| p.clamp(Decimal::ZERO, max))
-}
-
-/// **El resolvedor ÚNICO del porcentaje de retirada (U4).** Todo consumidor de una
-/// `WithdrawalRule` —el perfil que publican `GET`/`PATCH`, el `PhasePlan` que arma
-/// `handlers/projection.rs`, las bandas de Monte Carlo y el `profile_overrides` del what-if—
-/// pasa por aquí, directamente o vía [`resolve_retirement_profile`]. Que sea uno solo es el
-/// punto: con dos, «el porcentaje único» sería único en un sitio y otra cosa en el otro, y la
-/// diferencia solo se vería en el chart.
-///
-/// Qué hace: rellena con `swr_pct` el porcentaje que la regla necesita y que el usuario no
-/// escribió, y anota en `pct_source` de dónde salió.
-///
-/// * `percent_of_balance` / `guardrails` → `pct`.
-/// * `hybrid` → `start_pct` (`end_pct` sigue siendo obligatorio: es el suelo del latch, no un
-///   porcentaje que el SWR pueda dimensionar).
-/// * `fixed_real` → nada: no tiene porcentaje, y `pct_source` se queda ausente.
-///
-/// **No clampa.** Los clamps de lectura viven en [`resolve_retirement_profile`] y corren ANTES,
-/// así que el valor heredado es el `swr_pct` ya acotado; y un explícito fuera de rango que
-/// llegue por una vía de escritura debe ser **rechazado** por `validate_*`, no reescrito.
-///
-/// **Es idempotente, y por una razón operativa**: el what-if aplica su patchset sobre el perfil
-/// ya RESUELTO, así que este resolvedor vuelve a correr sobre un `pct` que él mismo materializó.
-/// Un porcentaje marcado `swr` se RE-hereda (si el escenario cambió `swr_pct`, el % de la regla
-/// se mueve con él); uno `explicit` se respeta. Sin esa relectura, un `profile_overrides` que
-/// solo tocara el SWR dejaría congelado el porcentaje heredado del SWR anterior — el modo de
-/// fallo silencioso exacto que U4 existe para eliminar.
-pub(crate) fn resolve_withdrawal_rule(rule: &WithdrawalRule, swr_pct: Decimal) -> WithdrawalRule {
-    let mut r = rule.clone();
-    // `inherit` decide por el par (valor, procedencia) y no solo por el valor: ver la nota de
-    // idempotencia de arriba.
-    let inherit = |value: &mut Option<Decimal>, source: &mut Option<PctSource>| {
-        if value.is_none() || *source == Some(PctSource::Swr) {
-            *value = Some(swr_pct);
-            *source = Some(PctSource::Swr);
-        } else {
-            *source = Some(PctSource::Explicit);
-        }
-    };
-    match r.kind {
-        // Sin porcentaje que dimensionar: se retira la necesidad declarada, indexada y sin techo.
-        WithdrawalRuleKind::FixedReal => r.pct_source = None,
-        WithdrawalRuleKind::PercentOfBalance | WithdrawalRuleKind::Guardrails => {
-            let mut source = r.pct_source;
-            inherit(&mut r.pct, &mut source);
-            r.pct_source = source;
-        }
-        WithdrawalRuleKind::Hybrid => {
-            let mut source = r.pct_source;
-            inherit(&mut r.start_pct, &mut source);
-            r.pct_source = source;
-        }
-    }
-    r
 }
 
 /// Defaults **y clamps** en lectura. Ver el porqué en la cabecera del módulo.
@@ -829,14 +610,6 @@ pub(crate) fn resolve_retirement_profile(stored: Option<RetirementProfile>) -> R
     p.coast_stop_age = p
         .coast_stop_age
         .map(|a| a.clamp(MIN_PROFILE_AGE, coast_ceiling));
-
-    p.withdrawal_rule.pct = clamp_pct(p.withdrawal_rule.pct, MAX_WITHDRAWAL_PCT);
-    p.withdrawal_rule.start_pct = clamp_pct(p.withdrawal_rule.start_pct, MAX_WITHDRAWAL_PCT);
-    p.withdrawal_rule.end_pct = clamp_pct(p.withdrawal_rule.end_pct, MAX_WITHDRAWAL_PCT);
-    p.withdrawal_rule.band_pct = clamp_pct(p.withdrawal_rule.band_pct, MAX_GUARDRAIL_PCT);
-    p.withdrawal_rule.adjust_pct = clamp_pct(p.withdrawal_rule.adjust_pct, MAX_GUARDRAIL_PCT);
-    // U4 — DESPUÉS de los clamps, para que lo que se hereda sea el `swr_pct` ya acotado.
-    p.withdrawal_rule = resolve_withdrawal_rule(&p.withdrawal_rule, p.swr_pct);
 
     let horizon = p.horizon_lifespan_age;
     let swr = p.swr_pct;
@@ -1040,72 +813,6 @@ pub(crate) fn validate_retirement_profile(p: &RetirementProfile) -> Result<(), A
         }
     }
 
-    // U4 — se valida el porcentaje EFECTIVO, no el escrito: `pct`/`start_pct` ausentes heredan
-    // `swr_pct` (ya comprobado arriba contra `MAX_SWR_PCT`), así que lo que hay que acotar es lo
-    // que de verdad va a retirar el motor. Consecuencia declarada: con `swr_pct = 0` una regla
-    // basada en saldo y sin `pct` propio es `withdrawal_pct_out_of_range` — un plan que retira 0 %
-    // no es un plan, y callarlo devolvería una simulación que no vende nada sin decir por qué.
-    validate_withdrawal_rule(&resolve_withdrawal_rule(&p.withdrawal_rule, p.swr_pct))
-}
-
-/// Cada `kind` exige SUS campos y no los de otro. Corre sobre la regla YA resuelta
-/// (`resolve_withdrawal_rule`), así que `pct` y `start_pct` nunca llegan aquí ausentes para los
-/// `kind` que los usan: lo que sigue vivo de `withdrawal_pct_required` son `end_pct` del `hybrid`
-/// y la banda/ajuste de `guardrails`, que **no** heredan nada (no son porcentajes de retirada:
-/// son el suelo del latch y la reacción de la regla).
-fn validate_withdrawal_rule(r: &WithdrawalRule) -> Result<(), ApiError> {
-    let need_pct = |label: &str, v: Option<Decimal>, max: Decimal| -> Result<Decimal, ApiError> {
-        let Some(v) = v else {
-            return Err(ApiError::BadRequest(format!(
-                "withdrawal_pct_required: withdrawal_rule.{label} is required for this rule kind"
-            )));
-        };
-        // B8 — el mensaje dice la COTA REAL, no «out of range» a secas. Sin el número, quien
-        // escribe un 25 no sabe si el techo es 5, 20 o 100, y la SPA no puede decírselo: el
-        // catálogo de `errorMessages.ts` traduce el código, no interpola cotas.
-        if v <= Decimal::ZERO || v > max {
-            let max = max.normalize();
-            return Err(ApiError::BadRequest(format!(
-                "withdrawal_pct_out_of_range: {label} tiene que ser mayor que 0 y como mucho {max} %"
-            )));
-        }
-        Ok(v)
-    };
-
-    match r.kind {
-        WithdrawalRuleKind::FixedReal => {}
-        WithdrawalRuleKind::PercentOfBalance => {
-            need_pct("pct", r.pct, MAX_WITHDRAWAL_PCT)?;
-        }
-        WithdrawalRuleKind::Hybrid => {
-            let start = need_pct("start_pct", r.start_pct, MAX_WITHDRAWAL_PCT)?;
-            let end = need_pct("end_pct", r.end_pct, MAX_WITHDRAWAL_PCT)?;
-            if end >= start {
-                // B8 — el arranque puede ser HEREDADO del SWR (U4), así que el mensaje nombra el
-                // número contra el que se ha comparado de verdad: sin él, «menor que start_pct»
-                // señala a un campo que el usuario ha dejado vacío a propósito.
-                let start = start.normalize();
-                return Err(ApiError::BadRequest(format!(
-                    "hybrid_end_pct_not_below_start: el porcentaje final tiene que ser menor que tu tasa de retirada ({start} %)"
-                )));
-            }
-        }
-        WithdrawalRuleKind::Guardrails => {
-            need_pct("pct", r.pct, MAX_WITHDRAWAL_PCT)?;
-            for (label, v) in [("band_pct", r.band_pct), ("adjust_pct", r.adjust_pct)] {
-                let Some(v) = v else {
-                    return Err(ApiError::BadRequest(format!(
-                        "withdrawal_pct_required: withdrawal_rule.{label} is required for this rule kind"
-                    )));
-                };
-                if v <= Decimal::ZERO || v > MAX_GUARDRAIL_PCT {
-                    return Err(ApiError::BadRequest(format!(
-                        "withdrawal_band_out_of_range: withdrawal_rule.{label} must be greater than 0 and at most {MAX_GUARDRAIL_PCT} (percent)"
-                    )));
-                }
-            }
-        }
-    }
     Ok(())
 }
 
@@ -1116,14 +823,8 @@ fn validate_withdrawal_rule(r: &WithdrawalRule) -> Result<(), ApiError> {
 /// Cambios campo a campo del perfil. **Omitir = no cambiar**; el `Option<Option<T>>` de los
 /// campos opcionales distingue además `null` (= borrar) de un valor.
 ///
-/// `withdrawal_rule` se sustituye ENTERA y no campo a campo a propósito: cuáles de sus `pct` son
-/// obligatorios depende de `kind`, así que un merge parcial permitiría llegar a estados como
-/// «guardrails con el `pct` del percent_of_balance anterior» que nadie escribió.
-///
-/// **Corolario de U4, y la respuesta a «¿cómo suelto un `pct` explícito?»**: como el objeto se
-/// reemplaza entero, mandar `withdrawal_rule` SIN la clave `pct` (o sin `start_pct`) ya la borra,
-/// y el porcentaje vuelve a heredarse de `swr_pct`. Por eso no hay —ni debe haber— un
-/// `clear_pct`: sería un segundo mecanismo para lo que el reemplazo ya hace.
+/// `pension` y `partial_retirement` se sustituyen ENTEROS, no campo a campo: cuáles de sus campos
+/// son obligatorios depende de los demás, y un merge parcial llegaría a estados que nadie escribió.
 #[derive(Debug, Default)]
 pub(crate) struct RetirementProfilePatch {
     pub strategy: Option<RetirementStrategy>,
@@ -1137,7 +838,6 @@ pub(crate) struct RetirementProfilePatch {
     pub success_threshold_pct: Option<u32>,
     pub coast_mode: Option<CoastMode>,
     pub coast_stop_age: Option<Option<u32>>,
-    pub withdrawal_rule: Option<WithdrawalRule>,
     pub pension: Option<Option<PensionPlan>>,
     pub partial_retirement: Option<Option<PartialRetirement>>,
 }
@@ -1189,9 +889,6 @@ impl RetirementProfilePatch {
         if let Some(v) = self.coast_stop_age {
             after.coast_stop_age = v;
         }
-        if let Some(v) = self.withdrawal_rule.clone() {
-            after.withdrawal_rule = v;
-        }
         if let Some(v) = self.pension.clone() {
             after.pension = v;
             // **S4 murió con `target_basis` (M4).** Quitar la pensión ya no tiene que soltar
@@ -1217,7 +914,6 @@ impl RetirementProfilePatch {
             success_threshold_pct,
             coast_mode,
             coast_stop_age,
-            withdrawal_rule,
             pension,
             partial_retirement,
         } = self;
@@ -1230,7 +926,6 @@ impl RetirementProfilePatch {
             && success_threshold_pct.is_none()
             && coast_mode.is_none()
             && coast_stop_age.is_none()
-            && withdrawal_rule.is_none()
             && pension.is_none()
             && partial_retirement.is_none()
     }
@@ -1338,17 +1033,11 @@ pub struct PatchRetirementProfileBody {
     #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
     #[schema(value_type = Option<u32>, nullable = true)]
     pub coast_stop_age: Option<Option<u32>>,
-    /// Regla de retirada COMPLETA: **sustituye a la actual**, no se mergea campo a campo. `pct`
-    /// y `start_pct` son opcionales (U4): omitidos heredan `swr_pct`, y omitirlos es justamente
-    /// cómo se suelta un porcentaje que antes era explícito.
-    ///
-    /// **Excepción al tri-estado del cuerpo**: `null` aquí equivale a OMITIR (no toca la regla),
-    /// no la «borra» — la regla siempre existe y volver a la de fábrica es mandar
-    /// `{"kind": "fixed_real"}`. Medido en la demo 5.0.0: un PATCH con `withdrawal_rule: null`
-    /// dejaba una regla por saldo intacta y el capital necesario cambiaba de orden de magnitud
-    /// sin que nada lo dijera.
-    #[serde(default)]
-    pub withdrawal_rule: Option<WithdrawalRule>,
+    // `withdrawal_rule` vivía aquí hasta el 2026-10-10 (decisión «solo SWR»: las reglas de
+    // retirada por saldo y el modo de gasto se retiraron del producto). El cuerpo no lleva
+    // `deny_unknown_fields`, así que un cliente que todavía la mande no rompe: la clave se ignora
+    // como cualquier otra desconocida, y si es lo ÚNICO que trae el cuerpo, la respuesta es
+    // `patch_empty` — no un 200 que finja haber guardado algo.
     /// Pensión COMPLETA (el puente vive dentro, C7): **sustituye a la actual**. `null` la borra —
     /// y con ella el puente, que sin pensión no tiene destino.
     #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option_typed")]
@@ -1390,7 +1079,6 @@ impl PatchRetirementProfileBody {
             success_threshold_pct: self.success_threshold_pct,
             coast_mode: self.coast_mode,
             coast_stop_age: self.coast_stop_age,
-            withdrawal_rule: self.withdrawal_rule.clone(),
             pension: self.pension.clone(),
             partial_retirement: self.partial_retirement.clone(),
         })
@@ -1593,8 +1281,6 @@ mod tests {
         assert_eq!(p.swr_pct, Decimal::new(35, 1));
         assert_eq!(p.horizon_lifespan_age, 90);
         assert_eq!(p.fire_number_mode, FireNumberMode::AnnualExpense);
-        assert_eq!(p.withdrawal_rule.kind, WithdrawalRuleKind::FixedReal);
-        assert_eq!(p.withdrawal_rule.spend_mode, SpendMode::Ceiling);
         // v2: el umbral vuelve al perfil (M2/C3) y el coast estrena modo (M10).
         assert_eq!(p.success_threshold_pct, DEFAULT_SUCCESS_THRESHOLD_PCT);
         assert_eq!(p.coast_mode, CoastMode::FixedRetirementAge);
@@ -1892,130 +1578,24 @@ mod tests {
         }
     }
 
+    /// **«Solo SWR» (2026-10-10)**: un JSONB escrito por 5.0.0-dev con una regla por saldo sigue
+    /// cargando —la clave se ignora— y el perfil publicado ya no la lleva. La migración
+    /// `20261010130000_drop_stored_withdrawal_rule.sql` la borra del almacén, pero leer no
+    /// depende de que haya corrido.
     #[test]
-    fn each_withdrawal_kind_demands_its_own_fields() {
-        let mut p = default_retirement_profile();
-
-        // U4: `percent_of_balance` SIN `pct` ya no es un error — hereda el SWR.
-        p.withdrawal_rule = WithdrawalRule {
-            kind: WithdrawalRuleKind::PercentOfBalance,
-            ..WithdrawalRule::default()
-        };
-        validate_retirement_profile(&p).expect("percent sin pct hereda el SWR");
-
-        p.withdrawal_rule.pct = Some(Decimal::from(4u32));
-        validate_retirement_profile(&p).expect("percent con pct");
-
-        p.withdrawal_rule = WithdrawalRule {
-            kind: WithdrawalRuleKind::Hybrid,
-            start_pct: Some(Decimal::from(3u32)),
-            end_pct: Some(Decimal::from(5u32)),
-            ..WithdrawalRule::default()
-        };
-        let err = validate_retirement_profile(&p).expect_err("end >= start");
+    fn a_stored_withdrawal_rule_is_ignored_and_never_re_emitted() {
+        let stored: RetirementProfile = serde_json::from_str(
+            r#"{"strategy":"asap","swr_pct":"3.5",
+                "withdrawal_rule":{"kind":"guardrails","pct":"4","band_pct":"20","adjust_pct":"10","spend_mode":"rule_is_spend"}}"#,
+        )
+        .expect("un perfil con la regla retirada tiene que seguir cargando");
+        let p = resolve_retirement_profile(Some(stored));
+        assert_eq!(p, resolve_retirement_profile(None));
+        let json = serde_json::to_value(&p).expect("serializa");
         assert!(
-            matches!(&err, ApiError::BadRequest(m) if m.starts_with("hybrid_end_pct_not_below_start: ")),
-            "{err:?}"
+            json.get("withdrawal_rule").is_none(),
+            "withdrawal_rule no debe re-emitirse: {json}"
         );
-        // B8 — el mensaje nombra el arranque REAL contra el que se comparó.
-        let ApiError::BadRequest(m) = &err else { unreachable!() };
-        assert!(m.contains('3'), "{m}");
-
-        p.withdrawal_rule.end_pct = Some(Decimal::from(2u32));
-        validate_retirement_profile(&p).expect("hybrid coherente");
-
-        p.withdrawal_rule = WithdrawalRule {
-            kind: WithdrawalRuleKind::Guardrails,
-            pct: Some(Decimal::from(4u32)),
-            band_pct: Some(Decimal::from(20u32)),
-            ..WithdrawalRule::default()
-        };
-        assert!(validate_retirement_profile(&p).is_err(), "guardrails sin adjust");
-        p.withdrawal_rule.adjust_pct = Some(Decimal::from(10u32));
-        validate_retirement_profile(&p).expect("guardrails completo");
-
-        // Lo que SIGUE siendo obligatorio tras U4: el `end_pct` del hybrid y la banda/ajuste de
-        // guardrails. No son porcentajes de retirada, así que no heredan nada.
-        p.withdrawal_rule = WithdrawalRule {
-            kind: WithdrawalRuleKind::Hybrid,
-            ..WithdrawalRule::default()
-        };
-        let err = validate_retirement_profile(&p).expect_err("hybrid sin end_pct");
-        assert!(
-            matches!(&err, ApiError::BadRequest(m) if m.starts_with("withdrawal_pct_required: ")),
-            "{err:?}"
-        );
-    }
-
-    /// U4 — el porcentaje de retirada es ÚNICO: `swr_pct` dimensiona el objetivo Y es el % de la
-    /// regla basada en saldo cuando el usuario no escribe uno propio.
-    #[test]
-    fn a_missing_withdrawal_pct_inherits_the_swr_and_says_so() {
-        let mut stored = default_retirement_profile();
-        stored.swr_pct = Decimal::new(30, 1); // 3,0 %
-        stored.withdrawal_rule = WithdrawalRule {
-            kind: WithdrawalRuleKind::PercentOfBalance,
-            ..WithdrawalRule::default()
-        };
-        let r = resolve_retirement_profile(Some(stored.clone()));
-        assert_eq!(r.withdrawal_rule.pct, Some(Decimal::new(30, 1)));
-        assert_eq!(r.withdrawal_rule.pct_source, Some(PctSource::Swr));
-
-        // Explícito: se honra y se declara como tal.
-        stored.withdrawal_rule.pct = Some(Decimal::from(2u32));
-        let r = resolve_retirement_profile(Some(stored.clone()));
-        assert_eq!(r.withdrawal_rule.pct, Some(Decimal::from(2u32)));
-        assert_eq!(r.withdrawal_rule.pct_source, Some(PctSource::Explicit));
-
-        // `hybrid` hereda por `start_pct`; `end_pct` no hereda nada.
-        stored.withdrawal_rule = WithdrawalRule {
-            kind: WithdrawalRuleKind::Hybrid,
-            end_pct: Some(Decimal::from(2u32)),
-            ..WithdrawalRule::default()
-        };
-        let r = resolve_retirement_profile(Some(stored.clone()));
-        assert_eq!(r.withdrawal_rule.start_pct, Some(Decimal::new(30, 1)));
-        assert_eq!(r.withdrawal_rule.end_pct, Some(Decimal::from(2u32)));
-        assert_eq!(r.withdrawal_rule.pct_source, Some(PctSource::Swr));
-
-        // `fixed_real` no tiene porcentaje: el campo NO viaja (ni siquiera como `null`).
-        stored.withdrawal_rule = WithdrawalRule::default();
-        let r = resolve_retirement_profile(Some(stored));
-        assert_eq!(r.withdrawal_rule.pct_source, None);
-        let json = serde_json::to_value(&r.withdrawal_rule).expect("serializa");
-        assert!(
-            json.get("pct_source").is_none(),
-            "fixed_real no debe publicar pct_source: {json}"
-        );
-    }
-
-    /// El resolvedor corre otra vez sobre lo que él mismo resolvió (el what-if aplica su patch
-    /// sobre el perfil RESUELTO). Un % heredado se RE-hereda del SWR nuevo; uno explícito no se
-    /// mueve. Sin esto, un `profile_overrides` que solo tocara `swr_pct` dejaría congelado el
-    /// porcentaje del SWR anterior — silenciosamente.
-    #[test]
-    fn re_resolving_re_inherits_the_swr_but_never_touches_an_explicit_pct() {
-        let mut p = default_retirement_profile();
-        p.withdrawal_rule = WithdrawalRule {
-            kind: WithdrawalRuleKind::PercentOfBalance,
-            ..WithdrawalRule::default()
-        };
-        let resolved = resolve_retirement_profile(Some(p));
-        assert_eq!(resolved.withdrawal_rule.pct, Some(Decimal::new(35, 1)));
-
-        let mut moved = resolved.clone();
-        moved.swr_pct = Decimal::from(2u32);
-        let again = resolve_retirement_profile(Some(moved));
-        assert_eq!(again.withdrawal_rule.pct, Some(Decimal::from(2u32)));
-        assert_eq!(again.withdrawal_rule.pct_source, Some(PctSource::Swr));
-
-        let mut explicit = resolved;
-        explicit.withdrawal_rule.pct = Some(Decimal::from(1u32));
-        explicit.withdrawal_rule.pct_source = Some(PctSource::Explicit);
-        explicit.swr_pct = Decimal::from(2u32);
-        let again = resolve_retirement_profile(Some(explicit));
-        assert_eq!(again.withdrawal_rule.pct, Some(Decimal::from(1u32)));
-        assert_eq!(again.withdrawal_rule.pct_source, Some(PctSource::Explicit));
     }
 
     /// La media jornada en modo `asap` no necesita edad de inicio; en modo `at_age`, sí.

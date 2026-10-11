@@ -145,15 +145,12 @@ fn prob(v: &Value) -> f64 {
         .expect("probabilidad parseable")
 }
 
-/// Los tres contadores de `failures_by_kind`, en su orden fijo `[F1, F2, F3]`.
-fn failures_by_kind(b: &Value) -> [u64; 3] {
+/// Los dos contadores de `failures_by_kind`, en su orden fijo `[F1, F2]`. (Eran tres hasta el
+/// 2026-10-10: F3, el fallo de las reglas de retirada por saldo, se retiró con ellas.)
+fn failures_by_kind(b: &Value) -> [u64; 2] {
     let a = b["failures_by_kind"].as_array().expect("failures_by_kind");
-    assert_eq!(a.len(), 3, "el reparto tiene TRES motivos y solo tres: {b}");
-    [
-        a[0].as_u64().expect("F1"),
-        a[1].as_u64().expect("F2"),
-        a[2].as_u64().expect("F3"),
-    ]
+    assert_eq!(a.len(), 2, "el reparto tiene DOS motivos y solo dos: {b}");
+    [a[0].as_u64().expect("F1"), a[1].as_u64().expect("F2")]
 }
 
 /// **Las tres lecturas del éxito tienen que ser coherentes entre sí**, siempre y en todos los
@@ -201,7 +198,7 @@ fn assert_success_block_is_consistent(b: &Value) {
     );
     // El reparto por motivo suma exactamente los fallos que implica la probabilidad.
     let k = failures_by_kind(b);
-    let total = (k[0] + k[1] + k[2]) as f64;
+    let total = (k[0] + k[1]) as f64;
     assert!(
         (total - (1.0 - success) * paths).abs() <= 0.5,
         "failures_by_kind suma {total} y la probabilidad implica {}: {b}",
@@ -479,7 +476,7 @@ async fn zero_volatility_makes_the_band_the_deterministic_line() {
 /// decir. Jubilarse a los 45 con una hucha de 3.000 € y un gasto de 2.500 €/mes exige vender el
 /// **1.000 % anual** de la cartera; la puerta de tasa inicial lo tumba en el PRIMER mes jubilado,
 /// antes de que a la cartera le dé tiempo a agotarse. El orden de prioridad del motor es
-/// `F1 > F2 > F3` y F1 exige una venta que se quedó corta — en el primer mes la hucha todavía
+/// `F1 > F2` y F1 exige una venta que se quedó corta — en el primer mes la hucha todavía
 /// paga. Con un solo «probabilidad de ruina» los dos casos se veían iguales; con `failures_by_kind`
 /// tienen arreglos distintos (F1 pide más capital, F2 pide retrasar la fecha).
 #[tokio::test]
@@ -526,8 +523,8 @@ async fn a_plan_that_breaks_deterministically_scores_zero_and_says_which_gate_br
         "los {PATHS} caminos fallan por tasa inicial excedida: {b}"
     );
     assert_eq!(
-        [k[0], k[2]], [0, 0],
-        "y por nada más: F1 exige una venta que se quede corta y F3 una regla con techo: {b}"
+        k[0], 0,
+        "y por nada más: F1 exige una venta que se quede corta: {b}"
     );
     assert_success_block_is_consistent(&b);
     // La curva de fallo lo fecha: el 100 % ya en la primera fila, la de la jubilación.
@@ -557,7 +554,7 @@ async fn a_plan_with_no_reachable_date_draws_the_line_that_never_retires() {
     seed(&app, &owner, "2000", "1950", &[("Hucha", "1000", Some("0"))]).await;
 
     let b = bands(&app, &owner.cookie, &format!("?paths={PATHS_SPREAD}")).await;
-    assert_eq!(failures_by_kind(&b), [0, 0, 0], "{b}");
+    assert_eq!(failures_by_kind(&b), [0, 0], "{b}");
     // La tabla trae UNA fila —la del horizonte— y vale 0. No está vacía y no dice «seguro».
     let curve = b["failure_probability_by_age"].as_array().expect("curva");
     assert_eq!(
@@ -645,7 +642,7 @@ async fn a_plan_without_a_reachable_date_publishes_null_success_with_its_reason(
         b["points"].as_array().expect("puntos").len() > 10,
         "las bandas de percentiles siguen viajando: {b}"
     );
-    assert_eq!(b["failures_by_kind"].as_array().expect("reparto").len(), 3);
+    assert_eq!(b["failures_by_kind"].as_array().expect("reparto").len(), 2);
     assert!(
         !b["failure_probability_by_age"]
             .as_array()
@@ -1069,21 +1066,20 @@ async fn the_bands_echo_the_threshold_the_paths_and_the_sampling_error() {
 /// agotamiento ya no es el único motivo de fallo.**
 ///
 /// El hogar: se jubila a los 45 por EDAD (así hay fecha pase lo que pase), con **800.000 €**
-/// líquidos y una regla `percent_of_balance` al **1 % anual** contra un gasto de 2.000 €/mes.
+/// líquidos al 5 %, un gasto de 2.000 €/mes de hoy y un SWR del **1 %**.
 ///
-/// Las tres cifras están elegidas para aislar F3, y conviene decir cómo, porque el motor prioriza
-/// `F1 > F2 > F3`:
+/// Las cifras están elegidas para aislar F2 sin F1 (el motor prioriza `F1 > F2`):
 ///
-/// - **F2 no puede saltar**: la puerta de tasa inicial compara el SWR del perfil (3,5 %) contra
-///   la necesidad anual — 3,5 % de 800.000 € son 28.000 €/año y hacen falta 24.000. Con una
-///   cartera pequeña saltaría F2 y F3 no llegaría a evaluarse nunca (y eso es exactamente lo que
-///   hacía fallar a la primera versión de este test, con 300.000 €).
-/// - **F1 tampoco**: retirar el 1 % de un capital que crece al 5 % no vacía nada.
-/// - **F3 sí**: la regla permite ~667 €/mes donde hacen falta 2.000, en el primer mes jubilado.
+/// - **F2 salta**: al llegar a los 45 el líquido ronda 1,4 M€ (nueve años de 5 % y de ahorro), y
+///   el 1 % de eso son ~14.000 €/año frente a una necesidad que, indexada, pasa de 24.000.
+/// - **F1 no**: vender ~2.500 €/mes de una cartera de 1,4 M€ que crece al 5 % no la vacía en el
+///   horizonte.
 ///
 /// Con la tabla vieja este plan publicaba «0 % de probabilidad de agotar» en todas las filas —
 /// porque, literalmente, no se agota. Con la nueva publica el 100 % de fallo, y
-/// `failures_by_kind` dice por qué.
+/// `failures_by_kind` dice por qué. (Hasta el 2026-10-10 el test aislaba F3 con una regla
+/// `percent_of_balance` al 1 %; F3 se retiró con las reglas y la propiedad —«la curva cuenta más
+/// que el agotamiento»— la sostiene ahora la puerta de tasa inicial.)
 #[tokio::test]
 async fn the_failure_curve_counts_more_than_depletion() {
     let app = TestApp::spawn().await;
@@ -1096,7 +1092,7 @@ async fn the_failure_curve_counts_more_than_depletion() {
         json!({
             "strategy": "retire_at_age",
             "target_retirement_age": 45,
-            "withdrawal_rule": {"kind": "percent_of_balance", "pct": "1", "spend_mode": "ceiling"},
+            "swr_pct": "1",
         }),
     )
     .await;
@@ -1108,13 +1104,8 @@ async fn the_failure_curve_counts_more_than_depletion() {
         "la cartera NO se agota: retirar el 1 % de un capital que crece al 5 % no la vacía: {b}"
     );
     assert_eq!(
-        k[1], 0,
-        "y la tasa inicial NO se excede: el SWR del perfil cubre la necesidad de sobra — si esto \
-         saltara, F3 no llegaría a evaluarse y el test mediría otra cosa: {b}"
-    );
-    assert_eq!(
-        k[2], u64::from(PATHS),
-        "y sin embargo TODOS los caminos fallan, por F3 — la regla no llega a la necesidad: {b}"
+        k[1], u64::from(PATHS),
+        "y sin embargo TODOS los caminos fallan, por F2 — la tasa inicial excede el SWR: {b}"
     );
     assert_eq!(b["success_of_plan"], "0", "{b}");
     assert_success_block_is_consistent(&b);

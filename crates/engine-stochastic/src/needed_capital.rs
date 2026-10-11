@@ -255,7 +255,7 @@ const LAMBDA_SCALE: u32 = 10;
 pub const ABSENT_NO_LIQUID_ASSETS: &str = "no_liquid_assets";
 
 /// **Ni multiplicando la cartera por `2^`[`MAX_LAMBDA_DOUBLINGS`] se cumple el umbral.** El plan no
-/// falla por falta de capital: falla por otra cosa (una regla que no llega a la necesidad, un
+/// falla por falta de capital: falla por otra cosa (una tasa inicial que ninguna cartera escalada cumple a tiempo, un
 /// horizonte imposible, un umbral inalcanzable con los caminos sorteados — ver
 /// `SuccessAt::meets`).
 pub const ABSENT_THRESHOLD_UNREACHABLE: &str = "threshold_unreachable";

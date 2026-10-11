@@ -134,7 +134,11 @@ fn all_cases() -> Vec<ProjCase> {
 fn every_case_degenerates_from_decimal_to_floating_point() {
     let cases = all_cases();
     assert!(
-        cases.len() >= 23,
+        // Hasta el 2026-10-10 la batería tenía 25 casos y el suelo era 23: P15–P17 (las tres
+        // reglas de retirada por saldo) salieron con las reglas (decisión «solo SWR») y quedan 22,
+        // con el suelo igual al recuento. La cota de euros no se toca y ningún caso superviviente
+        // se excluye.
+        cases.len() >= 22,
         "la batería del motor no puede encogerse sin que este test lo diga: {} casos",
         cases.len()
     );

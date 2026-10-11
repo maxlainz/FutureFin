@@ -1091,14 +1091,14 @@ pub struct PlanExtras {
     /// **El fallo acumulado por edad**: `(mes del bucle, fracción de caminos con ALGÚN fallo hasta
     /// ese mes, fallos por motivo)`.
     ///
-    /// El tercer elemento es el reparto `[F1 cartera agotada, F2 tasa inicial excedida, F3 la
-    /// regla no llega a la necesidad]` **de la ejecución entera**, no del tramo: `McOutcome`
+    /// El tercer elemento es el reparto `[F1 cartera agotada, F2 tasa inicial excedida]` **de la
+    /// ejecución entera**, no del tramo: `McOutcome`
     /// clasifica el PRIMER fallo de cada camino sobre todo el horizonte y no lo desglosa por mes.
     /// Es exacto en la ÚLTIMA fila —que cierra en `1 − éxito`, el mismo conjunto de caminos— y en
     /// las anteriores es la composición del horizonte completo, no la del tramo. Inventarse aquí
     /// un reparto por tramo sería una segunda implementación de una clasificación que el motor
     /// posee: si hace falta, se pide en `crates/engine-stochastic`.
-    pub failure_probability_by_age: Vec<(u32, f64, [u32; 3])>,
+    pub failure_probability_by_age: Vec<(u32, f64, [u32; 2])>,
 }
 
 impl PlanExtras {

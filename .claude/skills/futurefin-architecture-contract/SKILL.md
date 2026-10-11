@@ -204,7 +204,7 @@ petición. Lo que la hace admisible son cuatro condiciones, y las cuatro son ver
    **estadísticas** —probabilidad de éxito, percentiles de una banda, probabilidad de agotamiento
    por edad—, donde un error relativo de 1e-15 no cambia ninguna decisión. Está escrito en el crate
    (`crates/engine-stochastic/src/lib.rs:14-20`) **y en el cable**: la última frase de
-   `BANDS_MODEL_NOTE` (`handlers/projection_bands.rs:341`) se lo dice a quien consume la respuesta.
+   `BANDS_MODEL_NOTE` (`handlers/projection_bands.rs:597` el 2026-10-11 —busca `const BANDS_MODEL_NOTE`—) se lo dice a quien consume la respuesta.
    **Enmienda (5.0.0 E7/E8, panel adversarial 2026-09-06, modelo de jubilación v2)**: el crate SÍ
    publica hoy cifras en euros —capital necesario (`needed_capital_today`/`needed_capital_curve`),
    aportación mínima (`minimum_extra_contribution`), ahorro liberado de coast
@@ -233,7 +233,7 @@ petición. Lo que la hace admisible son cuatro condiciones, y las cuatro son ver
    cambia en un solo sitio. El `F64Money` es un newtype por la orphan rule **y** para que no se
    pueda mezclar un número estocástico con un `Decimal`; todas sus políticas (saturación al
    convertir a `Decimal`, `checked_*` que devuelven `None` ⟺ no finito, `total_cmp`, igualdad de
-   `g` por tolerancia `1e-12`) están declaradas en una tabla en `lib.rs:83-95`.
+   `g` por tolerancia `1e-12`) están declaradas en una tabla en el doc-comment de `F64Money` (`lib.rs:158-168` el 2026-10-11; aquí decía `83-95`, que hoy son los `pub use`).
 4. **La puerta de degeneración** (`crates/engine-stochastic/tests/degeneration.rs`,
    `every_case_degenerates_from_decimal_to_floating_point`): para **todos** los casos de la batería
    del motor —reutilizada por `#[path]`, una sola definición y dos crates que la corren— compara
@@ -242,7 +242,7 @@ petición. Lo que la hace admisible son cuatro condiciones, y las cuatro son ver
    `phase_transitions`). **La cota de contrato es 1 € por mes** (`EUR_TOLERANCE`); por encima de
    2⁵³ € —donde el propio espaciado de un `f64` ya supera el euro— la cota es **relativa 1e-12**, y
    el caso se marca en la tabla que el test imprime. Ninguna cota se relaja «porque falla», y el
-   número de casos es un **suelo** asertado (`cases.len() >= 23`), no una constante. Medido hoy:
+   número de casos es un **suelo** asertado (`cases.len() >= 22` desde «solo SWR», que sacó P15–P17 de la batería; era `>= 23`), no una constante. Medido hoy:
    **máximo 1,5e-7 €** en 840 meses (caso P9) y los cuatro índices coincidiendo **exactamente**.
 
 **La excepción gana HILOS, no frontera (5.0.0 E12).** Desde E12 el sorteo reparte sus caminos
@@ -267,10 +267,10 @@ La API **nunca** rellena `McConfig::threads`; si un handler empezara a hacerlo, 
 abriría un pool efímero y ese techo desaparecería.
 
 Tests que hay que saber deletrear —hay **dos** con nombre parecido y greparlos mal da vacío—:
-`mc_zero_volatility_degenerates` (`degeneration.rs:295`, inyecta multiplicadores deterministas por
+`mc_zero_volatility_degenerates` (`degeneration.rs:345`, inyecta multiplicadores deterministas por
 el hook y exige igualdad **bit a bit**) y `mc_zero_volatility_degenerates_to_deterministic`
-(`monte_carlo.rs:225`, con el RNG en medio y σ=0). El de reproducibilidad es
-`mc_same_seed_bit_identical` (`monte_carlo.rs:142`), que además fija que el camino 7 es el camino 7
+(`monte_carlo.rs:195`, con el RNG en medio y σ=0). El de reproducibilidad es
+`mc_same_seed_bit_identical` (`monte_carlo.rs:112`; los números de línea de este párrafo son del 2026-10-11 y caducan — localiza por nombre), que además fija que el camino 7 es el camino 7
 tanto suelto como dentro de 64 o de 500; el del paralelismo es
 `parallel_and_sequential_runs_are_bit_identical` (`parallel_determinism.rs`).
 
@@ -1090,10 +1090,24 @@ Verificación: `grep -n "crossing_is_reading_only = true" apps/api/src/handlers/
 sin condición) y `grep -n "pub retirement_trigger\b" apps/api/src/handlers/projection.rs` (vacío: el
 campo salió del wire).
 
+> **Homónimos — no confundir con las D22/D24 del plan de #207.** Fuera de esta skill, «D22/D24»
+> (`engine.md`, `financial-contracts.md`, `mcp-catalog.md`, `api-routes.md`, las skills de dominio)
+> nombra las decisiones del **plan de la issue #207**, no las secciones D22/D24 de aquí: «el recorte
+> de una regla de retirada no es fracaso ni descubierto» y la separación de las tres magnitudes
+> (`withdrawal_shortfall` / `unmet_need` / `withdrawal_excess`). **Esas dos decisiones del plan están
+> SUSTITUIDAS desde el 2026-10-10 por la decisión «solo SWR» del owner**: sin reglas de retirada por
+> saldo no hay recorte que clasificar, `withdrawal_shortfall` y `withdrawal_excess` salieron del
+> motor y del wire, y lo único que queda es `withdrawal + unmet_need = need_net`
+> (`crates/engine/src/projection.rs`, doc de `unmet_need`). Contrato vigente:
+> `futurefin-fire-domain-reference`; porqué y medición: `futurefin-failure-archaeology`, entrada
+> «Reglas de retirada por saldo y modo de gasto (5.0.0-dev), retiradas antes de publicar».
+> Comprobación de ausencia: `git grep -nE "withdrawal_shortfall|withdrawal_excess|RuleBelowNeed" -- 'crates/*/src' apps/api/src | grep -vE "^[^:]+:[0-9]+:\s*(//|\*)" || echo "OK: solo SWR"`.
+
 ### D25. El perfil de jubilación es una ENTRADA DEL MOTOR, por usuario (5.0.0, plan #207 D13)
 
 `users.retirement_profile` (JSONB) no es preferencia de UI: **gobierna cómo corre la simulación** —
-trigger, objetivo y su base, fases, regla de retirada, horizonte. De ahí se derivan tres obligaciones
+trigger, fases, tasa de retirada (la puerta de tasa inicial, F2), puente, umbral de éxito,
+horizonte (la `withdrawal_rule` que estuvo aquí se retiró el 2026-10-10 — «solo SWR»). De ahí se derivan tres obligaciones
 que no tiene ningún otro ajuste personal:
 
 1. **Un PATCH aplicado invalida la cache de proyección** (D7), instalación entera, y con ella las
@@ -1203,8 +1217,10 @@ agregados de hogar que no suman.
   semillas explícitas y cachear solo la estable.
 - **W7 — Errors in projection math are silent** (owner-identified hardest problem): wrong
   economic modeling produces plausible-looking numbers. Stochastic returns, sequence-of-returns
-  risk, tax-aware withdrawal and variable SWR are all candidate directions and currently
-  UNIMPLEMENTED. Any work here goes through
+  risk and tax-aware drawdown landed in 5.0.0 (Monte Carlo in `crates/engine-stochastic`, the
+  gross-up in the drain); **variable SWR / guardrails were implemented in 5.0.0-dev and RETIRED
+  before publishing** (owner decision «solo SWR», 2026-10-10 — `futurefin-failure-archaeology`), so
+  they are again an open direction. Any work here goes through
   `.claude/skills/futurefin-projection-realism-campaign/SKILL.md`.
 - **W8 — the container is a two-process bash supervisor** (new with D13, v3.0.0).
   `apps/api/docker-entrypoint.sh` is PID 1 and runs as **root** — only to `chown` and then `gosu`

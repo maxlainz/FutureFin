@@ -20,10 +20,10 @@
  *     alguno es exactamente la mentira silenciosa que esta app existe para no contar: el
  *     redondeo se topa a 99 mientras la probabilidad no sea 1 exacta (y a 1 mientras no sea 0).
  *  4. **El SUJETO de la probabilidad.** En el modelo v2 el éxito ya no es «no agotar el capital»:
- *     un camino falla si la cartera no cubre un mes (F1), si la tasa inicial del mes de
- *     jubilación supera el tope (F2) o si el permitido de una regla por saldo se queda por debajo
- *     de la necesidad ordinaria (F3). El verbo de la casa para las tres es **«aguantar»**, y la
- *     copy lo lleva dentro, no en el popover.
+ *     un camino falla si la cartera no cubre un mes (F1) o si la tasa inicial del mes de
+ *     jubilación supera el tope (F2). El verbo de la casa para las dos es **«aguantar»**, y la
+ *     copy lo lleva dentro, no en el popover. (F3, el permitido de una regla por saldo bajo la
+ *     necesidad, se fue con las reglas de retirada — «solo SWR», 2026-10-10.)
  *
  * Y dos reglas de lectura que la copy no puede olvidar:
  *
@@ -422,47 +422,38 @@ export type RiskExtraRowsInput = {
 };
 
 /**
- * Los tres modos de fallo de §2.4, en el ORDEN FIJO de `failures_by_kind`. Cada rótulo dice lo
+ * Los dos modos de fallo de §2.4, en el ORDEN FIJO de `failures_by_kind`. Cada rótulo dice lo
  * que le pasó al camino, no la sigla: «F2» no significa nada para quien mira la pantalla, y
  * «tasa inicial por encima del tope» sí — y es la que más sorprende, porque el dinero sigue ahí.
  *
- * **Dos de las tres se deciden en un solo mes, el de la jubilación**: la tasa inicial (F2) y la
- * regla de retirada (F3, desde la decisión C10). Solo «se quedan sin dinero» (F1) puede firmar en
- * cualquier mes posterior; lo que la regla recorte después de la fecha vive en las dos filas de
- * cobertura, no aquí.
+ * **La tasa inicial (F2) se decide en un solo mes, el de la jubilación.** Solo «se quedan sin
+ * dinero» (F1) puede firmar en cualquier mes posterior.
  */
-const FAILURE_KIND_LABELS: readonly [string, string, string] = [
+const FAILURE_KIND_LABELS: readonly [string, string] = [
   "Se quedan sin dinero",
   "Tasa inicial por encima del tope",
-  "La regla no cubre el gasto",
 ];
 
 /**
  * Las filas EXTRA del panel de riesgo: lo que hace AUDITABLE el «Éxito del plan» de arriba.
  *
  * Cada una responde una pregunta que el número grande deja abierta: por qué fallan los que
- * fallan, cuánto se apretó el cinturón en los que aguantan, cuántos acaban fallando en algún
- * momento del horizonte, y qué garantiza la muestra.
+ * fallan, cuántos acaban fallando en algún momento del horizonte, y qué garantiza la muestra.
  *
- * Ninguna se esconde por la regla de retirada. Hasta el pase de correcciones de 5.0.0 las dos
- * filas de cobertura se ocultaban con `fixed_real` porque medían solo el recorte de la REGLA —y
- * esa regla no tiene techo, así que sus cifras eran 0 y 1 por construcción. Desde §F miden también
- * **el gasto que la cartera no pudo financiar**, así que con `fixed_real` son perfectamente
- * informativas: la regla no recorta nunca, pero el dinero se puede acabar igual (un fixture medido
- * pasó de `1,0` a `0,0865` al dejar de ignorar el descubierto). Esconderlas ahí era esconder el
- * caso en que la cobertura tiene una sola causa y es la peor.
+ * **Las dos filas de cobertura se fueron con «solo SWR» (2026-10-10).** Sin reglas de retirada,
+ * un mes por debajo del gasto ES un fallo F1, así que sus medianas valían 0 meses y 100 % en
+ * cualquier plan con éxito ≥ 50 % — es decir, en cualquier plan que la app pueda proponer con un
+ * umbral de 80 a 100. El servidor dejó de publicarlas.
  *
  * ## La excepción: sin éxito que auditar no hay auditoría (A12)
  *
  * Cuando la respuesta trae `success_absent_reason`, el escenario sorteado **no lleva mes de
  * jubilación** y el motor solo clasifica fallos estando jubilado. Las cifras que alimentan estas
  * filas siguen viajando —el servidor no las esconde, porque describen la trayectoria del
- * patrimonio sin jubilarse— pero valen todas 0 o casi: `failures_by_kind` es `[0, 0, 0]`,
- * `failure_probability_by_age` trae una sola fila valiendo 0 y las dos de cobertura no tienen
- * meses jubilados que medir.
+ * patrimonio sin jubilarse— pero valen todas 0 o casi: `failures_by_kind` es `[0, 0]` y
+ * `failure_probability_by_age` trae una sola fila valiendo 0.
  *
- * Pintadas como siempre, esas filas dicen «cero fallos, cobertura entera, 0 % de escenarios
- * fallan»: **un plan impecable que no existe**, que es exactamente la lectura contraria a la
+ * Pintadas como siempre, esas filas dicen «cero fallos, 0 % de escenarios fallan»: **un plan impecable que no existe**, que es exactamente la lectura contraria a la
  * verdadera. No son cifras equivocadas, son cifras de otra pregunta. Así que en ese caso NO se
  * emite ninguna: se emite **una sola fila** que dice que no hay éxito que auditar y por qué. Sin
  * porcentaje —no hay ninguno honesto que poner— y sin adjetivos: «no hay fecha» no es una alarma
@@ -507,12 +498,12 @@ export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
 
   // ── Por qué falla el que falla (§2.4) ────────────────────────────────────────────────────
   //
-  // Las TRES filas o ninguna. Si no ha fallado nadie, tres «0 de 2.500» son ruido: el número
+  // Las DOS filas o ninguna. Si no ha fallado nadie, dos «0 de 2.500» son ruido: el número
   // grande ya cuenta la historia entera. Si ha fallado alguien, un cero SÍ es una lectura («por
-  // esto no falló ninguno») y además es lo que hace que las tres casillas cuadren con el total:
-  // esconder las vacías dejaría un desglose que no suma.
+  // esto no falló ninguno») y además es lo que hace que las dos casillas cuadren con el total:
+  // esconder la vacía dejaría un desglose que no suma.
   const kinds = Array.isArray(b.failures_by_kind) ? b.failures_by_kind : null;
-  if (kinds && kinds.length === 3 && kinds.some((n) => finite(n) && n > 0)) {
+  if (kinds && kinds.length === FAILURE_KIND_LABELS.length && kinds.some((n) => finite(n) && n > 0)) {
     const total = finite(b.paths) && b.paths > 0 ? b.paths : null;
     kinds.forEach((count, i) => {
       if (!finite(count)) return;
@@ -527,20 +518,6 @@ export function buildRiskExtraRows(input: RiskExtraRowsInput): RiskExtraRow[] {
       });
     });
   }
-
-  // ── Cuánto se apretó el cinturón el que aguantó ──────────────────────────────────────────
-  rows.push({
-    key: "months_below_need",
-    label: "Meses por debajo del gasto (mediana)",
-    value: `${b.months_below_need_p50}`,
-    helpId: "retirement.coverage",
-  });
-  rows.push({
-    key: "withdrawal_to_need",
-    label: "Parte del gasto que la regla cubrió (mediana)",
-    value: formatFractionAsPercent(b.withdrawal_to_need_ratio_p50),
-    helpId: "retirement.coverage",
-  });
 
   // ── El total acumulado, que el color de la banda no puede rotular ────────────────────────
   //

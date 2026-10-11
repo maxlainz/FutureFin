@@ -511,16 +511,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   partial_not_before_retirement:
     "La media jornada tiene que empezar antes de la jubilación total.",
   partial_income_negative: "El ingreso de la media jornada no puede ser negativo.",
-  withdrawal_rule_kind: "Esa regla de retirada no existe.",
-  spend_mode: "Esa forma de relacionar la regla de retirada con tu gasto no es válida.",
   expense_basis: "Esa base de gasto para la media jornada no es válida.",
-  withdrawal_pct_required: "A esa regla de retirada le falta alguno de sus porcentajes.",
-  withdrawal_pct_out_of_range:
-    "El porcentaje de la regla de retirada debe ser mayor que 0 y como mucho 20 %.",
-  withdrawal_band_out_of_range:
-    "La banda y el ajuste de la regla de bandas deben ser mayores que 0 y como mucho 50 %.",
-  hybrid_end_pct_not_below_start:
-    "En la regla híbrida, el porcentaje final tiene que ser menor que el inicial.",
   partial_retirement_required:
     "«Media jornada» necesita que declares la fase parcial: a qué edad empieza y con qué ingreso.",
   field_set_and_clear:
@@ -627,8 +618,6 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Con los datos actuales no se puede calcular la proyección. Revisa activos, reglas de reparto y presupuesto.",
   household_not_simulable:
     "La vista del hogar no se puede simular: elige tu vista (Yo).",
-  engine_feature_unavailable:
-    "Esta configuración de jubilación aún no está disponible en el motor.",
   task_panic:
     "El cálculo de la proyección se ha interrumpido. Vuelve a intentarlo en unos segundos.",
   months_out_of_range:

@@ -38,10 +38,8 @@ import {
   DEFAULT_SUCCESS_THRESHOLD_PCT,
   MAX_BRIDGE_PCT,
   MAX_BRIDGE_YEARS,
-  MAX_GUARDRAIL_PCT,
   MAX_SUCCESS_THRESHOLD_PCT,
   MAX_SWR_PCT,
-  MAX_WITHDRAWAL_PCT,
   MIN_BRIDGE_YEARS,
   MIN_PENSION_AGE,
   MIN_PROFILE_AGE,
@@ -95,8 +93,8 @@ describe("defaults del perfil", () => {
     expect(p.swr_pct).toBe("3.5");
     expect(p.horizon_lifespan_age).toBe(90);
     expect(p.fire_number_mode).toBe("annual_expense");
-    expect(p.withdrawal_rule.kind).toBe("fixed_real");
-    expect(p.withdrawal_rule.spend_mode).toBe("ceiling");
+    // «Solo SWR» (2026-10-10): no hay regla de retirada que elegir — el perfil ni la lleva.
+    expect(p).not.toHaveProperty("withdrawal_rule");
     // El umbral VOLVIÓ al perfil (C3, revierte V7) y su default es 95, no 100: el 100 significa
     // cero fallos de N caminos y es una exigencia, no el punto de partida razonable.
     expect(p.success_threshold_pct).toBe(95);
@@ -336,11 +334,9 @@ describe("normalizeRetirementProfile", () => {
       ...defaultRetirementProfileApi(),
       strategy: "monte_carlo",
       coast_mode: "vibes",
-      withdrawal_rule: { ...defaultRetirementProfileApi().withdrawal_rule, kind: "magia" },
     } as unknown as RetirementProfileApi);
     expect(p.strategy).toBe("asap");
     expect(p.coast_mode).toBe("fixed_retirement_age");
-    expect(p.withdrawal_rule.kind).toBe("fixed_real");
   });
 
   it("las claves del modelo viejo se caen solas", () => {
@@ -355,6 +351,23 @@ describe("normalizeRetirementProfile", () => {
     expect(p).not.toHaveProperty("target_basis");
     expect(p).not.toHaveProperty("bridge_discount_basis");
     expect(p).not.toHaveProperty("cash_buffer_months");
+  });
+
+  it("una `withdrawal_rule` de un backend o backup anterior a «solo SWR» se cae sola", () => {
+    // El servidor la ignora al leer y la migración la borra del JSONB; si el cliente la
+    // conservara, el siguiente PATCH la reenviaría como si alguien la hubiera decidido.
+    const p = normalizeRetirementProfile({
+      ...defaultRetirementProfileApi(),
+      withdrawal_rule: {
+        kind: "guardrails",
+        pct: "4",
+        band_pct: "20",
+        adjust_pct: "10",
+        spend_mode: "rule_is_spend",
+        pct_source: "explicit",
+      },
+    } as unknown as RetirementProfileApi);
+    expect(p).not.toHaveProperty("withdrawal_rule");
   });
 });
 
@@ -510,35 +523,6 @@ describe("buildRetirementProfilePatch — tri-estado", () => {
     expect(patch.partial_retirement?.starts_at_age).toBeNull();
   });
 
-  it("la regla de retirada viaja ENTERA, nunca campo a campo", () => {
-    // Sus `pct` obligatorios dependen de `kind`: un merge parcial permitiría estados como
-    // «guardrails con el pct del percent_of_balance anterior» que nadie escribió.
-    const before = base();
-    const patch = buildRetirementProfilePatch(
-      before,
-      base({
-        withdrawal_rule: {
-          kind: "guardrails",
-          pct: "4",
-          start_pct: null,
-          end_pct: null,
-          band_pct: "20",
-          adjust_pct: "10",
-          spend_mode: "rule_is_spend",
-        },
-      }),
-    );
-    expect(patch.withdrawal_rule).toEqual({
-      kind: "guardrails",
-      pct: "4",
-      start_pct: null,
-      end_pct: null,
-      band_pct: "20",
-      adjust_pct: "10",
-      spend_mode: "rule_is_spend",
-    });
-  });
-
   it("un importe vacío de bloque llega al wire como «0», nunca como cadena vacía", () => {
     const patch = buildRetirementProfilePatch(
       base(),
@@ -547,12 +531,13 @@ describe("buildRetirementProfilePatch — tri-estado", () => {
     expect(patch.partial_retirement?.income_monthly_today).toBe("0");
   });
 
-  it("ninguno de los tres ejes retirados puede colarse en el PATCH", () => {
+  it("ninguno de los ejes retirados puede colarse en el PATCH", () => {
     const before = base();
     const patch = buildRetirementProfilePatch(before, {
       ...before,
       target_basis: "perpetuity",
       cash_buffer_months: 24,
+      withdrawal_rule: { kind: "percent_of_balance", pct: "4", spend_mode: "ceiling" },
     } as unknown as RetirementProfileApi);
     expect(patch).toEqual({});
   });
@@ -563,8 +548,6 @@ describe("buildRetirementProfilePatch — tri-estado", () => {
 // ---------------------------------------------------------------------------
 
 describe("retirementProfileIssue — espejo de validate_retirement_profile", () => {
-  const rule = defaultRetirementProfileApi().withdrawal_rule;
-
   const cases: Array<[string, RetirementProfileApi, string | null]> = [
     // --- Los cuatro ejes movidos conservan sus códigos de 4.15.x -------------------------
     ["SWR en la cota alta (6 %) es válido", base({ swr_pct: String(MAX_SWR_PCT) }), null],
@@ -807,107 +790,6 @@ describe("retirementProfileIssue — espejo de validate_retirement_profile", () 
       null,
     ],
 
-    // --- Reglas de retirada: cada `kind` exige SUS campos --------------------------------
-    ["fixed_real no pide nada", base({ withdrawal_rule: { ...rule } }), null],
-    // U4 — un porcentaje ausente ya NO es un hueco: hereda `swr_pct` (3,5 % por defecto), que es
-    // el punto entero de que la pantalla tenga un solo porcentaje editable.
-    [
-      "percent_of_balance sin pct HEREDA el SWR",
-      base({ withdrawal_rule: { ...rule, kind: "percent_of_balance" } }),
-      null,
-    ],
-    // …y la consecuencia declarada, la misma que en Rust: con el SWR a 0 lo heredado no es un
-    // plan, y se dice en vez de devolver una simulación que no vende nada.
-    [
-      "percent_of_balance sin pct y SWR 0",
-      base({ swr_pct: "0", withdrawal_rule: { ...rule, kind: "percent_of_balance" } }),
-      "withdrawal_pct_out_of_range",
-    ],
-    [
-      "percent_of_balance con pct",
-      base({ withdrawal_rule: { ...rule, kind: "percent_of_balance", pct: "4" } }),
-      null,
-    ],
-    [
-      "percent_of_balance con pct 0",
-      base({ withdrawal_rule: { ...rule, kind: "percent_of_balance", pct: "0" } }),
-      "withdrawal_pct_out_of_range",
-    ],
-    [
-      "percent_of_balance por encima del techo",
-      base({
-        withdrawal_rule: {
-          ...rule,
-          kind: "percent_of_balance",
-          pct: String(MAX_WITHDRAWAL_PCT + 1),
-        },
-      }),
-      "withdrawal_pct_out_of_range",
-    ],
-    [
-      "hybrid sin start_pct hereda el SWR (3,5) y el 3 % queda por debajo",
-      base({ withdrawal_rule: { ...rule, kind: "hybrid", end_pct: "3" } }),
-      null,
-    ],
-    // El `end_pct` NO hereda nada: es el suelo del latch, no un porcentaje de retirada. Y se
-    // compara contra el heredado, que es el que va a retirar el motor.
-    [
-      "hybrid sin start_pct y end por encima del SWR heredado",
-      base({ withdrawal_rule: { ...rule, kind: "hybrid", end_pct: "3.9" } }),
-      "hybrid_end_pct_not_below_start",
-    ],
-    [
-      "hybrid sin end_pct sigue siendo un hueco",
-      base({ withdrawal_rule: { ...rule, kind: "hybrid" } }),
-      "withdrawal_pct_required",
-    ],
-    [
-      "hybrid con end >= start",
-      base({
-        withdrawal_rule: { ...rule, kind: "hybrid", start_pct: "3", end_pct: "5" },
-      }),
-      "hybrid_end_pct_not_below_start",
-    ],
-    [
-      "hybrid coherente",
-      base({
-        withdrawal_rule: { ...rule, kind: "hybrid", start_pct: "5", end_pct: "3" },
-      }),
-      null,
-    ],
-    [
-      "guardrails sin adjust_pct",
-      base({
-        withdrawal_rule: { ...rule, kind: "guardrails", pct: "4", band_pct: "20" },
-      }),
-      "withdrawal_pct_required",
-    ],
-    [
-      "guardrails con banda fuera de cota",
-      base({
-        withdrawal_rule: {
-          ...rule,
-          kind: "guardrails",
-          pct: "4",
-          band_pct: String(MAX_GUARDRAIL_PCT + 1),
-          adjust_pct: "10",
-        },
-      }),
-      "withdrawal_band_out_of_range",
-    ],
-    [
-      "guardrails completo",
-      base({
-        withdrawal_rule: {
-          ...rule,
-          kind: "guardrails",
-          pct: "4",
-          band_pct: "20",
-          adjust_pct: "10",
-        },
-      }),
-      null,
-    ],
   ];
 
   for (const [name, profile, expected] of cases) {
@@ -933,6 +815,14 @@ describe("retirementProfileIssue — espejo de validate_retirement_profile", () 
       "pension_required_for_bridge",
       "bridge_discount_out_of_range",
       "target_basis",
+      // «Solo SWR» (2026-10-10): las reglas de retirada y el modo de gasto se fueron del
+      // producto, y con ellos todos sus códigos.
+      "withdrawal_pct_out_of_range",
+      "withdrawal_pct_required",
+      "withdrawal_band_out_of_range",
+      "hybrid_end_pct_not_below_start",
+      "withdrawal_rule_kind",
+      "spend_mode",
     ]) {
       expect(emitted.has(dead)).toBe(false);
     }

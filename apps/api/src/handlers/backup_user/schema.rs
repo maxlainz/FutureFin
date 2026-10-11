@@ -601,10 +601,10 @@ impl BackupFireSettings {
     /// el comentario que sustituye — y lo que sembraba el importador con ese resultado ERA lo que
     /// se guardaba en `users.retirement_profile`. El problema no es el clamp (los cuatro ejes se
     /// siguen acotando aquí, a mano, contra las MISMAS cotas): es que `resolve_retirement_profile`
-    /// también DERIVA — el `pct_source` de una regla por saldo, el `bridge_enabled` que el alias
-    /// `pension_bridge` enciende — y guardar ese resultado freza esas derivaciones como si el
+    /// también DERIVA — el `bridge_enabled` que el alias `pension_bridge` enciende (y, hasta el
+    /// 2026-10-10, el `pct_source` de una regla de retirada por saldo) — y guardar ese resultado freza esas derivaciones como si el
     /// usuario las hubiera elegido, en vez de dejarlas para que se calculen en cada lectura. Un
-    /// backup ≤ v12 nunca trae ni regla de retirada ni pensión (`LegacyFireAxes` solo tiene los
+    /// backup ≤ v12 nunca trae pensión (`LegacyFireAxes` solo tiene los
     /// cuatro ejes de abajo), así que hoy el efecto observable es nulo — pero el día que este
     /// sembrado se extienda a más campos, la próxima persona que lo toque no tiene que descubrir
     /// esta trampa dos veces.

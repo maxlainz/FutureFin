@@ -228,6 +228,17 @@ const RETIRED_CODES: &[&str] = &[
     "bridge_discount_out_of_range",
     "cash_buffer_out_of_range",
     "pension_required_for_bridge",
+    // «Solo SWR» (2026-10-10): las reglas de retirada por saldo y el modo de gasto se retiraron
+    // enteros del perfil, y con ellos sus seis códigos de validación.
+    "withdrawal_rule_kind",
+    "withdrawal_pct_required",
+    "withdrawal_pct_out_of_range",
+    "withdrawal_band_out_of_range",
+    "hybrid_end_pct_not_below_start",
+    "spend_mode",
+    // Mismo día: `EngineError::UnsupportedPhase` se quedó sin productor (WP3 implementó las
+    // fases) y era la última variante que mapeaba a este código.
+    "engine_feature_unavailable",
 ];
 
 #[test]

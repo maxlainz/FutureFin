@@ -1276,7 +1276,6 @@ async fn no_money_string_carries_more_than_four_decimals_or_negative_zero() {
             || key.ends_with("success_of_plan_delta")
             || key.ends_with("success_wilson_low")
             || key.ends_with("success_probability")
-            || key.ends_with("withdrawal_to_need_ratio_p50")
             || key.ends_with("probability")
     }
 
@@ -2036,10 +2035,12 @@ async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_th
             "success_probability",
             "sampling_error_pp",
             "failures_by_kind",
-            "months_below_need_p50",
-            "withdrawal_to_need_ratio_p50",
         ] {
             assert!(sin[lado][k].is_null(), "{lado}.{k} sin el eje: {sin}");
+        }
+        // Retiradas el 2026-10-10 con las reglas de retirada por saldo: no viajan nunca.
+        for dead in ["months_below_need_p50", "withdrawal_to_need_ratio_p50"] {
+            assert!(sin[lado].get(dead).is_none(), "{lado}.{dead}: {sin}");
         }
         assert!(
             sin[lado].get("failure_probability_by_age").is_none(),
@@ -2076,12 +2077,12 @@ async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_th
         let k = &con[lado];
         assert!(k["success_probability"].is_string(), "{lado}: {con}");
         assert!(k["sampling_error_pp"].is_string(), "{lado}: {con}");
-        assert!(k["months_below_need_p50"].is_u64(), "{lado}: {con}");
-        // El reparto por motivo: tres contadores, y suman los caminos fallidos.
+        assert!(k.get("months_below_need_p50").is_none(), "{lado}: {con}");
+        // El reparto por motivo: dos contadores, y suman los caminos fallidos.
         let kinds = k["failures_by_kind"].as_array().unwrap_or_else(|| {
             panic!("{lado} debe traer failures_by_kind: {con}")
         });
-        assert_eq!(kinds.len(), 3, "{lado}: [F1, F2, F3]: {con}");
+        assert_eq!(kinds.len(), 2, "{lado}: [F1, F2]: {con}");
         let fallos: u64 = kinds.iter().map(|v| v.as_u64().expect("contador")).sum();
         let exito: f64 = k["success_probability"].as_str().unwrap().parse().unwrap();
         let esperados = ((1.0 - exito) * 24.0).round() as u64;
@@ -2099,8 +2100,8 @@ async fn the_monte_carlo_axis_adds_probabilities_to_both_sides_without_moving_th
             previa = p;
             assert_eq!(
                 fila["by_kind"].as_array().map(|a| a.len()),
-                Some(3),
-                "{lado}: cada fila lleva el reparto de la ejecución entera: {con}"
+                Some(2),
+                "{lado}: cada fila lleva el reparto [F1, F2] de la ejecución entera: {con}"
             );
         }
         assert!(

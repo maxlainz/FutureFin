@@ -564,7 +564,7 @@ Re-verify before trusting volatile facts:
 - **Recipe 7 — lo que el golden NO cazó y el fuzz diferencial sí (2026-09-03, pase de correcciones)**:
   `grep -n "fn p24_publishes_the_undrained_operand_with_the_scale_of_4_15_0\|fn p25_keeps_the_debt_service_grouping_of_4_15_0" crates/engine/tests/golden_pins.rs` (2 hits) y el arnés de fuzz sobre hogares aleatorios `grep -n "fn random_households_satisfy_the_accounting_identities" crates/engine/tests/fuzz_invariants.rs`
 - **La trampa del `max` inherente, declarada en el trait**: `grep -n -B2 -A6 "fn max(self" crates/engine/src/money.rs`
-- **El inverso exacto en vez de la bisección** (Recipe 7): `grep -n "fn mixed_drawdown_for_gross_cap" crates/engine/src/tax.rs`; y la bisección legítima, `grep -n "pub const MAX_SOLVE_ITERATIONS" crates/engine/src/solve.rs`
+- **El inverso exacto en vez de la bisección** (Recipe 7): `grep -n -B1 "pub fn mixed_drawdown_for_gross_cap" crates/engine/src/tax.rs` (imprime `#[cfg(test)]` y la fn: desde el 2026-10-10, «solo SWR», es **solo de tests** —su único consumidor en el bucle era el tope bruto de las reglas por saldo, ya retiradas— y se queda como el mapa directo contra el que se verifica `gross_up_mixed_monthly`); y la bisección legítima, `grep -n "pub const MAX_SOLVE_ITERATIONS" crates/engine/src/solve.rs`
 - **La segunda frontera f64 (Recipe 5)**: `grep -c "impl MoneyOps for F64Money" crates/engine-stochastic/src/lib.rs` (1) y el freezer intacto `grep -n "fn crates_engine_src_has_no_f64_outside_comments" crates/engine/src/lib.rs`
 - Engine purity greps: the four commands in Recipe 6.
 - CI scope (what is / isn't covered): `grep -nE "cargo (test|build)|npm" .github/workflows/ci.yml`

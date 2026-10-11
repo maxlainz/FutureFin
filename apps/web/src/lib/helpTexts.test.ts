@@ -103,11 +103,53 @@ describe("catálogo de descripciones", () => {
     expect(body, "y tiene que decir lo contrario, no callarse").toMatch(/retrasa/i);
   });
 
-  it("«Retirada» explica las DOS cifras que deciden la fecha: umbral y tasa", () => {
-    const { body } = HELP_TEXTS["retirement.section_withdrawal"];
-    expect(body).toMatch(/umbral/i);
-    expect(body).toMatch(/escenarios/i);
+  /**
+   * «Solo SWR» (2026-10-10): la tarjeta «Retirada» desapareció. El SWR cierra «Gasto en
+   * jubilación» y el umbral abre «Horizonte y exigencia», así que cada mitad de lo que decía
+   * aquella frase se comprueba ahora en la ayuda del apartado donde vive.
+   */
+  it("«Gasto en jubilación» explica la puerta de la tasa inicial: gasto del primer año contra la tasa", () => {
+    const { body } = HELP_TEXTS["retirement.section_spending"];
+    expect(body).toMatch(/tasa de retirada/i);
     expect(body).toMatch(/primer año/i);
+    expect(body).toMatch(/inflación/i);
+  });
+
+  it("«Horizonte y exigencia» nombra el umbral de éxito que ahora abre el apartado", () => {
+    const t = HELP_TEXTS["settings.horizon_age"];
+    expect(t.title).toBe("Horizonte y exigencia");
+    expect(t.body).toMatch(/umbral/i);
+    expect(t.body).toMatch(/escenarios/i);
+  });
+
+  it("el SWR es una tasa INICIAL, no un tope mensual ni un objetivo de capital", () => {
+    const { body } = HELP_TEXTS["settings.swr"];
+    expect(body).toMatch(/inicial/i);
+    expect(body).toMatch(/primer año/i);
+    expect(body).toMatch(/no un tope mes a mes/i);
+    expect(body).toMatch(/puente/i);
+  });
+
+  it("ninguna ayuda resucita las reglas de retirada ni el modo de gasto («solo SWR»)", () => {
+    const prohibidas = [
+      "regla de retirada",
+      "reglas de retirada",
+      "regla por saldo",
+      "reglas por saldo",
+      "% del saldo",
+      "con bandas",
+      "híbrida",
+      "es mi gasto",
+      "fijado por api",
+    ];
+    const ofensas: string[] = [];
+    for (const [id, t] of Object.entries(HELP_TEXTS)) {
+      const texto = `${t.title} ${t.body}`.toLowerCase();
+      for (const frase of prohibidas) {
+        if (texto.includes(frase)) ofensas.push(`${id}: «${frase}»`);
+      }
+    }
+    expect(ofensas, `conceptos retirados con «solo SWR»: ${ofensas.join(" · ")}`).toEqual([]);
   });
 
   it("«Pensión» dice qué hace el puente, y que en ese tramo no hay aportaciones", () => {

@@ -34,28 +34,11 @@ pub enum EngineError {
     AssetValueOverflow,
     #[error("history timeline dates must be strictly ascending")]
     InvalidHistoryTimeline,
-    /// 5.0.0: el `PhasePlan` pide una regla de retirada que este motor todavía no ejecuta.
-    ///
-    /// **Desde WP2 no la produce ninguna regla**: las cuatro de `WithdrawalRule` se simulan
-    /// (`crates/engine/src/withdrawal.rs`). La variante sobrevive porque `apps/api` la mapea
-    /// JUNTO a [`EngineError::UnsupportedPhase`] al mismo `engine_feature_unavailable`
-    /// (`handlers/projection.rs::map_engine_err`), y retirarla es un cambio del API que
-    /// pertenece a WP3 — cuando la fase parcial y la pensión con fecha dejen de estar pendientes
-    /// y `UnsupportedPhase` se vaya con ella.
-    #[error("withdrawal rule not implemented yet in this engine version")]
-    UnsupportedWithdrawalRule,
-    /// 5.0.0 WP2: la regla de retirada trae un parámetro que no describe ninguna política
-    /// simulable (un porcentaje ≤ 0, un ajuste de guardarraíl ≥ 100 %). La API ya los acota mucho
-    /// antes (`handlers/retirement_profile.rs`), pero el motor es una **función pura** y su firma
-    /// admite cualquier `Decimal`: rechaza con un error tipado en vez de panicar o de simular un
-    /// plan distinto del configurado.
-    #[error("withdrawal rule parameters are outside the simulable range")]
-    InvalidWithdrawalRule,
-    /// 5.0.0 WP1b: el `PhasePlan` declara una fase que este motor todavía no ejecuta (media
-    /// jornada o pensión con fecha; WP3). Mismo criterio que
-    /// [`EngineError::UnsupportedWithdrawalRule`].
-    #[error("phase plan uses a phase not implemented yet in this engine version")]
-    UnsupportedPhase,
+    // `UnsupportedPhase` (WP1b) y `UnsupportedWithdrawalRule` (WP2) vivieron aquí mientras el
+    // plan por fases y las reglas de retirada se construían: «el motor aún no sabe simular esto».
+    // WP3 implementó las fases, y la decisión «solo SWR» (2026-10-10) retiró las reglas por
+    // saldo; ninguna de las dos variantes tenía ya productor y una variante sin productor es un
+    // código de error (`engine_feature_unavailable`) que el contrato prometía y nadie emitía.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -690,36 +673,19 @@ pub struct ProjectionOutput {
     /// `Partial` entra en WP3.
     pub phase_transitions: Vec<(Phase, u32)>,
     /// Retirada NETA efectiva del mes: los euros que de verdad salieron de los activos —
-    /// `after_tax(bruto vendido)`, con el bruto decidido por la regla de retirada y el modo de
-    /// gasto (§B.2). `len == horizon+1`, índice 0 = 0 (el mes 0 es el estado inicial, no un mes
-    /// simulado). Con `fixed_real` ES el drenaje de 4.15.0 — el que ya alimentaba
-    /// `uncovered_deficit_total`.
+    /// `after_tax(bruto vendido)`, con el bruto que la necesidad neta del mes pide.
+    /// `len == horizon+1`, índice 0 = 0 (el mes 0 es el estado inicial, no un mes simulado). ES
+    /// el drenaje de 4.15.0 — el que ya alimentaba `uncovered_deficit_total`.
     pub withdrawal: Vec<Decimal>,
-    /// Recorte de la REGLA: `max(0, necesidad_neta − neto que el techo permitía)` (B.1.5 /
-    /// D22-D24). **Informativo y solo eso**: no resta patrimonio, no entra en
-    /// `uncovered_deficit_total` y no cuenta como fracaso. Mide cuánto gasto declarado dejó fuera
-    /// la política de retirada, NO cuánto no pudieron vender los activos — esa es la otra
-    /// magnitud, y confundirlas fue el hallazgo B2 de la revisión adversarial.
-    ///
-    /// Cero por construcción con `fixed_real` (no hay techo que recorte) y, en modo `ceiling`,
-    /// fuera de los meses de déficit.
-    pub withdrawal_shortfall: Vec<Decimal>,
-    /// Exceso de la regla sobre la necesidad en modo `rule_is_spend`: `max(0, retirada neta −
-    /// necesidad neta)`. Son euros VENDIDOS y GASTADOS — salen de la cartera y no vuelven a
-    /// entrar. Cero por construcción en modo `ceiling` (allí la retirada nunca supera la
-    /// necesidad) y con `fixed_real` en cualquiera de los dos modos.
-    pub withdrawal_excess: Vec<Decimal>,
     /// **Necesidad NETA que el mes NO obtuvo** porque los activos no pudieron fundar la venta:
     /// el incremento mensual de `uncovered_deficit_total`, clampado a 0 (el acumulador conserva
     /// el operando literal de 4.15.0, que puede llevar una cola de ±1e-24; una serie publicada
     /// no). `len == horizon+1`, índice 0 = 0.
     ///
-    /// Es la TERCERA magnitud del mes y la que faltaba: `withdrawal` es lo que se obtuvo,
-    /// `withdrawal_shortfall` lo que la REGLA rechazó y `unmet_need` lo que la CARTERA no dio.
-    /// Su suma es la necesidad neta del mes, y sin ella cualquier cociente de cobertura miente
-    /// en el caso que más importa —la cartera agotada— porque con `fixed_real` el recorte es
-    /// cero por construcción (hallazgo #4 de la revisión adversarial: un cociente publicado de
-    /// 1,0 sobre caminos que cubrían el 8,65 % de la necesidad).
+    /// Identidad del mes (tolerancia de redondeo): `withdrawal + unmet_need = necesidad neta`.
+    /// Hasta el 2026-10-10 había dos términos más —el recorte de la regla de retirada
+    /// (`withdrawal_shortfall`) y el exceso de `rule_is_spend` (`withdrawal_excess`)—; se
+    /// retiraron con las reglas por saldo y el modo de gasto (decisión «solo SWR»).
     pub unmet_need: Vec<Decimal>,
     /// Primer mes con pensión con fecha. `None` en WP1b (la pensión con fecha llega en WP3; la
     /// pensión plana de hoy viaja dentro de `income_retirement_monthly` y no tiene mes propio).
@@ -765,7 +731,7 @@ pub struct ProjectionOutput {
     // -----------------------------------------------------------------------------------------
     /// **Primer mes (1-based) en que ESTE camino falló**, o `None` si aguanta hasta el horizonte.
     ///
-    /// Latch monótono: se fija la primera vez que alguno de los tres motivos de
+    /// Latch monótono: se fija la primera vez que alguno de los dos motivos de
     /// [`PathFailure`] se cumple y no se mueve nunca más — un plan que se rompe no se «arregla»
     /// porque un mes posterior vaya bien.
     ///
@@ -776,15 +742,15 @@ pub struct ProjectionOutput {
     ///
     /// **No es `assets_depleted_month_index`** y puede no coincidir con él: aquel marca el mes en
     /// que la cartera se VACIÓ (con confirmación posterior) y se evalúa en cualquier fase; este
-    /// marca el primer mes JUBILADO (o de media jornada) en que la necesidad se quedó sin fundar,
-    /// la tasa inicial se pasó del tope o la regla se quedó por debajo del gasto ordinario.
+    /// marca el primer mes JUBILADO (o de media jornada) en que la necesidad se quedó sin fundar
+    /// o la tasa inicial se pasó del tope.
     pub failure_month_index: Option<u32>,
     /// **Por qué falló** este camino. `Some` ⟺ [`Self::failure_month_index`] es `Some`
     /// (invariante del latch: los dos se fijan a la vez). Prioridad dentro del mismo mes:
-    /// F1 (`PortfolioDepleted`) > F2 (`InitialRateExceeded`) > F3 (`RuleBelowNeed`).
+    /// F1 (`PortfolioDepleted`) > F2 (`InitialRateExceeded`).
     ///
-    /// **F2 y F3 solo pueden firmar en `R`, el primer mes jubilado** (C10): los dos juzgan la
-    /// FECHA. A partir del mes siguiente el único motivo posible es F1.
+    /// **F2 solo puede firmar en `R`, el primer mes jubilado** (C10): juzga la FECHA. A partir
+    /// del mes siguiente el único motivo posible es F1.
     pub failure_kind: Option<PathFailure>,
 }
 

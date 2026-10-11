@@ -11,7 +11,7 @@ La jubilación deja de ser una sola fecha del hogar y pasa a ser **el plan de ca
 pestaña Jubilación eliges tu estrategia entre cinco tarjetas —«Cuanto antes (FIRE clásico)», «A una
 edad fija», «Ahorrar ahora y dejar crecer (Coast FIRE)», «Media jornada» y «Puente hasta la
 pensión»— y solo aparecen los ajustes que esa estrategia necesita: edad objetivo, pensión pública
-con la edad en que la cobrarás, media jornada, regla de retirada, colchón de caja. Cada uno tiene
+con la edad en que la cobrarás, media jornada, tasa de retirada (SWR) y umbral de éxito. Jubilado, cada año se retira el gasto de jubilación ajustado a la inflación: no hay reglas de retirada que elegir. Cada uno tiene
 su plan; el hogar se ve agregado y solo en lectura con el control «Yo | Hogar».
 
 - **Lo que te cuesta cumplir el plan**: ahorro necesario al mes, margen que te sobra, el mes en
