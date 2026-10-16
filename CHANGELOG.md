@@ -1032,6 +1032,35 @@ npm test --workspace futurefin-web
   nuevas (tarjetas por tema con los modos, tres tiles, chart con curva de capital necesario y marca de
   la fecha, banda teñida por motivo de fallo, tira de éxito por año, avisos de CAGR y de fecha de
   nacimiento) a 1280 / 390 / 360 px, y las pruebas multiplataforma sobre la imagen `:dev`.
+## [4.15.3] - 2026-09-14
+
+### React 19.3 y Vite 8.3 en la imagen
+
+- **La interfaz pasa a React 19.3.0** (antes 19.2.8, con `react-dom` y `scheduler` 0.28.0 en el mismo
+  salto) **y se empaqueta con Vite 8.3.0** (antes 8.2.2). Las dos son dependencias que sí entran en
+  `apps/web/dist/`, así que cambian los bytes de la imagen; el resto del grupo `npm-menores`
+  (`@types/node`, `@types/react`, `@types/react-dom`, `eslint`, `typescript-eslint`) es solo
+  tipos y lint y no viaja en la imagen. Ninguno de los ocho saltos cruza un major. Sin cambios de
+  comportamiento esperados ni acción por parte de quien actualiza (PR #238).
+
+## [4.15.2] - 2026-09-14
+
+### Toolchain de Rust al día en la imagen
+
+- **El binario se compila con una snapshot más reciente de `rust:bookworm`** (digest `82150a5` →
+  `9a73a50`). Es la etapa `rust-builder` del `apps/api/Dockerfile`: mismo canal `stable`, misma
+  versión de las dependencias, solo la foto del toolchain con la que se construye el artefacto que se
+  publica. Sin cambios de comportamiento ni de esquema; sin acción por parte de quien actualiza
+  (PR #237).
+
+## [4.15.1] - 2026-09-14
+
+### Node 24.21 en la imagen
+
+- **La imagen se construye con Node 24.21** (antes 24.20). Cambia solo la etapa `web` del
+  `apps/api/Dockerfile` —la que compila `apps/web/dist/` con Vite—, así que el binario, el esquema y
+  el comportamiento de la aplicación son idénticos: la actualización trae los parches de la rama 24
+  de Node al artefacto que se publica. Sin acción por parte de quien actualiza (PR #236).
 
 ## [4.15.0] - 2026-09-02
 

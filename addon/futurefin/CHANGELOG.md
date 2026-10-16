@@ -8,10 +8,12 @@ decisión — vive en el
 ## 5.0.0
 
 La jubilación deja de ser una sola fecha del hogar y pasa a ser **el plan de cada persona**. En la
-pestaña Jubilación eliges tu estrategia entre cinco tarjetas —«Cuanto antes (FIRE clásico)», «A una
-edad fija», «Ahorrar ahora y dejar crecer (Coast FIRE)», «Media jornada» y «Puente hasta la
-pensión»— y solo aparecen los ajustes que esa estrategia necesita: edad objetivo, pensión pública
-con la edad en que la cobrarás, media jornada, tasa de retirada (SWR) y umbral de éxito. Jubilado, cada año se retira el gasto de jubilación ajustado a la inflación: no hay reglas de retirada que elegir. Cada uno tiene
+pestaña Jubilación eliges tu estrategia entre cuatro tarjetas —«Cuanto antes (FIRE clásico)», «A una
+edad fija», «Ahorrar ahora y dejar crecer (Coast FIRE)» y «Jornada reducida (Barista FIRE)»— y solo
+aparecen los ajustes que esa estrategia necesita: edad objetivo, pensión pública con la edad en que
+la cobrarás (y, si quieres, el puente hasta ella), jornada reducida, tasa de retirada (SWR) y umbral
+de éxito. La fecha la decide la probabilidad de éxito que exijas. Jubilado, cada mes se retira el
+gasto de jubilación ajustado a la inflación: no hay reglas de retirada que elegir. Cada uno tiene
 su plan; el hogar se ve agregado y solo en lectura con el control «Yo | Hogar».
 
 - **Lo que te cuesta cumplir el plan**: ahorro necesario al mes, margen que te sobra, el mes en
@@ -27,6 +29,21 @@ su plan; el hogar se ve agregado y solo en lectura con el control «Yo | Hogar»
   pasan al propietario del hogar); las copias `.ffbackup` suben a la versión 13. Haz una copia
   antes de actualizar (el contenedor la hace sola antes de migrar). Detalle en
   `docs/actualizar.md` del proyecto.
+## 4.15.3
+
+- Mantenimiento interno: la interfaz se actualiza a React 19.3 y se empaqueta con una versión al día
+  de Vite. Tus cifras no se mueven; si notas algún detalle visual raro, repórtalo.
+
+## 4.15.2
+
+- Mantenimiento interno: el add-on se compila con una versión al día de las herramientas de Rust.
+  Nada cambia en lo que ves ni en tus números.
+
+## 4.15.1
+
+- Actualización de mantenimiento: la imagen del add-on pasa a construirse con **Node 24.21**. No
+  cambia nada de lo que ves ni de lo que guardas; son los parches al día de la herramienta con la
+  que se compila la interfaz.
 
 ## 4.15.0
 
