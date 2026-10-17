@@ -17,6 +17,16 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   mismo cambio para dejar las cuatro alertas cerradas. Sin cambios de comportamiento ni acción por
   parte de quien actualiza.
 
+### Pipeline de publicación (no cambia la imagen)
+
+- **El ci-gate del auto-tag espera hasta 100 min** (antes 30): la CI de 5.0.0 tarda ~48 min y el
+  gate expiraba antes de verla en verde, dejando el release sin tag ni imagen.
+- **La CI de `main` ya no se cancela con el push siguiente** (`cancel-in-progress` solo en PRs):
+  mergear un PR mientras corría la CI de un release la cancelaba, y el gate trata «ninguna
+  ejecución en verde» como fallo.
+- **El bump del add-on nunca baja de versión**: un rerun de un release viejo con uno más nuevo ya
+  publicado dejaba el add-on apuntando a la imagen anterior.
+
 ## [5.0.0] - 2026-10-17
 
 ### La jubilación deja de ser un cruce del hogar y pasa a ser el plan de cada persona

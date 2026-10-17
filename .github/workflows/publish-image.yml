@@ -222,7 +222,8 @@ jobs:
 
           echo "Comprobando la CI del commit ${SHA}…"
 
-          for i in $(seq 1 60); do
+          # 200 × 30 s = 100 min: por encima del timeout-minutes de los shards (ci.yml).
+          for i in $(seq 1 200); do
             runs="$(gh api --paginate \
               "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=100" \
               --jq '.workflow_runs[] | "\(.status)\t\(.conclusion)\t\(.html_url)"' || true)"
@@ -274,7 +275,7 @@ jobs:
             exit 0
           done
 
-          echo "ERROR: 30 minutos esperando a la CI de ${SHA} y sigue sin concluir."
+          echo "ERROR: 100 minutos esperando a la CI de ${SHA} y sigue sin concluir."
           echo "Revisa https://github.com/${REPO}/actions y vuelve a lanzar el workflow."
           exit 1
 
@@ -687,6 +688,11 @@ jobs:
           actual="$(grep -m1 '^version:' "${RUNNER_TEMP}/addon-config.yaml" | cut -d'"' -f2)"
           if [ "$actual" = "$v" ]; then
             echo "El add-on ya está en ${v}: nada que hacer."
+            exit 0
+          fi
+          # Nunca hacia atrás: el rerun de un release viejo con otro más nuevo ya publicado.
+          if [ "$(printf '%s\n%s\n' "$v" "$actual" | sort -V | tail -1)" != "$v" ]; then
+            echo "El add-on ya está en ${actual}, más nuevo que ${v}: no se baja."
             exit 0
           fi
 

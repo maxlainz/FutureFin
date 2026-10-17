@@ -13,11 +13,12 @@ on:
 permissions:
   contents: read
 
-# Un push nuevo a la misma rama cancela el run anterior: desde el modelo v2 (5.0.0) la
-# integración dura decenas de minutos y dos runs en paralelo solo se roban minutos de runner.
+# Un push nuevo a la misma rama de PR cancela el run anterior: desde el modelo v2 (5.0.0) la
+# integración dura decenas de minutos. En main NO: el ci-gate de publish-image.yml exige un run
+# `success` del commit del release, y cancelarlo al mergear el PR siguiente lo deja sin tag.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Barato, rápido y primero: ningún dato personal entra al repositorio. Existe porque
