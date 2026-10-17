@@ -37,7 +37,10 @@
 #[path = "../../engine/tests/common/cases.rs"]
 mod cases;
 
-use cases::{projection_cases_5_0, projection_cases_6_0_dated, projection_cases_all, ProjCase};
+use cases::{
+    projection_cases_5_0, projection_cases_6_0_changes, projection_cases_6_0_dated,
+    projection_cases_all, ProjCase,
+};
 use futurefin_engine::{project_net_worth_series, PathFailure, Phase, ProjectionOutput};
 use futurefin_engine_stochastic::{
     deterministic_growth_multipliers, simulate_f64, simulate_f64_with_multipliers, F64Money,
@@ -128,6 +131,8 @@ fn all_cases() -> Vec<ProjCase> {
     // 6.0.0 F1a: activos y pasivos con mes de inicio. Fuera de los pines dorados, dentro de la
     // puerta: lo fechado tiene que materializarse el mismo mes en `Decimal` y en `f64`.
     out.extend(projection_cases_6_0_dated());
+    // 6.0.0 F1b: cambios de ingreso/gasto con fecha (escala, delta, ingreso indexado, suelo).
+    out.extend(projection_cases_6_0_changes());
     out
 }
 
@@ -410,5 +415,22 @@ fn a_badly_sized_override_row_falls_back_instead_of_panicking() {
     assert_eq!(
         out.net_worth, plain.net_worth,
         "la fila inservible se ignora y ese mes usa el multiplicador de siempre"
+    );
+}
+
+/// 6.0.0 F1b: el aviso de suelo en 0 (`CashFlowClampedAtZero`) es un veredicto PUBLICADO, así que
+/// los dos tipos tienen que emitirlo igual. C1 no toca el suelo; C2 sí, desde el mes 13.
+#[test]
+fn change_cases_publish_the_same_warnings_in_both_types() {
+    for case in projection_cases_6_0_changes() {
+        let dec = project_net_worth_series(&case.input).expect("el caso es válido");
+        let flo = simulate_f64(&case.input).expect("el caso es válido");
+        assert_eq!(dec.warnings, flo.warnings, "{}", case.name);
+    }
+    let c2 = &projection_cases_6_0_changes()[1];
+    let dec = project_net_worth_series(&c2.input).unwrap();
+    assert_eq!(
+        dec.warnings,
+        vec![futurefin_engine::EngineWarning::CashFlowClampedAtZero]
     );
 }

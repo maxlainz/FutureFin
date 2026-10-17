@@ -366,6 +366,8 @@ pub struct SimInput<M> {
     /// elementos como activos**: una fila mal dimensionada se ignora en vez de panicar, porque el
     /// motor es una función pura.
     pub growth_overrides: Option<Vec<Vec<M>>>,
+    /// 6.0.0 F1b. Semántica: [`ProjectionInput::income_expense_changes`].
+    pub income_expense_changes: crate::changes::IncomeExpenseChangesG<M>,
 }
 
 // =============================================================================================
@@ -576,6 +578,7 @@ impl<M: MoneyOps> From<&ProjectionInput> for SimInput<M> {
             phase_plan: PhasePlanG::from(&input.phase_plan),
             fire_target: input.fire_target.as_ref().map(FireTargetG::from),
             growth_overrides: None,
+            income_expense_changes: input.income_expense_changes.to_generic(),
         }
     }
 }

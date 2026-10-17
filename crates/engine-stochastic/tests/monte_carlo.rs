@@ -75,6 +75,7 @@ fn single_asset_retiree(
     horizon: u32,
 ) -> ProjectionInput {
     ProjectionInput {
+        income_expense_changes: Default::default(),
         ref_date: chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
         horizon_months: horizon,
         annual_inflation_percent: Decimal::ZERO,

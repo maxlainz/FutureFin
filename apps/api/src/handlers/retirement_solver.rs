@@ -1339,6 +1339,7 @@ mod tests {
     /// distinguibles. Doce meses: los sorteos de estos tests cuestan milisegundos, no segundos.
     fn tiny_input(liquid: i64) -> ProjectionInput {
         ProjectionInput {
+            income_expense_changes: Default::default(),
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 1).expect("fecha válida"),
             horizon_months: 12,
             annual_inflation_percent: Decimal::ZERO,

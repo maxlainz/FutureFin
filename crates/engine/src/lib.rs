@@ -1,5 +1,6 @@
 //! Monthly net-worth projection.
 
+mod changes;
 mod history;
 mod money;
 mod net_return;
@@ -13,6 +14,10 @@ mod target;
 mod tax;
 mod withdrawal;
 
+pub use changes::{
+    build_change_vectors, ChangeKind, ChangeTarget, ChangeVectors, ChangeVectorsG,
+    IncomeExpenseChange, IncomeExpenseChanges, IncomeExpenseChangesG,
+};
 pub use history::{
     add_months_signed, amortized_segment_value, anchored_cashflow_segment_value, evaluate_timeline,
     month_index_of, CashFlowEntry, HistoryItem, HistoryItemKind, HistoryObservation,

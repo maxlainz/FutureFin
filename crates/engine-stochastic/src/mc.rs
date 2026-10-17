@@ -1327,6 +1327,7 @@ mod tests {
         use futurefin_engine::{PhasePlan, SimAsset};
         use rust_decimal::Decimal;
         ProjectionInput {
+            income_expense_changes: Default::default(),
             ref_date: chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
             horizon_months: 12,
             annual_inflation_percent: Decimal::ZERO,

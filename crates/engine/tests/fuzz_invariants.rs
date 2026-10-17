@@ -191,6 +191,7 @@ fn gen_case(seed: u64, i: u64) -> ProjectionInput {
 
     let taxes_enabled = !r.one_in(3);
     ProjectionInput {
+        income_expense_changes: Default::default(),
         ref_date: cases::ref_date(),
         horizon_months: horizon,
         annual_inflation_percent: Decimal::ZERO,

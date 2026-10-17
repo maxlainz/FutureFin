@@ -808,6 +808,7 @@ pub struct ProjectionInput {
     pub planning_monthly_cash_adjustment: Vec<Decimal>,
     pub phase_plan: PhasePlan,         // 5.0.0 WP1b — absorbe los 4 campos de jubilación de 4.15.0
     pub fire_target: Option<FireTarget>,
+    pub income_expense_changes: IncomeExpenseChanges, // 6.0.0 F1b — Default = 5.0 bit a bit (§Cambios de ingreso y gasto)
 }
 
 // 5.0.0 WP1b (`phases.rs`, re-exportado de `lib.rs`); WP3 implementó las dos fases pendientes
@@ -841,7 +842,7 @@ pub enum ExpenseBasis { Retirement, Regular }
 pub enum Phase { Accumulating, Partial, Retired }
 // WP3 llenó el enum. `code()` es el literal PÚBLICO de cada aviso (el que la API publica en
 // `warnings[]`): vive en el motor para que no haya un `match` duplicado en `apps/api`.
-pub enum EngineWarning { PartialPhaseCapitalShrinking } // E1 retiró RetireAtAgeUnderfunded; E4, CoastNotReachable
+pub enum EngineWarning { PartialPhaseCapitalShrinking, CashFlowClampedAtZero } // E1 retiró RetireAtAgeUnderfunded; E4, CoastNotReachable; F1b añadió el suelo en 0
 impl EngineWarning { pub fn code(self) -> &'static str }
 // 5.0.0 E1 — puerta de tasa inicial y veredicto de UN camino (§2.5 de financial-contracts.md).
 pub struct InitialRateGate { pub swr_pct: Decimal, pub bridge: Option<BridgeCap> }
@@ -1228,6 +1229,63 @@ Predicado único: `sim_core::started_by_g(start, k) = start.is_none_or(|s| s <= 
   `liability_interest_accrues` (KPI de `/v1/summary`) no conoce `start_month`. La API pasa siempre
   `None` hasta F2.
 
+## Cambios de ingreso y gasto (6.0.0 F1b — `changes.rs`)
+
+RFC Planes D-4/D-5/D-6/D-8 y §4: un cambio de ingreso o gasto es un **delta sobre la realidad de
+hoy**, con fecha. `ProjectionInput::income_expense_changes: IncomeExpenseChanges` (gemelo genérico
+`IncomeExpenseChangesG<M>` en `SimInput`, convertido campo a campo; Monte Carlo lo hereda tal cual):
+
+```rust
+pub struct IncomeExpenseChangesG<M> {
+    pub income_follows_inflation: bool,   // default false (#139, legacy)
+    pub expense_follows_inflation: bool,  // default true (el comportamiento desde #139)
+    pub vectors: ChangeVectorsG<M>,       // cuatro Vec<M>: vacío o len == horizon_months
+}
+pub struct ChangeVectorsG<M> {
+    pub income_scale_monthly: Vec<M>,  pub expense_scale_monthly: Vec<M>,  // factor sobre la base (1 = igual, 0 = −100 %)
+    pub income_delta_monthly: Vec<M>,  pub expense_delta_monthly: Vec<M>,  // NOMINAL, con signo; la escala no lo toca
+}
+```
+
+Fórmula del mes `k` (rejilla 1-based del bucle, índice `k−1` en los vectores):
+
+```text
+income_k  = max(0, base_income_k  · f_inc · income_scale[k−1]  + income_delta[k−1]) (+ pensión con fecha)
+expense_k = max(0, base_expense_k · f_exp · expense_scale[k−1] + expense_delta[k−1])
+f = inflation_factor_at_month_index(annual_inflation_percent, k−1) = (1 + i/100)^((k−1)/12)
+f_inc = f si income_follows_inflation, si no 1;  f_exp = f si expense_follows_inflation, si no 1
+```
+
+- `base_*_k` es la base de la **fase** del mes (regular / media jornada / jubilado), con la pausa de
+  ingresos ya aplicada: los cambios valen **en todas las fases**, encima de la base que la fase
+  use. La pensión con fecha, la media jornada y la pausa no cambian; la pensión se suma después y
+  ni la escala ni el delta la tocan (la pensión indexada sigue usando `f` aunque el gasto no siga
+  la inflación). El objetivo FIRE no ve los cambios (su necesidad se declara aparte; desaparece en F2).
+  Los techos de la cascada (`MonthsExpense`, `IncomeMultiple`) y la necesidad ordinaria sí leen el
+  ingreso/gasto ya cambiados.
+- **Suelo en 0, con aviso**: si un lado sale negativo se usa 0 y se emite UNA vez
+  `EngineWarning::CashFlowClampedAtZero` (`"cash_flow_clamped_at_zero"`). Un gasto negativo sería un
+  ingreso fantasma que ningún cambio declaró (y un ingreso negativo, un gasto fantasma); la
+  decisión de si se avisó la toma `MoneyOps::strictly_below`, para que `Decimal` y `f64` no
+  discrepen por un ulp alrededor de 0.
+- `first_month_allocation` aplica los cambios del mes 1 con la misma función (sin aviso).
+- **Coste cero inactivos**: con el `Default` (`is_active() == false`) el bucle sigue el camino de
+  5.0 sin una operación de más; los pines no se regeneran. El factor `f` solo se multiplica al
+  ingreso si `k > 1` (`f(0) = 1` exacto).
+
+**Constructor** `build_change_vectors(changes: &[IncomeExpenseChange<M>], horizon_months, annual_inflation_percent) -> ChangeVectorsG<M>` (puro, para que la API no duplique la conversión euros-de-hoy → nominal). Cada `IncomeExpenseChange { target: Income|Expense, start_month (1-based; 0 ≡ 1; > horizonte ⇒ sin efecto), end_month: Option<u32> (inclusivo; None ⇒ horizonte), kind, keeps_purchasing_power }`:
+
+| `kind` | Efecto |
+|---|---|
+| `DeltaMonthly { amount_today }` | `delta[k−1] += a·f(k)` en cada `k ∈ [s, e]` si `keeps_purchasing_power`, `+= a` (nominal fijo) si no |
+| `OneOff { amount_today }` | `delta[s−1] += a·f(s)` (o `a`); `end_month` se ignora |
+| `Percent { pct }` | `scale[k−1] *= 1 + pct/100` en `[s, e]`; los solapados se componen multiplicando; `keeps_purchasing_power` no aplica |
+
+con `f(k) = inflation_factor_at_index_g(inflación, k−1)`, el MISMO factor del bucle. Un vector al que
+no apunta ningún cambio queda vacío. No valida signos ni rangos (el suelo del bucle avisa).
+Tests: `crates/engine/tests/income_expense_changes.rs`; casos `C1`/`C2` de
+`projection_cases_6_0_changes()` en la puerta de degeneración.
+
 ## AllocationRule fields
 ```rust
 pub struct AllocationRule {
@@ -1266,7 +1324,7 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
      **`crossing_is_reading_only` (D17)** desactiva el cruce como TRIGGER sin tirar el objetivo: `liquid_crossing_month_index` se sigue anotando, y quien jubila es solo `AtMonth(R)`. Es lo que permite a una estrategia por edad conservar el objetivo para el chart y para medir el infra-financiado. Con `false` (el default) la unión `cruce || mes forzado` es la de 4.15.0, tal cual, y `P10_jubilacion_forzada` sigue pineado.
      En el mes efectivo `R` (el primero jubilado) se evalúa la **puerta de tasa inicial** (5.0.0 E1, C1): con `phase_plan.initial_rate = Some(gate)`, si `12·ordinaria(R) > tope/100 · liquid_prev` el camino FALLA en `R` con `PathFailure::InitialRateExceeded`. El tope es `gate.bridge.max_pct` cuando hay puente Y pensión con fecha dentro de la ventana (`P − R ≤ 12·max_years`, `P = start_index + 1` en meses del bucle) y `gate.swr_pct` si no; se evalúa con `withdrawal::monthly_allowance` (la ÚNICA función que queda en `withdrawal.rs`; hasta el 2026-10-10 también topaba las reglas por saldo) y se compara con `MoneyOps::strictly_below`. `initial_rate: None` —el default de los dos constructores— **no ejecuta ninguna comparación**, y por eso `pins-4.15.json` no se mueve. Aquí vivía `EngineWarning::RetireAtAgeUnderfunded`, **retirado en E1**: «me jubilo por edad y no llego» dejó de ser un booleano contra un objetivo descontado y pasó a ser `1 − éxito(R)` en el crate estocástico.
    - **Media jornada** (P7/D10) si el latch no cerró y `k ≥ partial.start_month`: el ingreso es `partial.income_monthly` (PLANO) y el gasto el que diga `expense_basis` (jubilación por defecto, regular si el perfil lo dice). `partial_retirement_month_index` solo se publica si la fase se pisó de verdad — una media jornada declarada DESPUÉS de la jubilación no ocurre y no se pinta.
-   El ingreso y el gasto salen de la fase; **el gasto elegido se multiplica por `f(k−1) = inflation_factor_at_month_index(input.annual_inflation_percent, k−1)`** (4.9.0, #139) — el ingreso no.
+   El ingreso y el gasto salen de la fase; **el gasto elegido se multiplica por `f(k−1) = inflation_factor_at_month_index(input.annual_inflation_percent, k−1)`** (4.9.0, #139) — el ingreso no, salvo `income_expense_changes.income_follows_inflation` (6.0 F1b). Encima de esa base se aplican los **cambios de ingreso y gasto** (escala, delta, suelo en 0 — §Cambios de ingreso y gasto), en cualquier fase y ANTES de sumar la pensión con fecha; inactivos (el default) no ejecutan ninguna operación.
 3. **Pensión con fecha** (P2/D3/D8, WP3): desde `k−1 ≥ pension.start_index` se SUMA al ingreso, **en cualquier fase**, por `monthly_today·f(k−1)` si `indexed` y plana si no; durante `Partial`, × `fraction_while_partial`. Sin pensión con fecha aquí no se ejecuta ni una suma (bit-identidad). `pension_start_month_index = start_index + 1` (rejilla 0-based del target → mes 1-based del bucle), `None` si cae fuera del horizonte.
    **Pausa de ingresos** (P8.c): dentro de la ventana semiabierta de `income_pause`, el ingreso GANADO de la fase se multiplica por `income_fraction` — la pensión con fecha, que se suma después, NO se pausa.
 4. `retirement_withdrawal` = `phase_plan.extra_monthly_withdrawal` if `in_retirement`, else 0.
@@ -1377,7 +1435,7 @@ pub struct ProjectionOutput {
     pub unmet_need: Vec<Decimal>,                   // 5.0.0 (revisión D20): necesidad que la CARTERA no fundó — incremento mensual del descubierto, clampado a 0
     pub pension_start_month_index: Option<u32>,     // WP3: `pension.start_index + 1` (1-based), None si cae fuera del horizonte
     pub partial_retirement_month_index: Option<u32>,// WP3: primer mes de media jornada — None si la fase no se pisó
-    pub warnings: Vec<EngineWarning>,               // desde E4 solo PartialPhaseCapitalShrinking (E1 retiró RetireAtAgeUnderfunded; E4, CoastNotReachable)
+    pub warnings: Vec<EngineWarning>,               // PartialPhaseCapitalShrinking y, desde 6.0 F1b, CashFlowClampedAtZero (E1 retiró RetireAtAgeUnderfunded; E4, CoastNotReachable)
     // --- 5.0.0 WP3 (§B.3, §B.7): lecturas de fase y margen. E4 retiró las TRES del objetivo
     //     (bridge_effective_withdrawal_pct, pension_coverage_ratio, partial_gap_target) ---
     pub partial_phase_capital_growing: bool,        // true ⟺ HUBO fase parcial Y el líquido no bajó ni un mes en ella
@@ -1507,8 +1565,9 @@ array de 841 Decimals no lo pinta nadie.
 - `EngineError::InvalidAllocationRuleTarget` — `target_index` out of bounds of `assets[]`
 - `EngineError::InvalidHistoryTimeline` — `HistoryTimeline::dates` not strictly ascending
 - `EngineError::AssetValueOverflow` — el valor de un activo desbordó el rango de `Decimal` al componer su rentabilidad (error tipado, no saturación silenciosa)
+- `EngineError::InvalidIncomeExpenseChanges` (6.0.0 F1b) — un vector de `income_expense_changes` no está vacío ni mide `horizon_months` (también en `first_month_allocation`)
 
-Cuenta viva de las variantes: `sed -n '/pub enum EngineError/,/^}/p' crates/engine/src/projection.rs | grep -cE '^    [A-Z][A-Za-z]+,$'` (hoy 5, las cinco de arriba).
+Cuenta viva de las variantes: `sed -n '/pub enum EngineError/,/^}/p' crates/engine/src/projection.rs | grep -cE '^    [A-Z][A-Za-z]+,$'` (hoy 6, las seis de arriba).
 
 **Variantes retiradas** (historia): `InvalidWithdrawalRule` (parámetros no simulables de una regla
 por saldo), `UnsupportedWithdrawalRule` y `UnsupportedPhase` (la primera dejó de tener productor en
