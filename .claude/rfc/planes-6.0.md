@@ -5,7 +5,7 @@ abierto y el inventario de impacto en el código. Es la referencia para cualquie
 continúe este trabajo: **léelo entero antes de tocar nada de 6.0.0** y actualízalo en el mismo PR
 cuando una decisión cambie o un abierto se cierre.
 
-- **Estado**: diseño cerrado salvo los abiertos de §8. No hay código todavía. Propuesta visual: D-25.
+- **Estado**: diseño cerrado; en §8 solo quedan detalles de implementación. No hay código todavía. Propuesta visual: D-25.
 - **Rama de trabajo**: ver §10. Este documento vive en `main`.
 - **Fecha del debate de origen**: 2026-10-17.
 
@@ -57,6 +57,8 @@ cuando una decisión cambie o un abierto se cierre.
 | D-26 | **Selector de plan = pestañas** (propuesta B del canvas): una pestaña por plan, el **activo siempre el primero** (marcado con un punto) y «Solo la realidad» **siempre el último**. Abrir un borrador **no lo activa**: un aviso recuerda qué plan alimenta el Resumen y ofrece «Activar este plan» y «Comparar con el activo». Nada de tarjetas: no deben parecer KPIs. |
 | D-27 | **Los flujos actuales de Simulación se importan** como cambios de un plan nuevo; conservan su interruptor. Los que no tienen fecha reciben la fecha de la importación + 90 días (hoy se reparten en 90 días). |
 | D-28 | **Multipropiedad**: los activos y pasivos llevan cuotas de propiedad que se eligen en su configuración (p. ej. 50/50). Los cambios de un plan y las transacciones se asignan a un activo/cuenta y heredan de él la propiedad; un cambio sin activo (mi ingreso/gasto) es de quien lo crea. Consecuencia: `view=mine` deja de ser «filas mías» y pasa a ser **«mi parte»** (un piso al 50 % cuenta 125.000 € de 250.000 €). |
+| D-29 | **Déficit**: sale por el flujo de ahorro al revés, del destino del sobrante de las reglas de reparto. Si ese destino tiene plusvalía, la salida tributa y se muestra en la lista como «cobertura de déficit». Agotado el destino, el mes queda sin cubrir: fallo. |
+| D-30 | El plan importado de D-27 **queda activo** si había algún flujo encendido, para que la proyección no cambie de golpe al actualizar. |
 
 ## 3. Modelo (borrador)
 
@@ -195,21 +197,13 @@ al llegar que no lo había entendido.
    `ownership_shares` o JSONB por fila), cómo prorratean los agregados de `view=mine` y qué pasa
    con la frontera de escritura D23 cuando una fila tiene varios dueños.
 4. ~~Colchón de liquidez~~ → D-22.
-5. ~~`planning_flows` existentes~~ → D-27. Por decidir solo si el plan importado queda activo
-   (propuesta: sí, si había algún flujo encendido, para que la proyección no cambie de golpe por
-   desaparecer).
-6. **Venta explícita que agota su activo**: el cambio se detiene y, si el gasto queda sin cubrir,
-   ese mes cuenta como fallo y se señala como «mes en riesgo».
+5. ~~`planning_flows` existentes~~ → D-27 y D-30.
+6. **Venta explícita que agota su activo**: el cambio se detiene; el déficit sigue la regla de
+   D-29 y, si tampoco alcanza, el mes se señala como «mes en riesgo» (fallo).
 7. **Copia de seguridad de todo el hogar por el admin**, y verificar que el flujo `.ffbackup`
    funciona en el add-on de Home Assistant, donde no hay login explícito. Va **fuera de 6.0.0**,
    como tarea aparte.
-8. **Déficit.** El excedente se reparte según las reglas de reparto (el flujo de ahorro), y eso no
-   cambia. La duda es el mes con **déficit**: con D-10 nada se vende solo. Propuesta: el déficit
-   sale por el **mismo flujo al revés**, del destino del sobrante (la cuenta a la que cae lo que
-   sobra), que es lo que pasa en la vida real al gastar de la cuenta. Si ese destino tiene
-   plusvalía (un fondo), esa salida tributa y se **muestra** en la lista como «cobertura de déficit»,
-   para que no sea un vicio oculto. Cuando el destino se agota, el mes queda sin cubrir: fallo.
-   **Por confirmar con el owner.**
+8. ~~Déficit~~ → D-29.
 
 ## 9. Fases
 
