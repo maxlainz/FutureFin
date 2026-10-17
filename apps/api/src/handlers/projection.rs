@@ -1747,6 +1747,8 @@ pub(crate) async fn build_installation_projection_input(
 
     let input = ProjectionInput {
         income_expense_changes: Default::default(),
+        deficit_policy: Default::default(),
+        asset_sales: Default::default(),
         ref_date: today,
         horizon_months,
         // #139: el MISMO supuesto efectivo que el target (sin clamp desde #146) — indexa el
@@ -4733,6 +4735,8 @@ mod milestone_tests {
     fn compound_marker_ignores_planning_and_liability_payments() {
         let input = ProjectionInput {
             income_expense_changes: Default::default(),
+            deficit_policy: Default::default(),
+            asset_sales: Default::default(),
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: 24,
             annual_inflation_percent: Decimal::ZERO,
@@ -4781,6 +4785,8 @@ mod milestone_tests {
     fn compound_marker_requires_persistent_crossover() {
         let input = ProjectionInput {
             income_expense_changes: Default::default(),
+            deficit_policy: Default::default(),
+            asset_sales: Default::default(),
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: 24,
             annual_inflation_percent: Decimal::ZERO,

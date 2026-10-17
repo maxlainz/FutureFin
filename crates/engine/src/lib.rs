@@ -7,6 +7,7 @@ mod net_return;
 mod phases;
 mod projection;
 mod runway;
+mod sales;
 mod sim;
 mod sim_core;
 mod solve;
@@ -17,6 +18,10 @@ mod withdrawal;
 pub use changes::{
     build_change_vectors, ChangeKind, ChangeTarget, ChangeVectors, ChangeVectorsG,
     IncomeExpenseChange, IncomeExpenseChanges, IncomeExpenseChangesG,
+};
+pub use sales::{
+    build_asset_sale_orders, remainder_sink_index, AssetSaleKind, AssetSaleSpec, AssetSales,
+    AssetSalesG, DeficitPolicy, SaleAmount, SaleCadence, SaleOrderG, SaleTaxMode,
 };
 pub use history::{
     add_months_signed, amortized_segment_value, anchored_cashflow_segment_value, evaluate_timeline,

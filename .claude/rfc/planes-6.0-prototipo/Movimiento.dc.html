@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Nuevo cambio</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:oklch(0.56 0.13 250)}a:hover{color:oklch(0.46 0.13 250)}
+</style>
+</helmet>
+<div style="width: 600px; height: 700px; box-sizing: border-box; padding: 24px; background: #f4f4f5; font-family: 'IBM Plex Sans', system-ui, sans-serif; color: #0a0a0a; font-variant-numeric: tabular-nums;">
+<div role="dialog" aria-label="Nuevo cambio" style="background: #ffffff; border: 1px solid #e4e4e7; border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 20px;">
+
+<div style="display: flex; justify-content: space-between; align-items: center;">
+<h2 style="margin: 0; font-size: 18px; font-weight: 600;">Nuevo cambio · Gastos</h2>
+<button type="button" aria-label="Cerrar" style="border: 0; background: transparent; width: 36px; height: 36px; border-radius: 8px; cursor: pointer; color: #404040;"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l10 10M13 3L3 13"></path></svg></button>
+</div>
+
+<div style="background: #fafafa; border: 1px solid #e4e4e7; border-radius: 10px; padding: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 16px; line-height: 1.4;">
+<span>Desde</span>
+<label style="display: flex;"><span style="position: absolute; left: -9999px;">Fecha de inicio</span><input value="03/2028" style="width: 86px; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; background: #ffffff;"></label>
+<label style="display: flex;"><span style="position: absolute; left: -9999px;">Sobre</span><select style="padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; background: #ffffff;"><option>mi gasto</option><option>mi ingreso</option></select></label>
+<label style="display: flex;"><span style="position: absolute; left: -9999px;">Sentido</span><select style="padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; background: #ffffff;"><option>baja</option><option>sube</option></select></label>
+<label style="display: flex;"><span style="position: absolute; left: -9999px;">Importe</span><input value="900" style="width: 72px; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; text-align: right; background: #ffffff;"></label>
+<label style="display: flex;"><span style="position: absolute; left: -9999px;">Unidad</span><select style="padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; background: #ffffff;"><option>€/mes</option><option>€ una vez</option><option>%</option></select></label>
+<span>hasta</span>
+<label style="display: flex;"><span style="position: absolute; left: -9999px;">Fecha de fin</span><input placeholder="sin fin" style="width: 86px; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; background: #ffffff;"></label>
+</div>
+
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px;">
+<label style="display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #404040;">Bloque<select style="padding: 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; font-size: 15px; color: #0a0a0a; background: #ffffff;"><option>Comprar piso</option><option>Sin bloque</option></select></label>
+<label style="display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #404040;">Nota<input value="dejo el alquiler" style="padding: 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; font-size: 15px; background: #ffffff;"></label>
+</div>
+
+<label style="display: flex; gap: 10px; align-items: flex-start; font-size: 15px;"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 2px 0 0;"><span>Mantiene su poder adquisitivo<br><span style="font-size: 13px; color: #737373;">Sube con la inflación del plan (3,0 %). Desmárcalo para un importe fijo, como un contrato cerrado.</span></span></label>
+
+<div style="border-top: 1px solid #e4e4e7; padding-top: 16px; display: flex; flex-direction: column; gap: 6px; font-size: 14px;">
+<span style="font-weight: 600;">Cómo lo calcula</span>
+<span style="color: #404040;">900 € de hoy al mes · en 03/2028 son ≈ 939 € nominales · en 2050, ≈ 1.800 €.</span>
+<span style="color: #737373;">Tus gastos ya siguen la inflación en este plan: este cambio baja su nivel, no su ritmo.</span>
+</div>
+
+<div style="display: flex; justify-content: flex-end; gap: 8px;">
+<button type="button" style="border: 1px solid #e4e4e7; background: #fafafa; border-radius: 999px; padding: 10px 18px; min-height: 44px; font: inherit; font-size: 15px; cursor: pointer;">Cancelar</button>
+<button type="button" style="border: 0; background: #0a0a0a; color: #fafafa; border-radius: 999px; padding: 10px 18px; min-height: 44px; font: inherit; font-size: 15px; cursor: pointer;">Añadir cambio</button>
+</div>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":600,"height":700}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>

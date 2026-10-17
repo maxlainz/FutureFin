@@ -76,6 +76,8 @@ fn remainder_to(target_index: usize) -> AllocationRule {
 fn base(horizon: u32, income: &str, expense: &str, assets: Vec<SimAsset>) -> ProjectionInput {
     ProjectionInput {
         income_expense_changes: Default::default(),
+        deficit_policy: Default::default(),
+        asset_sales: Default::default(),
         ref_date: NaiveDate::from_ymd_opt(2026, 9, 1).expect("fecha válida"),
         horizon_months: horizon,
         annual_inflation_percent: Decimal::ZERO,

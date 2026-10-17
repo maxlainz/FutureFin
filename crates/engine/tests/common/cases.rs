@@ -28,6 +28,9 @@
 
 use chrono::NaiveDate;
 use futurefin_engine::{
+    build_asset_sale_orders, AssetSaleKind, AssetSaleSpec, DeficitPolicy, SaleTaxMode,
+};
+use futurefin_engine::{
     build_change_vectors, ChangeKind, ChangeTarget, IncomeExpenseChange, IncomeExpenseChanges,
 };
 use futurefin_engine::{
@@ -124,6 +127,8 @@ pub fn base_input(
 ) -> ProjectionInput {
     ProjectionInput {
         income_expense_changes: Default::default(),
+        deficit_policy: Default::default(),
+        asset_sales: Default::default(),
         ref_date: ref_date(),
         horizon_months: horizon,
         annual_inflation_percent: Decimal::ZERO,
@@ -1463,6 +1468,188 @@ pub fn projection_cases_6_0_changes() -> Vec<ProjCase> {
         ProjCase {
             name: "C2_changes_expense_floor_at_zero",
             input: c2,
+        },
+    ]
+}
+
+/// **6.0.0 F1c — déficit por el sumidero (D-29) y ventas explícitas (D-10/D-21).** Como los de
+/// F1a/F1b: fuera de los pines dorados (capacidad aditiva), dentro de la puerta de degeneración,
+/// que es donde importa que `Decimal` y `f64` decidan el mismo mes sin cubrir, la misma orden
+/// agotada y la misma fiscalidad.
+pub fn projection_cases_6_0_sales() -> Vec<ProjCase> {
+    // S1 (SinkOnly): fondo sumidero con plusvalía al 5 %, segundo fondo NO sumidero con
+    // plusvalía al 6 % y casa ilíquida al 2 %. Ingreso 2.500 y gasto 2.300 indexado al 2,5 %: el
+    // gasto alcanza al ingreso hacia el mes 40 y desde ahí hay déficit que paga el sumidero con
+    // impuestos ES. Ventas: 1.500 €/mes netos de hoy del segundo fondo (Auto) de 120 a 300, y la
+    // casa entera en el mes 360 con un 10 % manual. Mide la vía del sumidero, la fiscalidad
+    // mensual y puntual, y una orden agotada (medido: el segundo fondo se agota en el mes 228;
+    // el sumidero cubre desde el mes 42 y aguanta los 480 meses).
+    let sink = mk_asset_with_basis(
+        1,
+        Decimal::from(40_000),
+        true,
+        Some(Decimal::from(5)),
+        Decimal::from(30_000),
+    );
+    let fund = mk_asset_with_basis(
+        2,
+        Decimal::from(120_000),
+        true,
+        Some(Decimal::from(6)),
+        Decimal::from(60_000),
+    );
+    let house = mk_asset_with_basis(
+        3,
+        Decimal::from(250_000),
+        false,
+        Some(Decimal::from(2)),
+        Decimal::from(180_000),
+    );
+    let mut s1 = base_input(
+        480,
+        Decimal::from(2_500),
+        Decimal::from(2_300),
+        vec![sink, fund, house],
+        vec![rule_remainder(0)],
+    );
+    s1.annual_inflation_percent = d(25, 1);
+    s1.tax_brackets = es_tax_brackets_2025_26();
+    s1.taxes_enabled = true;
+    s1.taxable_gain_ratio = d(5, 1);
+    s1.deficit_policy = DeficitPolicy::SinkOnly;
+    s1.asset_sales = build_asset_sale_orders(
+        &[
+            AssetSaleSpec {
+                asset_index: 1,
+                start_month: 120,
+                end_month: Some(300),
+                kind: AssetSaleKind::MonthlyNet {
+                    amount_today: Decimal::from(1_500),
+                },
+                keeps_purchasing_power: true,
+                tax_mode: SaleTaxMode::Auto,
+            },
+            AssetSaleSpec {
+                asset_index: 2,
+                start_month: 360,
+                end_month: None,
+                kind: AssetSaleKind::Whole,
+                keeps_purchasing_power: false,
+                tax_mode: SaleTaxMode::ManualPct {
+                    pct: Decimal::from(10),
+                },
+            },
+        ],
+        480,
+        s1.annual_inflation_percent,
+    );
+
+    // S2 (SinkOnly, agotamiento en ACUMULACIÓN): cuenta sumidero de 30.000 € al 0 % sin
+    // plusvalía, fondo no sumidero intacto, gasto 3.000 e ingreso 2.000 planos. El sumidero se
+    // agota en el mes 30 (30.000 / 1.000) y desde el 31 el mes queda sin cubrir — fallo aunque
+    // no haya jubilación. Ventas: el fondo vende 400 €/mes exentos de 1 a 12 (retrasa el
+    // agotamiento: 30.000 + 4.800 = 34.800 ⇒ el sumidero cubre hasta el mes 34 y el 35 es el
+    // primero sin cubrir del todo).
+    let cash = mk_asset_with_basis(1, Decimal::from(30_000), true, None, Decimal::from(30_000));
+    let fund2 = mk_asset_with_basis(
+        2,
+        Decimal::from(80_000),
+        true,
+        Some(Decimal::from(4)),
+        Decimal::from(50_000),
+    );
+    let mut s2 = base_input(
+        120,
+        Decimal::from(2_000),
+        Decimal::from(3_000),
+        vec![cash, fund2],
+        vec![rule_remainder(0)],
+    );
+    s2.deficit_policy = DeficitPolicy::SinkOnly;
+    s2.asset_sales = build_asset_sale_orders(
+        &[AssetSaleSpec {
+            asset_index: 1,
+            start_month: 1,
+            end_month: Some(12),
+            kind: AssetSaleKind::MonthlyNet {
+                amount_today: Decimal::from(400),
+            },
+            keeps_purchasing_power: false,
+            tax_mode: SaleTaxMode::Exempt,
+        }],
+        120,
+        Decimal::ZERO,
+    );
+
+    // S3 (LegacyDrain + ventas): el drenaje de siempre con ventas explícitas encima — una venta
+    // puntual de 20.000 € de hoy con impuesto manual de 1.500 € en el mes 24, y una mensual de
+    // 5.000 € nominales Auto desde el 100 sobre un fondo de 60.000 que se agota (orden agotada).
+    let f_a = mk_asset_with_basis(
+        1,
+        Decimal::from(60_000),
+        true,
+        Some(Decimal::from(3)),
+        Decimal::from(40_000),
+    );
+    let f_b = mk_asset_with_basis(
+        2,
+        Decimal::from(90_000),
+        true,
+        Some(Decimal::from(5)),
+        Decimal::from(45_000),
+    );
+    let mut s3 = base_input(
+        240,
+        Decimal::from(2_800),
+        Decimal::from(2_600),
+        vec![f_a, f_b],
+        vec![rule_remainder(1)],
+    );
+    s3.annual_inflation_percent = d(2, 0);
+    s3.tax_brackets = es_tax_brackets_2025_26();
+    s3.taxes_enabled = true;
+    s3.taxable_gain_ratio = d(5, 1);
+    s3.asset_sales = build_asset_sale_orders(
+        &[
+            AssetSaleSpec {
+                asset_index: 1,
+                start_month: 24,
+                end_month: None,
+                kind: AssetSaleKind::OneOffNet {
+                    amount_today: Decimal::from(20_000),
+                },
+                keeps_purchasing_power: true,
+                tax_mode: SaleTaxMode::ManualAmount {
+                    tax: Decimal::from(1_500),
+                },
+            },
+            AssetSaleSpec {
+                asset_index: 0,
+                start_month: 100,
+                end_month: None,
+                kind: AssetSaleKind::MonthlyNet {
+                    amount_today: Decimal::from(5_000),
+                },
+                keeps_purchasing_power: false,
+                tax_mode: SaleTaxMode::Auto,
+            },
+        ],
+        240,
+        s3.annual_inflation_percent,
+    );
+
+    vec![
+        ProjCase {
+            name: "S1_sink_only_sales_es_taxes",
+            input: s1,
+        },
+        ProjCase {
+            name: "S2_sink_only_exhausted_accum",
+            input: s2,
+        },
+        ProjCase {
+            name: "S3_legacy_with_explicit_sales",
+            input: s3,
         },
     ]
 }

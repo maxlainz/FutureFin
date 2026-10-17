@@ -6,7 +6,7 @@ continúe este trabajo: **léelo entero antes de tocar nada de 6.0.0** y actual�
 cuando una decisión cambie o un abierto se cierre.
 
 - **Estado**: diseño cerrado; en §8 solo quedan detalles de implementación. No hay código todavía. Propuesta visual: D-25.
-- **Rama de trabajo**: ver §10. Este documento vive en `main`.
+- **Rama de trabajo**: ver §10. **Estado del avance y cómo retomarlo: [`planes-6.0-estado.md`](planes-6.0-estado.md)** (en `next/6.0`). Plan de F2: [`planes-6.0-f2.md`](planes-6.0-f2.md).
 - **Fecha del debate de origen**: 2026-10-17.
 
 ## 1. Motivación
@@ -59,6 +59,9 @@ cuando una decisión cambie o un abierto se cierre.
 | D-28 | **Multipropiedad**: los activos y pasivos llevan cuotas de propiedad que se eligen en su configuración (p. ej. 50/50). Los cambios de un plan y las transacciones se asignan a un activo/cuenta y heredan de él la propiedad; un cambio sin activo (mi ingreso/gasto) es de quien lo crea. Consecuencia: `view=mine` deja de ser «filas mías» y pasa a ser **«mi parte»** (un piso al 50 % cuenta 125.000 € de 250.000 €). |
 | D-29 | **Déficit**: sale por el flujo de ahorro al revés, del destino del sobrante de las reglas de reparto. Si ese destino tiene plusvalía, la salida tributa y se muestra en la lista como «cobertura de déficit». Agotado el destino, el mes queda sin cubrir: fallo. |
 | D-30 | El plan importado de D-27 **queda activo** si había algún flujo encendido, para que la proyección no cambie de golpe al actualizar. |
+| D-31 | Las partidas del presupuesto con fecha de fin futura se **borran sin importarlas** al plan al retirar D-18; se declara en el CHANGELOG. |
+| D-32 | Los «Próximos» importados (D-27) entran como **importe fijo nominal** (`keeps_purchasing_power = false`): su caja queda idéntica. «Importe fijo» es el modo de un pago aplazado sin intereses o cualquier valor nominal cerrado. |
+| D-33 | **Ninguna página espera a Monte Carlo.** Resumen y serie solo devuelven datos deterministas; la probabilidad de éxito se calcula en segundo plano (single-flight, clave por contenido del plan) y se publica aparte con estado `computing`/`ready`. Warm-up al arrancar y al reanudar sesión. Presupuesto: Resumen en frío < 300 ms. Sin parche 5.0.x (decisión del owner). |
 
 ## 3. Modelo (borrador)
 
