@@ -1,6 +1,6 @@
 /**
- * Mapeo pestaña ↔ ruta canónica. Compartido por App.tsx y vistas (RetirementView linkea a
- * Ajustes → Jubilación; SettingsView usa los slugs de sub-tab).
+ * Mapeo pestaña ↔ ruta canónica. Compartido por App.tsx y vistas (SettingsView usa los slugs de
+ * sub-tab).
  */
 
 import type { LedgerPersonScope } from "./ledger";
@@ -13,7 +13,6 @@ export type TabId =
   | "expenses"
   | "upcoming"
   | "projection"
-  | "retirement"
   | "settings";
 
 /**
@@ -46,7 +45,6 @@ export const TABS: { id: TabId; label: string }[] = [
   { id: "budget", label: "Presupuesto" },
   { id: "expenses", label: "Movimientos" },
   { id: "upcoming", label: "Simulación" },
-  { id: "retirement", label: "Jubilación" },
   { id: "projection", label: "Proyección" },
   { id: "settings", label: "Ajustes" },
 ];
@@ -88,7 +86,6 @@ export const TAB_PATH: Record<TabId, string> = {
   expenses: "/movimientos",
   upcoming: "/simulacion",
   projection: "/proyeccion",
-  retirement: "/jubilacion",
   settings: "/ajustes",
 };
 
@@ -141,6 +138,9 @@ export function tabFromPathname(pathname: string): TabId | null {
   // Ídem para «Próximos» → «Simulación» (5.0.0): canónica /simulacion, /proximos sigue
   // resolviendo para que un enlace guardado no caiga en la pestaña por defecto.
   if (p === "/proximos") return "upcoming";
+  // 6.0.0 (D-7): la pestaña «Jubilación» se retiró con el modelo de jubilación. Un enlace
+  // guardado a /jubilacion aterriza en Proyección, que es donde queda la trayectoria.
+  if (p === "/jubilacion") return "projection";
   const ids = Object.keys(TAB_PATH) as TabId[];
   for (const id of ids) {
     if (TAB_PATH[id] === p) return id;

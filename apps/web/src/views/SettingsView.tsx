@@ -37,10 +37,8 @@ import {
 } from "../lib/fire";
 import {
   SETTINGS_SUBTAB_LABEL,
-  TAB_PATH,
   type SettingsSubTabId,
 } from "../lib/navigation";
-import { appUrl } from "../lib/basePath";
 
 const CATEGORY_SCOPES: CategoryScope[] = ["asset", "liability", "income", "expense"];
 
@@ -96,7 +94,6 @@ export function SettingsView({
   onToggleMcpWrite,
   settingsSubTab,
   navigateSettingsSubTab,
-  navigate,
   visibleSettingsSubTabs,
   pendingUsers,
   pendingUsersBusy,
@@ -197,8 +194,6 @@ export function SettingsView({
   onToggleMcpWrite: (enabled: boolean) => void;
   settingsSubTab: SettingsSubTabId;
   navigateSettingsSubTab: (id: SettingsSubTabId) => void;
-  /** Navegación de la app (la usa el puntero a Jubilación del panel «Plan»). */
-  navigate: (path: string, replace?: boolean) => void;
   visibleSettingsSubTabs: SettingsSubTabId[];
   pendingUsers: UserResponse[];
   pendingUsersBusy: boolean;
@@ -345,8 +340,7 @@ export function SettingsView({
           // La marca de «ya guardado» va en el `then`, NO en el `finally`: marcándola pasara lo
           // que pasara, un PATCH fallido quedaba registrado como guardado, el efecto no volvía a
           // intentarlo nunca (el payload ya coincidía con el ref) y el pie del panel seguía
-          // prometiendo «Guardado automático». El cambio se perdía en silencio. Mismo patrón que
-          // `runFireSave` en RetirementView.
+          // prometiendo «Guardado automático». El cambio se perdía en silencio.
           if (!cancelled) lastSavedFireTaxPayloadRef.current = payloadJson;
         })
         .catch(() => {
@@ -620,24 +614,6 @@ export function SettingsView({
         planEditable ? (
         <section className="panel">
           <h3 className="panel-title">Proyección y modo de edad</h3>
-          {/* 5.0.0 (D13/D26): estrategia, edad objetivo, SWR y edad límite del horizonte dejaron
-              de ser del hogar y son de cada persona. Aquí solo queda el puntero — un ajuste que
-              se editaba en dos sitios acaba divergiendo en uno de ellos. */}
-          <p className="muted">
-            Tu estrategia, tu edad objetivo y tu SWR se editan en{" "}
-            <a
-              href={appUrl(TAB_PATH.retirement)}
-              onClick={(e) => {
-                if (e.button !== 0 || e.metaKey || e.altKey || e.ctrlKey || e.shiftKey)
-                  return;
-                e.preventDefault();
-                navigate(TAB_PATH.retirement);
-              }}
-            >
-              Jubilación
-            </a>
-            .
-          </p>
           <div className="stack bordered-top">
             <label className="field">
               <span className="label-with-help">

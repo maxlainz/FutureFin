@@ -18,37 +18,6 @@ use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-/// Modo de cálculo del FIRE number (presupuesto regular sin cuotas derivadas de pasivos × 12 como base en modos automáticos).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum FireNumberMode {
-    Manual,
-    #[default]
-    AnnualExpense,
-    CurrentIncome,
-}
-
-impl<'de> Deserialize<'de> for FireNumberMode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        use serde::de::Error;
-        let s = String::deserialize(deserializer)?;
-        match s.as_str() {
-            "manual" => Ok(Self::Manual),
-            "annual_expense" => Ok(Self::AnnualExpense),
-            // Alias preservado para importar backups antiguos cuyo schema usaba este modo.
-            "annual_expense_adjusted" => Ok(Self::AnnualExpense),
-            "current_income" => Ok(Self::CurrentIncome),
-            _ => Err(D::Error::unknown_variant(
-                &s,
-                &["manual", "annual_expense", "current_income"],
-            )),
-        }
-    }
-}
-
 /// Fuente del ahorro mensual de la simulación:
 /// - `budget` (modo A, default): income y gasto del presupuesto.
 /// - `transactions_avg` (modo B): promedio real 12m de las transacciones para income y gasto.
@@ -142,10 +111,9 @@ pub struct AvgWindowSpec {
 pub use futurefin_engine::TaxBracket;
 
 /// Supuestos FIRE **compartidos por el hogar**: fiscalidad, fuente del ahorro y ventanas del
-/// promedio. Todo lo que es PERSONAL —modo del objetivo, importe manual, SWR y edad límite del
-/// horizonte— se mudó en 5.0.0 al perfil de jubilación de cada usuario
-/// (`handlers/retirement_profile.rs`, decisión D13): con proyecciones independientes por miembro
-/// esos cuatro ejes no podían seguir siendo del hogar. **Breaking**: `PATCH /v1/installation` ya
+/// promedio. Lo que era PERSONAL —modo del objetivo, importe manual, SWR y edad límite del
+/// horizonte— se mudó en 5.0.0 al perfil de jubilación de cada usuario (D13), y ese perfil se
+/// retiró entero en 6.0.0 (D-7). **Breaking**: `PATCH /v1/installation` ya
 /// no los acepta y `GET` ya no los devuelve; la migración `20260902200000_…` los copia al perfil
 /// de cada usuario antes de retirarlos del JSONB, así que el upgrade no mueve un número.
 ///
@@ -247,16 +215,10 @@ fn default_es_tax_brackets() -> Vec<TaxBracket> {
     ]
 }
 
-/// Cotas de la edad límite del horizonte (#149). 85 para no cortar por debajo de la esperanza
-/// de vida al nacer; 105 porque más allá el tope [5,70] del horizonte ya decide para cualquier
-/// edad adulta.
-///
-/// Desde 5.0.0 el EJE vive en el perfil de jubilación de cada usuario
-/// (`retirement_profile::RetirementProfile::horizon_lifespan_age`, decisión D13). Las cotas se
-/// quedan aquí, donde nacieron y donde ya las importaba el resto del módulo, y el perfil las
-/// reusa: dos copias de un rango publicado se separan sin que ningún test lo note.
-pub(crate) const MIN_HORIZON_LIFESPAN_AGE: u32 = 85;
-pub(crate) const MAX_HORIZON_LIFESPAN_AGE: u32 = 105;
+/// **Edad límite del horizonte de la proyección** (#149): los meses que faltan hasta esta edad del
+/// solicitante. Fija en 90 desde 6.0.0: el eje configurable (85..=105) vivía en el perfil de
+/// jubilación, retirado con D-7; F2-3 lo lleva a los supuestos del plan (`horizon_age`).
+pub(crate) const DEFAULT_HORIZON_LIFESPAN_AGE: u32 = 90;
 
 /// Resuelve el `FireSettings` almacenado aplicando defaults **y clamps**.
 ///

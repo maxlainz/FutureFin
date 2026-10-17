@@ -1,25 +1,18 @@
-//! **`GET /v1/projection/bands`** — la superficie HTTP de Monte Carlo (5.0.0, modelo v2 de
-//! jubilación, WP A6).
+//! **`GET /v1/projection/bands`** — la superficie HTTP de Monte Carlo (5.0.0, WP A6).
 //!
 //! Lo que estos tests compran, en orden de importancia:
 //!
 //! 1. **σ = 0 ⇒ la banda ES la línea determinista.** Es el único gate que ata el camino `f64` al
 //!    camino `Decimal` que la app publica como dinero: si el ensamblado del endpoint tomara otro
-//!    input —otro perfil, otro horizonte, otro scope, **otro mes de jubilación**—, la banda
-//!    seguiría saliendo bonita y el error sería invisible. Aquí se compara punto a punto contra
-//!    `/v1/projection/series`.
-//! 2. **El sorteo describe EL PLAN, no otro.** Desde la v2 el escenario lleva el mes de
-//!    jubilación que el solver fijó, así que el éxito de estas bandas y el `success_of_plan` de
-//!    la serie tienen que ser la MISMA cifra con el sorteo por defecto
-//!    (`the_bands_success_equals_the_plan_success_for_the_default_draw`).
-//! 3. **El veredicto se mide contra el umbral DEL PERFIL y contra su INTERVALO**, no contra un
-//!    corte fijo: el mismo sorteo cambia de color con el umbral, y con pocos caminos el intervalo
-//!    no llega aunque el estimador puntual sí.
-//! 4. **El vector de volatilidades sigue el orden de los activos.** Un vector descolocado produce
+//!    input —otro horizonte, otro scope—, la banda seguiría saliendo bonita y el error sería
+//!    invisible. Aquí se compara punto a punto contra `/v1/projection/series`.
+//! 2. **Sin jubilación no hay éxito que publicar** (6.0.0, D-7): las tres cifras del éxito viajan
+//!    a `null` con `success_absent_reason: "no_retirement_phase"` en vez de un 100 % mecánico.
+//! 3. **El vector de volatilidades sigue el orden de los activos.** Un vector descolocado produce
 //!    bandas ESTRECHAS Y CREÍBLES, que es el peor fallo posible en esta superficie.
-//! 5. **Reproducibilidad**: misma semilla ⇒ mismo cuerpo byte a byte; otra semilla ⇒ otro mercado.
-//! 6. **El hogar no tiene bandas** (400 declarado) y el cache se invalida con las mismas
-//!    mutaciones que la serie — con el **umbral** dentro de la clave.
+//! 4. **Reproducibilidad**: misma semilla ⇒ mismo cuerpo byte a byte; otra semilla ⇒ otro mercado.
+//! 5. **El hogar no tiene bandas** (400 declarado) y el cache se invalida con las mismas
+//!    mutaciones que la serie.
 
 mod common;
 
@@ -33,16 +26,9 @@ use uuid::Uuid;
 /// orden de magnitud más que en release (0,2 ms/camino medidos en release, §doc del módulo).
 const PATHS: u32 = 24;
 
-/// Los tests que miran la DISPERSIÓN o que esperan un VERDE suben a este. No es cosmético:
-/// **con el umbral por defecto (95) el verde es inalcanzable por debajo de 73 caminos**, porque
-/// con cero fallos la cota de Wilson topa en `n/(n + 1,96²)` y con 24 caminos eso es 0,862. 120
-/// da 0,969 y sigue siendo barato.
+/// Los tests que miran la DISPERSIÓN suben a este: con 24 caminos la banda es demasiado ruidosa
+/// para comparar anchos.
 const PATHS_SPREAD: u32 = 120;
-
-/// El umbral por defecto del perfil (`DEFAULT_SUCCESS_THRESHOLD_PCT`). Se escribe aquí porque
-/// entra en la CLAVE del cache y en el eco de la respuesta, y un test que lo dé por supuesto sin
-/// nombrarlo se rompe de forma incomprensible el día que el default cambie.
-const DEFAULT_THRESHOLD_PCT: u32 = 95;
 
 async fn bands(app: &TestApp, cookie: &str, q: &str) -> Value {
     let r = app
@@ -54,8 +40,7 @@ async fn bands(app: &TestApp, cookie: &str, q: &str) -> Value {
 
 /// La serie, **recomputada a propósito**.
 ///
-/// La invalidación previa no es higiene decorativa: desde el modelo v2 un MISS de proyección
-/// resuelve el plan (decenas de segundos en `debug`), y el warm-up que el login lanza en
+/// La invalidación previa no es higiene decorativa: el warm-up que el login lanza en
 /// `tokio::spawn` puede aterrizar **después** de que el test haya sembrado el hogar, repoblando
 /// la cache con la proyección del hogar VACÍO —`settle_login_warmup` solo espera un segundo—. Un
 /// test que compare la banda contra esa serie compara contra una línea de ceros y falla
@@ -69,13 +54,6 @@ async fn series(app: &TestApp, cookie: &str) -> Value {
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "GET series: {r:?}");
     r.json()
-}
-
-async fn patch_profile(app: &TestApp, u: &LoggedInOwner, body: Value) {
-    let r = app
-        .patch_json_with_cookie("/v1/auth/me/retirement-profile", body, &u.cookie)
-        .await;
-    assert_eq!(r.status, http::StatusCode::OK, "perfil: {r:?}");
 }
 
 /// Presupuesto + N activos. Devuelve los ids en el mismo orden de creación, que con
@@ -118,31 +96,19 @@ async fn seed(
     ids
 }
 
-/// La clave del cache de bandas. **Lleva el umbral desde 5.0.0**: el veredicto se mide contra él,
-/// así que dos umbrales describen dos respuestas distintas del mismo sorteo.
-fn key(iid: Uuid, user_id: Uuid, paths: u32, seed: &str, threshold_pct: u32) -> BandsCacheKey {
+/// La clave del cache de bandas.
+fn key(iid: Uuid, user_id: Uuid, paths: u32, seed: &str) -> BandsCacheKey {
     BandsCacheKey {
         installation_id: iid,
         user_id,
         paths,
         seed: seed.parse().expect("semilla decimal"),
-        threshold_pct,
     }
 }
 
 fn f(v: &Value) -> f64 {
     v.as_f64()
         .unwrap_or_else(|| panic!("se esperaba un número, llegó {v}"))
-}
-
-/// Una probabilidad publicada: string decimal → `f64`. Va por `as_str` a propósito: si algún día
-/// una de estas cifras dejara de viajar como cadena, el test debe caerse aquí y no comparar
-/// silenciosamente contra un `null` convertido en 0.
-fn prob(v: &Value) -> f64 {
-    v.as_str()
-        .unwrap_or_else(|| panic!("se esperaba un string decimal, llegó {v}"))
-        .parse()
-        .expect("probabilidad parseable")
 }
 
 /// Los dos contadores de `failures_by_kind`, en su orden fijo `[F1, F2]`. (Eran tres hasta el
@@ -153,57 +119,18 @@ fn failures_by_kind(b: &Value) -> [u64; 2] {
     [a[0].as_u64().expect("F1"), a[1].as_u64().expect("F2")]
 }
 
-/// **Las tres lecturas del éxito tienen que ser coherentes entre sí**, siempre y en todos los
-/// tests: el intervalo por debajo del punto, la barra igual a su distancia (con el redondeo de
-/// publicación) y el reparto por motivo sumando los fallos que la probabilidad implica.
-fn assert_success_block_is_consistent(b: &Value) {
-    let success = prob(&b["success_of_plan"]);
-    let low = prob(&b["success_wilson_low"]);
-    let paths = b["paths"].as_u64().expect("paths") as f64;
-    assert!(
-        (0.0..=1.0).contains(&success) && (0.0..=1.0).contains(&low),
-        "las dos cifras son fracciones: {b}"
-    );
-    assert!(
-        low <= success + 1e-9,
-        "la cota inferior de Wilson no puede estar por encima del estimador puntual: {b}"
-    );
-    // La barra es la distancia entre las dos, en puntos porcentuales y con UN decimal.
-    let bar: f64 = b["success_sampling_error_pp"]
-        .as_str()
-        .expect("la barra viaja como string decimal")
-        .parse()
-        .expect("barra parseable");
-    // **La barra es cero en un solo caso, y no es «medición sin error»**: con TODOS los caminos
-    // fallidos (`p̂ = 0`) la cota inferior de Wilson vale 0 exacto —una probabilidad no baja de
-    // cero—, así que la barra HACIA ABAJO no tiene dónde ir. Con cualquier éxito por encima de 0,
-    // incluido el 1 perfecto, es estrictamente positiva: ese es el sentido entero de Wilson
-    // frente a la aproximación normal.
-    if success > 0.0 {
+/// **Sin fase de jubilación no hay éxito que publicar** (6.0.0, D-7): el motor solo cuenta
+/// fallos estando jubilado, así que el sorteo devolvería mecánicamente un `1`. Las tres cifras
+/// viajan a `null` —presentes, no omitidas— con su motivo, y los contadores son cero.
+fn assert_success_is_absent(b: &Value) {
+    for k in ["success_of_plan", "success_wilson_low", "success_sampling_error_pp"] {
         assert!(
-            bar > 0.0,
-            "con éxito > 0 la barra de Wilson NUNCA es cero, tampoco con CERO fallos: {b}"
-        );
-    } else {
-        assert_eq!(
-            bar, 0.0,
-            "con p̂ = 0 la cota inferior es 0 exacto y la barra hacia abajo también: {b}"
+            b.get(k).is_some_and(Value::is_null),
+            "`{k}` viaja como null explícito: {b}"
         );
     }
-    assert!(
-        (bar - (success - low) * 100.0).abs() <= 0.06,
-        "la barra ({bar} pp) debe ser la distancia punto→cota ({} pp) salvo el redondeo a un \
-         decimal: {b}",
-        (success - low) * 100.0
-    );
-    // El reparto por motivo suma exactamente los fallos que implica la probabilidad.
-    let k = failures_by_kind(b);
-    let total = (k[0] + k[1]) as f64;
-    assert!(
-        (total - (1.0 - success) * paths).abs() <= 0.5,
-        "failures_by_kind suma {total} y la probabilidad implica {}: {b}",
-        (1.0 - success) * paths
-    );
+    assert_eq!(b["success_absent_reason"], "no_retirement_phase", "{b}");
+    assert_eq!(failures_by_kind(b), [0, 0], "sin jubilación no hay fallo que contar: {b}");
 }
 
 /// **Los campos del modelo VIEJO no pueden volver por la puerta de atrás.** Un cliente que
@@ -218,10 +145,14 @@ fn assert_the_v1_fields_are_gone(b: &Value) {
         "underfunded_probability",
         "depletion_probability_by_age",
         "retirement_trigger",
+        // 6.0.0 (D-7): retirados con el modelo de jubilación.
+        "strategy",
+        "success_threshold_pct",
+        "success_verdict",
     ] {
         assert!(
             b.get(dead).is_none(),
-            "`{dead}` se retiró en el modelo v2 y no puede volver: {b}"
+            "`{dead}` se retiró y no puede volver: {b}"
         );
     }
 }
@@ -260,31 +191,15 @@ async fn bands_exist_for_mine_and_the_household_is_a_declared_400() {
     assert_eq!(b["view"], "mine", "{b}");
     assert_eq!(b["paths"], PATHS, "{b}");
     assert_eq!(b["percentiles"], json!([10, 50, 90]), "{b}");
-    assert_eq!(b["strategy"], "asap", "{b}");
-    // El umbral del perfil VUELVE a la respuesta en v2: es la restricción que decidió la fecha y
-    // el listón del veredicto, así que sin él el color no se puede auditar.
-    assert_eq!(b["success_threshold_pct"], DEFAULT_THRESHOLD_PCT, "{b}");
     assert_eq!(b["any_volatility_declared"], true, "{b}");
-    // Las cuatro cifras del éxito viajan JUNTAS: el punto, su intervalo, su barra y su N.
-    for k in [
-        "success_of_plan",
-        "success_wilson_low",
-        "success_sampling_error_pp",
-    ] {
-        assert!(b[k].is_string(), "`{k}` viaja como string decimal: {b}");
-    }
-    assert!(
-        ["green", "amber", "red"].contains(&b["success_verdict"].as_str().expect("veredicto")),
-        "{b}"
-    );
-    assert_success_block_is_consistent(&b);
+    assert_success_is_absent(&b);
     assert_the_v1_fields_are_gone(&b);
     assert!(
         b["model_note"]
             .as_str()
             .expect("nota")
-            .contains("SOLO PUEDE FALLAR ESTANDO JUBILADO"),
-        "la nota debe declarar el límite de la definición de éxito: {b}"
+            .contains("SIN JUBILACIÓN"),
+        "la nota debe declarar por qué no hay éxito: {b}"
     );
 
     // La rejilla es la MISMA que la de la serie: mismo primer y último `month_index`.
@@ -390,16 +305,13 @@ async fn a_malformed_seed_is_rejected_instead_of_falling_back() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 3. El gate: σ = 0 ⇒ la banda ES la línea, y es la línea DEL PLAN
+// 3. El gate: σ = 0 ⇒ la banda ES la línea
 // ---------------------------------------------------------------------------------------------
 
 /// **Sin volatilidad declarada, los tres percentiles coinciden con la serie determinista.**
 ///
 /// Es el único punto donde el camino `f64` se mide contra el `Decimal` que la app publica como
-/// dinero, y desde la v2 comprueba una cosa más: que las dos superficies simulan **el mismo
-/// plan**. Si las bandas sortearan la entrada en crudo (jubilación por cruce) y la serie el
-/// escenario con el mes forzado, las curvas divergirían justo a partir de la jubilación — que es
-/// donde nadie mira, porque el principio coincide.
+/// dinero.
 ///
 /// La tolerancia es RELATIVA (1e-6) porque la degeneración del camino genérico está medida en
 /// ≤ 1,5e-7 € sobre patrimonios de seis cifras — un umbral absoluto en euros mentiría sobre lo
@@ -455,254 +367,7 @@ async fn zero_volatility_makes_the_band_the_deterministic_line() {
         }
     }
 
-    // Con σ = 0 todos los caminos son EL camino: el éxito solo puede ser 1 o 0, sin fracciones.
-    let success = prob(&b["success_of_plan"]);
-    assert!(
-        success == 1.0 || success == 0.0,
-        "sin dispersión el éxito es binario: {b}"
-    );
-    assert_success_block_is_consistent(&b);
-}
-
-/// El espejo del anterior: un plan que **sí** se rompe da éxito `0` exacto, veredicto rojo, y
-/// **dice por qué motivo se rompió**.
-///
-/// **Se fuerza la fecha con `retire_at_age`** y no se deja a `asap`, y la razón es el hallazgo que
-/// documenta el módulo: el motor solo clasifica fallos estando JUBILADO, así que un plan que no
-/// llega a jubilarse nunca falla. Con `asap` este hogar no alcanzaría ninguna fecha válida y el
-/// sorteo mediría «un plan sin jubilación», que es otra pregunta.
-///
-/// **Y el motivo es F2, no F1**, que es justo lo que el reparto por motivo existe para poder
-/// decir. Jubilarse a los 45 con una hucha de 3.000 € y un gasto de 2.500 €/mes exige vender el
-/// **1.000 % anual** de la cartera; la puerta de tasa inicial lo tumba en el PRIMER mes jubilado,
-/// antes de que a la cartera le dé tiempo a agotarse. El orden de prioridad del motor es
-/// `F1 > F2` y F1 exige una venta que se quedó corta — en el primer mes la hucha todavía
-/// paga. Con un solo «probabilidad de ruina» los dos casos se veían iguales; con `failures_by_kind`
-/// tienen arreglos distintos (F1 pide más capital, F2 pide retrasar la fecha).
-#[tokio::test]
-async fn a_plan_that_breaks_deterministically_scores_zero_and_says_which_gate_broke() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    let inc = app.create_category(&owner, "income", "Nómina").await;
-    let exp = app.create_category(&owner, "expense", "Vida").await;
-    let ast = app.create_category(&owner, "asset", "Fondos").await;
-    for (cat, amount) in [(&inc, "2600"), (&exp, "2500")] {
-        let r = app
-            .post_json_with_cookie(
-                "/v1/budget/entries",
-                json!({"category_id": cat, "amount": amount, "ends_at_retirement": false}),
-                &owner.cookie,
-            )
-            .await;
-        assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
-    }
-    let r = app
-        .post_json_with_cookie(
-            "/v1/assets",
-            json!({"category_id": ast, "name": "Hucha", "current_value": "3000",
-                   "is_liquid": true, "expected_annual_return_percent": "0"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
-    patch_profile(
-        &app,
-        &owner,
-        json!({"strategy": "retire_at_age", "target_retirement_age": 45}),
-    )
-    .await;
-
-    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}")).await;
-    assert_eq!(b["strategy"], "retire_at_age", "{b}");
-    assert_eq!(b["success_of_plan"], "0", "{b}");
-    assert_eq!(b["success_verdict"], "red", "{b}");
-    // El motivo es la PUERTA DE TASA INICIAL (F2), y el reparto lo dice sin ambigüedad.
-    let k = failures_by_kind(&b);
-    assert_eq!(
-        k[1], u64::from(PATHS),
-        "los {PATHS} caminos fallan por tasa inicial excedida: {b}"
-    );
-    assert_eq!(
-        k[0], 0,
-        "y por nada más: F1 exige una venta que se quede corta: {b}"
-    );
-    assert_success_block_is_consistent(&b);
-    // La curva de fallo lo fecha: el 100 % ya en la primera fila, la de la jubilación.
-    let curve = b["failure_probability_by_age"].as_array().expect("curva");
-    assert_eq!(
-        curve.first().map(|r| &r["probability"]),
-        Some(&json!("1")),
-        "el plan se rompe EN la jubilación, no más tarde: {b}"
-    );
-}
-
-/// **El plan sin fecha alcanzable, pinchado a propósito.**
-///
-/// Un hogar que ahorra 50 €/mes no alcanza ninguna fecha que cumpla el umbral, así que el
-/// escenario que se sortea es el que la serie publica: **no jubilarse dentro del horizonte**. Y
-/// como el motor solo clasifica fallos estando jubilado, ese plan **no puede fallar**: el éxito
-/// sale 1 y el veredicto verde.
-///
-/// **Ese verde no dice «llegas», dice «este plan sin jubilación no se rompe».** El test existe
-/// para que la trampa esté escrita y medida en vez de descubrirse en producción: quien pinte el
-/// semáforo mira antes `retirement_date_basis` en la serie, y la `model_note` lo dice para quien
-/// solo ve el JSON.
-#[tokio::test]
-async fn a_plan_with_no_reachable_date_draws_the_line_that_never_retires() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    seed(&app, &owner, "2000", "1950", &[("Hucha", "1000", Some("0"))]).await;
-
-    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS_SPREAD}")).await;
-    assert_eq!(failures_by_kind(&b), [0, 0], "{b}");
-    // La tabla trae UNA fila —la del horizonte— y vale 0. No está vacía y no dice «seguro».
-    let curve = b["failure_probability_by_age"].as_array().expect("curva");
-    assert_eq!(
-        curve.len(),
-        1,
-        "la rejilla arranca en el mes forzado (horizonte + 1): solo cabe el cierre: {b}"
-    );
-    assert_eq!(curve[0]["probability"], "0", "{curve:?}");
-    assert_eq!(
-        curve[0]["month_index"].as_u64(),
-        b["months"].as_u64().map(|m| m - 1),
-        "esa única fila es la del horizonte, y el horizonte del BUCLE es `months − 1` en la \
-         rejilla publicada (`engine_month_to_grid`): {b}"
-    );
-    // Y la nota lo declara, que es lo único que ve un consumidor conversacional.
-    assert!(
-        b["model_note"]
-            .as_str()
-            .expect("nota")
-            .contains("success_absent_reason"),
-        "la nota tiene que nombrar el campo que declara el hueco: {b}"
-    );
-}
-
-// ---------------------------------------------------------------------------------------------
-// 3-bis. Sin fecha: `null` con su motivo, jamás un verde (5.0.0, WP A12)
-// ---------------------------------------------------------------------------------------------
-
-/// **El bug que este test cierra publicaba un 100 % tranquilizador sobre un plan que no existe.**
-///
-/// El motor solo clasifica fallos estando jubilado o en media jornada, así que un escenario que se
-/// jubila en `horizonte + 1` —el que se sortea cuando ningún mes cumple el umbral— no puede fallar
-/// ni una vez: el sorteo devolvía `success_of_plan: "1"`, `success_verdict: "green"` y la SPA
-/// pintaba de verde la sección Riesgo. La respuesta no tenía ningún campo con el que desmentirlo y
-/// la nota de modelo mandaba al lector a MIRAR OTRO ENDPOINT.
-///
-/// El contrato ahora es el de la casa: **las cuatro cifras del éxito a `null` y el motivo al
-/// lado**. Se comprueban las cuatro —no una— porque publicar el intervalo sin el punto, o la barra
-/// sin el intervalo, dejaría media medición suelta en una respuesta que ya ha dicho que no hay
-/// nada que medir.
-///
-/// El hogar: ingreso 2.000 y gasto 1.950 con 1.000 € de hucha. Ahorra 50 € al mes durante 54 años
-/// y termina con ~173.000 € nominales, que no sostienen 1.950 €/mes de gasto indexado en ningún
-/// mes del horizonte — de ahí `not_reachable`, no `birth_date_missing` (la fecha de nacimiento
-/// está puesta: el horizonte sale de `lifespan_age`).
-#[tokio::test]
-async fn a_plan_without_a_reachable_date_publishes_null_success_with_its_reason() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    seed(&app, &owner, "2000", "1950", &[("Hucha", "1000", Some("0"))]).await;
-
-    // La serie es quien nombra la situación; las bandas tienen que decir LO MISMO sin que haya que
-    // ir a buscarlo allí. Se lee primero para que un fallo de este test distinga «el plan no es
-    // `not_reachable`» de «las bandas no lo declaran».
-    let s = series(&app, &owner.cookie).await;
-    assert_eq!(
-        s["retirement_date_basis"], "not_reachable",
-        "el fixture tiene que ser un plan SIN fecha alcanzable, o este test prueba otra cosa: {s}"
-    );
-
-    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS_SPREAD}")).await;
-    assert_eq!(
-        b["success_absent_reason"], "not_reachable",
-        "el motivo viaja, y con el MISMO literal que `retirement_date_basis`: {b}"
-    );
-    for campo in [
-        "success_of_plan",
-        "success_wilson_low",
-        "success_sampling_error_pp",
-        "success_verdict",
-    ] {
-        assert!(
-            b.get(campo).is_some(),
-            "`{campo}` tiene que seguir viajando, como `null`: {b}"
-        );
-        assert!(
-            b[campo].is_null(),
-            "`{campo}` sin fecha es `null`, jamás un 1 ni un «green»: {b}"
-        );
-    }
-
-    // **Lo que NO desaparece**: la trayectoria sin jubilarse es una respuesta legítima y se sigue
-    // publicando entera. Lo que cambia es que ahora hay un campo que dice cómo leerla.
-    assert!(
-        b["points"].as_array().expect("puntos").len() > 10,
-        "las bandas de percentiles siguen viajando: {b}"
-    );
-    assert_eq!(b["failures_by_kind"].as_array().expect("reparto").len(), 2);
-    assert!(
-        !b["failure_probability_by_age"]
-            .as_array()
-            .expect("curva")
-            .is_empty(),
-        "la tabla de fallo sigue viajando (con su 0, que significa «sin jubilación no hay fallo \
-         que contar»): {b}"
-    );
-    assert_eq!(b["success_threshold_pct"], 95, "el umbral se ecoa igual: {b}");
-}
-
-/// **Sin plan que resolver, el mismo contrato y el MISMO literal que la serie.**
-///
-/// Sin fecha de nacimiento no hay plan (C5), así que tampoco hay mes forzado y el sorteo vuelve a
-/// ser el del escenario que nunca se jubila. El motivo que se publica **no se reescribe aquí**: es
-/// el `plan_absent_reason` del ensamblado tal cual, porque la causa es la misma y un literal
-/// propio sería un segundo vocabulario para el mismo hecho.
-///
-/// Es el único `plan_absent_reason` alcanzable por esta ruta, y conviene dejarlo escrito: los
-/// otros dos no pueden llegar. `months_override` necesita un `?months=` que este endpoint **no
-/// acepta** (`ProjectionBandsQuery` solo tiene `view`, `paths` y `seed`), y `household_not_solved`
-/// un `view=household` que aquí es 400 `household_bands_unavailable`.
-#[tokio::test]
-async fn without_a_birth_date_the_bands_publish_the_same_reason_as_the_series() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    seed(&app, &owner, "3000", "1000", &[("Fondo", "200000", Some("12"))]).await;
-    let r = app
-        .patch_json_with_cookie("/v1/auth/me", json!({"birth_date": null}), &owner.cookie)
-        .await;
-    assert_eq!(r.status, http::StatusCode::OK, "borrar la DOB: {r:?}");
-
-    let s = series(&app, &owner.cookie).await;
-    assert_eq!(s["plan_absent_reason"], "birth_date_missing", "{s}");
-
-    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS_SPREAD}")).await;
-    assert_eq!(
-        b["success_absent_reason"], "birth_date_missing",
-        "las bandas propagan el motivo de la serie, no inventan uno propio: {b}"
-    );
-    assert!(b["success_of_plan"].is_null(), "{b}");
-    assert!(b["success_verdict"].is_null(), "{b}");
-
-    // Y un `?months=` no cambia nada: este endpoint no lo acepta y lo IGNORA, así que nunca puede
-    // publicar `months_override`. Se pinea para que quien añada el parámetro algún día se
-    // encuentre este test y decida el literal a propósito.
-    let con_months = bands(
-        &app,
-        &owner.cookie,
-        &format!("?paths={PATHS_SPREAD}&months=120"),
-    )
-    .await;
-    assert_eq!(
-        con_months["months"], b["months"],
-        "`?months=` no existe en esta superficie: el horizonte no se mueve: {con_months}"
-    );
-    assert_eq!(
-        con_months["success_absent_reason"], "birth_date_missing",
-        "y por tanto `months_override` no es alcanzable aquí: {con_months}"
-    );
+    assert_success_is_absent(&b);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -804,8 +469,8 @@ async fn paths_out_of_range_is_rejected_not_clamped() {
 // ---------------------------------------------------------------------------------------------
 
 /// HIT/MISS con centinela (el mismo patrón que `projection_cache.rs`: se envenena la entrada, y si
-/// el siguiente GET la devuelve es que salió de la cache) e invalidación por los DOS caminos que
-/// mueven la simulación: una mutación del ledger y un PATCH del perfil de jubilación.
+/// el siguiente GET la devuelve es que salió de la cache) e invalidación por una mutación del
+/// ledger.
 #[tokio::test]
 async fn the_bands_cache_serves_hits_and_dies_with_the_projection() {
     let app = TestApp::spawn().await;
@@ -822,7 +487,7 @@ async fn the_bands_cache_serves_hits_and_dies_with_the_projection() {
 
     let q = format!("?paths={PATHS}&seed=11");
     let first = bands(&app, &owner.cookie, &q).await;
-    let k = key(iid, owner.user_id, PATHS, "11", DEFAULT_THRESHOLD_PCT);
+    let k = key(iid, owner.user_id, PATHS, "11");
     assert!(
         app.state.bands_cache.read().await.contains_key(&k),
         "el primer GET debe dejar la entrada"
@@ -849,7 +514,7 @@ async fn the_bands_cache_serves_hits_and_dies_with_the_projection() {
     let other = bands(&app, &owner.cookie, &format!("?paths={}&seed=11", PATHS + 1)).await;
     assert_ne!(other["model_note"], SENTINEL, "otro `paths` es otra entrada");
 
-    // 1) Mutación del ledger: PATCH de un activo.
+    // Mutación del ledger: PATCH de un activo.
     let r = app
         .patch_json_with_cookie(
             &format!("/v1/assets/{}", ids[0]),
@@ -866,73 +531,6 @@ async fn the_bands_cache_serves_hits_and_dies_with_the_projection() {
     assert_ne!(
         after["points"], first["points"],
         "la banda debe reflejar el activo nuevo"
-    );
-
-    // 2) PATCH del perfil de jubilación: cambia el plan entero, así que cambia el sorteo.
-    patch_profile(&app, &owner, json!({"swr_pct": "3"})).await;
-    assert!(
-        !app.state.bands_cache.read().await.contains_key(&k),
-        "un PATCH del perfil debe invalidar las bandas"
-    );
-}
-
-/// **El umbral está en la CLAVE, no solo en la respuesta.**
-///
-/// El fallo que esto cierra es el que describe `state.rs`: cambiar el umbral en Ajustes y recibir
-/// el veredicto del umbral anterior —verde donde tocaba ámbar— sin que ningún campo lo dijera.
-///
-/// La prueba fuerte es la última: después de cambiar el umbral se **reinyecta a mano** la entrada
-/// vieja (la del umbral anterior) y el siguiente GET **no** puede servirla. Si el umbral no
-/// estuviera en la clave, ese centinela saldría por la respuesta.
-#[tokio::test]
-async fn the_bands_cache_key_carries_the_threshold() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    seed(&app, &owner, "3000", "2000", &[("Indexado", "20000", Some("12"))]).await;
-    let iid = app.installation_id().await;
-
-    let q = format!("?paths={PATHS}&seed=11");
-    let b = bands(&app, &owner.cookie, &q).await;
-    assert_eq!(b["success_threshold_pct"], DEFAULT_THRESHOLD_PCT, "{b}");
-
-    let k95 = key(iid, owner.user_id, PATHS, "11", DEFAULT_THRESHOLD_PCT);
-    let k80 = key(iid, owner.user_id, PATHS, "11", 80);
-    assert_ne!(k95, k80, "dos umbrales son dos claves");
-    assert!(app.state.bands_cache.read().await.contains_key(&k95));
-
-    const SENTINEL: &str = "SENTINEL-umbral-viejo";
-    let poisoned = {
-        let cache = app.state.bands_cache.read().await;
-        let mut resp = (*cache.get(&k95).expect("entrada del 95").response).clone();
-        resp.model_note = SENTINEL.to_string();
-        resp
-    };
-
-    patch_profile(&app, &owner, json!({"success_threshold_pct": 80})).await;
-    // El PATCH invalida las bandas enteras (sale del mismo `ProjectionInput`).
-    assert!(
-        !app.state.bands_cache.read().await.contains_key(&k95),
-        "un PATCH del perfil invalida las bandas"
-    );
-    // Se REINYECTA la entrada del umbral viejo: si la clave no llevara el umbral, el GET de
-    // abajo la serviría.
-    app.state
-        .bands_cache_insert_if_current(
-            k95.clone(),
-            app.state.projection_generation(iid).await,
-            std::sync::Arc::new(poisoned),
-        )
-        .await;
-
-    let after = bands(&app, &owner.cookie, &q).await;
-    assert_ne!(
-        after["model_note"], SENTINEL,
-        "la respuesta del umbral 95 no puede servirse a quien ahora tiene 80: {after}"
-    );
-    assert_eq!(after["success_threshold_pct"], 80, "{after}");
-    assert!(
-        app.state.bands_cache.read().await.contains_key(&k80),
-        "el GET con el umbral nuevo deja su PROPIA entrada"
     );
 }
 
@@ -951,7 +549,7 @@ async fn logout_drops_the_bands_of_that_user() {
             .bands_cache
             .read()
             .await
-            .contains_key(&key(iid, owner.user_id, PATHS, "5", DEFAULT_THRESHOLD_PCT)),
+            .contains_key(&key(iid, owner.user_id, PATHS, "5")),
         "la entrada debe existir antes del logout"
     );
     app.state.invalidate_projection_by_user(owner.user_id).await;
@@ -962,248 +560,7 @@ async fn logout_drops_the_bands_of_that_user() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// 7. Veredicto: el umbral del perfil Y su intervalo
-// ---------------------------------------------------------------------------------------------
-
-/// **El veredicto se mide contra el umbral DEL PERFIL y contra el INTERVALO, no contra un corte
-/// fijo** (5.0.0, modelo v2, C3). Sustituye al corte fijo al 100 % de la primera vuelta.
-///
-/// Las tres regiones sobre **la misma muestra**, que es lo que las hace comparables:
-///
-/// | caminos | umbral | cota de Wilson (0 fallos) | color | por qué |
-/// |---|---|---|---|---|
-/// | 120 | 95 | 0,9690 | verde | el intervalo llega |
-/// | 24 | 95 | 0,8621 | **ámbar** | el puntual (1) llega, el intervalo no |
-/// | 24 | 80 | 0,8621 | verde | con menos exigencia, el intervalo sí llega |
-/// | 120 | 100 | — | verde | cero fallos, que es la regla del 100 % |
-///
-/// El ámbar es la región que un corte fijo no sabía nombrar: «puede que sí, pero esta muestra no
-/// lo demuestra». Y que 24 caminos no puedan ser verdes al 95 % **no es un bug**: con cero fallos
-/// la cota topa en `n/(n + 1,96²)`, así que el 95 % exige al menos 73 caminos. El plan no se
-/// resiente —se resuelve siempre con 500/2.500—, solo el veredicto de ESTE sorteo.
-#[tokio::test]
-async fn the_verdict_follows_the_profile_threshold_and_its_interval() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    // σ = 0: el éxito es exactamente 1, así que lo único que mueve el color es el umbral y el N.
-    seed(&app, &owner, "3000", "2000", &[("Indexado", "20000", Some("0"))]).await;
-
-    let wide = bands(&app, &owner.cookie, &format!("?paths={PATHS_SPREAD}")).await;
-    assert_eq!(wide["success_of_plan"], "1", "sin dispersión, 1 exacto: {wide}");
-    assert_eq!(
-        wide["success_verdict"], "green",
-        "{PATHS_SPREAD} caminos limpios superan el 95 %: {wide}"
-    );
-
-    let narrow = bands(&app, &owner.cookie, &format!("?paths={PATHS}")).await;
-    assert_eq!(narrow["success_of_plan"], "1", "{narrow}");
-    assert_eq!(
-        narrow["success_verdict"], "amber",
-        "con {PATHS} caminos el puntual llega y el INTERVALO no — esa franja es el ámbar: {narrow}"
-    );
-
-    // Mismo sorteo, otro umbral: el color cambia sin que cambie ni un camino.
-    patch_profile(&app, &owner, json!({"success_threshold_pct": 80})).await;
-    let relaxed = bands(&app, &owner.cookie, &format!("?paths={PATHS}")).await;
-    assert_eq!(relaxed["success_threshold_pct"], 80, "{relaxed}");
-    assert_eq!(relaxed["success_of_plan"], "1", "{relaxed}");
-    assert_eq!(
-        relaxed["success_verdict"], "green",
-        "la misma muestra, con menos exigencia, sí cumple: {relaxed}"
-    );
-
-    // Y el 100 %: la regla deja de mirar el intervalo y cuenta FALLOS. Cero fallos ⇒ verde.
-    patch_profile(&app, &owner, json!({"success_threshold_pct": 100})).await;
-    let strict = bands(&app, &owner.cookie, &format!("?paths={PATHS_SPREAD}")).await;
-    assert_eq!(strict["success_threshold_pct"], 100, "{strict}");
-    assert_eq!(
-        strict["success_verdict"], "green",
-        "el 100 % es «cero fallos de N», y no hay ninguno: {strict}"
-    );
-}
-
-/// **El umbral, los caminos y la barra de error se ECOAN**, y la barra encoge con la muestra.
-///
-/// Es la trinidad que hace auditable una probabilidad: sin el umbral el color no se puede
-/// comprobar, sin `paths` la cifra no se puede comparar con otra, y sin la barra un 94 % de 24
-/// caminos parece lo mismo que un 94 % de 2.500.
-#[tokio::test]
-async fn the_bands_echo_the_threshold_the_paths_and_the_sampling_error() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    seed(&app, &owner, "3000", "2000", &[("Indexado", "20000", Some("12"))]).await;
-    patch_profile(&app, &owner, json!({"success_threshold_pct": 90})).await;
-
-    let few = bands(&app, &owner.cookie, &format!("?paths={PATHS}&seed=7")).await;
-    let many = bands(&app, &owner.cookie, &format!("?paths={PATHS_SPREAD}&seed=7")).await;
-
-    for (b, paths) in [(&few, PATHS), (&many, PATHS_SPREAD)] {
-        assert_eq!(b["success_threshold_pct"], 90, "el umbral del perfil: {b}");
-        assert_eq!(b["paths"], paths, "los caminos efectivos: {b}");
-        assert_success_block_is_consistent(b);
-    }
-
-    let bar = |b: &Value| -> f64 {
-        b["success_sampling_error_pp"]
-            .as_str()
-            .expect("string")
-            .parse()
-            .expect("barra")
-    };
-    assert!(
-        bar(&few) > bar(&many),
-        "más caminos, menos incertidumbre: {} pp con {PATHS} frente a {} pp con {PATHS_SPREAD}",
-        bar(&few),
-        bar(&many)
-    );
-}
-
-// ---------------------------------------------------------------------------------------------
-// 8. La curva de fallo cuenta MÁS que el agotamiento
-// ---------------------------------------------------------------------------------------------
-
-/// **`failure_probability_by_age` sustituye a `depletion_probability_by_age` porque el
-/// agotamiento ya no es el único motivo de fallo.**
-///
-/// El hogar: se jubila a los 45 por EDAD (así hay fecha pase lo que pase), con **800.000 €**
-/// líquidos al 5 %, un gasto de 2.000 €/mes de hoy y un SWR del **1 %**.
-///
-/// Las cifras están elegidas para aislar F2 sin F1 (el motor prioriza `F1 > F2`):
-///
-/// - **F2 salta**: al llegar a los 45 el líquido ronda 1,4 M€ (nueve años de 5 % y de ahorro), y
-///   el 1 % de eso son ~14.000 €/año frente a una necesidad que, indexada, pasa de 24.000.
-/// - **F1 no**: vender ~2.500 €/mes de una cartera de 1,4 M€ que crece al 5 % no la vacía en el
-///   horizonte.
-///
-/// Con la tabla vieja este plan publicaba «0 % de probabilidad de agotar» en todas las filas —
-/// porque, literalmente, no se agota. Con la nueva publica el 100 % de fallo, y
-/// `failures_by_kind` dice por qué. (Hasta el 2026-10-10 el test aislaba F3 con una regla
-/// `percent_of_balance` al 1 %; F3 se retiró con las reglas y la propiedad —«la curva cuenta más
-/// que el agotamiento»— la sostiene ahora la puerta de tasa inicial.)
-#[tokio::test]
-async fn the_failure_curve_counts_more_than_depletion() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    // σ = 0: el resultado es binario y exacto, sin un sorteo que interpretar.
-    seed(&app, &owner, "3000", "2000", &[("Indexado", "800000", Some("0"))]).await;
-    patch_profile(
-        &app,
-        &owner,
-        json!({
-            "strategy": "retire_at_age",
-            "target_retirement_age": 45,
-            "swr_pct": "1",
-        }),
-    )
-    .await;
-
-    let b = bands(&app, &owner.cookie, &format!("?paths={PATHS}")).await;
-    let k = failures_by_kind(&b);
-    assert_eq!(
-        k[0], 0,
-        "la cartera NO se agota: retirar el 1 % de un capital que crece al 5 % no la vacía: {b}"
-    );
-    assert_eq!(
-        k[1], u64::from(PATHS),
-        "y sin embargo TODOS los caminos fallan, por F2 — la tasa inicial excede el SWR: {b}"
-    );
-    assert_eq!(b["success_of_plan"], "0", "{b}");
-    assert_success_block_is_consistent(&b);
-
-    // La curva lo dice a lo largo del tiempo, con el reparto por motivo al lado de cada fila.
-    let curve = b["failure_probability_by_age"].as_array().expect("curva");
-    assert!(!curve.is_empty(), "con fecha de jubilación hay tabla: {b}");
-    let mut prev = -1.0f64;
-    for row in curve {
-        assert!(row["month_index"].is_u64(), "{row}");
-        assert!(
-            row["age"].is_u64(),
-            "el arnés registra con fecha de nacimiento, así que la edad existe: {row}"
-        );
-        let p = prob(&row["probability"]);
-        assert!(p >= prev - 1e-9, "la acumulada no puede bajar: {curve:?}");
-        prev = p;
-        assert_eq!(
-            row["by_kind"],
-            b["failures_by_kind"],
-            "el reparto por fila es el de la EJECUCIÓN entera, declarado como tal: {row}"
-        );
-    }
-    // La última fila es el horizonte y cierra en 1 − éxito.
-    let last = curve.last().expect("última fila");
-    assert_eq!(
-        last["month_index"].as_u64(),
-        b["months"].as_u64().map(|m| m - 1),
-        "la tabla cierra SIEMPRE en el horizonte — que en la rejilla publicada es `months − 1`, \
-         un punto ANTES del último de `points[]`: {b}"
-    );
-    assert!(
-        (prob(&last["probability"]) - (1.0 - prob(&b["success_of_plan"]))).abs() <= 1e-6,
-        "la última fila y el éxito cuentan el mismo conjunto de caminos: {b}"
-    );
-
-    // Y el contraste que da nombre al test: la serie NO marca agotamiento.
-    let s = series(&app, &owner.cookie).await;
-    assert_eq!(
-        s["assets_depleted_month_index"],
-        Value::Null,
-        "la tabla vieja habría publicado 0 % en todas las filas de este plan: {s}"
-    );
-}
-
-// ---------------------------------------------------------------------------------------------
-// 9. La identidad con el plan de la serie
-// ---------------------------------------------------------------------------------------------
-
-/// **El éxito que dibuja el fan chart y el que decide la fecha son la MISMA cifra.**
-///
-/// Es la propiedad que justifica que `DEFAULT_BANDS_PATHS` sea, literalmente,
-/// `SOLVE_CONFIRM_PATHS`: con el sorteo por defecto —2.500 caminos y la semilla estable del
-/// usuario— las bandas re-ejecutan la MISMA muestra que confirmó la fecha sobre el MISMO
-/// escenario, así que las dos pantallas no pueden publicar dos probabilidades del mismo plan.
-///
-/// Se compara a 6 decimales porque las dos salen del mismo redondeo de publicación. Y se exige
-/// primero que el plan TENGA fecha: sin ella la serie publica la mejor observación de la búsqueda
-/// (500 caminos) y las bandas sortean el escenario sin jubilación — dos preguntas distintas, y la
-/// identidad no aplica (ver el doc del módulo del handler).
-///
-/// **Es el test más caro de la suite**: usa los caminos por defecto a propósito, porque la
-/// identidad solo se promete ahí.
-#[tokio::test]
-async fn the_bands_success_equals_the_plan_success_for_the_default_draw() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    // Un hogar con margen: hace falta que el plan alcance una fecha válida.
-    seed(&app, &owner, "4000", "1500", &[("Indexado", "400000", Some("12"))]).await;
-
-    let s = series(&app, &owner.cookie).await;
-    assert_ne!(
-        s["retirement_date_basis"], "not_reachable",
-        "sin fecha la identidad no aplica; este hogar tiene que alcanzarla: {s}"
-    );
-    let plan_success = s["success_of_plan"]
-        .as_str()
-        .unwrap_or_else(|| panic!("la serie debe publicar `success_of_plan`: {s}"));
-
-    // Sin `?paths=` ni `?seed=`: el sorteo por defecto, que es el único con identidad prometida.
-    let b = bands(&app, &owner.cookie, "").await;
-    assert_eq!(
-        b["success_of_plan"].as_str(),
-        Some(plan_success),
-        "el éxito del fan chart y el del plan salen de la MISMA muestra: bandas {b}, serie {s}"
-    );
-    assert_eq!(
-        b["success_threshold_pct"], s["success_threshold_pct"],
-        "y contra el mismo umbral"
-    );
-    assert_eq!(
-        b["paths"], 2500,
-        "el default de la superficie es el presupuesto de confirmación del plan: {b}"
-    );
-}
-
-// ---------------------------------------------------------------------------------------------
-// 10. Tamaño del payload
+// 7. Tamaño del payload
 // ---------------------------------------------------------------------------------------------
 
 /// **La medida del presupuesto de contexto**, con el número impreso para que quede en el log del
@@ -1217,9 +574,8 @@ async fn the_bands_success_equals_the_plan_success_for_the_default_draw() {
 ///
 /// **El payload es independiente de `paths`** salvo por el eco del propio número: los puntos son
 /// percentiles, no caminos. Por eso se mide con una muestra pequeña — el default de 2.500 no
-/// cambiaría ni un byte de `points[]` y cuesta cien veces más. Lo que sí creció en 5.0.0 es la
-/// `model_note` y el `by_kind` de cada fila de la curva de fallo; los dos se imprimen aparte para
-/// que el margen esté medido y no supuesto.
+/// cambiaría ni un byte de `points[]` y cuesta cien veces más. La `model_note` y la curva de
+/// fallo se imprimen aparte para que el margen esté medido y no supuesto.
 #[tokio::test]
 async fn the_hybrid_payload_stays_within_the_context_budget() {
     let app = TestApp::spawn().await;

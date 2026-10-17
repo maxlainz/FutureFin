@@ -137,57 +137,17 @@ async fn every_view_aware_response_echoes_the_view_it_applied() {
         //
         // `/v1/projection/series` es la excepción DECLARADA desde 5.0.0 (§D): su `household` ya
         // no es «las mismas cuentas con más filas» sino el AGREGADO de una simulación por
-        // miembro, así que cambia de forma —`members[]`, `jubilacion_*` nulos con
-        // `household_aggregate`— aunque el hogar tenga una sola persona. Eso se comprueba abajo,
-        // en `projection_household_aggregate.rs`.
+        // miembro, así que cambia de forma —`members[]` poblado— aunque el hogar tenga una sola
+        // persona. Eso se comprueba en `projection_household_aggregate.rs`.
+        //
+        // `/v1/summary` dejó de ser excepción en 6.0.0 (D-7): su bloque `plan` —el plan de
+        // jubilación de UNA persona— se retiró con el modelo de jubilación.
         if ep == "/v1/projection/series" {
-            // **`fire_number_classic_absent_reason`, no `fire_target_absent_reason`**: el objetivo
-            // FIRE descontado murió con el modelo v2 (WP E4/A4) y lo que queda es el número FIRE
-            // CLÁSICO, informativo. El nombre viejo quedó aquí tras el renombrado y la aserción
-            // pasó a comparar `null` contra un literal — o sea, a fallar; peor habría sido lo
-            // contrario (`is_null()` sobre una clave inexistente pasa siempre).
-            assert_eq!(
-                explicit["fire_number_classic_absent_reason"], "household_aggregate",
-                "{explicit}"
-            );
             assert!(mine["members"].as_array().is_some_and(|m| m.is_empty()), "{mine}");
             continue;
         }
-        // `/v1/summary` es la SEGUNDA excepción declarada (5.0.0 WP5-2b, D27): su bloque `plan`
-        // —estrategia, fecha, ahorro necesario, éxito y capital necesario— es el plan de UNA
-        // persona, y el agregado del hogar no tiene uno. Sale entero a `null` con
-        // `absent_reason: household_aggregate`, igual que los `jubilacion_*` de la serie. El
-        // resto del payload sí sigue siendo idéntico con un solo usuario, y eso es lo que se
-        // comprueba: la excepción está ACOTADA a `plan`.
         let mut sin_view = mine.clone();
-        if ep == "/v1/summary" {
-            let plan_household = &explicit["plan"];
-            assert_eq!(plan_household["absent_reason"], "household_aggregate", "{explicit}");
-            // **Solo campos que EXISTEN.** `is_null()` sobre una clave que el servidor no publica
-            // devuelve `true`, así que un nombre muerto en esta lista no protege nada y encima
-            // parece que sí: `retirement_trigger` (v1) estaba aquí y llevaba desde el modelo v2
-            // sin comprobar una sola cosa. La lista es ahora la del bloque v2.
-            for k in [
-                "strategy",
-                "jubilacion_month_index",
-                "required_savings_monthly",
-                "underfunded",
-                "safe_date_month_index",
-                "success_of_plan",
-                "success_threshold_pct",
-                "success_wilson_low",
-                "success_verdict",
-                "needed_capital_today",
-            ] {
-                assert!(
-                    plan_household[k].is_null(),
-                    "en household el plan va entero a null, y {k} no lo está: {explicit}"
-                );
-            }
-            assert!(mine["plan"]["absent_reason"].is_null(), "{mine}");
-            assert_eq!(mine["plan"]["strategy"], "asap", "{mine}");
-            sin_view["plan"] = explicit["plan"].clone();
-        }
+        assert!(mine.get("plan").is_none(), "{ep}: {mine}");
         sin_view["view"] = explicit["view"].clone();
         assert_eq!(
             sin_view, explicit,

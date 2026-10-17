@@ -2349,8 +2349,9 @@ fn classify(envelope: &serde_json::Value) -> Outcome {
 ///   * **Observable**: **35 de las 41** declaran algún parámetro `required`, así que con
 ///     `{}` mueren en la deserialización de rmcp y **nunca ejecutan el gate**. Con
 ///     argumentos vacíos sólo lo alcanzan `capture_snapshot`, `materialize_recurring`,
-///     `reconcile_transfers`, `update_fire_settings`, `update_retirement_profile` y
-///     `update_installation_settings` (las tres últimas: todos sus parámetros son opcionales).
+///     `reconcile_transfers`, `update_fire_settings` y `update_installation_settings` (las dos
+///     últimas: todos sus parámetros son opcionales; `update_retirement_profile` también lo
+///     estaba hasta que 6.0.0 la retiró).
 ///
 /// Es decir: un test que barriera las 41 con `{}` y aceptara «cualquier error» daría verde
 /// aunque el gate no existiera en 35 de ellas. De ahí la tabla.
@@ -2406,9 +2407,6 @@ fn write_probe(name: &str) -> Option<serde_json::Value> {
         "delete_snapshot" => json!({"id": ID}),
         "delete_import" => json!({"id": ID}),
         "update_fire_settings" => json!({"taxes_enabled": true}),
-        // 5.0.0: el plan de jubilación es del usuario del token, así que el gate es por ROL
-        // (`require_mcp_write`), no owner-only.
-        "update_retirement_profile" => json!({"swr_pct": "3.5"}),
         // Fase 6 (issue #87).
         "create_batch" => json!({
             "transactions": [
@@ -2478,11 +2476,12 @@ async fn every_write_tool_rejects_a_viewer_and_the_disabled_toggle() {
     let writes = write_tool_names(&catalog);
     assert_eq!(
         writes.len(),
-        42,
-        "contador de futurefin-mcp-parity §5: 42 tools de escritura (31 hasta la Fase 5; la \
+        41,
+        "contador de futurefin-mcp-parity §5: 41 tools de escritura (31 hasta la Fase 5; la \
          Fase 6 añade create_batch, create_snapshot, update_snapshot, create_allocation_rule, \
          delete_allocation_rule, update_category, delete_category, confirm_transfer_match y \
-         update_installation_settings; 5.0.0 añade update_retirement_profile y update_recurring_rule). Si has añadido o \
+         update_installation_settings; 5.0.0 añade update_retirement_profile y update_recurring_rule; \
+         6.0.0 retira update_retirement_profile). Si has añadido o \
          retirado una, actualiza el contador \
          AQUÍ, en la skill mcp-parity, en .claude/mcp-catalog.md y en .claude/backend-structure.md a la vez: {writes:?}"
     );
@@ -2625,13 +2624,13 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     const SRC: &str = include_str!("../src/mcp/server.rs");
     let blocks = tool_blocks();
 
-    // Contadores de futurefin-mcp-parity §5 (72 / 30 / 42 / 42, a 2026-10-10, 5.0.0:
-    // `update_recurring_rule` — la plantilla recurrente pasa a ser editable).
+    // Contadores de futurefin-mcp-parity §5 (70 / 29 / 41 / 41, 6.0.0: se retiran
+    // `get_retirement_profile` y `update_retirement_profile` con el modelo de jubilación, D-7).
     let read_only = blocks.iter().filter(|b| b.read_only).count();
     let writes = blocks.iter().filter(|b| !b.read_only).count();
-    assert_eq!(blocks.len(), 72, "total de tools (§5 de futurefin-mcp-parity)");
-    assert_eq!(read_only, 30, "tools de lectura + simulate (§5)");
-    assert_eq!(writes, 42, "tools de escritura (§5)");
+    assert_eq!(blocks.len(), 70, "total de tools (§5 de futurefin-mcp-parity)");
+    assert_eq!(read_only, 29, "tools de lectura + simulate (§5)");
+    assert_eq!(writes, 41, "tools de escritura (§5)");
     assert_eq!(
         read_only + writes,
         blocks.len(),
@@ -2639,14 +2638,14 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     );
     assert_eq!(
         SRC.matches("require_mcp_write(&self.state.pool").count(),
-        42,
+        41,
         "el nº de llamadas al gate debe ser EXACTAMENTE el nº de escrituras: una escritura \
          sin gate es un fallo de seguridad (viewer escribiendo, o escritura con el \
          kill-switch apagado); una llamada de más es una lectura que ya no lo es"
     );
     assert_eq!(
         SRC.matches("p.confirm.unwrap_or(false)").count(),
-        19,
+        18,
         "tools con preview/confirm (§5). Toda destructiva nueva debería sumar aquí. Subió de 11 \
          a 14 en la Fase 3 (issue #84): `materialize_recurring`, `reconcile_transfers` y \
          `unreconcile_transfer` eran destructivas SIN preview — dos de ellas irreversibles —, así \
@@ -2657,7 +2656,7 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
          `confirm_transfer_match` ya tiene su preview en OTRA tool — `suggest_transfer_matches` \
          es literalmente la fase 1, y el `match_id` que emite es lo que acota el espacio de \
          acciones alcanzables. 5.0.0 suma `update_recurring_rule` (preview solo con \
-         apply_to=all)"
+         apply_to=all) y `update_retirement_profile`, que 6.0.0 retira"
     );
     // Las 9 que además exigen el token de un solo uso del preview (Fase 3; la 9.ª, 5.0.0). El `confirm`
     // booleano lo escribe el propio modelo, así que por sí solo nunca fue un control: sólo el
@@ -2677,7 +2676,7 @@ fn every_write_tool_in_the_source_calls_require_mcp_write() {
     // Y la auditoría: cada gate abre una fila, y `settled` es el ÚNICO sitio donde se cierra.
     assert_eq!(
         SRC.matches("settled(&self.state.pool, audit").count(),
-        42,
+        41,
         "toda escritura cierra su fila de auditoría con `settled`; sin él la fila se queda en \
          `attempted` y el log calla el desenlace de justo las llamadas que fallaron"
     );
@@ -3132,10 +3131,8 @@ async fn every_preview_shares_the_entity_side_effects_shape() {
         ("delete_allocation_rule", json!({"id": alloc_id})),
         ("delete_category", json!({"id": spare_cat})),
         ("update_installation_settings", json!({"base_currency": "EUR"})),
-        // 5.0.0 (issue #207): mismo criterio que `update_fire_settings`, pero por perfil.
-        ("update_retirement_profile", json!({"swr_pct": "3.5"})),
     ];
-    assert_eq!(cases.len(), 18, "los previews del catálogo (§5 de futurefin-mcp-parity)");
+    assert_eq!(cases.len(), 17, "los previews del catálogo (§5 de futurefin-mcp-parity)");
     for (tool, args) in cases {
         let preview = preview_of(args, tool).await;
         assert_shape(tool, &preview);
@@ -4186,229 +4183,6 @@ async fn mcp_writes_cannot_touch_another_members_rows() {
         .expect("sigue ahí");
     assert_eq!(row["name"], "MSCI World", "{row}");
     assert_eq!(row["current_value"], "10000.0000", "{row}");
-}
-
-/// Las dos tools nuevas del perfil: preview/confirm, merge campo a campo y — lo que las separa de
-/// `update_fire_settings` — **auth por ROL, no owner-only**. El perfil es dato del usuario del
-/// token, así que un `viewer` edita el suyo y nadie el de otro (no hay parámetro para pedirlo).
-#[tokio::test]
-async fn retirement_profile_tools_are_personal_and_preview_before_writing() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    let token = create_token(&app, &owner).await;
-
-    // Lectura: los defaults de 4.15.x.
-    let got = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
-    assert_eq!(got["profile"]["strategy"], "asap", "{got}");
-    assert_eq!(got["profile"]["swr_pct"], "3.5", "{got}");
-    assert_eq!(got["birth_date"], "1990-01-01", "{got}");
-
-    // Preview: valida y enseña before/after, sin persistir.
-    let preview = tool_json(
-        &mcp_post(
-            &app,
-            &token,
-            tool_call(
-                "update_retirement_profile",
-                json!({"strategy": "retire_at_age", "target_retirement_age": 57, "swr_pct": "3.0"}),
-            ),
-        )
-        .await,
-    );
-    assert_eq!(preview["preview"], true, "{preview}");
-    assert_eq!(preview["effects"]["entity"]["before"]["strategy"], "asap");
-    assert_eq!(preview["effects"]["entity"]["after"]["strategy"], "retire_at_age");
-    // El radio es UNA persona, no la instalación: es lo que lo distingue de update_fire_settings.
-    assert_eq!(preview["effects"]["side_effects"]["scope"], "user", "{preview}");
-    let still = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
-    assert_eq!(still["profile"]["strategy"], "asap", "el preview no persiste: {still}");
-
-    // Confirm: escribe, y el merge NO resetea lo que no nombra.
-    let applied = tool_json(
-        &mcp_post(
-            &app,
-            &token,
-            tool_call(
-                "update_retirement_profile",
-                json!({"strategy": "retire_at_age", "target_retirement_age": 57, "swr_pct": "3.0", "confirm": true}),
-            ),
-        )
-        .await,
-    );
-    assert_eq!(applied["applied"], true, "{applied}");
-    let applied2 = tool_json(
-        &mcp_post(
-            &app,
-            &token,
-            tool_call("update_retirement_profile", json!({"coast_stop_age": 40, "confirm": true})),
-        )
-        .await,
-    );
-    let after = &applied2["outcome"]["after"];
-    assert_eq!(after["coast_stop_age"], 40, "{applied2}");
-    assert_eq!(after["target_retirement_age"], 57, "el merge no resetea: {applied2}");
-    assert_eq!(after["swr_pct"], "3.0", "{applied2}");
-
-    // Las mismas cotas que el PATCH HTTP, con el mismo código.
-    let envelope = mcp_post(
-        &app,
-        &token,
-        tool_call("update_retirement_profile", json!({"swr_pct": "9", "confirm": true})),
-    )
-    .await;
-    tool_error(&envelope, "bad_request");
-
-    // `clear_*` y su valor a la vez es una intención contradictoria, no un ganador implícito.
-    let envelope = mcp_post(
-        &app,
-        &token,
-        tool_call(
-            "update_retirement_profile",
-            json!({"coast_stop_age": 30, "clear_coast_stop_age": true}),
-        ),
-    )
-    .await;
-    let body = tool_error(&envelope, "bad_request");
-    assert_eq!(body["code"], "field_set_and_clear", "{body}");
-
-    // Un VIEWER edita el SUYO: el gate es por rol (require_mcp_write), no owner-only… salvo que
-    // `viewer` no es rol de escritura, así que se comprueba con un `member`, que sí lo es, y que
-    // con `update_fire_settings` recibiría un 403.
-    let member = app.register_and_approve_member(&owner, "bob", "member").await;
-    let member_token = create_token_for(&app, &member.cookie).await;
-    let mine = tool_json(
-        &mcp_post(
-            &app,
-            &member_token,
-            tool_call(
-                "update_retirement_profile",
-                json!({"strategy": "coast", "target_retirement_age": 50, "confirm": true}),
-            ),
-        )
-        .await,
-    );
-    assert_eq!(mine["applied"], true, "un member configura SU jubilación: {mine}");
-    // Y no ha tocado la del owner.
-    let owners = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
-    assert_eq!(owners["profile"]["strategy"], "retire_at_age", "{owners}");
-}
-
-/// **Los cinco ejes retirados por el modelo v2 (M4/M6) se aceptan y se ignoran** (5.0.0/A9):
-/// `target_basis`, `clear_target_basis`, `bridge_discount_basis`, `cash_buffer_months` y
-/// `clear_cash_buffer_months` siguen en el schema —los dos params son `deny_unknown_fields` y
-/// borrarlos convertiría en 400 lo que hoy funciona— pero no tienen cotas y no llegan al
-/// dominio: mandarlos junto a un eje real es un 200 normal en el que el eje real aplica y los
-/// retirados no dejan rastro. Al lado, los ejes NUEVOS de v2: `success_threshold_pct`
-/// (load-bearing, ya no deprecado), `coast_mode`/`coast_stop_age`, y el puente dentro de
-/// `pension` con sus defaults al encenderlo sin números.
-#[tokio::test]
-async fn update_retirement_profile_accepts_the_v2_axes_and_ignores_the_deprecated_ones() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    let token = create_token(&app, &owner).await;
-
-    // Los cinco retirados, junto a un eje real: 200, el eje real aplica, los retirados no
-    // aparecen en el perfil publicado (ya no son columnas de `RetirementProfile`).
-    let applied = tool_json(
-        &mcp_post(
-            &app,
-            &token,
-            tool_call(
-                "update_retirement_profile",
-                json!({
-                    "strategy": "retire_at_age",
-                    "target_retirement_age": 60,
-                    "target_basis": "bridge_to_pension",
-                    "clear_target_basis": true,
-                    "bridge_discount_basis": "swr",
-                    "cash_buffer_months": 12,
-                    "clear_cash_buffer_months": true,
-                    "confirm": true
-                }),
-            ),
-        )
-        .await,
-    );
-    assert_eq!(applied["applied"], true, "{applied}");
-    let after = &applied["outcome"]["after"];
-    assert_eq!(after["strategy"], "retire_at_age", "el eje real SÍ aplica: {applied}");
-    assert!(
-        after.get("target_basis").is_none(),
-        "target_basis ya no es una columna del perfil: {applied}"
-    );
-    assert!(
-        after.get("cash_buffer_months").is_none(),
-        "cash_buffer_months ya no es una columna del perfil: {applied}"
-    );
-
-    // `success_threshold_pct` deja de ser «se acepta y se ignora» (V7): decide la fecha, y el
-    // GET lo ecoa.
-    let applied2 = tool_json(
-        &mcp_post(
-            &app,
-            &token,
-            tool_call(
-                "update_retirement_profile",
-                json!({"success_threshold_pct": 90, "confirm": true}),
-            ),
-        )
-        .await,
-    );
-    assert_eq!(applied2["applied"], true, "{applied2}");
-    let got = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
-    assert_eq!(got["profile"]["success_threshold_pct"], 90, "{got}");
-
-    // `coast_mode`/`coast_stop_age`: el modo B hace del stop age un DATO, y el GET lo ecoa.
-    let applied3 = tool_json(
-        &mcp_post(
-            &app,
-            &token,
-            tool_call(
-                "update_retirement_profile",
-                json!({
-                    "strategy": "coast",
-                    "coast_mode": "fixed_stop_age",
-                    "coast_stop_age": 45,
-                    "confirm": true
-                }),
-            ),
-        )
-        .await,
-    );
-    assert_eq!(applied3["applied"], true, "{applied3}");
-    let got = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
-    assert_eq!(got["profile"]["coast_mode"], "fixed_stop_age", "{got}");
-    assert_eq!(got["profile"]["coast_stop_age"], 45, "{got}");
-
-    // El puente vive DENTRO de `pension` (C7): encenderlo sin números rellena los defaults
-    // (max(5, swr+1) % y 7 años).
-    let applied4 = tool_json(
-        &mcp_post(
-            &app,
-            &token,
-            tool_call(
-                "update_retirement_profile",
-                json!({
-                    "pension": {
-                        "monthly_amount_today": "1200",
-                        "starts_at_age": 67,
-                        "bridge_enabled": true
-                    },
-                    "confirm": true
-                }),
-            ),
-        )
-        .await,
-    );
-    assert_eq!(applied4["applied"], true, "{applied4}");
-    let got = tool_json(&mcp_post(&app, &token, tool_call("get_retirement_profile", json!({}))).await);
-    let pension = &got["profile"]["pension"];
-    assert_eq!(pension["bridge_enabled"], true, "{got}");
-    assert!(
-        pension["bridge_max_pct"].is_string(),
-        "el default se rellena al encender el puente sin cifra: {got}"
-    );
-    assert_eq!(pension["bridge_max_years"], 7, "{got}");
 }
 
 /// **`update_asset` puede BORRAR la rentabilidad esperada y la volatilidad** (5.0.0, WP5-2).

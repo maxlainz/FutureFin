@@ -1,78 +1,12 @@
-//! Fase 3.3 — `FireNumberMode` debe rechazar variantes desconocidas (no silenciar a default).
-//! Fase 3.4 (compat) — el alias `annual_expense_adjusted` se conserva para importar backups antiguos.
+//! `PATCH /v1/installation`: el interruptor de escritura MCP y las cotas de la inflación.
 //!
-//! **5.0.0**: `fire_number_mode` dejó de ser del hogar y pasó al perfil de jubilación de cada
-//! usuario (D13), así que los tres tests del modo se hacen contra
-//! `PATCH /v1/auth/me/retirement-profile`. Lo que prueban no ha cambiado —una variante
-//! desconocida se rechaza, el alias legado se acepta, un cambio válido se persiste—: solo la
-//! ruta. Se quedan en este fichero porque siguen siendo el pin del `Deserialize` a mano de
-//! `FireNumberMode`, que es lo que hace que un literal desconocido no caiga a default.
+//! Hasta 5.0.x este fichero también pineaba el `Deserialize` de `FireNumberMode` contra
+//! `PATCH /v1/auth/me/retirement-profile`; el modo y la ruta se retiraron con el modelo de
+//! jubilación en 6.0.0 (D-7).
 
 mod common;
 
 use common::TestApp;
-
-#[tokio::test]
-async fn patch_installation_unknown_fire_number_mode_returns_client_error() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-
-    let resp = app
-        .patch_json_with_cookie(
-            "/v1/auth/me/retirement-profile",
-            serde_json::json!({"fire_number_mode": "foobar"}),
-            &owner.cookie,
-        )
-        .await;
-    // Axum devuelve 422 (Unprocessable Entity) cuando el JSON no se puede deserializar al tipo
-    // target (variante desconocida). Antes el handler aceptaba 200 silenciosamente con default.
-    assert_eq!(
-        resp.status,
-        http::StatusCode::UNPROCESSABLE_ENTITY,
-        "modo desconocido debe ser rechazado (422), recibido {}",
-        resp.status
-    );
-    let body_text = String::from_utf8_lossy(&resp.body);
-    assert!(
-        body_text.contains("unknown variant") && body_text.contains("foobar"),
-        "cuerpo debe nombrar la variante desconocida: {body_text}"
-    );
-}
-
-#[tokio::test]
-async fn patch_installation_accepts_legacy_annual_expense_adjusted_alias() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("bob").await;
-
-    // El alias se mapea silenciosamente al modo actual (`annual_expense`). Soporte a backups antiguos.
-    let resp = app
-        .patch_json_with_cookie(
-            "/v1/auth/me/retirement-profile",
-            serde_json::json!({"fire_number_mode": "annual_expense_adjusted"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(resp.status, http::StatusCode::OK, "alias debe ser aceptado: {resp:?}");
-    let body = resp.json();
-    assert_eq!(body["profile"]["fire_number_mode"], "annual_expense");
-}
-
-#[tokio::test]
-async fn patch_installation_accepts_valid_fire_mode_change() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("carol").await;
-
-    let resp = app
-        .patch_json_with_cookie(
-            "/v1/auth/me/retirement-profile",
-            serde_json::json!({"fire_number_mode": "current_income"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(resp.status, http::StatusCode::OK, "{resp:?}");
-    let body = resp.json();
-    assert_eq!(body["profile"]["fire_number_mode"], "current_income");
-}
 
 #[tokio::test]
 async fn mcp_write_enabled_defaults_true_and_owner_can_toggle() {

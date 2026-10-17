@@ -1,13 +1,9 @@
 import type {
   InstallationAccess,
   ProjectionSeriesApi,
-  RetirementProfileApi,
   SummaryResponse,
 } from "../api/types";
 import { EmptyState } from "../components/EmptyState";
-import { HelpPopover } from "../components/HelpPopover";
-import { HELP_TEXTS } from "../lib/helpTexts";
-import { appUrl } from "../lib/basePath";
 import { MetricCard } from "../components/MetricCard";
 import {
   SummaryBreakdownBlock,
@@ -15,7 +11,7 @@ import {
 } from "../components/charts/summary";
 import { MiniProjection } from "../components/charts/MiniProjection";
 import { ChartLegend } from "../components/charts/ChartLegend";
-import { buildAssetLegendItems, householdMemberColor } from "../lib/chart-legend";
+import { buildAssetLegendItems } from "../lib/chart-legend";
 import {
   METRIC_DASH,
   formatCurrencyAmount,
@@ -31,38 +27,24 @@ import {
 } from "../lib/format";
 import { runwaySwrParenthetical } from "../lib/fire";
 import { formatDeltaCurrency } from "../lib/expenses";
-import { formatDateDmy } from "../lib/dates";
-import { planCardV2, resolvePlanMilestoneCivil } from "../lib/plan-card";
-import { householdPlanLines } from "../lib/household-plan-lines";
-import { TAB_PATH, settingsSubTabPath } from "../lib/navigation";
 
-type LedgerPersonScope = "household" | "mine";
 
 export function SummaryView({
   installation,
-  retirementProfile,
   loading,
   hasMembership,
-  ledgerPersonScope,
   summary,
   summaryBusy,
   projectionSeries,
-  navigate,
   onAddFirstAsset,
   onAddFirstBudgetEntry,
 }: {
   installation: InstallationAccess | null;
-  /** Perfil de jubilación del usuario (5.0.0): de aquí sale el SWR de la tarjeta de Autonomía. */
-  retirementProfile: RetirementProfileApi | null;
   loading: boolean;
   hasMembership: boolean;
-  ledgerPersonScope: LedgerPersonScope;
   summary: SummaryResponse | null;
   summaryBusy: boolean;
   projectionSeries: ProjectionSeriesApi | null;
-  /** Router de la app: la tarjeta «Tu plan» enlaza a «Tu cuenta» y a «Jubilación» cuando falta
-   *  un dato del perfil. */
-  navigate: (path: string, replace?: boolean) => void;
   /**
    * Lleva al formulario de nuevo activo (pestaña Activos con el modal ya abierto). El Resumen
    * no tiene formularios propios, así que su estado vacío delega en el de Activos — pero cae
@@ -156,14 +138,14 @@ export function SummaryView({
   })();
 
   // Runway: el servidor marca `runway_is_indefinite` (y `runway_months` a null) cuando la
-  // retirada anual cabe en el SWR de `fire_settings` (pestaña Jubilación) — la tarjeta sigue
+  // retirada anual cabe en un SWR fijo del 3,5 % (6.0.0; D-22 retira la marca) — la tarjeta sigue
   // siendo relevante (es la mejor noticia posible) y el paréntesis explica el porqué.
   // El guard mira AUSENCIA, no cero: un runway de 0 meses es información (el peor caso posible).
   const runwayIsIndefinite = fh?.runway_is_indefinite === true;
   const showRunwayTile =
     showMetrics && fh && (runwayIsIndefinite || !isAbsentMetric(fh.runway_months));
   const runwayParenthetical = runwayIsIndefinite
-    ? runwaySwrParenthetical(retirementProfile)
+    ? runwaySwrParenthetical()
     : undefined;
 
   // Rendimiento neto: la cifra grande es la REAL (descontada la inflación) y el paréntesis el
@@ -202,60 +184,6 @@ export function SummaryView({
   // Portada de un hogar recién creado: ni ledger ni salud. Una sola llamada a la acción, sin
   // rejillas de ceros ni tres paneles diciendo «Sin datos.».
   const nothingYet = ledgerEmpty && healthEmpty;
-
-  // ── Tarjeta «Tu plan» (D27/U9) y frases del hogar (D32/U10) ───────────────────────────────
-  //
-  // En «Yo» es UNA tarjeta ancha con la ORACIÓN del plan (`planCardV2`, `lib/plan-card.ts`); en
-  // «Hogar» el agregado no tiene plan propio y lo que hay son N frases, una por miembro
-  // (`householdPlanLines`, `lib/household-plan-lines.ts`) — sin cifras ni tarjetas por persona.
-  //
-  // `planMonthLabel` fecha un índice de mes con el mismo ancla que usa el chart (mes 0 = hoy):
-  // sin ancla cae a «mes N» en vez de inventarse una fecha.
-  const planMonthLabel = (monthIndex: number): string => {
-    const civil = resolvePlanMilestoneCivil({
-      monthIndex,
-      anchorDateYmd: projectionSeries?.anchor_date_ymd ?? null,
-    });
-    return civil.ymd ? formatDateDmy(civil.ymd) : `mes ${monthIndex}`;
-  };
-
-  /**
-   * Edad cumplida en un mes de la rejilla, con el MISMO ancla civil que `planMonthLabel`. La
-   * fecha de nacimiento sale de la propia serie (`viewer_birth_date`), que es la que el servidor
-   * usó para resolver el plan; sin ella devuelve `null` y la frase se queda sin su paréntesis de
-   * edad en vez de estimarla restando años (B5).
-   */
-  const planAgeAt = (monthIndex: number): number | null =>
-    resolvePlanMilestoneCivil({
-      monthIndex,
-      anchorDateYmd: projectionSeries?.anchor_date_ymd ?? null,
-      birthDateIso: projectionSeries?.viewer_birth_date ?? null,
-    }).age;
-
-  const cardV2 =
-    hasMembership && ledgerPersonScope === "mine" && (summary?.plan != null || projectionSeries != null)
-      ? planCardV2({
-          plan: summary?.plan,
-          series: projectionSeries,
-          monthLabel: planMonthLabel,
-          ageAt: planAgeAt,
-          currencyIso,
-          targetRetirementAge: retirementProfile?.target_retirement_age ?? null,
-        })
-      : null;
-
-  const householdLines =
-    hasMembership && ledgerPersonScope === "household"
-      ? householdPlanLines(projectionSeries?.members, planMonthLabel)
-      : [];
-
-  const showPlanPanel =
-    hasMembership &&
-    (ledgerPersonScope === "household" ? householdLines.length > 0 : cardV2 != null);
-
-  const goToPlanAction = (target: "account" | "retirement") => {
-    navigate(target === "account" ? settingsSubTabPath("general") : TAB_PATH.retirement);
-  };
 
   const liquidAssetsPctOfTotalAssets =
     showMetrics && summary && fh
@@ -308,124 +236,6 @@ export function SummaryView({
           <MetricCard label="Pasivos totales" value={tl} />
           <MetricCard label="Ratio deuda / activos" helpId="summary.debt_to_assets_ratio" value={dta} />
         </div>
-      ) : null}
-
-      {/* U9/U10 (issue #207) — «Tu plan» pasa de dos tarjetas apiladas a UNA tarjeta ancha en
-          una fila: la ORACIÓN del plan (título, coloreada por su tono), la estrategia + hito
-          secundario (subtítulo) y, a la derecha, el KPI «Éxito del plan». El aviso, si lo hay,
-          va debajo. En Hogar el agregado no tiene plan propio: la tarjeta se sustituye por una
-          lista de FRASES, una por miembro, con el punto de color de su línea del chart — sin
-          cifras ni tarjetas por persona, y sin KPI de éxito: el hogar no tiene plan propio y su
-          «—» con la razón se retiró el 2026-10-10 (las KPI agregadas de arriba no cambian). */}
-      {!nothingYet && showPlanPanel ? (
-        <section className="panel">
-          <div className="panel-head-row">
-            <h3 className="panel-title">
-              {ledgerPersonScope === "household" ? "Planes del hogar" : "Tu plan"}
-            </h3>
-            <HelpPopover
-              title={HELP_TEXTS["summary.plan"].title}
-              body={HELP_TEXTS["summary.plan"].body}
-            />
-          </div>
-          {ledgerPersonScope === "household" ? (
-            <>
-              <ul className="plan-sentence-list bordered-top">
-                {/* B7 — la línea lleva el TONO de esa persona: un miembro infra-financiado o
-                    al que le falta la fecha de nacimiento se leía exactamente igual que uno que
-                    llega, mientras su propia tarjeta sí lo pintaba de rojo. El vocabulario de
-                    tonos es el de la frase del plan (`retirement-sentence--{tone}`). */}
-                {householdLines.map((line, idx) => (
-                  <li
-                    key={line.userId}
-                    className={`plan-sentence-item retirement-sentence--${line.tone}`}
-                  >
-                    <span
-                      className="plan-sentence-dot"
-                      style={{ background: householdMemberColor(idx) }}
-                      aria-hidden
-                    />
-                    {line.text}
-                  </li>
-                ))}
-              </ul>
-            </>
-          ) : cardV2 ? (
-            <>
-              <div className="plan-card-wide bordered-top">
-                <div className="plan-card-wide-main">
-                  <div
-                    className={`plan-card-wide-title${
-                      cardV2.tone === "danger" ? " plan-card-wide-title--danger" : ""
-                    }`}
-                  >
-                    {cardV2.title}
-                  </div>
-                  <div className="plan-card-wide-subtitle">{cardV2.subtitle}</div>
-                </div>
-                {cardV2.success ? (
-                  <div className="plan-card-wide-kpi">
-                    <MetricCard
-                      label={cardV2.success.label}
-                      helpId="summary.success"
-                      value={cardV2.success.value}
-                      parenthetical={cardV2.success.parenthetical}
-                      detail={cardV2.success.detail}
-                      tone={cardV2.success.tone}
-                    />
-                  </div>
-                ) : null}
-                {/* «Capital necesario hoy» — la MISMA cifra que Jubilación y Proyección, al
-                    euro: sale del bloque `plan` del summary, no de un segundo cálculo. Va junto
-                    al éxito porque las dos contestan la misma pregunta desde los dos lados
-                    («¿aguanta?» y «¿cuánto haría falta?»), y sin cifra no se pinta: un guion
-                    mudo se leería como «tu plan no necesita capital». */}
-                {cardV2.neededCapital ? (
-                  <div className="plan-card-wide-kpi">
-                    <MetricCard
-                      label={cardV2.neededCapital.label}
-                      value={cardV2.neededCapital.value}
-                      parenthetical={cardV2.neededCapital.parenthetical}
-                      detail={cardV2.neededCapital.detail}
-                      tone={cardV2.neededCapital.tone}
-                    />
-                  </div>
-                ) : null}
-              </div>
-              {cardV2.warning ? (
-                <div
-                  className={`plan-card-wide-warning${
-                    cardV2.tone === "danger" ? " plan-card-wide-warning--danger" : ""
-                  }`}
-                >
-                  {cardV2.warning.text}
-                  {" · "}
-                  <a
-                    href={appUrl(
-                      cardV2.warning.target === "account"
-                        ? settingsSubTabPath("general")
-                        : TAB_PATH.retirement,
-                    )}
-                    onClick={(e) => {
-                      if (
-                        e.button !== 0 ||
-                        e.metaKey ||
-                        e.altKey ||
-                        e.ctrlKey ||
-                        e.shiftKey
-                      )
-                        return;
-                      e.preventDefault();
-                      goToPlanAction(cardV2.warning!.target);
-                    }}
-                  >
-                    {cardV2.warning.actionLabel}
-                  </a>
-                </div>
-              ) : null}
-            </>
-          ) : null}
-        </section>
       ) : null}
 
       {!nothingYet ? (
