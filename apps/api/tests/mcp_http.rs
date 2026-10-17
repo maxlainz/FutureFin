@@ -194,7 +194,6 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "get_liability_schedule",
             "get_projection",
             "get_projection_bands",
-            "get_retirement_profile",
             "get_settings",
             "get_summary",
             "get_transactions_summary",
@@ -227,7 +226,6 @@ async fn tools_list_returns_exactly_the_v1_catalog() {
             "update_liability",
             "update_planning_flow",
             "update_recurring_rule",
-            "update_retirement_profile",
             "update_snapshot",
             "update_transaction",
             "update_transactions",
@@ -417,7 +415,11 @@ async fn get_projection_bands_matches_http_and_hides_the_liquid_bands_by_default
     // **5.0.0 (modelo v2)**: el campo es `success_of_plan` (antes `success_probability`, que ya no
     // existe en ninguna de las dos superficies — compararlo era una aserción vacua: `Null == Null`).
     // `.get()` en vez de indexar para que un renombrado futuro falle aquí en vez de pasar en silencio.
-    for field in ["success_of_plan", "success_verdict", "success_absent_reason", "success_threshold_pct"] {
+    // 6.0.0 (D-7): `success_verdict` y `success_threshold_pct` se retiraron con el umbral del
+    // perfil; el éxito viaja a null con `success_absent_reason: no_retirement_phase`.
+    assert!(bands["success_of_plan"].is_null(), "{bands}");
+    assert_eq!(bands["success_absent_reason"], "no_retirement_phase", "{bands}");
+    for field in ["success_of_plan", "success_absent_reason", "failures_by_kind"] {
         assert!(bands.get(field).is_some() && http.get(field).is_some(), "{field} falta: {bands} / {http}");
         assert_eq!(bands[field], http[field], "MCP y HTTP citan la misma ejecución ({field}): {bands} / {http}");
     }
@@ -693,8 +695,8 @@ async fn get_settings_returns_installation_and_role() {
     let settings = tool_text_json(&envelope);
     assert_eq!(settings["role"], "owner");
     assert!(settings["installation"]["base_currency"].is_string());
-    // 5.0.0: `fire_settings` es lo COMPARTIDO del hogar; el SWR y los otros tres ejes movidos
-    // viven en `get_retirement_profile` (D13).
+    // 5.0.0: `fire_settings` es lo COMPARTIDO del hogar; el SWR se mudó al perfil de jubilación
+    // (D13), que 6.0.0 retiró (D-7).
     assert!(settings["installation"]["fire_settings"]["taxable_gain_ratio"].is_string());
     assert!(
         settings["installation"]["fire_settings"]["swr_pct"].is_null(),
@@ -2914,20 +2916,6 @@ async fn enumerated_params_publish_a_real_enum_in_the_json_schema() {
             "update_fire_settings",
             "savings_source",
             &["budget", "transactions_avg", "budget_income_real_expense"],
-        ),
-        // 5.0.0: `fire_number_mode` se mudó al perfil de jubilación por usuario (D13).
-        (
-            "update_retirement_profile",
-            "fire_number_mode",
-            &["manual", "annual_expense", "current_income"],
-        ),
-        // El literal retirado "pension_bridge" NO se anuncia (modelo v2, C7): se sigue aceptando
-        // como alias en el deserializador de dominio, pero no aparece en el schema — nadie debe
-        // aprender un nombre que ya no existe.
-        (
-            "update_retirement_profile",
-            "strategy",
-            &["asap", "retire_at_age", "coast", "partial"],
         ),
         ("update_fire_settings", "expense_avg_window_mode", &["data", "calendar"]),
         ("simulate_projection", "view", &["mine", "household"]),

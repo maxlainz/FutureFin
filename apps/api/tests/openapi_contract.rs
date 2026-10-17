@@ -189,176 +189,57 @@ fn no_dangling_schema_references() {
     assert!(colgantes.is_empty(), "$ref sin componente: {colgantes:?}");
 }
 
-/// `PatchRetirementProfileBody` debe anunciar los ENUMS del modelo v2 (`CoastMode`,
-/// `PartialStartMode`, los dos modos de M10/M11), y el objetivo con descuento que el modelo
-/// retiró (`TargetBasis`, `BridgeDiscountBasis`) no debe seguir publicado.
+/// **6.0.0 (D-7): el modelo de jubilación salió del documento entero.** Un componente que la API
+/// ya no sirve y la spec sigue declarando es un cliente generado que lee para siempre un campo
+/// que no existe (como `null`) en vez de un error de compilación que le avise del cambio.
 ///
-/// El fallo original que este test cerraba (antes de la v2): `target_basis` llevaba
-/// `#[schema(value_type = Option<String>)]` heredado del molde de los otros tri-estado, así que
-/// el documento decía «cualquier string» sobre un `Deserialize` que solo aceptaba dos literales.
-/// El modelo v2 retiró el objetivo con descuento entero (M4) — sin el guardián de abajo, sus dos
-/// componentes podrían sobrevivir como `$ref` colgantes que nada referencia, o peor, como un
-/// campo fantasma que un cliente generado sigue pudiendo mandar.
+/// Lo que SIGUE declarado es el contrato de Monte Carlo (`/v1/projection/bands`) y las dos
+/// magnitudes del punto de la serie (`withdrawal`, `unmet_need`).
 #[test]
-fn the_retirement_profile_patch_advertises_the_mode_enums() {
+fn the_retirement_model_is_gone_and_the_bands_contract_is_declared() {
     let doc = doc();
-    let patch = &doc["components"]["schemas"]["PatchRetirementProfileBody"]["properties"];
+    let schemas = &doc["components"]["schemas"];
 
-    // `coast_mode` se refiere al enum, no a un string libre.
-    let coast_mode = patch["coast_mode"].to_string();
-    assert!(
-        coast_mode.contains("CoastMode"),
-        "coast_mode debe referirse al enum CoastMode, no a un string libre: {coast_mode}"
-    );
-    let mut coast_variants: Vec<&str> = doc["components"]["schemas"]["CoastMode"]["enum"]
-        .as_array()
-        .expect("CoastMode publica su lista de variantes")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    coast_variants.sort_unstable();
-    assert_eq!(
-        coast_variants,
-        vec!["fixed_retirement_age", "fixed_stop_age"],
-        "{coast_variants:?}"
-    );
-
-    // `PartialStartMode` no es un campo directo del patch —vive en `partial_retirement.mode`—,
-    // pero utoipa registra todo tipo alcanzable desde un componente publicado: basta con que el
-    // documento lo declare en algún punto y con sus variantes exactas.
-    let mut partial_variants: Vec<&str> = doc["components"]["schemas"]["PartialStartMode"]["enum"]
-        .as_array()
-        .expect("PartialStartMode publica su lista de variantes")
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
-    partial_variants.sort_unstable();
-    assert_eq!(partial_variants, vec!["asap", "at_age"], "{partial_variants:?}");
-
-    // Y los dos componentes del objetivo con descuento retirado no deben seguir publicados.
-    for retired in ["TargetBasis", "BridgeDiscountBasis"] {
-        assert!(
-            doc["components"]["schemas"][retired].is_null(),
-            "'{retired}' es del modelo viejo (objetivo con descuento) y no debería seguir \
-             declarado como componente"
-        );
-    }
-    assert!(
-        patch["target_basis"].is_null(),
-        "PatchRetirementProfileBody.target_basis es del modelo viejo y no debería seguir \
-         declarado"
-    );
-}
-
-/// **El bloque `plan` del Resumen (`SummaryPlan`) y el bloque `plan` de la serie determinista
-/// (`GET /v1/projection/series`, modelo v2) están DECLARADOS.** Un campo que la API sirve y el
-/// documento no describe es un cliente generado que no lo tiene, y aquí la mitad son cifras de
-/// dinero: `null` y `0` significan cosas distintas y el contrato tiene que poder decirlo.
-///
-/// El modelo v2 (5.0.0/WP A1-A6) sustituyó el bloque de solves de la serie entero: el objetivo
-/// con descuento (`bridge_discount_annual_pct`, `pension_coverage_ratio`…) y los nombres del
-/// perfil viejo (`required_contribution_monthly`, `coast_fire_month_index`…) dejaron de
-/// publicarse, y en su lugar la respuesta lleva el bloque `plan` con la fecha que decide el
-/// umbral de éxito, su horquilla de Wilson y el capital necesario. Lo mismo en `bands`: el
-/// colchón de caja (`buffer_*`) murió y el fallo pasó de «solo agotamiento» a tres motivos.
-#[test]
-fn the_plan_block_is_declared_in_the_document() {
-    let doc = doc();
-
-    // `/v1/summary` → `plan`, bajo el modelo v2: el Resumen sigue publicando el mismo resumen de
-    // una frase, pero por debajo lo alimenta ahora el bloque `plan` de la serie (mismos nombres,
-    // `safe_date_month_index`/`success_of_plan`/`success_wilson_low`/`needed_capital_today`) y
-    // añade `plan_state` (`ready`/`pending`/`absent`, el semáforo de simulaciones del apagado
-    // ordenado).
-    let plan_ref = doc["components"]["schemas"]["SummaryResponse"]["properties"]["plan"].to_string();
-    assert!(
-        plan_ref.contains("SummaryPlan"),
-        "SummaryResponse.plan debe referirse al componente SummaryPlan: {plan_ref}"
-    );
-    let plan = &doc["components"]["schemas"]["SummaryPlan"]["properties"];
-    for k in [
-        "strategy",
-        "plan_state",
-        "safe_date_month_index",
-        "jubilacion_month_index",
-        "required_savings_monthly",
-        "underfunded",
-        "absent_reason",
-        "success_of_plan",
-        "success_threshold_pct",
-        "success_wilson_low",
-        "success_verdict",
-        "success_absent_reason",
-        "needed_capital_today",
+    for dead in [
+        "RetirementProfile",
+        "PatchRetirementProfileBody",
+        "RetirementProfileResponse",
+        "SummaryPlan",
+        "SuccessByYearPoint",
+        "FireNumberMode",
+        "CoastMode",
+        "PartialStartMode",
+        "PhaseTransition",
     ] {
-        assert!(!plan[k].is_null(), "SummaryPlan.{k} no está declarado: {plan}");
+        assert!(schemas[dead].is_null(), "el schema {dead} se retiró con D-7");
     }
-    // Y los CINCO nombres del modelo viejo que la v2 retiró de `SummaryPlan`: `retirement_trigger`
-    // (el modelo v2 no distingue un disparador aparte de la fecha), las tres caras de la
-    // probabilidad de la revisión adversarial anterior (`success_probability`,
-    // `never_retired_probability`, `success_given_retired`) —sustituidas por `success_of_plan` /
-    // `success_wilson_low`, que ya vienen del mismo sorteo sin necesitar las otras dos— y
-    // `disposable_monthly` (WP A12), que sobrevivió una versión valiendo SIEMPRE `null` solo
-    // porque la SPA lo declaraba obligatorio: un campo que no puede tomar ningún valor se lee como
-    // «no lo sabemos» y lo cierto es que esa pregunta ya no se hace.
-    for k in [
-        "retirement_trigger",
-        "success_probability",
-        "never_retired_probability",
-        "success_given_retired",
-        "disposable_monthly",
-    ] {
-        assert!(
-            plan[k].is_null(),
-            "SummaryPlan.{k} es del modelo viejo y no debería seguir declarado"
-        );
-    }
+    assert!(
+        doc["paths"]["/v1/auth/me/retirement-profile"].is_null(),
+        "la ruta del perfil se retiró con D-7"
+    );
+    assert!(
+        schemas["SummaryResponse"]["properties"]["plan"].is_null(),
+        "SummaryResponse.plan se retiró con D-7"
+    );
 
-    // `/v1/projection/series` → el bloque `plan` del modelo v2: quién decidió la fecha, el
-    // umbral de éxito, la fecha válida (con su nombre del modelo) y su cota de Wilson, el
-    // capital necesario hoy y su curva por edad, los solves de coast/media jornada y el número
-    // FIRE clásico como referencia informativa.
-    let serie = &doc["components"]["schemas"]["ProjectionSeriesResponse"]["properties"];
+    let serie = &schemas["ProjectionSeriesResponse"]["properties"];
     for k in [
         "safe_date_month_index",
         "success_of_plan",
-        "success_wilson_low",
         "needed_capital_today",
         "needed_capital_curve",
-        "contribution_required_monthly",
-        "coast_stop_month_index",
-        "partial_start_month_index",
-        "success_by_retirement_year",
         "plan_absent_reason",
         "fire_number_classic_today",
-    ] {
-        assert!(
-            !serie[k].is_null(),
-            "ProjectionSeriesResponse.{k} no está declarado"
-        );
-    }
-    // Y los siete nombres del objetivo con descuento y del perfil viejo que la v2 retiró: un
-    // cliente generado contra ellos leería para siempre un campo que ya no existe como `null`,
-    // en vez de un error de compilación que le avisara del cambio de contrato.
-    for k in [
-        "jubilacion_target_net_worth",
+        "jubilacion_month_index",
         "fire_target_series",
-        "bridge_discount_annual_pct",
-        "pension_coverage_ratio",
-        "partial_gap_target",
-        "required_contribution_monthly",
-        "coast_fire_month_index",
     ] {
         assert!(
             serie[k].is_null(),
-            "ProjectionSeriesResponse.{k} es del modelo viejo y no debería seguir declarado"
+            "ProjectionSeriesResponse.{k} se retiró y no debería seguir declarado"
         );
     }
 
-    // `/v1/projection/bands` → el contrato entero de Monte Carlo bajo el modelo v2. Se declara
-    // aquí y no solo en el handler porque es la superficie que un cliente lee ANTES de llamar:
-    // un campo que existe en el JSON y no en la spec es un campo que nadie consume.
-    let bandas = &doc["components"]["schemas"]["ProjectionBandsResponse"]["properties"];
+    let bandas = &schemas["ProjectionBandsResponse"]["properties"];
     for k in [
         "view",
         "months",
@@ -369,14 +250,12 @@ fn the_plan_block_is_declared_in_the_document() {
         "percentiles",
         "points",
         "success_of_plan",
-        "success_threshold_pct",
         "success_wilson_low",
         "success_sampling_error_pp",
-        "success_verdict",
+        "success_absent_reason",
         "failures_by_kind",
         "failure_probability_by_age",
         "any_volatility_declared",
-        "strategy",
         "computed_in_ms",
         "model_note",
     ] {
@@ -385,30 +264,10 @@ fn the_plan_block_is_declared_in_the_document() {
             "ProjectionBandsResponse.{k} no está declarado"
         );
     }
-    // El colchón de caja (`buffer_*`) murió con el modelo v2. Y con el umbral fijo de antes se
-    // fueron las dos lecturas que solo tenían sentido bajo él: `never_retired_probability` (el
-    // modelo v2 no separa «no se jubila» de «se rompe»: las tres son la MISMA cuenta de fallo,
-    // `failures_by_kind`) y `retirement_month_index_percentiles` (la fecha ya no es un percentil
-    // del sorteo — la decide el umbral, un único mes: `safe_date_month_index`).
-    for k in [
-        "buffer_active",
-        "buffer_inactive_reason",
-        "buffer_refills_p50",
-        "buffer_refill_net_total_p50",
-        "buffer_source",
-        "buffer_target_amount",
-        "buffer_months_effective",
-        "buffer_source_rule_id",
-        "buffer_source_asset_name",
-        "never_retired_probability",
-        "retirement_month_index_percentiles",
-        // «Solo SWR» (2026-10-10): las dos lecturas del recorte de una regla de retirada.
-        "months_below_need_p50",
-        "withdrawal_to_need_ratio_p50",
-    ] {
+    for k in ["strategy", "success_threshold_pct", "success_verdict", "never_retired_probability"] {
         assert!(
             bandas[k].is_null(),
-            "ProjectionBandsResponse.{k} es del modelo viejo y no debería seguir declarado"
+            "ProjectionBandsResponse.{k} se retiró y no debería seguir declarado"
         );
     }
     // La semilla es un **string** en la spec: un `u64` como número JSON pierde precisión por
@@ -417,7 +276,7 @@ fn the_plan_block_is_declared_in_the_document() {
         bandas["seed"]["type"], "string",
         "la semilla debe declararse como string: {bandas}"
     );
-    let punto = &doc["components"]["schemas"]["ProjectionBandPoint"]["properties"];
+    let punto = &schemas["ProjectionBandPoint"]["properties"];
     for k in [
         "month_index",
         "net_worth_p10",
@@ -434,55 +293,27 @@ fn the_plan_block_is_declared_in_the_document() {
     }
 
     // `points[]` de la serie: las dos magnitudes del mes. `withdrawal` es lo que se obtuvo y
-    // `unmet_need` lo que la CARTERA no dio — un cliente que no sepa que existe la segunda lee un
-    // plan agotado como un plan cubierto.
-    let punto_serie = &doc["components"]["schemas"]["ProjectionPoint"]["properties"];
+    // `unmet_need` lo que la CARTERA no dio.
+    let punto_serie = &schemas["ProjectionPoint"]["properties"];
     for k in ["withdrawal", "unmet_need"] {
         assert!(
             !punto_serie[k].is_null(),
             "ProjectionPoint.{k} no está declarado"
         );
     }
-    // Retiradas con las reglas de retirada por saldo («solo SWR», 2026-10-10).
-    for k in ["withdrawal_shortfall", "withdrawal_excess"] {
-        assert!(
-            punto_serie[k].is_null(),
-            "ProjectionPoint.{k} se retiró y no debería seguir declarado"
-        );
-    }
-    let perfil = &doc["components"]["schemas"]["RetirementProfile"]["properties"];
-    assert!(
-        !perfil["swr_pct"].is_null() && perfil["withdrawal_rule"].is_null(),
-        "RetirementProfile publica swr_pct y ya no withdrawal_rule: {perfil}"
-    );
-    for dead in ["WithdrawalRule", "WithdrawalRuleKind", "PctSource", "SpendMode"] {
-        assert!(
-            doc["components"]["schemas"][dead].is_null(),
-            "el schema {dead} se retiró con las reglas de retirada"
-        );
-    }
-    // Es un NÚMERO, como el resto de importes del punto (excepción chart-only D4/I3), no un
-    // string decimal: la serie es geometría de chart y el escalar hermano
-    // (`uncovered_deficit_total`) sigue siendo el string que se cita como dinero.
+    // Es un NÚMERO, como el resto de importes del punto (excepción chart-only D4/I3).
     assert_eq!(
         punto_serie["unmet_need"]["type"], "number",
         "ProjectionPoint.unmet_need debe declararse como número: {punto_serie}"
     );
 
-    // Y por miembro del hogar, bajo el modelo v2: por qué este miembro no trae fecha resuelta
-    // (`plan_state` — el agregado no resuelve el sorteo por persona), su mes efectivo de
-    // jubilación y los de sus dos fases (media jornada y pensión con fecha).
-    let miembro = &doc["components"]["schemas"]["HouseholdMemberProjection"]["properties"];
-    for k in [
-        "plan_state",
-        "jubilacion_month_index",
-        "partial_retirement_month_index",
-        "pension_start_month_index",
-    ] {
-        assert!(
-            !miembro[k].is_null(),
-            "HouseholdMemberProjection.{k} no está declarado"
-        );
+    // Por miembro del hogar ya no hay fases ni fecha de jubilación.
+    let miembro = &schemas["HouseholdMemberProjection"]["properties"];
+    for k in ["user_id", "username", "series"] {
+        assert!(!miembro[k].is_null(), "HouseholdMemberProjection.{k} no está declarado");
+    }
+    for k in ["plan_state", "jubilacion_month_index", "pension_start_month_index"] {
+        assert!(miembro[k].is_null(), "HouseholdMemberProjection.{k} se retiró con D-7");
     }
 }
 

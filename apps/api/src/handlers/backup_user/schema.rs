@@ -18,8 +18,11 @@ use crate::handlers::installation::FireSettings;
 /// declarada por activo. Los cuatro ejes que hasta el 12 viajaban dentro de
 /// `installation_snapshot_informative.fire_settings` —`fire_number_mode`,
 /// `fire_number_manual_amount`, `swr_pct`, `horizon_lifespan_age`— salen de ahí y entran en el
-/// perfil; al importar un fichero ≤ 12 se leen de su sitio viejo para SEMBRAR el perfil, y solo
-/// si el usuario que importa no tiene uno. Ver `BackupFireSettings`.
+/// perfil.
+///
+/// **6.0.0 (D-7)** retira el modelo de jubilación sin subir la versión: el export escribe
+/// `retirement_profile: null` y el import ignora el campo y los cuatro ejes legados de un fichero
+/// ≤ 12 (se leen y se descartan). Ver `BackupFireSettings`.
 pub const CURRENT_SCHEMA_VERSION: u32 = 13;
 pub const SUPPORTED_FORMAT_VERSION: u8 = 1;
 pub const MAGIC: &[u8; 4] = b"FFBK";
@@ -531,33 +534,12 @@ pub struct UiPreferences {
     pub projection_focus: Option<String>,
 }
 
-/// Los cuatro ejes FIRE que hasta el schema 12 vivían DENTRO de `fire_settings` y desde 5.0.0
-/// son del perfil de jubilación de cada usuario (D13). Se leen del MISMO objeto JSON para poder
-/// SEMBRAR el perfil al importar un fichero viejo; un export v13 no los escribe.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-pub struct LegacyFireAxes {
-    pub fire_number_mode: Option<crate::handlers::installation::FireNumberMode>,
-    #[serde(with = "rust_decimal::serde::str_option")]
-    pub fire_number_manual_amount: Option<Decimal>,
-    #[serde(with = "rust_decimal::serde::str_option")]
-    pub swr_pct: Option<Decimal>,
-    pub horizon_lifespan_age: Option<u32>,
-}
-
-impl LegacyFireAxes {
-    fn is_empty(&self) -> bool {
-        self.fire_number_mode.is_none()
-            && self.fire_number_manual_amount.is_none()
-            && self.swr_pct.is_none()
-            && self.horizon_lifespan_age.is_none()
-    }
-}
-
-/// `fire_settings` **tal y como viaja en el fichero**, en todas las versiones de schema: lo que
-/// sigue siendo del hogar (`settings`) más los ejes legados que ya no lo son (`legacy`).
+/// `fire_settings` **tal y como viaja en el fichero**, en todas las versiones de schema. Los
+/// cuatro ejes legados que un fichero ≤ 12 lleva dentro (`fire_number_mode`,
+/// `fire_number_manual_amount`, `swr_pct`, `horizon_lifespan_age`) se ignoran al leer: sembraban
+/// el perfil de jubilación, que 6.0.0 retiró (D-7).
 ///
-/// **Por qué serde a mano y no `#[serde(flatten)]`.** Se intentó primero con flatten, y rompió
+/// **Por qué serde a mano y no `#[serde(flatten)]`** (histórico, de cuando se leían los ejes legados). Se intentó primero con flatten, y rompió
 /// TRECE tests de esta misma suite: flatten bufferiza el objeto en el `Content` de serde, y por
 /// ese camino `rust_decimal::serde::str_option` **rechaza un `null` explícito** —
 /// `ContentDeserializer::deserialize_option` mapea el null a `visit_unit()`, que el visitor de
@@ -570,7 +552,6 @@ impl LegacyFireAxes {
 #[derive(Debug, Default)]
 pub struct BackupFireSettings {
     pub settings: FireSettings,
-    pub legacy: LegacyFireAxes,
 }
 
 impl Serialize for BackupFireSettings {
@@ -583,65 +564,8 @@ impl<'de> Deserialize<'de> for BackupFireSettings {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         use serde::de::Error;
         let raw = serde_json::Value::deserialize(d)?;
-        let settings: FireSettings =
-            serde_json::from_value(raw.clone()).map_err(D::Error::custom)?;
-        let legacy: LegacyFireAxes = serde_json::from_value(raw).map_err(D::Error::custom)?;
-        Ok(BackupFireSettings { settings, legacy })
-    }
-}
-
-impl BackupFireSettings {
-    /// Perfil de jubilación reconstruido a partir de los ejes LEGADOS de un fichero ≤ v12.
-    ///
-    /// `None` cuando el fichero no llevaba ninguno (v13, o un v12 con el JSONB ya limpio): en ese
-    /// caso no hay nada que sembrar y el usuario se queda con sus defaults.
-    ///
-    /// **Devuelve un perfil SIN RESOLVER (B3).** Hasta 5.0.0-WP5 esta función terminaba en
-    /// `resolve_retirement_profile(Some(p))` — «para mantener el clamp en un solo sitio», decía
-    /// el comentario que sustituye — y lo que sembraba el importador con ese resultado ERA lo que
-    /// se guardaba en `users.retirement_profile`. El problema no es el clamp (los cuatro ejes se
-    /// siguen acotando aquí, a mano, contra las MISMAS cotas): es que `resolve_retirement_profile`
-    /// también DERIVA — el `bridge_enabled` que el alias `pension_bridge` enciende (y, hasta el
-    /// 2026-10-10, el `pct_source` de una regla de retirada por saldo) — y guardar ese resultado freza esas derivaciones como si el
-    /// usuario las hubiera elegido, en vez de dejarlas para que se calculen en cada lectura. Un
-    /// backup ≤ v12 nunca trae pensión (`LegacyFireAxes` solo tiene los
-    /// cuatro ejes de abajo), así que hoy el efecto observable es nulo — pero el día que este
-    /// sembrado se extienda a más campos, la próxima persona que lo toque no tiene que descubrir
-    /// esta trampa dos veces.
-    pub fn legacy_retirement_profile(
-        &self,
-    ) -> Option<crate::handlers::retirement_profile::RetirementProfile> {
-        if self.legacy.is_empty() {
-            return None;
-        }
-        let mut p = crate::handlers::retirement_profile::default_retirement_profile();
-        if let Some(m) = self.legacy.fire_number_mode {
-            p.fire_number_mode = m;
-        }
-        if self.legacy.fire_number_manual_amount.is_some() {
-            p.fire_number_manual_amount = self.legacy.fire_number_manual_amount;
-        }
-        // Clamp A MANO de los dos ejes numéricos, contra las MISMAS cotas que
-        // `resolve_retirement_profile` aplicaría en lectura — un fichero manipulado a mano
-        // (o de una versión con cotas más laxas) no puede sembrar un SWR de 99 ni un horizonte
-        // de 200 años. `fire_number_mode` es un enum cerrado (no hay nada que acotar) y
-        // `fire_number_manual_amount` no lleva cota de lectura (solo la de ESCRITURA,
-        // `fire_manual_amount_not_positive`, que no aplica aquí: sembrar no es escribir).
-        if let Some(v) = self.legacy.swr_pct {
-            p.swr_pct = v.clamp(
-                rust_decimal::Decimal::ZERO,
-                crate::handlers::retirement_profile::MAX_SWR_PCT,
-            );
-        }
-        if let Some(v) = self.legacy.horizon_lifespan_age {
-            p.horizon_lifespan_age = v.clamp(
-                crate::handlers::installation::MIN_HORIZON_LIFESPAN_AGE,
-                crate::handlers::installation::MAX_HORIZON_LIFESPAN_AGE,
-            );
-        }
-        // Sin `resolve_retirement_profile`: lo que sale de aquí es exactamente lo que el fichero
-        // traía, acotado — nunca una derivación congelada como si fuera una elección.
-        Some(p)
+        let settings: FireSettings = serde_json::from_value(raw).map_err(D::Error::custom)?;
+        Ok(BackupFireSettings { settings })
     }
 }
 
@@ -955,10 +879,11 @@ pub struct BackupPayloadV13 {
     #[serde(default)]
     pub ui_preferences: UiPreferences,
     pub installation_snapshot_informative: InstallationSnapshotInformative,
-    /// Perfil de jubilación del usuario (5.0.0, D13). `null` = el usuario nunca lo configuró y
-    /// su columna era `NULL`; al restaurar se deja `NULL` (defaults), que es el mismo estado.
+    /// Perfil de jubilación del usuario (5.0.0, D13). **Retirado en 6.0.0 (D-7)**: el export
+    /// escribe siempre `null` y el import lo ignora; se conserva como JSON opaco para que un
+    /// fichero 5.0.x siga siendo legible sin subir la versión del schema.
     #[serde(default)]
-    pub retirement_profile: Option<crate::handlers::retirement_profile::RetirementProfile>,
+    pub retirement_profile: Option<serde_json::Value>,
     #[serde(default)]
     pub snapshots: Vec<BackupSnapshot>,
     #[serde(default)]
@@ -1439,10 +1364,7 @@ fn payload_v11_to_v12(p: BackupPayloadV11) -> BackupPayloadV12 {
 
 /// v12 → v13 (5.0.0, #207): un fichero v12 describe un mundo sin volatilidad declarada (todos
 /// los activos deterministas: `None`) y sin perfil de jubilación en el payload. Los cuatro ejes
-/// FIRE que ese fichero llevaba dentro de `fire_settings` NO se convierten aquí en un perfil:
-/// viajan intactos en `BackupFireSettings` y es el IMPORTADOR quien decide si sembrar con ellos
-/// —solo si el usuario que importa no tiene perfil propio—, porque esa condición es estado de la
-/// base, no del fichero.
+/// FIRE que ese fichero llevaba dentro de `fire_settings` se descartan al leer (6.0.0, D-7).
 fn payload_v12_to_v13(p: BackupPayloadV12) -> BackupPayloadV13 {
     BackupPayloadV13 {
         user: p.user,
@@ -1524,15 +1446,11 @@ pub fn migrate_to_current(any: AnyPayload) -> BackupPayload {
 mod tests {
     use super::*;
 
-    /// El `#[serde(flatten)]` de `BackupFireSettings` es la pieza que hace posible sembrar el
-    /// perfil desde un fichero ≤ v12 sin duplicar `FireSettings` entera. Se fija en las DOS
-    /// direcciones porque las dos pueden romperse en silencio: si el flatten dejara de recoger
-    /// los ejes legados, el import de un backup de 4.15.x devolvería a esa persona a los
-    /// defaults sin decir nada; si el export volviera a emitirlos, el fichero llevaría dos
-    /// copias de la misma cifra y la siguiente importación no sabría cuál manda.
+    /// Un `fire_settings` escrito por 4.15.x lleva DENTRO los cuatro ejes que luego fueron del
+    /// perfil de jubilación. Desde 6.0.0 (D-7) se leen y se descartan: lo compartido sigue
+    /// intacto y al escribir no sale ninguno.
     #[test]
-    fn legacy_fire_axes_survive_the_flatten() {
-        // Lo que escribía un servidor 4.15.x: los cuatro ejes DENTRO de fire_settings.
+    fn legacy_fire_axes_are_read_and_dropped() {
         let v12 = serde_json::json!({
             "fire_number_mode": "current_income",
             "fire_number_manual_amount": null,
@@ -1549,25 +1467,9 @@ mod tests {
         });
         let parsed: BackupFireSettings =
             serde_json::from_value(v12).expect("un fire_settings v12 debe parsear");
-        // Lo compartido sigue en `settings`…
         assert!(!parsed.settings.taxes_enabled);
         assert_eq!(parsed.settings.income_avg_window_months, 6);
         assert_eq!(parsed.settings.expense_avg_window_months, 24);
-        // …y los cuatro ejes personales quedan disponibles para sembrar el perfil.
-        assert_eq!(parsed.legacy.swr_pct, Some(Decimal::new(325, 2)));
-        assert_eq!(parsed.legacy.horizon_lifespan_age, Some(95));
-        let seeded = parsed
-            .legacy_retirement_profile()
-            .expect("hay ejes legados: debe salir un perfil");
-        assert_eq!(seeded.swr_pct, Decimal::new(325, 2));
-        assert_eq!(seeded.horizon_lifespan_age, 95);
-        assert_eq!(
-            seeded.fire_number_mode,
-            crate::handlers::installation::FireNumberMode::CurrentIncome
-        );
-
-        // Y al ESCRIBIR nunca salen, ni siquiera si el objeto en memoria los lleva (que es lo
-        // que pasa al reexportar un backup viejo recién importado).
         let out = serde_json::to_value(&parsed).expect("serializa");
         for k in [
             "fire_number_mode",
@@ -1575,20 +1477,14 @@ mod tests {
             "swr_pct",
             "horizon_lifespan_age",
         ] {
-            assert!(out.get(k).is_none(), "v13 no debe emitir `{k}`: {out}");
+            assert!(out.get(k).is_none(), "no se debe emitir `{k}`: {out}");
         }
         assert!(out.get("taxes_enabled").is_some(), "y sí lo compartido: {out}");
-        assert!(
-            BackupFireSettings::default().legacy_retirement_profile().is_none(),
-            "sin ejes legados no hay nada que sembrar"
-        );
     }
 
-    /// Un fichero v12 llega a v13 con volatilidad ausente (determinista) y sin perfil en el
-    /// payload: los ejes legados siguen viajando en `fire_settings` para que el importador
-    /// decida si siembra.
+    /// Un fichero v12 llega a v13 con volatilidad ausente (determinista) y sin perfil.
     #[test]
-    fn migrate_v12_leaves_the_profile_to_the_importer() {
+    fn migrate_v12_has_no_profile() {
         let v12 = BackupPayloadV12 {
             user: BackupUser { username: "u".into(), birth_date: None },
             categories_used: vec![],
@@ -1614,10 +1510,6 @@ mod tests {
                 show_age_mode: "dates".into(),
                 fire_settings: BackupFireSettings {
                     settings: crate::handlers::installation::default_fire_settings(),
-                    legacy: LegacyFireAxes {
-                        swr_pct: Some(Decimal::new(30, 1)),
-                        ..LegacyFireAxes::default()
-                    },
                 },
             },
             snapshots: vec![],
@@ -1631,13 +1523,6 @@ mod tests {
         assert_eq!(v13.assets.len(), 1);
         assert_eq!(v13.assets[0].annual_volatility_percent, None);
         assert!(v13.retirement_profile.is_none());
-        assert_eq!(
-            v13.installation_snapshot_informative
-                .fire_settings
-                .legacy_retirement_profile()
-                .map(|p| p.swr_pct),
-            Some(Decimal::new(30, 1))
-        );
     }
 
     #[test]

@@ -61,8 +61,8 @@ fn point_at(s: &Value, month: u64, field: &str) -> f64 {
         .unwrap_or_else(|| panic!("{field} del mes {month} no es número"))
 }
 
-/// Dos miembros con activos, presupuestos y ESTRATEGIAS distintas. El hogar es la suma exacta de
-/// sus dos vistas `mine`, punto a punto y en todos los agregados escalares.
+/// Dos miembros con activos y presupuestos distintos. El hogar es la suma exacta de sus dos
+/// vistas `mine`, punto a punto y en todos los agregados escalares.
 ///
 /// Se comprueba sobre el horizonte COMÚN (`?months=` explícito) para que las tres respuestas
 /// compartan rejilla: sin él, el hogar corre a `max(horizontes)` y comparar el mes 240 de una
@@ -86,16 +86,6 @@ async fn household_series_is_the_sum_of_each_members_mine_series() {
     asset(&app, &bob, &cat_b, "Indexado B", "12000").await;
     budget(&app, &bob, &inc_b, "2000").await;
     budget(&app, &bob, &exp_b, "1200").await;
-
-    // Estrategias distintas: alice por cruce (default), bob a los 60.
-    let r = app
-        .patch_json_with_cookie(
-            "/v1/auth/me/retirement-profile",
-            json!({"strategy": "retire_at_age", "target_retirement_age": 60}),
-            &bob.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::OK, "perfil de bob: {r:?}");
 
     let q = "?months=360";
     let mine_a = series(&app, &alice.cookie, q).await;
@@ -152,128 +142,42 @@ async fn household_series_is_the_sum_of_each_members_mine_series() {
     let id_b = mine_b["asset_series"][0]["asset_id"].as_str().unwrap();
     assert!(ids.contains(&id_a) && ids.contains(&id_b), "faltan activos: {ids:?}");
 
-    // 3. Lo que no se puede sumar es `null` CON su razón — nunca un 0 ni un campo ausente.
+    // 3. 6.0.0 (D-7): ni el agregado ni sus miembros publican plan de jubilación. Lo que no se
+    //    puede sumar y SÍ sigue existiendo es `null` CON su razón.
     for campo in [
         "jubilacion_month_index",
-        "jubilacion_date_ymd",
-        "jubilacion_age",
-        "jubilacion_series_position",
         "retirement_month_index",
-        "retirement_series_position",
-        "compound_outpaces_true_savings_month_index",
         "strategy",
-        "pension_start_month_index",
-        "partial_retirement_month_index",
-        // 5.0.0 — el bloque «plan»: el agregado no resuelve ninguno.
-        "retirement_date_basis",
-        "success_threshold_pct",
-        "safe_date_month_index",
-        "safe_date_series_position",
-        "safe_date_date_ymd",
-        "safe_date_age",
-        "safe_date_is_approximate",
-        "safe_date_at_100_month_index",
-        "safe_date_at_90_month_index",
+        "plan_absent_reason",
         "success_of_plan",
-        "success_wilson_low",
-        "success_sampling_error_pp",
-        "paths_used",
-        "seed",
-        "needed_capital_today",
-        "needed_capital_absent_reason",
-        "contribution_required_monthly",
-        "contribution_required_search_ceiling",
-        "contribution_underfunded",
-        "coast_stop_month_index",
-        "partial_start_month_index",
+        "needed_capital_curve",
+        "phase_transitions",
         "fire_number_classic_today",
-        "pension_absent_reason",
     ] {
-        assert!(
-            hh.get(campo).map(|v| v.is_null()).unwrap_or(true),
-            "{campo} debería ser null en el agregado: {}",
-            hh[campo]
-        );
+        assert!(hh.get(campo).is_none(), "{campo} se retiró con D-7: {hh}");
     }
-    assert_eq!(
-        hh["fire_number_classic_absent_reason"], "household_aggregate",
-        "{hh}"
-    );
-    assert_eq!(hh["jubilacion_absent_reason"], "household_aggregate", "{hh}");
-    assert_eq!(hh["plan_absent_reason"], "household_aggregate", "{hh}");
+    assert!(hh["compound_outpaces_true_savings_month_index"].is_null(), "{hh}");
     assert_eq!(
         hh["compound_outpaces_true_savings_absent_reason"], "household_aggregate",
         "{hh}"
     );
-    assert_eq!(
-        hh["needed_capital_curve_state"], "unavailable",
-        "sin plan no hay curva, y no la va a haber: {hh}"
-    );
-    assert!(
-        hh["needed_capital_curve"].as_array().unwrap().is_empty(),
-        "sin plan del hogar no hay línea que dibujar: {hh}"
-    );
-    assert!(
-        hh["success_by_retirement_year"].as_array().unwrap().is_empty(),
-        "{hh}"
-    );
-    assert!(
-        hh["phase_transitions"].as_array().unwrap().is_empty(),
-        "las fases son de una persona: {hh}"
-    );
 
-    // 4. `members[]`: una fila por miembro, con SU estrategia y SU hito.
+    // 4. `members[]`: una fila por miembro.
     let members = hh["members"].as_array().expect("members");
     assert_eq!(members.len(), 2, "dos miembros: {members:?}");
-    let by_name = |n: &str| -> Value {
-        members
-            .iter()
-            .find(|m| m["username"] == n)
-            .unwrap_or_else(|| panic!("falta {n} en members: {members:?}"))
-            .clone()
-    };
-    let ma = by_name("alice");
-    let mb = by_name("bob");
-    assert_eq!(ma["strategy"], "asap", "{ma}");
-    assert_eq!(mb["strategy"], "retire_at_age", "{mb}");
-    // La fecha por EDAD es la misma en el agregado que en su propia vista: `members[]` explica
-    // la suma, no la reinterpreta. (La de `alice` no viaja: su estrategia la decidiría el
-    // umbral, y el hogar no resuelve planes — ver el bloque 5.)
-    assert_eq!(
-        mb["jubilacion_month_index"], mine_b["jubilacion_month_index"],
-        "la edad de bob no depende de la vista: {mb} vs {mine_b}"
-    );
-    assert_eq!(mb["jubilacion_age"], 60, "bob se jubila a los 60 por estrategia: {mb}");
-    for m in members {
+    for n in ["alice", "bob"] {
         assert!(
-            m["retirement_month_index"] == m["jubilacion_month_index"],
-            "R8: los dos nombres son el mismo mes: {m}"
+            members.iter().any(|m| m["username"] == n),
+            "falta {n} en members: {members:?}"
         );
+    }
+    for m in members {
         assert!(m["user_id"].is_string(), "{m}");
         assert!(m["warnings"].as_array().is_some(), "{m}");
+        for dead in ["strategy", "jubilacion_month_index", "plan_state"] {
+            assert!(m.get(dead).is_none(), "{dead} se retiró con D-7: {m}");
+        }
     }
-
-    // 5. **El hogar NO resuelve fecha por miembro** (5.0.0). Cada solve estocástico cuesta
-    // segundos y el agregado corre N simulaciones: resolver N planes convertiría la vista más
-    // informativa en la petición más cara de la app. Cada fila lo DICE con su `plan_state`, en
-    // vez de dejar un hueco que se leería como «este miembro no tiene plan».
-    for m in members {
-        assert_eq!(
-            m["plan_state"], "household_not_solved",
-            "el estado es una propiedad de la VISTA, igual para todos: {m}"
-        );
-    }
-    // Lo que sí viaja es la fecha por EDAD de quien la tenga: es un DATO del perfil, no una
-    // búsqueda, así que no cuesta un solo sorteo. `bob` corre `retire_at_age`; `alice` corre
-    // `asap`, cuya fecha la decidiría el umbral — y el hogar no lo resuelve.
-    assert!(
-        ma["jubilacion_month_index"].is_null(),
-        "la fecha de `asap` la decide el umbral, y el hogar no lo resuelve: {ma}"
-    );
-    assert!(
-        !mb["jubilacion_month_index"].is_null(),
-        "la edad de bob es un dato, no una búsqueda: {mb}"
-    );
 
     // 6. El agregado NO publica plan propio.
     assert!(
@@ -309,10 +213,6 @@ async fn a_member_without_data_contributes_zeros_and_still_appears() {
     let members = hh["members"].as_array().expect("members");
     assert_eq!(members.len(), 2, "bob existe aunque no tenga nada: {members:?}");
     let bob = members.iter().find(|m| m["username"] == "bob").expect("bob");
-    assert!(
-        bob["jubilacion_month_index"].is_null(),
-        "sin datos no hay jubilación que alcanzar: {bob}"
-    );
     assert!(bob["assets_depleted_month_index"].is_null(), "{bob}");
 }
 
@@ -378,16 +278,9 @@ async fn every_member_publishes_its_own_series_on_the_same_grid() {
     budget(&app, &bob, &inc_b, "2000").await;
     budget(&app, &bob, &exp_b, "1200").await;
 
-    // Bob vive hasta los 100: su horizonte PROPIO es mayor que el de alice (90 por defecto), que
-    // es justo el caso que `horizon_months` existe para poder contar.
-    let r = app
-        .patch_json_with_cookie(
-            "/v1/auth/me/retirement-profile",
-            json!({"horizon_lifespan_age": 100}),
-            &bob.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::OK, "perfil de bob: {r:?}");
+    // Bob (1992) es dos años más joven que alice (1990): con la misma edad límite (90, fija desde
+    // 6.0.0) su horizonte PROPIO es mayor, que es justo el caso que `horizon_months` existe para
+    // poder contar.
 
     // Sin `?months=`: así el horizonte es el COMÚN derivado (`household_max_lifespan`) y
     // `horizon_months` por miembro tiene algo que decir.
@@ -415,14 +308,14 @@ async fn every_member_publishes_its_own_series_on_the_same_grid() {
         let own = m["horizon_months"].as_u64().expect("horizon_months");
         assert!(own > 0 && own <= common, "horizonte propio {own} vs común {common}: {m}");
     }
-    // Bob (edad límite 100) es quien fija el horizonte común; alice se queda corta.
+    // Bob (el más joven) es quien fija el horizonte común; alice se queda corta.
     let own_a = members.iter().find(|m| m["username"] == "alice").unwrap()["horizon_months"]
         .as_u64()
         .unwrap();
     let own_b = members.iter().find(|m| m["username"] == "bob").unwrap()["horizon_months"]
         .as_u64()
         .unwrap();
-    assert!(own_b > own_a, "bob vive 10 años más: {own_b} vs {own_a}");
+    assert!(own_b > own_a, "bob es más joven: {own_b} vs {own_a}");
     assert_eq!(own_b, common, "el común es el máximo de los propios: {own_b} vs {common}");
 
     // Σ de las series por miembro == la serie agregada, punto a punto y en los dos campos.

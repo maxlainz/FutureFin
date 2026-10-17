@@ -3,9 +3,10 @@
  *
  * Por qué existe: hasta ahora, quien acababa de instalar FutureFin aterrizaba en un Resumen en
  * blanco, con la zona horaria en `UTC` (así que «hoy» podía no ser hoy), la divisa clavada en
- * euros sin forma de cambiarla, la inflación a 0 —lo que hacía que la pestaña Jubilación abriera
- * con un aviso de advertencia antes de que hubiera metido un solo dato— y ninguna pista sobre
- * por dónde empezar.
+ * euros sin forma de cambiarla y ninguna pista sobre por dónde empezar.
+ *
+ * 6.0.0 (D-7): el paso «Tu plan» (fecha de nacimiento y estrategia de jubilación) se retiró con el
+ * modelo de jubilación. La fecha de nacimiento se pide en «Tu cuenta».
  *
  * El asistente no configura la app entera: pide lo mínimo que la app **no puede adivinar** y que,
  * si se queda mal, hace que todas las cifras salgan raras. Todo lo demás se toca luego en Ajustes.
@@ -16,28 +17,9 @@
 
 import { useState } from "react";
 import { apiPatch, apiPost } from "../api/client";
-import type {
-  CategoryRow,
-  InstallationSnapshot,
-  RetirementProfileApi,
-  RetirementProfilePatchApi,
-} from "../api/types";
+import type { CategoryRow, InstallationSnapshot } from "../api/types";
 import { Modal, ModalFormError } from "../components/Modal";
 import { toApiDecimalString } from "../lib/format";
-import {
-  buildOnboardingPlanPatch,
-  emptyOnboardingPlanState,
-  onboardingPlanFields,
-  strategyNeedsBirthDate,
-  validateOnboardingPlan,
-  type OnboardingPlanFieldKey,
-  type OnboardingPlanState,
-} from "../lib/onboarding-plan";
-import {
-  RETIREMENT_STRATEGIES,
-  RETIREMENT_STRATEGY_BLURB,
-  RETIREMENT_STRATEGY_LABEL,
-} from "../lib/retirementProfile";
 
 /** Divisas que acepta el backend (`normalize_currency`). Una sola por instalación: FutureFin no
  *  convierte ni mezcla divisas, así que esto se elige una vez y define toda la contabilidad. */
@@ -57,30 +39,18 @@ function browserTimeZone(): string {
   }
 }
 
-type Step = 1 | 2 | 3 | 4;
+type Step = 1 | 2 | 3;
 
 export function OnboardingWizard({
   open,
   installation,
   assetCategories,
-  userBirthDate,
-  onSaveRetirementProfile,
   onFinished,
   onSkip,
 }: {
   open: boolean;
   installation: InstallationSnapshot;
   assetCategories: CategoryRow[];
-  /** `user.birth_date` de la sesión (`App.tsx`): si ya existe, el paso «Tu plan» la trae
-   *  precargada en vez de pedirla otra vez. */
-  userBirthDate: string | null;
-  /** Mismo helper que usa Jubilación (`saveRetirementProfilePatch` en `App.tsx`): un PATCH
-   *  mínimo a `/v1/auth/me/retirement-profile` que además actualiza el `retirementProfile` en
-   *  memoria y recarga la proyección — así Resumen/Jubilación no se quedan enseñando el plan
-   *  por defecto hasta el siguiente login. */
-  onSaveRetirementProfile: (
-    patch: RetirementProfilePatchApi,
-  ) => Promise<RetirementProfileApi | null>;
   /** Se llama tras marcar el hogar como configurado: App recarga instalación y ledger. */
   onFinished: () => void;
   /** Cierra sin marcar nada. El asistente volverá a salir en la próxima carga. */
@@ -96,20 +66,6 @@ export function OnboardingWizard({
       ? installation.calendar_tz
       : browserTimeZone(),
   );
-
-  // U8: el paso «Tu plan» ya no pregunta inflación ni SWR — se quedan en su default (2,5 % / 3,5 %)
-  // y se cambian luego desde Ajustes → Plan / Jubilación. Lo que pide es lo esencial para tener un
-  // plan: fecha de nacimiento, estrategia y los campos que esa estrategia exige (`onboarding-plan.ts`).
-  const [planState, setPlanState] = useState<OnboardingPlanState>(() => ({
-    ...emptyOnboardingPlanState(),
-    birthDate: userBirthDate ?? "",
-  }));
-  const planEssentials = onboardingPlanFields(planState.strategy);
-  const planIssues = validateOnboardingPlan(planState);
-  const planIssueFor = (field: OnboardingPlanFieldKey): string | null =>
-    planIssues.find((i) => i.field === field)?.message ?? null;
-  const planLabelFor = (id: (typeof planEssentials)[number]["id"]): string =>
-    planEssentials.find((f) => f.id === id)?.label ?? "";
 
   const [assetCategoryId, setAssetCategoryId] = useState(assetCategories[0]?.id ?? "");
   const [assetName, setAssetName] = useState("");
@@ -144,15 +100,6 @@ export function OnboardingWizard({
       });
     }, 2);
 
-  const savePlan = () =>
-    run(async () => {
-      // Un único PATCH mínimo (S12): fecha de nacimiento + estrategia + solo los esenciales que
-      // esa estrategia exige (`buildOnboardingPlanPatch`). El SWR, la inflación, el umbral de
-      // éxito y el resto de supuestos se quedan en su default — se afinan luego desde
-      // Ajustes → Plan / Jubilación, no aquí.
-      await onSaveRetirementProfile(buildOnboardingPlanPatch(planState));
-    }, 3);
-
   const saveFirstAsset = () =>
     run(async () => {
       // Paso opcional: sin nombre o sin valor se pasa de largo sin crear nada.
@@ -163,13 +110,13 @@ export function OnboardingWizard({
         current_value: toApiDecimalString(assetValue),
         is_liquid: assetLiquid,
       });
-    }, 4);
+    }, 3);
 
   return (
     <Modal title="Bienvenido a FutureFin" open={open} onClose={onSkip} wide>
       <div className="onboarding-wizard">
         <ol className="onboarding-steps" aria-label="Pasos de la configuración inicial">
-          {(["Tu hogar", "Tu plan", "Primer activo", "Listo"] as const).map((label, i) => (
+          {(["Tu hogar", "Primer activo", "Listo"] as const).map((label, i) => (
             <li
               key={label}
               className={`onboarding-step ${step === i + 1 ? "is-active" : ""} ${
@@ -232,128 +179,6 @@ export function OnboardingWizard({
         {step === 2 ? (
           <section>
             <p>
-              Con tu fecha de nacimiento y cómo quieres jubilarte, FutureFin ya puede calcular tu
-              plan. Todo lo demás —tasa de retirada, umbral de éxito, pensión indexada…— se
-              afina luego desde Jubilación; aquí basta con lo esencial.
-            </p>
-            <label className="field">
-              <span>
-                Fecha de nacimiento
-                {strategyNeedsBirthDate(planState.strategy) ? "" : " (opcional)"}
-              </span>
-              <input
-                type="date"
-                value={planState.birthDate}
-                onChange={(e) =>
-                  setPlanState((s) => ({ ...s, birthDate: e.target.value }))
-                }
-              />
-              <small className="muted">
-                {planIssueFor("birthDate") ??
-                  (strategyNeedsBirthDate(planState.strategy)
-                    ? "Esta estrategia se dispara por edad: sin fecha de nacimiento no se puede simular tal y como la has elegido."
-                    : /* copy_fixes #23 de la revisión — sin fecha de nacimiento el horizonte
-                         cae al fallback de 30 años (`fallback_no_demographics`), no solo se
-                         pierde la edad en pantalla: es una simulación distinta, no un adorno. */
-                      "Sin ella el plan se simula sobre un horizonte fijo de 30 años. Puedes añadirla más tarde desde «Tu cuenta».")}
-              </small>
-            </label>
-
-            <div
-              className="retirement-mode-grid retirement-strategy-grid"
-              role="radiogroup"
-              aria-label="Estrategia de jubilación"
-            >
-              {RETIREMENT_STRATEGIES.map((s) => (
-                <label
-                  key={s}
-                  className={`retirement-mode-card ${planState.strategy === s ? "is-active" : ""}`}
-                >
-                  <input
-                    type="radio"
-                    name="onboarding_retirement_strategy"
-                    className="sr-only"
-                    checked={planState.strategy === s}
-                    onChange={() => setPlanState((prev) => ({ ...prev, strategy: s }))}
-                  />
-                  <span className="retirement-mode-name">{RETIREMENT_STRATEGY_LABEL[s]}</span>
-                  <span className="retirement-mode-sub">{RETIREMENT_STRATEGY_BLURB[s]}</span>
-                </label>
-              ))}
-            </div>
-
-            {planState.strategy === "retire_at_age" || planState.strategy === "coast" ? (
-              <label className="field">
-                <span>{planLabelFor("target_retirement_age")}</span>
-                <input
-                  inputMode="numeric"
-                  value={planState.targetRetirementAge}
-                  placeholder="p. ej. 60"
-                  autoComplete="off"
-                  onChange={(e) =>
-                    setPlanState((s) => ({ ...s, targetRetirementAge: e.target.value }))
-                  }
-                />
-                {planIssueFor("targetRetirementAge") ? (
-                  <small className="muted">{planIssueFor("targetRetirementAge")}</small>
-                ) : null}
-              </label>
-            ) : null}
-
-            {planState.strategy === "partial" ? (
-              <div className="field-row">
-                <label className="field">
-                  <span>{planLabelFor("partial_start_age")}</span>
-                  <input
-                    inputMode="numeric"
-                    value={planState.partialStartAge}
-                    placeholder="p. ej. 55"
-                    autoComplete="off"
-                    onChange={(e) =>
-                      setPlanState((s) => ({ ...s, partialStartAge: e.target.value }))
-                    }
-                  />
-                  {planIssueFor("partialStartAge") ? (
-                    <small className="muted">{planIssueFor("partialStartAge")}</small>
-                  ) : null}
-                </label>
-                <label className="field">
-                  <span>{planLabelFor("partial_income")}</span>
-                  <input
-                    inputMode="decimal"
-                    value={planState.partialIncome}
-                    placeholder="p. ej. 800"
-                    autoComplete="off"
-                    onChange={(e) =>
-                      setPlanState((s) => ({ ...s, partialIncome: e.target.value }))
-                    }
-                  />
-                  {planIssueFor("partialIncome") ? (
-                    <small className="muted">{planIssueFor("partialIncome")}</small>
-                  ) : null}
-                </label>
-              </div>
-            ) : null}
-
-            <div className="asset-form-actions">
-              <button type="button" className="btn ghost" onClick={() => setStep(1)} disabled={busy}>
-                Atrás
-              </button>
-              <button
-                type="button"
-                className="btn primary"
-                onClick={() => void savePlan()}
-                disabled={busy || planIssues.length > 0}
-              >
-                Continuar
-              </button>
-            </div>
-          </section>
-        ) : null}
-
-        {step === 3 ? (
-          <section>
-            <p>
               Añade tu primera cuenta o inversión para que el Resumen deje de estar vacío. Puedes
               saltarte este paso y hacerlo luego desde la pestaña Activos.
             </p>
@@ -406,7 +231,7 @@ export function OnboardingWizard({
               </>
             )}
             <div className="asset-form-actions">
-              <button type="button" className="btn ghost" onClick={() => setStep(2)} disabled={busy}>
+              <button type="button" className="btn ghost" onClick={() => setStep(1)} disabled={busy}>
                 Atrás
               </button>
               <button type="button" className="btn primary" onClick={() => void saveFirstAsset()} disabled={busy}>
@@ -416,7 +241,7 @@ export function OnboardingWizard({
           </section>
         ) : null}
 
-        {step === 4 ? (
+        {step === 3 ? (
           <section>
             <p>Ya está. Esto es lo que tienes por delante:</p>
             <ul className="onboarding-summary">
@@ -438,9 +263,8 @@ export function OnboardingWizard({
               </li>
             </ul>
             <p>
-              Tu plan vive en Jubilación: <strong>{RETIREMENT_STRATEGY_LABEL[planState.strategy]}</strong>.
-              Cambia la estrategia, la tasa de retirada o cualquier otro supuesto cuando quieras
-              desde ahí.
+              Añade tu fecha de nacimiento en «Tu cuenta»: con ella la proyección llega hasta los
+              90 años en vez de a un horizonte fijo de 30.
             </p>
             <p className="muted">
               Tu hogar ya tiene un juego de categorías para empezar. Cámbialas, bórralas o añade

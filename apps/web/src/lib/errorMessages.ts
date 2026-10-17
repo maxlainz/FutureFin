@@ -480,40 +480,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   ids_do_not_match_scope:
     "El nuevo orden no coincide con las reglas que hay ahora. Recarga la página e inténtalo otra vez.",
 
-  // ── Plan de jubilación por usuario (5.0.0 / modelo v2) ────────────────────────────────
-  strategy: "Esa estrategia de jubilación no existe.",
-  target_retirement_age_required:
-    "Esa estrategia necesita que digas a qué edad quieres jubilarte.",
-  retirement_age_out_of_range:
-    "La edad de jubilación tiene que estar entre los 18 años y tu edad límite del horizonte.",
-  coast_mode: "Ese modo de coast no existe.",
-  success_threshold_out_of_range:
-    "La probabilidad de éxito exigida tiene que estar entre el 80 % y el 100 %.",
-  pension_age_out_of_range:
-    "La edad a la que empieza la pensión tiene que estar entre los 50 años y tu edad límite del horizonte.",
-  pension_amount_not_positive: "El importe de la pensión debe ser mayor que cero.",
-  pension_fraction_out_of_range:
-    "La parte de la pensión que se cobra en media jornada debe estar entre 0 y 1.",
-  bridge_max_pct_out_of_range:
-    "La tasa máxima del puente hasta la pensión tiene que ser mayor que 0 y como mucho el 20 %.",
-  bridge_max_pct_not_above_swr:
-    "La tasa máxima del puente hasta la pensión tiene que ser mayor que tu tasa de retirada segura: si no, no adelanta nada.",
-  bridge_max_years_out_of_range:
-    "Los años máximos del puente hasta la pensión tienen que estar entre 1 y 20.",
-  coast_stop_age_required:
-    "El modo «edad fija» de coast necesita que digas a qué edad dejas de aportar.",
-  coast_stop_age_out_of_range:
-    "La edad a la que dejas de aportar en coast tiene que estar entre los 18 años y tu edad de jubilación (o tu edad límite del horizonte si aún no la has fijado).",
-  partial_age_out_of_range:
-    "La edad a la que empieza la media jornada tiene que estar entre los 18 años y tu edad límite del horizonte.",
-  partial_start_age_required:
-    "El modo «a una edad» de la media jornada necesita que digas a qué edad la empiezas.",
-  partial_not_before_retirement:
-    "La media jornada tiene que empezar antes de la jubilación total.",
-  partial_income_negative: "El ingreso de la media jornada no puede ser negativo.",
-  expense_basis: "Esa base de gasto para la media jornada no es válida.",
-  partial_retirement_required:
-    "«Media jornada» necesita que declares la fase parcial: a qué edad empieza y con qué ingreso.",
+  // ── Escrituras con `clear_*` (tri-estado por MCP) ─────────────────────────────────────
   field_set_and_clear:
     "Has pedido a la vez fijar y borrar el mismo campo. Elige una de las dos cosas.",
 
@@ -523,13 +490,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
   household_read_only:
     "La vista del hogar es solo de lectura para esta acción. Cambia a «Yo» y vuelve a intentarlo.",
 
-  // ── Ajustes del hogar y del plan ──────────────────────────────────────────────────────
-  swr_out_of_range: "La tasa de retirada segura debe estar entre 0 y 6 %.",
-  fire_number_mode: "Esa forma de fijar el número FIRE no es válida.",
-  fire_manual_amount_required:
-    "Has elegido fijar el número FIRE a mano, pero falta la cifra.",
-  fire_manual_amount_not_positive:
-    "El número FIRE fijado a mano debe ser mayor que cero.",
+  // ── Ajustes del hogar ──────────────────────────────────────────────────────
   savings_source: "Ese origen del ahorro no es válido.",
   avg_window_invalid:
     "Esa ventana del promedio no es válida. Elige 3, 6 o 12 meses, el año en curso o todo el histórico.",
@@ -556,8 +517,6 @@ export const ERROR_MESSAGES: Record<string, string> = {
   tax_brackets_not_increasing:
     "Los límites de los tramos deben ir siempre a más. Corrige el que se repite o baja.",
   inflation_out_of_range: "La inflación anual debe estar entre -2 y 50 %.",
-  horizon_lifespan_age_out_of_range:
-    "La edad límite del horizonte debe estar entre 85 y 105 años.",
   taxable_gain_ratio_out_of_range:
     "La fracción de plusvalía gravable debe estar entre 0 y 1 (por ejemplo, 0,5).",
   apr_out_of_range:
@@ -636,8 +595,6 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Ese cambio de ingreso cae fuera del horizonte que estás proyectando.",
   income_step_date_out_of_horizon:
     "Esa fecha de cambio de ingreso queda fuera del horizonte que estás proyectando.",
-  retirement_expense_not_positive:
-    "El gasto anual en jubilación debe ser mayor que cero.",
   one_off_amount_not_positive:
     "El importe del gasto puntual debe ser mayor que cero.",
   one_off_amount_required:
@@ -663,16 +620,10 @@ export const ERROR_MESSAGES: Record<string, string> = {
   invalid_seed:
     "Esa semilla no es válida: tiene que ser un número entero sin signo.",
 
-  // Escenarios «¿y si…?» del perfil de jubilación (5.0.0, §E). Solo llegan por MCP: la SPA
+  // Escenarios «¿y si…?» de `simulate_projection` (5.0.0, §E). Solo llegan por MCP: la SPA
   // explora GUARDANDO la configuración (D30), así que estas frases las lee quien pilota
   // FutureFin desde Claude o desde la API a mano — pero se traducen igual, porque el catálogo
   // es el único sitio donde vive lo que ve una persona.
-  profile_overrides_empty:
-    "El escenario no cambia ni un dato de tu plan de jubilación. Indica al menos un valor distinto o quita el supuesto.",
-  profile_overrides_no_op:
-    "Los valores del escenario son los que ya tienes guardados, así que la simulación saldría idéntica. Cambia alguno.",
-  swr_pct_set_twice:
-    "Has indicado la tasa de retirada segura dos veces en el mismo escenario. Déjala en un solo sitio.",
   income_pause_timing_ambiguous:
     "Indica cuándo empieza la pausa de ingresos de una sola forma: el mes o la fecha, no las dos.",
   income_pause_months_zero:
@@ -683,8 +634,6 @@ export const ERROR_MESSAGES: Record<string, string> = {
     "Ese mes de inicio de la pausa queda fuera del horizonte que estás proyectando.",
   income_pause_date_out_of_horizon:
     "Esa fecha de inicio de la pausa queda fuera del horizonte que estás proyectando.",
-  solve_no_op:
-    "Has pedido calcular cuánto gasto extra aguanta tu fecha de jubilación y a la vez lo has desactivado. Pídelo o quítalo del escenario.",
 
   // ── Parámetros de consulta ────────────────────────────────────────────────────────────
   // La app nunca los provoca: manda siempre valores válidos. Existen porque desde 4.0.0 la API

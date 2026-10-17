@@ -43,16 +43,17 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   `http::request::Parts` hasta el `RequestContext` de cada tool. Fallo → 401/403 JSON
   `{error, code, message}` (el `ErrorBody` del API, con su código estable); **solo el 401** añade
   `WWW-Authenticate` (ver la nota del challenge en la sección OAuth).
-- **Tools de lectura — 29**, más `simulate_projection`, que tiene bullet propio: **30 con
-  `read_only_hint = true`** de las 72 del catálogo. Diecinueve se enumeran aquí (las 10 iniciales en
+- **Tools de lectura — 28**, más `simulate_projection`, que tiene bullet propio: **29 con
+  `read_only_hint = true`** de las 70 del catálogo (6.0.0: `get_retirement_profile` retirada).
+  La enumeración de abajo es histórica (5.x) en lo que toca al perfil. Diecinueve se enumeran aquí (las 10 iniciales en
   este bullet, las 9 del issue #2 en el siguiente), la vigésima es `get_allocation_resolution` (bullet
   de la cascada, más abajo) y las **siete de la Fase 6** tienen bloque propio al final de la sección.
   **Los contadores no se cuentan a mano**: los congela
   `mcp_write.rs::every_write_tool_in_the_source_calls_require_mcp_write` (un `#[test]` sin BD que
-  trocea `server.rs`), y son los mismos de `futurefin-mcp-parity` §5 — **72 tools / 30 lectura /
-  42 escritura / 19 con preview-confirm / 9 con `confirm_token` / 19 con `impact`** (5.0.0/WP4:
-  `get_retirement_profile` y `update_retirement_profile`; WP6b: `get_projection_bands`;
-  2026-10-10: `update_recurring_rule`). Verificación de
+  trocea `server.rs`), y son los mismos de `futurefin-mcp-parity` §5 — **70 tools / 29 lectura /
+  41 escritura / 18 con preview-confirm / 9 con `confirm_token` / 18 con `impact`** a 6.0.0
+  (5.0.0/WP4 añadió `get_retirement_profile` y `update_retirement_profile`, que 6.0.0/D-7 retira;
+  WP6b: `get_projection_bands`; 2026-10-10: `update_recurring_rule`). Verificación de
   un vistazo:
   `grep -c '#\[tool(' apps/api/src/mcp/server.rs` y
   `grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs`.
@@ -355,8 +356,8 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   rmcp): `title` legible, `open_world_hint = false` (el servidor solo toca su propia DB) y
   `read_only_hint = true` en las lecturas. Sin ellas un cliente conforme al spec asume el peor
   caso (escritura destructiva). Test: `tools_list_exposes_annotations_on_every_tool`. Recuentos
-  reproducibles: `grep -c 'read_only_hint = true'` → **30**, `grep -c 'destructive_hint = true'`
-  → **28** (`apps/api/src/mcp/server.rs`, medido el 2026-09-03 con 5.0.0; eran 28 y 27 tras la
+  reproducibles: `grep -c 'read_only_hint = true'` → **29**, `grep -c 'destructive_hint = true'`
+  → **28** (`apps/api/src/mcp/server.rs`, recontado en 6.0.0; 30/28 el 2026-09-03 con 5.0.0; eran 28 y 27 tras la
   Fase 6 de 4.4.0, y 21 y 22 en 4.0.0).
   **Dos reclasificaciones a `destructive_hint = true` en 4.0.0** — `destructive_hint` es lo que un
   cliente MCP conforme usa para decidir si pide permiso al humano, así que declararlo mal no es un
@@ -452,7 +453,7 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
     sobra se mueve a un campo de procedencia o al `instructions`. Medida barata, del fixture
     generado (que publica `description_len` por tool):
     `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
-    → **hoy (2026-10-10) `72 23984 548`**, margen 16 (histórico: `68 23975 596` medido en `feat/175-176-fin-del-surplus-cash`, 4.12.1: la muerte de
+    → **hoy (6.0.0, F2-2) `70 22462 509`**, margen 1.538 (2026-10-10: `72 23984 548`; histórico: `68 23975 596` medido en `feat/175-176-fin-del-surplus-cash`, 4.12.1: la muerte de
     `surplus_cash` movió las descripciones de `delete_asset` y `get_allocation_resolution` y el
     total subió +101 sobre los `23874` de la ronda anterior; era `52 21319 596` al cerrar la Fase 5).
     **La Fase 6 gastó casi todo el margen**: las 16 tools nuevas llevaron el crudo a **28.884**
@@ -829,7 +830,7 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   guardias del PATCH viven en la **core** (`rule_patch_empty`, `rule_patch_conflict`): el `clear_*`
   ya no gana en silencio sobre el campo puesto. Catálogo total tras el tren 4.4.0 completo: **68 tools de entonces** (28 con
   `read_only_hint = true` + 40 de escritura) — cifra **histórica**, no un recuento vivo: hoy son
-  **72 (30 + 42)**. El comando que lo recuenta
+  **70 (29 + 41)** a 6.0.0. El comando que lo recuenta
   (`grep -c '#\[tool(' apps/api/src/mcp/server.rs`) vive en §catálogo, junto a su valor actual —
   aquí solo estorbaría, porque una medición fechada con un comando vivo al lado se lee como si el
   comando devolviera ese número. Congelado
@@ -870,7 +871,8 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   histórica), y `list_liabilities` publica `plan_expired_with_balance` + la regla de visibilidad
   nueva (#145: el vencido con saldo vivo se sirve marcado). Todo por las cores compartidas; el
   catálogo congelado (`mcp-catalog.json`) se regeneró conscientemente.
-- **5.0.0 / WP4 (issue #207) — 68 → 70 tools: el plan de jubilación es de cada persona.** Dos tools
+- **5.0.0 / WP4 (issue #207) — 68 → 70 tools: el plan de jubilación es de cada persona.**
+  (**Retiradas en 6.0.0, F2-2/D-7** — ver la entrada de 6.0.0 al final de la lista.) Dos tools
   nuevas, ambas sobre el usuario DEL TOKEN y sin parámetro de scope (no hay forma de pedir el de
   otro):
   - **`get_retirement_profile`** (lectura, `NoParams`): el perfil ya resuelto —defaults y clamps
@@ -1347,6 +1349,19 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   548`** (margen 16), medido con
   `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`.
   Fixture `mcp-catalog.json` regenerado (`git diff release/5.0.0 -- apps/api/tests/fixtures/mcp-catalog.json` lista qué entradas se movieron).
+- **6.0.0 / F2-2 (D-7) — 72 → 70 tools: fuera el modelo de jubilación.** Bajas:
+  `get_retirement_profile`, `update_retirement_profile` (paridad: su ruta HTTP
+  `/v1/auth/me/retirement-profile` desaparece a la vez). Actualizadas: `simulate_projection` pierde
+  `swr_pct`, `retirement_annual_expense`, `profile_overrides` y `solve`, y sus KPIs pierden todo lo
+  del plan; `get_projection` deja de publicar `jubilacion_*`/bloque «plan»/número FIRE;
+  `get_projection_bands` pierde `strategy`/`success_threshold_pct`/`success_verdict` y el éxito
+  viaja a `null` con `success_absent_reason: "no_retirement_phase"` (igual en el eje
+  `monte_carlo` de `simulate_projection`); `get_summary` pierde `plan`; `get_budget` pierde los
+  equivalentes «de jubilación». `instructions` reescrito sin el plan. **Gap de paridad abierto**:
+  la fecha de nacimiento ya no tiene escritor MCP (`update_retirement_profile` la aceptaba); por
+  HTTP sigue `PATCH /v1/auth/me`. Contadores `futurefin-mcp-parity` §5 → **70/29/41/41/18/9/41/18**.
+  Presupuesto: `python3 -c "import json;t=json.load(open('apps/api/tests/fixtures/mcp-catalog.json'))['tools'];l=[x['description_len'] for x in t];print(len(t),sum(l),max(l))"`
+  → `70 22462 509`. Fixture `mcp-catalog.json` y `error-codes.json` regenerados.
 - **Paridad con la API HTTP (norma)**: el catálogo de arriba es superficie derivada de la API —
   cualquier cambio en rutas/handlers obliga a pasar la evaluación de paridad MCP ANTES de
   mergear (¿tool nueva/actualizada, u omisión deliberada registrada?). El criterio de decisión,
