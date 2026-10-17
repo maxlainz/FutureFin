@@ -59,7 +59,7 @@ jobs:
   #   - `needs:` NO sirve: solo enlaza jobs DENTRO del mismo workflow, y CI vive en
   #     ci.yml.
   #   - `on: workflow_run` NO sirve: ci.yml se dispara con `push: branches:
-  #     [main, dev]`, nunca con tags, así que empujar un tag no produce ninguna
+  #     [main]`, nunca con tags, así que empujar un tag no produce ninguna
   #     ejecución de CI a la que encadenarse. Cambiar ci.yml para que corriera
   #     también en tags solo duplicaría el trabajo (mismo commit, mismos tests) y
   #     dejaría el `workflow_dispatch` de reconstrucción sin cubrir.
@@ -257,8 +257,8 @@ jobs:
             echo "Ejecuciones de CI sobre ${SHA}:"
             printf '%s\n' "${runs}" | sed 's/^/  /'
 
-            # Un mismo commit puede tener varias ejecuciones (el push a dev y el
-            # push a main son el mismo SHA). Basta UNA en rojo para no publicar.
+            # Un mismo commit puede tener varias ejecuciones (p. ej. un rerun o un
+            # dispatch). Basta UNA en rojo para no publicar.
             # Las canceladas se ignoran: cancelar una ejecución redundante es un
             # acto deliberado, no un fallo.
             if printf '%s\n' "${runs}" \
@@ -288,7 +288,8 @@ jobs:
       #
       # La regla: NO se construye vX.Y.Z hasta que el tag inmediatamente anterior tenga su
       # GitHub Release — que este mismo workflow crea SOLO tras empujar la imagen, así que
-      # es el marcador fiable de «imagen publicada» (verificado: 38 tags = 38 Releases).
+      # es el marcador fiable de «imagen publicada» (re-verificable: `git ls-remote --tags origin
+      # | wc -l` contra `gh release list --limit 1000 | wc -l`).
       #
       # Si el run del tag anterior sigue en marcha, se espera (les separa un build multi-arch
       # de ~2 h; sondeo cada 2 min, tope 165 min). Si NO hay ningún run de este workflow en
@@ -634,21 +635,19 @@ jobs:
 
       # ── El add-on de Home Assistant apunta a la versión recién publicada ─────
       # `addon/futurefin/config.yaml` declara `version:`, y el Supervisor usa ese
-      # número como tag de la imagen (`ghcr.io/maxlainz/futurefin:X.Y.Z`). Si no se
+      # número como tag de la imagen (`image:` de config.yaml, en Docker Hub). Si no se
       # sube, la tienda de add-ons se queda clavada en la versión anterior para
       # siempre. Por eso el bump lo hace el mismo run que publica.
       #
       # Va por la CONTENTS API y no por `git push`: los dos checkouts de este
       # workflow usan `persist-credentials: false`, así que no hay credencial en el
-      # working tree con la que empujar. La API escribe el commit directamente sobre
-      # `main` con el GITHUB_TOKEN del run.
+      # working tree con la que empujar. La API escribe el commit con el token de la
+      # App (ver REQUISITO abajo).
       #
       # Corre AQUÍ, al final, cuando la imagen ya está verificada en el registry y el
-      # Release creado: nunca se anuncia en la tienda una versión que no existe.
-      #
-      # No hay bucle: un push hecho con GITHUB_TOKEN no dispara workflows (GitHub lo
-      # impide para evitar recursión). El `[skip ci]` del mensaje es cinturón y
-      # tirantes, no la garantía.
+      # Release creado: nunca se anuncia en la tienda una versión que no existe. Por
+      # eso exige también `dockerhub == 'true'`: sin Docker Hub la imagen sale solo a
+      # GHCR y el add-on apuntaría a una etiqueta inexistente.
       #
       # Si este paso falla, la imagen y el Release YA están fuera: el add-on se queda
       # una versión por detrás y se arregla con un PR normal que suba el `version:`.
@@ -663,14 +662,14 @@ jobs:
       # previo. El [skip ci] del mensaje sigue evitando la reentrada: un push de una App
       # SÍ dispara workflows (a diferencia del GITHUB_TOKEN), pero [skip ci] los corta.
       - name: Token de la App para el bump del add-on
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag)
+        if: steps.images.outputs.dockerhub == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag))
         id: addon_bump_token
         uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.ADDON_BUMP_APP_ID }}
           private-key: ${{ secrets.ADDON_BUMP_APP_PRIVATE_KEY }}
       - name: Bump de la versión del add-on en main
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag)
+        if: steps.images.outputs.dockerhub == 'true' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.create_tag))
         env:
           GH_TOKEN: ${{ steps.addon_bump_token.outputs.token }}
           TAG: ${{ steps.ref.outputs.tag }}

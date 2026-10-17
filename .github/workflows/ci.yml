@@ -94,9 +94,10 @@ jobs:
             # Los commits de la rama del PR (el checkout de un PR es su merge ref).
             mensajes="$(git log --format=%B "origin/$BASE..HEAD")"
           else
-            # Push a main (o dispatch): el commit en la punta — un squash arrastra
-            # los mensajes de la rama, así que esto caza lo que se colara al mergear.
-            mensajes="$(git log -1 --format=%B HEAD)"
+            # Push a main (o dispatch): lo que entró con la punta — un squash arrastra
+            # los mensajes de la rama; con merge commit (Dependabot) HEAD^1..HEAD
+            # incluye además los commits del segundo padre.
+            mensajes="$(git log --format=%B HEAD^1..HEAD)"
           fi
           if printf '%s\n' "$mensajes" | grep -niE '^(co-authored-by:[[:space:]]*claude\b|claude-session:)|generated with \[claude code\]'; then
             echo "::error::hay atribución en un mensaje de commit (líneas arriba). Reescribe el mensaje (amend/reword) antes de mergear — la norma vive en .claude/git-and-releases.md §Sin atribuciones."
@@ -109,7 +110,7 @@ jobs:
           if [ "$EVENTO" = "pull_request" ]; then
             identidades="$(git log --format='%an <%ae>%n%cn <%ce>' "origin/$BASE..HEAD")"
           else
-            identidades="$(git log -1 --format='%an <%ae>%n%cn <%ce>' HEAD)"
+            identidades="$(git log --format='%an <%ae>%n%cn <%ce>' HEAD^1..HEAD)"
           fi
           if printf '%s\n' "$identidades" | grep -niE 'anthropic\.com|^claude '; then
             echo "::error::hay un commit autorado o comiteado con identidad de asistente (líneas arriba). Reescribe con la identidad del owner (git commit --amend --reset-author tras configurar user.name/user.email) — incidente documentado en el issue #194."
@@ -181,6 +182,10 @@ jobs:
           node-version: "24"
       - name: npm ci
         run: npm ci
+      # `npm ci` no compara los package.json de los workspaces con el lock: un PR puede
+      # anunciar `^5` e instalar 4.x con todo en verde (issue #243). `npm ls` lo marca «invalid».
+      - name: Manifiestos y lockfile coinciden
+        run: npm ls --workspaces --include-workspace-root --depth=0
       - name: typecheck
         run: npm run typecheck:web
       # lint y Vitest existían desde siempre en package.json pero nunca corrían en

@@ -25,7 +25,15 @@ Versioning follows [Semantic Versioning](https://semver.org/).
   mergear un PR mientras corría la CI de un release la cancelaba, y el gate trata «ninguna
   ejecución en verde» como fallo.
 - **El bump del add-on nunca baja de versión**: un rerun de un release viejo con uno más nuevo ya
-  publicado dejaba el add-on apuntando a la imagen anterior.
+  publicado dejaba el add-on apuntando a la imagen anterior. Y solo se hace si la imagen salió a
+  Docker Hub, que es de donde tira el Supervisor.
+- **`attribution-scan` pasa a check obligatorio** del ruleset «Proteger main» (no lo era, aunque
+  la documentación decía que bloqueaba), y en push a `main` mira también los commits del segundo
+  padre de un merge commit.
+- **El job `web` comprueba que los `package.json` casan con el lockfile** (`npm ls`): un PR podía
+  anunciar una versión e instalar otra con todo en verde (issue #243).
+- Documentación del ritual de release al día: sin la rama `dev` retirada, el bump del add-on con
+  el token de la App, y las excepciones conocidas del historial sin atribuciones.
 
 ## [5.0.0] - 2026-10-17
 
