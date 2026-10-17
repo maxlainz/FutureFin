@@ -1003,7 +1003,7 @@ cualquier otro. Desde 5.0.0, **toda mutación de las cinco tablas del ledger** �
 `owner_user_id == usuario de sesión` y devuelve **403 `not_row_owner`**, por HTTP y por MCP.
 
 - **Una sola puerta, no un `if` por handler**: `require_row_owner` / `not_row_owner`
-  (`handlers/person_view.rs:23-41`). Los cinco módulos la importan y la llaman en el PATCH y en el
+  (`handlers/person_view.rs`). Los cinco módulos la importan y la llaman en el PATCH y en el
   DELETE; las sentencias `DELETE` además rebindan el dueño (`AND owner_user_id = $3`) como cinturón
   y tirantes.
 - **El rol `owner` NO salta la regla.** Ser dueño de la instalación no es ser dueño de la fila, y hay
@@ -1029,7 +1029,20 @@ MCP, un `curl` o la propia SPA con un bug seguían pudiendo escribir la fila de 
 producto que solo vive en el frontend no es una promesa.
 **Breaks if violated**: un handler nuevo que se olvide la puerta reabre la escritura cruzada en
 silencio — la clase de fallo que D2 ya documenta para las lecturas, pero ahora con pérdida de datos.
-Regresión: `apps/api/tests/ledger_ownership.rs` (5 tests) + `mcp_write.rs` / `mcp_confirm_and_impact.rs`.
+Regresión: `apps/api/tests/ledger_ownership.rs` + `mcp_write.rs` / `mcp_confirm_and_impact.rs`.
+
+**Condicional a `shared_finances` desde 6.0** (RFC Planes D-16, «permisos y visualización, no
+propiedad»). `installation.shared_finances` (owner-only, default `false`) abre la escritura cruzada:
+con el interruptor encendido, `require_row_owner` —ahora `async`, y sigue siendo la ÚNICA puerta—
+deja a cualquier rol que escribe (`owner`/`member`) mutar cualquier fila de las cinco tablas, previews
+de borrado incluidos, y el `reorder` admite `?view=household`. **La fila conserva su
+`owner_user_id`**: la puerta devuelve el dueño de la fila y es ese el que rebindan los `UPDATE`/`DELETE`
+(cinturón contra una fila que cambie de manos entre el SELECT y la escritura), e I1 sigue
+verificándose por dueño. El `viewer` sigue sin escribir: la puerta comprueba el rol vivo además de
+la superficie. Apagado, todo lo de arriba rige sin cambios (y sus tests siguen siendo el modo por
+defecto). Regresión del modo encendido: `ledger_ownership.rs::shared_finances_*` y
+`mcp_write.rs::shared_finances_toggle_and_cross_member_writes_via_mcp`. Las lecturas NO cambian en
+F3a: `view=mine` sigue siendo el default; la simulación única del hogar es F3b.
 
 ### D24. Un solo trigger de jubilación por simulación: SIEMPRE el mes forzado (5.0.0, plan #207 D17; reescrita 2026-09-06 para el modelo de jubilación v2)
 

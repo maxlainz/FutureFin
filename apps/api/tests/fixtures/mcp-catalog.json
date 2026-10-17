@@ -1338,8 +1338,8 @@
         "$.purchase_price": "pattern=\"^\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "9e1335a8dd6c",
-      "description_len": 399,
-      "description_sha256_12": "42e396df860f",
+      "description_len": 426,
+      "description_sha256_12": "e108809a29f2",
       "name": "update_asset",
       "properties": [
         "annual_volatility_percent",
@@ -1367,8 +1367,8 @@
         "$.expected_annual_return_percent": "pattern=\"^-?\\\\d+(\\\\.\\\\d+)?$\" type=[\"null\",\"string\"]"
       },
       "constraints_sha256_12": "4d33fcf99be9",
-      "description_len": 382,
-      "description_sha256_12": "f1dbacd24c9b",
+      "description_len": 409,
+      "description_sha256_12": "bf54db195993",
       "name": "update_asset_value",
       "properties": [
         "asset_id",
@@ -1505,16 +1505,18 @@
         "$.base_currency": "enum=[\"EUR\",\"GBP\",\"USD\"] type=[\"null\",\"string\"]",
         "$.calendar_tz": "type=[\"null\",\"string\"]",
         "$.confirm": "type=[\"boolean\",\"null\"]",
+        "$.shared_finances": "type=[\"boolean\",\"null\"]",
         "$.show_age_mode": "enum=[\"ages\",\"dates\"] type=[\"null\",\"string\"]"
       },
-      "constraints_sha256_12": "d48b812c3fc7",
-      "description_len": 205,
-      "description_sha256_12": "7023b6fa32e3",
+      "constraints_sha256_12": "7d0132059741",
+      "description_len": 296,
+      "description_sha256_12": "3a5245b88686",
       "name": "update_installation_settings",
       "properties": [
         "base_currency",
         "calendar_tz",
         "confirm",
+        "shared_finances",
         "show_age_mode"
       ],
       "required": []

@@ -619,7 +619,8 @@ pub(crate) async fn patch_planning_flow_core(
     let Some(current) = row else {
         return Err(ApiError::NotFound);
     };
-    require_row_owner(current.owner_user_id, user_id)?;
+    let write_owner =
+        require_row_owner(&state.pool, iid, current.owner_user_id, user_id).await?;
 
     let new_cat = body.category_id.unwrap_or(current.category_id);
     if new_cat != current.category_id {
@@ -739,7 +740,7 @@ pub(crate) async fn patch_planning_flow_core(
     .bind(body.enabled.unwrap_or(current.enabled))
     .bind(id)
     .bind(iid)
-    .bind(user_id)
+    .bind(write_owner)
     .fetch_one(&state.pool)
     .await?;
 
@@ -791,7 +792,8 @@ pub(crate) async fn delete_planning_flow_core(
     .bind(iid)
     .fetch_optional(&state.pool)
     .await?;
-    require_row_owner(owner.ok_or(ApiError::NotFound)?, user_id)?;
+    let write_owner =
+        require_row_owner(&state.pool, iid, owner.ok_or(ApiError::NotFound)?, user_id).await?;
 
     let res = sqlx::query(
         r#"DELETE FROM planning_flows
@@ -799,7 +801,7 @@ pub(crate) async fn delete_planning_flow_core(
     )
     .bind(id)
     .bind(iid)
-    .bind(user_id)
+    .bind(write_owner)
     .execute(&state.pool)
     .await?;
 

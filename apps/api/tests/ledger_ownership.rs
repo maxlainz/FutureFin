@@ -16,6 +16,12 @@
 //! El caso del `reorder` de reglas es distinto y está aparte: reordenar en `household` renumeraba
 //! de golpe las cascadas de TODOS los miembros — la única mutación que tocaba filas ajenas por
 //! diseño. Pasa a ser 400 `household_read_only`.
+//!
+//! **6.0.0 (RFC Planes D-16) — los dos modos.** Todo lo anterior es el modo por defecto
+//! (`installation.shared_finances = false`). Con «finanzas compartidas» encendido —interruptor
+//! owner-only— cualquier miembro con rol de escritura puede editar, borrar y reordenar las filas
+//! de los demás, y **la fila conserva su `owner_user_id`**: es permiso, no propiedad. Los `viewer`
+//! siguen sin escribir en los dos modos. Los tests `shared_finances_*` cubren ese modo.
 
 mod common;
 
@@ -294,4 +300,206 @@ async fn reordering_allocation_rules_is_per_member_only() {
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
     assert_eq!(r.json().as_array().expect("rules array").len(), 1, "{r:?}");
+}
+
+// ---------------------------------------------------------------------------
+// 6.0.0 (RFC Planes D-16) — «finanzas compartidas»
+// ---------------------------------------------------------------------------
+
+async fn set_shared(app: &TestApp, owner: &LoggedInOwner, on: bool) {
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            serde_json::json!({"shared_finances": on}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(r.json()["installation"]["shared_finances"], on, "{r:?}");
+}
+
+async fn owner_of(app: &TestApp, table: &str, id: &str) -> Option<uuid::Uuid> {
+    let id: uuid::Uuid = id.parse().expect("uuid");
+    sqlx::query_scalar(&format!("SELECT owner_user_id FROM {table} WHERE id = $1"))
+        .bind(id)
+        .fetch_optional(&app.pool)
+        .await
+        .expect("owner query")
+}
+
+/// Solo el owner de la instalación toca el interruptor, y nace apagado.
+#[tokio::test]
+async fn shared_finances_defaults_off_and_only_the_installation_owner_toggles_it() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let member = app.register_and_approve_member(&owner, "bob", "member").await;
+
+    let got = app.get_with_cookie("/v1/installation", &member.cookie).await;
+    assert_eq!(got.json()["installation"]["shared_finances"], false, "{got:?}");
+
+    let r = app
+        .patch_json_with_cookie(
+            "/v1/installation",
+            serde_json::json!({"shared_finances": true}),
+            &member.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::FORBIDDEN, "un member no lo enciende: {r:?}");
+
+    set_shared(&app, &owner, true).await;
+    let got = app.get_with_cookie("/v1/installation", &member.cookie).await;
+    assert_eq!(got.json()["installation"]["shared_finances"], true, "{got:?}");
+}
+
+/// Encendido: un `member` edita y borra las filas del owner en las cinco tablas, y cada fila
+/// sigue siendo del owner. Apagado otra vez: vuelve el 403 `not_row_owner` de siempre.
+#[tokio::test]
+async fn shared_finances_lets_members_edit_and_delete_any_row_keeping_its_owner() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let member = app.register_and_approve_member(&owner, "bob", "member").await;
+    let [asset, liab, entry, flow, rule] = seed_ledger(&app, &owner, "alice").await;
+
+    set_shared(&app, &owner, true).await;
+
+    let patches: Vec<(&str, String, &String, serde_json::Value)> = vec![
+        ("assets", format!("/v1/assets/{asset}"), &asset, serde_json::json!({"name": "compartido"})),
+        ("liabilities", format!("/v1/liabilities/{liab}"), &liab, serde_json::json!({"label": "compartido"})),
+        ("budget_entries", format!("/v1/budget/entries/{entry}"), &entry, serde_json::json!({"amount": "1"})),
+        ("planning_flows", format!("/v1/planning/flows/{flow}"), &flow, serde_json::json!({"title": "compartido"})),
+        ("allocation_rules", format!("/v1/allocation-rules/{rule}"), &rule, serde_json::json!({"notes": "compartido"})),
+    ];
+    for (table, path, id, body) in &patches {
+        let r = app.patch_json_with_cookie(path, body.clone(), &member.cookie).await;
+        assert_eq!(r.status, http::StatusCode::OK, "PATCH {path} compartido: {r:?}");
+        assert_eq!(
+            owner_of(&app, table, id).await,
+            Some(owner.user_id),
+            "PATCH {path}: la fila conserva su dueño"
+        );
+    }
+
+    // Apagado: el mismo PATCH vuelve a ser 403 — el interruptor es vivo, no una marca de alta.
+    set_shared(&app, &owner, false).await;
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/assets/{asset}"),
+            serde_json::json!({"name": "otra vez"}),
+            &member.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::FORBIDDEN, "{r:?}");
+    assert_eq!(r.json()["code"], "not_row_owner", "{r:?}");
+
+    // Una regla NO sumidero del owner, para poder borrarla sin `remainder_required`.
+    let extra = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            serde_json::json!({"target_asset_id": asset, "kind": "fixed", "amount": "100"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(extra.status, http::StatusCode::CREATED, "{extra:?}");
+    let extra_rule = extra.json()["id"].as_str().expect("rule id").to_string();
+
+    set_shared(&app, &owner, true).await;
+    for path in [
+        format!("/v1/allocation-rules/{extra_rule}"),
+        format!("/v1/liabilities/{liab}"),
+        format!("/v1/budget/entries/{entry}"),
+        format!("/v1/planning/flows/{flow}"),
+        format!("/v1/assets/{asset}"),
+    ] {
+        let r = app.delete_with_cookie(&path, &member.cookie).await;
+        assert_eq!(r.status, http::StatusCode::NO_CONTENT, "DELETE {path} compartido: {r:?}");
+    }
+    assert_eq!(owner_of(&app, "assets", &asset).await, None, "borrado de verdad");
+}
+
+/// Un `viewer` sigue sin escribir en los dos modos: el interruptor da permiso a los ROLES que
+/// escriben, no a todo el que ve.
+#[tokio::test]
+async fn shared_finances_never_lets_a_viewer_write() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let viewer = app.register_and_approve_member(&owner, "carol", "viewer").await;
+    let [asset, _liab, _entry, flow, _rule] = seed_ledger(&app, &owner, "alice").await;
+
+    for on in [false, true] {
+        set_shared(&app, &owner, on).await;
+        let r = app
+            .patch_json_with_cookie(
+                &format!("/v1/assets/{asset}"),
+                serde_json::json!({"name": "visor"}),
+                &viewer.cookie,
+            )
+            .await;
+        assert_eq!(r.status, http::StatusCode::FORBIDDEN, "shared={on}: {r:?}");
+        let d = app
+            .delete_with_cookie(&format!("/v1/planning/flows/{flow}"), &viewer.cookie)
+            .await;
+        assert_eq!(d.status, http::StatusCode::FORBIDDEN, "shared={on}: {d:?}");
+    }
+}
+
+/// Encendido, el reorden en vista de hogar SÍ se admite (apagado sigue siendo 400
+/// `household_read_only`, ver `reordering_allocation_rules_is_per_member_only`). Cada regla
+/// conserva su dueño y I1 sigue mirando la cascada de cada persona por separado.
+#[tokio::test]
+async fn shared_finances_allows_household_reorder_across_members() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let member = app.register_and_approve_member(&owner, "bob", "member").await;
+    let [asset_a, _, _, _, sink_a] = seed_ledger(&app, &owner, "alice").await;
+    let [_, _, _, _, sink_b] = seed_ledger(&app, &member, "bob").await;
+    let fixed_a = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules",
+            serde_json::json!({"target_asset_id": asset_a, "kind": "fixed", "amount": "100"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(fixed_a.status, http::StatusCode::CREATED, "{fixed_a:?}");
+    let fixed_a = fixed_a.json()["id"].as_str().expect("id").to_string();
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules/reorder?view=household",
+            serde_json::json!({"ids": [fixed_a, sink_a, sink_b]}),
+            &member.cookie,
+        )
+        .await;
+    assert_eq!(r.json()["code"], "household_read_only", "apagado: {r:?}");
+
+    set_shared(&app, &owner, true).await;
+
+    // I1 por dueño: el sumidero de Alice delante de su regla fija sigue siendo ilegal.
+    let r = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules/reorder?view=household",
+            serde_json::json!({"ids": [sink_a, fixed_a, sink_b]}),
+            &member.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{r:?}");
+    assert_eq!(r.json()["code"], "sink_must_be_last", "{r:?}");
+
+    let r = app
+        .post_json_with_cookie(
+            "/v1/allocation-rules/reorder?view=household",
+            serde_json::json!({"ids": [sink_b, fixed_a, sink_a]}),
+            &member.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let order: Vec<String> = r
+        .json()
+        .as_array()
+        .expect("rules")
+        .iter()
+        .map(|x| x["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(order, vec![sink_b.clone(), fixed_a.clone(), sink_a.clone()]);
+    assert_eq!(owner_of(&app, "allocation_rules", &fixed_a).await, Some(owner.user_id));
+    assert_eq!(owner_of(&app, "allocation_rules", &sink_b).await, Some(member.user_id));
 }

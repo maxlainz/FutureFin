@@ -339,7 +339,8 @@ El segundo da el reparto por fichero: `allocation_rules` ×4, `transactions/crud
 Semántica no negociable, y **sigue sin cambiar**: `view` es un filtro de presentación, **no** una
 frontera de autorización — cualquier miembro puede leer los datos del hogar pidiendo
 `?view=household`. Lo que 5.0.0 sí añade es una frontera **de escritura**, que es otra cosa: toda
-mutación del ledger exige ser el dueño de la fila (403 `not_row_owner`, `person_view.rs:23-41`) y
+mutación del ledger exige ser el dueño de la fila (403 `not_row_owner`, `person_view.rs::require_row_owner`;
+condicional desde 6.0 a `installation.shared_finances`) y
 `POST /v1/allocation-rules/reorder` rechaza la vista del hogar con 400 `household_read_only`
 (`allocation_rules.rs:1034`). Ver `futurefin-architecture-contract` D2/D21.
 
@@ -505,6 +506,7 @@ NOT warm it; warm-up happens only after login, see futurefin-architecture-contra
 | `show_age_mode` | setup + PATCH | `dates` \| `ages` | `dates` | Whether the projection X axis shows calendar dates or the viewer's age. |
 | `annual_inflation_assumption_percent` | PATCH only | sent as a **string** (`"2.5"`); empty string → `0`; must parse as decimal, bounds **[−2, 50]** desde 4.9.0/#146 (deflación sostenida admitida) | `2.5` para filas NUEVAS desde 4.9.0/#146 (migración `20260901130000`; las existentes conservan su valor — la mayoría `0`, el default histórico) | Annual % que indexa el **GASTO del bucle** (regular y de jubilación, eje `(k−1)/12` — 4.9.0/#139; los INGRESOS quedan planos a propósito) y el **target FIRE móvil** — `target(month_index) = base × (1+pct/100)^(month_index/12) + término_deuda` (`fire_target_at_month_index`). Con pct negativo, gasto y objetivo DECRECEN y el deflactor de presentación es > 1. Semantics owned by futurefin-fire-domain-reference. |
 | `fire_settings` | PATCH only | JSONB, shape below | column nullable; `NULL` → defaults applied on read (`resolve_fire_settings`) | FIRE target computation config. |
+| `shared_finances` | PATCH only (+ MCP `update_installation_settings`) | bool | `FALSE` (column `NOT NULL DEFAULT FALSE`, migración `20261022120000`) | «Finanzas compartidas» (6.0, RFC Planes D-16): **permiso**, no propiedad. Encendido, `person_view::require_row_owner` deja a cualquier rol que escribe (`owner`/`member`) mutar cualquier fila del ledger (y `reorder` admite `?view=household`); la fila conserva su `owner_user_id`. `viewer` nunca escribe. Leído de la DB en cada escritura cruzada (vivo). Las lecturas no cambian aún (`view=mine` sigue siendo el default). Owner-only, como todo el PATCH. |
 | `mcp_write_enabled` | PATCH only | bool | `TRUE` (column `NOT NULL DEFAULT TRUE`, migración `20260818120000`) | Kill-switch **vivo** de las tools de escritura del servidor MCP (issue #3): `require_mcp_write` lo lee de la DB en cada llamada de escritura → apagarlo corta la escritura en el siguiente request sin reiniciar (`FUTUREFIN_MCP_ENABLED` sigue siendo el kill-switch de `/mcp` entero, en el entorno; este es un **DB setting**, no una env var — deliberado: tiene toggle en la GUI, Ajustes → Integraciones). Las lecturas MCP no lo consultan. |
 
 ### `fire_settings` JSONB shape — **recortado en 5.0.0**
@@ -832,6 +834,8 @@ Env/compose/entrypoint rows re-verified **2026-08-16 against v3.0.0**, the two O
 rows (`FUTUREFIN_PUBLIC_URL`, `FUTUREFIN_MCP_ENABLED`) **2026-08-17 against v3.1.0**, and the
 `mcp_write_enabled` installation-setting row **2026-08-18** (issue #3; re-verify with
 `grep -n "mcp_write_enabled" apps/api/src/handlers/installation.rs apps/api/src/mcp/auth.rs`).
+`shared_finances` installation-setting row **2026-10-17** (6.0 F3a; re-verify with
+`grep -n "shared_finances" apps/api/src/handlers/person_view.rs apps/api/src/handlers/installation.rs`).
 **§1.2 and every `DATABASE_URL` claim re-verified 2026-08-22 against v4.0.0**, which RETIRED the
 external-database mode (`exec_api_external`, `automigrate_*`, `FUTUREFIN_DB_MODE=external` and
 `FUTUREFIN_EXTERNAL_WAIT_SECS` are gone from `apps/api/docker-entrypoint.sh`).

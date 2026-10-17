@@ -4490,3 +4490,107 @@ async fn update_asset_clears_the_return_and_the_volatility() {
     assert_eq!(a["annual_volatility_percent"], "18.0000", "{a}");
     assert!(a["expected_annual_return_percent"].is_null(), "borrada sigue borrada: {a}");
 }
+
+/// **6.0.0 (RFC Planes D-16)** — «finanzas compartidas» por MCP: el interruptor vive en
+/// `update_installation_settings` (owner-only, con preview) y `get_settings` lo expone; encendido,
+/// las tools de escritura de un `member` llegan a las filas de otro —incluido el preview de
+/// `delete_asset` y su `confirm_token`— porque comparten la MISMA puerta de fila que el HTTP.
+#[tokio::test]
+async fn shared_finances_toggle_and_cross_member_writes_via_mcp() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let member = app.register_and_approve_member(&owner, "bob", "member").await;
+    let owner_token = create_token(&app, &owner).await;
+    let member_token = create_token_for(&app, &member.cookie).await;
+
+    let cat = app.create_category(&owner, "asset", "Indexados").await;
+    let created = app
+        .post_json_with_cookie(
+            "/v1/assets",
+            json!({"category_id": cat, "name": "MSCI World", "current_value": "10000"}),
+            &owner.cookie,
+        )
+        .await;
+    let asset_id = created.json()["id"].as_str().expect("asset id").to_string();
+
+    let settings =
+        tool_json(&mcp_post(&app, &member_token, tool_call("get_settings", json!({}))).await);
+    assert_eq!(settings["installation"]["shared_finances"], false, "{settings}");
+
+    // Un member no lo enciende (owner-only dentro de la core).
+    let envelope = mcp_post(
+        &app,
+        &member_token,
+        tool_call(
+            "update_installation_settings",
+            json!({"shared_finances": true, "confirm": true}),
+        ),
+    )
+    .await;
+    tool_error(&envelope, "forbidden");
+
+    // Preview del owner: before/after, sin persistir.
+    let preview = tool_json(
+        &mcp_post(
+            &app,
+            &owner_token,
+            tool_call("update_installation_settings", json!({"shared_finances": true})),
+        )
+        .await,
+    );
+    assert_eq!(preview["effects"]["entity"]["before"]["shared_finances"], false, "{preview}");
+    assert_eq!(preview["effects"]["entity"]["after"]["shared_finances"], true, "{preview}");
+    let envelope = mcp_post(
+        &app,
+        &member_token,
+        tool_call("update_asset", json!({"asset_id": asset_id, "name": "x"})),
+    )
+    .await;
+    assert_eq!(
+        tool_error(&envelope, "forbidden")["code"],
+        "not_row_owner",
+        "el preview no persiste"
+    );
+
+    let done = tool_json(
+        &mcp_post(
+            &app,
+            &owner_token,
+            tool_call(
+                "update_installation_settings",
+                json!({"shared_finances": true, "confirm": true}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(done["applied"], true, "{done}");
+    let settings =
+        tool_json(&mcp_post(&app, &member_token, tool_call("get_settings", json!({}))).await);
+    assert_eq!(settings["installation"]["shared_finances"], true, "{settings}");
+
+    // Encendido: el member edita el activo del owner y la fila sigue siendo del owner.
+    tool_json(
+        &mcp_post(
+            &app,
+            &member_token,
+            tool_call(
+                "update_asset_value",
+                json!({"asset_id": asset_id, "current_value": "12000"}),
+            ),
+        )
+        .await,
+    );
+    let owner_now: uuid::Uuid =
+        sqlx::query_scalar("SELECT owner_user_id FROM assets WHERE id = $1")
+            .bind(asset_id.parse::<uuid::Uuid>().unwrap())
+            .fetch_one(&app.pool)
+            .await
+            .unwrap();
+    assert_eq!(owner_now, owner.user_id, "permiso, no propiedad");
+
+    // Y el borrado en dos fases: el preview emite el token y la confirmación borra.
+    let confirmed =
+        preview_then_confirm(&app, &member_token, "delete_asset", json!({"id": asset_id})).await;
+    assert_ne!(confirmed["result"]["isError"], true, "{confirmed}");
+    assert_eq!(app.count_rows("assets").await, 0);
+}

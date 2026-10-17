@@ -450,7 +450,7 @@ español:
 |--------|------|-------|
 | GET | `/v1/installation/session-context` | Returns `{installation_initialized, access}` — used for routing the UI gate |
 | GET | `/v1/installation` | Own membership + installation snapshot |
-| PATCH | `/v1/installation` | Owner only. Updates `base_currency`, `onboarding_completed`, tz, inflation, show_age_mode, fire_settings (incluye `savings_source: "budget" \| "transactions_avg" \| "budget_income_real_expense"` — fuente del ahorro de la simulación; no existe `target_age` — eliminado en v1.0.6) y `mcp_write_enabled` (bool, kill-switch vivo de las tools de escritura MCP — issue #3). **Dos de esos campos NUNCA son alcanzables por MCP** y es una decisión escrita, no un olvido: `mcp_write_enabled` (autorreferencia del kill-switch — uno reencendible desde la superficie que corta es decorativo) y `onboarding_completed` (**estado de la UI**: marca que la SPA ya no debe enseñar el asistente de alta; que un agente lo ponga a `true` no cambia un dato del hogar, solo le quita a una persona una pantalla que quizá no había visto). Los tres ejes de **presentación** —`base_currency`, `calendar_tz`, `show_age_mode`— sí lo son desde 4.4.0, vía `update_installation_settings` (allowlist estricta, §MCP) |
+| PATCH | `/v1/installation` | Owner only. Updates `base_currency`, `onboarding_completed`, tz, inflation, show_age_mode, `shared_finances` (bool, default `false`, 6.0 RFC Planes D-16 — «finanzas compartidas»: abre la escritura cruzada del ledger a los roles que escriben, ver §Dueño de la fila; alcanzable también por MCP vía `update_installation_settings`), fire_settings (incluye `savings_source: "budget" \| "transactions_avg" \| "budget_income_real_expense"` — fuente del ahorro de la simulación; no existe `target_age` — eliminado en v1.0.6) y `mcp_write_enabled` (bool, kill-switch vivo de las tools de escritura MCP — issue #3). **Dos de esos campos NUNCA son alcanzables por MCP** y es una decisión escrita, no un olvido: `mcp_write_enabled` (autorreferencia del kill-switch — uno reencendible desde la superficie que corta es decorativo) y `onboarding_completed` (**estado de la UI**: marca que la SPA ya no debe enseñar el asistente de alta; que un agente lo ponga a `true` no cambia un dato del hogar, solo le quita a una persona una pantalla que quizá no había visto). Los tres ejes de **presentación** —`base_currency`, `calendar_tz`, `show_age_mode`— sí lo son desde 4.4.0, vía `update_installation_settings` (allowlist estricta, §MCP) |
 | POST | `/v1/installation/setup` | Creates singleton installation (409 if exists) |
 
 ### Pending users (`/v1/installation/pending-users/`)
@@ -1737,7 +1737,12 @@ persona, así que editar la de otro no es «colaborar», es mover su plan sin qu
 - **el alta atribuye siempre al usuario de la sesión**: no hay forma de crear a nombre de otro.
 
 Punto único: `person_view::require_row_owner` — los cinco módulos la llaman en vez de escribir el
-`if`. Se aplica también a los **previews** de `delete_asset` y `delete_liability`
+`if`. **Condicional desde 6.0 a `installation.shared_finances`** (RFC Planes D-16): con el interruptor encendido (owner-only, default `false`) cualquier miembro con rol de escritura (`owner`/`member`) muta cualquier fila del ledger y la fila **conserva su `owner_user_id`** —permiso, no propiedad—; los `viewer` siguen sin escribir. Apagado, todo lo de aquí rige tal cual. La puerta es `async`, lee `shared_finances` + el rol
+vivo de la sesión solo cuando la fila es ajena, y **devuelve el dueño de la fila**, que es lo que
+rebindan los `AND owner_user_id = $n` de cada `UPDATE`/`DELETE` (antes, el usuario de sesión).
+Con el interruptor encendido el reorder de reglas **sí admite `?view=household`** (renumera las
+reglas de todos; I1 sigue verificándose por dueño). Regresión: `ledger_ownership.rs::shared_finances_*`
+y `mcp_write.rs::shared_finances_toggle_and_cross_member_writes_via_mcp`. Se aplica también a los **previews** de `delete_asset` y `delete_liability`
 (`*_delete_effects`), que enseñan el contenido de la fila **y emiten el `confirm_token`** que la
 ejecuta; y a `allocation_rule_delete_effects`.
 
