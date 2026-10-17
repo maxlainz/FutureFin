@@ -1304,7 +1304,8 @@ pub struct AssetSaleSpec<M> { asset_index, start_month /* 1-based; 0 ≡ 1 */, e
                               kind, keeps_purchasing_power, tax_mode }
 pub fn build_asset_sale_orders(specs, horizon_months, annual_inflation_percent) -> AssetSalesG<M>
 pub struct AssetSalesG<M> { pub orders: Vec<SaleOrderG<M>> }  // orden NO decreciente de mes
-pub struct SaleOrderG<M> { month, asset_index, amount: SaleAmount::Net(M) | All, cadence: Monthly | OneOff, tax_mode }
+pub struct SaleOrderG<M> { month, asset_index, amount: SaleAmount::Net(M) | All, cadence: Monthly | OneOff, tax_mode,
+                            spec_index /* la especificación de origen: identifica la ORDEN para el agotamiento */ }
 pub fn remainder_sink_index(rules) -> Option<usize>
 ```
 
@@ -1319,6 +1320,14 @@ neto es `after_tax(valor)` y el resto queda **sin cubrir**. Sin regla así, o co
 todo el déficit queda sin cubrir. Ningún otro activo se vende solo (D-10), ni líquido ni ilíquido;
 y un sumidero **ilíquido** tampoco: se trata como «sin sumidero» (decisión del owner, D-10). Lo no cubierto se acumula en
 `uncovered_deficit_total`, resta patrimonio y se publica en `unmet_need`, igual que en legacy.
+Un sumidero con **mes de inicio futuro** (F1a) vale 0 hasta materializarse: los déficits
+anteriores a ese mes quedan **sin cubrir** (y son `UncoveredMonth`), no se cubren de otro activo.
+
+**`assets_depleted_month_index` en `SinkOnly`** significa «**el sumidero se agotó**»: se levanta
+solo si hay sumidero, ya existe (F1a) y su valor queda ≤ 0 al cubrir un déficit (con la misma
+confirmación de siempre: alguna venta sin fundar desde ese mes). Sin sumidero —o con uno ilíquido,
+que es «sin sumidero»— se queda en `None`: el fallo ya lo publican los meses sin cubrir
+(`first_uncovered_month`, `failure_kind = UncoveredMonth`). En `LegacyDrain` no cambia.
 
 **Fallo (D-9).** «Mes sin cubrir» = la venta que cubría el déficit no se pudo fundar **y** quedó
 necesidad neta > 0 (los dos operandos de F1, sin puerta de fase). En `SinkOnly` es
@@ -1343,13 +1352,27 @@ con `g` del activo en ese momento:
 **Simplificación conocida**: cada venta puntual/entera tributa como un hecho AISLADO del año —
 no se acumula con otras ventas del mismo año fiscal (ni con las coberturas mensuales), así que con
 tramos progresivos el impuesto de dos ventas grandes el mismo año queda por debajo del real.
+**Segunda simplificación del mismo tipo** (apilamiento de tramos): en un mes con venta explícita
+`Auto` Y cobertura del déficit por el sumidero, las dos se anualizan POR SEPARADO (cada una con su
+convención: la venta como hecho aislado o M1 mensual, la cobertura con M1) — no se suman en la
+misma base liquidable, así que con tramos progresivos el impuesto conjunto queda por debajo del real.
 Si `G > v` se vende el activo entero, el impuesto se recalcula sobre `v` con la misma regla y la orden
-queda **agotada** (se anota `(asset_index, mes)` una vez por activo en `explicit_sale_exhausted`; las
-órdenes siguientes encuentran 0). `pct ≥ 100` no vende y queda agotada. La base del resto baja en
+queda **agotada**: esa ORDEN —la especificación entera, `spec_index`— **no vuelve a vender nunca**,
+aunque el activo se rellene después (por la cascada o por la materialización de F1a); las demás
+especificaciones sobre el mismo activo siguen vivas. `explicit_sale_exhausted` anota
+`(asset_index, mes)` **una vez por activo**, con el primer mes en que una orden lo agotó de verdad.
+Una orden cuyo mes es anterior al mes de inicio del activo (F1a) se **salta sin marcar
+agotamiento** (un activo que aún no existe no está agotado). La base del resto baja en
 proporción (`b' = b·v_post/v_pre`, #120). El neto entra en la caja del mes ANTES de decidir superávit
-o déficit: si sobra, la cascada lo reinvierte. `first_month_allocation` ejecuta las órdenes del mes 1
-con la misma función (campo `explicit_sales_net`, ya dentro de `base_cash`). Las órdenes se validan
-(`EngineError::InvalidAssetSales`).
+o déficit: si sobra, la cascada lo reinvierte **entero — el techo de aportación no lo recorta**: el
+techo solo ve el AHORRO del mes (caja sin ventas); el neto de una venta es un cambio de composición
+del patrimonio, no ahorro nuevo, y no puede acabar en `disposable_cash` (sin ventas en el mes, la
+expresión de siempre bit a bit). `first_month_allocation` ejecuta las órdenes del mes 1 con la misma
+función y la misma regla del techo (campo `explicit_sales_net`, ya dentro de `base_cash`). Las
+órdenes se validan (`EngineError::InvalidAssetSales`): activo en rango, mes en `1..=horizon`, meses
+no decrecientes y fiscalidad válida — `ManualPct { pct }` con `0 ≤ pct < 100` y
+`ManualAmount { tax }` con `tax ≥ 0`, en cualquier tipo de venta (un `Whole` al 100 % destruiría el
+activo entero en impuesto).
 
 **Orden dentro del mes** (exacto): servicio de deuda → fase → ingreso/gasto (+ cambios F1b, pensión
 con fecha, planning, retirada extra) → **ventas explícitas** → caja neta → cascada si sobra |
@@ -1413,7 +1436,7 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
    neto de las ventas explícitas del mes** (6.0.0 F1c, solo si el mes tiene órdenes — §Déficit y
    ventas explícitas).
    **Y, al lado, la necesidad ORDINARIA** (5.0.0 E1): `ordinary_need = max(0, expense + retirement_withdrawal − income)` — el gasto de vivir, con la pensión con fecha y las rentas persistentes ya restadas, **sin servicio de deuda y sin `planning_adj`**. Es la magnitud que juzga la puerta de tasa inicial (F2); `net_cash` sigue siendo lo que decide cuánto se VENDE. Se publica en `SimOutput::ordinary_need` (serie, `len = horizon+1`, `[0] = 0`) y **no** en `ProjectionOutput`: la consume el crate estocástico, no la API.
-6. If `net_cash > 0` (surplus): **techo de aportación** primero (WP3, §B.7) — con `contribution_cap_monthly = Some(c)` (o `k ≥ contributions_stop_month`, que impone `c = 0`) la cascada solo ve `min(sobrante, c)` y el resto se publica en `disposable_cash(k)`: **no se invierte, no compone y no entra en el patrimonio**, mismo trato que `unallocated_savings_total`. Sin techo, el pool es el sobrante entero y no se ejecuta una operación de más. Después, **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)) — **también en jubilación** (4.12.1, #175): es la MISMA cascada del usuario, sin rama especial por estado; los techos de la fase #171 pasan de explicativos a vinculantes también aquí. `AllocationSkipReason::InRetirement` y el literal de wire `in_retirement` MURIERON con la rama que los producía. Lo que ninguna regla absorbe **NO entra en el NW**: se acumula en `unallocated_savings_total` (ver [Output](#output)) — inalcanzable en producción con activos vivos (sumidero indestructible, #176). Lo reinvertido en cada activo, jubilado o no, **sube su base de coste** (`basis[i] += alloc[i]`, `basis_declared[i] = true`) y abarata sus ventas futuras (#178, ver paso 6). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
+6. If `net_cash > 0` (surplus): **techo de aportación** primero (WP3, §B.7) — con `contribution_cap_monthly = Some(c)` (o `k ≥ contributions_stop_month`, que impone `c = 0`) la cascada solo ve `min(sobrante, c)` (6.0.0 F1c: en un mes con ventas explícitas el techo recorta solo el AHORRO, `min(ahorro, c)` + el neto de las ventas entero — §Déficit y ventas explícitas) y el resto se publica en `disposable_cash(k)`: **no se invierte, no compone y no entra en el patrimonio**, mismo trato que `unallocated_savings_total`. Sin techo, el pool es el sobrante entero y no se ejecuta una operación de más. Después, **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)) — **también en jubilación** (4.12.1, #175): es la MISMA cascada del usuario, sin rama especial por estado; los techos de la fase #171 pasan de explicativos a vinculantes también aquí. `AllocationSkipReason::InRetirement` y el literal de wire `in_retirement` MURIERON con la rama que los producía. Lo que ninguna regla absorbe **NO entra en el NW**: se acumula en `unallocated_savings_total` (ver [Output](#output)) — inalcanzable en producción con activos vivos (sumidero indestructible, #176). Lo reinvertido en cada activo, jubilado o no, **sube su base de coste** (`basis[i] += alloc[i]`, `basis_declared[i] = true`) y abarata sus ventas futuras (#178, ver paso 6). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
 7. **La venta del mes** (`execute_month_sale_g`; con `DeficitPolicy::SinkOnly`,
    `cover_deficit_from_sink_g` — solo el sumidero, §Déficit y ventas explícitas). Cuánto se vende lo decide la NECESIDAD
    (§Retirada en jubilación): solo hay venta si el mes tiene déficit de caja, y la venta es

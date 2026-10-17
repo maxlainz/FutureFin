@@ -15,7 +15,9 @@
 //! 2. **Ventas explícitas** ([`AssetSaleSpec`] → [`build_asset_sale_orders`] → [`AssetSales`]).
 //!    El plan dice «vendo X €/mes netos del activo A de s a e», «vendo X € una vez en s» o «vendo
 //!    A entero en s»; cada venta lleva su fiscalidad ([`SaleTaxMode`], D-21). El bucle las ejecuta
-//!    ANTES de decidir el déficit del mes (son caja planeada) y en las DOS políticas.
+//!    ANTES de decidir el déficit del mes (son caja planeada) y en las DOS políticas; su neto NO
+//!    pasa por el techo de aportación (es un cambio de composición, no ahorro nuevo): entra
+//!    entero en la cascada (#B1).
 //!
 //! # Identificación del sumidero
 //!
@@ -50,9 +52,18 @@
 //! Si `G` supera el valor del activo, se vende el activo entero (`G = v`), el impuesto se recalcula
 //! sobre `v` con la misma regla (`Auto` mensual: `tax(12·g·v)/12`; `Auto` puntual: `tax(g·v)`;
 //! `ManualAmount`: `min(tax, v)`; `ManualPct`: `v·pct/100`) y la orden se marca como **agotada**
-//! (la venta se detiene: las órdenes posteriores sobre ese activo encuentran 0). Un `pct ≥ 100`
-//! no puede netear nada: la orden no vende y se marca agotada. La base de coste del resto baja en
-//! proporción al valor vendido, `b' = b·v_post/v_pre` (#120), igual que en la venta del mes.
+//! (#B3): esa ORDEN —la especificación entera, identificada por [`SaleOrderG::spec_index`]— no
+//! vuelve a ejecutarse aunque el activo se rellene después (por la cascada o por la
+//! materialización de F1a). Las demás especificaciones sobre el mismo activo siguen vivas. Una
+//! orden cuyo mes es anterior al mes de inicio del activo (F1a) se SALTA sin marcar agotamiento:
+//! un activo que aún no existe no está agotado. `explicit_sale_exhausted` anota `(activo, mes)`
+//! UNA vez por activo, con el primer mes en que una orden lo agotó de verdad.
+//!
+//! **Validación** (#B4): `ManualPct { pct }` exige `0 ≤ pct < 100` y `ManualAmount { tax }`
+//! exige `tax ≥ 0`, en cualquier tipo de venta; fuera de eso la entrada es
+//! `EngineError::InvalidAssetSales` (un `pct = 100` con `Whole` destruiría el activo entero en
+//! impuesto). La base de coste del resto baja en proporción al valor vendido,
+//! `b' = b·v_post/v_pre` (#120), igual que en la venta del mes.
 
 use crate::money::MoneyOps;
 use crate::sim::TaxBracketG;
@@ -80,8 +91,19 @@ pub enum SaleTaxMode<M> {
     Exempt,
     /// Un impuesto NOMINAL fijo por evento de venta (en una venta mensual, cada mes).
     ManualAmount { tax: M },
-    /// Un porcentaje del BRUTO vendido.
+    /// Un porcentaje del BRUTO vendido, en `[0, 100)`.
     ManualPct { pct: M },
+}
+
+impl<M: crate::money::MoneyOps> SaleTaxMode<M> {
+    /// `ManualPct` en `[0, 100)` y `ManualAmount` `≥ 0`; `Auto`/`Exempt` siempre (#B4).
+    pub fn is_valid(&self) -> bool {
+        match *self {
+            SaleTaxMode::Auto | SaleTaxMode::Exempt => true,
+            SaleTaxMode::ManualAmount { tax } => tax >= M::zero(),
+            SaleTaxMode::ManualPct { pct } => pct >= M::zero() && pct < M::from_u32(100),
+        }
+    }
 }
 
 /// Qué vende una venta explícita.
@@ -137,6 +159,10 @@ pub struct SaleOrderG<M> {
     pub amount: SaleAmount<M>,
     pub cadence: SaleCadence,
     pub tax_mode: SaleTaxMode<M>,
+    /// Índice de la especificación de origen (posición en el `specs` del constructor). Identifica
+    /// la ORDEN a efectos de agotamiento: una especificación que agota su activo no vuelve a
+    /// vender (#B3).
+    pub spec_index: usize,
 }
 
 /// Las ventas explícitas de un plan, como las consume el bucle: órdenes en orden NO decreciente
@@ -181,6 +207,7 @@ impl AssetSales {
                     },
                     cadence: o.cadence,
                     tax_mode: tax(o.tax_mode),
+                    spec_index: o.spec_index,
                 })
                 .collect(),
         }
@@ -188,11 +215,17 @@ impl AssetSales {
 }
 
 impl<M: MoneyOps> AssetSalesG<M> {
-    /// Cada orden con activo en rango, mes en `1..=horizon` y meses no decrecientes.
+    /// Cada orden con activo en rango, mes en `1..=horizon`, meses no decrecientes y fiscalidad
+    /// válida ([`SaleTaxMode::is_valid`], #B4).
     pub(crate) fn orders_ok(&self, n_assets: usize, horizon: u32) -> bool {
         let mut prev = 0u32;
         for o in &self.orders {
-            if o.asset_index >= n_assets || o.month == 0 || o.month > horizon || o.month < prev {
+            if o.asset_index >= n_assets
+                || o.month == 0
+                || o.month > horizon
+                || o.month < prev
+                || !o.tax_mode.is_valid()
+            {
                 return false;
             }
             prev = o.month;
@@ -209,6 +242,8 @@ impl<M: MoneyOps> AssetSalesG<M> {
 /// - `Whole`: una orden `All` en `s`.
 ///
 /// Un importe ≤ 0 no genera orden (no hay «venta negativa»; comprar es un cambio de otro tipo).
+/// La fiscalidad se copia tal cual: una `ManualPct` fuera de `[0, 100)` o una `ManualAmount`
+/// negativa la rechaza la validación de la entrada (`EngineError::InvalidAssetSales`, #B4).
 /// Las órdenes salen ordenadas por mes con orden ESTABLE: dentro de un mes, en el orden de
 /// `specs` — que es el orden en que el bucle las ejecuta.
 pub fn build_asset_sale_orders<M: MoneyOps>(
@@ -224,7 +259,7 @@ pub fn build_asset_sale_orders<M: MoneyOps>(
         }
     };
     let mut orders: Vec<SaleOrderG<M>> = Vec::new();
-    for s in specs {
+    for (spec_index, s) in specs.iter().enumerate() {
         let start = s.start_month.max(1);
         if start > horizon_months {
             continue;
@@ -242,6 +277,7 @@ pub fn build_asset_sale_orders<M: MoneyOps>(
                         amount: SaleAmount::Net(indexed(amount_today, s.keeps_purchasing_power, k)),
                         cadence: SaleCadence::Monthly,
                         tax_mode: s.tax_mode,
+                        spec_index,
                     });
                 }
             }
@@ -255,6 +291,7 @@ pub fn build_asset_sale_orders<M: MoneyOps>(
                     amount: SaleAmount::Net(indexed(amount_today, s.keeps_purchasing_power, start)),
                     cadence: SaleCadence::OneOff,
                     tax_mode: s.tax_mode,
+                    spec_index,
                 });
             }
             AssetSaleKind::Whole => orders.push(SaleOrderG {
@@ -263,6 +300,7 @@ pub fn build_asset_sale_orders<M: MoneyOps>(
                 amount: SaleAmount::All,
                 cadence: SaleCadence::OneOff,
                 tax_mode: s.tax_mode,
+                spec_index,
             }),
         }
     }
@@ -490,6 +528,7 @@ mod tests {
             amount: SaleAmount::Net(d(900)),
             cadence: SaleCadence::Monthly,
             tax_mode: mode,
+            spec_index: 0,
         };
         let e = execute_sale_order_g(
             d(10_000),

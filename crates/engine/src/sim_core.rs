@@ -481,7 +481,9 @@ pub(crate) fn asset_gain_g<M: MoneyOps>(value: M, basis: M, declared: bool, scal
 /// de `orders[*cursor..]` cuyo mes es `k`, resta el bruto de cada activo, encoge su base en
 /// proporción (#120) y devuelve `Some((neto, impuesto))` — o `None` si el mes no tiene órdenes,
 /// en cuyo caso no se ejecuta ni una operación. `exhausted` anota el primer mes en que una orden
-/// no se pudo llenar entera, una vez por activo.
+/// no se pudo llenar entera, una vez por activo; `stopped_specs` guarda las especificaciones que
+/// agotaron su activo, que NO vuelven a vender aunque el activo se rellene (#B3). Una orden sobre
+/// un activo que aún no existe (`available[i] == false`, F1a) se salta sin marcar nada.
 #[allow(clippy::too_many_arguments)]
 fn execute_month_orders_g<M: MoneyOps>(
     orders: &[crate::sales::SaleOrderG<M>],
@@ -490,9 +492,11 @@ fn execute_month_orders_g<M: MoneyOps>(
     values: &mut [M],
     basis: &mut [M],
     basis_declared: &[bool],
+    available: &[bool],
     scalar_gain_ratio: M,
     brackets: &[TaxBracketG<M>],
     taxes_enabled: bool,
+    stopped_specs: &mut Vec<usize>,
     mut exhausted: Option<&mut Vec<(usize, u32)>>,
 ) -> Option<(M, M)> {
     let mut acc: Option<(M, M)> = None;
@@ -502,6 +506,9 @@ fn execute_month_orders_g<M: MoneyOps>(
         }
         *cursor += 1;
         let i = o.asset_index;
+        if !available.get(i).copied().unwrap_or(true) || stopped_specs.contains(&o.spec_index) {
+            continue;
+        }
         let gain = asset_gain_g(values[i], basis[i], basis_declared[i], scalar_gain_ratio);
         let e = crate::sales::execute_sale_order_g(values[i], gain, o, brackets, taxes_enabled);
         if e.gross > M::zero() {
@@ -512,6 +519,7 @@ fn execute_month_orders_g<M: MoneyOps>(
             }
         }
         if e.short {
+            stopped_specs.push(o.spec_index);
             if let Some(ex) = exhausted.as_deref_mut() {
                 if !ex.iter().any(|(a, _)| *a == i) {
                     ex.push((i, k));
@@ -532,6 +540,11 @@ fn execute_month_orders_g<M: MoneyOps>(
 /// `bruto − need_net`; si no, se vende entero, el neto es `after_tax(valor)` y el resto queda sin
 /// cubrir (`unfunded_sale = true`). Sin sumidero, o con el sumidero a 0, todo queda sin cubrir.
 /// Ningún otro activo se toca (D-10). Devuelve la venta del mes y el impuesto.
+///
+/// `depleted_portfolio` significa aquí «el SUMIDERO se agotó» (#B2): solo se levanta si hay
+/// sumidero, ya existe (`sink_available`, F1a) y su valor queda ≤ 0 al cubrir un déficit. Sin
+/// sumidero (o con uno que aún no existe) se queda en `false`: el fallo ya lo publican los meses
+/// sin cubrir.
 #[allow(clippy::too_many_arguments)]
 fn cover_deficit_from_sink_g<M: MoneyOps>(
     values: &mut [M],
@@ -542,6 +555,7 @@ fn cover_deficit_from_sink_g<M: MoneyOps>(
     brackets: &[TaxBracketG<M>],
     taxes_enabled: bool,
     need_net: M,
+    sink_available: bool,
     watch_depletion: bool,
 ) -> (MonthSale<M>, M) {
     let mut out = MonthSale::empty();
@@ -569,9 +583,10 @@ fn cover_deficit_from_sink_g<M: MoneyOps>(
     out.net_obtained = covered;
     out.unfunded_sale = unfunded;
     out.undrained = Some(if unfunded { need_net - covered } else { M::zero() });
-    if watch_depletion {
-        let left = sink.map_or(M::zero(), |s| values[s].max(M::zero()));
-        out.depleted_portfolio = unfunded || left <= M::zero();
+    if watch_depletion && sink_available {
+        if let Some(s) = sink {
+            out.depleted_portfolio = values[s] <= M::zero();
+        }
     }
     (out, tax)
 }
@@ -1141,6 +1156,11 @@ pub(crate) fn first_month_allocation_g<M: MoneyOps>(
             .map(|a| a.purchase_price.is_some())
             .collect();
         let mut cursor = 0usize;
+        let started: Vec<bool> = input
+            .assets
+            .iter()
+            .map(|a| started_by_g(a.start_month, 1))
+            .collect();
         execute_month_orders_g(
             &sales.orders,
             &mut cursor,
@@ -1148,25 +1168,37 @@ pub(crate) fn first_month_allocation_g<M: MoneyOps>(
             &mut values,
             &mut basis,
             &declared,
+            &started,
             input.taxable_gain_ratio,
             &input.tax_brackets,
             input.taxes_enabled,
+            &mut Vec::new(),
             None,
         )
     };
+    // El ahorro del mes SIN las ventas: solo él pasa por el techo de aportación (#B1).
+    let savings_cash = recurring_net + planning_component;
     let net_cash_month = match explicit {
-        Some((net, _)) => recurring_net + planning_component + net,
-        None => recurring_net + planning_component,
+        Some((net, _)) => savings_cash + net,
+        None => savings_cash,
     };
 
     let mut rules_trace: Vec<RuleOutcomeG<M>> = Vec::new();
     // 4.12.1 (#175): la cascada corre TAMBIÉN jubilado. Los techos se resuelven con la FASE del
     // mes, y desde 4.12.1 esos techos GOBIERNAN euros de verdad, no solo la explicación. Mismo
     // techo de aportación que el bucle (§B.7).
-    let (pool, disposable) = match plan.contribution_cap_at(1) {
-        Some(cap) if net_cash_month > M::zero() => {
+    //
+    // 6.0.0 F1c (#B1): el techo solo recorta el AHORRO del mes; el neto de una venta explícita es
+    // un cambio de composición del patrimonio, no ahorro nuevo, y entra ENTERO en la cascada.
+    // Sin ventas en el mes es la expresión de siempre, bit a bit.
+    let (pool, disposable) = match (plan.contribution_cap_at(1), explicit) {
+        (Some(cap), None) if net_cash_month > M::zero() => {
             let invested = net_cash_month.min(cap);
             (invested, net_cash_month - invested)
+        }
+        (Some(cap), Some(_)) if savings_cash > M::zero() && net_cash_month > M::zero() => {
+            let disposable = savings_cash - savings_cash.min(cap);
+            (net_cash_month - disposable, disposable)
         }
         _ => (net_cash_month, M::zero()),
     };
@@ -1277,6 +1309,8 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
     let mut explicit_sale_net = new_series(has_sales);
     let mut explicit_sale_tax = new_series(has_sales);
     let mut explicit_sale_exhausted: Vec<(usize, u32)> = Vec::new();
+    // #B3: especificaciones que agotaron su activo — no vuelven a vender.
+    let mut stopped_sale_specs: Vec<usize> = Vec::new();
     let mut deficit_coverage_net = new_series(sink_only);
     let mut deficit_coverage_tax = new_series(sink_only);
     let mut first_uncovered_month: Option<u32> = None;
@@ -1667,6 +1701,9 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
             });
 
         let net_cash_month = income - expense - debt_service + planning_adj - retirement_withdrawal;
+        // El AHORRO del mes, sin ventas: lo único que ve el techo de aportación (#B1).
+        let savings_cash = net_cash_month;
+        let mut month_sale_net: Option<M> = None;
 
         // **Ventas explícitas** (6.0.0 F1c): caja PLANEADA del mes, antes de decidir superávit o
         // déficit — el neto entra en la caja y, si sobra, la cascada lo reparte. Sin órdenes en el
@@ -1679,13 +1716,16 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
                 &mut values,
                 &mut basis,
                 &basis_declared,
+                &asset_available,
                 input.taxable_gain_ratio,
                 &input.tax_brackets,
                 input.taxes_enabled,
+                &mut stopped_sale_specs,
                 Some(&mut explicit_sale_exhausted),
             );
             explicit_sale_net.push(executed.map_or(M::zero(), |(net, _)| net));
             explicit_sale_tax.push(executed.map_or(M::zero(), |(_, tax)| tax));
+            month_sale_net = executed.map(|(net, _)| net);
             match executed {
                 Some((net, _)) => net_cash_month + net,
                 None => net_cash_month,
@@ -1714,7 +1754,23 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
             // **Techo de aportación** (§B.7): la cascada solo ve `min(sobrante, c)`; el resto es
             // caja DISPONIBLE. Sin techo el pool es el sobrante entero y no se ejecuta ni una
             // operación de más: bit-identidad.
+            //
+            // 6.0.0 F1c (#B1): el techo recorta SOLO el ahorro (`savings_cash`); el neto de una
+            // venta explícita es un cambio de composición del patrimonio y entra ENTERO en la
+            // cascada. Sin ventas en el mes, la expresión de siempre (bit a bit).
             let pool = match plan.contribution_cap_at(k) {
+                Some(cap) if month_sale_net.is_some() => {
+                    let disposable = if savings_cash > M::zero() {
+                        savings_cash - savings_cash.min(cap)
+                    } else {
+                        M::zero()
+                    };
+                    if disposable > M::zero() {
+                        disposable_series[k as usize] = disposable;
+                        disposable_total = disposable_total + disposable;
+                    }
+                    investable - disposable
+                }
                 Some(cap) => {
                     let invested = investable.min(cap);
                     let disposable = investable - invested;
@@ -1767,6 +1823,7 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
                 &input.tax_brackets,
                 input.taxes_enabled,
                 need_assets_net,
+                sink.is_some_and(|s| asset_available[s]),
                 assets_depleted_month_index.is_none(),
             );
             deficit_coverage_net.push(sale.net_obtained);
