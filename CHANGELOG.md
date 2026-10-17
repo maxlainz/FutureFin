@@ -4,6 +4,37 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [5.0.1] - 2026-10-17
+
+### Parches de seguridad de dependencias
+
+- **`rustls` 0.23.43 → 0.23.46** (alerta Dependabot #25, severidad media: mensajes del handshake
+  TLS 1.3 aceptados cruzando niveles de cifrado; corregido en 0.23.45). Es dependencia de runtime
+  del binario, así que cambia la imagen y por eso hay release.
+- **`source-map-js` 1.2.1 → 1.2.2** (alerta #32, alta) y **`brace-expansion` → 1.1.21 y 5.0.12**
+  (alertas #30 y #31, medias): denegación de servicio por CPU con entradas maliciosas. Son
+  dependencias de desarrollo y build del frontend, no viajan en `apps/web/dist/`; se suben en el
+  mismo cambio para dejar las cuatro alertas cerradas. Sin cambios de comportamiento ni acción por
+  parte de quien actualiza.
+
+### Pipeline de publicación (no cambia la imagen)
+
+- **El ci-gate del auto-tag espera hasta 100 min** (antes 30): la CI de 5.0.0 tarda ~48 min y el
+  gate expiraba antes de verla en verde, dejando el release sin tag ni imagen.
+- **La CI de `main` ya no se cancela con el push siguiente** (`cancel-in-progress` solo en PRs):
+  mergear un PR mientras corría la CI de un release la cancelaba, y el gate trata «ninguna
+  ejecución en verde» como fallo.
+- **El bump del add-on nunca baja de versión**: un rerun de un release viejo con uno más nuevo ya
+  publicado dejaba el add-on apuntando a la imagen anterior. Y solo se hace si la imagen salió a
+  Docker Hub, que es de donde tira el Supervisor.
+- **`attribution-scan` pasa a check obligatorio** del ruleset «Proteger main» (no lo era, aunque
+  la documentación decía que bloqueaba), y en push a `main` mira también los commits del segundo
+  padre de un merge commit.
+- **El job `web` comprueba que los `package.json` casan con el lockfile** (`npm ls`): un PR podía
+  anunciar una versión e instalar otra con todo en verde (issue #243).
+- Documentación del ritual de release al día: sin la rama `dev` retirada, el bump del add-on con
+  el token de la App, y las excepciones conocidas del historial sin atribuciones.
+
 ## [5.0.0] - 2026-10-17
 
 ### La jubilación deja de ser un cruce del hogar y pasa a ser el plan de cada persona

@@ -78,9 +78,9 @@ directamente — la protección lo rechaza, y ese es el objetivo.
 Tags publicados: `:X.Y.Z`, `:X.Y`, `:X`, `:latest`. Requiere los secrets `DOCKERHUB_USERNAME` +
 `DOCKERHUB_TOKEN`.
 
-> **El tag es la publicación.** Nunca taguees una versión histórica sin publicar: el workflow
-> incluye `type=raw,value=latest`, así que reconstruir una versión vieja **sobrescribe `:latest`**
-> con código antiguo.
+> **El tag es la publicación.** Nunca taguees una versión histórica sin publicar: el push del tag
+> corre el `publish-image.yml` **de ese commit antiguo**, anterior a la guarda «¿es el tag más
+> alto?», así que reconstruir una versión vieja **sobrescribe `:latest`** con código antiguo.
 
 ## Sin atribuciones — los commits y PRs no llevan firma de herramienta
 
@@ -113,9 +113,16 @@ Re-verificación (el primero debe dar **0**; el segundo es el control positivo d
 funciona — si ambos dan 0, lo roto es el comando, no la limpieza del historial):
 
 ```bash
-git log origin/main -i --grep='co-authored-by: claude' --grep='claude-session' --oneline | wc -l   # 0
+git log origin/main -i --grep='co-authored-by: claude' --grep='claude-session' --oneline | wc -l   # 1
 git log origin/main -i --grep='co-authored-by: dependabot' --oneline | wc -l                       # >0
 ```
+
+Excepciones conocidas, que no se reescriben (exigiría otro force-push de `main` y de todos los
+tags): el **1** es `815fb27` (4.12.3, el squash del incidente #194, posterior a la reescritura).
+Y la reescritura del 2026-08-31 limpió **mensajes**, no autores: 73 commits de `main`
+(2026-07-02 → 2026-08-21) siguen **autorados** como asistente —
+`git log origin/main --format='%ae' | grep -c anthropic.com`. El gate de identidades solo mira
+commits nuevos.
 
 ## Dependencias — automatizado (rutina cloud)
 
