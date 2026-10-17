@@ -460,12 +460,12 @@ Reproducible counters (run from repo root; **valores medidos el 2026-10-10, rama
 (tras `update_recurring_rule`); entre paréntesis los de 2026-09-03**):
 
 ```bash
-grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 72 (71) — total tools
-grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 30 (30) — reads + simulate
-grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 42 (41) — writes
-grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 42 (41) — MUST equal writes
-grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 19 (18) — preview/confirm
-grep -c '= two_phase(' apps/api/src/mcp/server.rs                    # 9 (8) — las que exigen token de dos fases
+grep -c '#\[tool(' apps/api/src/mcp/server.rs                      # 70 (72) — total tools
+grep -c 'read_only_hint = true' apps/api/src/mcp/server.rs          # 29 (30) — reads + simulate
+grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs         # 41 (42) — writes
+grep -c 'require_mcp_write(&self.state.pool' apps/api/src/mcp/server.rs  # 41 (42) — MUST equal writes
+grep -c 'p.confirm.unwrap_or(false)' apps/api/src/mcp/server.rs     # 18 (19) — preview/confirm
+grep -c '= two_phase(' apps/api/src/mcp/server.rs                    # 9 (9) — las que exigen token de dos fases
 #   (OJO 1: `grep -c 'confirm_token'` a secas da 47 — cuenta también el campo del schema y su prosa.
 #    OJO 2: el comando de esta línea fue `grep -c 'confirm_token.as_deref'` hasta la Fase 7, y hoy
 #    da **10**, no 8: el propio doc-comment de `DeleteWithTokenParams` en `server.rs` menciona esa
@@ -475,15 +475,17 @@ grep -c '= two_phase(' apps/api/src/mcp/server.rs                    # 9 (8) —
 #    dos menciones en prosa son `[`two_phase`]`, con backticks). Alternativa igual de buena:
 #    `grep -c 'p\.confirm_token\.as_deref()'` → 9 (8 hasta `update_recurring_rule`). **`server.rs` sigue prescribiendo el grep viejo**
 #    y no se puede arreglar desde documentación — reportado como deriva código↔contrato.)
-grep -c 'settled(&self.state.pool' apps/api/src/mcp/server.rs       # 42 (41) — == escrituras: toda escritura cierra su fila de auditoría
+grep -c 'settled(&self.state.pool' apps/api/src/mcp/server.rs       # 41 (42) — == escrituras: toda escritura cierra su fila de auditoría
 #   (el patrón lleva `&self.state.pool` a propósito: `grep -c 'settled('` da 42, contando la definición)
-grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs       # 19 (19) — escrituras que publican el bloque `impact`
-#   (`grep -c 'impact_since('` da 20: cuenta también la definición)
+grep -c 'impact_since(&self.state' apps/api/src/mcp/server.rs       # 18 (19) — escrituras que publican el bloque `impact`
+#   (`grep -c 'impact_since('` cuenta además la definición)
 grep -c 'sqlx::query' apps/api/src/mcp/server.rs                   # 0 — EL invariante real
 grep -c 'sqlx::query' apps/api/src/mcp/auth.rs                     # 4 — gate + auditoría (4.4.0)
 ```
 
-Los ocho números son **72/30/42/42/19/9/42/19** a **2026-10-10** (5.0.0, `update_recurring_rule`:
+Los ocho números son **70/29/41/41/18/9/41/18** en **6.0.0 (F2-2, D-7)**: se retiran
+`get_retirement_profile` y `update_retirement_profile` con el modelo de jubilación (el paréntesis
+de cada línea es el valor anterior). Eran **72/30/42/42/19/9/42/19** a **2026-10-10** (5.0.0, `update_recurring_rule`:
 la primera tool nueva desde el tren de #207 que SÍ acuña token, con `apply_to = "all"`). A 2026-09-03
 (issue #207): 71/30/41/41/18/8/41/19, recontados enteros ese día. A 2026-08-28 (Fases 0–6 del tren 4.4.0): 68/28/40/40/17/8/40/18. Antes de la Fase 6:
 52/21/31/31/14/7/31/15. **`= two_phase(` es el único que no se movió** — las tres tools nuevas no

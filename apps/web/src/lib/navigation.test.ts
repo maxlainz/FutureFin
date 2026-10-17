@@ -90,6 +90,11 @@ describe("pestaña Simulación (antes Próximos)", () => {
     expect(tabFromPathname("/proximos/")).toBe("upcoming");
   });
 
+  it("/jubilacion (pestaña retirada en 6.0.0) resuelve a Proyección", () => {
+    expect(tabFromPathname("/jubilacion")).toBe("projection");
+    expect(tabFromPathname("/jubilacion/")).toBe("projection");
+  });
+
   it("el orden de las pestañas no cambia", () => {
     expect(TABS.map((t) => t.label)).toEqual([
       "Resumen",
@@ -98,7 +103,6 @@ describe("pestaña Simulación (antes Próximos)", () => {
       "Presupuesto",
       "Movimientos",
       "Simulación",
-      "Jubilación",
       "Proyección",
       "Ajustes",
     ]);
@@ -109,7 +113,7 @@ describe("pestaña Simulación (antes Próximos)", () => {
 // solo lectura y sin dueño visible por fila — la nav deja de ofrecer un sitio ya bloqueado. Es
 // presentación, no la frontera de seguridad (el servidor sigue con el 403 `not_row_owner`, D23).
 describe("nav filtrada por ámbito (F1)", () => {
-  it("scope mine ve las nueve pestañas, sin cambios", () => {
+  it("scope mine ve las ocho pestañas, sin cambios", () => {
     expect(tabsForScope("mine")).toEqual(TABS);
   });
 

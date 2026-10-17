@@ -43,10 +43,6 @@ use crate::handlers::ha_sso::{__path_ha_callback, __path_ha_start};
 #[allow(unused_imports)]
 use crate::handlers::sso::__path_sso_login;
 #[allow(unused_imports)]
-use crate::handlers::retirement_profile::{
-    __path_get_retirement_profile, __path_patch_retirement_profile,
-};
-#[allow(unused_imports)]
 use crate::handlers::summary::__path_get_summary;
 #[allow(unused_imports)]
 use crate::handlers::assets::{
@@ -167,8 +163,6 @@ impl utoipa::Modify for SecurityAddon {
         ha_callback,
         me,
         patch_me,
-        get_retirement_profile,
-        patch_retirement_profile,
         get_installation_session_context,
         get_my_installation,
         patch_my_installation,
@@ -269,7 +263,6 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::members::MemberResponse,
         crate::handlers::members::AssignableRole,
         crate::handlers::members::UpdateMemberRoleBody,
-        crate::handlers::installation::FireNumberMode,
         crate::handlers::installation::SavingsSource,
         crate::handlers::installation::FireSettings,
         crate::handlers::installation::TaxBracket,
@@ -278,15 +271,6 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::installation::InstallationSessionContext,
         crate::handlers::installation::SetupInstallationBody,
         crate::handlers::installation::PatchInstallationBody,
-        crate::handlers::retirement_profile::RetirementProfile,
-        crate::handlers::retirement_profile::RetirementProfileResponse,
-        crate::handlers::retirement_profile::PatchRetirementProfileBody,
-        crate::handlers::retirement_profile::RetirementStrategy,
-        crate::handlers::retirement_profile::CoastMode,
-        crate::handlers::retirement_profile::PartialStartMode,
-        crate::handlers::retirement_profile::PensionPlan,
-        crate::handlers::retirement_profile::PartialRetirement,
-        crate::handlers::retirement_profile::PartialExpenseBasis,
         crate::handlers::membership::MembershipRole,
         crate::handlers::api_tokens::ApiTokenResponse,
         crate::handlers::api_tokens::CreateApiTokenBody,
@@ -327,7 +311,6 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::liabilities::PaymentFrequency,
         crate::handlers::liabilities::RepaymentModel,
         crate::handlers::summary::SummaryResponse,
-        crate::handlers::summary::SummaryPlan,
         crate::handlers::summary::FinancialHealthMetrics,
         crate::handlers::summary::CategoryBreakdownLine,
         crate::handlers::summary::TypeTagBreakdownLine,
@@ -345,7 +328,6 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::projection::ProjectionSeriesResponse,
         crate::handlers::projection::DeflateResponse,
         crate::handlers::projection::ProjectionPoint,
-        crate::handlers::projection::SuccessByYearPoint,
         crate::handlers::projection_bands::ProjectionBandsResponse,
         crate::handlers::projection_bands::ProjectionBandPoint,
         crate::handlers::projection_bands::FailureProbabilityPoint,

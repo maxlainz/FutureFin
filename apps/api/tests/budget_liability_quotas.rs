@@ -9,8 +9,8 @@
 //! - `totals.expense_regular_monthly_equivalent` incluye las cuotas y es exactamente la suma de
 //!   los `entries` de scope `expense`; `expense_total_*` vale lo mismo.
 //! - `totals.expense_derived_monthly_equivalent` y `derived_from_liabilities` **ya no existen**.
-//! - `expense_retirement_monthly_equivalent` NO recibe la cuota (termina con su plan de pago) —
-//!   es el campo que alimenta la previa FIRE, con incidente propio (v1.3.0, divergencia 2–3×).
+//! - `expense_retirement_monthly_equivalent` (la base de gasto post-jubilación, sin la cuota) se
+//!   retiró con el modelo de jubilación en 6.0.0 (D-7).
 //! - La base de gasto del **engine** sigue siendo solo lo persistido: el engine cobra la cuota
 //!   por su lado (`ProjectionLiabilityInput::monthly_payment`), así que fundirla también ahí la
 //!   contaría dos veces en toda la proyección del modo A.
@@ -174,10 +174,10 @@ async fn manual_entries_keep_their_shape() {
     assert_eq!(entries[0]["category_id"].as_str().unwrap(), exp_cat);
 }
 
-/// La cuota NO entra en `expense_retirement_monthly_equivalent`: termina con su plan de pago, así
-/// que no es gasto post-jubilación. Ese campo alimenta la previa FIRE de `RetirementView`.
+/// 6.0.0 (D-7): los equivalentes «de jubilación» (`income_/expense_retirement_monthly_equivalent`)
+/// se retiraron con el modelo de jubilación. La cuota sigue en el gasto regular.
 #[tokio::test]
-async fn quota_stays_out_of_the_retirement_expense_base() {
+async fn the_retirement_equivalents_are_gone_and_the_quota_stays_regular() {
     let app = TestApp::spawn().await;
     let owner = app.register_and_login_owner("alice").await;
     let cat = app.create_category(&owner, "liability", "Préstamo").await;
@@ -192,7 +192,8 @@ async fn quota_stays_out_of_the_retirement_expense_base() {
 
     let totals = budget_snapshot(&app, &owner.cookie, "/v1/budget").await["totals"].clone();
     approx(parse_dec(&totals["expense_regular_monthly_equivalent"]), 1200.0);
-    approx(parse_dec(&totals["expense_retirement_monthly_equivalent"]), 1000.0);
+    assert!(totals.get("expense_retirement_monthly_equivalent").is_none(), "{totals}");
+    assert!(totals.get("income_retirement_monthly_equivalent").is_none(), "{totals}");
 }
 
 /// **Regresión del doble conteo en la proyección.** `monthly_delta_assumption` es

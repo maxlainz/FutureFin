@@ -13,7 +13,6 @@ import {
   savingsBasisParenthetical,
   savingsSourceUsesTransactions,
 } from "./fire";
-import { defaultRetirementProfileApi } from "./retirementProfile";
 
 describe("normalizeInstallationFireSettings — savings_source", () => {
   it("default settings incluyen savings_source = budget", () => {
@@ -39,8 +38,8 @@ describe("normalizeInstallationFireSettings — savings_source", () => {
 
   it("un fire_settings de 4.15.x con los cuatro ejes mudados no los arrastra (5.0.0)", () => {
     // El JSONB guardado por 4.15.x traía modo, importe manual, SWR y edad límite dentro. Desde
-    // 5.0.0 son personales (perfil de jubilación, D13): el normalizador debe IGNORARLOS, no
-    // reexportarlos, o el PATCH del hogar los volvería a escribir donde ya no viven.
+    // 5.0.0 no son del hogar (y desde 6.0.0 no existen): el normalizador debe IGNORARLOS, no
+    // reexportarlos, o el PATCH del hogar los volvería a escribir.
     const out = normalizeInstallationFireSettings({
       fire_number_mode: "manual",
       fire_number_manual_amount: "500000",
@@ -191,26 +190,9 @@ describe("savingsBasisParenthetical", () => {
 });
 
 describe("runwaySwrParenthetical", () => {
-  // 5.0.0: lee el PERFIL de jubilación del usuario, no `fire_settings` — el SWR dejó de ser del
-  // hogar (D13).
-  it("sin perfil (sesión sin cargar) → etiqueta sin número, no el default", () => {
-    expect(runwaySwrParenthetical(null)).toBe("dentro del SWR");
-    expect(runwaySwrParenthetical(undefined)).toBe("dentro del SWR");
-  });
-
-  it("formatea el SWR configurado con un decimal y ' %' (es-ES)", () => {
-    expect(
-      runwaySwrParenthetical({ ...defaultRetirementProfileApi(), swr_pct: "3.5" }),
-    ).toBe("dentro del SWR 3,5 %");
-    expect(
-      runwaySwrParenthetical({ ...defaultRetirementProfileApi(), swr_pct: "4" }),
-    ).toBe("dentro del SWR 4,0 %");
-  });
-
-  it("swr_pct vacío → el normalizador cae al default 3,5", () => {
-    expect(
-      runwaySwrParenthetical({ ...defaultRetirementProfileApi(), swr_pct: "" }),
-    ).toBe("dentro del SWR 3,5 %");
+  // 6.0.0 (D-7): el perfil de jubilación se retiró; el servidor decide la marca con un 3,5 % fijo.
+  it("rotula el SWR fijo del servidor", () => {
+    expect(runwaySwrParenthetical()).toBe("dentro del SWR 3,5 %");
   });
 });
 

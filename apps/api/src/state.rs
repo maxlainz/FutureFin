@@ -1,11 +1,8 @@
 use crate::handlers::person_view::LedgerView;
 use crate::handlers::projection::ProjectionSeriesResponse;
 use crate::handlers::projection_bands::ProjectionBandsResponse;
-use crate::handlers::retirement_solver::{
-    Level1Key, PlanExtras, PlanKey, PlanLevel1, PLAN_CACHE_MAX_ENTRIES, PLAN_CACHE_TTL,
-};
 use sqlx::PgPool;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
@@ -20,7 +17,7 @@ pub const PROJECTION_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 ///
 /// Ambas comparten el mismo compute interno del engine (840 meses).
 /// Solo cambia la serialización del response (qué puntos se incluyen en
-/// `points`, `fire_target_series`, `asset_series[].values`).
+/// `points`, `asset_series[].values`).
 #[derive(Hash, Eq, PartialEq, Clone, Copy, Debug)]
 pub enum Density {
     Monthly,
@@ -29,7 +26,7 @@ pub enum Density {
 
 /// Clave de cache. `owner_user_id` es SIEMPRE `Some(_)`, también en `household`:
 /// la respuesta depende de la fecha de nacimiento del **solicitante** (horizonte,
-/// `viewer_birth_date`, `jubilacion_age`, eje de edades), así que una entrada
+/// `viewer_birth_date`, eje de edades), así que una entrada
 /// household compartida servía la demografía de un miembro a otro.
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 pub struct ProjectionCacheKey {
@@ -42,28 +39,7 @@ pub struct ProjectionCacheKey {
 pub struct ProjectionCacheEntry {
     pub response: Arc<ProjectionSeriesResponse>,
     pub last_used: Instant,
-    /// **La clave del PLAN que esta respuesta describe** (5.0.0, WP A3). `None` = esta entrada no
-    /// tiene plan resuelto: horizonte a medida (`?months=`), miembro del hogar sin solve, o
-    /// usuario sin fecha de nacimiento — los casos que publican `plan_absent_reason`.
-    ///
-    /// Existe para que un **HIT** de la serie pueda mirar el nivel 2 (`plan_cache`) sin reconstruir
-    /// el `ProjectionInput`: sin este campo, servir la curva de capital desde una respuesta
-    /// cacheada obligaría a rehacer el ensamblado entero —decenas de queries— solo para volver a
-    /// calcular una huella que ya se calculó una vez.
-    ///
-    /// Es `Option` y no un `PlanKey` a secas porque **hay respuestas sin plan**, y una clave
-    /// inventada para rellenar el hueco apuntaría a los extras de otro hogar.
-    pub plan_key: Option<PlanKey>,
 }
-
-/// El estado de la **cache del nivel 1** (5.0.0, WP A12): el `PlanLevel1` resuelto y cuándo se usó
-/// por última vez. Ver [`AppState::level1_cache`].
-pub(crate) struct Level1CacheEntry {
-    pub level1: Arc<PlanLevel1>,
-    pub last_used: Instant,
-}
-
-pub(crate) type Level1CacheMap = HashMap<Level1Key, Level1CacheEntry>;
 
 pub type ProjectionCacheMap = HashMap<ProjectionCacheKey, ProjectionCacheEntry>;
 
@@ -83,13 +59,6 @@ pub struct BandsCacheKey {
     pub user_id: Uuid,
     pub paths: u32,
     pub seed: u64,
-    /// **El umbral de éxito del perfil** (5.0.0, modelo v2). Está en la clave porque está en la
-    /// RESPUESTA: desde 5.0.0 las bandas publican el veredicto contra el umbral del usuario
-    /// (`success_verdict`) y lo ecoan (`success_threshold_pct`), así que dos umbrales distintos
-    /// describen dos respuestas distintas del mismo sorteo. Sin este eje, cambiar el umbral en
-    /// Ajustes devolvería el veredicto del umbral anterior — verde donde tocaba ámbar — sin que
-    /// ningún campo lo dijera.
-    pub threshold_pct: u32,
 }
 
 pub struct BandsCacheEntry {
@@ -98,30 +67,6 @@ pub struct BandsCacheEntry {
 }
 
 pub type BandsCacheMap = HashMap<BandsCacheKey, BandsCacheEntry>;
-
-/// El estado de una entrada de la **cache de plan** (nivel 2 de `retirement_solver`).
-///
-/// Dos estados y ninguno más. La ausencia de entrada es un tercer caso —«nadie lo ha pedido»— y
-/// significa otra cosa que [`PlanCacheSlot::Pending`]: quien lee publica `unavailable` en el
-/// primero y `computing` en el segundo, y confundirlos le dice al usuario «no se puede» mientras
-/// se está calculando.
-#[derive(Clone)]
-pub enum PlanCacheSlot {
-    /// El nivel 2 está en vuelo. Se registra **antes** de que la petición que lo lanzó responda,
-    /// para que ningún lector caiga en la ventana en que la tarea existe y la entrada no.
-    Pending,
-    /// Terminó. `PlanExtras::state` dice si con resultado o con su razón de fallo: una entrada
-    /// fallida **también se guarda**, porque reintentar un sorteo de veinticinco segundos en cada
-    /// GET sería peor que decir «no disponible» durante el TTL.
-    Done(Arc<PlanExtras>),
-}
-
-pub struct PlanCacheEntry {
-    pub slot: PlanCacheSlot,
-    pub last_used: Instant,
-}
-
-pub type PlanCacheMap = HashMap<PlanKey, PlanCacheEntry>;
 
 pub struct AppState {
     pub version: &'static str,
@@ -158,58 +103,6 @@ pub struct AppState {
     /// invalidaciones**: `invalidate_projection_by_installation` y `..._by_user` borran los dos
     /// mapas. Una banda calculada sobre unos activos que ya no existen es peor que no tener banda.
     pub bands_cache: RwLock<BandsCacheMap>,
-    /// **Cache del NIVEL 2 del plan de jubilación** (5.0.0, WP A3): las dos fechas de referencia,
-    /// la curva de capital por edad, la tira anual de éxito y el fallo acumulado por edad. Del
-    /// orden de veinticinco segundos de CPU por entrada, así que se calcula en segundo plano y se
-    /// guarda.
-    ///
-    /// # Por qué este mapa NO se invalida
-    ///
-    /// Los otros dos se invalidan porque su clave nombra un HOGAR (`installation_id`,
-    /// `user_id`) y el contenido cuelga de unos datos que pueden cambiar: tras una mutación, la
-    /// entrada sigue siendo alcanzable y ya no describe la realidad.
-    ///
-    /// La clave de este es un **hash del contenido** (`plan_fingerprint`: la entrada entera del
-    /// motor, las volatilidades, el umbral, los caminos y la semilla). Cambiar un activo, el
-    /// umbral o la semilla produce **otra clave**, así que la entrada vieja deja de tener quien la
-    /// pida: no hay ninguna petición que pueda servirse de ella por error. Una entrada obsoleta
-    /// aquí es **inalcanzable, nunca peligrosa** — que es la razón por la que un `retain` por
-    /// instalación no compraría nada, y además no podría escribirse: la clave no lleva
-    /// `installation_id`, y llevarlo la haría dejar de ser una huella del contenido.
-    ///
-    /// Lo único que hay que evitar es que crezca sin límite, y de eso se ocupan el TTL (el mismo
-    /// de la proyección) y el tope LRU de `PLAN_CACHE_MAX_ENTRIES`, los dos aplicados en
-    /// [`AppState::plan_cache_insert`].
-    pub plan_cache: RwLock<PlanCacheMap>,
-    /// **Claves del nivel 2 en vuelo**, para que dos peticiones concurrentes del mismo hogar
-    /// lancen **un** solo cálculo. Un `Mutex` y no un `RwLock` porque toda operación aquí escribe
-    /// (`insert` / `remove`); un lock de lectura no tendría usuarios.
-    pub plan_inflight: Mutex<HashSet<PlanKey>>,
-    /// **Cache del NIVEL 1 del plan** (5.0.0, WP A12): la fecha, el éxito y el capital necesario
-    /// hoy — de dos a cinco segundos de bisección estocástica por entrada.
-    ///
-    /// # Qué problema resuelve
-    ///
-    /// El nivel 1 lo necesitan DOS superficies del mismo hogar: `GET /v1/projection/series` (que
-    /// lo resuelve dentro de su miss) y `GET /v1/projection/bands` (que hasta 5.0.0 lo volvía a
-    /// resolver ENTERO en cada miss propio, con la misma entrada, el mismo perfil y la misma
-    /// semilla estable — o sea, para obtener exactamente el mismo resultado). La SPA pide las dos
-    /// al abrir Jubilación, así que ese doble solve era el caso NORMAL, no el raro.
-    ///
-    /// # Por qué no le vale la clave del nivel 2
-    ///
-    /// `PlanKey` se calcula sobre el escenario de DESPUÉS del solve, y aquí hay que preguntar
-    /// antes de resolver. La clave es [`Level1Key`], huella de los cinco argumentos de
-    /// `solve_plan_level1_with_budget` — que es una función pura de ellos.
-    ///
-    /// # Por qué NO se invalida
-    ///
-    /// El mismo argumento que en [`Self::plan_cache`], y por la misma propiedad: la clave **es**
-    /// el contenido. Cambiar un activo, el perfil, el umbral, el presupuesto o la semilla produce
-    /// otra clave, así que una entrada obsoleta se queda sin quien la pida. Lo único que hay que
-    /// acotar es el tamaño, y de eso se ocupan el TTL y el LRU de
-    /// [`AppState::level1_cache_insert`] — los mismos del nivel 2.
-    pub(crate) level1_cache: RwLock<Level1CacheMap>,
     /// **Generación del cache de proyección, por instalación** (5.0.0, WP A12).
     ///
     /// # El fallo que cierra
@@ -272,9 +165,6 @@ impl AppState {
             ha_sso: None,
             projection_cache: RwLock::new(HashMap::new()),
             bands_cache: RwLock::new(HashMap::new()),
-            plan_cache: RwLock::new(HashMap::new()),
-            plan_inflight: Mutex::new(HashSet::new()),
-            level1_cache: RwLock::new(HashMap::new()),
             projection_generation: Mutex::new(HashMap::new()),
         }
     }
@@ -345,16 +235,10 @@ impl AppState {
             .unwrap_or(0)
     }
 
-    /// Guarda una respuesta de proyección **con la clave de su plan**, y **solo si la generación
-    /// que el llamante capturó antes de computar sigue vigente**. Devuelve `false` si se descartó.
+    /// Guarda una respuesta de proyección **solo si la generación que el llamante capturó antes
+    /// de computar sigue vigente**. Devuelve `false` si se descartó.
     ///
-    /// `plan_key` es un parámetro y no un campo opcional que se rellena luego a propósito: es la
-    /// única forma de que sea **imposible olvidarlo**. Una entrada guardada sin su clave publicaría
-    /// `computing` para siempre —el nivel 2 nunca se buscaría ni se lanzaría— y ese fallo no
-    /// levanta ningún assert de tipo. `None` es una respuesta legítima (sin plan: `?months=`,
-    /// miembro del hogar sin solve, usuario sin fecha de nacimiento), pero hay que escribirla.
-    ///
-    /// **`generation` es un parámetro por la MISMA razón** (5.0.0, WP A12): no existe una versión
+    /// **`generation` es un parámetro a propósito** (5.0.0, WP A12): no existe una versión
     /// sin guardia de este método, así que ningún camino nuevo puede olvidarse de la carrera. Lo
     /// que se descarta es una respuesta **correcta pero vieja**: el siguiente GET la recalcula
     /// contra los datos de ahora, que es exactamente lo que la mutación pidió.
@@ -363,7 +247,6 @@ impl AppState {
         key: ProjectionCacheKey,
         generation: u64,
         response: Arc<ProjectionSeriesResponse>,
-        plan_key: Option<PlanKey>,
     ) -> bool {
         // Orden de locks: generación → mapa, el MISMO que usan las dos invalidaciones. Se sostiene
         // la generación hasta después de insertar, así que una invalidación no puede colarse entre
@@ -385,18 +268,11 @@ impl AppState {
             ProjectionCacheEntry {
                 response,
                 last_used: Instant::now(),
-                plan_key,
             },
         );
         drop(cache);
         drop(generations);
         true
-    }
-
-    /// La clave del plan de una entrada cacheada, si la tiene. **No refresca el TTL**: quien lo
-    /// refresca es `projection_cache_get`, que es quien de verdad sirve la respuesta.
-    pub async fn projection_cache_plan_key(&self, key: &ProjectionCacheKey) -> Option<PlanKey> {
-        self.projection_cache.read().await.get(key)?.plan_key
     }
 
     /// Hit del cache de bandas, con el MISMO TTL sliding que la proyección.
@@ -451,136 +327,6 @@ impl AppState {
         drop(cache);
         drop(generations);
         true
-    }
-
-    // ---------------------------------------------------------------------------------------
-    // Cache del NIVEL 1 — **direccionada por CONTENIDO**, ver el doc de `level1_cache`.
-    // ---------------------------------------------------------------------------------------
-
-    /// Hit de la cache del nivel 1, con el MISMO TTL sliding que la proyección.
-    pub(crate) async fn level1_cache_get(&self, key: &Level1Key) -> Option<Arc<PlanLevel1>> {
-        {
-            let cache = self.level1_cache.read().await;
-            let entry = cache.get(key)?;
-            if entry.last_used.elapsed() < PLAN_CACHE_TTL {
-                let level1 = entry.level1.clone();
-                drop(cache);
-                let mut cache = self.level1_cache.write().await;
-                if let Some(e) = cache.get_mut(key) {
-                    e.last_used = Instant::now();
-                }
-                return Some(level1);
-            }
-        }
-        let mut cache = self.level1_cache.write().await;
-        cache.remove(key);
-        None
-    }
-
-    /// Inserta y **acota el mapa**, con la misma política (y las mismas cotas) que
-    /// [`Self::plan_cache_insert`]: barrido de expiradas, inserción, desalojo LRU. **No hay
-    /// guardia de generación aquí y es correcto**: la clave ES el contenido, así que una entrada
-    /// vieja no es alcanzable por una petición nueva — el problema que la generación resuelve es
-    /// el de las caches direccionadas por HOGAR, que sí siguen siendo alcanzables tras un cambio.
-    pub(crate) async fn level1_cache_insert(&self, key: Level1Key, level1: Arc<PlanLevel1>) {
-        let mut cache = self.level1_cache.write().await;
-        cache.retain(|_, e| e.last_used.elapsed() < PLAN_CACHE_TTL);
-        cache.insert(
-            key,
-            Level1CacheEntry {
-                level1,
-                last_used: Instant::now(),
-            },
-        );
-        while cache.len() > PLAN_CACHE_MAX_ENTRIES {
-            let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| *k)
-            else {
-                break;
-            };
-            cache.remove(&oldest);
-        }
-    }
-
-    // ---------------------------------------------------------------------------------------
-    // Cache de plan (nivel 2) — **direccionada por CONTENIDO**, ver el doc de `plan_cache`.
-    // ---------------------------------------------------------------------------------------
-
-    /// Hit de la cache de plan, con el MISMO TTL sliding que la proyección. `None` = no hay
-    /// entrada (que **no** es lo mismo que [`PlanCacheSlot::Pending`]: uno se publica como
-    /// `unavailable` y el otro como `computing`).
-    pub async fn plan_cache_get(&self, key: &PlanKey) -> Option<PlanCacheSlot> {
-        {
-            let cache = self.plan_cache.read().await;
-            let entry = cache.get(key)?;
-            if entry.last_used.elapsed() < PLAN_CACHE_TTL {
-                let slot = entry.slot.clone();
-                drop(cache);
-                let mut cache = self.plan_cache.write().await;
-                if let Some(e) = cache.get_mut(key) {
-                    e.last_used = Instant::now();
-                }
-                return Some(slot);
-            }
-        }
-        let mut cache = self.plan_cache.write().await;
-        cache.remove(key);
-        None
-    }
-
-    /// Refresca el TTL de una entrada **sin leerla**, y dice si existía y sigue viva.
-    ///
-    /// Lo usa un HIT de la serie: la respuesta ya está cacheada y el nivel 2 no hace falta
-    /// clonarlo, pero la entrada del plan se está usando y desalojarla por LRU mientras su serie
-    /// sigue caliente obligaría a recalcular veinticinco segundos de sorteos.
-    pub async fn plan_cache_touch(&self, key: &PlanKey) -> bool {
-        let mut cache = self.plan_cache.write().await;
-        match cache.get_mut(key) {
-            Some(e) if e.last_used.elapsed() < PLAN_CACHE_TTL => {
-                e.last_used = Instant::now();
-                true
-            }
-            Some(_) => {
-                cache.remove(key);
-                false
-            }
-            None => false,
-        }
-    }
-
-    /// Inserta (o reemplaza) una entrada y **acota el mapa**, en este orden:
-    ///
-    /// 1. se caen las entradas **expiradas** por TTL — barrer aquí es lo que hace que una cache
-    ///    que nadie vuelve a leer no se quede con su memoria retenida para siempre;
-    /// 2. se inserta la nueva;
-    /// 3. mientras sobren entradas, se desaloja la de `last_used` más antiguo (**LRU**).
-    ///
-    /// El desalojo mira `last_used` y no distingue [`PlanCacheSlot::Pending`] de `Done` a
-    /// propósito: desalojar un `Pending` solo hace que un lector publique `unavailable` en vez de
-    /// `computing` durante unos segundos —la tarea sigue viva y volverá a insertar—, mientras que
-    /// protegerlos abriría la puerta a un mapa lleno de `Pending` que el tope no puede acotar.
-    pub async fn plan_cache_insert(&self, key: PlanKey, slot: PlanCacheSlot) {
-        let mut cache = self.plan_cache.write().await;
-        cache.retain(|_, e| e.last_used.elapsed() < PLAN_CACHE_TTL);
-        cache.insert(
-            key,
-            PlanCacheEntry {
-                slot,
-                last_used: Instant::now(),
-            },
-        );
-        while cache.len() > PLAN_CACHE_MAX_ENTRIES {
-            let Some(oldest) = cache
-                .iter()
-                .min_by_key(|(_, e)| e.last_used)
-                .map(|(k, _)| *k)
-            else {
-                break;
-            };
-            cache.remove(&oldest);
-        }
     }
 
     /// Tras una mutación: borra todas las entries del installation. Ambas

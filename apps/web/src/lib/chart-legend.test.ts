@@ -12,7 +12,6 @@ import {
 describe("buildStructuralLegendItems", () => {
   it("base: Patrimonio neto + Capital aportado, en ese orden", () => {
     const items = buildStructuralLegendItems({
-      hasNeededCapital: false,
       hasHistory: false,
     });
     expect(items.map((i) => i.label)).toEqual([
@@ -23,57 +22,10 @@ describe("buildStructuralLegendItems", () => {
     expect(items[1]!.swatch).toBe("dashed");
   });
 
-  // INVERTIDO por el modelo v2 (C4): «Objetivo FIRE» ya no es una entrada posible —
-  // `fire_target_series` salió del contrato y no hay objetivo que cruzar—, y en su hueco van la
-  // curva «Capital necesario» y la MARCA de la fecha válida.
-  it("nunca vuelve «Objetivo FIRE»: en su sitio va «Capital necesario»", () => {
-    const items = buildStructuralLegendItems({
-      hasNeededCapital: true,
-      hasHistory: false,
-    });
-    expect(items.map((i) => i.label)).toEqual([
-      "Patrimonio neto",
-      "Capital aportado",
-      "Capital necesario",
-    ]);
+  it("nunca vuelven «Objetivo FIRE» ni «Capital necesario» (retirados con la jubilación)", () => {
+    const items = buildStructuralLegendItems({ hasHistory: true });
     expect(items.some((i) => i.label.includes("Objetivo"))).toBe(false);
-    // Discontinua, y con el token de la curva que el chart pinta — no un color escrito aparte.
-    expect(items[2]!.swatch).toBe("dashed");
-    expect(items[2]!.color).toBe("var(--proj-required)");
-  });
-
-  it("la marca de la fecha válida entra con SU rótulo y muestra propia", () => {
-    const items = buildStructuralLegendItems({
-      hasNeededCapital: true,
-      hasHistory: false,
-      validDateMarkLabel: "Fecha válida",
-    });
-    expect(items.map((i) => i.label)).toEqual([
-      "Patrimonio neto",
-      "Capital aportado",
-      "Capital necesario",
-      "Fecha válida",
-    ]);
-    // `mark` y no `line`: es un instante, no una serie, y la muestra lo dice.
-    expect(items[3]!.swatch).toBe("mark");
-    expect(items[3]!.color).toBe("var(--ff-accent)");
-  });
-
-  // Sin fecha válida (`not_reachable`) el chart no pinta marca: la leyenda tampoco puede
-  // reservarle hueco, o rotularía una línea que no está. La explicación va en la NOTA del pie,
-  // que no es un ítem de leyenda.
-  it("sin rótulo de marca (ausente, null o en blanco) no hay entrada de marca", () => {
-    for (const label of [undefined, null, "", "   "]) {
-      const items = buildStructuralLegendItems({
-        hasNeededCapital: false,
-        hasHistory: false,
-        validDateMarkLabel: label,
-      });
-      expect(items.map((i) => i.label)).toEqual([
-        "Patrimonio neto",
-        "Capital aportado",
-      ]);
-    }
+    expect(items.some((i) => i.label.includes("necesario"))).toBe(false);
   });
 
   it("historyIsAssetsOnly renombra el tramo pasado a «Activos (histórico)»", () => {
@@ -81,7 +33,6 @@ describe("buildStructuralLegendItems", () => {
     // activos: la leyenda tiene que decirlo, o las dos mitades de la curva se leen como la misma
     // magnitud — el error que el `net_worth: null` del servidor acaba de cerrar.
     const items = buildStructuralLegendItems({
-      hasNeededCapital: false,
       hasHistory: true,
       historyIsAssetsOnly: true,
     });
@@ -97,7 +48,6 @@ describe("buildStructuralLegendItems", () => {
 
     // Omitido o false → etiqueta de siempre, sin title propio.
     const plain = buildStructuralLegendItems({
-      hasNeededCapital: false,
       hasHistory: true,
     });
     expect(plain[2]!.label).toBe("Histórico");
@@ -106,27 +56,13 @@ describe("buildStructuralLegendItems", () => {
 
   // El histórico cierra SIEMPRE el bloque estructural (los activos se concatenan detrás en el
   // componente): un orden que cambiara con las props movería la leyenda entera bajo el usuario.
-  it("con todo activo, el orden es nw · cc · necesario · marca · histórico", () => {
-    const items = buildStructuralLegendItems({
-      hasNeededCapital: true,
-      hasHistory: true,
-      validDateMarkLabel: "Fecha válida",
-    });
-    expect(items.map((i) => i.key)).toEqual([
-      "nw",
-      "cc",
-      "needed_capital",
-      "safe_date",
-      "hist",
-    ]);
+  it("con todo activo, el orden es nw · cc · histórico", () => {
+    const items = buildStructuralLegendItems({ hasHistory: true });
+    expect(items.map((i) => i.key)).toEqual(["nw", "cc", "hist"]);
   });
 
   it("todos los colores son tokens var(--…)", () => {
-    for (const i of buildStructuralLegendItems({
-      hasNeededCapital: true,
-      hasHistory: true,
-      validDateMarkLabel: "Fecha válida",
-    })) {
+    for (const i of buildStructuralLegendItems({ hasHistory: true })) {
       expect(i.color.startsWith("var(--")).toBe(true);
     }
   });

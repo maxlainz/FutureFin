@@ -1241,15 +1241,6 @@ pub(crate) async fn allocation_resolution_core(
 
     let today = crate::handlers::installation::installation_naive_today(pool, iid).await?;
     let fire_settings = load_fire_settings(pool, iid).await?;
-    let retirement_profile =
-        crate::handlers::retirement_profile::load_retirement_profile(pool, user_id).await?;
-    // La DOB del solicitante: sin ella una estrategia por edad no se puede convertir en mes del
-    // bucle, y el reparto del mes 1 se resolvería como si el usuario siguiera trabajando.
-    let birth_date: Option<chrono::NaiveDate> =
-        sqlx::query_scalar(r#"SELECT birth_date FROM users WHERE id = $1"#)
-            .bind(user_id)
-            .fetch_one(pool)
-            .await?;
     let built = build_installation_projection_input(
         pool,
         iid,
@@ -1259,8 +1250,6 @@ pub(crate) async fn allocation_resolution_core(
         1,
         Decimal::ZERO,
         Some(&fire_settings),
-        &retirement_profile,
-        birth_date,
         None,
     )
     .await?;
@@ -1554,8 +1543,6 @@ pub(crate) async fn allocation_goals_core(
         ctx.months,
         ctx.inflation_annual_percent,
         Some(&ctx.fire_settings),
-        &ctx.retirement_profile,
-        ctx.session_birth_date,
         None,
     )
     .await?;

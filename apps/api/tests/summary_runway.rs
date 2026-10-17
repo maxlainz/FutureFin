@@ -16,7 +16,8 @@
 //!
 //! El resto cubre el comportamiento compuesto (todos con el número o la desigualdad PREDICHOS en
 //! el comentario de cada test): rentabilidad que alarga, inflación que acorta, el caso indefinido
-//! decidido por el **umbral SWR** (v2.3.0: infinito ⟺ `gross_up(12·gasto) ≤ líquidos·swr/100`,
+//! decidido por el **umbral SWR** (v2.3.0: infinito ⟺ `gross_up(12·gasto) ≤ líquidos·swr/100`;
+//! desde 6.0.0 el SWR es un 3,5 % fijo, `RUNWAY_LEGACY_SWR_PCT`, hasta que D-22 retire la marca,
 //! con el mismo gross-up fiscal que el target FIRE; el tope de 1.200 meses pasa a ser un suelo
 //! finito `Months(1200)`), y la base de gasto efectiva en modo B (`transactions_avg`) con sus
 //! identidades.
@@ -168,19 +169,6 @@ async fn set_fire_settings(app: &TestApp, cookie: &str, fs: Value) {
         .patch_json_with_cookie("/v1/installation", json!({ "fire_settings": fs }), cookie)
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "set fire_settings: {r:?}");
-}
-
-/// El SWR salió de `fire_settings` en 5.0.0 (D13): el umbral «runway indefinido» lo fija ahora el
-/// perfil de jubilación del SOLICITANTE, no el hogar. Mismo eje, mismo número, otra ruta.
-async fn set_swr(app: &TestApp, cookie: &str, swr: &str) {
-    let r = app
-        .patch_json_with_cookie(
-            "/v1/auth/me/retirement-profile",
-            json!({ "swr_pct": swr }),
-            cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::OK, "set swr_pct: {r:?}");
 }
 
 async fn budget(app: &TestApp, cookie: &str, cat: &str, amount: &str) {
@@ -507,34 +495,6 @@ async fn runway_gross_up_raises_threshold() {
         sin_impuestos["runway_months"]
     );
     assert_eq!(sin_impuestos["runway_is_indefinite"], true);
-}
-
-/// `swr_pct = 0` (válido en la API) nunca marca infinito, por grande que sea el saldo o la
-/// rentabilidad.
-///
-/// PREDICCIÓN: 1.000.000 € al 7 % con gasto 1.000 €/mes — el escenario que con SWR 3,5 es
-/// `Indefinite` (y que en 2.2.0 lo era por el cap) — aquí NO cumple el umbral (A·0 = 0); el
-/// retorno (~5.654 €/mes) cubre el gasto, así que el bucle agota el tope y devuelve el **suelo**:
-/// `runway_months == 1200` y `runway_is_indefinite == false`.
-#[tokio::test]
-async fn runway_swr_zero_never_indefinite() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-
-    let asset_cat = app.create_category(&owner, "asset", "Cuenta").await;
-    let expense_cat = app.create_category(&owner, "expense", "Gastos").await;
-
-    set_swr(&app, &owner.cookie, "0").await;
-    liquid_asset_with_return(&app, &owner.cookie, &asset_cat, "Cartera", "1000000", "7").await;
-    budget(&app, &owner.cookie, &expense_cat, "1000").await;
-
-    let h = health(&app, &owner.cookie).await;
-    assert_eq!(h["runway_is_indefinite"], false, "con SWR 0 jamás hay infinito");
-    assert_eq!(
-        dec(&h["runway_months"]),
-        d(1_200),
-        "el saldo sobrevive el tope → suelo Months(1200), no Indefinite"
-    );
 }
 
 // ---------------------------------------------------------------------------

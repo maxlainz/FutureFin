@@ -31,7 +31,7 @@
  */
 
 import type { HouseholdMemberProjectionApi } from "../api/types";
-import { householdMemberColor } from "./chart-legend";
+import { householdMemberColor, type ChartLegendItem } from "./chart-legend";
 import { lastPointIndexAtOrBeforeMonth } from "./projection-chart";
 
 /** Un vértice de la línea de un miembro. `month_index` (y no `x`) para que el punto se pueda
@@ -127,4 +127,21 @@ export function memberValueAtMonth(
   if (pts[pts.length - 1]!.month_index < month) return null;
   const idx = lastPointIndexAtOrBeforeMonth(pts, month);
   return pts[idx]?.value ?? null;
+}
+
+/**
+ * Entradas de leyenda de las líneas finas por miembro (D32): mismo color que su línea
+ * (`householdMemberColor` por posición en `members[]`) y la misma `key`, para que la leyenda no
+ * nombre la curva de otro. Vivía en `phase-strip.ts`, retirado con la tira de fases (6.0.0, D-7).
+ */
+export function buildHouseholdMemberLegendItems(
+  members: readonly HouseholdMemberProjectionApi[] | null | undefined,
+): ChartLegendItem[] {
+  return (members ?? []).map((m, idx) => ({
+    key: `member-${m.user_id}`,
+    label: m.username,
+    color: householdMemberColor(idx),
+    swatch: "line" as const,
+    title: `Patrimonio de ${m.username}`,
+  }));
 }
