@@ -15,15 +15,15 @@ qué está a medias, dónde vive cada cosa y cuál es el siguiente paso. Se actu
 - **`next/6.0`**: rama de integración (excepción documentada en `.claude/git-and-releases.md`). Todo
   entra por PR desde `feat/6.0-…` con CI verde, merge commit (no squash). `main` se mergea en ella con
   regularidad. Entra en `main` con un único PR que lleva el bump a 6.0.0.
-- **`wip/6.0-…`**: instantáneas de trabajo a medias (sin CI, sin garantías) para no perderlo si la sesión
+- **`wip/6.0-…`**: instantáneas (el proxy de la sesión no deja borrar ramas remotas: bórralas a mano cuando su PR esté mergeado) de trabajo a medias (sin CI, sin garantías) para no perderlo si la sesión
   se corta. Se borran cuando su PR se mergea.
 
-## Avance (actualizado 2026-10-17 ~14:40 UTC) — total ≈ 29 %
+## Avance (actualizado 2026-10-17 ~15:45 UTC) — total ≈ 33 %
 
 | Fase | Peso | Estado |
 |---|---|---|
 | F1 motor | 25 % | **Hecha.** F1a #263 (activos/pasivos con mes de inicio), F1b #264 (cambios de ingreso/gasto + indexación), F1c #265 (ventas explícitas, déficit por el sumidero, fallo en todo el horizonte; 4 bugs de la revisión adversarial arreglados) |
-| F2 API/MCP | 35 % | F2-1 (tablas + CRUD de planes) y F2-2 (retirada de la jubilación) en curso; F2-3…F2-7 pendientes |
+| F2 API/MCP | 35 % | F2-2 (retirada de la jubilación) en PR #266; F2-1 (tablas + CRUD) terminando tests; F2-3…F2-7 pendientes |
 | F3 finanzas compartidas | 10 % | F3a (interruptor + permisos) en curso; F3b (simulación única del hogar, planes de hogar, cuotas de propiedad D-28) pendiente |
 | F4 UI | 20 % | Prototipo hecho; implementación pendiente (arranca cuando F2-1 fije el contrato) |
 | F5 docs + release | 10 % | RFC y plan escritos; reescritura de docs/skills, CHANGELOG y bump pendientes |
@@ -33,7 +33,7 @@ qué está a medias, dónde vive cada cosa y cuál es el siguiente paso. Se actu
 | Pieza | Instantánea | Qué falta |
 |---|---|---|
 | F2-1 tablas + CRUD | `wip/6.0-f2-1-plans-crud` | Terminar la suite completa de tests de la API, abrir PR `feat/6.0-f2-1-plans-crud` → `next/6.0` |
-| F2-2 retirar jubilación | `wip/6.0-f2-2-remove-retirement` | Ver el plan F2 §Retirada; pines de `projection_pins.rs` sin cambios; web en verde |
+| F2-2 retirar jubilación | PR #266 (`feat/6.0-f2-2-remove-retirement`) | Esperar CI y mergear. Huecos que hereda F2-3/F2-4/F2-6: éxito `null` con `no_retirement_phase` en bandas/simulate hasta SinkOnly; colchón con SWR fijo 3,5 % hasta D-22; horizonte fijo a 90; fecha de nacimiento sin escritor MCP (F2-6); CSS `.retirement-*`/`.plan-card-*` huérfano (F4) |
 | F3a finanzas compartidas | `wip/6.0-f3a-shared-finances` | Interruptor `shared_finances` en installation, `require_row_owner` condicional, tests en ambos modos |
 
 Para retomar una instantánea: `git checkout -b feat/6.0-<pieza> origin/wip/6.0-<pieza>` (el commit es una
