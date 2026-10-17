@@ -12,6 +12,8 @@ The repo carries three documentation layers. Consult them in this order:
 2. **Skills** (`.claude/skills/*/SKILL.md`) — task-shaped runbooks with verified commands, the project's history and its discipline. **Pick by task type** (table below).
 3. **Reference docs** (`.claude/*.md`) — per-area fact sheets (routes, schema, engine, env…).
 
+**Trabajo en curso — 6.0.0 «Planes»**: la jubilación deja de ser un modelo y pasa a ser una hipótesis dentro de planes. Antes de tocar proyección, jubilación, `planning_flows`, presupuesto o permisos, lee el RFC [`.claude/rfc/planes-6.0.md`](.claude/rfc/planes-6.0.md) (decisiones, abiertos, inventario de impacto, fases y rama de trabajo).
+
 El manual de usuario (`docs/*.md`) es una cuarta superficie con la **misma barra de exactitud**: las secuencias de comandos canónicas (dev, build local, producción) viven allí — ver §Commands.
 
 ### Skill routing (load BEFORE starting the matching task)
