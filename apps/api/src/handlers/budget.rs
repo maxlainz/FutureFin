@@ -872,7 +872,8 @@ pub(crate) async fn patch_budget_entry_core(
     let Some(current) = row else {
         return Err(missing_budget_entry_error(&state.pool, iid, id).await);
     };
-    require_row_owner(current.owner_user_id, user_id)?;
+    let write_owner =
+        require_row_owner(&state.pool, iid, current.owner_user_id, user_id).await?;
 
     let new_cat = body.category_id.unwrap_or(current.category_id);
     if new_cat != current.category_id {
@@ -946,7 +947,7 @@ pub(crate) async fn patch_budget_entry_core(
     .bind(new_expense_end_date)
     .bind(id)
     .bind(iid)
-    .bind(user_id)
+    .bind(write_owner)
     .fetch_one(&state.pool)
     .await?;
 
@@ -1001,10 +1002,10 @@ pub(crate) async fn delete_budget_entry_core(
     .bind(iid)
     .fetch_optional(&state.pool)
     .await?;
-    match owner {
+    let write_owner = match owner {
         None => return Err(missing_budget_entry_error(&state.pool, iid, id).await),
-        Some(o) => require_row_owner(o, user_id)?,
-    }
+        Some(o) => require_row_owner(&state.pool, iid, o, user_id).await?,
+    };
 
     let res = sqlx::query(
         r#"DELETE FROM budget_entries
@@ -1012,7 +1013,7 @@ pub(crate) async fn delete_budget_entry_core(
     )
     .bind(id)
     .bind(iid)
-    .bind(user_id)
+    .bind(write_owner)
     .execute(&state.pool)
     .await?;
 

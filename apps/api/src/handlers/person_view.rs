@@ -27,17 +27,67 @@ pub fn not_row_owner() -> ApiError {
     )
 }
 
-/// Puerta de D21: compara el dueño de la fila con el usuario de la sesión.
+/// Puerta de D21/D23: decide si el usuario de la sesión puede mutar una fila del ledger cuyo dueño
+/// es `row_owner`, y devuelve **el dueño que hay que rebindar** en el `UPDATE`/`DELETE`.
 ///
 /// Punto ÚNICO — los cinco módulos del ledger la llaman en vez de escribir el `if`, que es lo
 /// que evita que uno de ellos se quede atrás en la próxima refactorización (el patrón del
 /// dual-branch drift que ya mordió dos veces en el MCP).
-pub fn require_row_owner(row_owner: Uuid, session_user_id: Uuid) -> Result<(), ApiError> {
+///
+/// **6.0.0 (RFC Planes D-16) — condicional a `installation.shared_finances`.**
+/// - Interruptor apagado (default): exactamente D23 — solo el dueño de la fila, 403
+///   `not_row_owner` para cualquier otro, también para el owner de la instalación.
+/// - Interruptor encendido: cualquier miembro con rol de ESCRITURA (`owner`/`member`) puede mutar
+///   cualquier fila de la instalación. Es permiso, **no propiedad**: la fila conserva su
+///   `owner_user_id` (por eso se devuelve `row_owner`, no la sesión — el `AND owner_user_id = $n`
+///   de cada sentencia sigue siendo el cinturón contra una fila que cambiase de manos entre el
+///   SELECT y la escritura). Un `viewer` sigue sin escribir en los dos modos: el rol se comprueba
+///   AQUÍ también, no solo en la superficie, para que una core llamada desde una superficie nueva
+///   no herede un permiso que el interruptor no da.
+///
+/// El camino propio (`row_owner == session_user_id`) no consulta nada: el coste extra solo lo paga
+/// la escritura cruzada.
+pub async fn require_row_owner<'c, E>(
+    executor: E,
+    installation_id: Uuid,
+    row_owner: Uuid,
+    session_user_id: Uuid,
+) -> Result<Uuid, ApiError>
+where
+    E: sqlx::Executor<'c, Database = Postgres>,
+{
     if row_owner == session_user_id {
-        Ok(())
+        return Ok(row_owner);
+    }
+    if shared_finances_grants_write(executor, installation_id, session_user_id).await? {
+        Ok(row_owner)
     } else {
         Err(not_row_owner())
     }
+}
+
+/// `true` ⟺ la instalación tiene `shared_finances` encendido **y** el usuario es miembro con rol
+/// de escritura. Lo usan la puerta de fila y el `reorder` de reglas en vista de hogar.
+pub async fn shared_finances_grants_write<'c, E>(
+    executor: E,
+    installation_id: Uuid,
+    session_user_id: Uuid,
+) -> Result<bool, ApiError>
+where
+    E: sqlx::Executor<'c, Database = Postgres>,
+{
+    let row: Option<(bool, String)> = sqlx::query_as(
+        r#"SELECT i.shared_finances, m.role
+           FROM installation i
+           JOIN installation_memberships m
+             ON m.installation_id = i.id AND m.user_id = $2
+           WHERE i.id = $1"#,
+    )
+    .bind(installation_id)
+    .bind(session_user_id)
+    .fetch_optional(executor)
+    .await?;
+    Ok(matches!(row, Some((true, role)) if crate::handlers::membership::role_can_write(&role)))
 }
 
 #[derive(Debug, Deserialize)]

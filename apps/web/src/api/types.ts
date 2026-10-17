@@ -206,6 +206,8 @@ export type InstallationSnapshot = {
   fire_settings?: FireSettingsApi;
   /** Kill-switch vivo de las tools de escritura MCP. Ausente en backends antiguos → `true`. */
   mcp_write_enabled?: boolean;
+  /** «Finanzas compartidas» (6.0, D-16): escritura cruzada del ledger entre miembros. Ausente en backends antiguos → `false`. */
+  shared_finances?: boolean;
   /** `false` mientras el hogar no haya pasado por el asistente de primera vez (3.10.0).
    *  Ausente en backends antiguos → se trata como completado, para no lanzar el asistente a
    *  quien ya tenía su hogar configurado. */

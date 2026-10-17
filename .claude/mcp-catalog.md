@@ -1029,6 +1029,12 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
   **y emitía el `confirm_token`** que la ejecuta. Regresión:
   `mcp_write.rs::mcp_writes_cannot_touch_another_members_rows` y
   `mcp_confirm_and_impact.rs::el_preview_de_un_borrado_ajeno_no_emite_token`.
+  **Desde 6.0 es condicional a `shared_finances`** (RFC Planes D-16): encendido, la misma puerta
+  deja pasar a cualquier rol que escribe —previews de borrado y su `confirm_token` incluidos— y la
+  fila conserva su dueño. El interruptor lo expone `get_settings` (`installation.shared_finances`) y
+  lo cambia `update_installation_settings` (owner-only en la core, con preview; a diferencia de
+  `mcp_write_enabled` no gobierna la propia superficie MCP, así que no es un kill-switch
+  autorreferente). Regresión: `mcp_write.rs::shared_finances_toggle_and_cross_member_writes_via_mcp`.
 
 - **5.0.0 / WP6b (issue #207) — 70 → 71 tools: Monte Carlo.** Una tool nueva de LECTURA,
   `get_projection_bands` (contadores: 71 / 30 / 41), y un eje nuevo en `simulate_projection`.

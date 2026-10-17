@@ -2968,6 +2968,11 @@ pub struct UpdateInstallationSettingsParams {
     #[serde(default)]
     #[schemars(extend("enum" = ["EUR", "USD", "GBP"]))]
     pub base_currency: Option<String>,
+    /// «Finanzas compartidas»: true = cualquier miembro con rol de escritura edita, borra y
+    /// reordena CUALQUIER fila del ledger (la fila conserva su dueño); false = solo el dueño de
+    /// cada fila (403 not_row_owner). Las lecturas no cambian: view sigue siendo "mine" por defecto.
+    #[serde(default)]
+    pub shared_finances: Option<bool>,
     /// Sin confirm=true NO se persiste nada: devuelve el before/after validado (preview).
     #[serde(default)]
     pub confirm: Option<bool>,
@@ -4624,7 +4629,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_asset_value",
-        description = "Actualiza la valoración de un activo («mi fondo vale ahora 52.300 €»): current_value y/o expected_annual_return_percent (> -100; los negativos componen pérdidas). Subset deliberado del PATCH completo — para nombre, categoría, liquidez o para BORRAR un campo usa update_asset. Solo el DUEÑO del activo (403 not_row_owner). Devuelve valor anterior y nuevo. Mueve la proyección entera.",
+        description = "Actualiza la valoración de un activo («mi fondo vale ahora 52.300 €»): current_value y/o expected_annual_return_percent (> -100; los negativos componen pérdidas). Subset deliberado del PATCH completo — para nombre, categoría, liquidez o para BORRAR un campo usa update_asset. Solo el DUEÑO del activo (403 not_row_owner), salvo con shared_finances. Devuelve valor anterior y nuevo. Mueve la proyección entera.",
         annotations(title = "Actualizar valor de activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_asset_value(
@@ -4712,7 +4717,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_asset",
-        description = "Edita cualquier campo de un activo: nombre, categoría (scope asset), valor actual, liquidez (`is_liquid` gobierna runway y disparador SWR), precio de compra, rentabilidad esperada y volatilidad. Los tres últimos son tri-estado: omitir no toca, su `clear_*` BORRA (sin volatilidad = determinista). Solo la valoración: update_asset_value. Solo el DUEÑO (403 not_row_owner). Mueve la proyección entera.",
+        description = "Edita cualquier campo de un activo: nombre, categoría (scope asset), valor actual, liquidez (`is_liquid` gobierna runway y disparador SWR), precio de compra, rentabilidad esperada y volatilidad. Los tres últimos son tri-estado: omitir no toca, su `clear_*` BORRA (sin volatilidad = determinista). Solo la valoración: update_asset_value. Solo el DUEÑO (403 not_row_owner), salvo con shared_finances. Mueve la proyección entera.",
         annotations(title = "Editar activo", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_asset(
@@ -6700,7 +6705,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "update_installation_settings",
-        description = "Ajustes de PRESENTACIÓN del hogar, solo owner: zona horaria del calendario, eje por fechas o edades y divisa base. La divisa RE-ETIQUETA los importes, no los convierte. Los ejes FIRE: update_fire_settings.",
+        description = "Ajustes del hogar, solo owner: zona horaria del calendario, eje por fechas o edades, divisa base y `shared_finances` (finanzas compartidas: cualquier miembro con rol de escritura edita las filas de todos). La divisa RE-ETIQUETA los importes, no los convierte. Los ejes FIRE: update_fire_settings.",
         annotations(title = "Ajustes de la instalación", read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
     )]
     async fn update_installation_settings(
@@ -6717,6 +6722,7 @@ impl FutureFinMcp {
             calendar_tz: p.calendar_tz.clone(),
             show_age_mode: p.show_age_mode.clone(),
             base_currency: p.base_currency.clone(),
+            shared_finances: p.shared_finances,
         };
         let audit =
             match require_mcp_write(&self.state.pool, &id, "update_installation_settings").await {
@@ -7195,7 +7201,8 @@ impl ServerHandler for FutureFinMcp {
                 gasto indexado necesita. Y toda \
                 fila del ledger (activos, pasivos, presupuesto, flujos de simulación, reglas) tiene \
                 dueño: editar la de otro miembro es 403 `not_row_owner`, también para el \
-                owner.\n\nSIMULACIÓN. Los planning flows (pestaña «Simulación», antes «Próximos») \
+                owner, SALVO que el hogar tenga `shared_finances: true` (get_settings): entonces \
+                cualquier rol que escriba edita las filas de todos, y la fila conserva su dueño.\n\nSIMULACIÓN. Los planning flows (pestaña «Simulación», antes «Próximos») \
                 llevan `enabled`: `false` = el flujo sigue listado pero NO entra en la proyección \
                 ni en ningún KPI (`upcoming_*` de get_summary, tramo `planning` de \
                 get_allocation_resolution, `events`). Para apartar un flujo sin perderlo, \

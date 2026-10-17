@@ -91,6 +91,13 @@ Desde 5.0.0 hay **dos ejes** sobre la tabla de arriba, y ninguno la sustituye:
   por miembro (D9) cada fila pertenece a la simulación de UNA persona. La LECTURA no cambia:
   `?view=household` sigue enseñando el hogar entero. Detalle y códigos:
   [`api-routes.md`](api-routes.md) §Dueño de la fila en las mutaciones.
+  **Desde 6.0 es condicional a «finanzas compartidas»** (`installation.shared_finances`, RFC Planes
+  D-16): con el interruptor encendido —solo el owner de la instalación lo toca, `PATCH
+  /v1/installation` o la tool MCP `update_installation_settings`— cualquier rol que escribe
+  (`owner`/`member`) edita, borra y reordena las filas de todos, y cada fila **conserva su
+  `owner_user_id`**: es un permiso, no un cambio de propiedad. Un `viewer` sigue sin escribir en los
+  dos modos (la puerta `require_row_owner` comprueba también el rol). Las lecturas no cambian
+  todavía: `view=mine` sigue siendo el default (la simulación única del hogar llega en F3b).
 - **Dato personal: cualquier rol edita el SUYO.** `PATCH /v1/auth/me/retirement-profile` (y la tool
   MCP `update_retirement_profile`) es la **única escritura del API que un `viewer` puede hacer**, y
   no es una excepción arbitraria: el perfil de jubilación no es configuración del hogar sino de esa

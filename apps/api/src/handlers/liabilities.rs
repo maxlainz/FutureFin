@@ -1006,7 +1006,8 @@ pub(crate) async fn patch_liability_core(
     let Some(current) = row else {
         return Err(ApiError::NotFound);
     };
-    require_row_owner(current.owner_user_id, user_id)?;
+    let write_owner =
+        require_row_owner(&state.pool, iid, current.owner_user_id, user_id).await?;
 
     let new_cat = body.category_id.unwrap_or(current.category_id);
     if new_cat != current.category_id {
@@ -1198,7 +1199,7 @@ pub(crate) async fn patch_liability_core(
     .bind(iid)
     .bind(new_min_pct)
     .bind(new_min_eur)
-    .bind(user_id)
+    .bind(write_owner)
     .fetch_one(&state.pool)
     .await?;
 
@@ -1276,7 +1277,7 @@ pub async fn liability_delete_effects(
     .bind(iid)
     .fetch_optional(pool)
     .await?;
-    require_row_owner(owner.ok_or(ApiError::NotFound)?, session_user_id)?;
+    require_row_owner(pool, iid, owner.ok_or(ApiError::NotFound)?, session_user_id).await?;
 
     let transactions_unlinked: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)::bigint FROM transactions
@@ -1309,14 +1310,15 @@ pub(crate) async fn delete_liability_core(
     .bind(iid)
     .fetch_optional(&state.pool)
     .await?;
-    require_row_owner(owner.ok_or(ApiError::NotFound)?, user_id)?;
+    let write_owner =
+        require_row_owner(&state.pool, iid, owner.ok_or(ApiError::NotFound)?, user_id).await?;
 
     let res = sqlx::query(
         r#"DELETE FROM liabilities WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3"#,
     )
     .bind(id)
     .bind(iid)
-    .bind(user_id)
+    .bind(write_owner)
     .execute(&state.pool)
     .await?;
 

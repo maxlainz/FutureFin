@@ -6,7 +6,9 @@
 use crate::error::ApiError;
 use crate::handlers::installation::require_installation_member;
 use crate::handlers::membership::role_can_write;
-use crate::handlers::person_view::{require_row_owner, LedgerView, LedgerViewQuery};
+use crate::handlers::person_view::{
+    require_row_owner, shared_finances_grants_write, LedgerView, LedgerViewQuery,
+};
 use crate::handlers::projection::refresh_projection_after_mutation;
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
@@ -691,7 +693,8 @@ pub(crate) async fn patch_allocation_rule_core(
     };
     // D21: la fila ya está cargada con su dueño, así que la puerta va aquí — antes de tocar
     // nada y sin una query extra.
-    require_row_owner(current.owner_user_id, user_id)?;
+    let write_owner =
+        require_row_owner(&mut *tx, iid, current.owner_user_id, user_id).await?;
 
     let new_kind = match &body.kind {
         Some(k) => normalize_kind(k)?,
@@ -820,7 +823,7 @@ pub(crate) async fn patch_allocation_rule_core(
     .bind(new_priority)
     .bind(id)
     .bind(iid)
-    .bind(user_id)
+    .bind(write_owner)
     .fetch_one(&mut *tx)
     .await?;
     commit_with_sink_invariant(tx, iid, &[current.owner_user_id]).await?;
@@ -905,7 +908,7 @@ pub(crate) async fn allocation_rule_delete_effects(
     };
     // D21: el preview de un borrado ajeno ya cuenta cosas del plan de otro miembro. Falla igual
     // que fallaría la confirmación, y antes de mirar nada más.
-    require_row_owner(owner, user_id)?;
+    require_row_owner(pool, iid, owner, user_id).await?;
     let sink = is_sink(&kind, cap_kind.as_deref());
 
     let blocked_reason = if sink {
@@ -960,7 +963,7 @@ pub(crate) async fn delete_allocation_rule_core(
     };
     // D21 antes que la guardia del sumidero: decir «esta regla es el único sumidero» de una
     // cascada ajena ya es contar algo del plan de otro.
-    require_row_owner(owner, user_id)?;
+    let write_owner = require_row_owner(&mut *tx, iid, owner, user_id).await?;
 
     // Borrar el sumidero dejaría el scope huérfano.
     if is_sink(&kind, cap_kind.as_deref()) {
@@ -978,7 +981,7 @@ pub(crate) async fn delete_allocation_rule_core(
     )
     .bind(id)
     .bind(iid)
-    .bind(user_id)
+    .bind(write_owner)
     .execute(&mut *tx)
     .await?;
     commit_with_sink_invariant(tx, iid, &[owner]).await?;
@@ -1028,8 +1031,16 @@ pub async fn reorder_allocation_rules(
     // tener sentido: la cascada es de quien la va a simular. `household` pasa a ser solo lectura
     // aquí, con un 400 que dice qué pedir en su lugar (y no un 403: no es un permiso que falte,
     // es una vista que no admite esta operación).
+    //
+    // **6.0.0 (RFC Planes D-16)**: con `shared_finances` encendido la vista de hogar SÍ admite el
+    // reorden — cualquier miembro con rol de escritura puede editar cualquier fila, y reordenar es
+    // editar prioridades. Cada fila conserva su `owner_user_id` y la post-condición de I1 sigue
+    // corriendo por dueño (un sumidero por cascada de persona, y el último dentro de ella). Con el
+    // interruptor apagado, el 400 de siempre.
     let view = q.resolve()?;
-    if view == LedgerView::Household {
+    if view == LedgerView::Household
+        && !shared_finances_grants_write(&state.pool, iid, user.id.0).await?
+    {
         return Err(ApiError::BadRequest(
             "household_read_only: reordering allocation rules is per-member; call it with ?view=mine".into(),
         ));
@@ -1055,8 +1066,12 @@ pub async fn reorder_allocation_rules(
     let touched_scopes: Vec<SinkScope> = current.iter().map(|(_, owner)| *owner).collect();
 
     let mut tx = state.pool.begin().await?;
+    let owner_of: std::collections::HashMap<Uuid, Uuid> = current.iter().copied().collect();
     for (idx, id) in body.ids.iter().enumerate() {
         let new_priority = (idx as i32) + 1;
+        // El dueño que se rebinda es el de la FILA (leído arriba en el mismo scope), no el de la
+        // sesión: en `view=mine` coinciden; en hogar compartido, la fila no cambia de manos.
+        let row_owner = owner_of[id];
         sqlx::query(
             r#"UPDATE allocation_rules SET priority = $1
                WHERE id = $2 AND installation_id = $3 AND owner_user_id = $4"#,
@@ -1064,7 +1079,7 @@ pub async fn reorder_allocation_rules(
         .bind(new_priority)
         .bind(id)
         .bind(iid)
-        .bind(user.id.0)
+        .bind(row_owner)
         .execute(&mut *tx)
         .await?;
     }

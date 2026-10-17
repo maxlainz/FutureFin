@@ -368,6 +368,12 @@ pub struct InstallationSnapshot {
     /// Kill-switch vivo de la escritura vía MCP (issue #3): con `false` las tools de escritura
     /// devuelven error tipado en el siguiente request. Editable solo por el owner (Ajustes → MCP).
     pub mcp_write_enabled: bool,
+    /// **6.0.0 (RFC Planes D-16)** — «finanzas compartidas». Con `true`, cualquier miembro con
+    /// rol de escritura puede editar, borrar y reordenar cualquier fila del ledger del hogar (la
+    /// fila conserva su dueño: es permiso, no propiedad). Con `false` (default) solo el dueño de
+    /// la fila la cambia (403 `not_row_owner`, D23). Editable solo por el owner. Las LECTURAS no
+    /// cambian todavía: `view=mine` sigue siendo el default.
+    pub shared_finances: bool,
     /// `false` mientras el hogar no haya pasado por el asistente de primera vez. La SPA lo usa
     /// para lanzarlo; el owner puede volver a abrirlo cuando quiera desde Ajustes.
     pub onboarding_completed: bool,
@@ -422,6 +428,10 @@ pub struct PatchInstallationBody {
     /// Omit = unchanged. Kill-switch de la escritura vía MCP (owner-only como todo el PATCH).
     #[serde(default)]
     pub mcp_write_enabled: Option<bool>,
+    /// Omit = unchanged. «Finanzas compartidas» (D-16): `true` deja a cualquier miembro con rol
+    /// de escritura editar cualquier fila del ledger; `false` vuelve a «solo el dueño de la fila».
+    #[serde(default)]
+    pub shared_finances: Option<bool>,
     /// Omit = unchanged. Divisa base del hogar (EUR, USD o GBP). **Una sola por instalación**:
     /// FutureFin no convierte entre divisas ni las mezcla. Hasta 3.10.0 estaba clavada a EUR en
     /// el código y no había forma de cambiarla — el único selector que existía era código muerto
@@ -442,6 +452,7 @@ struct InstallationMemberRow {
     show_age_mode: String,
     fire_settings: Option<SqlxJson<FireSettings>>,
     mcp_write_enabled: bool,
+    shared_finances: bool,
     onboarding_completed_at: Option<DateTime<Utc>>,
     role: String,
 }
@@ -459,6 +470,7 @@ fn installation_access_from_row(r: InstallationMemberRow) -> Result<Installation
             show_age_mode: r.show_age_mode,
             fire_settings: resolve_fire_settings(r.fire_settings.map(|j| j.0)),
             mcp_write_enabled: r.mcp_write_enabled,
+            shared_finances: r.shared_finances,
             onboarding_completed: r.onboarding_completed_at.is_some(),
         },
         role,
@@ -700,7 +712,7 @@ pub async fn get_installation_session_context(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
                   i.show_age_mode, i.fire_settings, i.mcp_write_enabled,
-                  i.onboarding_completed_at, m.role
+                  i.shared_finances, i.onboarding_completed_at, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1
@@ -749,7 +761,7 @@ pub(crate) async fn installation_access_core(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
                   i.show_age_mode, i.fire_settings, i.mcp_write_enabled,
-                  i.onboarding_completed_at, m.role
+                  i.shared_finances, i.onboarding_completed_at, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1
@@ -928,6 +940,8 @@ pub(crate) struct PresentationSettings {
     pub show_age_mode: String,
     /// `EUR` | `USD` | `GBP`. **Una sola por instalación**: FutureFin no convierte ni mezcla.
     pub base_currency: String,
+    /// «Finanzas compartidas» (6.0.0, D-16): permiso de escritura cruzada entre miembros.
+    pub shared_finances: bool,
 }
 
 /// Patchset campo a campo de los ejes de presentación. Omitir = conservar.
@@ -940,12 +954,17 @@ pub(crate) struct PresentationSettings {
 ///   persona una pantalla que quizá no había visto.
 /// - `fire_settings` y `annual_inflation_assumption_percent` no están porque ya los cubre
 ///   `patch_fire_settings_core`, campo a campo y con su propio preview.
+///
+/// `shared_finances` (6.0.0, D-16) SÍ está, aunque no sea «presentación»: es un ajuste del hogar,
+/// owner-only como los demás, y —a diferencia de `mcp_write_enabled`— no gobierna la propia
+/// superficie MCP, así que no tiene el problema del interruptor que se reenciende solo.
 #[allow(dead_code)]
 #[derive(Debug, Default, Clone)]
 pub(crate) struct PresentationSettingsPatch {
     pub calendar_tz: Option<String>,
     pub show_age_mode: Option<String>,
     pub base_currency: Option<String>,
+    pub shared_finances: Option<bool>,
 }
 
 impl PresentationSettingsPatch {
@@ -957,8 +976,12 @@ impl PresentationSettingsPatch {
             calendar_tz,
             show_age_mode,
             base_currency,
+            shared_finances,
         } = self;
-        calendar_tz.is_none() && show_age_mode.is_none() && base_currency.is_none()
+        calendar_tz.is_none()
+            && show_age_mode.is_none()
+            && base_currency.is_none()
+            && shared_finances.is_none()
     }
 }
 
@@ -994,23 +1017,26 @@ pub(crate) async fn patch_presentation_settings_core(
 ) -> Result<PresentationSettingsOutcome, ApiError> {
     if patchset.is_empty() {
         return Err(ApiError::BadRequest(
-            "patch_empty: provide at least one of calendar_tz, show_age_mode, base_currency".into(),
+            "patch_empty: provide at least one of calendar_tz, show_age_mode, base_currency, shared_finances".into(),
         ));
     }
     if !user_is_installation_owner(&state.pool, user_id, iid).await? {
         return Err(ApiError::Forbidden);
     }
 
-    let (calendar_tz, show_age_mode, base_currency): (String, String, String) = sqlx::query_as(
-        r#"SELECT calendar_tz, show_age_mode, base_currency FROM installation WHERE id = $1"#,
-    )
-    .bind(iid)
-    .fetch_one(&state.pool)
-    .await?;
+    let (calendar_tz, show_age_mode, base_currency, shared_finances): (String, String, String, bool) =
+        sqlx::query_as(
+            r#"SELECT calendar_tz, show_age_mode, base_currency, shared_finances
+               FROM installation WHERE id = $1"#,
+        )
+        .bind(iid)
+        .fetch_one(&state.pool)
+        .await?;
     let before = PresentationSettings {
         calendar_tz,
         show_age_mode,
         base_currency,
+        shared_finances,
     };
 
     let after = PresentationSettings {
@@ -1030,18 +1056,21 @@ pub(crate) async fn patch_presentation_settings_core(
             Some(raw) => normalize_currency(raw)?,
             None => before.base_currency.clone(),
         },
+        shared_finances: patchset.shared_finances.unwrap_or(before.shared_finances),
     };
 
     if apply {
         sqlx::query(
             r#"UPDATE installation
-               SET calendar_tz = $1, show_age_mode = $2, base_currency = $3
+               SET calendar_tz = $1, show_age_mode = $2, base_currency = $3,
+                   shared_finances = $5
                WHERE id = $4"#,
         )
         .bind(&after.calendar_tz)
         .bind(&after.show_age_mode)
         .bind(&after.base_currency)
         .bind(iid)
+        .bind(after.shared_finances)
         .execute(&state.pool)
         .await?;
         refresh_projection_after_mutation(state, iid, user_id).await;
@@ -1106,11 +1135,12 @@ pub async fn patch_my_installation(
         && body.annual_inflation_assumption_percent.is_none()
         && body.fire_settings.is_none()
         && body.mcp_write_enabled.is_none()
+        && body.shared_finances.is_none()
         && body.base_currency.is_none()
         && body.onboarding_completed.is_none()
     {
         return Err(ApiError::BadRequest(
-            "patch_empty: provide at least one of calendar_tz, show_age_mode, annual_inflation_assumption_percent, fire_settings, mcp_write_enabled, base_currency, onboarding_completed".into(),
+            "patch_empty: provide at least one of calendar_tz, show_age_mode, annual_inflation_assumption_percent, fire_settings, mcp_write_enabled, shared_finances, base_currency, onboarding_completed".into(),
         ));
     }
 
@@ -1118,7 +1148,7 @@ pub async fn patch_my_installation(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
                   i.show_age_mode, i.fire_settings, i.mcp_write_enabled,
-                  i.onboarding_completed_at, m.role
+                  i.shared_finances, i.onboarding_completed_at, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1 AND i.id = $2"#,
@@ -1170,6 +1200,7 @@ pub async fn patch_my_installation(
     };
 
     let new_mcp_write = body.mcp_write_enabled.unwrap_or(row_before.mcp_write_enabled);
+    let new_shared = body.shared_finances.unwrap_or(row_before.shared_finances);
 
     let new_currency = match &body.base_currency {
         None => row_before.base_currency.clone(),
@@ -1191,7 +1222,8 @@ pub async fn patch_my_installation(
                fire_settings = $4,
                mcp_write_enabled = $5,
                base_currency = $6,
-               onboarding_completed_at = $7
+               onboarding_completed_at = $7,
+               shared_finances = $9
            WHERE id = $8"#,
     )
     .bind(&new_tz)
@@ -1202,6 +1234,7 @@ pub async fn patch_my_installation(
     .bind(&new_currency)
     .bind(new_onboarding_at)
     .bind(iid)
+    .bind(new_shared)
     .execute(&state.pool)
     .await?;
 
@@ -1209,7 +1242,7 @@ pub async fn patch_my_installation(
         r#"SELECT i.id, i.base_currency, i.calendar_tz,
                   i.annual_inflation_assumption_percent,
                   i.show_age_mode, i.fire_settings, i.mcp_write_enabled,
-                  i.onboarding_completed_at, m.role
+                  i.shared_finances, i.onboarding_completed_at, m.role
            FROM installation_memberships m
            JOIN installation i ON i.id = m.installation_id
            WHERE m.user_id = $1 AND i.id = $2"#,
@@ -1305,6 +1338,7 @@ pub async fn setup_installation(
                 show_age_mode: body.show_age_mode,
                 fire_settings: default_fire_settings(),
                 mcp_write_enabled: true,
+                shared_finances: false,
                 // Este endpoint ES la configuración inicial, así que el hogar nace configurado.
                 onboarding_completed: true,
             },
