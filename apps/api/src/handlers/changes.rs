@@ -2,8 +2,8 @@
 //!
 //! ## Por qué un módulo propio y no una ruta de `installation` ni de `history`
 //!
-//! No es una propiedad del singleton de instalación: es un **índice transversal** sobre ocho tablas
-//! del ledger, y colgarlo de `PATCH/GET /v1/installation` lo dejaría escondido detrás de un recurso
+//! No es una propiedad del singleton de instalación: es un **índice transversal** sobre las tablas
+//! del ledger (y, desde 6.0.0, `plans`), y colgarlo de `PATCH/GET /v1/installation` lo dejaría escondido detrás de un recurso
 //! de ajustes. Tampoco puede vivir en `history.rs`: ese módulo ya se llama «historia» con un
 //! significado muy concreto y muy distinto —la serie de patrimonio interpolada entre snapshots—, y
 //! un feed de ediciones bajo `/v1/history/*` se leería como parte de esa curva. Un módulo propio
@@ -60,6 +60,7 @@ const COVERED: &[&str] = &[
     "recurring_transaction_rules",
     "categorization_rules",
     "history_snapshots",
+    "plans",
 ];
 
 /// Tablas del dominio SIN columna `updated_at`, y por tanto invisibles para este feed.
@@ -80,7 +81,8 @@ pub struct RecentChangesQuery {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct RecentChange {
     /// `asset` | `liability` | `budget_entry` | `planning_flow` | `transaction` |
-    /// `recurring_rule` | `categorization_rule` | `snapshot`.
+    /// `recurring_rule` | `categorization_rule` | `snapshot` | `plan` (6.0.0: una edición de un
+    /// bloque o de un cambio del plan aparece como `updated` del plan).
     pub entity: String,
     #[schema(value_type = String, format = "uuid")]
     pub id: Uuid,
@@ -94,9 +96,9 @@ pub struct RecentChange {
     pub change: &'static str,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    /// Dueño de la fila. Desde 5.0.0 las OCHO tablas del feed lo tienen `NOT NULL` (D14), así
-    /// que el campo viaja siempre; el `Option` se conserva por compatibilidad del contrato ya
-    /// publicado. Es además quien puede editarla (D21).
+    /// Dueño de la fila. Desde 5.0.0 las ocho tablas del ledger del feed lo tienen `NOT NULL`
+    /// (D14). La excepción es `plans` (6.0.0): `NULL` = plan de hogar, que no existe hasta F3 y
+    /// entonces viaja sin el campo. Es además quien puede editarla (D21).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, format = "uuid")]
     pub owner_user_id: Option<Uuid>,
@@ -116,7 +118,7 @@ pub struct RecentChangesResponse {
     /// Por qué no. Valor único: `no_tombstones`.
     #[schema(value_type = String)]
     pub deletions_absent_reason: &'static str,
-    /// Las ocho tablas que se consultan.
+    /// Las tablas que se consultan (nueve desde 6.0.0, con `plans`).
     #[schema(value_type = Vec<String>)]
     pub tables_covered: Vec<&'static str>,
     /// Tablas del dominio que **no** se pueden cubrir por no tener `updated_at`.
@@ -230,7 +232,7 @@ pub(crate) async fn list_recent_changes_core(
 
     // Una rama por tabla, todas con el MISMO WHERE de scope (`$1` / `$1,$2`) y el mismo `$since`.
     // Las etiquetas se normalizan a `label` para que la unión tenga una sola forma.
-    let arms: [(&str, &str, &str); 8] = [
+    let arms: [(&str, &str, &str); 9] = [
         ("asset", "assets", "name"),
         ("liability", "liabilities", "label"),
         // `budget_entries` no tiene columna de nombre propia (la tuvo y se retiró): una partida
@@ -249,6 +251,10 @@ pub(crate) async fn list_recent_changes_core(
             "history_snapshots",
             "kind || ' @ ' || to_char(snapshot_date, 'YYYY-MM-DD')",
         ),
+        // 6.0.0 F2-1: un plan sube su `updated_at` con CUALQUIER escritura de sus bloques o
+        // cambios (`bump_revision`), así que esta fila cubre también lo que pasa dentro de él.
+        // Un plan de hogar (`owner_user_id` NULL, F3) solo sale en `view=household`.
+        ("plan", "plans", "name"),
     ];
     let base = arms
         .iter()

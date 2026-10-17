@@ -19,6 +19,7 @@ pub mod oauth_consent;
 pub mod pending_users;
 pub mod person_view;
 pub mod planning;
+pub mod plans;
 pub mod projection;
 pub mod projection_bands;
 pub mod retirement_profile;

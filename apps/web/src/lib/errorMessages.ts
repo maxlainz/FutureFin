@@ -523,6 +523,21 @@ export const ERROR_MESSAGES: Record<string, string> = {
   household_read_only:
     "La vista del hogar es solo de lectura para esta acción. Cambia a «Yo» y vuelve a intentarlo.",
 
+  // ── Planes (6.0.0) ────────────────────────────────────────────────────────────────────
+  plan_not_found: "Ese plan ya no existe. Recarga la página.",
+  plan_block_not_found: "Ese bloque ya no existe en este plan. Recarga la página.",
+  plan_change_not_found: "Ese cambio ya no existe en este plan. Recarga la página.",
+  plan_not_in_scope:
+    "Ese plan es de otra persona del hogar. Puedes verlo desde la vista del hogar.",
+  household_plans_not_available:
+    "Los planes del hogar todavía no están disponibles: cada plan es de una persona.",
+  plan_change_invalid_shape:
+    "Ese cambio no encaja con su tipo. Revisa el importe, las fechas, la frecuencia y el activo.",
+  plan_assumptions_invalid:
+    "Algún supuesto del plan no es válido. Revisa la inflación, el horizonte y el ajuste de mercado.",
+  plan_activation_conflict:
+    "Otro cambio de plan activo se ha cruzado con este. Recarga y vuelve a intentarlo.",
+
   // ── Ajustes del hogar y del plan ──────────────────────────────────────────────────────
   swr_out_of_range: "La tasa de retirada segura debe estar entre 0 y 6 %.",
   fire_number_mode: "Esa forma de fijar el número FIRE no es válida.",

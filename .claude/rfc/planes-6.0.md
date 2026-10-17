@@ -59,6 +59,8 @@ cuando una decisión cambie o un abierto se cierre.
 | D-28 | **Multipropiedad**: los activos y pasivos llevan cuotas de propiedad que se eligen en su configuración (p. ej. 50/50). Los cambios de un plan y las transacciones se asignan a un activo/cuenta y heredan de él la propiedad; un cambio sin activo (mi ingreso/gasto) es de quien lo crea. Consecuencia: `view=mine` deja de ser «filas mías» y pasa a ser **«mi parte»** (un piso al 50 % cuenta 125.000 € de 250.000 €). |
 | D-29 | **Déficit**: sale por el flujo de ahorro al revés, del destino del sobrante de las reglas de reparto. Si ese destino tiene plusvalía, la salida tributa y se muestra en la lista como «cobertura de déficit». Agotado el destino, el mes queda sin cubrir: fallo. |
 | D-30 | El plan importado de D-27 **queda activo** si había algún flujo encendido, para que la proyección no cambie de golpe al actualizar. |
+| D-31 | Al retirar las fechas de fin del presupuesto (D-18), las partidas con fecha de fin futura **se borran sin importarlas** al plan. El gasto pasa a ser indefinido; se declara en el CHANGELOG. |
+| D-32 | Los «Próximos» importados (D-27) entran con `keeps_purchasing_power = false` (importe fijo): su caja queda idéntica. «Importe fijo» es el modo correcto para un pago aplazado sin intereses o cualquier cosa de valor nominal cerrado: se toma tal cual, sin indexar ni deflactar. |
 
 ## 3. Modelo (borrador)
 
@@ -215,6 +217,9 @@ al llegar que no lo había entendido.
 | F3 | Finanzas compartidas: permisos y simulación única del hogar. |
 | F4 | UI: pestaña Planes, formulario de frase, € de hoy, Ajustes con supuestos atenuados (prototipo: D-25); se elimina la pestaña Jubilación. |
 | F5 | Docs y skills; release 6.0.0. |
+
+Plan de implementación de F2 (migraciones, handlers, cableado de la proyección, retirada, MCP y
+aceptación por PR): [`planes-6.0-f2.md`](planes-6.0-f2.md).
 
 ## 10. Rama de trabajo
 
