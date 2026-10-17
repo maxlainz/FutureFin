@@ -192,6 +192,8 @@ fn gen_case(seed: u64, i: u64) -> ProjectionInput {
     let taxes_enabled = !r.one_in(3);
     ProjectionInput {
         income_expense_changes: Default::default(),
+        deficit_policy: Default::default(),
+        asset_sales: Default::default(),
         ref_date: cases::ref_date(),
         horizon_months: horizon,
         annual_inflation_percent: Decimal::ZERO,
@@ -480,6 +482,8 @@ fn check(
                 Some(PathFailure::InitialRateExceeded) => {
                     m == 1 && f2 != Some(false) && out.unmet_need[1] <= EPS
                 }
+                // 6.0.0 F1c: solo con `DeficitPolicy::SinkOnly`, que este fuzz no sortea.
+                Some(PathFailure::UncoveredMonth) => false,
                 None => false,
             };
             if !kind_ok {

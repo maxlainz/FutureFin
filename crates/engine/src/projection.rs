@@ -28,6 +28,10 @@ pub enum EngineError {
     /// 6.0.0 F1b: un vector de `income_expense_changes` no está vacío ni mide `horizon_months`.
     #[error("income_expense_changes vectors must be empty or have length horizon_months")]
     InvalidIncomeExpenseChanges,
+    /// 6.0.0 F1c: una orden de `asset_sales` apunta a un activo fuera de rango, a un mes fuera de
+    /// `1..=horizon_months`, o las órdenes no van en orden no decreciente de mes.
+    #[error("asset_sales orders must target existing assets, months 1..=horizon_months, in non-decreasing month order")]
+    InvalidAssetSales,
     /// El valor de un activo desbordó el rango de `Decimal` (~7,9e28) al componer su
     /// rentabilidad. Error tipado y no saturación silenciosa: a diferencia del payoff de un
     /// pasivo (donde saturar conserva una serie finita y conservadora), congelar aquí el valor
@@ -655,6 +659,12 @@ pub struct ProjectionInput {
     /// plano, vectores vacíos). El objetivo FIRE (`fire_target`) NO los ve: su necesidad se
     /// declara aparte, y desaparece en F2.
     pub income_expense_changes: crate::changes::IncomeExpenseChanges,
+    /// **6.0.0 F1c — qué cubre el déficit del mes** (D-29). `Default` = `LegacyDrain`, 5.0 bit a
+    /// bit. Semántica: [`crate::sales`].
+    pub deficit_policy: crate::sales::DeficitPolicy,
+    /// **6.0.0 F1c — ventas explícitas** (D-10, D-21), ya resueltas a órdenes por mes con
+    /// [`crate::build_asset_sale_orders`]. Vacío (el default) = ninguna operación de más.
+    pub asset_sales: crate::sales::AssetSales,
 }
 
 #[derive(Debug, Clone)]
@@ -810,6 +820,33 @@ pub struct ProjectionOutput {
     /// **F2 solo puede firmar en `R`, el primer mes jubilado** (C10): juzga la FECHA. A partir
     /// del mes siguiente el único motivo posible es F1.
     pub failure_kind: Option<PathFailure>,
+    // -----------------------------------------------------------------------------------------
+    // 6.0.0 F1c — déficit por el sumidero y ventas explícitas (`sales.rs`). APÉNDICE: ningún pin
+    // dorado los mira, y con el default (`LegacyDrain`, sin ventas) son vacíos/`None`.
+    // -----------------------------------------------------------------------------------------
+    /// **Primer mes (1-based) con gasto sin cubrir**, en CUALQUIER fase: la venta que cubría el
+    /// déficit no se pudo fundar y quedó necesidad neta > 0. En `SinkOnly` es el fallo de D-9
+    /// (coincide con `failure_month_index` cuando el motivo es `UncoveredMonth`); en
+    /// `LegacyDrain` es una LECTURA que no gobierna nada (el fallo legacy sigue con su puerta de
+    /// fase). La cuantía del mes es [`Self::unmet_need`]. En `SinkOnly` es además el ÚNICO motivo
+    /// de fallo (la puerta de tasa inicial no firma en ese modo).
+    pub first_uncovered_month: Option<u32>,
+    /// Solo en `SinkOnly` (vacío en `LegacyDrain`): NETO del déficit cubierto por el sumidero en
+    /// cada mes — la «cobertura de déficit» de D-29. `len == horizon+1`, índice 0 = 0. Coincide
+    /// con [`Self::withdrawal`]; se publica aparte para que la lista la nombre.
+    pub deficit_coverage_net: Vec<Decimal>,
+    /// Solo en `SinkOnly` (vacío en `LegacyDrain`): impuesto pagado por esa cobertura
+    /// (bruto vendido del sumidero − neto). `len == horizon+1`, índice 0 = 0.
+    pub deficit_coverage_tax: Vec<Decimal>,
+    /// Ventas explícitas: NETO que entró en caja cada mes (Σ de las órdenes del mes). Vacío sin
+    /// ventas. `len == horizon+1`, índice 0 = 0.
+    pub explicit_sale_net: Vec<Decimal>,
+    /// Ventas explícitas: impuesto de cada mes. Vacío sin ventas. `len == horizon+1`.
+    pub explicit_sale_tax: Vec<Decimal>,
+    /// `(asset_index, mes)` del PRIMER mes en que una venta explícita no se pudo llenar entera
+    /// sobre ese activo (agotado, aún no materializado, o `pct ≥ 100`): la venta se detiene ahí.
+    /// Un elemento por activo como mucho, en orden de aparición.
+    pub explicit_sale_exhausted: Vec<(usize, u32)>,
 }
 
 /// Primero-de-mes de una fecha (día 1 del mismo mes). Compartido con `history.rs`.
@@ -1014,6 +1051,9 @@ pub struct FirstMonthAllocation {
     /// Extiende la identidad documentada arriba: con `base_cash > 0`,
     /// `Σ per_asset + leftover + disposable = base_cash`.
     pub disposable: Decimal,
+    /// 6.0.0 F1c: neto de las ventas explícitas del mes 1, ya DENTRO de `base_cash` (es caja
+    /// planeada del mes, como la de `planning_component`). `0` sin ventas en el mes 1.
+    pub explicit_sales_net: Decimal,
     /// Traza regla a regla, en el orden de `ProjectionInput::allocation_rules`.
     pub rules: Vec<RuleOutcome>,
 }
@@ -1114,6 +1154,8 @@ mod tests {
     ) -> ProjectionInput {
         ProjectionInput {
             income_expense_changes: Default::default(),
+            deficit_policy: Default::default(),
+            asset_sales: Default::default(),
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: horizon,
             annual_inflation_percent: Decimal::ZERO,

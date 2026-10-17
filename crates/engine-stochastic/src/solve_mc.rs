@@ -153,6 +153,10 @@ fn kind_index(kind: PathFailure) -> usize {
     match kind {
         PathFailure::PortfolioDepleted => KIND_PORTFOLIO_DEPLETED,
         PathFailure::InitialRateExceeded => KIND_INITIAL_RATE_EXCEEDED,
+        // 6.0.0 F1c: el «mes sin cubrir» de `SinkOnly` ocupa la casilla de F1 — es el mismo
+        // hecho («la cartera no pudo cubrir el gasto») sin puerta de fase. Pregunta abierta: una
+        // tercera casilla cambiaría la forma `[u32; 2]` que la API publica.
+        PathFailure::UncoveredMonth => KIND_PORTFOLIO_DEPLETED,
     }
 }
 

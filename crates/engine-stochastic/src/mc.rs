@@ -829,6 +829,15 @@ pub struct McOutcome {
     /// ¿Algún activo declaró volatilidad? Con `false` todas las bandas coinciden con la línea
     /// determinista y la UI debe decirlo («sin volatilidad declarada: la banda es la línea»).
     pub any_volatility_declared: bool,
+    /// 6.0.0 F1c: la política de déficit con la que se sortearon los caminos (eco del input).
+    pub deficit_policy: futurefin_engine::DeficitPolicy,
+    /// **6.0.0 F1c (D-9)** — fracción de caminos SIN ningún mes de gasto sin cubrir en TODO el
+    /// horizonte (`first_uncovered_month.is_none()`), en cualquier fase. Con
+    /// `DeficitPolicy::SinkOnly` es el éxito del plan entero que pide D-9 y coincide con
+    /// [`Self::success_probability`] (en ese modo la puerta de tasa inicial no firma: el único
+    /// fallo es el mes sin cubrir). Con `LegacyDrain` es una LECTURA (el
+    /// drenaje legacy vende cualquier activo, y un mes sin cubrir acumulando no es fallo allí).
+    pub uncovered_free_probability: f64,
 }
 
 // =================================================================================================
@@ -918,6 +927,7 @@ pub fn project_percentile_bands(
     let mut retired_at: Vec<Option<u32>> = Vec::with_capacity(n);
     let mut failure_month: Vec<Option<u32>> = Vec::with_capacity(n);
     let mut failure_kind: Vec<Option<PathFailure>> = Vec::with_capacity(n);
+    let mut first_uncovered: Vec<Option<u32>> = Vec::with_capacity(n);
 
     // **Lo que un camino aporta al resultado**, recogido dentro del propio camino (E12). Todo lo
     // que aquí se calcula es INTRA-camino: dos vectores de muestras, cuatro escalares y dos sumas
@@ -930,6 +940,7 @@ pub fn project_percentile_bands(
         retired_at: Option<u32>,
         failure_month: Option<u32>,
         failure_kind: Option<PathFailure>,
+        first_uncovered: Option<u32>,
     }
 
     let digest = |_p: u32, out: &SimOutput<F64Money>| -> PathDigest {
@@ -946,6 +957,7 @@ pub fn project_percentile_bands(
             retired_at: out.retirement_month_index,
             failure_month: out.failure_month_index,
             failure_kind: out.failure_kind,
+            first_uncovered: out.first_uncovered_month,
         }
     };
 
@@ -965,6 +977,7 @@ pub fn project_percentile_bands(
             retired_at.push(d.retired_at);
             failure_month.push(d.failure_month);
             failure_kind.push(d.failure_kind);
+            first_uncovered.push(d.first_uncovered);
         },
     )?;
 
@@ -1005,6 +1018,9 @@ pub fn project_percentile_bands(
     // ahora `1 − éxito(R)` del solver estocástico (`solve_mc`).
     let successes = (0..n).filter(|&p| failure_month[p].is_none()).count();
     let success_probability = successes as f64 / n_f;
+    // 6.0.0 F1c (D-9): caminos sin ningún mes sin cubrir, en cualquier fase.
+    let uncovered_free_probability =
+        first_uncovered.iter().filter(|f| f.is_none()).count() as f64 / n_f;
 
     // Fallos por motivo: el PRIMER (y único, por construcción del bucle) motivo de cada camino
     // fallido, en el orden común con `solve_mc::SuccessAt::by_kind`.
@@ -1089,6 +1105,8 @@ pub fn project_percentile_bands(
         failures_by_kind,
         cumulative_failure_by_age,
         any_volatility_declared,
+        deficit_policy: input.deficit_policy,
+        uncovered_free_probability,
     })
 }
 
@@ -1101,6 +1119,8 @@ fn kind_index(kind: PathFailure) -> usize {
     match kind {
         PathFailure::PortfolioDepleted => KIND_PORTFOLIO_DEPLETED,
         PathFailure::InitialRateExceeded => KIND_INITIAL_RATE_EXCEEDED,
+        // 6.0.0 F1c: misma casilla que F1, igual que en `solve_mc::kind_index`.
+        PathFailure::UncoveredMonth => KIND_PORTFOLIO_DEPLETED,
     }
 }
 
@@ -1328,6 +1348,8 @@ mod tests {
         use rust_decimal::Decimal;
         ProjectionInput {
             income_expense_changes: Default::default(),
+            deficit_policy: Default::default(),
+            asset_sales: Default::default(),
             ref_date: chrono::NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(),
             horizon_months: 12,
             annual_inflation_percent: Decimal::ZERO,

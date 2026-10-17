@@ -368,6 +368,10 @@ pub struct SimInput<M> {
     pub growth_overrides: Option<Vec<Vec<M>>>,
     /// 6.0.0 F1b. Semántica: [`ProjectionInput::income_expense_changes`].
     pub income_expense_changes: crate::changes::IncomeExpenseChangesG<M>,
+    /// 6.0.0 F1c. Semántica: [`ProjectionInput::deficit_policy`].
+    pub deficit_policy: crate::sales::DeficitPolicy,
+    /// 6.0.0 F1c. Semántica: [`ProjectionInput::asset_sales`].
+    pub asset_sales: crate::sales::AssetSalesG<M>,
 }
 
 // =============================================================================================
@@ -397,6 +401,7 @@ pub struct FirstMonthAllocationG<M> {
     pub debt_service: M,
     pub leftover: M,
     pub disposable: M,
+    pub explicit_sales_net: M,
     pub rules: Vec<RuleOutcomeG<M>>,
 }
 
@@ -431,6 +436,13 @@ pub struct SimOutput<M> {
     pub disposable_cash_total: M,
     pub failure_month_index: Option<u32>,
     pub failure_kind: Option<PathFailure>,
+    /// 6.0.0 F1c — semántica de los seis: [`ProjectionOutput`].
+    pub first_uncovered_month: Option<u32>,
+    pub deficit_coverage_net: Vec<M>,
+    pub deficit_coverage_tax: Vec<M>,
+    pub explicit_sale_net: Vec<M>,
+    pub explicit_sale_tax: Vec<M>,
+    pub explicit_sale_exhausted: Vec<(usize, u32)>,
 }
 
 // =============================================================================================
@@ -579,6 +591,8 @@ impl<M: MoneyOps> From<&ProjectionInput> for SimInput<M> {
             fire_target: input.fire_target.as_ref().map(FireTargetG::from),
             growth_overrides: None,
             income_expense_changes: input.income_expense_changes.to_generic(),
+            deficit_policy: input.deficit_policy,
+            asset_sales: input.asset_sales.to_generic(),
         }
     }
 }
@@ -608,6 +622,12 @@ impl From<SimOutput<Decimal>> for ProjectionOutput {
             disposable_cash_total: o.disposable_cash_total,
             failure_month_index: o.failure_month_index,
             failure_kind: o.failure_kind,
+            first_uncovered_month: o.first_uncovered_month,
+            deficit_coverage_net: o.deficit_coverage_net,
+            deficit_coverage_tax: o.deficit_coverage_tax,
+            explicit_sale_net: o.explicit_sale_net,
+            explicit_sale_tax: o.explicit_sale_tax,
+            explicit_sale_exhausted: o.explicit_sale_exhausted,
         }
     }
 }
@@ -636,6 +656,7 @@ impl From<FirstMonthAllocationG<Decimal>> for FirstMonthAllocation {
             debt_service: a.debt_service,
             leftover: a.leftover,
             disposable: a.disposable,
+            explicit_sales_net: a.explicit_sales_net,
             rules: a.rules.into_iter().map(RuleOutcome::from).collect(),
         }
     }

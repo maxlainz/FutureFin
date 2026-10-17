@@ -140,6 +140,8 @@ fn outcomes_are_bit_identical(what: &str, a: &McOutcome, b: &McOutcome) {
         failures_by_kind,
         cumulative_failure_by_age,
         any_volatility_declared,
+        deficit_policy,
+        uncovered_free_probability,
     } = a;
 
     assert_eq!(*seed, b.seed, "{what}: seed");
@@ -189,6 +191,12 @@ fn outcomes_are_bit_identical(what: &str, a: &McOutcome, b: &McOutcome) {
     assert_eq!(
         *any_volatility_declared, b.any_volatility_declared,
         "{what}: any_volatility_declared"
+    );
+    assert_eq!(*deficit_policy, b.deficit_policy, "{what}: deficit_policy");
+    same_bits(
+        &format!("{what}: uncovered_free_probability"),
+        *uncovered_free_probability,
+        b.uncovered_free_probability,
     );
 }
 

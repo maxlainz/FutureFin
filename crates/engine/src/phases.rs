@@ -183,6 +183,11 @@ pub enum PathFailure {
     /// **F2** — la tasa de retirada INICIAL supera el tope ([`InitialRateGate`]) en el primer
     /// mes jubilado. No se vuelve a evaluar: es una propiedad de la FECHA, no del mes.
     InitialRateExceeded,
+    /// **6.0.0 F1c (D-9/D-29)** — solo con `DeficitPolicy::SinkOnly`: un mes, en CUALQUIER fase,
+    /// cuyo déficit el sumidero de las reglas de reparto no pudo cubrir (agotado o inexistente).
+    /// Es el ÚNICO motivo en ese modo (ni `PortfolioDepleted` ni `InitialRateExceeded` firman);
+    /// Monte Carlo lo cuenta en la casilla de F1.
+    UncoveredMonth,
 }
 
 impl PathFailure {
@@ -192,6 +197,7 @@ impl PathFailure {
         match self {
             PathFailure::PortfolioDepleted => "portfolio_depleted",
             PathFailure::InitialRateExceeded => "initial_rate_exceeded",
+            PathFailure::UncoveredMonth => "uncovered_month",
         }
     }
 }
