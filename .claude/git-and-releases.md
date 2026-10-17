@@ -26,6 +26,20 @@ sitio.**
 `main` está protegida: PR obligatorio, CI en verde, sin force-push ni borrado. No se empuja
 directamente — la protección lo rechaza, y ese es el objetivo.
 
+### Excepción vigente: `next/6.0` (rediseño «Planes»)
+
+La 6.0.0 reescribe motor, API, MCP y UI en fases que **no se pueden publicar a medias** (ver
+[`rfc/planes-6.0.md`](rfc/planes-6.0.md) §9-§10): si cada fase entrara en `main`, cualquier parche
+5.0.x saldría con la 6.0 a medio hacer. Por eso existe, **temporalmente**, una rama de integración:
+
+- **`next/6.0`** sale de `main`. Cada fase llega a ella por PR desde una rama corta
+  (`feat/6.0-…`), con el mismo CI que `main` (`ci.yml` escucha también `next/6.0`).
+- **`main` se mergea en `next/6.0` con regularidad** (merge, nunca rebase), para que los parches
+  5.0.x no diverjan.
+- `next/6.0` entra en `main` con **un único PR** que lleva el bump a 6.0.0. Después la rama se borra y
+  esta sección se retira: la norma vuelve a ser rama única.
+- Mientras exista, los arreglos que deban salir en 5.0.x van a `main`, no a `next/6.0`.
+
 ## Releases
 
 > **Una versión, una imagen.** Un número de versión existe si y solo si hay una imagen publicada
