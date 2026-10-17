@@ -6973,7 +6973,7 @@ impl FutureFinMcp {
 
     #[tool(
         name = "list_recent_changes",
-        description = "Altas y ediciones desde `since` en ocho tablas del ledger. NO cubre BORRADOS (no hay tombstones) ni categories/allocation_rules (sin updated_at): no es una auditoría, y la respuesta lo declara.",
+        description = "Altas y ediciones desde `since` en el ledger y los planes. NO cubre BORRADOS (no hay tombstones) ni categories/allocation_rules (sin updated_at): no es una auditoría, y la respuesta lo declara.",
         annotations(title = "Cambios recientes", read_only_hint = true, open_world_hint = false)
     )]
     async fn list_recent_changes(

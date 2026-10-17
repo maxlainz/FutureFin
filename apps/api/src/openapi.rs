@@ -76,6 +76,16 @@ use crate::handlers::planning::{
     __path_patch_planning_flow,
 };
 #[allow(unused_imports)]
+use crate::handlers::plans::changes::{
+    __path_create_plan_change, __path_delete_plan_change, __path_patch_plan_change,
+};
+#[allow(unused_imports)]
+use crate::handlers::plans::crud::{
+    __path_activate_plan, __path_create_plan, __path_create_plan_block, __path_deactivate_plans,
+    __path_delete_plan, __path_delete_plan_block, __path_get_plan, __path_list_plans,
+    __path_patch_plan, __path_patch_plan_block,
+};
+#[allow(unused_imports)]
 use crate::handlers::categories::{
     __path_create_category, __path_delete_category, __path_list_categories,
     __path_patch_category,
@@ -208,6 +218,19 @@ impl utoipa::Modify for SecurityAddon {
         create_planning_flow,
         patch_planning_flow,
         delete_planning_flow,
+        list_plans,
+        create_plan,
+        get_plan,
+        patch_plan,
+        delete_plan,
+        activate_plan,
+        deactivate_plans,
+        create_plan_block,
+        patch_plan_block,
+        delete_plan_block,
+        create_plan_change,
+        patch_plan_change,
+        delete_plan_change,
         get_projection_series,
         get_projection_deflate,
         get_projection_bands,
@@ -342,6 +365,25 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::planning::PlanningFlowDirection,
         crate::handlers::planning::CreatePlanningFlowBody,
         crate::handlers::planning::PatchPlanningFlowBody,
+        crate::handlers::plans::crud::PlanResponse,
+        crate::handlers::plans::crud::PlanBlockResponse,
+        crate::handlers::plans::crud::PlansListResponse,
+        crate::handlers::plans::crud::PlanActivationResponse,
+        crate::handlers::plans::crud::CreatePlanBody,
+        crate::handlers::plans::crud::PatchPlanBody,
+        crate::handlers::plans::crud::CreatePlanBlockBody,
+        crate::handlers::plans::crud::PatchPlanBlockBody,
+        crate::handlers::plans::changes::PlanChangeResponse,
+        crate::handlers::plans::changes::CreatePlanChangeBody,
+        crate::handlers::plans::changes::PatchPlanChangeBody,
+        crate::handlers::plans::validate::PlanAssumptions,
+        crate::handlers::plans::validate::PlanChangeKind,
+        crate::handlers::plans::validate::PlanAmountUnit,
+        crate::handlers::plans::validate::PlanCadence,
+        crate::handlers::plans::validate::PlanChangeParams,
+        crate::handlers::plans::validate::AssetInParams,
+        crate::handlers::plans::validate::LoanParams,
+        crate::handlers::plans::validate::NoParams,
         crate::handlers::projection::ProjectionSeriesResponse,
         crate::handlers::projection::DeflateResponse,
         crate::handlers::projection::ProjectionPoint,
@@ -467,6 +509,10 @@ impl utoipa::Modify for SecurityAddon {
         (
             name = "planning",
             description = "Upcoming / planned cash flows (income or expense categories); parity PlanningTabView list CRUD"
+        ),
+        (
+            name = "plans",
+            description = "«Planes» (6.0.0): listas de cambios sobre la realidad (ingreso/gasto, activo que entra o se vende, préstamo) agrupadas en bloques, con sus supuestos. Como mucho un plan activo por persona. En F2-1 todavía no alimentan la proyección. Escritura solo del dueño (403 `not_row_owner`); `view=household` es de solo lectura."
         ),
         (
             name = "projection",

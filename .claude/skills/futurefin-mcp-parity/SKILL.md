@@ -151,13 +151,17 @@ the blocking reason changes (noted per row).
 | `GET /v1/history/snapshots/prefill` | **defer** | Only meaningful as companion of snapshot backfill | Gap #3 below is implemented |
 | Full-body `PATCH /v1/installation` tool | **restricted** | `mcp_write_enabled` self-reference (§2.1); FIRE subset already covered by `update_fire_settings` (owner-only) | Only ever as explicit field-allowlist tool, never `PatchInstallationBody` passthrough |
 
-### 3.2 Pertinent gaps — BACKLOG VACÍO (cero filas abiertas)
+### 3.2 Pertinent gaps — 1 HUECO ABIERTO (rama `next/6.0`)
 
-> **Estado: 0 huecos abiertos.** Las cuatro filas que esta sección tuvo se **cerraron** el
-> 2026-08-28 (Fase 6, issue #87). Lo que sigue es el **archivo** de esas cuatro, no una lista
-> de trabajo pendiente: cada fila dice con qué se cerró y qué hubo que decidir. Si buscas qué
-> falta por hacer, la respuesta es «nada en esta tabla» — salta a *¿Y si el backlog está
-> vacío?*, al final de la sección.
+> **Estado: 1 hueco abierto**, el de abajo, que vive solo en la rama de integración `next/6.0`
+> mientras dure la fase F2 de «Planes». Las cuatro filas del archivo que sigue se **cerraron**
+> el 2026-08-28 (Fase 6, issue #87): son historia, no trabajo pendiente.
+
+#### Huecos abiertos
+
+| Superficie | Estado | Por qué está abierto y con qué se cierra |
+|---|---|---|
+| `/v1/plans` entero (6.0.0 F2-1: listar/leer, crear/editar/borrar plan, `activate`, `deactivate`, CRUD de bloques y de cambios) | **pendiente — F2-6** | Pertinente sin duda (§2.2: es el objeto central de 6.0 y el chat es el sitio natural para «¿y si en 2029 compro un piso?»). Se difiere a propósito: F2-1 solo crea tablas y CRUD, la proyección no lee los planes hasta F2-4, y una tool que publicara un plan sin poder decir qué hace con la cifra sería una promesa vacía. Las cores `*_core` de `handlers/plans/` ya están separadas y validan dentro (`plan_assumptions_invalid`, `plan_change_invalid_shape`), así que F2-6 solo añade la capa MCP: `list/get/create/update/delete_plan`, `activate_plan` (sin preview, devuelve el impacto), CRUD de bloques y cambios, `delete_plan` y `delete_plan_block` con dos fases + `confirm_token`, todas con `require_mcp_write` (plan: `.claude/rfc/planes-6.0-f2.md` §MCP). Mientras tanto la única huella MCP de los planes es indirecta: `list_recent_changes` ya lista la entidad `plan` |
 
 Se archiva en vez de borrarse porque una fila cerrada dice qué se decidió y por qué, y una tabla
 vacía sin historia invita a reabrir lo mismo dentro de seis meses. **Antes de añadir una fila

@@ -20,6 +20,7 @@ use crate::handlers::liabilities::liabilities_router;
 use crate::handlers::members::members_router;
 use crate::handlers::pending_users::pending_users_router;
 use crate::handlers::planning::planning_router;
+use crate::handlers::plans::plans_router;
 use crate::handlers::projection::projection_router;
 use crate::handlers::retirement_profile::retirement_profile_router;
 use crate::handlers::sso::sso_login;
@@ -92,6 +93,7 @@ pub fn app_router(state: &Arc<AppState>) -> Router {
         .nest("/summary", summary_router())
         .nest("/budget", budget_router())
         .nest("/planning", planning_router())
+        .nest("/plans", plans_router())
         .nest("/projection", projection_router())
         .nest("/history", history_router())
         .nest("/transactions", transactions_router())

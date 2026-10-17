@@ -888,6 +888,89 @@ de quedar intocable. Misma cota, mismo criterio y código hermano `payment_end_d
 códigos se emiten como literales completos en cada sitio** porque `error_codes_parity` los extrae del
 fuente y uno compuesto con `format!` sería invisible para el catálogo.
 
+### Plans (`/v1/plans/`) — **6.0.0 F2-1**, «Planes»
+
+Diseño: [`rfc/planes-6.0.md`](rfc/planes-6.0.md); plan de la fase: [`rfc/planes-6.0-f2.md`](rfc/planes-6.0-f2.md).
+Módulo `handlers/plans/` (`crud.rs` planes, bloques y activación; `changes.rs` cambios;
+`validate.rs` supuestos, parámetros y forma; `engine_map.rs` la regla única de meses),
+montado con `.nest("/plans", plans_router())`. Tablas: `plans`, `plan_blocks`, `plan_changes`
+([`data-model.md`](data-model.md)). **En F2-1 la proyección todavía no lee los planes** (eso es
+F2-4): ninguna cifra se mueve, pero toda escritura ya llama a `refresh_projection_after_mutation`
+(invalidación FULL por instalación, sin warm-up) — barato, y correcto el día que se cableen.
+Regresión de las dos promesas: `plans_crud.rs::plans_do_not_move_the_projection_yet_but_invalidate_its_cache`.
+
+| Method | Path | Core | Notas |
+|---|---|---|---|
+| GET | `/v1/plans` | `list_plans_core` | `?view=` (default `mine`; `household` = los de todo el hogar, solo lectura). Sobre `{view, plans[]}`; el activo primero, luego `sort_index` y alta. Cada plan trae sus bloques y, en cada bloque, sus cambios en orden cronológico |
+| POST | `/v1/plans` | `create_plan_core` | 201. `{name, assumptions?, sort_index?, household?}`. Nace **inactivo** y con un bloque «General» |
+| GET | `/v1/plans/{id}` | `get_plan_core` | `?view=`: con `mine` el plan de otro miembro → 404 `plan_not_in_scope`; con `household`, cualquiera |
+| PATCH | `/v1/plans/{id}` | `patch_plan_core` | `name`, `assumptions` (**reemplaza el objeto entero**: lo no mandado vuelve a su default), `sort_index`; vacío → `patch_empty` |
+| DELETE | `/v1/plans/{id}` | `delete_plan_core` | 204; cascada a bloques y cambios. Si era el activo, la persona vuelve a «solo la realidad» |
+| POST | `/v1/plans/{id}/activate` | `activate_plan_core(Some)` | `{active_plan_id, deactivated_plan_ids[], changed}`. Activar B apaga A. Activar el que ya está activo: `changed: false`, sin subir `revision` ni invalidar |
+| POST | `/v1/plans/deactivate` | `activate_plan_core(None)` | Apaga el plan activo **de quien lo pide** (no el de los demás) |
+| POST | `/v1/plans/{id}/blocks` | `create_plan_block_core` | 201. `{name, enabled?, sort_index?}` |
+| PATCH/DELETE | `/v1/plans/{id}/blocks/{block_id}` | `patch_/delete_plan_block_core` | Borrar un bloque borra sus cambios; 404 `plan_block_not_found` |
+| POST | `/v1/plans/{id}/changes` | `create_plan_change_core` | 201. `block_id` omitido = el primer bloque |
+| PATCH/DELETE | `/v1/plans/{id}/changes/{change_id}` | `patch_/delete_plan_change_core` | El PATCH valida el estado RESULTANTE; `kind` es inmutable; tri-estado en `end_date`, `amount`, `asset_id`, `target_change_id`; 404 `plan_change_not_found` |
+
+**Escritura (D21/D23, igual que el ledger).** Rol de escritura (viewer → 403 `forbidden`) y, dentro
+de la core y de la transacción, la puerta `lock_plan_for_write`: el plan existe en la instalación
+(404 `plan_not_found`), no es de hogar (400 `household_plans_not_available`) y es del usuario
+(403 `not_row_owner` — el `owner` de la instalación tampoco la salta). La fila del plan queda
+bloqueada (`FOR UPDATE`) hasta el commit. **Toda** escritura del plan, de un bloque o de un cambio
+sube `plans.revision` y `plans.updated_at` (también activar y desactivar, en los planes que cambian):
+`revision` será el sello de cache de F2-4, y `updated_at` es lo que hace que `GET /v1/changes` vea la
+edición de un cambio como `updated` del plan.
+
+**Planes de hogar** (`owner_user_id` NULL): existen en el esquema (índice `plans_one_active_household`)
+pero la API **no los crea** (`household: true` → 400 `household_plans_not_available`) **ni los
+escribe** hasta F3 (finanzas compartidas). Se leen con `view=household` y nunca con `mine`.
+
+**Exactamente un activo por persona.** Índice único parcial `plans_one_active_per_owner` y, en la
+core, una transacción que bloquea primero TODAS las filas de planes de la persona (orden de id),
+después pasa la puerta del plan pedido, desactiva y activa. En ese orden: al revés, dos activaciones
+simultáneas de A y B se interbloqueaban (cada una con su plan, esperando el de la otra → 500).
+Serializadas, la segunda relee y apaga lo que encendió la primera. El 23505 queda como red → 409
+`plan_activation_conflict`. Regresión: `plans_crud.rs::concurrent_activations_leave_exactly_one_active`.
+
+**`assumptions`** (`PlanAssumptions`, porcentajes como strings decimales; viaja siempre entero):
+`inflation_override_pct` (`null` = la de Ajustes; `[-2, 50]`), `income_follows_inflation` (`true`),
+`expense_follows_inflation` (`true`), `horizon_age` (90; `[85, 105]`), `market_return_adjustment_pp`
+(`"0"`; `[-5, 5]`). **Escritura estricta** (`deny_unknown_fields`: una clave desconocida → 400
+`plan_assumptions_invalid`, igual que un valor fuera de rango o un número donde va un string) y
+**lectura tolerante** del JSONB guardado (claves desconocidas ignoradas, ausentes a su default) — la
+asimetría existe por el precedente de `retirement_profile.rs`. Se parsean en la core, no en el
+extractor, para que el error lleve código estable y la tool MCP de F2-6 lo herede.
+
+**Cambios** (`PlanChangeResponse`; todos los campos viajan siempre, `null` incluido):
+`kind` ∈ `income` | `expense` | `asset_in` | `asset_sale` | `loan`; `start_date`; `end_date`
+(inclusivo; `null` = sin fin); `amount` (Decimal string **en euros de hoy**, a la escala de la
+columna: `"200.0000"`; con signo en ingreso/gasto); `amount_unit` `eur` | `pct`; `cadence`
+`monthly` | `one_off` (default `monthly` en ingreso/gasto, `one_off` en el resto);
+`keeps_purchasing_power` (default `true`; `loan` siempre `false`); `asset_id`; `target_change_id`;
+`params`; `enabled`. Forma por tipo (400 `plan_change_invalid_shape`, validada sobre el estado
+resultante y espejada en los `CHECK` de la tabla):
+
+| `kind` | Forma |
+|---|---|
+| `income` / `expense` | `amount ≠ 0` (con signo); `pct` ∈ `[-100, 1000]` y solo mensual; `params = {}` |
+| `asset_in` | `amount > 0`, `eur`, `one_off`; `params` = `AssetInParams` `{name, expected_annual_return_percent?, annual_volatility_percent?, is_liquid (true), purchase_price?}` con las cotas de `POST /v1/assets` |
+| `asset_sale` | **exactamente uno** de `asset_id` (activo REAL del dueño del plan; si no → 400 `asset_not_in_scope`) o `target_change_id` (un `asset_in` del MISMO plan); `amount` `null` = vender entero (solo `one_off` + `eur`), si no `> 0` (`pct` ≤ 100, solo mensual); `params = {}` |
+| `loan` | `amount > 0` (el principal), `eur`, `one_off`, `keeps_purchasing_power = false`; `params` = `LoanParams` `{name?, apr_percent [0,100], term_months [1,600], repayment_model: "french"}` |
+
+Comunes: un `one_off` no tiene `end_date`; `end_date ≥ start_date`; `pct` solo mensual; las fechas
+que la escritura introduce, a ≤ 100 años (`max_user_settable_future_date`). `params` desconocidos →
+400 (escritura estricta por tipo; el tipo lo decide la columna `kind`, no la forma del JSON).
+
+**Ventas sin sujeto.** `plan_changes.asset_id` es `ON DELETE SET NULL` y `target_change_id` también
+(FK compuesta `(target_change_id, plan_id)` con `SET NULL (target_change_id)`): borrar el activo
+real, el `asset_in` vendido o su bloque deja la venta con los dos a `null`. La tabla lo admite («como
+mucho un sujeto»); la API no lo crea y, como valida el estado resultante, **no deja editar esa venta
+sin darle un sujeto nuevo**. Cómo la trata el motor lo decide F2-4.
+
+**MCP**: sin tools hasta F2-6 — hueco abierto en la skill `futurefin-mcp-parity` §3.2. Las cores
+`*_core` ya están separadas para esas tools.
+
 ### Projection (`/v1/projection/`)
 Net-worth series via `futurefin-engine`. Accepts `?view=` (**default `mine` desde 5.0.0**, R2) y
 `?months=N`. `N` fuera de **12–840** es **400 `months_out_of_range`** (desde 4.4.0; antes se
@@ -1624,7 +1707,9 @@ mismos 400.
 
 Qué se ha creado o editado desde una fecha, leyendo los `updated_at` que **ya** se mantienen en
 ocho tablas del ledger (`assets`, `liabilities`, `budget_entries`, `planning_flows`,
-`transactions`, `recurring_transaction_rules`, `categorization_rules`, `history_snapshots`), con un
+`transactions`, `recurring_transaction_rules`, `categorization_rules`, `history_snapshots`) y,
+desde 6.0.0 F2-1, en `plans` (entidad `plan`; editar un bloque o un cambio sube el `updated_at` del
+plan, así que sale como `updated` del plan — `plan_blocks`/`plan_changes` no se listan aparte), con un
 `UNION ALL` y orden `updated_at DESC, id ASC` — el desempate por `id` no es adorno: dos filas de la
 misma transacción comparten `now()` al microsegundo. Handler `get_recent_changes`, core
 `list_recent_changes_core` (`handlers/changes.rs`), montado con `.nest("/changes", changes_router())`.
@@ -1642,11 +1727,11 @@ respuesta, no omisiones**:
   mentir.
 - `tables_missing_updated_at: ["categories", "allocation_rules"]` — quedan fuera **porque no tienen
   la columna**, no por criterio.
-- `tables_covered` (las 8), `item_count` / `items_included` / `truncated`, y `now` — el `since` del
+- `tables_covered` (9 desde 6.0.0), `item_count` / `items_included` / `truncated`, y `now` — el `since` del
   siguiente sondeo, servido para que el cliente no tenga que fabricarlo con su propio reloj.
 
 Cada `RecentChange`: `entity` (`asset` | `liability` | `budget_entry` | `planning_flow` |
-`transaction` | `recurring_rule` | `categorization_rule` | `snapshot`), `id`, `label`, `change`
+`transaction` | `recurring_rule` | `categorization_rule` | `snapshot` | `plan`), `id`, `label`, `change`
 (`created` si `created_at >= since`, si no `updated`), `created_at`, `updated_at` y `owner_user_id`
 (omitido si `None`). La etiqueta de `budget_entries` sale de su categoría por subquery: esa tabla no
 tiene columna de nombre. **Ningún campo es un `Decimal`** — es un índice de cambios, no un extracto.

@@ -1,6 +1,7 @@
 //! `GET /v1/changes` — la mitad honesta de una auditoría.
 //!
-//! Cubre altas y ediciones sobre los `updated_at` que ocho tablas ya mantienen. **No cubre
+//! Cubre altas y ediciones sobre los `updated_at` que ocho tablas del ledger —y, desde 6.0.0,
+//! `plans`— ya mantienen. **No cubre
 //! borrados** (no hay tombstones) y no ve `categories` ni `allocation_rules` (no tienen
 //! `updated_at`). Los tests fijan las dos cosas: que lo que promete lo cumple, y que **lo que no
 //! cubre lo dice en la respuesta** en vez de dejar una lista vacía ambigua.
@@ -72,7 +73,9 @@ async fn changes_lists_creations_and_edits_and_declares_what_it_cannot_see() {
         json!(["categories", "allocation_rules"]),
         "las dos tablas invisibles se nombran: {b}"
     );
-    assert_eq!(b["tables_covered"].as_array().unwrap().len(), 8, "{b}");
+    // Ocho tablas del ledger + `plans` (6.0.0 F2-1, que cubre también sus bloques y cambios vía
+    // el `updated_at` del plan).
+    assert_eq!(b["tables_covered"].as_array().unwrap().len(), 9, "{b}");
     // 5.0.0 (R2): sin `?view` la respuesta es `mine`. Este test tiene un solo usuario, así que
     // el contenido no cambia — lo que cambia es lo que la respuesta DECLARA haber aplicado.
     assert_eq!(b["view"], "mine", "{b}");

@@ -563,8 +563,9 @@ CORS, `Origin` y tope de body: §CORS y topes de body, arriba.
       persona, así que un scope aquí sería un parámetro que no significa nada.
     - `list_goals` — ETA de cada tope de la cascada. Acepta `view`. Corre bajo
       `heavy::run_projection_sim` (simula el horizonte completo).
-    - `list_recent_changes` — qué se ha tocado desde `since` en ocho tablas. Acepta `view`. **No
-      cubre borrados** y lo declara en la respuesta.
+    - `list_recent_changes` — qué se ha tocado desde `since` en las tablas del ledger y, desde 6.0.0,
+      en `plans` (la lista viaja en `tables_covered`). Acepta `view`. **No cubre borrados** y lo
+      declara en la respuesta.
   - **Escritura (9)**: `create_batch` (COND, sin `impact`, `idempotency_key` **del lote** en la
     raíz), `create_snapshot` + `update_snapshot` (**cache NONE por contrato, D12** — publican
     `"affects_projection": false` en vez de `impact`; cierran la fila §3.2 #1 del registro, «el

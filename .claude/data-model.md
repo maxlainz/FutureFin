@@ -71,6 +71,48 @@ cada fecha sale de `users`. No hay migración de retirada y no se expone en el A
 
 **planning_flows**: `id`, `installation_id`, `owner_user_id`, `category_id`, `title`, `expected_amount (decimal, CHECK > 0)`, `amount_basis (text NOT NULL DEFAULT 'one_off', CHECK IN ('one_off','per_month') — 4.11.0/#148)`, `due_date (date nullable; solo one_off)`, `window_start_date (date nullable)`, `window_end_date (date nullable)`, `show_in_chart (bool — `20260517120000_planning_flows_show_in_chart.sql`; solo puede ser true con one_off + due_date)`, `enabled (bool NOT NULL DEFAULT true — 5.0.0, `20261010120000_planning_flows_enabled.sql`: interruptor de la pestaña «Simulación»; `false` = la fila existe y se lista, pero no es input de la proyección ni de ningún KPI — ver `api-routes.md` §Planning)`, `notes`, `sort_index`, `created_at`, `updated_at`. **No hay columna `direction`**: la dirección se DERIVA de `categories.scope` de su categoría (`income` → inflow, `expense` → outflow; `apps/api/src/handlers/planning.rs::scope_to_direction`) — una versión anterior de esta fila la inventaba (errata C6 del spike de la Ola 7). `amount_basis` declara la unidad del importe (`one_off` = TOTAL en €; `per_month` = **€/MES** durante `[window_start_date, window_end_date]`, `window_end_date` NULL = sin fin). Forma por base: CHECK `planning_flows_basis_shape_chk` (one_off sin ventana; per_month sin due_date y con window_start) + `planning_flows_window_order_chk` (end ≥ start) — migración `20260901140000_planning_flows_recurring_window.sql`.
 
+### Plans («Planes» — 6.0.0 F2-1)
+
+Migración `20261020120000_plans.sql` (aditiva). Contrato HTTP en [`api-routes.md`](api-routes.md)
+§Plans; diseño en [`rfc/planes-6.0.md`](rfc/planes-6.0.md). **En F2-1 nada de la proyección lee estas
+tablas** (F2-4 las cablea).
+
+**plans**: `id`, `installation_id` (FK CASCADE), `owner_user_id` (**nullable**, FK `users`
+`ON DELETE CASCADE` — NULL = plan de HOGAR, solo esquema hasta F3; CASCADE y no `SET NULL` como el
+ledger porque un plan huérfano se convertiría en un plan de hogar que nadie creó), `name` (CHECK
+1..200 tras trim), `is_active (bool NOT NULL DEFAULT false)`, `assumptions (jsonb NOT NULL DEFAULT
+'{}', CHECK objeto — `PlanAssumptions`, claves ausentes = default al leer)`, `revision (bigint NOT
+NULL DEFAULT 1, CHECK ≥ 1 — sube en toda escritura del plan, sus bloques o sus cambios, y al
+(des)activar)`, `sort_index`, `created_at`, `updated_at`. Índices únicos parciales
+**`plans_one_active_per_owner`** `(installation_id, owner_user_id) WHERE is_active AND owner_user_id
+IS NOT NULL` y **`plans_one_active_household`** `(installation_id) WHERE is_active AND owner_user_id
+IS NULL`: como mucho un activo por persona y uno de hogar.
+
+**plan_blocks**: `id`, `plan_id` (FK CASCADE), `name` (CHECK 1..200), `enabled (bool DEFAULT
+true)`, `sort_index`, `created_at`, `updated_at`; `UNIQUE (id, plan_id)` — destino de la FK compuesta
+de los cambios. Cada plan nace con un bloque «General» (lo crea la API, no la tabla).
+
+**plan_changes**: `id`, `plan_id` (FK CASCADE, denormalizado a propósito), `block_id` con FK
+compuesta `(block_id, plan_id) → plan_blocks(id, plan_id) ON DELETE CASCADE` (un cambio no puede
+colgar de un bloque de otro plan), `kind` (CHECK `income|expense|asset_in|asset_sale|loan`),
+`start_date (date NOT NULL)`, `end_date (date nullable, inclusivo)`, `amount (NUMERIC(18,4)
+nullable — euros de hoy; con signo en ingreso/gasto; NULL solo en asset_sale = vender entero)`,
+`amount_unit (eur|pct, DEFAULT eur)`, `cadence (monthly|one_off, DEFAULT monthly)`,
+`keeps_purchasing_power (bool DEFAULT true)`, `asset_id` (FK `assets` **`ON DELETE SET NULL`**),
+`target_change_id` con FK compuesta `(target_change_id, plan_id) → plan_changes(id, plan_id) ON
+DELETE SET NULL (target_change_id)` (el `asset_in` vendido es del MISMO plan; la lista de columnas
+del `SET NULL` exige PostgreSQL ≥ 15, la imagen lleva 16), `params (jsonb NOT NULL DEFAULT '{}', CHECK
+objeto — `PlanChangeParams` por tipo)`, `enabled`, `created_at`, `updated_at`; `UNIQUE (id,
+plan_id)`. CHECKs de forma con nombre (`plan_changes_*`): fin ≥ inicio; un `one_off` sin fin; **pct
+solo mensual**; ingreso/gasto con importe ≠ 0; `asset_in` > 0, eur, one_off; `asset_sale` con **como
+mucho** un sujeto (la API exige exactamente uno; ninguno es el estado que deja borrar lo vendido),
+importe NULL solo one_off + eur, si no > 0; `loan` > 0, eur, one_off y **siempre nominal**
+(`NOT keeps_purchasing_power`); sujetos solo en ventas; una venta no se apunta a sí misma.
+
+Lo que todavía **no** cubren (deuda de fases posteriores, declarada): los planes **no viajan en el
+`.ffbackup`** (el bump de esquema del backup es F2-5), y un import de backup —que vacía y reinserta
+`assets` con UUIDs frescos— deja sin sujeto (`asset_id` NULL) las ventas de activos reales.
+
 ### History snapshots (perspectiva histórica — v1.5.0)
 `20260706203746_history_snapshots.sql`. Snapshots manuales per-user del patrimonio: el ledger solo guarda el valor presente (`assets.current_value`, `liabilities.principal` son escalares mutables sin historial), así que estas dos tablas conservan fotos puntuales de las que el servidor interpola la serie histórica de net worth (ver `GET /v1/history/series`). Totales derivados, nunca almacenados.
 
