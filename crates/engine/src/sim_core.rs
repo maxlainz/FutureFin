@@ -145,6 +145,14 @@ pub(crate) fn fire_target_at_index_g<M: MoneyOps>(
 // Pasivos: la recurrencia del mes
 // =============================================================================================
 
+/// ¿Existe ya, durante el mes `k` del bucle (1-based), un activo o pasivo con este mes de inicio
+/// (6.0.0 F1a)? `None` ⇒ existe desde hoy; `Some(s)` ⇒ existe en los meses `k ≥ s`, así que
+/// `Some(0)` y `Some(1)` equivalen a `None`. ÚNICA definición del predicado: la usan el bucle, la
+/// resolución del mes 1 y el calendario de amortización.
+pub(crate) fn started_by_g(start_month: Option<u32>, k: u32) -> bool {
+    start_month.is_none_or(|s| s <= k)
+}
+
 /// ¿Plan de pago vivo? — la mitad reutilizable de [`liability_active_g`].
 pub(crate) fn plan_alive_g<M: MoneyOps>(
     monthly_payment: M,
@@ -659,10 +667,38 @@ fn rule_cap_ceiling_and_room_g<M: MoneyOps>(
 /// incluidas las que no reciben nada. **Una sola implementación de la cascada**: dos divergirían
 /// en silencio al primer cambio de caps, y una explicación que no coincide con lo que el motor
 /// hace es peor que no tener explicación.
+#[cfg(test)]
 pub(crate) fn distribute_contributions_g<M: MoneyOps>(
     pool: M,
     rules: &[AllocationRuleG<M>],
     values: &[M],
+    monthly_expense_with_debt: M,
+    monthly_income: M,
+    trace: Option<&mut Vec<RuleOutcomeG<M>>>,
+) -> (Vec<M>, M) {
+    distribute_contributions_avail_g(
+        pool,
+        rules,
+        values,
+        None,
+        monthly_expense_with_debt,
+        monthly_income,
+        trace,
+    )
+}
+
+/// La cascada de `distribute_contributions_g` (arriba) con la **disponibilidad** de cada activo
+/// (6.0.0 F1a). `available: None` ⇒ todos existen (el camino de siempre, sin una operación de
+/// más). Con `Some(a)`, una regla cuyo destino `i` tiene `a[i] == false` —un activo con mes de
+/// inicio futuro— **se salta y su parte sigue cascada abajo**, exactamente como una regla cuyo
+/// destino está lleno: el euro no se pierde ni se aparca esperando al activo. En la traza se
+/// publica como `InvalidTarget` (un destino que este mes no es válido); F2 decidirá si merece un
+/// motivo propio en el wire.
+pub(crate) fn distribute_contributions_avail_g<M: MoneyOps>(
+    pool: M,
+    rules: &[AllocationRuleG<M>],
+    values: &[M],
+    available: Option<&[bool]>,
     monthly_expense_with_debt: M,
     monthly_income: M,
     mut trace: Option<&mut Vec<RuleOutcomeG<M>>>,
@@ -739,6 +775,12 @@ pub(crate) fn distribute_contributions_g<M: MoneyOps>(
             skip!(AllocationSkipReason::InvalidTarget, M::zero(), None, None);
             continue;
         }
+        // 6.0.0 F1a: el destino aún no existe (mes de inicio futuro). Se salta ANTES de mirar el
+        // techo: un activo que no existe no tiene hueco que llenar.
+        if available.is_some_and(|a| !a.get(target).copied().unwrap_or(true)) {
+            skip!(AllocationSkipReason::InvalidTarget, M::zero(), None, None);
+            continue;
+        }
         let ceiling = resolve_cap_ceiling_g(rule.cap, monthly_expense_with_debt, monthly_income);
         let cap_room = ceiling.map(|c| (c - live_values[target]).max(M::zero()));
         if let Some(room) = cap_room {
@@ -808,11 +850,34 @@ pub(crate) fn first_month_allocation_g<M: MoneyOps>(
     // Sin activos NO hay atajo a ceros (#127): la caja del mes 1 existe aunque no haya dónde
     // asignarla, y los KPIs la leen de aquí.
 
-    let values: Vec<M> = input.assets.iter().map(|a| a.value).collect();
+    // 6.0.0 F1a: lo que aún no existe en el mes 1 (mes de inicio ≥ 2) vale 0 y no es destino.
+    let values: Vec<M> = input
+        .assets
+        .iter()
+        .map(|a| {
+            if started_by_g(a.start_month, 1) {
+                a.value
+            } else {
+                M::zero()
+            }
+        })
+        .collect();
+    let available: Vec<bool> = input
+        .assets
+        .iter()
+        .map(|a| started_by_g(a.start_month, 1))
+        .collect();
+    let any_pending_asset = available.iter().any(|a| !a);
     let principals: Vec<M> = input
         .liabilities
         .iter()
-        .map(|l| l.principal.max(M::zero()))
+        .map(|l| {
+            if started_by_g(l.start_month, 1) {
+                l.principal.max(M::zero())
+            } else {
+                M::zero()
+            }
+        })
         .collect();
 
     let start_month_first = month_first_calendar(input.ref_date);
@@ -824,7 +889,7 @@ pub(crate) fn first_month_allocation_g<M: MoneyOps>(
         // Mismos helpers que el bucle; el principal de cierre se descarta aquí porque esta
         // función solo resuelve el mes 1 — pero la amortización extra SÍ entra en el servicio de
         // deuda, que es lo que decide cuánto sobrante llega a la cascada.
-        let active = liability_active_g(liab, m_start);
+        let active = started_by_g(liab.start_month, 1) && liability_active_g(liab, m_start);
         let opening = principals.get(i).copied().unwrap_or(M::zero());
         let (cash, closing) = liability_month_g(liab, opening, liab.monthly_payment, active);
         let (extra, fee) = liability_extra_principal_g(liab, 1, closing, active);
@@ -922,10 +987,11 @@ pub(crate) fn first_month_allocation_g<M: MoneyOps>(
         }
         _ => (net_cash_month, M::zero()),
     };
-    let (alloc, leftover) = distribute_contributions_g(
+    let (alloc, leftover) = distribute_contributions_avail_g(
         pool,
         &input.allocation_rules,
         &values,
+        any_pending_asset.then_some(available.as_slice()),
         expense + debt_service,
         income,
         Some(&mut rules_trace),
@@ -973,7 +1039,33 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         }
     }
 
-    let mut values: Vec<M> = input.assets.iter().map(|a| a.value).collect();
+    // 6.0.0 F1a — **mes de inicio**. Un activo o pasivo con `start_month = s ≥ 2` no existe en
+    // los meses `1..s−1` (valor/principal 0, base 0, inactivo) y se MATERIALIZA al cierre del mes
+    // `s−1`, después del crecimiento y de asentar principales y antes de publicar el punto: así
+    // el índice `s−1` de la serie ya lo lleva y el mes `s` es el primero que vive. Sin ningún
+    // mes de inicio futuro (`any_dated == false`, todo 4.x/5.x) no se ejecuta ni una operación
+    // de más: bit-identidad con los pines.
+    let any_dated = input.assets.iter().any(|a| !started_by_g(a.start_month, 1))
+        || input
+            .liabilities
+            .iter()
+            .any(|l| !started_by_g(l.start_month, 1));
+    let mut asset_available: Vec<bool> = input
+        .assets
+        .iter()
+        .map(|a| started_by_g(a.start_month, 1))
+        .collect();
+    let mut values: Vec<M> = input
+        .assets
+        .iter()
+        .map(|a| {
+            if started_by_g(a.start_month, 1) {
+                a.value
+            } else {
+                M::zero()
+            }
+        })
+        .collect();
     let liquid: Vec<bool> = input.assets.iter().map(|a| a.is_liquid).collect();
     let rates: Vec<Option<M>> = input
         .assets
@@ -996,7 +1088,13 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
     let mut principals: Vec<M> = input
         .liabilities
         .iter()
-        .map(|l| l.principal.max(M::zero()))
+        .map(|l| {
+            if started_by_g(l.start_month, 1) {
+                l.principal.max(M::zero())
+            } else {
+                M::zero()
+            }
+        })
         .collect();
     // Cuota efectiva por pasivo (#151): solo la muta «reducir cuota» (λ-escala). Con el efecto
     // default (`ReduceTerm`) nunca se toca y la simulación es bit-idéntica a 4.6.0.
@@ -1065,9 +1163,14 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         .assets
         .iter()
         .map(|a| {
-            a.purchase_price
-                .filter(|p| *p > M::zero())
-                .unwrap_or(M::zero())
+            if started_by_g(a.start_month, 1) {
+                a.purchase_price
+                    .filter(|p| *p > M::zero())
+                    .unwrap_or(M::zero())
+            } else {
+                // F1a: un activo que aún no existe no tiene base; la declarada entra con él.
+                M::zero()
+            }
         })
         .collect();
     // #178 extensión (4.12.1): un activo cuya base ALIMENTA la simulación (la cascada le aportó)
@@ -1130,7 +1233,8 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
             if i >= principals.len() {
                 break;
             }
-            let active = liability_active_g(liab, m_start);
+            // F1a: un pasivo aún no firmado no paga, no devenga y no amortiza.
+            let active = started_by_g(liab.start_month, k) && liability_active_g(liab, m_start);
             let (cash, closing) =
                 liability_month_g(liab, principals[i], effective_payment[i], active);
             // Amortización extra (what-if): sale de la caja del mes como servicio de deuda Y baja
@@ -1328,10 +1432,13 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
                 }
                 None => investable,
             };
-            let (alloc, leftover) = distribute_contributions_g(
+            let (alloc, leftover) = distribute_contributions_avail_g(
                 pool,
                 &input.allocation_rules,
                 &values,
+                // F1a: solo hay que mirar disponibilidad si queda algún activo por aparecer.
+                (any_dated && asset_available.iter().any(|a| !a))
+                    .then_some(asset_available.as_slice()),
                 expense + debt_service,
                 income,
                 None,
@@ -1448,6 +1555,28 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         // Amortización: solo se asienta el cierre ya calculado arriba. Sin recomputar nada.
         for (i, closing) in closing_principals.iter().enumerate() {
             principals[i] = *closing;
+        }
+
+        // **Materialización** (6.0.0 F1a): lo que empieza el mes `k+1` aparece AHORA, al cierre
+        // del mes `k` = apertura del `k+1`, con su valor/principal declarado y SIN caja: el
+        // patrimonio salta exactamente `value` (o baja exactamente `principal`). Sus meses
+        // anteriores no lo tocaron (valor 0, inactivo), así que asignar es reemplazar un cero.
+        if any_dated {
+            for (i, a) in input.assets.iter().enumerate() {
+                if a.start_month == Some(k + 1) {
+                    values[i] = a.value;
+                    basis[i] = a
+                        .purchase_price
+                        .filter(|p| *p > M::zero())
+                        .unwrap_or(M::zero());
+                    asset_available[i] = true;
+                }
+            }
+            for (i, l) in input.liabilities.iter().enumerate() {
+                if l.start_month == Some(k + 1) && i < principals.len() {
+                    principals[i] = l.principal.max(M::zero());
+                }
+            }
         }
 
         let nw = nw_fn(&values, &principals, undrained_cumulative);

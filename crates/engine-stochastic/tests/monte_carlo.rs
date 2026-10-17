@@ -89,6 +89,7 @@ fn single_asset_retiree(
             purchase_price: None,
             is_liquid: true,
             expected_annual_return_percent: Some(annual_return),
+            start_month: None,
         }],
         allocation_rules: Vec::new(),
         liabilities: Vec::new(),

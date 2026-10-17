@@ -968,6 +968,7 @@ pub struct ProjectionLiabilityInput {
     pub extra_principal_lump_sums: Vec<(u32, Decimal)>, // 4.4.0 — (mes 1-based, importe); varios del mismo mes SUMAN
     pub early_repayment_fee_pct: Option<Decimal>,  // 4.7.0 (#151) — compensación % del extra; None = 0
     pub early_repayment_effect: EarlyRepaymentEffect, // 4.7.0 (#151) — ReduceTerm (default) | ReducePayment
+    pub start_month: Option<u32>,                  // 6.0.0 F1a — mes de firma, rejilla 1-based del bucle; None = hoy (§Mes de inicio)
 }
 
 pub enum RepaymentModel { FixedPayments, French, InterestOnly, Revolving }
@@ -1176,6 +1177,56 @@ en `E` en los meses con sobrante, porque la cascada reparte menos.
 - `expected_annual_return_percent`: **nominal** compound growth rate (7 = 7%/year). None = no compound growth.
 - `is_liquid`: liquid assets are drained first when cash is negative; sorted by growth rate (lowest first).
 - `purchase_price`: optional cost basis; seeds `basis[i]` (#120) and therefore `contributed_capital[0]`. La base baja proporcionalmente al valor drenado y la rentabilidad nunca la toca — el hueco `valor − base` es la plusvalía latente.
+- `start_month: Option<u32>` (6.0.0 F1a): mes de inicio en la rejilla 1-based del bucle; `None` = existe hoy. Ver §Mes de inicio de activos y pasivos.
+
+## Mes de inicio de activos y pasivos (6.0.0 F1a)
+
+`SimAsset::start_month` y `ProjectionLiabilityInput::start_month` (gemelos en `SimAssetG` /
+`SimLiability` del núcleo genérico) permiten que un plan diga «en 2029 entra una casa» o «firmo
+una hipoteca en 03/2028» (RFC Planes 6.0, §3 Motor). La lógica vive en el **núcleo genérico**
+(`sim_core::simulate` + `first_month_allocation_g`), así que `Decimal` y `F64Money` la ejecutan
+igual; la puerta de degeneración lleva un caso fechado (`D1_dated_house_mortgage_inheritance`,
+`projection_cases_6_0_dated()`, fuera de los pines dorados a propósito).
+
+**Rejilla: el mes `s` del BUCLE (1-based)**, el mismo eje que `extra_principal_lump_sums` y
+`RetirementTrigger::AtMonth` — no el 0-based de la serie ni el de `PensionSchedule::start_index`.
+Predicado único: `sim_core::started_by_g(start, k) = start.is_none_or(|s| s <= k)`.
+
+| `start_month` | Significado |
+|---|---|
+| `None`, `Some(0)`, `Some(1)` | Existe hoy. **Bit a bit** el comportamiento previo (test `start_at_first_month_or_zero_reproduces_legacy_bit_for_bit` sobre toda la batería de 4.15.0 + P9). |
+| `Some(s)`, `s ≥ 2` | No existe en los meses `1..s−1`; existe desde la **apertura del mes `s`**. |
+
+- **Antes de `s`**: un activo vale 0, tiene base 0, no crece, no entra en la venta del mes y suma
+  0 al patrimonio y al líquido; un pasivo tiene principal 0 y está **inactivo** (sin cuota, sin
+  devengo, sin amortización extra — los `extra_principal_lump_sums` de esos meses se ignoran).
+- **Materialización**: al cierre del mes `s−1` (= apertura del `s`), DESPUÉS del crecimiento y de
+  asentar principales y ANTES de publicar el punto, el ítem toma su `value`/`purchase_price` (o su
+  `principal`). Por eso **en la serie aparece por primera vez en el índice `s−1`** — el punto
+  fechado en el mes civil del mes `s` — sin haber crecido aún; el mes `s` es el primero que vive
+  (recibe cascada, puede venderse, crece; el pasivo paga en `s` su PRIMERA cuota, interés sobre el
+  saldo de apertura). Con `s = horizon + 1` solo aparece en el último punto; más allá, nunca.
+- **La aparición NO crea caja**: el patrimonio salta exactamente `+value` (o `−principal`). Pagar
+  la entrada o cobrar el préstamo son otros cambios del plan.
+- **Préstamos**: el calendario se cuenta desde `s` — la serie de un préstamo firmado en `s` es la
+  del mismo préstamo firmado hoy desplazada `s−1` meses, bit a bit (test
+  `dated_liability_is_the_same_loan_shifted`, que también fija el interés total igual).
+  `payment_end` sigue siendo una **fecha civil absoluta** (dato del contrato): no se desplaza. Un
+  préstamo «a 25 años» se construye con `payment_end = firma + plazo` (o `None`). Un `payment_end`
+  anterior a `s` deja el pasivo sin plan vivo: resta constante desde `s`.
+  `liability_amortization_schedule` empieza en `month_index = s` (sin renumerar); con `s` más allá
+  del horizonte sale vacío (`NoPaymentPlan`).
+- **Cascada**: una regla cuyo destino aún no existe **se salta y su parte sigue cascada abajo**
+  (`distribute_contributions_avail_g`), igual que un destino lleno; desde `s` vuelve a aportar.
+  En la traza de `first_month_allocation` el salto se publica como
+  `AllocationSkipReason::InvalidTarget` (no se añadió variante: la API no produce aún
+  `start_month` y un motivo nuevo es un literal de wire — decisión de F2).
+- **Coste cero sin fechas**: con ningún ítem fechado (`any_dated == false`) el bucle no ejecuta ni
+  una operación de más; `pins-4.15.json` y `pins-5.0-outputs.json` no se regeneran.
+- **Fuera de alcance de F1a** (5.x, se retira en 6.0.0): el término de deuda del objetivo FIRE
+  (`debt_payments_remaining_series`) suma también las cuotas de un pasivo futuro desde hoy, y
+  `liability_interest_accrues` (KPI de `/v1/summary`) no conoce `start_month`. La API pasa siempre
+  `None` hasta F2.
 
 ## AllocationRule fields
 ```rust
@@ -1259,6 +1310,9 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
 8. Apply compound growth (`× monthly_multiplier(rate)`) to each asset value — sin deflactar. `monthly_multiplier` = raíz 12ª del factor anual `1 + p/100`; `None` y `0` → factor 1; **las tasas negativas componen de verdad** (−50 % anual ⇒ ×0,5 en 12 meses); `p ≤ −100` se clampa a factor 0 (la capa API rechaza esos inputs con error tipado).
 9. Assign each liability its `closing_principal` from step 1. No recomputation, no `min` — just the
    assignment.
+10. **Materialización de lo fechado** (6.0.0 F1a): los activos y pasivos con `start_month = k+1`
+   toman su valor/principal declarado AHORA, antes de publicar el punto `k`. Sin caja. Solo corre
+   si hay algún ítem fechado. Ver §Mes de inicio de activos y pasivos.
 
 ## Retirada en jubilación — solo SWR (`withdrawal.rs`, decisión del 2026-10-10)
 

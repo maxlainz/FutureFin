@@ -129,6 +129,7 @@ fn gen_case(seed: u64, i: u64) -> ProjectionInput {
             },
             is_liquid: !r.one_in(4),
             expected_annual_return_percent: if r.one_in(6) { None } else { Some(r.pct()) },
+            start_month: None,
         })
         .collect();
     let rules: Vec<AllocationRule> = (0..r.upto(3))

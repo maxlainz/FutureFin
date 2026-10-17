@@ -299,6 +299,8 @@ pub struct SimAssetG<M> {
     pub purchase_price: Option<M>,
     pub is_liquid: bool,
     pub expected_annual_return_percent: Option<M>,
+    /// Mes de inicio, rejilla 1-based del bucle. Semántica: [`SimAsset::start_month`].
+    pub start_month: Option<u32>,
 }
 
 /// Un pasivo, en el tipo del núcleo. Gemelo de [`ProjectionLiabilityInput`].
@@ -315,6 +317,9 @@ pub struct SimLiability<M> {
     pub extra_principal_lump_sums: Vec<(u32, M)>,
     pub early_repayment_fee_pct: Option<M>,
     pub early_repayment_effect: EarlyRepaymentEffect,
+    /// Mes de firma, rejilla 1-based del bucle. Semántica:
+    /// [`ProjectionLiabilityInput::start_month`].
+    pub start_month: Option<u32>,
 }
 
 /// Tope de una regla de la cascada, en el tipo del núcleo. Gemelo de [`AllocationCap`].
@@ -497,6 +502,7 @@ impl<M: MoneyOps> From<&SimAsset> for SimAssetG<M> {
             purchase_price: a.purchase_price.map(M::from_decimal),
             is_liquid: a.is_liquid,
             expected_annual_return_percent: a.expected_annual_return_percent.map(M::from_decimal),
+            start_month: a.start_month,
         }
     }
 }
@@ -519,6 +525,7 @@ impl<M: MoneyOps> From<&ProjectionLiabilityInput> for SimLiability<M> {
                 .collect(),
             early_repayment_fee_pct: l.early_repayment_fee_pct.map(M::from_decimal),
             early_repayment_effect: l.early_repayment_effect,
+            start_month: l.start_month,
         }
     }
 }
