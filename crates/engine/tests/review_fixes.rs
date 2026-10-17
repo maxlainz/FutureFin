@@ -60,6 +60,7 @@ fn asset(i: u128, value: &str, basis: Option<&str>, liquid: bool, rate: &str) ->
         purchase_price: basis.map(dec),
         is_liquid: liquid,
         expected_annual_return_percent: Some(dec(rate)),
+        start_month: None,
     }
 }
 

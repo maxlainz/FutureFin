@@ -37,7 +37,7 @@
 #[path = "../../engine/tests/common/cases.rs"]
 mod cases;
 
-use cases::{projection_cases_5_0, projection_cases_all, ProjCase};
+use cases::{projection_cases_5_0, projection_cases_6_0_dated, projection_cases_all, ProjCase};
 use futurefin_engine::{project_net_worth_series, PathFailure, Phase, ProjectionOutput};
 use futurefin_engine_stochastic::{
     deterministic_growth_multipliers, simulate_f64, simulate_f64_with_multipliers, F64Money,
@@ -125,6 +125,9 @@ fn describe(delta: Option<i64>) -> String {
 fn all_cases() -> Vec<ProjCase> {
     let mut out = projection_cases_all();
     out.extend(projection_cases_5_0());
+    // 6.0.0 F1a: activos y pasivos con mes de inicio. Fuera de los pines dorados, dentro de la
+    // puerta: lo fechado tiene que materializarse el mismo mes en `Decimal` y en `f64`.
+    out.extend(projection_cases_6_0_dated());
     out
 }
 

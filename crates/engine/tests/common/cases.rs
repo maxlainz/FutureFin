@@ -56,6 +56,7 @@ pub fn mk_asset(id: u128, value: Decimal, liquid: bool, rate: Option<Decimal>) -
         purchase_price: None,
         is_liquid: liquid,
         expected_annual_return_percent: rate,
+        start_month: None,
     }
 }
 
@@ -75,6 +76,7 @@ pub fn mk_asset_with_basis(
         purchase_price: Some(purchase_price),
         is_liquid: liquid,
         expected_annual_return_percent: rate,
+        start_month: None,
     }
 }
 
@@ -106,6 +108,7 @@ pub fn mk_liab(
         extra_principal_lump_sums: vec![],
         early_repayment_fee_pct: None,
         early_repayment_effect: Default::default(),
+        start_month: None,
     }
 }
 
@@ -1212,6 +1215,7 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
         extra_principal_lump_sums: vec![(1, d(1_490_733, 2)), (1, d(1_059_170, 2))],
         early_repayment_fee_pct: None,
         early_repayment_effect: EarlyRepaymentEffect::ReduceTerm,
+        start_month: None,
     }];
     p24.phase_plan = PhasePlan::forced_at(1, Decimal::ZERO, Decimal::from(2_690), Decimal::ZERO);
     out.push(ProjCase {
@@ -1258,6 +1262,7 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
             extra_principal_lump_sums: vec![],
             early_repayment_fee_pct: None,
             early_repayment_effect: EarlyRepaymentEffect::ReducePayment,
+            start_month: None,
         },
         ProjectionLiabilityInput {
             principal: Decimal::from(4_555),
@@ -1271,6 +1276,7 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
             extra_principal_lump_sums: vec![],
             early_repayment_fee_pct: None,
             early_repayment_effect: EarlyRepaymentEffect::ReduceTerm,
+            start_month: None,
         },
     ];
     p25.phase_plan = PhasePlan::classic(Decimal::ZERO, Decimal::from(148));
@@ -1280,6 +1286,57 @@ pub fn projection_cases_5_0() -> Vec<ProjCase> {
     });
 
     out
+}
+
+/// Casos de 6.0.0 F1a: **activos y pasivos con mes de inicio**. Fuera de
+/// [`projection_cases_all`] y de [`projection_cases_5_0`] a propósito: esos dos alimentan los
+/// pines dorados, que no se regeneran por una capacidad aditiva. Los consume la puerta de
+/// degeneración (`crates/engine-stochastic/tests/degeneration.rs`), que es donde importa que el
+/// camino `Decimal` y el `f64` materialicen lo fechado en el mismo mes.
+pub fn projection_cases_6_0_dated() -> Vec<ProjCase> {
+    // D1: hogar con fondo con plusvalía; en el mes 37 se compra (sin caja: la entrada sería otro
+    // cambio) una casa ilíquida al 2 % y se firma una hipoteca francesa de 200.000 € al 3 % a
+    // 25 años; en el mes 100 entra una herencia líquida de 50.000 € al 0 %. La primera regla
+    // apunta a la casa: se salta hasta el mes 37 y su parte va al fondo. Gasto indexado al
+    // 2,5 % e ingreso plano: desde algún punto hay déficit y se vende con impuestos (vía mixta,
+    // por las bases distintas). La cartera aguanta los 40 años: el caso mide la materialización y
+    // la venta, no el agotamiento (que ya cubren P1–P25).
+    let fund = mk_asset_with_basis(
+        1,
+        Decimal::from(30_000),
+        true,
+        Some(Decimal::from(6)),
+        Decimal::from(20_000),
+    );
+    let mut house = mk_asset(2, Decimal::from(250_000), false, Some(Decimal::from(2)));
+    house.start_month = Some(37);
+    let mut inheritance = mk_asset(3, Decimal::from(50_000), true, None);
+    inheritance.start_month = Some(100);
+    let mut d1 = base_input(
+        480,
+        Decimal::from(3_000),
+        Decimal::from(1_800),
+        vec![fund, house, inheritance],
+        vec![rule_fixed(1, Decimal::from(200), None), rule_remainder(0)],
+    );
+    d1.annual_inflation_percent = d(25, 1);
+    d1.tax_brackets = es_tax_brackets_2025_26();
+    d1.taxes_enabled = true;
+    d1.taxable_gain_ratio = d(5, 1);
+    let mut mortgage = mk_liab(
+        Decimal::from(200_000),
+        d(94_842, 2),
+        Some(Decimal::from(3)),
+        RepaymentModel::French,
+        None,
+    );
+    mortgage.start_month = Some(37);
+    d1.liabilities = vec![mortgage];
+
+    vec![ProjCase {
+        name: "D1_dated_house_mortgage_inheritance",
+        input: d1,
+    }]
 }
 
 /// Lo que `audit_dump` vuelca al CSV: la batería histórica (P1–P6 y P13) en su orden, **más** los

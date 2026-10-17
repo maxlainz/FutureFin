@@ -1576,6 +1576,7 @@ pub(crate) async fn liability_schedule_core(
         extra_principal_lump_sums: Vec::new(),
         early_repayment_fee_pct: None,
         early_repayment_effect: Default::default(),
+        start_month: None,
     };
     let sch =
         futurefin_engine::liability_amortization_schedule(&liab, today, SCHEDULE_HORIZON_MONTHS);

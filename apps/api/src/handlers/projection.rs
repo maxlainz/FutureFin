@@ -2239,6 +2239,7 @@ pub(crate) async fn build_installation_projection_input(
                 purchase_price: r.purchase_price,
                 is_liquid: r.is_liquid,
                 expected_annual_return_percent: r.expected_annual_return_percent,
+                start_month: None,
             }
         })
         .collect();
@@ -2312,6 +2313,7 @@ pub(crate) async fn build_installation_projection_input(
             extra_principal_lump_sums: Vec::new(),
             early_repayment_fee_pct: None,
             early_repayment_effect: Default::default(),
+            start_month: None,
             }
         })
         .collect();
@@ -6887,6 +6889,7 @@ mod milestone_tests {
                 purchase_price: Some(Decimal::from(10_000)),
                 is_liquid: true,
                 expected_annual_return_percent: Some(Decimal::from(6)),
+                start_month: None,
             }],
             allocation_rules: vec![AllocationRule {
                 target_index: 0,
@@ -6906,6 +6909,7 @@ mod milestone_tests {
                 extra_principal_lump_sums: Vec::new(),
                 early_repayment_fee_pct: None,
                 early_repayment_effect: Default::default(),
+                start_month: None,
             }],
             planning_monthly_cash_adjustment: vec![Decimal::from(5_000); 24],
             phase_plan: PhasePlan::classic(Decimal::ZERO, Decimal::from(2500)),
@@ -6932,6 +6936,7 @@ mod milestone_tests {
                 purchase_price: Some(Decimal::from(50_000)),
                 is_liquid: true,
                 expected_annual_return_percent: Some(Decimal::from(18)),
+                start_month: None,
             }],
             allocation_rules: vec![AllocationRule {
                 target_index: 0,

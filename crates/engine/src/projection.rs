@@ -49,6 +49,28 @@ pub struct SimAsset {
     pub is_liquid: bool,
     /// Expected annual return % (e.g. 7 for 7%). None → no compound growth (factor 1).
     pub expected_annual_return_percent: Option<Decimal>,
+    /// **Mes de inicio** (6.0.0 F1a, «entra una casa en 2029»), en la rejilla **1-based del
+    /// bucle**: el mes `k` es el mes civil `month_first_calendar(ref_date) + (k−1)`, el mismo eje
+    /// que `extra_principal_lump_sums` y `RetirementTrigger::AtMonth` — NO la rejilla 0-based de
+    /// la serie publicada ni la de `PensionSchedule::start_index`.
+    ///
+    /// Semántica (`s = start_month`):
+    /// - `None`, `Some(0)` o `Some(1)` ⇒ el activo existe HOY: comportamiento previo bit a bit.
+    /// - `Some(s)` con `s ≥ 2` ⇒ durante los meses `1..s−1` el activo **no existe**: valor 0, base
+    ///   de coste 0, no crece, ninguna regla de la cascada le aporta (la regla se salta y su parte
+    ///   sigue cascada abajo), no entra en la venta del mes y suma 0 al patrimonio y al líquido.
+    /// - El activo **aparece al abrir el mes `s`** con `value` y `purchase_price` declarados, y
+    ///   desde ahí es indistinguible de uno que existiera desde el mes 0 visto desde ese mes: el
+    ///   mes `s` es el primero en que recibe cascada, puede venderse y crece.
+    /// - En la serie publicada (índice `i` = cierre del mes `i`, índice 0 = hoy = apertura del
+    ///   mes 1) aparece por primera vez en el **índice `s−1`**, que es el punto fechado en el mes
+    ///   civil del mes `s`. Con `s = horizon_months + 1` aparece solo en el último punto; con
+    ///   `s > horizon_months + 1`, nunca.
+    /// - **La aparición NO genera caja**: el patrimonio salta exactamente `value` y nada más. La
+    ///   entrada (pagar la entrada de la casa, cobrar la herencia como caja…) es otro cambio del
+    ///   plan (RFC Planes 6.0, §3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_month: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -155,6 +177,27 @@ pub struct ProjectionLiabilityInput {
     /// default y comportamiento 4.4.0 — la cuota no cambia) o bajar la cuota (`ReducePayment`,
     /// λ-escala que conserva EXACTAMENTE el mes de extinción; ver el bucle de simulación).
     pub early_repayment_effect: EarlyRepaymentEffect,
+    /// **Mes de firma** (6.0.0 F1a, «hipoteca de 200.000 € en 03/2028»), en la rejilla **1-based
+    /// del bucle** — la misma que [`SimAsset::start_month`] y que `extra_principal_lump_sums`.
+    ///
+    /// Semántica (`s = start_month`):
+    /// - `None`, `Some(0)` o `Some(1)` ⇒ el pasivo existe HOY: comportamiento previo bit a bit.
+    /// - `Some(s)` con `s ≥ 2` ⇒ durante los meses `1..s−1` el pasivo **no existe**: principal 0,
+    ///   sin devengo, sin cuota, sin amortización extra (las `extra_principal_lump_sums` de esos
+    ///   meses se ignoran) y sin servicio de deuda.
+    /// - **Aparece al abrir el mes `s`** con `principal` íntegro; el mes `s` paga la PRIMERA
+    ///   cuota (interés sobre el saldo de apertura, cuota a fin de mes). El calendario francés se
+    ///   cuenta, por tanto, **desde `s`**: la cuota `j`-ésima del préstamo cae en el mes
+    ///   `s + j − 1`, y la serie es la del mismo préstamo firmado hoy desplazada `s − 1` meses.
+    /// - `payment_end` sigue siendo una **fecha civil absoluta** (es un dato del contrato, D-18):
+    ///   NO se desplaza con `s`. Quien construya un préstamo con plazo («25 años») pone
+    ///   `payment_end = fecha de firma + plazo` (o `None` y deja que la cuota lo extinga). Un
+    ///   `payment_end` anterior al mes `s` deja el pasivo sin plan de pago vivo: aparece como una
+    ///   resta constante al patrimonio, igual que cualquier pasivo sin plan.
+    /// - En la serie publicada el principal resta por primera vez en el **índice `s−1`**.
+    /// - **La firma NO genera caja**: el patrimonio baja exactamente `principal`. Cobrar el
+    ///   préstamo (o pagar con él la casa) es otro cambio del plan (RFC Planes 6.0, §3).
+    pub start_month: Option<u32>,
 }
 
 /// Efecto de la amortización anticipada sobre el plan de pago (#151). En una renta francesa el
@@ -316,8 +359,9 @@ pub struct LiabilityScheduleMonth {
 /// calendario y el que se deduce de `ProjectionOutput` son el mismo número, no dos aproximaciones.
 #[derive(Debug, Clone)]
 pub struct LiabilitySchedule {
-    /// Meses simulados, en orden, desde el mes 1 hasta la extinción, el fin del plan de pago o el
-    /// horizonte — lo que llegue antes. Vacío ⟺ no había plan de pago activo (o el principal ya
+    /// Meses simulados, en orden, desde el mes 1 (o desde el mes de firma
+    /// [`ProjectionLiabilityInput::start_month`], 6.0.0 F1a) hasta la extinción, el fin del plan
+    /// de pago o el horizonte — lo que llegue antes. Vacío ⟺ no había plan de pago activo (o el principal ya
     /// era 0).
     pub months: Vec<LiabilityScheduleMonth>,
     /// Saldo de partida (mes 0), ya saneado a ≥ 0.
@@ -429,8 +473,13 @@ pub fn liability_amortization_schedule(
     let mut payoff_month_index = principal.is_zero().then_some(0u32);
     let mut plan_ended = false;
 
+    // 6.0.0 F1a: un pasivo con mes de firma `s` empieza su calendario en `s` (rejilla 1-based
+    // del bucle, sin renumerar `month_index`): la primera fila es `month_index = s`. Con `s` más
+    // allá del horizonte el calendario sale vacío (`NoPaymentPlan`): nada que pagar en la
+    // ventana pedida.
+    let first_month = liab.start_month.unwrap_or(1).max(1);
     if !principal.is_zero() {
-        for k in 1..=horizon {
+        for k in first_month..=horizon {
             let month_first = add_months(start_month_first, k - 1);
             let (m_start, _m_end) = month_window(month_first);
             let active = sim_core::liability_active_g(liab, m_start);
@@ -999,6 +1048,7 @@ mod tests {
             purchase_price: None,
             is_liquid: liquid,
             expected_annual_return_percent: rate,
+            start_month: None,
         }
     }
 
@@ -1707,6 +1757,7 @@ mod tests {
             extra_principal_lump_sums: Vec::new(),
             early_repayment_fee_pct: None,
             early_repayment_effect: EarlyRepaymentEffect::default(),
+            start_month: None,
         }];
 
         // (a) Sin componente de planning: base == neto recurrente.
@@ -1861,6 +1912,7 @@ mod tests {
                 purchase_price: Some(Decimal::from(80_000)),
                 is_liquid: true,
                 expected_annual_return_percent: None,
+                start_month: None,
             }],
             vec![],
         );
@@ -1883,6 +1935,7 @@ mod tests {
                 purchase_price: Some(Decimal::from(1200)),
                 is_liquid: true,
                 expected_annual_return_percent: None,
+                start_month: None,
             }],
             vec![rule_remainder(0)],
         );
@@ -1903,6 +1956,7 @@ mod tests {
                 purchase_price: None,
                 is_liquid: true,
                 expected_annual_return_percent: None,
+                start_month: None,
             }],
             vec![],
         );
@@ -1951,6 +2005,7 @@ mod tests {
                 purchase_price: None,
                 is_liquid: true,
                 expected_annual_return_percent: None,
+                start_month: None,
             }],
             vec![rule_remainder(0)],
         );
@@ -1985,6 +2040,7 @@ mod tests {
                 purchase_price: None,
                 is_liquid: true,
                 expected_annual_return_percent: Some(Decimal::from(7)),
+                start_month: None,
             }],
             vec![rule_remainder(0)],
         );
@@ -2024,6 +2080,7 @@ mod tests {
                 purchase_price: None,
                 is_liquid: true,
                 expected_annual_return_percent: Some(Decimal::from(5)),
+                start_month: None,
             }],
             vec![],
         );
@@ -2212,6 +2269,7 @@ mod tests {
             extra_principal_lump_sums: Vec::new(),
             early_repayment_fee_pct: None,
             early_repayment_effect: EarlyRepaymentEffect::default(),
+            start_month: None,
         }];
         inp.planning_monthly_cash_adjustment[0] = Decimal::from(250);
         inp.planning_monthly_cash_adjustment[5] = Decimal::from(-100);
@@ -2356,6 +2414,7 @@ mod tests {
             extra_principal_lump_sums: Vec::new(),
             early_repayment_fee_pct: None,
             early_repayment_effect: EarlyRepaymentEffect::default(),
+            start_month: None,
         }];
         inp
     }
@@ -2783,6 +2842,7 @@ mod tests {
             extra_principal_lump_sums: Vec::new(),
             early_repayment_fee_pct: None,
             early_repayment_effect: EarlyRepaymentEffect::default(),
+            start_month: None,
         }
     }
 
@@ -4165,6 +4225,7 @@ mod tests {
             purchase_price: Some(techo),
             is_liquid: true,
             expected_annual_return_percent: Some(Decimal::from(20)),
+            start_month: None,
         };
         let inp = base_input(
             840,

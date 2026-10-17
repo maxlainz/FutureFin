@@ -1341,6 +1341,7 @@ mod tests {
                 purchase_price: None,
                 is_liquid: true,
                 expected_annual_return_percent: None,
+                start_month: None,
             }],
             allocation_rules: Vec::new(),
             liabilities: Vec::new(),
