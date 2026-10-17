@@ -39,7 +39,7 @@ mod cases;
 
 use cases::{
     projection_cases_5_0, projection_cases_6_0_changes, projection_cases_6_0_dated,
-    projection_cases_all, ProjCase,
+    projection_cases_6_0_sales, projection_cases_all, ProjCase,
 };
 use futurefin_engine::{project_net_worth_series, PathFailure, Phase, ProjectionOutput};
 use futurefin_engine_stochastic::{
@@ -133,6 +133,8 @@ fn all_cases() -> Vec<ProjCase> {
     out.extend(projection_cases_6_0_dated());
     // 6.0.0 F1b: cambios de ingreso/gasto con fecha (escala, delta, ingreso indexado, suelo).
     out.extend(projection_cases_6_0_changes());
+    // 6.0.0 F1c: déficit por el sumidero (SinkOnly) y ventas explícitas, en las dos políticas.
+    out.extend(projection_cases_6_0_sales());
     out
 }
 
@@ -289,6 +291,41 @@ fn every_case_degenerates_from_decimal_to_floating_point() {
             }
         }
         let _ = PathFailure::PortfolioDepleted; // el enum viaja en la tabla, no solo en el assert
+
+        // 6.0.0 F1c: el primer mes sin cubrir es un veredicto (en `SinkOnly`, EL fallo) y no
+        // admite holgura; las series de cobertura y de ventas, ≤ 1 € por mes; la orden agotada,
+        // idéntica.
+        if dec.first_uncovered_month != flo.first_uncovered_month {
+            failures.push(format!(
+                "{}: first_uncovered_month difiere ({:?} vs {:?})",
+                case.name, dec.first_uncovered_month, flo.first_uncovered_month
+            ));
+        }
+        if dec.explicit_sale_exhausted != flo.explicit_sale_exhausted {
+            failures.push(format!(
+                "{}: explicit_sale_exhausted difiere ({:?} vs {:?})",
+                case.name, dec.explicit_sale_exhausted, flo.explicit_sale_exhausted
+            ));
+        }
+        for (label, d_s, f_s) in [
+            ("deficit_coverage_net", &dec.deficit_coverage_net, &flo.deficit_coverage_net),
+            ("deficit_coverage_tax", &dec.deficit_coverage_tax, &flo.deficit_coverage_tax),
+            ("explicit_sale_net", &dec.explicit_sale_net, &flo.explicit_sale_net),
+            ("explicit_sale_tax", &dec.explicit_sale_tax, &flo.explicit_sale_tax),
+            ("unmet_need", &dec.unmet_need, &flo.unmet_need),
+        ] {
+            if d_s.len() != f_s.len() {
+                failures.push(format!("{}: {label} con largos distintos", case.name));
+                continue;
+            }
+            let delta = compare_series(d_s, f_s);
+            if !verdict(&delta).0 {
+                failures.push(format!(
+                    "{}: {label} se desvía {:.6} € en el mes {}",
+                    case.name, delta.max_abs, delta.at_month
+                ));
+            }
+        }
         if !lq_ok {
             failures.push(format!(
                 "{}: liquid_worth se desvía {:.6} € en el mes {} (magnitud máx {:.3e}, relativa {:.3e}, regla «{}»)",

@@ -180,7 +180,10 @@ motor) **se retiraron de `McOutcome`**: esa lectura es ahora `1 − éxito(R)` d
 
 `failures_by_kind: [u32; 2]` cuenta el PRIMER motivo de cada camino fallido, en el orden
 `KIND_PORTFOLIO_DEPLETED` / `KIND_INITIAL_RATE_EXCEEDED` (`KIND_RULE_BELOW_NEED` se borró con F3) —los MISMOS
-índices que `SuccessAt::by_kind` de `solve_mc`, para que las dos capas no diverjan— y suma
+índices que `SuccessAt::by_kind` de `solve_mc`, para que las dos capas no diverjan; desde 6.0.0
+F1c el `UncoveredMonth` de `SinkOnly` cuenta en la casilla de F1 y `McOutcome` gana
+`uncovered_free_probability` (caminos sin ningún mes sin cubrir, D-9) y el eco `deficit_policy`,
+§Déficit y ventas explícitas— y suma
 exactamente `paths − paths·success_probability`. `wilson_low`/`half_width_pp` reutilizan
 `solve_mc::SuccessAt::new` (Wilson nunca se reimplementa en `mc.rs`): con `failures == 0`,
 `wilson_low` colapsa a la forma cerrada `n/(n+z²)` — **estrictamente menor que 1**, nunca «100 %
@@ -809,6 +812,8 @@ pub struct ProjectionInput {
     pub phase_plan: PhasePlan,         // 5.0.0 WP1b — absorbe los 4 campos de jubilación de 4.15.0
     pub fire_target: Option<FireTarget>,
     pub income_expense_changes: IncomeExpenseChanges, // 6.0.0 F1b — Default = 5.0 bit a bit (§Cambios de ingreso y gasto)
+    pub deficit_policy: DeficitPolicy,  // 6.0.0 F1c — LegacyDrain (default, 5.0 bit a bit) | SinkOnly (D-29) (§Déficit y ventas explícitas)
+    pub asset_sales: AssetSales,        // 6.0.0 F1c — órdenes de venta explícitas por mes; vacío = ninguna operación
 }
 
 // 5.0.0 WP1b (`phases.rs`, re-exportado de `lib.rs`); WP3 implementó las dos fases pendientes
@@ -847,8 +852,8 @@ impl EngineWarning { pub fn code(self) -> &'static str }
 // 5.0.0 E1 — puerta de tasa inicial y veredicto de UN camino (§2.5 de financial-contracts.md).
 pub struct InitialRateGate { pub swr_pct: Decimal, pub bridge: Option<BridgeCap> }
 pub struct BridgeCap { pub max_pct: Decimal, pub max_years: u32 }
-pub enum PathFailure { PortfolioDepleted, InitialRateExceeded }   // F1, F2 — F3 se retiró el 2026-10-10
-impl PathFailure { pub fn code(self) -> &'static str } // portfolio_depleted | initial_rate_exceeded
+pub enum PathFailure { PortfolioDepleted, InitialRateExceeded, UncoveredMonth }   // F1, F2 — F3 se retiró el 2026-10-10; UncoveredMonth (6.0.0 F1c) solo en SinkOnly
+impl PathFailure { pub fn code(self) -> &'static str } // portfolio_depleted | initial_rate_exceeded | uncovered_month
 pub struct PartialPhase { pub start_month: u32, pub income_monthly: Decimal, pub expense_basis: ExpenseBasis }
 pub struct PensionSchedule { pub start_index: u32, pub monthly_today: Decimal, pub indexed: bool,
                              pub fraction_while_partial: Decimal }
@@ -1286,6 +1291,82 @@ no apunta ningún cambio queda vacío. No valida signos ni rangos (el suelo del 
 Tests: `crates/engine/tests/income_expense_changes.rs`; casos `C1`/`C2` de
 `projection_cases_6_0_changes()` en la puerta de degeneración.
 
+## Déficit y ventas explícitas (6.0.0 F1c — `sales.rs`)
+
+RFC Planes D-9, D-10, D-21, D-29. Dos piezas ADITIVAS: con el default (`LegacyDrain`, sin órdenes)
+el bucle no ejecuta ni una operación de más y los pines dorados no se regeneran.
+
+```rust
+pub enum DeficitPolicy { LegacyDrain /* default */, SinkOnly }
+pub enum SaleTaxMode<M> { Auto, Exempt, ManualAmount { tax: M }, ManualPct { pct: M } }
+pub enum AssetSaleKind<M> { MonthlyNet { amount_today: M }, OneOffNet { amount_today: M }, Whole }
+pub struct AssetSaleSpec<M> { asset_index, start_month /* 1-based; 0 ≡ 1 */, end_month: Option<u32> /* inclusivo */,
+                              kind, keeps_purchasing_power, tax_mode }
+pub fn build_asset_sale_orders(specs, horizon_months, annual_inflation_percent) -> AssetSalesG<M>
+pub struct AssetSalesG<M> { pub orders: Vec<SaleOrderG<M>> }  // orden NO decreciente de mes
+pub struct SaleOrderG<M> { month, asset_index, amount: SaleAmount::Net(M) | All, cadence: Monthly | OneOff, tax_mode }
+pub fn remainder_sink_index(rules) -> Option<usize>
+```
+
+**Política de déficit.** `LegacyDrain` es 5.0: el déficit se vende de todos los activos en el orden
+de `drain_order_g` y el fallo F1 solo cuenta jubilado/parcial. `SinkOnly` (D-29): el déficit neto
+del mes sale **solo del sumidero** —el destino de la **primera regla `Remainder` sin tope** en el
+orden de la cascada, la que se queda el sobrante; la API garantiza una por scope (I1) y `household`
+es la suma de una simulación por miembro, así que hay un sumidero por `SimInput`—, con el gross-up
+MENSUAL del motor sobre la `g` del sumidero (`1 − b/v` si la base es dato, el escalar si no). Si el
+sumidero alcanza, cubre el neto EXACTO y el impuesto es `bruto − neto`; si no, se vende entero, el
+neto es `after_tax(valor)` y el resto queda **sin cubrir**. Sin regla así, o con el sumidero a 0,
+todo el déficit queda sin cubrir. Ningún otro activo se vende solo (D-10), ni líquido ni ilíquido;
+y un sumidero **ilíquido** tampoco: se trata como «sin sumidero» (decisión del owner, D-10). Lo no cubierto se acumula en
+`uncovered_deficit_total`, resta patrimonio y se publica en `unmet_need`, igual que en legacy.
+
+**Fallo (D-9).** «Mes sin cubrir» = la venta que cubría el déficit no se pudo fundar **y** quedó
+necesidad neta > 0 (los dos operandos de F1, sin puerta de fase). En `SinkOnly` es
+`PathFailure::UncoveredMonth` en CUALQUIER fase y es el **único** fallo de ese modo: la puerta de
+tasa inicial (F2/SWR) no firma en `SinkOnly` aunque esté configurada (decisión del owner). En
+`LegacyDrain` es solo la lectura `first_uncovered_month` y F1/F2 siguen como siempre.
+
+**Ventas explícitas** (las dos políticas). `build_asset_sale_orders` resuelve euros de hoy → nominal
+con el factor del bucle `f(k) = inflation_factor_at_index_g(infl, k−1)` (o nominal si
+`keeps_purchasing_power = false`): `MonthlyNet` → una orden `Net(a·f(k))` por mes de `[s, e]`;
+`OneOffNet` → `Net(a·f(s))` en `s`; `Whole` → `All` en `s`. Importes ≤ 0 no generan orden. Fiscalidad
+con `g` del activo en ese momento:
+
+| modo | bruto `G` para un neto `N` | impuesto |
+|---|---|---|
+| `Auto`, mensual | `gross_up_monthly(N, tramos, g)` (M1, como el déficit) | `G − N` |
+| `Auto`, puntual / `Whole` | `gross_up_net_annual_fire(N, tramos, g)` — UN hecho del año | `G − N` (`Whole`: `tax(g·v)`) |
+| `Exempt` | `N` | 0 |
+| `ManualAmount { tax }` | `N + tax` | `tax` nominal por evento (cada mes en una mensual) |
+| `ManualPct { pct }` | `N / (1 − pct/100)` | `G · pct/100` |
+
+**Simplificación conocida**: cada venta puntual/entera tributa como un hecho AISLADO del año —
+no se acumula con otras ventas del mismo año fiscal (ni con las coberturas mensuales), así que con
+tramos progresivos el impuesto de dos ventas grandes el mismo año queda por debajo del real.
+Si `G > v` se vende el activo entero, el impuesto se recalcula sobre `v` con la misma regla y la orden
+queda **agotada** (se anota `(asset_index, mes)` una vez por activo en `explicit_sale_exhausted`; las
+órdenes siguientes encuentran 0). `pct ≥ 100` no vende y queda agotada. La base del resto baja en
+proporción (`b' = b·v_post/v_pre`, #120). El neto entra en la caja del mes ANTES de decidir superávit
+o déficit: si sobra, la cascada lo reinvierte. `first_month_allocation` ejecuta las órdenes del mes 1
+con la misma función (campo `explicit_sales_net`, ya dentro de `base_cash`). Las órdenes se validan
+(`EngineError::InvalidAssetSales`).
+
+**Orden dentro del mes** (exacto): servicio de deuda → fase → ingreso/gasto (+ cambios F1b, pensión
+con fecha, planning, retirada extra) → **ventas explícitas** → caja neta → cascada si sobra |
+cobertura del déficit (`LegacyDrain`: drenaje; `SinkOnly`: sumidero) → veredicto → crecimiento →
+asiento de principales → materialización de lo fechado.
+
+**Salidas** (APÉNDICE de `ProjectionOutput`/`SimOutput`, ningún pin las mira):
+`first_uncovered_month: Option<u32>`; `deficit_coverage_net`/`deficit_coverage_tax` (solo
+`SinkOnly`, vacías en legacy; `len horizon+1`, `[0] = 0`; el neto coincide con `withdrawal`);
+`explicit_sale_net`/`explicit_sale_tax` (vacías sin órdenes); `explicit_sale_exhausted`. La cuantía
+sin cubrir del mes es `unmet_need`. Monte Carlo: `McOutcome::uncovered_free_probability` (fracción de
+caminos sin ningún mes sin cubrir — el éxito de D-9; en `SinkOnly` coincide con
+`success_probability`, porque F2 no firma) y el eco `deficit_policy`; `UncoveredMonth`
+cuenta en la casilla de F1 de `failures_by_kind` (forma `[u32; 2]` intacta).
+Tests: `crates/engine/tests/deficit_and_sales.rs`, `crates/engine-stochastic/tests/sink_only_mc.rs`;
+casos `S1`–`S3` de `projection_cases_6_0_sales()` en la puerta de degeneración.
+
 ## AllocationRule fields
 ```rust
 pub struct AllocationRule {
@@ -1328,10 +1409,13 @@ All monetary state is **nominal** throughout (euros del momento). El ajuste por 
 3. **Pensión con fecha** (P2/D3/D8, WP3): desde `k−1 ≥ pension.start_index` se SUMA al ingreso, **en cualquier fase**, por `monthly_today·f(k−1)` si `indexed` y plana si no; durante `Partial`, × `fraction_while_partial`. Sin pensión con fecha aquí no se ejecuta ni una suma (bit-identidad). `pension_start_month_index = start_index + 1` (rejilla 0-based del target → mes 1-based del bucle), `None` si cae fuera del horizonte.
    **Pausa de ingresos** (P8.c): dentro de la ventana semiabierta de `income_pause`, el ingreso GANADO de la fase se multiplica por `income_fraction` — la pensión con fecha, que se suma después, NO se pausa.
 4. `retirement_withdrawal` = `phase_plan.extra_monthly_withdrawal` if `in_retirement`, else 0.
-5. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`.
+5. `net_cash = income - expense - debt_service + planning_adj[k] - retirement_withdrawal`, **más el
+   neto de las ventas explícitas del mes** (6.0.0 F1c, solo si el mes tiene órdenes — §Déficit y
+   ventas explícitas).
    **Y, al lado, la necesidad ORDINARIA** (5.0.0 E1): `ordinary_need = max(0, expense + retirement_withdrawal − income)` — el gasto de vivir, con la pensión con fecha y las rentas persistentes ya restadas, **sin servicio de deuda y sin `planning_adj`**. Es la magnitud que juzga la puerta de tasa inicial (F2); `net_cash` sigue siendo lo que decide cuánto se VENDE. Se publica en `SimOutput::ordinary_need` (serie, `len = horizon+1`, `[0] = 0`) y **no** en `ProjectionOutput`: la consume el crate estocástico, no la API.
 6. If `net_cash > 0` (surplus): **techo de aportación** primero (WP3, §B.7) — con `contribution_cap_monthly = Some(c)` (o `k ≥ contributions_stop_month`, que impone `c = 0`) la cascada solo ve `min(sobrante, c)` y el resto se publica en `disposable_cash(k)`: **no se invierte, no compone y no entra en el patrimonio**, mismo trato que `unallocated_savings_total`. Sin techo, el pool es el sobrante entero y no se ejecuta una operación de más. Después, **run the allocation cascade** over `allocation_rules` (see [AllocationRule fields](#allocationrule-fields)) — **también en jubilación** (4.12.1, #175): es la MISMA cascada del usuario, sin rama especial por estado; los techos de la fase #171 pasan de explicativos a vinculantes también aquí. `AllocationSkipReason::InRetirement` y el literal de wire `in_retirement` MURIERON con la rama que los producía. Lo que ninguna regla absorbe **NO entra en el NW**: se acumula en `unallocated_savings_total` (ver [Output](#output)) — inalcanzable en producción con activos vivos (sumidero indestructible, #176). Lo reinvertido en cada activo, jubilado o no, **sube su base de coste** (`basis[i] += alloc[i]`, `basis_declared[i] = true`) y abarata sus ventas futuras (#178, ver paso 6). `distribute_contributions` takes an optional trace sink (`Option<&mut Vec<RuleOutcome>>`): the loop passes `None` — it runs up to 840 times per request and nobody reads the trace there — while `first_month_allocation` passes `Some`. **One cascade implementation, not two**: a second one would diverge silently at the first cap change, and an explanation that disagrees with what the engine does is worse than no explanation. The cascade **cannot over-allocate**: `take` is bounded three times (rule intent, cap room, remaining cash) and the loop breaks when cash runs out.
-7. **La venta del mes** (`execute_month_sale_g`). Cuánto se vende lo decide la NECESIDAD
+7. **La venta del mes** (`execute_month_sale_g`; con `DeficitPolicy::SinkOnly`,
+   `cover_deficit_from_sink_g` — solo el sumidero, §Déficit y ventas explícitas). Cuánto se vende lo decide la NECESIDAD
    (§Retirada en jubilación): solo hay venta si el mes tiene déficit de caja, y la venta es
    exactamente lo que ese déficit pide, sin techo. El paso queda detrás del reparto (desde WP2 de
    5.0.0 no es el `else` del paso anterior; las dos ramas siguen siendo excluyentes —un mes con
@@ -1445,6 +1529,13 @@ pub struct ProjectionOutput {
     pub failure_month_index: Option<u32>,          // primer mes (1-based) en que el camino falló; None = aguanta
     pub failure_kind: Option<PathFailure>,         // por qué. Prioridad F1 > F2 dentro del mes;
                                                    // F2 SOLO puede firmar en R (C10), después solo F1
+    // --- 6.0.0 F1c (§Déficit y ventas explícitas). Vacías/None con el default ---
+    pub first_uncovered_month: Option<u32>,        // primer mes sin cubrir, CUALQUIER fase (SinkOnly: el fallo; legacy: lectura)
+    pub deficit_coverage_net: Vec<Decimal>,        // solo SinkOnly: neto cubierto por el sumidero
+    pub deficit_coverage_tax: Vec<Decimal>,        // solo SinkOnly: impuesto de esa cobertura
+    pub explicit_sale_net: Vec<Decimal>,           // ventas explícitas: neto del mes (vacía sin órdenes)
+    pub explicit_sale_tax: Vec<Decimal>,           // ventas explícitas: impuesto del mes
+    pub explicit_sale_exhausted: Vec<(usize, u32)>,// (activo, primer mes con una orden que no se llenó)
 }
 ```
 
@@ -1566,8 +1657,9 @@ array de 841 Decimals no lo pinta nadie.
 - `EngineError::InvalidHistoryTimeline` — `HistoryTimeline::dates` not strictly ascending
 - `EngineError::AssetValueOverflow` — el valor de un activo desbordó el rango de `Decimal` al componer su rentabilidad (error tipado, no saturación silenciosa)
 - `EngineError::InvalidIncomeExpenseChanges` (6.0.0 F1b) — un vector de `income_expense_changes` no está vacío ni mide `horizon_months` (también en `first_month_allocation`)
+- `EngineError::InvalidAssetSales` (6.0.0 F1c) — una orden de `asset_sales` con activo fuera de rango, mes fuera de `1..=horizon_months` o meses decrecientes (también en `first_month_allocation`)
 
-Cuenta viva de las variantes: `sed -n '/pub enum EngineError/,/^}/p' crates/engine/src/projection.rs | grep -cE '^    [A-Z][A-Za-z]+,$'` (hoy 6, las seis de arriba).
+Cuenta viva de las variantes: `sed -n '/pub enum EngineError/,/^}/p' crates/engine/src/projection.rs | grep -cE '^    [A-Z][A-Za-z]+,$'` (hoy 7, las siete de arriba).
 
 **Variantes retiradas** (historia): `InvalidWithdrawalRule` (parámetros no simulables de una regla
 por saldo), `UnsupportedWithdrawalRule` y `UnsupportedPhase` (la primera dejó de tener productor en
