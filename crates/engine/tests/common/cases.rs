@@ -28,6 +28,9 @@
 
 use chrono::NaiveDate;
 use futurefin_engine::{
+    build_change_vectors, ChangeKind, ChangeTarget, IncomeExpenseChange, IncomeExpenseChanges,
+};
+use futurefin_engine::{
     debt_payments_remaining_series, AllocationCap, AllocationKind, AllocationRule,
     EarlyRepaymentEffect, ExpenseBasis, FireNeed, FireTarget, IncomePause, PartialPhase,
     PensionSchedule, PhasePlan, ProjectionInput, ProjectionLiabilityInput, RepaymentModel,
@@ -120,6 +123,7 @@ pub fn base_input(
     rules: Vec<AllocationRule>,
 ) -> ProjectionInput {
     ProjectionInput {
+        income_expense_changes: Default::default(),
         ref_date: ref_date(),
         horizon_months: horizon,
         annual_inflation_percent: Decimal::ZERO,
@@ -1337,6 +1341,130 @@ pub fn projection_cases_6_0_dated() -> Vec<ProjCase> {
         name: "D1_dated_house_mortgage_inheritance",
         input: d1,
     }]
+}
+
+/// **6.0.0 F1b — cambios de ingreso y gasto con fecha.** Igual que los fechados de F1a: fuera de
+/// los pines dorados (capacidad aditiva), dentro de la puerta de degeneración, que es donde
+/// importa que `Decimal` y `f64` apliquen escala, delta, indexación del ingreso y suelo en 0 el
+/// mismo mes.
+pub fn projection_cases_6_0_changes() -> Vec<ProjCase> {
+    // C1: fondo con plusvalía al 5 %, ingreso 3.500 y gasto 2.200 ambos indexados al 2,5 %, con
+    // impuestos. Cambios: herencia puntual de 75.000 € de hoy en el mes 18; el gasto baja 900 €
+    // de hoy desde el mes 25; el gasto sube un 10 % entre los meses 60 y 180; el ingreso cae un
+    // 100 % desde el mes 120 (jubilación) y sube 1.400 € de hoy desde el mes 240 (pensión). Entre
+    // 120 y 239 hay déficit y se vende con impuestos.
+    let fund = mk_asset_with_basis(
+        1,
+        Decimal::from(50_000),
+        true,
+        Some(Decimal::from(5)),
+        Decimal::from(35_000),
+    );
+    let mut c1 = base_input(
+        480,
+        Decimal::from(3_500),
+        Decimal::from(2_200),
+        vec![fund],
+        vec![rule_remainder(0)],
+    );
+    c1.annual_inflation_percent = d(25, 1);
+    c1.tax_brackets = es_tax_brackets_2025_26();
+    c1.taxes_enabled = true;
+    c1.taxable_gain_ratio = d(4, 1);
+    let ch = |target, start_month, end_month, kind, keeps_purchasing_power| IncomeExpenseChange {
+        target,
+        start_month,
+        end_month,
+        kind,
+        keeps_purchasing_power,
+    };
+    let changes = [
+        ch(
+            ChangeTarget::Income,
+            18,
+            None,
+            ChangeKind::OneOff {
+                amount_today: Decimal::from(75_000),
+            },
+            true,
+        ),
+        ch(
+            ChangeTarget::Expense,
+            25,
+            None,
+            ChangeKind::DeltaMonthly {
+                amount_today: Decimal::from(-900),
+            },
+            true,
+        ),
+        ch(
+            ChangeTarget::Expense,
+            60,
+            Some(180),
+            ChangeKind::Percent {
+                pct: Decimal::from(10),
+            },
+            true,
+        ),
+        ch(
+            ChangeTarget::Income,
+            120,
+            None,
+            ChangeKind::Percent {
+                pct: Decimal::from(-100),
+            },
+            true,
+        ),
+        ch(
+            ChangeTarget::Income,
+            240,
+            None,
+            ChangeKind::DeltaMonthly {
+                amount_today: Decimal::from(1_400),
+            },
+            true,
+        ),
+    ];
+    c1.income_expense_changes = IncomeExpenseChanges {
+        income_follows_inflation: true,
+        expense_follows_inflation: true,
+        vectors: build_change_vectors(&changes, 480, c1.annual_inflation_percent),
+    };
+
+    // C2: el suelo en 0. Gasto 2.000 €, y desde el mes 13 un delta fijo de −2.500 €: el gasto
+    // quedaría en −500 y se publica 0 (con aviso). Mide que el suelo sea el mismo mes en los dos
+    // tipos.
+    let mut c2 = base_input(
+        120,
+        Decimal::from(1_500),
+        Decimal::from(2_000),
+        vec![mk_asset(1, Decimal::from(40_000), true, Some(Decimal::from(4)))],
+        vec![rule_remainder(0)],
+    );
+    c2.income_expense_changes.vectors = build_change_vectors(
+        &[ch(
+            ChangeTarget::Expense,
+            13,
+            None,
+            ChangeKind::DeltaMonthly {
+                amount_today: Decimal::from(-2_500),
+            },
+            false,
+        )],
+        120,
+        Decimal::ZERO,
+    );
+
+    vec![
+        ProjCase {
+            name: "C1_changes_inheritance_retire_pension",
+            input: c1,
+        },
+        ProjCase {
+            name: "C2_changes_expense_floor_at_zero",
+            input: c2,
+        },
+    ]
 }
 
 /// Lo que `audit_dump` vuelca al CSV: la batería histórica (P1–P6 y P13) en su orden, **más** los

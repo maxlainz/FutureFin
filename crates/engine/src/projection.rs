@@ -25,6 +25,9 @@ pub enum EngineError {
     InvalidPlanningAdjustments,
     #[error("allocation_rules contains an out-of-bounds target_index")]
     InvalidAllocationRuleTarget,
+    /// 6.0.0 F1b: un vector de `income_expense_changes` no está vacío ni mide `horizon_months`.
+    #[error("income_expense_changes vectors must be empty or have length horizon_months")]
+    InvalidIncomeExpenseChanges,
     /// El valor de un activo desbordó el rango de `Decimal` (~7,9e28) al componer su
     /// rentabilidad. Error tipado y no saturación silenciosa: a diferencia del payoff de un
     /// pasivo (donde saturar conserva una serie finita y conservadora), congelar aquí el valor
@@ -646,6 +649,12 @@ pub struct ProjectionInput {
     /// Target FIRE móvil. Cuando está presente, las aportaciones se detienen en el primer mes
     /// donde el patrimonio cruza el target inflado correspondiente al mes en curso.
     pub fire_target: Option<FireTarget>,
+    /// **6.0.0 F1b — cambios de ingreso y gasto con fecha**: indexación de cada lado y cuatro
+    /// vectores mensuales (escala y delta nominal por lado). Fórmula, suelo en 0 y aviso:
+    /// [`crate::changes`]. `Default::default()` reproduce 5.0 bit a bit (gasto indexado, ingreso
+    /// plano, vectores vacíos). El objetivo FIRE (`fire_target`) NO los ve: su necesidad se
+    /// declara aparte, y desaparece en F2.
+    pub income_expense_changes: crate::changes::IncomeExpenseChanges,
 }
 
 #[derive(Debug, Clone)]
@@ -1104,6 +1113,7 @@ mod tests {
         rules: Vec<AllocationRule>,
     ) -> ProjectionInput {
         ProjectionInput {
+            income_expense_changes: Default::default(),
             ref_date: NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(),
             horizon_months: horizon,
             annual_inflation_percent: Decimal::ZERO,

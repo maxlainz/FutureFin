@@ -355,6 +355,10 @@ pub enum EngineWarning {
     /// Durante la media jornada el patrimonio LÍQUIDO bajó de un mes al siguiente: la fase se
     /// está comiendo el capital en vez de dejarlo crecer.
     PartialPhaseCapitalShrinking,
+    /// 6.0.0 F1b: algún mes, los cambios de ingreso/gasto dejaron el ingreso o el gasto por
+    /// debajo de 0 y el motor los publicó como 0 (un gasto negativo sería un ingreso fantasma).
+    /// Se emite una sola vez por simulación.
+    CashFlowClampedAtZero,
 }
 
 impl EngineWarning {
@@ -366,6 +370,7 @@ impl EngineWarning {
     pub fn code(self) -> &'static str {
         match self {
             EngineWarning::PartialPhaseCapitalShrinking => "partial_phase_capital_shrinking",
+            EngineWarning::CashFlowClampedAtZero => "cash_flow_clamped_at_zero",
         }
     }
 }

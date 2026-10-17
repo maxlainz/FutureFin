@@ -941,6 +941,27 @@ pub(crate) fn first_month_allocation_g<M: MoneyOps>(
         Some(f) => income * f,
         None => income,
     };
+    // 6.0 F1b: los cambios del mes 1, con la MISMA función que el bucle y ANTES de sumar la
+    // pensión (que no los ve). `f(1) = 1` exacto, así que la indexación de cada lado no mueve
+    // nada aquí; escala y delta sí. El aviso de suelo lo emite `simulate`, no esta lectura.
+    let changes = &input.income_expense_changes;
+    if !changes.lengths_ok(input.horizon_months) {
+        return Err(EngineError::InvalidIncomeExpenseChanges);
+    }
+    let changes_active = changes.is_active();
+    let income = if changes_active {
+        apply_cash_flow_changes_g(
+            income,
+            changes.income_follows_inflation,
+            M::one(),
+            &changes.vectors.income_scale_monthly,
+            &changes.vectors.income_delta_monthly,
+            1,
+        )
+        .0
+    } else {
+        income
+    };
     // El mes 1 evalúa el índice 0 y `f(0) = 1` exacto, así que una pensión indexada que ya
     // hubiera empezado se cobra por su importe de hoy — el mismo valor que el bucle calcula.
     let pension_income = match plan.pension {
@@ -965,6 +986,19 @@ pub(crate) fn first_month_allocation_g<M: MoneyOps>(
             .partial_expense_basis_monthly(input.expense_regular_monthly)
             .unwrap_or(input.expense_regular_monthly),
         Phase::Accumulating => input.expense_regular_monthly,
+    };
+    let expense = if changes_active {
+        apply_cash_flow_changes_g(
+            expense,
+            changes.expense_follows_inflation,
+            M::one(),
+            &changes.vectors.expense_scale_monthly,
+            &changes.vectors.expense_delta_monthly,
+            1,
+        )
+        .0
+    } else {
+        expense
     };
     let retirement_withdrawal = if in_retirement {
         plan.extra_monthly_withdrawal
@@ -1015,6 +1049,25 @@ pub(crate) fn first_month_allocation_g<M: MoneyOps>(
     })
 }
 
+/// 6.0 F1b: un lado del flujo de caja del mes `k` con sus cambios —
+/// `base · (f si sigue la inflación) · escala[k−1] + delta[k−1]`, con suelo en 0—. Devuelve
+/// `(importe, se_clampó)`. El factor solo se multiplica si es útil (`k > 1`): `f(1) = 1` exacto.
+fn apply_cash_flow_changes_g<M: MoneyOps>(
+    base: M,
+    follows_inflation: bool,
+    inflation_factor: M,
+    scale: &[M],
+    delta: &[M],
+    k: u32,
+) -> (M, bool) {
+    let indexed = if follows_inflation && k > 1 {
+        base * inflation_factor
+    } else {
+        base
+    };
+    crate::changes::apply_scale_delta_g(indexed, scale, delta, (k - 1) as usize)
+}
+
 // =============================================================================================
 // EL BUCLE
 // =============================================================================================
@@ -1038,6 +1091,14 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
             return Err(EngineError::InvalidAllocationRuleTarget);
         }
     }
+    // 6.0.0 F1b — cambios de ingreso/gasto (`changes.rs`). Inactivos (el default, todo 4.x/5.x)
+    // el bucle no ejecuta ni una operación de más: bit-identidad con los pines.
+    let changes = &input.income_expense_changes;
+    if !changes.lengths_ok(input.horizon_months) {
+        return Err(EngineError::InvalidIncomeExpenseChanges);
+    }
+    let changes_active = changes.is_active();
+    let mut cash_flow_clamped = false;
 
     // 6.0.0 F1a — **mes de inicio**. Un activo o pasivo con `start_month = s ≥ 2` no existe en
     // los meses `1..s−1` (valor/principal 0, base 0, inactivo) y se MATERIALIZA al cierre del mes
@@ -1327,18 +1388,44 @@ pub fn simulate<M: MoneyOps>(input: &SimInput<M>) -> Result<SimOutput<M>, Engine
         };
         // #139: el GASTO se indexa al IPC de la instalación con el factor único sobre el MISMO
         // eje que el trigger del target, `(k−1)/12` — el mes 1 cobra el gasto base tal cual
-        // (`f(1)=1`). Los INGRESOS quedan planos a propósito.
+        // (`f(1)=1`). Los INGRESOS quedan planos salvo `income_follows_inflation` (6.0 F1b).
         let expense_factor = inflation_factor_at_index_g(input.annual_inflation_percent, k - 1);
-        let expense = expense_factor
-            * match phase {
-                Phase::Retired => plan.expense_retirement_monthly,
-                // D10: el gasto de la media jornada es CONFIGURABLE — el de jubilación por
-                // defecto, el regular si el perfil lo dice. Mismo factor (#139).
-                Phase::Partial => plan
-                    .partial_expense_basis_monthly(input.expense_regular_monthly)
-                    .unwrap_or(input.expense_regular_monthly),
-                Phase::Accumulating => input.expense_regular_monthly,
-            };
+        let expense_base = match phase {
+            Phase::Retired => plan.expense_retirement_monthly,
+            // D10: el gasto de la media jornada es CONFIGURABLE — el de jubilación por
+            // defecto, el regular si el perfil lo dice. Mismo factor (#139).
+            Phase::Partial => plan
+                .partial_expense_basis_monthly(input.expense_regular_monthly)
+                .unwrap_or(input.expense_regular_monthly),
+            Phase::Accumulating => input.expense_regular_monthly,
+        };
+        let (income, expense) = if changes_active {
+            // 6.0 F1b: `base · f · escala + delta` por lado, en CUALQUIER fase y encima de la
+            // base que la fase use; suelo en 0 con aviso. La pensión con fecha se suma después.
+            let (inc, inc_clamped) = apply_cash_flow_changes_g(
+                income,
+                changes.income_follows_inflation,
+                expense_factor,
+                &changes.vectors.income_scale_monthly,
+                &changes.vectors.income_delta_monthly,
+                k,
+            );
+            let (exp, exp_clamped) = apply_cash_flow_changes_g(
+                expense_base,
+                changes.expense_follows_inflation,
+                expense_factor,
+                &changes.vectors.expense_scale_monthly,
+                &changes.vectors.expense_delta_monthly,
+                k,
+            );
+            if (inc_clamped || exp_clamped) && !cash_flow_clamped {
+                cash_flow_clamped = true;
+                warnings.push(EngineWarning::CashFlowClampedAtZero);
+            }
+            (inc, exp)
+        } else {
+            (income, expense_factor * expense_base)
+        };
 
         // **Pensión con fecha** (§B.1 paso 3): es INGRESO en cualquier fase desde `start_index`,
         // con la rejilla 0-based (`k−1`) y el MISMO factor de inflación que el gasto del bucle si
