@@ -4,12 +4,12 @@
  * Lo que estos tests protegen, por orden de gravedad:
  *  1. **Que nada se calcule sobre posiciones de array.** Las series de miembro llegan decimadas
  *     igual que `points[]` (`density=hybrid`: la posición 13 es el mes 24). El valor de un mes se
- *     busca por MES, con la convención «último vértice servido en ese mes o antes» — la del API
- *     (`jubilacion_series_position`) —, no por índice.
+ *     busca por MES, con la convención «último vértice servido en ese mes o antes», no por
+ *     índice.
  *  2. **Que el horizonte propio TERMINA la línea.** El agregado corre al horizonte común, así que
  *     un miembro con menos años declarados tiene serie de sobra; dibujarla entera enseñaría el
  *     patrimonio de una vida que esa persona no declaró.
- *  3. **Que el color empareja línea, tick de la tira y entrada de leyenda.** Si las tres no salen
+ *  3. **Que el color empareja línea y entrada de leyenda.** Si las tres no salen
  *     de `householdMemberColor`, la leyenda acaba nombrando la curva de otro — un chart del hogar
  *     que atribuye mal el dinero.
  *  4. Que la deflactación se aplica mes a mes con el `month_index` real (un factor único, o el
@@ -18,9 +18,12 @@
 
 import { describe, expect, it } from "vitest";
 import type { HouseholdMemberProjectionApi } from "../api/types";
-import { buildHouseholdMemberLines, memberValueAtMonth } from "./member-lines";
+import {
+  buildHouseholdMemberLegendItems,
+  buildHouseholdMemberLines,
+  memberValueAtMonth,
+} from "./member-lines";
 import { householdMemberColor } from "./chart-legend";
-import { buildHouseholdMemberLegendItems, buildPhaseMarks } from "./phase-strip";
 import { deflationFactorAt } from "./projection-chart";
 
 const NOMINAL = () => 1;
@@ -45,12 +48,6 @@ function member(
   over: Partial<HouseholdMemberProjectionApi> & { user_id: string; username: string },
 ): HouseholdMemberProjectionApi {
   return {
-    strategy: "asap",
-    jubilacion_month_index: null,
-    jubilacion_age: null,
-    retirement_month_index: null,
-    partial_retirement_month_index: null,
-    pension_start_month_index: null,
     assets_depleted_month_index: null,
     warnings: [],
     ...over,
@@ -169,27 +166,18 @@ describe("buildHouseholdMemberLines", () => {
   });
 });
 
-describe("emparejamiento de color línea ↔ tick ↔ leyenda", () => {
-  it("las tres superficies dan el MISMO color por posición en members[]", () => {
-    const members = [
-      { ...ANA, retirement_month_index: 200 },
-      { ...LUIS, retirement_month_index: 260 },
-    ];
+describe("emparejamiento de color línea ↔ leyenda", () => {
+  it("las dos superficies dan el MISMO color por posición en members[]", () => {
+    const members = [ANA, LUIS];
     const lines = buildHouseholdMemberLines(members, NOMINAL);
     const legend = buildHouseholdMemberLegendItems(members);
-    const marks = buildPhaseMarks({
-      members,
-      window: { startMonth: 0, endMonth: 600 },
-    }).filter((m) => m.kind === "member");
 
     expect(lines.map((l) => l.color)).toEqual([
       householdMemberColor(0),
       householdMemberColor(1),
     ]);
     expect(legend.map((l) => l.color)).toEqual(lines.map((l) => l.color));
-    // Las marcas se ordenan por mes; se emparejan por key, no por posición.
     for (const line of lines) {
-      expect(marks.find((m) => m.key === line.key)!.color).toBe(line.color);
       expect(legend.find((l) => l.key === line.key)!.color).toBe(line.color);
     }
   });

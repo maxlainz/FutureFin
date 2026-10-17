@@ -2,6 +2,20 @@
 
 Post-refactor (May 2026). Before: one `App.tsx` of 10.384 LOC owning everything. After: composition root + per-concern modules.
 
+> **6.0.0 (F2-2, D-7) — sin modelo de jubilación en la SPA.** Se retiraron la pestaña
+> «Jubilación» (`RetirementView.tsx`; la ruta `/jubilacion` es ahora un alias de lectura que
+> resuelve a Proyección, `lib/navigation.ts`), el paso «Tu plan» del asistente de alta (quedan
+> 3 pasos), la tarjeta «Tu plan» del Resumen, la curva «Capital necesario», la marca de la fecha
+> válida y la tira de fases del chart, y los módulos que solo los servían: `lib/retirementProfile*`,
+> `retirement-tiles*`, `retirement-form*`, `retirement-chart*`, `plan-card*`, `plan-fields*`,
+> `plan-sentence*`, `phase-strip*`, `household-plan-lines*`, `risk-bands*`, `risk-gradient*`,
+> `onboarding-plan*`, `stale-data*`, `duration*` y `fire.test.ts`. `buildHouseholdMemberLegendItems`
+> se mudó de `phase-strip.ts` a `lib/member-lines.ts`; `runwaySwrParenthetical()` ya no recibe
+> perfil (SWR fijo 3,5 % hasta D-22). Los tipos `RetirementProfile*`, `SummaryPlanApi`,
+> `ProjectionBandsApi` y los campos del plan salieron de `api/types.ts`. Las notas de 5.0.0 que
+> sigan citando esos módulos describen la historia; las secciones de re-verificación de 5.0.0 al
+> final ya no aplican a los ficheros retirados.
+
 ```
 src/
 ├── App.tsx                       # composition root: auth gate + global state + route → view dispatch.
@@ -99,33 +113,6 @@ src/
 │   ├── ledger.repayment-model.test.ts  # 4.2.0 — paridad con apps/api/tests/fixtures/liability-derived-principal-parity.json
 │   │                             #   (patrón fire-parity: mismo JSON leído por el test Rust y por Vitest) + puertas del preview
 │   ├── ledger.scope.test.ts      # 5.0.0 — los cuatro helpers de scope de arriba (`grep -c 'it(' apps/web/src/lib/ledger.scope.test.ts`)
-│   ├── retirementProfile.ts      # 5.0.0 (D13, issue #207): perfil de jubilación POR USUARIO en cliente. Tres
-│   │                             #   responsabilidades y ninguna más — (1) defaults/clamps en LECTURA
-│   │                             #   (`normalizeRetirementProfile`), espejo de
-│   │                             #   `resolve_retirement_profile` (`apps/api/src/handlers/retirement_profile.rs`);
-│   │                             #   (2) guarda de validez en ESCRITURA (`retirementProfileIssue`),
-│   │                             #   MISMOS códigos estables que el servidor, para que el autosave nunca prometa
-│   │                             #   «Guardado automático» sobre un valor que el PATCH iba a rechazar con 400; (3)
-│   │                             #   PATCH MÍNIMO tri-estado (buildRetirementProfilePatch/isEmptyRetirementProfilePatch)
-│   │                             #   — mandar el perfil entero resetearía en silencio lo que el usuario no tocó.
-│   │                             #   **Reescrito 2026-09-06 para el modelo v2** (decisiones M2/M4/M5/M6/C3/C5/C7):
-│   │                             #   el bloque R6 (**withStoredTargetBasis**/**targetBasisSource**/
-│   │                             #   `effectiveTargetBasis`) **murió con el objetivo** — sin base que derivar, no
-│   │                             #   queda nada que distinguir entre «almacenado» y «derivado». En su lugar:
-│   │                             #   `parseRetirementStrategy` acepta **`pension_bridge`** como alias que PLIEGA a
-│   │                             #   `asap` (nunca se re-emite), `withBridgeEnabled(pension, on, swrPct)` enciende
-│   │                             #   el puente rellenando `bridge_max_pct`/`bridge_max_years` con su default en el
-│   │                             #   MISMO cambio (nunca dos renders con el switch encendido y los números vacíos),
-│   │                             #   y `resolveBridge`/`strategyRequiresTargetAge` sustituyen la lógica de modos.
-│   │                             #   `RETIREMENT_STRATEGIES` son **CUATRO** (`asap | retire_at_age | coast |
-│   │                             #   partial`); las cotas DUPLICADAS a propósito contra `retirement_profile.rs`
-│   │                             #   ganan `MAX_SWR_PCT 6` (subido de 4), `MIN/MAX/DEFAULT_SUCCESS_THRESHOLD_PCT
-│   │                             #   80/100/95` (**vuelve** a ser load-bearing, C3) y `MAX_BRIDGE_PCT`/`MIN/
-│   │                             #   MAX_BRIDGE_YEARS`/`DEFAULT_BRIDGE_YEARS`; **pierden** `MAX_CASH_BUFFER_MONTHS`
-│   │                             #   (el colchón se retiró, M6). Test: retirementProfile.test.ts
-│   │                             #   (`grep -c 'it(' apps/web/src/lib/retirementProfile.test.ts` → 43); recorre la
-│   │                             #   tabla de cotas entera para que una divergencia con Rust sea un test rojo, no un
-│   │                             #   400 en producción.
 │   ├── fire.ts                   # client-side FIRE math for the live form preview (mirror of handlers/projection.rs):
 │   │                             #   defaultFireSettingsApi, normalizeInstallationFireSettings, taxOnGrossCapitalAnnual,
 │   │                             #   grossUpNetAnnualFire, computeFireAnnualNeedNetEur, findFirstMonthNetWorthAtLeastInflated
@@ -169,175 +156,6 @@ src/
 │   │                             #   que un miembro cuya curva ya acabó desaparece del tooltip en vez de repetir su
 │   │                             #   último importe. Solo `net_worth`: el líquido viaja pero NO se dibuja.
 │   │                             #   Test: member-lines.test.ts
-│   ├── phase-strip.ts            # 5.0.0 (D29, issue #207): geometría PURA de la tira de fases del chart —
-│   │                             #   buildPhaseSegments (phase_transitions → tramos contiguos recortados a la ventana,
-│   │                             #   con transitionMonth = el mes REAL del corte aunque la ventana lo tape),
-│   │                             #   phaseAtMonth, buildPhaseMarks (pensión = flecha; «Cruce» SOLO con
-│   │                             #   retirement_trigger === "target_age" y cruce ≠ jubilación efectiva; un tick por
-│   │                             #   miembro en Hogar, coloreado con `householdMemberColor`) y
-│   │                             #   buildHouseholdMemberLegendItems (`swatch: "line"` desde WP7-3b: cada miembro
-│   │                             #   tiene ya su polyline fina, así que la muestra dibuja lo que hay pintado).
-│   │                             #   **Todo en MESES**: no recibe
-│   │                             #   `points`, así que la densidad no puede moverla (test de invariancia
-│   │                             #   monthly ≡ hybrid en phase-strip.test.ts). PHASE_LABELS trae el par largo/corto
-│   │                             #   («Trabajo»/«Trab.», «Media jornada»/«½ jorn.», «Jubilado»/«Jub.»)
-│   ├── plan-fields.ts            # 5.0.0 (U2/U12 de #207; reagrupada por V3 de la tercera vuelta de UX): ÚNICA fuente
-│   │                             #   de qué campos del plan se ven por estrategia, y **en qué TARJETA caen**. Los dos
-│   │                             #   grupos («plan»/«avanzado») y las seis secciones del acordeón desaparecieron: hoy
-│   │                             #   el eje es el TEMA — `PlanCardId` = strategy · spending · ages · pension ·
-│   │                             #   horizon (**cinco** desde «solo SWR», 2026-10-10: «Retirada» se retiró con las reglas
-│   │                             #   de retirada), en `PLAN_CARD_ORDER`. **No hay tarjeta `risk`**: tras V6
-│   │                             #   (colchón derivado) y V7 (umbral retirado) se quedó sin un solo campo, y una
-│   │                             #   tarjeta vacía no se pinta — **el modelo v2 devolvió el umbral (C3), pero a una
-│   │                             #   tarjeta de formulario, no a una `risk` resucitada** (primero a `withdrawal`; desde
-│   │                             #   «solo SWR» abre `horizon`, «Horizonte y exigencia», y `swr_pct` cierra `spending`): el colchón sigue fuera y una tarjeta con un solo
-│   │                             #   campo seguía sin justificarse. Ni una condición de visibilidad cambió con V3: es
-│   │                             #   la misma tabla ordenada por otro criterio. `planCardGroups(ctx)` da las tarjetas
-│   │                             #   a pintar (nunca una vacía; `strategy` es la excepción — su contenido es el
-│   │                             #   radiogroup, no campos). Un campo irrelevante para la estrategia NO EXISTE en la
-│   │                             #   lista (U2), y U4 se impone en negativo: no hay más porcentaje de
-│   │                             #   retirada que `swr_pct`. **`PlanFieldId` tiene 20 ids** (recuento: ver el comando
-│   │                             #   de la sección de re-verificación; eran 24 con las reglas de retirada, que se
-│   │                             #   llevaron cuatro) desde el modelo v2 (`target_basis`/`bridge_discount_basis` murieron; nacieron
-│   │                             #   `success_threshold_pct`, `coast_mode`, `coast_stop_age`, `partial_mode`,
-│   │                             #   `bridge_enabled`, `bridge_max_pct`, `bridge_max_years`). `onboarding-plan.ts` se
-│   │                             #   construye desde esta misma tabla para no discrepar sobre qué pide cada
-│   │                             #   estrategia. Test: plan-fields.test.ts (`grep -c 'it(' apps/web/src/lib/plan-fields.test.ts` → 71)
-│   ├── plan-sentence.ts          # 5.0.0 (rediseño UX U1a; decisiones U7/U9/U10 de #207): la FRASE-hito del plan,
-│   │                             #   una sola vez para las tres superficies que la necesitan — planSentence
-│   │                             #   (Jubilación y Resumen) y memberPlanSentence en tercera persona (Hogar, U10).
-│   │                             #   S8: la longitud del puente es pension_start − jubilación, NUNCA «meses desde
-│   │                             #   hoy» (la tarjeta anterior medía lo segundo). Un índice `null` tiene su propia
-│   │                             #   frase de ausencia, nunca un guion. Test: plan-sentence.test.ts
-│   ├── plan-card.ts              # 5.0.0 (D27/D32 → U9/U10, rediseño UX): dos piezas. (1) El ESTADO
-│   │                             #   (planStatusFromWarnings/planStatusFromPlan, PRECEDENCIA:
-│   │                             #   retire_at_age_underfunded rojo > birth_date_missing >
-│   │                             #   target_retirement_age_missing > «En plan») + resolvePlanMilestoneCivil (mes
-│   │                             #   de la rejilla → fecha con `anchor_date_ymd` + edad; sin ancla no se inventa
-│   │                             #   fecha). (2) **planCardV2** (U9): la tarjeta ANCHA de Resumen — una ORACIÓN
-│   │                             #   (`plan-sentence.ts`) + el KPI «Éxito del plan» + el aviso; único modelo que
-│   │                             #   consume `SummaryView.tsx` desde U2. El trío anterior «hito grande + edad +
-│   │                             #   estado» (`ownPlanCard`/`planMilestone`, D27 original) **se retiró en U2 sin
-│   │                             #   consumidores**: la CSS `.plan-card-grid`/`.plan-card`/`.plan-card-figures`
-│   │                             #   que lo pintaba queda sin consumidor en el árbol (`git grep plan-card -- '*.tsx'`
-│   │                             #   solo devuelve `plan-card-wide*`) — limpieza pendiente, no de este paquete.
-│   │                             #   Test: plan-card.test.ts
-│   ├── retirement-tiles.ts       # 5.0.0 (D16/D17/D31, tabla §C de #207): **buildRetirementTiles (v1) ya NO tiene
-│   │                             #   consumidor** — `RetirementView.tsx` consume exclusivamente `buildRetirementTilesV2`
-│   │                             #   desde el rediseño U1b; el `@deprecated` de su doc-comment sigue siendo correcto,
-│   │                             #   lo que caducó fue el «sigue viva mientras la consuma» (`grep -rn
-│   │                             #   "buildRetirementTiles\b" apps/web/src --include='*.tsx'` → vacío). Se conserva
-│   │                             #   con su test por si alguna vista futura necesita la forma v1 (hasta 5 tarjetas,
-│   │                             #   dos slots de subtítulo); si sigue sin consumidor, retirarla es limpieza segura.
-│   │                             #   **buildRetirementTilesV2 reescrita para el modelo v2** (M9, `RETIREMENT_
-│   │                             #   TILES_V2_CAP = 3`, una cifra por tarjeta, subtítulo COMPLETO sin truncar): ya
-│   │                             #   **no hay tile «Objetivo»** — el objetivo con puente que E4 retiró del motor no
-│   │                             #   tiene tile que ocupar. Las tres son SIEMPRE, en este orden: 1. **«Capital
-│   │                             #   necesario hoy»** (`needed_capital`, euros de HOY, siempre); 2. **«Éxito del
-│   │                             #   plan»** (`success`, con el umbral del perfil en el subtítulo); 3. **la propia de
-│   │                             #   la estrategia** (`safeDateTile` en `asap` · `requiredContributionTile` en
-│   │                             #   `retire_at_age` · `coastTile` en `coast` · `partialTile` en `partial`; sin
-│   │                             #   estrategia resuelta, no hay tercera tarjeta — repetir la misma razón tres veces
-│   │                             #   no ayuda). **retirementDetailRows**: número FIRE clásico (`fire_number_classic`,
-│   │                             #   solo si no es `null`), fechas al 100 % y al 90 %, semilla y caminos del sorteo —
-│   │                             #   más `buildRetirementNotices` (avisos: `contribution_underfunded`,
-│   │                             #   `coast_not_reachable`, `partial_never_starts`, `partial_never_fully_retires`,
-│   │                             #   `pension_unpaid_during_partial`, `no_volatility_declared`,
-│   │                             #   `strategy_pension_bridge_migrated`) — en el «Detalle del cálculo» plegado.
-│   │                             #   Convive con `retirement-tiles.ts`/`retirement-tiles.test.ts` (22 tests, la V1
-│   │                             #   sin consumidor de arriba) y su propio `retirement-tiles-v2.test.ts` (43 tests,
-│   │                             #   NO es una inclusión del primero — son dos ficheros).
-│   ├── retirement-form.ts        # 5.0.0 U1b (decisiones S3/S6 y la guarda de autosave de U2, #207): las TRES piezas
-│   │                             #   de lógica del formulario de Jubilación que no son JSX. (1) **S3**:
-│   │                             #   `percentFromFraction`/`fractionFromPercent` — la fracción de pensión durante la
-│   │                             #   media jornada se EDITA en porcentaje (0–100), no en fracción (0–1, el campo
-│   │                             #   viejo rotulaba «0 a 1» y confundía 40 % con ×40). (2) **S6**: `saveIndicatorLabel`
-│   │                             #   — el rótulo del ÚNICO indicador de guardado de la cabecera, precedencia fija
-│   │                             #   error > guardando > bloqueado > guardado (sustituye a los seis pies «Guardado
-│   │                             #   automático» de WP7). (3) **U2**: `missingRequiredPlanFields` — de los
-│   │                             #   obligatorios de `requiredPlanFields`, cuáles siguen vacíos; apaga el autosave
-│   │                             #   (nunca lo confundas con `retirementProfileIssue`: esa valida lo que el servidor
-│   │                             #   aceptaría, esta valida si la estrategia está completa — un «A una edad fija» sin
-│   │                             #   fecha de nacimiento se guarda bien y el motor lo degrada a «Cuanto antes», que es
-│   │                             #   justo el caso que hay que impedir). También `PLAN_FIELD_HELP` — la tabla campo → `helpId` como
-│   │                             #   DATO (no una prop de ayuda repartida por el JSX), con la forma de objeto que el
-│   │                             #   escáner de `helpTexts.test.ts` reconoce. Y **V3**: `PLAN_CARD_COPY` — título y
-│   │                             #   título de cada una de las cinco tarjetas de configuración (sustituye a
-│   │                             #   `ADVANCED_SECTION_LABEL`, que solo tenía rótulos porque el acordeón los usaba de
-│   │                             #   separador). Ninguna frase describe el control: dicen qué cambia y qué implica
-│   │                             #   cambiarlo. Test: retirement-form.test.ts
-│   ├── retirement-chart.ts       # 5.0.0 U1b (decisión U5 de #207): los MARCADORES del chart único —
-│   │                             #   `buildRetirementChartMarkers` (serie → hasta 4 hitos: jubilación/coast/media
-│   │                             #   jornada/pensión, ordenados por MES, un hito fuera de la ventana no se emite) +
-│   │                             #   `placeMarkerLabels` (coloca los rótulos resolviendo colisiones POR PRIORIDAD: la
-│   │                             #   jubilación nunca cede el suyo, las demás se ceden de izquierda a derecha si caen
-│   │                             #   a menos de `minGapPx` — 46 por defecto — de uno ya puesto; la línea se pinta
-│   │                             #   SIEMPRE, ceder es perder solo el texto). Todo en MESES, nunca en posiciones de
-│   │                             #   `points[]`. W11 (issue #228): gana **`retirementNetWorthSeries`** — la línea
-│   │                             #   PRINCIPAL del chart, LÍQUIDA y no total (decisión C11): extrae `net_worth_liquid`
-│   │                             #   de cada punto, `null` si falta (nunca cae a `net_worth` en silencio), NOMINAL —
-│   │                             #   `MiniProjection` la deflacta, prop `netWorthSeries`. Test: retirement-chart.test.ts
-│   ├── risk-gradient.ts          # 5.0.0 (V2/V5/P1 de la tercera vuelta de UX; feedback F6/F7/F8); **cortes
-│   │                             #   dinámicos por umbral desde el modelo v2 (W6/W7)**: el COLOR de la banda
-│   │                             #   10–90 % — `riskGradientStops` (paradas del `<linearGradient>`, offset por MES
-│   │                             #   sobre `[monthStart, monthEnd]`, extensión PLANA a los dos lados),
-│   │                             #   `riskColorForProbability(p, cutoffs)` (recibe los cortes en vez de asumirlos:
-│   │                             #   `0 → --ff-pos`, `(0, cutoffs.amber] mezcla a --ff-warn`, `(cutoffs.amber,
-│   │                             #   cutoffs.red) mezcla a --ff-neg`, `≥ cutoffs.red → --ff-neg`) y
-│   │                             #   **`riskCutoffsForThreshold(thresholdPct)`** — sustituye a los antiguos
-│   │                             #   `RISK_AMBER_AT`/`RISK_RED_AT` fijos: `red = max(RISK_RED_FLOOR = 0.10, (100 −
-│   │                             #   umbral) / 100)`, `amber = red / 2`. Con umbral ≥ 90 (incluidos el 95 default y
-│   │                             #   el 100) los cortes son **pixel-idénticos** a los fijos de antes (0,05/0,10) —
-│   │                             #   pineado en test —; con un umbral del 80 % el rojo empieza en el 20 %, no en el
-│   │                             #   10 %: pedir menos éxito ensancha lo que cuenta como zona roja. Y
-│   │                             #   **`failureProbabilityAtMonth`** (renombrada de `depletionProbabilityAtMonth`:
-│   │                             #   ahora es F1+F2 acumulado, no solo agotamiento) + **`failureKindsAtMonth`**
-│   │                             #   (el reparto por motivo del hover). Plana antes de la 1.ª muestra, lineal entre
-│   │                             #   muestras, plana después; `null` si no hay ninguna. La misma función colorea
-│   │                             #   **y** rotula el hover: si fueran dos, el tinte y el número podrían discrepar y
-│   │                             #   nadie lo notaría. Una `probability: null` se SALTA, jamás vale 0. Menos de dos
-│   │                             #   muestras → `[]` y la banda vuelve al acento plano. Test: risk-gradient.test.ts
-│   │                             #   (`grep -c 'it(' apps/web/src/lib/risk-gradient.test.ts` → 32)
-│   ├── household-plan-lines.ts   # 5.0.0 (rediseño UX U1a; decisión U10 de #207): las líneas por miembro de Hogar
-│   │                             #   — householdPlanLines, una ORACIÓN por persona (memberPlanSentence de
-│   │                             #   `plan-sentence.ts`), sin cifras: el hogar no tiene plan propio. Orden = el del
-│   │                             #   servidor (`members[]`), el mismo que fija el color de cada línea fina del
-│   │                             #   chart. Test: household-plan-lines.test.ts
-│   ├── duration.ts               # 5.0.0 (rediseño UX U1a): formatMonthSpanEs — un TRAMO en meses → texto español
-│   │                             #   («12 años», nunca «y 0 meses»), distinto de formatYearsEsFromMonths
-│   │                             #   (`projection-chart.ts`), que es una CUENTA ATRÁS y trata el 0 como «Ya
-│   │                             #   alcanzado». Mezclar los dos usos fue el bug S8. Test: duration.test.ts
-│   ├── onboarding-plan.ts        # 5.0.0 (rediseño UX, decisión U8 de #207): modelo PURO del paso «Tu plan» del
-│   │                             #   asistente de bienvenida — buildOnboardingPlanPatch construye un ÚNICO PATCH
-│   │                             #   al perfil desde fecha de nacimiento + estrategia + solo el dato esencial de
-│   │                             #   esa estrategia (`onboardingPlanFields`, envoltorio de `plan-fields.ts` con el
-│   │                             #   contexto de quien no tiene nada configurado); inflación y SWR ya NO se piden
-│   │                             #   aquí, se quedan en sus defaults (2,5 % / 3,5 %). Validación propia
-│   │                             #   (`retirementProfileIssue` valida el perfil YA resuelto; este paso valida un
-│   │                             #   formulario a medio rellenar) alineada A MANO con
-│   │                             #   `validate_retirement_profile` del handler. Test: onboarding-plan.test.ts
-│                                 # ── `plan-series.ts` SE BORRÓ con el modelo v2 (2026-09-06): dibujaba
-│                                 #   `required_capital_path`/`coast_path`, dos campos que E4/A5 retiraron del wire
-│                                 #   (`required_capital_path`, `coast_path`, `disposable_capital` — los tres campos
-│                                 #   del solve determinista contra el objetivo). Su sucesor es
-│                                 #   `neededCurveForChart`/`NEEDED_CAPITAL_SERIES` en `lib/projection-chart.ts`
-│                                 #   (ver abajo), que dibuja la curva de `needed_capital_curve` — un cálculo
-│                                 #   distinto (bisección estocástica por edad, no un solve determinista) y por eso
-│                                 #   no es un simple renombrado. `ls apps/web/src/lib/plan-series.ts` → No such file or directory.
-│   ├── stale-data.ts             # W13 (informe del owner 2026-09-07): las dos piezas PURAS de «actualizar la data,
-│   │                             #   no descargar y cargar nada nuevo». (1) **nextLastGood(prev, incoming, busy)** —
-│   │                             #   stale-while-revalidate: con una petición en vuelo se CONSERVA la última
-│   │                             #   respuesta buena y solo cambia el flag `refreshing`; un `null` con la carga ya
-│   │                             #   apagada SÍ suelta el dato (es un error o un scope vacío, y seguir enseñando
-│   │                             #   cifras de otro momento sería mentir). Devuelve `prev` por IDENTIDAD cuando nada
-│   │                             #   cambia (lo consumen `useMemo`s) y es IDEMPOTENTE, que es lo que la hace segura
-│   │                             #   de aplicar sobre un `ref` durante el render, StrictMode incluido. (2) El SONDEO
-│   │                             #   del nivel 2 —`curvePollDelayMs` (2 s ×1,5, techo 15 s) y `shouldPollNeededCurve`
-│   │                             #   (solo con `needed_capital_curve_state === "computing"`, pestaña activa y sin
-│   │                             #   agotar `CURVE_POLL_MAX_ATTEMPTS`)—: antes NADIE pedía el GET posterior que trae
-│   │                             #   la curva, así que «Calculando el capital necesario por edad…» se quedaba puesto
-│   │                             #   hasta que el usuario cambiaba de pestaña. `ready`/`unavailable` son FINALES.
-│   │                             #   Test: stale-data.test.ts
 │   ├── history-merge.ts          # mergeProjectionWithHistory(series, history): une la serie histórica (month_index<0) con la
 │   │                             #   proyección en el vértice mes-0; identidad byte-idéntica si history null/vacío/anchor distinto.
 │   │                             #   Con net_worth null (pasivo sin fotografiar entero) cae a assets_total y marca pastIsAssetsOnly:
@@ -489,80 +307,6 @@ src/
 │   ├── RecurringRulesModal.tsx   # modal «Recurrentes» (botón en la toolbar de Movimientos): lista GET /v1/transactions/recurring y permite «Detener» (DELETE) cada regla
 │   │                             #   (conserva las instancias ya materializadas). Patrón ManualCashEntryModal: fetch al abrir, toda la lógica de presentación aquí (nada en lib/)
 │   ├── UpcomingView.tsx          # Pestaña «Simulación» (antes «Próximos», id interno `upcoming`): planning flows con interruptor por fila (`Switch`, PATCH `enabled` optimista vía `togglePlanningFlow` en App.tsx; fila apagada `.planning-row--disabled`); KPIs en lib/upcoming-kpis.ts (solo encendidos); los marcadores `show_in_chart` de ProjectionNetWorthChart también ignoran los apagados
-│   ├── RetirementView.tsx        # 5.0.0 — **rediseñada tres veces**: U1b (segunda revisión de UX, U0–U12), la
-│   │                             #   TERCERA vuelta (V1–V7, feedback F2/F5–F10) y el **modelo de jubilación v2**
-│   │                             #   (2026-09-06, decisiones M1–M13/C1–C8, WP W4). Las versiones WP7
-│   │                             #   (`.retirement-solve-grid` de 8 tiles + dos charts + seis pies «Guardado
-│   │                             #   automático») y el acordeón «Avanzado» de U1b quedan como formas descartadas en
-│   │                             #   `futurefin-failure-archaeology` §3, junto con el objetivo-con-puente y el
-│   │                             #   colchón derivado de V6/V7 (§4 de la misma skill). ~2.380 líneas; DOS `<section>`
-│   │                             #   de contenido y ningún acordeón de configuración:
-│   │                             #
-│   │                             #   1. **Cabecera**: título + UN indicador de guardado (S6,
-│   │                             #   `.retirement-save-state`, `saveIndicatorLabel` de `lib/retirement-form.ts`).
-│   │                             #   2. **Hogar en solo lectura** (cuando `scopeReadOnly`): SOLO el aviso
-│   │                             #   + `<ul class="household-plan-lines">` (una frase por miembro,
-│   │                             #   `lib/household-plan-lines.ts`) + «Cambia a «Yo»» (`.retirement-scope-link`,
-│   │                             #   prop `onSelectMineScope`). Nada de tarjetas ni cifras — U10.
-│   │                             #   3. **El plan** (oculto en Hogar): SIN panel envoltorio desde 2026-09-13 —
-│   │                             #   `planCardGroups(fieldCtx)` emite una `<section class="panel
-│   │                             #   retirement-plan-panel">` HERMANA por tema
-│   │                             #   (`strategy`/`spending`/`ages`/`pension`/`horizon` — ese ORDEN
-│   │                             #   desde 2026-09-13: el gasto es el factor de mayor influencia—, **cinco**
-│   │                             #   paneles desde «solo SWR» (2026-10-10; eran seis con «Retirada»), sin `risk`), con `<h3 class="panel-title">` + la frase de
-│   │                             #   `PLAN_CARD_COPY` + sus campos. «Estrategia» pinta **CUATRO** radio-cards
-│   │                             #   (`asap`/`retire_at_age`/`coast`/`partial` — `pension_bridge` ya no es una);
-│   │                             #   «Pensión» lleva el interruptor del PUENTE (`bridge_enabled`, con
-│   │                             #   `withBridgeEnabled` rellenando sus dos números al encenderlo); «Gasto en jubilación» cierra con `swr_pct`
-│   │                             #   (el deslizador SWR es su ÚLTIMO campo) y «Horizonte y exigencia» abre con
-│   │                             #   `success_threshold_pct` (slider 80–100); «Edades»
-│   │                             #   lleva `coast_mode`/`coast_stop_age`/`partial_mode` según la estrategia. **Sin
-│   │                             #   banner de alta** (F5) y **sin enlace a Avanzado**. Un `renderField(f)` único
-│   │                             #   pinta los ids de `PlanFieldId` (20 hoy; ver el comando de re-verificación).
-│   │                             #   4. **«Resultado»**: la FRASE-hito (`sentence`, `lib/plan-sentence.ts`, coloreada
-│   │                             #   por `sentence.tone`, filete lateral — NUNCA color de texto; branches por
-│   │                             #   estrategia + estados `pending`/`not_reachable`/`plan_absent_reason`) → banner
-│   │                             #   rojo por avisos (`contribution_underfunded`, `coast_not_reachable`,
-│   │                             #   `partial_never_starts`/`_fully_retires`) → hasta **3** tiles
-│   │                             #   (`buildRetirementTilesV2`: «Capital necesario hoy» + «Éxito del plan» + la
-│   │                             #   propia de la estrategia — **sin tile «Objetivo»**) → **el chart único**
-│   │                             #   (`MiniProjection` con `band`/`markers`/`deflator`/`yAxis`/`bandGradient`/
-│   │                             #   `bandEdgeLabels`/`hoverLabel` **más** `neededCurve`/`validDateMark`/
-│   │                             #   `successStrip`/`successStripCutoffs` del modelo v2; toggles «En dinero de hoy»
-│   │                             #   + «Banda 10–90 %») → la ESCALA del color (`.retirement-risk-scale`, cortes por
-│   │                             #   `riskCutoffsForThreshold`) → **Riesgo compacto** («Éxito del plan» en `87,0 %`
-│   │                             #   con su precisión de Wilson en pp, fallos por tipo (F1/F2) — **sin filas de
-│   │                             #   cobertura** (se fueron con «solo SWR») **ni línea de colchón** (retirada en M6)) →
-│   │                             #   **«Detalle del cálculo»** plegado (`<summary class="details-trigger">`:
-│   │                             #   número FIRE clásico, fechas al 100 %/90 %, + `riskExtraRows`; la semilla vive en el pie de «Las cifras del riesgo»
-│   │                             #   + avisos no-danger).
-│   │                             #
-│   │                             #   Autosave de 420 ms (`queueProfileSave`) con doble guarda: `retirementProfileIssue`
-│   │                             #   (validez, mismos códigos que el servidor) y `missingRequiredPlanFields` (U2: un
-│   │                             #   obligatorio vacío apaga el autosave y lo dice — `.retirement-required-hint`).
-│   │                             #   `canEditProfile = hasMembership && !scopeReadOnly` (SIN exigir
-│   │                             #   `role === "owner"`: el perfil es dato personal, lo edita cualquier rol, `viewer`
-│   │                             #   incluido). **No hay PATCH del colchón**: el mecanismo se retiró del todo (M6),
-│   │                             #   no solo su input.
-│   │                             #
-│   │                             #   **W13 (informe del owner, 2026-09-07) — dos columnas y stale-while-revalidate.**
-│   │                             #   (a) La página se envuelve en `.retirement-layout` con dos `.retirement-col`
-│   │                             #   (plan | resultado): `auto-fit` a partir de ~1.040 px, apiladas por debajo con el
-│   │                             #   plan primero. `<main>` usa el ancho ESTÁNDAR de la app desde 2026-09-13 (tuvo
-│   │                             #   uno propio entre W13 y esa fecha, mientras la pantalla llevaba prosa dentro).
-│   │                             #   En Hogar no hay layout: el agregado sigue
-│   │                             #   siendo un panel único. (b) **La vista ya no se apaga al recargar**: dos latches
-│   │                             #   `nextLastGood` (`lib/stale-data.ts`) sobre `projectionSeries`/`projectionBands`
-│   │                             #   producen `shownSeries`/`shownBands`, que son los que consumen TODOS los memos
-│   │                             #   del resultado; `retirementMetricsReady` pasa a ser `hasMembership &&
-│   │                             #   shownSeries != null` y **ya no mira `projectionBusy`/`retirementBusy`** — eso lo
-│   │                             #   dice ahora `metricsRefreshing`, cuya única consecuencia visible es el punto
-│   │                             #   `.retirement-refreshing` junto al título «Resultado». Las latches se aplican
-│   │                             #   sobre `ref`s DURANTE el render (un efecto pintaría primero el hueco) y se vacían
-│   │                             #   al cambiar de ámbito. (c) La tarjeta «Pensión» se
-│   │                             #   parte en dos sub-columnas (`renderPensionCard`: DOM pensión → puente,
-│   │                             #   `row-reverse` en CSS para dejar el puente a la izquierda sin tocar el orden de
-│   │                             #   tabulación); `BRIDGE_FIELD_IDS` es la única lista de qué campo cae en cuál.
 │   ├── ProjectionView.tsx        # wraps ProjectionNetWorthChart; tile «Capital necesario hoy» vía
 │   │                             #   `neededCapitalAtRetirement` (`lib/projection-chart.ts`) — la MISMA cifra que
 │   │                             #   Jubilación y el Resumen (M9), nunca una segunda derivación
@@ -685,127 +429,13 @@ hijo de `<main>`** en TODAS las pestañas cuando `scopeReadOnly` — no solo en 
 el ámbito es global y quien llega a Jubilación o a Resumen desde el drawer no ha pasado por ninguna
 otra pantalla. Ver [`design-system.md`](design-system.md) §Shell.
 
-## Perfil de jubilación por usuario (5.0.0, D13, issue #207; reescrito 2026-09-06 para el modelo v2)
+## ~~Perfil de jubilación por usuario~~ y ~~sección «Riesgo»~~ — retirados en 6.0.0 (D-7)
 
-`retirementProfile` (`RetirementProfileApi | null`, `App.tsx`) es el perfil del usuario de la
-sesión — estrategia, edad objetivo o modo de coast/media jornada, SWR, umbral de éxito, edad
-límite del horizonte, pensión con fecha (con su puente dentro) y regla de retirada. Es un INPUT
-del motor, así que vive en `App.tsx` y no en `RetirementView`: lo consume también el Resumen (el
-SWR del paréntesis de la tarjeta Autonomía, vía `runwaySwrParenthetical`). `null` mientras no ha
-llegado — nunca se sustituye por el default para pintar, o la vista enseñaría un plan que no es el
-del usuario. **Ya no hay «modo/importe del objetivo» ni «colchón»** en esta lista: el objetivo con
-puente y el colchón derivado murieron con el modelo v2 (M4/M6); `fire_number_mode`/
-`fire_number_manual_amount` siguen en el perfil pero ya no dimensionan nada más que el número FIRE
-clásico informativo.
-
-- **Carga**: `loadRetirementProfile()` se dispara en el mismo `useEffect` que `loadInstallation()`
-  al iniciar sesión — no depende de la membresía, es dato del token
-  (`GET /v1/auth/me/retirement-profile`, `patch_retirement_profile_core` lo acepta de cualquier
-  rol).
-- **Guardado**: `saveRetirementProfilePatch(patch)`, hermana de `saveFireSettingsPatch` (que desde
-  5.0.0 solo cubre los supuestos del HOGAR — impuestos, ventanas del promedio, plusvalía gravable).
-  Manda el PATCH **mínimo** tri-estado (`buildRetirementProfilePatch`, `lib/retirementProfile.ts`),
-  actualiza el estado con el perfil YA RESUELTO que devuelve el servidor y recarga la serie de
-  proyección (`loadProjectionSeriesPage()`), igual que `saveFireSettingsPatch`, para que Jubilación
-  / Resumen / Proyección no se queden enseñando el plan anterior hasta el siguiente cambio de
-  pestaña. **Sin el bloque R6**: el modelo v2 no tiene nada que derivar-y-resincronizar (no hay
-  `target_basis`), así que el ciclo carga→edita→guarda es un PATCH normal, sin la doble lectura
-  «resuelto vs almacenado» que el objetivo exigía.
-- **A diferencia de `fire_settings`, NO es owner-only**: es el dato personal del usuario de la
-  sesión y el servidor lo acepta de cualquier rol — de ahí que `canEditProfile` en `RetirementView`
-  no exija `role === "owner"` (ver tabla de arriba).
-
-## Bandas de Monte Carlo y sección «Riesgo» (5.0.0, D28, issue #207; reescrito 2026-09-06 para el modelo v2)
-
-`projectionBands` (`ProjectionBandsApi | null`, `App.tsx`) alimenta la banda 10–90 % del chart
-único de «Resultado», **su COLOR por probabilidad de FALLO acumulada** (`lib/risk-gradient.ts`,
-umbral-dependiente), la tira de éxito por año bajo el eje, el semáforo «Éxito del plan» y las
-lecturas de recorte/cobertura/fallos-por-tipo que bajan al «Detalle del cálculo». Es una
-**segunda petición, más cara que la serie** (un MISS de `GET /v1/projection/bands` mide ~55 ms en
-release contra el sub-ms de un HIT de proyección — con el default de 2.500 caminos, no 500), y por
-eso su ciclo de vida tiene cuatro reglas:
-
-1. **Después de la serie, nunca antes ni en paralelo.** `loadProjectionBands()` se dispara al
-   final del `try` de `loadRetirementPage()`, sin `await`: la línea determinista y los KPIs son lo
-   primero que se mira y el abanico es su contexto. Dentro del `try` a propósito — si el
-   presupuesto o la serie fallaron, la vista ya enseña un error y un abanico encima no aporta nada.
-2. **Solo en la pestaña Jubilación.** Es la única que lo dibuja. El KPI «Éxito del plan» del
-   **Resumen NO lo necesita**: sus campos (`success_of_plan`, `success_threshold_pct`,
-   `safe_date_month_index`, `needed_capital_today`, `plan_state`) llegan dentro de `summary.plan`,
-   leídos del cache de PLAN (no del de bandas) — así el tile y el chart único de Jubilación citan
-   **la misma resolución** del solver. Pedir las bandas también desde el Resumen sería un segundo
-   sorteo caro por una cifra que ya viaja con la serie.
-3. **Nunca en Hogar.** El servidor devuelve 400 `household_bands_unavailable` (los percentiles no
-   suman entre miembros), así que el cliente ni lo intenta: limpia el estado y la sección pinta
-   «Solo en tu vista (Yo)». Gastar un request en descubrir algo que el cliente ya sabe es la única
-   forma de equivocarse aquí.
-4. **Se recarga con la serie.** Además del cambio de pestaña/ámbito, `saveRetirementProfilePatch`
-   la refetchea junto a `loadProjectionSeriesPage()`: el perfil ES el input del sorteo (estrategia,
-   umbral, regla de retirada). En el servidor las dos invalidaciones de la proyección
-   borran **los dos mapas** de cache, así que una banda vieja junto a una línea nueva —dos cifras
-   que se contradicen en la misma pantalla— no puede ocurrir mientras el cliente refetchee las dos.
-
-La URL no lleva `paths` ni `seed`: los defaults del servidor (**2.500** caminos — `DEFAULT_BANDS_PATHS`,
-no el `DEFAULT_PATHS` de 500 del crate — y la semilla estable por usuario, D23) son exactamente la
-petición cuyo resultado alimenta también el plan del Resumen, así que las dos superficies caen en
-la misma entrada de cache.
-
-- **Dos módulos puros**: [`lib/risk-bands.ts`](../apps/web/src/lib/risk-bands.ts)
-  (`successVerdictTone`, `formatSuccessPercent`, `formatSamplingErrorPp` — **pp, nunca %**: el
-  semiancho de Wilson es un margen en PUNTOS PORCENTUALES, confundirlo con `%` multiplica el error
-  visualmente por su propia magnitud —, `successParenthetical`, `buildRiskExtraRows`,
-  `showsNoVolatilityNotice`, `riskFootnote`, `summarySuccessTile`) y
-  [`lib/risk-gradient.ts`](../apps/web/src/lib/risk-gradient.ts) (el color de la banda, ver abajo),
-  los dos con test. **`cashBufferLine`/`buildDepletionRows` NO EXISTEN**: el primero murió con el
-  colchón (M6), el segundo con la tabla de agotamiento que V5 ya había sustituido por el color de
-  la banda. **Ni una decisión de modelo vive aquí**: el veredicto, la probabilidad y las medianas
-  las calcula el servidor y este módulo alinea, deflacta y traduce a copy. `buildRiskFan` sigue en
-  el archivo pero **`@deprecated`, sin consumidor de UI** (el propio doc-comment lo dice: «si al
-  leer esto sigue sin consumidores, bórrala»).
-- **Chart**: el abanico de percentiles vive en
-  [`MiniProjection`](../apps/web/src/components/charts/MiniProjection.tsx) vía las props opcionales
-  `band`/`markers`/`deflator`/`yAxis`/`bandGradient`/`bandEdgeLabels`/`hoverLabel` (heredadas de la
-  tercera vuelta de UX) **más las CUATRO del modelo v2** — `neededCurve` (la curva de capital
-  necesario, discontinua), `validDateMark` (la marca vertical en la fecha válida, con su éxito),
-  `successStrip` + `successStripCutoffs` (la tira de éxito por año bajo el eje, coloreada con los
-  mismos cortes que la banda). Ver [`design-system.md`](design-system.md) §`MiniProjection` para
-  el prop-list completo.
-- **La trampa que este código existe para no pisar**: la banda viaja SIEMPRE a densidad `hybrid`
-  (`GET /v1/projection/bands` no acepta `?density`) mientras `points[]` de la serie suele ser
-  `monthly` (segunda fase del two-phase). **Son dos rejillas distintas**: se emparejan por
-  `month_index`, jamás por posición de array — en el chart único, `MiniProjection` filtra `band`
-  por `month >= monthStart && month <= monthEnd` y la deflacta con el MISMO factor que la curva.
-  Emparejar por posición desplaza el abanico décadas y el chart resultante sigue pareciendo
-  correcto.
-- **Deflactación**: el toggle «En dinero de hoy» del chart único comparte llave de `localStorage`
-  con el de Proyección (`PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY`) — es la misma pregunta y dos
-  respuestas distintas en dos pestañas harían comparar cifras que no son comparables. El factor sale
-  de `deflation_annual_inflation_percent` de la RESPUESTA y `chartDeflator` (`RetirementView.tsx`)
-  se pasa como la prop `deflator` de `MiniProjection`, que lo aplica a patrimonio, `p10`/`p90` y la
-  curva de capital necesario por igual: deflactar solo una serie la separaría de la línea que dice
-  contener.
-- **El COLOR de la banda, umbral-dependiente desde el modelo v2**: `riskGradientStops`
-  (`lib/risk-gradient.ts`) traduce `failure_probability_by_age` a paradas de un `<linearGradient>`,
-  **por MES** y con los mismos extremos que usa el chart para repartir su eje X. Los cortes YA NO
-  son absolutos: `riskCutoffsForThreshold(success_threshold_pct)` los deriva del umbral del perfil
-  —con 95 % (default) o cualquier umbral ≥ 90 %, pixel-idénticos a los fijos de antes (5 %/10 %);
-  con un umbral del 80 %, el rojo empieza en el 20 %—. El tooltip del hover sale de
-  `failureProbabilityAtMonth` + `failureKindsAtMonth` (F1/F2, la MISMA función que colorea) y
-  reparte el motivo entre paréntesis. Sin volatilidad declarada NO se colorea: teñir de verde una
-  banda de ancho cero diría «ningún escenario falla» sobre un sorteo que no existe.
-- **helpIds** (§helpTexts.ts; recuento de las `retirement.*`: `grep -c '^  "retirement\.' apps/web/src/lib/helpTexts.ts`): `retirement.bands`, `retirement.success`,
-  `retirement.failure_by_age` (sustituye a `retirement.depletion_by_age`: el color de la banda **y**
-  la fila acumulada del Detalle, ahora F1+F2), `retirement.needed_capital`,
-  `retirement.safe_date`, `retirement.success_threshold`, `retirement.bridge_settings`,
-  `retirement.coast_mode`, `retirement.partial_mode`, `retirement.fire_number_classic` y
-  `summary.success`. **`retirement.target_basis`/`retirement.bridge_discount`/
-  `retirement.cash_buffer` NO EXISTEN**. `RiskExtraRow` lleva un `helpId?` opcional y la vista pinta
-  el `HelpPopover` **junto al rótulo de la fila**, no en el título del panel.
-
-Los campos del bloque «plan» de `api/types.ts` (`retirement_date_basis`, `success_of_plan`,
-`success_wilson_low`, `needed_capital_today`, `needed_capital_curve`, `safe_date_month_index`,
-`plan_absent_reason`…) viajan **opcionales**: la SPA los trata como «ausente = esa fila/tile no se
-pinta», nunca como un cero tranquilizador, igual que `failure_probability_by_age[].by_kind`.
+`retirementProfile` (estado de `App.tsx`), `loadRetirementProfile`, `saveRetirementProfilePatch`,
+`loadRetirementPage`, `loadProjectionBands` y el sondeo del nivel 2 (`needed_capital_curve_state`)
+se fueron con el modelo de jubilación. La SPA ya no pide `/v1/auth/me/retirement-profile` ni
+`/v1/projection/bands`. Comprobación: `grep -rn "retirement-profile\|projection/bands" apps/web/src`
+→ vacío.
 
 ## Import conventions
 

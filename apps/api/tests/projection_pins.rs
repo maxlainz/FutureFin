@@ -12,13 +12,6 @@ use chrono::{Datelike, Duration, Months, Utc};
 use common::TestApp;
 use serde_json::{json, Value};
 
-fn dec(v: &Value) -> f64 {
-    v.as_str()
-        .unwrap_or_else(|| panic!("esperaba string decimal, llegó {v:?}"))
-        .parse::<f64>()
-        .expect("decimal")
-}
-
 /// NW(360) del escenario A **sin jubilación** (5.0.0), recapturado tras el cambio de modelo con la
 /// predicción escrita ANTES de medir: sube respecto de los 677.335,52 € de 4.15.x porque el hogar
 /// deja de drenar desde el mes 235 (con `?months=` no hay plan, y sin plan no hay jubilación —
@@ -94,84 +87,31 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
-    // 5.0.0 (D13): modo del objetivo y SWR son del perfil del usuario. Se escriben explícitos
-    // aunque coincidan con los defaults: un pin no se apoya en un default.
-    let r = app
-        .patch_json_with_cookie(
-            "/v1/auth/me/retirement-profile",
-            json!({"fire_number_mode": "annual_expense", "swr_pct": "3.5"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
-
+    // 6.0.0 (D-7): el perfil de jubilación (modo del objetivo, SWR) se retiró. Estos pins son la
+    // trayectoria SIN jubilarse, que nunca dependió de él: sus cifras no se mueven.
     let s = app
         .get_with_cookie("/v1/projection/series?months=360", &owner.cookie)
         .await
         .json();
 
-    // a mano: need = 1.200×12 = 14.400 (SIN la cuota). Gross-up escala ES:
-    // tramo 19 %: 14.400/0,81 = 17.777,78 > 6.000 → K = 1.140;
-    // tramo 21 %: (14.400 + 1.140 − 0,21×6.000)/0,79 = 14.280/0,79 = 18.075,9494 ≤ 50.000 ✓.
-    // target = 18.075,9494 / 0,035 = 516.455,6961.
-    //
-    // **5.0.0** — `jubilacion_target_net_worth` (la BASE del objetivo en euros de hoy) y
-    // `fire_target_debt_component` (su término finito de deuda) se retiraron con el objetivo como
-    // decisión. Lo que sobrevive es el **número FIRE clásico**, un escalar informativo que vale
-    // `base + término de deuda` en el mes 0 — las dos mitades que antes viajaban por separado,
-    // ahora sumadas.
-    //
-    // Aquí NO se pinea su valor exacto a propósito: el término de deuda de este escenario lleva
-    // el residual del plan francés, que este fichero no deriva a mano (lo pinean los tests del
-    // motor de la Ola 4). Lo que se pinea es la COTA que la descomposición implica: la cifra
-    // tiene que superar la base de 516.455,6961 € en al menos las 180 cuotas de 800 € que quedan
-    // por pagar. El pin exacto y sin deuda está en el escenario B.
-    let clasico = dec(&s["fire_number_classic_today"]);
-    assert!(
-        clasico >= 516_455.6961 + 144_000.0,
-        "número FIRE clásico = base (516.455,6961) + término de deuda (≥ 180×800): {clasico}"
-    );
-    assert!(s["fire_number_classic_absent_reason"].is_null(), "hay número: {s}");
-
-    // capturado 4.6.0 (#144 default french ya aplicado aquí a mano; verificado inmóvil en la
-    // Ola 4 por lo de arriba; #124 no aplica — no hay partidas vencidas):
-    let jub = s["jubilacion_month_index"].clone();
+    // **6.0.0 (D-7)**: el número FIRE clásico, la fecha de jubilación, la estrategia, las fases y
+    // el bloque «plan» se retiraron con el modelo de jubilación. La serie es la trayectoria SIN
+    // jubilarse —la misma que 5.0.x publicaba con `?months=` («sin plan»)—, y los pins de abajo
+    // son exactamente los de entonces.
+    for dead in [
+        "fire_number_classic_today",
+        "fire_number_classic_absent_reason",
+        "jubilacion_month_index",
+        "retirement_month_index",
+        "strategy",
+        "plan_absent_reason",
+        "phase_transitions",
+    ] {
+        assert!(s.get(dead).is_none(), "`{dead}` se retiró en 6.0.0: {s}");
+    }
     let nw12 = nw_at(&s, 12);
     let nw180 = nw_at(&s, 180);
     let nw360 = nw_at(&s, 360);
-    // **5.0.0 — este pin cambia de veredicto, y es la consecuencia entera del modelo v2.**
-    //
-    // Hasta 4.15.x este hogar se jubilaba en el mes 235 porque el LÍQUIDO cruzaba el objetivo
-    // determinista. En v2 el cruce no jubila a nadie: la fecha la decide el umbral de éxito, y
-    // un `?months=` **no resuelve plan** (D7 — biseccionar sobre miles de caminos en cada
-    // petición con horizonte arbitrario pondría decenas de segundos de CPU detrás de un
-    // parámetro de query). Así que esta serie es la trayectoria SIN jubilarse: el motor recibe
-    // `AtMonth(horizonte + 1)`.
-    //
-    // Predicho ANTES de medir: `jubilacion_month_index` pasa de 235 a `null`;
-    // `phase_transitions` pierde la fase `retired`; la retirada del mes 300 pasa de > 0 a 0; y
-    // NW(360) **sube** —el hogar sigue ingresando 3.000 y gastando 1.200 hasta el final en vez
-    // de drenar desde el 235—. NW(12) y NW(180) **no se mueven**: los dos caen antes del mes
-    // 235, donde las dos versiones simulan exactamente lo mismo.
-    assert!(
-        jub.is_null(),
-        "un `?months=` no resuelve plan, y sin plan no hay fecha: {jub}"
-    );
-    assert!(s["retirement_month_index"].is_null(), "{s}");
-    assert_eq!(s["strategy"], "asap", "estrategia por defecto: {}", s["strategy"]);
-    assert_eq!(
-        s["jubilacion_absent_reason"], "months_override",
-        "la ausencia se nombra: {s}"
-    );
-    assert_eq!(s["plan_absent_reason"], "months_override", "{s}");
-    // Las fases: solo acumulación. Sobre la serie, no sobre el enum (§C: el invariante es de
-    // comportamiento).
-    let fases = s["phase_transitions"].as_array().expect("phase_transitions");
-    assert_eq!(fases.len(), 1, "sin jubilación solo hay acumulación: {fases:?}");
-    assert_eq!(fases[0]["phase"], "accumulating");
-    assert_eq!(fases[0]["month_index"], 0);
-    // La serie de retirada existe en cada punto (las de recorte y exceso de una regla de
-    // retirada por saldo se retiraron el 2026-10-10 con las reglas).
     let pts = s["points"].as_array().expect("points");
     for p in pts {
         assert!(p["withdrawal"].is_number(), "falta withdrawal: {p}");
@@ -186,8 +126,8 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
             .as_f64()
             .unwrap()
     };
-    assert_eq!(w(180), 0.0, "en el mes 180 aún no está jubilado");
-    assert_eq!(w(300), 0.0, "sin plan no se jubila nunca: el mes 300 tampoco retira");
+    assert_eq!(w(180), 0.0, "sin déficit de caja no hay retirada");
+    assert_eq!(w(300), 0.0, "sin jubilación no se drena nunca: el mes 300 tampoco retira");
     // El hogar de un solo miembro NO publica `members[]` en `mine`: la respuesta entera es suya.
     assert!(
         s["members"].as_array().is_some_and(|m| m.is_empty()),
@@ -212,8 +152,7 @@ async fn pin_escenario_a_hipoteca_viva_modo_a() {
     //
     // **5.0.0 recaptura NW(360)**: sin jubilación no hay drenaje desde el mes 235, así que la
     // cifra SUBE respecto de los 677.335,52 € de 4.15.x. La cota se comprueba antes que el
-    // valor: si algún día el número bajara de aquello, sería que la jubilación volvió a colarse
-    // en una respuesta que declara `plan_absent_reason`.
+    // valor: si algún día el número bajara de aquello, sería que un drenaje volvió a colarse.
     assert!(
         nw360 > 677_335.52,
         "sin drenaje desde el mes 235, NW(360) tiene que superar el pin de 4.15.x: {nw360}"
@@ -257,48 +196,21 @@ async fn pin_escenario_b_inflacion() {
         )
         .await;
     assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
-    // 5.0.0 (D13): el modo del objetivo y el SWR son del PERFIL del usuario, no del hogar. El
-    // pin no cambia de números — cambia de dónde se escriben los mismos dos ejes.
-    let r = app
-        .patch_json_with_cookie(
-            "/v1/auth/me/retirement-profile",
-            json!({"fire_number_mode": "annual_expense", "swr_pct": "4"}),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
-
     let s = app
         .get_with_cookie("/v1/projection/series?months=360", &owner.cookie)
         .await
         .json();
 
-    // a mano: base = 1.500×12/0,04 = 450.000. **Sin deuda**, el número FIRE clásico de 5.0.0 ES
-    // esa base: `PlanFireTarget.at(0)` = base + término de deuda, y aquí el término es 0 exacto.
-    // Es el pin limpio de la cifra, sin el residual del plan francés que enturbia el escenario A.
-    let clasico = dec(&s["fire_number_classic_today"]);
-    assert!((clasico - 450_000.0).abs() < 0.01, "número FIRE clásico: {clasico}");
-    // **5.0.0**: la serie del objetivo (`fire_target_series`) se retiró — el motor ya no recibe
-    // objetivo y el cruce no decide nada. La línea que la app dibuja contra el patrimonio es hoy
-    // `needed_capital_curve`, de NIVEL 2 y por tanto ausente en un `?months=`.
-    // `.get(...).is_none()` y no `is_null()` (WP A12): sobre un objeto JSON, indexar una clave
-    // que NO EXISTE devuelve `Value::Null`, así que un `is_null()` sobre un campo retirado pasa
-    // haga lo que haga el servidor — incluido volver a publicarlo. Lo que hay que comprobar es que
-    // la CLAVE no está.
-    assert!(s.get("fire_target_series").is_none(), "{s}");
+    // 6.0.0 (D-7): sin número FIRE ni fecha de jubilación; ninguna de las dos claves viaja.
+    for dead in ["fire_number_classic_today", "jubilacion_month_index", "fire_target_series"] {
+        assert!(s.get(dead).is_none(), "`{dead}` se retiró: {s}");
+    }
 
-    // INVERTIDO en la Ola 5 (#139; capturado en 4.6.0 como 285 / 211.361,91 / 1.094.275,23 con
-    // el gasto congelado). Con el gasto indexado al 2,5 % e ingresos planos, este hogar —que
-    // ahorra 1.000 €/mes sobre 1.500 de gasto, al 7 % nominal— DEJA DE ALCANZAR el FIRE dentro
-    // de 30 años: la señal de producto más dura de la ola, en primera línea del CHANGELOG.
-    // Números predichos por la réplica a 50 dígitos ANTES de ejecutar (spike §5.2.2).
-    let jub = s["jubilacion_month_index"].clone();
+    // INVERTIDO en la Ola 5 (#139; capturado en 4.6.0 con el gasto congelado). Con el gasto
+    // indexado al 2,5 % e ingresos planos. Números predichos por la réplica a 50 dígitos ANTES
+    // de ejecutar (spike §5.2.2).
     let nw120 = nw_at(&s, 120);
     let nw360 = nw_at(&s, 360);
-    assert!(
-        jub.is_null(),
-        "un `?months=` no resuelve plan; y con el gasto indexado este hogar tampoco cruzaría: {jub}"
-    );
     assert!((nw120 - 181_037.91).abs() < 0.01, "NW(120) predicho: {nw120}");
     assert!((nw360 - 777_970.12).abs() < 0.01, "NW(360) predicho: {nw360}");
 }

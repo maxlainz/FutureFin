@@ -2,11 +2,8 @@
 //! fase 1 de la revisión adversarial del MCP). Los tres casos comparten una misma familia de fallo:
 //! el número viajaba, era sintácticamente válido, y *significaba otra cosa*.
 //!
-//! 1. `jubilacion_month_index` no indexa ninguna serie devuelta — es un número de MES, y con
-//!    `density=hybrid` (la que fuerza la tool MCP `get_projection`) los arrays llevan ~42 puntos
-//!    para 361 meses. Se añaden `jubilacion_series_position` (posición real) y
-//!    `jubilacion_target_net_worth_nominal` (el objetivo del mes del cruce, que hasta ahora era
-//!    **inobtenible**: solo se publicaba la base en euros de hoy).
+//! 1. `jubilacion_month_index` no indexaba ninguna serie devuelta (era un número de MES). Se
+//!    retiró con el modelo de jubilación en 6.0.0 (D-7).
 //! 2. `final_net_worth_real_delta` restaba dos cifras deflactadas con inflaciones distintas cuando
 //!    el eje simulado ES la inflación → `null` + `real_delta_absent_reason`.
 //! 3. `debt_service_monthly: "0"` con un préstamo vivo → `null` + `debt_service_absent_reason`.
@@ -118,31 +115,9 @@ async fn budget(app: &TestApp, cookie: &str, cat: &str, amount: &str) {
     assert_eq!(r.status, http::StatusCode::CREATED, "budget: {r:?}");
 }
 
-/// Hogar que **sí** cruza su número FIRE dentro del horizonte por defecto (360 meses, sin fecha de
-/// nacimiento): ingreso 3.000, gasto 1.000 → 2.000 €/mes de sobrante, un activo líquido de 50.000 al
-/// 7 % y una regla sumidero que encamina TODO el sobrante a ese activo (sin ella, desde 4.12.1,
-/// el sobrante queda VARADO fuera del balance y el cruce se va fuera del horizonte).
-///
-/// PREDICCIÓN del objetivo base (modo `annual_expense`, SWR 3,5 %, tramos ES por defecto):
-/// neto anual = 1.000 × 12 = 12.000. Gross-up: tramo 1 (19 %, techo 6.000) da 12.000/0,81 =
-/// 14.814,81 > 6.000 → K = 1.140; tramo 2 (21 %, techo 50.000): (12.000 + 1.140 − 0,21×6.000)/0,79
-/// = 11.880/0,79 = **15.037,9746835443…**. Objetivo = 15.037,97…/0,035 = **429.656,4195 €**.
-fn es_brackets() -> Vec<futurefin_engine::TaxBracket> {
-    [
-        (Some(6_000u32), 19u32),
-        (Some(50_000), 21),
-        (Some(200_000), 23),
-        (Some(300_000), 27),
-        (None, 30),
-    ]
-    .into_iter()
-    .map(|(up, pct)| futurefin_engine::TaxBracket {
-        up_to: up.map(rust_decimal::Decimal::from),
-        pct: rust_decimal::Decimal::from(pct),
-    })
-    .collect()
-}
-
+/// Hogar solvente: ingreso 3.000, gasto 1.000 → 2.000 €/mes de sobrante, un activo líquido de
+/// 50.000 al 7 % y una regla sumidero que encamina TODO el sobrante a ese activo (sin ella, desde
+/// 4.12.1, el sobrante queda VARADO fuera del balance).
 async fn seed_crossing_household(app: &TestApp, owner: &LoggedInOwner) -> String {
     let cat_inc = app.create_category(owner, "income", "Nomina").await;
     let cat_exp = app.create_category(owner, "expense", "Vida").await;
@@ -168,28 +143,6 @@ async fn seed_crossing_household(app: &TestApp, owner: &LoggedInOwner) -> String
     r.json()["id"].as_str().unwrap().to_string()
 }
 
-/// Espera a que el NIVEL 2 del plan aterrice, con una cota acotada por EVENTO y no por reloj:
-/// sale en cuanto el estado deja de ser `computing`. El tope solo se agota si de verdad no llegó.
-async fn settle_plan_extras(app: &TestApp, cookie: &str, query: &str) -> Value {
-    // **El presupuesto es de EVENTO, no de reloj**: se sale en cuanto el estado deja de ser
-    // `computing`. El tope es generoso a propósito — los costes medidos del nivel 2 (≈ 16 s la
-    // curva, ≈ 7 s la tira anual) están tomados en `release`, y estos tests corren en `debug`,
-    // donde la coma flotante del sorteo va un orden de magnitud más lenta y además compite por
-    // los DOS permisos del semáforo de CPU con el resto de la suite.
-    for _ in 0..1_200 {
-        let r = app
-            .get_with_cookie(&format!("/v1/projection/series{query}"), cookie)
-            .await;
-        assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
-        let body = r.json();
-        if body["needed_capital_curve_state"] != "computing" {
-            return body;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-    }
-    panic!("el nivel 2 no aterrizó dentro del margen");
-}
-
 async fn set_inflation(app: &TestApp, owner: &LoggedInOwner, pct: &str) {
     let r = app
         .patch_json_with_cookie(
@@ -202,275 +155,10 @@ async fn set_inflation(app: &TestApp, owner: &LoggedInOwner, pct: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// 1. El bloque «plan» indexa la REJILLA, y su curva es paralela a `points[]`
+// 1. El bloque «plan» (5.0.0) se retiró con el modelo de jubilación en 6.0.0 (D-7): sus tests
+//    (`the_plan_block_indexes_the_grid…`, `the_plan_fields_are_explicit_null…`,
+//    `the_withdrawal_series_are_monthly_flows…`) se fueron con él.
 // ---------------------------------------------------------------------------
-
-/// El fallo de familia que este fichero documenta: **un `*_month_index` es un número de MES, no
-/// una posición de array**. Con `density=hybrid` los arrays llevan ~42 posiciones y el mes del
-/// plan ronda el 200: indexar con el mes se sale del array, y caer en `[0]` presenta la cifra de
-/// HOY como si fuera la de dentro de veinte años.
-///
-/// En 5.0.0 el bloque «plan» hereda ese contrato entero y le añade uno propio: la **curva de
-/// capital necesario es PARALELA a `points[]`**, una entrada por punto, con `null` donde la
-/// rejilla gruesa del nivel 2 no midió. Un `null` ahí significa «aquí no se midió», jamás «aquí
-/// hacen falta 0 €» — y por eso la curva no se interpola: el cruce con la trayectoria del
-/// patrimonio, que es lo único que la curva existe para enseñar, caería en un mes inventado.
-///
-/// PREDICCIONES antes de ejecutar:
-/// - `safe_date_month_index == jubilacion_month_index` en las dos densidades (son la misma
-///   fecha bajo dos nombres) y `safe_date_series_position == jubilacion_series_position`.
-/// - `needed_capital_curve.len() == points.len()` en las DOS densidades.
-/// - La posición de la fecha tiene cifra en la curva: el nivel 2 evalúa el mes del plan a
-///   propósito, para que la curva cruce la línea **en la fecha** y no entre dos nodos.
-/// - `density` no mueve ninguna cifra del plan: es una decisión de SERIALIZACIÓN.
-#[tokio::test]
-async fn the_plan_block_indexes_the_grid_and_the_curve_is_parallel_to_points() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    seed_crossing_household(&app, &owner).await;
-    set_inflation(&app, &owner, "3").await;
-
-    let mut fechas = Vec::new();
-    for density in ["monthly", "hybrid"] {
-        let body = settle_plan_extras(&app, &owner.cookie, &format!("?density={density}")).await;
-
-        let points = body["points"].as_array().expect("points");
-        let curva = body["needed_capital_curve"]
-            .as_array()
-            .expect("la curva viaja siempre, aunque sea de nulos");
-        assert_eq!(
-            curva.len(),
-            points.len(),
-            "{density}: la curva es PARALELA a points[] — {} vs {}",
-            curva.len(),
-            points.len()
-        );
-        assert_eq!(body["needed_capital_curve_state"], "ready", "{density}: {body}");
-
-        let k = body["jubilacion_month_index"]
-            .as_u64()
-            .unwrap_or_else(|| panic!("{density}: el hogar semilla tiene que tener fecha: {body}"));
-        assert_eq!(
-            body["safe_date_month_index"], body["jubilacion_month_index"],
-            "{density}: los dos nombres son la misma fecha: {body}"
-        );
-
-        // --- La posición existe, indexa de verdad, y respeta la convención documentada ---------
-        let pos = body["jubilacion_series_position"]
-            .as_u64()
-            .unwrap_or_else(|| panic!("{density}: hay fecha, debe haber posición: {body}"))
-            as usize;
-        assert_eq!(
-            body["safe_date_series_position"], body["jubilacion_series_position"],
-            "{density}: y las dos posiciones, la misma: {body}"
-        );
-        assert!(
-            pos < points.len() && pos < curva.len(),
-            "{density}: la posición {pos} tiene que caber en los arrays ({} puntos)",
-            points.len()
-        );
-        let mi_pos = points[pos]["month_index"].as_u64().unwrap();
-        assert!(
-            mi_pos <= k,
-            "{density}: la convención es el punto anterior o igual — {mi_pos} > {k}"
-        );
-        if pos + 1 < points.len() {
-            let mi_next = points[pos + 1]["month_index"].as_u64().unwrap();
-            assert!(
-                mi_next > k,
-                "{density}: {pos} no es el ÚLTIMO punto <= {k} (el siguiente es {mi_next})"
-            );
-        }
-        if density == "monthly" {
-            assert_eq!(pos as u64, k, "monthly: mes y posición coinciden punto por punto");
-        } else {
-            // El bug, hecho test: el índice de mes NO indexa el array de la densidad híbrida.
-            assert!(
-                (curva.len() as u64) <= k,
-                "hybrid: con {} puntos y fecha en el mes {k}, indexar por mes se sale del array \
-                 — si esto deja de cumplirse, el test ya no prueba lo que dice",
-                curva.len()
-            );
-        }
-
-        // --- La curva CRUZA en la fecha: el nodo del mes del plan tiene cifra ------------------
-        let en_fecha = curva[pos]
-            .as_f64()
-            .unwrap_or_else(|| panic!("{density}: el nivel 2 evalúa el mes del plan: {body}"));
-        assert!(en_fecha > 0.0, "{density}: {en_fecha}");
-        // …y la mayoría de las posiciones NO: la rejilla del nivel 2 es gruesa, y un hueco
-        // declarado no es un 0 €.
-        let con_cifra = curva.iter().filter(|v| !v.is_null()).count();
-        assert!(
-            con_cifra >= 2 && con_cifra < curva.len(),
-            "{density}: la rejilla es gruesa y la curva no se interpola — {con_cifra} nodos con \
-             cifra de {} posiciones",
-            curva.len()
-        );
-        // El primer nodo de la curva es el capital necesario de HOY, y en el mes 0 las dos bases
-        // (nominal y euros de hoy) coinciden exactamente: el factor de inflación en el índice 0
-        // es 1. Es la única posición donde se pueden comparar.
-        let hoy: f64 = body["needed_capital_today"]
-            .as_str()
-            .expect("el capital de hoy viaja como decimal-string")
-            .parse()
-            .expect("decimal");
-        let nodo0 = curva[0]
-            .as_f64()
-            .unwrap_or_else(|| panic!("{density}: el nodo del mes 0 siempre se evalúa: {body}"));
-        assert!(
-            (hoy - nodo0).abs() < 0.01,
-            "{density}: en el mes 0 la curva nominal y el capital de hoy son la MISMA cifra \
-             ({hoy} vs {nodo0})"
-        );
-        // Y en la fecha la curva ya no vale lo de hoy: es una curva, no una recta.
-        assert!(
-            (en_fecha - nodo0).abs() > 1.0,
-            "{density}: con inflación 3 % y {k} meses la curva tiene que moverse ({nodo0} → \
-             {en_fecha})"
-        );
-
-        fechas.push((
-            body["jubilacion_month_index"].clone(),
-            body["success_of_plan"].clone(),
-            body["needed_capital_today"].clone(),
-        ));
-    }
-    assert_eq!(
-        fechas[0], fechas[1],
-        "la densidad es una decisión de SERIALIZACIÓN: no puede mover una sola cifra del plan"
-    );
-}
-
-/// Sin plan, TODOS los campos del bloque viajan como `null` explícito — coherentes con los
-/// `jubilacion_*` que ya lo hacían (auditoría MCP §8: desaparecer no es lo mismo que no
-/// alcanzarse). Un campo que se esfuma no se puede distinguir de una versión que no lo publica.
-#[tokio::test]
-async fn the_plan_fields_are_explicit_null_when_there_is_no_plan() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    seed_crossing_household(&app, &owner).await;
-    let token = create_token(&app, &owner).await;
-
-    // Horizonte corto: el objetivo no se alcanza.
-    let short = tool_json(
-        &mcp_post(&app, &token, tool_call("get_projection", json!({"months": 12}))).await,
-    );
-    for field in [
-        "jubilacion_month_index",
-        "jubilacion_series_position",
-        "jubilacion_date_ymd",
-        "jubilacion_age",
-        "retirement_date_basis",
-        "safe_date_month_index",
-        "safe_date_series_position",
-        "safe_date_date_ymd",
-        "safe_date_age",
-        "safe_date_is_approximate",
-        "safe_date_at_100_month_index",
-        "safe_date_at_90_month_index",
-        "success_of_plan",
-        "success_wilson_low",
-        "success_sampling_error_pp",
-        "paths_used",
-        "seed",
-        "needed_capital_today",
-        "needed_capital_absent_reason",
-        "contribution_required_monthly",
-        "contribution_required_search_ceiling",
-        "contribution_underfunded",
-        "coast_stop_month_index",
-        "partial_start_month_index",
-        "success_threshold_pct",
-    ] {
-        assert!(
-            short.get(field).is_some(),
-            "`{field}` debe viajar aunque no haya plan: {short}"
-        );
-        assert!(short[field].is_null(), "`{field}` debería ser null: {short}");
-    }
-    // Y la ausencia se NOMBRA, en los dos campos que existen para eso.
-    assert_eq!(short["plan_absent_reason"], "months_override", "{short}");
-    assert_eq!(short["jubilacion_absent_reason"], "months_override", "{short}");
-    assert_eq!(
-        short["needed_capital_curve_state"], "unavailable",
-        "sin plan no hay curva, y no la va a haber: {short}"
-    );
-    // El número FIRE clásico SÍ existe: es un escalar de la configuración, no del plan.
-    assert!(
-        !short["fire_number_classic_today"].is_null(),
-        "el escalar informativo no depende del plan: {short}"
-    );
-}
-
-/// 5.0.0 (§B.8) — **las tres series de retirada son FLUJOS del mes, no acumulados**, y los dos
-/// nombres del mes efectivo apuntan al mismo punto de la serie.
-///
-/// Publicar `withdrawal` como acumulado sería el mismo fallo de familia que este fichero
-/// documenta: una cifra sintácticamente válida que significa otra cosa. Se distingue con una
-/// prueba directa —la suma de los flujos hasta el mes k es MAYOR que el flujo de k, y el flujo no
-/// es monótono— sin depender de ningún número concreto del modelo.
-#[tokio::test]
-async fn the_withdrawal_series_are_monthly_flows_and_the_positions_index_the_arrays() {
-    let app = TestApp::spawn().await;
-    let owner = app.register_and_login_owner("alice").await;
-    seed_crossing_household(&app, &owner).await;
-
-    // **Sin `?months=` a propósito**: un horizonte a medida no resuelve plan (D7), y sin plan
-    // este hogar no se jubila nunca — no habría drenaje que mirar.
-    let r = app.get_with_cookie("/v1/projection/series", &owner.cookie).await;
-    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
-    let s = r.json();
-
-    let k = s["jubilacion_month_index"]
-        .as_u64()
-        .unwrap_or_else(|| panic!("este escenario debe tener fecha válida: {s}"));
-    assert_eq!(
-        s["retirement_month_index"], s["jubilacion_month_index"],
-        "R8: los dos nombres son el mismo mes: {s}"
-    );
-    assert_eq!(
-        s["retirement_series_position"], s["jubilacion_series_position"],
-        "y las dos posiciones, la misma: {s}"
-    );
-
-    let pts = s["points"].as_array().expect("points");
-    // La posición INDEXA el array (esa es toda su razón de ser) y apunta al último punto servido
-    // que no pasa del mes publicado.
-    let pos = s["retirement_series_position"].as_u64().expect("posición") as usize;
-    assert!(pos < pts.len(), "la posición debe caer dentro de points: {pos} / {}", pts.len());
-    assert!(
-        pts[pos]["month_index"].as_u64().unwrap() <= k,
-        "convención «el punto anterior o igual»: {}",
-        pts[pos]
-    );
-
-    // El flujo del mes: 0 mientras se acumula, positivo una vez jubilado.
-    let w_at = |m: u64| -> f64 {
-        pts.iter()
-            .find(|p| p["month_index"] == m)
-            .unwrap_or_else(|| panic!("sin punto {m}"))["withdrawal"]
-            .as_f64()
-            .unwrap()
-    };
-    assert_eq!(w_at(0), 0.0, "el mes 0 no es un mes simulado: {s}");
-    assert_eq!(w_at(k.saturating_sub(1)), 0.0, "el mes anterior aún no drena");
-    let despues = w_at(k + 12);
-    assert!(despues > 0.0, "jubilado: el mes {} retira: {despues}", k + 12);
-
-    // Y NO es un acumulado: la suma de los flujos posteriores al cruce supera con creces
-    // cualquier flujo individual, y el flujo individual no crece sin parar de mes en mes.
-    let suma: f64 = pts
-        .iter()
-        .filter(|p| p["month_index"].as_u64().unwrap() > k)
-        .map(|p| p["withdrawal"].as_f64().unwrap())
-        .sum();
-    assert!(
-        suma > despues * 2.0,
-        "si `withdrawal` fuese acumulado, un solo punto ya valdría casi la suma entera: \
-         suma {suma}, punto {despues}"
-    );
-}
 
 /// **`unmet_need`: la segunda magnitud del mes** (pase de correcciones de la revisión
 /// adversarial, hallazgo B2/#4).
@@ -894,20 +582,10 @@ async fn an_expired_budget_entry_stops_counting_everywhere_at_once() {
         .await
         .expect("vencer la partida");
 
-    // SWR 4 % (por defecto es 3,5): objetivo redondo del escenario.
     let r = app
         .patch_json_with_cookie(
             "/v1/installation",
             json!({ "fire_settings": { "taxes_enabled": false, "tax_brackets": [] } }),
-            &owner.cookie,
-        )
-        .await;
-    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
-    // 5.0.0 (D13): modo del objetivo y SWR son del perfil del usuario, no del hogar.
-    let r = app
-        .patch_json_with_cookie(
-            "/v1/auth/me/retirement-profile",
-            json!({"fire_number_mode": "annual_expense", "swr_pct": "4"}),
             &owner.cookie,
         )
         .await;
@@ -920,18 +598,11 @@ async fn an_expired_budget_entry_stops_counting_everywhere_at_once() {
     let visible = b["entries"].as_array().unwrap().iter().any(|e| e["id"] == entry_id.as_str());
     assert!(visible, "la fila vencida sigue en entries (no se purga)");
 
-    // 2) Proyección: delta y objetivo alineados — y SIN caja fantasma (la entrada compensadora
+    // 2) Proyección: delta alineado — y SIN caja fantasma (la entrada compensadora
     //    del motor se retiró junto con la partida; con solo medio arreglo el delta sería 2.000).
     let p = app.get_with_cookie("/v1/projection/series?months=120", &owner.cookie).await.json();
     let delta: f64 = p["monthly_delta_assumption"].as_str().unwrap().parse().unwrap();
     assert!((delta - 1_500.0).abs() < 0.001, "delta sin la vencida y sin fantasma: {delta}");
-    // 5.0.0: el objetivo determinista sobrevive como escalar informativo `fire_number_classic_today`
-    // (sin deuda, `base + 0`). La cifra es la misma: 1.500×12/0,04.
-    let clasico: f64 = p["fire_number_classic_today"].as_str().unwrap().parse().unwrap();
-    assert!(
-        (clasico - 450_000.0).abs() < 0.001,
-        "número FIRE clásico 1.500×12/0,04: {clasico}"
-    );
 }
 
 /// #127 (4.8.0), a mano: ingreso 3.000, gasto 1.800, y un pasivo sin intereses con cuota

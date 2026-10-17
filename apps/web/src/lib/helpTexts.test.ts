@@ -25,9 +25,8 @@ for (const f of sourceFiles(SRC)) {
   const src = readFileSync(f, "utf8");
   if (f.endsWith("helpTexts.ts")) continue;
   for (const m of src.matchAll(/helpId="([^"]+)"/g)) used.add(m[1]);
-  // Forma de OBJETO (`helpId: "retirement.coast_month"`), no de prop JSX: desde 5.0.0 hay
-  // módulos puros que deciden qué tarjetas se pintan y con qué ayuda
-  // (`lib/retirement-tiles.ts`, tabla §C de #207). Sin este patrón el escáner los daba por
+  // Forma de OBJETO (`helpId: "summary.runway"`), no de prop JSX: desde 5.0.0 hay módulos
+  // puros que deciden qué tarjetas se pintan y con qué ayuda (tabla §C de #207). Sin este patrón el escáner los daba por
   // huérfanos y la cobertura bidireccional empujaba a BORRAR textos que sí se usan — el fallo
   // exacto que este test existe para impedir, del revés.
   for (const m of src.matchAll(/helpId:\s*"([^"]+)"/g)) used.add(m[1]);
@@ -86,50 +85,6 @@ describe("catálogo de descripciones", () => {
     expect(ofensas, `conceptos retirados en 5.0.0: ${ofensas.join(" · ")}`).toEqual([]);
   });
 
-  /**
-   * Los tres guardas que vivían en `retirement-form.test.ts` sobre `PLAN_CARD_COPY.blurb`
-   * (2026-09-13). Las frases de apartado dejaron de pintarse en prosa y pasaron al `<?>` del
-   * título, así que su contenido se comprueba donde ahora vive: el catálogo. No juzgan estilo —
-   * cazan que alguien reescriba una entrada y se lleve por delante el hecho que la frase
-   * existía para decir.
-   */
-  it("«Horizonte» dice que alargarlo RETRASA tu fecha, no lo contrario", () => {
-    // Era cierto mientras la fecha era un cruce de capital contra un objetivo. En v2 la fecha
-    // válida es el primer mes cuyo éxito HASTA EL HORIZONTE cumple el umbral, así que alargar el
-    // horizonte la retrasa. Es la mentira más cara de las que el modelo v2 dejó atrás: invita a
-    // subir la edad límite «por si acaso» y a no entender por qué se va la fecha.
-    const { body } = HELP_TEXTS["settings.horizon_age"];
-    expect(body).not.toMatch(/no mueve tu fecha/i);
-    expect(body, "y tiene que decir lo contrario, no callarse").toMatch(/retrasa/i);
-  });
-
-  /**
-   * «Solo SWR» (2026-10-10): la tarjeta «Retirada» desapareció. El SWR cierra «Gasto en
-   * jubilación» y el umbral abre «Horizonte y exigencia», así que cada mitad de lo que decía
-   * aquella frase se comprueba ahora en la ayuda del apartado donde vive.
-   */
-  it("«Gasto en jubilación» explica la puerta de la tasa inicial: gasto del primer año contra la tasa", () => {
-    const { body } = HELP_TEXTS["retirement.section_spending"];
-    expect(body).toMatch(/tasa de retirada/i);
-    expect(body).toMatch(/primer año/i);
-    expect(body).toMatch(/inflación/i);
-  });
-
-  it("«Horizonte y exigencia» nombra el umbral de éxito que ahora abre el apartado", () => {
-    const t = HELP_TEXTS["settings.horizon_age"];
-    expect(t.title).toBe("Horizonte y exigencia");
-    expect(t.body).toMatch(/umbral/i);
-    expect(t.body).toMatch(/escenarios/i);
-  });
-
-  it("el SWR es una tasa INICIAL, no un tope mensual ni un objetivo de capital", () => {
-    const { body } = HELP_TEXTS["settings.swr"];
-    expect(body).toMatch(/inicial/i);
-    expect(body).toMatch(/primer año/i);
-    expect(body).toMatch(/no un tope mes a mes/i);
-    expect(body).toMatch(/puente/i);
-  });
-
   it("ninguna ayuda resucita las reglas de retirada ni el modo de gasto («solo SWR»)", () => {
     const prohibidas = [
       "regla de retirada",
@@ -150,12 +105,6 @@ describe("catálogo de descripciones", () => {
       }
     }
     expect(ofensas, `conceptos retirados con «solo SWR»: ${ofensas.join(" · ")}`).toEqual([]);
-  });
-
-  it("«Pensión» dice qué hace el puente, y que en ese tramo no hay aportaciones", () => {
-    const { body } = HELP_TEXTS["retirement.pension"];
-    expect(body).toMatch(/puente/i);
-    expect(body).toMatch(/aportaciones/i);
   });
 
   it("cada texto tiene título corto y cuerpo con sustancia", () => {

@@ -8,14 +8,8 @@ import type {
   ProjectionSeriesApi,
 } from "../api/types";
 import { MetricCard } from "../components/MetricCard";
-import { neededCapitalTile } from "../lib/retirement-tiles";
 import { Switch } from "../components/Switch";
-import {
-  METRIC_DASH,
-  formatCurrencyNumber,
-  formatPercentAmount,
-  parseDisplayDecimal,
-} from "../lib/format";
+import { formatPercentAmount, parseDisplayDecimal } from "../lib/format";
 import {
   formatProjectionMilestoneCompactLabel,
   type LedgerPersonScope,
@@ -23,7 +17,6 @@ import {
 import {
   PROJECTION_FOCUS_STORAGE_KEY,
   PROJECTION_INFLATION_ADJUSTED_STORAGE_KEY,
-  neededCapitalAtRetirement,
   projectionXTickLabel,
   resolveProjectionAxisAgeMode,
 } from "../lib/projection-chart";
@@ -91,22 +84,6 @@ export function ProjectionView({
     return pick;
   })();
   const axisAnchor = projectionSeries?.anchor_date_ymd?.trim() || null;
-  /**
-   * El mes que rotula el pseudo-hito «jubilación» de la tira de KPIs (modelo v2, C4).
-   *
-   * Con `success_threshold` es la FECHA VÁLIDA (`safe_date_month_index`): el mes en que jubilarse
-   * cumple tu umbral. Con cualquier otra base manda `jubilacion_month_index`, que es el mes en que
-   * esta simulación se jubila de verdad —la edad que pediste—; rotular ahí la fecha válida diría
-   * «te jubilas aquí» sobre un mes en el que el plan simulado no hace nada.
-   *
-   * Con `not_reachable`/`pending` los dos son `null` y el pseudo-hito no existe: no hay fecha que
-   * fingir.
-   */
-  const jubilacionMiNo =
-    (projectionSeries?.retirement_date_basis === "success_threshold"
-      ? projectionSeries?.safe_date_month_index
-      : projectionSeries?.jubilacion_month_index) ?? null;
-
   // Preferencia PERSISTIDA de «Vista cercana» (la memoria de escritorio)…
   const [focusModeStored, setFocusModeStored] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
@@ -178,47 +155,9 @@ export function ProjectionView({
     return n != null && Number.isFinite(n) ? n : 0;
   }, [installation?.installation.annual_inflation_assumption_percent]);
 
-  /**
-   * El tile «Capital necesario hoy» (modelo v2, M9/C4). Reemplaza a «Objetivo al jubilarte»: en v2
-   * no hay objetivo — hay el LÍQUIDO que, con tu mezcla de activos, sostiene el plan a tu umbral.
-   *
-   * **La cifra principal NO se toca con el toggle**: `needed_capital_today` viaja en euros de HOY
-   * por contrato, redondeada a cientos hacia arriba, y es la MISMA, al euro, en Jubilación,
-   * Resumen y Proyección. Deflactarla la haría discrepar de sus dos gemelas sin que nada fallara.
-   *
-   * Valor y estado salen de `neededCapitalTile` (`lib/retirement-tiles.ts`), la MISMA función que
-   * pinta la tarjeta de Jubilación (2026-10-10): aquí la sublínea decía «en euros de hoy · para que
-   * aguanten N de cada 100», que es la explicación de la cifra y vive en su `<?>`.
-   */
-  const neededTile = useMemo(
-    () => (projectionSeries ? neededCapitalTile(projectionSeries, currencyIso) : null),
-    [projectionSeries, currencyIso],
-  );
-
-  /**
-   * La SEGUNDA línea del tile: el capital necesario en la fecha válida, leído de la curva en
-   * `safe_date_series_position`. Esta sí sigue el toggle —es un importe de un mes futuro— y por
-   * eso la base viaja pegada al importe en vez de re-derivarse del estado del interruptor:
-   * «toggle activo con inflación 0» y «toggle apagado» dan el MISMO número con bases distintas.
-   *
-   * Ausente mientras el nivel 2 calcula la curva (`needed_capital_curve_state: "computing"`): la
-   * línea simplemente no se pinta, que es lo correcto — un importe inventado ahí sería una
-   * promesa que el sorteo aún no ha hecho.
-   */
-  const neededAtRetirement = useMemo(
-    () =>
-      neededCapitalAtRetirement(
-        projectionSeries,
-        inflationAdjusted,
-        projectionInflationPct,
-      ),
-    [projectionSeries, inflationAdjusted, projectionInflationPct],
-  );
-
   // Con el toggle de inflación activo (y inflación > 0), los hitos se expresan en euros de hoy: el
   // backend ya cruza los mismos umbrales (1M, 2.5M…) sobre el patrimonio deflactado, así que el
   // marcador del chart cae sobre la curva deflactada y la KPI muestra "1M € de hoy hacia ~año".
-  // La jubilación no se ve afectada por inflación (su mes de cruce es invariante).
   //
   // El `useMemo` NO es cosmético: era una IIFE, así que cada render del padre devolvía un array
   // nuevo → `focusWindow` (memoizado sobre `milestones`) se recalculaba → su efecto reescribía
@@ -228,27 +167,16 @@ export function ProjectionView({
       inflationAdjusted &&
       projectionInflationPct > 0 &&
       (projectionSeries?.milestones_real?.length ?? 0) > 0;
-    const base =
+    return (
       (useRealMilestones
         ? projectionSeries?.milestones_real
-        : projectionSeries?.milestones) ?? [];
-    if (jubilacionMiNo !== null) {
-      return [
-        ...base,
-        {
-          target: "jubilacion",
-          reached_month_index: jubilacionMiNo,
-          reached_date_ymd: "",
-        },
-      ];
-    }
-    return base;
+        : projectionSeries?.milestones) ?? []
+    );
   }, [
     inflationAdjusted,
     projectionInflationPct,
     projectionSeries?.milestones,
     projectionSeries?.milestones_real,
-    jubilacionMiNo,
   ]);
 
   return (
@@ -297,40 +225,11 @@ export function ProjectionView({
           {nextMilestones.length > 0 ? (
             <div className="metric-grid workspace-kpi-strip">
               {nextMilestones.map((m) => {
-                const isJubilacion = m.target === "jubilacion";
                 return (
                   <MetricCard
                     key={`${m.target}-${m.reached_month_index}`}
-                    label={isJubilacion ? "Capital necesario hoy" : "Hito"}
-                    value={
-                      isJubilacion
-                        ? (neededTile?.value ?? METRIC_DASH)
-                        : formatProjectionMilestoneCompactLabel(m.target)
-                    }
-                    helpId={isJubilacion ? "retirement.needed_capital" : undefined}
-                    // Debajo, solo VALOR o ESTADO (2026-10-10): el motivo de una ausencia —el
-                    // mismo que en Jubilación— y la lectura de la curva en la fecha válida cuando
-                    // el nivel 2 ya la ha resuelto, con su base pegada al importe porque esa sí
-                    // sigue el interruptor.
-                    detail={
-                      isJubilacion
-                        ? [
-                            neededTile?.subtitle ?? null,
-                            neededAtRetirement.amount !== null
-                              ? `al jubilarte: ${formatCurrencyNumber(
-                                  neededAtRetirement.amount,
-                                  currencyIso,
-                                )} ${
-                                  neededAtRetirement.basis === "today"
-                                    ? "(euros de hoy)"
-                                    : "(euros de ese mes)"
-                                }`
-                              : null,
-                          ]
-                            .filter((l): l is string => l !== null)
-                            .join(" · ") || undefined
-                        : undefined
-                    }
+                    label="Hito"
+                    value={formatProjectionMilestoneCompactLabel(m.target)}
                     parenthetical={`~${projectionXTickLabel(
                       m.reached_month_index,
                       projectionSeries.months,

@@ -2,6 +2,12 @@
 
 Refresca de UI completa, **solo frontend**: no toca handlers, datos ni endpoints. Origen: bundle de Claude Design exportado (`futurefin/`). El diseño se llamó "V1" en el chat de iteración — el resto de variantes (V2–V4) se descartaron.
 
+> **6.0.0 (F2-2, D-7):** la pestaña «Jubilación» (`views/RetirementView.tsx`) y sus módulos
+> (`lib/plan-*`, `lib/retirement-*`, `lib/risk-*`, `lib/stale-data.ts`, `lib/phase-strip.ts`) se
+> retiraron. Las secciones y comandos de re-verificación de este doc que los citan describen 5.x;
+> las clases `.retirement-*`/`.plan-card-*` de `App.css` quedan SIN consumidor (limpieza
+> pendiente: `grep -c "retirement-" apps/web/src/App.css`).
+
 > **Si haces cambios visuales, lee este doc primero.** Los tokens y reglas viven aquí; no improvises colores ni clases nuevas en App.css.
 
 ## Identidad

@@ -52,16 +52,10 @@ import {
   ledgerViewQs,
   resolveLedgerPersonScope,
 } from "./lib/ledger";
-import { savingsSourceUsesTransactions } from "./lib/fire";
-import {
-  isEmptyRetirementProfilePatch,
-  normalizeRetirementProfile,
-} from "./lib/retirementProfile";
 import { buildAssetWriteBody } from "./lib/asset-form";
 import { readFileAsBase64 } from "./lib/files";
 import { chartPerf } from "./lib/perf";
 import { PROJECTION_FOCUS_STORAGE_KEY } from "./lib/projection-chart";
-import { curvePollDelayMs, shouldPollNeededCurve } from "./lib/stale-data";
 import { assetOwnerNameById } from "./lib/chart-legend";
 import type { LedgerPersonScope } from "./lib/ledger";
 import {
@@ -166,9 +160,6 @@ const GastosView = lazy(() =>
 const UpcomingView = lazy(() =>
   import("./views/UpcomingView").then((m) => ({ default: m.UpcomingView })),
 );
-const RetirementView = lazy(() =>
-  import("./views/RetirementView").then((m) => ({ default: m.RetirementView })),
-);
 const ProjectionView = lazy(() =>
   import("./views/ProjectionView").then((m) => ({ default: m.ProjectionView })),
 );
@@ -200,11 +191,7 @@ import type {
   MemberApiRow,
   PlanningAmountBasisApi,
   PlanningFlowApiRow,
-  ProjectionBandsApi,
   ProjectionSeriesApi,
-  RetirementProfileApi,
-  RetirementProfilePatchApi,
-  RetirementProfileResponseApi,
   SummaryResponse,
   UserResponse,
 } from "./api/types";
@@ -387,21 +374,6 @@ export default function App() {
   const [installationProjectionSaving, setInstallationProjectionSaving] =
     useState(false);
 
-  /**
-   * Perfil de jubilación del usuario de la sesión (5.0.0, D13). Vive AQUÍ y no en
-   * `RetirementView` porque es un input del motor: lo consume también el Resumen (el SWR de la
-   * tarjeta de Autonomía) y toda escritura obliga a recargar la serie de proyección. `null`
-   * mientras no ha llegado — nunca se sustituye por el default para pintar, o la vista
-   * enseñaría un plan que no es el del usuario.
-   */
-  const [retirementProfile, setRetirementProfile] =
-    useState<RetirementProfileApi | null>(null);
-  const [retirementProfileBusy, setRetirementProfileBusy] = useState(false);
-  const [retirementProfileError, setRetirementProfileError] = useState<
-    string | null
-  >(null);
-  const [retirementProfileSaving, setRetirementProfileSaving] = useState(false);
-
   const [pendingUsers, setPendingUsers] = useState<UserResponse[]>([]);
   const [pendingUsersBusy, setPendingUsersBusy] = useState(false);
   const [pendingUsersError, setPendingUsersError] = useState<string | null>(
@@ -570,33 +542,6 @@ export default function App() {
   const [projectionBusy, setProjectionBusy] = useState(false);
   const [projectionError, setProjectionError] = useState<string | null>(null);
 
-  /**
-   * Bandas de Monte Carlo (5.0.0 WP6b, D28) — la sección «Riesgo» de Jubilación.
-   *
-   * Es una SEGUNDA petición, más cara que la serie (un MISS mide ~55 ms en release contra el
-   * sub-ms de un HIT de proyección), así que:
-   *
-   *  - se pide **después** de la serie, nunca en paralelo: la línea determinista es lo que el
-   *    usuario ve primero y el abanico es su contexto, no al revés;
-   *  - se pide **solo en la pestaña Jubilación**, que es la única que la dibuja. El KPI «Éxito
-   *    del plan» del Resumen NO la necesita: sus tres campos llegan dentro de `summary.plan`,
-   *    del MISMO cache de bandas del servidor (así el tile y el fan chart citan la misma
-   *    ejecución de Monte Carlo, nunca dos sorteos distintos del mismo plan);
-   *  - **no se pide en Hogar**: el servidor devuelve 400 `household_bands_unavailable` porque
-   *    los percentiles no suman entre miembros. La vista lo dice en vez de pedirlo y fallar.
-   *
-   * Refresco: se recarga con la serie. Toda mutación que invalida la proyección en el servidor
-   * invalida también las bandas (los dos mapas se borran juntos), así que una banda vieja al
-   * lado de una línea nueva —dos cifras que se contradicen en la misma pantalla— no puede
-   * ocurrir mientras el cliente refetchee las dos a la vez.
-   */
-  const [projectionBands, setProjectionBands] =
-    useState<ProjectionBandsApi | null>(null);
-  const [projectionBandsBusy, setProjectionBandsBusy] = useState(false);
-  const [projectionBandsError, setProjectionBandsError] = useState<string | null>(
-    null,
-  );
-
   // Serie histórica (snapshots pasados). Es un enhancement del chart: cualquier
   // fallo cae a `null` en silencio (sin busy/error state) y el chart degrada a
   // solo-futuro. Se carga junto a la proyección en la pestaña Proyección.
@@ -631,11 +576,6 @@ export default function App() {
     "closed" | "assets" | "liabilities"
   >("closed");
   const [snapshotPromptBusy, setSnapshotPromptBusy] = useState(false);
-
-  const [retirementBudgetSnapshot, setRetirementBudgetSnapshot] =
-    useState<BudgetSnapshotApi | null>(null);
-  const [retirementBusy, setRetirementBusy] = useState(false);
-  const [retirementError, setRetirementError] = useState<string | null>(null);
 
   const [userProfileOpen, setUserProfileOpen] = useState(false);
   const [userBirthDraft, setUserBirthDraft] = useState("");
@@ -836,30 +776,6 @@ export default function App() {
       setInstallationGate("fetch_failed");
     } finally {
       setInstallationBusy(false);
-    }
-  }, []);
-
-  /**
-   * Perfil de jubilación del usuario (5.0.0). Se carga con la instalación, en el mismo momento:
-   * la ruta devuelve los DEFAULTS cuando no hay nada guardado, así que no hay estado «sin
-   * perfil» que gestionar — solo «todavía no ha llegado».
-   */
-  const loadRetirementProfile = useCallback(async () => {
-    setRetirementProfileBusy(true);
-    setRetirementProfileError(null);
-    try {
-      const body = await apiGet<RetirementProfileResponseApi>(
-        "/v1/auth/me/retirement-profile",
-      );
-      // El perfil se toma tal y como lo publica el servidor: YA resuelto. El modelo v2 retiró
-      // `target_basis_stored` —el único campo cuya elección ALMACENADA difería de la resuelta—
-      // junto con el objetivo descontado (C1/M4), así que no queda nada que recomponer aquí.
-      setRetirementProfile(normalizeRetirementProfile(body.profile));
-    } catch (e: unknown) {
-      setRetirementProfile(null);
-      setRetirementProfileError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRetirementProfileBusy(false);
     }
   }, []);
 
@@ -1238,60 +1154,6 @@ export default function App() {
     }
   }, [ledgerPersonScope]);
 
-  /**
-   * Recarga de la serie **SIN tocar los flags de carga** (W13, informe del owner 2026-09-07).
-   *
-   * `loadProjectionSeriesPage` enciende `projectionBusy` y, si algo falla, vacía la serie: las
-   * dos cosas son correctas para una navegación (no hay nada que enseñar todavía) y ruinosas
-   * para una revalidación (hay una respuesta buena en pantalla y el usuario está mirándola). Esta
-   * variante es la que usa el sondeo del nivel 2: si la respuesta llega, sustituye el dato en
-   * sitio; si falla, **no pasa nada** — lo que ya estaba pintado sigue siendo válido y el
-   * siguiente intento lo corregirá.
-   */
-  const refreshProjectionSeriesQuietly = useCallback(async () => {
-    try {
-      await fetchProjectionTwoPhase(ledgerPersonScope, (data) => {
-        setProjectionSeries(data);
-      });
-    } catch {
-      /* revalidación silenciosa: lo último bueno se queda en pantalla */
-    }
-  }, [ledgerPersonScope]);
-
-  /**
-   * `GET /v1/projection/bands` — el abanico de percentiles de la sección «Riesgo».
-   *
-   * **Solo en la vista «Yo»**: en Hogar el servidor contesta 400 `household_bands_unavailable`
-   * (los percentiles no suman entre miembros), así que ni se pide — se limpia el estado y la
-   * vista pinta «Solo en tu vista (Yo)». Pedirlo para enseñar el error sería gastar un request
-   * en descubrir algo que el cliente ya sabe.
-   *
-   * Sin `paths` ni `seed`: los defaults del servidor (500 caminos, semilla estable por usuario)
-   * son EXACTAMENTE la petición cuyo resultado alimenta también el KPI del Resumen, así que las
-   * dos superficies caen en la misma entrada de cache y citan el mismo sorteo.
-   */
-  const loadProjectionBands = useCallback(async () => {
-    if (ledgerPersonScope !== "mine") {
-      setProjectionBands(null);
-      setProjectionBandsError(null);
-      return;
-    }
-    setProjectionBandsBusy(true);
-    setProjectionBandsError(null);
-    try {
-      const data = await apiGet<ProjectionBandsApi>(
-        "/v1/projection/bands?view=mine",
-      );
-      setProjectionBands(data);
-    } catch (e: unknown) {
-      // El abanico es contexto, no el plan: su fallo no puede tumbar la vista de Jubilación.
-      setProjectionBands(null);
-      setProjectionBandsError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setProjectionBandsBusy(false);
-    }
-  }, [ledgerPersonScope]);
-
   const loadHistorySeries = useCallback(async () => {
     // Purga síncrona antes del await: en un toggle Hogar↔Mío la serie del scope anterior no debe
     // sobrevivir la ventana de fetch (se fusionaría con la proyección del nuevo scope → empalme
@@ -1367,89 +1229,6 @@ export default function App() {
       void loadCashflowSeries();
     },
     [loadHistorySeries, loadCashflowSeries],
-  );
-
-  const loadRetirementPage = useCallback(
-    async (opts?: { silent?: boolean; skipProjection?: boolean }) => {
-      const silent = opts?.silent === true;
-      // skipProjection: usado por el prefetch tras login para no volver a pegar
-      // a /v1/projection/series (lo hace loadSummaryPage). Refetcheamos
-      // proyección en navegación normal (refresh tras mutaciones).
-      const skipProjection = opts?.skipProjection === true;
-      if (!silent) {
-        setRetirementBusy(true);
-        setRetirementError(null);
-        setProjectionError(null);
-      }
-      try {
-        const qs = ledgerViewQs(ledgerPersonScope);
-        const budPromise = fetch(apiUrl(`/v1/budget${qs}`), defaultFetchInit);
-        const projPromise = skipProjection
-          ? Promise.resolve(null as Response | null)
-          : fetch(apiUrl(`/v1/projection/series${qs}`), defaultFetchInit);
-        // El preview del target en los modos con promedio (B y C) consume los equivalentes
-        // efectivos del summary; lo cargamos aquí para que sea fresco y coherente con el scope
-        // activo. Independiente y silencioso: cualquier fallo degrada el preview al
-        // presupuesto (modo A), sin bloquear budget/proyección. Solo se lanza en B/C: en
-        // presupuesto RetirementView usa la base del budget y este fetch sería inútil.
-        if (
-          savingsSourceUsesTransactions(
-            installation?.installation?.fire_settings?.savings_source,
-          )
-        ) {
-          void (async () => {
-            try {
-              const res = await fetch(apiUrl(`/v1/summary${qs}`), defaultFetchInit);
-              if (res.status === 403 || res.status === 404) {
-                setSummary(null);
-              } else if (res.ok) {
-                setSummary((await res.json()) as SummaryResponse);
-              }
-            } catch {
-              /* stale summary tolerado: el preview degrada a presupuesto */
-            }
-          })();
-        }
-        const [budRes, projRes] = await Promise.all([budPromise, projPromise]);
-        if (budRes.status === 403 || budRes.status === 404) {
-          setRetirementBudgetSnapshot(null);
-        } else if (!budRes.ok) {
-          throw await apiErrorFromResponse(budRes);
-        } else {
-          const raw = (await budRes.json()) as BudgetSnapshotApi;
-          setRetirementBudgetSnapshot({
-            ...raw,
-            entries: Array.isArray(raw.entries) ? raw.entries : [],
-          });
-        }
-        if (projRes) {
-          if (projRes.status === 403 || projRes.status === 404) {
-            setProjectionSeries(null);
-          } else if (!projRes.ok) {
-            throw await apiErrorFromResponse(projRes);
-          } else {
-            setProjectionSeries((await projRes.json()) as ProjectionSeriesApi);
-          }
-        }
-        // Las bandas van DESPUÉS y sin `await` (§Riesgo, D28): son la segunda petición, la cara,
-        // y la sección que las dibuja está más abajo en la página. Bloquear aquí retrasaría los
-        // KPIs y el chart determinista, que es lo primero que se mira. Dentro del `try` a
-        // propósito: si el presupuesto o la serie fallaron, la vista ya está enseñando un error
-        // y un abanico encima no aporta nada.
-        void loadProjectionBands();
-      } catch (e: unknown) {
-        if (!silent) {
-          setRetirementBudgetSnapshot(null);
-          if (!skipProjection) setProjectionSeries(null);
-          setRetirementError(e instanceof Error ? e.message : String(e));
-        }
-      } finally {
-        if (!silent) {
-          setRetirementBusy(false);
-        }
-      }
-    },
-    [ledgerPersonScope, installation, loadProjectionBands],
   );
 
   const loadCategories = useCallback(async () => {
@@ -1538,8 +1317,6 @@ export default function App() {
         return budgetLoading || assetsBusy || allocationRulesBusy;
       case "upcoming":
         return planningLoading;
-      case "retirement":
-        return retirementBusy;
       case "projection":
         return projectionBusy;
       case "settings":
@@ -1555,7 +1332,6 @@ export default function App() {
     budgetLoading,
     allocationRulesBusy,
     planningLoading,
-    retirementBusy,
     projectionBusy,
     categoriesBusy,
   ]);
@@ -1600,15 +1376,6 @@ export default function App() {
           importChunk: () => import("./views/GastosView"),
         },
         {
-          tab: "retirement",
-          importChunk: () => import("./views/RetirementView"),
-          // skipProjection: loadSummaryPage ya cargó /v1/projection/series; un
-          // segundo fetch saturaría el endpoint pesado y dispararía re-render
-          // del chart con la misma data.
-          loadData: () =>
-            loadRetirementPage({ silent: true, skipProjection: true }),
-        },
-        {
           tab: "upcoming",
           importChunk: () => import("./views/UpcomingView"),
           loadData: () => loadPlanningPage(),
@@ -1643,7 +1410,6 @@ export default function App() {
       loadBudgetPage,
       loadAllocationRules,
       loadPlanningPage,
-      loadRetirementPage,
     ],
   );
 
@@ -1724,9 +1490,6 @@ export default function App() {
   useEffect(() => {
     if (user) {
       void loadInstallation();
-      // El perfil no depende de la membresía: es dato del usuario del token y lo edita
-      // cualquier rol, `viewer` incluido (`patch_retirement_profile_core`).
-      void loadRetirementProfile();
     } else {
       setInstallation(null);
       setInstallationGate("loading");
@@ -1735,10 +1498,8 @@ export default function App() {
       setPendingUsersError(null);
       setSummary(null);
       setSummaryError(null);
-      setRetirementProfile(null);
-      setRetirementProfileError(null);
     }
-  }, [user, loadInstallation, loadRetirementProfile]);
+  }, [user, loadInstallation]);
 
   // Los drafts de zona horaria e inflación/modo edad se re-inicializan SOLO al cambiar de
   // instalación, no en cada refresh del objeto `installation`: desde que ambos formularios
@@ -1842,66 +1603,6 @@ export default function App() {
     loadProjectionSeriesPage,
     loadHistorySeries,
     loadCashflowSeries,
-  ]);
-
-  useEffect(() => {
-    if (!user || !hasMembership || activeTab !== "retirement") {
-      return;
-    }
-    void loadRetirementPage();
-    // Solo recargar bloqueante al cambiar sesión / pestaña / vista; no cuando `user` muta tras PATCH pensión.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id, hasMembership, activeTab, loadRetirementPage]);
-
-  /**
-   * Sondeo del NIVEL 2 de la proyección (W13, informe del owner 2026-09-07).
-   *
-   * `needed_capital_curve` se calcula en segundo plano y la respuesta se declara `computing`
-   * (`handlers/projection.rs`, `CURVE_STATE_COMPUTING`): la curva llega en un GET POSTERIOR que
-   * **nadie pedía**. Sin un cambio de pestaña o una mutación, Jubilación se quedaba con
-   * «Calculando el capital necesario por edad…» indefinidamente y el chart sin su línea auxiliar.
-   *
-   * Las cotas viven puras y testeadas en `lib/stale-data.ts`: 2 s con backoff ×1,5 hasta 15 s,
-   * `CURVE_POLL_MAX_ATTEMPTS` intentos, y **parada seca** en `ready`/`unavailable` (los dos son
-   * finales; seguir pidiendo con `unavailable` sería un bucle contra una respuesta que no va a
-   * cambiar). El refetch es el SILENCIOSO: no toca `projectionBusy`, así que la vista revalida
-   * en sitio y lo único que se mueve es su indicador discreto.
-   *
-   * El contador vive en un ref porque cada respuesta trae un objeto nuevo y re-dispara el efecto:
-   * con el contador en estado, el backoff se reiniciaría en cada vuelta y el «sondeo suave»
-   * volvería a ser un bucle a 2 s.
-   */
-  const curvePollAttemptsRef = useRef(0);
-  useEffect(() => {
-    const state = projectionSeries?.needed_capital_curve_state;
-    if (state !== "computing") {
-      curvePollAttemptsRef.current = 0;
-      return;
-    }
-    const active =
-      user != null &&
-      hasMembership &&
-      (activeTab === "retirement" || activeTab === "projection");
-    if (
-      !shouldPollNeededCurve({
-        state,
-        attempts: curvePollAttemptsRef.current,
-        active,
-      })
-    ) {
-      return;
-    }
-    const id = window.setTimeout(() => {
-      curvePollAttemptsRef.current += 1;
-      void refreshProjectionSeriesQuietly();
-    }, curvePollDelayMs(curvePollAttemptsRef.current));
-    return () => window.clearTimeout(id);
-  }, [
-    projectionSeries,
-    user,
-    hasMembership,
-    activeTab,
-    refreshProjectionSeriesQuietly,
   ]);
 
   useEffect(() => {
@@ -2396,56 +2097,6 @@ export default function App() {
     } catch (e: unknown) {
       setInstallationError(e instanceof Error ? e.message : String(e));
       throw e;
-    }
-  }
-
-  /**
-   * Guarda un PATCH **mínimo** del perfil de jubilación y devuelve el perfil resuelto que
-   * responde el servidor (lo necesita la vista para saber que el guardado cuajó — ver
-   * `buildRetirementProfilePatch`).
-   *
-   * El perfil es un input del motor (umbral, SWR, regla, edad límite y la fase entera): tras
-   * guardarlo se recarga la serie de proyección igual que hace
-   * `saveFireSettingsPatch`, para que el chart de Jubilación / Resumen / Proyección no se quede
-   * enseñando el plan anterior hasta el siguiente cambio de pestaña.
-   *
-   * A diferencia de `fire_settings`, esto NO es owner-only: es el dato personal del usuario de
-   * la sesión, y el servidor lo acepta de cualquier rol.
-   */
-  async function saveRetirementProfilePatch(
-    patch: RetirementProfilePatchApi,
-  ): Promise<RetirementProfileApi | null> {
-    if (isEmptyRetirementProfilePatch(patch)) return retirementProfile;
-    setRetirementProfileError(null);
-    setRetirementProfileSaving(true);
-    try {
-      const res = await fetch(apiUrl("/v1/auth/me/retirement-profile"), {
-        ...defaultFetchInit,
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-      });
-      if (!res.ok) {
-        throw await apiErrorFromResponse(res);
-      }
-      const body = (await res.json()) as RetirementProfileResponseApi;
-      const saved = normalizeRetirementProfile(body.profile);
-      setRetirementProfile(saved);
-      // S1 (5.0.0 U1b) — este PATCH acepta también `birth_date`, y Jubilación lo usa para que la
-      // estrategia por edad no obligue a ir a «Tu cuenta» a mitad de la elección. Sin
-      // resincronizar aquí, `user` seguiría diciendo que falta la fecha que se acaba de guardar:
-      // el campo volvería a pedirla y el resto de la app la seguiría dando por ausente.
-      setUser((u) => (u && u.birth_date !== body.birth_date ? { ...u, birth_date: body.birth_date } : u));
-      void loadProjectionSeriesPage();
-      // El perfil ES el input del sorteo (estrategia, umbral, regla, puente): sin esto la
-      // sección «Riesgo» seguiría enseñando el abanico del plan anterior junto a la línea nueva.
-      void loadProjectionBands();
-      return saved;
-    } catch (e: unknown) {
-      setRetirementProfileError(e instanceof Error ? e.message : String(e));
-      throw e;
-    } finally {
-      setRetirementProfileSaving(false);
     }
   }
 
@@ -3922,14 +3573,7 @@ export default function App() {
             className={
               activeTab === "projection"
                 ? "app-main app-main--projection-fullbleed"
-                : // Jubilación usa el ancho ESTÁNDAR, como el resto de la app (2026-09-13).
-                  // Tuvo el suyo propio entre W13 y hoy: las dos columnas no cabían en 66rem
-                  // mientras cada apartado llevaba un párrafo y cada campo su `<small>`. Sacada
-                  // esa prosa a los `<?>`, el mismo plan cabe en columnas de 504px y el motivo
-                  // desapareció. La nota de su retirada está en `App.css`, junto a
-                  // `.retirement-layout` — no escribas aquí el nombre de la clase: el design
-                  // system cuenta sus consumidores con un `grep -c` sobre ESTE fichero.
-                  "app-main"
+                : "app-main"
             }
           >
         {/* Aviso de ámbito (D9/D32): el Hogar es un agregado informativo. Va en TODAS las
@@ -4021,8 +3665,6 @@ export default function App() {
             open
             installation={installation.installation}
             assetCategories={assetCategories}
-            userBirthDate={user?.birth_date ?? null}
-            onSaveRetirementProfile={saveRetirementProfilePatch}
             onFinished={() => {
               setOnboardingForced(false);
               setOnboardingSkipped(false);
@@ -4040,7 +3682,6 @@ export default function App() {
         <Suspense fallback={<p className="muted tight">Cargando…</p>}>
         {activeTab === "summary" ? (
           <SummaryView
-            navigate={navigate}
             // Los CTA de estado vacío abren un modal de alta: sin `canEditLedger` el modal no
             // se monta (la vista destino lo gatea), así que el botón llevaría a una pantalla
             // donde no pasa nada. Sin `onAction`, `EmptyState` se queda en texto.
@@ -4063,10 +3704,8 @@ export default function App() {
                 : undefined
             }
             installation={installation}
-            retirementProfile={retirementProfile}
             loading={installationBusy}
             hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
             summary={summary}
             summaryBusy={summaryBusy}
             projectionSeries={projectionSeries}
@@ -4337,32 +3976,6 @@ export default function App() {
               setPlanningModalOpen(true);
             }}
           />
-        ) : activeTab === "retirement" ? (
-          <RetirementView
-            installation={installation}
-            installationBusy={installationBusy}
-            hasMembership={hasMembership}
-            ledgerPersonScope={ledgerPersonScope}
-            projectionSeries={projectionSeries}
-            projectionBusy={projectionBusy}
-            projectionBands={projectionBands}
-            projectionBandsBusy={projectionBandsBusy}
-            projectionBandsError={projectionBandsError}
-            retirementBudgetSnapshot={retirementBudgetSnapshot}
-            summary={summary}
-            retirementBusy={retirementBusy}
-            retirementError={retirementError}
-            retirementProfile={retirementProfile}
-            retirementProfileBusy={retirementProfileBusy}
-            retirementProfileError={retirementProfileError}
-            retirementProfileSaving={retirementProfileSaving}
-            user={user}
-            calendarTz={installation?.installation.calendar_tz?.trim() || "UTC"}
-            scopeReadOnly={scopeReadOnly}
-            onSaveRetirementProfile={saveRetirementProfilePatch}
-            onSelectMineScope={() => setLedgerPersonScope("mine")}
-            navigate={navigate}
-          />
         ) : activeTab === "projection" ? (
           <ProjectionView
             installation={installation}
@@ -4456,7 +4069,6 @@ export default function App() {
             onToggleMcpWrite={(enabled) => void saveInstallationMcpWrite(enabled)}
             settingsSubTab={settingsSubTab}
             navigateSettingsSubTab={navigateSettingsSubTab}
-            navigate={navigate}
             visibleSettingsSubTabs={visibleSettingsSubTabs}
             pendingUsers={pendingUsers}
             pendingUsersBusy={pendingUsersBusy}

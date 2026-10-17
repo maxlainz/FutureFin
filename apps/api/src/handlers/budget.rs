@@ -108,10 +108,6 @@ pub struct BudgetTotalsResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub income_monthly_equivalent: Decimal,
-    /// Sum of income entries with `persists_after_retirement = true`.
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub income_retirement_monthly_equivalent: Decimal,
     /// Gasto mensual del plan: partidas persistidas **+ cuotas de pasivos activos**. Desde la
     /// 3.7.0 las cuotas son una partida más de `entries`, así que este total es exactamente la
     /// suma de los `entries` de scope `expense` — antes excluía las cuotas, que se sumaban
@@ -119,14 +115,6 @@ pub struct BudgetTotalsResponse {
     #[serde(with = "rust_decimal::serde::str")]
     #[schema(value_type = String)]
     pub expense_regular_monthly_equivalent: Decimal,
-    /// Suma de las partidas de gasto que continúan tras la jubilación (`ends_at_retirement =
-    /// false`). Cuenta **solo partidas persistidas**: una cuota de pasivo tiene fecha de fin de
-    /// plan, así que por definición no es gasto post-jubilación. Es el campo que consume el
-    /// cálculo FIRE (`RetirementView`) — no lo confundas con `expense_regular_*` (incidente de
-    /// la divergencia 2–3× en la previa del formulario, v1.3.0).
-    #[serde(with = "rust_decimal::serde::str")]
-    #[schema(value_type = String)]
-    pub expense_retirement_monthly_equivalent: Decimal,
     /// Idéntico a `expense_regular_monthly_equivalent` desde la 3.7.0 (ya no hay una componente
     /// derivada que sumarle). Se mantiene por compatibilidad de contrato.
     #[serde(with = "rust_decimal::serde::str")]
@@ -385,9 +373,7 @@ pub(crate) fn ledger_budget_totals_from_parts(
     today: NaiveDate,
 ) -> Result<BudgetTotalsResponse, ApiError> {
     let mut income_m = Decimal::ZERO;
-    let mut income_retirement_m = Decimal::ZERO;
     let mut expense_reg = Decimal::ZERO;
-    let mut expense_retirement_m = Decimal::ZERO;
 
     let month_first_today =
         NaiveDate::from_ymd_opt(today.year(), today.month(), 1).unwrap_or(today);
@@ -396,9 +382,6 @@ pub(crate) fn ledger_budget_totals_from_parts(
         match r.scope.as_str() {
             "income" => {
                 income_m += me;
-                if r.persists_after_retirement {
-                    income_retirement_m += me;
-                }
             }
             "expense" => {
                 // #124: la partida vencida no se paga — fuera de los totales (misma regla y
@@ -409,17 +392,13 @@ pub(crate) fn ledger_budget_totals_from_parts(
                     continue;
                 }
                 expense_reg += me;
-                if !r.ends_at_retirement {
-                    expense_retirement_m += me;
-                }
             }
             _ => {}
         }
     }
 
     // Las cuotas de los pasivos activos son gasto del plan como cualquier otra partida: se suman
-    // DENTRO de `expense_reg`, no como una componente aparte. `expense_retirement_m` no las
-    // recibe a propósito (una cuota termina con su plan; ver el doc del campo).
+    // DENTRO de `expense_reg`, no como una componente aparte.
     for d in derived_raw {
         PaymentFrequency::parse(&d.payment_frequency)?;
         expense_reg += monthly_equivalent(d.payment_amount, &d.payment_frequency);
@@ -430,9 +409,7 @@ pub(crate) fn ledger_budget_totals_from_parts(
     Ok(BudgetTotalsResponse {
         basis: BUDGET_TOTALS_BASIS,
         income_monthly_equivalent: income_m,
-        income_retirement_monthly_equivalent: income_retirement_m,
         expense_regular_monthly_equivalent: expense_reg,
-        expense_retirement_monthly_equivalent: expense_retirement_m,
         expense_total_monthly_equivalent: expense_reg,
         net_monthly_equivalent: net,
     })
