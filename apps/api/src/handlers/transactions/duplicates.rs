@@ -165,7 +165,7 @@ pub struct DuplicatesQuery {
     path = "/v1/transactions/duplicates",
     tag = "transactions",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = solo míos; omitido → household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
         ("month" = Option<String>, Query, description = "`YYYY-MM`. Excluyente con `date_from`/`date_to`."),
         ("kind" = Option<String>, Query, description = "`expense` | `income` | `savings`."),
         ("import_id" = Option<Uuid>, Query, description = "Limita el barrido a un lote de import."),

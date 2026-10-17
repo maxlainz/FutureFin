@@ -21,7 +21,9 @@
 //! plantilla recurrente SÍ invalida (COND, corrección 4.0.0)**: sus instancias sobreviven
 //! (`ON DELETE SET NULL`) pero pierden el enlace y pasan a contar como movimientos REALES — cambia
 //! la **clasificación**, no el conjunto, y eso puede activar un mes que el promedio ignoraba
-//! (mecanismo completo en la cabecera de `delete_recurring_rule_core`, `recurring.rs`). Regresión:
+//! (mecanismo completo en la cabecera de `delete_recurring_rule_core`, `recurring.rs`). El **PATCH
+//! de plantilla (5.0.0)** invalida COND solo con `apply_to = all` (reescribe instancias); con
+//! `future` no toca `transactions` y no invalida (`update_recurring_rule_core`). Regresión:
 //! `transactions_projection_cache.rs`. Ojo: **aplicar** una regla retroactivamente (backfill) sí es
 //! una mutación del conjunto y sí invalida COND — es otra ruta, con su propio test.
 //!
@@ -68,7 +70,9 @@ pub use reconcile::{
     confirm_transfer_match, reconcile_now, reconcile_pair, suggest_transfer_matches,
     unreconcile_transaction,
 };
-pub use recurring::{delete_recurring_rule, list_recurring_rules, materialize_recurring};
+pub use recurring::{
+    delete_recurring_rule, list_recurring_rules, materialize_recurring, patch_recurring_rule,
+};
 pub use rules::{apply_rule, create_rule, delete_rule, list_rules, patch_rule};
 pub use summary::{get_category_series, get_transactions_summary};
 
@@ -78,8 +82,8 @@ pub use schema::{
     ImportBatchResponse, ImportConfirmBody, ImportConfirmResponse, ImportDecision, ImportPreviewBody,
     ImportPreviewResponse, MaterializeResponse, MonthEntry, PatchRuleBody, PatchTransactionBody,
     PendingAssignment, PreviewRow, RecurrenceSpec, ReconcilePairBody, ReconcilePairResponse,
-    ReconcileRunResponse,
-    RecurringRuleResponse, RuleResponse, TransactionResponse, TransactionsSummaryResponse,
+    PatchRecurringRuleBody, ReconcileRunResponse,
+    RecurringRuleResponse, RuleResponse, UpdateRecurringRuleResponse, TransactionResponse, TransactionsSummaryResponse,
 };
 
 // ---------------------------------------------------------------------------
@@ -363,7 +367,10 @@ pub fn transactions_router() -> Router {
         // Reglas recurrentes: los segmentos estáticos deben resolverse antes que `/{id}`.
         .route("/recurring", get(list_recurring_rules))
         .route("/recurring/materialize", post(materialize_recurring))
-        .route("/recurring/{id}", delete(delete_recurring_rule))
+        .route(
+            "/recurring/{id}",
+            patch(patch_recurring_rule).delete(delete_recurring_rule),
+        )
         // Conciliación de transferencias: los segmentos estáticos antes que `/{id}`.
         .route("/reconcile", post(reconcile_now))
         // Sugerencias (GET, lectura pura) y confirmación de una de ellas por su `match_id`. El

@@ -12,11 +12,24 @@ import type {
   FireNumberModeApi,
   FireSettingsApi,
   AvgWindowModeApi,
+  RetirementProfileApi,
   SavingsAvgBasisApi,
   SavingsSourceApi,
   TaxBracketApi,
 } from "../api/types";
 import { formatPercentAmount, parseDisplayDecimal } from "./format";
+import { normalizeRetirementProfile } from "./retirementProfile";
+
+/**
+ * Lo que la vista previa del objetivo necesita saber del PERFIL de jubilación (5.0.0): el modo
+ * y, si es manual, la cifra. Es un subconjunto declarado a propósito y no el perfil entero —
+ * así el fixture de paridad `fire-parity.json`, que sigue describiendo la BASE del objetivo,
+ * puede alimentar esta función sin arrastrar toda la forma del perfil.
+ */
+export type FireTargetModeInputs = {
+  fire_number_mode: FireNumberModeApi;
+  fire_number_manual_amount: string | null;
+};
 
 export const DEFAULT_ES_TAX_BRACKETS_API: TaxBracketApi[] = [
   { up_to: "6000", pct: "19" },
@@ -28,9 +41,6 @@ export const DEFAULT_ES_TAX_BRACKETS_API: TaxBracketApi[] = [
 
 export function defaultFireSettingsApi(): FireSettingsApi {
   return {
-    fire_number_mode: "annual_expense",
-    fire_number_manual_amount: null,
-    swr_pct: "3.5",
     taxes_enabled: true,
     tax_brackets: DEFAULT_ES_TAX_BRACKETS_API.map((b) => ({
       up_to: b.up_to,
@@ -42,7 +52,6 @@ export function defaultFireSettingsApi(): FireSettingsApi {
     expense_avg_window_months: 12,
     expense_avg_window_mode: "calendar",
     taxable_gain_ratio: "1",
-    horizon_lifespan_age: 90,
   };
 }
 
@@ -66,28 +75,10 @@ export function normalizeInstallationFireSettings(
   if (!raw || typeof raw !== "object") return defaultFireSettingsApi();
   const base = defaultFireSettingsApi();
   return {
-    fire_number_mode: (() => {
-      const m = raw.fire_number_mode as
-        | FireNumberModeApi
-        | "annual_expense_adjusted";
-      if (m === "manual" || m === "annual_expense" || m === "current_income") {
-        return m;
-      }
-      if (m === "annual_expense_adjusted") return "annual_expense";
-      return base.fire_number_mode;
-    })(),
-    fire_number_manual_amount:
-      raw.fire_number_manual_amount != null
-        ? String(raw.fire_number_manual_amount)
-        : null,
-    // fire_number_expense_adjustment_pct se RETIRÓ del tipo (Ola 1, S5/#137): el servidor
-    // no lo tiene en FireSettings y lo descartaba al deserializar — el cliente lo
-    // round-trippeaba a un agujero negro. Los backups antiguos que lo traen siguen
-    // importando: el import ya ignoraba campos desconocidos.
-    swr_pct:
-      raw.swr_pct != null && String(raw.swr_pct).trim() !== ""
-        ? String(raw.swr_pct)
-        : base.swr_pct,
+    // 5.0.0: `fire_number_mode`, `fire_number_manual_amount`, `swr_pct` y
+    // `horizon_lifespan_age` YA NO están aquí — son personales y viven en
+    // `RetirementProfileApi` (`lib/retirementProfile.ts`, decisión D13). Un JSONB guardado por
+    // 4.15.x que aún los traiga simplemente se ignora, igual que hace el servidor.
     taxes_enabled:
       typeof raw.taxes_enabled === "boolean"
         ? raw.taxes_enabled
@@ -110,11 +101,7 @@ export function normalizeInstallationFireSettings(
     income_avg_window_mode: parseAvgWindowMode(raw?.income_avg_window_mode),
     expense_avg_window_months: clampWindowMonths(raw?.expense_avg_window_months, 12),
     expense_avg_window_mode: parseAvgWindowMode(raw?.expense_avg_window_mode),
-    // #149: mismo round-trip obligatorio — sin devolverla, guardar cualquier otro ajuste la
-    // resetearía a 90 en silencio (el PATCH manda el objeto completo). Clamp 85..=105 como el
-    // servidor (`resolve_fire_settings`).
-    horizon_lifespan_age: clampHorizonLifespanAge(raw?.horizon_lifespan_age, 90),
-    // #140 fase 2: mismo round-trip obligatorio; clamp [0,1] espejo de resolve_fire_settings.
+    // #140 fase 2: round-trip obligatorio; clamp [0,1] espejo de resolve_fire_settings.
     taxable_gain_ratio: clampTaxableGainRatio(raw?.taxable_gain_ratio, "1"),
   };
 }
@@ -124,12 +111,6 @@ export function clampTaxableGainRatio(v: unknown, fallback: string): string {
   const n = typeof v === "string" ? Number(v) : typeof v === "number" ? v : NaN;
   if (!Number.isFinite(n)) return fallback;
   return String(Math.min(1, Math.max(0, n)));
-}
-
-/** Cota de la edad límite del horizonte (85..=105), espejo de `resolve_fire_settings`. */
-export function clampHorizonLifespanAge(v: unknown, fallback: number): number {
-  const n = typeof v === "number" && Number.isFinite(v) ? Math.trunc(v) : fallback;
-  return Math.min(105, Math.max(85, n));
 }
 
 /** Allow-list de la semántica de ventana; cualquier otra cosa → `calendar` (el default). */
@@ -199,14 +180,17 @@ export function savingsBasisParenthetical(
  * Paréntesis de la tarjeta Runway cuando el servidor la marca infinita: explica el porqué (la
  * retirada anual cabe en el SWR configurado en Jubilación). Solo pinta la etiqueta — la decisión
  * es exclusivamente del servidor (`runway_is_indefinite`), aquí no se re-deriva el umbral. Sin
- * `fire_settings` (instalación aún sin cargar) se omite el número en vez de inventar el default:
- * el porcentaje mostrado debe ser siempre el realmente configurado.
+ * perfil cargado se omite el número en vez de inventar el default: el porcentaje mostrado debe
+ * ser siempre el realmente configurado.
+ *
+ * 5.0.0: el SWR dejó de ser del hogar y pasó al perfil de jubilación del usuario (D13), así que
+ * esta función lee el PERFIL, no `fire_settings`.
  */
 export function runwaySwrParenthetical(
-  fire: FireSettingsApi | undefined | null,
+  profile: RetirementProfileApi | undefined | null,
 ): string {
-  if (!fire) return "dentro del SWR";
-  const swr = normalizeInstallationFireSettings(fire).swr_pct;
+  if (!profile) return "dentro del SWR";
+  const swr = normalizeRetirementProfile(profile).swr_pct;
   return `dentro del SWR ${formatPercentAmount(swr)}`;
 }
 
@@ -252,8 +236,13 @@ export function grossUpNetAnnualFire(
 }
 
 
+/**
+ * Necesidad anual NETA del objetivo, según el modo elegido. 5.0.0: el modo y el importe manual
+ * llegan del PERFIL de jubilación (D13), no de `fire_settings` — de ahí que el primer parámetro
+ * sea el subconjunto `FireTargetModeInputs` y no el objeto de ajustes del hogar.
+ */
 export function computeFireAnnualNeedNetEur(
-  fire: FireSettingsApi,
+  target: FireTargetModeInputs,
   expenseRegularMonthlyEquivalent: string | null | undefined,
   incomeMonthlyEquivalent: string | null | undefined,
   incomeRetirementMonthlyEquivalent: string | null | undefined,
@@ -264,9 +253,9 @@ export function computeFireAnnualNeedNetEur(
   const incomeM = parseDisplayDecimal(String(incomeMonthlyEquivalent ?? ""));
   const incomeRetM =
     parseDisplayDecimal(String(incomeRetirementMonthlyEquivalent ?? "")) ?? 0;
-  switch (fire.fire_number_mode) {
+  switch (target.fire_number_mode) {
     case "manual": {
-      const m = parseDisplayDecimal(String(fire.fire_number_manual_amount ?? ""));
+      const m = parseDisplayDecimal(String(target.fire_number_manual_amount ?? ""));
       return m !== null && m > 0 ? m : null;
     }
     case "annual_expense": {

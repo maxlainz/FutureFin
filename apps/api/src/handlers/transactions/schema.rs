@@ -1017,6 +1017,71 @@ pub struct RecurringRuleResponse {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Body de `PATCH /v1/transactions/recurring/{id}` (5.0.0): edita una plantilla recurrente con
+/// la semántica de un calendario — `apply_to` decide si el cambio alcanza también a lo ya
+/// materializado.
+///
+/// **Sin fechas**: la resolución de una regla es mensual y su `origin_month` es el ancla de la
+/// convergencia; moverla cambiaría qué meses le pertenecen, que es otra operación (bórrala y
+/// recréala). Campos opcionales con `clear_*` tri-estado, mismo contrato que el PATCH de
+/// transacciones: poner y borrar el MISMO campo en una llamada es 400 por campo.
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+pub struct PatchRecurringRuleBody {
+    /// **Obligatorio.** `all` = la plantilla Y todas las instancias ya materializadas
+    /// (`transactions.recurring_rule_id = id`, incluida la de origen) reciben los campos del
+    /// patch, en la misma transacción; `future` = solo la plantilla — lo materializado no cambia y
+    /// las materializaciones futuras usan los valores nuevos. Otro valor o ausente → 400
+    /// `apply_to_invalid`.
+    #[serde(default)]
+    pub apply_to: Option<String>,
+    #[serde(default)]
+    pub concept: Option<String>,
+    /// Firmado (negativo = cargo). Debe cuadrar con el `kind` efectivo
+    /// (`amount_sign_mismatch`), como el PATCH de transacciones cuando fija el importe.
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub amount: Option<Decimal>,
+    /// `expense` | `income` | `savings`. Cambiar de scope sin nombrar categoría es
+    /// `category_scope_mismatch` (la que tenía es del scope viejo).
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub category_id: Option<Uuid>,
+    /// En `income`/`expense` devuelve la plantilla a la categoría POR DEFECTO de su scope (no la
+    /// deja sin categoría: la BD no lo admite); en `savings`, sin categoría.
+    #[serde(default)]
+    pub clear_category: Option<bool>,
+    #[serde(default)]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub linked_asset_id: Option<Uuid>,
+    #[serde(default)]
+    pub clear_linked_asset: Option<bool>,
+    #[serde(default)]
+    #[schema(value_type = Option<String>, format = "uuid")]
+    pub linked_liability_id: Option<Uuid>,
+    #[serde(default)]
+    pub clear_linked_liability: Option<bool>,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub clear_notes: Option<bool>,
+}
+
+/// Respuesta del PATCH de plantilla: la plantilla ya editada (misma forma que un elemento de
+/// `GET /v1/transactions/recurring`) más el alcance aplicado y cuántas instancias se tocaron.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UpdateRecurringRuleResponse {
+    #[serde(flatten)]
+    pub rule: RecurringRuleResponse,
+    /// Eco del alcance aplicado: `all` | `future`.
+    pub apply_to: String,
+    /// Instancias materializadas reescritas. **Siempre 0 en `future`**; en `all`, todas las filas
+    /// enlazadas a la plantilla (incluida la de origen), cambie o no algún valor en cada una.
+    pub instances_updated: i64,
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct MaterializeResponse {
     /// Reglas examinadas. Desde 3.9.0 la convergencia es de ámbito **instalación**, así que

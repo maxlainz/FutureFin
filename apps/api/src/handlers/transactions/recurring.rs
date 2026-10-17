@@ -55,11 +55,17 @@ use crate::handlers::membership::role_can_write;
 use crate::handlers::session::require_session_user;
 use crate::handlers::transactions::crud::PreparedTxn;
 use crate::handlers::transactions::schema::{
-    compute_fingerprint, MaterializeResponse, RecurringRuleResponse, SOURCE_MANUAL,
+    assert_amount_sign_matches_kind, compute_fingerprint, normalize_concept_field, normalize_kind,
+    normalize_notes, MaterializeResponse, PatchRecurringRuleBody, RecurringRuleResponse,
+    UpdateRecurringRuleResponse, SOURCE_MANUAL,
 };
-use crate::handlers::transactions::reconcile::auto_reconcile_after_mutation;
+use crate::handlers::transactions::reconcile::{
+    auto_reconcile_after_mutation, unlink_pair_no_rejection,
+};
 use crate::handlers::transactions::{
+    assert_asset_in_installation, assert_liability_in_installation,
     invalidate_projection_if_savings_uses_transactions, next_fingerprint_ordinal,
+    resolve_category_for_kind,
 };
 use crate::state::AppState;
 use axum::extract::{Extension, Path};
@@ -560,4 +566,355 @@ pub(crate) async fn delete_recurring_rule_core(
     converge_recurring_after_mutation(state, iid).await;
     invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /v1/transactions/recurring/{id} (5.0.0)
+// ---------------------------------------------------------------------------
+
+/// Alcance de una edición de plantilla, con la semántica de una app de calendario.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecurringApplyTo {
+    /// Plantilla + TODAS las instancias ya materializadas (incluida la de origen).
+    All,
+    /// Solo la plantilla: lo ya materializado no cambia; las materializaciones futuras usan los
+    /// valores nuevos.
+    Future,
+}
+
+impl RecurringApplyTo {
+    pub(crate) fn parse(raw: Option<&str>) -> Result<Self, ApiError> {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("all") => Ok(Self::All),
+            Some("future") => Ok(Self::Future),
+            _ => Err(ApiError::BadRequest(
+                "apply_to_invalid: apply_to is required and must be 'all' or 'future'".into(),
+            )),
+        }
+    }
+
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Future => "future",
+        }
+    }
+}
+
+/// Fila de una instancia enlazada, con todo lo que el UPDATE por fila necesita recomponer.
+#[derive(Debug, FromRow)]
+struct InstanceRow {
+    id: Uuid,
+    import_id: Option<Uuid>,
+    source: String,
+    op_date: NaiveDate,
+    concept: String,
+    amount: Decimal,
+    kind: Option<String>,
+    category_id: Option<Uuid>,
+    linked_asset_id: Option<Uuid>,
+    linked_liability_id: Option<Uuid>,
+    notes: Option<String>,
+    fingerprint: String,
+    fingerprint_ordinal: i32,
+}
+
+#[utoipa::path(
+    patch,
+    path = "/v1/transactions/recurring/{id}",
+    tag = "transactions",
+    request_body = PatchRecurringRuleBody,
+    params(("id" = Uuid, Path, description = "Recurring rule id")),
+    responses(
+        (status = 200, description = "Plantilla editada (y, con apply_to=all, sus instancias)", body = UpdateRecurringRuleResponse),
+        (status = 400, description = "Validación (apply_to_invalid, patch_empty, *_set_and_clear, amount_sign_mismatch, savings_no_category, category_scope_mismatch, linked_*_not_found…)"),
+        (status = 401, description = "No valid session"),
+        (status = 403, description = "Viewer or not a member"),
+        (status = 404, description = "Regla inexistente o de otro usuario"),
+    )
+)]
+pub async fn patch_recurring_rule(
+    Extension(state): Extension<Arc<AppState>>,
+    jar: CookieJar,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PatchRecurringRuleBody>,
+) -> Result<Json<UpdateRecurringRuleResponse>, ApiError> {
+    let user = require_session_user(&jar, &state.pool).await?;
+    let (iid, role) = require_installation_member(&state.pool, user.id.0).await?;
+    if !role_can_write(role.as_str()) {
+        return Err(ApiError::Forbidden);
+    }
+    let resp = update_recurring_rule_core(&state, iid, user.id.0, id, body, false).await?;
+    Ok(Json(resp))
+}
+
+/// Core sin HTTP: la comparten el handler PATCH y la tool MCP `update_recurring_rule`.
+///
+/// Edita la plantilla `id` (guardia id + instalación + owner → 404) y, con `apply_to = all`,
+/// aplica **los mismos campos del patch** —solo esos— a todas sus instancias materializadas en la
+/// MISMA transacción SQL. Validación idéntica a la del PATCH de transacciones (signo↔kind cuando
+/// viene `amount`, `resolve_category_for_kind`, links de la instalación, `*_set_and_clear`).
+///
+/// **Huella de dedup de las instancias (`all`)**: se RECOMPUTA cuando cambian `amount` o
+/// `concept`, con ordinal libre — la política de las filas manuales del PATCH individual
+/// (`patch_transaction_core`), que es lo que son: la convergencia las inserta con
+/// `compute_fingerprint(manual, op_date, rule.amount, rule.concept)`, y la huella de una fila
+/// manual es una función de esos campos (el restore de `.ffbackup` también la recomputa así).
+/// Dejar la vieja haría que una instancia de 900 € llevara la huella de 800 €. Una instancia
+/// importada (`import_id` no nulo, solo alcanzable vía restore) conserva la suya, igual que en el
+/// PATCH individual. `op_date` nunca se toca.
+///
+/// **Pares conciliados**: si cambia `amount`, el par de cada instancia se rompe SIN rechazo
+/// (`unlink_pair_no_rejection`), como en el PATCH individual, y post-commit corren el pase de
+/// conciliación y la convergencia antes de invalidar (orden contractual del módulo).
+///
+/// **Cache (COND)**: `all` reescribe importes/clasificación de movimientos reales → invalida en
+/// los modos B/C. `future` **no invalida**: no cambia ninguna fila de `transactions` (ni su
+/// conjunto, ni sus importes, ni su `recurring_rule_id`, que es lo que cambia la clasificación
+/// en el borrado), y ninguna lectura del motor mira `recurring_transaction_rules`. Las
+/// materializaciones futuras que usen los valores nuevos llegan con la mutación que activa su
+/// mes, que invalida por su cuenta. Regresión: `transactions_projection_cache.rs`.
+///
+/// `dry_run = true` ejecuta TODO (validación, UPDATEs, recuento) dentro de la transacción y la
+/// deshace: es lo que permite al preview MCP enseñar el nº exacto de instancias sin SQL propio.
+/// Sin efectos post-commit.
+pub(crate) async fn update_recurring_rule_core(
+    state: &Arc<AppState>,
+    iid: Uuid,
+    user_id: Uuid,
+    id: Uuid,
+    body: PatchRecurringRuleBody,
+    dry_run: bool,
+) -> Result<UpdateRecurringRuleResponse, ApiError> {
+    let apply_to = RecurringApplyTo::parse(body.apply_to.as_deref())?;
+
+    // Mensajes COMPLETOS y literales (ver `patch_transaction_core`): `error_codes_parity.rs`
+    // extrae los códigos de los literales del fuente.
+    for (msg, puesto, borrado) in [
+        (
+            "category_set_and_clear: category_id and clear_category are mutually exclusive",
+            body.category_id.is_some(),
+            body.clear_category == Some(true),
+        ),
+        (
+            "linked_asset_set_and_clear: linked_asset_id and clear_linked_asset are mutually exclusive",
+            body.linked_asset_id.is_some(),
+            body.clear_linked_asset == Some(true),
+        ),
+        (
+            "linked_liability_set_and_clear: linked_liability_id and clear_linked_liability are mutually exclusive",
+            body.linked_liability_id.is_some(),
+            body.clear_linked_liability == Some(true),
+        ),
+        (
+            "notes_set_and_clear: notes and clear_notes are mutually exclusive",
+            body.notes.is_some(),
+            body.clear_notes == Some(true),
+        ),
+    ] {
+        if puesto && borrado {
+            return Err(ApiError::BadRequest(msg.into()));
+        }
+    }
+
+    let touches_concept = body.concept.is_some();
+    let touches_amount = body.amount.is_some();
+    let touches_classification =
+        body.kind.is_some() || body.category_id.is_some() || body.clear_category == Some(true);
+    let touches_asset = body.linked_asset_id.is_some() || body.clear_linked_asset == Some(true);
+    let touches_liability =
+        body.linked_liability_id.is_some() || body.clear_linked_liability == Some(true);
+    let touches_notes = body.notes.is_some() || body.clear_notes == Some(true);
+    if !(touches_concept
+        || touches_amount
+        || touches_classification
+        || touches_asset
+        || touches_liability
+        || touches_notes)
+    {
+        return Err(ApiError::BadRequest(
+            "patch_empty: provide at least one of concept, amount, kind, category_id, clear_category, linked_asset_id, clear_linked_asset, linked_liability_id, clear_linked_liability, notes, clear_notes".into(),
+        ));
+    }
+
+    let mut tx = state.pool.begin().await?;
+
+    // Bloquea la plantilla: una convergencia concurrente (que la lee `FOR UPDATE`) espera a que
+    // esta edición termine, así que nunca materializa con valores a medio cambiar.
+    let current: Option<RuleCore> = sqlx::query_as(
+        r#"SELECT id, owner_user_id, concept, amount, kind, category_id,
+                  linked_asset_id, linked_liability_id, notes, origin_month
+           FROM recurring_transaction_rules
+           WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3
+           FOR UPDATE"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(current) = current else {
+        return Err(ApiError::NotFound);
+    };
+
+    let new_concept = match &body.concept {
+        Some(c) => normalize_concept_field(c)?,
+        None => current.concept.clone(),
+    };
+    let new_amount = body.amount.map(|a| a.round_dp(4)).unwrap_or(current.amount);
+    if new_amount.is_zero() {
+        return Err(ApiError::BadRequest(
+            "amount_zero: amount must not be zero".into(),
+        ));
+    }
+    let new_kind = match &body.kind {
+        Some(k) => normalize_kind(k)?,
+        None => current.kind.clone(),
+    };
+    // Signo↔kind solo cuando el patch fija el importe: misma regla que el PATCH de transacciones.
+    if touches_amount {
+        assert_amount_sign_matches_kind(new_amount, &new_kind)?;
+    }
+    let requested_category = if body.clear_category == Some(true) {
+        None
+    } else {
+        body.category_id.or(current.category_id)
+    };
+    let new_category =
+        resolve_category_for_kind(&state.pool, iid, &new_kind, requested_category).await?;
+    let new_linked_asset = if body.clear_linked_asset == Some(true) {
+        None
+    } else {
+        body.linked_asset_id.or(current.linked_asset_id)
+    };
+    let new_linked_liability = if body.clear_linked_liability == Some(true) {
+        None
+    } else {
+        body.linked_liability_id.or(current.linked_liability_id)
+    };
+    let new_notes = if body.clear_notes == Some(true) {
+        None
+    } else {
+        match &body.notes {
+            Some(_) => normalize_notes(&body.notes)?,
+            None => current.notes.clone(),
+        }
+    };
+    assert_asset_in_installation(&state.pool, iid, new_linked_asset).await?;
+    assert_liability_in_installation(&state.pool, iid, new_linked_liability).await?;
+
+    sqlx::query(
+        r#"UPDATE recurring_transaction_rules
+           SET concept = $1, amount = $2, kind = $3, category_id = $4, linked_asset_id = $5,
+               linked_liability_id = $6, notes = $7, updated_at = now()
+           WHERE id = $8 AND installation_id = $9 AND owner_user_id = $10"#,
+    )
+    .bind(&new_concept)
+    .bind(new_amount)
+    .bind(&new_kind)
+    .bind(new_category)
+    .bind(new_linked_asset)
+    .bind(new_linked_liability)
+    .bind(new_notes.as_deref())
+    .bind(id)
+    .bind(iid)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let mut instances_updated: i64 = 0;
+    let mut pairing_changed = false;
+    if apply_to == RecurringApplyTo::All {
+        let instances: Vec<InstanceRow> = sqlx::query_as(
+            r#"SELECT id, import_id, source, op_date, concept, amount, kind, category_id,
+                      linked_asset_id, linked_liability_id, notes, fingerprint, fingerprint_ordinal
+               FROM transactions
+               WHERE recurring_rule_id = $1 AND installation_id = $2 AND owner_user_id = $3
+               ORDER BY op_date ASC, id ASC
+               FOR UPDATE"#,
+        )
+        .bind(id)
+        .bind(iid)
+        .bind(user_id)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        for inst in &instances {
+            // Solo los campos que vienen en el patch; el resto conserva lo que la fila tenga
+            // (una instancia retocada a mano no pierde lo que el patch no nombra).
+            let concept = if touches_concept { new_concept.clone() } else { inst.concept.clone() };
+            let amount = if touches_amount { new_amount } else { inst.amount };
+            let (kind, category) = if touches_classification {
+                (Some(new_kind.clone()), new_category)
+            } else {
+                (inst.kind.clone(), inst.category_id)
+            };
+            let linked_asset = if touches_asset { new_linked_asset } else { inst.linked_asset_id };
+            let linked_liability =
+                if touches_liability { new_linked_liability } else { inst.linked_liability_id };
+            let notes = if touches_notes { new_notes.clone() } else { inst.notes.clone() };
+
+            if amount != inst.amount {
+                unlink_pair_no_rejection(&mut tx, iid, user_id, inst.id).await?;
+                pairing_changed = true;
+            }
+            let (fp, ordinal) = if inst.import_id.is_none() {
+                let fp = compute_fingerprint(&inst.source, inst.op_date, amount, &concept);
+                if fp == inst.fingerprint {
+                    (inst.fingerprint.clone(), inst.fingerprint_ordinal)
+                } else {
+                    let ord = next_fingerprint_ordinal(&mut tx, iid, user_id, &fp).await?;
+                    (fp, ord)
+                }
+            } else {
+                (inst.fingerprint.clone(), inst.fingerprint_ordinal)
+            };
+
+            sqlx::query(
+                r#"UPDATE transactions
+                   SET concept = $1, amount = $2, kind = $3, category_id = $4,
+                       linked_asset_id = $5, linked_liability_id = $6, notes = $7,
+                       fingerprint = $8, fingerprint_ordinal = $9, updated_at = now()
+                   WHERE id = $10 AND installation_id = $11 AND owner_user_id = $12"#,
+            )
+            .bind(&concept)
+            .bind(amount)
+            .bind(kind.as_deref())
+            .bind(category)
+            .bind(linked_asset)
+            .bind(linked_liability)
+            .bind(notes.as_deref())
+            .bind(&fp)
+            .bind(ordinal)
+            .bind(inst.id)
+            .bind(iid)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+            instances_updated += 1;
+        }
+    }
+
+    let sql = format!("{RULE_SELECT} WHERE r.id = $1");
+    let row: RuleRow = sqlx::query_as(&sql).bind(id).fetch_one(&mut *tx).await?;
+    let resp = UpdateRecurringRuleResponse {
+        rule: row_to_response(row),
+        apply_to: apply_to.as_str().to_string(),
+        instances_updated,
+    };
+
+    if dry_run {
+        tx.rollback().await?;
+        return Ok(resp);
+    }
+    tx.commit().await?;
+
+    if instances_updated > 0 {
+        if pairing_changed {
+            auto_reconcile_after_mutation(state, iid, user_id).await;
+            converge_recurring_after_mutation(state, iid).await;
+        }
+        invalidate_projection_if_savings_uses_transactions(state, iid, user_id).await;
+    }
+    Ok(resp)
 }

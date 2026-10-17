@@ -31,7 +31,7 @@ use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgConnection};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -535,7 +535,9 @@ pub(crate) async fn capture_snapshots_core(
             .await?;
 
         if kind == "asset" {
-            // Filas compartidas (owner_user_id IS NULL) excluidas por construcción.
+            // El snapshot es POR USUARIO: se filtra `owner_user_id = $3`, así que solo entran
+            // las filas del capturador. Desde 5.0.0 la columna es NOT NULL (D14) y toda fila
+            // tiene dueño, así que ya no hay «compartidas» que excluir.
             sqlx::query(
                 r#"INSERT INTO history_snapshot_items
                        (snapshot_id, source_item_id, label, value,
@@ -1076,10 +1078,13 @@ fn serialize_opt_decimal_as_chart_f64<S: serde::Serializer>(
     }
 }
 
-/// Serie histórica por asset (`source_item_id`), agregada entre usuarios.
+/// Serie histórica por asset, agregada entre usuarios. **Una por activo, no una por item de
+/// snapshot**: los items se resuelven antes a una identidad común ([`resolve_item_identity`]).
 #[derive(Debug, Serialize, ToSchema)]
 pub struct HistoryAssetSeries {
-    /// `source_item_id` del item (id del asset vivo en capturas; clave de backfill si no).
+    /// Id canónico del item: el del **asset vivo** cuando el nombre lo identifica sin ambigüedad
+    /// (es la clave por la que el chart junta pasado y futuro), y si no un `source_item_id` del
+    /// grupo — serie solo-histórica, que por diseño no está en `/v1/assets`.
     #[schema(value_type = String, format = "uuid")]
     pub asset_id: Uuid,
     pub asset_name: String,
@@ -1196,6 +1201,9 @@ struct LiveAssetRow {
 #[derive(Debug, Clone, FromRow)]
 struct LiveLiabilityRow {
     id: Uuid,
+    /// Nombre vivo del pasivo. Solo lo consume la resolución de identidad
+    /// ([`resolve_item_identity`]); la interpolación nunca mira etiquetas.
+    label: String,
     principal: Decimal,
     apr_percent: Option<Decimal>,
     payment_amount: Option<Decimal>,
@@ -1343,27 +1351,31 @@ async fn fetch_history_scope(
         .fetch_all(pool)
         .await?;
 
-    // 3) Assets vivos del scope. Las filas compartidas (owner_user_id IS NULL) nunca
-    //    participan en el histórico → conjunto extra `owner_user_id IS NOT NULL`.
+    // 3) Assets vivos del scope. El filtro extra `owner_user_id IS NOT NULL` que había aquí
+    //    —«las filas compartidas nunca participan en el histórico»— se retiró en 5.0.0: la
+    //    migración `20260902200100_ledger_owner_not_null.sql` (D14) asignó las filas legadas al
+    //    owner más antiguo y dejó la columna `NOT NULL`, así que el predicado era una tautología
+    //    que se leía como una regla viva.
     let a_scope = view.scope_where("a");
     let assets_sql = format!(
         "SELECT a.id, a.name, a.current_value, a.owner_user_id
          FROM assets a
-         WHERE {a_scope} AND a.owner_user_id IS NOT NULL"
+         WHERE {a_scope}"
     );
     let live_assets: Vec<LiveAssetRow> = view
         .bind_scope_as(sqlx::query_as(&assets_sql), iid, session_user_id)
         .fetch_all(pool)
         .await?;
 
-    // 4) Pasivos del scope con plan vivo o saldo vivo (#145), mismo conjunto extra.
+    // 4) Pasivos del scope con plan vivo o saldo vivo (#145). Mismo caso que los activos: el
+    //    `owner_user_id IS NOT NULL` murió con la migración de D14.
     let l_scope = view.scope_where("l");
     let l_today_arg = view.next_arg_index();
     let liabs_sql = format!(
-        "SELECT l.id, l.principal, l.apr_percent, l.payment_amount,
+        "SELECT l.id, l.label, l.principal, l.apr_percent, l.payment_amount,
                 l.payment_frequency, l.repayment_model, l.owner_user_id
          FROM liabilities l
-         WHERE {l_scope} AND l.owner_user_id IS NOT NULL
+         WHERE {l_scope}
            AND (l.payment_end_date IS NULL OR l.payment_end_date >= ${l_today_arg} OR l.principal > 0)"
     );
     let live_liabs: Vec<LiveLiabilityRow> = view
@@ -1386,14 +1398,139 @@ async fn fetch_history_scope(
 }
 
 /// Resultado de evaluar el scope sobre una rejilla: totales por punto + serie por asset
-/// (agrupada por `source_item_id` entre usuarios) + el label más reciente de cada asset.
+/// (agrupada por id canónico entre usuarios) + el label más reciente de cada asset.
 struct SeriesAccumulation {
     assets_total: Vec<Decimal>,
     liabilities_total: Vec<Decimal>,
-    /// `source_item_id` → valores paralelos a la rejilla (suma entre usuarios).
+    /// Id canónico ([`resolve_item_identity`]) → valores paralelos a la rejilla (suma entre
+    /// usuarios). Con el id del activo VIVO cuando el nombre lo identifica sin ambigüedad.
     asset_values: HashMap<Uuid, Vec<Decimal>>,
-    /// `source_item_id` → (fecha, label) del snapshot más reciente que lo contiene (fallback name).
+    /// Id canónico → (fecha, label) del snapshot más reciente que lo contiene (fallback name).
     latest_label: HashMap<Uuid, (NaiveDate, String)>,
+}
+
+/// Clave de comparación de una etiqueta de item (NO la de almacenamiento: `normalize_label` sigue
+/// mandando en la escritura). Solo la usa [`resolve_item_identity`]: recorta y pliega mayúsculas
+/// para que «Cuenta corriente» y «cuenta corriente» sean el mismo item.
+fn identity_label_key(raw: &str) -> String {
+    raw.trim().to_lowercase()
+}
+
+/// Resuelve la IDENTIDAD de los items de snapshot de un grupo `(owner, kind)`:
+/// `source_item_id` → id canónico. Solo devuelve las entradas que MUEVEN algo (un id que se
+/// queda como está no aparece), así que un mapa vacío significa «no había nada que resolver».
+///
+/// **Por qué existe.** `source_item_id` es la clave de identidad ENTRE snapshots, pero el
+/// servidor la genera (`Uuid::new_v4`, `validate_and_prepare_items`) cuando el cliente no la
+/// manda — y la tool MCP `create_snapshot` ni siquiera la expone, así que N fotos de la misma
+/// cuenta llegan como N items distintos. Sin resolver, cada uno es un timeline propio: el LOCF
+/// de #130 los APILA (con N snapshots el total se multiplica por N y cae a 0 en el punto vivo,
+/// donde todos cuentan como borrados) y el chart pinta N líneas homónimas cuya leyenda no
+/// empalma con ningún activo vivo. El síntoma visible eran 25 `asset_series` para 5 activos.
+///
+/// **Regla**, aplicada siempre DENTRO del grupo (jamás entre usuarios ni entre kinds):
+/// 1. Los items se agrupan por su etiqueta más reciente ([`identity_label_key`]).
+/// 2. Un grupo cuya etiqueta case con EXACTAMENTE una fila viva del owner se canoniza al id de
+///    esa fila — así el histórico empalma con la observación virtual «hoy» y el `asset_id` que
+///    publica la serie es el del activo vivo, que es por el que junta el chart. Si no casa
+///    ninguna (activo borrado, backfill libre), al MENOR `source_item_id` del grupo:
+///    determinista, y sigue siendo una clave que existió en los datos.
+/// 3. **Ambigüedad ⇒ no se toca nada.** Si dos items del MISMO snapshot cayeran en la misma
+///    identidad, esa identidad se disuelve entera (cada id vuelve a ser el suyo). Dos filas con
+///    el mismo nombre en una foto son dos cosas distintas que el usuario llamó igual: fusionarlas
+///    perdería una de las dos observaciones, y perder una observación es perder dinero.
+///
+/// Con datos bien formados —el camino de la SPA, que reenvía el `item_id` del prefill— cada
+/// grupo de etiqueta tiene un solo id y esta función devuelve un mapa vacío: **no-op bit a bit**.
+fn resolve_item_identity(
+    scope: &HistoryScope,
+    group_headers: &[&SeriesHeaderRow],
+    live_rows: &[(Uuid, &str)],
+) -> HashMap<Uuid, Uuid> {
+    // 1) Etiqueta más reciente de cada `source_item_id` del grupo (misma regla que el nombre que
+    //    publica la serie: gana el snapshot más reciente que contiene el item).
+    let mut latest: BTreeMap<Uuid, (NaiveDate, String)> = BTreeMap::new();
+    for h in group_headers {
+        let Some(items) = scope.items_by_snapshot.get(&h.id) else {
+            continue;
+        };
+        for it in items {
+            let slot = latest
+                .entry(it.source_item_id)
+                .or_insert_with(|| (h.snapshot_date, it.label.clone()));
+            if h.snapshot_date >= slot.0 {
+                *slot = (h.snapshot_date, it.label.clone());
+            }
+        }
+    }
+
+    // 2) Cubos por etiqueta y filas vivas indexadas por nombre (solo las inequívocas: dos activos
+    //    vivos que se llamen igual no permiten decidir a cuál pertenece la foto).
+    let mut buckets: BTreeMap<String, BTreeSet<Uuid>> = BTreeMap::new();
+    for (id, (_, label)) in &latest {
+        buckets
+            .entry(identity_label_key(label))
+            .or_default()
+            .insert(*id);
+    }
+    let live_ids: HashSet<Uuid> = live_rows.iter().map(|(id, _)| *id).collect();
+    let mut live_by_label: HashMap<String, Option<Uuid>> = HashMap::new();
+    for (id, label) in live_rows {
+        live_by_label
+            .entry(identity_label_key(label))
+            .and_modify(|slot| *slot = None)
+            .or_insert(Some(*id));
+    }
+
+    let mut canonical: HashMap<Uuid, Uuid> = HashMap::new();
+    for (label, ids) in &buckets {
+        let live_in_bucket: Vec<Uuid> =
+            ids.iter().copied().filter(|id| live_ids.contains(id)).collect();
+        let canon = match live_in_bucket.as_slice() {
+            // Una foto ya traía el id vivo: ese manda (es el que el chart junta).
+            [only] => *only,
+            [] => match live_by_label.get(label) {
+                Some(Some(live_id)) => *live_id,
+                // Sin fila viva que case: serie solo-histórica, una por etiqueta.
+                _ => *ids.iter().next().expect("bucket no vacío"),
+            },
+            // Dos filas vivas distintas fotografiadas bajo la misma etiqueta: ambiguo, no se toca.
+            _ => continue,
+        };
+        for id in ids {
+            if *id != canon {
+                canonical.insert(*id, canon);
+            }
+        }
+    }
+
+    // 3) Disolución por colisión. Converge: cada vuelta retira al menos una entrada del mapa (dos
+    //    items del mismo snapshot no pueden ser AMBOS identidad — sus `source_item_id` son únicos
+    //    por el UNIQUE (snapshot_id, source_item_id)), y el mapa es finito.
+    while !canonical.is_empty() {
+        let mut clash: HashSet<Uuid> = HashSet::new();
+        for h in group_headers {
+            let Some(items) = scope.items_by_snapshot.get(&h.id) else {
+                continue;
+            };
+            let mut seen: HashSet<Uuid> = HashSet::with_capacity(items.len());
+            for it in items {
+                let canon = canonical
+                    .get(&it.source_item_id)
+                    .copied()
+                    .unwrap_or(it.source_item_id);
+                if !seen.insert(canon) {
+                    clash.insert(canon);
+                }
+            }
+        }
+        if clash.is_empty() {
+            break;
+        }
+        canonical.retain(|_, canon| !clash.contains(canon));
+    }
+
+    canonical
 }
 
 /// Evalúa los timelines por `(owner_user_id, kind)` sobre `grid` y agrega los totales por punto y
@@ -1454,15 +1591,42 @@ fn accumulate_series(
         let append_virtual = last_real < today;
         let total_len = dates.len() + usize::from(append_virtual);
 
+        // Identidad de los items ANTES de montar los timelines: N fotos de la misma cuenta
+        // llegan con N `source_item_id` distintos cuando el cliente no manda `item_id`, y sin
+        // resolverlas cada una sería un timeline propio que se apila sobre las demás. Mapa vacío
+        // (datos bien formados) ⇒ ruta idéntica bit a bit a la anterior. Ver
+        // [`resolve_item_identity`].
+        let live_labeled: Vec<(Uuid, &str)> = match kind {
+            HistoryItemKind::Asset => live_assets_by_owner
+                .get(owner_id)
+                .into_iter()
+                .flatten()
+                .map(|a| (a.id, a.name.as_str()))
+                .collect(),
+            HistoryItemKind::Liability => live_liabs_by_owner
+                .get(owner_id)
+                .into_iter()
+                .flatten()
+                .map(|l| (l.id, l.label.as_str()))
+                .collect(),
+        };
+        let identity = resolve_item_identity(scope, group_headers, &live_labeled);
+        let canonical_id = |src: Uuid| identity.get(&src).copied().unwrap_or(src);
+
         let mut obs_map: BTreeMap<Uuid, Vec<Option<HistoryObservation>>> = BTreeMap::new();
         for (j, h) in group_headers.iter().enumerate() {
             let Some(items) = scope.items_by_snapshot.get(&h.id) else {
                 continue;
             };
             for it in items {
+                let item_id = canonical_id(it.source_item_id);
                 let obs = obs_map
-                    .entry(it.source_item_id)
+                    .entry(item_id)
                     .or_insert_with(|| vec![None; total_len]);
+                // `resolve_item_identity` disuelve toda identidad que colisionara dentro de un
+                // snapshot, así que aquí nunca se pisa una observación (pisarla sería perder
+                // dinero en silencio: el total de la foto dejaría de cuadrar).
+                debug_assert!(obs[j].is_none(), "dos items del mismo snapshot en una identidad");
                 obs[j] = Some(HistoryObservation {
                     value: it.value,
                     terms: loan_terms_of(
@@ -1474,7 +1638,7 @@ fn accumulate_series(
                 });
                 if kind == HistoryItemKind::Asset {
                     let slot = latest_label
-                        .entry(it.source_item_id)
+                        .entry(item_id)
                         .or_insert_with(|| (h.snapshot_date, it.label.clone()));
                     if h.snapshot_date >= slot.0 {
                         *slot = (h.snapshot_date, it.label.clone());
@@ -1624,7 +1788,7 @@ const DEFAULT_HISTORY_WINDOW_MONTHS: i64 = 120;
     path = "/v1/history/series",
     tag = "history",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = solo mis snapshots; omitido u otro valor → `household` (todos los usuarios de la instalación)."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
         ("window_months" = Option<i64>, Query, description = "Limita la serie a los últimos N meses (1..=1200; fuera de rango → 400 `window_months_out_of_range`). Omitido = 120 (10 años); usa 1200 para todo el histórico. La respuesta ecoa `window_months` y marca `window_truncated`."),
         ("include_asset_series" = Option<bool>, Query, description = "`false` omite `asset_series`. Default `true`."),
     ),
@@ -2021,7 +2185,7 @@ const MAX_FINE_CURVE_WINDOW_MONTHS: i32 = 36;
     path = "/v1/history/cashflow",
     tag = "history",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = solo mis transacciones/snapshots; omitido u otro valor → `household`."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
         ("window_months" = Option<i64>, Query, description = "Meses de ventana (default 24, rango 1..=120; fuera de rango → 400 `window_months_out_of_range`). Por encima de 36 el agregado mensual llega igual, pero la curva fina se omite con `fine_absent_reason = window_too_large_for_curve`."),
         ("resolution" = Option<String>, Query, description = "`weekly` (default) | `daily`. `daily` requiere `window_months <= 6`."),
     ),

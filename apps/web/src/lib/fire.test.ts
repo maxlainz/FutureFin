@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import type { FireSettingsApi } from "../api/types";
+import type { FireNumberModeApi, TaxBracketApi } from "../api/types";
 import { computeFireAnnualNeedNetEur, grossUpNetAnnualFire } from "./fire";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -23,9 +23,26 @@ const FIXTURE_PATH = path.resolve(
   "../../../api/tests/fixtures/fire-parity.json",
 );
 
+/**
+ * Forma de un caso del fixture COMPARTIDO. Ojo: `fire_settings` es el nombre de la clave en el
+ * JSON, no el tipo `FireSettingsApi` de la SPA — desde 5.0.0 (D13) el modo del objetivo, el
+ * importe manual y el SWR viven en el PERFIL de jubilación y ya no en los ajustes del hogar. El
+ * fixture NO se toca (es contrato compartido con Rust): lo que cambia es de dónde saca la SPA
+ * cada eje, y este tipo local lo declara sin fingir que el bloque sigue siendo un
+ * `FireSettingsApi`.
+ */
 type Case = {
   name: string;
-  fire_settings: FireSettingsApi;
+  fire_settings: {
+    // Del perfil de jubilación (5.0.0).
+    fire_number_mode: FireNumberModeApi;
+    fire_number_manual_amount?: string | null;
+    swr_pct: string;
+    // Siguen siendo del hogar.
+    taxes_enabled: boolean;
+    tax_brackets: TaxBracketApi[];
+    taxable_gain_ratio?: string;
+  };
   monthly: {
     income: string;
     income_retirement: string;
@@ -46,7 +63,12 @@ function clientTargetNw(c: Case): number | null {
   // El cliente DEBE pasar expense_retirement (no expense_regular) para alinearse con el
   // servidor. RetirementView lo hace tras Fase 4.6.
   const need = computeFireAnnualNeedNetEur(
-    fs,
+    // 5.0.0: la función recibe el subconjunto del PERFIL (modo + importe manual), no los
+    // ajustes del hogar. La fontanería cambia; la fórmula y el esperado del fixture, no.
+    {
+      fire_number_mode: fs.fire_number_mode,
+      fire_number_manual_amount: fs.fire_number_manual_amount ?? null,
+    },
     c.monthly.expense_retirement,
     c.monthly.income,
     c.monthly.income_retirement,

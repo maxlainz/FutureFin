@@ -13,6 +13,7 @@ import {
   savingsBasisParenthetical,
   savingsSourceUsesTransactions,
 } from "./fire";
+import { defaultRetirementProfileApi } from "./retirementProfile";
 
 describe("normalizeInstallationFireSettings — savings_source", () => {
   it("default settings incluyen savings_source = budget", () => {
@@ -30,13 +31,36 @@ describe("normalizeInstallationFireSettings — savings_source", () => {
 
   it("campo ausente → budget", () => {
     const raw = {
-      fire_number_mode: "annual_expense",
-      fire_number_manual_amount: null,
-      swr_pct: "3.5",
       taxes_enabled: true,
       tax_brackets: [{ up_to: null, pct: "30" }],
     } as FireSettingsApi;
     expect(normalizeInstallationFireSettings(raw).savings_source).toBe("budget");
+  });
+
+  it("un fire_settings de 4.15.x con los cuatro ejes mudados no los arrastra (5.0.0)", () => {
+    // El JSONB guardado por 4.15.x traía modo, importe manual, SWR y edad límite dentro. Desde
+    // 5.0.0 son personales (perfil de jubilación, D13): el normalizador debe IGNORARLOS, no
+    // reexportarlos, o el PATCH del hogar los volvería a escribir donde ya no viven.
+    const out = normalizeInstallationFireSettings({
+      fire_number_mode: "manual",
+      fire_number_manual_amount: "500000",
+      swr_pct: "3.0",
+      horizon_lifespan_age: 100,
+      taxes_enabled: true,
+      tax_brackets: [{ up_to: null, pct: "30" }],
+    } as unknown as FireSettingsApi);
+    expect(Object.keys(out).sort()).toEqual(
+      [
+        "expense_avg_window_mode",
+        "expense_avg_window_months",
+        "income_avg_window_mode",
+        "income_avg_window_months",
+        "savings_source",
+        "tax_brackets",
+        "taxable_gain_ratio",
+        "taxes_enabled",
+      ].sort(),
+    );
   });
 
   it("valor válido transactions_avg se preserva", () => {
@@ -167,23 +191,25 @@ describe("savingsBasisParenthetical", () => {
 });
 
 describe("runwaySwrParenthetical", () => {
-  it("sin fire_settings (instalación sin cargar) → etiqueta sin número, no el default", () => {
+  // 5.0.0: lee el PERFIL de jubilación del usuario, no `fire_settings` — el SWR dejó de ser del
+  // hogar (D13).
+  it("sin perfil (sesión sin cargar) → etiqueta sin número, no el default", () => {
     expect(runwaySwrParenthetical(null)).toBe("dentro del SWR");
     expect(runwaySwrParenthetical(undefined)).toBe("dentro del SWR");
   });
 
   it("formatea el SWR configurado con un decimal y ' %' (es-ES)", () => {
     expect(
-      runwaySwrParenthetical({ ...defaultFireSettingsApi(), swr_pct: "3.5" }),
+      runwaySwrParenthetical({ ...defaultRetirementProfileApi(), swr_pct: "3.5" }),
     ).toBe("dentro del SWR 3,5 %");
     expect(
-      runwaySwrParenthetical({ ...defaultFireSettingsApi(), swr_pct: "4" }),
+      runwaySwrParenthetical({ ...defaultRetirementProfileApi(), swr_pct: "4" }),
     ).toBe("dentro del SWR 4,0 %");
   });
 
   it("swr_pct vacío → el normalizador cae al default 3,5", () => {
     expect(
-      runwaySwrParenthetical({ ...defaultFireSettingsApi(), swr_pct: "" }),
+      runwaySwrParenthetical({ ...defaultRetirementProfileApi(), swr_pct: "" }),
     ).toBe("dentro del SWR 3,5 %");
   });
 });
@@ -195,7 +221,6 @@ describe("ventanas del promedio — round-trip obligatorio", () => {
   // resetearía a 3/12 en silencio — sin error, sin aviso, y con la proyección moviéndose.
   it("conserva las cuatro ventanas del servidor", () => {
     const out = normalizeInstallationFireSettings({
-      swr_pct: "3.5",
       savings_source: "transactions_avg",
       income_avg_window_months: 6,
       income_avg_window_mode: "data",
@@ -210,7 +235,7 @@ describe("ventanas del promedio — round-trip obligatorio", () => {
 
   it("ausentes → defaults 3/12 en calendario", () => {
     const out = normalizeInstallationFireSettings({
-      swr_pct: "3.5",
+      taxes_enabled: true,
     } as unknown as FireSettingsApi);
     expect(out.income_avg_window_months).toBe(3);
     expect(out.expense_avg_window_months).toBe(12);
@@ -220,7 +245,6 @@ describe("ventanas del promedio — round-trip obligatorio", () => {
 
   it("valores fuera de cota o basura → el default del lado, nunca 0", () => {
     const out = normalizeInstallationFireSettings({
-      swr_pct: "3.5",
       income_avg_window_months: 0,
       expense_avg_window_months: 999,
       income_avg_window_mode: "monte_carlo",

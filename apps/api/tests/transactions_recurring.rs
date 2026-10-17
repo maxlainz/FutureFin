@@ -989,3 +989,272 @@ async fn materializing_a_legacy_rule_after_the_backfill_keeps_the_fallback() {
         assert_eq!(c, Some(otros_gastos), "instancia sin la categoría de la plantilla");
     }
 }
+
+// ---------------------------------------------------------------------------
+// PATCH de plantilla (5.0.0): «Todos» / «Solo futuros»
+// ---------------------------------------------------------------------------
+
+/// Crea una regla con origen en M-`back` (día 10) y activa M-1, de modo que la convergencia deja
+/// exactamente DOS instancias enlazadas: la de origen y la de M-1. Devuelve el id de la regla.
+async fn rule_with_two_instances(app: &TestApp, owner: &common::LoggedInOwner, back: i32) -> String {
+    let today = server_today(app, &owner.cookie).await;
+    let (oy, om) = shift_month(today.year(), today.month(), -back);
+    let (m1y, m1m) = shift_month(today.year(), today.month(), -1);
+    activate_month_raw(app, owner.user_id, m1y, m1m).await;
+    let r = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": date_in(oy, om, 10), "concept": "Gimnasio", "amount": "-40",
+                    "kind": "expense", "recurrence": {} }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::CREATED, "{r:?}");
+    r.json()["recurring_rule_id"].as_str().unwrap().to_string()
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct InstanceFp {
+    op_date: NaiveDate,
+    concept: String,
+    amount: rust_decimal::Decimal,
+    notes: Option<String>,
+    fingerprint: String,
+    fingerprint_ordinal: i32,
+}
+
+async fn instances_of(app: &TestApp, rule_id: &str) -> Vec<InstanceFp> {
+    sqlx::query_as(
+        "SELECT op_date, concept, amount, notes, fingerprint, fingerprint_ordinal \
+         FROM transactions WHERE recurring_rule_id = $1 ORDER BY op_date",
+    )
+    .bind(Uuid::parse_str(rule_id).unwrap())
+    .fetch_all(&app.pool)
+    .await
+    .expect("instancias de la regla")
+}
+
+/// «Todos»: la plantilla y TODAS sus instancias (la de origen incluida) reciben los campos del
+/// patch en la misma transacción, y la huella de dedup de cada instancia manual se RECOMPUTA con
+/// los valores nuevos — la misma política que el PATCH individual de un manual. Se comprueba
+/// contra `compute_fingerprint` y, por comportamiento, con un alta manual idéntica a una
+/// instancia: toma el ordinal 1 porque la instancia ya ocupa el 0 con la huella NUEVA.
+#[tokio::test]
+async fn patch_rule_all_rewrites_every_instance_and_recomputes_fingerprints() {
+    use futurefin_api::handlers::transactions::schema::compute_fingerprint;
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let rule_id = rule_with_two_instances(&app, &owner, 3).await;
+    let before = instances_of(&app, &rule_id).await;
+    assert_eq!(before.len(), 2, "origen + M-1: {before:?}");
+
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/recurring/{rule_id}"),
+            json!({"apply_to": "all", "amount": "-45", "concept": "Gimnasio Plus",
+                   "notes": "sube la cuota"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let body = r.json();
+    assert_eq!(body["apply_to"], "all");
+    assert_eq!(body["instances_updated"], 2, "{body}");
+    assert_eq!(body["id"].as_str().unwrap(), rule_id, "plantilla aplanada en la respuesta");
+    assert_eq!(body["concept"], "Gimnasio Plus");
+    assert_eq!(body["amount"], "-45.0000");
+    assert_eq!(body["notes"], "sube la cuota");
+
+    let after = instances_of(&app, &rule_id).await;
+    assert_eq!(after.len(), 2);
+    for (b, a) in before.iter().zip(after.iter()) {
+        assert_eq!(a.op_date, b.op_date, "la fecha de una instancia nunca se toca");
+        assert_eq!(a.concept, "Gimnasio Plus");
+        assert_eq!(a.amount, rust_decimal::Decimal::new(-45, 0));
+        assert_eq!(a.notes.as_deref(), Some("sube la cuota"));
+        assert_ne!(a.fingerprint, b.fingerprint, "la huella vieja describía -40 €");
+        assert_eq!(
+            a.fingerprint,
+            compute_fingerprint("manual", a.op_date, a.amount, &a.concept),
+            "huella = f(source, op_date, amount, concept) con los valores NUEVOS"
+        );
+    }
+
+    // Un alta manual idéntica a la instancia de M-1 colisiona con su huella NUEVA → ordinal 1.
+    let m1 = &after[1];
+    let dup = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({ "op_date": m1.op_date.format("%Y-%m-%d").to_string(),
+                    "concept": "Gimnasio Plus", "amount": "-45", "kind": "expense" }),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(dup.status, http::StatusCode::CREATED, "{dup:?}");
+    let ord: i32 = sqlx::query_scalar(
+        "SELECT fingerprint_ordinal FROM transactions WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(dup.json()["id"].as_str().unwrap()).unwrap())
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(ord, m1.fingerprint_ordinal + 1, "la instancia ocupa la huella nueva");
+
+    // Y el listado de plantillas refleja la edición.
+    let rules = app
+        .get_with_cookie("/v1/transactions/recurring", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(rules[0]["amount"], "-45.0000");
+}
+
+/// «Solo futuros»: la plantilla cambia, lo materializado NO; un mes que se active DESPUÉS
+/// materializa con los valores nuevos.
+#[tokio::test]
+async fn patch_rule_future_changes_only_the_template_and_later_months() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let rule_id = rule_with_two_instances(&app, &owner, 3).await;
+    let before = instances_of(&app, &rule_id).await;
+
+    let r = app
+        .patch_json_with_cookie(
+            &format!("/v1/transactions/recurring/{rule_id}"),
+            json!({"apply_to": "future", "amount": "-45"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    assert_eq!(r.json()["apply_to"], "future");
+    assert_eq!(r.json()["instances_updated"], 0);
+    assert_eq!(r.json()["amount"], "-45.0000");
+
+    let after = instances_of(&app, &rule_id).await;
+    assert_eq!(after.len(), 2);
+    for (b, a) in before.iter().zip(after.iter()) {
+        assert_eq!(a.amount, b.amount, "lo ya materializado no cambia");
+        assert_eq!(a.fingerprint, b.fingerprint);
+    }
+
+    // Activa M-2 (entre el origen M-3 y M-1) y converge: su instancia nace con -45.
+    let today = server_today(&app, &owner.cookie).await;
+    let (m2y, m2m) = shift_month(today.year(), today.month(), -2);
+    activate_month_raw(&app, owner.user_id, m2y, m2m).await;
+    let mat = materialize(&app, &owner.cookie).await;
+    assert_eq!(mat.json()["materialized"], 1, "{mat:?}");
+    let now = instances_of(&app, &rule_id).await;
+    assert_eq!(now.len(), 3);
+    let m2 = now
+        .iter()
+        .find(|i| i.op_date.year() == m2y && i.op_date.month() == m2m)
+        .expect("instancia de M-2");
+    assert_eq!(m2.amount, rust_decimal::Decimal::new(-45, 0), "valores nuevos");
+    assert_eq!(now[0].amount, rust_decimal::Decimal::new(-40, 0), "origen intacto");
+}
+
+/// Validación: misma batería que el PATCH de transacciones, más `apply_to` y `patch_empty`.
+#[tokio::test]
+async fn patch_rule_validation_codes() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let rule_id = rule_with_two_instances(&app, &owner, 2).await;
+    let url = format!("/v1/transactions/recurring/{rule_id}");
+    let income_cat = app.create_category(&owner, "income", "Extras").await;
+
+    let cases = [
+        (json!({"amount": "-45"}), "apply_to_invalid"),
+        (json!({"apply_to": "sometimes", "amount": "-45"}), "apply_to_invalid"),
+        (json!({"apply_to": "all"}), "patch_empty"),
+        (json!({"apply_to": "all", "clear_notes": false}), "patch_empty"),
+        (
+            json!({"apply_to": "all", "category_id": income_cat, "clear_category": true}),
+            "category_set_and_clear",
+        ),
+        (json!({"apply_to": "future", "notes": "x", "clear_notes": true}), "notes_set_and_clear"),
+        (json!({"apply_to": "all", "amount": "45"}), "amount_sign_mismatch"),
+        (json!({"apply_to": "all", "amount": "0"}), "amount_zero"),
+        // Cambiar de scope sin nombrar categoría: la que tiene es del scope viejo.
+        (json!({"apply_to": "all", "kind": "income"}), "category_scope_mismatch"),
+        (json!({"apply_to": "all", "category_id": income_cat}), "category_scope_mismatch"),
+        (
+            json!({"apply_to": "all", "kind": "savings", "category_id": income_cat}),
+            "savings_no_category",
+        ),
+        (
+            json!({"apply_to": "all", "linked_asset_id": "00000000-0000-4000-8000-000000000001"}),
+            "linked_asset_not_found",
+        ),
+        (
+            json!({"apply_to": "all", "linked_liability_id": "00000000-0000-4000-8000-000000000001"}),
+            "linked_liability_not_found",
+        ),
+    ];
+    for (body, code) in cases {
+        let r = app.patch_json_with_cookie(&url, body.clone(), &owner.cookie).await;
+        assert_eq!(r.status, http::StatusCode::BAD_REQUEST, "{body} → {r:?}");
+        assert_eq!(r.json()["code"], code, "{body} → {}", r.json());
+    }
+    // Nada de lo anterior escribió: la plantilla sigue en -40.
+    let rules = app
+        .get_with_cookie("/v1/transactions/recurring", &owner.cookie)
+        .await
+        .json();
+    assert_eq!(rules[0]["amount"], "-40.0000");
+
+    // Reclasificar a ingreso nombrando categoría + importe positivo: válido, y alcanza a todas
+    // las instancias con kind Y categoría.
+    let r = app
+        .patch_json_with_cookie(
+            &url,
+            json!({"apply_to": "all", "kind": "income", "category_id": income_cat, "amount": "40"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let wrong: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM transactions WHERE recurring_rule_id = $1 \
+         AND (kind <> 'income' OR category_id <> $2 OR amount <> 40)",
+    )
+    .bind(Uuid::parse_str(&rule_id).unwrap())
+    .bind(Uuid::parse_str(&income_cat).unwrap())
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(wrong, 0, "todas las instancias reclasificadas");
+
+    // `clear_category` en income vuelve a la categoría POR DEFECTO, no a null (4.15.0).
+    let r = app
+        .patch_json_with_cookie(&url, json!({"apply_to": "all", "clear_category": true}), &owner.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::OK, "{r:?}");
+    let fb = fallback_category(&app, "income").await;
+    assert_eq!(r.json()["category_id"].as_str().unwrap(), fb.to_string());
+}
+
+#[tokio::test]
+async fn patch_rule_viewer_403_and_other_users_rule_404() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let viewer = app
+        .register_and_approve_member(&owner, "vic", "viewer")
+        .await;
+    let bob = app
+        .register_and_approve_member(&owner, "bob", "member")
+        .await;
+    let rule_id = rule_with_two_instances(&app, &owner, 2).await;
+    let url = format!("/v1/transactions/recurring/{rule_id}");
+
+    let r = app
+        .patch_json_with_cookie(&url, json!({"apply_to": "future", "notes": "x"}), &viewer.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::FORBIDDEN, "{r:?}");
+    let r = app
+        .patch_json_with_cookie(&url, json!({"apply_to": "all", "notes": "x"}), &bob.cookie)
+        .await;
+    assert_eq!(r.status, http::StatusCode::NOT_FOUND, "regla ajena → 404: {r:?}");
+    let touched: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions WHERE notes = 'x'")
+        .fetch_one(&app.pool)
+        .await
+        .unwrap();
+    assert_eq!(touched, 0);
+}

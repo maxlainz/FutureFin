@@ -52,7 +52,7 @@ to. The old `docker-compose.split-dev.yml` override no longer exists.
 | view scoping | `?view=mine` filters rows to `owner_user_id = current_user`. Client-side filter, NOT an authz boundary. Default `household`. |
 | density | `/v1/projection/series?density=hybrid` decimates the big arrays at serialization time (months 0..12 monthly, then 24, 36, … annual). `monthly` (default) serializes every month. The engine compute is identical for both. |
 | projection cache | In-memory `HashMap` in `AppState`, sliding 60-min TTL (`PROJECTION_CACHE_TTL`, `apps/api/src/state.rs`), keyed `(installation_id, view, owner_user_id, density)`. Invalidated by every mutating handler; warmed only after login. |
-| warm-up | After `POST /v1/auth/login`, a `tokio::spawn` recomputes `view=household` for BOTH densities so the first GET is a hit (`warm_up_household_projection`). There is deliberately NO warm-up after mutations (race condition — see futurefin-failure-archaeology). |
+| warm-up | After `POST /v1/auth/login` the server recomputes **`view=mine`** for BOTH densities so the first GET is a hit (`warm_up_mine_projection`, `handlers/projection.rs`). **Cambió en 5.0.0**: hasta 4.15.x calentaba `household` (`warm_up_household_projection`), que con el default invertido sería una entrada que nadie consulta — y que ahora cuesta N simulaciones, no una. Las **bandas no se calientan**. There is deliberately NO warm-up after mutations (race condition — see futurefin-failure-archaeology). |
 | nominal vs real | Engine simulates in nominal euros; only the FIRE target grows with inflation. "Real" (deflated, today-euros) values are derived for display/milestones. Math details: futurefin-fire-domain-reference. |
 
 ## 1. Existing tool inventory
@@ -203,6 +203,66 @@ diffing bytes.
 **view=mine vs household diff**: use `projection-diff.sh "" "view=mine"` (below), or
 manually fetch both and compare `starting_net_worth` / `asset_series` — they SHOULD
 differ if members own different rows; `mine` has its own cache key.
+
+**5.0.0 invierte el default de `view`**: omitir el parámetro es ahora `mine`, no `household`
+(`apps/api/src/handlers/person_view.rs`). Dos consecuencias para quien mide:
+
+- `"" ` vs `"view=mine"` en `projection-diff.sh` debe dar **cero diferencias por diseño** — ya no
+  es la comprobación de «¿se ignoró el parámetro?». La pareja que discrimina hoy es
+  `"" ` vs `"view=household"`, y el campo `view` ecoado sigue siendo lo primero que hay que leer.
+- Toda medición de *baseline* tomada antes de 5.0.0 sin `?view=` explícito midió el **hogar**;
+  la misma línea de comando mide ahora **una persona**. Re-baseliniza antes de comparar: en un
+  hogar de dos miembros la respuesta pasa de 21,0 KB (`mine`) a 34,2 KB (`household`), medido sin
+  gzip a densidad `hybrid`.
+
+### Bandas de Monte Carlo, solves y series por miembro (5.0.0)
+
+Tres superficies nuevas que **no** se comportan como el resto de la proyección al medirlas:
+
+```bash
+# Bandas: solo `mine` (el hogar devuelve 400 household_bands_unavailable) y SIN density.
+curl -sf -b "$JAR" -o /dev/null -w 'paths=500  %{time_total}s  %{size_download} B\n' \
+  "$BASE/v1/projection/bands?paths=500"
+curl -sf -b "$JAR" -o /dev/null -w 'paths=2000 %{time_total}s  %{size_download} B\n' \
+  "$BASE/v1/projection/bands?paths=2000&seed=1"
+
+# Qué se sorteó de verdad: sin volatilidad declarada la banda ES la línea.
+curl -sf -b "$JAR" "$BASE/v1/projection/bands" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("paths", d["paths"], "seed", d["seed"], "any_vol", d["any_volatility_declared"], "success_of_plan", d["success_of_plan"], "verdict", d["success_verdict"])'
+```
+
+- **Coste medido** (release, horizonte 840 meses, entrada de cache fría): **500 caminos 104 ms ·
+  1.000 caminos 204 ms · 2.000 caminos 391 ms** — lineal en `paths`, que es lo que se espera de un
+  sorteo por camino y la señal de que algo va mal si deja de serlo. **`paths` topa en 5.000 por HTTP
+  y en 2.500 por MCP, default 2.500** (subido del 2.000/1.000/500 de la primera vuelta de 5.0.0 con
+  el modelo v2 — `resolve_paths` en `apps/api/src/handlers/projection_bands.rs`); el campo de éxito
+  se llama `success_of_plan`, no `success_probability` (retirado con `never_retired_probability`/
+  `success_given_retired`, E9).
+- **`seed` viaja como CADENA de dígitos**, no como número JSON: es un `u64` y `JSON.parse` lo
+  redondea por encima de 2⁵³. Si tu script la lee con `jq` y la reinyecta como número, «repetir el
+  mismo sorteo» te devolverá otro en silencio — el fallo más caro de medir aquí, porque no da error.
+- **Cache propia**, con clave `(instalación, usuario, paths, semilla)` y el TTL de la proyección; se
+  invalida con **las mismas** mutaciones que la serie. Para forzar un MISS de verdad, cambia `seed`
+  (no `paths`, que también es clave pero cambia además el resultado).
+- **Solves del plan (nombres renombrados con el modelo v2, 2026-09-06)**: `contribution_required_monthly`,
+  `coast_stop_month_index` y compañía (antes `required_contribution_monthly`/`coast_fire_month_index`,
+  retirados con el objetivo) se calculan con el presupuesto de BÚSQUEDA (~500 caminos) y se guardan
+  con la serie (nivel 1), así que un HIT no los paga; la curva `needed_capital_curve` y las fechas al
+  100/90 % son **nivel 2**, en una cache APARTE (`AppState::plan_cache`) que se resuelve en segundo
+  plano con el presupuesto de confirmación (2.500 caminos) — ver `futurefin-architecture-contract`
+  D25. Lo que sí cambia es el **primer** GET, y cambia con la estrategia — medido en release
+  sobre un hogar con 4 activos, hipoteca francesa y dos Próximos: **5 ms** (`asap`, sin solve),
+  **19 ms** (`coast`), **41 ms** (`retire_at_age`), **100 ms** (`partial` con pensión y edad); los
+  hits, 1–3 ms. Un «la proyección se ha vuelto lenta» sin decir la estrategia no es una medición.
+- **`members[].series`**: ~**5,9 KB por miembro** a densidad `hybrid` (11,7 KB por dos), lineal con
+  el tamaño del hogar. Viajan siempre por HTTP y son **opt-in** en la tool MCP `get_projection`
+  (`include_member_series`), igual que `asset_series`. Las bandas del líquido son opt-in por el
+  mismo motivo en `get_projection_bands` (`include_liquid_bands`): la respuesta completa pesa
+  **16,4 KB** y la mitad son esas tres series.
+
+**Arnés de tiempos del motor** (WP0, sin base de datos): `cargo test -p futurefin-engine --test
+timing -- --nocapture` imprime milisegundos por proyección para toda la batería de casos — es donde
+se midieron las cotas de arriba antes de diseñarlas, y el sitio donde se comprueba una regresión de
+rendimiento del bucle sin montar nada.
 
 ### History and cash-flow payload sizes (Fase 5, issue #86 — defaults changed under you)
 
@@ -432,12 +492,18 @@ SMOKE_USER=... SMOKE_PASS=... bash $S --compare /tmp/base.json # AFTER
 Fetches `/v1/projection/series` twice (positional args = raw query strings) and
 diffs: scalars (`months`, `horizon_*`, `starting_net_worth`,
 `monthly_delta_assumption`), KPIs (`jubilacion_month_index`,
-`jubilacion_target_net_worth`, `compound_outpaces_true_savings_month_index`),
-`milestones`/`milestones_real`, array lengths, and every value at **shared
-month_index points**. Exit 0 = no forbidden divergence; exit 1 = real DIFF.
+`compound_outpaces_true_savings_month_index`), the 5.0.0 plan block
+(`retirement_date_basis`, `safe_date_month_index`, `success_of_plan`,
+`needed_capital_today`, `needed_capital_curve_state`), `milestones`/`milestones_real`,
+array lengths (`points`, `needed_capital_curve`, `asset_series`), and every value at
+**shared month_index points** — `net_worth`, `contributed_capital` and the non-null
+entries of `needed_capital_curve` (parallel to `points[]`; a `null` there means «not
+measured at this point», never 0). Exit 0 = no forbidden divergence; exit 1 = real DIFF.
+Re-anclado el 2026-09-06 al modelo v2: hasta entonces comparaba `jubilacion_target_net_worth`
+y `fire_target_series`, retirados enteros, y esas filas no podían fallar nunca (placebo).
 
 Interpretation:
-- **Densities differ (default run)**: `points_len`/`fire_target_series_len`/last
+- **Densities differ (default run)**: `points_len`/`needed_capital_curve_len`/last
   `month_index` differences are labeled `diff (expected)` (decimation artifacts).
   Note the series is `months + 1` points long (index 0 + one per month), and at
   the default 840-month horizon BOTH densities end at `month_index = 840` (it is

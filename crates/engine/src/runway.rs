@@ -207,7 +207,12 @@ pub fn liquid_runway_months(
                 need -= take;
             }
         } else {
-            let segments: Vec<crate::tax::MixedSegment> = order
+            // 5.0.0 WP5.5: el solver mixto es genérico; el runway lo instancia en `Decimal` y
+            // convierte la escala una vez por mes de la vía mixta (una copia de 5 elementos, sin
+            // una sola operación).
+            let brackets_g =
+                crate::sim::TaxBracketG::<Decimal>::from_decimal_slice(tax_brackets);
+            let segments: Vec<crate::tax::MixedSegment<Decimal>> = order
                 .iter()
                 .map(|&i| crate::tax::MixedSegment {
                     capacity_monthly: vals[i].max(Decimal::ZERO),
@@ -215,7 +220,7 @@ pub fn liquid_runway_months(
                 })
                 .collect();
             let dd =
-                crate::tax::gross_up_mixed_monthly(g, &segments, tax_brackets, taxes_enabled);
+                crate::tax::gross_up_mixed_monthly(g, &segments, &brackets_g, taxes_enabled);
             if dd.net_shortfall_monthly > Decimal::ZERO {
                 // Mes final fraccionario, en NETO (bajo mezcla no existe «el» bruto del mes
                 // completo): la parte del gasto del mes k que las ventas aún netean.

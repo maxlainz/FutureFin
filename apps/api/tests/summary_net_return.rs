@@ -202,7 +202,8 @@ async fn view_mine_ignores_another_members_asset_in_both_terms() {
     asset(&app, &owner.cookie, &asset_cat, "Fondo Alice", "100000", Some("6")).await;
     asset(&app, &bob.cookie, &asset_cat, "Cuenta Bob", "100000", Some("0")).await;
 
-    let hogar = health(&app, &owner.cookie, "/v1/summary").await;
+    // `household` explícito desde 5.0.0 (R2).
+    let hogar = health(&app, &owner.cookie, "/v1/summary?view=household").await;
     assert_eq!(dec(&hogar["net_return_nominal_annual_pct"]), Decimal::from(3));
 
     let mine = health(&app, &owner.cookie, "/v1/summary?view=mine").await;

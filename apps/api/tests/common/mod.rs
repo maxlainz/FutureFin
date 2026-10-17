@@ -109,9 +109,25 @@ impl TestApp {
             .expect("installation id")
     }
 
-    /// Clave de cache de la vista household en densidad `monthly` (la que sirve `GET
-    /// /v1/projection/series` sin parámetros). `user_id` es el SOLICITANTE: la clave
-    /// lo incluye también en household porque la respuesta lleva su demografía.
+    /// Clave de cache de la vista **por defecto** en densidad `monthly` — la que puebla `GET
+    /// /v1/projection/series` sin parámetros.
+    ///
+    /// **Desde 5.0.0 esa vista es `mine`** (R2), no `household`: el helper se renombró en vez de
+    /// cambiarle el contenido al viejo `household_key`, porque una clave que dice «household» y
+    /// construye otra cosa es exactamente el tipo de mentira que estos tests existen para cazar.
+    /// Quien necesite de verdad la entrada del hogar tiene [`TestApp::household_key`] al lado.
+    pub fn default_view_key(&self, installation_id: Uuid, user_id: Uuid) -> ProjectionCacheKey {
+        ProjectionCacheKey {
+            installation_id,
+            view: LedgerView::Mine,
+            owner_user_id: Some(user_id),
+            density: Density::Monthly,
+        }
+    }
+
+    /// Clave de cache de la vista `household` (densidad `monthly`), que desde 5.0.0 hay que pedir
+    /// EXPLÍCITAMENTE con `?view=household`. `user_id` es el SOLICITANTE: la clave lo incluye
+    /// también en household porque la respuesta lleva su demografía.
     pub fn household_key(&self, installation_id: Uuid, user_id: Uuid) -> ProjectionCacheKey {
         ProjectionCacheKey {
             installation_id,
@@ -126,14 +142,15 @@ impl TestApp {
         self.state.projection_cache.read().await.contains_key(key)
     }
 
-    /// Calienta la entrada con un GET y comprueba que quedó cacheada.
+    /// Calienta la entrada de la vista POR DEFECTO con un GET sin parámetros y comprueba que
+    /// quedó cacheada. Desde 5.0.0 esa vista es `mine` — pásale [`TestApp::default_view_key`].
     ///
     /// **Sin sleep a propósito**: `projection_series_cached` inserta y DESPUÉS responde, y el
     /// cliente de test es in-process, así que al volver el GET la entrada ya está. El sleep que
     /// había aquí no daba margen — se lo daba a una invalidación pendiente para colarse justo
     /// antes del assert (en `current_thread` la tarea spawneada solo corre cuando el test cede, y
     /// el sleep era el único punto donde cedía). Era la causa del flake, no su remedio.
-    pub async fn warm_household(&self, cookie: &str, key: &ProjectionCacheKey) {
+    pub async fn warm_default_view(&self, cookie: &str, key: &ProjectionCacheKey) {
         let r = self.get_with_cookie("/v1/projection/series", cookie).await;
         assert_eq!(r.status, http::StatusCode::OK);
         assert!(
@@ -177,11 +194,18 @@ impl TestApp {
         // no van a aparecer nunca. Lo que NO puede es quedarse corta cuando sí van a llegar —
         // de ahí el conteo por usuario.
         let esperadas = users * 2;
-        for _ in 0..200 {
+        // **El tope subió a 30 s en 5.0.0 (modelo v2) y no es un margen a ojo**: el warm-up ya no
+        // es una proyección determinista de milisegundos — desde A3/A4 arrastra el NIVEL 1 del
+        // plan, que son miles de simulaciones f64 por usuario (segundos, incluso con los crates
+        // del motor optimizados en dev). Con el segundo escaso de antes, `settle` se rendía, la
+        // cache quedaba vacía, y el warm-up aterrizaba DESPUÉS —dentro de la llamada que el test
+        // estaba midiendo—: un `assert!(cache.is_empty())` fallaba culpando al código bajo prueba.
+        // Sigue siendo una espera acotada por un EVENTO: sale en cuanto las entradas aparecen.
+        for _ in 0..600 {
             if self.state.projection_cache.read().await.len() >= esperadas {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
         // ...y se limpia: a partir de aquí solo puebla la cache quien el test decida.
         self.state

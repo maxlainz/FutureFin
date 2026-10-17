@@ -1,0 +1,207 @@
+/**
+ * El ESTADO del plan (D27) — precedencia de avisos y fecha/edad del hito.
+ *
+ * El valor de estos tests está en la PRECEDENCIA: `warnings[]` es un array, puede traer más de un
+ * literal a la vez y la tarjeta enseña UNA línea. Sin un test, el día que se añada el cuarto aviso
+ * la regla se rompe en silencio y el usuario ve «Falta tu fecha de nacimiento» donde debería ver
+ * el rojo de «no llegas».
+ *
+ * El modelo de la tarjeta ANCHA (`planCardV2`, U9) compone estas mismas piezas con la ORACIÓN de
+ * `lib/plan-sentence.ts` — sin test propio aquí porque cada mitad (estado, fecha/edad, frase,
+ * KPI de éxito) ya está probada por separado y `planCardV2` es solo su ensamblaje.
+ */
+
+import { describe, expect, it } from "vitest";
+import {
+  planStatusFromPlan,
+  planStatusFromWarnings,
+  resolvePlanMilestoneCivil,
+} from "./plan-card";
+
+describe("planStatusFromWarnings", () => {
+  it("sin avisos, el plan está en plan y no ofrece acción", () => {
+    const s = planStatusFromWarnings([]);
+    expect(s).toEqual({
+      warning: null,
+      tone: "ok",
+      label: "En plan",
+      action: null,
+    });
+    expect(planStatusFromWarnings(undefined).tone).toBe("ok");
+    expect(planStatusFromWarnings(null).tone).toBe("ok");
+  });
+
+  it("falta la fecha de nacimiento ⇒ ROJO con enlace a Tu cuenta (C5: sin ella no hay plan)", () => {
+    const s = planStatusFromWarnings(["birth_date_missing"]);
+    expect(s.warning).toBe("birth_date_missing");
+    expect(s.tone).toBe("danger");
+    expect(s.label).toBe("Falta tu fecha de nacimiento");
+    expect(s.action).toEqual({ label: "Tu cuenta", target: "account" });
+  });
+
+  it("falta la edad objetivo ⇒ aviso con enlace a Jubilación", () => {
+    const s = planStatusFromWarnings(["target_retirement_age_missing"]);
+    expect(s.tone).toBe("warn");
+    expect(s.action?.target).toBe("retirement");
+  });
+
+  it("infra-financiado gana a todo y va en ROJO", () => {
+    // El literal del modelo v2 es `contribution_underfunded` (el motor retiró
+    // `retire_at_age_underfunded`): la pregunta es la aportación, no la estrategia entera.
+    const s = planStatusFromWarnings([
+      "birth_date_missing",
+      "contribution_underfunded",
+      "target_retirement_age_missing",
+    ]);
+    expect(s.warning).toBe("contribution_underfunded");
+    expect(s.tone).toBe("danger");
+    expect(s.action?.target).toBe("retirement");
+  });
+
+  it("los tres fallos de solve del modelo v2 son rojos y llevan a Jubilación", () => {
+    for (const w of [
+      "coast_not_reachable",
+      "partial_never_starts",
+      "partial_never_fully_retires",
+    ]) {
+      const s = planStatusFromWarnings([w]);
+      expect(s.warning, w).toBe(w);
+      expect(s.tone, w).toBe("danger");
+      expect(s.action?.target, w).toBe("retirement");
+    }
+  });
+
+  it("los avisos INFORMATIVOS no suben aquí: llenarían de ámbar el Resumen de casi todos", () => {
+    // `no_volatility_declared` (C5) y `strategy_pension_bridge_migrated` (C7) tienen su sitio en
+    // «Riesgo» y en la tarjeta de Pensión, no en el estado del plan.
+    expect(planStatusFromWarnings(["no_volatility_declared"]).tone).toBe("ok");
+    expect(planStatusFromWarnings(["strategy_pension_bridge_migrated"]).tone).toBe("ok");
+  });
+
+  it("entre los dos avisos de dato ausente manda la fecha de nacimiento", () => {
+    const s = planStatusFromWarnings([
+      "target_retirement_age_missing",
+      "birth_date_missing",
+    ]);
+    expect(s.warning).toBe("birth_date_missing");
+  });
+
+  it("un literal desconocido no deja la tarjeta sin estado", () => {
+    const s = planStatusFromWarnings(["algo_que_no_existe_todavia"]);
+    expect(s.tone).toBe("ok");
+    expect(s.label).toBe("En plan");
+  });
+});
+
+describe("planStatusFromPlan", () => {
+  it("`underfunded: true` es el rojo aunque no llegue ningún aviso", () => {
+    const s = planStatusFromPlan({ underfunded: true });
+    expect(s.tone).toBe("danger");
+    expect(s.warning).toBe("contribution_underfunded");
+  });
+
+  it("`plan_state: pending` es una ESPERA, no un hueco ni un verde", () => {
+    const s = planStatusFromPlan({ planState: "pending" });
+    expect(s.tone).toBe("warn");
+    expect(s.label).toBe("Calculando tu plan…");
+    expect(s.action).toBeNull();
+  });
+
+  it("cada `absent_reason` dice lo suyo; uno desconocido no se pinta de verde", () => {
+    expect(planStatusFromPlan({ absentReason: "household_aggregate" }).label).toBe(
+      "El hogar no tiene un plan propio",
+    );
+    expect(planStatusFromPlan({ absentReason: "months_override" }).tone).toBe("warn");
+    expect(planStatusFromPlan({ absentReason: "algo_nuevo" }).label).toBe(
+      "Tu plan no está disponible",
+    );
+  });
+
+  // A12 — la tabla llevaba una fila para `no_liquid_assets` que ninguna de las dos fuentes emite
+  // (`absent_reason` del Resumen ni `plan_absent_reason` de la serie): es un valor de
+  // `needed_capital_absent_reason`. Retirada, cae a la genérica como cualquier literal ajeno.
+  it("un literal de OTRO campo (`no_liquid_assets`) no tiene fila propia: cae a la genérica", () => {
+    const s = planStatusFromPlan({ absentReason: "no_liquid_assets" });
+    expect(s.label).toBe("Tu plan no está disponible");
+    expect(s.label).not.toContain("líquidos");
+  });
+
+  // A12 — el caso que salía VERDE con la etiqueta «En plan» mientras el título de la tarjeta decía
+  // «no hay ninguna fecha que aguante tu umbral». `plan_state` es `ready`, no hay `absent_reason` y
+  // el servidor no emite ningún aviso para esto (no es un dato que falte: es el resultado del
+  // solve), así que sin una señal propia la única rama que quedaba era la de «sin avisos».
+  it("`noValidDate`: el plan resuelto que no llega a ninguna fecha es ROJO, no «En plan»", () => {
+    const s = planStatusFromPlan({ planState: "ready", noValidDate: true });
+    expect(s.tone).toBe("danger");
+    expect(s.label).toBe("Ninguna fecha de tu horizonte llega a tu umbral");
+    expect(s.action).toEqual({ label: "Revisar tu plan", target: "retirement" });
+  });
+
+  it("`noValidDate` NO gana a `contribution_underfunded`: ese dice además por qué no llega", () => {
+    const s = planStatusFromPlan({ underfunded: true, noValidDate: true });
+    expect(s.warning).toBe("contribution_underfunded");
+  });
+
+  it("`noValidDate` gana a un hueco de configuración: un resultado es más específico", () => {
+    const s = planStatusFromPlan({
+      noValidDate: true,
+      warnings: ["target_retirement_age_missing"],
+    });
+    expect(s.tone).toBe("danger");
+    expect(s.warning).toBeNull();
+  });
+
+  it("un aviso explícito gana a la razón de ausencia: dice QUÉ falta, no solo que falta algo", () => {
+    const s = planStatusFromPlan({
+      absentReason: "birth_date_missing",
+      warnings: ["target_retirement_age_missing"],
+    });
+    expect(s.warning).toBe("target_retirement_age_missing");
+  });
+
+  it("`underfunded: null` NO es «va bien» ni «va mal»: la pregunta no aplica", () => {
+    expect(planStatusFromPlan({ underfunded: null }).tone).toBe("ok");
+    expect(planStatusFromPlan({ underfunded: false }).tone).toBe("ok");
+  });
+
+  it("con avisos y sin booleano sigue valiendo la precedencia de siempre", () => {
+    expect(
+      planStatusFromPlan({ underfunded: null, warnings: ["birth_date_missing"] })
+        .warning,
+    ).toBe("birth_date_missing");
+  });
+});
+
+describe("resolvePlanMilestoneCivil", () => {
+  it("el índice de mes se fecha con el ANCLA de la proyección (mes 0 = ancla)", () => {
+    const r = resolvePlanMilestoneCivil({
+      monthIndex: 12,
+      anchorDateYmd: "2026-09-03",
+      birthDateIso: "1986-05-10",
+    });
+    expect(r.ymd).toBe("2027-09-03");
+    expect(r.age).toBe(41);
+  });
+
+  it("el mes 0 es hoy, no un hueco", () => {
+    expect(
+      resolvePlanMilestoneCivil({ monthIndex: 0, anchorDateYmd: "2026-09-03" }).ymd,
+    ).toBe("2026-09-03");
+  });
+
+  it("sin ancla no se inventa una fecha", () => {
+    expect(resolvePlanMilestoneCivil({ monthIndex: 12 })).toEqual({
+      ymd: null,
+      age: null,
+    });
+  });
+
+  it("sin fecha de nacimiento hay fecha pero no edad", () => {
+    const r = resolvePlanMilestoneCivil({
+      monthIndex: 6,
+      anchorDateYmd: "2026-09-03",
+    });
+    expect(r.ymd).toBe("2027-03-03");
+    expect(r.age).toBeNull();
+  });
+});

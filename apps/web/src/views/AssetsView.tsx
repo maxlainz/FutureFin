@@ -1,4 +1,9 @@
-import { useMemo, type Dispatch, type FormEvent, type SetStateAction } from "react";
+import {
+  useMemo,
+  type Dispatch,
+  type FormEvent,
+  type SetStateAction,
+} from "react";
 import { HelpPopover } from "../components/HelpPopover";
 import { HELP_TEXTS } from "../lib/helpTexts";
 import type {
@@ -32,7 +37,6 @@ import {
   formatAssetContributionNominalCell,
   formatProjectionMilestoneCompactLabel,
   groupRowsByCategoryOrdered,
-  type LedgerPersonScope,
   roundUpToHundred,
 } from "../lib/ledger";
 
@@ -40,7 +44,6 @@ export function AssetsView({
   installation,
   installationBusy,
   hasMembership,
-  ledgerPersonScope,
   canEdit,
   formError,
   projectionSeries,
@@ -64,6 +67,8 @@ export function AssetsView({
   setAssetFormLiquid,
   assetFormExpectedReturn,
   setAssetFormExpectedReturn,
+  assetFormVolatility,
+  setAssetFormVolatility,
   assetFormNotes,
   setAssetFormNotes,
   editingAssetId,
@@ -77,7 +82,6 @@ export function AssetsView({
   installation: InstallationAccess | null;
   installationBusy: boolean;
   hasMembership: boolean;
-  ledgerPersonScope: LedgerPersonScope;
   canEdit: boolean;
   formError: string | null;
   projectionSeries: ProjectionSeriesApi | null;
@@ -101,6 +105,9 @@ export function AssetsView({
   setAssetFormLiquid: Dispatch<SetStateAction<boolean>>;
   assetFormExpectedReturn: string;
   setAssetFormExpectedReturn: Dispatch<SetStateAction<string>>;
+  /** Volatilidad anual % del activo (5.0.0, §A.2). Vacío = determinista. */
+  assetFormVolatility: string;
+  setAssetFormVolatility: Dispatch<SetStateAction<string>>;
   assetFormNotes: string;
   setAssetFormNotes: Dispatch<SetStateAction<string>>;
   editingAssetId: string | null;
@@ -116,7 +123,6 @@ export function AssetsView({
    */
   onOpenCategorySettings?: () => void;
 }) {
-  const currency = installation?.installation.base_currency ?? METRIC_DASH;
   const currencyIso = installation?.installation.base_currency ?? "";
   const isMobile = useIsMobile();
 
@@ -203,20 +209,12 @@ export function AssetsView({
     <div className="workspace">
       <div className="workspace-header">
         <h2 className="workspace-title">Activos</h2>
-        <p className="workspace-sub">
-          {installationBusy
-            ? "Cargando…"
-            : !hasMembership
-              ? "Sin acceso hasta aprobación."
-              : `Moneda ${currency}`}
-        </p>
+        {installationBusy || !hasMembership ? (
+          <p className="workspace-sub">
+            {installationBusy ? "Cargando…" : "Sin acceso hasta aprobación."}
+          </p>
+        ) : null}
       </div>
-
-      {hasMembership && ledgerPersonScope === "mine" ? (
-        <div className="banner info-banner tight-banner">
-          <strong>Mío</strong> · sin titular en <strong>Hogar</strong>
-        </div>
-      ) : null}
 
       {!installationBusy && !hasMembership ? (
         <div className="banner info-banner">Sin acceso al hogar.</div>
@@ -309,7 +307,7 @@ export function AssetsView({
                 />
               </label>
               <label className="field">
-                <span>Precio compra (opc.)</span>
+                <span>Precio compra (opcional)</span>
                 <input
                   value={assetFormPurchase}
                   onChange={(e) => setAssetFormPurchase(e.target.value)}
@@ -328,7 +326,7 @@ export function AssetsView({
               </label>
               <label className="field">
                 <span className="label-with-help">
-                Rentab. anual esperada % (opc.)
+                Rentab. anual compuesta % (opcional)
                 <HelpPopover
                   title={HELP_TEXTS["assets.expected_return"].title}
                   body={HELP_TEXTS["assets.expected_return"].body}
@@ -342,9 +340,25 @@ export function AssetsView({
                   autoComplete="off"
                 />
               </label>
+              <label className="field">
+                <span className="label-with-help">
+                  Volatilidad anual % (opcional)
+                  <HelpPopover
+                    title={HELP_TEXTS["assets.volatility"].title}
+                    body={HELP_TEXTS["assets.volatility"].body}
+                  />
+                </span>
+                <input
+                  value={assetFormVolatility}
+                  onChange={(e) => setAssetFormVolatility(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="—"
+                  autoComplete="off"
+                />
+              </label>
             </div>
             <label className="field">
-              <span>Notas (opc.)</span>
+              <span>Notas (opcional)</span>
               <textarea
                 value={assetFormNotes}
                 onChange={(e) => setAssetFormNotes(e.target.value)}
@@ -467,6 +481,13 @@ export function AssetsView({
                   a.expected_annual_return_percent != null &&
                   String(a.expected_annual_return_percent).trim() !== "",
               );
+              // La volatilidad solo ocupa columna cuando alguien del grupo la ha declarado; en
+              // móvil no entra ni en la sub-línea (el ancho ya se lo comen valor, compra y
+              // rentabilidad, y es el dato menos accionable de los cuatro).
+              const showVolatility = g.items.some((a) => {
+                const v = parseDisplayDecimal(String(a.annual_volatility_percent ?? ""));
+                return v != null && v > 0;
+              });
               const showContribution = g.items.some(
                 (a) => assetContributionMonthlyEstimateNum(a) > 0,
               );
@@ -508,10 +529,18 @@ export function AssetsView({
                               Rent. % a.a.
                             </th>
                           ) : null}
+                          {!isMobile && showVolatility ? (
+                            <th
+                              className="num"
+                              title="Desviación típica anual de los retornos. Solo alimenta las bandas de Monte Carlo; el camino determinista la ignora."
+                            >
+                              Volat. % a.a.
+                            </th>
+                          ) : null}
                           {!isMobile && showContribution ? (
                             <th
                               className="num"
-                              title="Aporte estimado del primer mes (suma de reglas de Presupuesto → Asignación del sobrante que apuntan a este activo). Incluye flujos puntuales de Próximos. Cero si todas las reglas anteriores agotan el sobrante antes de llegar a este activo."
+                              title="Aporte estimado del primer mes (suma de reglas de Presupuesto → Asignación del sobrante que apuntan a este activo). Incluye flujos puntuales encendidos de Simulación. Cero si todas las reglas anteriores agotan el sobrante antes de llegar a este activo."
                             >
                               Aporte
                             </th>
@@ -639,6 +668,14 @@ export function AssetsView({
                                     ? formatPercentAmount(
                                         a.expected_annual_return_percent,
                                       )
+                                    : METRIC_DASH}
+                                </td>
+                              ) : null}
+                              {!isMobile && showVolatility ? (
+                                <td className="num muted">
+                                  {a.annual_volatility_percent != null &&
+                                  a.annual_volatility_percent !== ""
+                                    ? formatPercentAmount(a.annual_volatility_percent)
                                     : METRIC_DASH}
                                 </td>
                               ) : null}

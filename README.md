@@ -32,14 +32,48 @@ números, no una regla de tres.
 
 ![Proyección de patrimonio](docs/img/proyeccion-claro.png)
 
-### Cuándo llegas a tu objetivo
+### Cuándo puedes jubilarte
 
-Dile cuánto quieres gastar al año cuando dejes de trabajar y con qué tasa de retirada, y verás en
-qué año se cruzan tu patrimonio y tu objetivo. El objetivo **crece con la inflación** que configures
-—no es lo mismo 30.000 € al año hoy que dentro de veinte— y, si quieres, descuenta el IRPF del
-ahorro por tramos.
+Dile cuánto quieres gastar al año cuando dejes de trabajar y con qué tasa de retirada (SWR), y
+FutureFin te da la **primera fecha en la que el plan aguanta**: la que cumplen, como mínimo, el
+umbral de escenarios que tú fijas (95 de cada 100 de serie) hasta la edad que elijas. No es el
+cruce de dos líneas, es una pregunta de probabilidad. El gasto **crece con la inflación** que
+configures —no es lo mismo 30.000 € al año hoy que dentro de veinte— y, si quieres, se descuenta el
+IRPF del ahorro por tramos. Aparte, el número FIRE clásico (gasto ÷ tasa de retirada) sigue ahí como
+referencia.
 
 ![Plan de jubilación](docs/img/jubilacion-oscuro.png)
+
+### Tu jubilación, a tu manera
+
+La fecha que aguanta es una forma de jubilarse, no la única. Eliges **una estrategia** y
+la simulación entera se adapta:
+
+- **FIRE clásico** — te vas el primer mes en que el plan aguanta con el umbral que has pedido.
+- **Edad fija** — te vas a los 55 pase lo que pase, y el plan te dice **cuánto tienes que ahorrar**
+  para llegar con ese umbral. Si no llegas, te lo dice en rojo en vez de dibujar una curva
+  optimista.
+- **Coast FIRE** — el mes a partir del cual puedes dejar de aportar y llegar igual.
+- **Barista FIRE** — una fase intermedia con menos ingreso, cubriendo el hueco con el capital.
+
+Si cobrarás una **pensión pública**, la declaras **con la edad a la que empieza** y entra como un
+ingreso más desde ese mes. Un **puente** opcional (cualquier estrategia) sube el tope de la tasa de
+retirada del primer año mientras llega la pensión, dentro de los límites que tú pones.
+
+Y una sola regla para **cómo sale el dinero**: tu tasa de retirada (SWR) decide si el primer año
+cabe, y desde ahí cada año se retira tu gasto ajustado a la inflación. Cada plan es de **cada
+persona**: en un hogar compartido, cada cual tiene el suyo.
+
+### Y si los mercados no se portan como la media
+
+Declara la **volatilidad** de cada activo y FutureFin corre cientos de veces el mismo plan —el mismo
+motor, tus mismos datos— sorteando cada mes: una **banda de escenarios** p10/p50/p90, la
+**probabilidad de que la cartera aguante** el horizonte entero, y la de fallar a cada edad.
+
+Con los supuestos declarados en la propia respuesta, no en una nota al pie: el sorteo es
+paramétrico y no un histórico, los meses son independientes, y con un shock común la diversificación
+no se premia aquí. Un modelo estocástico sin sus supuestos a la vista es un generador de números que
+parecen ciertos.
 
 ### Presupuesto, y qué haces con lo que sobra
 
@@ -61,9 +95,11 @@ propias cuentas para que no cuenten como gasto. Después compara mes real, presu
 
 - **Histórico**: guarda fotos de tu patrimonio y FutureFin reconstruye la curva del pasado, unida a
   la del futuro en un solo gráfico.
-- **Hogar compartido**: varias personas, una instalación. Cada una ve el conjunto o solo lo suyo.
-  Quien es propietario aprueba a quien entra, y también puede cambiarle el rol o retirarle el
-  acceso — sin borrar sus datos, que vuelven intactos si la readmite.
+- **Hogar compartido**: varias personas, una instalación. Cada una trabaja en **lo suyo** y puede
+  mirar el hogar entero en una vista agregada de solo lectura, con la línea de cada miembro sobre la
+  suma. Editar la fila de otra persona no se puede, tampoco siendo el propietario. Quien es
+  propietario aprueba a quien entra, y también puede cambiarle el rol o retirarle el acceso — sin
+  borrar sus datos, que vuelven intactos si la readmite.
 - **Copias de seguridad**: exporta tus datos en un archivo cifrado con tu contraseña, y el
   contenedor guarda un respaldo automático antes de cada actualización.
 - **Claude**: si quieres, conecta la app a Claude y pregúntale por tus finanzas en voz alta, o
@@ -145,6 +181,7 @@ Más detalle en [docs/instalacion.md](docs/instalacion.md).
 | [Instalación](docs/instalacion.md) | Poner en marcha la app, volúmenes, primer usuario, subpath |
 | [Home Assistant](docs/home-assistant.md) | El add-on: panel, opciones, SSO, backups, MCP |
 | [Actualizar](docs/actualizar.md) | Subir de versión, volver atrás, migrar desde 2.x |
+| [Tu plan de jubilación](docs/jubilacion.md) | Las estrategias, la pensión con fecha, la tasa de retirada y la sección «Riesgo» |
 | [Configuración](docs/configuracion.md) | Variables de entorno y ajustes de la instalación |
 | [Copias de seguridad](docs/backups.md) | Las tres capas de respaldo y cómo restaurar |
 | [Conectar Claude](docs/mcp.md) | El servidor MCP, tokens y permisos |
@@ -177,6 +214,27 @@ hogar: es probable que tu caso toque algo que nadie ha probado. Los issues son b
 
 - **Divisa**: se elige una por instalación (EUR, USD o GBP). No hay multidivisa ni conversión.
 - **Idioma**: la interfaz está solo en español.
+
+### Lo que se afirma aquí, y qué lo respalda
+
+Todo lo de arriba es comprobable en el repositorio; estas tres son las que más fácil sería exagerar,
+así que van con el test que las sostiene:
+
+- **«El mismo sorteo da la misma cifra hoy y dentro de un año»** — la semilla de los escenarios se
+  deriva de tu instalación y tu usuario, y la corrida es reproducible bit a bit:
+  `mc_same_seed_bit_identical` (`crates/engine-stochastic/tests/monte_carlo.rs`).
+- **«Es el mismo motor, evaluado muchas veces»** — sin volatilidad declarada, la banda **es** la
+  línea de siempre: `mc_zero_volatility_degenerates_to_deterministic` (mismo fichero), y la
+  equivalencia entre el camino exacto y el estocástico se comprueba mes a mes en todo el horizonte,
+  para todos los escenarios de la batería, en `tests/degeneration.rs`.
+- **«La jubilación por estrategias no cambió los números de nadie que ya usaba FutureFin»** — el
+  motor está fijado a un fichero dorado que resume **todas** sus salidas caso por caso:
+  `crates/engine/tests/fixtures/pins-4.15.json`, comprobado por
+  `cargo test -p futurefin-engine --test golden_pins`. Si un solo dígito se moviera, el test falla y
+  nombra el escenario.
+
+Lo que **no** se afirma: que las probabilidades sean predicciones. Son aritmética sobre supuestos
+que eliges tú — ver el [Aviso](#aviso) de arriba.
 
 ## Contribuir
 

@@ -664,8 +664,15 @@ async fn si_los_efectos_cambian_entre_el_preview_y_el_confirm_el_token_deja_de_v
     assert_eq!(ok_json(&envelope)["deleted"], true, "{envelope}");
 }
 
-/// El token es del usuario que previsualizó. El de otro miembro no confirma tu borrado — con
+/// El token es del usuario que previsualizó. El de otro miembro no confirma tu operación — con
 /// ámbito de instalación sería una vía para que una sesión ajena consumiera tu salvaguarda.
+///
+/// **Se prueba sobre `materialize_recurring` y ya no sobre `delete_asset`** (5.0.0). No es un
+/// cambio de propiedad, es que la propiedad ya no se puede montar con un borrado de fila: desde
+/// D21 una fila del ledger solo la toca su dueño, así que dos usuarios distintos no pueden
+/// previsualizar y confirmar el MISMO activo — el segundo se estrella antes, en `not_row_owner`.
+/// `materialize_recurring` sí es de ámbito instalación (los dos miembros pueden llamarla con los
+/// mismos argumentos), que es justo el caso que este test existe para cerrar.
 #[tokio::test]
 async fn el_token_de_otro_miembro_no_confirma_lo_tuyo() {
     let app = TestApp::spawn().await;
@@ -674,6 +681,40 @@ async fn el_token_de_otro_miembro_no_confirma_lo_tuyo() {
         .register_and_approve_member(&owner, "bob", "member")
         .await;
     let owner_token = create_token(&app, &owner.cookie).await;
+    let member_token = create_token(&app, &member.cookie).await;
+
+    let preview = ok_json(
+        &mcp_post(
+            &app,
+            &member_token,
+            tool_call("materialize_recurring", json!({})),
+        )
+        .await,
+    );
+    let ct = preview["confirm_token"].as_str().unwrap().to_string();
+
+    let envelope = mcp_post(
+        &app,
+        &owner_token,
+        tool_call(
+            "materialize_recurring",
+            json!({"confirm": true, "confirm_token": ct}),
+        ),
+    )
+    .await;
+    assert_eq!(error_code(&envelope), "confirm_token_invalid", "{envelope}");
+}
+
+/// La otra mitad de D21 sobre el preview: el token NI SIQUIERA se emite para una fila ajena. El
+/// preview de `delete_asset` enseña nombre y valor, cuenta la cascada Y entrega la credencial
+/// para ejecutarla; sobre el activo de otro miembro las tres cosas sobran.
+#[tokio::test]
+async fn el_preview_de_un_borrado_ajeno_no_emite_token() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let member = app
+        .register_and_approve_member(&owner, "bob", "member")
+        .await;
     let member_token = create_token(&app, &member.cookie).await;
     let cat_ast = app.create_category(&owner, "asset", "Fondos").await;
     let asset_id = app
@@ -688,21 +729,13 @@ async fn el_token_de_otro_miembro_no_confirma_lo_tuyo() {
         .unwrap()
         .to_string();
 
-    let preview = ok_json(
-        &mcp_post(&app, &member_token, tool_call("delete_asset", json!({"id": asset_id}))).await,
-    );
-    let ct = preview["confirm_token"].as_str().unwrap().to_string();
-
     let envelope = mcp_post(
         &app,
-        &owner_token,
-        tool_call(
-            "delete_asset",
-            json!({"id": asset_id, "confirm": true, "confirm_token": ct}),
-        ),
+        &member_token,
+        tool_call("delete_asset", json!({"id": asset_id})),
     )
     .await;
-    assert_eq!(error_code(&envelope), "confirm_token_invalid", "{envelope}");
+    assert_eq!(error_code(&envelope), "not_row_owner", "{envelope}");
     assert_eq!(app.count_rows("assets").await, 1);
 }
 
@@ -910,4 +943,100 @@ async fn borrar_una_cuota_derivada_como_partida_remite_al_pasivo() {
         );
     }
     assert_eq!(app.count_rows("liabilities").await, 1);
+}
+
+/// `update_recurring_rule` (5.0.0). `future` cambia solo la plantilla y se aplica directo (lo
+/// que pisa —la plantilla vieja— viaja entero en `before`). `all` reescribe N movimientos que el
+/// preview no puede enseñar uno a uno, así que es de dos fases CON token: el preview cuenta las
+/// instancias con la misma core en dry-run (sin escribir), y el token caduca si el conjunto
+/// cambia entre el preview y la confirmación.
+#[tokio::test]
+async fn update_recurring_rule_future_aplica_directo_y_all_exige_token() {
+    let app = TestApp::spawn().await;
+    let owner = app.register_and_login_owner("alice").await;
+    let token = create_token(&app, &owner.cookie).await;
+    let rec = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({"op_date": "2026-06-15", "concept": "Gimnasio", "amount": "-40",
+                   "kind": "expense", "recurrence": {}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(rec.status, http::StatusCode::CREATED, "{rec:?}");
+    let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
+    let origin_id = Uuid::parse_str(rec.json()["id"].as_str().unwrap()).unwrap();
+    let amount_of_origin = || async {
+        sqlx::query_scalar::<_, rust_decimal::Decimal>("SELECT amount FROM transactions WHERE id = $1")
+            .bind(origin_id)
+            .fetch_one(&app.pool)
+            .await
+            .unwrap()
+    };
+
+    // future: sin preview, la respuesta trae la plantilla nueva y la vieja.
+    let out = ok_json(
+        &mcp_post(
+            &app,
+            &token,
+            tool_call(
+                "update_recurring_rule",
+                json!({"id": rule_id, "apply_to": "future", "amount": "-45"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(out["rule"]["amount"], "-45.0000", "{out}");
+    assert_eq!(out["before"]["amount"], "-40.0000", "{out}");
+    assert_eq!(out["instances_updated"], 0, "{out}");
+    assert_eq!(amount_of_origin().await, rust_decimal::Decimal::new(-40, 0), "origen intacto");
+
+    // all sin confirm: preview con token y recuento, sin escribir nada.
+    let args = json!({"id": rule_id, "apply_to": "all", "amount": "-50"});
+    let preview = ok_json(&mcp_post(&app, &token, tool_call("update_recurring_rule", args.clone())).await);
+    assert_eq!(preview["preview"], true, "{preview}");
+    assert!(preview["confirm_token"].is_string(), "{preview}");
+    assert_eq!(preview["effects"]["side_effects"]["instances_to_update"], 1, "{preview}");
+    assert_eq!(preview["effects"]["entity"]["amount"], "-45.0000", "la plantilla ACTUAL: {preview}");
+    assert_eq!(amount_of_origin().await, rust_decimal::Decimal::new(-40, 0), "el preview no escribe");
+    let rule_amount: rust_decimal::Decimal = sqlx::query_scalar(
+        "SELECT amount FROM recurring_transaction_rules WHERE id = $1",
+    )
+    .bind(Uuid::parse_str(&rule_id).unwrap())
+    .fetch_one(&app.pool)
+    .await
+    .unwrap();
+    assert_eq!(rule_amount, rust_decimal::Decimal::new(-45, 0), "el dry-run se deshizo");
+
+    // confirm a ciegas: rechazado.
+    let mut blind = args.clone();
+    blind["confirm"] = json!(true);
+    let envelope = mcp_post(&app, &token, tool_call("update_recurring_rule", blind)).await;
+    assert_eq!(error_code(&envelope), "confirm_token_required", "{envelope}");
+
+    // preview → confirm: reescribe la instancia.
+    let (_, envelope) = preview_then_confirm(&app, &token, "update_recurring_rule", args).await;
+    let done = ok_json(&envelope);
+    assert_eq!(done["instances_updated"], 1, "{done}");
+    assert_eq!(done["apply_to"], "all", "{done}");
+    assert_eq!(amount_of_origin().await, rust_decimal::Decimal::new(-50, 0));
+
+    // Validación de la core, también por MCP.
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call(
+            "update_recurring_rule",
+            json!({"id": rule_id, "apply_to": "nunca", "notes": "x"}),
+        ),
+    )
+    .await;
+    assert_eq!(error_code(&envelope), "apply_to_invalid", "{envelope}");
+    let envelope = mcp_post(
+        &app,
+        &token,
+        tool_call("update_recurring_rule", json!({"id": rule_id, "apply_to": "future"})),
+    )
+    .await;
+    assert_eq!(error_code(&envelope), "patch_empty", "{envelope}");
 }

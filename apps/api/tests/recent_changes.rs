@@ -73,7 +73,9 @@ async fn changes_lists_creations_and_edits_and_declares_what_it_cannot_see() {
         "las dos tablas invisibles se nombran: {b}"
     );
     assert_eq!(b["tables_covered"].as_array().unwrap().len(), 8, "{b}");
-    assert_eq!(b["view"], "household", "{b}");
+    // 5.0.0 (R2): sin `?view` la respuesta es `mine`. Este test tiene un solo usuario, así que
+    // el contenido no cambia — lo que cambia es lo que la respuesta DECLARA haber aplicado.
+    assert_eq!(b["view"], "mine", "{b}");
     assert!(b["since"].as_str().unwrap().starts_with("1970-01-01"), "{b}");
 
     let ents = entities(&b);
@@ -233,4 +235,50 @@ async fn a_truncated_page_says_so() {
 /// `+` en un timestamp RFC 3339 con offset se leería como espacio en una query string.
 fn urlencoding_lite(s: &str) -> String {
     s.replace('+', "%2B")
+}
+
+/// 5.0.0: el PATCH de una plantilla recurrente toca `updated_at`, así que aparece como
+/// `recurring_rule` / `updated`; con `apply_to: "all"` aparecen además sus movimientos
+/// reescritos como `transaction` / `updated`, y con `future` NO (no los toca).
+#[tokio::test]
+async fn a_recurring_rule_patch_reads_as_updated_and_all_also_lists_its_instances() {
+    let app = TestApp::spawn().await;
+    let owner = setup(&app).await;
+    let rec = app
+        .post_json_with_cookie(
+            "/v1/transactions",
+            json!({"op_date": "2026-06-15", "concept": "Gimnasio", "amount": "-40",
+                   "kind": "expense", "recurrence": {}}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(rec.status, http::StatusCode::CREATED, "{rec:?}");
+    let rule_id = rec.json()["recurring_rule_id"].as_str().unwrap().to_string();
+    let txn_id = rec.json()["id"].as_str().unwrap().to_string();
+    let url = format!("/v1/transactions/recurring/{rule_id}");
+
+    for (apply_to, lists_instance) in [("future", false), ("all", true)] {
+        let cut = chrono::Utc::now().to_rfc3339();
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let p = app
+            .patch_json_with_cookie(&url, json!({"apply_to": apply_to, "notes": apply_to}), &owner.cookie)
+            .await;
+        assert_eq!(p.status, http::StatusCode::OK, "{p:?}");
+        let b = app
+            .get_with_cookie(
+                &format!("/v1/changes?since={}", urlencoding_lite(&cut)),
+                &owner.cookie,
+            )
+            .await
+            .json();
+        let rule = find(&b, "recurring_rule");
+        assert_eq!(rule["id"].as_str().unwrap(), rule_id, "{b}");
+        assert_eq!(rule["change"], "updated", "{apply_to}: {b}");
+        let has_txn = b["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["entity"] == "transaction" && c["id"].as_str() == Some(txn_id.as_str()));
+        assert_eq!(has_txn, lists_instance, "{apply_to}: {b}");
+    }
 }

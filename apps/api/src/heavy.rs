@@ -93,8 +93,39 @@ fn backup_permits() -> &'static Semaphore {
 ///   techo es exactamente lo que mantiene vivo `/v1/ready` bajo carga.
 ///
 /// Lo que **no** se serializa: la proyección **cacheada**. El permiso se pide alrededor de la
-/// simulación, no del handler, así que un HIT de `projection_series_cached` no toca el semáforo
-/// (regresión: `projection_concurrency.rs`).
+/// simulación, no del handler, así que un HIT de `projection_series_cached` no toca el semáforo —
+/// es **estructural**, no una regresión con nombre: `run_projection_sim` solo se llama dentro del
+/// miss. La regresión que sí existe es
+/// `apps/api/tests/write_safety_phase3.rs::el_techo_de_concurrencia_no_cambia_ni_un_numero`, y
+/// prueba la otra mitad: ocho proyecciones concurrentes con `?months=` —que salta la cache por
+/// diseño (D7), así que simulan de verdad— terminan todas y devuelven el MISMO JSON hasta el
+/// último dígito. **Esta línea nombraba `projection_concurrency.rs`, un fichero que no existe en
+/// el repo** (`ls apps/api/tests/ | grep concurr` sale vacío); corregido al escribir la nota de
+/// E12, que es cuando alguien fue a buscarlo.
+///
+/// ## Un permiso ya no es un hilo: cómo convive este techo con el paralelismo de Monte Carlo (E12)
+///
+/// Desde 5.0.0/E12, una simulación **estocástica** reparte sus caminos entre varios núcleos
+/// (`futurefin_engine_stochastic::parallel`). Eso rompería este techo si cada simulación abriera
+/// su propio pool: `permisos × hilos` son hasta 64 hilos de CPU pura en una máquina de 8 núcleos,
+/// y el semáforo dejaría de proteger justo lo que existe para proteger.
+///
+/// No ocurre, y la razón hay que escribirla porque es la parte que se rompería sola: el crate
+/// estocástico tiene **un solo pool, compartido y creado una vez** (`OnceLock`), dimensionado con
+/// la MISMA regla que este semáforo —`available_parallelism()` acotado a `[1, 8]`—. `M`
+/// simulaciones concurrentes no abren `M` pools: reparten los mismos hilos, cada una va más lenta
+/// y ninguna roba núcleos de más. El techo total de CPU de Monte Carlo pasa de ser `permisos × 1`
+/// a ser `permisos + pool`, no `permisos × núcleos`.
+///
+/// Dos consecuencias prácticas:
+///
+/// - **La API nunca fija `McConfig::threads`** (los tres sitios que construyen un `McConfig` pasan
+///   `None`, con su nota). Ese campo es la palanca de los tests y del arnés de tiempos; si un
+///   handler empezara a rellenarlo con un valor propio, cada petición se construiría un pool
+///   efímero y volvería el `permisos × hilos` que este párrafo descarta.
+/// - **El permiso sigue siendo la unidad correcta**: mientras una simulación estocástica espera a
+///   sus hilos, su hilo de `spawn_blocking` está bloqueado sin consumir CPU, así que el permiso
+///   sigue midiendo «una simulación en vuelo», que es lo que este semáforo cuenta.
 fn projection_permits() -> &'static Semaphore {
     static S: OnceLock<Semaphore> = OnceLock::new();
     S.get_or_init(|| {

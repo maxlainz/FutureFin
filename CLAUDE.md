@@ -147,13 +147,22 @@ Las secuencias canónicas viven en el manual (`docs/`) y en las referencias — 
 
 ### Workspace layout
 ```
-Cargo workspace: apps/api + crates/domain + crates/engine
+Cargo workspace: apps/api + crates/domain + crates/engine + crates/engine-stochastic
 npm workspace:   apps/web (futurefin-web)
 ```
 
 **crates/domain** — shared primitives: `UserId` (newtype over `Uuid`), re-exports `Decimal` and `Uuid`. No `f64` for monetary values anywhere in the domain.
 
-**crates/engine** — pure projection math (`project_net_worth_series`), historical-snapshot interpolation (`history.rs`), liquidity runway (`runway.rs`) y, desde 4.2.0, pasivos que devengan interés (`RepaymentModel`). No I/O, no DB; only `Decimal` arithmetic; has unit tests. API pública, bucle de simulación y semántica completa: [`.claude/engine.md`](.claude/engine.md).
+**crates/engine** — pure projection math (`project_net_worth_series`), historical-snapshot interpolation (`history.rs`), liquidity runway (`runway.rs`), pasivos que devengan interés (`RepaymentModel`, 4.2.0) y, desde 5.0.0, el plan por fases (`phases.rs`), las reglas de retirada (`withdrawal.rs`) y los solves (`solve.rs`). No I/O, no DB, **sin RNG**; only `Decimal` arithmetic; has unit tests. API pública, bucle de simulación y semántica completa: [`.claude/engine.md`](.claude/engine.md).
+
+**crates/engine-stochastic** (5.0.0) — Monte Carlo sobre el **mismo** bucle: instancia el núcleo genérico (`MoneyOps`) con `F64Money` y publica **solo salidas estadísticas** (bandas p10/p50/p90, probabilidad de éxito, agotamiento por edad). De aquí no sale un euro publicado, el `rand_chacha` vive solo aquí, y el freezer `no_f64` de `crates/engine` **no se toca**: la red que lo sostiene es la puerta de degeneración (`tests/degeneration.rs`, ≤ 1 € por mes en todos los casos de la batería). Porqué y condiciones: `futurefin-architecture-contract` D4.
+
+**crates/engine-stochastic** — la evaluación estocástica (Monte Carlo) del MISMO bucle: no tiene
+simulación propia, tiene el tipo `F64Money` que implementa `MoneyOps` e instancia el núcleo
+genérico de `crates/engine` en coma flotante (5.0.0). El freezer `f64` del motor **no se toca**: la
+coma flotante vive solo aquí, y de aquí **no sale un euro** — sus salidas son estadísticas
+(probabilidad de éxito, percentiles), nunca un KPI monetario. Puerta de aceptación:
+`tests/degeneration.rs` (los dos caminos, mes a mes, todo el horizonte).
 
 **apps/api** — Axum HTTP server. Mapa de módulos y receta para añadir un handler: [`.claude/backend-structure.md`](.claude/backend-structure.md); contrato de cada ruta: [`.claude/api-routes.md`](.claude/api-routes.md).
 
@@ -167,13 +176,13 @@ Resumen ejecutivo; el detalle y el porqué viven en el doc o la skill que cada b
 
 **Installation singleton**: one row in `installation` per deployment. All financial data belongs to it. Users who register but aren't in `installation_memberships` are "pending" — they see no data until the owner approves them.
 
-**Money**: always `rust_decimal::Decimal`. API serializes amounts as decimal strings; the frontend receives and sends strings, never floats. Never use `f64` for financial values in domain code — la única excepción sancionada (los arrays numéricos de las series de chart) está acotada en `futurefin-architecture-contract` D4.
+**Money**: always `rust_decimal::Decimal`. API serializes amounts as decimal strings; the frontend receives and sends strings, never floats. Never use `f64` for financial values in domain code — hay **dos** excepciones sancionadas y las dos están acotadas en `futurefin-architecture-contract` D4: los arrays numéricos de las series de chart (**publicación**) y el crate `crates/engine-stochastic` (**cómputo**, solo salidas estadísticas).
 
 **Dual-port dev**: Vite `:8080`, API `:8081`; `vite.config.ts` lee `FUTUREFIN_API_PORT` y `WEB_DEV_PORT` del `.env` raíz. La imagen Docker sirve todo en `:8080` (`WEB_STATIC_ROOT=/app/web`).
 
 **Imagen autocontenida (3.0.0)**: en producción PostgreSQL 16 corre **dentro** del contenedor (socket Unix, sin TCP), supervisado por `apps/api/docker-entrypoint.sh` (PID 1). El entrypoint **jamás borra un cluster**, la imagen **no declara `VOLUME`** y aborta si no hay volumen montado en `PGDATA`. Runbook: skill `futurefin-run-and-operate`; porqué y trampas: `futurefin-architecture-contract` D13 + `futurefin-failure-archaeology`.
 
-**View scoping**: `?view=mine` filtra por `owner_user_id = current_user`; default `household`. Es un filtro de cliente, **no** una frontera de autorización. Los handlers usan los helpers de `handlers/person_view.rs` (`scope_where` + `bind_scope_as/scalar`), y toda respuesta cuyo contenido dependa del scope **ecoa** la vista aplicada en un campo `view` (4.4.0). Detalle e incidente: `futurefin-architecture-contract` D2 + [`.claude/backend-structure.md`](.claude/backend-structure.md).
+**View scoping**: `?view=mine` filtra por `owner_user_id = current_user` y **es el default desde 5.0.0** (`household` hay que pedirlo explícitamente; un literal desconocido es 400 `invalid_view`). Sigue siendo un filtro de cliente, **no** una frontera de autorización — la frontera de ESCRITURA sí es nueva: toda mutación del ledger exige ser el dueño de la fila (403 `not_row_owner`, D23) y `household` es un agregado de solo lectura. Los handlers usan los helpers de `handlers/person_view.rs` (`scope_where` + `bind_scope_as/scalar`), y toda respuesta cuyo contenido dependa del scope **ecoa** la vista aplicada en un campo `view` (4.4.0). Detalle e incidente: `futurefin-architecture-contract` D2 + [`.claude/backend-structure.md`](.claude/backend-structure.md).
 
 **Reads never mutate**: los pasivos con `payment_end_date < today` se **filtran** en los GET, nunca se borran (la legacy `purge_expired_liabilities` se retiró en mayo 2026: los GET emitían `DELETE`s en silencio). Detalle: `futurefin-architecture-contract` D5.
 

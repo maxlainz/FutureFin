@@ -112,8 +112,9 @@ async fn goals_cross_the_projection_series_at_the_predicted_month() {
         .await;
     assert_eq!(retarget.status, http::StatusCode::OK, "{retarget:?}");
 
+    // `household` explícito desde 5.0.0 (R2): sin `?view` este endpoint responde `mine`.
     let resp = app
-        .get_with_cookie("/v1/allocation-rules/goals", &owner.cookie)
+        .get_with_cookie("/v1/allocation-rules/goals?view=household", &owner.cookie)
         .await;
     assert_eq!(resp.status, http::StatusCode::OK, "{resp:?}");
     let b = resp.json();

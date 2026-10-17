@@ -12,8 +12,9 @@
 
 import type { ReactNode } from "react";
 import { MenuIcon } from "./icons";
-import { TABS, TAB_PATH, type TabId } from "../lib/navigation";
+import { TAB_PATH, tabsForScope, type TabId } from "../lib/navigation";
 import { appUrl } from "../lib/basePath";
+import type { LedgerPersonScope } from "../lib/ledger";
 
 export function TopBar({
   activeTab,
@@ -23,6 +24,7 @@ export function TopBar({
   onMobileMenuOpen,
   extras,
   showNav = true,
+  scope,
 }: {
   activeTab: TabId | null;
   navigate: (path: string) => void;
@@ -34,6 +36,8 @@ export function TopBar({
   /** `false` oculta pestañas y hamburguesa. Se usa mientras el usuario no tiene acceso al hogar:
    *  antes las nueve pills se pintaban igual y no hacían nada al pulsarlas — navegación muerta. */
   showNav?: boolean;
+  /** Ámbito de datos (Yo | Hogar): filtra qué pestañas se pintan (F1, `tabsForScope`). */
+  scope: LedgerPersonScope;
 }) {
   const healthOk = !!health && !healthError;
   const healthTitle = healthError
@@ -57,7 +61,7 @@ export function TopBar({
 
       {showNav ? (
       <nav className="ff-topbar-nav" aria-label="Secciones">
-        {TABS.map((t) => (
+        {tabsForScope(scope).map((t) => (
           <a
             key={t.id}
             // El `href` es lo que ve el navegador en un clic con Cmd/rueda o al previsualizar

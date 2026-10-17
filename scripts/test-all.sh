@@ -21,6 +21,12 @@ cargo build -p futurefin-api --locked
 step "cargo test -p futurefin-engine"
 cargo test -p futurefin-engine
 
+# La puerta de degeneración (`crates/engine-stochastic`) no necesita base de datos y es el gate que
+# dice que el camino de coma flotante y el exacto siguen siendo la MISMA simulación. Corre aquí y
+# no solo dentro de `cargo test --workspace`, para que también la vea `SKIP_DB=1`.
+step "cargo test -p futurefin-engine-stochastic"
+cargo test -p futurefin-engine-stochastic
+
 if [ "${SKIP_DB:-0}" = "1" ]; then
   step "integración SALTADA (SKIP_DB=1)"
 else

@@ -230,7 +230,7 @@ impl McpWriteAudit {
 /// ciegas. Las dos primeras no tocan la base: solo la tercera consulta.
 ///
 /// `tool` es el nombre de la tool que llama. Es OBLIGATORIO y no decorativo: este gate es el
-/// único punto por el que pasan TODAS las escrituras (hoy 40; `grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs`), así que es donde vive la traza Y la tabla de
+/// único punto por el que pasan TODAS las escrituras (hoy 41; `grep -c 'read_only_hint = false' apps/api/src/mcp/server.rs`), así que es donde vive la traza Y la tabla de
 /// auditoría. Sin él, un borrado masivo por MCP no deja absolutamente ningún rastro de qué tool
 /// lo hizo: `delete_transaction` es hard delete y el único registro que existía
 /// (`api_tokens.last_used_at`) tiene throttle de 60 s.

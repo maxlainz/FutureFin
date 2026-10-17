@@ -9,13 +9,13 @@ hace absolutamente nada: responde 401 a todo.
 
 ## Qué puede hacer
 
-A fecha de agosto de 2026 (4.4.0) el catálogo son **68 herramientas**, que se reparten así:
+En la 5.0.0 el catálogo son **72 herramientas**, que se reparten así:
 
 | Grupo | Cuántas | Qué son |
 |---|---|---|
-| **Lectura** | 27 | Resumen, proyección FIRE, presupuesto, activos, pasivos, reglas de reparto, movimientos, importaciones, categorías, histórico, snapshots, ajustes; y, desde la 4.4.0, agregados de gasto sin bajarse las filas, movimientos duplicados, candidatos a transferencia, calendario de amortización de un pasivo, deflactado a euros de hoy, objetivos de la cascada y qué ha cambiado desde una fecha. |
-| **Simulación** | 1 | `simulate_projection`: un *what-if* puro («¿y si gasto 200 € más al mes?», «¿y si amortizo 10.000 € de la hipoteca?»). No persiste nada ni ensucia la cache. |
-| **Escritura** | 40 | Crear, editar y borrar activos, pasivos, presupuesto, planificación, movimientos, categorías, reglas de reparto y de categorización, y snapshots (incluido grabar el pasado a mano); conciliar transferencias; cambiar los supuestos FIRE y los ajustes de presentación de la instalación. |
+| **Lectura** | 29 | Resumen, proyección FIRE, presupuesto, activos, pasivos, reglas de reparto, movimientos, importaciones, categorías, histórico, snapshots, ajustes; agregados de gasto sin bajarse las filas, movimientos duplicados, candidatos a transferencia, calendario de amortización de un pasivo, deflactado a euros de hoy, objetivos de la cascada y qué ha cambiado desde una fecha; y, desde la 5.0.0, **tu plan de jubilación** y las **bandas de escenarios** de Monte Carlo. |
+| **Simulación** | 1 | `simulate_projection`: un *what-if* puro («¿y si gasto 200 € más al mes?», «¿y si me jubilo a los 55?», «¿y si me cojo una excedencia de un año?»). No persiste nada ni ensucia la cache. |
+| **Escritura** | 42 | Crear, editar y borrar activos, pasivos, presupuesto, planificación, movimientos (y sus plantillas recurrentes), categorías, reglas de reparto y de categorización, y snapshots (incluido grabar el pasado a mano); conciliar transferencias; cambiar los supuestos fiscales del hogar, **tu plan de jubilación** y los ajustes de presentación de la instalación. |
 
 Las herramientas no son una API paralela: llaman **a las mismas funciones internas** que los
 endpoints HTTP de la app. Lo que ves por MCP es exactamente lo que ves en la interfaz.
@@ -195,9 +195,10 @@ Escribir vía MCP pasa por **tres puertas**, y las tres tienen que estar abierta
    reintente.
 3. **La confirmación, en las destructivas.** Las herramientas que borran o cambian cosas en lote
    solo actúan con `confirm: true`. Sin ese campo devuelven un **preview** de lo que pasaría. Así,
-   un borrado nunca ocurre "de paso". Y las ocho de radio no acotado o sin vuelta atrás (deshacer
+   un borrado nunca ocurre "de paso". Y las de radio no acotado o sin vuelta atrás (deshacer
    una importación, borrar un activo, un pasivo, un snapshot o una regla de la cascada de reparto,
-   aplicar una regla al histórico, desconciliar una transferencia, materializar recurrentes) piden
+   aplicar una regla al histórico, desconciliar una transferencia, materializar recurrentes, editar
+   una recurrente aplicando el cambio a **todos** sus movimientos) piden
    **además** un código que solo
    emite ese preview: dura 10 minutos, sirve una vez y va atado a los efectos exactos que se te
    enseñaron — si cambian entre el preview y la confirmación, hay que volver a previsualizar. No hay

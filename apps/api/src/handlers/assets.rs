@@ -1,7 +1,7 @@
 use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::membership::role_can_write;
-use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
+use crate::handlers::person_view::{require_row_owner, LedgerView, LedgerViewQuery};
 use crate::handlers::projection::{assets_projection_context, refresh_projection_after_mutation};
 use crate::handlers::session::require_session_user;
 use crate::state::AppState;
@@ -64,6 +64,16 @@ pub struct AssetResponse {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub expected_annual_return_percent: Option<Decimal>,
+    /// **Volatilidad anual** de los retornos de este activo, en puntos porcentuales
+    /// (`"17"` = 17 %/año). Es la desviación típica ANUAL, no un rango ni un peor caso.
+    ///
+    /// `null` o `0` = activo determinista (cuenta corriente, depósito). El camino Decimal del
+    /// motor la **ignora siempre** (D12): solo la lee el Monte Carlo, así que declararla no
+    /// mueve ni un euro de la proyección determinista. Cota [0, 100].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub annual_volatility_percent: Option<Decimal>,
     /// Aporte del **primer mes** resuelto por la cascada de reglas de asignación. Ojo al nombre:
     /// NO es un importe mensual estable — la cascada reparte `net_cash_month`, que incluye el
     /// tramo de los planning flows sin fecha del mes en curso (repartidos a `importe/90` por día
@@ -91,8 +101,12 @@ pub struct AssetResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
     pub sort_index: i32,
-    /// Usuario dueño de la fila (`NULL` = compartida). Dato de display para la UI
-    /// (el trigger del modal de snapshot). No es una frontera de seguridad.
+    /// Usuario dueño de la fila. Desde 5.0.0 la columna es `NOT NULL` (D14), así que el campo
+    /// viaja SIEMPRE — el `Option` se conserva por compatibilidad del contrato publicado.
+    ///
+    /// Es dato de display para la UI (el trigger del modal de snapshot) **y**, desde D21, el
+    /// que decide quién puede editar la fila: una mutación sobre un activo ajeno devuelve 403
+    /// `not_row_owner`. La lectura sigue siendo del hogar (`?view` no es autorización).
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, format = "uuid")]
     pub owner_user_id: Option<Uuid>,
@@ -122,6 +136,11 @@ pub struct CreateAssetBody {
     #[serde(with = "rust_decimal::serde::str_option")]
     #[schema(value_type = Option<String>)]
     pub expected_annual_return_percent: Option<Decimal>,
+    /// Volatilidad anual en % (0–100). Omitir o `0` = activo determinista.
+    #[serde(default)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub annual_volatility_percent: Option<Decimal>,
     #[serde(default)]
     pub notes: Option<String>,
     #[serde(default)]
@@ -143,10 +162,19 @@ pub struct PatchAssetBody {
     #[schema(value_type = Option<Object>, nullable = true)]
     pub purchase_price: Option<serde_json::Value>,
     pub is_liquid: Option<bool>,
-    #[serde(default)]
-    #[serde(with = "rust_decimal::serde::str_option")]
-    #[schema(value_type = Option<String>)]
-    pub expected_annual_return_percent: Option<Decimal>,
+    /// Rentabilidad anual esperada en % (> −100). **Tri-estado desde 5.0.0**: omitir = sin
+    /// cambio, `null` = borrarla (el activo vuelve a la rentabilidad no declarada), un valor la
+    /// fija. Hasta 4.15.x `null` era indistinguible de omitir y no había forma de deshacer una
+    /// rentabilidad escrita por error.
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
+    #[schema(value_type = Option<Object>, nullable = true)]
+    pub expected_annual_return_percent: Option<serde_json::Value>,
+    /// Volatilidad anual en % (0–100). **Tri-estado desde 5.0.0**: omitir = sin cambio, `null` =
+    /// borrarla (el activo vuelve a ser determinista), un valor la fija. Sin el `null` no había
+    /// camino de vuelta al determinismo, que es justo el estado por defecto.
+    #[serde(default, deserialize_with = "crate::handlers::deserialize_double_option")]
+    #[schema(value_type = Option<Object>, nullable = true)]
+    pub annual_volatility_percent: Option<serde_json::Value>,
     pub notes: Option<String>,
     pub sort_index: Option<i32>,
 }
@@ -160,9 +188,11 @@ struct AssetRow {
     purchase_price: Option<Decimal>,
     is_liquid: bool,
     expected_annual_return_percent: Option<Decimal>,
+    annual_volatility_percent: Option<Decimal>,
     notes: Option<String>,
     sort_index: i32,
-    owner_user_id: Option<Uuid>,
+    /// `NOT NULL` desde la migración 5.0.0 (D14): toda fila del ledger tiene dueño.
+    owner_user_id: Uuid,
 }
 
 fn normalize_name(raw: &str) -> Result<String, ApiError> {
@@ -205,11 +235,21 @@ fn assert_non_negative(d: Decimal, field: &'static str) -> Result<(), ApiError> 
     Ok(())
 }
 
-/// PATCH: clave ausente → conservar `current`; `null` JSON → `None` en BD; valor → sustituir.
-fn merge_optional_decimal_patch(
+/// PATCH: clave ausente → conservar `current`; `null` JSON → `None` en BD; valor → sustituir,
+/// tras pasar por `check`.
+///
+/// El validador es un parámetro y no una llamada fija a `assert_non_negative` porque los tres
+/// campos tri-estado de un activo tienen cotas distintas: `purchase_price` es `>= 0`,
+/// `expected_annual_return_percent` admite negativos hasta −100 (excluido) y
+/// `annual_volatility_percent` vive en `[0, 100]`. Con la cota cableada dentro, extender el
+/// tri-estado a los otros dos habría significado copiar el parseo — que es exactamente la parte
+/// que no se puede duplicar sin que las dos copias se separen (`"1.234,56 €"` se acepta en una
+/// y se rechaza en la otra sin que ningún test lo note).
+fn merge_optional_decimal_patch_with(
     patch: &Option<serde_json::Value>,
     current: Option<Decimal>,
     field: &'static str,
+    check: impl Fn(Decimal) -> Result<(), ApiError>,
 ) -> Result<Option<Decimal>, ApiError> {
     match patch {
         None => Ok(current),
@@ -226,10 +266,19 @@ fn merge_optional_decimal_patch(
                     ApiError::BadRequest(format!("decimal_invalid: {field} must be a valid decimal"))
                 })?
             };
-            assert_non_negative(d, field)?;
+            check(d)?;
             Ok(Some(d))
         }
     }
+}
+
+/// El caso `>= 0` de [`merge_optional_decimal_patch_with`] (`purchase_price`).
+fn merge_optional_decimal_patch(
+    patch: &Option<serde_json::Value>,
+    current: Option<Decimal>,
+    field: &'static str,
+) -> Result<Option<Decimal>, ApiError> {
+    merge_optional_decimal_patch_with(patch, current, field, |d| assert_non_negative(d, field))
 }
 
 async fn assert_asset_category(
@@ -309,13 +358,14 @@ fn row_to_response(
         unrealized_pnl_pct_absent_reason,
         is_liquid: r.is_liquid,
         expected_annual_return_percent: r.expected_annual_return_percent,
+        annual_volatility_percent: r.annual_volatility_percent,
         // Presentación: la cascada trabaja con la precisión completa, aquí solo se publica.
         contribution_nominal_monthly: contribution_nominal_monthly.round_dp(4),
         contribution_recurring_monthly: contribution_recurring_monthly.round_dp(4),
         contribution_target_amount,
         notes: r.notes,
         sort_index: r.sort_index,
-        owner_user_id: r.owner_user_id,
+        owner_user_id: Some(r.owner_user_id),
         seeded_allocation_rule_id: None,
     }
 }
@@ -371,7 +421,7 @@ async fn fetch_asset_resolved_targets(
     path = "/v1/assets",
     tag = "assets",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = rows attributed to the signed-in user; omit or other value = full household."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
     ),
     responses(
         (status = 200, description = "Assets for the installation", body = [AssetResponse]),
@@ -415,7 +465,7 @@ pub(crate) async fn list_assets_core(
     let assets_scope = view.scope_where("");
     let assets_sql = format!(
         r#"SELECT id, category_id, name, current_value, purchase_price,
-                  is_liquid, expected_annual_return_percent,
+                  is_liquid, expected_annual_return_percent, annual_volatility_percent,
                   notes, sort_index, owner_user_id
            FROM assets
            WHERE {assets_scope}
@@ -477,9 +527,27 @@ pub(crate) fn assert_return_percent(pct: Option<Decimal>) -> Result<(), ApiError
     Ok(())
 }
 
+/// Cota de la volatilidad anual declarada por activo: `[0, 100]` puntos porcentuales.
+///
+/// El `CHECK` de columna es más laxo a propósito (solo `>= 0`, para poder importar backups
+/// viejos); esta es la cota de la API. 100 % de desviación típica anual ya es un activo cuyo
+/// valor puede duplicarse o irse a cero en un año: por encima, el número deja de describir
+/// nada que una cartera pueda tener.
+pub(crate) fn assert_volatility_percent(v: Option<Decimal>) -> Result<(), ApiError> {
+    if let Some(vol) = v {
+        if vol < Decimal::ZERO || vol > Decimal::from(100u32) {
+            return Err(ApiError::BadRequest(
+                "volatility_out_of_range: annual_volatility_percent must be between 0 and 100"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Core sin HTTP: lo comparten el handler POST y la tool MCP `create_asset`.
-/// Invalidación FULL dentro. Sin owner-check en el ledger de assets (contrato del módulo:
-/// cualquier member edita cualquier fila del hogar).
+/// Invalidación FULL dentro. El alta atribuye SIEMPRE al usuario de la sesión (D21): no hay
+/// forma de crear una fila a nombre de otro miembro.
 ///
 /// **#150 — siembra del sumidero.** Si este es el PRIMER activo de un scope sin cascada (cero
 /// activos Y cero reglas del owner), tras el INSERT se crea la regla `remainder` apuntándole,
@@ -497,6 +565,7 @@ pub(crate) async fn create_asset_core(
 ) -> Result<AssetResponse, ApiError> {
     assert_asset_category(&state.pool, iid, body.category_id).await?;
     assert_return_percent(body.expected_annual_return_percent)?;
+    assert_volatility_percent(body.annual_volatility_percent)?;
 
     let name = normalize_name(&body.name)?;
     assert_non_negative(body.current_value, "current_value")?;
@@ -527,12 +596,12 @@ pub(crate) async fn create_asset_core(
                installation_id, category_id, name, current_value,
                purchase_price, is_liquid,
                expected_annual_return_percent,
-               notes, sort_index, owner_user_id
+               annual_volatility_percent, notes, sort_index, owner_user_id
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
            RETURNING id, category_id, name, current_value, purchase_price,
                      is_liquid, expected_annual_return_percent,
-                     notes, sort_index, owner_user_id"#,
+                     annual_volatility_percent, notes, sort_index, owner_user_id"#,
     )
     .bind(iid)
     .bind(body.category_id)
@@ -541,6 +610,7 @@ pub(crate) async fn create_asset_core(
     .bind(body.purchase_price)
     .bind(is_liquid)
     .bind(body.expected_annual_return_percent)
+    .bind(body.annual_volatility_percent)
     .bind(&notes)
     .bind(sort_index)
     .bind(user_id)
@@ -633,8 +703,11 @@ pub async fn patch_asset(
 }
 
 /// Core sin HTTP: lo comparten el handler PATCH y las tools MCP `update_asset` (body completo)
-/// y `update_asset_value` (subset de valoración). Invalidación FULL dentro. Sin owner-check
-/// (contrato del módulo).
+/// y `update_asset_value` (subset de valoración). Invalidación FULL dentro.
+///
+/// **D21 (5.0.0)**: exige que el activo sea del usuario de la sesión — 403 `not_row_owner` si es
+/// de otro miembro, 404 si no existe. El comentario histórico decía «sin owner-check (contrato
+/// del módulo)»; ese contrato se retiró con las proyecciones por miembro.
 pub(crate) async fn patch_asset_core(
     state: &Arc<AppState>,
     iid: Uuid,
@@ -642,13 +715,13 @@ pub(crate) async fn patch_asset_core(
     id: Uuid,
     body: PatchAssetBody,
 ) -> Result<AssetResponse, ApiError> {
-    assert_return_percent(body.expected_annual_return_percent)?;
     if body.category_id.is_none()
         && body.name.is_none()
         && body.current_value.is_none()
         && body.purchase_price.is_none()
         && body.is_liquid.is_none()
         && body.expected_annual_return_percent.is_none()
+        && body.annual_volatility_percent.is_none()
         && body.notes.is_none()
         && body.sort_index.is_none()
     {
@@ -659,7 +732,7 @@ pub(crate) async fn patch_asset_core(
 
     let row: Option<AssetRow> = sqlx::query_as(
         r#"SELECT id, category_id, name, current_value, purchase_price,
-                  is_liquid, expected_annual_return_percent,
+                  is_liquid, expected_annual_return_percent, annual_volatility_percent,
                   notes, sort_index, owner_user_id
            FROM assets
            WHERE id = $1 AND installation_id = $2"#,
@@ -672,6 +745,7 @@ pub(crate) async fn patch_asset_core(
     let Some(current) = row else {
         return Err(ApiError::NotFound);
     };
+    require_row_owner(current.owner_user_id, user_id)?;
 
     let new_cat = body.category_id.unwrap_or(current.category_id);
     if new_cat != current.category_id {
@@ -695,11 +769,23 @@ pub(crate) async fn patch_asset_core(
 
     let new_liquid = body.is_liquid.unwrap_or(current.is_liquid);
 
-    let new_exp = if body.expected_annual_return_percent.is_some() {
-        body.expected_annual_return_percent
-    } else {
-        current.expected_annual_return_percent
-    };
+    // Tri-estado (5.0.0): omitir conserva, `null` BORRA, un valor sustituye — la misma forma que
+    // `purchase_price` ha tenido siempre. Las cotas se comprueban DENTRO del merge, sobre el
+    // valor que de verdad va a la columna, no sobre el patchset: con el `null` en juego, validar
+    // el patchset dejaba pasar exactamente el caso que se quería cazar.
+    let new_exp = merge_optional_decimal_patch_with(
+        &body.expected_annual_return_percent,
+        current.expected_annual_return_percent,
+        "expected_annual_return_percent",
+        |d| assert_return_percent(Some(d)),
+    )?;
+
+    let new_vol = merge_optional_decimal_patch_with(
+        &body.annual_volatility_percent,
+        current.annual_volatility_percent,
+        "annual_volatility_percent",
+        |d| assert_volatility_percent(Some(d)),
+    )?;
 
     let new_notes = match &body.notes {
         Some(_) => normalize_notes(&body.notes)?,
@@ -716,13 +802,14 @@ pub(crate) async fn patch_asset_core(
                purchase_price = $4,
                is_liquid = $5,
                expected_annual_return_percent = $6,
-               notes = $7,
-               sort_index = $8,
+               annual_volatility_percent = $7,
+               notes = $8,
+               sort_index = $9,
                updated_at = now()
-           WHERE id = $9 AND installation_id = $10
+           WHERE id = $10 AND installation_id = $11 AND owner_user_id = $12
            RETURNING id, category_id, name, current_value, purchase_price,
                      is_liquid, expected_annual_return_percent,
-                     notes, sort_index, owner_user_id"#,
+                     annual_volatility_percent, notes, sort_index, owner_user_id"#,
     )
     .bind(new_cat)
     .bind(&new_name)
@@ -730,10 +817,12 @@ pub(crate) async fn patch_asset_core(
     .bind(new_pp)
     .bind(new_liquid)
     .bind(new_exp)
+    .bind(new_vol)
     .bind(&new_notes)
     .bind(new_sort)
     .bind(id)
     .bind(iid)
+    .bind(user_id)
     .fetch_one(&state.pool)
     .await?;
 
@@ -808,11 +897,26 @@ pub(crate) struct AssetDeleteEffects {
     pub allocation_remainder_rules_deleted: i64,
 }
 
+/// **D21 en el PREVIEW, no solo en el borrado.** El preview de `delete_asset` enseña el nombre y
+/// el valor del activo, cuenta la cascada que se lleva por delante y —esto es lo que lo separa de
+/// una lectura cualquiera— **emite un `confirm_token`**. Sobre un activo ajeno eso es contarle a
+/// alguien el plan de otro y darle además la credencial para ejecutarlo; que la confirmación
+/// fuese a fallar después no lo arregla. Falla aquí, con el mismo `not_row_owner`.
 pub(crate) async fn asset_delete_effects(
     pool: &sqlx::PgPool,
     iid: Uuid,
+    session_user_id: Uuid,
     id: Uuid,
 ) -> Result<AssetDeleteEffects, ApiError> {
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT owner_user_id FROM assets WHERE id = $1 AND installation_id = $2"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .fetch_optional(pool)
+    .await?;
+    require_row_owner(owner.ok_or(ApiError::NotFound)?, session_user_id)?;
+
     let transactions_unlinked: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*)::bigint FROM transactions
            WHERE installation_id = $1 AND linked_asset_id = $2"#,
@@ -855,17 +959,32 @@ pub(crate) async fn delete_asset_core(
     user_id: Uuid,
     id: Uuid,
 ) -> Result<(), ApiError> {
+    // D21 ANTES que nada: el borrado no tenía SELECT previo, así que hace falta uno para
+    // distinguir «no existe» (404) de «es de otro miembro» (403). Va delante de la guardia del
+    // sumidero a propósito — contarle a alguien que el activo ajeno es el destino de una regla
+    // ya es contarle algo de un plan que no es suyo.
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT owner_user_id FROM assets WHERE id = $1 AND installation_id = $2"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .fetch_optional(&state.pool)
+    .await?;
+    require_row_owner(owner.ok_or(ApiError::NotFound)?, user_id)?;
+
     // 4.12.1 (#176): el sumidero es indestructible con activos vivos — si este activo es su
     // destino y quedan otros, el borrado se rechaza (mueve antes la regla). El último activo
     // del scope sí se borra.
     crate::handlers::allocation_rules::assert_asset_delete_keeps_the_sink(&state.pool, iid, id)
         .await?;
-    let res =
-        sqlx::query(r#"DELETE FROM assets WHERE id = $1 AND installation_id = $2"#)
-            .bind(id)
-            .bind(iid)
-            .execute(&state.pool)
-            .await?;
+    let res = sqlx::query(
+        r#"DELETE FROM assets WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .bind(user_id)
+    .execute(&state.pool)
+    .await?;
 
     if res.rows_affected() == 0 {
         return Err(ApiError::NotFound);

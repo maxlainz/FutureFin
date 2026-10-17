@@ -2,7 +2,7 @@ use crate::error::ApiError;
 use crate::handlers::installation::{installation_naive_today, require_installation_member};
 use crate::handlers::liabilities::PaymentFrequency;
 use crate::handlers::membership::role_can_write;
-use crate::handlers::person_view::{LedgerView, LedgerViewQuery};
+use crate::handlers::person_view::{require_row_owner, LedgerView, LedgerViewQuery};
 use crate::handlers::projection::refresh_projection_after_mutation;
 use crate::handlers::session::require_session_user;
 use crate::money::money_out;
@@ -204,6 +204,8 @@ pub(crate) struct BudgetEntryJoinRow {
     persists_after_retirement: bool,
     ends_at_retirement: bool,
     expense_end_date: Option<NaiveDate>,
+    /// `NOT NULL` desde la migración 5.0.0 (D14). Lo lee la puerta de D21 del PATCH.
+    owner_user_id: Uuid,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -340,7 +342,7 @@ pub(crate) async fn fetch_budget_rows_and_derived_liabilities(
     let entries_sql = format!(
         r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
                   b.notes, b.sort_index, b.persists_after_retirement,
-                  b.ends_at_retirement, b.expense_end_date
+                  b.ends_at_retirement, b.expense_end_date, b.owner_user_id
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE {entries_scope}
@@ -629,7 +631,7 @@ pub(crate) async fn ledger_regular_monthly_income_and_expense(
     path = "/v1/budget",
     tag = "budget",
     params(
-        ("view" = Option<String>, Query, description = "`mine` = partidas atribuidas al usuario de la sesión (las cuotas de pasivo se filtran igual); omitido = hogar."),
+        ("view" = Option<String>, Query, description = "`mine` (default: `view` omitido o vacío) = filas atribuidas al usuario de la sesión; `household` = hogar completo, y hay que pedirlo EXPLÍCITAMENTE desde 5.0.0. Cualquier otro valor → 400 `invalid_view`."),
     ),
     responses(
         (status = 200, description = "Presupuesto: partidas persistidas y cuotas de pasivos activos en una sola lista (`entries`, discriminadas por `source`), con los totales normalizados a equivalente mensual.", body = BudgetSnapshotResponse),
@@ -761,7 +763,7 @@ pub(crate) async fn create_budget_entry_core(
     let row: BudgetEntryJoinRow = sqlx::query_as(
         r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
                   b.notes, b.sort_index, b.persists_after_retirement,
-                  b.ends_at_retirement, b.expense_end_date
+                  b.ends_at_retirement, b.expense_end_date, b.owner_user_id
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1"#,
@@ -857,7 +859,7 @@ pub(crate) async fn patch_budget_entry_core(
     let row: Option<BudgetEntryJoinRow> = sqlx::query_as(
         r#"SELECT b.id, b.category_id, c.scope AS scope, b.amount,
                   b.notes, b.sort_index, b.persists_after_retirement,
-                  b.ends_at_retirement, b.expense_end_date
+                  b.ends_at_retirement, b.expense_end_date, b.owner_user_id
            FROM budget_entries b
            JOIN categories c ON c.id = b.category_id
            WHERE b.id = $1 AND b.installation_id = $2"#,
@@ -870,6 +872,7 @@ pub(crate) async fn patch_budget_entry_core(
     let Some(current) = row else {
         return Err(missing_budget_entry_error(&state.pool, iid, id).await);
     };
+    require_row_owner(current.owner_user_id, user_id)?;
 
     let new_cat = body.category_id.unwrap_or(current.category_id);
     if new_cat != current.category_id {
@@ -918,7 +921,7 @@ pub(crate) async fn patch_budget_entry_core(
                ends_at_retirement = $6,
                expense_end_date = $7,
                updated_at = now()
-           WHERE id = $8 AND installation_id = $9
+           WHERE id = $8 AND installation_id = $9 AND owner_user_id = $10
            RETURNING budget_entries.id,
                      budget_entries.category_id,
                      (
@@ -931,7 +934,8 @@ pub(crate) async fn patch_budget_entry_core(
                      budget_entries.sort_index,
                      budget_entries.persists_after_retirement,
                      budget_entries.ends_at_retirement,
-                     budget_entries.expense_end_date"#,
+                     budget_entries.expense_end_date,
+                     budget_entries.owner_user_id"#,
     )
     .bind(new_cat)
     .bind(new_amount)
@@ -942,6 +946,7 @@ pub(crate) async fn patch_budget_entry_core(
     .bind(new_expense_end_date)
     .bind(id)
     .bind(iid)
+    .bind(user_id)
     .fetch_one(&state.pool)
     .await?;
 
@@ -986,11 +991,30 @@ pub(crate) async fn delete_budget_entry_core(
     user_id: Uuid,
     id: Uuid,
 ) -> Result<(), ApiError> {
-    let res = sqlx::query(r#"DELETE FROM budget_entries WHERE id = $1 AND installation_id = $2"#)
-        .bind(id)
-        .bind(iid)
-        .execute(&state.pool)
-        .await?;
+    // D21: el «no existe» de este módulo NO es un 404 pelado —puede ser el 422 que manda a
+    // /v1/liabilities—, así que la puerta de dueño se resuelve con un SELECT propio y deja
+    // intacto `missing_budget_entry_error` para el caso de verdad ausente.
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT owner_user_id FROM budget_entries WHERE id = $1 AND installation_id = $2"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .fetch_optional(&state.pool)
+    .await?;
+    match owner {
+        None => return Err(missing_budget_entry_error(&state.pool, iid, id).await),
+        Some(o) => require_row_owner(o, user_id)?,
+    }
+
+    let res = sqlx::query(
+        r#"DELETE FROM budget_entries
+           WHERE id = $1 AND installation_id = $2 AND owner_user_id = $3"#,
+    )
+    .bind(id)
+    .bind(iid)
+    .bind(user_id)
+    .execute(&state.pool)
+    .await?;
 
     if res.rows_affected() == 0 {
         return Err(missing_budget_entry_error(&state.pool, iid, id).await);

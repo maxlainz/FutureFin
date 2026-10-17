@@ -398,30 +398,6 @@
 }
 
 /* ---------- Selector de vista (mío/hogar) — anclado en el TopBar ---------- */
-.ledger-view-select {
-  appearance: auto;
-  max-width: min(11rem, 40vw);
-  padding: 0.25rem 0.5rem;
-  font-size: 0.78rem;
-  line-height: 1.3;
-  color: var(--ff-ink);
-  background-color: var(--ff-paper);
-  border: 1px solid var(--ff-line-soft);
-  border-radius: var(--ff-radius-pill);
-  cursor: pointer;
-}
-
-.ledger-view-select:hover {
-  border-color: var(--ff-accent);
-  color: var(--ff-ink);
-}
-
-.ledger-view-select:focus {
-  outline: none;
-  border-color: var(--ff-accent);
-  box-shadow: 0 0 0 2px color-mix(in oklch, var(--ff-accent) 25%, transparent);
-}
-
 /* ---------- Settings sub-tab bar (pills) ---------- */
 .settings-subtab-bar {
   display: flex;
@@ -434,10 +410,26 @@
   border-radius: 0;
 }
 
+/* Los avisos globales: el hueco entre ellos lo pone el `gap` (0,5rem, el
+   mismo que entre banners hermanos en flujo) y el de debajo el propio
+   contenedor. Antes cada banner traía además su `margin-bottom` de 1rem,
+   que en flex no colapsa: 1,45rem entre dos avisos y 1rem en el resto
+   de la app. */
 .app-global-errors {
   display: flex;
   flex-direction: column;
-  gap: 0.45rem;
+  gap: 0.5rem;
+}
+
+/* Con `:has` en la lista: `.banner:has(+ .banner)` de más abajo tiene la
+   misma especificidad y, al ir después, ganaría. */
+.app-global-errors > .banner,
+.app-global-errors > .banner:has(+ .banner) {
+  margin: 0;
+}
+
+.app-global-errors:not(:empty) {
+  margin-bottom: 1rem;
 }
 
 .app-main {
@@ -577,11 +569,18 @@
 .assets-table.assets-table--budget-lines {
   width: 100%;
   max-width: 100%;
-  table-layout: auto;
+  table-layout: fixed;
+}
+
+.assets-table.assets-table--budget-lines th {
+  white-space: normal;
+}
+
+.assets-table.assets-table--budget-lines td:first-child {
+  overflow-wrap: anywhere;
 }
 
 .assets-table.assets-table--budget-lines .asset-actions-cell {
-  width: 1%;
   vertical-align: middle;
   white-space: nowrap;
 }
@@ -1029,9 +1028,8 @@
 
 .modal-title {
   margin: 0;
-  font-size: 1rem;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-size: 0.95rem;
+  font-weight: 600;
   color: var(--ff-ink);
 }
 
@@ -1104,10 +1102,36 @@
 .banner {
   padding: 0.55rem 0.8rem;
   border-radius: 0.5rem;
-  margin-bottom: 1rem;
+  margin: 0 0 1rem;
   border: 1px solid var(--ff-line-soft);
   background: var(--ff-paper);
   color: var(--ff-ink);
+}
+
+/* Espaciado de banners — UNA regla para toda la app (2026-10-10).
+
+   - Debajo: 1rem hasta el bloque siguiente, el mismo ritmo que `.panel`.
+   - Encima, cuando sigue a un bloque que no es un banner: 0,75rem. En
+     flujo de bloque colapsa con el margen inferior del vecino (tras un
+     panel o una cabecera manda el suyo), así que solo se nota donde el
+     vecino no trae margen: una nota `muted tight`, el slot de altura
+     reservada de «Resultado» o la rejilla de dos columnas de
+     Jubilación — los tres sitios donde el banner quedaba a 0 px.
+   - Entre banners hermanos: 0,5rem, siempre el mismo.
+
+   Dentro de un contenedor flex/grid los márgenes no colapsan: ahí el
+   contenedor pone el hueco con `gap` y los banners van sin margen
+   (`.app-global-errors`, abajo). */
+* + .banner {
+  margin-top: 0.75rem;
+}
+
+.banner + .banner {
+  margin-top: 0;
+}
+
+.banner:has(+ .banner) {
+  margin-bottom: 0.5rem;
 }
 
 .error-banner {
@@ -1216,21 +1240,49 @@
   accent-color: var(--ff-accent);
 }
 
-.field input,
+/* CONTROLES SUBRAYADOS, no encajonados (2026-09-13, «decluter»).
+   Cada input era una caja completa con borde, radio y fondo propio:
+   en una pantalla de formulario eso son quince o veinte rectángulos
+   que pesan lo mismo que los paneles que los contienen. Con una sola
+   línea inferior el control sigue diciendo «aquí se escribe» y deja
+   de competir con la estructura.
+
+   **Las tres exclusiones no son cosmética.** Casillas y radios pintan
+   su propia caja nativa y un `border: 0` se la come; el `range` no
+   tiene borde que sustituir y la línea le dibujaría un raíl falso
+   bajo el suyo. Si añades un tipo de control nuevo, pregúntate
+   primero si su caja ES el control.
+
+   El `border-bottom` usa `--ff-line` y no `--ff-line-soft`: al perder
+   el fondo y el resto del borde, el contraste que quedaba era
+   demasiado tenue para leerse como un campo editable. */
+.field input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
 .field select {
   font: inherit;
-  padding: 0.5rem 0.7rem;
-  border: 1px solid var(--ff-line-soft);
-  border-radius: var(--ff-radius-input);
-  background: var(--ff-paper);
+  padding: 0.5rem 0.15rem;
+  border: 0;
+  border-bottom: 1px solid var(--ff-line);
+  border-radius: 0;
+  background: transparent;
   color: var(--ff-ink);
+}
+
+/* Al escribir, la línea se engorda y se tiñe: es la única señal de
+   «este es el campo activo» que queda cuando no hay caja. El
+   `outline` de foco sigue donde estaba (regla de accesibilidad), con
+   `offset` para que no se pegue al texto. */
+.field input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus,
+.field select:focus {
+  border-bottom-color: var(--ff-accent);
+  border-bottom-width: 2px;
+  padding-bottom: calc(0.5rem - 1px);
 }
 
 .field input:focus-visible,
 .field select:focus-visible,
 .hh-select:focus-visible {
   outline: 2px solid var(--ff-accent);
-  outline-offset: 0;
+  outline-offset: 2px;
 }
 
 .field input::placeholder {
@@ -1403,13 +1455,6 @@
 
 .tax-brackets-table input::placeholder {
   color: var(--ff-muted);
-}
-
-.subsection-title {
-  margin: 0;
-  font-size: 0.95rem;
-  font-weight: 600;
-  color: var(--ff-ink);
 }
 
 .settings-meta-dl {
@@ -1612,7 +1657,7 @@
 
 .ff-account-name {
   font-size: 0.95rem;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--ff-ink);
   letter-spacing: -0.01em;
   overflow: hidden;
@@ -1721,8 +1766,37 @@
   outline-offset: -2px;
 }
 
+/* Variante «Yo | Hogar» del TopBar (5.0.0, D32). Comparte la piel del segmentado de tema —la
+   única del sistema, según design-system.md— y solo compacta la tipografía para la cabecera:
+   con el título de marca, el indicador de salud y la hamburguesa, los dos segmentos tienen que
+   caber en 360px sin empujar nada (regla de oro: cero scroll horizontal de página). */
+.ff-topbar-scope {
+  flex-shrink: 0;
+}
+
+.ff-topbar-scope button {
+  padding: 0.3rem 0.72rem;
+  font-size: 0.78rem;
+  line-height: 1.3;
+}
+
 .tight-banner {
   margin-bottom: 0;
+}
+
+/* Aviso «Vista agregada del hogar · solo lectura» (D32): primera línea de dato, segunda de
+   apoyo. Sin colores propios — reutiliza `.banner.info-banner`, que ya resuelve claro/oscuro. */
+.app-scope-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  /* En Proyección `.app-main` es un flex column con `overflow:hidden`: sin esto el aviso cedería
+     altura al chart y se quedaría con una línea y media. */
+  flex: 0 0 auto;
+}
+
+.app-scope-banner small {
+  color: var(--ff-muted);
 }
 
 /* Popover de ayuda (3.10.0). El icono reutiliza `.inline-hint-icon`, ya tokenizado; aquí solo se
@@ -1742,10 +1816,18 @@
   align-items: center;
   flex-shrink: 0;
 }
+/* Sin borde desde 2026-09-13 («decluter»). Cada disparador era un
+   círculo con su propio filete: ocho cajitas más en una pantalla que
+   ya tenía treinta y cuatro, y compitiendo en peso con los controles
+   de verdad. El glifo en `--ff-muted` basta para que se lea como
+   «aquí hay ayuda», y al pasar por encima o enfocarlo recupera el
+   acento. El área de click NO encoge: el `padding` sustituye al
+   espacio que ocupaba el borde. */
 .help-popover__trigger {
   background: none;
-  border: 1px solid var(--ff-line-soft);
-  padding: 0;
+  border: 0;
+  padding: 0 0.1rem;
+  color: var(--ff-muted);
   cursor: pointer;
   display: inline-flex;
   align-items: center;
@@ -1758,7 +1840,6 @@
 .help-popover__trigger:hover,
 .help-popover__trigger[aria-expanded="true"] {
   color: var(--ff-accent);
-  border-color: var(--ff-accent);
 }
 .help-popover__panel {
   position: absolute;
@@ -1903,13 +1984,6 @@
   border: 1px solid var(--ff-line-soft);
   border-radius: 0.6rem;
   background: var(--ff-paper);
-}
-
-.summary-donut-card .subsection-title {
-  margin: 0 0 0.5rem;
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: var(--ff-ink-soft);
 }
 
 .summary-donut-inner {
@@ -2698,7 +2772,8 @@
   gap: 0.5rem;
 }
 
-.checkbox-field input[type="checkbox"] {
+.checkbox-field input[type="checkbox"],
+.checkbox-field input[type="radio"] {
   width: auto;
   margin: 0;
 }
@@ -2723,19 +2798,16 @@
   font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
 
-.retirement-radio-stack {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem 1rem;
-  align-items: center;
-}
-
-.retirement-radio-stack .field-label-text {
-  flex: 1 0 100%;
+/* «Volver a la derivada» (5.0.0, D13): vive FUERA del radiogroup —un botón enfocable entre radios
+   rompe la navegación con flechas—, así que hereda el `align-items: stretch` del `.field` y sin
+   esto ocuparía todo el ancho como si fuera la acción principal del panel. Es una salida. */
+.retirement-basis-reset {
+  align-self: flex-start;
+  margin-left: -0.55rem;
 }
 
 .retirement-config-stack {
-  gap: 0.875rem;
+  gap: 0.7rem;
 }
 
 fieldset.retirement-config-stack {
@@ -2745,38 +2817,91 @@ fieldset.retirement-config-stack {
   min-inline-size: 0;
 }
 
+/* `auto-fit` y NO `repeat(3, 1fr)`: con tres pistas fijas un radiogroup de DOS opciones
+   —`coast_mode`, `partial_mode`— dejaba la tercera celda literalmente vacía, y era uno de los
+   huecos que el owner señaló (2026-09-13). Con `auto-fit` las pistas sin contenido colapsan, así
+   que N opciones ocupan N fracciones iguales del ancho real: dos mitades, tres tercios. El mínimo
+   de 9rem solo decide cuándo se envuelve en pantallas estrechas. */
+/* CONTROL SEGMENTADO (2026-09-13, «decluter»). Antes cada opción era
+   una caja con su borde: nueve rectángulos en la pantalla de los que
+   solo tres estaban elegidos, y el borde gritaba igual en los seis
+   que no. Ahora la rejilla es UNA caja y las opciones se separan con
+   un filete interno.
+
+   `gap: 0` + `overflow: hidden` es lo que deja el redondeo limpio en
+   las esquinas sin tocar el radio de cada opción. El DOM no cambia
+   —siguen siendo `<label>` con su `<input type="radio" class="sr-only">`
+   dentro—, así que el foco, el teclado y el lector de pantalla se
+   comportan exactamente igual que antes: esto es piel, no control. */
 .retirement-mode-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+  gap: 0;
+  border: 1px solid var(--ff-line-soft);
+  border-radius: 0.7rem;
+  overflow: hidden;
+  background: var(--ff-paper);
 }
 
+/* Las CUATRO tarjetas de estrategia (D26, tras la retirada de «Puente hasta la pensión» en C7):
+   mismo lenguaje visual que los modos, pero con un mínimo MAYOR — a 9rem cuatro opciones caben en
+   una fila de ~165px y el nombre no entra en una línea. A 15rem se reparten dos y dos. El
+   `minmax(min(100%, …))` es el patrón sancionado del design system: en móvil colapsa solo, sin
+   abrir un breakpoint nuevo. */
+.retirement-strategy-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+}
+
+/* El `min-height` de 4,5rem existía para que la caja no bailara con
+   un sub-rótulo de una o dos líneas. **Los sub-rótulos se fueron el
+   2026-09-13** (owner: «el texto dentro del botón de modo también se
+   debe reducir o poner en `<?>`») — y ya estaban dichos, uno por uno,
+   en el `<?>` del apartado que gobierna cada rejilla. Sin ellos el
+   botón es un nombre: una línea, y `min-height` pasa a ser el área
+   táctil mínima (2,75rem ≈ 44px, la regla del design system), no una
+   reserva de texto. */
 .retirement-mode-card {
   display: grid;
   gap: 0.15rem;
-  align-content: start;
-  min-height: 4.5rem;
-  border: 1px solid var(--ff-line-soft);
-  border-radius: 0.7rem;
-  background: var(--ff-paper);
-  padding: 0.65rem 0.7rem;
+  align-content: center;
+  min-height: 2.75rem;
+  /* Sin borde ni radio propios: los pone el segmentado que las
+     contiene. El único filete es el que separa una opción de su
+     vecina, y `-1px` de margen lo funde con el borde exterior para
+     que no salga doble en los cantos. */
+  border-left: 1px solid var(--ff-line-soft);
+  margin-left: -1px;
+  /* …y el mismo truco arriba, para el segmentado que ENVUELVE (las
+     cuatro estrategias van en 2×2): sin esto las dos filas se tocaban
+     sin línea entre ellas. En una sola fila este borde cae justo
+     sobre el del contenedor y no se ve. */
+  border-top: 1px solid var(--ff-line-soft);
+  margin-top: -1px;
+  background: transparent;
+  padding: 0.5rem 0.7rem;
   cursor: pointer;
   transition: box-shadow 120ms ease, background-color 120ms ease, border-color 120ms ease;
 }
 
 .retirement-mode-card:hover {
-  border-color: color-mix(in oklch, var(--ff-accent) 30%, var(--ff-line-soft));
+  background: color-mix(in oklch, var(--ff-accent) 6%, transparent);
 }
 
+/* Dentro de un segmentado, «elegida» es la que está PINTADA: sin
+   bordes propios que resaltar, el relleno es lo único que distingue,
+   y por eso sube del 14 % al 18 % de acento. El halo de 2px se fue
+   con el borde — dentro de una caja única dibujaba un rectángulo
+   flotando sobre otro. */
 .retirement-mode-card.is-active {
-  background: color-mix(in oklch, var(--ff-accent) 14%, var(--ff-paper));
-  border-color: var(--ff-accent);
-  box-shadow: 0 0 0 2px color-mix(in oklch, var(--ff-accent) 25%, transparent);
+  background: color-mix(in oklch, var(--ff-accent) 18%, var(--ff-paper));
 }
 
+/* `outline-offset: -2px` (hacia DENTRO): con el offset positivo de
+   antes el foco se salía de la caja del segmentado y pisaba a la
+   opción vecina. */
 .retirement-mode-card:focus-within {
   outline: 2px solid var(--ff-accent);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 .retirement-mode-name {
@@ -2789,20 +2914,6 @@ fieldset.retirement-config-stack {
   font-size: 0.78rem;
   color: var(--ff-ink-soft);
   line-height: 1.25;
-}
-
-.retirement-mode-amount {
-  font-size: 0.84rem;
-  font-weight: 600;
-  color: var(--ff-ink);
-  font-variant-numeric: tabular-nums;
-  font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
-}
-
-.retirement-mode-monthly {
-  color: var(--ff-muted);
-  font-size: 0.78em;
-  font-weight: normal;
 }
 
 @media (max-width: 900px) {
@@ -2929,7 +3040,6 @@ fieldset.retirement-config-stack {
 
 /* ---- Movimientos (tabla) ---- */
 .exp-concept-cell {
-  max-width: 18rem;
   word-break: break-word;
 }
 
@@ -3718,9 +3828,6 @@ fieldset.retirement-config-stack {
     gap: 0.5rem;
     padding: 0.55rem 0.75rem;
   }
-  .ledger-view-select {
-    max-width: min(8.5rem, 34vw);
-  }
 }
 
 /* Borde ultra-estrecho: ocultar solo el título del TopBar (queda el logo).
@@ -4025,4 +4132,1266 @@ fieldset.retirement-config-stack {
   margin: 6px 0 0;
   border-left: 2px solid var(--ff-line-soft);
   padding-left: 10px;
+}
+
+/* Tono rojo de un KPI (5.0.0, D17): el plan está completo y NO llega. Mismo
+   tinte que `.error-banner` — un solo vocabulario de «esto va mal» en toda la
+   app. Solo la piel: la cifra sigue siendo tinta normal, porque el número no
+   está mal, lo que está mal es lo que significa. Único consumidor: la tarjeta
+   «Ahorro necesario» de Jubilación cuando `underfunded === true`
+   (`buildRetirementTilesV2`, `tone="danger"` de `MetricCard`). La rejilla
+   `.plan-card-grid`/`.plan-card`/`.plan-card-figures` que vivía junto a esta
+   regla —la D27 original, sustituida por `.plan-card-wide` en U9— se retiró
+   en el pase de documentación U5b tras confirmar cero consumidores en
+   `apps/web/src` (`git grep -nE '(^|[^a-zA-Z0-9_-])plan-card(-grid|-figures)?([^a-zA-Z0-9_-]|$)'
+   -- '*.tsx'`, vacío). */
+.metric-card--danger {
+  background: color-mix(in oklch, var(--ff-neg) 8%, var(--ff-paper));
+  border-color: color-mix(in oklch, var(--ff-neg) 45%, var(--ff-line-soft));
+}
+
+.metric-card--danger .metric-value-detail {
+  color: var(--ff-neg);
+  font-weight: 600;
+}
+
+/* ============================================================
+   TARJETA «TU PLAN» ANCHA Y FRASES DEL HOGAR (5.0.0, U9/U10,
+   issue #207)
+   ------------------------------------------------------------
+   U9 sustituye la rejilla D27 original (`.plan-card-grid`/`.plan-card`/
+   `.plan-card-figures`, retirada de `App.css` en el pase de documentación
+   U5b — cero consumidores en `apps/web/src`) por UNA tarjeta ancha en «Yo»:
+   título = la oración del plan, coloreada por su tono; subtítulo =
+   estrategia + hito secundario; a la
+   derecha, el KPI «Éxito del plan» (reusa `.metric-card`, cero CSS
+   nuevo ahí). U10 sustituye la rejilla en «Hogar» por una lista de
+   frases con el punto de color de cada miembro. Cero hex: solo
+   tokens y color-mix sobre ellos.
+   ============================================================ */
+.plan-card-wide {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1.25rem;
+  padding-top: 0.85rem;
+}
+
+.plan-card-wide-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.plan-card-wide-title {
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ff-ink);
+}
+
+/* Mismo tinte que `.plan-card-wide-warning--danger`/`.error-banner`: un solo
+   vocabulario de «esto va mal». El ámbar (warn) no tiñe texto — es el
+   estado normal de «hay algo que arreglar», no una alarma. */
+.plan-card-wide-title--danger {
+  color: var(--ff-neg);
+}
+
+.plan-card-wide-subtitle {
+  font-size: 0.82rem;
+  color: var(--ff-ink-soft);
+  line-height: 1.3;
+}
+
+/* Ancho de una KPI normal (mismo criterio que `.summary-success-grid`);
+   `max-width: 100%` para que nunca desborde en tarjetas estrechas. */
+.plan-card-wide-kpi {
+  flex: 0 0 auto;
+  width: 13rem;
+  max-width: 100%;
+}
+
+.plan-card-wide-warning {
+  margin-top: 0.6rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--ff-line-soft);
+  font-size: 0.82rem;
+  line-height: 1.35;
+  color: var(--ff-ink-soft);
+}
+
+.plan-card-wide-warning--danger {
+  color: var(--ff-neg);
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  /* bp:640 — el KPI cede su columna y cae bajo el título/subtítulo. */
+  .plan-card-wide {
+    flex-direction: column;
+  }
+  .plan-card-wide-kpi {
+    width: 100%;
+  }
+}
+
+/* U10 — «Planes del hogar»: una frase por miembro, con el MISMO punto de
+   color que su línea fina en el chart y su tick en la tira de fases
+   (`householdMemberColor`, `lib/chart-legend.ts`). Sin tarjetas ni
+   cifras por persona: el agregado no tiene plan propio. */
+.plan-sentence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  margin: 0;
+  padding-top: 0.85rem;
+  list-style: none;
+}
+
+.plan-sentence-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.55rem;
+  font-size: 0.88rem;
+  line-height: 1.4;
+  color: var(--ff-ink);
+}
+
+.plan-sentence-dot {
+  flex: 0 0 auto;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: var(--ff-radius-pill);
+  transform: translateY(-0.12em);
+}
+
+/* ============================================================
+   TIRA DE FASES DEL CHART DE PROYECCIÓN (5.0.0, D29, issue #207)
+   ------------------------------------------------------------
+   Bajo el eje X: qué fase vive cada tramo del horizonte, más las
+   marcas que no son fases (pensión, cruce, miembros del hogar).
+   Su alto sale del PLOT, nunca de lienzo extra (ver el comentario
+   del `xAxisExtraBottom` en ProjectionNetWorthChart.tsx).
+
+   Color: tinte PROGRESIVO del acento, el mismo recurso que las
+   variantes de `.metric-card` — no es color decorativo, es una
+   escala ordinal (trabajas → media jornada → jubilado). Solo
+   tokens, y el color-mix contra `--ff-paper` resuelve claro y
+   oscuro sin una segunda regla.
+   ============================================================ */
+.projection-phase-band {
+  stroke: var(--proj-grid);
+  stroke-width: 0.5;
+}
+
+.projection-phase-band--accumulating {
+  fill: color-mix(in oklch, var(--ff-accent) 7%, var(--ff-paper));
+}
+
+.projection-phase-band--partial {
+  fill: color-mix(in oklch, var(--ff-accent) 18%, var(--ff-paper));
+}
+
+.projection-phase-band--retired {
+  fill: color-mix(in oklch, var(--ff-accent) 32%, var(--ff-paper));
+}
+
+.projection-phase-label {
+  font-size: 8.5px;
+  letter-spacing: 0.02em;
+  fill: var(--proj-meta);
+  pointer-events: none;
+}
+
+.projection-phase-mark-label {
+  font-size: 8.5px;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
+/* ============================================================
+   SECCIÓN «RIESGO» DE JUBILACIÓN (5.0.0, D28, issue #207)
+   ------------------------------------------------------------
+   Abanico de percentiles + semáforo de éxito + tabla de
+   agotamiento por edad. Cero color propio salvo el ámbar de
+   estado (`--ff-warn`, definido en theme.css con sus dos ramas):
+   el resto son los mismos tokens que ya usan panel, KPI y tabla.
+   ============================================================ */
+
+/* Ámbar de un KPI (D28): el peldaño INTERMEDIO del semáforo. Misma
+   construcción que `.metric-card--danger` —tinte al 8 %, borde al 45 %—
+   para que verde/ámbar/rojo se lean como una escala y no como tres
+   decoraciones sin relación. Solo la piel: la cifra sigue en tinta
+   normal, porque el número no está mal; lo que matiza es su lectura. */
+.metric-card--warn {
+  background: color-mix(in oklch, var(--ff-warn) 8%, var(--ff-paper));
+  border-color: color-mix(in oklch, var(--ff-warn) 45%, var(--ff-line-soft));
+}
+
+.metric-card--warn .metric-value-detail {
+  color: var(--ff-warn);
+  font-weight: 600;
+}
+
+/* Filas extra (jubilación probable, recorte, colchón): pares
+   etiqueta/valor apilados, con la base debajo en muted. Slot de detalle
+   NO reservado a propósito — no hay baseline compartida que alinear:
+   cada fila es independiente y su altura la marca su propio texto. */
+.risk-extra-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+.risk-extra-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.risk-extra-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.15rem 0.6rem;
+}
+
+.risk-extra-label {
+  font-size: 0.78rem;
+  color: var(--ff-ink-soft);
+}
+
+.risk-extra-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--ff-ink);
+}
+
+/* `.risk-extra-detail` (la segunda línea explicativa bajo una fila) se
+   retiró el 2026-10-10: las filas son rótulo + valor y lo que explicaban
+   vive en el `<?>` de su rótulo. */
+
+/* Pie del panel: coste y semilla (los caminos van en la fila «Precisión
+   del sorteo»). Letra pequeña de verdad —es
+   procedencia, no una cifra del plan— y `overflow-wrap` porque la
+   semilla es un entero de 20 dígitos que no cabe a 360px. */
+.risk-footnote {
+  margin-top: 0.6rem;
+  font-size: 0.72rem;
+  line-height: 1.35;
+  color: var(--ff-muted);
+  overflow-wrap: anywhere;
+}
+
+/* KPI «Éxito del plan» del Resumen (5.0.0, D28): una sola tarjeta dentro del
+   panel «Tu plan». `auto-fill` (y no `auto-fit`) es lo que la mantiene del
+   ancho de una KPI y no estirada a toda la fila: con `auto-fit` la única
+   tarjeta absorbería las pistas vacías. `margin-bottom: 0` porque ya está
+   dentro de un panel que trae su propio espaciado inferior. */
+.metric-grid.summary-success-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 13rem), 1fr));
+  margin-top: 0.65rem;
+  margin-bottom: 0;
+}
+
+/* ============================================================
+   JUBILACIÓN — rediseño UX U1b (5.0.0, issue #207)
+   ------------------------------------------------------------
+   Todo lo de aquí es ADITIVO y vive al final del archivo a
+   propósito: así ninguna línea anterior se desplaza y las anclas
+   por `file:línea` del freezer `no-hex-outside-theme.test.ts`
+   siguen apuntando donde apuntaban.
+   Cero hex: solo tokens `--ff-*` / `--proj-*` y `color-mix`
+   sobre ellos.
+   ============================================================ */
+
+/* ---- 1 · Cabecera: título + UN indicador de guardado (S6) ----
+   Sustituye a los seis «Guardado automático.» al pie de cada
+   panel, que podían contradecirse entre sí (uno decía «guardado»
+   mientras otro tenía un 400 en la mano). Se alinea a la derecha
+   del título y envuelve debajo cuando no cabe. */
+.workspace-header.retirement-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.35rem 1rem;
+}
+
+.retirement-save-state {
+  font-size: 0.78rem;
+  color: var(--ff-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* El único estado con color propio. No es decoración: es la escala
+   de ESTADO ya sancionada (D17/D28) — «no se ha guardado» es un
+   hecho del plan, no un adorno. «Guardado» se queda en muted:
+   el caso bueno es el normal y teñirlo lo convierte en ruido. */
+.retirement-save-state--danger {
+  color: var(--ff-neg);
+  font-weight: 600;
+}
+
+/* ---- 2 · «Tu plan» ----
+   Marca de campo obligatorio sin rellenar (U2): el autosave está
+   parado hasta que llegue, y hay que decir cuál falta. Mismo rojo
+   de estado que el indicador de la cabecera, un solo vocabulario. */
+.retirement-required-hint {
+  color: var(--ff-neg);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+/* La cifra que el modo de gasto DERIVA, con su procedencia pegada
+   («1.250 €/mes · 15.000 €/año · del presupuesto»). Monoespaciada
+   porque las dos primeras mitades son dinero; envuelve en móvil. */
+.retirement-derived-line {
+  margin: 0;
+  font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--ff-ink-soft);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Valor del slider de retirada, junto a él. */
+.retirement-slider-value {
+  font-family: ui-monospace, "IBM Plex Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ff-ink);
+}
+
+/* Enlace de texto que no es una acción destructiva ni primaria: la
+   vuelta a la vista «Yo» desde el agregado del hogar. Alineado a la
+   izquierda y sin ocupar todo el ancho del `.stack`, que lo haría
+   parecer el botón principal del panel. (El hermano que tenía, el
+   salto a «Avanzado», se fue con el acordeón en la tercera vuelta
+   de UX.) */
+.retirement-scope-link {
+  align-self: flex-start;
+  margin-left: -0.55rem;
+}
+
+.retirement-scope-link {
+  margin-top: 0.75rem;
+}
+
+/* ---- S11 · las tarjetas de estrategia ----
+   La rejilla EXPLÍCITA de cinco columnas que había aquí (con sus
+   dos media queries de VIEWPORT, `bp:strategy 1023` y `bp:mobile
+   640`) se retiró en W13, por dos motivos que se acumulaban:
+
+     · contaba CINCO estrategias y desde C7 son CUATRO
+       (`pension_bridge` dejó de ser una), así que la quinta
+       columna estaba vacía en todos los anchos;
+     · con la página en dos columnas, el ancho del viewport ya no
+       dice nada del ancho de la tarjeta: a 1280px la rejilla de
+       cinco caía dentro de una columna de ~570px y cada opción se
+       quedaba en 114px.
+
+   Vuelve a mandar `.retirement-strategy-grid` (auto-fit con
+   `minmax(min(100%, 15rem), 1fr)`, el patrón sancionado), que
+   reparte por el ancho REAL del contenedor. */
+
+/* ---- 3 · «Resultado» ----
+   La FRASE del plan (U7). Es la cabecera de resultados entera, así
+   que pesa como un título sin serlo. El TONO va en un filete
+   lateral y NUNCA en el color del texto: la regla de la casa
+   reserva verde/rojo para cifras delta, y la escala de estado
+   (D17/D28) tiñe pieles, no letras. Verde no tiene piel — «va
+   bien» es el estado normal —, así que `ok` usa el acento, que es
+   lo que la app ya usa para destacar UN elemento. */
+.retirement-sentence {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--ff-ink);
+  border-left: 3px solid var(--ff-line-soft);
+  padding-left: 0.7rem;
+}
+
+.retirement-sentence--ok {
+  border-left-color: var(--ff-accent);
+}
+
+.retirement-sentence--warn {
+  border-left-color: var(--ff-warn);
+}
+
+.retirement-sentence--danger {
+  border-left-color: var(--ff-neg);
+}
+
+/* Las ≤3 tarjetas de la cabecera (U7). La variante existe SOLO
+   para que su subtítulo envuelva: ahí vive la BASE de la cifra
+   («de 658 €/mes de sobrante · es TODO tu sobrante y no basta»), y
+   media base es peor que ninguna. El recorte global de
+   `.metric-value-parenthetical` se queda como está — lo necesitan
+   las bandas `nowrap` con scroll, que aquí no aplican porque esta
+   rejilla envuelve. */
+/* 11rem y no 15rem desde 2026-09-13: son TRES tarjetas
+   (`RETIREMENT_TILES_V2_CAP`) y a 15rem solo caben dos en la columna
+   del resultado (~695px a 1512px), así que la tercera se iba sola a
+   una fila y dejaba media vacía — el mismo agujero que esta pasada
+   vino a quitar. A 11rem entran las tres, y con un subtítulo que
+   ENVUELVE (regla de debajo) el ancho menor no recorta nada. */
+.metric-grid.retirement-tiles-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.retirement-tiles-grid .metric-value-parenthetical {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.3;
+}
+
+/* El chart único (U5) y su barra de conmutadores. */
+.retirement-chart-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.retirement-chart-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+
+/* Rótulo de un hito dentro del SVG. El color lo pone el propio
+   marcador (acento el primario, meta los demás); aquí solo la
+   tipografía, que en un `<text>` no se hereda del CSS del padre. */
+.proj-mini-marker-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* «Riesgo», ya compacto: un KPI y la tabla por edad. Todo lo demás
+   (percentiles, cobertura, colchón, procedencia) baja al «Detalle
+   del cálculo». */
+.retirement-risk-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.retirement-detail > summary {
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ff-ink-soft);
+}
+
+.retirement-detail[open] > summary {
+  margin-bottom: 0.6rem;
+}
+
+/* ---- Hogar (U10) ----
+   Una frase por persona y nada más: el hogar no tiene plan propio,
+   así que una rejilla de tarjetas invitaría a comparar cifras con
+   bases distintas. Lista sin viñeta, del ancho del panel. */
+.household-plan-lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-size: 0.88rem;
+  line-height: 1.4;
+  color: var(--ff-ink);
+}
+
+/* ============================================================
+   JUBILACIÓN — tercera vuelta de UX (5.0.0, V1–V7, issue #207)
+   ------------------------------------------------------------
+   Aditivo y al FINAL del archivo a propósito: así ninguna línea
+   anterior se desplaza y las anclas por `file:línea` del freezer
+   `no-hex-outside-theme.test.ts` no se mueven por esto.
+   Cero hex: solo tokens `--ff-*` / `--proj-*` y `color-mix`.
+   ============================================================ */
+
+/* El subtítulo del KPI «Éxito del plan» ENVUELVE. Desde V1 el valor
+   es «87,0 %» y el sujeto de la cifra («de los escenarios no agotan
+   el capital» / «0 de 500 escenarios agotan el capital») vive en el
+   paréntesis: recortado con ellipsis diría «de los escenarios no
+   ag…», que es media base — y media base es peor que ninguna.
+   Precedente sancionado: `.retirement-tiles-grid`. */
+.summary-success-grid .metric-value-parenthetical,
+.plan-card-wide-kpi .metric-value-parenthetical {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.3;
+}
+
+/* ---- V3 · los apartados de «Tu plan» ----
+   UN APARTADO, UN PANEL (2026-09-13, informe del owner: «estos tiles
+   dentro de tiles no los usamos en ningún lado»). Nacieron como
+   `.retirement-card`: cajas con borde propio, fondo un escalón por
+   debajo y radio de KPI, metidas DENTRO de un panel «Tu plan». Era el
+   único anidamiento de ese tipo en la app —Ajustes son doce paneles
+   hermanos, y la propia columna «Resultado» separa sus bloques con
+   filete— y el envoltorio se fue con su título: los seis títulos ya
+   dicen qué es cada cosa, y el indicador «Guardado» de la cabecera es
+   el que ata el conjunto.
+
+   Aquí solo queda la MAQUETACIÓN: la piel (borde, fondo, radio,
+   sombra, padding) la pone `.panel` y el hueco entre paneles el `gap`
+   de `.retirement-col`. */
+.retirement-plan-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+/* La tarjeta es un flex-column con `gap`, así que el margen inferior
+   del `.panel-title` sumaría un segundo hueco bajo el título. */
+.retirement-plan-panel > .panel-title {
+  margin-bottom: 0;
+}
+
+/* `.retirement-plan-blurb` (la frase bajo el título de cada apartado)
+   se RETIRÓ el 2026-09-13. El owner: «hay mucho plain text, y ya
+   tenemos un mecanismo para dar explicaciones `<?>`, usémoslo». Las
+   seis frases no se perdieron: viven en el catálogo
+   (`lib/helpTexts.ts`) y las pinta el HelpPopover del título, cableado
+   por `PLAN_CARD_HELP`. Con ellas se fueron nueve `<small>` de ayuda
+   bajo campos; lo que queda en prosa son VALORES y ESTADOS (la cifra
+   derivada del gasto, «obligatorio · sin guardar», los avisos), nunca
+   explicaciones.
+
+   El espacio recuperado se reinvierte en apretar la pantalla —era la
+   otra mitad del encargo: «con el espacio ganado podemos encoger
+   algunas superficies y que no sea tan abrumador»—, de ahí los tres
+   ajustes de abajo. */
+.retirement-plan-panel {
+  padding-block: 0.85rem;
+}
+
+/* ---- El panel ancho se lee como una LISTA DE AJUSTES ----
+   (2026-09-13, informe del owner: «deja muchos huecos vacíos… está
+   un tanto fea, aunque la jerarquía de información es buena»)
+
+   El aire no venía de la jerarquía, venía de la geometría. Un
+   `.field` es un flex-column que estira su control: en el panel de
+   695px que da la columna del plan a 1512px, el input de «Edad de
+   jubilación» medía 664px para escribir `55` (medido; hoy 104), y lo
+   mismo el `<select>` de la regla. Un apartado de un solo campo
+   —Edades, Horizonte, Pensión sin marcar— gastaba una franja entera
+   en una línea.
+
+   El panel ancho pasa a ser una lista: RÓTULO a la izquierda,
+   CONTROL a la derecha con el ancho que de verdad pide (una edad no
+   necesita 16rem, un `<select>` sí), la frase de ayuda bajo el
+   rótulo y un filete `--ff-line-soft` entre filas para atar cada par
+   cuando los separan 40 cm de panel.
+
+   **El corte lo decide `@container`, no un `@media`.** Es la misma
+   doctrina que W13 dejó escrita —«el reparto lo decide el ancho REAL
+   del contenedor, que en dos columnas ya no es el del viewport»—,
+   aquí con la herramienta que la expresa directamente en vez de con
+   un `flex-basis`.
+
+   El umbral es **28rem** desde 2026-09-13: con la página de vuelta al
+   ancho estándar (66rem) el panel mide 469px — 29,3rem —, y a 30rem
+   la lista se habría apagado justo donde hace falta. Por debajo
+   —móvil, o la página en una sola columna estrecha— los campos
+   vuelven solos a apilarse, que es lo que quieren ahí.
+
+   La pista del control es de **17rem**. La fijó el `<select>` más
+   largo de entonces —el de la regla de retirada, 255px con su
+   flecha—, que se retiró con «solo SWR» (2026-10-10); el valor se
+   conserva sin volver a medir: con menos controles anchos solo
+   puede sobrar sitio, y bajarlo es una decisión visual aparte.
+
+   `.retirement-subcol` es contenedor por derecho propio: las dos
+   sub-columnas de «Pensión» miden 223px dentro de un panel de 469px,
+   así que sus campos se quedan apilados —correcto— y solo estrenan
+   filas cuando la página va a una columna y el panel crece. */
+.retirement-plan-panel,
+.retirement-subcol {
+  container-type: inline-size;
+}
+
+@container (min-width: 28rem) {
+  /* Las cuatro estrategias, DOS Y DOS. Con `auto-fit` el número de
+     pistas lo decidía el ancho y en una tarjeta de ~810px salían
+     tres: la cuarta se iba sola a la fila de abajo y dejaba una
+     celda vacía — el mismo agujero que `auto-fit` arregla en los
+     radiogroups de dos opciones, aquí al revés. Con cuatro opciones
+     fijas, la única repartición sin resto es 2×2 (o 1×4 cuando no
+     caben dos, que es lo que hace la regla base). */
+  .retirement-strategy-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  /* `.retirement-field--block` (marcado en `RetirementView.tsx`) es la
+     salida declarada: el campo cuyo contenido es una rejilla de modos
+     o una pila de radios se queda apilado, porque ahí el ancho no es
+     aire, es lo que hace legibles las opciones. */
+  .retirement-config-stack > .field:not(.checkbox-field):not(.retirement-field--block),
+  .retirement-subcol > .field:not(.checkbox-field):not(.retirement-field--block) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(7rem, 17rem);
+    column-gap: 1rem;
+    row-gap: 0.2rem;
+    align-items: center;
+  }
+
+  .retirement-config-stack
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > span:first-child,
+  .retirement-subcol
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > span:first-child {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .retirement-config-stack
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > :is(input, select),
+  .retirement-subcol
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > :is(input, select) {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  /* La frase de ayuda y la marca «obligatorio» acompañan al RÓTULO,
+     no al control: son lo que explica la pregunta. */
+  .retirement-config-stack
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > small,
+  .retirement-subcol
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > small {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  /* Un deslizador no es un control estrecho: la fila rótulo/control lo
+     dejaba en 16rem con su valor colgando en una segunda línea y una
+     celda vacía al lado. Aquí la fila se lee como una cabecera —
+     RÓTULO a la izquierda, VALOR a la derecha— y la barra ocupa el
+     ancho entero debajo, que es el patrón canónico de un slider y el
+     que mejor usa el ancho recuperado. */
+  .retirement-config-stack
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > .retirement-slider-value {
+    grid-column: 2;
+    grid-row: 1;
+    text-align: right;
+  }
+
+  .retirement-config-stack
+    > .field:not(.checkbox-field):not(.retirement-field--block)
+    > input[type="range"] {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+  }
+
+  /* Cada control pide su ancho. Sin esto el input de una edad se
+     estiraba a las 16rem de la pista y volvíamos al hueco de
+     partida, ahora dentro del propio control. */
+  /* `text-align: right` va con el subrayado, no es un capricho: sin
+     caja, un valor pegado a la izquierda de una línea que sigue hacia
+     la derecha se lee como un campo a medio rellenar. Alineado al
+     final, el número y el final de su línea coinciden. */
+  .retirement-config-stack > .field > input[inputmode="numeric"],
+  .retirement-subcol > .field > input[inputmode="numeric"] {
+    max-width: 6.5rem;
+    justify-self: end;
+    text-align: right;
+  }
+
+  .retirement-config-stack > .field > input[inputmode="decimal"],
+  .retirement-subcol > .field > input[inputmode="decimal"] {
+    max-width: 10rem;
+    justify-self: end;
+    text-align: right;
+  }
+
+  .retirement-config-stack > .field > input[type="date"],
+  .retirement-subcol > .field > input[type="date"] {
+    max-width: 11rem;
+    justify-self: end;
+  }
+
+  /* SIN filete entre filas desde 2026-09-13. Lo puse cuando la columna
+     medía 695px y el control quedaba a medio panel del rótulo; con la
+     vuelta al ancho estándar están a un palmo y la línea pasó de atar
+     a ser una reja. El hueco del `gap` basta. */
+}
+
+/* Disparador de un `<details>` de SEGUNDO orden («Detalle del
+   cálculo»). Deliberadamente menor que un `.panel-title`: no es el
+   título de una sección, es la puerta a lo que se puede no leer.
+   Tiene clase propia —y no un `<summary>` pelado— porque la norma
+   de títulos (P6) prohíbe que un elemento sin clase decida su
+   tamaño: así el tamaño está declarado en un sitio y se ve. */
+.details-trigger {
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ff-ink-soft);
+}
+
+/* …salvo cuando el `<details>` ES el panel (2026-09-13). «Detalle
+   del cálculo» dejó de ser un bloque con filete dentro de
+   «Resultado» y pasó a panel hermano, así que su `<summary>` ya no
+   es una puerta dentro de una sección: es el TÍTULO de la sección, y
+   plegado el panel entero es esa línea. En 0,82rem y `--ff-ink-soft`
+   parecía un panel a medio pintar al lado de «Resultado» y
+   «Riesgo». La regla vive aquí —y no cambiando las clases del
+   `<summary>`— porque `.retirement-detail > summary` la pisaría por
+   especificidad, y P6 exige que el tamaño se declare en un sitio
+   donde se vea. */
+.retirement-detail-panel > .retirement-detail > summary {
+  font-size: 0.95rem;
+  color: var(--ff-ink);
+}
+
+/* ---- V2/V5 · el gráfico de riesgo dice el riesgo ----
+   Rótulos DENTRO del plot (los dos bordes de la banda y el del
+   hover): halo del color del fondo con `paint-order: stroke`, que
+   es lo que los deja legibles sobre la banda teñida sin abrirles
+   un hueco blanco. El color lo pone el `fill` del propio `<text>`;
+   aquí solo la tipografía, que en SVG no se hereda del CSS del
+   padre. */
+.proj-mini-band-label,
+.proj-mini-hover-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  paint-order: stroke;
+  stroke: var(--proj-plot-bg);
+  stroke-width: 2.5px;
+  stroke-linejoin: round;
+}
+
+/* La ESCALA del color de la banda. No es una leyenda —no nombra
+   series, describe una escala continua— y por eso vive fuera de
+   `ChartLegend`, en una línea de texto normal bajo el chart. */
+.retirement-risk-scale {
+  margin: 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--ff-muted);
+}
+
+.retirement-risk-scale-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  margin-left: 0.65rem;
+  white-space: nowrap;
+}
+
+/* El color llega por custom property (mismo patrón que
+   `--ff-legend-color` de `ChartLegend`): el valor es un token, o un
+   `color-mix` de dos, y tiene que resolver por tema. */
+.retirement-risk-scale-swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: var(--ff-radius-pill);
+  background: var(--ff-risk-swatch, var(--ff-accent));
+  flex: 0 0 auto;
+}
+
+/* La línea informativa del colchón de caja (V6): procedencia y, si
+   alguien lo fijó por API, su salida. El botón se alinea con el
+   texto en vez de saltar de línea. */
+.retirement-buffer-line {
+  margin: 0;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--ff-ink-soft);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.2rem 0.6rem;
+}
+
+.retirement-buffer-line .btn {
+  margin-left: -0.35rem;
+}
+
+/* ---- WP-C (F3, P7): sin scroll horizontal en Presupuesto y Movimientos a escritorio ----
+   `table-layout: fixed` + <colgroup> con clases reutilizables por columna. `.col-remainder` y
+   `.col-actions` se comparten entre las tablas de Presupuesto y la de Movimientos; el resto son
+   específicas de una tabla. Móvil no usa colgroup y no se toca (design-system §regla de oro). */
+.col-remainder {
+  width: auto;
+}
+
+.col-actions {
+  width: 5.25rem;
+}
+
+/* `.asset-actions-cell .btn { margin-right: 0.25rem }` (regla compartida, ver más arriba) suma
+   ESE margen al `gap` del propio `.budget-row-actions` flex — nadie lo cancelaba: el override
+   que existía, `.asset-actions-cell.budget-row-actions .btn`, exige las dos clases en el MISMO
+   elemento y aquí viven en el `<td>` y en el `<div>` hijo, así que nunca ha disparado en ninguna
+   de sus 8 tablas. Bajo `table-layout: auto` esa doble sombra de espacio no se notaba (la columna
+   crecía); bajo `fixed` desbordaba el `.table-scroll` en ~12px. Se corrige aquí, scoped a las dos
+   tablas de este WP (mayor especificidad que la regla compartida, que no se toca). */
+.assets-table--budget-lines .budget-row-actions .btn,
+.exp-movements-table--fixed .budget-row-actions .btn {
+  margin-right: 0;
+}
+
+.col-budget-amount {
+  width: 34%;
+}
+
+.col-exp-date {
+  width: 6.5rem;
+}
+
+.col-exp-category {
+  width: 18%;
+}
+
+.col-exp-kind {
+  width: 14%;
+}
+
+.col-exp-amount {
+  width: 12%;
+}
+
+.col-exp-link {
+  width: 2.25rem;
+}
+
+.exp-movements-table--fixed {
+  table-layout: fixed;
+}
+
+/* Doble clase (no solo `.exp-movements-table--fixed th`) a propósito: la cabecera «Importe» lleva
+   también `.num`, y `.assets-table .num { white-space: nowrap }` (dos clases) le gana a una regla
+   de una clase + tipo. `.assets-table.exp-movements-table--fixed th` iguala esa especificidad
+   (dos clases + tipo) y gana por orden de aparición — mismo patrón que
+   `.assets-table.assets-table--budget-lines th` más arriba. */
+.assets-table.exp-movements-table--fixed th {
+  white-space: normal;
+}
+
+/* Comparativa mensual Gastos/Ingresos (`renderComparisonTable`, `.exp-comparison-grid`): dos
+   tablas lado a lado, cada una a la mitad del ancho útil de la página — la misma causa de fondo
+   que la tabla de movimientos (`.app-main { max-width: 66rem }`), detectada al verificar CADA
+   `.table-scroll` de la página, no solo la tabla nombrada en el diagnóstico F3. */
+.exp-comparison-table--fixed {
+  table-layout: fixed;
+}
+
+.assets-table.exp-comparison-table--fixed th {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.col-comparison-amount {
+  width: 5.5rem;
+}
+
+/* Concepto en una sola línea con ellipsis (solo la tabla fija de escritorio; móvil sigue
+   envolviendo por `word-break` en `.exp-concept-cell`, sin este span). */
+.exp-concept-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+/* Los dos `<select>` inline de la fila (categoría, tipo) llenan su columna en vez de topar a
+   `.exp-inline-select { max-width: 12rem }` (pensada para `table-layout: auto`). */
+.exp-movements-table--fixed .exp-inline-select {
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+}
+
+/* ---- WP-G (F12, P6): título de la tarjeta donut de Resumen ----
+   Único consumidor que necesitaba la talla menor de `.subsection-title` (retirada: sus otros
+   cinco consumidores migraron a `.panel-title`, que ya comparte tamaño/peso/color). Nombre
+   propio y explícito en vez de una clase de título que cambia de talla según el contenedor. */
+.donut-card-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--ff-ink-soft);
+}
+
+/* ---- W7 (modelo v2, C4): la marca de la FECHA VÁLIDA, la nota bajo la leyenda y la muestra de
+   marca de la leyenda ----
+   Se AÑADEN al final del fichero a propósito: el freezer `no-hex-outside-theme.test.ts` ancla sus
+   excepciones de sombra por `App.css:línea` EXACTA, así que cualquier inserción más arriba las
+   desplazaría y rompería el test sin que el CSS hubiera cambiado de verdad. (El literal de esas
+   sombras no se escribe aquí ni en un comentario: el comando de re-verificación de la casa lo
+   busca con `grep` sobre este fichero y contaría esta línea como una tercera aparición.) */
+
+/* Sustituye a `.projection-chart-jubilacion-line`: aquella marcaba el mes en que el patrimonio
+   cruzaba un objetivo FIRE que ya no existe. Esta va de suelo a techo del plot —no muere en la
+   curva como los hitos monetarios— porque no es un punto de la serie, es un instante del plan. */
+.projection-chart-safe-date-line {
+  stroke: var(--ff-accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  opacity: 0.9;
+}
+
+/* Con halo del color del fondo del plot (`paint-order: stroke`): el rótulo cae sobre las áreas de
+   activo apiladas y sin halo se pierde en cuanto hay más de dos. */
+.projection-chart-safe-date-label {
+  fill: var(--ff-accent);
+  font-size: 10px;
+  font-weight: 600;
+  paint-order: stroke;
+  stroke: var(--proj-plot-bg);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+/* El mismo halo en el chart compacto, donde el rótulo cae además sobre la banda teñida. */
+.proj-mini-safe-date-label {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  paint-order: stroke;
+  stroke: var(--proj-plot-bg);
+  stroke-width: 2.5px;
+  stroke-linejoin: round;
+}
+
+/* Notas del pie de la leyenda («Calculando el capital necesario…», «sin fecha válida al 95 %»).
+   NO son ítems de leyenda —no rotulan nada dibujado— y por eso van en texto meta, sin muestra de
+   color: una muestra afirmaría que hay una serie que no está. */
+.projection-chart-legend-note {
+  margin: 0.15rem 0 0;
+  /* Alineado con el padding lateral de `.ff-chart-legend`, justo encima. */
+  padding: 0 0.15rem;
+  font-size: 0.72rem;
+  color: var(--ff-ink-soft);
+}
+
+/* Muestra de la leyenda para una MARCA vertical: un palo, no una línea horizontal — la diferencia
+   entre «esto es una serie» y «esto es un instante» se ve antes en la forma que en el rótulo. */
+.ff-chart-legend-swatch--mark {
+  height: 0.7rem;
+  width: 0;
+  border-left: 2px solid var(--ff-legend-color);
+}
+
+/* ============================================================
+   JUBILACIÓN — modelo v2 (5.0.0, C1–C8, issue #207) · WP W4
+   ------------------------------------------------------------
+   Aditivo y al FINAL del archivo, como el bloque anterior: así
+   ninguna línea previa se desplaza y las anclas por `file:línea`
+   del freezer `no-hex-outside-theme.test.ts` (App.css:2396/2397,
+   la sombra del tooltip de Proyección) siguen donde están.
+   Cero hex: solo tokens `--ff-*`.
+   ============================================================ */
+
+/* B7 — el TONO por miembro en las listas de frases del hogar
+   («Planes del hogar», en Jubilación y en Resumen).
+   Reusa el vocabulario de la frase del plan
+   (`.retirement-sentence--{ok,warn,danger}`, que ya define el
+   `border-left-color`) y solo añade lo que un `<li>` no tiene: el
+   filete y su sangría. El verde NO lleva filete — «va bien» es el
+   estado normal y no se decora, misma regla que en la frase.
+   El filete va a la IZQUIERDA del punto de color del miembro, que
+   identifica su línea del chart: son dos cosas distintas (quién
+   es y cómo va) y por eso no comparten sitio. */
+.household-plan-lines > li.retirement-sentence--warn,
+.household-plan-lines > li.retirement-sentence--danger,
+.plan-sentence-item.retirement-sentence--warn,
+.plan-sentence-item.retirement-sentence--danger {
+  border-left-width: 3px;
+  border-left-style: solid;
+  padding-left: 0.55rem;
+}
+
+/* Huérfanas desde el modelo v2 (5.0.0): ningún `.tsx` de `apps/web/src` las nombra. Retirar en un
+   pase que recuente los anclajes: .retirement-buffer-line, .retirement-buffer-line .btn,
+   .retirement-basis-reset, .projection-chart-jubilacion-line, .projection-chart-jubilacion-label.
+
+   OJO con el glob que este comentario tenía escrito (`src/` + dos asteriscos + `/` + `*.tsx`): la
+   secuencia `*` + `/` de en medio CIERRA el comentario CSS, y lo que venía detrás quedaba como
+   regla suelta. `lightningcss` lo rechazaba con «Unexpected end of input» y `npm run build`
+   —solo el build: ni el typecheck, ni el lint, ni Vitest miran el CSS— llevaba rojo desde
+   8f4f7ff. Aquí no se escriben globs con asteriscos. */
+
+/* ============================================================
+   JUBILACIÓN — W13 (informe del owner, 2026-09-07)
+   ------------------------------------------------------------
+   Aditivo y al FINAL del archivo, como los dos bloques anteriores:
+   así ninguna línea previa se desplaza y los anclajes por
+   `file:línea` del freezer `no-hex-outside-theme.test.ts`
+   (`App.css:2396/2397`) siguen valiendo. Cero hex: tokens
+   `--ff-*` y `color-mix`.
+
+   Tres cosas, en el orden del informe:
+     1 · que la recarga no parpadee ni mueva la altura;
+     2 · dos columnas (datos | resultado) — a ancho completo
+         entonces, dentro del ancho estándar desde 2026-09-13;
+     3 · la tarjeta «Pensión» partida en dos sub-columnas — con el
+         puente a la izquierda entonces, a la DERECHA desde
+         2026-09-13, que es el orden que pidió el owner al verlo.
+   ============================================================ */
+
+/* ---- 1 · Alturas estables y un solo indicio de recarga ----
+
+   La causa del parpadeo era lógica (ver `RetirementView.tsx`,
+   §stale-while-revalidate): el panel entero colgaba de los flags
+   de carga. Lo que queda aquí es la mitad geométrica — que lo que
+   SÍ aparece y desaparece no mueva a sus vecinos.
+
+   `min-height` en `em` y no en `px`: el slot mide UNA línea del
+   texto que va a contener, así que tiene que seguir a la
+   tipografía. */
+.retirement-note-slot {
+  min-height: 1.6em;
+  font-size: 0.78rem;
+}
+
+.retirement-note-slot > p {
+  margin: 0;
+}
+
+/* La frase-hito reserva DOS líneas: «Calculando tu plan…» ocupa
+   una y la frase resuelta casi siempre dos, así que sin esto la
+   primera respuesta empujaba media pantalla hacia abajo. Puede
+   crecer a tres en un plan con puente — es un mínimo, no un
+   recorte: media frase es peor que una frase larga. */
+.retirement-sentence {
+  min-height: 2.7em;
+}
+
+/* Placeholders de las tarjetas: la MISMA caja que un `MetricCard`
+   (borde, radio, papel) y la misma altura, para que la llegada de
+   las cifras no desplace el chart de debajo. Sin animación: un
+   esqueleto que late es otra forma de parpadeo. */
+.retirement-tiles-grid--placeholder {
+  pointer-events: none;
+}
+
+.retirement-tile-placeholder {
+  min-height: 5.75rem;
+  border: 1px solid var(--ff-line-soft);
+  border-radius: var(--ff-radius-kpi);
+  background: color-mix(in oklch, var(--ff-paper) 55%, var(--ff-bg));
+}
+
+/* La leyenda del chart CAMBIA de entradas en caliente: la de
+   «Capital necesario» aparece cuando aterriza el nivel 2 (que
+   desde W13 llega solo, por sondeo, con el usuario mirando) y la
+   de la banda sale cuando hay degradado. Una fila reservada evita
+   que el chart de arriba se mueva cuando eso pasa. La escala de
+   color de debajo no necesita reserva: solo aparece con la primera
+   carga de bandas, y a partir de ahí la latch la conserva. */
+.retirement-chart-block .ff-chart-legend {
+  min-height: 2.2rem;
+}
+
+/* El ÚNICO indicio de «se está recalculando» (informe del owner:
+   «nunca un spinner que sustituya contenido»). Vive en la fila del
+   título, en `nowrap`, así que no puede añadir una línea ni mover
+   nada de lo que hay debajo. */
+.retirement-refreshing {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-left: auto;
+  font-size: 0.74rem;
+  color: var(--ff-muted);
+  white-space: nowrap;
+}
+
+/* `.panel-head-row` reparte con `space-between`, que con DOS hijos
+   manda el interrogante al borde derecho del panel y con TRES lo
+   dejaría flotando en medio, lejos del título que explica. Aquí se
+   agrupan a la izquierda y el indicador se va al borde con su
+   `margin-left: auto` — que es además lo que dice la norma de
+   ayudas: cuelgan del rótulo. */
+.panel-head-row.retirement-result-head {
+  justify-content: flex-start;
+}
+
+.retirement-refreshing-dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: var(--ff-radius-pill);
+  background: var(--ff-accent);
+  flex: 0 0 auto;
+  animation: ff-retirement-pulse 1.4s ease-in-out infinite;
+}
+
+/* Lo único que se mueve en toda la pantalla durante una recarga —y
+   son 6px de opacidad, no un relayout. Se apaga con
+   `prefers-reduced-motion`: entonces el punto se queda encendido,
+   que sigue diciendo lo mismo. */
+@keyframes ff-retirement-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .retirement-refreshing-dot {
+    animation: none;
+  }
+}
+
+/* ---- 2 · Dos columnas, dentro del ancho estándar ---- */
+/* `.app-main--wide` (2026-09-07, W13) se RETIRÓ el 2026-09-13.
+   Existía porque «con el tope de 66rem las dos columnas caían a
+   ~500px y ninguna cabía» — y era verdad ENTONCES: cada apartado
+   llevaba un párrafo, cada campo su `<small>`, cada botón de modo su
+   sub-rótulo, y los controles se estiraban a lo ancho. Esa razón se
+   disolvió al sacar la prosa a los `<?>` y apretar las superficies:
+   el mismo plan que pedía 732px de columna cabe hoy en 504px. El
+   owner lo pidió de vuelta al ancho estándar —«¿podríamos probar a
+   devolverlo a una página de ancho estándar como el resto?»— y la
+   medición lo confirmó. Si alguien vuelve a meter prosa permanente
+   en esta pantalla, esto es lo primero que se rompe. */
+
+/* La rejilla de la página. SIN breakpoint nuevo: `auto-fit` con
+   `minmax(min(100%, 34rem), 1fr)` da dos columnas a partir de
+   ~1.100 px (2 × 34rem + el hueco) y UNA por debajo, con el plan
+   primero por orden del DOM. Es el idioma que el design system ya
+   sanciona para las bandas de KPIs, y no clava un ancho concreto
+   en un `@media` que solo arregla una franja.
+
+   `align-items: start`: las dos columnas miden lo suyo. Sin esto,
+   la corta se estiraría hasta la larga y su panel quedaría con un
+   fondo vacío de varios cientos de píxeles. */
+.retirement-layout {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 31rem), 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+/* Las modificadoras `--plan` / `--result` no llevan reglas: son
+   marcadores en el DOM para leer la maquetación de un vistazo (y
+   el enganche por el que entraría un `position: sticky` el día que
+   se decida gatearlo). */
+.retirement-col {
+  display: flex;
+  flex-direction: column;
+  /* 0,75rem y no 1rem desde 2026-09-13: sin la frase bajo cada título
+     los apartados son mucho más cortos, y con el hueco de antes la
+     columna se leía como una lista de cajas sueltas. */
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+/* El hueco entre paneles lo pone el `gap` de la columna; el
+   `margin-bottom` que `.panel` trae de serie sumaría un segundo
+   hueco bajo el último (y en la columna corta, sobre el aire que
+   ya deja `align-items: start`). */
+.retirement-col > .panel {
+  margin-bottom: 0;
+}
+
+/* ---- 3 · El panel «Pensión» se parte en dos sub-columnas ----
+
+   Dos sub-columnas cuando caben, apiladas cuando no.
+
+   **`row`, no `row-reverse` (2026-09-13).** W13 invirtió la fila para
+   dejar el puente a la izquierda; el owner lo leyó luego al revés y
+   con razón: «primero se debería definir si habrá pensión, y [luego]
+   si se puentea hasta ella. así no tiene sentido». El puente es un
+   AJUSTE de la pensión —no existe sin ella, y su interruptor solo
+   aparece con una pensión declarada—, así que leerlo antes obliga a
+   entender la consecuencia antes que la causa. Ahora el orden visual
+   y el del DOM coinciden, que es además el de tabulación: ya no hay
+   truco que mantener.
+
+   `flex: 1 1 16rem` es lo que fija el punto de corte (~33rem de
+   panel): por debajo, dos columnas de campos con `<select>`s y
+   sufijos dentro no caben sin desbordar. */
+.retirement-subcols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+}
+
+.retirement-subcol {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  flex: 1 1 13.5rem;
+  min-width: 0;
+}
+
+/* Los pares de campos que van en fila (`.field-row`, p. ej. el
+   importe de la pensión y su edad de inicio) tienen que poder
+   apilarse aquí: en una sub-columna de ~16rem, dos campos en fila
+   dejan cada input en ~7rem y el rótulo en tres líneas. `wrap` +
+   una base de 9rem lo resuelve sin tocar la regla global, que la
+   comparten todos los formularios de la app. */
+.retirement-subcol .field-row {
+  flex-wrap: wrap;
+}
+
+.retirement-subcol .field-row > .field {
+  flex: 1 1 9rem;
+}
+
+/* …pero SOLO mientras la fila sea una fila. En ≤720px la regla global
+   `.field-row` pasa a `flex-direction: column` (bp:struct 720), y ahí
+   `flex-basis: 9rem` deja de ser un ANCHO y se convierte en un ALTO:
+   cada campo se estiraba a 144px para un rótulo y un input que suman
+   69, y el apartado «Pensión» abría dos huecos de 75px en móvil.
+   Medido el 2026-09-13; el defecto venía de W13, cuando esta regla se
+   escribió pensando solo en el caso de dos columnas. */
+@media (max-width: 720px) { /* bp:struct 720 */
+  .retirement-subcol .field-row > .field {
+    flex: 0 0 auto;
+  }
+}
+
+/* `.retirement-subcol-title` (el rótulo en versalita de cada
+   sub-columna de «Pensión») se RETIRÓ el 2026-09-13: los dos que
+   había eran ruido —el del puente repetía palabra por palabra el
+   rótulo del interruptor que tenía debajo—, y hoy cada sub-columna
+   abre con su propio control de encendido, que es lo que la titula
+   de verdad. */
+
+/* Simulación (antes «Próximos», 5.0.0): interruptor por flujo. La celda del switch es tan
+   estrecha como el control; la fila apagada se atenúa con tokens (sigue legible y el switch
+   conserva su contraste, porque el apagado se puede volver a encender desde ahí mismo). */
+.upcoming-toggle-cell {
+  width: 1%;
+  white-space: nowrap;
+}
+.planning-row--disabled td:not(.upcoming-toggle-cell) {
+  color: var(--ff-muted);
+}
+.planning-row--disabled td:not(.upcoming-toggle-cell) .chip {
+  opacity: 0.6;
 }

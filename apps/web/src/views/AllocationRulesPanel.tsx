@@ -120,7 +120,7 @@ export function AllocationRulesPanel({
       )}
       <p className="muted tight">
         Cascada en orden ascendente. Cada mes, sobre el sobrante (ingresos −
-        gastos − cuotas de deuda + flujos puntuales de Próximos), cada regla
+        gastos − cuotas de deuda + flujos puntuales encendidos de Simulación), cada regla
         coge su parte y lo que queda baja a la siguiente:
       </p>
       <ul className="muted tight allocation-rules-help">

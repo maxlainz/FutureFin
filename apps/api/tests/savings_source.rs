@@ -463,8 +463,6 @@ async fn mode_b_target_annual_expense_uses_expense_avg() {
         .patch_json_with_cookie(
             "/v1/installation",
             json!({ "fire_settings": {
-                "fire_number_mode": "annual_expense",
-                "swr_pct": "4",
                 "taxes_enabled": false,
                 "tax_brackets": [],
                 "savings_source": "transactions_avg"
@@ -473,9 +471,27 @@ async fn mode_b_target_annual_expense_uses_expense_avg() {
         )
         .await;
     assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    // 5.0.0 (D13): el modo del objetivo y el SWR son del PERFIL del usuario; la fuente del
+    // ahorro y la fiscalidad siguen siendo del hogar. Mismos números, dos superficies.
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "annual_expense", "swr_pct": "4"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
 
     let body = app.get_with_cookie("/v1/projection/series?months=240", &owner.cookie).await.json();
-    let target = parse_dec(&body["jubilacion_target_net_worth"]);
+    // **`fire_number_classic_today`, no `jubilacion_target_net_worth`** (5.0.0, WP A12): el modelo
+    // v2 retiró el objetivo que disparaba la jubilación —la fecha la decide el éxito— y lo que
+    // queda es el número FIRE clásico, informativo. La ARITMÉTICA es la misma
+    // (`gross_up(necesidad anual)/SWR` evaluado en el índice 0, o sea euros de HOY), así que el
+    // número esperado NO se mueve; lo que este test comprueba sigue siendo de dónde sale la
+    // NECESIDAD según el modo de ahorro. Con el nombre viejo la lectura era `null` y `parse_dec`
+    // reventaba — el fallo ruidoso que hay que agradecer: un `.unwrap_or(0.0)` habría comparado
+    // ceros en silencio.
+    let target = parse_dec(&body["fire_number_classic_today"]);
     approx(target, 300_000.0);
 }
 
@@ -498,7 +514,13 @@ async fn mode_b_household_vs_mine_scoping() {
     set_mode_b(&app, &owner.cookie).await;
 
     // household: income 3000, expense 1200 → delta 1800.
-    let hh = projection_delta(&app, &owner.cookie, "/v1/projection/series?months=240").await;
+    // `household` explícito desde 5.0.0 (R2): sin él, el GET devuelve la vista `mine`.
+    let hh = projection_delta(
+        &app,
+        &owner.cookie,
+        "/v1/projection/series?view=household&months=240",
+    )
+    .await;
     approx(hh, 1800.0);
     // mine (owner): income 2000, expense 800 → delta 1200.
     let mine = projection_delta(&app, &owner.cookie, "/v1/projection/series?view=mine&months=240").await;
@@ -910,8 +932,6 @@ async fn mode_c_target_annual_expense_uses_expense_avg() {
         .patch_json_with_cookie(
             "/v1/installation",
             json!({ "fire_settings": {
-                "fire_number_mode": "annual_expense",
-                "swr_pct": "4",
                 "taxes_enabled": false,
                 "tax_brackets": [],
                 "savings_source": "budget_income_real_expense"
@@ -920,9 +940,27 @@ async fn mode_c_target_annual_expense_uses_expense_avg() {
         )
         .await;
     assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    // 5.0.0 (D13): el modo del objetivo y el SWR son del PERFIL del usuario; la fuente del
+    // ahorro y la fiscalidad siguen siendo del hogar. Mismos números, dos superficies.
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "annual_expense", "swr_pct": "4"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
 
     let body = app.get_with_cookie("/v1/projection/series?months=240", &owner.cookie).await.json();
-    let target = parse_dec(&body["jubilacion_target_net_worth"]);
+    // **`fire_number_classic_today`, no `jubilacion_target_net_worth`** (5.0.0, WP A12): el modelo
+    // v2 retiró el objetivo que disparaba la jubilación —la fecha la decide el éxito— y lo que
+    // queda es el número FIRE clásico, informativo. La ARITMÉTICA es la misma
+    // (`gross_up(necesidad anual)/SWR` evaluado en el índice 0, o sea euros de HOY), así que el
+    // número esperado NO se mueve; lo que este test comprueba sigue siendo de dónde sale la
+    // NECESIDAD según el modo de ahorro. Con el nombre viejo la lectura era `null` y `parse_dec`
+    // reventaba — el fallo ruidoso que hay que agradecer: un `.unwrap_or(0.0)` habría comparado
+    // ceros en silencio.
+    let target = parse_dec(&body["fire_number_classic_today"]);
     approx(target, 300_000.0);
 }
 
@@ -945,8 +983,6 @@ async fn mode_c_target_current_income_uses_budget_income() {
         .patch_json_with_cookie(
             "/v1/installation",
             json!({ "fire_settings": {
-                "fire_number_mode": "current_income",
-                "swr_pct": "4",
                 "taxes_enabled": false,
                 "tax_brackets": [],
                 "savings_source": "budget_income_real_expense"
@@ -955,9 +991,27 @@ async fn mode_c_target_current_income_uses_budget_income() {
         )
         .await;
     assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
+    // 5.0.0 (D13): el modo del objetivo y el SWR son del PERFIL del usuario; la fuente del
+    // ahorro y la fiscalidad siguen siendo del hogar. Mismos números, dos superficies.
+    let patched = app
+        .patch_json_with_cookie(
+            "/v1/auth/me/retirement-profile",
+            json!({"fire_number_mode": "current_income", "swr_pct": "4"}),
+            &owner.cookie,
+        )
+        .await;
+    assert_eq!(patched.status, http::StatusCode::OK, "{patched:?}");
 
     let body = app.get_with_cookie("/v1/projection/series?months=240", &owner.cookie).await.json();
-    let target = parse_dec(&body["jubilacion_target_net_worth"]);
+    // **`fire_number_classic_today`, no `jubilacion_target_net_worth`** (5.0.0, WP A12): el modelo
+    // v2 retiró el objetivo que disparaba la jubilación —la fecha la decide el éxito— y lo que
+    // queda es el número FIRE clásico, informativo. La ARITMÉTICA es la misma
+    // (`gross_up(necesidad anual)/SWR` evaluado en el índice 0, o sea euros de HOY), así que el
+    // número esperado NO se mueve; lo que este test comprueba sigue siendo de dónde sale la
+    // NECESIDAD según el modo de ahorro. Con el nombre viejo la lectura era `null` y `parse_dec`
+    // reventaba — el fallo ruidoso que hay que agradecer: un `.unwrap_or(0.0)` habría comparado
+    // ceros en silencio.
+    let target = parse_dec(&body["fire_number_classic_today"]);
     approx(target, 1_500_000.0);
 }
 

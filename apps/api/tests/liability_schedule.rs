@@ -526,9 +526,12 @@ async fn the_schedule_respects_the_ledger_scope() {
     )
     .await;
 
-    // El hogar lo ve.
+    // El hogar lo ve — pidiéndolo EXPLÍCITAMENTE (5.0.0, R2: el default es `mine`).
     let hogar = app
-        .get_with_cookie(&format!("/v1/liabilities/{id}/schedule"), &member.cookie)
+        .get_with_cookie(
+            &format!("/v1/liabilities/{id}/schedule?view=household"),
+            &member.cookie,
+        )
         .await;
     assert_eq!(hogar.status, http::StatusCode::OK, "{hogar:?}");
     assert_eq!(hogar.json()["view"], "household");
