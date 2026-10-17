@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>Vender de un activo</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+a{color:oklch(0.56 0.13 250)}a:hover{color:oklch(0.46 0.13 250)}
+</style>
+</helmet>
+<div style="width: 600px; height: 760px; box-sizing: border-box; padding: 24px; background: #f4f4f5; font-family: 'IBM Plex Sans', system-ui, sans-serif; color: #0a0a0a; font-variant-numeric: tabular-nums;">
+<div role="dialog" aria-label="Vender de un activo" style="background: #ffffff; border: 1px solid #e4e4e7; border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 18px;">
+
+<div style="display: flex; justify-content: space-between; align-items: center;">
+<h2 style="margin: 0; font-size: 18px; font-weight: 600;">Nuevo cambio · Activos</h2>
+<button type="button" aria-label="Cerrar" style="border: 0; background: transparent; width: 36px; height: 36px; border-radius: 8px; cursor: pointer; color: #404040;"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 3l10 10M13 3L3 13"></path></svg></button>
+</div>
+
+<div style="background: #fafafa; border: 1px solid #e4e4e7; border-radius: 10px; padding: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 16px; line-height: 1.4;">
+<span>Vendo</span>
+<label style="display: flex;"><span style="position: absolute; left: -9999px;">Importe neto</span><input value="2.000" style="width: 76px; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; text-align: right; background: #ffffff;"></label>
+<label style="display: flex;"><span style="position: absolute; left: -9999px;">Modo</span><select style="padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; background: #ffffff;"><option>€/mes</option><option>€ una vez</option><option>todo el activo</option></select></label>
+<span>de</span>
+<label style="display: flex;"><span style="position: absolute; left: -9999px;">Activo</span><select style="padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; background: #ffffff;"><option>Fondo indexado global</option><option>Piso (de este plan)</option><option>Cuenta remunerada</option></select></label>
+<span>desde</span>
+<label style="display: flex;"><span style="position: absolute; left: -9999px;">Fecha de inicio</span><input value="03/2051" style="width: 86px; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; background: #ffffff;"></label>
+<span>hasta</span>
+<label style="display: flex;"><span style="position: absolute; left: -9999px;">Fecha de fin</span><input placeholder="agotarlo" style="width: 86px; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; background: #ffffff;"></label>
+</div>
+
+<label style="display: flex; gap: 10px; align-items: flex-start; font-size: 15px;"><input type="checkbox" checked style="width: 18px; height: 18px; margin: 2px 0 0;"><span>Mantiene su poder adquisitivo<br><span style="font-size: 13px; color: #737373;">El importe neto que recibes sube con la inflación del plan.</span></span></label>
+
+<fieldset style="border: 1px solid #e4e4e7; border-radius: 10px; padding: 14px 16px; margin: 0; display: flex; flex-direction: column; gap: 12px;">
+<legend style="font-size: 14px; font-weight: 600; padding: 0 6px;">Fiscalidad de la venta</legend>
+<label style="display: flex; gap: 10px; align-items: flex-start; font-size: 15px;"><input type="radio" name="fisc" checked style="width: 18px; height: 18px; margin: 2px 0 0;"><span>Automática<br><span style="font-size: 13px; color: #737373;">Tramos del ahorro de Ajustes sobre la plusvalía de lo vendido.</span></span></label>
+<label style="display: flex; gap: 10px; align-items: flex-start; font-size: 15px;"><input type="radio" name="fisc" style="width: 18px; height: 18px; margin: 2px 0 0;"><span>Exenta<br><span style="font-size: 13px; color: #737373;">Por ejemplo, vivienda habitual reinvertida o vendida con 65 años o más. Compruébalo antes: la app no valida la ley.</span></span></label>
+<div style="display: flex; gap: 10px; align-items: flex-start; font-size: 15px;">
+<input type="radio" name="fisc" id="fisc-manual" style="width: 18px; height: 18px; margin: 2px 0 0;">
+<div style="display: flex; flex-direction: column; gap: 8px;">
+<label for="fisc-manual">Manual</label>
+<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 14px; color: #404040;">
+<label style="display: flex; align-items: center; gap: 6px;"><input placeholder="0" style="width: 72px; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; text-align: right;"> €</label>
+<span>o</span>
+<label style="display: flex; align-items: center; gap: 6px;"><input placeholder="0" style="width: 56px; padding: 8px 10px; border: 1px solid #d4d4d8; border-radius: 10px; font: inherit; text-align: right;"> % de lo vendido</label>
+</div>
+</div>
+</div>
+</fieldset>
+
+<div style="border-top: 1px solid #e4e4e7; padding-top: 14px; display: flex; flex-direction: column; gap: 6px; font-size: 14px;">
+<span style="font-weight: 600;">Cómo lo calcula, en 03/2051</span>
+<span style="color: #404040;">Recibes 2.000 € de hoy al mes · vendes ≈ 2.235 € de participaciones · impuesto ≈ 235 € (plusvalía estimada: el 50 % de lo vendido, al 21 %).</span>
+<span style="color: #737373;">El precio de compra del resto baja en proporción. Si el fondo se agota, el cambio se detiene y aparece como mes en riesgo.</span>
+</div>
+
+<div style="display: flex; justify-content: flex-end; gap: 8px;">
+<button type="button" style="border: 1px solid #e4e4e7; background: #fafafa; border-radius: 999px; padding: 10px 18px; min-height: 44px; font: inherit; font-size: 15px; cursor: pointer;">Cancelar</button>
+<button type="button" style="border: 0; background: #0a0a0a; color: #fafafa; border-radius: 999px; padding: 10px 18px; min-height: 44px; font: inherit; font-size: 15px; cursor: pointer;">Añadir cambio</button>
+</div>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":600,"height":760}}'>
+class Component extends DCLogic {
+renderVals() {
+return {};
+}
+}
+</script>
+</body>
+</html>
