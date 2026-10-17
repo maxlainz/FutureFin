@@ -5,6 +5,11 @@ add-on de Home Assistant. El detalle técnico completo — cifras exactas, issue
 decisión — vive en el
 [CHANGELOG del proyecto](https://github.com/maxlainz/FutureFin/blob/main/CHANGELOG.md).
 
+## 5.0.1
+
+- Mantenimiento de seguridad: se actualiza la librería TLS del servidor y varias dependencias de
+  desarrollo con avisos de seguridad. Sin cambios visibles ni nada que hacer al actualizar.
+
 ## 5.0.0
 
 La jubilación deja de ser una sola fecha del hogar y pasa a ser **el plan de cada persona**. En la

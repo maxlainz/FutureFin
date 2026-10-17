@@ -4,6 +4,19 @@ All notable changes to FutureFin will be documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versioning follows [Semantic Versioning](https://semver.org/).
 
+## [5.0.1] - 2026-10-17
+
+### Parches de seguridad de dependencias
+
+- **`rustls` 0.23.43 → 0.23.46** (alerta Dependabot #25, severidad media: mensajes del handshake
+  TLS 1.3 aceptados cruzando niveles de cifrado; corregido en 0.23.45). Es dependencia de runtime
+  del binario, así que cambia la imagen y por eso hay release.
+- **`source-map-js` 1.2.1 → 1.2.2** (alerta #32, alta) y **`brace-expansion` → 1.1.21 y 5.0.12**
+  (alertas #30 y #31, medias): denegación de servicio por CPU con entradas maliciosas. Son
+  dependencias de desarrollo y build del frontend, no viajan en `apps/web/dist/`; se suben en el
+  mismo cambio para dejar las cuatro alertas cerradas. Sin cambios de comportamiento ni acción por
+  parte de quien actualiza.
+
 ## [5.0.0] - 2026-10-17
 
 ### La jubilación deja de ser un cruce del hogar y pasa a ser el plan de cada persona
